@@ -111,6 +111,13 @@ const DATA_BITS_HIGH_CHILD: usize = 42;
 /// The high flag byte of a retail mob after its card (newchar-retail-2026-09-18: `13` in 373 mob
 /// states, `33` in 94; a fresh card sends `10`).
 const MOB_DATA_BITS_HIGH: u8 = 0x13;
+/// The high flag byte (child 42) of the client's own first state: `0x53` (own player flag word
+/// `0x53d3`, client-lock note section 3).
+const OWN_DATA_BITS_HIGH: u8 = 0x53;
+/// The high flag byte (child 42) of another player's first state: `0x03` on 16 of 18 first
+/// cards of other players in the own retail captures (general-other-01, newchar-retail,
+/// newchar-linux); the own value `0x53` on the other 2.
+const REMOTE_DATA_BITS_HIGH: u8 = 0x03;
 /// Slot 1 children of the height of the feet over the floor (`distGround`, a byte over 0 to
 /// 10 m) and of the depth of the water at them (`waterDepth`) (ALC constructor `FUN_142a36d50`:
 /// the first two names of the slot-1 list; run-15 movement study).
@@ -729,6 +736,60 @@ pub struct SequenceClock {
 /// 31 of 247 when it came 40 ms or more later).
 pub const SEQUENCE_ABS_REPEAT_MS: u64 = 40;
 
+/// The sequence time of another player as one viewer's client has it. Retail sends other
+/// players no new absolute part when a slayer state starts: the relative byte goes below its
+/// zero (general-other-01, other players' attack and move starts: `2=3f 14=9ff1 15=9314` with no
+/// child 3, then `41`, `46`, `48`; none of the 30 starts read carried child 3). A new absolute
+/// part goes only when the time leaves the byte's reach, with the byte at zero, and again in the
+/// next state (the long stand of slot 25: `2=7f 3=5e12`, `2=82 3=5e12`, then the byte alone).
+/// Ours sent an absolute part with every start, as the own states do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RemoteSequenceClock {
+    /// The absolute part the client has (`half` bits).
+    abs: Option<u16>,
+    /// The next state carries the absolute part again.
+    again: bool,
+}
+
+impl RemoteSequenceClock {
+    /// The clock of a client that took a first state ([`AlcState::remote_spawn`]): it has that
+    /// state's absolute part.
+    pub const fn after_spawn() -> Self {
+        Self {
+            abs: Some(SPAWN_SEQUENCE_ABS),
+            again: false,
+        }
+    }
+
+    /// The wire form of `seconds` into the sequence for the next state.
+    pub fn time(&mut self, seconds: f32) -> SequenceTime {
+        let steps = self
+            .abs
+            .map(|abs| ((seconds - half_value(abs)) / SEQUENCE_TIME_STEP_S).round())
+            .filter(|steps| (-SEQUENCE_TIME_MAX_STEPS..=SEQUENCE_TIME_MAX_STEPS).contains(steps));
+        let Some(steps) = steps else {
+            let abs = half_bits(seconds);
+            self.abs = Some(abs);
+            self.again = true;
+            return SequenceTime {
+                rel: SEQUENCE_TIME_REL_ZERO,
+                abs: Some(abs),
+            };
+        };
+        let again = std::mem::take(&mut self.again);
+        // -127 to 127 steps from the zero byte 0x7f: 0 to 254.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "checked to -127..=127 steps"
+        )]
+        SequenceTime {
+            rel: (f32::from(SEQUENCE_TIME_REL_ZERO) + steps) as u8,
+            abs: self.abs.filter(|_| again),
+        }
+    }
+}
+
 /// The `slayerSeqTimeRel` and `slayerSeqTimeAbs` of the first own state (the most common retail
 /// first own ALC): 2 steps from 1/30 s, two input records into the slot's state.
 const SPAWN_SEQUENCE_REL: u8 = 0x81;
@@ -796,9 +857,10 @@ impl SequenceClock {
 /// its slayer state).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RemoteStep {
-    /// Its number and time; its anchor goes with every state (our choice: a client that comes
-    /// into view of the player in the middle of an anchor period knows no other anchor).
+    /// Its number and time.
     pub stamp: AlcStamp,
+    /// What the viewer's client already has of the clock: the parts it has go not again.
+    pub known: KnownStamp,
     /// Where the player is, when it goes with the state: an offset from the anchor every viewer
     /// shares, or a new anchor ([`StepPlace`]).
     pub position: Option<StepPlace>,
@@ -812,6 +874,33 @@ pub struct RemoteStep {
     pub sequence_time: Option<SequenceTime>,
     /// Its slayer slots past the first and its slayer marker, when they go with the state.
     pub upper: Option<RemoteUpper>,
+}
+
+/// What a viewer's client has of another player's clock: its anchor and the high bytes of its
+/// state number and time, as the last state sent to it set them. Retail sends another player's
+/// `timeAnchor` (child 40) in 1 % and the high byte of its number (25) in 1 % of its states, when
+/// they change (general-other-01 and newchar-retail: 1,751 states after the first cards); ours
+/// sent both in every state, and the other players' animations stuck in their first frames
+/// (live 2026-11-09).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KnownStamp {
+    /// The anchor it has.
+    pub anchor_us: Option<u64>,
+    /// The high byte of the state number it has.
+    pub id_high: Option<u8>,
+    /// The high byte of the state time it has.
+    pub time_high: Option<u8>,
+}
+
+impl KnownStamp {
+    /// What a client has after a state with `stamp` whole.
+    pub fn of(stamp: AlcStamp) -> Self {
+        Self {
+            anchor_us: Some(stamp.anchor_us),
+            id_high: Some(AlcStamp::high(stamp.id)),
+            time_high: Some(AlcStamp::high(stamp.offset_ms)),
+        }
+    }
 }
 
 /// The slayer slots past the first and the slayer marker of another player as one of its states
@@ -1240,11 +1329,19 @@ impl AlcState {
     ///
     /// Returns [`MessageError`] when a slayer value does not fit the prefix code.
     pub fn remote_step(step: &RemoteStep) -> Result<Self, MessageError> {
-        let mut children: Vec<(usize, Vec<u8>)> = stamp_children(step.stamp).into();
-        children.push((
-            TIME_ANCHOR_CHILD,
-            step.stamp.anchor_us.to_be_bytes().to_vec(),
-        ));
+        let stamp = step.stamp;
+        let known = step.known;
+        let mut children: Vec<(usize, Vec<u8>)> = stamp_children(stamp)
+            .into_iter()
+            .filter(|(child, value)| match *child {
+                ID_ABS_CHILD => known.id_high != value.first().copied(),
+                TIME_ABS_CHILD => known.time_high != value.first().copied(),
+                _ => true,
+            })
+            .collect();
+        if known.anchor_us != Some(stamp.anchor_us) {
+            children.push((TIME_ANCHOR_CHILD, stamp.anchor_us.to_be_bytes().to_vec()));
+        }
         if let Some(place) = step.position {
             children.extend(place.children());
         }
@@ -1459,15 +1556,69 @@ impl AlcState {
     ///
     /// Returns [`MessageError`] when a prefix value cannot be encoded.
     pub fn spawn(place: CardPlace, stamp: AlcStamp) -> Result<Self, MessageError> {
+        Self::first_state(
+            place,
+            stamp,
+            FirstStateSlots::OwnerAndPublic,
+            SPAWN_MOVEMENT,
+        )
+    }
+
+    /// The first state of an entity at `place` that a client sees but does not control (another
+    /// player, a mob): the slot-0 children and values of [`Self::spawn`] without slot 1. Slot 1
+    /// (`distGround`, `waterDepth` and the rest) is the controlling client's own: retail sends it
+    /// in the first state of the own player only (general-other-01 and the other own captures:
+    /// slot byte `01` in all 40 first cards of another player, `03` on the own cards).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when a prefix value cannot be encoded.
+    ///
+    /// `movement` is the slayer state and sequence the entity plays now (children 13 and 15):
+    /// retail's first cards of other players carry what the player does then (general-other-01:
+    /// states `1f`, `1a`, `1b`, `0a`, `09` and `08` over 18 first cards), not the stand of a
+    /// spawn.
+    pub fn remote_spawn(
+        place: CardPlace,
+        stamp: AlcStamp,
+        movement: (u64, u64),
+    ) -> Result<Self, MessageError> {
+        Self::first_state(place, stamp, FirstStateSlots::Public, movement)
+    }
+
+    fn first_state(
+        place: CardPlace,
+        stamp: AlcStamp,
+        slots: FirstStateSlots,
+        (slayer_state, slayer_sequence): (u64, u64),
+    ) -> Result<Self, MessageError> {
         let (pos10, offset) = place.resolved();
         let at = SpawnPlace {
             pos10,
             offset: offset.unwrap_or(ZERO_POS3),
         };
         let mut writer = Writer::new();
-        writer.u8(SLOT_BITS[0] | SLOT_BITS[1]);
-        write_children(&mut writer, &SPAWN_SLOT0, at, stamp)?;
-        write_children(&mut writer, &SPAWN_SLOT1, at, stamp)?;
+        match slots {
+            FirstStateSlots::OwnerAndPublic => {
+                writer.u8(SLOT_BITS[0] | SLOT_BITS[1]);
+                let values = FirstValues {
+                    data_bits_high: OWN_DATA_BITS_HIGH,
+                    slayer_state,
+                    slayer_sequence,
+                };
+                write_children(&mut writer, &SPAWN_SLOT0, at, stamp, values)?;
+                write_children(&mut writer, &SPAWN_SLOT1, at, stamp, values)?;
+            }
+            FirstStateSlots::Public => {
+                writer.u8(SLOT_BITS[0]);
+                let values = FirstValues {
+                    data_bits_high: REMOTE_DATA_BITS_HIGH,
+                    slayer_state,
+                    slayer_sequence,
+                };
+                write_children(&mut writer, &SPAWN_SLOT0, at, stamp, values)?;
+            }
+        }
         Ok(Self {
             bytes: writer.finish(),
             pos10: Some(pos10),
@@ -1565,12 +1716,39 @@ enum SpawnValue {
     TimeHigh,
     /// The number of the state before: where the slayer slots started.
     StartedBefore,
+    /// The high flag byte: the own player's or another player's ([`OWN_DATA_BITS_HIGH`],
+    /// [`REMOTE_DATA_BITS_HIGH`]).
+    DataBitsHigh,
+    /// The slayer state and sequence the entity plays ([`FirstValues`]).
+    FirstSlayerState,
+    FirstSlayerSequence,
 }
 
+/// The values of a first state that differ by the entity it is for.
+#[derive(Debug, Clone, Copy)]
+struct FirstValues {
+    data_bits_high: u8,
+    slayer_state: u64,
+    slayer_sequence: u64,
+}
+
+/// The slayer state and sequence of a spawn: standing still, the weapon away (`13=1f 15=b910`,
+/// the most common retail first own ALC).
+pub const SPAWN_MOVEMENT: (u64, u64) = (31, 1081);
+
 use SpawnValue::{
-    Anchor, Byte, Float, IdHigh, IdLow, Position as SpawnPosition, PositionOffset, Prefixed, Raw,
-    StartedBefore, TimeHigh, TimeLow, Word,
+    Anchor, Byte, DataBitsHigh, FirstSlayerSequence, FirstSlayerState, Float, IdHigh, IdLow,
+    Position as SpawnPosition, PositionOffset, Prefixed, Raw, StartedBefore, TimeHigh, TimeLow,
+    Word,
 };
+
+/// The slots of a first state: both for the client's own player, slot 0 alone for an entity it
+/// only sees.
+#[derive(Debug, Clone, Copy)]
+enum FirstStateSlots {
+    OwnerAndPublic,
+    Public,
+}
 
 /// Where a first state puts the player: its `pos10` and its `worldPosRel` offset from it.
 #[derive(Debug, Clone, Copy)]
@@ -1645,9 +1823,9 @@ const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
     (POS_REL_CHILD, PositionOffset),
     (11, Raw(&[0x66, 0xfe])),
     (12, Raw(&[0x19, 0x7f])),
-    (13, Prefixed(31)),
+    (SLAYER_STATE_CHILD, FirstSlayerState),
     (14, StartedBefore),
-    (15, Prefixed(1081)),
+    (SLAYER_SEQUENCE_CHILD, FirstSlayerSequence),
     (16, Prefixed(45)),
     (17, StartedBefore),
     (18, Prefixed(0)),
@@ -1670,7 +1848,7 @@ const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
     (37, Word(0)),
     (TIME_ANCHOR_CHILD, Anchor),
     (DATA_BITS_CHILD, Byte(243)),
-    (42, Byte(83)),
+    (DATA_BITS_HIGH_CHILD, DataBitsHigh),
     (43, Byte(0)),
     (44, Byte(20)),
     (45, Byte(0)),
@@ -1697,6 +1875,7 @@ fn write_children(
     children: &[(usize, SpawnValue)],
     place: SpawnPlace,
     stamp: AlcStamp,
+    values: FirstValues,
 ) -> Result<(), MessageError> {
     let present = children
         .iter()
@@ -1740,6 +1919,15 @@ fn write_children(
             }
             StartedBefore => {
                 writer.u16(stamp.id.wrapping_sub(SPAWN_STARTED_BEFORE));
+            }
+            DataBitsHigh => {
+                writer.u8(values.data_bits_high);
+            }
+            FirstSlayerState => {
+                writer.prefixed(values.slayer_state)?;
+            }
+            FirstSlayerSequence => {
+                writer.prefixed(values.slayer_sequence)?;
             }
         }
     }
@@ -2051,6 +2239,7 @@ mod tests {
         };
         let step = |after_state| RemoteStep {
             stamp,
+            known: KnownStamp::default(),
             position: None,
             facing: None,
             look: None,
@@ -2431,6 +2620,122 @@ mod tests {
         let slot1_at = state.bytes.len() - SLOT1_BODY_LEN;
         let mut slot1 = Reader::new(&state.bytes[slot1_at..]);
         assert_eq!(slot1.wide_prefixed().expect("slot 1"), RETAIL_FIRST_SLOT1);
+    }
+
+    #[test]
+    fn the_first_state_of_a_seen_entity_is_the_spawn_state_without_slot_1() {
+        let place = CardPlace {
+            anchor: None,
+            at: InputPosition {
+                x: POS10_X,
+                y: POS10_Y,
+                z_raw: POS10_Z_RAW,
+            },
+        };
+        let stamp = AlcStamp {
+            id: SPAWN_STATE_ID,
+            anchor_us: 0x0003_01af_d01e_e5a5,
+            offset_ms: SPAWN_STATE_MS,
+        };
+        let own = AlcState::spawn(place, stamp).expect("spawn");
+        let seen = AlcState::remote_spawn(place, stamp, SPAWN_MOVEMENT).expect("remote spawn");
+        assert_eq!(
+            seen.bytes[0], SLOT_BITS[0],
+            "slot 0 alone, as in all 40 retail first cards of another player"
+        );
+        assert_eq!(
+            seen.bytes.len(),
+            own.bytes.len() - SLOT1_BODY_LEN,
+            "the own player's slot 0 alone"
+        );
+        let mut whole = Reader::new(&seen.bytes);
+        let read = AlcState::read(&mut whole).expect("read");
+        whole.finish().expect("the whole body is one state");
+        assert_eq!(read, seen);
+        let with_high = |children: Vec<(usize, Vec<u8>)>, high: u8| -> Vec<(usize, Vec<u8>)> {
+            children
+                .into_iter()
+                .map(|(index, value)| {
+                    (
+                        index,
+                        if index == DATA_BITS_HIGH_CHILD {
+                            vec![high]
+                        } else {
+                            value
+                        },
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            read.slot0_children().expect("children"),
+            with_high(
+                own.slot0_children().expect("children"),
+                REMOTE_DATA_BITS_HIGH
+            ),
+            "the own slot 0 with another player's high flag byte (retail 03, 16 of 18)"
+        );
+        assert_eq!(
+            child(&own, DATA_BITS_HIGH_CHILD),
+            Some(vec![OWN_DATA_BITS_HIGH])
+        );
+    }
+
+    #[test]
+    fn another_players_sequence_time_takes_a_new_absolute_part_only_out_of_reach() {
+        let mut clock = RemoteSequenceClock::after_spawn();
+        let spawn_s = half_value(SPAWN_SEQUENCE_ABS);
+        // A state that starts over: the time is back near 0, within the byte's reach.
+        assert_eq!(
+            clock.time(spawn_s),
+            SequenceTime {
+                rel: SEQUENCE_TIME_REL_ZERO,
+                abs: None
+            },
+            "no absolute part with a start (retail: none of 30 starts of other players)"
+        );
+        let one_second = clock.time(spawn_s + 64.0 * SEQUENCE_TIME_STEP_S);
+        assert_eq!(one_second.rel, SEQUENCE_TIME_REL_ZERO + 64);
+        assert_eq!(one_second.abs, None);
+        // A long stand: out of reach, a new absolute part, and again in the next state.
+        let far = clock.time(388.0);
+        assert_eq!(far.rel, SEQUENCE_TIME_REL_ZERO);
+        assert_eq!(far.abs, Some(half_bits(388.0)));
+        let next = clock.time(388.0 + 3.0 * SEQUENCE_TIME_STEP_S);
+        assert_eq!(next.abs, far.abs, "the next state carries it again");
+        let after = clock.time(388.0 + 6.0 * SEQUENCE_TIME_STEP_S);
+        assert_eq!(after.abs, None);
+        // A start after it: one second before the absolute part, the byte below its zero.
+        let back = clock.time(half_value(half_bits(388.0)) - 64.0 * SEQUENCE_TIME_STEP_S);
+        assert_eq!(
+            (back.rel, back.abs),
+            (SEQUENCE_TIME_REL_ZERO - 64, None),
+            "retail `2=3f` at a start"
+        );
+    }
+
+    #[test]
+    fn a_seen_entitys_first_state_carries_its_movement() {
+        const MOVING: (u64, u64) = (0x1b, 1405);
+        let place = CardPlace {
+            anchor: None,
+            at: InputPosition {
+                x: POS10_X,
+                y: POS10_Y,
+                z_raw: POS10_Z_RAW,
+            },
+        };
+        let stamp = AlcStamp {
+            id: SPAWN_STATE_ID,
+            anchor_us: 0,
+            offset_ms: SPAWN_STATE_MS,
+        };
+        let seen = AlcState::remote_spawn(place, stamp, MOVING).expect("remote spawn");
+        assert_eq!(child(&seen, SLAYER_STATE_CHILD), Some(vec![0x1b]));
+        assert_eq!(
+            child(&seen, SLAYER_SEQUENCE_CHILD),
+            Some(prefixed_bytes(MOVING.1).expect("prefix"))
+        );
     }
 
     /// Slot 1 of the spawn state: a 1-byte presence integer and seven 1-byte children.
@@ -3212,6 +3517,7 @@ mod tests {
             second: None,
         };
         let step = RemoteStep {
+            known: KnownStamp::default(),
             stamp: AlcStamp {
                 id: 0x28c5,
                 anchor_us: STAMP.anchor_us,
@@ -3278,6 +3584,40 @@ mod tests {
             [0, 1, 25, 26, 40],
             "a state is never without its time"
         );
+        let known = KnownStamp::of(step.stamp);
+        let again = AlcState::remote_step(&RemoteStep {
+            known,
+            position: None,
+            facing: None,
+            look: None,
+            slayer: None,
+            sequence_time: None,
+            ..step
+        })
+        .expect("step");
+        let present: Vec<usize> = children_of(&again).into_iter().map(|(c, _)| c).collect();
+        assert_eq!(
+            present,
+            [0, 1],
+            "a viewer that has the anchor and high bytes gets the low bytes alone (retail: 40 and \
+             25 in 1 % of other players' states)"
+        );
+        let later = AlcState::remote_step(&RemoteStep {
+            known,
+            stamp: AlcStamp {
+                offset_ms: step.stamp.offset_ms + 0x100,
+                ..step.stamp
+            },
+            position: None,
+            facing: None,
+            look: None,
+            slayer: None,
+            sequence_time: None,
+            ..step
+        })
+        .expect("step");
+        let present: Vec<usize> = children_of(&later).into_iter().map(|(c, _)| c).collect();
+        assert_eq!(present, [0, 1, 26], "a new high byte of the time goes");
     }
 
     /// The retail newchar sequence started at record 0x2aa (20 Hz records of 0.05 s): the

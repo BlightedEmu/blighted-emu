@@ -22,7 +22,7 @@ use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use nw_bus::{
-    Admit, BusId, CarriedItem, CellTable, ConnectionRef, Ghost, HandoffOffer, ItemPlace,
+    Admit, BusId, CarriedItem, CellTable, ConnectionRef, Ghost, GhostName, HandoffOffer, ItemPlace,
     MOB_STATES, MissionTake, MobGhost, PlayerGhost, PlayerInventory, PlayerProgression,
     PlayerQuests, Point, QuestRun, ScriptLogLine, SimSlot, SnapMob, SnapPlayer,
 };
@@ -43,10 +43,11 @@ use nw_messages::{
     ConsumableCooldown, CooldownChange, CooldownMap, CooldownsState, CurrencyState,
     DisableCollisionMsg, GatheringInterruptedMsg, Hands, HealthChange, InputRecord,
     InteractionEndedMsg, InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT,
-    LevelSpec, LookDir, LookupRequest, MeleeHitMsg, MemberState, MessageError, PlayerLook,
-    PlayerSeenByAiMsg, PlayerStates, ProgressionState, SelectedAsTargetMsg, ServerMessage,
-    ShownItem, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg, UnselectedAsTargetMsg,
-    VitalsData, WorldPosition, facet_entity, put_looking_through_loadout, put_member,
+    LevelSpec, LookDir, LookupRequest, MeleeHitMsg, MemberState, MessageError, PlayerIdentity,
+    PlayerLook, PlayerSeenByAiMsg, PlayerStates, ProgressionState, SelectedAsTargetMsg,
+    ServerMessage, ShownItem, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg,
+    UnselectedAsTargetMsg, VitalsData, WorldPosition, facet_entity, put_looking_through_loadout,
+    put_member,
 };
 use nw_messages::{SyncExecuteEntitiesMsg, TriggerAddress};
 use nw_sim_core::{
@@ -98,6 +99,7 @@ mod mount;
 mod music;
 mod mutations;
 mod notifications;
+mod passives;
 mod points;
 mod progression;
 mod projectile;
@@ -123,7 +125,9 @@ mod status_effects;
 mod storage_search;
 pub(crate) mod store_purchase;
 mod title_choice;
+mod town_props;
 mod tradeskill;
+mod trading_post_cards;
 pub mod transmog;
 mod travel;
 mod walked_floor;
@@ -137,8 +141,8 @@ use level_assets::{ASSET_ENTITY_BASE, AssetViews, asset_gde_ref, spell_gde_ref};
 use level_flow::{AchievementRules, LevelFlow};
 use members::{
     CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, OwnClock, OwnPlaces, OwnTeleport, OwnTick,
-    StateNumber, bundles, card_of, log_mob_group, mob_group, own_group, own_state_counter,
-    remote_group,
+    StateNumber, bundles, card_of, log_mob_group, log_player_card, log_player_state, mob_group,
+    own_group, own_state_counter, remote_group,
 };
 use mob_timeline::{Animations, MobPose, MobTimelines, TreeEntry, TreePose, animations_of};
 use quest_tracker::{JournalRecord, QuestTracker, instance_of};
@@ -329,6 +333,8 @@ pub const MAX_BUNDLE_MEMBERS: usize = 48;
 /// Settings of the world state.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WorldSettings {
+    /// The world this sim serves: every player's home world on its card (3935 `homeWorldId`).
+    pub world_id: Uuid,
     /// Players see each other inside this radius, in metres.
     pub interest_radius_m: f32,
     /// Most other players and ghosts in a player's bundles: the nearest.
@@ -358,6 +364,9 @@ pub struct WorldSettings {
     /// Whether this sim has the instance role: it runs one expedition, raid or trial at a time
     /// ([`instances`]).
     pub instance_role: bool,
+    /// Whether this sim runs the open world's encounters (the open map role on
+    /// [`nw_world::dungeon_scripts::OPEN_WORLD_LEVEL`]).
+    pub world_events: bool,
     /// Longest wait for the director's answer to an expedition request.
     pub instance_request_timeout_ms: u64,
     /// Most GM mobs one command spawns (`[admin] max_gm_spawn`).
@@ -619,6 +628,11 @@ struct Player {
     state_number: Option<StateNumber>,
     /// The view angles of its newest input: where other players see it face and look.
     view: Option<LookDir>,
+    /// The camera point of its newest input.
+    camera: Option<Position>,
+    /// The newest aim point its input carried (row 3), and when it came: where the client aims
+    /// a targeted spell ([`abilities`]).
+    aim: Option<(Position, u64)>,
     /// The view angles the newest own state carried back to its client.
     view_sent: Option<LookDir>,
     /// Its slayer state: the action its client started, then the server's follow-up, or its
@@ -748,6 +762,8 @@ struct Player {
     item_effects: item_calls::ItemEffects,
     /// Its status effects ([`status_effects`]).
     status_effects: status_effects::StatusEffects,
+    /// When its passive abilities fire again ([`passives`]).
+    passives: passives::PassiveReady,
     /// The fall its body is in ([`fall_damage`]).
     fall: fall_damage::FallTrack,
     /// The health its client last got (a card or a vitals change).
@@ -958,6 +974,8 @@ pub struct SimWorld {
     coin_moves: HashMap<Uuid, (nw_bus::CoinReply, u64)>,
     /// The encounters of the running instance's level script.
     dungeon_run: Option<dungeon_script::DungeonRun>,
+    /// The encounters of the open world, on the sim of its level.
+    world_events: Option<dungeon_script::DungeonRun>,
     /// The expedition requests for the director since the last tick.
     instance_requests: Vec<(ConnectionRef, nw_bus::InstanceRequest)>,
     /// The level of each instance game mode, by its CRC: an instance names its own frame.
@@ -1013,6 +1031,8 @@ pub struct SimWorld {
     /// The dead mobs that were skinned, and those whose corpse state the bundles sent.
     skinned: HashMap<u64, u64>,
     skinned_shown: HashSet<u64>,
+    /// The block state each mob's clients were last sent.
+    blocks_shown: HashMap<u64, bool>,
     dice: Dice,
     deaths: Vec<Departure>,
     /// Hit, death and facet messages since the last [`SimWorld::take_messages`].
@@ -1033,6 +1053,8 @@ pub struct SimWorld {
     effect_flights: Vec<abilities::EffectFlight>,
     /// The spell areas of player abilities, open or still to open.
     spell_areas: Vec<spell_areas::SpellArea>,
+    /// The spell entities in the world: their slot key and when each one goes.
+    spell_entities: Vec<(u64, u64)>,
     /// The projectiles mobs fired, on their way to where they aimed.
     mob_shots: Vec<mob_shot::MobShot>,
     /// Swings that a tutorial script started, for the next tick.
@@ -1182,13 +1204,18 @@ impl SimWorld {
             mob_effects_shown: HashMap::new(),
             look_targets: HashMap::new(),
             nodes: Nodes::default(),
-            stations: crafting::Stations::build(&content.stations, &content.structure_costs),
+            stations: crafting::Stations::build(
+                &content.stations,
+                &content.structure_costs,
+                &content.town_props,
+            ),
             bags: loot_bag::LootBags::default(),
             performances: music::Performances::default(),
             open_gathers: Vec::new(),
             crafts: Vec::new(),
             skinned: HashMap::new(),
             skinned_shown: HashSet::new(),
+            blocks_shown: HashMap::new(),
             content,
             mobs: Mobs::new(Arc::clone(&combat.spawns), &combat),
             raw_ids: IdHolder::new(),
@@ -1207,6 +1234,7 @@ impl SimWorld {
             projectile_flights: Vec::new(),
             effect_flights: Vec::new(),
             spell_areas: Vec::new(),
+            spell_entities: Vec::new(),
             mob_shots: Vec::new(),
             scripted_swings: Vec::new(),
             stat_events: Vec::new(),
@@ -1217,6 +1245,7 @@ impl SimWorld {
             instance_run: None,
             coin_moves: HashMap::new(),
             dungeon_run: None,
+            world_events: None,
             instance_requests: Vec::new(),
             instance_levels,
             combat,
@@ -1608,6 +1637,7 @@ impl SimWorld {
         let Some(&entity) = self.by_connection.get(connection) else {
             return;
         };
+        let server_ms = self.server_ms;
         if !self
             .world
             .get::<Player>(entity)
@@ -1641,6 +1671,15 @@ impl SimWorld {
                 // apart from the own card.
                 let in_probation = player.account_in_probation;
                 nw_messages::put_account_in_probation(&mut player.extra_members, in_probation);
+                // The session's start on both clocks, which sets the client's wall clock
+                // (retail has the pair in the own card; Inferred: a change sets it the same).
+                nw_messages::put_session_start(
+                    &mut player.extra_members,
+                    nw_messages::SessionStart {
+                        wall_clock_ns: unix_ns(server_ms),
+                        time_point_ns: server_ms.saturating_mul(nw_messages::NS_PER_MS),
+                    },
+                );
             }
             player.own_card_bundle = None;
         }
@@ -1854,6 +1893,15 @@ impl SimWorld {
                 continue;
             }
             player.view = seen.view;
+            player.camera = seen.camera;
+            if let Some(aim) = record.row_3_position {
+                let at = Position {
+                    x: aim.x,
+                    y: aim.y,
+                    z: aim.z(),
+                };
+                player.aim = Some((at, now_ms));
+            }
             let tracked = player
                 .tracked
                 .record(input, ground, self.settings.ocean_level_m);
@@ -4027,6 +4075,20 @@ impl SimWorld {
 
     /// The clock of player `player`'s ALC states at server time `server_ms`: from its first own
     /// state, or from now before it has one, numbered by its client's input when it numbers it.
+    /// The life block of the own card: alive or dead since the own spawn (the server time of
+    /// the first own state, else now).
+    const fn own_life(vitals: &Vitals, spawned_ms: Option<u64>, server_ms: u64) -> VitalsData {
+        let since = match spawned_ms {
+            Some(spawned) => spawned,
+            None => server_ms,
+        };
+        if vitals.health.is_dead() {
+            VitalsData::player_dead(since)
+        } else {
+            VitalsData::player_alive(since)
+        }
+    }
+
     const fn alc_clock(player: &Player, server_ms: u64) -> OwnClock {
         let spawn_ms = match player.own_spawned_ms {
             Some(spawned) => spawned,
@@ -4036,7 +4098,12 @@ impl SimWorld {
     }
 
     /// What other players see of `player` now ([`replica`]).
-    fn replica_source(player: &Player, vitals: &Vitals, server_ms: u64) -> ReplicaSource {
+    fn replica_source(
+        player: &Player,
+        vitals: &Vitals,
+        server_ms: u64,
+        progression: &Progression,
+    ) -> ReplicaSource {
         let clock = Self::alc_clock(player, server_ms);
         let (items, hands, gear_version) = player.gear.as_ref().map_or_else(
             || (Vec::new(), Hands::default(), 0),
@@ -4047,6 +4114,10 @@ impl SimWorld {
         );
         ReplicaSource {
             character: *player.character.as_bytes(),
+            name: GhostName::of(&player.name),
+            level: progression.level_of(player.experience),
+            sequence: player.slayer.remote_sequence(),
+            movement: player.slayer.card_movement(),
             look: player.look,
             health: vitals.health.current(),
             max_health: vitals.health.max(),
@@ -4077,7 +4148,9 @@ impl SimWorld {
                 .filter(|(_, _, vitals)| !vitals.health.is_dead())
             {
                 let position = body.motion.position();
-                let ghost = Self::replica_source(player, vitals, self.server_ms).ghost();
+                let ghost =
+                    Self::replica_source(player, vitals, self.server_ms, &self.content.progression)
+                        .ghost();
                 for owner in cells.owners.others_within(cells.me, position, radius) {
                     if let Some(sim) = cells.sims.get(usize::from(owner)) {
                         lists.entry(sim.id.clone()).or_default().push(Ghost {
@@ -4146,7 +4219,7 @@ impl SimWorld {
             .map(|(player, vitals)| {
                 (
                     player.number,
-                    Self::replica_source(player, vitals, server_time),
+                    Self::replica_source(player, vitals, server_time, &self.content.progression),
                 )
             })
             .collect();
@@ -4234,6 +4307,9 @@ impl SimWorld {
             card.remote_effects = self.mob_effects_shown.get(&entity).cloned();
             card.skinned = self.skinned.contains_key(&entity);
             card.skinned_changed = card.skinned && self.skinned_shown.insert(entity);
+            card.blocking = self.mobs.blocking(entity);
+            let was_blocking = self.blocks_shown.insert(entity, card.blocking);
+            card.blocking_changed = was_blocking.map_or(card.blocking, |was| was != card.blocking);
             let unseen = owner.is_some_and(|owner| !spawned.contains(&owner));
             if let Some(look) = content
                 .mob_looks
@@ -4291,6 +4367,8 @@ impl SimWorld {
         let skinned = &self.skinned;
         self.skinned_shown
             .retain(|entity| skinned.contains_key(entity));
+        self.blocks_shown
+            .retain(|entity, _| mobs.health(*entity).is_some());
         // The radius is checked at start to be a finite number above 0.
         let Some(mut grid) = SpatialGrid::new(self.settings.interest_radius_m) else {
             return Ok(Bundled::default());
@@ -4316,6 +4394,7 @@ impl SimWorld {
             mutation_unix_s: self.unix_s(),
             replicas,
             local_player_card: self.settings.local_player_card,
+            world_id: self.settings.world_id,
             now_ms,
             server_time,
         };
@@ -4454,6 +4533,8 @@ impl SimWorld {
                     input_counter: None,
                     state_number: None,
                     view: None,
+                    camera: None,
+                    aim: None,
                     view_sent: None,
                     slayer: slayer::SlayerTrack::default(),
                     remote_plan: replica::RemotePlan::default(),
@@ -4551,6 +4632,7 @@ impl SimWorld {
                     cooldowns_changed: !arrival.progression.consumable_cooldowns.is_empty(),
                     item_effects: item_calls::ItemEffects::default(),
                     status_effects: status_effects::StatusEffects::default(),
+                    passives: passives::PassiveReady::default(),
                     fall: fall_damage::FallTrack::default(),
                     health_sent: None,
                     deaths_door_sent: false,
@@ -4902,6 +4984,8 @@ struct Neighbourhood<'a> {
     /// Every player as the players who see it get it this tick.
     replicas: HashMap<u64, Replica>,
     local_player_card: bool,
+    /// The world this sim serves: every player's home world.
+    world_id: Uuid,
     now_ms: u64,
     server_time: u64,
 }
@@ -4994,8 +5078,6 @@ impl Neighbourhood<'_> {
                         replica,
                         // A player without a slot yet gets one, and its card, below.
                         new: !player.slots.assigned().contains_key(number),
-                        refresh: player.bundles_sent.wrapping_add(*number) % CARD_REFRESH_BUNDLES
-                            == 0,
                     })
                 })
                 .collect();
@@ -5256,8 +5338,15 @@ impl Neighbourhood<'_> {
                 if let Some(state) = progression.as_ref() {
                     tracing::debug!(player = player.number, first, ?state, "progression sent");
                 }
+                let card_name = first.then(|| player.name.clone());
+                let life = SimWorld::own_life(vitals, player.own_spawned_ms, self.server_time);
                 let states = PlayerStates {
                     character_id: *player.character.as_bytes(),
+                    identity: card_name.as_deref().map(|name| PlayerIdentity {
+                        name,
+                        home_world: *self.world_id.as_bytes(),
+                        life,
+                    }),
                     look: player.look,
                     health: Some((vitals.health.current(), vitals.health.max())),
                     gear: gear.as_ref(),
@@ -5474,35 +5563,56 @@ impl Neighbourhood<'_> {
                 let Some(slot) = player.slots.slot(number) else {
                     continue;
                 };
-                // Staggered by the entity number, so the cards of a crowd do not all come in one
-                // bundle.
-                let refresh = player.bundles_sent.wrapping_add(number) % CARD_REFRESH_BUNDLES == 0;
-                let carded = slot.new || refresh;
                 // A mob card, else a player's position.
                 groups.extend(match seen {
                     Ok(card) => {
                         let look = self.mob_looks.look(card.state.vitals_id, card.asset);
                         // A mob with a prefab gets its card once, as on retail: the card makes
                         // the client load the creature slice, and a card again starts that
-                        // load over, so the mob never shows (live 2026-09-12).
-                        let carded = if look.is_some() { slot.new } else { carded };
+                        // load over, so the mob never shows (live 2026-09-12). A mob without
+                        // one sends its card again, staggered by the entity number, so the
+                        // cards of a crowd do not all come in one bundle.
+                        let carded = slot.new
+                            || (look.is_none()
+                                && player.bundles_sent.wrapping_add(number) % CARD_REFRESH_BUNDLES
+                                    == 0);
                         let group = mob_group(slot.interest, card, look, carded)?;
                         if let Some(group) = &group {
                             log_mob_group(number, carded, group);
                         }
                         group
                     }
+                    // Another player gets its card once too. Retail sends it when the player
+                    // comes into view and then only its states (general-other-01: one card in a
+                    // slot, then up to 7,368 groups without one); a card again starts the load
+                    // of the player slice over, as it does a mob's (live 2026-11-09: while the
+                    // card went every second, two players 2 m apart did not see each other).
                     Err(position) => match self.replicas.get(&number) {
                         Some(replica) if shown_players.contains(&number) => {
-                            replica.group(slot.interest, number, position, carded)?
+                            let group = replica.group(
+                                slot.interest,
+                                number,
+                                position,
+                                slot.new,
+                                *self.world_id.as_bytes(),
+                                player.remote_plan.sight(number),
+                            )?;
+                            if let Some(group) = &group {
+                                if slot.new {
+                                    log_player_card(own, number, group);
+                                } else {
+                                    log_player_state(own, number, group);
+                                }
+                            }
+                            group
                         }
                         Some(_) => None,
                         None => remote_group(
                             slot.interest,
                             number,
-                            EntityKind::PLAYER,
+                            EntityKind::REMOTE_PLAYER,
                             position,
-                            carded,
+                            slot.new,
                         )?,
                     },
                 });
@@ -5753,9 +5863,9 @@ mod tests {
     use nw_messages::{
         ALC_TYPE_INDEX, GDE_METADATA_TYPE_INDEX, InputPosition, LOCAL_PLAYER_INTEREST,
         LOGIN_MESSAGE_TYPES, LOOK_CHOICES, MemberState, OPEN_WORLD_LEVEL, PAPERDOLL_TYPE_INDEX,
-        PLAYER_APPEARANCE_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS, POS_REL_CHILD,
-        PlayerAppearanceState, ReplicatedStateBundle, SlotRead, SlotUpdate, VITALS_TYPE_INDEX,
-        VitalsState,
+        PLAYER_APPEARANCE_TYPE_INDEX, PLAYER_COMPONENT_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS,
+        POS_REL_CHILD, PlayerAppearanceState, REMOTE_PLAYER_CARD_CLASSES, ReplicatedStateBundle,
+        SlotRead, SlotUpdate, VITALS_TYPE_INDEX, VitalsState,
     };
     use nw_reflect::{Envelope, encode_server_messages};
     use nw_sim_core::test_support::{FlatGround, NoGround};
@@ -5885,8 +5995,13 @@ mod tests {
     /// The sea height of the test level: below the test players.
     pub(super) const OCEAN_LEVEL_M: f32 = 20.0;
 
+    /// The world of the test sims.
+    pub(super) const TEST_WORLD_ID: Uuid =
+        Uuid::from_u128(0x8d0f_4c2e_0000_4000_8000_0000_0000_0001);
+
     pub(super) fn settings(max_visible_players: usize, max_players: u32) -> WorldSettings {
         WorldSettings {
+            world_id: TEST_WORLD_ID,
             interest_radius_m: RADIUS,
             max_visible_players,
             max_players,
@@ -5907,6 +6022,7 @@ mod tests {
             level: OPEN_WORLD_LEVEL,
             ocean_level_m: OCEAN_LEVEL_M,
             instance_role: false,
+            world_events: false,
             instance_request_timeout_ms: INSTANCE_REQUEST_TIMEOUT_MS,
             max_gm_spawn: MAX_GM_SPAWN,
         }
@@ -6620,10 +6736,114 @@ mod tests {
         const SLOT_2_SPAWN_MEMBERS: u64 = 3;
         assert_eq!(
             tick(&mut world, NOW + OWN_CARD_DELAY_MS).bundle_members,
-            PLAYERS * PLAYERS * (2 + PLAYER_EMPTY_COMPONENTS.len() as u64)
+            PLAYERS * (2 + PLAYER_EMPTY_COMPONENTS.len() as u64)
+                + PLAYERS * (PLAYERS - 1) * (2 + REMOTE_PLAYER_CARD_CLASSES.len() as u64)
                 + PLAYERS * SLOT_2_SPAWN_MEMBERS,
-            "3 bundles of 3 groups, each a card, the empty player components and a position, \
-             and the slot-2 entity of each player"
+            "3 bundles of 3 groups: the own player's card, its empty player components and its \
+             position, each other player's card, the states retail shows of it and its \
+             position, and the slot-2 entity of each player"
+        );
+    }
+
+    #[test]
+    fn another_player_gets_its_card_once_with_only_what_retail_shows() {
+        const TICK_MS: u64 = 33;
+        const VIEWER: u64 = 1;
+        const OTHER: u64 = 2;
+        const APART_M: f32 = 2.0;
+        const REFRESH_PERIODS: u64 = 3;
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, VIEWER, CELL_M / 2.0);
+        join(&mut world, OTHER, CELL_M / 2.0 + APART_M);
+        let viewer = connection(VIEWER);
+        let mut cards: Vec<BTreeSet<u64>> = Vec::new();
+        let mut first_states: Vec<nw_messages::AlcState> = Vec::new();
+        let mut card_states: Vec<MemberState> = Vec::new();
+        for step in 0..=CARD_REFRESH_BUNDLES * REFRESH_PERIODS {
+            let messages = tick(&mut world, NOW + OWN_CARD_DELAY_MS + step * TICK_MS).messages;
+            for out in messages
+                .iter()
+                .filter(|out| out.connection == viewer && out.channel == REPLICATION_CHANNEL)
+            {
+                for bytes in &out.envelopes {
+                    for (entity, update) in groups_in(&world, &viewer, &bundle_in(bytes)) {
+                        if entity == OTHER && update.card.is_some() {
+                            cards.push(
+                                update
+                                    .members
+                                    .iter()
+                                    .map(|member| member.state.type_index())
+                                    .collect(),
+                            );
+                            card_states
+                                .extend(update.members.iter().map(|member| member.state.clone()));
+                            first_states.extend(update.members.iter().filter_map(|member| {
+                                match &member.state {
+                                    MemberState::Alc(alc) => Some(alc.clone()),
+                                    _ => None,
+                                }
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            cards.len(),
+            1,
+            "one card while the other player stays in view, as on retail (general-other-01)"
+        );
+        let retail: BTreeSet<u64> = [GDE_METADATA_TYPE_INDEX, ALC_TYPE_INDEX]
+            .into_iter()
+            .chain(REMOTE_PLAYER_CARD_CLASSES)
+            .collect();
+        assert_eq!(
+            cards[0], retail,
+            "the states retail shows of another player, never its coins, bags or progression \
+             points"
+        );
+        /// The ALC slot byte of slot 0 alone.
+        const ALC_SLOT_0: u8 = 0x01;
+        let mut alc = nw_messages::Writer::new();
+        first_states[0].write(&mut alc);
+        assert_eq!(
+            alc.finish()[0],
+            ALC_SLOT_0,
+            "its first state without the own client's slot 1 (retail: 40 of 40 first cards)"
+        );
+        let player = card_states
+            .iter()
+            .find_map(|state| match state {
+                MemberState::PlayerComponent(player) => Some(player.clone()),
+                _ => None,
+            })
+            .expect("3935");
+        assert_eq!(
+            player.character_name.as_deref(),
+            Some(player_name(OTHER).as_bytes()),
+            "its name (retail: every other player's first card)"
+        );
+        assert_eq!(player.home_world_id, Some(*TEST_WORLD_ID.as_bytes()));
+        assert_eq!(player.looking_through_loadout, Some(false));
+        assert!(
+            card_states.iter().any(|state| matches!(
+                state,
+                MemberState::Progression(ProgressionState {
+                    level: Some(_),
+                    experience: None,
+                    rested: None,
+                })
+            )),
+            "its level alone: {card_states:?}"
+        );
+        assert!(
+            card_states.iter().any(|state| matches!(
+                state,
+                MemberState::Vitals(vitals)
+                    if vitals.slot_0.is_some_and(|slot| slot.vitals_data.is_some_and(|life| !life.is_dead()))
+            )),
+            "its life block: alive"
         );
     }
 
@@ -9118,11 +9338,29 @@ mod tests {
             ))),
             "the saved look, not the default mesh"
         );
+        let Some(MemberState::Vitals(vitals)) = state_of(VITALS_TYPE_INDEX) else {
+            panic!("vitals");
+        };
+        let life = vitals
+            .slot_0
+            .and_then(|slot| slot.vitals_data)
+            .expect("the life block (retail: every own card)");
+        assert!(!life.is_dead());
         assert_eq!(
-            state_of(VITALS_TYPE_INDEX),
-            Some(MemberState::Vitals(VitalsState::player(max, max))),
+            vitals,
+            VitalsState::player(max, max).with_life(life),
             "full health of the player vitals row, so the bar is not 00/00"
         );
+        let Some(MemberState::PlayerComponent(player)) = state_of(PLAYER_COMPONENT_TYPE_INDEX)
+        else {
+            panic!("3935");
+        };
+        assert_eq!(
+            player.character_name.as_deref(),
+            Some(admit.name.as_bytes()),
+            "its name (retail: the own card)"
+        );
+        assert_eq!(player.home_world_id, Some(*TEST_WORLD_ID.as_bytes()));
     }
 
     /// The states that `who` got of entity `entity` in every replication bundle of `outgoing`.
@@ -10035,6 +10273,48 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_kill_drops_the_quest_item_of_a_have_and_return_task_into_its_loot_bag() {
+        // Retail Secrets of the Earth (2026-10-02): each `02A_Side02_BoneDust` came with a loot
+        // bag use (kind 28) of a killed Lost, 30 to 50 ms before its task counted.
+        use crate::objectives::{KillTypes, TaskBook, TaskRow};
+        use crate::player_content::{ObjectiveRow, QuestBook};
+        const QUEST: &str = "02A_Side02_01_Secrets";
+        const DUST: &str = "02A_Side02_BoneDust";
+        let mut world = loot_world(FLINT_TABLE, LootTables::default());
+        let mut content = (*world.content).clone();
+        content.mob_loot = MobLoot::default();
+        content.kill_types = KillTypes::build([(TEST_MOB.to_owned(), format!("{TEST_MOB},Lost"))]);
+        content.kits = gear::tests::kits_with(&[(DUST, "Resource+Quest")]);
+        content.quests = QuestBook::build(
+            [ObjectiveRow {
+                id: QUEST.to_owned(),
+                root: "Dust".to_owned(),
+                ..ObjectiveRow::default()
+            }],
+            TaskBook::new(vec![TaskRow {
+                task_id: "Dust".to_owned(),
+                kind: "TaskHaveAndReturnItems".to_owned(),
+                item_name: Some(DUST.to_owned()),
+                item_drop_vc: Some("Lost".to_owned()),
+                item_drop_probability: Some(100),
+                target_qty: Some(5),
+                ..TaskRow::default()
+            }]),
+        );
+        world.content = Arc::new(content);
+        let mob = crate::mobs::mob_entity(0);
+        world.drop_loot(mob, 1, NOW);
+        assert_eq!(
+            world.bags.counts(),
+            (0, 0),
+            "a mob type without a table and no quest drops nothing"
+        );
+        world.start_quest(1, QUEST, NOW).expect("quest");
+        world.drop_loot(mob, 1, NOW);
+        assert_eq!(world.bags.items_for(1), [vec![(DUST.to_owned(), 1)]]);
     }
 
     #[test]
@@ -12568,7 +12848,7 @@ mod tests {
                 remote_group(
                     u16::MAX - offset as u16,
                     largest_number - offset,
-                    EntityKind::PLAYER,
+                    EntityKind::REMOTE_PLAYER,
                     at(0.0),
                     true,
                 )

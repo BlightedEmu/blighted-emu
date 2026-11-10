@@ -20,22 +20,29 @@ use std::sync::Arc;
 use bevy_ecs::entity::Entity;
 use nw_bus::ConnectionRef;
 use nw_content::attribute_bonuses::AbilityStats;
-use nw_content::player_abilities::{AbilityList, ListAction, SpellProjectile, SpellRow};
+use nw_content::combat::CombatData;
+use nw_content::player_abilities::{
+    AbilityList, FragmentRow, ListAction, SpellProjectile, SpellRow, TransitionTo,
+};
 use nw_content::player_attacks::stance_tags;
 use nw_content::status_effects::StatusEffectRules;
 use nw_formats::mannequin::{CageWorld, CastKind, Condition, ManaCompare, TagCase, TagChange};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::paperdoll::slot;
 use nw_messages::{AbilityCooldown, InputRecord, LookDir};
-use nw_sim_core::Position;
+use nw_sim_core::{Position, weapon_damage_scale};
 
 use super::gear::Gear;
 use super::hit_shape::PLAYER_CAPSULE;
+use super::points::Attributes;
+use super::progression::Masteries;
 use super::projectile::{AimLine, Shot, ShotHit, first_on_line, flight_ms};
 use super::spell_areas::SpellArea;
+use super::status_effects::StatusEffects;
 use super::{Player, SimWorld};
 use crate::combat::{AttackOutcome, AttackRefusal};
 use crate::mobs::Capsule;
+use crate::player_content::PlayerContent;
 
 /// Mana back per second at Focus 250 (Observed, general-other-01 and target-lock-test).
 const RETAIL_MANA_REGEN_PER_S: f32 = 3.259;
@@ -60,12 +67,17 @@ const US_PER_MS: u64 = 1_000;
 /// name (Inferred: the client's character fits its controller, the weapon its requirements and
 /// its slot (the abilities run only while a weapon is in the hand), and the client checks its own
 /// aim point, which it does not send).
-const PASSING_TESTS: [&str; 4] = [
+const PASSING_TESTS: [&str; 3] = [
     "IfCanResizeCharacterController",
     "IfHasWeaponPrerequisites",
     "IfItemInSlotEquippable",
-    "ActionConditionSpellSpawnLocationState",
 ];
+/// The test that the aim's raycast placed the spell. An aimed ability's cast action starts on it
+/// (the life staff's `Ability_Life_Staff_HealingWave_Loop` after the click of
+/// `Ability_Life_Staff_HealingWave`; retail `general-other-01`: the click at 79.458 s, the spell
+/// at 79.792 s, the 0.333 s of the cast fragment's `CAGE-CastSpell` clip). It holds once the
+/// chain cast a spell.
+const SPELL_PLACED_TEST: &str = "ActionConditionSpellSpawnLocationState";
 
 /// The client settings that `IfStackConfigVar` tests and that are on: each one's client default
 /// is on (the creation site of `NewWorld.exe` build 25810808 passes 1) and the retail remote
@@ -127,8 +139,9 @@ struct Press {
     key: usize,
     /// CRC-32 of the lowercase id of the ability mapped to it.
     ability: u32,
-    /// When it came.
-    at_ms: u64,
+    /// The time of the first tick that read it; `None` until that tick. A press comes with its
+    /// input message, between two ticks, and is of the frame of the tick that reads it first.
+    read_ms: Option<u64>,
     /// It started a chain: it still names its ability to the chain's tests within the frames
     /// each test counts back (`BackTicks`), but starts no other chain.
     used: bool,
@@ -142,7 +155,10 @@ struct Running {
     list: usize,
     /// Its index in the list.
     action: usize,
-    /// When it started.
+    /// The fragment a transition clip switched it to ([`TransitionTo::Fragment`]); `None` while
+    /// it plays its action's own.
+    fragment: Option<String>,
+    /// When the fragment it plays started.
     started_ms: u64,
     /// Each of its tag activities: off, or on with the case it started with (`None`: no case).
     tag_activities: Vec<Option<Option<TagCase>>>,
@@ -155,6 +171,29 @@ struct Cooldown {
     ability: u32,
     /// When it ends.
     end_ms: u64,
+    /// The key (0, 1 or 2) of the press that started it.
+    key: usize,
+    /// When it started on the client's clock (µs since 2000-01-01).
+    start_us: u64,
+}
+
+impl Running {
+    /// The fragment it plays now, of its list `list`.
+    fn fragment_in<'a>(&'a self, list: &'a AbilityList) -> Option<&'a FragmentRow> {
+        let name = self
+            .fragment
+            .as_deref()
+            .or_else(|| Some(list.actions.get(self.action)?.fragment.as_str()))?;
+        list.fragment(name)
+    }
+}
+
+/// What a transition clip of a running action does.
+enum Step<'a> {
+    /// The action stops and this action of this list starts.
+    Action(&'a AbilityList, usize),
+    /// The action goes on with this fragment.
+    Fragment(&'a str),
 }
 
 /// What a tick of the run asks the world to do.
@@ -226,6 +265,11 @@ impl Mana {
         self.current = (self.current + back).min(self.max);
     }
 
+    /// Gives `amount` of mana (below 0: takes it), from 0 to the max.
+    pub(super) fn add(&mut self, amount: f32) {
+        self.current = (self.current + amount).clamp(0.0, self.max);
+    }
+
     /// The mana to send when it changed since the last send.
     pub fn take_change(&mut self) -> Option<f32> {
         (self.sent != Some(self.current)).then(|| {
@@ -233,6 +277,42 @@ impl Mana {
             self.current
         })
     }
+}
+
+/// The stance tags of weapon item `item` (`1H_Melee,Sword`); `None` for an item of no stance.
+pub(super) fn weapon_tags(data: &CombatData, item: &str) -> Option<Vec<String>> {
+    data.weapon_of_item(item)
+        .and_then(|weapon| data.stance(weapon.stance))
+        .map(|stance| stance_tags(&stance.tags))
+}
+
+/// The abilities player `player` holds now: the points it spent in its weapon masteries (each an
+/// `AbilityID`), the `EquipAbility` of its worn perks and the threshold abilities of its
+/// attributes (food adds its points).
+/// The parts are the player's fields, so a caller may hold others of them.
+pub(super) fn held_abilities<'a>(
+    (masteries, gear, attributes, effects): (
+        &'a Masteries,
+        Option<&'a Gear>,
+        &Attributes,
+        &StatusEffects,
+    ),
+    content: &'a PlayerContent,
+) -> Vec<&'a str> {
+    let rules = &content.status_effects;
+    let mut abilities: Vec<&str> = masteries.spent_points().collect();
+    abilities.extend(gear.into_iter().flat_map(|gear| {
+        gear.worn_perks()
+            .into_iter()
+            .filter_map(|(perk, _)| content.perk_effects.ability_of(perk))
+    }));
+    // An attribute id is its place in `ATTRIBUTE_NAMES`.
+    abilities.extend(content.attribute_bonuses.abilities(|attribute| {
+        attributes
+            .value(&content.progression.points, attribute)
+            .saturating_add(effects.attribute_bonus(rules, attribute as usize))
+    }));
+    abilities
 }
 
 /// The ability state of one player.
@@ -279,15 +359,6 @@ struct RunWorld<'a> {
 }
 
 impl RunWorld<'_> {
-    /// The length of action `index`'s fragment, ms.
-    fn length(&self, index: usize) -> u64 {
-        self.list.actions.get(index).map_or(0, |action| {
-            self.list
-                .fragment(&action.fragment)
-                .map_or(0, |fragment| fragment.length_ms)
-        })
-    }
-
     /// The running actions of every list, with their list and action.
     fn all_running(&self) -> impl Iterator<Item = (&Running, &AbilityList, &ListAction)> {
         self.run.running.iter().filter_map(|running| {
@@ -299,26 +370,33 @@ impl RunWorld<'_> {
         })
     }
 
-    /// The running actions that play fragment `fragment` (any case; `None`: the testing
-    /// action), each with its fragment's length and how long it runs.
+    /// The running actions that play fragment `fragment` now (any case; `None`: the testing
+    /// action), each with its fragment's length and how long it plays it.
     fn playing(&self, fragment: Option<&str>) -> Vec<(u64, u64)> {
         let elapsed = |running: &Running| self.now_ms.saturating_sub(running.started_ms);
+        let length = |running: &Running, list: &AbilityList| {
+            running
+                .fragment_in(list)
+                .map_or(0, |fragment| fragment.length_ms)
+        };
         match fragment {
             None => self
                 .run
                 .running_in(self.list)
                 .filter(|running| Some(running.action) == self.current)
-                .map(|running| (self.length(running.action), elapsed(running)))
+                .map(|running| (length(running, self.list), elapsed(running)))
                 .collect(),
             Some(name) => self
                 .all_running()
-                .filter(|(_, _, action)| action.fragment.eq_ignore_ascii_case(name))
-                .map(|(running, list, action)| {
-                    let length = list
-                        .fragment(&action.fragment)
-                        .map_or(0, |fragment| fragment.length_ms);
-                    (length, elapsed(running))
+                .filter(|(running, list, action)| {
+                    running
+                        .fragment
+                        .as_deref()
+                        .unwrap_or(&action.fragment)
+                        .eq_ignore_ascii_case(name)
+                        && list.fragment(name).is_some()
                 })
+                .map(|(running, list, _)| (length(running, list), elapsed(running)))
                 .collect(),
         }
     }
@@ -330,8 +408,8 @@ impl CageWorld for RunWorld<'_> {
     }
 
     fn marker(&self, marker: &str) -> bool {
-        self.all_running().any(|(running, list, action)| {
-            list.fragment(&action.fragment).is_some_and(|fragment| {
+        self.all_running().any(|(running, list, _)| {
+            running.fragment_in(list).is_some_and(|fragment| {
                 fragment
                     .markers_at(self.now_ms.saturating_sub(running.started_ms))
                     .contains(&marker)
@@ -350,10 +428,11 @@ impl CageWorld for RunWorld<'_> {
         installed && self.all_running().any(|(_, _, own)| own.name == action)
     }
 
+    /// Whether a running action plays the fragment: it holds its scopes until its action
+    /// stops or another fragment takes them, also past its length (an aim fragment ends in a
+    /// loop, and the cast that follows it tests that it plays).
     fn fragment_playing(&self, fragment: Option<&str>) -> bool {
-        self.playing(fragment)
-            .into_iter()
-            .any(|(length, elapsed)| elapsed < length)
+        !self.playing(fragment).is_empty()
     }
 
     fn fragment_done(&self, fragment: Option<&str>, exit_offset_ms: u32) -> bool {
@@ -365,7 +444,9 @@ impl CageWorld for RunWorld<'_> {
     fn ability_move(&self, ability: &str, back_ticks: u32) -> bool {
         self.run.press.is_some_and(|press| {
             press.ability == lowercase_crc32(ability)
-                && self.now_ms.saturating_sub(press.at_ms)
+                && press
+                    .read_ms
+                    .map_or(0, |read_ms| self.now_ms.saturating_sub(read_ms))
                     <= u64::from(back_ticks) * CLIENT_FRAME_MS
         })
     }
@@ -409,6 +490,10 @@ impl CageWorld for RunWorld<'_> {
     }
 
     fn other(&self, test: &str) -> bool {
+        if test == SPELL_PLACED_TEST {
+            // The raycast of the aim found the spell's place: a cast of this chain.
+            return !self.run.chain_cast.is_empty();
+        }
         PASSING_TESTS.contains(&test)
     }
 }
@@ -423,7 +508,6 @@ impl AbilityRun {
         records: &[InputRecord],
         mapped: impl Fn(usize) -> Option<u32>,
         inputs_of: impl Fn(&InputRecord) -> Vec<String>,
-        now_ms: u64,
     ) {
         self.inputs_on.clear();
         for record in records.iter().rev() {
@@ -447,7 +531,7 @@ impl AbilityRun {
                 self.press = Some(Press {
                     key,
                     ability,
-                    at_ms: now_ms,
+                    read_ms: None,
                     used: false,
                 });
             }
@@ -467,6 +551,9 @@ impl AbilityRun {
         let stats = holder.stats();
         self.mana.set_stats(stats);
         self.mana.regen(now_ms);
+        if let Some(press) = self.press.as_mut() {
+            press.read_ms.get_or_insert(now_ms);
+        }
         let mut events = Vec::new();
         for list in lists {
             self.tick_list(lists, list, holder, (now_ms, server_ms), &mut events);
@@ -491,10 +578,10 @@ impl AbilityRun {
         let stats = holder.stats();
         let key = list_key(list);
         let tags = holder.tags();
-        let transitions: Vec<(usize, &AbilityList, usize)> = self
+        let steps: Vec<(usize, Step<'_>)> = self
             .running_in(list)
             .filter_map(|running| {
-                let fragment = list.fragment(&list.actions[running.action].fragment)?;
+                let fragment = running.fragment_in(list)?;
                 let since_ms = now_ms.saturating_sub(running.started_ms);
                 let world = self.world(lists, list, holder, &tags, Some(running.action), now_ms);
                 fragment
@@ -513,26 +600,36 @@ impl AbilityRun {
                                 .as_ref()
                                 .is_none_or(|condition| condition.holds_in(&world))
                     })
-                    .filter_map(|transition| {
-                        std::iter::once(list)
+                    .find_map(|transition| match &transition.to {
+                        TransitionTo::Action(name) => std::iter::once(list)
                             .chain(lists.iter().copied().filter(|other| list_key(other) != key))
                             .find_map(|target| {
                                 let index = target
                                     .actions
                                     .iter()
-                                    .position(|action| action.name == transition.action)?;
+                                    .position(|action| action.name == *name)?;
                                 Some((target, index))
                             })
+                            .filter(|(target, next)| {
+                                !self.running_in(target).any(|other| other.action == *next)
+                            })
+                            .map(|(target, next)| Step::Action(target, next)),
+                        TransitionTo::Fragment(name) => list
+                            .fragment(name)
+                            .filter(|next| next.name != fragment.name)
+                            .map(|next| Step::Fragment(next.name.as_str())),
                     })
-                    .find(|(target, next)| {
-                        !self.running_in(target).any(|other| other.action == *next)
-                    })
-                    .map(|(target, next)| (running.action, target, next))
+                    .map(|step| (running.action, step))
             })
             .collect();
-        for (from, target, to) in transitions {
-            self.leave(list, &[from]);
-            self.enter(target, to, self.chain, stats, (now_ms, server_ms), events);
+        for (from, step) in steps {
+            match step {
+                Step::Action(target, to) => {
+                    self.leave(list, &[from]);
+                    self.start(lists, target, to, self.chain, stats, (now_ms, server_ms), events);
+                }
+                Step::Fragment(fragment) => self.switch_fragment(key, from, fragment, now_ms),
+            }
         }
         let stops: Vec<usize> = self
             .running_in(list)
@@ -573,6 +670,7 @@ impl AbilityRun {
                 continue;
             }
             if !activation.holds_in(&self.world(lists, list, holder, &tags, Some(index), now_ms)) {
+                self.report_refusal(action, now_ms, "its activation does not hold");
                 continue;
             }
             let starts_cooldowns = action
@@ -581,13 +679,14 @@ impl AbilityRun {
                 .is_some_and(|ability| !ability.starts_cooldowns.is_empty());
             if starts_cooldowns && self.mana.current < chain_cost(list, index) {
                 // Too little mana for the spells it starts: no cooldown and no spell.
+                self.report_refusal(action, now_ms, "too little mana");
                 continue;
             }
             if starts_chain {
                 self.chain = chain;
                 self.chain_cast.clear();
             }
-            self.enter(list, index, chain, stats, (now_ms, server_ms), events);
+            self.start(lists, list, index, chain, stats, (now_ms, server_ms), events);
             if starts_chain && let Some(press) = self.press.as_mut() {
                 press.used = true;
             }
@@ -597,7 +696,19 @@ impl AbilityRun {
         for running in self.running_in(list) {
             let action = &list.actions[running.action];
             let world = self.world(lists, list, holder, &tags, Some(running.action), now_ms);
+            // An action that casts by raycast shows its aim first with a targeting cast of the
+            // spell (Sacred Ground: `CastSpellTargeting` of the plain spell while the staff
+            // readies, then `CastSpellRaycast` of the plain spell or of the upgrade the player
+            // holds). The aim spawns nothing: retail spawned one spell per press, and with both
+            // a player who held the upgrade got two areas (live 2026-11-10).
+            let aims_first = action
+                .casts
+                .iter()
+                .any(|cast| cast.kind == CastKind::Raycast);
             for (cast_index, cast) in action.casts.iter().enumerate() {
+                if aims_first && cast.kind == CastKind::Targeting {
+                    continue;
+                }
                 let spell = &cast.spell.id;
                 let cast_before = self.chain_cast.contains(spell)
                     || casts.iter().any(|(own, index): &(usize, usize)| {
@@ -624,6 +735,87 @@ impl AbilityRun {
         }
     }
 
+    /// Logs that `action`, the start of the ability of the newest press, did not start at
+    /// `now_ms` for `reason`: in the tick that reads the press, and in each tick with an input on
+    /// (the click of an aimed ability). An action of another ability logs nothing.
+    fn report_refusal(&self, action: &ListAction, now_ms: u64, reason: &str) {
+        let Some(press) = self.press.filter(|press| !press.used) else {
+            return;
+        };
+        let of_press = action
+            .ability
+            .as_ref()
+            .and_then(|ability| ability.move_name.as_deref())
+            .is_some_and(|name| lowercase_crc32(name) == press.ability);
+        if !of_press || (press.read_ms != Some(now_ms) && self.inputs_on.is_empty()) {
+            return;
+        }
+        let on_cooldown = self
+            .cooldowns
+            .iter()
+            .any(|cooldown| cooldown.ability == press.ability && cooldown.end_ms > now_ms);
+        tracing::debug!(
+            action = %action.name,
+            key = press.key,
+            reason,
+            inputs_on = ?self.inputs_on,
+            tags_on = ?self.tags_on,
+            mana = self.mana.current,
+            on_cooldown,
+            running = self.running.len(),
+            "ability press starts no action"
+        );
+    }
+
+    /// The running action `action` of the list of key `list` goes on with fragment `fragment`
+    /// from `now_ms`.
+    fn switch_fragment(&mut self, list: usize, action: usize, fragment: &str, now_ms: u64) {
+        if let Some(running) = self
+            .running
+            .iter_mut()
+            .find(|running| running.list == list && running.action == action)
+        {
+            running.fragment = Some(fragment.to_owned());
+            running.started_ms = now_ms;
+        }
+    }
+
+    /// Starts action `index` of list `list` ([`AbilityRun::enter`]) after the running actions
+    /// of `lists` whose fragments play on a scope of its fragment stopped: a fragment that
+    /// starts on a Mannequin scope takes it from the one that played there (the life staff's
+    /// `Ability_Life_Staff_HealingWave_Loop` on `UpperBody+Weapon` ends the aim of
+    /// `Ability_Life_Staff_HealingWave` on `UpperBody`, whose own end test is only the
+    /// `Magic_AimExit` marker of a left aim; live 2026-11-10: that aim ran on after the cast, and
+    /// no press cast again). A fragment without known scopes takes none.
+    #[allow(clippy::too_many_arguments, reason = "the arguments of `enter` and the lists")]
+    fn start(
+        &mut self,
+        lists: &[&AbilityList],
+        list: &AbilityList,
+        index: usize,
+        chain: u64,
+        stats: AbilityStats,
+        times: (u64, u64),
+        events: &mut Vec<AbilityEvent>,
+    ) {
+        let scopes: &[String] = list
+            .fragment(&list.actions[index].fragment)
+            .map_or(&[], |fragment| &fragment.scopes);
+        for other in lists {
+            let taken: Vec<usize> = self
+                .running_in(other)
+                .filter(|running| {
+                    running.fragment_in(other).is_some_and(|fragment| {
+                        fragment.scopes.iter().any(|scope| scopes.contains(scope))
+                    })
+                })
+                .map(|running| running.action)
+                .collect();
+            self.leave(other, &taken);
+        }
+        self.enter(list, index, chain, stats, times, events);
+    }
+
     /// Starts action `index` of list `list` in chain `chain` at `now_ms` (`server_ms` on the
     /// server clock): it starts its ability's cooldowns, and its effects go in `events`.
     fn enter(
@@ -640,6 +832,7 @@ impl AbilityRun {
         self.running.push(Running {
             list: key,
             action: index,
+            fragment: None,
             started_ms: now_ms,
             tag_activities: vec![None; list.actions[index].tag_activities.len()],
         });
@@ -783,12 +976,14 @@ impl AbilityRun {
         let ability = lowercase_crc32(id);
         self.cooldowns
             .retain(|cooldown| cooldown.ability != ability && cooldown.end_ms > now_ms);
+        let key = self.press.map_or(0, |press| press.key);
+        let start_us = server_ms.saturating_mul(US_PER_MS);
         self.cooldowns.push(Cooldown {
             ability,
             end_ms: now_ms + time_ms,
+            key,
+            start_us,
         });
-        let key = self.press.map_or(0, |press| press.key);
-        let start_us = server_ms.saturating_mul(US_PER_MS);
         self.cooldown_changes.push((
             key,
             AbilityCooldown {
@@ -797,6 +992,41 @@ impl AbilityRun {
                 start_us,
             },
         ));
+    }
+
+    /// Changes the time left of each running cooldown whose ability `cut` names by `share` of it
+    /// (below 0: shorter; a passive's `CooldownTimer`, Inferred: a share of the time left, as the
+    /// descriptions say "reduces its cooldown by 80%"), at `now_ms` and `server_ms`; the client
+    /// gets each changed one with the key of its press.
+    pub(super) fn cut_cooldowns(
+        &mut self,
+        cut: impl Fn(u32) -> bool,
+        share: f64,
+        (now_ms, server_ms): (u64, u64),
+    ) {
+        for cooldown in &mut self.cooldowns {
+            if !cut(cooldown.ability) || cooldown.end_ms <= now_ms {
+                continue;
+            }
+            // Some seconds left; a share of a few tenths.
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let left_ms =
+                ((cooldown.end_ms - now_ms) as f64 * (1.0 + share).max(0.0)).round() as u64;
+            cooldown.end_ms = now_ms + left_ms;
+            let end_us = server_ms.saturating_add(left_ms).saturating_mul(US_PER_MS);
+            self.cooldown_changes.push((
+                cooldown.key,
+                AbilityCooldown {
+                    ability: cooldown.ability,
+                    end_us,
+                    start_us: cooldown.start_us,
+                },
+            ));
+        }
     }
 
     /// The cooldowns started since the last call, with the key (0, 1 or 2) of their press.
@@ -955,7 +1185,17 @@ pub(super) struct Caster {
     pub(super) number: u64,
     from: Position,
     view: Option<LookDir>,
+    camera: Option<Position>,
+    /// The newest aim point of its input, and when it came.
+    aim: Option<(Position, u64)>,
     lock_target: Option<u64>,
+}
+
+impl Caster {
+    /// The yaw of its look; north without one.
+    pub(super) fn yaw(&self) -> f32 {
+        self.view.map_or(0.0, |view| view.yaw)
+    }
 }
 
 /// The status effects of a friendly projectile spell on their way to the player it met.
@@ -965,16 +1205,21 @@ pub(super) struct EffectFlight {
     effects: Vec<String>,
     /// The number of the caster.
     source: u64,
+    /// The hit of their spell ([`SimWorld::spell_heal_base`]).
+    hit_amount: f64,
     /// The radius around the player in which the other players take them too.
     splash_m: f32,
     /// When they get there.
     land_ms: u64,
 }
 
+/// The CAGE input names of the ability keys (`ability1` to `ability3`).
+const ABILITY_INPUT_PREFIX: &str = "ability";
+
 impl SimWorld {
-    /// Reads the ability key presses in the input `records` of player `entity` at `now_ms`: a key
-    /// names the mapped ability that the lists of the weapon in its hand start.
-    pub(super) fn ability_presses(&mut self, entity: Entity, records: &[InputRecord], now_ms: u64) {
+    /// Reads the ability key presses in the input `records` of player `entity`: a key names the
+    /// mapped ability that the lists of the weapon in its hand start.
+    pub(super) fn ability_presses(&mut self, entity: Entity, records: &[InputRecord]) {
         // A silence or a stun keeps the ability keys from starting anything.
         if !self.player_control(entity).may_cast() {
             return;
@@ -991,11 +1236,27 @@ impl SimWorld {
         let mapped: Vec<Option<u32>> = (0..nw_messages::MAX_MAPPED_SLOTS)
             .map(|key| ability_of_key(&lists, player.masteries.mapped_to(key)))
             .collect();
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let keys: Vec<String> = records
+                .iter()
+                .flat_map(|record| data.ability_inputs_on(|number| record.input_on(number)))
+                .filter(|input| input.starts_with(ABILITY_INPUT_PREFIX))
+                .collect();
+            if !keys.is_empty() {
+                tracing::debug!(
+                    player = player.number,
+                    item,
+                    lists = lists.len(),
+                    ?mapped,
+                    ?keys,
+                    "ability keys"
+                );
+            }
+        }
         player.abilities.press(
             records,
             |key| mapped.get(key).copied().flatten(),
             |record| data.ability_inputs_on(|number| record.input_on(number)),
-            now_ms,
         );
     }
 
@@ -1023,11 +1284,7 @@ impl SimWorld {
             if lists.is_empty() {
                 continue;
             }
-            let tags_of = |item: &str| {
-                data.weapon_of_item(item)
-                    .and_then(|weapon| data.stance(weapon.stance))
-                    .map(|stance| stance_tags(&stance.tags))
-            };
+            let tags_of = |item: &str| weapon_tags(&data, item);
             let tags = tags_of(item).unwrap_or_default();
             let option_tags = player.gear.as_ref().map_or_else(Vec::new, |gear| {
                 MAIN_HAND_OPTIONS
@@ -1037,20 +1294,15 @@ impl SimWorld {
                     })
                     .collect()
             });
-            let mut abilities_on: Vec<&str> = player.masteries.spent_points().collect();
-            abilities_on.extend(player.gear.iter().flat_map(|gear| {
-                gear.worn_perks()
-                    .into_iter()
-                    .filter_map(|(perk, _)| content.perk_effects.ability_of(perk))
-            }));
-            let attributes = &player.attributes;
-            let effects = &player.status_effects;
-            // An attribute id is its place in `ATTRIBUTE_NAMES`; food adds its points.
-            abilities_on.extend(content.attribute_bonuses.abilities(|attribute| {
-                attributes
-                    .value(&content.progression.points, attribute)
-                    .saturating_add(effects.attribute_bonus(rules, attribute as usize))
-            }));
+            let abilities_on = held_abilities(
+                (
+                    &player.masteries,
+                    player.gear.as_ref(),
+                    &player.attributes,
+                    &player.status_effects,
+                ),
+                &content,
+            );
             let stats = content
                 .attribute_bonuses
                 .stats_of(abilities_on.iter().copied());
@@ -1136,6 +1388,8 @@ impl SimWorld {
             number: player.number,
             from: body.motion.position(),
             view: player.view,
+            camera: player.camera,
+            aim: player.aim,
             lock_target: self
                 .world
                 .get::<super::Vitals>(entity)
@@ -1159,12 +1413,11 @@ impl SimWorld {
     ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
         let places = self.target_places();
         let facing = caster.view.map(|view| view.yaw);
-        let Some(yaw) = Self::aim_yaw(caster.lock_target, facing, caster.from, &places) else {
+        let yaw = Self::aim_yaw(caster.lock_target, facing, caster.from, &places);
+        let point = fresh_aim(caster.aim, now_ms).filter(|_| caster.lock_target.is_none());
+        let pitch = caster.view.map_or(0.0, |view| view.pitch);
+        let Some(aim) = AimLine::of(caster.from, point, yaw, Some(pitch)) else {
             return vec![Err(AttackRefusal::NoAim)];
-        };
-        let aim = AimLine {
-            yaw,
-            pitch: caster.view.map_or(0.0, |view| view.pitch),
         };
         let splash_m = spell.radius_m.unwrap_or_default();
         let shot = projectile
@@ -1207,6 +1460,7 @@ impl SimWorld {
                 target: Entity::from_bits(met),
                 effects: spell.status_effects.clone(),
                 source: caster.number,
+                hit_amount: self.spell_heal_base(caster.entity),
                 splash_m,
                 land_ms: now_ms.saturating_add(flight_ms(flight_s)),
             });
@@ -1218,6 +1472,7 @@ impl SimWorld {
                 secondary,
                 at,
                 now_ms.saturating_add(flight_ms(flight_s)),
+                self.spell_heal_base(caster.entity),
             );
             self.open_spell_area(area);
         }
@@ -1269,14 +1524,33 @@ impl SimWorld {
         })
     }
 
-    /// Opens the area `spell` of `caster` at `now_ms`: at the caster, or the point its
-    /// `CastDistance` ahead along the caster's look (Inferred: the client aims a raycast or
-    /// targeting cast where it looks, and sends no point) ([`super::spell_areas`]).
+    /// Opens the area `spell` of `caster` at `now_ms` where the caster aims ([`aimed_point`])
+    /// ([`super::spell_areas`]).
     fn ability_spell_area(&mut self, caster: &Caster, spell: &SpellRow, now_ms: u64) {
-        let yaw = caster.view.map_or(0.0, |view| view.yaw);
-        let ahead = spell.cast_distance_m.unwrap_or_default().max(0.0);
-        let area = SpellArea::new(caster, spell, ahead_of(caster.from, yaw, ahead), now_ms);
+        let reach_m = spell.cast_distance_m.unwrap_or_default().max(0.0);
+        let area = SpellArea::new(
+            caster,
+            spell,
+            aimed_point(caster, reach_m, now_ms),
+            now_ms,
+            self.spell_heal_base(caster.entity),
+        );
         self.open_spell_area(area);
+    }
+
+    /// The base of the `HealthModifierDamageBased` heals of the spell effects of player
+    /// `caster`: the damage of the weapon in its hand at its gear score (else the config's
+    /// weapon, as a hit: [`SimWorld::hit_paced`]). Inferred from the data: Sacred Ground's effect
+    /// holds 0.16 and Light's Embrace's 0.8, the shares of the weapon damage their tooltips
+    /// name. The spell's damage row is not in it: the heal rows hold a coefficient of 0
+    /// (`LifeStaff_SacredGround`, `LifeStaff_LightsEmbrace`, `LifeStaff_DivineEmbrace`), and
+    /// with it those heals gave nothing (live 2026-11-10). The effect's `UseHealScalingValue`
+    /// is not read (Unknown: what it changes).
+    pub(super) fn spell_heal_base(&self, caster: Entity) -> f64 {
+        self.held_weapon(caster).map_or_else(
+            || self.combat.data.weapon().base_damage,
+            |(weapon, gear_score)| weapon.base_damage * weapon_damage_scale(gear_score),
+        )
     }
 
     /// The living players within `radius` of `centre`.
@@ -1292,13 +1566,13 @@ impl SimWorld {
             .collect()
     }
 
-    /// Puts the spell `effects` of player `source` on player `entity`; with `keep_held`, an
-    /// effect it holds stays as it is.
+    /// Puts the spell `effects` of player `source`, whose spell hits for `hit_amount`, on player
+    /// `entity`; with `keep_held`, an effect it holds stays as it is.
     pub(super) fn spell_effects_on_player(
         &mut self,
         entity: Entity,
         effects: &[String],
-        source: u64,
+        (source, hit_amount): (u64, f64),
         keep_held: bool,
     ) {
         let content = Arc::clone(&self.content);
@@ -1309,13 +1583,9 @@ impl SimWorld {
                 if keep_held && holds_effect(&player.status_effects, rules, effect) {
                     continue;
                 }
-                player.status_effects.add_by_id(
-                    rules,
-                    effect,
-                    OWN_EFFECT_POTENCY,
-                    source,
-                    server_ms,
-                );
+                player
+                    .status_effects
+                    .add_spell_effect(rules, effect, source, hit_amount, server_ms);
             }
         }
     }
@@ -1385,9 +1655,66 @@ impl SimWorld {
                 takers.push(flight.target);
             }
             for taker in takers {
-                self.spell_effects_on_player(taker, &flight.effects, flight.source, false);
+                self.spell_effects_on_player(
+                    taker,
+                    &flight.effects,
+                    (flight.source, flight.hit_amount),
+                    false,
+                );
             }
         }
+    }
+}
+
+/// An aim point of the input counts for a cast for this long (retail: the point came 1 to 34
+/// ms before its spell spawned in 6 casts; a point 21.9 s old was not the spell's place).
+/// Inferred: the tick and the cast point of an action add to the retail 34 ms.
+const AIM_POINT_MS: u64 = 200;
+
+/// The aim point of the input `aim` (the point, when it came) that counts at `now_ms`.
+pub(super) fn fresh_aim(aim: Option<(Position, u64)>, now_ms: u64) -> Option<Position> {
+    aim.filter(|(_, came_ms)| now_ms.saturating_sub(*came_ms) <= AIM_POINT_MS)
+        .map(|(at, _)| at)
+}
+/// A look this flat or higher meets no floor within reach (Inferred).
+const MIN_AIM_PITCH: f32 = 0.01;
+
+/// Where `caster` aims a spell of reach `reach_m` at `now_ms`, never farther than the reach
+/// from the caster (Inferred: `CastDistance` is the most a cast goes). Observed in the retail
+/// `general-other-01` (11 Sacred Ground and Orb of Protection area spells, their `strtpos`):
+/// the aim point of the client's input (row 3) when one came with the cast (0.1 to 0.5 m from
+/// the spell in 6 casts); else the point where the look from the camera meets the caster's
+/// floor (0.08 to 0.27 m in 3 casts). Before, the area opened the whole reach ahead (Sacred
+/// Ground 25 m) and healed nobody (live 2026-11-10); retail's were 1.7 to 20 m from the caster.
+/// Without a camera or with a look that meets no floor it is the reach ahead.
+fn aimed_point(caster: &Caster, reach_m: f32, now_ms: u64) -> Position {
+    let within_reach = |at: Position| {
+        let distance_m = at.horizontal_distance(caster.from);
+        if distance_m <= reach_m || distance_m <= f32::EPSILON {
+            return at;
+        }
+        let share = reach_m / distance_m;
+        Position {
+            x: caster.from.x + (at.x - caster.from.x) * share,
+            y: caster.from.y + (at.y - caster.from.y) * share,
+            z: at.z,
+        }
+    };
+    if let Some(at) = fresh_aim(caster.aim, now_ms) {
+        return within_reach(at);
+    }
+    let yaw = caster.view.map_or(0.0, |view| view.yaw);
+    match (caster.camera, caster.view) {
+        (Some(camera), Some(view)) if view.pitch >= MIN_AIM_PITCH && camera.z > caster.from.z => {
+            // The pitch is positive down: the look falls `sin(pitch)` per metre.
+            let along_m = (camera.z - caster.from.z) / view.pitch.sin() * view.pitch.cos();
+            let floor = ahead_of(camera, yaw, along_m);
+            within_reach(Position {
+                z: caster.from.z,
+                ..floor
+            })
+        }
+        _ => ahead_of(caster.from, yaw, reach_m),
     }
 }
 
@@ -1430,6 +1757,7 @@ mod tests {
     use nw_messages::InputSlots;
 
     use super::*;
+    use crate::combat::test_support::TEST_SWORD_DAMAGE;
     use crate::mobs::mob_entity;
     use crate::world::tests::{CELL_M, NOW, join, table, test_spawn, tick, world_with_spawns};
 
@@ -1545,6 +1873,7 @@ mod tests {
                     tag: "AttackAction".to_owned(),
                     on_enter: TagChange::Set,
                     on_exit: TagChange::Unset,
+                    delay_ms: 0,
                 }),
             }],
             ability: Some(AbilityUse {
@@ -1580,6 +1909,7 @@ mod tests {
             actions: vec![start, follow_up],
             fragments: vec![FragmentRow {
                 name: SMITE.to_owned(),
+                scopes: Vec::new(),
                 length_ms: FRAGMENT_MS,
                 markers: vec![FragmentMarker {
                     name: MARKER.to_owned(),
@@ -1626,7 +1956,7 @@ mod tests {
         const TRANSITION_MS: u64 = 500;
         let mut first = list();
         first.fragments[0].transitions = vec![FragmentTransition {
-            action: LOOP.to_owned(),
+            to: TransitionTo::Action(LOOP.to_owned()),
             input: None,
             condition: None,
             start_ms: TRANSITION_MS,
@@ -1648,6 +1978,7 @@ mod tests {
             }],
             fragments: vec![FragmentRow {
                 name: LOOP.to_owned(),
+                scopes: Vec::new(),
                 length_ms: FRAGMENT_MS,
                 markers: Vec::new(),
                 transitions: Vec::new(),
@@ -1658,7 +1989,7 @@ mod tests {
         };
         let lists = [&first, &second];
         let mut run = AbilityRun::default();
-        run.press(&[key_1(10)], mapped, no_inputs, 0);
+        run.press(&[key_1(10)], mapped, no_inputs);
         run.tick(&lists, &Staff, 0, SERVER_MS);
         run.tick(&lists, &Staff, 100, SERVER_MS);
         assert_eq!(run.running.len(), 2, "the start and its follow-up");
@@ -1687,7 +2018,7 @@ mod tests {
             run.tick(&[&list], &Staff, 0, SERVER_MS).is_empty(),
             "no press"
         );
-        run.press(&[key_1(10)], mapped, no_inputs, 0);
+        run.press(&[key_1(10)], mapped, no_inputs);
         let start = run.tick(&[&list], &Staff, 0, SERVER_MS);
         assert_eq!(
             start,
@@ -1718,12 +2049,42 @@ mod tests {
             "one cast per run"
         );
         // A second press during the cooldown starts nothing.
-        run.press(&[key_1(11)], mapped, no_inputs, 2_000);
+        run.press(&[key_1(11)], mapped, no_inputs);
         assert!(run.tick(&[&list], &Staff, 2_000, SERVER_MS).is_empty());
         assert!(run.take_cooldown_changes().is_empty());
         // After the cooldown it runs again.
-        run.press(&[key_1(12)], mapped, no_inputs, 5_000);
+        run.press(&[key_1(12)], mapped, no_inputs);
         assert_eq!(run.tick(&[&list], &Staff, 5_000, SERVER_MS).len(), 1);
+    }
+
+    /// A press comes with its input message, between two ticks. The start's test names the press
+    /// only in its own frame (`BackTicks` 0): the first tick after the message is that frame, and
+    /// the tick after it is not. Before, the press was timed by its message, so no tick was ever
+    /// in its frame and no ability started on the live server.
+    #[test]
+    fn a_press_between_two_ticks_starts_its_ability_in_the_next_tick_only() {
+        /// The server's tick.
+        const TICK_MS: u64 = 33;
+        let list = list();
+        let mut run = AbilityRun::default();
+        assert!(run.tick(&[&list], &Staff, 0, SERVER_MS).is_empty());
+        run.press(&[key_1(10)], mapped, no_inputs);
+        assert_eq!(
+            run.tick(&[&list], &Staff, TICK_MS, SERVER_MS),
+            [AbilityEvent::Effects(vec!["Smite_Self".to_owned()])]
+        );
+        let mut late = AbilityRun::default();
+        late.mana.current = 0.0;
+        late.press(&[key_1(10)], mapped, no_inputs);
+        assert!(
+            late.tick(&[&list], &Staff, 0, SERVER_MS).is_empty(),
+            "no mana"
+        );
+        late.mana.current = MANA_MAX;
+        assert!(
+            late.tick(&[&list], &Staff, TICK_MS, SERVER_MS).is_empty(),
+            "the press is one frame old"
+        );
     }
 
     /// An ability whose start does not test the mana itself (89 of the 111 retail starts that set
@@ -1745,11 +2106,11 @@ mod tests {
         );
         let mut run = AbilityRun::default();
         run.mana.current = COST - 1.0;
-        run.press(&[key_1(10)], mapped, no_inputs, 0);
+        run.press(&[key_1(10)], mapped, no_inputs);
         assert!(run.tick(&[&list], &Staff, 0, SERVER_MS).is_empty());
         assert!(run.take_cooldown_changes().is_empty(), "no cooldown");
         run.mana.current = MANA_MAX;
-        run.press(&[key_1(11)], mapped, no_inputs, 100);
+        run.press(&[key_1(11)], mapped, no_inputs);
         assert_eq!(run.tick(&[&list], &Staff, 100, SERVER_MS).len(), 1);
         assert_eq!(run.take_cooldown_changes().len(), 1);
     }
@@ -1811,7 +2172,7 @@ mod tests {
             "the retail rate at Focus 250"
         );
         run.mana.current = run.mana.max;
-        run.press(&[key_1(10)], mapped, no_inputs, 2_000);
+        run.press(&[key_1(10)], mapped, no_inputs);
         run.tick(&[&list], &FocusedStaff, 2_000, SERVER_MS);
         let changes = run.take_cooldown_changes();
         let (_, cooldown) = changes[0];
@@ -1825,11 +2186,11 @@ mod tests {
     #[test]
     fn a_repeated_frame_is_one_press_and_an_empty_slot_none() {
         let mut run = AbilityRun::default();
-        run.press(&[key_1(10), key_1(10)], |_| Some(0), no_inputs, 0);
+        run.press(&[key_1(10), key_1(10)], |_| Some(0), no_inputs);
         assert_eq!(run.press, None, "an empty slot names no ability");
-        run.press(&[key_1(10)], mapped, no_inputs, 0);
+        run.press(&[key_1(10)], mapped, no_inputs);
         assert_eq!(run.press, None, "frame 10 was read");
-        run.press(&[key_1(11)], mapped, no_inputs, 0);
+        run.press(&[key_1(11)], mapped, no_inputs);
         assert!(run.press.is_some());
     }
 
@@ -2023,6 +2384,127 @@ mod tests {
         assert!(world.spell_areas.is_empty());
     }
 
+    /// Before, a spell's effects came without a heal base, so the life staff's heals
+    /// (`HealthModifierDamageBased`) changed no health.
+    #[test]
+    fn the_heal_base_of_a_spell_is_the_casters_weapon_damage() {
+        let (world, caster) = spell_fight(&[]);
+        assert!((world.spell_heal_base(caster) - TEST_SWORD_DAMAGE).abs() < f64::EPSILON);
+    }
+
+    /// `general-other-01` at 79.810 s: no aim point, the camera 4.70 m over the floor, the
+    /// look 0.6977 down; retail's Sacred Ground opened 0.15 m from where that look meets the
+    /// floor. At 663.957 s the input carried the aim point, 0.11 m from the spell.
+    #[test]
+    fn an_area_spell_opens_at_the_aim_point_or_where_the_look_meets_the_floor() {
+        const REACH_M: f32 = 25.0;
+        const CAMERA_HEIGHT_M: f32 = 4.70;
+        const PITCH: f32 = 0.697_677_43;
+        let (world, entity) = spell_fight(&[]);
+        let caster = world.caster(entity).expect("caster");
+        let from = caster.from;
+        let looking = Caster {
+            view: Some(LookDir {
+                yaw: 0.0,
+                pitch: PITCH,
+            }),
+            camera: Some(Position {
+                z: from.z + CAMERA_HEIGHT_M,
+                ..from
+            }),
+            aim: None,
+            ..world.caster(entity).expect("caster")
+        };
+        let floor = aimed_point(&looking, REACH_M, NOW);
+        let along_m = CAMERA_HEIGHT_M / PITCH.tan();
+        assert!((floor.y - (from.y + along_m)).abs() < 0.01 && (floor.x - from.x).abs() < 0.01);
+        assert!((floor.z - from.z).abs() < f32::EPSILON);
+        let aim = Position {
+            x: from.x + 3.0,
+            y: from.y + 4.0,
+            z: from.z,
+        };
+        let aiming = Caster {
+            aim: Some((aim, NOW)),
+            ..world.caster(entity).expect("caster")
+        };
+        assert_eq!(aimed_point(&aiming, REACH_M, NOW + AIM_POINT_MS), aim);
+        let stale = aimed_point(&aiming, REACH_M, NOW + AIM_POINT_MS + 1);
+        assert_ne!(stale, aim, "an old aim point is not the cast's");
+        let far = Caster {
+            aim: Some((
+                Position {
+                    x: from.x + 2.0 * REACH_M,
+                    ..from
+                },
+                NOW,
+            )),
+            ..world.caster(entity).expect("caster")
+        };
+        let clamped = aimed_point(&far, REACH_M, NOW);
+        assert!((clamped.horizontal_distance(from) - REACH_M).abs() < 0.01);
+    }
+
+    /// Retail spawns a spell entity per cast (Sacred Ground's circle: slice
+    /// `spell_aoe_heal_foe`, 8,253 cards). Before, the server spawned none and the spell did
+    /// not show (live 2026-11-10).
+    #[test]
+    fn an_area_spell_with_a_slice_spawns_its_entity_until_it_ends() {
+        const SLICES: &str = r#"{"spells": [{
+            "spell": 2055668591,
+            "asset": "094588f7778354589543449b79e2a386",
+            "owned": true,
+            "members": ["0483310103420000"],
+            "cards": 1
+        }]}"#;
+        const NEAR_M: f32 = 1.0;
+        let (mut world, caster) = spell_fight(&[]);
+        let ground = SpellRow {
+            cast_distance_m: Some(0.0),
+            duration_ms: Some(GROUND_MS),
+            target_types: Some("Friend".to_owned()),
+            ..spell()
+        };
+        assert_eq!(
+            lowercase_crc32(&ground.id),
+            2_055_668_591,
+            "the table's spell"
+        );
+        Arc::make_mut(&mut world.content).spell_slices =
+            nw_content::spell_slices::SpellSlices::parse(SLICES).expect("slices");
+        let at = world.caster(caster).expect("caster").from;
+        world.cast_ability_spell(caster, "Test", &ground, CastKind::Raycast, NOW);
+        assert_eq!(
+            world.stations.numbers_near(at, NEAR_M).count(),
+            0,
+            "not open yet"
+        );
+        world.tick_spell_areas(NOW);
+        let numbers: Vec<u64> = world.stations.numbers_near(at, NEAR_M).collect();
+        assert_eq!(numbers.len(), 1, "its entity");
+        assert_eq!(world.spell_entities, [(numbers[0], NOW + GROUND_MS as u64)]);
+        world.tick_spell_areas(NOW + TICK_MS);
+        assert_eq!(
+            world.stations.numbers_near(at, NEAR_M).count(),
+            1,
+            "one per area"
+        );
+        world.tick_spell_areas(NOW + GROUND_MS as u64);
+        assert_eq!(
+            world.stations.numbers_near(at, NEAR_M).count(),
+            0,
+            "gone with the area"
+        );
+        // A spell without a slice spawns nothing.
+        let other = SpellRow {
+            id: "Spell_Test_No_Slice".to_owned(),
+            ..ground
+        };
+        world.cast_ability_spell(caster, "Test", &other, CastKind::Raycast, NOW);
+        world.tick_spell_areas(NOW);
+        assert!(world.spell_entities.is_empty());
+    }
+
     #[test]
     fn a_projectile_opens_its_secondary_spell_where_it_hits() {
         let (mut world, caster) = spell_fight(&[MOB_X]);
@@ -2054,7 +2536,7 @@ mod tests {
         let staff = Staff;
         let ready = Condition::Not(Box::new(Condition::Cooldown(SMITE.to_owned())));
         assert!(run.holds(&list, &staff, &ready, 0));
-        run.press(&[key_1(10)], mapped, no_inputs, 0);
+        run.press(&[key_1(10)], mapped, no_inputs);
         run.tick(&[&list], &staff, 0, SERVER_MS);
         assert!(!run.holds(&list, &staff, &ready, 1), "on cooldown");
         let resize = Condition::Other("IfCanResizeCharacterController".to_owned());
@@ -2070,9 +2552,9 @@ mod tests {
         assert!(!run.holds(&list, &staff, &other, 0));
         let shoot = Condition::Input("attack_shoot".to_owned());
         assert!(!run.holds(&list, &staff, &shoot, 0), "not pressed");
-        run.press(&[key_1(11)], mapped, |_| vec!["attack_shoot".to_owned()], 0);
+        run.press(&[key_1(11)], mapped, |_| vec!["attack_shoot".to_owned()]);
         assert!(run.holds(&list, &staff, &shoot, 0), "named by the record");
-        run.press(&[key_1(12)], mapped, no_inputs, 0);
+        run.press(&[key_1(12)], mapped, no_inputs);
         assert!(
             !run.holds(&list, &staff, &shoot, 0),
             "the next message lets it go"
@@ -2096,6 +2578,8 @@ mod retail_tests {
     const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
     const SACRED_GROUND: &str = "Ability_Lifestaff_SacredGround";
     const SACRED_GROUND_SPELL: &str = "Spell_LifeStaff_SacredGround";
+    const SACRED_GROUND_UPGRADE: &str = "Upgrade_Lifestaff_SacredGround_Dmg";
+    const SACRED_GROUND_UPGRADE_SPELL: &str = "Spell_LifeStaff_SacredGround_Upgrade";
     /// `Cooldowns_Player` `Ability_Lifestaff_SacredGround`: 20 s.
     const SACRED_GROUND_COOLDOWN_MS: u64 = 20_000;
     const SERVER_MS: u64 = 846_279_677_606;
@@ -2286,7 +2770,7 @@ mod retail_tests {
                                 .collect()
                         };
                         frame += 1;
-                        run.press(&[record(frame, key && down)], mapped, inputs, now);
+                        run.press(&[record(frame, key && down)], mapped, inputs);
                     }
                     for event in run.tick(&lists, &holder, now, SERVER_MS) {
                         if let AbilityEvent::Effects(effects) = event {
@@ -2349,7 +2833,7 @@ mod retail_tests {
                         .collect()
                 };
                 frame += 1;
-                run.press(&[record(frame, key && down)], mapped, inputs, now);
+                run.press(&[record(frame, key && down)], mapped, inputs);
             }
             run.tick(&lists, &holder, now, SERVER_MS);
             for running in &run.running {
@@ -2382,23 +2866,133 @@ mod retail_tests {
         );
     }
 
+    /// A life staff player who holds Sacred Ground's first upgrade.
+    struct UpgradedLifeStaff;
+
+    impl Holder for UpgradedLifeStaff {
+        fn tags(&self) -> Vec<&str> {
+            LifeStaff.tags()
+        }
+
+        fn has_effect(&self, effect: &str) -> bool {
+            LifeStaff.has_effect(effect)
+        }
+
+        fn item_in_slot(&self, slot: &str) -> bool {
+            LifeStaff.item_in_slot(slot)
+        }
+
+        fn ability_active(&self, ability: &str) -> bool {
+            ability == SACRED_GROUND_UPGRADE
+        }
+
+        fn stats(&self) -> AbilityStats {
+            LifeStaff.stats()
+        }
+    }
+
+    /// The key of an aimed ability, then the click that casts it [`CLICK_TICK`] ticks later
+    /// (retail `general-other-01`: Sacred Ground's key at 78.857 s, the click at 79.458 s, the
+    /// spell at 79.792 s): the run after [`RUN_MS`] and the spells it cast.
+    fn press_then_click(
+        lists: &[&AbilityList],
+        holder: &dyn Holder,
+        mapped: impl Fn(usize) -> Option<u32>,
+    ) -> (AbilityRun, Vec<String>) {
+        /// The tick of the click: about 0.6 s after the key.
+        const CLICK_TICK: u64 = 18;
+        let click = |_: &InputRecord| {
+            CLICK_INPUTS
+                .iter()
+                .map(|input| (*input).to_owned())
+                .collect()
+        };
+        let mut run = AbilityRun::default();
+        run.press(&[key_1(10)], &mapped, no_inputs);
+        let mut casts = Vec::new();
+        for tick in 0..=RUN_MS / TICK_MS {
+            if tick == CLICK_TICK {
+                run.press(&[record(11, false)], &mapped, click);
+            } else if tick == CLICK_TICK + STEP_TICKS {
+                run.press(&[record(12, false)], &mapped, no_inputs);
+            }
+            for event in run.tick(lists, holder, tick * TICK_MS, SERVER_MS) {
+                if let AbilityEvent::Cast { spell, .. } = event {
+                    casts.push(spell.id.clone());
+                }
+            }
+        }
+        (run, casts)
+    }
+
+    /// Live 2026-11-10: a player with the upgrade got two areas for one press, the plain spell
+    /// of the aim and the upgrade of the raycast.
+    #[test]
+    fn a_sacred_ground_press_with_the_upgrade_casts_the_upgrade_only() {
+        let table = table();
+        let lists = table.lists_for(&["LifeStaff"]);
+        let mapped = |key: usize| (key == 0).then(|| lowercase_crc32(SACRED_GROUND));
+        let (_, casts) = press_then_click(&lists, &UpgradedLifeStaff, mapped);
+        assert_eq!(casts, [SACRED_GROUND_UPGRADE_SPELL]);
+    }
+
+    /// Live 2026-11-10: Sacred Ground cast once, then no press cast again (its aim action ran on
+    /// after the cast), and a click later than the 0.67 s of the ready fragment cast nothing
+    /// (the aim loop it goes on with was not in the table).
+    #[test]
+    fn sacred_ground_casts_after_a_long_aim_and_again_after_its_cooldown() {
+        /// The click of the first press: 2 s after the key, in the aim loop.
+        const LONG_AIM_TICK: u64 = 60;
+        /// The second key, after the 20 s cooldown, and its click 0.6 s later.
+        const SECOND_KEY_TICK: u64 = 700;
+        const SECOND_CLICK_TICK: u64 = SECOND_KEY_TICK + 18;
+        const LAST_TICK: u64 = SECOND_CLICK_TICK + 30;
+        const FIRST_FRAME: u16 = 10;
+        let table = table();
+        let lists = table.lists_for(&["LifeStaff"]);
+        let mapped = |key: usize| (key == 0).then(|| lowercase_crc32(SACRED_GROUND));
+        let click = |_: &InputRecord| {
+            CLICK_INPUTS
+                .iter()
+                .map(|input| (*input).to_owned())
+                .collect()
+        };
+        let mut run = AbilityRun::default();
+        let mut frame = FIRST_FRAME;
+        let mut cast_ticks = Vec::new();
+        for tick in 0..=LAST_TICK {
+            let is_key = tick == 0 || tick == SECOND_KEY_TICK;
+            let is_click = tick == LONG_AIM_TICK || tick == SECOND_CLICK_TICK;
+            let click_ends =
+                tick == LONG_AIM_TICK + STEP_TICKS || tick == SECOND_CLICK_TICK + STEP_TICKS;
+            if is_key || is_click || click_ends {
+                frame += 1;
+            }
+            if is_key {
+                run.press(&[key_1(frame)], &mapped, no_inputs);
+            } else if is_click {
+                run.press(&[record(frame, false)], &mapped, click);
+            } else if click_ends {
+                run.press(&[record(frame, false)], &mapped, no_inputs);
+            }
+            for event in run.tick(&lists, &LifeStaff, tick * TICK_MS, SERVER_MS) {
+                if let AbilityEvent::Cast { spell, .. } = event {
+                    assert_eq!(spell.id, SACRED_GROUND_SPELL);
+                    cast_ticks.push(tick);
+                }
+            }
+        }
+        assert_eq!(cast_ticks.len(), 2, "one cast per press: {cast_ticks:?}");
+        assert!(cast_ticks[0] >= LONG_AIM_TICK, "the first at its late click");
+        assert!(cast_ticks[1] >= SECOND_CLICK_TICK, "the second at its click");
+    }
+
     #[test]
     fn a_sacred_ground_press_casts_its_spell_once_with_its_cooldown_and_mana() {
         let table = table();
         let lists = table.lists_for(&["LifeStaff"]);
         let mapped = |key: usize| (key == 0).then(|| lowercase_crc32(SACRED_GROUND));
-        let mut run = AbilityRun::default();
-        run.press(&[key_1(10)], mapped, no_inputs, 0);
-        let mut casts = Vec::new();
-        let mut now = 0;
-        while now <= RUN_MS {
-            for event in run.tick(&lists, &LifeStaff, now, SERVER_MS) {
-                if let AbilityEvent::Cast { spell, .. } = event {
-                    casts.push(spell.id.clone());
-                }
-            }
-            now += TICK_MS;
-        }
+        let (mut run, casts) = press_then_click(&lists, &LifeStaff, mapped);
         assert_eq!(casts, [SACRED_GROUND_SPELL], "one cast, no upgrade");
         let changes = run.take_cooldown_changes();
         assert_eq!(changes.len(), 1, "{changes:?}");

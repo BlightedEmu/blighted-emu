@@ -71,6 +71,7 @@ pub mod shop;
 mod slots;
 pub mod social;
 pub mod spawn_point;
+pub mod spell_state;
 pub mod spreadshot;
 pub mod store;
 #[cfg(any(test, feature = "test-util"))]
@@ -96,11 +97,11 @@ pub use achievements::{
 pub use afflictions::{Affliction, AfflictionId, AfflictionList, ColdLong, HotLong, LongForm};
 pub use alc::{
     ALC_TYPE_INDEX, AlcChild, AlcStamp, AlcState, CardPlace, DATA_BITS_ACTIVE, FRAG_TAGS_LEN,
-    LayerEntry, LookDir, MobAnimation, MobStep, POS_REL_CHILD, POS_REL_STEP_M, POS3_LEN,
-    POS10_CHILD, RemoteStep, RemoteUpper, SLOT0_CHILDREN, SLOT1_CHILDREN, SPAWN_STATE_ID,
-    SPAWN_STATE_MS, SPAWN_TELEPORT, ScopeEntry, SecondSlayerState, SequenceClock, SequenceTime,
-    SlayerState, SlotChange, StepPlace, StepScope, TeleportStep, UpperSlots, offset_from,
-    offset_metres,
+    KnownStamp, LayerEntry, LookDir, MobAnimation, MobStep, POS_REL_CHILD, POS_REL_STEP_M,
+    POS3_LEN, POS10_CHILD, RemoteSequenceClock, RemoteStep, RemoteUpper, SLOT0_CHILDREN,
+    SLOT1_CHILDREN, SPAWN_MOVEMENT, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, ScopeEntry,
+    SecondSlayerState, SequenceClock, SequenceTime, SlayerState, SlotChange, StepPlace, StepScope,
+    TeleportStep, UpperSlots, offset_from, offset_metres,
 };
 pub use appearance::{
     LOOK_CHOICES, PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState, PlayerIconData, PlayerLook,
@@ -227,9 +228,11 @@ pub use paperdoll::{
 pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, MemberState};
 pub use player_components::{
     EmptyState, HealthChange, PLAYER_COMPONENT_COMPONENT, PLAYER_COMPONENT_TYPE_INDEX,
-    PLAYER_EMPTY_COMPONENTS, PLAYER_VITALS_COMPONENT, PlayerComponentState, PlayerStates,
-    change_members, empty_state, gear_members, player_members, put_account_in_probation,
-    put_is_changing_mount, put_is_in_store, put_looking_through_loadout, put_member,
+    PLAYER_EMPTY_COMPONENTS, PLAYER_VITALS_COMPONENT, PlayerComponentState, PlayerIdentity,
+    SessionStart,
+    PlayerStates, REMOTE_PLAYER_CARD_CLASSES, change_members, empty_state, gear_members,
+    player_members, put_account_in_probation, put_is_changing_mount, put_is_in_store, put_session_start,
+    put_looking_through_loadout, put_member, remote_player_members,
 };
 pub use player_data::{
     NO_GUILD, NO_PLATFORM, NO_PLATFORM_PRESENCE, PlayerDataRequest, PlayerDataResponseMsg,

@@ -83,6 +83,8 @@ pub struct MobType {
     pub damage_mod: f64,
     /// The creature type, for the vision offset.
     pub creature_type: Option<String>,
+    /// Its guard, for a type that can block.
+    pub guard: Option<MobGuard>,
 }
 
 impl MobType {
@@ -92,7 +94,61 @@ impl MobType {
         category_health_mod: PLAIN_MOD,
         damage_mod: PLAIN_MOD,
         creature_type: None,
+        guard: None,
     };
+}
+
+/// The guard of a mob type that can block (`VitalsBaseData`; Observed in the rows of build
+/// 25810808: the shield and guard pose kinds that retail showed blocking, `Damned_1H_Swordsman_*`,
+/// `Lost_Knight_Tank_*`, `Dryad_Soldier_*`, `Invasion_Swordsman`, have `StaminaBaseMax` 50,
+/// `StaminaBaseTickRate` 2, `StaminaTickDelay` 1, `BlockDamageMitigation` 1 and
+/// `BlockStaminaCost` 0.8; the boar has `StaminaBaseMax` 1 and mitigation 0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MobGuard {
+    /// `StaminaBaseMax`.
+    pub stamina_max: f32,
+    /// `StaminaInitial`.
+    pub stamina_initial: f32,
+    /// Stamina back per second: `StaminaBaseTickRate` per `StaminaTickDelay`, at the player's
+    /// rate per unit (**Inferred**: the player row's 40 per 3 gives the 33.33 per second retail
+    /// showed, so 2 per 1 gives 5 per second).
+    pub regen_per_s: f32,
+    /// `BlockDamageMitigation`: the share of a blocked hit it stops (1: all; retail sent 3,315
+    /// of 4,586 direct hits on a raised mob block as `Resisted` with 0 damage).
+    pub mitigation: f32,
+    /// `BlockStaminaCost`: multiplies the stamina a blocked hit takes (**Inferred** from the
+    /// name).
+    pub stamina_cost: f32,
+}
+
+/// The player row's `StaminaBaseTickRate` and `StaminaTickDelay`, and the regen per second
+/// retail showed with them (stamina note: 1.111 per 33 ms tick).
+const PLAYER_TICK_RATE: f32 = 40.0;
+const PLAYER_TICK_DELAY: f32 = 3.0;
+const PLAYER_REGEN_PER_S: f32 = 100.0 / 3.0;
+/// A guard needs more stamina than this to block at all (the boar's `StaminaBaseMax` 1).
+const MIN_GUARD_STAMINA: f32 = 1.0;
+
+impl MobGuard {
+    /// The guard of the vitals cells (max, initial, tick rate, tick delay, mitigation, cost);
+    /// `None` for a type whose stamina is too small or whose block stops nothing.
+    pub fn of(
+        (max, initial, tick_rate, tick_delay): (i64, i64, i64, i64),
+        (mitigation, cost): (i64, f64),
+    ) -> Option<Self> {
+        // Stamina cells of a few dozen points.
+        let stamina_max = max as f32;
+        let delay = (tick_delay as f32).max(1.0);
+        (stamina_max > MIN_GUARD_STAMINA && mitigation > 0).then(|| Self {
+            stamina_max,
+            stamina_initial: (initial as f32).clamp(0.0, stamina_max),
+            regen_per_s: tick_rate as f32 / delay
+                * (PLAYER_REGEN_PER_S / (PLAYER_TICK_RATE / PLAYER_TICK_DELAY)),
+            // `BlockDamageMitigation` is 0 or 1 in every row.
+            mitigation: (mitigation as f32).clamp(0.0, 1.0),
+            stamina_cost: cost as f32,
+        })
+    }
 }
 
 /// One level of `VitalsLevelData`.
@@ -346,6 +402,18 @@ impl CombatSource {
                             category_health_mod: PLAIN_MOD,
                             damage_mod: row.damage_mod.unwrap_or(PLAIN_MOD),
                             creature_type: row.creature_type.clone(),
+                            guard: MobGuard::of(
+                                (
+                                    row.stamina_base_max.unwrap_or_default(),
+                                    row.stamina_initial.unwrap_or_default(),
+                                    row.stamina_base_tick_rate.unwrap_or_default(),
+                                    row.stamina_tick_delay.unwrap_or_default(),
+                                ),
+                                (
+                                    row.block_damage_mitigation.unwrap_or_default(),
+                                    row.block_stamina_cost.unwrap_or_default(),
+                                ),
+                            ),
                         },
                     )
                 })
@@ -1132,7 +1200,21 @@ mod tests {
             category_health_mod: 1.0,
             damage_mod: BOAR_DAMAGE_MOD,
             creature_type: Some("Beast".to_owned()),
+            guard: None,
         }
+    }
+
+    #[test]
+    fn a_shield_mobs_vitals_give_its_guard_and_a_boars_none() {
+        // Retail rows (build 25810808): `Damned_1H_Swordsman_M-F_42` and `Boar`.
+        let guard = MobGuard::of((50, 50, 2, 1), (1, 0.8)).expect("a guard");
+        assert!(
+            (guard.regen_per_s - 5.0).abs() < 1e-4,
+            "{}",
+            guard.regen_per_s
+        );
+        assert!((guard.mitigation - 1.0).abs() < f32::EPSILON);
+        assert_eq!(MobGuard::of((1, 0, 0, 0), (0, 0.0)), None);
     }
 
     /// The occultist's starter ice gauntlet, its stats row and the row's `MannequinTag` (retail

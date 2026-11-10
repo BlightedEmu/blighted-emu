@@ -210,6 +210,16 @@ pub struct VitalsSpawn {
     pub territory_ids: Vec<u16>,
 }
 
+impl WorldFile {
+    /// The task names of the waypoints of every patrol path (`POI_Lay_Down_On_Side_LOOP`).
+    pub fn waypoint_tasks(&self) -> impl Iterator<Item = &str> {
+        self.paths
+            .values()
+            .flat_map(|path| path.tasks.iter().flatten())
+            .map(|task| task.task.as_str())
+    }
+}
+
 /// A gatherable point (gatherables section).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GatherablePoint {

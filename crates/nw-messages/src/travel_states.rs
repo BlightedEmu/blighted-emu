@@ -449,13 +449,13 @@ pub struct HomePoint {
     pub position: [f32; POSITION_LEN],
     /// Its cooldown, ns.
     pub cooldown_ns: u64,
-    /// When its cooldown ends, on the client's clock (ns since 2000-01-01, the clock of
-    /// `TimeSynchMsg`); 0 for none. The client reads it into the point's cooldown end (+0x80,
-    /// `FUN_1434dc760`) and compares it with its clock as it is (`FUN_1434f1270`); a Unix time
-    /// here showed a 10,956 day recall countdown (live 2026-11-08). Retail sends a Unix time in
+    /// When its cooldown ends, Unix ns; 0 for none. The client reads it into the point's
+    /// cooldown end (+0x80, `FUN_1434dc760`, `Hud.LocalPlayer.HomePoints.%d.CooldownEndWallClock`)
+    /// and compares it with its synced wall clock (`FUN_1434f1270`). Retail sends a Unix time in
     /// 3,983 of 22,982 inn elements: a cooldown end (163 values of 40 ledgers lay 131 minutes
-    /// before to 11 minutes after the capture's record); how its client reads a Unix time here is
-    /// Unknown.
+    /// before to 11 minutes after the capture's record). A Unix time showed a 10,956 day recall
+    /// countdown (live 2026-11-08) while the client had no session start for its wall clock
+    /// ([`crate::player_components::SessionStart`]).
     pub cooldown_end_ns: u64,
     /// Its kind ([`home_point_kind`]).
     pub kind: u32,

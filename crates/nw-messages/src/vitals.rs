@@ -41,6 +41,8 @@ pub const PLAYER_MANA_MAX: f32 = 100.0;
 pub const PLAYER_STAMINA_TICK_RATE: u16 = 0x5100;
 /// `HealthTickRate` and `ManaTickRate` on every captured local-player body.
 pub const PLAYER_TICK_RATE: u16 = 0;
+/// `healthChangeFlags` of a first state: no change (retail first player cards).
+const NO_HEALTH_CHANGE_FLAGS: u8 = 0;
 /// The `vitalsData` head byte of a dead creature (mob-cards note, section 5).
 const DEAD_HEAD: u8 = 1;
 /// The `vitalsData` head byte of a player at death's door (status effects note 2026-10-31:
@@ -240,6 +242,17 @@ impl VitalsState {
             }),
             slot_1: self.slot_1.clone(),
         }
+    }
+
+    /// This first state with the player's life block `life` and no health change flags, as
+    /// retail sends them on every player's first card (general-other-01: `vitalsData` and
+    /// `healthChangeFlags` 0 on the own card and on the other players' first cards).
+    #[must_use]
+    pub fn with_life(mut self, life: VitalsData) -> Self {
+        let slot = self.slot_0.get_or_insert_with(VitalsSlot0::default);
+        slot.vitals_data = Some(life);
+        slot.health_change_flags = Some(NO_HEALTH_CHANGE_FLAGS);
+        self
     }
 
     /// This state with the max health `health_max` in slot 0 (`healthMax` and `maxHealth`).

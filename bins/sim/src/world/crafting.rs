@@ -29,6 +29,7 @@ use nw_content::crafting::{
 };
 use nw_content::perks::PERK_SLOTS;
 use nw_content::recipe_cooldowns::RecipeCooldown;
+use nw_content::town_props::TownProps;
 use nw_content::tradeskill_xp::bonus_crafts;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::crafting_state::{CraftingCooldown, CraftingState};
@@ -44,6 +45,7 @@ use nw_messages::{
 };
 use nw_sim_core::Position;
 use nw_world::stations::CraftingStation;
+use uuid::Uuid;
 
 use super::gear::unix_ns;
 use super::loot_bag::LimitsSent;
@@ -123,6 +125,15 @@ pub(super) fn gde_ref_of(id: u64) -> [u8; RAW_ID_LEN] {
     gde_ref
 }
 
+/// The `GdeRef` this server makes for entity `index` of the kind `namespace` names: the same on
+/// every start, in the dynamic form (the client spawns the card's slice for it).
+pub(super) fn dynamic_ref(namespace: u64, index: usize) -> [u8; RAW_ID_LEN] {
+    let namespace = Uuid::from_u64_pair(namespace, 0);
+    nw_messages::as_dynamic_raw_id(
+        *Uuid::new_v5(&namespace, &(index as u64).to_be_bytes()).as_bytes(),
+    )
+}
+
 /// The spawn group members of `station`, whose blueprint costs `costs` lists, with replicated
 /// lists at `version`: the card, then a state per replicated component the slice has, by
 /// component number (retail orders them differently in each group).
@@ -200,23 +211,29 @@ fn station_members(
     if let Some((component, rule)) = slice.ownership {
         members.push(member(
             component,
-            MemberState::Ownership(OwnershipState {
-                guild_id: Some(NO_GUILD_ID),
-                guild_owner: Some(Vec::new()),
-                guild_crest: Some(GuildCrest::NONE),
-                owner: Some(OwnerIdentification::none()),
-                permission_rule: Some(rule),
-                structure_name: Some(slice.structure_name.as_bytes().to_vec()),
-                raid_id: Some(NO_RAID),
-                faction_type: Some(NO_FACTION),
-                owner_pvp: Some(false),
-                owner_ffa: Some(false),
-                permission_options: Some(NO_PERMISSION_OPTIONS),
-            }),
+            MemberState::Ownership(unowned(rule, &slice.structure_name)),
         ));
     }
     members.sort_by_key(|member| member.component);
     members
+}
+
+/// The ownership of a structure of `structure_name` that nobody owns, under permission rule
+/// `rule`: no guild, owner, raid or faction.
+pub(super) fn unowned(rule: u8, structure_name: &str) -> OwnershipState {
+    OwnershipState {
+        guild_id: Some(NO_GUILD_ID),
+        guild_owner: Some(Vec::new()),
+        guild_crest: Some(GuildCrest::NONE),
+        owner: Some(OwnerIdentification::none()),
+        permission_rule: Some(rule),
+        structure_name: Some(structure_name.as_bytes().to_vec()),
+        raid_id: Some(NO_RAID),
+        faction_type: Some(NO_FACTION),
+        owner_pvp: Some(false),
+        owner_ffa: Some(false),
+        permission_options: Some(NO_PERMISSION_OPTIONS),
+    }
 }
 
 /// The header crafting answers go to: the request's, else player `number`'s entity plus
@@ -242,9 +259,15 @@ pub(super) const fn list_at<T>(version: u64, elements: Vec<T>) -> FullList<T> {
 }
 
 impl Stations {
-    /// The level's `stations`, whose blueprints cost `costs`.
-    pub(super) fn build(stations: &[CraftingStation], costs: &StructureCosts) -> Self {
-        let stations: Vec<Station> = stations
+    /// The level's `stations`, whose blueprints cost `costs`, then the settlements' trading
+    /// posts ([`super::trading_post_cards`]) and the settlement props `props`
+    /// ([`super::town_props`]).
+    pub(super) fn build(
+        stations: &[CraftingStation],
+        costs: &StructureCosts,
+        props: &TownProps,
+    ) -> Self {
+        let mut stations: Vec<Station> = stations
             .iter()
             .map(|station| {
                 let [x, y, z] = station.position;
@@ -257,6 +280,8 @@ impl Stations {
                 }
             })
             .collect();
+        stations.extend(super::trading_post_cards::stations());
+        stations.extend(super::town_props::stations(props));
         let by_ref = stations
             .iter()
             .enumerate()
@@ -1100,7 +1125,7 @@ mod tests {
 
     #[test]
     fn a_station_goes_out_on_view_entry_only_and_names_its_answer() {
-        let stations = Stations::build(&[campfire()], &costs());
+        let stations = Stations::build(&[campfire()], &costs(), &TownProps::default());
         let number = STATION_ENTITY_BASE;
         assert_eq!(
             stations.numbers_near(NEAR, RADIUS_M).collect::<Vec<_>>(),

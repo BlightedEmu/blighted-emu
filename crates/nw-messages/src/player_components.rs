@@ -52,7 +52,7 @@ use crate::progression_points::{
     PROGRESSION_POINT_COMPONENT, PROGRESSION_POINT_TYPE_INDEX, ProgressionPointState,
 };
 use crate::slots::{
-    children_mask, read_children, read_slot_byte, read_wide_children, write_known_children,
+    children_mask, read_children, read_slot_byte, read_wide_children, write_children,
     write_known_wide_children,
 };
 use crate::social::states::{
@@ -85,6 +85,19 @@ const SLOT_1_CHILDREN: u8 = 22;
 /// 1.9 to 9.4 s after the spawn in all three captured sessions (general-other-01,
 /// newchar-linux, newchar-retail).
 const CHILD_ACCOUNT_IN_PROBATION: u32 = 1 << 3;
+/// Slot 1 child 6: `sessionStartWallClockTimePoint`, a big-endian `u64`: the Unix time of the
+/// session's start in ns. With child 7 it sets the client's synced wall clock
+/// (`GetSyncedWallClockTime`), which times every wall clock end the server sends: a status
+/// effect's end, a home point's cooldown. Retail has both in the own card (`06 d4 00 02
+/// 18e0ef3b3152a0a8 d9 0bbda26bdf007c8e ...`, newchar-retail at Unix ms 1792695689284;
+/// general-other-01 and newchar-linux the same way): child 6 less child 7 is 946,684,800 s, the
+/// time from 1970 to 2000, plus 1 to 3 ms. Without them the client's wall clock was its 2000
+/// clock read as a Unix time, 30 years behind, and each effect showed about 10957 days (live
+/// 2026-10-01 to 2026-11-10).
+const CHILD_SESSION_START_WALL_CLOCK: u32 = 1 << 6;
+/// Slot 1 child 7: `sessionStartTimePoint`, a big-endian `u64`: the server time of the
+/// session's start in ns since 2000-01-01 (the clock of `TimeSynchMsg`).
+const CHILD_SESSION_START_TIME_POINT: u32 = 1 << 7;
 /// Slot 1 child 12: `onDeathRespawnCooldown`, an `f32`. A change of it to 0 or more opens the
 /// client's death screen (`FUN_14683dba0`, `Hud.LocalPlayer.OnPlayerDeath`).
 const CHILD_ON_DEATH_RESPAWN_COOLDOWN: u32 = 1 << 12;
@@ -105,6 +118,12 @@ const SLOT_2_BIT: u8 = 0b100;
 const SLOT_2_CHILDREN: u8 = 9;
 /// Slot 2 child 0: `characterId` (presence `FUN_14087ac50`).
 const CHILD_CHARACTER_ID: u16 = 1 << 0;
+/// Slot 2 child 1: `characterName`, prefix-coded length and the name bytes (retail
+/// `0c Raging Storm` on another player's first card, general-other-01 1792964399779).
+const CHILD_CHARACTER_NAME: u16 = 1 << 1;
+/// Slot 2 child 2: `homeWorldId`, a presence id as `characterId` (retail
+/// `05 eacab29f-...`, the same world id on the own card and on every other player's first card).
+const CHILD_HOME_WORLD_ID: u16 = 1 << 2;
 /// Slot 2 child 3: `playerConnected` (one boolean byte, `FUN_1417b4c20`).
 const CHILD_PLAYER_CONNECTED: u16 = 1 << 3;
 /// Slot 2 child 4: `lookingThroughLoadout`, one boolean byte (retail `04 10 01` and `04 10 00`).
@@ -218,6 +237,30 @@ const INSTANCED_SLAYER_SCRIPT_TYPE_INDEX: u64 = 6234;
 const REWARD_TRACK_TYPE_INDEX: u64 = 4913;
 /// Type index of `MB::ItemSkinningComponentReplicatedState` (component 35).
 const ITEM_SKINNING_TYPE_INDEX: u64 = 3765;
+/// Type index of `MB::StatMultiplierTableComponentReplicatedState` (component 43).
+const STAT_MULTIPLIER_TABLE_TYPE_INDEX: u64 = 1525;
+
+/// The classes of the player components that the card of another player carries, besides the
+/// card and the position. Retail sends these in every card of another player and never the own
+/// player's other states, such as the coins, the inventory or the progression points
+/// (general-other-01: the first card of each of the 12 slots of other players holds these 13
+/// classes; some hold a few more, such as the name tag or the groups, when those states are not
+/// empty).
+pub const REMOTE_PLAYER_CARD_CLASSES: [u64; 13] = [
+    VITALS_TYPE_INDEX,
+    AUDIO_PROXY_TYPE_INDEX,
+    PROGRESSION_TYPE_INDEX,
+    PLAYER_APPEARANCE_TYPE_INDEX,
+    STAT_MULTIPLIER_TABLE_TYPE_INDEX,
+    DAMAGE_RECEIVER_TYPE_INDEX,
+    FACTION_TYPE_INDEX,
+    PAPERDOLL_TYPE_INDEX,
+    PLAYER_COMPONENT_TYPE_INDEX,
+    SOCIAL_TYPE_INDEX,
+    STATUS_EFFECTS_TYPE_INDEX,
+    MOUNT_TYPE_INDEX,
+    INSTANCED_SLAYER_SCRIPT_TYPE_INDEX,
+];
 
 /// The first bodies retail gives these classes on a new character's card: the bodies of both
 /// new characters of newchar-retail-2026-09-18 and newchar-linux-2026-09-12 (counts: retail first
@@ -272,17 +315,27 @@ const NEW_CHARACTER_FIRST_BODIES: [(u64, &[u8]); 8] = [
     ),
 ];
 
+/// The faction's first body: slot 1 children 0 and 6, slot 2 children 1 and 3, all 0.
+const FACTION_FIRST_BODY: [u8; 7] = [0x06, 0x41, 0x00, 0x00, 0x0a, 0x00, 0x00];
+/// Where the public slot (slot 2) of [`FACTION_FIRST_BODY`] starts: its child byte.
+const FACTION_FIRST_PUBLIC_AT: usize = 4;
+/// The faction's slot byte of slot 2 alone.
+const FACTION_PUBLIC_SLOT: u8 = 0x04;
+/// [`FACTION_FIRST_BODY`] as another client gets it: slot 2 alone.
+const FACTION_PUBLIC_FIRST_BODY: [u8; 4] = [
+    FACTION_PUBLIC_SLOT,
+    FACTION_FIRST_BODY[FACTION_FIRST_PUBLIC_AT],
+    FACTION_FIRST_BODY[FACTION_FIRST_PUBLIC_AT + 1],
+    FACTION_FIRST_BODY[FACTION_FIRST_PUBLIC_AT + 2],
+];
+
 /// The first bodies retail gives these classes on every new player's card, the same for all
 /// (targeting note, 2026-09-18: beach capture q1). Our card left them empty, and the client then
 /// never picked a lock-on or attack target (Inferred: its relation filter reads the faction).
 /// Classes whose first body names the character (groups, abilities, attributes, status
 /// effects, contribution) are not among them.
 const RETAIL_FIRST_BODIES: [(u64, &[u8]); 6] = [
-    // Slot 1 children 0 and 6, slot 2 children 1 and 3: all 0.
-    (
-        FACTION_TYPE_INDEX,
-        &[0x06, 0x41, 0x00, 0x00, 0x0a, 0x00, 0x00],
-    ),
+    (FACTION_TYPE_INDEX, &FACTION_FIRST_BODY),
     // Slot 0 child 0: 1.
     (
         PLAYER_NAME_TAG_TYPE_INDEX,
@@ -356,20 +409,35 @@ impl EmptyState {
     }
 }
 
+/// The start of a player's session on the two clocks of the client (slot 1 children 6 and 7).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionStart {
+    /// The Unix time, ns.
+    pub wall_clock_ns: u64,
+    /// The server time, ns since 2000-01-01.
+    pub time_point_ns: u64,
+}
+
 /// `MB::PlayerComponentReplicatedState` (type 3935, component 9). Slot 2 holds
 /// `characterId`, `playerConnected` (local-player-check note) and `lookingThroughLoadout` of
 /// slot 2, and the `onDeathRespawnCooldown` of slot 1 (death note). Other children and slot 0
 /// are not encoded here.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlayerComponentState {
     /// Slot 1 child 3: whether the account is in probation (chat and trade blocked), when sent.
     pub account_in_probation: Option<bool>,
+    /// Slot 1 children 6 and 7: the start of the session on both clocks, when sent.
+    pub session_start: Option<SessionStart>,
     /// Slot 1 child 12: the respawn cooldown that opens the death screen, when sent.
     pub on_death_respawn_cooldown: Option<f32>,
     /// Slot 1 child 16: whether this player has the change mount screen open, when sent.
     pub is_changing_mount: Option<bool>,
     /// Slot 2 child 0: the 16-byte character id, when sent.
     pub character_id: Option<[u8; RAW_ID_LEN]>,
+    /// Slot 2 child 1: the character's name, when sent.
+    pub character_name: Option<Vec<u8>>,
+    /// Slot 2 child 2: the 16-byte id of the character's home world, when sent.
+    pub home_world_id: Option<[u8; RAW_ID_LEN]>,
     /// Slot 2 child 3: whether this player is connected, when sent.
     pub player_connected: Option<bool>,
     /// Slot 2 child 4: whether this player has its inventory open, when sent.
@@ -383,9 +451,12 @@ impl PlayerComponentState {
     pub const fn connected(id: [u8; RAW_ID_LEN]) -> Self {
         Self {
             account_in_probation: None,
+            session_start: None,
             on_death_respawn_cooldown: None,
             is_changing_mount: None,
             character_id: Some(id),
+            character_name: None,
+            home_world_id: None,
             player_connected: Some(true),
             looking_through_loadout: None,
             is_in_store: None,
@@ -397,9 +468,12 @@ impl PlayerComponentState {
     pub const fn died() -> Self {
         Self {
             account_in_probation: None,
+            session_start: None,
             on_death_respawn_cooldown: Some(OPEN_WORLD_RESPAWN_COOLDOWN),
             is_changing_mount: None,
             character_id: None,
+            character_name: None,
+            home_world_id: None,
             player_connected: None,
             looking_through_loadout: None,
             is_in_store: None,
@@ -415,9 +489,12 @@ impl PlayerComponentState {
     pub const fn looking_through_loadout(looking: bool) -> Self {
         Self {
             account_in_probation: None,
+            session_start: None,
             on_death_respawn_cooldown: None,
             is_changing_mount: None,
             character_id: None,
+            character_name: None,
+            home_world_id: None,
             player_connected: None,
             looking_through_loadout: Some(looking),
             is_in_store: None,
@@ -429,9 +506,12 @@ impl PlayerComponentState {
     pub const fn in_store(in_store: bool) -> Self {
         Self {
             account_in_probation: None,
+            session_start: None,
             on_death_respawn_cooldown: None,
             is_changing_mount: None,
             character_id: None,
+            character_name: None,
+            home_world_id: None,
             player_connected: None,
             looking_through_loadout: None,
             is_in_store: Some(in_store),
@@ -442,12 +522,23 @@ impl PlayerComponentState {
     pub const fn changing_mount(changing: bool) -> Self {
         Self {
             account_in_probation: None,
+            session_start: None,
             on_death_respawn_cooldown: None,
             is_changing_mount: Some(changing),
             character_id: None,
+            character_name: None,
+            home_world_id: None,
             player_connected: None,
             looking_through_loadout: None,
             is_in_store: None,
+        }
+    }
+
+    /// The start of the session, `start`, alone.
+    pub fn session_started(start: SessionStart) -> Self {
+        Self {
+            session_start: Some(start),
+            ..Self::default()
         }
     }
 
@@ -455,9 +546,12 @@ impl PlayerComponentState {
     pub const fn account_in_probation(in_probation: bool) -> Self {
         Self {
             account_in_probation: Some(in_probation),
+            session_start: None,
             on_death_respawn_cooldown: None,
             is_changing_mount: None,
             character_id: None,
+            character_name: None,
+            home_world_id: None,
             player_connected: None,
             looking_through_loadout: None,
             is_in_store: None,
@@ -489,6 +583,18 @@ impl PlayerComponentState {
                     CHILD_ACCOUNT_IN_PROBATION => {
                         state.account_in_probation = Some(reader.boolean()?);
                     }
+                    CHILD_SESSION_START_WALL_CLOCK => {
+                        state
+                            .session_start
+                            .get_or_insert_with(SessionStart::default)
+                            .wall_clock_ns = reader.u64()?;
+                    }
+                    CHILD_SESSION_START_TIME_POINT => {
+                        state
+                            .session_start
+                            .get_or_insert_with(SessionStart::default)
+                            .time_point_ns = reader.u64()?;
+                    }
                     CHILD_ON_DEATH_RESPAWN_COOLDOWN => {
                         state.on_death_respawn_cooldown = Some(reader.f32()?);
                     }
@@ -502,6 +608,16 @@ impl PlayerComponentState {
             read_children(reader, FIELD, SLOT_2_CHILDREN, |reader, child| {
                 match 1 << child {
                     CHILD_CHARACTER_ID => state.character_id = Some(read_presence_id(reader)?),
+                    CHILD_CHARACTER_NAME => {
+                        let len = reader.prefixed()?;
+                        let len =
+                            usize::try_from(len).map_err(|_| MessageError::CountTooLarge {
+                                count: len,
+                                limit: usize::MAX as u64,
+                            })?;
+                        state.character_name = Some(reader.bytes(len)?.to_vec());
+                    }
+                    CHILD_HOME_WORLD_ID => state.home_world_id = Some(read_presence_id(reader)?),
                     CHILD_PLAYER_CONNECTED => state.player_connected = Some(reader.boolean()?),
                     CHILD_LOOKING_THROUGH_LOADOUT => {
                         state.looking_through_loadout = Some(reader.boolean()?);
@@ -516,12 +632,19 @@ impl PlayerComponentState {
     }
 
     /// Writes the state for the bundle path. A slot without a known child is not sent.
-    pub fn write(&self, writer: &mut Writer) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError::Prefix`] when the name is too long for its length prefix.
+    pub fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
         let probation = self.account_in_probation;
         let cooldown = self.on_death_respawn_cooldown;
         let changing_mount = self.is_changing_mount;
+        let session_start = self.session_start;
         let slot_1_children = [
             (probation.is_some(), CHILD_ACCOUNT_IN_PROBATION),
+            (session_start.is_some(), CHILD_SESSION_START_WALL_CLOCK),
+            (session_start.is_some(), CHILD_SESSION_START_TIME_POINT),
             (cooldown.is_some(), CHILD_ON_DEATH_RESPAWN_COOLDOWN),
             (changing_mount.is_some(), CHILD_IS_CHANGING_MOUNT),
         ]
@@ -529,13 +652,15 @@ impl PlayerComponentState {
         .filter(|(sent, _)| *sent)
         .fold(0, |children, (_, child)| children | child);
         let character_id = self.character_id;
+        let character_name = self.character_name.as_deref();
+        let home_world_id = self.home_world_id;
         let player_connected = self.player_connected;
         let looking = self.looking_through_loadout;
         let in_store = self.is_in_store;
         let slot_2_children = children_mask(&[
             character_id.is_some(),
-            false,
-            false,
+            character_name.is_some(),
+            home_world_id.is_some(),
             player_connected.is_some(),
             looking.is_some(),
             false,
@@ -557,6 +682,12 @@ impl PlayerComponentState {
                     CHILD_ACCOUNT_IN_PROBATION => {
                         probation.map(|in_probation| writer.boolean(in_probation));
                     }
+                    CHILD_SESSION_START_WALL_CLOCK => {
+                        session_start.map(|start| writer.u64(start.wall_clock_ns));
+                    }
+                    CHILD_SESSION_START_TIME_POINT => {
+                        session_start.map(|start| writer.u64(start.time_point_ns));
+                    }
                     CHILD_ON_DEATH_RESPAWN_COOLDOWN => {
                         cooldown.map(|cooldown| writer.f32(cooldown));
                     }
@@ -567,31 +698,51 @@ impl PlayerComponentState {
             });
         }
         if slot_2_children != 0 {
-            write_known_children(
+            write_children(
                 writer,
                 slot_2_children,
                 SLOT_2_CHILDREN,
-                |writer, child| match 1 << child {
-                    CHILD_CHARACTER_ID => {
-                        character_id.map(|id| {
-                            writer
-                                .u8(PRESENCE_FLAG_FIXED | PRESENCE_FLAG_UUID_TEXT)
-                                .bytes(&id)
-                        });
+                |writer, child| -> Result<(), MessageError> {
+                    match 1 << child {
+                        CHILD_CHARACTER_ID => {
+                            if let Some(id) = character_id {
+                                write_presence_id(writer, &id);
+                            }
+                        }
+                        CHILD_CHARACTER_NAME => {
+                            if let Some(name) = character_name {
+                                writer.prefixed(name.len() as u64)?.bytes(name);
+                            }
+                        }
+                        CHILD_HOME_WORLD_ID => {
+                            if let Some(id) = home_world_id {
+                                write_presence_id(writer, &id);
+                            }
+                        }
+                        CHILD_PLAYER_CONNECTED => {
+                            player_connected.map(|connected| writer.boolean(connected));
+                        }
+                        CHILD_IS_IN_STORE => {
+                            in_store.map(|in_store| writer.boolean(in_store));
+                        }
+                        _ => {
+                            looking.map(|looking| writer.boolean(looking));
+                        }
                     }
-                    CHILD_PLAYER_CONNECTED => {
-                        player_connected.map(|connected| writer.boolean(connected));
-                    }
-                    CHILD_IS_IN_STORE => {
-                        in_store.map(|in_store| writer.boolean(in_store));
-                    }
-                    _ => {
-                        looking.map(|looking| writer.boolean(looking));
-                    }
+                    Ok(())
                 },
-            );
+            )?;
         }
+        Ok(())
     }
+}
+
+/// Writes one presence id as UUID text ([`PRESENCE_FLAG_UUID_TEXT`]), as retail sends
+/// `characterId` and `homeWorldId`.
+fn write_presence_id(writer: &mut Writer, id: &[u8; RAW_ID_LEN]) {
+    writer
+        .u8(PRESENCE_FLAG_FIXED | PRESENCE_FLAG_UUID_TEXT)
+        .bytes(id);
 }
 
 /// Reads one presence id (`FUN_14087ac50`): a flag byte whose bit 0 must be set, then 16 bytes.
@@ -683,6 +834,9 @@ pub fn empty_state(class: u64) -> MemberState {
 pub struct PlayerStates<'a> {
     /// The 3935 `characterId`: the login character of the client's own player.
     pub character_id: [u8; RAW_ID_LEN],
+    /// Who the player is and its life block, for a card (the 3935 name and home world, the
+    /// vitals' `vitalsData`); `None` on a change.
+    pub identity: Option<PlayerIdentity<'a>>,
     /// The saved look, when known.
     pub look: Option<PlayerLook>,
     /// Current and max health, when known; with them go full stamina and mana.
@@ -713,6 +867,19 @@ pub struct PlayerStates<'a> {
     pub mana: Option<f32>,
     /// The combat status children that changed, when some did.
     pub combat_status: Option<CombatStatusState>,
+}
+
+/// What every player card carries of who the player is (retail general-other-01: the own card
+/// and each other player's first card send the 3935 `characterName` and `homeWorldId`, and the
+/// vitals' `vitalsData` with `healthChangeFlags` 0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerIdentity<'a> {
+    /// The character's name.
+    pub name: &'a str,
+    /// The id of the world the character lives in.
+    pub home_world: [u8; RAW_ID_LEN],
+    /// Its life block: alive since its spawn, or dead.
+    pub life: VitalsData,
 }
 
 /// A change of a player's health.
@@ -757,6 +924,38 @@ pub fn player_members(states: PlayerStates<'_>) -> impl Iterator<Item = BundleMe
             component: *component,
             state: player_state(states, *component, *class),
         })
+}
+
+/// The members of the card of another player for `states`: the [`player_members`] of the
+/// [`REMOTE_PLAYER_CARD_CLASSES`] only, each with its public slots alone. The owner's slots (the
+/// vitals' slot 1 with the mana and afflictions, the faction's slot 1 with the pending PvP flag
+/// and the change count) go to the own client only: no first card of another player in the own
+/// captures has them (general-other-01 and the rest: slot byte `01` on the vitals and `04` on the
+/// faction in all 40, `03` and `06` on the own cards).
+pub fn remote_player_members(states: PlayerStates<'_>) -> impl Iterator<Item = BundleMember> {
+    player_members(states)
+        .filter(|member| REMOTE_PLAYER_CARD_CLASSES.contains(&member.state.type_index()))
+        .map(|member| BundleMember {
+            component: member.component,
+            state: public_state(member.state),
+        })
+}
+
+/// `state` without the owner's slots, as another client gets it.
+fn public_state(state: MemberState) -> MemberState {
+    match state {
+        MemberState::Vitals(vitals) => MemberState::Vitals(VitalsState {
+            slot_1: None,
+            ..vitals
+        }),
+        MemberState::Empty(EmptyState {
+            class: FACTION_TYPE_INDEX,
+        }) => MemberState::Recorded {
+            class: FACTION_TYPE_INDEX,
+            body: FACTION_PUBLIC_FIRST_BODY.to_vec(),
+        },
+        other => other,
+    }
 }
 
 /// The incapacitated state with `enabled`: slot 0, child 0, the flag.
@@ -866,6 +1065,7 @@ fn carries_gear_change(state: &MemberState) -> bool {
 pub fn gear_members(gear: &PlayerGear) -> impl Iterator<Item = BundleMember> + '_ {
     let states = PlayerStates {
         character_id: [0; RAW_ID_LEN],
+        identity: None,
         look: None,
         health: None,
         gear: Some(gear),
@@ -950,13 +1150,25 @@ fn player_state(states: PlayerStates<'_>, component: u64, class: u64) -> MemberS
     }
     match (class, states.look, states.health) {
         (PLAYER_COMPONENT_TYPE_INDEX, _, _) => {
-            MemberState::PlayerComponent(PlayerComponentState::connected(states.character_id))
+            let connected = PlayerComponentState::connected(states.character_id);
+            MemberState::PlayerComponent(match states.identity {
+                Some(identity) => PlayerComponentState {
+                    character_name: Some(identity.name.as_bytes().to_vec()),
+                    home_world_id: Some(identity.home_world),
+                    ..connected
+                },
+                None => connected,
+            })
         }
         (PLAYER_APPEARANCE_TYPE_INDEX, Some(look), _) => {
             MemberState::Appearance(PlayerAppearanceState::of(look))
         }
         (VITALS_TYPE_INDEX, _, Some((health, health_max))) => {
-            MemberState::Vitals(VitalsState::player(health, health_max))
+            let vitals = VitalsState::player(health, health_max);
+            MemberState::Vitals(match states.identity {
+                Some(identity) => vitals.with_life(identity.life),
+                None => vitals,
+            })
         }
         (STAMINA_TYPE_INDEX, _, Some(_)) => MemberState::Stamina(StaminaState::player()),
         (DAMAGE_RECEIVER_TYPE_INDEX, _, _) => {
@@ -1041,6 +1253,16 @@ pub fn put_account_in_probation(members: &mut Vec<BundleMember>, in_probation: b
         members,
         PlayerComponentState::account_in_probation(in_probation),
         |state| state.account_in_probation = Some(in_probation),
+    );
+}
+
+/// Puts the start of the session, `start`, into the own group `members`, as
+/// [`put_looking_through_loadout`] puts its change.
+pub fn put_session_start(members: &mut Vec<BundleMember>, start: SessionStart) {
+    put_player_change(
+        members,
+        PlayerComponentState::session_started(start),
+        |state| state.session_start = Some(start),
     );
 }
 
@@ -1190,9 +1412,143 @@ mod tests {
     }
 
     #[test]
+    fn another_players_card_holds_the_public_slots_only() {
+        let states = PlayerStates {
+            character_id: CHARACTER_ID,
+            identity: None,
+            look: None,
+            health: Some(HEALTH),
+            gear: None,
+            achievements: None,
+            objectives: None,
+            progression: None,
+            categorical_progression: None,
+            progression_points: None,
+            currency: None,
+            health_change: None,
+            cooldowns: None,
+            stamina: None,
+            combat_status: None,
+            mana: None,
+        };
+        let own: Vec<BundleMember> = player_members(states).collect();
+        let remote: Vec<BundleMember> = remote_player_members(states).collect();
+        let state_of = |members: &[BundleMember], class: u64| {
+            members
+                .iter()
+                .find(|member| member.state.type_index() == class)
+                .map(|member| member.state.clone())
+                .expect("class")
+        };
+        let MemberState::Vitals(own_vitals) = state_of(&own, VITALS_TYPE_INDEX) else {
+            panic!("own vitals");
+        };
+        assert_eq!(
+            state_of(&remote, VITALS_TYPE_INDEX),
+            MemberState::Vitals(VitalsState {
+                slot_0: own_vitals.slot_0,
+                slot_1: None,
+            }),
+            "health and stamina, not the mana and afflictions (retail slot byte 01 in 40 of 40)"
+        );
+        assert_eq!(
+            state_of(&remote, FACTION_TYPE_INDEX),
+            MemberState::Recorded {
+                class: FACTION_TYPE_INDEX,
+                body: vec![FACTION_PUBLIC_SLOT, 0x0a, 0x00, 0x00],
+            },
+            "the own first body's slot 2 alone (retail slot byte 04 in 40 of 40)"
+        );
+    }
+
+    #[test]
+    fn a_card_with_the_identity_carries_the_name_the_world_and_the_life_block() {
+        const WORLD: [u8; RAW_ID_LEN] = [9; RAW_ID_LEN];
+        const SPAWNED_MS: u64 = 1_000_000;
+        let life = VitalsData::player_alive(SPAWNED_MS);
+        let states = PlayerStates {
+            character_id: CHARACTER_ID,
+            identity: Some(PlayerIdentity {
+                name: "Testname",
+                home_world: WORLD,
+                life,
+            }),
+            look: None,
+            health: Some(HEALTH),
+            gear: None,
+            achievements: None,
+            objectives: None,
+            progression: None,
+            categorical_progression: None,
+            progression_points: None,
+            currency: None,
+            health_change: None,
+            cooldowns: None,
+            stamina: None,
+            combat_status: None,
+            mana: None,
+        };
+        for members in [
+            player_members(states).collect::<Vec<_>>(),
+            remote_player_members(states).collect(),
+        ] {
+            let state_of = |class: u64| {
+                members
+                    .iter()
+                    .find(|member| member.state.type_index() == class)
+                    .map(|member| member.state.clone())
+                    .expect("class")
+            };
+            let MemberState::PlayerComponent(player) = state_of(PLAYER_COMPONENT_TYPE_INDEX) else {
+                panic!("3935");
+            };
+            assert_eq!(player.character_id, Some(CHARACTER_ID));
+            assert_eq!(player.character_name.as_deref(), Some(&b"Testname"[..]));
+            assert_eq!(player.home_world_id, Some(WORLD));
+            assert_eq!(player.player_connected, Some(true));
+            let MemberState::Vitals(vitals) = state_of(VITALS_TYPE_INDEX) else {
+                panic!("vitals");
+            };
+            let slot_0 = vitals.slot_0.expect("slot 0");
+            assert_eq!(slot_0.vitals_data, Some(life), "retail: every player card");
+            assert_eq!(slot_0.health_change_flags, Some(0));
+        }
+    }
+
+    #[test]
+    fn another_players_card_holds_one_state_of_each_class_retail_shows() {
+        let states = PlayerStates {
+            character_id: CHARACTER_ID,
+            identity: None,
+            look: None,
+            health: None,
+            gear: None,
+            achievements: None,
+            objectives: None,
+            progression: None,
+            categorical_progression: None,
+            progression_points: None,
+            currency: None,
+            health_change: None,
+            cooldowns: None,
+            stamina: None,
+            combat_status: None,
+            mana: None,
+        };
+        let mut classes: Vec<u64> = remote_player_members(states)
+            .map(|member| member.state.type_index())
+            .collect();
+        classes.sort_unstable();
+        let mut retail = REMOTE_PLAYER_CARD_CLASSES.to_vec();
+        retail.sort_unstable();
+        assert_eq!(classes, retail, "every class once, and no other");
+    }
+
+    #[test]
     fn without_look_and_health_every_other_component_is_empty_or_its_retail_first_body() {
         let states = PlayerStates {
             character_id: CHARACTER_ID,
+            identity: None,
             look: None,
             health: None,
             gear: None,
@@ -1263,6 +1619,7 @@ mod tests {
         let look = PlayerLook::default();
         let states = PlayerStates {
             character_id: CHARACTER_ID,
+            identity: None,
             look: Some(look),
             health: Some(HEALTH),
             gear: None,
@@ -1318,7 +1675,7 @@ mod tests {
         let state = PlayerComponentState::read(&mut Reader::new(&RETAIL_BODY)).expect("read");
         assert_eq!(state, PlayerComponentState::died());
         let mut writer = Writer::new();
-        state.write(&mut writer);
+        state.write(&mut writer).expect("write");
         assert_eq!(writer.finish(), RETAIL_BODY);
     }
 
@@ -1327,6 +1684,7 @@ mod tests {
         const SPAWNED_MS: u64 = 5_000;
         let death = PlayerStates {
             character_id: CHARACTER_ID,
+            identity: None,
             look: None,
             health: Some(HEALTH),
             gear: None,
@@ -1403,6 +1761,7 @@ mod tests {
         const MANA: f32 = 110.0;
         let states = PlayerStates {
             character_id: CHARACTER_ID,
+            identity: None,
             look: None,
             health: None,
             gear: None,
@@ -1446,6 +1805,7 @@ mod tests {
         };
         let states = PlayerStates {
             character_id: CHARACTER_ID,
+            identity: None,
             look: None,
             health: Some(HEALTH),
             gear: None,
@@ -1506,6 +1866,7 @@ mod tests {
         let pools = ProgressionPointState::full(crate::items::FIRST_VERSION, &[], &[]);
         let states = PlayerStates {
             character_id: CHARACTER_ID,
+            identity: None,
             look: None,
             health: None,
             gear: None,
@@ -1553,6 +1914,7 @@ mod tests {
         };
         let states = PlayerStates {
             character_id: CHARACTER_ID,
+            identity: None,
             look: None,
             health: Some(HEALTH),
             gear: None,
@@ -1616,6 +1978,7 @@ mod tests {
         }]);
         let states = PlayerStates {
             character_id: CHARACTER_ID,
+            identity: None,
             look: None,
             health: None,
             gear: Some(&gear),
@@ -1693,7 +2056,7 @@ mod tests {
         const ID: [u8; RAW_ID_LEN] = [9; RAW_ID_LEN];
         let state = PlayerComponentState::connected(ID);
         let mut writer = Writer::new();
-        state.write(&mut writer);
+        state.write(&mut writer).expect("write");
         let bytes = writer.finish();
         assert_eq!(bytes.first(), Some(&SLOT_2_BIT));
         let mut reader = Reader::new(&bytes);
@@ -1705,6 +2068,32 @@ mod tests {
     }
 
     #[test]
+    fn the_session_start_goes_out_as_retail_s_two_clock_children() {
+        // Retail newchar-retail, the own card: `06 d4 00 02 18e0ef3b3152a0a8 d9 0bbda26bdf007c8e
+        // ...`: child 6 in the first group of the mask, child 7 in the second.
+        const WALL_CLOCK_NS: u64 = 0x18e0_ef3b_3152_a0a8;
+        const TIME_POINT_NS: u64 = 0x0bbd_a26b_df00_7c8e;
+        /// Slot 1; the mask group of child 6 with more to come; the mask group of child 7.
+        const HEAD: [u8; 2] = [0x02, 0xc0];
+        const SECOND_GROUP: u8 = 0x01;
+        let start = SessionStart {
+            wall_clock_ns: WALL_CLOCK_NS,
+            time_point_ns: TIME_POINT_NS,
+        };
+        let state = PlayerComponentState::session_started(start);
+        let mut writer = Writer::new();
+        state.write(&mut writer).expect("write");
+        let body = writer.finish();
+        let mut retail = HEAD.to_vec();
+        retail.extend(WALL_CLOCK_NS.to_be_bytes());
+        retail.push(SECOND_GROUP);
+        retail.extend(TIME_POINT_NS.to_be_bytes());
+        assert_eq!(body, retail);
+        let read = PlayerComponentState::read(&mut Reader::new(&body)).expect("read");
+        assert_eq!(read.session_start, Some(start));
+    }
+
+    #[test]
     fn the_probation_change_is_retail_s_bytes_and_merges_with_a_death() {
         // Retail, all three captured sessions: `02 08 00` (slot 1, child 3, false).
         const RETAIL_NOT_IN_PROBATION: [u8; 3] = [0x02, 0x08, 0x00];
@@ -1712,7 +2101,7 @@ mod tests {
         for (in_probation, retail) in [(false, RETAIL_NOT_IN_PROBATION), (true, IN_PROBATION)] {
             let state = PlayerComponentState::account_in_probation(in_probation);
             let mut writer = Writer::new();
-            state.write(&mut writer);
+            state.write(&mut writer).expect("write");
             let bytes = writer.finish();
             assert_eq!(bytes, retail);
             let mut reader = Reader::new(&bytes);
@@ -1731,7 +2120,7 @@ mod tests {
             panic!("player component");
         };
         let mut writer = Writer::new();
-        state.write(&mut writer);
+        state.write(&mut writer).expect("write");
         let bytes = writer.finish();
         let mut reader = Reader::new(&bytes);
         let read = PlayerComponentState::read(&mut reader).expect("read");
@@ -1755,7 +2144,9 @@ mod tests {
     fn a_connected_body_carries_the_character_id_as_uuid_text() {
         const ID: [u8; RAW_ID_LEN] = [7; RAW_ID_LEN];
         let mut writer = Writer::new();
-        PlayerComponentState::connected(ID).write(&mut writer);
+        PlayerComponentState::connected(ID)
+            .write(&mut writer)
+            .expect("write");
         let mut expected = vec![
             SLOT_2_BIT,
             0x09,
@@ -1764,6 +2155,40 @@ mod tests {
         expected.extend_from_slice(&ID);
         expected.push(1);
         assert_eq!(writer.finish(), expected, "facet +0xe8 note, section 6");
+    }
+
+    #[test]
+    fn another_players_first_body_has_the_retail_slot_2_layout() {
+        // general-other-01 1792964399779 (other player's first card): `04 9f <id> 0c <name>
+        // <world> 01 00`, then the platform children 7 and 8, which this server does not have.
+        // Made-up ids and name in place of the captured ones.
+        const ID: [u8; RAW_ID_LEN] = [7; RAW_ID_LEN];
+        const WORLD: [u8; RAW_ID_LEN] = [9; RAW_ID_LEN];
+        const NAME: &[u8] = b"Testname";
+        /// Children 0 to 4 (characterId to lookingThroughLoadout), no later child byte.
+        const CHILDREN_0_TO_4: u8 = 0x1f;
+        let state = PlayerComponentState {
+            character_name: Some(NAME.to_vec()),
+            home_world_id: Some(WORLD),
+            looking_through_loadout: Some(false),
+            ..PlayerComponentState::connected(ID)
+        };
+        let mut writer = Writer::new();
+        state.write(&mut writer).expect("write");
+        let bytes = writer.finish();
+        let presence = PRESENCE_FLAG_FIXED | PRESENCE_FLAG_UUID_TEXT;
+        let mut expected = vec![SLOT_2_BIT, CHILDREN_0_TO_4, presence];
+        expected.extend_from_slice(&ID);
+        expected.push(NAME.len() as u8);
+        expected.extend_from_slice(NAME);
+        expected.push(presence);
+        expected.extend_from_slice(&WORLD);
+        expected.extend_from_slice(&[1, 0]);
+        assert_eq!(bytes, expected);
+        assert_eq!(
+            PlayerComponentState::read(&mut Reader::new(&bytes)).expect("read"),
+            state
+        );
     }
 
     #[test]
@@ -1783,7 +2208,7 @@ mod tests {
         for (looking, retail) in [(true, [0x04, 0x10, 0x01]), (false, [0x04, 0x10, 0x00])] {
             let state = PlayerComponentState::looking_through_loadout(looking);
             let mut writer = Writer::new();
-            state.write(&mut writer);
+            state.write(&mut writer).expect("write");
             assert_eq!(writer.finish(), retail);
             let mut reader = Reader::new(&retail);
             assert_eq!(
@@ -1803,7 +2228,7 @@ mod tests {
         ] {
             let state = PlayerComponentState::changing_mount(changing);
             let mut writer = Writer::new();
-            state.write(&mut writer);
+            state.write(&mut writer).expect("write");
             assert_eq!(writer.finish(), retail);
             let mut reader = Reader::new(&retail);
             assert_eq!(
@@ -1871,7 +2296,9 @@ mod tests {
     fn the_store_flag_has_the_retail_bytes() {
         for (in_store, body) in [(true, [0x04, 0x40, 0x01]), (false, [0x04, 0x40, 0x00])] {
             let mut writer = Writer::new();
-            PlayerComponentState::in_store(in_store).write(&mut writer);
+            PlayerComponentState::in_store(in_store)
+                .write(&mut writer)
+                .expect("write");
             assert_eq!(writer.finish(), body);
             let read = PlayerComponentState::read(&mut Reader::new(&body)).expect("read");
             assert_eq!(read.is_in_store, Some(in_store));
@@ -1900,6 +2327,7 @@ mod tests {
         let gear = PlayerGear::hands_change(before, now);
         let states = PlayerStates {
             character_id: CHARACTER_ID,
+            identity: None,
             look: None,
             health: None,
             gear: Some(&gear),

@@ -879,8 +879,23 @@ pub const MOB_ENTITY_BASE: u64 = 1 << 34;
 /// player's ([`PlayerGhost`]: about 246 bytes with all its visible items, its view, target,
 /// action and mount, and 13 more bytes per visible item for its look: a 5-byte skin and two
 /// 4-byte dyes), and its upper slayer slots ([`GHOST_UPPER_SLOTS_BYTES`]).
-pub const MAX_GHOST_BYTES: usize =
-    288 + GHOST_VISIBLE_ITEMS * GHOST_ITEM_LOOK_BYTES + GHOST_UPPER_SLOTS_BYTES;
+pub const MAX_GHOST_BYTES: usize = 288
+    + GHOST_VISIBLE_ITEMS * GHOST_ITEM_LOOK_BYTES
+    + GHOST_UPPER_SLOTS_BYTES
+    + GHOST_NAME_POSTCARD_BYTES
+    + U32_BYTES
+    + OPTION_F32_BYTES
+    + OPTION_U64_PAIR_BYTES;
+/// Most `postcard` bytes of an optional pair of `u64`: the option tag and two 10-byte varints.
+const OPTION_U64_PAIR_BYTES: usize = 21;
+/// Most `postcard` bytes of an optional `f32`: the option tag and 4 bytes.
+const OPTION_F32_BYTES: usize = 5;
+/// Most bytes of a character name (the character name rule: 3 to 16 letters).
+pub const GHOST_NAME_BYTES: usize = 16;
+/// Most `postcard` bytes of a [`GhostName`]: its bytes and its length.
+const GHOST_NAME_POSTCARD_BYTES: usize = GHOST_NAME_BYTES + 1;
+/// Most `postcard` bytes of a `u32`: a 5-byte varint.
+const U32_BYTES: usize = 5;
 /// Most `postcard` bytes of one ghost item's look.
 const GHOST_ITEM_LOOK_BYTES: usize = 13;
 /// Most `postcard` bytes of an optional `u64`: the option tag and a 10-byte varint.
@@ -911,6 +926,36 @@ pub struct GhostItem {
     pub look: ItemLookState,
 }
 
+/// A player ghost's character name, in a fixed size so the ghost stays a small copy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GhostName {
+    bytes: [u8; GHOST_NAME_BYTES],
+    len: u8,
+}
+
+impl GhostName {
+    /// `name`, cut to its first [`GHOST_NAME_BYTES`] bytes at a character boundary.
+    pub fn of(name: &str) -> Self {
+        let mut len = name.len().min(GHOST_NAME_BYTES);
+        while !name.is_char_boundary(len) {
+            len -= 1;
+        }
+        let mut bytes = [0; GHOST_NAME_BYTES];
+        bytes[..len].copy_from_slice(&name.as_bytes()[..len]);
+        Self {
+            bytes,
+            // At most `GHOST_NAME_BYTES`.
+            len: len as u8,
+        }
+    }
+
+    /// The name.
+    pub fn as_str(&self) -> &str {
+        let len = usize::from(self.len).min(GHOST_NAME_BYTES);
+        std::str::from_utf8(&self.bytes[..len]).unwrap_or_default()
+    }
+}
+
 /// What other players see of a player near a border (replication note): its look, health,
 /// stance, block, facing, clock and the items that show on it, so the players of the other sim
 /// see it move, turn, fight and change weapons, not a statue.
@@ -918,6 +963,18 @@ pub struct GhostItem {
 pub struct PlayerGhost {
     /// The character.
     pub character: Uuid,
+    /// The character's name, which its card shows.
+    #[serde(default)]
+    pub name: GhostName,
+    /// Its zero-based level, which its card shows.
+    #[serde(default)]
+    pub level: u32,
+    /// Seconds into its slayer state's sequence, once its client took its first own state.
+    #[serde(default)]
+    pub sequence_s: Option<f32>,
+    /// The slayer state and sequence of its movement now, which its card shows.
+    #[serde(default)]
+    pub movement: Option<(u64, u64)>,
     /// The saved look.
     pub look: Option<[u8; LOOK_CHOICES]>,
     /// Health now.
@@ -1241,6 +1298,17 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, BusError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ghost_name_keeps_a_whole_name_and_cuts_a_long_one_at_a_character() {
+        assert_eq!(GhostName::of("Testplayer").as_str(), "Testplayer");
+        let long = format!("{}é", "a".repeat(GHOST_NAME_BYTES - 1));
+        assert_eq!(
+            GhostName::of(&long).as_str(),
+            "a".repeat(GHOST_NAME_BYTES - 1),
+            "the two-byte letter at the end does not fit"
+        );
+    }
 
     const CONNECTION: u64 = 7;
     /// A raw id of the dynamic form (bit 0 of the first byte clear).
@@ -1755,6 +1823,10 @@ mod tests {
             mob: None,
             player: Some(PlayerGhost {
                 character: Uuid::from_u128(u128::MAX),
+                name: GhostName::of(&"Z".repeat(GHOST_NAME_BYTES)),
+                level: u32::MAX,
+                sequence_s: Some(f32::MAX),
+                movement: Some((u64::MAX, u64::MAX)),
                 look: Some([u8::MAX; LOOK_CHOICES]),
                 health: u32::MAX,
                 max_health: u32::MAX,

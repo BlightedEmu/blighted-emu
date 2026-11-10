@@ -59,6 +59,16 @@ mod movement {
     pub(super) const STOP_RECORDS: u16 = 39;
 }
 
+/// The second slot of a weapon put away (retail, the first own slayer change after the sheathe
+/// key in 60 open world ledgers and the own captures: `16=2c 18=9b2c` in all 8 changes that
+/// carried a second slot, with the sheathed stand or move in the first slot).
+mod sheathe {
+    /// `slayerStateId` of the second slot (`16=2c`), the draw's too.
+    pub(super) const STATE: u64 = 0x2c;
+    /// Its sequence: `9b2c`.
+    pub(super) const SEQUENCE: u64 = 2843;
+}
+
 /// The slayer state of a player that a mob pulls (retail newchar 2026-09-12, Thorpe's first
 /// grab pull at 456719 ms: `13=04 14=3163 15=8a37 16=00 17=3163` in the state numbered `3163`,
 /// the pull's places in the next states, then `13=1f 15=b910`, standing still, at 457852 ms).
@@ -441,6 +451,10 @@ pub(super) struct SlayerTrack {
     dodge_held: bool,
     jump_held: bool,
     drawn: bool,
+    /// The stance of the weapon the previous record had drawn.
+    drawn_stance: Option<u32>,
+    /// The movement states of the newest record ([`MoveSet`]).
+    set: Option<MoveSet>,
     /// The player's own movement.
     locomotion: Locomotion,
     /// The last record was a fall the server already started.
@@ -495,6 +509,7 @@ impl SlayerTrack {
         let upper = self.upper_slots(&record, stance, drawn);
         let alt = drawn && record.intent.is_some_and(|intent| intent.block);
         let set = MoveSet::of(stance, drawn, alt);
+        self.set = Some(set);
         let entered_air = record.falling && !record.swimming && !self.in_air;
         let entered_water = record.swimming && self.swim == Swim::Out;
         self.in_air = record.falling && !record.swimming;
@@ -649,23 +664,34 @@ impl SlayerTrack {
         let alt = drawn && record.intent.is_some_and(|intent| intent.block);
         let was_alt = self.alt_held;
         let was_drawn = self.drawn;
+        let was_stance = self.drawn_stance;
         if record.intent.is_some() {
             self.alt_held = alt;
         }
         self.drawn = drawn;
+        self.drawn_stance = record
+            .weapon
+            .filter(|weapon| weapon.drawn)
+            .map(|weapon| weapon.stance);
+        let second = |state: u64, sequence: u64| SlotsChange {
+            second_state: Some(state),
+            second_sequence: Some(sequence),
+            ..Default::default()
+        };
+        if was_drawn && !drawn {
+            return slots_of(second(sheathe::STATE, sheathe::SEQUENCE), record.counter);
+        }
         let stance = stance?;
         let change = (if alt && !was_alt {
             stance.alt_start
         } else if !alt && was_alt && record.intent.is_some() {
             stance.alt_end
-        } else if drawn && !was_drawn {
-            stance
-                .draw
-                .map(|draw| nw_content::player_sequences::SlotsChange {
-                    second_state: Some(draw.state),
-                    second_sequence: Some(draw.sequence),
-                    ..Default::default()
-                })
+        } else if drawn && (!was_drawn || was_stance != self.drawn_stance) {
+            // A draw, and a swap to the other weapon while one is out: retail starts the new
+            // weapon's draw at every weapon key (351 presses: `16=2c 18=<draw>` with the new
+            // stance's sequence in the first slot). Ours started it from no weapon only, and
+            // the other players kept the old weapon's pose (live 2026-11-09).
+            stance.draw.map(|draw| second(draw.state, draw.sequence))
         } else {
             None
         })?;
@@ -923,9 +949,16 @@ impl SlayerTrack {
         (self.current, None)
     }
 
-    /// The newest slayer state, for the players who see this one.
+    /// The newest slayer state, in its own form.
     pub(super) const fn current(&self) -> Option<SlayerState> {
         self.current
+    }
+
+    /// The state and sequence of its movement now, for the first card of a player who comes
+    /// into view of it: its stand, move or stop in the stance of the weapon in its hand.
+    pub(super) fn card_movement(&self) -> (u64, u64) {
+        self.locomotion
+            .current(self.set.unwrap_or(MoveSet::SHEATHED))
     }
 
     /// The upper slots of this tick's own state, for the players who see this one: retail's
@@ -933,6 +966,14 @@ impl SlayerTrack {
     /// `16=24 18=9837 19=2e 21=9606 48=28` in 3 to 4 states, then without them).
     pub(super) const fn remote_upper(&self) -> Option<RemoteUpper> {
         self.remote
+    }
+
+    /// Seconds into the newest slayer state's sequence, for the players who see this one;
+    /// `None` before the first own state. Retail sends other players' `slayerSeqTimeRel` in
+    /// 1,750 of 1,751 of their states (general-other-01 and newchar-retail, the states after each
+    /// first card).
+    pub(super) fn remote_sequence(&self) -> Option<f32> {
+        self.clock.map(|_| self.sequence_s)
     }
 
     fn start(&mut self, state: SlayerState) -> Option<SlayerState> {
@@ -1524,6 +1565,74 @@ mod tests {
         track.record(keyed(31, aim, RELEASE, GREATSWORD), &table);
         let due = own_state(&mut track, 31);
         assert_ne!(due.state.map(|state| state.sequence), Some(LIGHT));
+    }
+
+    #[test]
+    fn a_swap_draws_the_new_weapon_and_a_sheathe_puts_it_away() {
+        const SWORD_DRAW: StatePlay = StatePlay {
+            state: 44,
+            sequence: 2310,
+        };
+        const GUN_DRAW: StatePlay = StatePlay {
+            state: 44,
+            sequence: 3250,
+        };
+        let draws = |tags: &str, draw| StanceSequences {
+            tags: tags.to_owned(),
+            draw: Some(draw),
+            ..StanceSequences::default()
+        };
+        let table = PlayerSequences::of_parts(
+            HOLD_RECORDS,
+            vec![draws(GREATSWORD, SWORD_DRAW), draws(BLUNDERBUSS, GUN_DRAW)],
+            Vec::new(),
+        );
+        let still = Intent::default();
+        let second = |track: &mut SlayerTrack, number: u16| {
+            own_state(track, number).slots.map(|slots| slots.second)
+        };
+        let drawn = |sequence: u64, started: u16| {
+            Some(SlotChange {
+                state: Some(SWORD_DRAW.state),
+                started: Some(started),
+                sequence: Some(sequence),
+            })
+        };
+        let mut track = spawned();
+        track.record(keyed(10, still, HELD, GREATSWORD), &table);
+        assert_eq!(
+            second(&mut track, 10),
+            drawn(SWORD_DRAW.sequence, 10),
+            "the draw"
+        );
+        for number in 11..20 {
+            track.record(keyed(number, still, HELD, GREATSWORD), &table);
+            own_state(&mut track, number);
+        }
+        track.record(keyed(20, still, HELD, BLUNDERBUSS), &table);
+        assert_eq!(
+            second(&mut track, 20),
+            drawn(GUN_DRAW.sequence, 20),
+            "the other weapon's draw at a swap (retail: every weapon key)"
+        );
+        for number in 21..30 {
+            track.record(keyed(number, still, HELD, BLUNDERBUSS), &table);
+            own_state(&mut track, number);
+        }
+        let away = SlayerRecord {
+            weapon: weapon(BLUNDERBUSS, false),
+            ..quiet_record(30, still)
+        };
+        track.record(away, &table);
+        assert_eq!(
+            second(&mut track, 30),
+            Some(SlotChange {
+                state: Some(sheathe::STATE),
+                started: Some(30),
+                sequence: Some(sheathe::SEQUENCE),
+            }),
+            "the sheathe (retail `16=2c 18=9b2c`)"
+        );
     }
 
     #[test]

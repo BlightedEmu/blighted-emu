@@ -28,6 +28,9 @@ const FALL_MAX_SHARE: f64 = 0.5;
 /// damage, 10.66 m, and the shortest with, 10.99 m).
 const FALL_MIN_DROP_M: f32 = 10.8;
 
+/// The shortest drop whose landing is logged (a jump on the spot is about 1 m).
+const LOGGED_DROP_M: f32 = 3.0;
+
 /// The fall of one body: the top since it left the floor.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct FallTrack {
@@ -80,6 +83,9 @@ impl SimWorld {
             let swimming = player.tracked.is_swimming();
             if let Some(drop_m) = player.fall.step(z, grounded, swimming) {
                 let share = fall_share(drop_m);
+                if drop_m >= LOGGED_DROP_M {
+                    tracing::debug!(player = player.number, drop_m, share, "landing");
+                }
                 if share > 0.0 {
                     landed.push((entity, player.number, share));
                 }

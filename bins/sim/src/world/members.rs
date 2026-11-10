@@ -2,8 +2,8 @@
 //! The bundle groups of the entities a client sees (world-entry note, "Spawn condition traced").
 //! Each entity is one group in its own slot ([`super::slots`]); the own player is slot
 //! [`LOCAL_PLAYER_INTEREST`]. A group holds the entity's spawn card (type 10, component
-//! [`GDE_METADATA_COMPONENT`]) when the entity comes into view (and again once per
-//! [`CARD_REFRESH_BUNDLES`] bundles while it stays in view), then its position in an
+//! [`GDE_METADATA_COMPONENT`]) when the entity comes into view (a mob without a prefab sends it
+//! again once per [`CARD_REFRESH_BUNDLES`] bundles while it stays in view), then its position in an
 //! `ALCReplicatedState` (type 11) carrying the `pos10` child, as the retail bundles do. A player's
 //! card names the player prefab ([`PLAYER_SLICE_ASSET`]): the client registers its local player
 //! only when that prefab is portrayed in slot 1. A mob's card ids are our own values: the mob
@@ -17,14 +17,15 @@ use nw_bus::MobGhost;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::{
     AlcStamp, AlcState, AssetId, BOSS_PHASE_TYPE_INDEX, BundleGroup, BundleMember, BundlePayload,
-    CardPlace, DATA_BITS_ACTIVE, DEPLETED_GATHERABLE, DYNAMIC_SLICE_SUB_ID, EffectMap,
-    GATHERABLE_CONTROLLER_TYPE_INDEX, GDE_METADATA_COMPONENT, GatherableControllerState,
-    GdeMetadataReplicatedState, InputPosition, LOCAL_PLAYER_INTEREST, LookDir, LookTargetingState,
-    MAX_BUNDLE_INDEXES, MemberState, MessageError, PLAYER_SLICE_ASSET, POS3_LEN, PlayerStates,
-    RemoteEffect, ReplicatedStateBundle, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT,
-    STATUS_EFFECTS_TYPE_INDEX, ServerMessage, StatusEffectsState, StepPlace, TeleportStep,
-    VitalsData, VitalsState, boss_phase_change, change_members, offset_from, player_members,
-    raw_id_of_entity,
+    CardPlace, DAMAGE_RECEIVER_TYPE_INDEX, DATA_BITS_ACTIVE, DEPLETED_GATHERABLE,
+    DYNAMIC_SLICE_SUB_ID, DamageReceiverState, EffectMap, GATHERABLE_CONTROLLER_TYPE_INDEX,
+    GDE_METADATA_COMPONENT, GatherableControllerState, GdeMetadataReplicatedState, InputPosition,
+    LOCAL_PLAYER_INTEREST, LookDir, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState,
+    MessageError, PLAYER_SLICE_ASSET, POS3_LEN, PlayerStates, RemoteEffect, ReplicatedStateBundle,
+    SPAWN_MOVEMENT, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, STATUS_EFFECTS_TYPE_INDEX,
+    ServerMessage, StatusEffectsState, StepPlace, TeleportStep, VitalsData, VitalsState,
+    boss_phase_change, change_members, offset_from, player_members, raw_id_of_entity,
+    remote_player_members,
 };
 use nw_sim_core::Position;
 
@@ -43,9 +44,10 @@ const STOP_BYTES: usize = 2;
 /// Most stops in one bundle: an eighth of the bundle bytes.
 const MAX_STOPS_PER_BUNDLE: usize = MAX_BUNDLE_PAYLOAD_BYTES / STOP_BYTES / 8;
 const _: () = assert!(MAX_STOPS_PER_BUNDLE as u64 <= MAX_BUNDLE_INDEXES);
-/// An entity in view sends its card again once per this many bundles of the player (about one
-/// second at one bundle per tick): a bundle is unreliable, and a lost card would hide the entity
-/// for as long as it stays in view.
+/// A mob without a prefab in view sends its card again once per this many bundles of the player
+/// (about one second at one bundle per tick): a bundle is unreliable, and a lost card would hide
+/// the mob for as long as it stays in view. A player or a mob with a prefab gets its card once: a
+/// card again starts the load of its slice over.
 pub(super) const CARD_REFRESH_BUNDLES: u64 = 30;
 /// The component of a player's `ALCReplicatedState`: 16 on every own-player member of the
 /// captures.
@@ -95,6 +97,10 @@ pub(super) struct MobCard {
     pub(super) skinned: bool,
     /// That happened since the last bundle step.
     pub(super) skinned_changed: bool,
+    /// Its block is up ([`crate::mobs::Mobs::blocking`]).
+    pub(super) blocking: bool,
+    /// Its block rose or fell since the last bundle step.
+    pub(super) blocking_changed: bool,
 }
 
 impl MobCard {
@@ -125,6 +131,8 @@ pub(super) const fn card_of(
         remote_effects_changed: false,
         skinned: false,
         skinned_changed: false,
+        blocking: false,
+        blocking_changed: false,
         asset: None,
         server_ms: 0,
         look_target: None,
@@ -132,22 +140,39 @@ pub(super) const fn card_of(
     }
 }
 
+/// The player component states that come with a card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardStates {
+    /// None: the card of a mob.
+    None,
+    /// A state for every other replicated component of the player prefab: the client's own
+    /// player ([`player_members`]).
+    Own,
+    /// The states retail shows of another player ([`remote_player_members`]).
+    Remote,
+}
+
 /// The prefab and the `ALCReplicatedState` component of one kind of entity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct EntityKind {
     asset: AssetId,
     alc_component: u64,
-    /// Whether the card comes with a state for every other replicated component of the prefab
-    /// ([`player_members`]).
-    empty_components: bool,
+    card_states: CardStates,
 }
 
 impl EntityKind {
-    /// A player.
-    pub(super) const PLAYER: Self = Self {
+    /// The client's own player.
+    pub(super) const OWN_PLAYER: Self = Self {
         asset: PLAYER_SLICE_ASSET,
         alc_component: PLAYER_ALC_COMPONENT,
-        empty_components: true,
+        card_states: CardStates::Own,
+    };
+
+    /// Another player.
+    pub(super) const REMOTE_PLAYER: Self = Self {
+        asset: PLAYER_SLICE_ASSET,
+        alc_component: PLAYER_ALC_COMPONENT,
+        card_states: CardStates::Remote,
     };
 
     /// A mob of a prefab of the prefab table: its creature slice and ALC component.
@@ -155,7 +180,7 @@ impl EntityKind {
         Self {
             asset: look.asset,
             alc_component: look.alc_component,
-            empty_components: false,
+            card_states: CardStates::None,
         }
     }
 
@@ -169,15 +194,15 @@ impl EntityKind {
                 sub_id: DYNAMIC_SLICE_SUB_ID,
             },
             alc_component: MOB_ALC_COMPONENT,
-            empty_components: false,
+            card_states: CardStates::None,
         }
     }
 }
 
-/// The group of `entity` of `kind` in slot `interest`: its card (with the other component states
-/// of a player) when `carded`, then its position. A player's states are `states` when known (the
-/// client's own player: its login character, look and vitals), else a connected 3935 state with
-/// the entity raw id as `characterId` and empty states.
+/// The group of `entity` of `kind` in slot `interest`: its card (with the component states of a
+/// player that its kind names) when `carded`, then its position. A player's states are `states`
+/// when known (its character, look and vitals), else a connected 3935 state with the entity raw
+/// id as `characterId` and empty states.
 /// `None` for a position that is not finite.
 pub(super) fn entity_group(
     interest: u16,
@@ -196,9 +221,10 @@ pub(super) fn entity_group(
                 kind.asset, entity,
             )),
         });
-        if kind.empty_components {
-            members.extend(player_members(states.unwrap_or(PlayerStates {
+        let states = || {
+            states.unwrap_or(PlayerStates {
                 character_id: raw_id_of_entity(entity),
+                identity: None,
                 look: None,
                 health: None,
                 gear: None,
@@ -213,7 +239,12 @@ pub(super) fn entity_group(
                 stamina: None,
                 combat_status: None,
                 mana: None,
-            })));
+            })
+        };
+        match kind.card_states {
+            CardStates::None => {}
+            CardStates::Own => members.extend(player_members(states())),
+            CardStates::Remote => members.extend(remote_player_members(states())),
         }
     }
     members.push(BundleMember {
@@ -226,9 +257,13 @@ pub(super) fn entity_group(
     })
 }
 
-/// Makes the position of `group` (its last member) the full first state at `position`
-/// ([`AlcState::spawn`]): a client places a new entity only from such a state; from a lone
-/// `pos10` it stays at the grid origin (own-player-position note).
+/// The first state of an entity at a place: [`AlcState::spawn`] for the client's own player,
+/// [`AlcState::remote_spawn`] for an entity it only sees.
+type FirstState = fn(CardPlace, AlcStamp) -> Result<AlcState, MessageError>;
+
+/// Makes the position of `group` (its last member) the full first state at `position` that
+/// `first` builds: a client places a new entity only from such a state; from a lone `pos10` it
+/// stays at the grid origin (own-player-position note).
 ///
 /// # Errors
 ///
@@ -237,11 +272,12 @@ fn full_first_position(
     group: &mut BundleGroup,
     position: Position,
     stamp: AlcStamp,
+    first: FirstState,
 ) -> Result<(), MessageError> {
     if let Some(pos) = InputPosition::from_metres(position.x, position.y, position.z)
         && let Some(alc) = group.members.last_mut()
     {
-        alc.state = MemberState::Alc(AlcState::spawn(
+        alc.state = MemberState::Alc(first(
             CardPlace {
                 anchor: None,
                 at: pos,
@@ -253,7 +289,7 @@ fn full_first_position(
 }
 
 /// The group of another entity of `kind` in slot `interest`: as [`entity_group`], with the full
-/// first position when `carded`.
+/// first position of an entity the client only sees ([`AlcState::remote_spawn`]) when `carded`.
 ///
 /// # Errors
 ///
@@ -269,7 +305,9 @@ pub(super) fn remote_group(
         return Ok(None);
     };
     if carded {
-        full_first_position(&mut group, position, NO_CLOCK_STAMP)?;
+        full_first_position(&mut group, position, NO_CLOCK_STAMP, |place, stamp| {
+            AlcState::remote_spawn(place, stamp, SPAWN_MOVEMENT)
+        })?;
     }
     Ok(Some(group))
 }
@@ -444,6 +482,25 @@ pub(super) fn mob_group(
             }),
         });
     }
+    // A raised block goes with the card and each rise and fall after it, on the prefab's damage
+    // receiver component (Observed, all-capture sweep 2026-11-09: retail mob damage receivers
+    // sent `isBlockActive` 1 at 7,887 block rises of 223 mob kinds, and 0 at each fall).
+    let receiver = look
+        .first
+        .iter()
+        .find(|member| member.state.type_index() == DAMAGE_RECEIVER_TYPE_INDEX)
+        .map(|member| member.component);
+    if let Some(component) = receiver
+        && ((carded && card.blocking) || card.blocking_changed)
+    {
+        group.members.push(BundleMember {
+            component,
+            state: MemberState::DamageReceiver(DamageReceiverState {
+                is_block_active: Some(card.blocking),
+                ..DamageReceiverState::default()
+            }),
+        });
+    }
     // The look target goes with the card and after each new target, as on retail (right after
     // each first 2415; never cleared at a 3916).
     if let Some(target) = card.look_target
@@ -475,6 +532,48 @@ pub(super) fn log_mob_group(mob: u64, carded: bool, group: &BundleGroup) {
     if !tracing::enabled!(tracing::Level::DEBUG) {
         return;
     }
+    tracing::debug!(
+        mob,
+        interest = group.interest,
+        carded,
+        members = members_hex(group),
+        "mob group"
+    );
+}
+
+/// Logs the card of another player `player` that viewer `viewer` gets, at debug level, as hex,
+/// as [`log_mob_group`] logs a mob's group.
+pub(super) fn log_player_card(viewer: u64, player: u64, group: &BundleGroup) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    tracing::debug!(
+        viewer,
+        player,
+        interest = group.interest,
+        members = members_hex(group),
+        "player card"
+    );
+}
+
+/// Logs a state of another player `player`, as viewer `viewer` gets it, at debug level, as hex,
+/// as [`log_player_card`] logs its card: the whole stream of a live run can be set beside a
+/// retail one.
+pub(super) fn log_player_state(viewer: u64, player: u64, group: &BundleGroup) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    tracing::debug!(
+        viewer,
+        player,
+        interest = group.interest,
+        members = members_hex(group),
+        "player state"
+    );
+}
+
+/// The members of `group`, each as its hex bytes, space-separated.
+fn members_hex(group: &BundleGroup) -> String {
     let members: Vec<String> = group
         .members
         .iter()
@@ -485,13 +584,7 @@ pub(super) fn log_mob_group(mob: u64, carded: bool, group: &BundleGroup) {
             )
         })
         .collect();
-    tracing::debug!(
-        mob,
-        interest = group.interest,
-        carded,
-        members = members.join(" "),
-        "mob group"
-    );
+    members.join(" ")
 }
 
 /// Milliseconds per own state number of a client that does not number its input records (the
@@ -743,7 +836,7 @@ pub(super) fn own_group(
     let Some(mut group) = entity_group(
         LOCAL_PLAYER_INTEREST,
         entity,
-        EntityKind::PLAYER,
+        EntityKind::OWN_PLAYER,
         position,
         card != OwnCard::Without,
         Some(states),
@@ -751,7 +844,7 @@ pub(super) fn own_group(
         return Ok(None);
     };
     if card == OwnCard::Spawn {
-        full_first_position(&mut group, position, tick.clock.stamp())?;
+        full_first_position(&mut group, position, tick.clock.stamp(), AlcState::spawn)?;
     } else if let (Some(teleport), Some(pos), Some(alc)) = (
         teleport,
         InputPosition::from_metres(position.x, position.y, position.z),
@@ -869,6 +962,7 @@ mod tests {
     fn own_states() -> PlayerStates<'static> {
         PlayerStates {
             character_id: *CHARACTER.as_bytes(),
+            identity: None,
             look: Some(PlayerLook::default()),
             health: Some(HEALTH),
             gear: None,

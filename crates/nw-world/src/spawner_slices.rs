@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The waypoints of a spawner capital's slice (`PointSpawner_Boar_Graze_*`,
 //! `PointSpawner_Boar_4wp_Patrol_*`): entities `wp1`, `wp2`, ... with an `AIWaypointComponent`
-//! whose server facet names the task its mob plays there. The level's vitals spawn of the
+//! whose server facet names the task its mob plays there. The slices write the names in four
+//! ways (Observed, build 25810808): `wp01` (`PointSpawner_3wp_Path`), `WP1`
+//! (`PointSpawner_Lynx_Patrol_Triangle`), `WP` (`PointSpawner_Blightfiend_Eat`) and `wp-nopath`
+//! (`PointSpawner_1wp_Stand`, the one waypoint of 6,631 open world spawns). A waypoint that a
+//! mob only walks through holds no task name (`PointSpawner_Wolf_Black_4wp_Patrol`). The level's vitals spawn of the
 //! spawner stands on the capital's position (Observed: 0.00 m on the beach graze and patrol
 //! spawners of `newworld_vitaeeterna`), and retail boars played the tasks (fragment
 //! `POI_Graze_LOOP` with action `POI_Waypoint_Loop`, newchar 2026-09-18).
@@ -11,8 +15,22 @@ use nw_formats::objectstream::{Element, lowercase_crc32};
 use crate::records::{Capital, PathMode, PatrolPath, WaypointTask};
 use crate::travel_slices::{AXES, SliceEntities, TRANSLATION_AT, capital_point, descendants};
 
-/// The name of a waypoint entity: this prefix, then its number on the path.
+/// The name of a waypoint entity (lower case): this prefix, then its number on the path.
 const WAYPOINT_PREFIX: &str = "wp";
+/// What follows [`WAYPOINT_PREFIX`] in the name of the one waypoint of a slice without a path.
+const NO_PATH_SUFFIX: &str = "-nopath";
+/// The number of a waypoint whose name holds none: its slice has one waypoint.
+const ONLY_WAYPOINT: u32 = 0;
+
+/// The number of the waypoint entity `name`; `None` for another entity.
+fn waypoint_number(name: &str) -> Option<u32> {
+    let name = name.to_ascii_lowercase();
+    let number = name.strip_prefix(WAYPOINT_PREFIX)?;
+    if number.is_empty() || number == NO_PATH_SUFFIX {
+        return Some(ONLY_WAYPOINT);
+    }
+    number.parse().ok()
+}
 /// The duration of a waypoint task whose slice names none: the slices' own "none" (`-1`).
 const NO_DURATION_S: f32 = -1.0;
 
@@ -45,23 +63,12 @@ impl SpawnerSlice {
         let mut waypoints: Vec<SliceWaypoint> = entities
             .all()
             .filter_map(|(id, entity)| {
-                let number = entity
-                    .child(name)?
-                    .as_string()
-                    .ok()?
-                    .strip_prefix(WAYPOINT_PREFIX)?
-                    .parse()
-                    .ok()?;
-                let facet = descendants(entity)
-                    .into_iter()
-                    .find(|element| element.child(task_name).is_some())?;
-                let float = |crc| facet.child(crc).and_then(|value| value.as_f32().ok());
+                let number = waypoint_number(entity.child(name)?.as_string().ok()?)?;
                 let placed = entities.placed(id);
-                let task = facet.child(task_name)?.as_string().ok()?;
-                Some(SliceWaypoint {
-                    number,
-                    at: std::array::from_fn(|axis| placed[TRANSLATION_AT + axis]),
-                    task: (!task.is_empty()).then(|| WaypointTask {
+                let task = descendants(entity).into_iter().find_map(|facet| {
+                    let task = facet.child(task_name)?.as_string().ok()?;
+                    let float = |crc| facet.child(crc).and_then(|value| value.as_f32().ok());
+                    (!task.is_empty()).then(|| WaypointTask {
                         task: task.to_owned(),
                         duration_s: [
                             float(min).unwrap_or(NO_DURATION_S),
@@ -71,7 +78,12 @@ impl SpawnerSlice {
                             .child(align)
                             .and_then(|value| value.as_bool().ok())
                             .unwrap_or(false),
-                    }),
+                    })
+                });
+                Some(SliceWaypoint {
+                    number,
+                    at: std::array::from_fn(|axis| placed[TRANSLATION_AT + axis]),
+                    task,
                 })
             })
             .collect();
@@ -182,5 +194,42 @@ mod tests {
             .expect("waypoint")
             .at(&capital);
         assert_eq!(path.tasks, [None], "an empty task name is no task");
+    }
+
+    #[test]
+    fn a_waypoint_is_known_by_each_way_the_slices_write_its_name() {
+        // `PointSpawner_3wp_Path`, `PointSpawner_Lynx_Patrol_Triangle`,
+        // `PointSpawner_Blightfiend_Eat` and `PointSpawner_1wp_Stand` (build 25810808).
+        assert_eq!(waypoint_number("wp03"), Some(3));
+        assert_eq!(waypoint_number("WP2"), Some(2));
+        assert_eq!(waypoint_number("WP"), Some(ONLY_WAYPOINT));
+        assert_eq!(waypoint_number("wp-nopath"), Some(ONLY_WAYPOINT));
+        assert_eq!(waypoint_number("Spawner"), None);
+        assert_eq!(waypoint_number("wpn"), None);
+        // The one waypoint of Boatswain Bridget's spawner
+        // (`PointSpawner_1wp_Stand_1128423533`): retail `12-4_crewmates` shows her play
+        // `POI_LookAround` at her spawn.
+        let stand = Element::with_children(
+            0,
+            vec![waypoint(
+                1,
+                "wp-nopath",
+                [0.0; AXES],
+                "POI_LookAround",
+                -1.0,
+                -1.0,
+            )],
+        );
+        let capital = Capital {
+            position: [10.0, 20.0, 30.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            ..Capital::default()
+        };
+        let path = SpawnerSlice::of(&stand).expect("waypoint").at(&capital);
+        assert_eq!(path.points, [[10.0, 20.0, 30.0]]);
+        assert_eq!(
+            path.tasks[0].as_ref().map(|task| task.task.as_str()),
+            Some("POI_LookAround")
+        );
     }
 }

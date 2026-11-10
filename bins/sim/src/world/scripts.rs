@@ -667,7 +667,7 @@ impl SimWorld {
                     engine.note(run, OTHER_SIM);
                     return next();
                 }
-                match self.spawn_gm(vitals, *level, *at, *count) {
+                match self.spawn_gm(vitals, *level, *at, *count, None) {
                     Ok(entities) => {
                         engine.note(run, &format!("{} spawned", entities.len()));
                         engine.states[state].mobs.extend(entities);
@@ -1203,7 +1203,9 @@ mod tests {
             y: 10.0,
             z: 50.0,
         };
-        let mob = world.spawn_gm(TEST_MOB, TEST_LEVEL, at, 1).expect("spawn")[0];
+        let mob = world
+            .spawn_gm(TEST_MOB, TEST_LEVEL, at, 1, None)
+            .expect("spawn")[0];
         world.note_kill(mob, PLAYER);
         world.note_kill(mob, PLAYER + 1);
         world.tick_scripts(NOW);

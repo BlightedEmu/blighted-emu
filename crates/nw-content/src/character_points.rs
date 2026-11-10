@@ -28,6 +28,43 @@ pub const CONSTITUTION: u32 = 0;
 const IS_ABILITY: &str = "1";
 /// The `Category` of a territory standing bonus pool (`ProgressionPoolData`).
 const TERRITORY_CATEGORY: &str = "Territory";
+/// The ability tables (CRC-32 of the lowercase `AbilityData` table id) in the client's order: the
+/// order of the tables in retail's ability state (type 185, general-other-01, the own card at
+/// 501 ms). The client names a table by its position in this order in its slot changes (2701)
+/// and respecs (186): retail's sword table is position 27. The bundle's table order differs, so
+/// with it every slot change named the wrong table (live 2026-11-09: every 2701 refused, the
+/// ability bar empty). No rule was found for the order (not by name, pak entry, or CRC bucket).
+const CLIENT_ABILITY_TABLE_ORDER: [u32; 29] = [
+    0x2915_fb5d,
+    0x6020_b33f,
+    0x6e4f_d87a,
+    0xaf42_a7f2,
+    0x5553_e699,
+    0x7c2b_b2c5,
+    0x180b_9a9f,
+    0x7a04_f0ce,
+    0xb8c4_187d,
+    0x4a36_6e22,
+    0x2ee6_a42e,
+    0x05e2_fc0c,
+    0xae40_fe40,
+    0xf94c_464f,
+    0x0c20_c4de,
+    0xac45_7988,
+    0x5725_62b8,
+    0x9e46_1eef,
+    0x1c79_c0c7,
+    0xe7aa_c3fb,
+    0x8157_5cbb,
+    0x3273_3382,
+    0x2a11_b501,
+    0x1c6a_ea69,
+    0x630d_9982,
+    0xc7ea_8ff8,
+    0x359c_b911,
+    0xe8ec_5716,
+    0xff59_aef3,
+];
 /// The start of a territory standing bonus pool id; the territory id follows
 /// (`TerritoryRankBonus_2`).
 const TERRITORY_POOL_PREFIX: &str = "TerritoryRankBonus_";
@@ -370,7 +407,7 @@ impl CharacterPoints {
                 .collect(),
             attributes: ranges.unwrap_or_default(),
             points,
-            ability_tables: ability_tables.into_iter().map(lowercase_crc32).collect(),
+            ability_tables: client_table_order(ability_tables.into_iter().map(lowercase_crc32)),
             pool_versions,
             respec_costs: BTreeMap::new(),
             constitution_health: BTreeMap::new(),
@@ -416,6 +453,19 @@ impl CharacterPoints {
     }
 }
 
+/// `tables` in the client's order ([`CLIENT_ABILITY_TABLE_ORDER`]); a table the order does not
+/// name goes after those, in the bundle's order.
+fn client_table_order(tables: impl IntoIterator<Item = u32>) -> Vec<u32> {
+    let mut tables: Vec<u32> = tables.into_iter().collect();
+    tables.sort_by_key(|table| {
+        CLIENT_ABILITY_TABLE_ORDER
+            .iter()
+            .position(|known| known == table)
+            .unwrap_or(CLIENT_ABILITY_TABLE_ORDER.len())
+    });
+    tables
+}
+
 /// A table number as a count: negative is 0, above `u32::MAX` is `u32::MAX`.
 fn clamp(value: i64) -> u32 {
     u32::try_from(value.max(0)).unwrap_or(u32::MAX)
@@ -429,6 +479,22 @@ fn small(value: i64) -> u16 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn the_ability_tables_go_in_the_clients_order() {
+        let sword = lowercase_crc32("SwordAbilityTable");
+        let flail = lowercase_crc32("FlailAbilityTable");
+        let unknown = lowercase_crc32("NotARetailTable");
+        let ordered = client_table_order([unknown, sword, flail]);
+        assert_eq!(ordered, [flail, sword, unknown]);
+        assert_eq!(
+            CLIENT_ABILITY_TABLE_ORDER
+                .iter()
+                .position(|table| *table == sword),
+            Some(27),
+            "retail's 2701 named the sword table 27"
+        );
+    }
 
     /// Retail `AttributePoints` of levels 0 to 3 (`javelindata_xpamountsbylevel`).
     const LEVEL_POINTS: [i64; 4] = [0, 5, 5, 5];

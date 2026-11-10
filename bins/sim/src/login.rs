@@ -16,6 +16,7 @@
 //! calls of the player's time component: their ids are its [`FacetHeader`] (tutorial-intro note,
 //! section 0), else the client drops them.
 
+use nw_messages::time_synch::NS_PER_MS;
 use nw_messages::{
     Block1415acc30, CalendarConnectedMsg, ClientAddEntryMsg, ConnectedBody, FacetHeader,
     LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec, MessageError, OBSERVED_DAY_PHASE,
@@ -53,17 +54,22 @@ pub struct WorldIds {
     pub calendar_block: Block1415acc30,
     /// The 16 bytes that both classes share in their second block.
     pub shared_session_bytes: [u8; RAW_ID_LEN],
-    /// The time of `SyncTimeChange`: the same at every login in the captures.
+    /// The time of `SyncTimeChange`: when the world started, in ns since 2000-01-01, the same at
+    /// every login (retail `newchar-retail-2026-09-18` and `general-other-01`, 3 days apart:
+    /// 845485830908027957 in both, 6 and 9 days before their `TimeSynch`). Before, it was the
+    /// start in Unix ms, a time in 1970 on that clock: every buff and debuff timer of the client
+    /// showed about 10957 days, the days from 1970 to 2000 (live 2026-11-10).
     pub time_change_time: u64,
 }
 
 impl WorldIds {
-    /// New random ids.
+    /// New random ids for a world that started at server time `start_server_ms` (ms since
+    /// 2000-01-01).
     ///
     /// # Errors
     ///
     /// Returns the `getrandom` error when the system has no random bytes.
-    pub fn random(start_time: u64) -> Result<Self, getrandom::Error> {
+    pub fn random(start_server_ms: u64) -> Result<Self, getrandom::Error> {
         let block = || -> Result<Block1415acc30, getrandom::Error> {
             Ok(Block1415acc30 {
                 value: random_u32()?,
@@ -75,7 +81,7 @@ impl WorldIds {
             timing_block: block()?,
             calendar_block: block()?,
             shared_session_bytes: random_id()?,
-            time_change_time: start_time,
+            time_change_time: start_server_ms.saturating_mul(NS_PER_MS),
         })
     }
 }
@@ -90,7 +96,8 @@ pub struct SessionIds {
 }
 
 impl SessionIds {
-    /// New random ids.
+    /// New random ids for a world that started at server time `start_server_ms` (ms since
+    /// 2000-01-01).
     ///
     /// # Errors
     ///
@@ -264,6 +271,7 @@ mod tests {
         };
         assert_eq!(change.ids, [time.target, time.entity]);
         assert_eq!(change.time, world.time_change_time);
+        assert_eq!(change.time, START_TIME * NS_PER_MS, "ns of the start");
         assert_eq!(
             (phase.component, phase.u64_at_8),
             (time.target, time.entity)

@@ -37,8 +37,8 @@ use nw_formats::azcs::{decode_azcs, is_azcs};
 use nw_formats::caf::Caf;
 use nw_formats::character::CharacterDefinition;
 use nw_formats::mannequin::{
-    Action, ActionList, AnimClip, AnimDatabase, CageGrid, DrivenMotion, Fragment, GridList,
-    ProcClip,
+    Action, ActionList, AnimClip, AnimDatabase, CageGrid, ControllerDef, DrivenMotion, Fragment,
+    GridList, ProcClip,
 };
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
 use nw_formats::skeleton::Skeleton;
@@ -63,6 +63,8 @@ const ACTION_LIST_SUFFIX: &str = ".actionlist";
 const ITEM_CLASS_SEPARATOR: char = '+';
 /// The player's CAGE grid: its action lists and the weapon classes each is on for.
 const PLAYER_GRID: &str = "sharedassets/springboardentitites/playerdata/cage/player.grid";
+/// The player's Mannequin controller definitions: the scopes each fragment plays on.
+const PLAYER_CONTROLLER: &str = "animations/mannequin/adb/player/playermalecontrollerdefs.xml";
 /// The folder of the client's input profiles ([`nw_formats::input_profile`]).
 const INPUT_PROFILE_FOLDER: &str = "libs/config/";
 /// The suffix of an input profile file.
@@ -184,6 +186,8 @@ pub struct AnimationSources {
     pub action_paths: Vec<String>,
     /// The action lists of the player grid (`player.grid`), in grid order.
     pub grid: Vec<GridList>,
+    /// The player's controller definitions.
+    pub controller: ControllerDef,
     /// The sheathe action of the action lists.
     pub sheathe: Option<SheatheAction>,
     /// The ranged attack database: (profile, attack) to (range, radius, hit scan).
@@ -1251,6 +1255,7 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
         actions: Vec::new(),
         action_paths: Vec::new(),
         grid: Vec::new(),
+        controller: ControllerDef::default(),
         sheathe: None,
         ranged: HashMap::new(),
         flights: HashMap::new(),
@@ -1263,6 +1268,7 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
                 || attach_paths.contains(path)
                 || (path.starts_with(PLAYER_ACTIONS_PREFIX) && path.ends_with(ACTION_LIST_SUFFIX))
                 || path == PLAYER_GRID
+                || path == PLAYER_CONTROLLER
                 || (path.starts_with(INPUT_PROFILE_FOLDER) && path.ends_with(INPUT_PROFILE_SUFFIX))
                 || path == RANGED_ATTACK_DATABASE
                 || prefab_slices.contains_key(path)
@@ -1305,6 +1311,11 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
             } else if path == PLAYER_GRID {
                 if let Some(lists) = text().and_then(|text| CageGrid::lists(text).ok()) {
                     sources.grid = lists;
+                }
+            } else if path == PLAYER_CONTROLLER {
+                if let Some(controller) = text().and_then(|text| ControllerDef::parse(text).ok())
+                {
+                    sources.controller = controller;
                 }
             } else if path.ends_with(ACTION_LIST_SUFFIX) {
                 if let Some(list) = text().and_then(|text| ActionList::parse(text).ok()) {
@@ -1488,6 +1499,7 @@ mod tests {
             actions: vec![ActionList::parse(ACTIONS).expect("actions")],
             action_paths: vec![String::new()],
             grid: Vec::new(),
+            controller: ControllerDef::default(),
             sheathe: SheatheAction::parse(ACTIONS, SHEATHE_ACTION).expect("actions"),
             ranged: HashMap::new(),
             flights: HashMap::new(),
@@ -1728,6 +1740,7 @@ mod tests {
             actions: vec![ActionList::parse(AIM_ACTION_LIST).expect("actions")],
             action_paths: vec![String::new()],
             grid: Vec::new(),
+            controller: ControllerDef::default(),
             sheathe: None,
             ranged: HashMap::from([
                 (

@@ -178,6 +178,7 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::DamageReceiver(_)
         | MemberState::GatherableController(_)
         | MemberState::Interact(_)
+        | MemberState::Spell(_)
         | MemberState::Currency(_)
         | MemberState::ItemManagement(_)
         | MemberState::Objectives(_)

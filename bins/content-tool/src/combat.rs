@@ -232,6 +232,7 @@ mod tests {
                     category_health_mod: 1.0,
                     damage_mod: 1.0,
                     creature_type: None,
+                    guard: None,
                 },
             )],
             levels: vec![(

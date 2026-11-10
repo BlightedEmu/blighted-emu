@@ -390,17 +390,6 @@ const fn unix_ms_ns(ms: u64) -> u64 {
     ms.saturating_mul(NS_PER_MS)
 }
 
-/// The client's clock (ns since 2000-01-01, [`crate::server::SERVER_EPOCH_UNIX_MS`]) at Unix
-/// milliseconds `ms`; 0 stays 0 (none). A home point's cooldown end is on this clock
-/// ([`HomePoint::cooldown_end_ns`]).
-const fn client_clock_ns(ms: u64) -> u64 {
-    if ms == 0 {
-        return 0;
-    }
-    ms.saturating_sub(crate::server::SERVER_EPOCH_UNIX_MS)
-        .saturating_mul(NS_PER_MS)
-}
-
 /// The header of a call to the travel component `component` of player `number`.
 fn header(component: u64, number: u64) -> FacetHeader {
     FacetHeader::of(component, number)
@@ -2124,7 +2113,7 @@ fn home_state(
             HOUSE_POINT_NAME.to_vec(),
             [x, y, z],
             0,
-            client_clock_ns(home.record.fast_travel_ready_ms),
+            unix_ms_ns(home.record.fast_travel_ready_ms),
             home_point_kind::HOUSE,
         )
     });
@@ -2192,13 +2181,13 @@ fn home_state(
     }
 }
 
-/// The end of the inn recall cooldown on the client's clock ([`client_clock_ns`]) after a
-/// recall at Unix ms `recalled_ms` with a cooldown of `cooldown_ms`; 0 when it never recalled.
+/// The end of the inn recall cooldown, Unix ns ([`HomePoint::cooldown_end_ns`]), after a recall
+/// at Unix ms `recalled_ms` with a cooldown of `cooldown_ms`; 0 when it never recalled.
 const fn inn_cooldown_end_ns(recalled_ms: u64, cooldown_ms: u64) -> u64 {
     if recalled_ms == 0 {
         return 0;
     }
-    client_clock_ns(recalled_ms.saturating_add(cooldown_ms))
+    unix_ms_ns(recalled_ms.saturating_add(cooldown_ms))
 }
 
 /// Whether `player` waits for the own states of a server move (a fast travel's or an unstuck's
@@ -3004,12 +2993,11 @@ mod tests {
     }
 
     #[test]
-    fn an_inn_cooldown_end_goes_out_on_the_client_clock() {
+    fn an_inn_cooldown_end_goes_out_as_a_unix_time() {
         /// A recall at 2026-11-08 18:00 UTC, Unix ms.
         const RECALLED_MS: u64 = 1_794_160_800_000;
-        /// Its cooldown end on the client's clock: ns since 2000-01-01.
-        const END_NS: u64 =
-            (RECALLED_MS + INN_COOLDOWN_MS - crate::server::SERVER_EPOCH_UNIX_MS) * NS_PER_MS;
+        /// Its cooldown end: Unix ns, as retail's.
+        const END_NS: u64 = (RECALLED_MS + INN_COOLDOWN_MS) * NS_PER_MS;
         assert_eq!(
             inn_cooldown_end_ns(0, INN_COOLDOWN_MS),
             0,
@@ -3018,7 +3006,7 @@ mod tests {
         assert_eq!(
             inn_cooldown_end_ns(RECALLED_MS, INN_COOLDOWN_MS),
             END_NS,
-            "not a Unix time, which the client shows as a 10,956 day countdown"
+            "the client's wall clock is a Unix clock once it has its session start"
         );
     }
 

@@ -33,6 +33,7 @@ use nw_content::music::MusicRules;
 use nw_content::music_charts::MusicCharts;
 use nw_content::mutations::MutationCatalog;
 use nw_content::objective_limits::ObjectiveLimitGroup;
+use nw_content::passive_abilities::PassiveAbilities;
 use nw_content::perk_effects::PerkEffects;
 use nw_content::poi_tags::PoiTags;
 use nw_content::progression::Progression;
@@ -222,7 +223,6 @@ impl MissionRow {
                     item_drop_vc: self.items_drop_enemy.clone().or(row.item_drop_vc.clone()),
                     item_drop_probability: self.items_drop_percent.or(row.item_drop_probability),
                     chest_drop_probability: self.chest_percent.or(row.chest_drop_probability),
-                    returned_on_turn_in: true,
                     ..row.clone()
                 })
             }
@@ -769,6 +769,10 @@ pub struct PlayerContent {
     pub shop: ShopConfig,
     /// The quick course paths; empty until the sim loads the quick course file.
     pub quick_course_paths: QuickCoursePaths,
+    /// The settlement and fort props the server spawns; empty until the sim loads their file.
+    pub town_props: nw_content::town_props::TownProps,
+    /// The slice each spell spawns; empty until the sim loads the spell slice file.
+    pub spell_slices: nw_content::spell_slices::SpellSlices,
     /// The loot value of a player's level by its experience.
     pub player_loot_levels: PlayerLootLevels,
     /// The point-of-interest tags of each territory, for go-to and exit tasks.
@@ -811,6 +815,9 @@ pub struct PlayerContent {
     /// The abilities attribute values hold and their mana and cooldown shares
     /// ([`nw_content::attribute_bonuses`]).
     pub attribute_bonuses: AttributeBonuses,
+    /// The passive abilities combat events fire, and the traits of the damage rows
+    /// ([`nw_content::passive_abilities`]).
+    pub passive_abilities: PassiveAbilities,
     /// When a player goes down to death's door first ([`nw_content::deaths_door`]).
     pub deaths_door: DeathsDoorRules,
     /// The mounts, their types, movement rows and dyes.
@@ -1256,6 +1263,8 @@ impl PlayerContent {
             store: StoreTable::default(),
             shop: ShopConfig::default(),
             quick_course_paths: QuickCoursePaths::default(),
+            town_props: nw_content::town_props::TownProps::default(),
+            spell_slices: nw_content::spell_slices::SpellSlices::default(),
             player_loot_levels: PlayerLootLevels::from_tables(tables),
             poi_tags: PoiTags::from_tables(tables),
             quest_objects,
@@ -1281,6 +1290,7 @@ impl PlayerContent {
             equip_loads: EquipLoads::from_tables(tables),
             perk_effects: PerkEffects::from_tables(tables),
             attribute_bonuses: AttributeBonuses::from_tables(tables),
+            passive_abilities: PassiveAbilities::from_tables(tables),
             deaths_door: DeathsDoorRules::from_tables(tables),
             mounts: MountRules::from_tables(tables),
             item_rules: ItemRules::from_tables(tables),

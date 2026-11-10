@@ -59,8 +59,8 @@ pub struct FragmentMarker {
 /// starts this way).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FragmentTransition {
-    /// `NewAction`.
-    pub action: String,
+    /// Where it leads.
+    pub to: TransitionTo,
     /// `Input`: the input that must be on; `None` for none or `Test_AlwaysTrue`.
     pub input: Option<String>,
     /// `Condition`: the list's named condition, resolved; `None` for none.
@@ -71,11 +71,29 @@ pub struct FragmentTransition {
     pub end_ms: u64,
 }
 
+/// Where a transition clip leads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransitionTo {
+    /// Another action starts and the running one stops: `NewAction`, or the action of the list
+    /// that plays the clip's `NewFragment`.
+    Action(String),
+    /// The running action goes on with another fragment: a `NewFragment` that no action of the
+    /// list plays (the life staff's `Ability_Life_Staff_HealingWave` goes on to its
+    /// `Ability_Life_Staff_HealingWave_Aim` after 0.43 s, and to `Magic_LowerWeapon`, whose
+    /// `Magic_AimExit` marker ends the action, when the aim is left).
+    Fragment(String),
+}
+
 /// A fragment the actions of a list play.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FragmentRow {
     /// Its name.
     pub name: String,
+    /// The Mannequin scopes it plays on for the list's stance (`UpperBody`, `Weapon`): a
+    /// fragment that starts on a scope takes it from the one that played there. Empty when the
+    /// controller definitions do not name the fragment.
+    #[serde(default)]
+    pub scopes: Vec<String>,
     /// How long it plays, ms; 0 when the build found no clip of it.
     pub length_ms: u64,
     /// Its markers, by start.
@@ -88,11 +106,16 @@ pub struct FragmentRow {
 }
 
 impl FragmentRow {
-    /// The markers it sets `since_start_ms` after it starts.
+    /// The markers it sets `since_start_ms` after it starts. A marker that ends no later than
+    /// it starts has no end: its fragment ends in a loop, whose length is the loop's start (the
+    /// life staff's aim loop sets `Magic_IsReady_Heal` from 0.067 s on).
     pub fn markers_at(&self, since_start_ms: u64) -> Vec<&str> {
         self.markers
             .iter()
-            .filter(|marker| (marker.start_ms..marker.end_ms).contains(&since_start_ms))
+            .filter(|marker| {
+                since_start_ms >= marker.start_ms
+                    && (since_start_ms < marker.end_ms || marker.start_ms >= marker.end_ms)
+            })
             .map(|marker| marker.name.as_str())
             .collect()
     }
@@ -356,6 +379,7 @@ mod tests {
             }],
             fragments: vec![FragmentRow {
                 name: "Smite".to_owned(),
+                scopes: Vec::new(),
                 length_ms: 1_000,
                 markers: vec![FragmentMarker {
                     name: MARKER.to_owned(),

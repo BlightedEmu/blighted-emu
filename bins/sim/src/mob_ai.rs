@@ -41,7 +41,8 @@ use std::sync::Arc;
 
 use nw_ai::brain::{Brain, Command, Destination, MotionOutcome, Runtime, Slot, World};
 use nw_ai::data::{
-    AiData, Archetype, CageAction, FacingMode, NavConfig, ProcWindow, SliceTriggerRef,
+    AiData, Archetype, CageAction, FacingMode, FragmentLength, MobCage, NavConfig, ProcWindow,
+    SliceTriggerRef,
 };
 use nw_ai::keys::EngineKey;
 use nw_ai::node::{
@@ -50,6 +51,7 @@ use nw_ai::node::{
 };
 use nw_ai::rng::Rng48;
 use nw_ai::value::{Blackboard, KeyId, NameId, Param, Value};
+use nw_content::combat::MobGuard;
 use nw_content::container::ContainerError;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_content::status_effects::Control;
@@ -129,6 +131,18 @@ const ORIGIN_ORIENTATION: i64 = 2;
 /// grids, `Reaction` and `Death`).
 const REACTION_ALIAS: &str = "Reaction";
 const DEATH_ALIAS: &str = "Death";
+/// The procedural clip of a fragment marker and its name param (`npc_damned_anims.adb`:
+/// `<Procedural type="CAGE-Named"><ProceduralParams><Name value="DisableBlock"/>`).
+const NAMED_CLIP: &str = "CAGE-Named";
+const NAMED_CLIP_NAME: &str = "Name";
+/// The reaction action of a broken guard (`baseai_reaction.actionlist` and the creature
+/// reaction lists: fragment `BrokenGuard` or `r_BlockBroken`, tags `Alerted` and `BlockBroken`).
+const BROKEN_GUARD_ACTION: &str = "BrokenGuard";
+/// How long a broken guard's reaction lasts when its fragment's length is Unknown (Inferred:
+/// about a hit reaction's length).
+const BROKEN_GUARD_MS: u64 = 1_000;
+/// Milliseconds per second of a fragment length.
+const MS_PER_SECOND_F32: f32 = 1_000.0;
 /// The procedural clips of a fragment and their parameters (Observed in `npc_boar_anims.adb`).
 const DAMAGE_CLIP: &str = "CAGE-Damage";
 const HOMING_CLIP: &str = "Homing";
@@ -244,6 +258,9 @@ impl AiRates {
 struct Names {
     reaction: Option<NameId>,
     death: Option<NameId>,
+    named_clip: Option<NameId>,
+    named_clip_name: Option<NameId>,
+    broken_guard: Option<NameId>,
     damage_clip: Option<NameId>,
     homing_clip: Option<NameId>,
     damage_row: Option<NameId>,
@@ -294,6 +311,9 @@ impl MobAi {
         let names = Names {
             reaction: name(REACTION_ALIAS),
             death: name(DEATH_ALIAS),
+            named_clip: name(NAMED_CLIP),
+            named_clip_name: name(NAMED_CLIP_NAME),
+            broken_guard: name(BROKEN_GUARD_ACTION),
             damage_clip: name(DAMAGE_CLIP),
             homing_clip: name(HOMING_CLIP),
             damage_row: name(DAMAGE_ROW_PARAM),
@@ -337,19 +357,21 @@ impl MobAi {
         self.slice_vitals.get(asset).copied()
     }
 
-    /// The AI data file of `client_build` in `dir`, with tick rates `rates` and the looks
-    /// `looks`.
+    /// The AI data file of `client_build` in `dir` with the waypoint task names `tasks` (the
+    /// level's and the scripts': [`with_task_names`]), tick rates `rates` and the looks `looks`.
     ///
     /// # Errors
     ///
     /// Returns [`ContainerError`] when the file is missing, from another build or bad.
-    pub fn load(
+    pub fn load<'a>(
         dir: &Path,
         client_build: &str,
+        tasks: impl IntoIterator<Item = &'a str>,
         rates: AiRates,
         looks: LookAssets,
     ) -> Result<Self, ContainerError> {
-        Ok(Self::new(AiData::load(dir, client_build)?, rates, looks))
+        let data = with_task_names(AiData::load(dir, client_build)?, tasks);
+        Ok(Self::new(data, rates, looks))
     }
 
     /// No data: every mob is without a tree.
@@ -398,6 +420,32 @@ impl MobAi {
     pub fn config_number(&self, archetype: u32, key: &str) -> Option<f64> {
         let key = self.data().key(key)?;
         self.arch(archetype)?.config_value(key)?.as_number()
+    }
+
+    /// The action of archetype `archetype`'s grid named `name`.
+    fn named(&self, archetype: u32, name: Option<NameId>) -> Option<u32> {
+        let data = self.data();
+        data.grids
+            .get(self.arch(archetype)?.grid? as usize)?
+            .named(name?)
+    }
+
+    /// The actions of archetype `archetype`'s grid that the engine starts by their condition.
+    fn engine_started(&self, archetype: u32) -> Vec<u32> {
+        let data = self.data();
+        self.arch(archetype)
+            .and_then(|arch| data.grids.get(arch.grid? as usize))
+            .map_or_else(Vec::new, |grid| {
+                grid.actions
+                    .iter()
+                    .map(|(_, action)| *action)
+                    .filter(|action| {
+                        data.cage_actions
+                            .get(*action as usize)
+                            .is_some_and(|cage| cage.activation.is_some())
+                    })
+                    .collect()
+            })
     }
 
     /// The action of archetype `archetype`'s grid whose alias is `alias`.
@@ -646,6 +694,36 @@ fn warn_unmapped(id: &str, profile: &AiProfile) {
     }
 }
 
+/// `data` with the waypoint task names `tasks` (a level's: [`WorldFile::waypoint_tasks`]; the
+/// scripts': `DungeonScripts::waypoint_tasks`). A waypoint task names the fragment that the
+/// mob plays at its waypoint; the trees name only some of them (the open world: 34 of its 148
+/// task names, 6,764 of its 18,264 waypoint tasks), and a route keeps a task only by its name id
+/// ([`route_of`]). Retail `12-6_pillageship`: three beach boars play
+/// `POI_Lay_Down_On_Side_LOOP`, a name of no tree.
+pub fn with_task_names<'a>(mut data: AiData, tasks: impl IntoIterator<Item = &'a str>) -> AiData {
+    for task in tasks {
+        data.intern(task);
+    }
+    data
+}
+
+/// The overrides of a script mob that spawns at `at` with the waypoints `path` of its spawner
+/// slice (points from the spawner's own place).
+pub fn script_mob_ai(path: &PatrolPath, at: Position, ai: &MobAi) -> SpawnAi {
+    let placed = PatrolPath {
+        points: path
+            .points
+            .iter()
+            .map(|point| [point[0] + at.x, point[1] + at.y, point[2] + at.z])
+            .collect(),
+        ..path.clone()
+    };
+    SpawnAi {
+        route: Some(Arc::new(route_of(&placed, ai))),
+        ..SpawnAi::default()
+    }
+}
+
 fn route_of(path: &PatrolPath, ai: &MobAi) -> Route {
     Route {
         points: path
@@ -844,6 +922,12 @@ pub struct Shown {
     /// Counts the starts, so that a start of the same action again is a new entry.
     pub serial: u32,
 }
+
+/// The time of a damage window that waits for its run to get to the target: no time comes to
+/// it until the run arrives (the boar's `Attack_Charge`: a `CAGE-Damage` clip from 0 s without
+/// an end on a looping fragment, played by a `NavigationAction`; live 2026-11-10 and before, a
+/// charge struck nobody).
+const ON_CONTACT_MS: u64 = u64::MAX;
 
 /// A damage window of the action a mob plays (`CAGE-Damage` of its fragment entry), or the
 /// moment its `CAGE-RangedAttack` clip fires.
@@ -1068,6 +1152,50 @@ struct MindState {
     /// The status effects its tree put on it (`true`) or took off it since the last
     /// [`TreeMind::take_status_changes`] (`StatusEffectDecorator`).
     status_changes: Vec<(NameId, bool)>,
+    /// The actions the engine runs by their condition.
+    engine_runs: Vec<EngineRun>,
+    /// The action of the reaction that plays (the grid's `Reaction`, or a broken guard's).
+    reaction_action: Option<u32>,
+    /// Its guard, for a mob type that can block.
+    guard: Option<GuardState>,
+    /// Its block is up (after its last step).
+    blocking: bool,
+}
+
+/// An action the engine runs by its activation condition (`Block`, `BlockBroken`,
+/// `Attack_Cooldown` of the mob block lists), and which of its tag activities are on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EngineRun {
+    action: u32,
+    tags_on: Vec<bool>,
+}
+
+/// A mob's guard stamina.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GuardState {
+    rules: MobGuard,
+    stamina: f32,
+    /// When its regen last ran.
+    regen_ms: Option<u64>,
+}
+
+/// What a blocked hit did to a mob's guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardHit {
+    /// The guard holds.
+    Held,
+    /// The hit took the last stamina: the guard broke.
+    Broken,
+}
+
+/// One change to the engine runs of a mob, found before any is made.
+enum EngineStep {
+    /// The action starts with these tag activities on.
+    Start(u32, Vec<bool>),
+    /// The action ends with these tag activities on; `true`: its stamina reset runs.
+    Stop(u32, Vec<bool>, bool),
+    /// A tag activity of a running action turns on or off.
+    Toggle(u32, usize, bool),
 }
 
 /// The last reach check of a mob: where it and its target stood, and the answer.
@@ -1438,6 +1566,21 @@ impl MindState {
             // and 1683 ms for 77 to 107 degrees, trace finding a).
             self.turn = done_at_ms.map(|end| (now_ms, end, self.yaw));
         }
+        self.open_windows(ai, tags, cage, now_ms, false);
+    }
+
+    /// The damage windows and ranged clips of `cage`, which starts at `now_ms`, for a mob with
+    /// the tags `tags`. An action that a move plays (`moving`, a `NavigationAction`: the boar's
+    /// `Attack_Charge`) keeps a damage clip without an end open for the whole run: it strikes
+    /// when the run gets to its target ([`ON_CONTACT_MS`]).
+    fn open_windows(
+        &mut self,
+        ai: &MobAi,
+        tags: &[NameId],
+        cage: &CageAction,
+        now_ms: u64,
+        moving: bool,
+    ) {
         let has_tag = |tag| tags.contains(&tag);
         // The weapon's `WeaponContext` scope plays the fragment from the weapon's database
         // beside the body. Its windows count only when the body's entry has no `CAGE-Damage`
@@ -1469,7 +1612,12 @@ impl MindState {
                 clippy::cast_sign_loss,
                 reason = "seconds of a fragment"
             )]
-            let at_ms = now_ms + (window.start_s * MS_PER_S).round() as u64;
+            let starts_ms = now_ms + (window.start_s * MS_PER_S).round() as u64;
+            let at_ms = if moving && window.end_s.is_none() {
+                ON_CONTACT_MS
+            } else {
+                starts_ms
+            };
             self.windows.push(Window {
                 at_ms,
                 row,
@@ -1628,6 +1776,13 @@ impl MindState {
         self.speed_mps = mover.speed_mps;
         match outcome {
             Some(outcome) => {
+                if outcome == MotionOutcome::Arrived {
+                    for window in &mut self.windows {
+                        if window.at_ms == ON_CONTACT_MS {
+                            window.at_ms = now_ms;
+                        }
+                    }
+                }
                 brain.report_motion(motion.slot, outcome);
                 self.stop_moving();
                 // The tree learns of it at once.
@@ -1744,8 +1899,288 @@ impl TreeMind {
                 order: None,
                 trackers: Vec::new(),
                 status_changes: Vec::new(),
+                engine_runs: Vec::new(),
+                reaction_action: None,
+                guard: None,
+                blocking: false,
             },
         })
+    }
+
+    /// It can block with guard `guard` (its mob type's): its stamina starts at the guard's
+    /// initial stamina.
+    pub fn set_guard(&mut self, guard: MobGuard) {
+        self.state.guard = Some(GuardState {
+            rules: guard,
+            stamina: guard.stamina_initial,
+            regen_ms: None,
+        });
+    }
+
+    /// Its guard, when it can block.
+    pub fn guard(&self) -> Option<MobGuard> {
+        self.state.guard.map(|guard| guard.rules)
+    }
+
+    /// Its block is up: a task action it plays raises one (`Block_On`), or an action the engine
+    /// runs does (`Block`, while no `DisableBlock` marker of its fragment is on), as of its last
+    /// step. A mob without a guard never blocks.
+    pub const fn blocking(&self) -> bool {
+        self.state.blocking
+    }
+
+    /// A blocked hit takes `loss` stamina (times the guard's `BlockStaminaCost`) from the mob at
+    /// `at` at `now_ms`; the hit that takes the last breaks its guard: the `BrokenGuard`
+    /// reaction plays and sets `BlockBroken`, whose engine action holds the regen and fills the
+    /// stamina at its end. `None` for a mob without a guard.
+    pub fn guard_hit(
+        &mut self,
+        ai: &MobAi,
+        at: Position,
+        now_ms: u64,
+        loss: f32,
+    ) -> Option<GuardHit> {
+        let guard = self.state.guard.as_mut()?;
+        guard.stamina = (guard.stamina - loss * guard.rules.stamina_cost).max(0.0);
+        if guard.stamina > 0.0 {
+            return Some(GuardHit::Held);
+        }
+        self.break_guard(ai, at, now_ms);
+        Some(GuardHit::Broken)
+    }
+
+    /// The guard of the mob at `at` breaks at `now_ms`: its `BrokenGuard` reaction plays.
+    fn break_guard(&mut self, ai: &MobAi, at: Position, now_ms: u64) {
+        self.state.blocking = false;
+        let Some(action) = ai.named(self.state.archetype, ai.names.broken_guard) else {
+            return;
+        };
+        let tags = self.brain.tags().to_vec();
+        let has_tag = |tag: NameId| tags.contains(&tag);
+        let length_ms = ai
+            .data()
+            .cage_actions
+            .get(action as usize)
+            .and_then(|cage| cage.variant(&has_tag))
+            .and_then(|variant| match variant.length {
+                // A reaction of a second or two.
+                FragmentLength::Seconds(seconds) => {
+                    Some((seconds * MS_PER_SECOND_F32).round() as u64)
+                }
+                FragmentLength::Loops | FragmentLength::Unknown => None,
+            })
+            .unwrap_or(BROKEN_GUARD_MS);
+        self.state.reaction_until_ms = Some(now_ms + length_ms);
+        self.reaction(ai, at, now_ms, action, true);
+        self.state.stop_moving();
+        self.state.windows.clear();
+    }
+
+    /// The tags, markers and status effects its CAGE conditions read at `now_ms`, with the
+    /// effects `held` the world holds on it, given to `with`.
+    fn with_cage<R>(
+        &self,
+        ai: &MobAi,
+        now_ms: u64,
+        held: Option<&HeldEffects>,
+        with: impl FnOnce(&MobCage<'_>) -> R,
+    ) -> R {
+        let data = ai.data();
+        let tags = self.brain.tags();
+        let has_tag = |tag: NameId| tags.contains(&tag);
+        let shown = self
+            .state
+            .shown
+            .and_then(|shown| Some((data.cage_actions.get(shown.action as usize)?, shown)));
+        let has_marker = |marker: NameId| {
+            let (Some((cage, shown)), Some(clip), Some(param)) =
+                (shown, ai.names.named_clip, ai.names.named_clip_name)
+            else {
+                return false;
+            };
+            // Seconds into a fragment of a few seconds.
+            #[allow(clippy::cast_precision_loss, reason = "seconds into a fragment")]
+            let elapsed_s = now_ms.saturating_sub(shown.started_ms) as f32 / MS_PER_SECOND_F32;
+            data.sets_marker(cage, &has_tag, (elapsed_s, marker), (clip, param))
+        };
+        let has_effect = |effect: NameId| {
+            let name = ai.name(effect);
+            self.state
+                .statuses
+                .iter()
+                .any(|status| ai.name(*status).eq_ignore_ascii_case(name))
+                || held.is_some_and(|held| {
+                    held.effects
+                        .iter()
+                        .any(|held| held.eq_ignore_ascii_case(name))
+                })
+        };
+        with(&MobCage {
+            has_tag: &has_tag,
+            has_marker: &has_marker,
+            has_effect: &has_effect,
+        })
+    }
+
+    /// Runs the actions the engine starts by their condition, for the mob at `at` at `now_ms`
+    /// with the effects `held`: an action starts while its activation holds and ends when its
+    /// deactivation holds (or, without one, when its activation stops holding); each of its tag
+    /// activities is on while its branch holds. Then its regen runs unless a running action
+    /// holds it, and its block state follows ([`Self::blocking`]).
+    fn run_engine_actions(
+        &mut self,
+        ai: &MobAi,
+        at: Position,
+        now_ms: u64,
+        held: Option<&HeldEffects>,
+    ) {
+        let engine = ai.engine_started(self.state.archetype);
+        let data = ai.data();
+        let steps: Vec<EngineStep> = self.with_cage(ai, now_ms, held, |mob| {
+            let mut steps = Vec::new();
+            for action in &engine {
+                let Some(cage) = data.cage_actions.get(*action as usize) else {
+                    continue;
+                };
+                let active = cage
+                    .activation
+                    .as_ref()
+                    .is_some_and(|condition| condition.holds_with(mob));
+                let on: Vec<bool> = cage
+                    .tags
+                    .iter()
+                    .map(|tag| tag.condition.holds_with(mob))
+                    .collect();
+                match self
+                    .state
+                    .engine_runs
+                    .iter()
+                    .find(|run| run.action == *action)
+                {
+                    None if active => steps.push(EngineStep::Start(*action, on)),
+                    None => {}
+                    Some(run) => {
+                        let stop = cage
+                            .deactivation
+                            .as_ref()
+                            .map_or(!active, |condition| condition.holds_with(mob));
+                        if stop {
+                            let reset = cage
+                                .stamina_reset
+                                .as_ref()
+                                .is_some_and(|condition| condition.holds_with(mob));
+                            steps.push(EngineStep::Stop(*action, run.tags_on.clone(), reset));
+                        } else {
+                            for (index, (was, now)) in run.tags_on.iter().zip(&on).enumerate() {
+                                if was != now {
+                                    steps.push(EngineStep::Toggle(*action, index, *now));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            steps
+        });
+        if !steps.is_empty() {
+            let passive = self.passive(ai);
+            let mut out = Vec::new();
+            {
+                let view = self.state.view(ai, at, now_ms, passive);
+                for step in &steps {
+                    match step {
+                        EngineStep::Start(action, on) | EngineStep::Stop(action, on, _) => {
+                            let enter = matches!(step, EngineStep::Start(..));
+                            for (index, _) in on.iter().enumerate().filter(|(_, on)| **on) {
+                                self.brain.engine_activity(
+                                    &ai.runtime,
+                                    &view,
+                                    (*action, index),
+                                    enter,
+                                    &mut out,
+                                );
+                            }
+                        }
+                        EngineStep::Toggle(action, index, on) => self.brain.engine_activity(
+                            &ai.runtime,
+                            &view,
+                            (*action, *index),
+                            *on,
+                            &mut out,
+                        ),
+                    }
+                }
+            }
+            for step in steps {
+                match step {
+                    EngineStep::Start(action, tags_on) => {
+                        self.state.engine_runs.push(EngineRun { action, tags_on });
+                    }
+                    EngineStep::Stop(action, _, reset) => {
+                        self.state.engine_runs.retain(|run| run.action != action);
+                        if let Some(guard) = self.state.guard.as_mut().filter(|_| reset) {
+                            guard.stamina = guard.rules.stamina_max;
+                        }
+                    }
+                    EngineStep::Toggle(action, index, on) => {
+                        if let Some(flag) = self
+                            .state
+                            .engine_runs
+                            .iter_mut()
+                            .find(|run| run.action == action)
+                            .and_then(|run| run.tags_on.get_mut(index))
+                        {
+                            *flag = on;
+                        }
+                    }
+                }
+            }
+            self.apply(ai, at, now_ms, out, &mut Thought::default(), Others::NONE);
+        }
+        self.guard_step(ai, now_ms, held);
+    }
+
+    /// The guard's regen at `now_ms` (none while a running engine action holds it) and the
+    /// block state.
+    fn guard_step(&mut self, ai: &MobAi, now_ms: u64, held: Option<&HeldEffects>) {
+        if self.state.guard.is_none() {
+            return;
+        }
+        let data = ai.data();
+        let (regen_off, blocking) = self.with_cage(ai, now_ms, held, |mob| {
+            let runs = || {
+                self.state
+                    .engine_runs
+                    .iter()
+                    .filter_map(|run| data.cage_actions.get(run.action as usize))
+            };
+            let regen_off = runs().any(|cage| {
+                cage.regen_off
+                    .as_ref()
+                    .is_some_and(|condition| condition.holds_with(mob))
+            });
+            let shown = self
+                .state
+                .shown
+                .and_then(|shown| data.cage_actions.get(shown.action as usize))
+                .is_some_and(|cage| cage.raises_block(mob));
+            (
+                regen_off,
+                shown || runs().any(|cage| cage.raises_block(mob)),
+            )
+        });
+        self.state.blocking = blocking;
+        if let Some(guard) = self.state.guard.as_mut() {
+            let from = guard.regen_ms.unwrap_or(now_ms);
+            guard.regen_ms = Some(now_ms);
+            if !regen_off {
+                // A step of a second or less.
+                #[allow(clippy::cast_precision_loss, reason = "a step of a second or less")]
+                let seconds = now_ms.saturating_sub(from) as f32 / MS_PER_SECOND_F32;
+                guard.stamina = (guard.stamina + guard.rules.regen_per_s * seconds)
+                    .min(guard.rules.stamina_max);
+            }
+        }
     }
 
     /// Its archetype.
@@ -1877,17 +2312,18 @@ impl TreeMind {
     /// creature's swing when a hit made it reel; swing note).
     pub fn react(&mut self, ai: &MobAi, at: Position, now_ms: u64, length_ms: u64) {
         self.state.reaction_until_ms = Some(now_ms + length_ms);
-        self.reaction(ai, at, now_ms, true);
+        if let Some(action) = ai.aliased(self.state.archetype, ai.names.reaction) {
+            self.reaction(ai, at, now_ms, action, true);
+        }
         self.state.stop_moving();
         self.state.windows.clear();
     }
 
-    /// The engine's `Reaction` action starts (`playing`) or ends.
-    fn reaction(&mut self, ai: &MobAi, at: Position, now_ms: u64, playing: bool) {
+    /// The engine's reaction action `action` (the grid's `Reaction`, or a broken guard's)
+    /// starts (`playing`) or ends.
+    fn reaction(&mut self, ai: &MobAi, at: Position, now_ms: u64, action: u32, playing: bool) {
         self.state.next_tick_ms = 0;
-        let Some(action) = ai.aliased(self.state.archetype, ai.names.reaction) else {
-            return;
-        };
+        self.state.reaction_action = playing.then_some(action);
         let passive = self.passive(ai);
         let mut out = Vec::new();
         {
@@ -1916,6 +2352,8 @@ impl TreeMind {
         state.stop_moving();
         state.windows.clear();
         state.shown = None;
+        state.engine_runs.clear();
+        state.blocking = false;
         state.target = None;
         state.threat.clear();
         state.trackers.clear();
@@ -1942,8 +2380,11 @@ impl TreeMind {
             .is_some_and(|until| now_ms >= until)
         {
             self.state.reaction_until_ms = None;
-            self.reaction(ai, *at, now_ms, false);
+            if let Some(action) = self.state.reaction_action {
+                self.reaction(ai, *at, now_ms, action, false);
+            }
         }
+        self.run_engine_actions(ai, *at, now_ms, around.held);
         let control = around
             .held
             .map_or_else(Control::default, |held| held.control);
@@ -1980,6 +2421,9 @@ impl TreeMind {
         if control.may_dodge() {
             self.state
                 .move_and_turn(ai, &mut self.brain, at, perceived.target, around, dt_s);
+            // A run that got to its target strikes now: the tree's next action starts in this
+            // step and takes the windows of the run away.
+            self.state.fire_windows(ai, now_ms, &mut thought);
         } else {
             self.state.speed_mps = 0.0;
         }
@@ -2156,6 +2600,14 @@ impl TreeMind {
                         steering,
                     });
                     self.state.show(ai, slot, task, now_ms);
+                    let moved = self
+                        .state
+                        .shown
+                        .and_then(|shown| ai.cage_action(shown.action));
+                    if let Some(cage) = moved {
+                        self.state
+                            .open_windows(ai, self.brain.tags(), cage, now_ms, true);
+                    }
                 }
                 Command::Strafe {
                     slot,
@@ -2793,7 +3245,8 @@ impl World for View<'_> {
 pub mod test_support {
     use nw_ai::build::{Build, run_config};
     use nw_ai::data::{
-        AiData, Creature, FragmentLength, ProcWindow, ProjectileSlice, RangedAttack, Vision,
+        AiData, BlockActivity, BlockEffect, CageAction, CageCondition, Creature, FragmentLength,
+        FragmentVariant, ProcWindow, ProjectileSlice, RangedAttack, TagActivity, TagEffect, Vision,
     };
     use nw_ai::node::PositionType;
     use nw_ai::value::{CompareOp, Value};
@@ -2984,6 +3437,7 @@ pub mod test_support {
         let mut aliases = vec![(reaction, reaction), (death, death)];
         aliases.sort_unstable();
         data.grids[0].aliases = aliases;
+        add_guard_actions(&mut data);
         let arch = &mut data.archetypes[0];
         let vision = Vision {
             angle_deg: FULL_CIRCLE_DEG,
@@ -3031,6 +3485,102 @@ pub mod test_support {
             group_detector: unset,
             group_range: unset,
         }
+    }
+
+    /// How long the test `BlockBroken` holds its tag (retail `damned_block.actionlist`: 8 s).
+    pub const TEST_BLOCK_BROKEN_S: f32 = 8.0;
+    /// How long the test `BrokenGuard` reaction plays.
+    pub const TEST_BROKEN_GUARD_S: f32 = 1.0;
+
+    /// The block actions of the retail `damned_block.actionlist`, trimmed: the engine runs
+    /// `Block` (raises the block and sets `Block` while `BlockBroken` is off; a mob without a
+    /// guard never blocks) and `BlockBroken` (unsets its tag after 8 s, holds the regen and
+    /// fills the stamina at its end); `BrokenGuard` is the reaction that sets `BlockBroken`.
+    fn add_guard_actions(data: &mut AiData) {
+        let mut name = |text: &str| {
+            data.names.push(text.to_owned());
+            u32::try_from(data.names.len() - 1).expect("name id")
+        };
+        let (block, broken, broken_guard) = (
+            name("Block"),
+            name("BlockBroken"),
+            name(super::BROKEN_GUARD_ACTION),
+        );
+        let list = name("damned_block.actionlist");
+        let not_broken = CageCondition::Not(Box::new(CageCondition::Tag(broken)));
+        let action = |name: u32, length: FragmentLength| CageAction {
+            list,
+            action: name,
+            fragment: name,
+            completion: None,
+            tags: Vec::new(),
+            triggers: Vec::new(),
+            motion_multiplier: None,
+            facing: None,
+            variants: vec![FragmentVariant {
+                tags: Vec::new(),
+                frag_tags: Vec::new(),
+                length,
+                windows: Vec::new(),
+            }],
+            weapon_variants: Vec::new(),
+            activation: None,
+            deactivation: None,
+            blocks: Vec::new(),
+            regen_off: None,
+            stamina_reset: None,
+        };
+        let tag = |tag: u32, on_enter, on_exit, delay_s| TagActivity {
+            condition: CageCondition::True,
+            tag,
+            on_enter,
+            on_exit,
+            delay_s,
+        };
+        let actions = [
+            (
+                block,
+                CageAction {
+                    activation: Some(not_broken),
+                    deactivation: Some(CageCondition::Tag(broken)),
+                    blocks: vec![BlockActivity {
+                        condition: CageCondition::True,
+                        on_enter: BlockEffect::Raise,
+                        on_exit: BlockEffect::Lower,
+                    }],
+                    tags: vec![tag(block, TagEffect::Set, TagEffect::Clear, 0.0)],
+                    ..action(block, FragmentLength::Loops)
+                },
+            ),
+            (
+                broken,
+                CageAction {
+                    activation: Some(CageCondition::Tag(broken)),
+                    tags: vec![tag(
+                        broken,
+                        TagEffect::Clear,
+                        TagEffect::NoEffect,
+                        TEST_BLOCK_BROKEN_S,
+                    )],
+                    regen_off: Some(CageCondition::True),
+                    stamina_reset: Some(CageCondition::True),
+                    ..action(broken, FragmentLength::Loops)
+                },
+            ),
+            (
+                broken_guard,
+                CageAction {
+                    tags: vec![tag(broken, TagEffect::Set, TagEffect::NoEffect, 0.0)],
+                    ..action(broken_guard, FragmentLength::Seconds(TEST_BROKEN_GUARD_S))
+                },
+            ),
+        ];
+        for (name, cage) in actions {
+            let index = u32::try_from(data.cage_actions.len()).expect("action index");
+            data.cage_actions.push(cage);
+            data.grids[0].actions.push((name, index));
+        }
+        data.grids[0].actions.sort_unstable();
     }
 
     /// The test AI with the retail tick rates; the mobs of `vitals_ids` show the test slice.
@@ -3790,6 +4340,63 @@ mod tests {
             [(empower, true), (empower, false)]
         );
         assert!(mind.take_status_changes().is_empty());
+    }
+
+    /// A mob with a guard holds its block up, loses stamina to blocked hits, and the hit that
+    /// takes the last breaks the guard: `BlockBroken` takes the block down for 8 s, holds the
+    /// regen, then fills the stamina, and the block rises again (retail `damned_block`).
+    #[test]
+    fn a_guard_breaks_at_no_stamina_and_rises_again_after_block_broken() {
+        use super::test_support::{TEST_BLOCK_BROKEN_S, TEST_BROKEN_GUARD_S};
+        const GUARD: MobGuard = MobGuard {
+            stamina_max: 50.0,
+            stamina_initial: 50.0,
+            regen_per_s: 5.0,
+            mitigation: 1.0,
+            stamina_cost: 0.8,
+        };
+        const STEP_MS: u64 = 100;
+        let ai = test_ai(&[]);
+        let ground = FlatGround(GROUND_Z);
+        let around = |now_ms| Surroundings {
+            now_ms,
+            seen: &[],
+            ground: &ground,
+            health_share: 1.0,
+            entity: 1,
+            tagged: &[],
+            held: None,
+        };
+        let mut plain = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let mut at = START;
+        plain.step(&ai, &mut at, &around(0));
+        assert!(!plain.blocking(), "no guard, no block");
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        mind.set_guard(GUARD);
+        mind.step(&ai, &mut at, &around(0));
+        assert!(mind.blocking(), "its block rises");
+        assert_eq!(mind.guard_hit(&ai, at, 0, 20.0), Some(GuardHit::Held));
+        assert_eq!(mind.guard_hit(&ai, at, 0, 50.0), Some(GuardHit::Broken));
+        assert!(!mind.blocking());
+        let broken_ms = (TEST_BLOCK_BROKEN_S * 1000.0) as u64;
+        let mut rose_ms = None;
+        for now_ms in (STEP_MS..broken_ms * 2).step_by(STEP_MS as usize) {
+            mind.step(&ai, &mut at, &around(now_ms));
+            if mind.blocking() && rose_ms.is_none() {
+                rose_ms = Some(now_ms);
+            }
+        }
+        let rose_ms = rose_ms.expect("the block rises again");
+        assert!(
+            rose_ms >= broken_ms
+                && rose_ms <= broken_ms + (TEST_BROKEN_GUARD_S * 1000.0) as u64 + 2_000,
+            "after BlockBroken: {rose_ms}"
+        );
+        assert_eq!(
+            mind.guard_hit(&ai, at, broken_ms * 2, 50.0 / 0.8 - 1.0),
+            Some(GuardHit::Held),
+            "the stamina is full again"
+        );
     }
 
     /// A stunned mob neither perceives, moves nor thinks; a root holds it in place while it

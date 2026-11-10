@@ -28,8 +28,9 @@ use nw_bus::{BusId, ConnectionRef, Hit};
 use std::sync::Arc;
 
 use nw_content::combat::{
-    AffixDamage, AttackRow, DamageCategory, LevelRow, RangedBlock, WeaponRow,
+    AffixDamage, AttackRow, DamageCategory, LevelRow, MobGuard, RangedBlock, WeaponRow,
 };
+use nw_content::passive_abilities::Trigger;
 use nw_content::player_attacks::{AttackHit, AttackKind, BasicAttack, Homing, MeleeShape, Stance};
 use nw_content::respawn_points::{nearest_respawn_point, respawn_point};
 use nw_content::status_effects::{Control, RowKey};
@@ -46,16 +47,19 @@ use nw_sim_core::{
     weapon_damage_scale,
 };
 
+use super::abilities::fresh_aim;
 use super::encounter::Tutorial;
 use super::gear::{Gear, unix_ns};
 use super::hit_shape::{
     MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, SweptShape, Wedge, body_frame, homing_score, turn,
 };
 use super::mob_timeline::yaw_toward;
+use super::passives::HitMods;
 use super::projectile::{AimLine, Shot, ShotHit};
 use super::stamina::{Dodge, Guard};
 use super::{Body, MESSAGE_CHANNEL, Outgoing, Placement, Player, Position, SimWorld};
 use crate::combat::{AttackOutcome, AttackRefusal, RemoteHit, RespawnRefusal};
+use crate::mob_ai::GuardHit;
 use crate::mobs::{
     Capsule, DEFAULT_BLOCK_STAMINA, DEFAULT_HIT_TAG, MobAttackIntent, MobReach, MoveHit,
     spawn_index,
@@ -104,6 +108,9 @@ pub(super) const MOUNT_FOOD_USE_MS: u64 = 690;
 /// A blocked hit that breaks the guard takes half its health (newchar-retail 422387: 17.025 of
 /// the same attack's 34.05 unblocked).
 const BROKEN_GUARD_DAMAGE_DIVISOR: u32 = 2;
+/// The `BlockStability` of a mob's guard in the blocked hit's stamina (`AttackRow::block_stamina`):
+/// a mob has no blocking weapon row, so none (Inferred; its `BlockStaminaCost` scales the loss).
+const NO_BLOCK_STABILITY: f64 = 0.0;
 
 /// A basic attack a player's client plays: when it started and its dodge cancel windows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -526,6 +533,8 @@ pub struct Aim {
     pub pitch: Option<f32>,
     /// The mob the player locked on (the input's target row).
     pub lock_target: Option<u64>,
+    /// The point under the crosshair (the input's aim point), when one came with the attack.
+    pub point: Option<Position>,
 }
 
 /// A player's basic attack that has not landed yet.
@@ -915,7 +924,10 @@ impl SimWorld {
     /// and row against the target's level, applies it here or sends it to the target's sim, and
     /// tells the attacker with the message `dealt` makes of the amount, the crit, the kill and the
     /// share of the damage the armor let through. A mob that absorbs hits (Thorpe in his
-    /// intermission) takes none.
+    /// intermission) takes none. A mob of this sim whose block is up stops a blockable hit from
+    /// its front ([`SimWorld::mob_blocks`]): its `BlockDamageMitigation` share of the hit goes
+    /// (all of it in every retail row), the hit takes stamina from its guard, and the attacker
+    /// gets the hit marked `Resisted` (retail: 3,315 of 4,586 such hits, 0 damage).
     fn strike(
         &mut self,
         strike: Strike<'_>,
@@ -945,7 +957,14 @@ impl SimWorld {
             )
         });
         let armor_share = rent_share(plain_share, rend, row.category);
+        let row_key = RowKey::of(&row.table, &row.damage_id);
+        // The passives that the hit fires change its crit before the roll.
+        let mods = self.passive_hit_mods(entity, target, &[Trigger::Hit], Some(row_key), now_ms);
         let (crit_chance, crit_multiplier) = self.player_crit(entity, &weapon);
+        let (crit_chance, crit_multiplier) = (
+            crit_chance + mods.crit_chance,
+            crit_multiplier + mods.crit_damage,
+        );
         let attack = PlayerAttack {
             base_damage: weapon.base_damage
                 * held.map_or(1.0, |(_, gear_score)| weapon_damage_scale(gear_score)),
@@ -975,11 +994,28 @@ impl SimWorld {
             return Ok(AttackOutcome::Hit { target, amount: 0 });
         }
         let mut hit = player_hit(&attack, armor_share, &mut self.dice);
-        // The status effects of the player and of the mob scale the hit (`Dmg*`, `Abs*`).
+        let block = (view.owner.is_none() && row.blockable)
+            .then(|| self.mob_blocks(entity, target))
+            .flatten();
+        let guard = block.and_then(|_| {
+            // A few dozen stamina points.
+            let loss = row.block_stamina(&weapon, NO_BLOCK_STABILITY) as f32;
+            self.mobs.guard_hit(target, loss, now_ms)
+        });
+        // The status effects of the player and of the mob scale the hit (`Dmg*`, `Abs*`), and
+        // so do the passives it fires (a crit fires its own).
         let effects_scale =
             self.player_hit_scale(entity, target, row.damage_type.unwrap_or(HIT_TAG));
+        let crit_mods = if hit.crit {
+            self.passive_hit_mods(entity, target, &[Trigger::Crit], Some(row_key), now_ms)
+        } else {
+            HitMods::default()
+        };
+        let passive_scale = mods.dealt_scale() * crit_mods.dealt_scale();
+        let through = block.map_or(1.0, |guard| f64::from(1.0 - guard.mitigation));
         // A hit of a few thousand points.
-        hit.amount = (f64::from(hit.amount) * effects_scale).round() as u32;
+        hit.amount =
+            (f64::from(hit.amount) * effects_scale * passive_scale * through).round() as u32;
         let threat = row.threat.saturating_add(u64::from(hit.amount));
         let outcome = match &view.owner {
             None => self
@@ -997,28 +1033,58 @@ impl SimWorld {
         let killed = matches!(outcome, AttackOutcome::Killed { .. });
         if matches!(outcome, AttackOutcome::Hit { .. }) {
             self.mob_timelines.hurt(target);
-            if view.owner.is_none() {
-                self.player_hit_effects(
-                    target,
-                    number,
-                    RowKey::of(&row.table, &row.damage_id),
-                    hit.amount,
-                );
+            if view.owner.is_none() && block.is_none() {
+                self.player_hit_effects(target, number, row_key, hit.amount);
             }
         }
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             player.combat.hit(now_ms, killed);
         }
-        self.send_reliable(
-            attacker.clone(),
-            &ServerMessage::DamageDealt(dealt(
-                amount_of(hit.amount),
-                hit.crit,
-                killed,
-                (1.0 - armor_share) as f32,
-            )),
+        let triggers: Vec<Trigger> = [
+            Some(Trigger::Hit),
+            hit.crit.then_some(Trigger::Crit),
+            killed.then_some(Trigger::Kill),
+            block.map(|_| Trigger::BlockedHit),
+            (guard == Some(GuardHit::Broken)).then_some(Trigger::TargetBlockBreak),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        self.run_passives(
+            (entity, target),
+            &triggers,
+            (Some(row_key), hit.amount),
+            now_ms,
         );
+        let message = dealt(
+            amount_of(hit.amount),
+            hit.crit,
+            killed,
+            (1.0 - armor_share) as f32,
+        );
+        let message = if block.is_some() {
+            message.resisted()
+        } else {
+            message
+        };
+        self.send_reliable(attacker.clone(), &ServerMessage::DamageDealt(message));
         Ok(outcome)
+    }
+
+    /// The guard of mob `mob` of this sim when its block is up and player `entity` stands in
+    /// front of it (Inferred: the half in front of its facing; retail let 1,243 hits through
+    /// raised mob blocks, and which side they came from is Unknown).
+    fn mob_blocks(&self, entity: Entity, mob: u64) -> Option<MobGuard> {
+        if !self.mobs.blocking(mob) {
+            return None;
+        }
+        let guard = self.mobs.guard(mob)?;
+        let from = self.world.get::<Body>(entity)?.motion.position();
+        let at = self.mobs.get(mob)?.position;
+        let yaw = self.mobs.facing(mob)?;
+        let (forward_x, forward_y) = (-yaw.sin(), yaw.cos());
+        let in_front = forward_x * (from.x - at.x) + forward_y * (from.y - at.y) >= 0.0;
+        in_front.then_some(guard)
     }
 
     /// The player of `shooter` fires the spread shot `request` at `now_ms` with the spread-shot
@@ -1361,7 +1427,7 @@ impl SimWorld {
         if let Some(newest) = records.first() {
             self.stamina_input(entity, number, newest, swimming, now_ms);
         }
-        self.ability_presses(entity, records, now_ms);
+        self.ability_presses(entity, records);
         if !self.player_control(entity).may_fight() {
             tracing::debug!(player = number, "attack keys while stunned");
             return Vec::new();
@@ -1524,10 +1590,12 @@ impl SimWorld {
                 return Vec::new();
             }
         }
-        let view = self
+        let (view, point) = self
             .world
             .get::<Player>(entity)
-            .and_then(|player| player.view);
+            .map_or((None, None), |player| {
+                (player.view, fresh_aim(player.aim, now_ms))
+            });
         let newest_view = records.first().and_then(|newest| newest.bit_6);
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             player.attack_playing = Some(PlayingAttack::of(&attack, started_ms));
@@ -1542,6 +1610,7 @@ impl SimWorld {
                     .map(|[_, pitch]| pitch)
                     .or(view.map(|view| view.pitch)),
                 lock_target,
+                point,
             },
             kind,
             attack,
@@ -1838,7 +1907,7 @@ impl SimWorld {
             .or_else(|| gear.main_weapon().and_then(|(item, _)| block(item)))
     }
 
-    fn held_weapon(&self, entity: Entity) -> Option<(WeaponRow, u32)> {
+    pub(super) fn held_weapon(&self, entity: Entity) -> Option<(WeaponRow, u32)> {
         let (item, gear_score) = self
             .world
             .get::<Player>(entity)?
@@ -2045,13 +2114,14 @@ impl SimWorld {
         now_ms: u64,
     ) -> Landing {
         let yaw = Self::aim_yaw(swing.aim.lock_target, swing.aim.facing, position, places);
-        let (Some(yaw), Some(pitch)) = (yaw, swing.aim.pitch) else {
+        let point = swing.aim.point.filter(|_| swing.aim.lock_target.is_none());
+        let Some(line) = AimLine::of(position, point, yaw, swing.aim.pitch) else {
             return Landing::Done(vec![Err(AttackRefusal::NoAim)]);
         };
         Landing::Done(self.cast(
             &swing.attacker,
             (shot, ShotHit::plain(swing.attack.damage_row.as_str())),
-            (position, AimLine { yaw, pitch }),
+            (position, line),
             places,
             now_ms,
         ))
@@ -2702,12 +2772,14 @@ impl SimWorld {
     ///   ([`SimWorld::ranged_block_of`]): its block takes the block stamina times
     ///   `RangedBlockStaminaDamageScaling`, and `RangedBlockHealthDamageScaling` of the health
     ///   passes it (Inferred from the data: no retail ranged block was captured).
+    /// - A block fires the player's `OnBlockedHitTaken` passives, a guard break its
+    ///   `OnBlockBreak` ones ([`super::passives`]); the hit's row `row` is known for a mob of
+    ///   this sim.
     fn defend(
         &mut self,
         entity: Entity,
-        target: u64,
-        mob: u64,
-        amount: u32,
+        (target, mob): (u64, u64),
+        (amount, row): (u32, Option<RowKey>),
         blow: Blow,
         now_ms: u64,
     ) -> Option<u32> {
@@ -2759,7 +2831,7 @@ impl SimWorld {
                 &ServerMessage::MeleeHit(MeleeHitMsg::on(target, guard.is_some())),
             );
         }
-        match guard {
+        let passed = match guard {
             // A hit of a few hundred points.
             Some(Guard::Held) => {
                 Some((f64::from(amount) * passes).round() as u32).filter(|passed| *passed > 0)
@@ -2769,7 +2841,21 @@ impl SimWorld {
                 Some(amount / BROKEN_GUARD_DAMAGE_DIVISOR)
             }
             None => Some(amount),
+        };
+        let trigger = match guard {
+            Some(Guard::Held) => Some(Trigger::BlockedHitTaken),
+            Some(Guard::Broken) => Some(Trigger::BlockBreak),
+            None => None,
+        };
+        if let Some(trigger) = trigger {
+            self.run_passives(
+                (entity, mob),
+                &[trigger],
+                (row, passed.unwrap_or(0)),
+                now_ms,
+            );
         }
+        passed
     }
 
     /// A mob hit from another sim on player `target` of this one, with `blow` (its block stamina
@@ -2785,8 +2871,17 @@ impl SimWorld {
         now_ms: u64,
     ) -> Option<AttackOutcome> {
         let entity = self.player_by_number(target)?;
-        let amount = self.defend(entity, target, attacker, amount, blow, now_ms)?;
-        self.apply_hit(target, attacker, amount, 0, now_ms)
+        let amount = self.defend(entity, (target, attacker), (amount, None), blow, now_ms)?;
+        let outcome = self.apply_hit(target, attacker, amount, 0, now_ms);
+        if outcome.is_some() {
+            self.run_passives(
+                (entity, attacker),
+                &[Trigger::HitTaken],
+                (None, amount),
+                now_ms,
+            );
+        }
+        outcome
     }
 
     /// Applies the mobs' hits on the players of this sim; a hit on a player ghost goes to its
@@ -2865,10 +2960,28 @@ impl SimWorld {
         now_ms: u64,
     ) -> Option<AttackOutcome> {
         if let Some(entity) = self.player_by_number(target) {
-            let amount = self.defend(entity, target, mob, amount, style.blow(), now_ms)?;
+            // The player's passives that a hit taken fires lower it.
+            let taken = self
+                .passive_hit_mods(entity, mob, &[Trigger::HitTaken], style.row, now_ms)
+                .taken_scale();
+            // A hit of a few hundred points.
+            let amount = (f64::from(amount) * taken).round() as u32;
+            let amount = self.defend(
+                entity,
+                (target, mob),
+                (amount, style.row),
+                style.blow(),
+                now_ms,
+            )?;
             let outcome = self.apply_hit_with(target, mob, amount, 0, now_ms, Some(&style));
             if outcome.is_some() {
                 self.mob_hit_effects(entity, mob, style.row, amount);
+                self.run_passives(
+                    (entity, mob),
+                    &[Trigger::HitTaken],
+                    (style.row, amount),
+                    now_ms,
+                );
             }
             return outcome;
         }
@@ -3099,6 +3212,7 @@ mod tests {
             facing: Some(yaw),
             pitch: Some(0.0),
             lock_target: None,
+            point: None,
         }
     }
 
@@ -3530,11 +3644,7 @@ mod tests {
             "the far locked mob is out of reach: the homing takes the near one"
         );
         // Without a yaw, only the lock aims.
-        let no_yaw = Aim {
-            facing: None,
-            pitch: None,
-            lock_target: None,
-        };
+        let no_yaw = Aim::default();
         assert_eq!(two_mobs_aside(no_yaw), Vec::<u64>::new());
     }
 
@@ -3570,6 +3680,92 @@ mod tests {
             scale: (1.0 - world.combat.armor_share) as f32,
         };
         DamageDealtMsg::melee(1, mob(), item, false, false)
+    }
+
+    #[test]
+    fn a_raised_mob_block_stops_a_hit_and_the_attacker_sees_it_resisted() {
+        // All-capture sweep 2026-11-09: 3,315 of 4,586 direct player hits on a mob whose
+        // damage receiver said `isBlockActive` 1 came back `Resisted` with 0 damage.
+        const GUARD: MobGuard = MobGuard {
+            stamina_max: 50.0,
+            stamina_initial: 50.0,
+            regen_per_s: 5.0,
+            mitigation: 1.0,
+            stamina_cost: 0.8,
+        };
+        let mut world = fight();
+        world.mobs.set_guard(mob(), GUARD);
+        tick(&mut world, NOW);
+        assert!(
+            world.mobs.blocking(mob()),
+            "the guarded mob raises its block"
+        );
+        world.take_messages();
+        let before = mob_health(&mut world).current();
+        world
+            .attack(&connection(1), mob(), LIGHT, NOW + TICK_MS)
+            .expect("hit");
+        assert_eq!(
+            mob_health(&mut world).current(),
+            before,
+            "the block stops all of it"
+        );
+        let dealt: Vec<DamageDealtMsg> = messages_to(&world.take_messages(), 1)
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::DamageDealt(dealt) => Some(dealt),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dealt.len(), 1);
+        assert!(dealt[0].is_resisted(), "{:?}", dealt[0]);
+    }
+
+    #[test]
+    fn a_held_passive_raises_the_hit_that_fires_it_then_waits_its_cooldown() {
+        use nw_content::attribute_bonuses::AttributeBonuses;
+        use nw_content::passive_abilities::PassiveAbilities;
+        const PASSIVE: &str = "Passive_Test_DmgOnLight";
+        /// `ActivationCooldown` seconds, and the time after which it fires again.
+        const COOLDOWN_S: f64 = 1.0;
+        const AFTER_COOLDOWN_MS: u64 = 1_000;
+        /// Between two attacks: past the attack interval, inside the cooldown.
+        const NEXT_ATTACK_MS: u64 = 500;
+        let rows: [nw_content::generated::AbilityData; 1] =
+            [serde_json::from_value(serde_json::json!({
+                "ability_id": PASSIVE,
+                "on_hit": true,
+                "base_damage": 0.5,
+                "damage_table_row": LIGHT,
+                "activation_cooldown": COOLDOWN_S
+            }))
+            .expect("row")];
+        let mut world = fight();
+        let mut content = (*world.content).clone();
+        // Every value of the first attribute holds the passive.
+        content.attribute_bonuses = AttributeBonuses::build([(0, 0, PASSIVE.to_owned())], []);
+        content.passive_abilities = PassiveAbilities::build(&rows, []);
+        world.content = Arc::new(content);
+        let dealt = |world: &mut SimWorld, at_ms: u64| {
+            let before = mob_health(world).current();
+            world
+                .attack(&connection(1), mob(), LIGHT, at_ms)
+                .expect("hit");
+            before - mob_health(world).current()
+        };
+        let boosted = dealt(&mut world, NOW);
+        let plain = dealt(&mut world, NOW + NEXT_ATTACK_MS);
+        assert_eq!(plain, SWORD_HIT, "inside the cooldown: the plain hit");
+        assert_eq!(
+            boosted,
+            (f64::from(SWORD_HIT) * 1.5).round() as u32,
+            "BaseDamage 0.5 adds half"
+        );
+        assert_eq!(
+            dealt(&mut world, NOW + AFTER_COOLDOWN_MS),
+            boosted,
+            "the cooldown ran out"
+        );
     }
 
     #[test]
@@ -4320,6 +4516,43 @@ mod tests {
     }
 
     #[test]
+    fn a_block_fires_the_blocked_hit_passives_of_the_blocker() {
+        // `Passive_Sword_Defender_StaminaOnBlock` shape: stamina back on a blocked hit.
+        use nw_content::attribute_bonuses::AttributeBonuses;
+        use nw_content::passive_abilities::PassiveAbilities;
+        const PASSIVE: &str = "Passive_Test_StaminaOnBlock";
+        /// `Stamina` points (an integer cell).
+        const STAMINA_POINTS: i64 = 10;
+        const STAMINA_BACK: f32 = 10.0;
+        let rows: [nw_content::generated::AbilityData; 1] =
+            [serde_json::from_value(serde_json::json!({
+                "ability_id": PASSIVE,
+                "on_blocked_hit_taken": true,
+                "stamina": STAMINA_POINTS
+            }))
+            .expect("row")];
+        let stamina_after_block = |with_passive: bool| {
+            let mut world = fight();
+            if with_passive {
+                let mut content = (*world.content).clone();
+                content.attribute_bonuses =
+                    AttributeBonuses::build([(0, 0, PASSIVE.to_owned())], []);
+                content.passive_abilities = PassiveAbilities::build(&rows, []);
+                world.content = Arc::new(content);
+            }
+            world.attack_input(&connection(1), &[block_held()], NOW);
+            until_swing(&mut world, NOW);
+            player_stamina(&mut world, 1)
+        };
+        let plain = stamina_after_block(false);
+        assert!(plain < 100.0, "the block took stamina: {plain}");
+        assert!(
+            (stamina_after_block(true) - (plain + STAMINA_BACK).min(100.0)).abs() < 1e-3,
+            "the passive gives its stamina back"
+        );
+    }
+
+    #[test]
     fn a_blocked_mob_hit_sends_2218_blocked_in_the_tutorial() {
         let mut world = tutorial_fight();
         world.attack_input(&connection(1), &[block_held()], NOW);
@@ -4380,7 +4613,13 @@ mod tests {
         const SWORD_SCALE: f64 = 0.5;
         let blocked = |world: &mut SimWorld, ranged: bool| {
             let entity = world.player_by_number(1).expect("player");
-            world.defend(entity, 1, mob(), AMOUNT, blow(BLOCK_STAMINA, ranged), NOW)
+            world.defend(
+                entity,
+                (1, mob()),
+                (AMOUNT, None),
+                blow(BLOCK_STAMINA, ranged),
+                NOW,
+            )
         };
         let mut world = fight();
         world.attack_input(&connection(1), &[block_held()], NOW);
@@ -4450,7 +4689,7 @@ mod tests {
             ..blow(BLOCK_STAMINA, false)
         };
         assert_eq!(
-            world.defend(entity, 1, mob(), AMOUNT, unblockable, NOW),
+            world.defend(entity, (1, mob()), (AMOUNT, None), unblockable, NOW),
             Some(AMOUNT),
             "a boss wipe goes through the block"
         );
@@ -4462,7 +4701,13 @@ mod tests {
             "also from another sim"
         );
         assert_eq!(
-            world.defend(entity, 1, mob(), AMOUNT, blow(BLOCK_STAMINA, false), NOW),
+            world.defend(
+                entity,
+                (1, mob()),
+                (AMOUNT, None),
+                blow(BLOCK_STAMINA, false),
+                NOW
+            ),
             None
         );
     }

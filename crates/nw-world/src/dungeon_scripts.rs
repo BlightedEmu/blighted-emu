@@ -14,8 +14,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::records::PatrolPath;
 use crate::slice_data::GUID_LEN;
 
+/// The level folder of the open world. Its encounters are placed by capitals, not by a game
+/// mode's level script; the file holds them under the level's name, beside the game modes.
+pub const OPEN_WORLD_LEVEL: &str = "newworld_vitaeeterna";
 /// The file name prefix; the client build and [`DUNGEON_SCRIPTS_EXTENSION`] follow.
 pub const DUNGEON_SCRIPTS_PREFIX: &str = "dungeon-scripts-";
 /// The file extension.
@@ -33,7 +37,7 @@ pub struct TargetMob {
 }
 
 /// One slice a spawn or a tracked target may be.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TargetSlice {
     /// The pak path of the slice.
     pub path: String,
@@ -44,10 +48,23 @@ pub struct TargetSlice {
     /// The mob its spawner slice names; `None` for a creature slice (the sim looks its GUID up
     /// in the mob prefab table) or a slice that is no mob.
     pub mob: Option<TargetMob>,
+    /// How many mobs one spawn of the slice makes: 1 for a spawner slice; the spawns of a
+    /// nested encounter slice (the storm priest's minion portal spawns two swarmers).
+    #[serde(default = "one_mob")]
+    pub mobs_per_spawn: u32,
+    /// The waypoints of its spawner slice, from the spawn's place (the storm priest's
+    /// `wp-nopath` with the task `POI_Ritual_Channeling_LOOP`); `None` for a slice without one.
+    #[serde(default)]
+    pub waypoints: Option<PatrolPath>,
+}
+
+/// The mobs of one spawn of a spawner slice.
+const fn one_mob() -> u32 {
+    1
 }
 
 /// The slices of one `m_sliceAsset` / `m_aliasAsset` pair.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Target {
     /// The slice's path or the alias asset's path.
     pub name: String,
@@ -298,6 +315,18 @@ impl DungeonScripts {
         self.game_modes.get(id)
     }
 
+    /// The task names of the waypoints of every spawned slice.
+    pub fn waypoint_tasks(&self) -> impl Iterator<Item = &str> {
+        self.game_modes
+            .values()
+            .flat_map(|script| &script.encounters)
+            .flat_map(|encounter| &encounter.targets)
+            .flat_map(|target| &target.slices)
+            .filter_map(|slice| slice.waypoints.as_ref())
+            .flat_map(|path| path.tasks.iter().flatten())
+            .map(|task| task.task.as_str())
+    }
+
     /// Whether a game mode on level `folder` has a script.
     pub fn has_level(&self, folder: &str) -> bool {
         self.game_modes
@@ -354,6 +383,8 @@ mod tests {
                         category_id: String::new(),
                         level: 25,
                     }),
+                    mobs_per_spawn: 1,
+                    waypoints: None,
                 }],
             }],
             ..Encounter::default()

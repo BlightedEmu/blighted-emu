@@ -496,8 +496,11 @@ impl SimConfig {
             level: self.level_spec(instances)?,
             ocean_level_m,
             instance_role: self.role == SimRole::Instance,
+            world_events: self.role == SimRole::OpenMap
+                && self.level == nw_world::dungeon_scripts::OPEN_WORLD_LEVEL,
             instance_request_timeout_ms: self.instance_request_timeout_ms,
             max_gm_spawn: self.admin.max_gm_spawn,
+            world_id: self.world_id,
         })
     }
 

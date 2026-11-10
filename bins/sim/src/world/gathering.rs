@@ -41,7 +41,7 @@ use super::statics::{
 use super::tradeskill::EventScale;
 use super::{Body, Player, SimWorld, gather_answer, gather_interrupted, send_now};
 use crate::mobs::spawn_index;
-use crate::objectives::Event;
+use crate::objectives::{Event, ObjectiveRun};
 use crate::server::SERVER_EPOCH_UNIX_MS;
 
 /// First slot key of a gather node: its index is added. Keys are never sent; they stay above
@@ -707,46 +707,59 @@ impl SimWorld {
         mob: Option<u64>,
         gatherable: &Gatherable,
     ) -> Vec<(String, u32)> {
+        if let Some(mob) = mob {
+            return self.mob_quest_drops(number, mob, ObjectiveRun::quest_drops);
+        }
+        // A quest object is most often a loot container too (346 of the 381 steps that drop
+        // from a gatherable, `1225_Truffle` of Truffle Fever among them): it gives its own
+        // drops and the drops of any container in a mission's place.
+        let drops = self
+            .quests_of_player(number)
+            .iter()
+            .flat_map(|quest| {
+                let mut drops = quest.run.gather_drops(&gatherable.id);
+                if gatherable.loot_container {
+                    drops.extend(quest.run.chest_drops());
+                }
+                drops
+            })
+            .collect();
+        self.roll_quest_drops(drops)
+    }
+
+    /// The items the quests of player `number` drop for mob `mob`: what `drops` gives for each
+    /// quest run with the mob's vitals id, categories and spawn categories, each rolled at its
+    /// chance ([`SimWorld::roll_quest_drops`]).
+    pub(super) fn mob_quest_drops(
+        &mut self,
+        number: u64,
+        mob: u64,
+        drops: impl Fn(&ObjectiveRun, &str, &[String], &[u32]) -> Vec<(String, u32)>,
+    ) -> Vec<(String, u32)> {
         let quests = self.quests_of_player(number);
         if quests.is_empty() {
             return Vec::new();
         }
-        let drops: Vec<(String, u32)> = match mob {
-            Some(mob) => {
-                let Some((vitals_id, categories)) = self
-                    .mobs
-                    .vitals_of(mob)
-                    .and_then(|vitals| self.content.kill_types.of(vitals))
-                else {
-                    return Vec::new();
-                };
-                let spawn_categories = self
-                    .content
-                    .kill_types
-                    .spawn_categories(self.mobs.category_of(mob));
-                quests
-                    .iter()
-                    .flat_map(|quest| {
-                        quest
-                            .run
-                            .quest_drops(vitals_id, categories, &spawn_categories)
-                    })
-                    .collect()
-            }
-            // A quest object is most often a loot container too (346 of the 381 steps that drop
-            // from a gatherable, `1225_Truffle` of Truffle Fever among them): it gives its own
-            // drops and the drops of any container in a mission's place.
-            None => quests
-                .iter()
-                .flat_map(|quest| {
-                    let mut drops = quest.run.gather_drops(&gatherable.id);
-                    if gatherable.loot_container {
-                        drops.extend(quest.run.chest_drops());
-                    }
-                    drops
-                })
-                .collect(),
+        let Some((vitals_id, categories)) = self
+            .mobs
+            .vitals_of(mob)
+            .and_then(|vitals| self.content.kill_types.of(vitals))
+        else {
+            return Vec::new();
         };
+        let spawn_categories = self
+            .content
+            .kill_types
+            .spawn_categories(self.mobs.category_of(mob));
+        let drops = quests
+            .iter()
+            .flat_map(|quest| drops(&quest.run, vitals_id, categories, &spawn_categories))
+            .collect();
+        self.roll_quest_drops(drops)
+    }
+
+    /// One of each item of `drops` (item, chance in percent) that its roll gives.
+    fn roll_quest_drops(&mut self, drops: Vec<(String, u32)>) -> Vec<(String, u32)> {
         drops
             .into_iter()
             .filter(|(_, percent)| self.dice.below(PERCENT) < *percent)

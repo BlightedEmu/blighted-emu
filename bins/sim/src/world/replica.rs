@@ -13,21 +13,23 @@
 //! goes to the other sim as a [`PlayerGhost`], which carries the same [`ReplicaSource`].
 //!
 //! Each viewer gets the remote players by priority ([`RemotePlan`]): one in combat or near every
-//! tick, farther ones less often, at most [`REMOTE_GROUPS_PER_TICK`] per tick, a card refresh and
-//! the longest waiting first; a new player's card and a change always go.
+//! tick, farther ones less often, at most [`REMOTE_GROUPS_PER_TICK`] per tick, the longest waiting
+//! first; a new player's card and a change always go. The card goes once, when the player comes
+//! into view, as on retail.
 
 use std::collections::HashMap;
 
 use nw_bus::{
-    GHOST_VISIBLE_ITEMS, GhostItem, GhostMount, GhostSlayer, GhostSlotChange, GhostUpperSlots,
-    ItemLookState, PlayerGhost,
+    GHOST_VISIBLE_ITEMS, GhostItem, GhostMount, GhostName, GhostSlayer, GhostSlotChange,
+    GhostUpperSlots, ItemLookState, PlayerGhost,
 };
 use nw_messages::mount::riding_active_map;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     AlcStamp, AlcState, BundleGroup, BundleMember, CardPlace, DamageReceiverState, Hands,
-    HealthChange, InputPosition, ItemLook, LookDir, MemberState, MessageError, PaperdollPublic,
-    PaperdollState, PlayerGear, PlayerLook, PlayerStates, RemoteStep, RemoteUpper,
+    HealthChange, InputPosition, ItemLook, KnownStamp, LookDir, MemberState, MessageError,
+    PaperdollPublic, PaperdollState, PlayerGear, PlayerIdentity, PlayerLook, PlayerStates,
+    ProgressionState, RemoteSequenceClock, RemoteStep, RemoteUpper, SPAWN_MOVEMENT,
     SecondSlayerState, ShownItem, SlayerState, SlotChange, StepPlace, UpperSlots, VitalsData,
     put_looking_through_loadout, put_member,
 };
@@ -53,11 +55,24 @@ const FAR_PERIOD_TICKS: u64 = 4;
 /// Most remote players one viewer gets in one tick besides cards and changes (our choice: about
 /// 1 KB of 40-byte remote states, retail's p99 datagram of 1,028 bytes).
 pub(super) const REMOTE_GROUPS_PER_TICK: usize = 24;
+/// The states of another player that carry its slayer state once it started (Observed: retail
+/// sent other players' slayer state in runs of 1 to 8 states, 1 to 3 in 14 of the 22 runs, and
+/// left it out of the 1,683 other states of general-other-01 and newchar-retail).
+const REMOTE_ACTION_ECHO_STATES: u8 = 3;
 
 /// What a player is now, for the players who see it: from its own sim, or from a ghost.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ReplicaSource {
     pub(super) character: [u8; RAW_ID_LEN],
+    /// The character's name.
+    pub(super) name: GhostName,
+    /// Its zero-based level.
+    pub(super) level: u32,
+    /// The time into its slayer state's sequence ([`super::slayer::SlayerTrack::remote_sequence`]).
+    pub(super) sequence: Option<f32>,
+    /// The slayer state and sequence of its movement now
+    /// ([`super::slayer::SlayerTrack::card_movement`]), for its card.
+    pub(super) movement: (u64, u64),
     pub(super) look: Option<PlayerLook>,
     pub(super) health: u32,
     pub(super) max_health: u32,
@@ -104,6 +119,10 @@ impl ReplicaSource {
         }
         PlayerGhost {
             character: uuid::Uuid::from_bytes(self.character),
+            name: self.name,
+            level: self.level,
+            sequence_s: self.sequence,
+            movement: Some(self.movement),
             look: self.look.map(|look| look.choices()),
             health: self.health,
             max_health: self.max_health,
@@ -143,6 +162,10 @@ impl ReplicaSource {
     pub(super) fn of_ghost(ghost: &PlayerGhost) -> Self {
         Self {
             character: *ghost.character.as_bytes(),
+            name: ghost.name,
+            level: ghost.level,
+            sequence: ghost.sequence_s,
+            movement: ghost.movement.unwrap_or(SPAWN_MOVEMENT),
             look: ghost.look.map(PlayerLook::of_choices),
             health: ghost.health,
             max_health: ghost.max_health,
@@ -257,6 +280,8 @@ pub(super) struct ReplicaMemory {
     mount: GhostMount,
     /// The start and sequence of its action.
     action: Option<(Option<u16>, u64)>,
+    /// How many more states carry its action.
+    action_echoes: u8,
     /// The server time of its last new life (ms since 2000-01-01).
     life_ms: u64,
     /// The `pos10` every viewer places it from: its states move it by offsets from it (Observed:
@@ -283,12 +308,16 @@ pub(super) struct Replica {
     block_changed: bool,
     /// It started an action: the others see it now.
     action_changed: bool,
+    /// Its state of this tick carries its action ([`REMOTE_ACTION_ECHO_STATES`]).
+    sends_action: bool,
     /// Its own state echoes a change of its upper slots: the others see it now.
     upper_due: bool,
     /// Where its state of this tick puts it: an offset from its anchor, or a new anchor.
     place: Option<StepPlace>,
     /// Its anchor after this tick.
     anchor: Option<InputPosition>,
+    /// The server time of its last new life (ms since 2000-01-01): its card's life block.
+    life_ms: u64,
     /// It got a new anchor while the viewers had an older one: every viewer gets it now, so no
     /// viewer places its later offsets from the old one.
     anchor_moved: bool,
@@ -317,6 +346,13 @@ impl Replica {
             .action
             .map(|action| (action.started, action.sequence));
         let action_changed = seen.is_some_and(|seen| seen.action != action);
+        // Its slayer state goes in the first states after it starts, then no more: a state that
+        // carries it again starts its animation over (live 2026-11-09: sent in every state, the
+        // other players' legs jerked and their attacks did not show).
+        let action_echoes_left = match seen {
+            Some(seen) if !action_changed => seen.action_echoes,
+            _ => REMOTE_ACTION_ECHO_STATES,
+        };
         let upper_due = seen.is_some() && source.upper.is_some();
         let gear = source.gear();
         let paperdoll_change = seen.and_then(|seen| {
@@ -369,6 +405,12 @@ impl Replica {
             looking_through_loadout: source.looking_through_loadout,
             mount: source.mount,
             action,
+            // The card carries the spawn's state: the echoes start with the next state.
+            action_echoes: if seen.is_some() {
+                action_echoes_left.saturating_sub(1)
+            } else {
+                action_echoes_left
+            },
             life_ms,
             anchor,
         };
@@ -382,10 +424,12 @@ impl Replica {
             mount_change,
             block_changed,
             action_changed,
+            sends_action: action_echoes_left > 0,
             upper_due,
             place,
             anchor,
             anchor_moved,
+            life_ms,
         };
         (replica, memory)
     }
@@ -428,20 +472,38 @@ impl Replica {
         entity: u64,
         position: Position,
         carded: bool,
+        home_world: [u8; RAW_ID_LEN],
+        sight: &mut ViewerSight,
     ) -> Result<Option<BundleGroup>, MessageError> {
         let Some(pos) = InputPosition::from_metres(position.x, position.y, position.z) else {
             return Ok(None);
         };
         let source = &self.source;
         if carded {
+            let life = if source.health == 0 {
+                VitalsData::player_dead(self.life_ms)
+            } else {
+                VitalsData::player_alive(self.life_ms)
+            };
             let states = PlayerStates {
                 character_id: source.character,
+                identity: Some(PlayerIdentity {
+                    name: source.name.as_str(),
+                    home_world,
+                    life,
+                }),
                 look: source.look,
                 health: Some((source.health, source.max_health)),
                 gear: Some(&self.gear),
                 achievements: None,
                 objectives: None,
-                progression: None,
+                // Retail sends other players the level alone (general-other-01: `01 01 <level>`
+                // on every first card of another player).
+                progression: Some(ProgressionState {
+                    level: Some(source.level),
+                    experience: None,
+                    rested: None,
+                }),
                 categorical_progression: None,
                 progression_points: None,
                 currency: None,
@@ -454,16 +516,16 @@ impl Replica {
             let Some(mut group) = entity_group(
                 interest,
                 entity,
-                EntityKind::PLAYER,
+                EntityKind::REMOTE_PLAYER,
                 position,
                 true,
                 Some(states),
             ) else {
                 return Ok(None);
             };
-            if source.looking_through_loadout {
-                put_looking_through_loadout(&mut group.members, true);
-            }
+            // Retail sends `lookingThroughLoadout` on every first card of another player, false
+            // too (general-other-01: slot 2 child 4 `00`).
+            put_looking_through_loadout(&mut group.members, source.looking_through_loadout);
             if let Some(mount) = remote_member(None, source.mount) {
                 put_member(&mut group.members, mount);
             }
@@ -472,22 +534,31 @@ impl Replica {
                     anchor: self.anchor,
                     at: pos,
                 };
-                alc.state = MemberState::Alc(AlcState::spawn(place, self.stamp)?);
+                alc.state =
+                    MemberState::Alc(AlcState::remote_spawn(place, self.stamp, source.movement)?);
             }
+            // The first state carries the own spawn's sequence time and the whole clock: the
+            // viewer's client has them from there.
+            *sight = ViewerSight {
+                sequence: RemoteSequenceClock::after_spawn(),
+                stamp: KnownStamp::of(self.stamp),
+            };
             return Ok(Some(group));
         }
         let mut members = vec![BundleMember {
             component: PLAYER_ALC_COMPONENT,
             state: MemberState::Alc(AlcState::remote_step(&RemoteStep {
                 stamp: self.stamp,
+                known: sight.stamp,
                 position: self.place,
                 facing: source.view.map(|view| view.yaw),
                 look: source.view,
-                slayer: source.action,
-                sequence_time: None,
+                slayer: source.action.filter(|_| self.sends_action),
+                sequence_time: source.sequence.map(|seconds| sight.sequence.time(seconds)),
                 upper: source.upper,
             })?),
         }];
+        sight.stamp = KnownStamp::of(self.stamp);
         if let Some(change) = self.health_change {
             members.push(BundleMember {
                 component: VITALS_COMPONENT,
@@ -543,8 +614,6 @@ pub(super) struct RemoteCandidate<'a> {
     pub(super) replica: &'a Replica,
     /// The viewer has no slot for it yet: its card goes now.
     pub(super) new: bool,
-    /// Its card refresh is due.
-    pub(super) refresh: bool,
 }
 
 /// Which remote players one viewer gets this tick.
@@ -552,21 +621,33 @@ pub(super) struct RemoteCandidate<'a> {
 pub(super) struct RemotePlan {
     /// The bundle step each remote player was last sent in, by entity number.
     last_sent: HashMap<u64, u64>,
+    /// What this viewer's client has of each remote player's clocks.
+    sights: HashMap<u64, ViewerSight>,
+}
+
+/// What one viewer's client has of one remote player's clocks: its sequence time and its state
+/// clock ([`KnownStamp`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct ViewerSight {
+    pub(super) sequence: RemoteSequenceClock,
+    pub(super) stamp: KnownStamp,
 }
 
 impl RemotePlan {
     /// The remote players of `candidates` that the viewer gets in its bundle step `step`: every
-    /// new one and every change, then the ones whose wait came, card refreshes first, then those
-    /// in combat, then the longest waiting, then the nearest, at most [`REMOTE_GROUPS_PER_TICK`].
+    /// new one and every change, then the ones whose wait came, those in combat first, then the
+    /// longest waiting, then the nearest, at most [`REMOTE_GROUPS_PER_TICK`].
     /// Players no longer seen are forgotten.
     pub(super) fn pick(&mut self, step: u64, candidates: &[RemoteCandidate<'_>]) -> Vec<u64> {
-        self.last_sent.retain(|number, _| {
+        let seen = |number: &u64| {
             candidates
                 .iter()
                 .any(|candidate| candidate.number == *number)
-        });
+        };
+        self.last_sent.retain(|number, _| seen(number));
+        self.sights.retain(|number, _| seen(number));
         let mut picked: Vec<u64> = Vec::new();
-        let mut waiting: Vec<(bool, bool, u64, f32, u64)> = Vec::new();
+        let mut waiting: Vec<(bool, u64, f32, u64)> = Vec::new();
         for candidate in candidates {
             let replica = candidate.replica;
             if candidate.new || replica.changed() {
@@ -577,9 +658,8 @@ impl RemotePlan {
                 .last_sent
                 .get(&candidate.number)
                 .map_or(u64::MAX, |sent| step.saturating_sub(*sent));
-            if candidate.refresh || age >= period_ticks(candidate.distance_m, replica.in_combat()) {
+            if age >= period_ticks(candidate.distance_m, replica.in_combat()) {
                 waiting.push((
-                    !candidate.refresh,
                     !replica.in_combat(),
                     u64::MAX - age,
                     candidate.distance_m,
@@ -590,9 +670,8 @@ impl RemotePlan {
         waiting.sort_by(|a, b| {
             a.0.cmp(&b.0)
                 .then(a.1.cmp(&b.1))
-                .then(a.2.cmp(&b.2))
-                .then(a.3.total_cmp(&b.3))
-                .then(a.4.cmp(&b.4))
+                .then(a.2.total_cmp(&b.2))
+                .then(a.3.cmp(&b.3))
         });
         picked.extend(
             waiting
@@ -605,6 +684,11 @@ impl RemotePlan {
         }
         picked
     }
+
+    /// What this viewer's client has of remote player `number`'s clocks.
+    pub(super) fn sight(&mut self, number: u64) -> &mut ViewerSight {
+        self.sights.entry(number).or_default()
+    }
 }
 
 #[cfg(test)]
@@ -613,6 +697,10 @@ pub(super) mod tests {
 
     const SPAWNED_MS: u64 = 1_000_000;
     const MAX_HEALTH: u32 = 856;
+    const HOME_WORLD: [u8; RAW_ID_LEN] = [3; RAW_ID_LEN];
+    const NAME: &str = "Remote";
+    /// A zero-based level: level 21.
+    const LEVEL: u32 = 20;
     /// A remote aim of the retail arena capture (2026-09-13): `19=2e 20=0dea 21=9606 48=28`.
     const AIM_STATE: u64 = 0x2e;
     const AIM_STARTED: u16 = 0x0dea;
@@ -627,6 +715,10 @@ pub(super) mod tests {
     pub(in crate::world) fn source() -> ReplicaSource {
         ReplicaSource {
             character: [7; RAW_ID_LEN],
+            name: GhostName::of(NAME),
+            level: LEVEL,
+            sequence: None,
+            movement: SPAWN_MOVEMENT,
             look: None,
             health: MAX_HEALTH,
             max_health: MAX_HEALTH,
@@ -677,6 +769,45 @@ pub(super) mod tests {
     }
 
     /// The source of a player whose own state echoes the retail aim.
+    #[test]
+    fn another_players_states_carry_its_sequence_time_on_the_viewers_clock() {
+        /// Seconds into the sequence: one step past a new absolute part.
+        const SECONDS: f32 = 1.5;
+        let source = ReplicaSource {
+            sequence: Some(SECONDS),
+            ..source()
+        };
+        let (replica, _) = Replica::new(source, AT, None, SPAWNED_MS);
+        let mut sight = ViewerSight::default();
+        let mut expected = sight.sequence;
+        let group = replica
+            .group(9, 1, AT, false, HOME_WORLD, &mut sight)
+            .expect("group")
+            .expect("state");
+        let MemberState::Alc(alc) = &group.members[0].state else {
+            panic!("the ALC first");
+        };
+        let time = expected.time(SECONDS);
+        let children = alc.slot0_children().expect("children");
+        let child = |index: usize| {
+            children
+                .iter()
+                .find(|(child, _)| *child == index)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            child(2),
+            Some(vec![time.rel]),
+            "slayerSeqTimeRel (retail 1,750 of 1,751)"
+        );
+        assert_eq!(
+            child(3),
+            time.abs.map(|abs| abs.to_be_bytes().to_vec()),
+            "a new absolute part for a viewer whose client has none"
+        );
+        assert_eq!(sight.sequence, expected, "the viewer's clock took it");
+    }
+
     fn aiming() -> ReplicaSource {
         ReplicaSource {
             upper: Some(RemoteUpper {
@@ -709,7 +840,7 @@ pub(super) mod tests {
         let (aim, seen) = Replica::new(aiming(), AT, Some(seen), SPAWNED_MS + 20);
         assert!(aim.changed(), "every viewer gets the aim now");
         let group = aim
-            .group(5, 9, AT, false)
+            .group(5, 9, AT, false, HOME_WORLD, &mut ViewerSight::default())
             .expect("encodes")
             .expect("a group");
         let MemberState::Alc(state) = &group.members[0].state else {
@@ -733,7 +864,7 @@ pub(super) mod tests {
         let (quiet, _) = Replica::new(source(), AT, Some(seen), SPAWNED_MS + 30);
         assert!(!quiet.changed(), "the echo is over");
         let group = quiet
-            .group(5, 9, AT, false)
+            .group(5, 9, AT, false, HOME_WORLD, &mut ViewerSight::default())
             .expect("encodes")
             .expect("a group");
         let MemberState::Alc(state) = &group.members[0].state else {
@@ -790,6 +921,64 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn others_get_an_action_in_its_first_states_only() {
+        /// A retail attack state (any value: only its change counts here).
+        const ATTACK: SlayerState = SlayerState {
+            state: Some(0x2e),
+            started: Some(0x0dea),
+            sequence: 406,
+            second: None,
+        };
+        let carried = |replica: &Replica| {
+            let group = replica
+                .group(9, 1, AT, false, HOME_WORLD, &mut ViewerSight::default())
+                .expect("group")
+                .expect("state");
+            let MemberState::Alc(alc) = &group.members[0].state else {
+                panic!("the ALC first");
+            };
+            alc.slot0_children()
+                .expect("children")
+                .iter()
+                .any(|(child, _)| *child == 13)
+        };
+        let attacking = ReplicaSource {
+            action: Some(ATTACK),
+            ..source()
+        };
+        let (_, mut seen) = Replica::new(attacking.clone(), AT, None, SPAWNED_MS);
+        let mut sent = Vec::new();
+        for tick in 1..=6 {
+            let (replica, now_seen) =
+                Replica::new(attacking.clone(), AT, Some(seen), SPAWNED_MS + tick * 33);
+            sent.push(carried(&replica));
+            seen = now_seen;
+        }
+        assert_eq!(
+            sent,
+            [true, true, true, false, false, false],
+            "after the card: its action in {REMOTE_ACTION_ECHO_STATES} states, then no more"
+        );
+        let next = SlayerState {
+            started: Some(0x0e00),
+            ..ATTACK
+        };
+        let (replica, _) = Replica::new(
+            ReplicaSource {
+                action: Some(next),
+                ..attacking
+            },
+            AT,
+            Some(seen),
+            SPAWNED_MS + 7 * 33,
+        );
+        assert!(
+            replica.changed() && carried(&replica),
+            "a new action goes at once"
+        );
+    }
+
+    #[test]
     fn others_get_a_change_of_the_hands_as_the_changed_maps_alone() {
         let (_, seen) = Replica::new(source(), AT, None, SPAWNED_MS);
         let drawn = ReplicaSource {
@@ -809,7 +998,10 @@ pub(super) mod tests {
             (None, None),
             "no slot or look list (retail newchar 2026-09-18)"
         );
-        let group = draw.group(9, 1, AT, false).expect("group").expect("state");
+        let group = draw
+            .group(9, 1, AT, false, HOME_WORLD, &mut ViewerSight::default())
+            .expect("group")
+            .expect("state");
         assert!(group.members.iter().any(|member| matches!(
             &member.state,
             MemberState::Paperdoll(paperdoll) if paperdoll.owner.is_none()
@@ -823,7 +1015,10 @@ pub(super) mod tests {
         };
         let (open, _) = Replica::new(looking, AT, Some(seen), SPAWNED_MS + 99);
         assert_eq!(open.loadout_change, Some(true));
-        let group = open.group(9, 1, AT, false).expect("group").expect("state");
+        let group = open
+            .group(9, 1, AT, false, HOME_WORLD, &mut ViewerSight::default())
+            .expect("group")
+            .expect("state");
         assert!(group.members.iter().any(|member| {
             member.component == nw_messages::PLAYER_COMPONENT_COMPONENT
                 && member.state
@@ -845,7 +1040,10 @@ pub(super) mod tests {
                 .cloned()
         };
         let (first, seen) = Replica::new(source(), AT, None, SPAWNED_MS);
-        let card = first.group(9, 1, AT, true).expect("group").expect("card");
+        let card = first
+            .group(9, 1, AT, true, HOME_WORLD, &mut ViewerSight::default())
+            .expect("group")
+            .expect("card");
         assert_eq!(
             mount_member(&card),
             remote_member(None, GhostMount::default()),
@@ -861,7 +1059,10 @@ pub(super) mod tests {
         };
         let (up, seen) = Replica::new(riding.clone(), AT, Some(seen), SPAWNED_MS + 33);
         assert!(up.changed(), "a mount-up goes to every viewer now");
-        let group = up.group(9, 1, AT, false).expect("group").expect("state");
+        let group = up
+            .group(9, 1, AT, false, HOME_WORLD, &mut ViewerSight::default())
+            .expect("group")
+            .expect("state");
         assert_eq!(
             mount_member(&group),
             remote_member(Some(GhostMount::default()), riding.mount)
@@ -895,7 +1096,14 @@ pub(super) mod tests {
         let (late, _) = Replica::new(source(), east(3.5), Some(seen), SPAWNED_MS + 99);
         assert_eq!(late.anchor, far.anchor);
         let group = late
-            .group(9, 1, east(3.5), true)
+            .group(
+                9,
+                1,
+                east(3.5),
+                true,
+                HOME_WORLD,
+                &mut ViewerSight::default(),
+            )
             .expect("group")
             .expect("card");
         let MemberState::Alc(card) = &group.members.last().expect("alc").state else {
@@ -921,7 +1129,6 @@ pub(super) mod tests {
             distance_m,
             replica,
             new: false,
-            refresh: false,
         };
         let mut plan = RemotePlan::default();
         let far = MID_M + 1.0;

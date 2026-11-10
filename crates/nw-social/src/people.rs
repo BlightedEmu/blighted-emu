@@ -326,6 +326,8 @@ impl SocialWorld {
             return;
         };
         let now_s = now_ms / MS_PER_SECOND;
+        // The live check of a voice sign-in: which call came, in order.
+        tracing::info!(%character, ?call, "client voice call");
         let push = match call {
             VoiceCall::Register => VoicePush::Registered {
                 api_url: service.api_url.clone(),

@@ -18,16 +18,32 @@
 //! - an objective's time limit ends it (`m_succeedOnTimeout`) or fails its stage; a failed
 //!   stage or a wipe (every player in the instance dead for the encounter's grace period)
 //!   resets the encounter: its mobs go and it starts again.
+//!
+//! The open world's encounters (its spawn groups: `WorldEvent_SpawnGroup_Single_Master` and
+//! the others of [`nw_world::dungeon_scripts::OPEN_WORLD_LEVEL`]) run by the same stages, with
+//! the open world's own start and end ([`OpenWorldRules`]; retail `12-8_demonstorm` and
+//! `12-9_demonstorm2`: the storm priest shows `Spawn` when the player comes within 84 m, and
+//! his swarmers come two at a time, 15 s apart, as his `Sub-Phase_01 - Spawn Swarmer Portals`
+//! stage spawns them):
+//!
+//! - an encounter starts when a player comes within the sim's wake radius of it, not with the
+//!   sim (Inferred: 329 encounters hold 1,875 mobs that would stand awake with no player near);
+//! - when no player is that near for its grace period, it resets and waits again;
+//! - an ended encounter starts again after the mob respawn time (Inferred: the retail time of
+//!   a world event is Unknown);
+//! - a sim runs the encounters of its own cells.
 
 use nw_bus::Point;
 use nw_sim_core::Position;
 use nw_world::dungeon_scripts::{
-    Encounter, LevelScript, ObjectiveSpec, Spawn, StageAction, TargetMob,
+    Encounter, LevelScript, OPEN_WORLD_LEVEL, ObjectiveSpec, Spawn, StageAction, TargetMob,
 };
+use nw_world::records::PatrolPath;
 use uuid::Uuid;
 
 use super::loot_bag::LimitsSent;
 use super::{Body, Player, SimWorld, Vitals};
+use crate::mob_ai::script_mob_ai;
 use crate::objectives::Event;
 
 /// Milliseconds in a second.
@@ -49,8 +65,14 @@ const ONE: u32 = 1;
 
 /// What the script asks of the sim.
 pub(super) trait ScriptHost {
-    /// Spawns mob `mob` at `at`; its entity, or `None` when it cannot spawn.
-    fn spawn(&mut self, mob: &TargetMob, at: [f32; 3]) -> Option<u64>;
+    /// Spawns mob `mob` at `at` with the waypoints `waypoints` of its spawner slice; its
+    /// entity, or `None` when it cannot spawn.
+    fn spawn(
+        &mut self,
+        mob: &TargetMob,
+        at: [f32; 3],
+        waypoints: Option<&PatrolPath>,
+    ) -> Option<u64>;
     /// Removes encounter mob `entity`.
     fn remove(&mut self, entity: u64);
     /// The health of mob `entity`; `None` when it is gone.
@@ -66,6 +88,8 @@ pub(super) trait ScriptHost {
 pub(super) struct ScriptView {
     /// The places of the living players.
     pub(super) living: Vec<Position>,
+    /// The places of every player, living or dead.
+    pub(super) everyone: Vec<Position>,
     /// Some player is in the instance (living or dead).
     pub(super) present: bool,
     /// The encounter events the mobs' trees sent: (mob, event id).
@@ -139,6 +163,19 @@ struct EncounterRun {
     wiped_since_ms: Option<u64>,
     /// Its end went out as an outcome.
     reported: bool,
+    /// Open world: since when no player is near.
+    left_since_ms: Option<u64>,
+    /// Open world: when it ended.
+    done_ms: Option<u64>,
+}
+
+/// How the encounters of the open world start and end (see the module text).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct OpenWorldRules {
+    /// A player this near starts an encounter and keeps it.
+    pub(super) near_m: f32,
+    /// An ended encounter starts again after this time.
+    pub(super) respawn_ms: u64,
 }
 
 /// What a tick of the script did that the sim acts on.
@@ -157,6 +194,8 @@ pub(crate) struct DungeonRun {
     script: LevelScript,
     encounters: Vec<EncounterRun>,
     completed: bool,
+    /// The rules of the open world; `None` for an instance.
+    open_world: Option<OpenWorldRules>,
 }
 
 impl DungeonRun {
@@ -175,7 +214,24 @@ impl DungeonRun {
             script,
             encounters,
             completed: false,
+            open_world: None,
         }
+    }
+
+    /// The run of the open world's `script` by `rules`: every encounter idle.
+    pub(super) fn of_open_world(script: LevelScript, rules: OpenWorldRules) -> Self {
+        Self {
+            open_world: Some(rules),
+            ..Self::new(Uuid::nil(), script)
+        }
+    }
+
+    /// The place of each encounter.
+    pub(super) fn places(&self) -> impl Iterator<Item = [f32; 3]> + '_ {
+        self.script
+            .encounters
+            .iter()
+            .map(|encounter| encounter.position)
     }
 
     /// The live mobs of every encounter.
@@ -187,16 +243,29 @@ impl DungeonRun {
             .map(|mob| mob.entity)
     }
 
-    /// One tick at `now_ms`.
+    /// One tick at `now_ms`. `owned` names the encounters this sim runs, by index (every one
+    /// when it is empty): an encounter of another sim's cell resets here.
     pub(super) fn tick(
         &mut self,
         host: &mut impl ScriptHost,
         view: &ScriptView,
+        owned: &[bool],
         now_ms: u64,
     ) -> Vec<ScriptOutcome> {
         let mut outcomes = Vec::new();
         for (index, encounter) in self.script.encounters.iter().enumerate() {
             let run = &mut self.encounters[index];
+            if !owned.get(index).copied().unwrap_or(true) {
+                if run.status != EncounterStatus::Idle {
+                    reset(run, host);
+                }
+                continue;
+            }
+            if let Some(rules) = self.open_world
+                && !open_world_step(encounter, run, host, view, rules, now_ms)
+            {
+                continue;
+            }
             tick_encounter(encounter, run, host, view, now_ms);
             if run.status == EncounterStatus::Done && !run.reported {
                 run.reported = true;
@@ -245,6 +314,46 @@ fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
 
 fn position([x, y, z]: [f32; 3]) -> Position {
     Position { x, y, z }
+}
+
+/// The open world's part of an encounter's tick: whether the encounter runs its stages in this
+/// tick. It waits idle until a player is near, resets when every player left for its grace
+/// period, and starts again [`OpenWorldRules::respawn_ms`] after its end.
+fn open_world_step(
+    encounter: &Encounter,
+    run: &mut EncounterRun,
+    host: &mut impl ScriptHost,
+    view: &ScriptView,
+    rules: OpenWorldRules,
+    now_ms: u64,
+) -> bool {
+    let place = position(encounter.position);
+    let near = view
+        .everyone
+        .iter()
+        .any(|player| player.horizontal_distance(place) <= rules.near_m);
+    match run.status {
+        EncounterStatus::Idle => near,
+        EncounterStatus::Done => {
+            bury(run, host, now_ms);
+            let done = *run.done_ms.get_or_insert(now_ms);
+            if now_ms.saturating_sub(done) >= rules.respawn_ms {
+                reset(run, host);
+            }
+            false
+        }
+        EncounterStatus::Due(_) | EncounterStatus::Running => {
+            run.left_since_ms = (!near).then(|| run.left_since_ms.unwrap_or(now_ms));
+            let grace_ms = u64::from(encounter.grace_period_s).saturating_mul(MS_PER_S);
+            let left = run
+                .left_since_ms
+                .is_some_and(|since| now_ms.saturating_sub(since) >= grace_ms);
+            if left {
+                reset(run, host);
+            }
+            !left
+        }
+    }
 }
 
 fn tick_encounter(
@@ -534,6 +643,7 @@ fn spawn_one(
         .enumerate()
         .filter_map(|(index, slice)| Some((index, slice.mob.as_ref()?, slice.percent.max(ONE))))
         .collect();
+    let per_spawn = |slice: usize| target.slices[slice].mobs_per_spawn.max(ONE);
     let total: u32 = mobs.iter().map(|(_, _, weight)| weight).sum();
     if mobs.is_empty() {
         tracing::debug!(target = %target.name, "encounter spawn of no mob");
@@ -553,20 +663,22 @@ fn spawn_one(
             .and_then(|number| spawn.locations.get(number % spawn.locations.len().max(1)))
             .copied()
             .unwrap_or(encounter.position);
-        match host.spawn(mob, at) {
-            Some(entity) => run.mobs.push(EncounterMob {
-                entity,
-                target: spawn.target,
-                slice,
-                stage,
-                died_ms: None,
-                gone: false,
-            }),
-            None => tracing::warn!(
-                vitals = %mob.vitals_id,
-                level = mob.level,
-                "an encounter mob cannot spawn"
-            ),
+        for _ in 0..per_spawn(slice) {
+            match host.spawn(mob, at, target.slices[slice].waypoints.as_ref()) {
+                Some(entity) => run.mobs.push(EncounterMob {
+                    entity,
+                    target: spawn.target,
+                    slice,
+                    stage,
+                    died_ms: None,
+                    gone: false,
+                }),
+                None => tracing::warn!(
+                    vitals = %mob.vitals_id,
+                    level = mob.level,
+                    "an encounter mob cannot spawn"
+                ),
+            }
         }
     }
 }
@@ -742,18 +854,32 @@ fn run_actions(
 /// The sim as the host of its instance's script.
 struct SimHost<'a> {
     world: &'a mut SimWorld,
+    /// The mobs take the instance's mutation (an instance's script).
+    mutated: bool,
 }
 
 impl ScriptHost for SimHost<'_> {
-    fn spawn(&mut self, mob: &TargetMob, at: [f32; 3]) -> Option<u64> {
+    fn spawn(
+        &mut self,
+        mob: &TargetMob,
+        at: [f32; 3],
+        waypoints: Option<&PatrolPath>,
+    ) -> Option<u64> {
         let [x, y, z] = at;
-        match self
-            .world
-            .spawn_gm(&mob.vitals_id, mob.level, Point { x, y, z }, ONE)
-        {
+        let ai =
+            waypoints.map(|path| script_mob_ai(path, Position { x, y, z }, self.world.mobs.ai()));
+        match self.world.spawn_gm(
+            &mob.vitals_id,
+            mob.level,
+            Point { x, y, z },
+            ONE,
+            ai.as_ref(),
+        ) {
             Ok(entities) => {
                 let entity = entities.first().copied()?;
-                self.world.mutate_mob(entity);
+                if self.mutated {
+                    self.world.mutate_mob(entity);
+                }
                 Some(entity)
             }
             Err(reason) => {
@@ -803,6 +929,10 @@ impl SimWorld {
     /// and the last one completes the instance.
     pub(super) fn tick_dungeon_script(&mut self, now_ms: u64) {
         let events = self.mobs.take_encounter_events();
+        if !self.instance_sim {
+            self.tick_world_events(events, now_ms);
+            return;
+        }
         let running = self
             .instance_run
             .as_ref()
@@ -832,14 +962,12 @@ impl SimWorld {
             events,
             ..ScriptView::default()
         };
-        let mut query = self.world.query::<(&Player, &Body, &Vitals)>();
-        for (_, body, vitals) in query.iter(&self.world) {
-            view.present = true;
-            if !vitals.health.is_dead() {
-                view.living.push(body.motion.position());
-            }
-        }
-        let outcomes = run.tick(&mut SimHost { world: self }, &view, now_ms);
+        self.see_players(&mut view);
+        let host = &mut SimHost {
+            world: self,
+            mutated: true,
+        };
+        let outcomes = run.tick(host, &view, &[], now_ms);
         for outcome in outcomes {
             match outcome {
                 ScriptOutcome::EncounterDone(index) => {
@@ -864,6 +992,69 @@ impl SimWorld {
             }
         }
         self.dungeon_run = Some(run);
+    }
+
+    /// The places of the players, for a script's view.
+    fn see_players(&mut self, view: &mut ScriptView) {
+        let mut query = self.world.query::<(&Player, &Body, &Vitals)>();
+        for (_, body, vitals) in query.iter(&self.world) {
+            let at = body.motion.position();
+            view.present = true;
+            view.everyone.push(at);
+            if !vitals.health.is_dead() {
+                view.living.push(at);
+            }
+        }
+    }
+
+    /// The open world's encounters at `now_ms`, with the encounter events `events` of the mobs'
+    /// trees: the script of this sim's level, when the dungeon script file holds one.
+    fn tick_world_events(&mut self, events: Vec<(u64, String)>, now_ms: u64) {
+        if self.world_events.is_none() {
+            let Some(script) = self
+                .settings
+                .world_events
+                .then(|| self.content.dungeon_scripts.game_mode(OPEN_WORLD_LEVEL))
+                .flatten()
+                .cloned()
+            else {
+                return;
+            };
+            tracing::info!(
+                encounters = script.encounters.len(),
+                "open world encounters"
+            );
+            let rules = OpenWorldRules {
+                near_m: self.combat.wake_radius_m,
+                respawn_ms: self.combat.mob_respawn_ms,
+            };
+            self.world_events = Some(DungeonRun::of_open_world(script, rules));
+        }
+        let Some(mut run) = self.world_events.take() else {
+            return;
+        };
+        let mut view = ScriptView {
+            events,
+            ..ScriptView::default()
+        };
+        self.see_players(&mut view);
+        let owned: Vec<bool> = run
+            .places()
+            .map(|[x, y, z]| self.owns(Point { x, y, z }))
+            .collect();
+        let host = &mut SimHost {
+            world: self,
+            mutated: false,
+        };
+        for outcome in run.tick(host, &view, &owned, now_ms) {
+            if let ScriptOutcome::EncounterDone(index) = outcome {
+                tracing::debug!(
+                    encounter = %run.script.encounters[index].name,
+                    "open world encounter done"
+                );
+            }
+        }
+        self.world_events = Some(run);
     }
 
     /// Every player of the instance finished its game mode (`TaskCompleteDungeon`).
@@ -950,7 +1141,12 @@ mod tests {
     }
 
     impl ScriptHost for Host {
-        fn spawn(&mut self, mob: &TargetMob, at: [f32; 3]) -> Option<u64> {
+        fn spawn(
+            &mut self,
+            mob: &TargetMob,
+            at: [f32; 3],
+            _waypoints: Option<&PatrolPath>,
+        ) -> Option<u64> {
             self.next += 1;
             self.health.insert(self.next, 100);
             self.spawned.push((mob.vitals_id.clone(), at));
@@ -1100,6 +1296,7 @@ mod tests {
     fn view(players: &[[f32; 3]]) -> ScriptView {
         ScriptView {
             living: players.iter().map(|at| position(*at)).collect(),
+            everyone: players.iter().map(|at| position(*at)).collect(),
             present: true,
             events: Vec::new(),
         }
@@ -1114,46 +1311,120 @@ mod tests {
         let mut run = DungeonRun::new(Uuid::nil(), script(vec![boss_encounter()]));
         let mut host = Host::default();
         let far = [0.0, 0.0, 0.0];
-        run.tick(&mut host, &view(&[far]), T0);
-        run.tick(&mut host, &view(&[far]), T0 + 1);
+        run.tick(&mut host, &view(&[far]), &[], T0);
+        run.tick(&mut host, &view(&[far]), &[], T0 + 1);
         assert_eq!(host.spawned, [(BOSS_VITALS.to_owned(), PLACE)]);
         assert_eq!(
             stage_status(&run, 1),
             StageStatus::Running,
             "waits for a player"
         );
-        run.tick(&mut host, &view(&[PLACE]), T0 + 2);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 2);
         assert_eq!(stage_status(&run, 1), StageStatus::Done);
         assert_eq!(stage_status(&run, 2), StageStatus::Running, "the intro");
         let mut events = view(&[PLACE]);
         events.events.push((1, "Intro2_Complete".to_owned()));
-        run.tick(&mut host, &events, T0 + 3);
+        run.tick(&mut host, &events, &[], T0 + 3);
         assert_eq!(stage_status(&run, 2), StageStatus::Done);
         assert_eq!(stage_status(&run, 3), StageStatus::Running, "the fight");
         host.kill(BOSS_VITALS);
-        let outcomes = run.tick(&mut host, &view(&[PLACE]), T0 + 4);
+        let outcomes = run.tick(&mut host, &view(&[PLACE]), &[], T0 + 4);
         assert_eq!(
             outcomes,
             [ScriptOutcome::EncounterDone(0), ScriptOutcome::Completed]
         );
         assert_eq!(run.chests_of(0).count(), 1);
-        run.tick(&mut host, &view(&[PLACE]), T0 + 4 + CORPSE_MS);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 4 + CORPSE_MS);
         assert_eq!(host.removed, [1], "the body goes after its corpse time");
+    }
+
+    #[test]
+    fn an_open_world_encounter_runs_while_a_player_is_near_and_comes_back_after_its_end() {
+        // Retail `12-8_demonstorm`: the storm priest shows `Spawn` when the player comes
+        // within 84 m of him.
+        const NEAR_M: f32 = 100.0;
+        const RESPAWN_MS: u64 = 60_000;
+        let rules = OpenWorldRules {
+            near_m: NEAR_M,
+            respawn_ms: RESPAWN_MS,
+        };
+        let far = [PLACE[0] + NEAR_M * 3.0, PLACE[1], PLACE[2]];
+        let mut run = DungeonRun::of_open_world(script(vec![boss_encounter()]), rules);
+        let mut host = Host::default();
+        run.tick(&mut host, &view(&[far]), &[], T0);
+        run.tick(&mut host, &view(&[far]), &[], T0 + 1);
+        assert!(host.spawned.is_empty(), "no player is near");
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 2);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 3);
+        assert_eq!(host.spawned, [(BOSS_VITALS.to_owned(), PLACE)]);
+        // Every player leaves for the grace period: its mobs go and it waits again.
+        let left = T0 + 4;
+        run.tick(&mut host, &view(&[far]), &[], left);
+        assert!(host.removed.is_empty(), "the grace period runs");
+        run.tick(
+            &mut host,
+            &view(&[far]),
+            &[],
+            left + u64::from(GRACE_S) * MS_PER_S,
+        );
+        assert_eq!(host.removed, [1]);
+        // A player comes back: it starts again; another sim's cell takes it away.
+        let back = left + u64::from(GRACE_S) * MS_PER_S + 1;
+        run.tick(&mut host, &view(&[PLACE]), &[], back);
+        run.tick(&mut host, &view(&[PLACE]), &[], back + 1);
+        assert_eq!(host.spawned.len(), 2);
+        run.tick(&mut host, &view(&[PLACE]), &[false], back + 2);
+        assert_eq!(host.removed, [1, 2], "an encounter of another sim's cell");
+        // It runs to its end, and starts again after the respawn time.
+        run.tick(&mut host, &view(&[PLACE]), &[], back + 3);
+        run.tick(&mut host, &view(&[PLACE]), &[], back + 4);
+        let mut events = view(&[PLACE]);
+        events.events.push((3, "Intro2_Complete".to_owned()));
+        run.tick(&mut host, &events, &[], back + 5);
+        host.kill(BOSS_VITALS);
+        let outcomes = run.tick(&mut host, &view(&[PLACE]), &[], back + 6);
+        assert!(outcomes.contains(&ScriptOutcome::EncounterDone(0)));
+        let spawned = host.spawned.len();
+        run.tick(&mut host, &view(&[PLACE]), &[], back + 7);
+        assert_eq!(host.spawned.len(), spawned, "it waits for its respawn time");
+        run.tick(&mut host, &view(&[PLACE]), &[], back + 7 + RESPAWN_MS);
+        run.tick(&mut host, &view(&[PLACE]), &[], back + 8 + RESPAWN_MS);
+        run.tick(&mut host, &view(&[PLACE]), &[], back + 9 + RESPAWN_MS);
+        assert_eq!(host.spawned.len(), spawned + 1, "it starts again");
+    }
+
+    #[test]
+    fn a_spawn_of_a_nested_encounter_slice_makes_each_of_its_mobs() {
+        // The storm priest's minion portal: one spawn of the nested encounter slice makes its
+        // two swarmers (retail `12-9_demonstorm2`: two `Corruption_Swarmer_Chaplain_Minion` at
+        // 121.0 s and 122.3 s, two more 15 s later).
+        const PER_PORTAL: u32 = 2;
+        let mut encounter = boss_encounter();
+        for target in &mut encounter.targets {
+            for slice in &mut target.slices {
+                slice.mobs_per_spawn = PER_PORTAL;
+            }
+        }
+        let mut run = DungeonRun::new(Uuid::nil(), script(vec![encounter]));
+        let mut host = Host::default();
+        run.tick(&mut host, &view(&[PLACE]), &[], T0);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
+        assert_eq!(host.spawned.len(), PER_PORTAL as usize);
     }
 
     #[test]
     fn the_intro_ends_at_its_time_limit_without_its_event() {
         let mut run = DungeonRun::new(Uuid::nil(), script(vec![boss_encounter()]));
         let mut host = Host::default();
-        run.tick(&mut host, &view(&[PLACE]), T0);
-        run.tick(&mut host, &view(&[PLACE]), T0 + 1);
-        run.tick(&mut host, &view(&[PLACE]), T0 + 2);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 2);
         assert_eq!(stage_status(&run, 2), StageStatus::Running);
         let limit = u64::from(INTRO_S) * MS_PER_S;
-        run.tick(&mut host, &view(&[PLACE]), T0 + 2 + limit);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 2 + limit);
         assert_eq!(stage_status(&run, 2), StageStatus::Done);
         host.phase.insert(1, 3);
-        run.tick(&mut host, &view(&[PLACE]), T0 + 3 + limit);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 3 + limit);
         assert_eq!(
             stage_status(&run, 3),
             StageStatus::Done,
@@ -1165,16 +1436,16 @@ mod tests {
     fn a_wipe_past_the_grace_period_resets_the_encounter() {
         let mut run = DungeonRun::new(Uuid::nil(), script(vec![boss_encounter()]));
         let mut host = Host::default();
-        run.tick(&mut host, &view(&[PLACE]), T0);
-        run.tick(&mut host, &view(&[PLACE]), T0 + 1);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
         assert_eq!(host.spawned.len(), 1);
-        run.tick(&mut host, &view(&[]), T0 + 2);
+        run.tick(&mut host, &view(&[]), &[], T0 + 2);
         let grace = u64::from(GRACE_S) * MS_PER_S;
-        run.tick(&mut host, &view(&[]), T0 + 2 + grace);
+        run.tick(&mut host, &view(&[]), &[], T0 + 2 + grace);
         assert_eq!(host.removed, [1], "the boss goes");
         assert_eq!(run.encounters[0].status, EncounterStatus::Idle);
-        run.tick(&mut host, &view(&[PLACE]), T0 + 3 + grace);
-        run.tick(&mut host, &view(&[PLACE]), T0 + 4 + grace);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 3 + grace);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 4 + grace);
         assert_eq!(host.spawned.len(), 2, "it starts again");
     }
 
@@ -1211,23 +1482,23 @@ mod tests {
         };
         let mut run = DungeonRun::new(Uuid::nil(), script(vec![encounter]));
         let mut host = Host::default();
-        run.tick(&mut host, &view(&[[0.0; 3]]), T0);
+        run.tick(&mut host, &view(&[[0.0; 3]]), &[], T0);
         assert_eq!(
             run.encounters[0].status,
             EncounterStatus::Idle,
             "no player near"
         );
-        run.tick(&mut host, &view(&[PLACE]), T0 + 1);
-        run.tick(&mut host, &view(&[PLACE]), T0 + 2);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 2);
         assert!(host.spawned.is_empty(), "the spawn waits for its delay");
-        run.tick(&mut host, &view(&[PLACE]), T0 + 2 + MS_PER_S);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 2 + MS_PER_S);
         assert_eq!(host.spawned.len(), 2);
         assert!(host.spawned.iter().all(|(_, at)| *at == [1.0, 2.0, 3.0]));
         host.kill(ADD_VITALS);
-        run.tick(&mut host, &view(&[PLACE]), T0 + 3 + MS_PER_S);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 3 + MS_PER_S);
         assert_eq!(stage_status(&run, 0), StageStatus::Done);
         assert_eq!(stage_status(&run, 1), StageStatus::Running);
-        let outcomes = run.tick(&mut host, &view(&[PLACE]), T0 + 4 + 4 * MS_PER_S);
+        let outcomes = run.tick(&mut host, &view(&[PLACE]), &[], T0 + 4 + 4 * MS_PER_S);
         assert!(outcomes.contains(&ScriptOutcome::Completed));
     }
 
@@ -1244,11 +1515,11 @@ mod tests {
         });
         let mut run = DungeonRun::new(Uuid::nil(), script(vec![encounter]));
         let mut host = Host::default();
-        run.tick(&mut host, &view(&[PLACE]), T0);
-        run.tick(&mut host, &view(&[PLACE]), T0 + 1);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
         let mut events = view(&[PLACE]);
         events.events.push((1, "Defeat".to_owned()));
-        run.tick(&mut host, &events, T0 + 2);
+        run.tick(&mut host, &events, &[], T0 + 2);
         assert_eq!(run.encounters[0].status, EncounterStatus::Idle);
         assert_eq!(host.removed, [1]);
     }
@@ -1275,11 +1546,11 @@ mod tests {
         encounter.stages[0].child_stages_optional = true;
         let mut run = DungeonRun::new(Uuid::nil(), script(vec![encounter]));
         let mut host = Host::default();
-        run.tick(&mut host, &view(&[PLACE]), T0);
-        run.tick(&mut host, &view(&[PLACE]), T0 + 1);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
         let mut events = view(&[PLACE]);
         events.events.push((1, "Fight_Complete".to_owned()));
-        run.tick(&mut host, &events, T0 + 2);
+        run.tick(&mut host, &events, &[], T0 + 2);
         assert_eq!(host.removed, [1], "the living boss goes with its stage");
         assert!(
             run.encounters[0]

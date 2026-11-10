@@ -31,7 +31,7 @@ use std::sync::Arc;
 use nw_ai::data::SliceTriggerRef;
 use nw_ai::value::NameId;
 use nw_bus::{MOB_ENTITY_BASE, MOB_STATES, MobGhost, SnapMob};
-use nw_content::combat::CombatData;
+use nw_content::combat::{CombatData, MobGuard};
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_sim_core::{
     BrainAction, ChaseBrain, ChaseSettings, Dice, Gait, Ground, Health, MobAttack, MobState,
@@ -42,8 +42,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::combat::CombatSettings;
 use crate::mob_ai::{
-    COMBAT_LEASH_KEY, HeldEffects, MobAi, RemoteFact, Shown, SpawnAi, Strike, Summon, Surroundings,
-    TaggedMob, TreeMind, floor_line, height_after_move,
+    COMBAT_LEASH_KEY, GuardHit, HeldEffects, MobAi, RemoteFact, Shown, SpawnAi, Strike, Summon,
+    Surroundings, TaggedMob, TreeMind, floor_line, height_after_move,
 };
 use crate::objectives::KillTypes;
 
@@ -394,6 +394,8 @@ pub struct Mobs {
     personal: FxHashMap<u32, Personal>,
     /// GM mobs by index, with their spawns; their indexes follow the spawn list too.
     gm: BTreeMap<u32, VitalsSpawn>,
+    /// The design overrides of the GM mobs that have any, by spawn index.
+    gm_ai: BTreeMap<u32, SpawnAi>,
     /// Mobs a tree spawned (`ExecuteSpawn`) by index; their indexes follow the spawn list too.
     summoned: FxHashMap<u32, Summoned>,
     /// The design overrides of each spawn of the spawn list (empty: none).
@@ -475,6 +477,22 @@ pub struct SpawnFilter<'a> {
     pub open_map: bool,
     /// The vitals categories, for the open map's rule.
     pub kill_types: &'a KillTypes,
+    /// The places of the open world encounters whose script the sim runs: the script spawns
+    /// their mobs, so the encounter spawns of their groups are left out.
+    pub scripted_at: &'a [[f32; 3]],
+}
+
+/// How far from its group's place the level file puts an encounter spawn of a spawn group
+/// (Observed: 0 to 0.62 m at the storm priest's group, his minion spawn points; the script
+/// spawns the priest 5 m from there).
+const SPAWN_GROUP_M: f32 = 2.0;
+
+/// Whether the encounter spawn `spawn` belongs to a spawn group at one of `places`.
+fn in_scripted_group(spawn: &VitalsSpawn, places: &[[f32; 3]]) -> bool {
+    spawn.is_encounter
+        && places.iter().any(|place| {
+            (spawn.position[0] - place[0]).hypot(spawn.position[1] - place[1]) <= SPAWN_GROUP_M
+        })
 }
 
 /// The spawns of `spawns` that `filter` keeps, with their design overrides. `ai` holds the
@@ -493,7 +511,7 @@ pub fn sim_spawns(
         .filter(|(_, spawn)| {
             let scripted = filter.scripted && spawn.is_encounter;
             let unrun = filter.open_map && is_unrun(spawn, filter.kill_types);
-            !(scripted || unrun)
+            !(scripted || unrun || in_scripted_group(spawn, filter.scripted_at))
         })
         .map(|(index, spawn)| (spawn.clone(), ai.get(index).cloned().flatten()))
         .unzip();
@@ -696,6 +714,7 @@ impl Mobs {
             spawns,
             personal: FxHashMap::default(),
             gm: BTreeMap::new(),
+            gm_ai: BTreeMap::new(),
             summoned: FxHashMap::default(),
             overrides: Arc::from([]),
             next_personal,
@@ -774,14 +793,23 @@ impl Mobs {
         let kind = self.data.mob_type(spawn.vitals_id)?;
         let level = self.data.level(spawn.level)?;
         let at = position_of(spawn);
-        let overrides = self.overrides.get(index as usize).and_then(Option::as_ref);
+        let overrides = self
+            .overrides
+            .get(index as usize)
+            .and_then(Option::as_ref)
+            .or_else(|| self.gm_ai.get(&index));
         let mind = self
             .archetype(spawn, asset)
             .and_then(|archetype| {
                 // Spawn facing: the world file keeps no spawn rotation (Unknown): north.
                 TreeMind::new(&self.ai, archetype, at, 0.0, u64::from(index), overrides)
             })
-            .map_or(Mind::Still, |mind| Mind::Tree(Box::new(mind)));
+            .map_or(Mind::Still, |mut mind| {
+                if let Some(guard) = kind.guard {
+                    mind.set_guard(guard);
+                }
+                Mind::Tree(Box::new(mind))
+            });
         Some(Mob {
             position: at,
             health: Health::full(mob_max_health(
@@ -858,10 +886,17 @@ impl Mobs {
         self.overrides = overrides;
     }
 
-    /// Spawns a GM mob of `spawn`; its entity number, or `None` without its rows.
-    pub fn spawn_gm(&mut self, spawn: VitalsSpawn) -> Option<u64> {
+    /// Spawns a GM mob of `spawn` with the design overrides `ai` (a script mob's waypoints);
+    /// its entity number, or `None` without its rows.
+    pub fn spawn_gm(&mut self, spawn: VitalsSpawn, ai: Option<SpawnAi>) -> Option<u64> {
         let index = self.next_personal;
-        let mob = self.make(index, &spawn, None)?;
+        if let Some(ai) = ai {
+            self.gm_ai.insert(index, ai);
+        }
+        let Some(mob) = self.make(index, &spawn, None) else {
+            self.gm_ai.remove(&index);
+            return None;
+        };
         self.next_personal = index.checked_add(1)?;
         self.live.insert(index, mob);
         self.wake_index(index);
@@ -875,6 +910,7 @@ impl Mobs {
         else {
             return false;
         };
+        self.gm_ai.remove(&index);
         self.live.remove(&index);
         self.awake.remove(&index);
         self.left.push(entity);
@@ -1793,6 +1829,42 @@ impl Mobs {
         }
     }
 
+    /// Whether mob `entity` has its block up (its tree's mind, as of its last step).
+    pub fn blocking(&self, entity: u64) -> bool {
+        self.tree(entity).is_some_and(TreeMind::blocking)
+    }
+
+    /// The guard of mob `entity`, when it can block.
+    pub fn guard(&self, entity: u64) -> Option<MobGuard> {
+        self.tree(entity).and_then(TreeMind::guard)
+    }
+
+    /// Where mob `entity` faces (its tree's yaw: forward is `(-sin, cos)`).
+    pub fn facing(&self, entity: u64) -> Option<f32> {
+        self.tree(entity).map(TreeMind::yaw)
+    }
+
+    /// Mob `entity` can block with guard `guard` (a test's mob of a type without one).
+    #[cfg(test)]
+    pub fn set_guard(&mut self, entity: u64, guard: MobGuard) {
+        if let Some(mob) = spawn_index(entity).and_then(|index| self.live.get_mut(&index))
+            && let Mind::Tree(mind) = &mut mob.mind
+        {
+            mind.set_guard(guard);
+        }
+    }
+
+    /// A blocked hit takes `loss` stamina from mob `entity` at `now_ms`
+    /// ([`TreeMind::guard_hit`]).
+    pub fn guard_hit(&mut self, entity: u64, loss: f32, now_ms: u64) -> Option<GuardHit> {
+        let ai = Arc::clone(&self.ai);
+        let mob = spawn_index(entity).and_then(|index| self.live.get_mut(&index))?;
+        let Mind::Tree(mind) = &mut mob.mind else {
+            return None;
+        };
+        mind.guard_hit(&ai, mob.position, now_ms, loss)
+    }
+
     /// A hit reaction of `length_ms` of mob `entity` starts at `now_ms`.
     pub fn react(&mut self, entity: u64, now_ms: u64, length_ms: u64) {
         let ai = Arc::clone(&self.ai);
@@ -2146,6 +2218,7 @@ mod tests {
             scripted,
             open_map: false,
             kill_types: &kill_types,
+            scripted_at: &[],
         };
         let (all, all_ai) = sim_spawns(&spawns, &ai, filter(false));
         assert_eq!((&*all, &*all_ai), (&spawns[..], &ai[..]));
@@ -2195,6 +2268,7 @@ mod tests {
             scripted: false,
             open_map,
             kill_types: &kill_types,
+            scripted_at: &[],
         };
         let (kept, kept_ai) = sim_spawns(&spawns, &ai, filter(true));
         assert_eq!(
@@ -2216,6 +2290,33 @@ mod tests {
     }
 
     #[test]
+    fn the_encounter_spawns_of_a_scripted_group_are_left_to_its_script() {
+        // The storm priest's group: the level file puts him and his six swarmers at the
+        // group's place and within 0.62 m of it; the open world script spawns them.
+        const GROUP: [f32; 3] = [7346.13, 2921.85, 61.1];
+        let at = |x: f32, is_encounter: bool| VitalsSpawn {
+            position: [x, GROUP[1], GROUP[2]],
+            is_encounter,
+            ..VitalsSpawn::default()
+        };
+        let spawns = [
+            at(GROUP[0], true),
+            at(GROUP[0] + 0.6, true),
+            at(GROUP[0] + 0.6, false),
+            at(GROUP[0] + 40.0, true),
+        ];
+        let kill_types = KillTypes::default();
+        let filter = SpawnFilter {
+            scripted: false,
+            open_map: true,
+            kill_types: &kill_types,
+            scripted_at: &[GROUP],
+        };
+        let (kept, _) = sim_spawns(&spawns, &[], filter);
+        assert_eq!(&*kept, &spawns[2..]);
+    }
+
+    #[test]
     fn spawns_without_overrides_get_none() {
         let spawns = [spawn_at(0.0, TEST_MOB, TEST_LEVEL)];
         let kill_types = KillTypes::default();
@@ -2223,6 +2324,7 @@ mod tests {
             scripted: false,
             open_map: true,
             kill_types: &kill_types,
+            scripted_at: &[],
         };
         let (_, ai) = sim_spawns(&spawns, &[], filter);
         assert_eq!(&*ai, &[None][..], "a level whose spawns have no design AI");
@@ -2800,7 +2902,7 @@ mod tests {
         const LATER_MS: u64 = 600_000;
         let mut mobs = mobs(Vec::new());
         let entity = mobs
-            .spawn_gm(spawn_at(10.0, TEST_MOB, TEST_LEVEL))
+            .spawn_gm(spawn_at(10.0, TEST_MOB, TEST_LEVEL), None)
             .expect("gm mob");
         assert_eq!(mobs.owner(entity), None, "every player sees it");
         assert_eq!(mobs.gm_mobs(), [entity]);
@@ -2819,7 +2921,7 @@ mod tests {
     fn a_gm_mob_without_rows_is_refused() {
         let mut mobs = mobs(Vec::new());
         assert_eq!(
-            mobs.spawn_gm(spawn_at(10.0, "no_such_mob", TEST_LEVEL)),
+            mobs.spawn_gm(spawn_at(10.0, "no_such_mob", TEST_LEVEL), None),
             None
         );
     }
@@ -3294,6 +3396,29 @@ mod retail_tests {
     }
 
     #[test]
+    fn a_retail_shield_soldier_raises_and_drops_its_block_in_a_fight() {
+        // Retail: `Dryad_Soldier_32` raised its block 90 times in the captures (all-capture
+        // sweep 2026-11-09); its type's guard (`VitalsBaseData`, build 25810808).
+        const ID: &str = "Dryad_Soldier_32";
+        const ASSET: &str = "692a1f1462025e428fe568e45ed9c8d6";
+        const FIGHT_MS: u64 = 60_000;
+        let guard = nw_content::combat::MobGuard::of((50, 50, 2, 1), (1, 0.8)).expect("guard");
+        let mut mobs = retail_mobs(
+            vec![spawn_at(SPAWN_X, ID, TEST_LEVEL)],
+            &[(ID, asset(ASSET))],
+        );
+        mobs.set_guard(mob_entity(0), guard);
+        let (mut rises, mut was) = (0, false);
+        for now in (0..FIGHT_MS).step_by(TICK_MS as usize) {
+            mobs.tick(&[player_at(SPAWN_X + 2.0)], now, &Flat, 1);
+            let up = mobs.blocking(mob_entity(0));
+            rises += u32::from(up && !was);
+            was = up;
+        }
+        assert!(rises > 0, "it raises its block while it fights");
+    }
+
+    #[test]
     fn the_beach_boar_wanders_inside_its_wander_distance() {
         const BOAR_ID: &str = "Retail_Boar";
         // Slice `boar`: `WanderDistanceMax` 25 m; its `Wander` nav config arrives within 0.1 m.
@@ -3422,6 +3547,212 @@ mod retail_tests {
     }
 
     #[test]
+    fn an_idle_mob_walks_its_wander_steps_to_their_ends() {
+        // Retail `12-5_survivors`: an idle sailor's `Move` is followed by its next `Move` after
+        // 3.98 s at the least. Live 2026-11-10: the storm priest (`Damned_Cultist_Named_03`)
+        // started a new wander walk about every 0.35 s and never ended one.
+        const ID: &str = "Damned_Cultist_Named_03";
+        const ASSET: &str = "f507b0c320b35746a35ab40b54c43904";
+        const IDLE_MS: u64 = 60_000;
+        /// The least mean time from one action to the next (before the fix: one think of the
+        /// tree, 363 ms).
+        const MIN_MEAN_MS: u64 = 2_000;
+        /// How far the player is: out of every sense of the mob.
+        const FAR_M: f32 = 40.0;
+        let mut mobs = retail_mobs(
+            vec![spawn_at(SPAWN_X, ID, TEST_LEVEL)],
+            &[(ID, asset(ASSET))],
+        );
+        let far = Seen {
+            entity: PLAYER,
+            position: Position {
+                y: super::tests::ROW_Y + FAR_M,
+                ..player_at(SPAWN_X).position
+            },
+        };
+        let mut fragments = Vec::new();
+        let mut serial = None;
+        let mut starts = Vec::new();
+        for now in (0..IDLE_MS).step_by(TICK_MS as usize) {
+            mobs.tick(&[far], now, &Flat, 1);
+            let before = fragments.len();
+            played(&mobs, mob_entity(0), &mut serial, &mut fragments);
+            if fragments.len() != before {
+                starts.push(now);
+            }
+        }
+        assert!(starts.len() > 2, "it wanders: {fragments:?}");
+        assert!(
+            (starts.len() as u64) < IDLE_MS / MIN_MEAN_MS,
+            "starts {starts:?} of {fragments:?}"
+        );
+    }
+
+    /// The mob of vitals id `vitals_id`, shown with slice asset `slice`, on the level spawn of
+    /// the open world at `place`, with the path and profile of that spawn; then what it plays
+    /// in `idle_ms` with no player near.
+    fn idle_at_its_spawn(
+        ground: &RealGround,
+        vitals_id: &str,
+        slice: &str,
+        place: [f32; 2],
+        idle_ms: u64,
+    ) -> Vec<String> {
+        const SAME_PLACE_M: f32 = 1.0;
+        /// How far the player is: out of every sense of the mob.
+        const FAR_M: f32 = 40.0;
+        let world = ground.terrain();
+        let id = lowercase_crc32(vitals_id);
+        let index = world
+            .vitals
+            .iter()
+            .position(|spawn| {
+                spawn.vitals_id == id
+                    && (spawn.position[0] - place[0]).hypot(spawn.position[1] - place[1])
+                        < SAME_PLACE_M
+            })
+            .expect("the mob's spawn");
+        // The test's combat rows hold one level.
+        let spawn = VitalsSpawn {
+            level: TEST_LEVEL,
+            ..world.vitals[index].clone()
+        };
+        let looks: LookAssets = [(id, asset(slice))].into_iter().collect();
+        let mut source = test_source();
+        source
+            .base_types
+            .push((vitals_id.to_owned(), MobType::PLAIN));
+        let mut combat = test_combat();
+        combat.data = Arc::new(CombatData::build(source, &CombatRows::default()).expect("rows"));
+        combat.ai = Arc::new(MobAi::new(
+            crate::mob_ai::with_task_names(retail_data(), world.waypoint_tasks()),
+            AiRates::default(),
+            looks,
+        ));
+        let overrides = crate::mob_ai::resolve_ai(world, &combat.ai);
+        let far = Seen {
+            entity: PLAYER,
+            position: Position {
+                x: spawn.position[0] + FAR_M,
+                y: spawn.position[1],
+                z: spawn.position[2],
+            },
+        };
+        let mut mobs = Mobs::new(vec![spawn].into(), &combat);
+        mobs.set_ai(vec![overrides[index].clone()].into());
+        mobs.set_cells(every);
+        let mut fragments = Vec::new();
+        let mut serial = None;
+        for now in (0..idle_ms).step_by(TICK_MS as usize) {
+            mobs.tick(&[far], now, ground, 1);
+            played(&mobs, mob_entity(0), &mut serial, &mut fragments);
+        }
+        fragments
+    }
+
+    #[test]
+    fn a_mob_plays_the_task_of_its_waypoint_at_its_spawn() {
+        // Each mob stands on a spawner whose waypoint names a task that no tree names.
+        // - Retail `12-6_pillageship` (68.92 s): the boar at (7029.51, 3129.06) plays
+        //   `POI_Lay_Down_On_Side_LOOP` with the action `POI_Waypoint`. Live 2026-11-09: the
+        //   beach boars of "Lessons of a Pirate's Life" stood.
+        // - Retail `12-4_crewmates` (73.35 s): Boatswain Bridget plays `POI_LookAround` at
+        //   (7170.98, 3146.52). Her spawner (`PointSpawner_1wp_Stand`) names its one waypoint
+        //   `wp-nopath`; the server's Bridget wandered.
+        const IDLE_MS: u64 = 20_000;
+        let ground = real_ground();
+        for (vitals_id, slice, place, task) in [
+            (
+                "Boar_StarterBeach",
+                "db96d765b50459d98c9e04adaa9c9485",
+                [7029.51, 3129.06],
+                "POI_Lay_Down_On_Side_LOOP",
+            ),
+            (
+                "Corrupted_Sailor_1H_Sword_Named_00",
+                "9cdc9dfea35f575fadc0fca2f7f0d29b",
+                [7170.98, 3146.52],
+                "POI_LookAround",
+            ),
+        ] {
+            let fragments = idle_at_its_spawn(&ground, vitals_id, slice, place, IDLE_MS);
+            assert_eq!(
+                fragments.last().map(String::as_str),
+                Some(task),
+                "{vitals_id}: {fragments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_boar_charge_strikes_the_player_it_runs_into() {
+        // The boar tree's charge (`Attack_Charge_Start`, the run `Attack_Charge`, then
+        // `Attack_Charge_End`) comes for a target 3 to 7 m away, when the attack cooldown and
+        // the charge cooldown (6 to 8 s from the alert) are over. The run's `CAGE-Damage` clip
+        // (`DamageTableRow` `Attack_Charge`) is open from 0 s without an end. Live 2026-11-10:
+        // Torok the Beast (`Boar_Named_00`) struck with `Attack_Gore` only.
+        const ID: &str = "Boar_Named_00";
+        const ASSET: &str = "60c339cf008e57d0822fa82fd9472955";
+        const CHARGE: &str = "Attack_Charge";
+        /// Boars far apart, each with its own player, so that some draw the charge.
+        const BOARS: u32 = 60;
+        const APART_M: f32 = 60.0;
+        const CLOSE_M: f32 = 2.0;
+        const CLOSE_MS: u64 = 9_000;
+        const BACK_M: f32 = 5.5;
+        const FIGHT_MS: u64 = 40_000;
+        // A row of a few boars.
+        #[allow(clippy::cast_precision_loss)]
+        let spawns: Vec<VitalsSpawn> = (0..BOARS)
+            .map(|boar| spawn_at(SPAWN_X + APART_M * boar as f32, ID, TEST_LEVEL))
+            .collect();
+        let mut mobs = retail_mobs(spawns, &[(ID, asset(ASSET))]);
+        let mut stands: Vec<Option<Position>> = vec![None; BOARS as usize];
+        let mut serials = vec![None; BOARS as usize];
+        let mut charged = vec![false; BOARS as usize];
+        let mut struck = vec![false; BOARS as usize];
+        for now in (0..FIGHT_MS).step_by(TICK_MS as usize) {
+            let seen: Vec<Seen> = (0..BOARS)
+                .map(|boar| {
+                    let mob = at(&mobs, boar);
+                    let position = if now < CLOSE_MS {
+                        Position {
+                            y: mob.y + CLOSE_M,
+                            ..mob
+                        }
+                    } else {
+                        *stands[boar as usize].get_or_insert(Position {
+                            y: mob.y + BACK_M,
+                            ..mob
+                        })
+                    };
+                    Seen {
+                        entity: PLAYER + u64::from(boar),
+                        position,
+                    }
+                })
+                .collect();
+            for hit in mobs.tick(&seen, now, &Flat, 1) {
+                if hit.strike.is_some_and(|strike| strike.row == CHARGE) {
+                    struck[(hit.target - PLAYER) as usize] = true;
+                }
+            }
+            for boar in 0..BOARS {
+                let mut started = Vec::new();
+                played(
+                    &mobs,
+                    mob_entity(boar),
+                    &mut serials[boar as usize],
+                    &mut started,
+                );
+                charged[boar as usize] |= started.iter().any(|fragment| fragment == CHARGE);
+            }
+        }
+        assert!(charged.contains(&true), "no boar charged");
+        assert_eq!(struck, charged, "each charge strikes its player");
+    }
+
+    #[test]
     fn janszoon_fights_a_player_in_front_of_him() {
         // Live 2026-10-29: First Mate Janszoon took a combat stance next to the player and never
         // swung (retail newchar: `Attack_Far_2H_Axe_01`, `Attack_Close_2H_Axe_04`). His slice's
@@ -3546,13 +3877,19 @@ mod retail_tests {
             played(&mobs, mob_entity(0), &mut serial, &mut fragments);
         }
         let drawn = at(&mobs, 0).horizontal_distance(spawn);
+        let mut nearest = drawn;
         for now in (FIGHT_MS..FIGHT_MS + AWAY_MS).step_by(TICK_MS as usize) {
             mobs.tick(&[], now, &Flat, 1);
+            nearest = nearest.min(at(&mobs, 0).horizontal_distance(spawn));
             played(&mobs, mob_entity(0), &mut serial, &mut fragments);
         }
-        let home = at(&mobs, 0).horizontal_distance(spawn);
+        let stays = at(&mobs, 0).horizontal_distance(spawn);
         assert!(drawn > 2.0, "the fight drew him off: {drawn} {fragments:?}");
-        assert!(home < 2.0, "home: {home} m from spawn; {fragments:?}");
+        assert!(nearest < 2.0, "home: {nearest} m from spawn; {fragments:?}");
+        assert!(
+            stays < AMBIENT_WALK_M,
+            "he stays near home: {stays} m; {fragments:?}"
+        );
     }
 
     #[test]
@@ -3579,6 +3916,7 @@ mod retail_tests {
             },
         };
         let mut farthest: f32 = 0.0;
+        let mut nearest: f32 = 0.0;
         let mut fragments = Vec::new();
         let mut serial = None;
         for now in (0..AGGRO_MS + RUN_MS).step_by(TICK_MS as usize) {
@@ -3588,15 +3926,24 @@ mod retail_tests {
                 SPAWN_X + FAR_M
             };
             mobs.tick(&[player_at_x(x)], now, &Flat, 1);
-            farthest = farthest.max(at(&mobs, 0).horizontal_distance(spawn));
+            let off = at(&mobs, 0).horizontal_distance(spawn);
+            if off > farthest {
+                farthest = off;
+                nearest = off;
+            }
+            nearest = nearest.min(off);
             played(&mobs, mob_entity(0), &mut serial, &mut fragments);
         }
-        let home = at(&mobs, 0).horizontal_distance(spawn);
+        let stays = at(&mobs, 0).horizontal_distance(spawn);
         assert!(
             farthest > 45.0,
             "he chased past his leash: {farthest}; {fragments:?}"
         );
-        assert!(home < 2.0, "home: {home} m from spawn; {fragments:?}");
+        assert!(nearest < 2.0, "home: {nearest} m from spawn; {fragments:?}");
+        assert!(
+            stays < AMBIENT_WALK_M,
+            "he stays near home: {stays} m; {fragments:?}"
+        );
     }
 
     #[test]
@@ -3616,6 +3963,7 @@ mod retail_tests {
         );
         let spawn = at(&mobs, 0);
         let mut farthest: f32 = 0.0;
+        let mut nearest = f32::INFINITY;
         let mut fragments = Vec::new();
         let mut serial = None;
         for now in (0..RUN_UNTIL_MS + AFTER_MS).step_by(TICK_MS as usize) {
@@ -3632,16 +3980,28 @@ mod retail_tests {
             };
             let seen: &[Seen] = if now < RUN_UNTIL_MS { &[player] } else { &[] };
             mobs.tick(seen, now, &Flat, 1);
-            farthest = farthest.max(at(&mobs, 0).horizontal_distance(spawn));
+            let off = at(&mobs, 0).horizontal_distance(spawn);
+            farthest = farthest.max(off);
+            if now >= RUN_UNTIL_MS {
+                nearest = nearest.min(off);
+            }
             played(&mobs, mob_entity(0), &mut serial, &mut fragments);
         }
-        let home = at(&mobs, 0).horizontal_distance(spawn);
+        let stays = at(&mobs, 0).horizontal_distance(spawn);
         assert!(farthest > 20.0, "he chased: {farthest}; {fragments:?}");
         assert!(
-            home < 2.0,
-            "home: {home} m from spawn, farthest {farthest}; {fragments:?}"
+            nearest < 2.0,
+            "home: {nearest} m from spawn, farthest {farthest}; {fragments:?}"
+        );
+        assert!(
+            stays < AMBIENT_WALK_M,
+            "he stays near home: {stays} m; {fragments:?}"
         );
     }
+
+    /// How far Janszoon's wander steps take him from his home after a reset (the wander tree
+    /// walks `WanderDistanceMin` and more from the spawn; these tests reached 5.3 m).
+    const AMBIENT_WALK_M: f32 = 10.0;
 
     /// The open world level.
     const OPEN_WORLD_LEVEL: &str = "newworld_vitaeeterna";
@@ -3660,9 +4020,8 @@ mod retail_tests {
         mob_on_real_ground(JANSZOON_ID, JANSZOON, JANSZOON_SPAWN)
     }
 
-    /// The mob of vitals id `vitals_id`, shown with slice asset `slice`, at `position` of the
-    /// open world, and the real ground of that level.
-    fn mob_on_real_ground(vitals_id: &str, slice: &str, position: [f32; 3]) -> (Mobs, RealGround) {
+    /// The real ground of the open world.
+    fn real_ground() -> RealGround {
         use nw_sim_core::LevelGround;
         use nw_world::WorldFile;
         use nw_world::collision::LevelCollision;
@@ -3683,6 +4042,12 @@ mod retail_tests {
             deferred: Vec::new(),
             ..collision
         }));
+        LevelGround::new(Arc::new(world), index)
+    }
+
+    /// The mob of vitals id `vitals_id`, shown with slice asset `slice`, at `position` of the
+    /// open world, and the real ground of that level.
+    fn mob_on_real_ground(vitals_id: &str, slice: &str, position: [f32; 3]) -> (Mobs, RealGround) {
         let spawn = VitalsSpawn {
             vitals_id: lowercase_crc32(vitals_id),
             level: TEST_LEVEL,
@@ -3691,7 +4056,7 @@ mod retail_tests {
         };
         (
             retail_mobs(vec![spawn], &[(vitals_id, asset(slice))]),
-            LevelGround::new(Arc::new(world), index),
+            real_ground(),
         )
     }
 
@@ -3724,6 +4089,7 @@ mod retail_tests {
         let home = at(&mobs, 0);
         let bearing = (AWAY[1] - JANSZOON_SPAWN[1]).atan2(AWAY[0] - JANSZOON_SPAWN[0]);
         let mut farthest: f32 = 0.0;
+        let mut nearest = f32::INFINITY;
         let mut fragments = Vec::new();
         let mut serial = None;
         for now in (0..RUN_UNTIL_MS + AFTER_MS).step_by(TICK_MS as usize) {
@@ -3734,14 +4100,22 @@ mod retail_tests {
             let player = player_near_janszoon(&ground, run_m, bearing);
             let seen: &[Seen] = if now < RUN_UNTIL_MS { &[player] } else { &[] };
             mobs.tick(seen, now, &ground, 1);
-            farthest = farthest.max(at(&mobs, 0).horizontal_distance(home));
+            let off = at(&mobs, 0).horizontal_distance(home);
+            farthest = farthest.max(off);
+            if now >= RUN_UNTIL_MS {
+                nearest = nearest.min(off);
+            }
             played(&mobs, mob_entity(0), &mut serial, &mut fragments);
         }
-        let back = at(&mobs, 0).horizontal_distance(home);
+        let stays = at(&mobs, 0).horizontal_distance(home);
         assert!(farthest > 20.0, "he chased: {farthest}; {fragments:?}");
         assert!(
-            back < 2.0,
-            "home: {back} m from spawn, farthest {farthest}; {fragments:?}"
+            nearest < 2.0,
+            "home: {nearest} m from spawn, farthest {farthest}; {fragments:?}"
+        );
+        assert!(
+            stays < AMBIENT_WALK_M,
+            "he stays near home: {stays} m; {fragments:?}"
         );
     }
 

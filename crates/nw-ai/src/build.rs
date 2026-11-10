@@ -145,6 +145,11 @@ impl Build {
                 windows,
             }],
             weapon_variants: Vec::new(),
+            activation: None,
+            deactivation: None,
+            blocks: Vec::new(),
+            regen_off: None,
+            stamina_reset: None,
         });
         let index = (self.data.cage_actions.len() - 1) as u32;
         self.tasks.push((name, index));

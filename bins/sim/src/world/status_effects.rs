@@ -20,8 +20,10 @@ use std::sync::Arc;
 use bevy_ecs::entity::Entity;
 use nw_bus::{EffectRepeat, PlayerStatusEffect};
 use nw_content::item_rules::Consumable;
+use nw_content::passive_abilities::EffectMatch;
 use nw_content::perk_effects::PerkEffects;
 use nw_content::status_effects::{Control, RowKey, StatusEffectRule, StatusEffectRules};
+use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::{
     BundleMember, DamageDealtMsg, DamageItem, EffectMap, HIT_TAG, LocalEffect, MemberState,
     NEUTRAL_SCALE, OnDamageMsg, RemoteEffect, STATUS_EFFECTS_COMPONENT, ServerMessage,
@@ -198,6 +200,34 @@ impl StatusEffects {
     /// Whether it holds effect `crc`.
     pub(super) fn holds(&self, crc: u32) -> bool {
         self.index(crc).is_some()
+    }
+
+    /// The stacks of its effects that `matched` names (by `StatusID` or category), of those
+    /// `source` applied when it names one.
+    pub(super) fn stacks_of(
+        &self,
+        rules: &StatusEffectRules,
+        matched: &EffectMatch,
+        source: Option<u64>,
+    ) -> u32 {
+        self.held
+            .iter()
+            .filter(|held| source.is_none_or(|source| held.source == source))
+            .filter(|held| match matched {
+                EffectMatch::Ids(ids) => ids.iter().any(|id| lowercase_crc32(id) == held.crc),
+                EffectMatch::Categories(categories) => rules.get(held.crc).is_some_and(|rule| {
+                    categories
+                        .iter()
+                        .any(|category| rule.has_category(&category.to_lowercase()))
+                }),
+            })
+            .map(|held| u32::from(held.stacks))
+            .sum()
+    }
+
+    /// The equip load whose effects it holds.
+    pub(super) const fn equip_load(&self) -> Option<EquipLoad> {
+        self.equip_load
     }
 
     /// The rules of the effects it holds.
@@ -432,14 +462,44 @@ impl StatusEffects {
         source: u64,
         now_ms: u64,
     ) -> bool {
-        let Some(crc) = rules.by_id(id).map(|rule| rule.crc) else {
-            return false;
-        };
         let application = Application {
             potency,
             ..Application::plain(source)
         };
-        self.add(rules, crc, application, now_ms)
+        self.add_named(rules, id, application, now_ms)
+    }
+
+    /// Adds the effect named `id` of a spell of `source` at server time `now_ms`
+    /// ([`Self::add`]); `false` for an id the data does not have. `hit_amount` is the spell's
+    /// hit: an effect with `HealthModifierDamageBased` (the life staff heals) changes the
+    /// health by its share of it.
+    pub(super) fn add_spell_effect(
+        &mut self,
+        rules: &StatusEffectRules,
+        id: &str,
+        source: u64,
+        hit_amount: f64,
+        now_ms: u64,
+    ) -> bool {
+        let application = Application {
+            hit_amount,
+            ..Application::plain(source)
+        };
+        self.add_named(rules, id, application, now_ms)
+    }
+
+    /// Adds the effect named `id` by `application` ([`Self::add`]); `false` for an id the data
+    /// does not have.
+    fn add_named(
+        &mut self,
+        rules: &StatusEffectRules,
+        id: &str,
+        application: Application,
+        now_ms: u64,
+    ) -> bool {
+        rules
+            .by_id(id)
+            .is_some_and(|rule| self.add(rules, rule.crc, application, now_ms))
     }
 
     /// Ends effect `crc`.
@@ -1524,6 +1584,31 @@ mod tests {
             hit_amount: HIT,
             ..Application::plain(source)
         }
+    }
+
+    /// `Status_Ability_Lifestaff_LightsEmbrace` (build 25810808): `BaseDuration` 1,
+    /// `TickRate` 2, `HealthModifierDamageBased` 0.8. It heals once, when it comes, by its share
+    /// of the spell's hit.
+    #[test]
+    fn a_spell_effect_heals_by_its_share_of_the_spells_hit() {
+        const EMBRACE: &str = "Status_Ability_Lifestaff_LightsEmbrace";
+        const SHARE: f64 = 0.8;
+        let rules = StatusEffectRules::build(StatusEffectSource {
+            effects: vec![EffectSourceRow {
+                base_duration_s: Some(1.0),
+                tick_s: Some(2.0),
+                hit_share: Some(SHARE),
+                ..row(EMBRACE)
+            }],
+            ..StatusEffectSource::default()
+        });
+        let mut held = StatusEffects::default();
+        assert!(held.add_spell_effect(&rules, EMBRACE, PLAYER, HIT, START_MS));
+        let ticks = held.tick(&rules, START_MS, MAX_HEALTH);
+        assert_eq!(ticks.len(), 1);
+        assert!((ticks[0].health - SHARE * HIT).abs() < f64::EPSILON);
+        assert_eq!(ticks[0].source, PLAYER);
+        assert!(!held.add_spell_effect(&rules, "Status_Unknown", PLAYER, HIT, START_MS));
     }
 
     /// A mob's held effects heal it scaled by its `HealMod`s (the ticks [`SimWorld`] heals mobs

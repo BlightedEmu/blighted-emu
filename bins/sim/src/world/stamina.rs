@@ -104,6 +104,11 @@ impl Stamina {
         self.cur
     }
 
+    /// The stamina now as a share of the max.
+    pub(super) fn share(&self) -> f64 {
+        f64::from(self.cur / MAX_STAMINA)
+    }
+
     /// A dodge press at `now_ms`: while the stamina is above [`DODGE_MIN_STAMINA`] it takes its
     /// stamina, at most all of it, and gives `true`; else it gives `false` and changes nothing.
     /// The action list also refuses a dodge while the `Exhausted` condition holds; when the

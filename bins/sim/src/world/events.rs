@@ -158,7 +158,7 @@ impl SimWorld {
                     y: event.at.y + wave.offset[1],
                     z: event.at.z + wave.offset[2],
                 };
-                match self.spawn_gm(&wave.vitals, wave.level, at, wave.count) {
+                match self.spawn_gm(&wave.vitals, wave.level, at, wave.count, None) {
                     Ok(entities) => event.mobs.extend(entities),
                     Err(reason) => tracing::warn!(event = %event.id, %reason, "event wave"),
                 }

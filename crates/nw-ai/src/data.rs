@@ -202,23 +202,48 @@ pub enum CageCondition {
     Tag(NameId),
     /// `<IfMannequinMarker>`.
     Marker(NameId),
-    /// Any other test, by element name: false for the runtime (it holds no input, ability or
-    /// status state).
+    /// `<IfHasStatusEffect StatusEffect>`.
+    StatusEffect(NameId),
+    /// Any other test, by element name: false for the runtime (it holds no input or ability
+    /// state).
     Other(NameId),
 }
 
 impl CageCondition {
-    /// Whether it holds for a mob that has the tags `has_tag` says it has.
+    /// Whether it holds for a mob that has the tags `has_tag` says it has, with no marker and
+    /// no status effect.
     pub fn holds(&self, has_tag: &impl Fn(NameId) -> bool) -> bool {
+        self.holds_with(&MobCage {
+            has_tag,
+            has_marker: &|_| false,
+            has_effect: &|_| false,
+        })
+    }
+
+    /// Whether it holds for the mob `mob` tells of.
+    pub fn holds_with(&self, mob: &MobCage<'_>) -> bool {
         match self {
-            Self::All(parts) => parts.iter().all(|part| part.holds(has_tag)),
-            Self::Any(parts) => parts.iter().any(|part| part.holds(has_tag)),
-            Self::Not(part) => !part.holds(has_tag),
+            Self::All(parts) => parts.iter().all(|part| part.holds_with(mob)),
+            Self::Any(parts) => parts.iter().any(|part| part.holds_with(mob)),
+            Self::Not(part) => !part.holds_with(mob),
             Self::True => true,
-            Self::Tag(tag) => has_tag(*tag),
-            Self::Marker(_) | Self::Other(_) => false,
+            Self::Tag(tag) => (mob.has_tag)(*tag),
+            Self::Marker(marker) => (mob.has_marker)(*marker),
+            Self::StatusEffect(effect) => (mob.has_effect)(*effect),
+            Self::Other(_) => false,
         }
     }
+}
+
+/// What a mob's CAGE conditions read: its Mannequin tags, the markers its playing fragment sets
+/// now and its status effects (by `StatusID`).
+pub struct MobCage<'a> {
+    /// Whether it has the tag.
+    pub has_tag: &'a dyn Fn(NameId) -> bool,
+    /// Whether its fragment sets the marker now.
+    pub has_marker: &'a dyn Fn(NameId) -> bool,
+    /// Whether it holds the status effect.
+    pub has_effect: &'a dyn Fn(NameId) -> bool,
 }
 
 /// When a CAGE action tells the tree that it is done: `HTNPlanDoneActivity` or
@@ -242,8 +267,11 @@ pub struct EntityTrigger {
 }
 
 /// The `Default` of a `SetMannequinTag` activity.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TagActivity {
+    /// The conditions of the branches (`IfThenElse`) it is in; `True` for none: while they
+    /// hold, the activity is on.
+    pub condition: CageCondition,
     /// `TagName`.
     pub tag: NameId,
     /// `OnEnter`.
@@ -263,6 +291,30 @@ pub enum TagEffect {
     Clear,
     /// `NoEffect`.
     NoEffect,
+}
+
+/// What an `ActivateBlock` activity does to a mob's block when it starts or ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockEffect {
+    /// The block rises (`ActivateOffHandWeapon`, `ActivateMainHandWeapon`).
+    Raise,
+    /// The block falls (`Deactivate`).
+    Lower,
+    /// The block stays as it is.
+    Keep,
+}
+
+/// An `ActivateBlock` activity of a mob action (Observed: `damned_block.actionlist`
+/// `Block_On` and `Block`, `baseai_block.actionlist`): its block is up while the activity is on
+/// and its start raises it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockActivity {
+    /// The conditions of the branches it is in; `True` for none.
+    pub condition: CageCondition,
+    /// `OnEnter`.
+    pub on_enter: BlockEffect,
+    /// `OnExit`.
+    pub on_exit: BlockEffect,
 }
 
 /// `SetDesiredFacingBlendParam` `FacingMode` (Observed values in the client action lists:
@@ -351,6 +403,20 @@ pub struct CageAction {
     /// damned axe attacks are only in `npc_damned_2h_axeanims.adb`, the weapon rows'
     /// `AnimDbPath`).
     pub weapon_variants: Vec<FragmentVariant>,
+    /// Its `<ActivationCondition>` when the engine starts it by itself: an action without a
+    /// task whose condition tests something (`Block`, `BlockBroken`, `Attack_Cooldown` of the
+    /// mob block lists); `None` for the others.
+    pub activation: Option<CageCondition>,
+    /// Its `<DeactivationCondition>`; `None` when it is empty: an engine action then ends when
+    /// its activation stops holding (Inferred: `BlockBroken` has none, and its `ResetStamina`
+    /// runs on its end).
+    pub deactivation: Option<CageCondition>,
+    /// Its `ActivateBlock` activities.
+    pub blocks: Vec<BlockActivity>,
+    /// `DisableStaminaRegen`: no stamina regen while this branch condition holds.
+    pub regen_off: Option<CageCondition>,
+    /// `ResetStamina` on its end, in this branch condition.
+    pub stamina_reset: Option<CageCondition>,
 }
 
 /// The entry of `variants` Mannequin plays for a mob with the tags `has_tag` says it has: of the
@@ -374,6 +440,14 @@ impl CageAction {
     /// says it has ([`best_variant`]).
     pub fn variant(&self, has_tag: &impl Fn(NameId) -> bool) -> Option<&FragmentVariant> {
         best_variant(&self.variants, has_tag)
+    }
+
+    /// Whether it raises a block for the mob `mob` tells of while it plays: an `ActivateBlock`
+    /// that raises on its start and whose branch holds.
+    pub fn raises_block(&self, mob: &MobCage<'_>) -> bool {
+        self.blocks
+            .iter()
+            .any(|block| block.on_enter == BlockEffect::Raise && block.condition.holds_with(mob))
     }
 
     /// The entry of the weapon's database its `WeaponContext` scope plays ([`best_variant`]).
@@ -514,11 +588,49 @@ impl AiData {
     }
 
     /// The id of string `text`, when the data has it.
+    /// The id of name `text`; the data takes the name when it does not hold it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the data holds more names than a [`NameId`] counts.
+    pub fn intern(&mut self, text: &str) -> NameId {
+        self.name_id(text).unwrap_or_else(|| {
+            self.names.push(text.to_owned());
+            NameId::try_from(self.names.len() - 1).expect("fewer names than NameId counts")
+        })
+    }
+
+    /// The id of name `text`, when the data holds it.
     pub fn name_id(&self, text: &str) -> Option<NameId> {
         self.names
             .iter()
             .position(|known| known == text)
             .and_then(|index| NameId::try_from(index).ok())
+    }
+
+    /// Whether the fragment entry of `action` that a mob with the tags `has_tag` plays sets
+    /// marker `marker` `elapsed_s` after its start: a procedural clip of kind `named.0`
+    /// (`CAGE-Named`) whose param `named.1` (`Name`) is the marker (any case), from its start to
+    /// its end (to the fragment's end without one).
+    pub fn sets_marker(
+        &self,
+        action: &CageAction,
+        has_tag: &impl Fn(NameId) -> bool,
+        (elapsed_s, marker): (f32, NameId),
+        named: (NameId, NameId),
+    ) -> bool {
+        action.variant(has_tag).is_some_and(|variant| {
+            variant.windows.iter().any(|window| {
+                window.kind == named.0
+                    && window.start_s <= elapsed_s
+                    && window.end_s.is_none_or(|end| elapsed_s < end)
+                    && window.params.iter().any(|(param, value)| {
+                        // The lists write `Block`, the fragments `block` (`npc_damned_anims.adb`).
+                        *param == named.1
+                            && self.name(*value).eq_ignore_ascii_case(self.name(marker))
+                    })
+            })
+        })
     }
 
     /// The key named `text`, when the data has it.
@@ -628,6 +740,53 @@ mod tests {
     const CHAIN_TAG: NameId = 7;
     const ARMADILLO_TAG: NameId = 8;
 
+    #[test]
+    fn a_condition_reads_markers_and_status_effects_and_a_marker_clip_any_case() {
+        const BLOCK_TAG: NameId = 3;
+        const DISABLE: NameId = 4;
+        const RESET_AI: NameId = 5;
+        let mob = MobCage {
+            has_tag: &|tag| tag == BLOCK_TAG,
+            has_marker: &|marker| marker == DISABLE,
+            has_effect: &|effect| effect == RESET_AI,
+        };
+        assert!(!CageCondition::Not(Box::new(CageCondition::Marker(DISABLE))).holds_with(&mob));
+        assert!(CageCondition::StatusEffect(RESET_AI).holds_with(&mob));
+        assert!(
+            !CageCondition::Marker(DISABLE).holds(&|_| true),
+            "no marker without a fragment"
+        );
+        let data = AiData {
+            names: ["CAGE-Named", "Name", "block", "Block"]
+                .map(str::to_owned)
+                .to_vec(),
+            ..AiData::default()
+        };
+        let cage = CageAction {
+            variants: vec![FragmentVariant {
+                tags: Vec::new(),
+                frag_tags: Vec::new(),
+                length: FragmentLength::Seconds(1.0),
+                windows: vec![ProcWindow {
+                    kind: 0,
+                    start_s: 0.2,
+                    end_s: Some(0.6),
+                    params: vec![(1, 2)],
+                }],
+            }],
+            ..gore()
+        };
+        let none = |_| false;
+        assert!(
+            data.sets_marker(&cage, &none, (0.3, 3), (0, 1)),
+            "Block is block"
+        );
+        assert!(
+            !data.sets_marker(&cage, &none, (0.7, 3), (0, 1)),
+            "after its end"
+        );
+    }
+
     fn gore() -> CageAction {
         CageAction {
             list: 0,
@@ -656,6 +815,11 @@ mod tests {
                 },
             ],
             weapon_variants: Vec::new(),
+            activation: None,
+            deactivation: None,
+            blocks: Vec::new(),
+            regen_off: None,
+            stamina_reset: None,
         }
     }
 

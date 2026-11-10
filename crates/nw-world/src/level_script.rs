@@ -242,7 +242,9 @@ pub enum ObjectiveKind {
     },
     /// `EntityActiveStateChangedObjective`: an entity of the slice changes state.
     EntityActiveState {
-        /// `m_targetEntityId`.
+        /// `m_targetEntityId`; the id of no entity when the slice names none (Observed:
+        /// `dg_enc_edengrove_00_arboretum_02`): no entity event completes the objective, its
+        /// time limit ends it.
         entity: u64,
         /// `m_completeOnActivated`.
         on_activated: bool,
@@ -662,7 +664,7 @@ fn objective(class: &Element, names: &Names) -> Result<Option<Objective>, LevelS
                 .map(|target| reference(target, names))
                 .transpose()?
                 .flatten()
-                .ok_or(LevelScriptError::Missing("objective", "m_targetEntityId"))?,
+                .unwrap_or(NO_ENTITY),
             on_activated: flag(class, names.on_activated)?,
             on_deactivated: flag(class, names.on_deactivated)?,
         },
@@ -822,6 +824,14 @@ fn entity(element: &Element, names: &Names) -> Result<ScriptEntity, LevelScriptE
             GATHERABLE_CONTROLLER_TYPE => {
                 let table = text(component, names.loot_table, LOOT_TABLE_DEPTH)?;
                 read.loot_table = (!table.is_empty()).then_some(table);
+            }
+            // A spawner of another class: a component that names a slice asset spawns it
+            // (Observed: the open world's `WorldEvent_SpawnGroup_Single_Master` names its
+            // encounter slice in a component of neither spawner class).
+            _ if read.spawner.is_none() => {
+                read.spawner = spawner(component, names)
+                    .ok()
+                    .filter(|found| found.slice.is_some());
             }
             _ => {}
         }

@@ -266,7 +266,7 @@ impl PositionInTheWorldReplicatedState {
     }
 }
 
-fn read_rotation(reader: &mut Reader<'_>) -> Result<Rotation, MessageError> {
+pub(crate) fn read_rotation(reader: &mut Reader<'_>) -> Result<Rotation, MessageError> {
     let mask = reader.u8()?;
     if mask & ROTATION_UNKNOWN != 0 {
         return Err(MessageError::UnknownBits {
@@ -298,7 +298,7 @@ fn read_rotation(reader: &mut Reader<'_>) -> Result<Rotation, MessageError> {
     })
 }
 
-fn write_rotation(rotation: &Rotation, writer: &mut Writer) {
+pub(crate) fn write_rotation(rotation: &Rotation, writer: &mut Writer) {
     let mut mask = if rotation.w_negative {
         ROTATION_W_NEGATIVE
     } else {

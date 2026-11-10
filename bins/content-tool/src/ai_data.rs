@@ -23,9 +23,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use nw_ai::data::{
-    AiData, Archetype, CageAction, CageCondition, Completion, Creature, EntityTrigger, FacingMode,
-    FragmentLength, FragmentVariant, Grid, NavConfig, ProcWindow, ProjectileSlice, RangedAttack,
-    SliceTriggerRef, TagActivity, TagEffect, TreeRef, Vision,
+    AiData, Archetype, BlockActivity, BlockEffect, CageAction, CageCondition, Completion, Creature,
+    EntityTrigger, FacingMode, FragmentLength, FragmentVariant, Grid, NavConfig, ProcWindow,
+    ProjectileSlice, RangedAttack, SliceTriggerRef, TagActivity, TagEffect, TreeRef, Vision,
 };
 use nw_ai::decode::{DecodeError, ServerPakError, TreeDecoder, decode_entries, server_pak_entries};
 use nw_ai::node::NodeId;
@@ -34,8 +34,9 @@ use nw_content::creature_animations::CreatureRow;
 use nw_formats::azcs::{decode_azcs, is_azcs};
 use nw_formats::datasheet::Datasheet;
 use nw_formats::mannequin::{
-    ActionList, AnimDatabase, CageGrid, Condition, EntityTrigger as NwEntityTrigger, GridList,
-    MannequinError, Node as XmlNode, parse_tree,
+    ActionList, AnimDatabase, BlockActivity as NwBlockActivity, BlockChange, CageGrid, Condition,
+    EntityTrigger as NwEntityTrigger, GridList, MannequinError, Node as XmlNode, StaminaActivities,
+    TagCase, TagChange, parse_tree,
 };
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
 use nw_formats::pak::{PakArchive, PakError, find_paks};
@@ -108,14 +109,6 @@ const COMPLETION_ACTIVITIES: [&str; 2] = ["HTNPlanDoneActivity", "BehaviorTreeTa
 const DEFAULT_ELEMENT: &str = "Default";
 const CONDITIONAL_ELEMENT: &str = "Conditional";
 const COMPLETION_OFFSET: &str = "CompletionFragmentOffset";
-const SET_TAG_ACTIVITY: &str = "SetMannequinTag";
-const TAG_NAME_ATTRIBUTE: &str = "TagName";
-const ON_ENTER_ATTRIBUTE: &str = "OnEnter";
-const ON_EXIT_ATTRIBUTE: &str = "OnExit";
-const DELAY_ATTRIBUTE: &str = "DelayTimer";
-const TAG_SET: &str = "Set";
-const TAG_CLEAR: &str = "Clear";
-const TAG_NO_EFFECT: &str = "NoEffect";
 const MOTION_ACTIVITY: &str = "AnimationDrivenMotion";
 const MOTION_MULTIPLIER: &str = "MotionMultiplier";
 /// The facing activity (Observed in `baseai_turninplace.actionlist`).
@@ -528,24 +521,48 @@ struct ListAction {
     fragment: String,
     tasks: Vec<String>,
     completion: Option<(f32, Vec<(String, f32)>)>,
-    tags: Vec<(String, TagEffect, TagEffect, f32)>,
+    /// The `<Default>` case of each `SetMannequinTag` activity, with the conditions of the
+    /// branches it is in (read by `nw_formats::mannequin`, which knows `Unset`: the mob lists
+    /// write it, never `Clear`).
+    tags: Vec<(Condition, TagCase)>,
     triggers: Vec<NwEntityTrigger>,
     motion_multiplier: Option<f32>,
     facing: Option<FacingMode>,
+    activation: Option<Condition>,
+    deactivation: Option<Condition>,
+    blocks: Vec<NwBlockActivity>,
+    stamina: StaminaActivities,
 }
 
 fn parse_number(text: Option<&str>) -> Option<f32> {
     text?.trim().parse().ok()
 }
 
-fn tag_effect(text: Option<&str>) -> Option<TagEffect> {
-    match text? {
-        TAG_SET => Some(TagEffect::Set),
-        TAG_CLEAR => Some(TagEffect::Clear),
-        TAG_NO_EFFECT => Some(TagEffect::NoEffect),
-        _ => None,
+/// The runtime's effect of a tag change.
+const fn tag_effect(change: TagChange) -> TagEffect {
+    match change {
+        TagChange::Set => TagEffect::Set,
+        TagChange::Unset => TagEffect::Clear,
+        TagChange::Keep => TagEffect::NoEffect,
     }
 }
+
+/// The runtime's effect of a block change.
+const fn block_effect(change: BlockChange) -> BlockEffect {
+    match change {
+        BlockChange::Raise => BlockEffect::Raise,
+        BlockChange::Lower => BlockEffect::Lower,
+        BlockChange::Keep => BlockEffect::Keep,
+    }
+}
+
+/// A condition that tests something: an empty `<ActivationCondition/>` reads as an empty `And`.
+fn testing(condition: Option<&Condition>) -> Option<&Condition> {
+    condition.filter(|condition| !matches!(condition, Condition::All(parts) if parts.is_empty()))
+}
+
+/// Milliseconds per second of a tag delay.
+const MS_PER_SECOND: f32 = 1000.0;
 
 fn children_named<'a>(node: &'a XmlNode, name: &'a str) -> impl Iterator<Item = &'a XmlNode> {
     node.children.iter().filter(move |child| child.name == name)
@@ -592,7 +609,6 @@ fn list_actions(text: &str) -> Result<ParsedList, MannequinError> {
             }
         }
         let mut completion = None;
-        let mut tags = Vec::new();
         let mut motion_multiplier = None;
         let mut facing = None;
         for activities in action
@@ -616,21 +632,6 @@ fn list_actions(text: &str) -> Result<ParsedList, MannequinError> {
                             .collect();
                         completion = Some((offset, conditional));
                     }
-                } else if activity.name == SET_TAG_ACTIVITY {
-                    if let Some(node) = default
-                        && let (Some(tag), Some(enter), Some(exit)) = (
-                            node.attribute(TAG_NAME_ATTRIBUTE),
-                            tag_effect(node.attribute(ON_ENTER_ATTRIBUTE)),
-                            tag_effect(node.attribute(ON_EXIT_ATTRIBUTE)),
-                        )
-                    {
-                        tags.push((
-                            tag.to_owned(),
-                            enter,
-                            exit,
-                            parse_number(node.attribute(DELAY_ATTRIBUTE)).unwrap_or(0.0),
-                        ));
-                    }
                 } else if activity.name == MOTION_ACTIVITY {
                     motion_multiplier =
                         default.and_then(|node| parse_number(node.attribute(MOTION_MULTIPLIER)));
@@ -646,16 +647,31 @@ fn list_actions(text: &str) -> Result<ParsedList, MannequinError> {
             fragment: fragment.to_owned(),
             tasks,
             completion,
-            tags,
+            tags: Vec::new(),
             triggers: Vec::new(),
             motion_multiplier,
             facing,
+            activation: None,
+            deactivation: None,
+            blocks: Vec::new(),
+            stamina: StaminaActivities::default(),
         });
     }
     let parsed = ActionList::parse(text)?;
     for action in &mut out {
         if let Some(list_action) = parsed.action(&action.name) {
             action.triggers.clone_from(&list_action.triggers);
+            action.tags = list_action
+                .tag_activities
+                .iter()
+                .filter_map(|activity| {
+                    Some((activity.condition.clone(), activity.default.clone()?))
+                })
+                .collect();
+            action.activation.clone_from(&list_action.activation);
+            action.deactivation.clone_from(&list_action.deactivation);
+            action.blocks.clone_from(&list_action.block_activities);
+            action.stamina.clone_from(&list_action.stamina);
         }
     }
     Ok(ParsedList {
@@ -1019,8 +1035,9 @@ fn cage_condition(decoder: &mut TreeDecoder, condition: &Condition) -> CageCondi
         Condition::True => CageCondition::True,
         Condition::Tag(tag) => CageCondition::Tag(decoder.intern(tag)),
         Condition::Marker(marker) => CageCondition::Marker(decoder.intern(marker)),
-        // A mob's tree reads tags and markers only: every other test stays a test by its
-        // element name, as before the parser knew them.
+        Condition::StatusEffect(effect) => CageCondition::StatusEffect(decoder.intern(effect)),
+        // A mob's tree reads tags, markers and status effects only: every other test stays a
+        // test by its element name, as before the parser knew them.
         other => CageCondition::Other(decoder.intern(other.test_element().unwrap_or_default())),
     }
 }
@@ -1683,11 +1700,13 @@ impl CageBuilder<'_> {
             tags: action
                 .tags
                 .iter()
-                .map(|(tag, on_enter, on_exit, delay_s)| TagActivity {
-                    tag: decoder.intern(tag),
-                    on_enter: *on_enter,
-                    on_exit: *on_exit,
-                    delay_s: *delay_s,
+                .map(|(condition, case)| TagActivity {
+                    condition: cage_condition(decoder, condition),
+                    tag: decoder.intern(&case.tag),
+                    on_enter: tag_effect(case.on_enter),
+                    on_exit: tag_effect(case.on_exit),
+                    // A delay of a few seconds.
+                    delay_s: case.delay_ms as f32 / MS_PER_SECOND,
                 })
                 .collect(),
             triggers: action
@@ -1702,6 +1721,32 @@ impl CageBuilder<'_> {
             facing: action.facing,
             variants,
             weapon_variants,
+            // The engine starts an action without a task by its condition; a task action's
+            // condition names its task.
+            activation: testing(action.activation.as_ref())
+                .filter(|_| action.tasks.is_empty())
+                .map(|condition| cage_condition(decoder, condition)),
+            deactivation: testing(action.deactivation.as_ref())
+                .map(|condition| cage_condition(decoder, condition)),
+            blocks: action
+                .blocks
+                .iter()
+                .map(|block| BlockActivity {
+                    condition: cage_condition(decoder, &block.condition),
+                    on_enter: block_effect(block.on_enter),
+                    on_exit: block_effect(block.on_exit),
+                })
+                .collect(),
+            regen_off: action
+                .stamina
+                .regen_off
+                .as_ref()
+                .map(|condition| cage_condition(decoder, condition)),
+            stamina_reset: action
+                .stamina
+                .reset_on_exit
+                .as_ref()
+                .map(|condition| cage_condition(decoder, condition)),
         }
     }
 
@@ -1879,6 +1924,39 @@ mod tests {
 </ActionList>"#;
 
     #[test]
+    fn a_mob_block_list_keeps_unset_tags_its_block_and_which_actions_the_engine_starts() {
+        // Retail `damned_block.actionlist` (build 25810808), trimmed. The mob lists write
+        // `Unset`; the old reader knew only `Clear`, so no mob tag was ever unset.
+        let text = r#"<ActionList><Actions>
+ <Action Name="Block_On" FragmentName="Block_Start">
+  <ActivationCondition/>
+  <Activities><ActivateBlock><Default OnEnter="ActivateOffHandWeapon" OnExit="Deactivate"/></ActivateBlock>
+   <SetMannequinTag ResetWhenReinstalled="true"><Default TagName="Block" OnEnter="NoEffect" OnExit="Set" DelayTimer="0.0"/></SetMannequinTag></Activities>
+ </Action>
+ <Action Name="Block" FragmentName="">
+  <ActivationCondition><IfMannequinTag TagName="Alerted"/></ActivationCondition>
+  <Activities><SetMannequinTag ResetWhenReinstalled="true"><Default TagName="Block" OnEnter="Set" OnExit="Unset" DelayTimer="0.0"/></SetMannequinTag></Activities>
+ </Action>
+</Actions></ActionList>"#;
+        let parsed = list_actions(text).expect("list");
+        let [block_on, block] = &parsed.actions[..] else {
+            panic!("two actions: {:?}", parsed.actions);
+        };
+        assert_eq!(tag_effect(block.tags[0].1.on_exit), TagEffect::Clear);
+        assert_eq!(block_on.blocks.len(), 1);
+        assert_eq!(
+            block_effect(block_on.blocks[0].on_enter),
+            BlockEffect::Raise
+        );
+        assert_eq!(
+            testing(block_on.activation.as_ref()),
+            None,
+            "an empty condition"
+        );
+        assert!(testing(block.activation.as_ref()).is_some());
+    }
+
+    #[test]
     fn an_action_list_gives_tasks_completion_motion_and_tags() {
         let parsed = list_actions(GORE_LIST).expect("list");
         let gore = &parsed.actions[0];
@@ -1893,10 +1971,13 @@ mod tests {
         assert_eq!(
             gore.tags,
             [(
-                "Alerted".to_owned(),
-                TagEffect::Set,
-                TagEffect::NoEffect,
-                0.1
+                Condition::True,
+                TagCase {
+                    tag: "Alerted".to_owned(),
+                    on_enter: TagChange::Set,
+                    on_exit: TagChange::Keep,
+                    delay_ms: 100,
+                }
             )]
         );
         assert!(

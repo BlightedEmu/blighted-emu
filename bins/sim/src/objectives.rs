@@ -463,12 +463,14 @@ pub(crate) enum TaskKind {
         count: u32,
         place: Option<String>,
     },
-    /// Done when the player gets the item; without one, when it loots a container.
+    /// Done when the player gets the item (a tutorial weapon take's drop id, its
+    /// `FailOnCondition`); without one, when it loots a container.
     HaveItem(Option<String>),
     /// Done when the player holds `count` of the item, in the bag or worn (`TaskHaveItems`, and
-    /// a mission's `TaskHaveAndReturnItems`); `returned`: the items go back at the turn-in.
-    /// While it waits, `drop` drops the item from a skinned corpse or a quest object, and a
-    /// container the player opens in its `chest`'s place drops it at the chest's chance.
+    /// a `TaskHaveAndReturnItems` with an `ItemName`); `returned`: the items go back at the
+    /// turn-in. While it waits, `drop` drops the item into the loot bag of a kill or from a
+    /// quest object ([`QuestDrop`]), and a container the player opens in its `chest`'s place
+    /// drops it at the chest's chance.
     HaveItems {
         item: String,
         count: u32,
@@ -478,12 +480,15 @@ pub(crate) enum TaskKind {
     },
     /// Done after the player gathered `count` of the item; a corpse of `drop`'s enemy that the
     /// player skins, or a quest object of `drop`'s gatherable that it gathers, drops it while it
-    /// waits (`TaskGatherItems`). The turn-in takes a `returned` item back
+    /// waits (`TaskGatherItems`), and so does a container it opens in its `chest`'s place at the
+    /// chest's chance (retail Stone Cold Secrets and Swamp Perfume, 2026-10-03: each count came
+    /// 10 to 40 ms after a loot container's gather). The turn-in takes a `returned` item back
     /// (`TaskGatherAndReturnItems`).
     GatherItems {
         item: String,
         count: u32,
         drop: Option<QuestDrop>,
+        chest: Option<ChestDrop>,
         returned: bool,
     },
     /// Done when the player crafts the recipe of this id (`TaskCraftRecipe`).
@@ -718,15 +723,55 @@ pub(crate) struct ChestDrop {
     pub(crate) place: Option<String>,
 }
 
-/// The item a gather task adds when the player skins a corpse of its enemy or gathers a quest
-/// object.
+/// The item a task adds when the player kills or skins one of its enemies or gathers one of its
+/// quest objects.
+///
+/// **Observed** (retail side quest captures, 2026-10-02 to 2026-10-03): a have-and-return task
+/// drops its item into the loot bag of the enemy it names, also for skinnable mobs (white wolves
+/// of `0332_0103_d_02_Task_KillCollect`, boars of `13A_SQ_18_KillBoar_Task_KillToken`, the
+/// grizzly of `02A_Side06_02_GetRing`: the task counted 30 to 50 ms after each loot bag use);
+/// a gather-and-return task drops it at the skinning of the corpse (the pig of
+/// `1127_0102_GatherMeat1`: after a gather of the corpse); both drop it at the gather of a quest
+/// object (`12A_Side_09_CollectGlass_CollectGlass`, the cactus list of
+/// `16_Side_25_01_01_Have_7_CactusFlower`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct QuestDrop {
-    /// `ItemDropVC`: the enemy type, as a kill task names one, or the `GatherableID` of a quest
-    /// object (`MSQ_Treasure_A`).
-    pub(crate) enemy: String,
+    /// `ItemDropVC`: the enemy types, as a kill task names one, or the `GatherableID`s of quest
+    /// objects (`MSQ_Treasure_A`); the cell is a comma list (`AngryEarth,Blighted`, five cactus
+    /// sizes).
+    pub(crate) sources: Vec<String>,
     /// `ItemDropProbability`, in percent.
     pub(crate) percent: u32,
+    /// The `POITag` the player must be in (`EnforceLocationRequirement`), as a kill task's place.
+    pub(crate) place: Option<String>,
+}
+
+/// Where a quest drop comes from ([`QuestDrop`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropFrom {
+    /// The skinning of a corpse: a gather task's drop.
+    Skin,
+    /// The loot bag of a kill: an item task's drop.
+    LootBag,
+    /// The gather of a quest object: the drop of both.
+    QuestObject,
+}
+
+impl QuestDrop {
+    /// Whether a mob of `vitals_id`, `categories` and spawn categories `spawn_categories` is one
+    /// of its enemies ([`kills_count`]).
+    fn names_mob(&self, vitals_id: &str, categories: &[String], spawn_categories: &[u32]) -> bool {
+        self.sources
+            .iter()
+            .any(|enemy| kills_count(enemy, vitals_id, categories, spawn_categories))
+    }
+
+    /// Whether gatherable `gatherable` is one of its quest objects.
+    fn names_gatherable(&self, gatherable: &str) -> bool {
+        self.sources
+            .iter()
+            .any(|source| source.eq_ignore_ascii_case(gatherable))
+    }
 }
 
 /// One task of a tree.
@@ -791,9 +836,6 @@ pub struct TaskRow {
     pub game_mode_id: Option<String>,
     /// `ShouldCheckPoints`.
     pub should_check_points: bool,
-    /// A mission's task whose items go back at the turn-in (`MissionData` overrides; retail: two
-    /// item changes 31 to 35 ms after each 2461 turn-in, board capture 2026-06-13).
-    pub returned_on_turn_in: bool,
     /// `ChestDropProbability`.
     pub chest_drop_probability: Option<i64>,
     /// `EnforceLocationRequirement`: the task counts only in its `POITag`.
@@ -898,7 +940,6 @@ pub fn task_rows(tables: &Tables) -> Vec<TaskRow> {
             interact_tag: row.interact_tag.clone(),
             game_mode_id: row.game_mode_id.clone(),
             should_check_points: row.should_check_points.unwrap_or_default(),
-            returned_on_turn_in: false,
             chest_drop_probability: row.chest_drop_probability,
             enforce_location: row.enforce_location_requirement.unwrap_or_default(),
             territory_id: row
@@ -952,17 +993,6 @@ const DROP_TIER_MARK: &str = "dropt";
 /// The lost-tier tail of the same kind of id (`LostT2`).
 const LOST_TIER_MARK: &str = "lostt";
 
-/// The item a have-and-return task watches. A row with `ItemName` watches that item. A row with
-/// only `FailOnCondition` watches that drop id (the seven tutorial weapon takes). A row with
-/// neither is done by any container loot.
-fn have_item_of(row: &TaskRow) -> Option<String> {
-    filled_cell(&row.item_name).or_else(|| filled_cell(&row.fail_on_condition))
-}
-
-fn filled_cell(cell: &Option<String>) -> Option<String> {
-    cell.clone().filter(|text| !text.is_empty())
-}
-
 /// The weapon family of `id`, without hand, archetype, or tier (`greatsword` from
 /// `SwordsmanArchetype_2hGreatsword` and from `2hGreatSwordDropT2`). `None` when `id` is not a
 /// handed weapon id.
@@ -1011,16 +1041,18 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         .unwrap_or(1)
         .max(1);
     let filled = |cell: &Option<String>| cell.clone().filter(|text| !text.is_empty());
+    let place = || row.enforce_location.then(|| filled(&row.poi_tag)).flatten();
     let drop = || {
-        filled(&row.item_drop_vc).map(|enemy| QuestDrop {
-            enemy,
+        let sources = categories_of(row.item_drop_vc.as_deref().unwrap_or_default());
+        (!sources.is_empty()).then(|| QuestDrop {
+            sources,
             percent: row
                 .item_drop_probability
                 .and_then(|percent| u32::try_from(percent).ok())
                 .unwrap_or(ALWAYS_PERCENT),
+            place: place(),
         })
     };
-    let place = || row.enforce_location.then(|| filled(&row.poi_tag)).flatten();
     let chest = || {
         row.chest_drop_probability
             .and_then(|percent| u32::try_from(percent).ok())
@@ -1034,6 +1066,7 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         item: item(),
         count,
         drop: drop(),
+        chest: chest(),
         returned,
     };
     let fishing = |step| TaskKind::Fishing { step, count };
@@ -1084,16 +1117,24 @@ fn kind_of(row: &TaskRow) -> TaskKind {
             count,
             place: place(),
         },
-        "taskhaveandreturnitems" if row.returned_on_turn_in => {
-            have_item_of(row).map_or(TaskKind::Empty, |item| TaskKind::HaveItems {
+        // Retail takes the items back at the turn-in, for a quest as for a mission (the two
+        // `MI_Alkahest` of `02A_Side02_02_02_02_Task_Fetch` left bag slot 175 at the turn-in of
+        // Earth Will Provide, 2026-10-02; board capture 2026-06-13: two item changes 31 to 35 ms
+        // after each 2461 turn-in). Its container chance adds to the container's own loot: the
+        // tutorial chest's table gives one `PotionHealthT1`, and retail's bag got two at its open
+        // (newchar-retail-2026-09-18, 216.9 s; `01_SoleSurvivor2_Tutorial_TakeChestLoot`, 100).
+        "taskhaveandreturnitems" => match filled(&row.item_name) {
+            Some(item) => TaskKind::HaveItems {
                 item,
                 count,
                 returned: true,
                 drop: drop(),
                 chest: chest(),
-            })
-        }
-        "taskhaveandreturnitems" => TaskKind::HaveItem(have_item_of(row)),
+            },
+            // A row with only `FailOnCondition` watches that drop id (the seven tutorial weapon
+            // takes); a row with neither is done by any container loot.
+            None => TaskKind::HaveItem(filled(&row.fail_on_condition)),
+        },
         "taskhaveitems" => TaskKind::HaveItems {
             item: item(),
             count,
@@ -2085,36 +2126,62 @@ impl ObjectiveRun {
     }
 
     /// The items the waiting gather tasks drop for a corpse of `vitals_id` and `categories`
-    /// that the player skins: each item and its chance in percent.
+    /// that the player skins: each item and its chance in percent ([`QuestDrop`]).
     pub fn quest_drops(
         &self,
         vitals_id: &str,
         categories: &[String],
         spawn_categories: &[u32],
     ) -> Vec<(String, u32)> {
-        self.drops(|drop| kills_count(&drop.enemy, vitals_id, categories, spawn_categories))
+        self.drops(DropFrom::Skin, |drop| {
+            drop.names_mob(vitals_id, categories, spawn_categories)
+        })
     }
 
-    /// The items the waiting gather tasks drop for a quest object of gatherable `gatherable`
-    /// that the player gathers: each item and its chance in percent.
+    /// The items the waiting item tasks drop into the loot bag of a mob of `vitals_id` and
+    /// `categories` that the player kills: each item and its chance in percent ([`QuestDrop`]).
+    pub fn kill_drops(
+        &self,
+        vitals_id: &str,
+        categories: &[String],
+        spawn_categories: &[u32],
+    ) -> Vec<(String, u32)> {
+        self.drops(DropFrom::LootBag, |drop| {
+            drop.names_mob(vitals_id, categories, spawn_categories)
+        })
+    }
+
+    /// The items the waiting gather and item tasks drop for a quest object of gatherable
+    /// `gatherable` that the player gathers: each item and its chance in percent.
     pub fn gather_drops(&self, gatherable: &str) -> Vec<(String, u32)> {
-        self.drops(|drop| drop.enemy.eq_ignore_ascii_case(gatherable))
+        self.drops(DropFrom::QuestObject, |drop| {
+            drop.names_gatherable(gatherable)
+        })
     }
 
-    /// The items of the waiting gather and item tasks whose drop `drops`, with their chances.
-    fn drops(&self, drops: impl Fn(&QuestDrop) -> bool) -> Vec<(String, u32)> {
+    /// The items of the waiting tasks that drop `from` there, whose drop `drops` and whose place
+    /// the player is in, with their chances.
+    fn drops(&self, from: DropFrom, drops: impl Fn(&QuestDrop) -> bool) -> Vec<(String, u32)> {
         self.waiting()
-            .filter_map(|kind| match kind {
-                TaskKind::GatherItems {
-                    item,
-                    drop: Some(drop),
-                    ..
+            .filter_map(|kind| match (kind, from) {
+                (
+                    TaskKind::GatherItems {
+                        item,
+                        drop: Some(drop),
+                        ..
+                    },
+                    DropFrom::Skin | DropFrom::QuestObject,
+                )
+                | (
+                    TaskKind::HaveItems {
+                        item,
+                        drop: Some(drop),
+                        ..
+                    },
+                    DropFrom::LootBag | DropFrom::QuestObject,
+                ) if drops(drop) && self.is_in(drop.place.as_deref()) => {
+                    Some((item.clone(), drop.percent))
                 }
-                | TaskKind::HaveItems {
-                    item,
-                    drop: Some(drop),
-                    ..
-                } if drops(drop) => Some((item.clone(), drop.percent)),
                 _ => None,
             })
             .collect()
@@ -2158,12 +2225,17 @@ impl ObjectiveRun {
             .collect()
     }
 
-    /// The items the waiting item tasks drop for a container the player opens (a loot crate)
-    /// where it is now: each item and its chance in percent.
+    /// The items the waiting item and gather tasks drop for a container the player opens (a loot
+    /// crate) where it is now: each item and its chance in percent.
     pub fn chest_drops(&self) -> Vec<(String, u32)> {
         self.waiting()
             .filter_map(|kind| match kind {
                 TaskKind::HaveItems {
+                    item,
+                    chest: Some(chest),
+                    ..
+                }
+                | TaskKind::GatherItems {
                     item,
                     chest: Some(chest),
                     ..
@@ -2834,8 +2906,13 @@ pub(crate) mod tests {
         let (run, effects) = ObjectiveRun::start(Arc::clone(&tree), 0);
         assert!(effects.contains(&Effect::GiveItem("1612_0201_MalatestaLetter".to_owned(), 1)));
         assert_eq!(
-            run.quest_drops("Bandit_Thug", &[], &[]),
-            [("1605_0301_BlessedRelic".to_owned(), 100)]
+            run.kill_drops("Bandit_Thug", &[], &[]),
+            [("1605_0301_BlessedRelic".to_owned(), 100)],
+            "into the loot bag of the kill"
+        );
+        assert!(
+            run.quest_drops("Bandit_Thug", &[], &[]).is_empty(),
+            "not at a skinning"
         );
         assert_eq!(
             tree.returned_items(),
@@ -3467,7 +3544,6 @@ pub(crate) mod tests {
                 poi_tag: Some(PLACE.to_owned()),
                 enforce_location: true,
                 chest_drop_probability: Some(100),
-                returned_on_turn_in: true,
                 ..row("Items", "TaskHaveAndReturnItems")
             },
         ]
@@ -3505,6 +3581,86 @@ pub(crate) mod tests {
         run.event(wolf, 0);
         assert!(run.is_done("Kill"), "inside it counts");
         assert_eq!(run.tree.returned_items(), [("FastenersT4".to_owned(), 1)]);
+    }
+
+    #[test]
+    fn a_gather_task_with_a_container_chance_drops_its_item_from_containers() {
+        // Retail row `1126_0101_02_Investigate_Ruins` (Stone Cold Secrets): `TaskGatherItems`,
+        // `ChestDropProbability` 100; retail counted it 10 ms after a loot container's gather.
+        const FRAGMENT: &str = "1126_AncientKeyFragment1";
+        let rows = vec![TaskRow {
+            item_name: Some(FRAGMENT.to_owned()),
+            chest_drop_probability: Some(100),
+            enforce_location: true,
+            ..row("Ruins", "TaskGatherItems")
+        }];
+        let tree = Arc::new(TaskBook::new(rows).tree("Ruins").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        assert_eq!(run.chest_drops(), [(FRAGMENT.to_owned(), 100)]);
+        run.event(
+            Event::ItemGained {
+                item: FRAGMENT,
+                quantity: 1,
+            },
+            0,
+        );
+        assert!(run.is_done("Ruins"));
+        assert!(run.chest_drops().is_empty(), "done: no more drops");
+    }
+
+    #[test]
+    fn a_quests_have_and_return_task_counts_held_items_drops_from_its_list_and_takes_them_back() {
+        // Retail rows: `02A_Side02_01_01_01_02_Task_KillToken1` (Lost, in its village, 5 bone
+        // dust) and the cactus sizes of `16_Side_25_01_01_Have_7_CactusFlower`, as one list.
+        const VILLAGE: &str = "abandoned_village_40210";
+        const DUST: &str = "02A_Side02_BoneDust";
+        let rows = vec![TaskRow {
+            item_name: Some(DUST.to_owned()),
+            target_qty: Some(5),
+            item_drop_vc: Some("Lost,Cactus_Tree_Tiny".to_owned()),
+            item_drop_probability: Some(100),
+            poi_tag: Some(VILLAGE.to_owned()),
+            enforce_location: true,
+            ..row("Dust", "TaskHaveAndReturnItems")
+        }];
+        let tree = Arc::new(TaskBook::new(rows).tree("Dust").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(Arc::clone(&tree), 0);
+        let lost = categories_of("Lost_Brute,Lost");
+        fn at<'a>(places: &'a [&'a str]) -> Facts<'a> {
+            Facts {
+                held: &[],
+                places: Some(places),
+                achieved: None,
+                level: None,
+                territories: None,
+                of_family: None,
+                houses: None,
+            }
+        }
+        run.sync(&at(&[]), 0);
+        assert!(
+            run.kill_drops("Lost_Brute", &lost, &[]).is_empty(),
+            "outside its place"
+        );
+        run.sync(&at(&[VILLAGE]), 0);
+        assert_eq!(
+            run.kill_drops("Lost_Brute", &lost, &[]),
+            [(DUST.to_owned(), 100)]
+        );
+        assert!(
+            run.quest_drops("Lost_Brute", &lost, &[]).is_empty(),
+            "a have-and-return item is not skinned"
+        );
+        assert_eq!(
+            run.gather_drops("cactus_tree_tiny"),
+            [(DUST.to_owned(), 100)],
+            "every source of the list"
+        );
+        run.sync_held(&[(DUST, 4, false)], 0);
+        assert!(!run.is_done("Dust"), "4 of 5");
+        run.sync_held(&[(DUST, 5, false)], 0);
+        assert!(run.is_done("Dust"));
+        assert_eq!(tree.returned_items(), [(DUST.to_owned(), 5)]);
     }
 
     /// A small tree in the shape of the tutorial's start: an unlock, a video start, a timer then

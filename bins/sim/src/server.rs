@@ -409,7 +409,7 @@ pub async fn serve(
     let mut state = Loop {
         world: SimWorld::new(
             settings.world,
-            WorldIds::random(started_at_ms)?,
+            WorldIds::random(started_at_ms.saturating_sub(SERVER_EPOCH_UNIX_MS))?,
             ground,
             me,
             settings.combat.clone(),
@@ -789,7 +789,10 @@ impl Loop {
             }
             Some(index) if let Some(call) = ItemCallMsg::decode(index, &envelope.body) => {
                 match call {
-                    Ok(call) => self.world.item_call(connection, call, self.now_ms()),
+                    Ok(call) => {
+                        tracing::debug!(?call, "client item call");
+                        self.world.item_call(connection, call, self.now_ms());
+                    }
                     Err(error) => bad_call(index, &error, &envelope.body),
                 }
             }

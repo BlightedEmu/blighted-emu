@@ -26,6 +26,11 @@ const CONTROLLER_DEF: &str = "ControllerDef";
 const TAGS_ELEMENT: &str = "Tags";
 const FRAGMENT_DEFS: &str = "FragmentDefs";
 const SCOPE_DEFS: &str = "ScopeDefs";
+const SCOPES_ATTRIBUTE: &str = "scopes";
+const OVERRIDE_ELEMENT: &str = "Override";
+const OVERRIDE_TAGS_ATTRIBUTE: &str = "tags";
+/// The separator of the scopes of a fragment and of the tags of an override (`UpperBody+Weapon`).
+const DEF_SEPARATOR: char = '+';
 const FILENAME_ATTRIBUTE: &str = "filename";
 const TAG_DEFINITION: &str = "TagDefinition";
 const GROUP_ELEMENT: &str = "Group";
@@ -128,6 +133,22 @@ const STATUS_EFFECT_ATTRIBUTE: &str = "StatusEffect";
 const ACTIVATION_CONDITION_ELEMENT: &str = "ActivationCondition";
 const DEACTIVATION_CONDITION_ELEMENT: &str = "DeactivationCondition";
 const SET_TAG_ELEMENT: &str = "SetMannequinTag";
+/// The `DelayTimer` of a tag case: seconds before its `OnEnter` change (Observed in the mob
+/// lists: `BlockBroken` unsets 8 s after its action starts, `damned_block.actionlist`).
+const DELAY_ATTRIBUTE: &str = "DelayTimer";
+/// The block activity of a mob action: `OnEnter` raises the block with the off-hand or main-hand
+/// weapon, `OnExit` lowers it (Observed: `damned_block.actionlist`, `baseai_block.actionlist`).
+const ACTIVATE_BLOCK_ELEMENT: &str = "ActivateBlock";
+/// The values of an `ActivateBlock` that raise the block.
+const BLOCK_RAISE_VALUES: [&str; 2] = ["ActivateOffHandWeapon", "ActivateMainHandWeapon"];
+/// The value of an `ActivateBlock` that lowers it.
+const BLOCK_LOWER_VALUE: &str = "Deactivate";
+/// `DisableStaminaRegen`: `OnEnter="Disable"` stops the stamina regen until `OnExit="Enable"`.
+const DISABLE_REGEN_ELEMENT: &str = "DisableStaminaRegen";
+const REGEN_OFF_VALUE: &str = "Disable";
+/// `ResetStamina`: `OnExit="Reset"` fills the stamina again.
+const RESET_STAMINA_ELEMENT: &str = "ResetStamina";
+const STAMINA_RESET_VALUE: &str = "Reset";
 const ON_ENTER_ATTRIBUTE: &str = "OnEnter";
 const ON_EXIT_ATTRIBUTE: &str = "OnExit";
 const CASE_NAME_ATTRIBUTE: &str = "Name";
@@ -280,6 +301,33 @@ pub struct ControllerDef {
     pub fragments: Vec<String>,
     /// The scope names, in `<ScopeDefs>` order: a scope's bit in `scopeData` is its index.
     pub scopes: Vec<String>,
+    /// The scopes each fragment plays on, in `<FragmentDefs>` order.
+    pub fragment_scopes: Vec<FragmentScopes>,
+}
+
+/// The scopes one fragment plays on (`<Name scopes="FullBody"><Override tags="MagicStaff+Heal"
+/// scopes="UpperBody+Weapon"/></Name>`). A fragment that starts on a scope takes it from the
+/// fragment that played there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FragmentScopes {
+    /// The fragment's name.
+    pub name: String,
+    /// Its scopes without an override.
+    pub scopes: Vec<String>,
+    /// Its overrides, in file order: the tags that pick one, and its scopes.
+    pub overrides: Vec<(Vec<String>, Vec<String>)>,
+}
+
+impl FragmentScopes {
+    /// Its scopes for the tag state `tags` (any case): those of the first override whose every
+    /// tag is in `tags`, else its own.
+    pub fn for_tags(&self, tags: &[&str]) -> &[String] {
+        let has = |tag: &String| tags.iter().any(|own| own.eq_ignore_ascii_case(tag));
+        self.overrides
+            .iter()
+            .find(|(wanted, _)| wanted.iter().all(has))
+            .map_or(&self.scopes, |(_, scopes)| scopes)
+    }
 }
 
 impl ControllerDef {
@@ -309,11 +357,49 @@ impl ControllerDef {
                 .map(|child| child.name.clone())
                 .collect())
         };
+        let parts = |node: &Node, key: &str| -> Vec<String> {
+            node.attribute(key)
+                .into_iter()
+                .flat_map(|text| text.split(DEF_SEPARATOR))
+                .filter(|part| !part.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let fragment_scopes = root
+            .child(FRAGMENT_DEFS)?
+            .children
+            .iter()
+            .map(|fragment| FragmentScopes {
+                name: fragment.name.clone(),
+                scopes: parts(fragment, SCOPES_ATTRIBUTE),
+                overrides: fragment
+                    .children
+                    .iter()
+                    .filter(|child| child.name == OVERRIDE_ELEMENT)
+                    .map(|child| {
+                        (
+                            parts(child, OVERRIDE_TAGS_ATTRIBUTE),
+                            parts(child, SCOPES_ATTRIBUTE),
+                        )
+                    })
+                    .collect(),
+            })
+            .collect();
         Ok(Self {
             tags_file,
             fragments: names(FRAGMENT_DEFS)?,
             scopes: names(SCOPE_DEFS)?,
+            fragment_scopes,
         })
+    }
+
+    /// The scopes fragment `fragment` (any case) plays on for the tag state `tags`; empty for a
+    /// fragment the definitions do not name.
+    pub fn scopes_of(&self, fragment: &str, tags: &[&str]) -> &[String] {
+        self.fragment_scopes
+            .iter()
+            .find(|own| own.name.eq_ignore_ascii_case(fragment))
+            .map_or(&[], |own| own.for_tags(tags))
     }
 }
 
@@ -1336,6 +1422,10 @@ pub struct Action {
     pub deactivation: Option<Condition>,
     /// Its active ability parts; `None` for an action that tests and performs no ability.
     pub ability: Option<AbilityUse>,
+    /// Its `ActivateBlock` activities (mob lists), in file order.
+    pub block_activities: Vec<BlockActivity>,
+    /// Its stamina activities (mob lists).
+    pub stamina: StaminaActivities,
 }
 
 /// How a cast activity aims its spell.
@@ -1379,6 +1469,51 @@ pub struct TagCase {
     pub on_enter: TagChange,
     /// `OnExit`.
     pub on_exit: TagChange,
+    /// `DelayTimer`, ms: the `OnEnter` change comes this long after the start.
+    pub delay_ms: u32,
+}
+
+/// What an `ActivateBlock` activity does to the block when it starts or ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BlockChange {
+    /// `ActivateOffHandWeapon` or `ActivateMainHandWeapon`: the block rises.
+    Raise,
+    /// `Deactivate`: the block falls.
+    Lower,
+    /// Any other value: the block stays as it is.
+    Keep,
+}
+
+impl BlockChange {
+    fn of(value: Option<&str>) -> Self {
+        match value {
+            Some(value) if BLOCK_RAISE_VALUES.contains(&value) => Self::Raise,
+            Some(BLOCK_LOWER_VALUE) => Self::Lower,
+            _ => Self::Keep,
+        }
+    }
+}
+
+/// An `ActivateBlock` activity: while the conditions of the branches it is in hold, it is on;
+/// its `<Default>` raises or lowers the block when it starts and ends (the `<Conditional>` cases
+/// only choose the weapon hand, which the server does not need).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BlockActivity {
+    /// The conditions of the branches it is in; `True` for none.
+    pub condition: Condition,
+    /// `OnEnter`.
+    pub on_enter: BlockChange,
+    /// `OnExit`.
+    pub on_exit: BlockChange,
+}
+
+/// The stamina activities of an action, each with the conditions of the branches it is in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StaminaActivities {
+    /// `DisableStaminaRegen` with `OnEnter="Disable"`: no regen while it is on.
+    pub regen_off: Option<Condition>,
+    /// `ResetStamina` with `OnExit="Reset"`: the stamina is full again when it ends.
+    pub reset_on_exit: Option<Condition>,
 }
 
 /// A `SetMannequinTag` activity: while the conditions of the branches it is in hold, it is on;
@@ -1657,6 +1792,11 @@ fn tag_activities(action: &Node) -> Vec<TagActivity> {
             tag: entry.attribute(TAG_NAME_ATTRIBUTE)?.to_owned(),
             on_enter: TagChange::of(entry.attribute(ON_ENTER_ATTRIBUTE)),
             on_exit: TagChange::of(entry.attribute(ON_EXIT_ATTRIBUTE)),
+            // A delay of a few seconds.
+            delay_ms: entry
+                .attribute(DELAY_ATTRIBUTE)
+                .and_then(|delay| delay.trim().parse::<f64>().ok())
+                .map_or(0, |delay| (delay.max(0.0) * MS_PER_SECOND).round() as u32),
         })
     };
     let mut found = Vec::new();
@@ -1682,6 +1822,61 @@ fn tag_activities(action: &Node) -> Vec<TagActivity> {
                 .and_then(case),
         });
         true
+    });
+    found
+}
+
+/// The `ActivateBlock` activities of `action`, each with the conditions of the branches it is in,
+/// in file order.
+fn block_activities(action: &Node) -> Vec<BlockActivity> {
+    let mut found = Vec::new();
+    walk_activities(action, &mut |activity, condition| {
+        if activity.name != ACTIVATE_BLOCK_ELEMENT {
+            return false;
+        }
+        if let Some(default) = activity
+            .children
+            .iter()
+            .find(|entry| entry.name == DEFAULT_ELEMENT)
+        {
+            found.push(BlockActivity {
+                condition,
+                on_enter: BlockChange::of(default.attribute(ON_ENTER_ATTRIBUTE)),
+                on_exit: BlockChange::of(default.attribute(ON_EXIT_ATTRIBUTE)),
+            });
+        }
+        true
+    });
+    found
+}
+
+/// The stamina activities of `action` (the first of each kind).
+fn stamina_activities(action: &Node) -> StaminaActivities {
+    let mut found = StaminaActivities::default();
+    walk_activities(action, &mut |activity, condition| {
+        let default = activity
+            .children
+            .iter()
+            .find(|entry| entry.name == DEFAULT_ELEMENT);
+        match activity.name.as_str() {
+            DISABLE_REGEN_ELEMENT => {
+                if default.and_then(|entry| entry.attribute(ON_ENTER_ATTRIBUTE))
+                    == Some(REGEN_OFF_VALUE)
+                {
+                    found.regen_off.get_or_insert(condition);
+                }
+                true
+            }
+            RESET_STAMINA_ELEMENT => {
+                if default.and_then(|entry| entry.attribute(ON_EXIT_ATTRIBUTE))
+                    == Some(STAMINA_RESET_VALUE)
+                {
+                    found.reset_on_exit.get_or_insert(condition);
+                }
+                true
+            }
+            _ => false,
+        }
     });
     found
 }
@@ -1821,6 +2016,24 @@ impl ActionList {
                         deactivation: condition_of(action, DEACTIVATION_CONDITION_ELEMENT)
                             .map(|condition| condition.resolved(&conditions, 0)),
                         ability: ability_use(action),
+                        block_activities: block_activities(action)
+                            .into_iter()
+                            .map(|activity| BlockActivity {
+                                condition: activity.condition.resolved(&conditions, 0),
+                                ..activity
+                            })
+                            .collect(),
+                        stamina: {
+                            let found = stamina_activities(action);
+                            StaminaActivities {
+                                regen_off: found
+                                    .regen_off
+                                    .map(|condition| condition.resolved(&conditions, 0)),
+                                reset_on_exit: found
+                                    .reset_on_exit
+                                    .map(|condition| condition.resolved(&conditions, 0)),
+                            }
+                        },
                     })
                 })
                 .collect(),
@@ -1919,6 +2132,9 @@ mod tests {
         let def = ControllerDef::parse(text).expect("defs");
         assert_eq!(def.fragments, ["Idle", "Move"]);
         assert_eq!(def.scopes, ["FullBody", "Additive", "LookPose"]);
+        assert_eq!(def.scopes_of("idle", &["a", "B"]), ["FullBody"]);
+        assert_eq!(def.scopes_of("Move", &[]), ["FullBody"]);
+        assert!(def.scopes_of("Jump", &[]).is_empty(), "not named");
         assert_eq!(
             def.tags_file,
             "Animations/Mannequin/ADB/NPC_Monster/Boar_Family/Boar_Tags.xml"
@@ -2458,6 +2674,70 @@ mod tests {
     }
 
     #[test]
+    fn mob_block_and_stamina_activities_read_with_their_branches() {
+        // Retail `damned_block.actionlist` (build 25810808), trimmed.
+        let text = r#"<ActionList><Actions>
+ <Action Name="Block" FragmentName="">
+  <ActivationCondition><And><IfMannequinTag TagName="Shield_OH"/><IfMannequinTag TagName="Alerted"/></And></ActivationCondition>
+  <DeactivationCondition><Or><Not><IfMannequinTag TagName="Shield_OH"/></Not><IfMannequinTag TagName="BlockBroken"/></Or></DeactivationCondition>
+  <Activities><IfThenElse ResetWhenReinstalled="true">
+   <IfCondition><Not><IfMannequinMarker MarkerName="DisableBlock"/></Not></IfCondition>
+   <ThenActivity><Group>
+    <ActivateBlock><Default OnEnter="ActivateOffHandWeapon" OnExit="Deactivate"/><Conditional Name="GreatAxeman" OnEnter="ActivateMainHandWeapon" OnExit="Deactivate"/></ActivateBlock>
+    <SetMannequinTag ResetWhenReinstalled="true"><Default TagName="Block" OnEnter="Set" OnExit="Unset" DelayTimer="0.0"/></SetMannequinTag>
+   </Group></ThenActivity></IfThenElse></Activities>
+ </Action>
+ <Action Name="BlockBroken" FragmentName="">
+  <ActivationCondition><And><IfMannequinTag TagName="BlockBroken"/></And></ActivationCondition>
+  <DeactivationCondition/>
+  <Activities>
+   <SetMannequinTag ResetWhenReinstalled="true"><Default TagName="BlockBroken" OnEnter="Unset" OnExit="NoEffect" DelayTimer="8.0"/></SetMannequinTag>
+   <DisableStaminaRegen ResetWhenReinstalled="true"><Default OnEnter="Disable" OnExit="Enable"/></DisableStaminaRegen>
+   <ResetStamina ResetWhenReinstalled="false"><Default OnEnter="NoEffect" OnExit="Reset"/></ResetStamina>
+  </Activities>
+ </Action>
+</Actions></ActionList>"#;
+        let list = ActionList::parse(text).expect("list");
+        let block = list.action("Block").expect("block");
+        // A `Not` reads its children as one `All`, as every condition list does.
+        let open = Condition::All(vec![Condition::All(vec![Condition::Not(Box::new(
+            Condition::All(vec![Condition::Marker("DisableBlock".to_owned())]),
+        ))])]);
+        assert_eq!(
+            block.block_activities,
+            [BlockActivity {
+                condition: open.clone(),
+                on_enter: BlockChange::Raise,
+                on_exit: BlockChange::Lower,
+            }]
+        );
+        assert_eq!(block.tag_activities[0].condition, open);
+        assert_eq!(
+            block.tag_activities[0]
+                .default
+                .as_ref()
+                .map(|case| case.on_exit),
+            Some(TagChange::Unset)
+        );
+        let broken = list.action("BlockBroken").expect("broken");
+        assert_eq!(
+            broken.tag_activities[0]
+                .default
+                .as_ref()
+                .map(|case| case.delay_ms),
+            Some(8_000)
+        );
+        assert_eq!(
+            broken.stamina,
+            StaminaActivities {
+                regen_off: Some(Condition::True),
+                reset_on_exit: Some(Condition::True),
+            }
+        );
+        assert!(broken.block_activities.is_empty());
+    }
+
+    #[test]
     fn tag_activities_keep_their_changes_branches_and_cases() {
         let text = r#"<ActionList><Conditions>
  <And Name="Bow_PenetratingAimActive"><IfMannequinTag TagName="Penetrating"/></And>
@@ -2477,6 +2757,7 @@ mod tests {
             tag: tag.to_owned(),
             on_enter,
             on_exit,
+            delay_ms: 0,
         };
         let shot = Condition::All(vec![Condition::Marker("ShotFired".to_owned())]);
         assert_eq!(

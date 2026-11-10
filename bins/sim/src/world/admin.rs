@@ -3,6 +3,7 @@
 //! `Kick` needs the server loop (it saves and closes the connection): see
 //! [`SimWorld::connection_of`].
 
+use crate::mob_ai::SpawnAi;
 use std::sync::Arc;
 
 use crate::mobs::ring;
@@ -315,14 +316,14 @@ impl SimWorld {
     /// Spawns `count` GM mobs of `vitals` on a ring around `at`. The admin sends this to the
     /// sim that owns the cell of `at`.
     fn spawn_gm_mobs(&mut self, vitals: &str, level: u32, at: Point, count: u32) -> AdminReply {
-        match self.spawn_gm(vitals, level, at, count) {
+        match self.spawn_gm(vitals, level, at, count, None) {
             Ok(entities) => AdminReply::Spawned { entities },
             Err(reason) => AdminReply::Failed { reason },
         }
     }
 
     /// Spawns `count` GM mobs of `vitals` at `level` on a ring around `at` (GM commands, scripts
-    /// and events); their entity numbers, or why none spawned. The level must have a row of the
+    /// and events), with the design overrides `ai`; their entity numbers, or why none spawned. The level must have a row of the
     /// mob level table (`VitalsLevelData`); the count is 1 to `[admin] max_gm_spawn`.
     pub(super) fn spawn_gm(
         &mut self,
@@ -330,6 +331,7 @@ impl SimWorld {
         level: u32,
         at: Point,
         count: u32,
+        ai: Option<&SpawnAi>,
     ) -> Result<Vec<u64>, String> {
         if self.combat.data.level(level).is_none() {
             let levels = self.combat.data.levels().map(|(level, _)| level);
@@ -352,7 +354,7 @@ impl SimWorld {
                 position: [x, y, at.z],
                 ..VitalsSpawn::default()
             };
-            match self.mobs.spawn_gm(spawn) {
+            match self.mobs.spawn_gm(spawn, ai.cloned()) {
                 Some(entity) => entities.push(entity),
                 None => {
                     self.remove_gm(&entities);

@@ -44,6 +44,7 @@ use super::gear::{BagEntry, unix_ns};
 use super::slots::Slot;
 use super::statics::interactor_target;
 use super::{Player, SimWorld, gather_answer, send_now};
+use crate::objectives::ObjectiveRun;
 
 /// First slot key of a loot bag: its serial is added. Keys are never sent; they stay above every
 /// player and mob number and below the gather nodes.
@@ -273,6 +274,16 @@ impl LootBags {
             },
         );
         id
+    }
+
+    /// The items of every bag that `player` may loot, bag by bag.
+    #[cfg(test)]
+    pub(super) fn items_for(&self, player: u64) -> Vec<Vec<(String, u32)>> {
+        self.bags
+            .values()
+            .filter(|bag| bag.owner == Some(player))
+            .map(|bag| bag.items.clone())
+            .collect()
     }
 
     /// The bag `id` that `player` may take now; `None` for another bag.
@@ -877,41 +888,52 @@ impl SimWorld {
     /// Mob `mob`, killed by player `killer` at `now_ms`, drops its loot bag at its corpse: the
     /// roll of its loot table at its type's `LootDropChance` ([`nw_content::loot::MobLoot`];
     /// every kill of a mob type with a table drops a bag, loot note) for the killer, less the
-    /// items its loot limits hold back, which its loot tracker lists when the roll gave items.
-    /// A killer on another sim, a mob type without a table and the tutorial drop nothing.
+    /// items its loot limits hold back, with the items the killer's quests drop for it
+    /// ([`crate::objectives::ObjectiveRun::kill_drops`]); its loot tracker lists the bag when it
+    /// holds items. A killer on another sim, a mob type with neither a table nor a quest drop
+    /// and the tutorial drop nothing.
     pub(super) fn drop_loot(&mut self, mob: u64, killer: u64, now_ms: u64) {
         if self.is_tutorial() || self.player_by_number(killer).is_none() {
             return;
         }
         let content = Arc::clone(&self.content);
-        let Some(drop) = self
+        let quest_items = self.mob_quest_drops(killer, mob, ObjectiveRun::kill_drops);
+        let drop = self
             .mobs
             .vitals_of(mob)
-            .and_then(|vitals| content.mob_loot.of(vitals))
-        else {
+            .and_then(|vitals| content.mob_loot.of(vitals));
+        if drop.is_none() && quest_items.is_empty() {
             return;
-        };
+        }
         let Some((corpse, spawn)) = self.mobs.places(mob) else {
             return;
         };
-        let reached = self.reached_loot_limits(killer);
-        // A mutated instance adds its loot tags and its injected creature tables.
-        let tags = self.mutation_loot_tags(&drop.tags);
-        let context = self.loot_context(killer, Some((mob, &tags)), &reached);
-        let dice = &mut self.dice;
-        let mut below = |below| dice.below(below);
-        // A type without a chance rolls at every kill: a sure chance before the multiplier.
-        let chance = (drop.chance.unwrap_or(SURE_CHANCE) * self.combat.loot_drop_multiplier)
-            .clamp(0.0, SURE_CHANCE);
-        let rolls_table = chance >= SURE_CHANCE || chance_hit(chance, &mut below);
-        let rolled = if rolls_table {
-            content.loot.roll(&drop.table, context, &mut below)
-        } else {
-            LootRoll::default()
+        let rolled = match drop {
+            Some(drop) => {
+                let reached = self.reached_loot_limits(killer);
+                // A mutated instance adds its loot tags and its injected creature tables.
+                let tags = self.mutation_loot_tags(&drop.tags);
+                let context = self.loot_context(killer, Some((mob, &tags)), &reached);
+                let dice = &mut self.dice;
+                let mut below = |below| dice.below(below);
+                // A type without a chance rolls at every kill: a sure chance before the
+                // multiplier.
+                let chance = (drop.chance.unwrap_or(SURE_CHANCE)
+                    * self.combat.loot_drop_multiplier)
+                    .clamp(0.0, SURE_CHANCE);
+                let rolls_table = chance >= SURE_CHANCE || chance_hit(chance, &mut below);
+                if rolls_table {
+                    content.loot.roll(&drop.table, context, &mut below)
+                } else {
+                    LootRoll::default()
+                }
+            }
+            None => LootRoll::default(),
         };
         let hints = rolled.gear_scores.clone();
         let mut items = self.limit_loot(killer, rolled);
         items.extend(self.mutation_kill_loot(killer, mob));
+        items.extend(quest_items);
         let rolled = !items.is_empty();
         let (items, values) = self.roll_drops(killer, Some(mob), items, &hints);
         let rarity = values

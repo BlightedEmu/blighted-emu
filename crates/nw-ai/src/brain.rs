@@ -15,7 +15,12 @@
 //!
 //! Re-planning (Inferred from the retail capture `newchar-retail-2026-09-18`): the plan is made
 //! again every tick; when it differs from the executing plan and every executing node is
-//! `Interruptable`, the executing plan is cancelled and the new one starts. Evidence: the beach
+//! `Interruptable`, the executing plan is cancelled and the new one starts. The plans differ when
+//! a selector that executes would take another child; the choice of a selector that does not
+//! execute yet is no difference (retail `12-5_survivors`: an idle sailor's `Move` is followed by
+//! the next `Move` after 3.98 s at the least, 8.66 s in the middle; with every difference
+//! counted, the weighted draw of the wander tree's `FidgetOrNothing`, the step after the walk,
+//! cut each walk after one think). Evidence of the cut: the beach
 //! boar's interruptable `Run` (mid band, 3 to 7 m) was cut after 470 ms when the target came
 //! within the close band and the boar started `Attack_Gore` at 3.22 m; `Combat_Idle` entries of
 //! the club sailors ended after 134 to 999 ms, when their attack cooldown ran out, although the
@@ -564,7 +569,13 @@ impl Brain {
         if enter {
             ctx.cancel_all();
         }
-        for activity in &cage.tags {
+        let tags = ctx.brain.tags.clone();
+        let has_tag = |tag: NameId| tags.contains(&tag);
+        for activity in cage
+            .tags
+            .iter()
+            .filter(|activity| activity.condition.holds(&has_tag))
+        {
             let effect = if enter {
                 activity.on_enter
             } else {
@@ -575,6 +586,41 @@ impl Brain {
                 effect,
                 if enter { activity.delay_s } else { 0.0 },
             );
+        }
+    }
+
+    /// Tag activity `activity` of action `action`, which the engine runs, turns on (`enter`) or
+    /// off as its branch condition starts or stops holding: its tag change applies, and the plan
+    /// goes on (the `DisableBlock` branch of the mob block lists' `Block` action).
+    pub fn engine_activity(
+        &mut self,
+        runtime: &Runtime,
+        world: &impl World,
+        (action, activity): (u32, usize),
+        enter: bool,
+        out: &mut Vec<Command>,
+    ) {
+        let data = runtime.data();
+        let (Some(arch), Some(activity)) = (
+            data.archetypes.get(self.archetype as usize),
+            data.cage_actions
+                .get(action as usize)
+                .and_then(|cage| cage.tags.get(activity)),
+        ) else {
+            return;
+        };
+        let mut ctx = Ctx {
+            rt: runtime,
+            arch,
+            world,
+            now: world.now_ms(),
+            brain: self,
+            out,
+        };
+        if enter {
+            ctx.tag_effect(activity.tag, activity.on_enter, activity.delay_s);
+        } else {
+            ctx.tag_effect(activity.tag, activity.on_exit, 0.0);
         }
     }
 
@@ -657,7 +703,9 @@ impl Brain {
                     }
                     ctx.brain.plan = fresh;
                 } else if planned && fresh != ctx.brain.plan {
-                    ctx.cancel_all();
+                    if ctx.executing_differs(&fresh) {
+                        ctx.cancel_all();
+                    }
                     ctx.brain.plan = fresh;
                 }
             }
@@ -1269,6 +1317,25 @@ impl<'a, W: World> Ctx<'a, '_, W> {
     }
 
     /// The child a selector chose when the plan was made.
+    /// Whether plan `fresh` takes another child than the executing one at a selector that
+    /// executes. A choice of a node that does not execute yet (a later step of a sequence) is no
+    /// change of the executing plan: the weighted draw of such a UtilitySelector differs from
+    /// tick to tick.
+    fn executing_differs(&self, fresh: &[(Slot, u16)]) -> bool {
+        let data = self.rt.data();
+        self.brain.active.iter().any(|active| {
+            let State::Index(index) = active.state else {
+                return false;
+            };
+            matches!(
+                data.node(active.node).kind,
+                NodeKind::Selector(_) | NodeKind::UtilitySelector { .. }
+            ) && !fresh
+                .iter()
+                .any(|(slot, child)| *slot == active.slot && u32::from(*child) == index)
+        })
+    }
+
     fn planned_choice(&self, slot: Slot) -> Option<u16> {
         self.brain
             .plan
@@ -1729,7 +1796,11 @@ impl<'a, W: World> Ctx<'a, '_, W> {
                 let done_at = cage_action
                     .done_after_s(&has_tag)
                     .map(|seconds| self.now + ms_of(f64::from(seconds)));
-                for activity in &cage_action.tags {
+                for activity in cage_action
+                    .tags
+                    .iter()
+                    .filter(|activity| activity.condition.holds(&has_tag))
+                {
                     self.tag_effect(activity.tag, activity.on_enter, activity.delay_s);
                 }
                 self.out.push(Command::PlayTask {
@@ -1966,9 +2037,12 @@ impl<'a, W: World> Ctx<'a, '_, W> {
                     .task(&cage.task)
                     .and_then(|task| self.cage_action(task))
                 {
+                    let tags = self.brain.tags.clone();
+                    let has_tag = |tag: NameId| tags.contains(&tag);
                     let exits: Vec<_> = action
                         .tags
                         .iter()
+                        .filter(|activity| activity.condition.holds(&has_tag))
                         .map(|activity| (activity.tag, activity.on_exit))
                         .collect();
                     for (tag, effect) in exits {
@@ -2083,7 +2157,7 @@ enum LeafStart {
 mod tests {
     use super::*;
     use crate::build::{Build, COMPLETION_OFFSET_S as GORE_OFFSET_S, EPSILON_UTILITY, GORE_S};
-    use crate::data::{FragmentLength, TagActivity};
+    use crate::data::{CageCondition, FragmentLength, TagActivity};
     use crate::node::{Children, CooldownOverride, CooldownSpec, Gates};
     use crate::value::CompareOp;
 
@@ -2459,6 +2533,34 @@ mod tests {
         assert!((share_a - 0.75).abs() < 0.04, "A drawn {share_a}");
     }
 
+    #[test]
+    fn the_draw_of_a_later_step_does_not_cut_the_running_step() {
+        // The wander tree (`WanderThenFidget`): a walk, then the weighted `FidgetOrNothing`.
+        const RUN_MS: u64 = 5_000;
+        let mut build = Build::default();
+        let walk = build.cage("Walk", FragmentLength::Loops, Vec::new());
+        let fidget = build.idle("Fidget");
+        let nothing = build.idle("Nothing");
+        let wrapped_fidget = build.sequence(&[fidget]);
+        let wrapped_nothing = build.sequence(&[nothing]);
+        data_set_utility(&mut build, wrapped_fidget, 1.0);
+        data_set_utility(&mut build, wrapped_nothing, 1.0);
+        let children = build.children(&[wrapped_fidget, wrapped_nothing]);
+        let later = build.node(NodeKind::UtilitySelector {
+            children,
+            method: SelectionMethod::WeightedRandom,
+            top_n: u64::MAX,
+            preserve_if_no_change: true,
+            always_preserve: true,
+        });
+        let steps = build.sequence(&[walk, later]);
+        let idle = build.idle("Idle");
+        let root = build.selector(&[steps, idle]);
+        let data = build.finish(root);
+        let mut world = TestWorld::default();
+        assert_eq!(run(&data, &mut brain(&data), &mut world, RUN_MS), ["Walk"]);
+    }
+
     fn data_set_utility(build: &mut Build, node: NodeId, utility: f32) {
         build.data.nodes[node as usize].utility = utility;
     }
@@ -2591,6 +2693,7 @@ mod tests {
             "Alert",
             FragmentLength::Seconds(GORE_S),
             vec![TagActivity {
+                condition: CageCondition::True,
                 tag: alerted,
                 on_enter: TagEffect::Set,
                 on_exit: TagEffect::NoEffect,

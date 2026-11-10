@@ -52,8 +52,14 @@ const HIT_FLAG_ABSORBED: u16 = 0x0400;
 const CAMERA_SHAKE_STRONG: u32 = 0x664b_2673;
 /// The item tag of an absorbed hit (retail Thorpe intermission; meaning Unknown).
 const ABSORBED_TAG: u8 = 6;
-/// Hit flags: a pellet of a spread shot (ranged note: `0x21` on every pellet 2071).
+/// Hit flags: a ranged hit, a pellet of a spread shot among them (ranged note: `0x21` on every
+/// pellet 2071; the client names the bit `Ranged`, `eDamageDealtInfo_NetworkData_Flags` in
+/// `FUN_1468e36f0`).
 const HIT_FLAG_PELLET: u16 = 0x0001;
+/// Hit flags: the target resisted the hit (`Resisted`, the eighth name of
+/// `eDamageDealtInfo_NetworkData_Flags`). Observed (all-capture sweep 2026-11-09): retail sent
+/// 3,315 of 4,586 direct player hits on a mob whose block was up with this flag and 0 damage.
+const HIT_FLAG_RESISTED: u16 = 0x0080;
 /// Hit flags: the hit was a crit (ranged note: `0x61` on crit pellets).
 const HIT_FLAG_CRIT: u16 = 0x0040;
 /// The item tag of a pellet (ranged note: tag 5 on most pellet hits).
@@ -207,6 +213,21 @@ impl DamageDealtMsg {
             raw_2: hit_flags(HIT_FLAG_CAN_CRIT, false, killed).to_le_bytes(),
             items: one_hit(amount),
         }
+    }
+}
+
+impl DamageDealtMsg {
+    /// The same hit, marked `Resisted`: retail's form of a hit that a raised mob block stopped.
+    #[must_use]
+    pub fn resisted(mut self) -> Self {
+        let flags = u16::from_le_bytes(self.raw_2) | HIT_FLAG_RESISTED;
+        self.raw_2 = flags.to_le_bytes();
+        self
+    }
+
+    /// Whether the hit is marked `Resisted`.
+    pub fn is_resisted(&self) -> bool {
+        u16::from_le_bytes(self.raw_2) & HIT_FLAG_RESISTED != 0
     }
 }
 

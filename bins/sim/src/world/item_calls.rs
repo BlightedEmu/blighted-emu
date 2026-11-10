@@ -338,16 +338,22 @@ impl SimWorld {
             }
             ItemCallMsg::GiveItemsByClass { class, .. } => {
                 let content = Arc::clone(&self.content);
-                self.with_gear(entity, |gear, _| {
-                    for (_, item_id, instance, locked) in gear.bag_stacks() {
-                        if locked || !content.is_of_ui_class(&item_id, class) {
-                            continue;
-                        }
-                        if let Err(refusal) = gear.deposit(instance, ALL_OF_THE_STACK) {
-                            tracing::debug!(?refusal, "deposit by class refused");
-                        }
-                    }
+                let stored = self.with_gear(entity, |gear, _| {
+                    gear.bag_stacks()
+                        .into_iter()
+                        .filter(|(_, item_id, _, locked)| {
+                            !locked && content.is_of_ui_class(item_id, class)
+                        })
+                        .filter(|(_, _, instance, _)| {
+                            gear.deposit(*instance, ALL_OF_THE_STACK)
+                                .inspect_err(|refusal| {
+                                    tracing::debug!(?refusal, "deposit by class refused");
+                                })
+                                .is_ok()
+                        })
+                        .count()
                 });
+                tracing::debug!(player = number, class, ?stored, "stacks stored by class");
             }
             ItemCallMsg::TakeItemsByClass { class, .. } => {
                 let content = Arc::clone(&self.content);
@@ -363,6 +369,12 @@ impl SimWorld {
                             .collect()
                     })
                     .unwrap_or_default();
+                tracing::debug!(
+                    player = number,
+                    class,
+                    wanted = wanted.len(),
+                    "stacks taken by class"
+                );
                 for instance in wanted {
                     self.take_item(entity, number, instance, ALL_OF_THE_STACK, now_ms);
                 }

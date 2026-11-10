@@ -131,6 +131,40 @@ pub(super) struct AimLine {
     pub(super) pitch: f32,
 }
 
+/// Half of a height.
+const HALF: f32 = 0.5;
+
+impl AimLine {
+    /// The line of a shot from a shooter standing at `from`: to the point under the crosshair
+    /// `point` (the aim point of the client's input) when the input sent one, else along the
+    /// camera's `yaw` and `pitch`; `None` without a yaw or a pitch. The camera stands over the
+    /// shooter's shoulder, so its angles from the shooter's own place pass beside or under the
+    /// body under the crosshair (live 2026-11-10: 13 of 69 life staff casts met no mob, with
+    /// the crosshair on it); the line to the point leaves the middle of the shooter's body.
+    pub(super) fn of(
+        from: Position,
+        point: Option<Position>,
+        yaw: Option<f32>,
+        pitch: Option<f32>,
+    ) -> Option<Self> {
+        point
+            .and_then(|point| {
+                let along_m = from.horizontal_distance(point);
+                let rise_m = point.z - (from.z + PLAYER_CAPSULE.height_m * HALF);
+                (along_m > f32::EPSILON).then(|| Self {
+                    yaw: yaw_toward(from, point),
+                    pitch: -(rise_m / along_m).atan(),
+                })
+            })
+            .or_else(|| {
+                Some(Self {
+                    yaw: yaw?,
+                    pitch: pitch?,
+                })
+            })
+    }
+}
+
 /// The first body of `bodies` (mob, place, capsule) that `shot` from a shooter standing at `from`
 /// along `aim` meets, with how long it flies to it (seconds); `None` when it meets none. It meets
 /// a body whose edge is within its range and its radius of its line, before its flight ends,
@@ -424,6 +458,29 @@ mod tests {
             first_on_line(&BOLT, FROM, NORTH, &bolt_below),
             None,
             "a bolt does not fall"
+        );
+    }
+
+    #[test]
+    fn a_shot_flies_to_the_point_under_the_crosshair() {
+        // A mob 8 m ahead whose middle is 0.9 m beside the shooter's own line of the camera's
+        // yaw (the camera stands over the shoulder): the camera's angles from the shooter's
+        // place pass beside it, the line to the aim point on it meets it.
+        const DOWN: f32 = 0.1;
+        let mob = at(0.9, 8.0);
+        let bodies = [(1, mob, BODY)];
+        let point = Position {
+            z: mob.z + BODY.height_m * HALF,
+            ..mob
+        };
+        let camera = AimLine::of(FROM, None, Some(0.0), Some(DOWN)).expect("angles");
+        assert_eq!(first_on_line(&BOLT, FROM, camera, &bodies), None);
+        let aimed = AimLine::of(FROM, Some(point), Some(0.0), Some(DOWN)).expect("point");
+        assert!(first_on_line(&BOLT, FROM, aimed, &bodies).is_some());
+        assert_eq!(AimLine::of(FROM, None, None, Some(DOWN)), None);
+        assert_eq!(
+            AimLine::of(FROM, Some(FROM), Some(0.0), Some(DOWN)),
+            Some(camera)
         );
     }
 

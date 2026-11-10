@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap};
 use nw_content::generated::{SpellData, Tables};
 use nw_content::player_abilities::{
     AbilityCast, AbilityList, FragmentMarker, FragmentRow, FragmentTransition, ListAction,
-    PlayerAbilities, SpellProjectile, SpellRow,
+    PlayerAbilities, SpellProjectile, SpellRow, TransitionTo,
 };
 use nw_content::player_attacks::stance_tags;
 use nw_formats::input_profile::input_actions;
@@ -236,9 +236,10 @@ fn markers_of(fragments: &[&Fragment], end_ms: u64) -> Vec<FragmentMarker> {
     markers
 }
 
-/// The `CAGE-TransitionInstant` clips of `fragments` that name an action of `list` (`NewAction`,
-/// else the action that plays its `NewFragment`: the ice gauntlet's Ice Storm intro goes on to
-/// `Ability_IceMagic_IceStorm_Aim`, the fragment of `IceMagic_IceStorm_AimSubState`), by start; a
+/// The `CAGE-TransitionInstant` clips of `fragments`, by start: each leads to an action of `list`
+/// (`NewAction`, else the action that plays its `NewFragment`: the ice gauntlet's Ice Storm intro
+/// goes on to `Ability_IceMagic_IceStorm_Aim`, the fragment of `IceMagic_IceStorm_AimSubState`),
+/// or to a `NewFragment` that no action plays ([`TransitionTo::Fragment`]); a
 /// clip without an end lasts to `end_ms`. A clip's named condition is the one of `list`, else of
 /// another of the action lists `all` (the bow's aim fragment tests the archery list's); a name
 /// that none has stays a test that never holds.
@@ -253,15 +254,22 @@ fn transitions_of(
         .flat_map(|fragment| fragment.clips_of(TRANSITION_CLIP))
         .filter_map(|clip| {
             let named = |key| clip.param(key).filter(|value| !value.is_empty());
-            let action = named(TRANSITION_ACTION).map(str::to_owned).or_else(|| {
-                let fragment = named(TRANSITION_FRAGMENT)?;
-                list.actions
-                    .iter()
-                    .find(|action| action.fragment.eq_ignore_ascii_case(fragment))
-                    .map(|action| action.name.clone())
-            })?;
+            let to = named(TRANSITION_ACTION)
+                .map(|action| TransitionTo::Action(action.to_owned()))
+                .or_else(|| {
+                    let fragment = named(TRANSITION_FRAGMENT)?;
+                    Some(
+                        list.actions
+                            .iter()
+                            .find(|action| action.fragment.eq_ignore_ascii_case(fragment))
+                            .map_or_else(
+                                || TransitionTo::Fragment(fragment.to_owned()),
+                                |action| TransitionTo::Action(action.name.clone()),
+                            ),
+                    )
+                })?;
             Some(FragmentTransition {
-                action,
+                to,
                 input: clip
                     .param(TRANSITION_INPUT)
                     .filter(|input| !input.is_empty() && *input != ALWAYS_ON_INPUT)
@@ -315,14 +323,23 @@ fn list_of(
     let tags: Vec<&str> = owned_tags.iter().map(String::as_str).collect();
     let body = weapon.map(|weapon| weapon_body(&sources.bodies, weapon));
     let mut fragments: Vec<FragmentRow> = Vec::new();
-    for action in actions.iter().filter(|action| !action.fragment.is_empty()) {
+    // Each fragment an action plays, then each one a transition switches a running action to,
+    // with the action it belongs to.
+    let mut wanted: Vec<(String, String)> = actions
+        .iter()
+        .filter(|action| !action.fragment.is_empty())
+        .map(|action| (action.name.clone(), action.fragment.clone()))
+        .collect();
+    let mut next = 0;
+    while let Some((action_name, fragment_name)) = wanted.get(next).cloned() {
+        next += 1;
         if fragments
             .iter()
-            .any(|fragment| fragment.name.eq_ignore_ascii_case(&action.fragment))
+            .any(|fragment| fragment.name.eq_ignore_ascii_case(&fragment_name))
         {
             continue;
         }
-        let player = sources.player_fragment_any_case(&action.fragment, &tags);
+        let player = sources.player_fragment_any_case(&fragment_name, &tags);
         let attach = weapon
             .and_then(|weapon| weapon.attach.as_ref())
             .and_then(|path| sources.attach.get(path))
@@ -330,7 +347,7 @@ fn list_of(
                 let entry = adb
                     .fragments
                     .iter()
-                    .find(|entry| entry.name.eq_ignore_ascii_case(&action.fragment))?;
+                    .find(|entry| entry.name.eq_ignore_ascii_case(&fragment_name))?;
                 adb.best(&entry.name, &tags)
             });
         let found: Vec<&Fragment> = attach.into_iter().chain(player).collect();
@@ -344,8 +361,8 @@ fn list_of(
                 weapon,
                 body.as_ref(),
                 &tags,
-                &action.name,
-                &action.fragment,
+                &action_name,
+                &fragment_name,
             )
             .ok(),
             _ => None,
@@ -358,11 +375,20 @@ fn list_of(
             },
             |hit| hit.length_ms,
         );
+        let transitions = transitions_of(&found, length_ms, action_list, &sources.actions);
+        wanted.extend(transitions.iter().filter_map(|transition| match &transition.to {
+            TransitionTo::Fragment(fragment) => Some((action_name.clone(), fragment.clone())),
+            TransitionTo::Action(_) => None,
+        }));
         fragments.push(FragmentRow {
-            name: action.fragment.clone(),
+            name: fragment_name.clone(),
+            scopes: sources
+                .controller
+                .scopes_of(&fragment_name, &tags)
+                .to_vec(),
             length_ms,
             markers: markers_of(&found, length_ms),
-            transitions: transitions_of(&found, length_ms, action_list, &sources.actions),
+            transitions,
             hit,
         });
     }
@@ -512,6 +538,7 @@ mod tests {
             actions: Vec::new(),
             action_paths: Vec::new(),
             grid: Vec::new(),
+            controller: nw_formats::mannequin::ControllerDef::default(),
             sheathe: None,
             ranged: HashMap::from([
                 (
@@ -534,6 +561,43 @@ mod tests {
             "spell_prefab_path": prefab,
         }))
         .expect("row")
+    }
+
+    #[test]
+    fn a_transition_leads_to_the_action_of_its_fragment_or_switches_the_fragment() {
+        use nw_formats::mannequin::AnimDatabase;
+
+        /// The life staff's ready fragment, cut (`player_magicstaff_heal.adb`, build 25810808):
+        /// it goes on with the aim loop, which no action plays, and a cast action plays `Cast`.
+        const ADB: &str = r#"<AnimDB><FragmentList>
+ <Ready><Fragment Tags="MagicStaff"><ProcLayer>
+  <Blend ExitTime="0.4"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Input value="Test_AlwaysTrue"/><NewFragment value="Aim"/><NewAction value=""/></ProceduralParams></Procedural>
+  <Blend ExitTime="0"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Input value="attack_shoot"/><NewFragment value="Cast"/><NewAction value=""/></ProceduralParams></Procedural>
+ </ProcLayer></Fragment></Ready>
+</FragmentList></AnimDB>"#;
+        const ACTIONS: &str = r#"<ActionList><Actions>
+ <Action Name="ReadyAction" FragmentName="Ready"/>
+ <Action Name="CastAction" FragmentName="Cast"/>
+</Actions></ActionList>"#;
+        const LENGTH_MS: u64 = 600;
+        let adb = AnimDatabase::parse(ADB).expect("adb");
+        let list = ActionList::parse(ACTIONS).expect("actions");
+        let ready = adb.best("Ready", &["MagicStaff"]).expect("fragment");
+        let transitions = transitions_of(&[ready], LENGTH_MS, &list, &[]);
+        let leads: Vec<(&TransitionTo, Option<&str>)> = transitions
+            .iter()
+            .map(|transition| (&transition.to, transition.input.as_deref()))
+            .collect();
+        assert_eq!(
+            leads,
+            [
+                (&TransitionTo::Fragment("Aim".to_owned()), None),
+                (
+                    &TransitionTo::Action("CastAction".to_owned()),
+                    Some("attack_shoot")
+                ),
+            ]
+        );
     }
 
     #[test]

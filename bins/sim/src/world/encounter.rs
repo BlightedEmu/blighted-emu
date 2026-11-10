@@ -1893,14 +1893,8 @@ pub(crate) mod tests {
             orders.contains(&Order::KillExperience(TUTORIAL_MOB_LEVEL)),
             "an island foe gives experience: {orders:?}"
         );
-        let orders = tutorial.event(
-            Event::ItemGained {
-                item: CHEST_ITEM,
-                quantity: 1,
-            },
-            &mut mobs,
-            NOW,
-        );
+        // The chest's potions count as held items (its task is a have-and-return task).
+        let orders = tutorial.sync_held(&[(CHEST_ITEM, 1, false)], &mut mobs, NOW);
         assert!(tutorial.run.finished());
         let mut rewards: Vec<Order> = LEAVING_LORE
             .iter()
@@ -1910,14 +1904,7 @@ pub(crate) mod tests {
         assert_eq!(orders, rewards, "the end gives the lore and fresh potions");
         assert!(
             tutorial
-                .event(
-                    Event::ItemGained {
-                        item: CHEST_ITEM,
-                        quantity: 1,
-                    },
-                    &mut mobs,
-                    NOW
-                )
+                .sync_held(&[(CHEST_ITEM, 1, false)], &mut mobs, NOW)
                 .is_empty(),
             "once"
         );

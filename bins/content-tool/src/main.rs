@@ -765,6 +765,10 @@ fn print_dungeon_scripts(report: &DungeonScriptsReport) {
         report.chests
     );
     println!(
+        "open world spawn groups: {} encounters",
+        report.open_world_encounters
+    );
+    println!(
         "target slices: {} spawner mobs ({} without a level), {} other slices",
         report.spawner_mobs, report.levelless_mobs, report.other_slices
     );

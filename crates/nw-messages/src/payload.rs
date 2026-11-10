@@ -60,6 +60,7 @@ use crate::social::states::{
     CHAT_STATE_TYPE_INDEX, ChatState, GROUPS_STATE_TYPE_INDEX, GUILDS_STATE_TYPE_INDEX,
     GroupsState, GuildsState, SocialState,
 };
+use crate::spell_state::{SPELL_TYPE_INDEX, SpellState};
 use crate::status_effects::{STATUS_EFFECTS_TYPE_INDEX, StatusEffectsState};
 use crate::temporary_affiliation::{TEMPORARY_AFFILIATION_TYPE_INDEX, TemporaryAffiliationState};
 use crate::title_choice::SOCIAL_TYPE_INDEX;
@@ -107,6 +108,8 @@ pub enum MemberState {
     GatherableController(GatherableControllerState),
     /// `MB::InteractReplicatedState`.
     Interact(InteractState),
+    /// `MB::SpellComponentReplicatedState`.
+    Spell(SpellState),
     /// The player's currency.
     Currency(CurrencyState),
     /// `MB::ItemManagementComponentReplicatedState`.
@@ -231,6 +234,7 @@ impl MemberState {
             Self::DamageReceiver(_) => DAMAGE_RECEIVER_TYPE_INDEX,
             Self::GatherableController(_) => GATHERABLE_CONTROLLER_TYPE_INDEX,
             Self::Interact(_) => INTERACT_TYPE_INDEX,
+            Self::Spell(_) => SPELL_TYPE_INDEX,
             Self::Currency(_) => CURRENCY_TYPE_INDEX,
             Self::ItemManagement(_) => ITEM_MANAGEMENT_TYPE_INDEX,
             Self::Objectives(_) => OBJECTIVES_TYPE_INDEX,
@@ -346,6 +350,7 @@ impl MemberState {
             TypeId::FileSlot(INTERACT_TYPE_INDEX) => {
                 InteractState::read(reader).map(Self::Interact)
             }
+            TypeId::FileSlot(SPELL_TYPE_INDEX) => SpellState::read(reader).map(Self::Spell),
             TypeId::FileSlot(CURRENCY_TYPE_INDEX) => {
                 CurrencyState::read(reader).map(Self::Currency)
             }
@@ -497,10 +502,7 @@ impl MemberState {
                 state.write(writer);
                 Ok(())
             }
-            Self::PlayerComponent(state) => {
-                state.write(writer);
-                Ok(())
-            }
+            Self::PlayerComponent(state) => state.write(writer),
             Self::Appearance(state) => {
                 state.write(writer);
                 Ok(())
@@ -521,6 +523,10 @@ impl MemberState {
                 Ok(())
             }
             Self::Interact(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::Spell(state) => {
                 state.write(writer);
                 Ok(())
             }

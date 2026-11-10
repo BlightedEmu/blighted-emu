@@ -266,9 +266,23 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             (MobLooks::default(), LookAssets::new(), SliceVitals::new())
         }
     };
+    let dungeon_scripts =
+        match DungeonScripts::load(&dungeon_scripts_path(&config.content_dir, &build)) {
+            Ok(scripts) => {
+                tracing::info!(game_modes = scripts.game_modes.len(), "dungeon scripts");
+                scripts
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no dungeon scripts: instances run without encounters");
+                DungeonScripts::default()
+            }
+        };
     let mob_ai = match MobAi::load(
         &config.content_dir,
         &build,
+        world_file
+            .waypoint_tasks()
+            .chain(dungeon_scripts.waypoint_tasks()),
         config.mob_ai,
         look_assets.clone(),
     ) {
@@ -340,17 +354,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             tracing::warn!(item = %tool.item, "start tool is no item of the data: left out");
         }
     }
-    content.dungeon_scripts =
-        match DungeonScripts::load(&dungeon_scripts_path(&config.content_dir, &build)) {
-            Ok(scripts) => {
-                tracing::info!(game_modes = scripts.game_modes.len(), "dungeon scripts");
-                scripts
-            }
-            Err(error) => {
-                tracing::warn!(%error, "no dungeon scripts: instances run without encounters");
-                DungeonScripts::default()
-            }
-        };
+    content.dungeon_scripts = dungeon_scripts;
     content.camp_slices = match CampSlices::load(&camp_slices_path(&config.content_dir, &build)) {
         Ok(slices) => {
             tracing::info!(
@@ -384,6 +388,31 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             Err(error) => {
                 tracing::warn!(%error, "no quick course paths: no course can be ridden");
                 QuickCoursePaths::default()
+            }
+        };
+    content.town_props = match nw_content::town_props::TownProps::load(&config.content_dir, &build)
+    {
+        Ok(props) => {
+            tracing::info!(props = props.len(), "town props");
+            props
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "no town props: station buildings, lights and house plots do not show"
+            );
+            nw_content::town_props::TownProps::default()
+        }
+    };
+    content.spell_slices =
+        match nw_content::spell_slices::SpellSlices::load(&config.content_dir, &build) {
+            Ok(slices) => {
+                tracing::info!(spells = slices.len(), "spell slices");
+                slices
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no spell slices: a cast spell shows nothing");
+                nw_content::spell_slices::SpellSlices::default()
             }
         };
     tracing::info!(
@@ -497,6 +526,19 @@ pub type WorldParts = (WorldSettings, CombatSettings, Arc<[Option<SpawnAi>]>);
 pub fn world_parts(config: &SimConfig, level: &LoadedLevel) -> Result<WorldParts, RunError> {
     let world_file = level.ground.terrain();
     let level_spawns = spawns_of_level(&config.level, &world_file.vitals);
+    let scripted_at: Vec<[f32; 3]> = level
+        .content
+        .dungeon_scripts
+        .game_mode(&config.level)
+        .filter(|_| config.role == SimRole::OpenMap)
+        .map(|script| {
+            script
+                .encounters
+                .iter()
+                .map(|encounter| encounter.position)
+                .collect()
+        })
+        .unwrap_or_default();
     let (spawns, spawn_ai) = sim_spawns(
         &level_spawns,
         &resolve_ai(world_file, &level.mob_ai),
@@ -505,6 +547,7 @@ pub fn world_parts(config: &SimConfig, level: &LoadedLevel) -> Result<WorldParts
                 && level.content.dungeon_scripts.has_level(&config.level),
             open_map: config.role == SimRole::OpenMap,
             kill_types: &level.content.kill_types,
+            scripted_at: &scripted_at,
         },
     );
     tracing::info!(

@@ -22,7 +22,7 @@ use nw_world::records::VitalsSpawn;
 use uuid::Uuid;
 
 use super::{OWN_CARD_DELAY_MS, Placement, Player, SimWorld};
-use crate::objectives::{Event, FishCaught, FishingStep, TaskKind, kills_count};
+use crate::objectives::{Event, FishCaught, FishingStep, QuestDrop, TaskKind, kills_count};
 use crate::player_content::requirement_met;
 
 /// The time of one world tick.
@@ -923,7 +923,7 @@ impl SimWorld {
                 count,
                 place,
             } => self.walk_kill(level, enemy, remaining(*count), place.as_deref()),
-            TaskKind::HaveItem(Some(item)) => self.walk_get_item(item, 1, None, false),
+            TaskKind::HaveItem(Some(item)) => self.walk_get_item(item, 1, None, false, false),
             TaskKind::HaveItem(None) => event(FlowEvent::ContainerLooted, 1),
             TaskKind::HaveItems {
                 item,
@@ -931,21 +931,28 @@ impl SimWorld {
                 drop,
                 chest,
                 ..
-            } => {
-                let from = drop
-                    .as_ref()
-                    .map(|drop| drop.enemy.clone())
-                    .or_else(|| chest.as_ref().map(|_| String::new()));
-                self.walk_get_item(item, remaining(*count), from.as_deref(), false)
-            }
+            } => self.walk_get_item(
+                item,
+                remaining(*count),
+                drop.as_ref(),
+                chest.is_some(),
+                false,
+            ),
             TaskKind::GatherItems {
-                item, count, drop, ..
-            } => {
-                let from = drop.as_ref().map(|drop| drop.enemy.clone());
-                self.walk_get_item(item, remaining(*count), from.as_deref(), true)
-            }
+                item,
+                count,
+                drop,
+                chest,
+                ..
+            } => self.walk_get_item(
+                item,
+                remaining(*count),
+                drop.as_ref(),
+                chest.is_some(),
+                true,
+            ),
             TaskKind::RequireGather { item, count } => {
-                self.walk_get_item(item, remaining(*count), None, true)
+                self.walk_get_item(item, remaining(*count), None, false, true)
             }
             TaskKind::CraftRecipe(recipe) => {
                 if content.recipes.get(lowercase_crc32(recipe)).is_none() {
@@ -1306,16 +1313,17 @@ impl SimWorld {
         }
     }
 
-    /// `count` of item `item` from a source the level has; `from` names the step's own drop
-    /// (`Some("")` for a container); `gathered`: the step counts gathers.
+    /// `count` of item `item` from a source the level has; `drop` is the step's own drop,
+    /// `chest` whether containers drop it; `gathered`: the step counts gathers.
     fn walk_get_item(
         &self,
         item: &str,
         count: u32,
-        from: Option<&str>,
+        drop: Option<&QuestDrop>,
+        chest: bool,
         gathered: bool,
     ) -> StepPlan {
-        match self.walk_item_source(item, from) {
+        match self.walk_item_source(item, drop, chest) {
             Some(ItemSource { said, node }) => StepPlan::Item {
                 item: item.to_owned(),
                 count,
@@ -1332,32 +1340,37 @@ impl SimWorld {
         }
     }
 
-    /// Where a player gets item `item` on this level; `from` names the step's own drop.
-    fn walk_item_source(&self, item: &str, from: Option<&str>) -> Option<ItemSource> {
+    /// Where a player gets item `item` on this level; `drop` is the step's own drop of an enemy
+    /// or a quest object, `chest` whether the containers of its place drop it.
+    fn walk_item_source(
+        &self,
+        item: &str,
+        drop: Option<&QuestDrop>,
+        chest: bool,
+    ) -> Option<ItemSource> {
         let content = &self.content;
-        match from {
-            Some("") => return Some(ItemSource::said("a container drop".to_owned())),
-            Some(enemy)
-                if self
-                    .combat
-                    .spawns
-                    .iter()
-                    .any(|spawn| self.walk_counts(spawn, enemy)) =>
-            {
-                return Some(ItemSource::said(format!("the drop of {enemy}")));
-            }
-            Some(object)
-                if content
-                    .gather_points
-                    .first(lowercase_crc32(object))
-                    .is_some() =>
-            {
-                return Some(ItemSource::gathered(
-                    format!("the drop of quest object {object}"),
-                    object,
-                ));
-            }
-            _ => {}
+        let sources = drop.map_or(&[][..], |drop| drop.sources.as_slice());
+        if let Some(enemy) = sources.iter().find(|enemy| {
+            self.combat
+                .spawns
+                .iter()
+                .any(|spawn| self.walk_counts(spawn, enemy))
+        }) {
+            return Some(ItemSource::said(format!("the drop of {enemy}")));
+        }
+        if let Some(object) = sources.iter().find(|object| {
+            content
+                .gather_points
+                .first(lowercase_crc32(object))
+                .is_some()
+        }) {
+            return Some(ItemSource::gathered(
+                format!("the drop of quest object {object}"),
+                object,
+            ));
+        }
+        if chest {
+            return Some(ItemSource::said("a container drop".to_owned()));
         }
         if let Some(gatherable) = content.gatherables.iter().find(|gatherable| {
             gatherable
@@ -2020,7 +2033,9 @@ mod tests {
             y: 10.0,
             z: 50.0,
         };
-        let spawned = world.spawn_gm(TEST_MOB, TEST_LEVEL, at, 1).expect("spawn")[0];
+        let spawned = world
+            .spawn_gm(TEST_MOB, TEST_LEVEL, at, 1, None)
+            .expect("spawn")[0];
         world.apply_hit(spawned, 1, LETHAL, 0, NOW);
         assert_eq!(
             world.quest_plan_lines(1, DEN),

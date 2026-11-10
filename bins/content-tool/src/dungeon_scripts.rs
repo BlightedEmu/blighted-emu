@@ -22,14 +22,17 @@ use nw_formats::objectstream::{Element, ObjectStreamError, parse_object_stream};
 use nw_formats::pak::PakError;
 use nw_world::capitals::parse_capitals;
 use nw_world::dungeon_scripts::{
-    Chest, DungeonScripts, DungeonScriptsError, Encounter, LevelScript, ObjectiveSpec, Spawn,
-    Stage, StageAction, StageObjective, Target, TargetMob, TargetSlice, dungeon_scripts_path,
+    Chest, DungeonScripts, DungeonScriptsError, Encounter, LevelScript, OPEN_WORLD_LEVEL,
+    ObjectiveSpec, Spawn, Stage, StageAction, StageObjective, Target, TargetMob, TargetSlice,
+    dungeon_scripts_path,
 };
 use nw_world::level_script::{
     Action, AliasSlice, AssetRef, DYNAMIC_SLICE_SUFFIX, LevelScriptError, ObjectiveKind,
-    SliceScript, Transform, alias_slices, pak_path, slice_script,
+    SliceScript, Transform, VitalsVariant, alias_slices, pak_path, slice_script,
 };
 use nw_world::metadata::{MetadataRecords, SkipCounts, read_metadata};
+use nw_world::records::{Capital, PatrolPath};
+use nw_world::spawner_slices::SpawnerSlice;
 
 use crate::collision::PakIndex;
 use crate::roads::without_azcs;
@@ -171,6 +174,8 @@ pub struct DungeonScriptsReport {
     pub spawns: usize,
     /// Chests written.
     pub chests: usize,
+    /// Encounters of the open world's spawn groups, of [`Self::encounters`].
+    pub open_world_encounters: usize,
     /// Target slices with a mob from their spawner slice.
     pub spawner_mobs: usize,
     /// Target slices without one (creature slices: the sim's prefab table; props).
@@ -183,6 +188,40 @@ pub struct DungeonScriptsReport {
     pub missing_slices: Vec<String>,
     /// The file written.
     pub path: PathBuf,
+}
+
+/// How deep a spawned slice is followed to its mob: a spawn of an encounter may be a spawner
+/// slice that spawns a nested encounter slice whose stage spawns the mob's spawner slice (the
+/// storm priest's `..._spawn_minionspawn`, then `..._minionspawn`, then `worldevent_ai_..._minion`).
+const NESTED_DEPTH: u32 = 4;
+/// The mobs of one spawn of a mob's own spawner slice.
+const ONE_MOB: u32 = 1;
+/// The rotation quaternion (x, y, z, w) of no rotation.
+const NO_ROTATION: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+/// The separator of a pak path, and the doubled one of a generated capital's slice name.
+const PATH_SEPARATOR: &str = "/";
+const DOUBLED_SEPARATOR: &str = "//";
+/// The file names of the open world's spawn group slices start with one of these (lower case).
+const SPAWN_GROUP_PREFIXES: [&str; 2] = ["worldevent_", "worldboss_"];
+
+/// The pak path of the slice a capital names: a level script capital names it without its
+/// extension (`Dungeon/LevelScripts/AmrineDungeon`), a generated one with it and with a doubled
+/// separator (`CoatGen\\\\efc337e6\\WorldEvent_SpawnGroup_Single_Master_3815808514.dynamicslice`).
+fn capital_script_path(slice_name: &str) -> String {
+    let path = pak_path(slice_name).replace(DOUBLED_SEPARATOR, PATH_SEPARATOR);
+    if path.ends_with(DYNAMIC_SLICE_SUFFIX) {
+        path
+    } else {
+        format!("{path}{DYNAMIC_SLICE_SUFFIX}")
+    }
+}
+
+/// Whether the slice at `path` is a spawn group of the open world.
+fn is_spawn_group(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    SPAWN_GROUP_PREFIXES
+        .iter()
+        .any(|prefix| file.starts_with(prefix))
 }
 
 /// The pak path of a game mode's `SlicePath` (`Dungeon/LevelScripts/AmrineDungeon`).
@@ -200,7 +239,7 @@ fn is_capitals_of(path: &str, folder: &str) -> bool {
 fn script_placements(
     index: &PakIndex,
     folder: &str,
-    wanted: &[String],
+    wanted: impl Fn(&str) -> bool,
 ) -> Result<Vec<(String, Transform)>, DungeonScriptsBuildError> {
     let paths = index.paths(|path| is_capitals_of(path, folder));
     let mut found = Vec::new();
@@ -212,8 +251,8 @@ fn script_placements(
         let capitals = parse_capitals(&bytes)
             .map_err(|source| DungeonScriptsBuildError::Capitals { path, source })?;
         for capital in capitals {
-            let script = pak_path(&format!("{}{DYNAMIC_SLICE_SUFFIX}", capital.slice_name));
-            if wanted.contains(&script) {
+            let script = capital_script_path(&capital.slice_name);
+            if wanted(&script) {
                 found.push((
                     script,
                     Transform::placed(
@@ -393,7 +432,9 @@ pub fn build_dungeon_scripts(
     let mut scripts = DungeonScripts::default();
     for (folder, by_script) in &wanted {
         let scripts_here: Vec<String> = by_script.keys().cloned().collect();
-        let placements = script_placements(index, folder, &scripts_here)?;
+        let placements = script_placements(index, folder, |script| {
+            scripts_here.iter().any(|known| known == script)
+        })?;
         let points = encounter_points(index, folder, &names)?;
         for (script, modes) in by_script {
             let Some((_, placement)) = placements.iter().find(|(path, _)| path == script) else {
@@ -419,6 +460,30 @@ pub fn build_dungeon_scripts(
             }
         }
     }
+    let points = encounter_points(index, OPEN_WORLD_LEVEL, &names)?;
+    let mut open_world = LevelScript {
+        level: OPEN_WORLD_LEVEL.to_owned(),
+        ..LevelScript::default()
+    };
+    for (script, placement) in script_placements(index, OPEN_WORLD_LEVEL, is_spawn_group)? {
+        let Some(group) = build_level(
+            &mut slices,
+            &script,
+            placement,
+            &levels,
+            &points,
+            &mut report,
+        )?
+        else {
+            continue;
+        };
+        open_world.encounters.extend(group.encounters);
+        open_world.chests.extend(group.chests);
+    }
+    report.open_world_encounters = open_world.encounters.len();
+    scripts
+        .game_modes
+        .insert(OPEN_WORLD_LEVEL.to_owned(), open_world);
     let path = dungeon_scripts_path(out_dir, client_build);
     scripts.write(&path)?;
     if DungeonScripts::load(&path)? != scripts {
@@ -738,8 +803,7 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
         slice: &AssetRef,
         percent: u32,
     ) -> Result<TargetSlice, DungeonScriptsBuildError> {
-        let variant = read_script(&mut *self.source, &slice.path, &mut *self.report)?
-            .and_then(|script| script.variant().cloned());
+        let (variant, mobs_per_spawn) = self.mob_of(&slice.path, NESTED_DEPTH)?;
         let mob = variant.map(|variant| {
             let level = match variant.level {
                 0 => self
@@ -768,8 +832,109 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
             guid: slice.guid,
             percent,
             mob,
+            mobs_per_spawn: mobs_per_spawn.max(ONE_MOB),
+            waypoints: self.waypoints(&slice.path)?,
         })
     }
+
+    /// The waypoints of the spawner slice at `path`, from the spawner's own place.
+    fn waypoints(&mut self, path: &str) -> Result<Option<PatrolPath>, DungeonScriptsBuildError> {
+        let origin = Capital {
+            rotation: NO_ROTATION,
+            ..Capital::default()
+        };
+        Ok(self
+            .source
+            .root(path)?
+            .and_then(|root| SpawnerSlice::of(&root))
+            .map(|spawner| spawner.at(&origin)))
+    }
+
+    /// The mob the slice at `path` spawns and how many of it one spawn makes: its own vitals
+    /// row, or the mobs of the slices its spawners and its stages spawn, at most `depth` slices
+    /// down (each open world spawn group spawns its encounter slice, which may spawn a nested
+    /// one). `None` for a slice that leads to no mob.
+    fn mob_of(
+        &mut self,
+        path: &str,
+        depth: u32,
+    ) -> Result<(Option<VitalsVariant>, u32), DungeonScriptsBuildError> {
+        let Some(script) = read_script(&mut *self.source, path, &mut *self.report)? else {
+            return Ok((None, 0));
+        };
+        if let Some(variant) = script.variant() {
+            // A spawner slice with more than one spawner entity makes one mob for each (the
+            // storm priest's `worldevent_ai_cultist_chaplain_minion`).
+            let spawners = script
+                .entities
+                .iter()
+                .filter(|entity| entity.variant.is_some())
+                .count();
+            return Ok((
+                Some(variant.clone()),
+                u32::try_from(spawners).unwrap_or(ONE_MOB),
+            ));
+        }
+        if depth == 0 {
+            return Ok((None, 0));
+        }
+        // Each spawn: its slice, else its alias (the first slice of the alias that is a mob).
+        let spawned: Vec<(Option<String>, Option<String>, u32)> = script
+            .entities
+            .iter()
+            .flat_map(|entity| match &entity.stage {
+                Some(stage) => stage
+                    .spawns
+                    .iter()
+                    .map(|spawn| {
+                        (
+                            path_of(spawn.slice.as_ref()),
+                            path_of(spawn.alias.as_ref()),
+                            spawn.count,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                None => entity
+                    .spawner
+                    .iter()
+                    .map(|spawner| {
+                        (
+                            path_of(spawner.slice.as_ref()),
+                            path_of(spawner.alias.as_ref()),
+                            ONE_MOB,
+                        )
+                    })
+                    .collect(),
+            })
+            .collect();
+        let (mut found, mut total) = (None, 0);
+        for (slice, alias, count) in spawned {
+            let mut candidates: Vec<String> = slice.into_iter().collect();
+            if let Some(alias) = alias.filter(|alias| alias.ends_with(ALIAS_SUFFIX)) {
+                candidates.extend(
+                    self.alias(&alias)?
+                        .into_iter()
+                        .map(|entry| entry.slice.path),
+                );
+            }
+            for nested in candidates {
+                let (variant, mobs) = self.mob_of(&nested, depth - 1)?;
+                if variant.is_some() {
+                    total += count * mobs;
+                    found = variant;
+                    break;
+                }
+            }
+        }
+        Ok((found, total))
+    }
+}
+
+/// The pak path of the asset `asset` names; `None` for no asset or an empty reference.
+fn path_of(asset: Option<&AssetRef>) -> Option<String> {
+    asset
+        .map(|asset| asset.path.clone())
+        .filter(|path| !path.is_empty())
 }
 
 /// The `EventType` value of `event`.
