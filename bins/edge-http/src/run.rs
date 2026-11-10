@@ -29,11 +29,12 @@ use nw_login::motd_pull::{MotdPull, motd_client};
 use nw_login::names::{NameError, normalize_username};
 use nw_login::password::{PasswordError, PasswordHasher};
 use nw_login::pg::{PgAccounts, PgCharacters};
-use nw_login::region_ping::region_ping_router;
+use nw_login::region_ping::plain_router;
 use nw_login::remote_config::{RemoteConfigError, RemoteConfigSets, remote_config_router};
 use nw_login::secrets::{SecretError, Secrets, load_database_passwords, load_secrets};
 use nw_login::store::StoreError;
 use nw_login::valkey::Valkey;
+use nw_login::voice::VoiceConfig;
 use uuid::Uuid;
 
 use crate::database::{EnsureDatabaseError, connect_all, ensure_database};
@@ -307,6 +308,7 @@ async fn serve_async(config: EdgeConfig, secrets: Secrets) -> Result<(), RunErro
     spawn_metrics(config.metrics_listen).await?;
     spawn_region_ping(
         config.ping_listen,
+        config.voice.clone(),
         Duration::from_secs(config.request_timeout_seconds),
         config.max_connections,
     )
@@ -326,16 +328,18 @@ async fn serve_async(config: EdgeConfig, secrets: Secrets) -> Result<(), RunErro
         .map_err(RunError::Listen)
 }
 
-/// Serves the client's region ping over plain HTTP ([`region_ping_router`]).
+/// Serves the plain HTTP routes ([`plain_router`]): the client's region ping, and the voice
+/// prelogin of `voice`.
 async fn spawn_region_ping(
     address: SocketAddr,
+    voice: Option<VoiceConfig>,
     time_limit: Duration,
     max_in_flight: usize,
 ) -> Result<(), RunError> {
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(RunError::Listen)?;
-    let app = with_limits(region_ping_router(), time_limit, max_in_flight);
+    let app = with_limits(plain_router(voice), time_limit, max_in_flight);
     tokio::spawn(async move {
         if let Err(error) = axum::serve(listener, app).await {
             tracing::error!(%error, "region ping listener stopped");

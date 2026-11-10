@@ -15,6 +15,7 @@ use nw_protocol::aws_mirror::is_dynamodb_host;
 
 use crate::error::ApiError;
 use crate::host::request_host;
+use crate::voice::{VoiceConfig, voice_router};
 
 /// The path the client pings.
 pub const PING_PATH: &str = "/ping";
@@ -36,6 +37,21 @@ pub fn ping_body(host: &str) -> String {
 /// request `404`.
 pub fn region_ping_router() -> Router {
     Router::new().fallback(ping)
+}
+
+/// The routes of the plain HTTP listener: the region ping, and the prelogin of `voice`
+/// ([`voice_router`]).
+///
+/// The voice SDK sends its prelogin without TLS when the API address names a port (live
+/// 2026-11-10, a trace of the client's `WinHttpOpenRequest`: `https://<host>:8443/vivox/api2/`
+/// gave the flags 0, no `WINHTTP_FLAG_SECURE`, the HTTPS listener's answer was WinHTTP error
+/// 12152 and the client showed voice error 10052; an address without a port gave a TLS
+/// request). A server that players reach on other ports than 443 and 80 names this listener's
+/// public port in the social service's `[voice] api_url`.
+pub fn plain_router(voice: Option<VoiceConfig>) -> Router {
+    voice.map_or_else(region_ping_router, |voice| {
+        region_ping_router().merge(voice_router(voice))
+    })
 }
 
 async fn ping(request: Request) -> Response {
@@ -116,6 +132,35 @@ mod tests {
                 crc32fast::hash(&body).to_string().as_str()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_plain_listener_answers_the_voice_prelogin_and_still_the_ping() {
+        const VOICE_HOST: &str = "game.example.org";
+        const XMPP_PORT: u16 = 5223;
+        let voice = VoiceConfig {
+            realm: "voice.example.org".to_owned(),
+            xmpp_host: VOICE_HOST.to_owned(),
+            xmpp_port: XMPP_PORT,
+            xmpp_tls: true,
+            ws_xmpp_url: format!("wss://{VOICE_HOST}/ws-xmpp"),
+            telemetry_url: format!("https://{VOICE_HOST}"),
+        };
+        let app = plain_router(Some(voice));
+        let prelogin = test_http::request("POST", crate::voice::PRELOGIN_PATH, "a=1");
+        let (status, body) = test_http::send(&app, prelogin).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(String::from_utf8_lossy(&body).contains(VOICE_HOST));
+        let ping = Request::builder()
+            .uri(PING_PATH)
+            .header(HOST, PING_HOST)
+            .body(Body::empty())
+            .expect("request");
+        let response = tower::ServiceExt::oneshot(app, ping).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let prelogin = test_http::request("POST", crate::voice::PRELOGIN_PATH, "a=1");
+        let (status, _) = test_http::send(&plain_router(None), prelogin).await;
+        assert_eq!(status, StatusCode::MISDIRECTED_REQUEST, "no voice service");
     }
 
     #[tokio::test]

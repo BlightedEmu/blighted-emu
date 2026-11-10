@@ -276,6 +276,9 @@ free = false
 # The community's voice service. The social service's [voice] api_url
 # (https://game.<domain>/vivox/api2/) leads the game's voice SDK here first: this server answers
 # its prelogin with the hosts below. Left out, the prelogin is not served and voice stays off.
+# When players reach this server on another HTTPS port than 443, the voice SDK sends the prelogin
+# without TLS: the ping listener answers it too, and api_url names the public ping port
+# (https://game.<domain>:<public_ping_port>/vivox/api2/).
 # [voice]
 # realm = "voice.example.org"            # the social service's [voice] domain
 # xmpp_host = "game.example.org"         # the voice server that signs players in
