@@ -271,13 +271,6 @@ struct ParsedDatabase {
 }
 
 impl ParsedDatabase {
-    /// The database `text`; `None` when it does not parse or its two readings do not line up.
-    fn parse(text: &str) -> Option<Self> {
-        let entries = adb_entries(text).ok()?;
-        let database = AnimDatabase::parse(text).ok()?;
-        (entries.len() == database.fragments.len()).then_some(Self { entries, database })
-    }
-
     /// The whole scope ticks of each option of each fragment of `fragments` for `tags`
     /// (Mannequin's options, [`AnimDatabase::options`]), by `lengths`; a fragment without an
     /// option of known length is left out.
@@ -410,6 +403,61 @@ pub(crate) fn read_entries(
     Ok(read)
 }
 
+/// The animation databases `paths` of the paks, each with the fragments of its sub databases
+/// ([`AnimDatabase::sub_databases`], to any depth): its entries' base layers and its fragments,
+/// in the same order, or why it could not be read.
+///
+/// # Errors
+///
+/// Returns [`ToolError`] when the paks cannot be read.
+pub(crate) fn read_databases(
+    source: &GameSource,
+    paths: &HashSet<String>,
+) -> Result<HashMap<String, Result<(Vec<AdbEntry>, AnimDatabase), String>>, ToolError> {
+    let mut bytes = read_entries(source, paths)?;
+    let mut wanted = paths.clone();
+    loop {
+        let subs: HashSet<String> = bytes
+            .values()
+            .filter_map(|bytes| std::str::from_utf8(bytes).ok())
+            .filter_map(|text| AnimDatabase::sub_databases(text).ok())
+            .flatten()
+            .map(|sub| sub.file)
+            .filter(|file| !wanted.contains(file))
+            .collect();
+        if subs.is_empty() {
+            break;
+        }
+        bytes.extend(read_entries(source, &subs)?);
+        wanted.extend(subs);
+    }
+    Ok(paths
+        .iter()
+        .map(|path| (path.clone(), database_of(path, &bytes)))
+        .collect())
+}
+
+/// The database `path` of `bytes` with the fragments of its sub databases.
+fn database_of(
+    path: &str,
+    bytes: &HashMap<String, Vec<u8>>,
+) -> Result<(Vec<AdbEntry>, AnimDatabase), String> {
+    let text = text_of(bytes.get(path))
+        .ok_or_else(|| "animation database missing or not UTF-8".to_owned())?;
+    let mut entries = adb_entries(text).map_err(|error| error.to_string())?;
+    let mut database = AnimDatabase::parse(text).map_err(|error| error.to_string())?;
+    if database.fragments.len() != entries.len() {
+        return Err("fragment entries and procedural clips do not line up".to_owned());
+    }
+    for sub in AnimDatabase::sub_databases(text).map_err(|error| error.to_string())? {
+        let (sub_entries, sub_database) =
+            database_of(&sub.file, bytes).map_err(|why| format!("{}: {why}", sub.file))?;
+        entries.extend(sub_entries);
+        database.adopt(sub_database, &sub.tags);
+    }
+    Ok((entries, database))
+}
+
 pub(crate) fn text_of(bytes: Option<&Vec<u8>>) -> Option<&str> {
     std::str::from_utf8(bytes?).ok()
 }
@@ -523,11 +571,11 @@ pub fn build_rows(
         .values()
         .filter_map(|mannequin| mannequin.animation_database.clone())
         .collect();
-    let databases: HashMap<String, ParsedDatabase> = read_entries(source, &database_paths)?
+    let databases: HashMap<String, ParsedDatabase> = read_databases(source, &database_paths)?
         .into_iter()
-        .filter_map(|(path, bytes)| {
-            let parsed = ParsedDatabase::parse(std::str::from_utf8(&bytes).ok()?)?;
-            Some((path, parsed))
+        .filter_map(|(path, parsed)| {
+            let (entries, database) = parsed.ok()?;
+            Some((path, ParsedDatabase { entries, database }))
         })
         .collect();
     let clip_names: BTreeSet<String> = databases
@@ -613,6 +661,14 @@ mod tests {
     use nw_formats::objectstream::write_object_stream;
 
     use super::*;
+
+    /// The database `text` without sub databases.
+    fn parsed_database(text: &str) -> Option<ParsedDatabase> {
+        Some(ParsedDatabase {
+            entries: adb_entries(text).ok()?,
+            database: AnimDatabase::parse(text).ok()?,
+        })
+    }
 
     fn named(name: &str, children: Vec<Element>) -> Element {
         Element::with_children(lowercase_crc32(name), children)
@@ -749,7 +805,7 @@ mod tests {
 
     #[test]
     fn a_fragment_lasts_the_whole_ticks_of_the_entry_the_creature_plays() {
-        let parsed = ParsedDatabase::parse(BOAR_DATABASE).expect("database");
+        let parsed = parsed_database(BOAR_DATABASE).expect("database");
         // The boar's death clip: 2.963 s (89 frames at 1/30 s, 88.89 ticks); retail's dead boar
         // states ended at tick 0x58 (glide note).
         let lengths = ClipLengths::of(&[
@@ -770,7 +826,7 @@ mod tests {
     fn each_option_of_a_fragment_has_its_ticks_in_file_order() {
         // `npc_risen_anims.adb`: two plain `r_Death` entries of 56 and 73 frames; retail's dead
         // risen ended at tick 0x49 (option 1, its tail 0x8f).
-        let parsed = ParsedDatabase::parse(
+        let parsed = parsed_database(
             r#"<AnimDB><FragmentList><r_Death>
  <Fragment Tags="BlightFiend"><AnimLayer><Blend ExitTime="0"/><Animation name="fiend_death"/></AnimLayer></Fragment>
  <Fragment Tags=""><AnimLayer><Blend ExitTime="0"/><Animation name="risen_death_a"/></AnimLayer></Fragment>

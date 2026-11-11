@@ -43,7 +43,7 @@ use nw_formats::pak::{PakArchive, PakError, find_paks};
 use nw_oodle::KrakenDecompressor;
 use nw_world::slice_triggers::slice_triggers;
 
-use crate::creature_animations::{main_hand_item, read_entries, text_of};
+use crate::creature_animations::{main_hand_item, read_databases, read_entries, text_of};
 use crate::error::ToolError;
 use crate::player_attacks::{RANGED_ATTACK_DATABASE, RANGED_CLIP, ranged_attacks, slice_flight};
 use crate::source::GameSource;
@@ -1258,30 +1258,17 @@ pub fn build_ai_data(
         .filter_map(|slice| slice.animation_database.clone())
         .chain(weapon_adbs.values().cloned())
         .collect();
-    let adb_bytes = read_entries(source, &adb_paths)?;
     let mut adbs: HashMap<String, (Vec<AdbEntry>, AnimDatabase)> = HashMap::new();
-    for path in &adb_paths {
-        let parsed = text_of(adb_bytes.get(path))
-            .ok_or_else(|| "animation database missing or not UTF-8".to_owned())
-            .and_then(|text| {
-                let entries = adb_entries(text).map_err(|error| error.to_string())?;
-                let clips = AnimDatabase::parse(text).map_err(|error| error.to_string())?;
-                if clips.fragments.len() == entries.len() {
-                    Ok((entries, clips))
-                } else {
-                    Err("fragment entries and procedural clips do not line up".to_owned())
-                }
-            });
+    for (path, parsed) in read_databases(source, &adb_paths)? {
         match parsed {
             Ok(parsed) => {
-                adbs.insert(path.clone(), parsed);
+                adbs.insert(path, parsed);
             }
             Err(reason) => {
-                report.skipped.insert(path.clone(), reason);
+                report.skipped.insert(path, reason);
             }
         }
     }
-    drop(adb_bytes);
     let clip_names: BTreeSet<String> = adbs
         .values()
         .flat_map(|(entries, _)| entries.iter().flatten())

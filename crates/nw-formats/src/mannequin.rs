@@ -45,6 +45,9 @@ const PATH_ATTRIBUTE: &str = "Path";
 const FRAGMENT_LIST: &str = "FragmentList";
 const FRAGMENT_ELEMENT: &str = "Fragment";
 const FRAGMENT_TAGS_ATTRIBUTE: &str = "Tags";
+const SUB_DATABASES: &str = "SubADBs";
+const SUB_DATABASE: &str = "SubADB";
+const SUB_DATABASE_FILE_ATTRIBUTE: &str = "File";
 const FRAGMENT_FRAG_TAGS_ATTRIBUTE: &str = "FragTags";
 const PROC_LAYER: &str = "ProcLayer";
 const ANIM_LAYER: &str = "AnimLayer";
@@ -854,6 +857,17 @@ fn layer_clips(layer: &Node, index: usize) -> Result<Vec<ProcClip>, MannequinErr
     Ok(clips)
 }
 
+/// A sub database of an animation database (`<SubADB Tags="Undead" File="..."/>`): Mannequin
+/// plays its fragments for a tag state that holds its tags (the damned database keeps the
+/// fragments of its undead, dryad and inquisitor creatures in three of them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubDatabase {
+    /// The tags that pick it.
+    pub tags: Vec<String>,
+    /// Its file as the paks name it ([`pak_path`]).
+    pub file: String,
+}
+
 /// A Mannequin animation database (`*.adb`): its fragments.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AnimDatabase {
@@ -902,6 +916,47 @@ impl AnimDatabase {
             }
         }
         Ok(Self { fragments })
+    }
+
+    /// The sub databases `*.adb` names in its `<SubADBs>`, in file order; none for a database
+    /// without that element.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MannequinError`] when the XML is not well formed.
+    pub fn sub_databases(text: &str) -> Result<Vec<SubDatabase>, MannequinError> {
+        let root = parse_tree(text)?;
+        Ok(root
+            .children
+            .iter()
+            .filter(|child| child.name == SUB_DATABASES)
+            .flat_map(|list| &list.children)
+            .filter(|child| child.name == SUB_DATABASE)
+            .filter_map(|child| {
+                Some(SubDatabase {
+                    tags: split_tags(child.attribute(FRAGMENT_TAGS_ATTRIBUTE)),
+                    file: pak_path(child.attribute(SUB_DATABASE_FILE_ATTRIBUTE)?),
+                })
+            })
+            .collect())
+    }
+
+    /// Takes the fragments of the sub database `sub` that `tags` pick: each one also needs
+    /// `tags`, so it wins over this database's entry of fewer tags for a tag state with them.
+    pub fn adopt(&mut self, sub: Self, tags: &[String]) {
+        self.fragments
+            .extend(sub.fragments.into_iter().map(|mut fragment| {
+                for tag in tags {
+                    if !fragment
+                        .tags
+                        .iter()
+                        .any(|own| own.eq_ignore_ascii_case(tag))
+                    {
+                        fragment.tags.push(tag.clone());
+                    }
+                }
+                fragment
+            }));
     }
 
     /// The entry of fragment `name` that Mannequin plays for the tag state `tags`: the first of
@@ -2096,6 +2151,39 @@ mod tests {
 
     fn state_hex(definition: &TagDefinition, names: &[&str]) -> Vec<u8> {
         definition.state(names.iter().copied()).to_vec()
+    }
+
+    #[test]
+    fn a_sub_database_gives_its_fragments_with_its_tags() {
+        // `npc_damned_anims.adb` (build 25810808), cut: the undead creatures' fragments are in
+        // a sub database; its pistol shot names the undead damage row, the parent's the damned.
+        const PARENT: &str = r#"<AnimDB><SubADBs>
+ <SubADB Tags="Undead" File="Animations\Mannequin\ADB\Sub.adb"/>
+</SubADBs><FragmentList>
+ <Fire_Pistol><Fragment Tags="Pistol"><ProcLayer/></Fragment></Fire_Pistol>
+</FragmentList></AnimDB>"#;
+        const SUB: &str = r#"<AnimDB><FragmentList>
+ <Fire_Pistol><Fragment Tags="Pistol+Shield_OH"><ProcLayer/></Fragment></Fire_Pistol>
+</FragmentList></AnimDB>"#;
+        let subs = AnimDatabase::sub_databases(PARENT).expect("subs");
+        assert_eq!(
+            subs,
+            [SubDatabase {
+                tags: vec!["Undead".to_owned()],
+                file: "animations/mannequin/adb/sub.adb".to_owned(),
+            }]
+        );
+        assert!(AnimDatabase::sub_databases(SUB).expect("none").is_empty());
+        let mut database = AnimDatabase::parse(PARENT).expect("parent");
+        database.adopt(AnimDatabase::parse(SUB).expect("sub"), &subs[0].tags);
+        let undead = database
+            .best("Fire_Pistol", &["Pistol", "Shield_OH", "Undead"])
+            .expect("the undead entry");
+        assert_eq!(undead.tags, ["Pistol", "Shield_OH", "Undead"]);
+        let damned = database
+            .best("Fire_Pistol", &["Pistol", "Damned"])
+            .expect("the parent's entry");
+        assert_eq!(damned.tags, ["Pistol"]);
     }
 
     #[test]
