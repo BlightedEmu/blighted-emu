@@ -1181,7 +1181,9 @@ impl Nodes {
         (0_u64..)
             .zip(&self.nodes)
             .filter(move |(_, node)| {
-                node.sent && node.version > 0 && node.position.horizontal_distance(position) <= radius_m
+                node.sent
+                    && node.version > 0
+                    && node.position.horizontal_distance(position) <= radius_m
             })
             .map(|(index, _)| GATHERABLE_ENTITY_BASE + index)
     }
@@ -1263,7 +1265,10 @@ pub(crate) mod tests {
             Err(NodeBusy::OtherNode),
             "the id of one node does not gather another"
         );
-        assert_eq!(nodes.start(OTHER, FLINT_POINT + 1, AT, PLAYER, SENT), Ok(()));
+        assert_eq!(
+            nodes.start(OTHER, FLINT_POINT + 1, AT, PLAYER, SENT),
+            Ok(())
+        );
     }
 
     #[test]
@@ -1282,7 +1287,11 @@ pub(crate) mod tests {
             "no card for a node whose slots the server does not know"
         );
         nodes.tick(RESPAWN_AT_MS);
-        assert_eq!(nodes.numbers_near(AT, RADIUS_M).count(), 0, "nor after it grows back");
+        assert_eq!(
+            nodes.numbers_near(AT, RADIUS_M).count(),
+            0,
+            "nor after it grows back"
+        );
     }
 
     #[test]
@@ -1363,7 +1372,10 @@ pub(crate) mod tests {
         let grown = nodes.group(number, kept, &mut sent).expect("change");
         assert_eq!(grown.members.len(), 2, "the states without the card");
         assert_eq!(state_of(&grown), Some(HEALTHY));
-        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER + 1, SENT), Ok(()));
+        assert_eq!(
+            nodes.start(FLINT, FLINT_POINT, AT, PLAYER + 1, SENT),
+            Ok(())
+        );
         nodes.release(&FLINT);
         assert_eq!(
             nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT),
