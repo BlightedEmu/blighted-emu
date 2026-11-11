@@ -51,6 +51,11 @@ pub struct AchievementRules {
 }
 
 impl AchievementRules {
+    /// The game event achievement `id` names ([`AchievementIndexes::game_event`]).
+    pub(super) fn game_event(&self, id: &str) -> Option<&str> {
+        self.indexes.game_event(id)
+    }
+
     /// The bit of achievement `id`.
     pub(super) fn bit(&self, id: &str) -> Option<u32> {
         self.indexes.index(id)

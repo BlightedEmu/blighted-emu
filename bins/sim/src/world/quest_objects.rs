@@ -191,7 +191,8 @@ impl SimWorld {
 
     /// Player `number` (`entity`) reads the lore note of interaction `request`, whose title the
     /// client names `name`: the read is accepted (3743 kind 47 status 1 with the title, as
-    /// retail) and the note's achievement is set, an event of its quest. A title that is no
+    /// retail) and the note's achievement is set, an event of its quest; the first read also
+    /// fires the achievement's game event. A title that is no
     /// `LoreData` title, or whose lore point is not within reach of the player, is refused
     /// (status 2, Inferred as for a busy gather): a client cannot read lore from anywhere.
     pub(super) fn read_lore(
@@ -230,12 +231,25 @@ impl SimWorld {
             "{LORE_ACHIEVEMENT_PREFIX}{}",
             title.trim_start_matches(LOCALIZED_MARK)
         );
+        let first_read = !player
+            .flow
+            .has_achievement(&self.achievement_rules, &achievement);
         player
             .flow
             .set_achievement(&self.achievement_rules, &achievement);
-        tracing::info!(player = number, %achievement, "lore read");
+        tracing::info!(player = number, %achievement, first_read, "lore read");
         self.mark_quests_unsaved(number);
         self.quest_event(number, Event::AchievementSet(&achievement), now_ms);
+        // The first read fires the note's game event: its experience and standing (Inferred
+        // from the achievement row's `GameEventID`; a note read again gives nothing more).
+        if first_read
+            && let Some(event) = self
+                .achievement_rules
+                .game_event(&achievement)
+                .map(str::to_owned)
+        {
+            self.fire_game_event(number, &event, now_ms);
+        }
     }
 
     /// Fires game event `event` for player `number`: its whisper plays on the client (5070),
@@ -473,5 +487,90 @@ impl SimWorld {
                 self.quest_event(number, Event::GameEvent(&event), now_ms);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use nw_content::achievements::AchievementIndexes;
+    use nw_content::rewards::{Reward, Rewards};
+    use nw_messages::client_input::LORE_KIND;
+
+    use super::*;
+    use crate::placed_points::PlacedPoints;
+    use crate::player_content::PlayerContent;
+    use crate::world::level_flow::AchievementRules;
+    use crate::world::tests::{NOW, SERVER_TIME, admit_at, world_with_spawns};
+
+    const PLAYER: u64 = 4;
+    /// A journal lore note of build 25810808 and its game event (2 experience points).
+    const TITLE: &str = "@Weavers_Title_01_01";
+    const ACHIEVEMENT: &str = "Lore_unlock_Weavers_Title_01_01";
+    const READ_EVENT: &str = "Read_LoreItem";
+    const READ_EXPERIENCE: u32 = 2;
+    const ACHIEVEMENT_BIT: u32 = 774;
+    const LORE: u32 = 0x1234;
+
+    #[test]
+    fn a_first_lore_read_keeps_the_note_and_fires_its_game_event_once() {
+        let mut world = world_with_spawns(Vec::new());
+        let indexes = AchievementIndexes::build([(ACHIEVEMENT.to_owned(), ACHIEVEMENT_BIT)])
+            .with_game_events([(ACHIEVEMENT.to_owned(), READ_EVENT.to_owned())]);
+        world.achievement_rules = AchievementRules::of(&indexes, &[]);
+        let note_at = Position {
+            x: 0.0,
+            y: 10.0,
+            z: 50.0,
+        };
+        world.content = Arc::new(PlayerContent {
+            lore_by_title: [(lore_title_key(TITLE), LORE)].into_iter().collect(),
+            lore_points: PlacedPoints::of([(LORE, note_at)]),
+            rewards: Rewards::build([(
+                READ_EVENT.to_owned(),
+                Reward {
+                    experience: READ_EXPERIENCE,
+                    ..Reward::default()
+                },
+            )]),
+            achievements: indexes,
+            ..PlayerContent::default()
+        });
+        world
+            .admit(&admit_at(PLAYER, 0.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let entity = world.player_by_number(PLAYER).expect("player");
+        let request = InteractionRequest {
+            target: [0; nw_messages::wire::RAW_ID_LEN],
+            target_entity: 0,
+            interaction: 1,
+            kind: LORE_KIND,
+            gatherable: None,
+        };
+        let experience = |world: &SimWorld| {
+            world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .experience
+        };
+        let before = experience(&world);
+        world.read_lore(entity, PLAYER, request, TITLE.as_bytes(), NOW);
+        let player = world.world.get::<Player>(entity).expect("player");
+        assert!(
+            player
+                .flow
+                .has_achievement(&world.achievement_rules, ACHIEVEMENT),
+            "kept"
+        );
+        let after_first = experience(&world);
+        assert!(after_first > before, "its game event's experience");
+        world.read_lore(entity, PLAYER, request, TITLE.as_bytes(), NOW);
+        assert_eq!(
+            experience(&world),
+            after_first,
+            "a note read again gives nothing more"
+        );
     }
 }

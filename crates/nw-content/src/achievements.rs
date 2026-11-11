@@ -18,6 +18,10 @@ use crate::Tables;
 pub struct AchievementIndexes {
     /// Bits by lowercase id.
     by_id: HashMap<String, u32>,
+    /// The `GameEventID` of each achievement that has one, by lowercase id (Observed, content
+    /// bundle 25810808: the 1,342 `Lore_unlock_` journal rows name `Read_LoreItem`, 2 points of
+    /// `UniversalExpAmount`).
+    game_events: HashMap<String, String>,
 }
 
 impl AchievementIndexes {
@@ -33,6 +37,33 @@ impl AchievementIndexes {
                     Some((row.achievement_id.clone(), index))
                 }),
         )
+        .with_game_events(
+            tables
+                .achievement_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter_map(|row| {
+                    let event = row.game_event_id.as_deref()?.trim();
+                    (!event.is_empty()).then(|| (row.achievement_id.clone(), event.to_owned()))
+                }),
+        )
+    }
+
+    /// The same indexes with the game events `events` (achievement id, event id).
+    #[must_use]
+    pub fn with_game_events(mut self, events: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.game_events = events
+            .into_iter()
+            .map(|(id, event)| (id.to_ascii_lowercase(), event))
+            .collect();
+        self
+    }
+
+    /// The game event achievement `id` (any case) names.
+    pub fn game_event(&self, id: &str) -> Option<&str> {
+        self.game_events
+            .get(&id.to_ascii_lowercase())
+            .map(String::as_str)
     }
 
     /// The indexes of `rows`: (achievement id, index).
@@ -42,6 +73,7 @@ impl AchievementIndexes {
                 .into_iter()
                 .map(|(id, index)| (id.to_ascii_lowercase(), index))
                 .collect(),
+            game_events: HashMap::new(),
         }
     }
 
@@ -75,5 +107,14 @@ mod tests {
             "a task names an achievement in another case"
         );
         assert_eq!(indexes.index("Last"), Some(LAST));
+        let with_event = indexes.with_game_events([(
+            "Lore_unlock_Weavers_Title_01_01".to_owned(),
+            "Read_LoreItem".to_owned(),
+        )]);
+        assert_eq!(
+            with_event.game_event("lore_unlock_weavers_title_01_01"),
+            Some("Read_LoreItem")
+        );
+        assert_eq!(with_event.game_event("Last"), None);
     }
 }
