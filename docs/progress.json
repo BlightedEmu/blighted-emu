@@ -5,80 +5,297 @@
       "features": [
         {
           "name": "Project setup and checks (M0)",
-          "percent": 100,
           "proof": "live",
-          "works": "Build, lint, tests, licence policy, Docker infrastructure.",
-          "missing": "Nothing."
+          "checks": [
+            {
+              "check": "Build, lint, tests, licence policy, Docker infrastructure.",
+              "proof": "live"
+            }
+          ]
         },
         {
           "name": "Game data pipeline (M1, M1b)",
-          "percent": 100,
           "proof": "tests",
-          "works": "All datasheets, text and 41 world files from your own install. The committed player attack table is the one of the paks again (it lacked the fields added since: aim, dodge cancel and block windows, root motion; refreshed 2026-11-01).",
-          "missing": "Nothing."
+          "checks": [
+            {
+              "check": "All datasheets, text and 41 world files from your own install.",
+              "proof": "tests"
+            },
+            {
+              "check": "The committed player attack table is the one of the paks again (it lacked the fields added since: aim, dodge cancel and block windows, root motion; refreshed 2026-11-01).",
+              "proof": "tests"
+            }
+          ]
         },
         {
           "name": "Collision, roads, water",
-          "percent": 75,
           "proof": "live",
-          "works": "Tutorial and open world collision files. Bodies stand on decks, stairs, roofs. Since 2026-11-10 (tests only) also the trees and stones of each region's distribution file (2,728,908 rows) and the engine's static colliders: 730,257 more bodies in the open world (2,146,861 now), 882 more in the tutorial. Closed meshes count as solid for mobs. Since 2026-11-10 (tests only) the collision tool also reads each region's slice data file (`region.slicedata`): the meshes and the collision flag of each slice and variant that the region's trees, stones and plants place. 361,192 rows whose variant no variation table holds now stand with their own mesh (303,313 of them have no collision, such as bushes); 284 rows keep an unknown variant.",
-          "missing": "Temple door wall opens by a quest trigger: not done. Retail player feet on our ground at La Roussette: 83 % of samples. Mobs sunk in the ground or stuck in walls (Janszoon, the cave) need a live check. 284 tree and stone rows name a variant that no variation table holds: they stand as their plain slice (the region's slice data file is not read yet)."
+          "checks": [
+            {
+              "check": "Tutorial and open world collision files.",
+              "proof": "live"
+            },
+            {
+              "check": "Bodies stand on decks, stairs, roofs.",
+              "proof": "live"
+            },
+            {
+              "check": "Since 2026-11-10 (tests only) also the trees and stones of each region's distribution file (2,728,908 rows) and the engine's static colliders: 730,257 more bodies in the open world (2,146,861 now), 882 more in the tutorial.",
+              "proof": "tests"
+            },
+            {
+              "check": "Closed meshes count as solid for mobs.",
+              "proof": "tests"
+            },
+            {
+              "check": "Since 2026-11-10 (tests only) the collision tool also reads each region's slice data file (`region.slicedata`): the meshes and the collision flag of each slice and variant that the region's trees, stones and plants place.",
+              "proof": "tests"
+            },
+            {
+              "check": "361,192 rows whose variant no variation table holds now stand with their own mesh (303,313 of them have no collision, such as bushes); 284 rows keep an unknown variant.",
+              "proof": "tests"
+            },
+            {
+              "check": "Temple door wall opens by a quest trigger: not done. Retail player feet on our ground at La Roussette: 83 % of samples.",
+              "proof": "none"
+            },
+            {
+              "check": "Mobs sunk in the ground or stuck in walls (Janszoon, the cave) need a live check.",
+              "proof": "none"
+            },
+            {
+              "check": "284 tree and stone rows name a variant that no variation table holds: they stand as their plain slice (the region's slice data file is not read yet).",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Capture decoders",
-          "percent": 95,
           "proof": "tests",
-          "works": "99.993% of 25.3 million bundles read.",
-          "missing": "Raid group data, a few classes."
+          "checks": [
+            {
+              "check": "99.993% of 25.3 million bundles read.",
+              "proof": "tests"
+            },
+            {
+              "check": "Raid group data, a few classes.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Client patch",
-          "percent": 100,
           "proof": "live",
-          "works": "Cert bypass, Steam offline login.",
-          "missing": "Nothing."
+          "checks": [
+            {
+              "check": "Cert bypass, Steam offline login.",
+              "proof": "live"
+            }
+          ]
         },
         {
           "name": "Login server and launcher (M2)",
-          "percent": 90,
           "proof": "live",
-          "works": "Saved servers in the launcher (2026-11-04; seen on Linux in both themes): a list of servers, each with its own name and login, and a click connects. Password or Discord login (live on Linux: Discord login with the server check and allow list, a linked password account; saves the Discord username and email), Linux Proton start, two worlds. Windows: a second player logged in and played from Windows on the game server (2026-11-09) with the Windows launcher and the patch script of the Windows test package of 2026-11-08 and its how-to.",
-          "missing": "The newer launcher (saved servers, site news) is not tested on Windows; the Windows player used the package of 2026-11-08. News hosts rerouted (live on Linux); region ping rerouted (live on Linux); shop services rerouted (live on Linux); privacy settings service answered as retail (tests only). Windows not live-checked. Other server ports (public_https_port, public_ping_port) built, tests only."
+          "checks": [
+            {
+              "check": "Saved servers in the launcher (2026-11-04; seen on Linux in both themes): a list of servers, each with its own name and login, and a click connects.",
+              "proof": "live"
+            },
+            {
+              "check": "Password or Discord login (live on Linux: Discord login with the server check and allow list, a linked password account; saves the Discord username and email), Linux Proton start, two worlds.",
+              "proof": "live"
+            },
+            {
+              "check": "Windows: a second player logged in and played from Windows on the game server (2026-11-09) with the Windows launcher and the patch script of the Windows test package of 2026-11-08 and its how-to.",
+              "proof": "live"
+            },
+            {
+              "check": "The newer launcher (saved servers, site news) is not tested on Windows; the Windows player used the package of 2026-11-08.",
+              "proof": "none"
+            },
+            {
+              "check": "News hosts rerouted (live on Linux); region ping rerouted (live on Linux); shop services rerouted (live on Linux); privacy settings service answered as retail (tests only).",
+              "proof": "none"
+            },
+            {
+              "check": "Windows not live-checked.",
+              "proof": "none"
+            },
+            {
+              "check": "Other server ports (public_https_port, public_ping_port) built, tests only.",
+              "proof": "code"
+            }
+          ]
         },
         {
           "name": "Gateway and registration (M3)",
-          "percent": 100,
           "proof": "live",
-          "works": "DTLS and registration with the real client.",
-          "missing": "Nothing."
+          "checks": [
+            {
+              "check": "DTLS and registration with the real client.",
+              "proof": "live"
+            }
+          ]
         },
         {
           "name": "Many sims and handoff (M5)",
-          "percent": 80,
           "proof": "bots",
-          "works": "1,000 bots cross cell borders. With 1,100 bots on 4 sims (2026-11-01), the busiest sim (about 365 players, 5,500 to 6,800 awake mobs) went from about 33 to 36 ms a tick (the limit is 33) to 20.5 to 23 ms, with 8 tick threads (`LIVE_STACK_TICK_THREADS=8`; the default is 4), a kept mob reach answer and a fast hash for the mob store. The metric `sim_tick_part_seconds{part}` times each part of a tick.",
-          "missing": "Real clients crossing cell borders: Unknown. In the last run 9.6 % of the busiest sim's ticks were still over 33 ms (1 late tick in 120 s). The mob card part runs on one thread (about 6 ms at 6,000 awake mobs). A build or a screen recorder on the same PC slows the sims."
+          "checks": [
+            {
+              "check": "1,000 bots cross cell borders.",
+              "proof": "bots"
+            },
+            {
+              "check": "With 1,100 bots on 4 sims (2026-11-01), the busiest sim (about 365 players, 5,500 to 6,800 awake mobs) went from about 33 to 36 ms a tick (the limit is 33) to 20.5 to 23 ms, with 8 tick threads (`LIVE_STACK_TICK_THREADS=8`; the default is 4), a kept mob reach answer and a fast hash for the mob store.",
+              "proof": "bots"
+            },
+            {
+              "check": "The metric `sim_tick_part_seconds{part}` times each part of a tick.",
+              "proof": "bots"
+            },
+            {
+              "check": "Real clients crossing cell borders: Unknown.",
+              "proof": "none"
+            },
+            {
+              "check": "In the last run 9.6 % of the busiest sim's ticks were still over 33 ms (1 late tick in 120 s).",
+              "proof": "none"
+            },
+            {
+              "check": "The mob card part runs on one thread (about 6 ms at 6,000 awake mobs).",
+              "proof": "none"
+            },
+            {
+              "check": "A build or a screen recorder on the same PC slows the sims.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Database saves",
-          "percent": 90,
           "proof": "tests",
-          "works": "Accounts, characters, items, progression, quests, notifications, recipe cooldowns, faction. Food and potion buffs stay over a log out and a sim border (migration 0026; on retail a food buff still had 303.5 s left after a login). Their timer pauses while the player is away unless the data says it keeps running (Inferred), and their heals go on. Added 2026-11-01: a placed camp's rotation and blueprint (0027), the mount summon cooldown (0028), potion and food cooldowns (0029, Inferred: no retail login shows one), and a trading post, trade or shop job now saves its players right away instead of in the next 10 s save. Each save is round-trip tested on a real database; no real client has logged out and back in to check them. Added 2026-11-04: the servers stop cleanly on SIGTERM (before, a restart skipped the last save round), a resumed player keeps its achievements, and the new sim of a handoff saves the items and quests it took over. Added 2026-11-10 (world migration 0034): health, mana and stamina at the save, so a player comes back as hurt as it left and a player saved dead comes back dead and respawns (retail: a recorded run that ended at health 0 started its next part at health 0 and respawned 32 s later); running ability cooldowns; the PvP flag wish (on, or on its way on: it comes back as on its way on); puzzle-stone turns; the bait on the fishing pole; and the depleted gather nodes of each level (world state: a sim restart no longer grows every node back early). All are saved with the progression in one transaction, and the nodes in their own table.",
-          "missing": "Not seen with a real client yet: log out hurt, log back in, and check health, cooldowns and nodes. Not saved, with the reason: loot bags (world objects that live at most 5 minutes; whether retail keeps them over a restart is Unknown), short effects from hits and abilities (their source is gone after a log out; retail rule Unknown), war sign-ups (no war is scheduled, so none is ever kept). Mana and stamina are kept as health is (Inferred: the same vitals state). Notes: findings/2026-11-01-database-saves.md and findings/2026-11-04-lost-progress-audit.md."
+          "checks": [
+            {
+              "check": "Accounts, characters, items, progression, quests, notifications, recipe cooldowns, faction.",
+              "proof": "tests"
+            },
+            {
+              "check": "Food and potion buffs stay over a log out and a sim border (migration 0026; on retail a food buff still had 303.5 s left after a login). Their timer pauses while the player is away unless the data says it keeps running (Inferred), and their heals go on.",
+              "proof": "tests"
+            },
+            {
+              "check": "Added 2026-11-01: a placed camp's rotation and blueprint (0027), the mount summon cooldown (0028), potion and food cooldowns (0029, Inferred: no retail login shows one), and a trading post, trade or shop job now saves its players right away instead of in the next 10 s save. Each save is round-trip tested on a real database; no real client has logged out and back in to check them.",
+              "proof": "tests"
+            },
+            {
+              "check": "Added 2026-11-04: the servers stop cleanly on SIGTERM (before, a restart skipped the last save round), a resumed player keeps its achievements, and the new sim of a handoff saves the items and quests it took over.",
+              "proof": "tests"
+            },
+            {
+              "check": "Added 2026-11-10 (world migration 0034): health, mana and stamina at the save, so a player comes back as hurt as it left and a player saved dead comes back dead and respawns (retail: a recorded run that ended at health 0 started its next part at health 0 and respawned 32 s later); running ability cooldowns; the PvP flag wish (on, or on its way on: it comes back as on its way on); puzzle-stone turns; the bait on the fishing pole; and the depleted gather nodes of each level (world state: a sim restart no longer grows every node back early).",
+              "proof": "tests"
+            },
+            {
+              "check": "All are saved with the progression in one transaction, and the nodes in their own table.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not seen with a real client yet: log out hurt, log back in, and check health, cooldowns and nodes.",
+              "proof": "none"
+            },
+            {
+              "check": "Not saved, with the reason: loot bags (world objects that live at most 5 minutes; whether retail keeps them over a restart is Unknown), short effects from hits and abilities (their source is gone after a log out; retail rule Unknown), war sign-ups (no war is scheduled, so none is ever kept).",
+              "proof": "none"
+            },
+            {
+              "check": "Mana and stamina are kept as health is (Inferred: the same vitals state).",
+              "proof": "none"
+            },
+            {
+              "check": "The world clock is saved (world migration 0035): day and night go on over a restart, and all sims share it.",
+              "proof": "tests"
+            }
+          ]
         },
         {
           "name": "Admin tools",
-          "percent": 80,
           "proof": "tests",
-          "works": "Live panel, studio, GM commands, drop simulator, script editor; a new look (2026-11-04, local only). GM chat commands in the game (`!help`). `nw-testclient chat` says a GM line and checks the answer. The site can run behind a relay on another machine (tests only).",
-          "missing": "Pages for systems that are not done. Relay: public, Discord login works live; live page stream not checked. GM chat commands: not checked live. In the 2026-10-30 camp test the client sent no chat line at all (cause: likely the chat probation flag, sent since c3c84794)."
+          "checks": [
+            {
+              "check": "Live panel, studio, GM commands, drop simulator, script editor; a new look (2026-11-04, local only).",
+              "proof": "tests"
+            },
+            {
+              "check": "GM chat commands in the game (`!help`).",
+              "proof": "tests"
+            },
+            {
+              "check": "`nw-testclient chat` says a GM line and checks the answer.",
+              "proof": "tests"
+            },
+            {
+              "check": "The site can run behind a relay on another machine (tests only).",
+              "proof": "tests"
+            },
+            {
+              "check": "Pages for systems that are not done.",
+              "proof": "none"
+            },
+            {
+              "check": "Relay: public, Discord login works live; live page stream not checked.",
+              "proof": "code"
+            },
+            {
+              "check": "GM chat commands: not checked live.",
+              "proof": "none"
+            },
+            {
+              "check": "In the 2026-10-30 camp test the client sent no chat line at all (cause: likely the chat probation flag, sent since c3c84794).",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Server status page",
-          "percent": 60,
           "proof": "bots",
-          "works": "New `status-reporter` (`config/status-reporter.toml`, 2026-11-08): one per world, on the game machine. Every 15 s it reads the metrics pages of login, gateway, director, sims and social and sends the world status (parts up or down, players online, the slowest gateway worker's p99 round trip) to the website; every 5 minutes it sends the 422 boards of the game data with their top 100 rows (values from the global database, character and company names from the world database). Each report is signed (HMAC-SHA256 of the time and the body, with the world's secret). Data only goes out: the website never reads a database or a metrics page. `content-tool leaderboards` writes the board table (English names and groups). Seen with a local copy of the website and the live servers: Online, then Players online 3 with 3 test bots. Since 2026-11-09 (tests only): each board also has its sub-group, value kind, order, reset time and what it ranks; ranks are shared like in the game; group rows name their members; edge-http pulls the message of the day from the site and names the launcher's news feed (docs/website-integration.md).",
-          "missing": "Not on the game VM or the public website yet. Not seen with the real game client: the p99 round trip stayed 0 ms with the test bots, which send no ping echo. No board had values yet, so no leaderboard row was seen on the website."
+          "checks": [
+            {
+              "check": "New `status-reporter` (`config/status-reporter.toml`, 2026-11-08): one per world, on the game machine.",
+              "proof": "bots"
+            },
+            {
+              "check": "Every 15 s it reads the metrics pages of login, gateway, director, sims and social and sends the world status (parts up or down, players online, the slowest gateway worker's p99 round trip) to the website; every 5 minutes it sends the 422 boards of the game data with their top 100 rows (values from the global database, character and company names from the world database). Each report is signed (HMAC-SHA256 of the time and the body, with the world's secret).",
+              "proof": "bots"
+            },
+            {
+              "check": "Data only goes out: the website never reads a database or a metrics page.",
+              "proof": "bots"
+            },
+            {
+              "check": "`content-tool leaderboards` writes the board table (English names and groups).",
+              "proof": "bots"
+            },
+            {
+              "check": "Seen with a local copy of the website and the live servers: Online, then Players online 3 with 3 test bots.",
+              "proof": "bots"
+            },
+            {
+              "check": "Since 2026-11-09 (tests only): each board also has its sub-group, value kind, order, reset time and what it ranks; ranks are shared like in the game; group rows name their members; edge-http pulls the message of the day from the site and names the launcher's news feed (docs/website-integration.md).",
+              "proof": "tests"
+            },
+            {
+              "check": "Not on the game VM or the public website yet.",
+              "proof": "none"
+            },
+            {
+              "check": "Not seen with the real game client: the p99 round trip stayed 0 ms with the test bots, which send no ping echo.",
+              "proof": "none"
+            },
+            {
+              "check": "No board had values yet, so no leaderboard row was seen on the website.",
+              "proof": "none"
+            }
+          ]
         }
       ]
     },
@@ -87,38 +304,85 @@
       "features": [
         {
           "name": "Create, select, enter world",
-          "percent": 95,
           "proof": "live",
-          "works": "New character goes in game. The select screen shows the saved level (not live-checked).",
-          "missing": "Small login burst gaps."
+          "checks": [
+            {
+              "check": "New character goes in game.",
+              "proof": "live"
+            },
+            {
+              "check": "The select screen shows the saved level (not live-checked).",
+              "proof": "tests"
+            },
+            {
+              "check": "Small login burst gaps.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Own movement",
-          "percent": 65,
           "proof": "live",
-          "works": "No more rubber banding (6d508fc). Every movement packet and note reviewed (findings/2026-11-01-movement-review.md); the replay guard passes (retail run: body 0.32 m median, 0.25 m open world; 0 pulls of the patched client).",
-          "missing": "Attack windows: 1.27 m median after 1 s (attack root motion is built but not wired: it made the camera follow worse). Ship fights 0.94 m (to-do t1)."
+          "checks": [
+            {
+              "check": "No more rubber banding (6d508fc).",
+              "proof": "live"
+            },
+            {
+              "check": "Every movement packet and note reviewed (findings/2026-11-01-movement-review.md); the replay guard passes (retail run: body 0.32 m median, 0.25 m open world; 0 pulls of the patched client).",
+              "proof": "live"
+            },
+            {
+              "check": "Attack windows: 1.27 m median after 1 s (attack root motion is built but not wired: it made the camera follow worse).",
+              "proof": "code"
+            },
+            {
+              "check": "Ship fights 0.94 m (to-do t1).",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "See other players",
-          "percent": 70,
           "proof": "live",
-          "works": "Look, gear, health, facing, attacks.",
-          "missing": "Full live test with many players: not done."
+          "checks": [
+            {
+              "check": "Look, gear, health, facing, attacks.",
+              "proof": "live"
+            },
+            {
+              "check": "Full live test with many players: not done.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Swim, water, falls",
-          "percent": 70,
           "proof": "live",
-          "works": "Swim strokes, water hold, fall damage.",
-          "missing": "Some swim states not checked."
+          "checks": [
+            {
+              "check": "Swim strokes, water hold, fall damage.",
+              "proof": "live"
+            },
+            {
+              "check": "Some swim states not checked.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Ship deck",
-          "percent": 75,
           "proof": "live",
-          "works": "Bodies stay on the deck, also in fights.",
-          "missing": "Fight camera does not fit the model."
+          "checks": [
+            {
+              "check": "Bodies stay on the deck, also in fights.",
+              "proof": "live"
+            },
+            {
+              "check": "Fight camera does not fit the model.",
+              "proof": "none"
+            }
+          ]
         }
       ]
     },
@@ -127,59 +391,227 @@
       "features": [
         {
           "name": "Melee hits",
-          "percent": 75,
           "proof": "live",
-          "works": "Homing, lag help, retail damage messages.",
-          "missing": "Boar hits miss sometimes (not seen in the 3 live logs of 2026-10-30: every swing with a mob within 2 m hit). Cause: Unknown."
+          "checks": [
+            {
+              "check": "Homing, lag help, retail damage messages.",
+              "proof": "live"
+            },
+            {
+              "check": "Boar hits miss sometimes (not seen in the 3 live logs of 2026-10-30: every swing with a mob within 2 m hit). Cause: Unknown.",
+              "proof": "none"
+            },
+            {
+              "check": "A melee hit from behind a mob is a crit (retail: 510 of 560 such hits), unless its row says `NoBackstab`.",
+              "proof": "tests"
+            }
+          ]
         },
         {
           "name": "Target lock",
-          "percent": 90,
           "proof": "live",
-          "works": "Lock, release and wheel cycling work live (110ccc0).",
-          "missing": "Retail check of the nearest-in-circle pick; lock after a reconnect."
+          "checks": [
+            {
+              "check": "Lock, release and wheel cycling work live (110ccc0).",
+              "proof": "live"
+            },
+            {
+              "check": "Retail check of the nearest-in-circle pick; lock after a reconnect.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Dodge and stamina",
-          "percent": 60,
           "proof": "tests",
-          "works": "Match retail (review 2026-10-01). A dodge in an attack waits for its CanDodgeCancel window while the key is held (all 9 retail dodges fit).",
-          "missing": "Live check. The buffer rule (key still held at the window) is Inferred."
+          "checks": [
+            {
+              "check": "Match retail (review 2026-10-01).",
+              "proof": "tests"
+            },
+            {
+              "check": "A dodge in an attack waits for its CanDodgeCancel window while the key is held (all 9 retail dodges fit).",
+              "proof": "tests"
+            },
+            {
+              "check": "Live check.",
+              "proof": "none"
+            },
+            {
+              "check": "The buffer rule (key still held at the window) is Inferred.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Block",
-          "percent": 55,
           "proof": "tests",
-          "works": "Guard break, no regen while held, 2218 only in the tutorial, cross-sim hits. The block stays down in an attack's BlockDisabled window (data). From the data (2026-11-01): the 150 unblockable attacks (`Unblockable`, `CanBeBlocked`: boss wipes, howls, spells) pass a block and take no stamina; mob empower buffs raise what a block takes (`StaminaDamageModifier`); a stun keeps the block down and the dodge back, a root only the dodge.",
-          "missing": "Live check. The rest of the retail 1 s rise delay, facing arc. Ranged block from the data only. Perk triggers on a block (`OnBlockedHitTaken`, `OnBlockBreak`) run since 2026-11-09 (tests only). Mobs do not block: the wire form of a hit a mob blocks and the mob stamina rule are Unknown."
+          "checks": [
+            {
+              "check": "Guard break, no regen while held, 2218 only in the tutorial, cross-sim hits.",
+              "proof": "tests"
+            },
+            {
+              "check": "The block stays down in an attack's BlockDisabled window (data).",
+              "proof": "tests"
+            },
+            {
+              "check": "From the data (2026-11-01): the 150 unblockable attacks (`Unblockable`, `CanBeBlocked`: boss wipes, howls, spells) pass a block and take no stamina; mob empower buffs raise what a block takes (`StaminaDamageModifier`); a stun keeps the block down and the dodge back, a root only the dodge.",
+              "proof": "tests"
+            },
+            {
+              "check": "Live check.",
+              "proof": "none"
+            },
+            {
+              "check": "The rest of the retail 1 s rise delay, facing arc.",
+              "proof": "none"
+            },
+            {
+              "check": "Ranged block from the data only.",
+              "proof": "none"
+            },
+            {
+              "check": "Perk triggers on a block (`OnBlockedHitTaken`, `OnBlockBreak`) run since 2026-11-09 (tests only).",
+              "proof": "none"
+            },
+            {
+              "check": "Mobs do not block: the wire form of a hit a mob blocks and the mob stamina rule are Unknown.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Ranged and magic",
-          "percent": 55,
           "proof": "tests",
-          "works": "Staffs, gauntlets, bows, muskets cast along the aim. Weapon abilities (keys 1 to 3) run the game's ability lists: cooldowns as retail, mana spend and regen, flying spells, lasting areas, second spells, upgrades (unit tests and one test on the real table).",
-          "missing": "No live check of abilities yet. Every weapon ability a key starts, but 6, starts in a test on the real lists (all 15 weapons); fixed: a sim crash with two-list weapons, the tag-in-slot and client-setting tests, the mana compare, the transition clips, and (2026-11-04) each key press test's own `BackTicks` and the real start and end of tag activities (Shooter's Stance and Stopping Power start now). Open: the bow's Penetrating, Poison and Rain of Arrows shots, Meteor Shower and Ice Storm (their shot actions are reached by no parsed fragment transition; fragment options by tag: Unknown) and the Ice Pylon (needs its placed pylon). Part of the retail cooldown cut: Unknown."
+          "checks": [
+            {
+              "check": "Staffs, gauntlets, bows, muskets cast along the aim.",
+              "proof": "tests"
+            },
+            {
+              "check": "Weapon abilities (keys 1 to 3) run the game's ability lists: cooldowns as retail, mana spend and regen, flying spells, lasting areas, second spells, upgrades (unit tests and one test on the real table).",
+              "proof": "tests"
+            },
+            {
+              "check": "No live check of abilities yet.",
+              "proof": "none"
+            },
+            {
+              "check": "Every weapon ability a key starts, but 6, starts in a test on the real lists (all 15 weapons); fixed: a sim crash with two-list weapons, the tag-in-slot and client-setting tests, the mana compare, the transition clips, and (2026-11-04) each key press test's own `BackTicks` and the real start and end of tag activities (Shooter's Stance and Stopping Power start now).",
+              "proof": "code"
+            },
+            {
+              "check": "Open: the bow's Penetrating, Poison and Rain of Arrows shots, Meteor Shower and Ice Storm (their shot actions are reached by no parsed fragment transition; fragment options by tag: Unknown) and the Ice Pylon (needs its placed pylon).",
+              "proof": "none"
+            },
+            {
+              "check": "Part of the retail cooldown cut: Unknown.",
+              "proof": "none"
+            },
+            {
+              "check": "A shot that meets the top of a body is a head shot: crit damage and the `Headshot` flag, never `Crit` (retail: 346 head shots).",
+              "proof": "tests"
+            },
+            {
+              "check": "Where the head starts on each creature is Inferred (the top 15 % of its body).",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Status effects",
-          "percent": 50,
           "proof": "tests",
-          "works": "Effects from game data. Checked against retail: the out-of-combat regen ends at full health, food heals 3 times as much while it runs, no heal number (4298) for the player's own heals. From the data (2026-11-01): weakness by damage type, stamina regen rate, food attributes (Constitution raises the max health), crit mods, heal mods (disease lowers heals, potions too), armor rend by damage category (and true damage takes no armor), health regen rate and no regen, stun, root and silence, the effects that end at death's door, effects added at death, first stacks.",
-          "missing": "Mob effects now go to the client in the mob's remote map (tests only; the full map, not retail's deltas). Live check of most effects. Not read: movement speed, tradeskill XP and luck columns. Passive ability triggers apply and remove effects since 2026-11-09 (tests only). Notes: findings/2026-11-01-block-and-status-effect-columns.md, findings/2026-11-09-quest-drops-and-passives.md."
+          "checks": [
+            {
+              "check": "Effects from game data.",
+              "proof": "tests"
+            },
+            {
+              "check": "Checked against retail: the out-of-combat regen ends at full health, food heals 3 times as much while it runs, no heal number (4298) for the player's own heals.",
+              "proof": "tests"
+            },
+            {
+              "check": "From the data (2026-11-01): weakness by damage type, stamina regen rate, food attributes (Constitution raises the max health), crit mods, heal mods (disease lowers heals, potions too), armor rend by damage category (and true damage takes no armor), health regen rate and no regen, stun, root and silence, the effects that end at death's door, effects added at death, first stacks.",
+              "proof": "tests"
+            },
+            {
+              "check": "Mob effects now go to the client in the mob's remote map (tests only; the full map, not retail's deltas).",
+              "proof": "code"
+            },
+            {
+              "check": "Live check of most effects.",
+              "proof": "none"
+            },
+            {
+              "check": "Not read: movement speed, tradeskill XP and luck columns.",
+              "proof": "none"
+            },
+            {
+              "check": "Passive ability triggers apply and remove effects since 2026-11-09 (tests only).",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Death, respawn, revive",
-          "percent": 85,
           "proof": "live",
-          "works": "Death screen, 38 respawn points, revive at 1 health. A drunk potion sends no heal number (retail). Death's door from the data (120 s, 1 s delay, off in the PvP modes and to a killer 10 levels above), retail vitals blocks (tests only). The incapacitated state (670) is on at death's door and off at its end, as retail (2026-11-05, tests only).",
-          "missing": "Live check of death's door. Status effects that skip it. Some respawn points."
+          "checks": [
+            {
+              "check": "Death screen, 38 respawn points, revive at 1 health.",
+              "proof": "live"
+            },
+            {
+              "check": "A drunk potion sends no heal number (retail).",
+              "proof": "live"
+            },
+            {
+              "check": "Death's door from the data (120 s, 1 s delay, off in the PvP modes and to a killer 10 levels above), retail vitals blocks (tests only).",
+              "proof": "tests"
+            },
+            {
+              "check": "The incapacitated state (670) is on at death's door and off at its end, as retail (2026-11-05, tests only).",
+              "proof": "tests"
+            },
+            {
+              "check": "Live check of death's door.",
+              "proof": "none"
+            },
+            {
+              "check": "Status effects that skip it.",
+              "proof": "none"
+            },
+            {
+              "check": "Some respawn points.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "PvP",
-          "percent": 25,
           "proof": "tests",
-          "works": "PvP hits roll like retail. Faction join and change (3161), saved, sent as retail; quests check RequiredFaction. Since 2026-11-05 the PvP flag waits while you are in a settlement, then counts down 30 s, as on retail.",
-          "missing": "Flag rules, PvP zones, rewards: not checked. Faction boards, forts."
+          "checks": [
+            {
+              "check": "PvP hits roll like retail.",
+              "proof": "tests"
+            },
+            {
+              "check": "Faction join and change (3161), saved, sent as retail; quests check RequiredFaction.",
+              "proof": "tests"
+            },
+            {
+              "check": "Since 2026-11-05 the PvP flag waits while you are in a settlement, then counts down 30 s, as on retail.",
+              "proof": "tests"
+            },
+            {
+              "check": "Flag rules, PvP zones, rewards: not checked.",
+              "proof": "none"
+            },
+            {
+              "check": "Faction boards, forts.",
+              "proof": "none"
+            }
+          ]
         }
       ]
     },
@@ -188,38 +620,161 @@
       "features": [
         {
           "name": "Spawns and health",
-          "percent": 50,
           "proof": "tests",
-          "works": "99.3% of creature records explained. The open map leaves out the invasion and breach encounter spawns (no encounter runner there); each kept spawn keeps its own AI profile and patrol path (fixed 2026-10-31: they had shifted to other spawns).",
-          "missing": "Since 2026-11-05 the mob copies keep every retail state of the captures (align to terrain on 782 creatures, status effects on 755, boss phase, timelines) and the sim reads all of them (it dropped 258 before). Respawn is now the retail 62 s (the data's 360 s rule is Unknown). A mob left alone plays its spawn again when a player comes back (radius = our wake radius; retail radius Unknown). Breaches and invasions need an encounter runner. A few odd records."
+          "checks": [
+            {
+              "check": "99.3% of creature records explained.",
+              "proof": "tests"
+            },
+            {
+              "check": "The open map leaves out the invasion and breach encounter spawns (no encounter runner there); each kept spawn keeps its own AI profile and patrol path (fixed 2026-10-31: they had shifted to other spawns).",
+              "proof": "tests"
+            },
+            {
+              "check": "Since 2026-11-05 the mob copies keep every retail state of the captures (align to terrain on 782 creatures, status effects on 755, boss phase, timelines) and the sim reads all of them (it dropped 258 before).",
+              "proof": "code"
+            },
+            {
+              "check": "Respawn is now the retail 62 s (the data's 360 s rule is Unknown).",
+              "proof": "code"
+            },
+            {
+              "check": "A mob left alone plays its spawn again when a player comes back (radius = our wake radius; retail radius Unknown).",
+              "proof": "none"
+            },
+            {
+              "check": "Breaches and invasions need an encounter runner.",
+              "proof": "none"
+            },
+            {
+              "check": "A few odd records.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Mob AI",
-          "percent": 70,
           "proof": "live",
-          "works": "1,075 behavior trees from Server.pak. Thorpe fight fixed. Mob paths stop at walls and climb at most 0.6 m a step. New 2026-11-10 (tests only): a mob moves and turns in its attack by the attack's `Homing` clips (radius, angle, turn rate, move to distance and time), so it strikes from near the player and not from 3 to 4.5 m; a mob blocked by solids searches a way over the floors and walks it (also around two walls that no single turn passes); it does not walk into solids, deep water or a level designer's no-floor mark (each town gate has one); on its way home with no way found it walks its trail back; a world event comes back after its spawner's respawn time from the data (for example 300 s, 600 s, 1 to 3 hours). Since 2026-11-10 (tests only): world events start and track players by the encounter's own detection volume (box, sphere, cylinder or capsule; 559 encounters have one), a stage that waits for a start object spawns it and ends when a player gathers it (44 start object slices from retail captures), and players near an event get its root entity with the event's status and each stage's status history, as retail sends them (240 of the 329 open world encounters; the other 89 slices are in no retail capture).",
-          "missing": "Janszoon tree is built from held trees; he attacks, throws his anchor at 6 to 10 m (Inferred; the anchor is now a real projectile), his charge follows the slope and he leashes home (live check needed). He also slams his anchor up close (a second retail fight, 2026-11-02), and a mob's weighted attack pick is drawn again after each attack, as the client does, so his heavy attacks come back (before: one light swing for minutes). His spin (`Attack_Mid_2H_Axe_02`) is only in the hard attack tree; with it he got stuck in a walk-home loop in one test, so it is not on yet. Terrain cookies now in our ground; mobs walk around rocks and crates. Boss summons (ExecuteSpawn) built: 10 of 46 summon slices have a retail card (the others cannot show). Not run: beams, boss-to-helper triggers, orders, tree projectiles (no capture). Not seen in the game yet: the homing in attacks, the way search, the town gate marks, the event respawn times (2026-11-10). Not seen in the game yet: event states, start objects and detection volumes. 89 encounter slices have no root (no retail capture shows them) and 8 start object slices are in no capture, so their events cannot go past that stage."
+          "checks": [
+            {
+              "check": "1,075 behavior trees from Server.pak.",
+              "proof": "live"
+            },
+            {
+              "check": "Thorpe fight fixed.",
+              "proof": "live"
+            },
+            {
+              "check": "Mob paths stop at walls and climb at most 0.6 m a step.",
+              "proof": "live"
+            },
+            {
+              "check": "New 2026-11-10 (tests only): a mob moves and turns in its attack by the attack's `Homing` clips (radius, angle, turn rate, move to distance and time), so it strikes from near the player and not from 3 to 4.5 m; a mob blocked by solids searches a way over the floors and walks it (also around two walls that no single turn passes); it does not walk into solids, deep water or a level designer's no-floor mark (each town gate has one); on its way home with no way found it walks its trail back; a world event comes back after its spawner's respawn time from the data (for example 300 s, 600 s, 1 to 3 hours).",
+              "proof": "tests"
+            },
+            {
+              "check": "Since 2026-11-10 (tests only): world events start and track players by the encounter's own detection volume (box, sphere, cylinder or capsule; 559 encounters have one), a stage that waits for a start object spawns it and ends when a player gathers it (44 start object slices from retail captures), and players near an event get its root entity with the event's status and each stage's status history, as retail sends them (240 of the 329 open world encounters; the other 89 slices are in no retail capture).",
+              "proof": "tests"
+            },
+            {
+              "check": "Janszoon tree is built from held trees; he attacks, throws his anchor at 6 to 10 m (Inferred; the anchor is now a real projectile), his charge follows the slope and he leashes home (live check needed).",
+              "proof": "code"
+            },
+            {
+              "check": "He also slams his anchor up close (a second retail fight, 2026-11-02), and a mob's weighted attack pick is drawn again after each attack, as the client does, so his heavy attacks come back (before: one light swing for minutes).",
+              "proof": "none"
+            },
+            {
+              "check": "His spin (`Attack_Mid_2H_Axe_02`) is only in the hard attack tree; with it he got stuck in a walk-home loop in one test, so it is not on yet.",
+              "proof": "none"
+            },
+            {
+              "check": "Terrain cookies now in our ground; mobs walk around rocks and crates.",
+              "proof": "code"
+            },
+            {
+              "check": "Boss summons (ExecuteSpawn) built: 10 of 46 summon slices have a retail card (the others cannot show).",
+              "proof": "code"
+            },
+            {
+              "check": "Not run: beams, boss-to-helper triggers, orders, tree projectiles (no capture).",
+              "proof": "none"
+            },
+            {
+              "check": "Not seen in the game yet: the homing in attacks, the way search, the town gate marks, the event respawn times (2026-11-10).",
+              "proof": "none"
+            },
+            {
+              "check": "Not seen in the game yet: event states, start objects and detection volumes.",
+              "proof": "none"
+            },
+            {
+              "check": "89 encounter slices have no root (no retail capture shows them) and 8 start object slices are in no capture, so their events cannot go past that stage.",
+              "proof": "none"
+            },
+            {
+              "check": "Mobs cast their spells (`CAGE-CastSpell`, 744 of 765 spell names have a row): ground areas hit the players in them by the mob's damage row, and self heals and buffs hold on the mob.",
+              "proof": "tests"
+            },
+            {
+              "check": "A hit plays the reaction of its side: front, back, left or right (retail: 160 captures).",
+              "proof": "tests"
+            },
+            {
+              "check": "A knockback perk pushes the mob back; a wall on the way stops it.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not seen with a real client: mob spells, side reactions, knockback.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Mob animations",
-          "percent": 60,
           "proof": "tests",
-          "works": "736 of 747 creature assets.",
-          "missing": "11 assets."
+          "checks": [
+            {
+              "check": "736 of 747 creature assets.",
+              "proof": "tests"
+            },
+            {
+              "check": "11 assets.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Patrols and waypoints",
-          "percent": 55,
           "proof": "tests",
-          "works": "12,858 spawns get waypoint paths.",
-          "missing": "Live check."
+          "checks": [
+            {
+              "check": "12,858 spawns get waypoint paths.",
+              "proof": "tests"
+            },
+            {
+              "check": "Live check.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Corpses",
-          "percent": 60,
           "proof": "tests",
-          "works": "Retail times per creature. Skinned corpses go after 5.5 s.",
-          "missing": "Boar times vary in retail."
+          "checks": [
+            {
+              "check": "Retail times per creature.",
+              "proof": "tests"
+            },
+            {
+              "check": "Skinned corpses go after 5.5 s.",
+              "proof": "tests"
+            },
+            {
+              "check": "Boar times vary in retail.",
+              "proof": "none"
+            }
+          ]
         }
       ]
     },
@@ -228,31 +783,59 @@
       "features": [
         {
           "name": "Tutorial flow (ftue_v2 level)",
-          "percent": 80,
           "proof": "live",
-          "works": "Ship, quick time event, sailors, legionnaires, corruption, Thorpe, journal.",
-          "missing": "Temple door and growth explode (level not yet checked)."
+          "checks": [
+            {
+              "check": "Ship, quick time event, sailors, legionnaires, corruption, Thorpe, journal.",
+              "proof": "live"
+            },
+            {
+              "check": "Temple door and growth explode (level not yet checked).",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Starting beach (open world)",
-          "percent": 70,
           "proof": "live",
-          "works": "Beach quests 12-1 to 12-9 played live up to the Demon Storm turn-in; lock, skinning, crafting, crates, cutscenes, journal auto pin. Play test 2 (2026-10-29) reached Janszoon.",
-          "missing": "Play test 2 fixes need a live check; hits from behind; the terrain cookie fix at La Roussette and the Satisfaction wreck needs a live check."
+          "checks": [
+            {
+              "check": "Beach quests 12-1 to 12-9 played live up to the Demon Storm turn-in; lock, skinning, crafting, crates, cutscenes, journal auto pin.",
+              "proof": "live"
+            },
+            {
+              "check": "Play test 2 (2026-10-29) reached Janszoon.",
+              "proof": "live"
+            },
+            {
+              "check": "Play test 2 fixes need a live check; hits from behind; the terrain cookie fix at La Roussette and the Satisfaction wreck needs a live check.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Journal auto pin",
-          "percent": 100,
           "proof": "live",
-          "works": "You confirmed it live (c21828b).",
-          "missing": "Nothing."
+          "checks": [
+            {
+              "check": "You confirmed it live (c21828b).",
+              "proof": "live"
+            }
+          ]
         },
         {
           "name": "Tutorial skip and class gear",
-          "percent": 60,
           "proof": "tests",
-          "works": "Skip completes Soul Survivor, gives class bag.",
-          "missing": "Live check."
+          "checks": [
+            {
+              "check": "Skip completes Soul Survivor, gives class bag.",
+              "proof": "tests"
+            },
+            {
+              "check": "Live check.",
+              "proof": "none"
+            }
+          ]
         }
       ]
     },
@@ -261,52 +844,193 @@
       "features": [
         {
           "name": "Quest engine",
-          "percent": 60,
           "proof": "tests",
-          "works": "Task types from task sheets, turn-in, rewards. Many quests at once, with the client's journal limit per quest type. Interact, game mode, give item, patrol, level, talk, gather, cyclic object, temporary unlock, craft, objective, use item, territory, fishing, salvage, item family, refine, song and dungeon steps. Town board missions. Drop a quest (3836, 2026-11-05: it leaves the journal and can be taken again). 772 quest trigger volumes from the level data. Done StayActive steps show as retail. Quest objects that are loot containers give their quest items; kills count by spawner category and category group. Have-and-return items of quests drop as retail (2026-11-09, side quest captures): into the kill's loot bag, from containers at the task's chance, from quest objects, and go back at the turn-in. A quest object with a detection sphere (238 kinds, the mount quest's torches) sets off its event when a player on its quest walks in, as retail. Food status effects, quest success events and recipes fire their game events; achievement steps read expressions; POI steps read tag lists; faction rank steps count.",
-          "missing": "Live check of the new steps (Truffle Fever failed live before the fix); pin limit Unknown. Open (audit 2026-11-03): encounter result events (45 tasks), encounter-spawned gatherables (9), PvP kill and fort events (7), volumes in deferred slices (12), kill-contribution mobs with no spawn (51); the mount food's daily experience limit is not checked. Live check of the races and the faction join. Puzzle scripts, the emote step, PvP faction mission steps (TaskDie, control points), trigger areas of instance levels (20)."
+          "checks": [
+            {
+              "check": "Task types from task sheets, turn-in, rewards.",
+              "proof": "tests"
+            },
+            {
+              "check": "Many quests at once, with the client's journal limit per quest type.",
+              "proof": "tests"
+            },
+            {
+              "check": "Interact, game mode, give item, patrol, level, talk, gather, cyclic object, temporary unlock, craft, objective, use item, territory, fishing, salvage, item family, refine, song and dungeon steps.",
+              "proof": "tests"
+            },
+            {
+              "check": "Town board missions.",
+              "proof": "tests"
+            },
+            {
+              "check": "Drop a quest (3836, 2026-11-05: it leaves the journal and can be taken again).",
+              "proof": "tests"
+            },
+            {
+              "check": "772 quest trigger volumes from the level data.",
+              "proof": "tests"
+            },
+            {
+              "check": "Done StayActive steps show as retail.",
+              "proof": "tests"
+            },
+            {
+              "check": "Quest objects that are loot containers give their quest items; kills count by spawner category and category group.",
+              "proof": "tests"
+            },
+            {
+              "check": "Have-and-return items of quests drop as retail (2026-11-09, side quest captures): into the kill's loot bag, from containers at the task's chance, from quest objects, and go back at the turn-in.",
+              "proof": "tests"
+            },
+            {
+              "check": "A quest object with a detection sphere (238 kinds, the mount quest's torches) sets off its event when a player on its quest walks in, as retail.",
+              "proof": "tests"
+            },
+            {
+              "check": "Food status effects, quest success events and recipes fire their game events; achievement steps read expressions; POI steps read tag lists; faction rank steps count.",
+              "proof": "tests"
+            },
+            {
+              "check": "Live check of the new steps (Truffle Fever failed live before the fix); pin limit Unknown.",
+              "proof": "none"
+            },
+            {
+              "check": "Open (audit 2026-11-03): encounter result events (45 tasks), encounter-spawned gatherables (9), PvP kill and fort events (7), volumes in deferred slices (12), kill-contribution mobs with no spawn (51); the mount food's daily experience limit is not checked.",
+              "proof": "none"
+            },
+            {
+              "check": "Live check of the races and the faction join.",
+              "proof": "none"
+            },
+            {
+              "check": "Puzzle scripts, the emote step, PvP faction mission steps (TaskDie, control points), trigger areas of instance levels (20).",
+              "proof": "none"
+            },
+            {
+              "check": "Game events give faction reputation and tokens to the player's faction (581 events: faction missions and rank quests).",
+              "proof": "tests"
+            },
+            {
+              "check": "A first lore read keeps the page and gives its game event's experience; a second read gives nothing.",
+              "proof": "tests"
+            },
+            {
+              "check": "Emote tasks and puzzle (slayer script) tasks: the client message is Unknown, no retail capture.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Beach and wreck quests",
-          "percent": 60,
           "proof": "tests",
-          "works": "Start beach chain and wreck quests 4 to 7.",
-          "missing": "Full live run."
+          "checks": [
+            {
+              "check": "Start beach chain and wreck quests 4 to 7.",
+              "proof": "tests"
+            },
+            {
+              "check": "Full live run.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Main story and side quests",
-          "percent": 40,
           "proof": "tests",
-          "works": "The engine runs them from game data. Side quests with only supported steps: 526 of 528; main story: 354 of 358 (2 steps have no target in the data, 2 are puzzle scripts).",
-          "missing": "Nobody played them live. The faction join works; the faction boards offer no missions yet."
+          "checks": [
+            {
+              "check": "The engine runs them from game data.",
+              "proof": "tests"
+            },
+            {
+              "check": "Side quests with only supported steps: 526 of 528; main story: 354 of 358 (2 steps have no target in the data, 2 are puzzle scripts).",
+              "proof": "tests"
+            },
+            {
+              "check": "Nobody played them live.",
+              "proof": "none"
+            },
+            {
+              "check": "The faction join works; the faction boards offer no missions yet.",
+              "proof": "code"
+            }
+          ]
         },
         {
           "name": "XP, levels, attribute points",
-          "percent": 60,
           "proof": "tests",
-          "works": "Kill XP, level up, attribute and weapon points. Max health grows with the level and Constitution as retail (856 + 1.75 x level squared + the Constitution health: 9 retail points fit), and the client gets the new max after a level up or a spend.",
-          "missing": "Live check after the tutorial. Attribute damage scaling and the attribute threshold effects (evidence conflicts). Gear health bonuses."
+          "checks": [
+            {
+              "check": "Kill XP, level up, attribute and weapon points.",
+              "proof": "tests"
+            },
+            {
+              "check": "Max health grows with the level and Constitution as retail (856 + 1.75 x level squared + the Constitution health: 9 retail points fit), and the client gets the new max after a level up or a spend.",
+              "proof": "tests"
+            },
+            {
+              "check": "Live check after the tutorial.",
+              "proof": "none"
+            },
+            {
+              "check": "Attribute damage scaling and the attribute threshold effects (evidence conflicts).",
+              "proof": "none"
+            },
+            {
+              "check": "Gear health bonuses.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Weapon mastery",
-          "percent": 55,
           "proof": "tests",
-          "works": "Mastery XP and saves.",
-          "missing": "Live check."
+          "checks": [
+            {
+              "check": "Mastery XP and saves.",
+              "proof": "tests"
+            },
+            {
+              "check": "Live check.",
+              "proof": "none"
+            },
+            {
+              "check": "Tree nodes without a trigger that change hits (crit, damage, damage taken) work on every hit while their weapon is held.",
+              "proof": "tests"
+            },
+            {
+              "check": "Perks and nodes on head shots and hits from behind (`OnHeadShot`, `OnHitBehind`, their damage shares) fire.",
+              "proof": "tests"
+            }
+          ]
         },
         {
           "name": "Area charting, territory standing",
-          "percent": 40,
           "proof": "tests",
-          "works": "Charting XP, standing rank 1.",
-          "missing": "Higher ranks and their rewards."
+          "checks": [
+            {
+              "check": "Charting XP, standing rank 1.",
+              "proof": "tests"
+            },
+            {
+              "check": "Higher ranks and their rewards.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Achievements",
-          "percent": 30,
           "proof": "code",
-          "works": "Achievement and meta achievement states.",
-          "missing": "Live check."
+          "checks": [
+            {
+              "check": "Achievement and meta achievement states.",
+              "proof": "code"
+            },
+            {
+              "check": "Live check.",
+              "proof": "none"
+            }
+          ]
         }
       ]
     },
@@ -315,66 +1039,237 @@
       "features": [
         {
           "name": "Inventory, gear, paperdoll",
-          "percent": 75,
           "proof": "live",
-          "works": "Inventory, slots, gear versions.",
-          "missing": "Gear score rules, some item calls."
+          "checks": [
+            {
+              "check": "Inventory, slots, gear versions.",
+              "proof": "live"
+            },
+            {
+              "check": "Gear score rules, some item calls.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Loot drops",
-          "percent": 60,
           "proof": "tests",
-          "works": "Retail loot tables, drop chance, one bag per kill.",
-          "missing": "Live check outside the tutorial."
+          "checks": [
+            {
+              "check": "Retail loot tables, drop chance, one bag per kill.",
+              "proof": "tests"
+            },
+            {
+              "check": "Live check outside the tutorial.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Gathering and skinning",
-          "percent": 70,
           "proof": "live",
-          "works": "Skinning, nodules and gatherables work live. The sickle is the harvesting tool (slot 34). Held effects add their gather speed (food, music buffs). Worn perks hold their status effects, scaled by the item's gear score (tool, armour, amulet and bag perks). Gather bots (`nw-testclient gather`, 2026-11-01) wear start tools (`NW_SIM_START_TOOLS`; the data has no T1 logging axe, so `2hAxeT2` is the lowest) and gather trees, herbs, crops, ore and stone (82 kinds in the 30 min run). In the last run all 100 bots gathered. A water gather targets the player and ends with the own done state, as retail `Hive_Dye` (before: the gather animation never ended); a second press on the same interaction id runs again. Since 2026-11-05 a gather needs a level node of its kind in reach. Since 2026-11-10 the server sends a node's state only for a kind whose bundle slots are known (Harvesting, Logging and Mining kinds, and 11 measured kinds of no tradeskill); doors, locks, banners and cannons keep the client's own state, so a used Fire Cannon no longer crashes the game.",
-          "missing": "Tool levels and node respawn, live. Gathering luck: how ROL values change a gather roll is Unknown (the roll is server only)."
+          "checks": [
+            {
+              "check": "Skinning, nodules and gatherables work live.",
+              "proof": "live"
+            },
+            {
+              "check": "The sickle is the harvesting tool (slot 34).",
+              "proof": "live"
+            },
+            {
+              "check": "Held effects add their gather speed (food, music buffs).",
+              "proof": "live"
+            },
+            {
+              "check": "Worn perks hold their status effects, scaled by the item's gear score (tool, armour, amulet and bag perks).",
+              "proof": "live"
+            },
+            {
+              "check": "Gather bots (`nw-testclient gather`, 2026-11-01) wear start tools (`NW_SIM_START_TOOLS`; the data has no T1 logging axe, so `2hAxeT2` is the lowest) and gather trees, herbs, crops, ore and stone (82 kinds in the 30 min run).",
+              "proof": "live"
+            },
+            {
+              "check": "In the last run all 100 bots gathered.",
+              "proof": "live"
+            },
+            {
+              "check": "A water gather targets the player and ends with the own done state, as retail `Hive_Dye` (before: the gather animation never ended); a second press on the same interaction id runs again.",
+              "proof": "live"
+            },
+            {
+              "check": "Since 2026-11-05 a gather needs a level node of its kind in reach.",
+              "proof": "live"
+            },
+            {
+              "check": "Since 2026-11-10 the server sends a node's state only for a kind whose bundle slots are known (Harvesting, Logging and Mining kinds, and 11 measured kinds of no tradeskill); doors, locks, banners and cannons keep the client's own state, so a used Fire Cannon no longer crashes the game.",
+              "proof": "live"
+            },
+            {
+              "check": "Tool levels and node respawn, live.",
+              "proof": "none"
+            },
+            {
+              "check": "Gathering luck: how ROL values change a gather roll is Unknown (the roll is server only).",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Crafting",
-          "percent": 65,
           "proof": "live",
-          "works": "Campfire, recipes (the skinning knife crafts live with no error message), craft answers after the item change, and the bag reasons of a craft (2 used, 3 made, 2 on a used-up slot) as retail. Required, hiding and one-time recipe achievements. Held effects (crafting food) raise the gear score range. A salvaged schematic teaches its recipe. Daily and weekly recipe cooldowns, saved, sent as retail. Checked against 6 retail crafting and refining captures: one storage note per item made, with the last storage search.",
-          "missing": "Live check of more recipes; higher stations and refining. Crafts take from storage in retail (which storage: Unknown); bonus items of another kind (their table: Unknown). The reset of the 79200 s cooldown and the colour gypsum orbs: Unknown."
+          "checks": [
+            {
+              "check": "Campfire, recipes (the skinning knife crafts live with no error message), craft answers after the item change, and the bag reasons of a craft (2 used, 3 made, 2 on a used-up slot) as retail.",
+              "proof": "live"
+            },
+            {
+              "check": "Required, hiding and one-time recipe achievements.",
+              "proof": "live"
+            },
+            {
+              "check": "Held effects (crafting food) raise the gear score range.",
+              "proof": "live"
+            },
+            {
+              "check": "A salvaged schematic teaches its recipe.",
+              "proof": "live"
+            },
+            {
+              "check": "Daily and weekly recipe cooldowns, saved, sent as retail.",
+              "proof": "live"
+            },
+            {
+              "check": "Checked against 6 retail crafting and refining captures: one storage note per item made, with the last storage search.",
+              "proof": "live"
+            },
+            {
+              "check": "Live check of more recipes; higher stations and refining.",
+              "proof": "none"
+            },
+            {
+              "check": "Crafts take from storage in retail (which storage: Unknown); bonus items of another kind (their table: Unknown).",
+              "proof": "none"
+            },
+            {
+              "check": "The reset of the 79200 s cooldown and the colour gypsum orbs: Unknown.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Fishing",
-          "percent": 40,
           "proof": "tests",
-          "works": "Fishing code, one live run. Fishing quest steps and quest fish.",
-          "missing": "Result of the live run: Unknown."
+          "checks": [
+            {
+              "check": "Fishing code, one live run.",
+              "proof": "tests"
+            },
+            {
+              "check": "Fishing quest steps and quest fish.",
+              "proof": "tests"
+            },
+            {
+              "check": "Result of the live run: Unknown.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Repair, salvage, transmog, dyes",
-          "percent": 35,
           "proof": "tests",
-          "works": "Checked against retail salvage (4 captures) and dye captures: the salvaged slot goes out with reason 24, its items with 26 (containers) or 33 (gear); dye items and their emptied slots with 2.",
-          "missing": "No retail repair capture. The storage note count of a salvage and a dye: Unknown. No live test."
+          "checks": [
+            {
+              "check": "Checked against retail salvage (4 captures) and dye captures: the salvaged slot goes out with reason 24, its items with 26 (containers) or 33 (gear); dye items and their emptied slots with 2.",
+              "proof": "tests"
+            },
+            {
+              "check": "No retail repair capture.",
+              "proof": "none"
+            },
+            {
+              "check": "The storage note count of a salvage and a dye: Unknown.",
+              "proof": "none"
+            },
+            {
+              "check": "No live test.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Shops and coins",
-          "percent": 30,
           "proof": "code",
-          "works": "Coins state, shop code.",
-          "missing": "Not checked live."
+          "checks": [
+            {
+              "check": "Coins state, shop code.",
+              "proof": "code"
+            },
+            {
+              "check": "Not checked live.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Storage",
-          "percent": 50,
           "proof": "tests",
-          "works": "Storage search code. Checked against the retail storage capture: new ids on a move, the view from afar, 2 storage notes per move.",
-          "missing": "No live test. Weight limit, transfer fee and the notes after a view from afar are Unknown."
+          "checks": [
+            {
+              "check": "Storage search code.",
+              "proof": "tests"
+            },
+            {
+              "check": "Checked against the retail storage capture: new ids on a move, the view from afar, 2 storage notes per move.",
+              "proof": "tests"
+            },
+            {
+              "check": "No live test.",
+              "proof": "none"
+            },
+            {
+              "check": "Weight limit, transfer fee and the notes after a view from afar are Unknown.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Trading post",
-          "percent": 60,
           "proof": "tests",
-          "works": "Part buys show the units left to both players (search, own lists, notices): a stack of 10 bought 1 then 9 ends with the buyer holding 10 and the seller paid (world test on the database). Retail event counts, ends, notice versions, completion times, sync reasons 19/10/0, the completer's own tax. Orders carry the retail settlement id (nearest settlement or outpost capital: 22 of 22 retail ids from data, 5 of 5 captures); a filled buy order's units go to that settlement's storage (retail 2 of 2). Search throttle (1 s). A part-filled bag no longer gives a delivery twice. Since 2026-11-05 the buyer gets the sold stack with its perks, gear score, durability and look, and the post opens only at a settlement.",
-          "missing": "No live test (the bot client has no trading post). Posting fees (no formula fits the 9 retail fees). Buys at another settlement and expired sell orders go to the bag (Unknown)."
+          "checks": [
+            {
+              "check": "Part buys show the units left to both players (search, own lists, notices): a stack of 10 bought 1 then 9 ends with the buyer holding 10 and the seller paid (world test on the database). Retail event counts, ends, notice versions, completion times, sync reasons 19/10/0, the completer's own tax.",
+              "proof": "tests"
+            },
+            {
+              "check": "Orders carry the retail settlement id (nearest settlement or outpost capital: 22 of 22 retail ids from data, 5 of 5 captures); a filled buy order's units go to that settlement's storage (retail 2 of 2).",
+              "proof": "tests"
+            },
+            {
+              "check": "Search throttle (1 s).",
+              "proof": "tests"
+            },
+            {
+              "check": "A part-filled bag no longer gives a delivery twice.",
+              "proof": "tests"
+            },
+            {
+              "check": "Since 2026-11-05 the buyer gets the sold stack with its perks, gear score, durability and look, and the post opens only at a settlement.",
+              "proof": "tests"
+            },
+            {
+              "check": "No live test (the bot client has no trading post).",
+              "proof": "none"
+            },
+            {
+              "check": "Posting fees (no formula fits the 9 retail fees).",
+              "proof": "none"
+            },
+            {
+              "check": "Buys at another settlement and expired sell orders go to the bag (Unknown).",
+              "proof": "none"
+            }
+          ]
         }
       ]
     },
@@ -383,80 +1278,249 @@
       "features": [
         {
           "name": "Fast travel, inns, recall",
-          "percent": 45,
           "proof": "tests",
-          "works": "Travel rules and saves. Inn check in is answered (its open and check in share one interaction id, retail inn tutorial). A shrine is charted at its first entry (its `ChartedAchievement`, as retail `Playthrough_Part_01` 3210.7 s), a discoverable one at an entry after its discovery. The phasing updates name all 10 phasing areas, so the client reports entries into the areas inside them (Brysedd Overlook Shrine lies in Monarch's Bluffs settlement's area 30155).",
-          "missing": "Live check of the inn recall (no used point named since 2026-11-08), the unstuck stand, the inn check in and a shrine in a settlement's area. The fast travel kneel plays live since 2026-11-08. Retail names only the phasing areas near the player; all of them go here (Inferred). Shrine travel needs no chart on the server."
+          "checks": [
+            {
+              "check": "Travel rules and saves.",
+              "proof": "tests"
+            },
+            {
+              "check": "Inn check in is answered (its open and check in share one interaction id, retail inn tutorial).",
+              "proof": "tests"
+            },
+            {
+              "check": "A shrine is charted at its first entry (its `ChartedAchievement`, as retail `Playthrough_Part_01` 3210.7 s), a discoverable one at an entry after its discovery.",
+              "proof": "tests"
+            },
+            {
+              "check": "The phasing updates name all 10 phasing areas, so the client reports entries into the areas inside them (Brysedd Overlook Shrine lies in Monarch's Bluffs settlement's area 30155).",
+              "proof": "tests"
+            },
+            {
+              "check": "Live check of the inn recall (no used point named since 2026-11-08), the unstuck stand, the inn check in and a shrine in a settlement's area.",
+              "proof": "none"
+            },
+            {
+              "check": "The fast travel kneel plays live since 2026-11-08. Retail names only the phasing areas near the player; all of them go here (Inferred).",
+              "proof": "none"
+            },
+            {
+              "check": "Shrine travel needs no chart on the server.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Player camps",
-          "percent": 50,
           "proof": "tests",
-          "works": "Place a camp for its costs, the retail camp entity group, respawn at its SpawnPoint, Camp crafting station, BindCamp event, the camp stands again at login.",
-          "missing": "Live check. PvP destruction, how a new character earns the Camping rank (Unknown), guild and faction."
+          "checks": [
+            {
+              "check": "Place a camp for its costs, the retail camp entity group, respawn at its SpawnPoint, Camp crafting station, BindCamp event, the camp stands again at login.",
+              "proof": "tests"
+            },
+            {
+              "check": "Live check.",
+              "proof": "none"
+            },
+            {
+              "check": "PvP destruction, how a new character earns the Camping rank (Unknown), guild and faction.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Mounts",
-          "percent": 65,
           "proof": "live",
-          "works": "Summon, ride, dash, stamina, dismounts, cooldowns, mount screens and saves. The mount quest (My Kingdom for a Horse) ran live to its end (2026-11-03): the cave torches light within their 9 m sphere, the box gives Moonshadow, the summon and the ride work. A jump on the mount sets the 1 s stamina regen delay. Mount food from quick slots 1 to 4 while riding: riding experience, the quest step and the daily limit of 3 (tests only). The change mount screen gets its `isChangingMount` echo (retail slot 1 child 16; before: it spun). Quick courses (races, rallies, tours, time trials): start on a mount with the course task, node hits, timer, finish; the race task counts each section, 1/8 to 8/8, as retail (before: 0/8 until the finish). A rider's server body keeps the floor (its saddle camera is 3.91 m up, a walker's 1.685 m), steps at its mount's speed (the walking 0.36 m a record held it at 7.2 m/s) and its camera trails 0.45 s (Inferred fit): retail Hermit's Rally replay 1.11 m off (median), before 2.95 m and 2.0 m up.",
-          "missing": "Live check of the change mount screen (store answer) and of mount food from a quick slot. Unknown: a dismount on a hit while idle (no retail capture shows one), town exclusion areas and forced walk, the trample message (6731), charm multipliers, the quest's required level (1 or 20). A failed course's result: Unknown."
+          "checks": [
+            {
+              "check": "Summon, ride, dash, stamina, dismounts, cooldowns, mount screens and saves.",
+              "proof": "live"
+            },
+            {
+              "check": "The mount quest (My Kingdom for a Horse) ran live to its end (2026-11-03): the cave torches light within their 9 m sphere, the box gives Moonshadow, the summon and the ride work.",
+              "proof": "live"
+            },
+            {
+              "check": "A jump on the mount sets the 1 s stamina regen delay.",
+              "proof": "live"
+            },
+            {
+              "check": "Mount food from quick slots 1 to 4 while riding: riding experience, the quest step and the daily limit of 3 (tests only).",
+              "proof": "tests"
+            },
+            {
+              "check": "The change mount screen gets its `isChangingMount` echo (retail slot 1 child 16; before: it spun).",
+              "proof": "tests"
+            },
+            {
+              "check": "Quick courses (races, rallies, tours, time trials): start on a mount with the course task, node hits, timer, finish; the race task counts each section, 1/8 to 8/8, as retail (before: 0/8 until the finish).",
+              "proof": "tests"
+            },
+            {
+              "check": "A rider's server body keeps the floor (its saddle camera is 3.91 m up, a walker's 1.685 m), steps at its mount's speed (the walking 0.36 m a record held it at 7.2 m/s) and its camera trails 0.45 s (Inferred fit): retail Hermit's Rally replay 1.11 m off (median), before 2.95 m and 2.0 m up.",
+              "proof": "tests"
+            },
+            {
+              "check": "Live check of the change mount screen (store answer) and of mount food from a quick slot. Unknown: a dismount on a hit while idle (no retail capture shows one), town exclusion areas and forced walk, the trample message (6731), charm multipliers, the quest's required level (1 or 20).",
+              "proof": "none"
+            },
+            {
+              "check": "A failed course's result: Unknown.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Social: chat, friends, groups, voice",
-          "percent": 50,
           "proof": "live",
-          "works": "Chat, friends, groups, raids, voice option. Account probation (72 h, staff never). Own voice service: sign-in, map cell rooms, push-to-talk audio relay; one player heard itself live (2026-11-08).",
-          "missing": "Live test with many players; voice between two players. Play time part of probation (180 min) not counted."
+          "checks": [
+            {
+              "check": "Chat, friends, groups, raids, voice option.",
+              "proof": "live"
+            },
+            {
+              "check": "Account probation (72 h, staff never).",
+              "proof": "live"
+            },
+            {
+              "check": "Own voice service: sign-in, map cell rooms, push-to-talk audio relay; one player heard itself live (2026-11-08).",
+              "proof": "live"
+            },
+            {
+              "check": "Live test with many players; voice between two players.",
+              "proof": "none"
+            },
+            {
+              "check": "Play time part of probation (180 min) not counted.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Companies and territories",
-          "percent": 20,
           "proof": "code",
-          "works": "Company code, standing.",
-          "missing": "Ownership, taxes, upkeep."
+          "checks": [
+            {
+              "check": "Company code, standing.",
+              "proof": "code"
+            },
+            {
+              "check": "Ownership, taxes, upkeep.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Expeditions and instances",
-          "percent": 25,
           "proof": "code",
-          "works": "Instances, dungeon scripts, mutations.",
-          "missing": "No live run of a dungeon."
+          "checks": [
+            {
+              "check": "Instances, dungeon scripts, mutations.",
+              "proof": "code"
+            },
+            {
+              "check": "No live run of a dungeon.",
+              "proof": "none"
+            },
+            {
+              "check": "Story instances on the open world map (Medea and the other story fights): their scripts are found (the capital names the script without its slices folder), and their doors (`Entrance_Quest*`, trial and raid entrances) name their mode.",
+              "proof": "tests"
+            },
+            {
+              "check": "The director starts instance sims from its config (`[instances.launch]`).",
+              "proof": "tests"
+            },
+            {
+              "check": "Not seen with a real client: entering a story instance.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Game modes (queues, arenas, Outpost Rush)",
-          "percent": 25,
           "proof": "code",
-          "works": "Queues and matches. Leave a queue (1066, and 2385 for all queues) with the retail 4970 answer, and leave a game mode (3309) back to the open world (2026-11-05, tests only). Since 2026-11-05 a queue join is refused at once (no fake local match).",
-          "missing": "Mode rules, the game mode world states (2343, 363, 3105), live test."
+          "checks": [
+            {
+              "check": "Queues and matches.",
+              "proof": "code"
+            },
+            {
+              "check": "Leave a queue (1066, and 2385 for all queues) with the retail 4970 answer, and leave a game mode (3309) back to the open world (2026-11-05, tests only).",
+              "proof": "code"
+            },
+            {
+              "check": "Since 2026-11-05 a queue join is refused at once (no fake local match).",
+              "proof": "code"
+            },
+            {
+              "check": "Mode rules, the game mode world states (2343, 363, 3105), live test.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Wars, sieges, invasions",
-          "percent": 15,
           "proof": "code",
-          "works": "Codecs and sign-ups only. Since 2026-11-05 sign-ups get the retail closed-war answer.",
-          "missing": "No capture shows the war flow."
+          "checks": [
+            {
+              "check": "Codecs and sign-ups only.",
+              "proof": "code"
+            },
+            {
+              "check": "Since 2026-11-05 sign-ups get the retail closed-war answer.",
+              "proof": "code"
+            },
+            {
+              "check": "No capture shows the war flow.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Seasons and season pass",
-          "percent": 15,
           "proof": "code",
-          "works": "Only the state the journal needs.",
-          "missing": "Season pass rewards and progress."
+          "checks": [
+            {
+              "check": "Only the state the journal needs.",
+              "proof": "code"
+            },
+            {
+              "check": "Season pass rewards and progress.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Leaderboards and analytics",
-          "percent": 35,
           "proof": "tests",
-          "works": "Stats service with the retail reply shapes, boards counted by the sims, client analytics events stored (Kinesis and STS answered).",
-          "missing": "Live check of the leaderboard screen. Only HercyneRaid_Reward boards count so far (docs/re/2026-09-18-leaderboards-and-analytics.md)."
+          "checks": [
+            {
+              "check": "Stats service with the retail reply shapes, boards counted by the sims, client analytics events stored (Kinesis and STS answered).",
+              "proof": "tests"
+            },
+            {
+              "check": "Live check of the leaderboard screen. Only HercyneRaid_Reward boards count so far (docs/re/2026-09-18-leaderboards-and-analytics.md).",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Music instruments",
-          "percent": 25,
           "proof": "code",
-          "works": "Music code exists. Since 2026-11-05 the server judges notes against the game's note charts, and the picked reward pays out its event.",
-          "missing": "Not checked live."
+          "checks": [
+            {
+              "check": "Music code exists.",
+              "proof": "code"
+            },
+            {
+              "check": "Since 2026-11-05 the server judges notes against the game's note charts, and the picked reward pays out its event.",
+              "proof": "code"
+            },
+            {
+              "check": "Not checked live.",
+              "proof": "none"
+            }
+          ]
         }
       ]
     },
@@ -465,43 +1529,88 @@
       "features": [
         {
           "name": "Housing",
-          "percent": 25,
           "proof": "tests",
-          "works": "Buy a house, enter and leave the plot, place, move and remove furniture, taxes, travel home (travel module). All 19 kinds of retail housing calls read and all 10 kinds of answers are built (capture survey 2026-11-05).",
-          "missing": "The house data (3663) and plot (3055) world states. Live test."
+          "checks": [
+            {
+              "check": "Buy a house, enter and leave the plot, place, move and remove furniture, taxes, travel home (travel module).",
+              "proof": "tests"
+            },
+            {
+              "check": "All 19 kinds of retail housing calls read and all 10 kinds of answers are built (capture survey 2026-11-05).",
+              "proof": "tests"
+            },
+            {
+              "check": "The house data (3663) and plot (3055) world states.",
+              "proof": "none"
+            },
+            {
+              "check": "Live test.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Artifacts",
-          "percent": 0,
           "proof": "none",
-          "works": "No code found.",
-          "missing": "All."
+          "checks": [
+            {
+              "check": "Not built.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Heartrunes",
-          "percent": 0,
-          "proof": "none",
-          "works": "No code found.",
-          "missing": "All."
+          "proof": "tests",
+          "checks": [
+            {
+              "check": "Hits fill the heart rune charge by the damage row's rune charge points (attack, blocked attack, hit, blocked hit); the charge state goes to the client in whole percents.",
+              "proof": "tests"
+            },
+            {
+              "check": "A worn rune (paperdoll slot 41) turns on the rune ability list; Detonate starts at a full charge and takes it.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not seen with a real client: the charge bar and the Detonate press.",
+              "proof": "none"
+            },
+            {
+              "check": "The other nine runes (Stone Form and the rest) are in the list but not checked one by one.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Town projects",
-          "percent": 10,
           "proof": "tests",
-          "works": "Town board missions: take, the mission's items, kills and place, turn-in.",
-          "missing": "Project progress, upgrades and the board's offer rules."
+          "checks": [
+            {
+              "check": "Town board missions: take, the mission's items, kills and place, turn-in.",
+              "proof": "tests"
+            },
+            {
+              "check": "Project progress, upgrades and the board's offer rules.",
+              "proof": "none"
+            }
+          ]
         },
         {
           "name": "Trophies",
-          "percent": 0,
           "proof": "none",
-          "works": "No code found.",
-          "missing": "All."
+          "checks": [
+            {
+              "check": "Not built.",
+              "proof": "none"
+            }
+          ]
         }
       ]
     }
   ],
   "nextSteps": [
+    "**Night order 2026-11-10: live check (all built, tests only).**\n\nSee in the game: a story instance door (Medea), the heart rune charge and Detonate, day and night after a restart, mob spells (ground areas, self heals), reactions from behind and the sides, crits from behind, head shots, knockback stopped by a wall, faction reputation and tokens from a faction quest, lore XP on a first read. The PC and the game VM need world migration 0035 (`world_clock`) and the new data files (dungeon scripts, player abilities) first.",
+    "**Website: show the checks after the merge to main.**\n\nThe site reads `docs/progress.json` from main. The new form (checks, no percent) is on dev; the website code for it is ready in its own repo, not deployed. Deploy the website when the emulator JSON with checks is on main, not before.",
     "**Mob movement and world events: live check (2026-11-10).**\n\nAll parts are built, in tests only. See in the game: mobs strike from near (homing), walk around obstacles, stop at town gates; world events start when a player walks into their volume, show their status, wait for their start object and come back at their data time; trees and stones block as their own mesh.",
     "**Live check of the new saves (migration 0034).**\n\nMigration 0034 is applied on the PC and on the game VM (2026-11-10), and the game VM runs the new programs. Then: take damage, use an ability, log out during its cooldown, log back in; health and the cooldown must be as they were. Die, log out, log back in: the death screen must show and the respawn must work. Gather a node, restart the sim, and check that the node is still empty.",
     "**Attacks of staffs and gauntlets (other players see none; heavy attacks stop): cause found 2026-11-10, not built.**\n\nThe server starts a tap's light attack and a hold's charge from a table of one sequence per weapon stance. The table has none for the life staff, the void and ice gauntlets, the flail, the dagger, the rapier, the bow and the musket. Measured on 1,082 retail ledgers the same day: one sequence per stance does not fit. After a tap retail sent nothing in 34 to 47 % of the taps, and the rest spread over many sequences (the most common one had 6 to 17 % per stance), some in the first slot and some in the upper slots. The client named its own attack in only 61 of 2,335 life staff presses. To do: key the sequence on the attack, not on the stance. The server knows each attack's damage row at the cast; mine the own-state sequence that goes with each damage row from retail, and send it at the cast to the owner and to the viewers.",
@@ -534,6 +1643,8 @@
     "**Systems with no code: housing, artifacts, heartrunes, trophies.**\n\nStart these last. They are not on the path of a new player."
   ],
   "done": [
+    "Game VM and PC stack updated (2026-11-11): the night order programs and data (not committed yet), world migration 0035 applied on the PC and on the game VM; the VM sims load 44 game modes, and the status reports are accepted.",
+    "Night order 2026-11-10 (tests only, not seen live): story instances on the open world map (15 more game modes scripted, entrance names), heart rune charge and Detonate, the world clock saved (world migration 0035), mob spells (744 of 765 spell names: ground areas, self heals and buffs), hit reactions by side (retail: 160 captures), weapon tree nodes without a trigger, crits from behind (retail: 510 of 560) and head shots (retail: 346), knockback stopped by walls, faction reputation and tokens from game events (581), lore read XP. The progress page now lists checks with their own proof; no percent.",
     "Game VM updated (2026-11-10): new programs and data from `54e38670`, world migration 0034 applied; the sims load 240 world event roots and 44 start objects, and the status reports are accepted.",
     "World events and tree variants (2026-11-10, tests only). The sim sends the encounter root entity of 240 open world events with the manager status and each stage's status history (bytes and stage order checked on retail captures); 44 start objects spawn and end their stage when gathered; 559 encounters use their own detection volume. The collision tool reads `region.slicedata`: 361,192 tree, stone and plant rows now have their own mesh.",
     "Database saves, second part (2026-11-10, tests only). New world migration 0034: health (dead too), mana, stamina, running ability cooldowns, the PvP flag wish, puzzle-stone turns and the fishing bait are saved with the progression; the depleted gather nodes of each level are saved in their own table and loaded at a sim start. Proof for health: a recorded retail run that ended dead began its next part dead. Run `edge-http migrate` before the next start.",
@@ -706,6 +1817,6 @@
     "Fix: quest items from loot-container objects (Truffle Fever) and kills by spawner category (`ed5044db`, `956d6a8b`, 2026-10-03)."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-10",
-  "lastCommit": "54e38670"
+  "updated": "2026-11-11",
+  "lastCommit": "5cb736b8"
 }

@@ -76,18 +76,21 @@
   th { font-size: 0.85rem; color: var(--muted); font-weight: 600; }
   tr:last-child td { border-bottom: 0; }
   td.name { font-weight: 600; width: 22%; }
-  td.bar { width: 18%; }
+  td.count { width: 14%; }
   .meter { height: 10px; background: var(--track); border-radius: 5px; overflow: hidden; margin-top: 7px; }
-  .meter span { display: block; height: 100%; border-radius: 5px; }
-  .pct { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .meter span { display: block; height: 100%; border-radius: 5px; background: var(--done); }
+  .count-text { font-weight: 700; font-variant-numeric: tabular-nums; }
+  ul.checks { list-style: none; margin: 0; padding: 0; }
+  ul.checks li { display: flex; gap: 8px; align-items: baseline; margin: 0 0 6px; }
+  ul.checks li:last-child { margin-bottom: 0; }
+  ul.checks li p { margin: 0; }
   .badge { display: inline-block; font-size: 0.78rem; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
   .p-live { color: var(--done); }
   .p-bots { color: var(--good); }
   .p-tests { color: var(--part); }
   .p-code { color: var(--low); }
   .p-none { color: var(--none); }
-  .works { color: var(--text); }
-  .missing { color: var(--muted); }
+  .check-none { color: var(--muted); }
   .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 8px 0 0; font-size: 0.92rem; }
   ul.done { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px 12px 40px; margin: 0; }
   ul.done li { margin: 4px 0; }
@@ -110,16 +113,16 @@
   </div>
 
   <div class="note">
-    <strong>How to read the percent.</strong> The percent is an estimate. It tells how much of the retail feature works with the real game client on our server.
-    It is not a count of lines of code.
-    A percent is never higher than its proof: <strong>Code</strong> at most 30 %, <strong>Tests</strong> at most 60 %, <strong>Bots</strong> at most 80 %. Only <strong>Live</strong> can go higher.
-    Tools that the client does not use (setup, game data, capture decoders, admin tools) are measured by their own checks.
+    <strong>How to read the checks.</strong> Each feature is a list of checks: things that must work as on retail. Each check has its own proof.
+    A check is <strong>proven</strong> only when it was seen to work with the real client (<strong>Live</strong>) or with test bots (<strong>Bots</strong>).
+    "3 of 8 checks proven" counts those. Automatic tests and code alone do not make a check proven, and no percent is shown: we cannot measure a share of retail.
+    Tools that the client does not use (setup, game data, capture decoders, admin tools) are proven by their own runs.
     <div class="legend">
       <span class="badge p-live">Live</span> seen to work with the real client
       <span class="badge p-bots">Bots</span> seen to work with test bots
       <span class="badge p-tests">Tests</span> only automatic tests
       <span class="badge p-code">Code</span> code exists, not checked
-      <span class="badge p-none">None</span> no code found
+      <span class="badge p-none">None</span> not done yet
     </div>
   </div>
 
@@ -148,23 +151,14 @@ const PROOF = {
   none: { label: "None", css: "p-none" },
 };
 
-const DONE_PERCENT = 100;
-const GOOD_PERCENT = 70;
-const PART_PERCENT = 40;
-const NOT_STARTED_PERCENT = 0;
+/** The proofs that make a check proven: seen to work with the real client or with bots. */
+const PROVEN = ["live", "bots"];
+const FULL_WIDTH = 100;
 
 /** Link schemes a text may open. */
 const LINK_SCHEMES = ["http:", "https:", "mailto:"];
 const BULLET_ITEM = /^[-*] /;
 const NUMBERED_ITEM = /^\d+\. /;
-
-function barColor(percent) {
-  if (percent >= DONE_PERCENT) return "var(--done)";
-  if (percent >= GOOD_PERCENT) return "var(--good)";
-  if (percent >= PART_PERCENT) return "var(--part)";
-  if (percent > NOT_STARTED_PERCENT) return "var(--low)";
-  return "var(--none)";
-}
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -258,47 +252,67 @@ function markdown(text) {
   });
 }
 
-function meter(percent) {
+/** How many of `checks` are proven, and how many there are. */
+function counted(checks) {
+  return {
+    proven: checks.filter((check) => PROVEN.includes(check.proof)).length,
+    total: checks.length,
+  };
+}
+
+function countText({ proven, total }) {
+  return `${proven} of ${total} checks proven`;
+}
+
+function meter({ proven, total }) {
   const track = element("div", "meter");
   const fill = element("span");
-  fill.style.width = `${percent}%`;
-  fill.style.background = barColor(percent);
+  fill.style.width = `${total === 0 ? 0 : (proven / total) * FULL_WIDTH}%`;
   track.append(fill);
   return track;
 }
 
-function average(values) {
-  return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
+function badge(proofName) {
+  const proof = PROOF[proofName];
+  return element("span", `badge ${proof.css}`, proof.label);
 }
 
-function textCell(className, text) {
-  const cell = element("td", className);
-  cell.append(...markdown(text));
-  return cell;
+function checkList(checks) {
+  const list = element("ul", "checks");
+  checks.forEach((check) => {
+    const item = element("li", check.proof === "none" ? "check-none" : "");
+    const text = element("div");
+    text.append(...markdown(check.check));
+    item.append(badge(check.proof), text);
+    list.append(item);
+  });
+  return list;
 }
 
 function featureRow(feature) {
   const row = element("tr");
   row.append(element("td", "name", feature.name));
-  const bar = element("td", "bar");
-  bar.append(element("span", "pct", `${feature.percent}%`), meter(feature.percent));
-  row.append(bar);
-  const proof = PROOF[feature.proof];
+  const count = counted(feature.checks);
+  const cell = element("td", "count");
+  cell.append(element("span", "count-text", `${count.proven} of ${count.total}`), meter(count));
+  row.append(cell);
   const proofCell = element("td");
-  proofCell.append(element("span", `badge ${proof.css}`, proof.label));
+  proofCell.append(badge(feature.proof));
   row.append(proofCell);
-  row.append(textCell("works", feature.works), textCell("missing", feature.missing));
+  const checks = element("td");
+  checks.append(checkList(feature.checks));
+  row.append(checks);
   return row;
 }
 
 function areaSection(area) {
   const section = element("section");
-  const percent = average(area.features.map((feature) => feature.percent));
-  section.append(element("h2", "", `${area.name}: ${percent}%`));
+  const count = counted(area.features.flatMap((feature) => feature.checks));
+  section.append(element("h2", "", `${area.name}: ${countText(count)}`));
   const wrap = element("div", "table-wrap");
   const table = element("table");
   const head = element("tr");
-  ["Feature", "Percent", "Proof", "What works", "What is missing"].forEach((title) => head.append(element("th", "", title)));
+  ["Feature", "Proven", "Proof", "Checks"].forEach((title) => head.append(element("th", "", title)));
   table.append(head);
   area.features.forEach((feature) => table.append(featureRow(feature)));
   wrap.append(table);
@@ -332,16 +346,14 @@ function render(data) {
   const sub = document.getElementById("sub");
   sub.append(`Status on ${data.updated}. Client build ${data.clientBuild}.`);
   if (data.lastCommit) sub.append(" Last commit ", element("code", "", data.lastCommit), ".");
-  const all = data.areas.flatMap((area) => area.features);
-  const percents = all.map((feature) => feature.percent);
-  const done = percents.filter((value) => value >= DONE_PERCENT).length;
-  const notStarted = percents.filter((value) => value === NOT_STARTED_PERCENT).length;
-  const partial = all.length - done - notStarted;
+  const checks = data.areas.flatMap((area) => area.features).flatMap((feature) => feature.checks);
+  const count = counted(checks);
+  const withProof = (proofs) => checks.filter((check) => proofs.includes(check.proof)).length;
   document.getElementById("summary").append(
-    summaryCard(`${average(percents)}%`, "Overall (simple average)"),
-    summaryCard(String(done), "Features done"),
-    summaryCard(String(partial), "Features in progress"),
-    summaryCard(String(notStarted), "Features not started"),
+    summaryCard(`${count.proven} of ${count.total}`, "Checks proven (live or bots)"),
+    summaryCard(String(withProof(["tests"])), "Checks with tests only"),
+    summaryCard(String(withProof(["code"])), "Checks with code only"),
+    summaryCard(String(withProof(["none"])), "Checks not done"),
   );
   data.nextSteps.forEach((text) => document.getElementById("next").append(nextStep(text)));
   const areas = document.getElementById("areas");
