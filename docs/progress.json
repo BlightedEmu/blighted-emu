@@ -128,6 +128,14 @@
             {
               "check": "Other server ports (public_https_port, public_ping_port) built, tests only.",
               "proof": "code"
+            },
+            {
+              "check": "The site's announcement shows at character select (live on Linux, 2026-11-11): the front door passes the game's news and remote config names to the game server, so a Linux client with the plain patch reads them.",
+              "proof": "live"
+            },
+            {
+              "check": "The Amazon account link pop-up is off (tests only, 2026-11-11): the served remote config sets `enable-agid-account-linking` to false.",
+              "proof": "tests"
             }
           ]
         },
@@ -408,6 +416,10 @@
             {
               "check": "A melee hit from behind a mob is a crit (retail: 510 of 560 such hits), unless its row says `NoBackstab`.",
               "proof": "tests"
+            },
+            {
+              "check": "Flail hits land (tests only, 2026-11-11): the flail's attack rows name `1h_Flail_*`, the damage table `1H_Flail_*`; a damage row now matches in any case, and two rows of one table that differ only in case are refused at load. Before, every flail hit was refused. The flail was the only weapon with this mismatch.",
+              "proof": "tests"
             }
           ]
         },
@@ -520,6 +532,10 @@
             {
               "check": "Where the head starts on each creature is Inferred (the top 15 % of its body).",
               "proof": "none"
+            },
+            {
+              "check": "Spell entities use the component numbers of their own slice (tests only, 2026-11-11): each slice numbers its states its own way (the upgraded Flail Slam: position 2, spell state 4). The server sent the spell state on component 1 for every slice, so 194 of 1,109 spells sent it to the wrong component, and the Flail Slam crashed the client. The table now keeps the spell, ownership and position components per slice, and a slice with a state the captures give no bytes for (54 spells: vitals or animation) spawns no entity.",
+              "proof": "tests"
             }
           ]
         },
@@ -1613,6 +1629,7 @@
     }
   ],
   "nextSteps": [
+    "**Flail and spell check (2026-11-11).**\n\nThe game VM runs the fix. See in the game: flail hits land on mobs, the flail Slam ability does not crash the client and its ground effect shows, other weapon abilities with a ground effect still show, and no Amazon account pop-up comes at login.",
     "**Night order 2026-11-10: live check (all built, tests only).**\n\nSee in the game: a story instance door (Medea), the heart rune charge and Detonate, day and night after a restart, mob spells (ground areas, self heals), reactions from behind and the sides, crits from behind, head shots, knockback stopped by a wall, faction reputation and tokens from a faction quest, lore XP on a first read. The PC and the game VM need world migration 0035 (`world_clock`) and the new data files (dungeon scripts, player abilities) first.",
     "**Mob movement and world events: live check (2026-11-10).**\n\nAll parts are built, in tests only. See in the game: mobs strike from near (homing), walk around obstacles, stop at town gates; world events start when a player walks into their volume, show their status, wait for their start object and come back at their data time; trees and stones block as their own mesh.",
     "**Live check of the new saves (migration 0034).**\n\nMigration 0034 is applied on the PC and on the game VM (2026-11-10), and the game VM runs the new programs. Then: take damage, use an ability, log out during its cooldown, log back in; health and the cooldown must be as they were. Die, log out, log back in: the death screen must show and the respawn must work. Gather a node, restart the sim, and check that the node is still empty.",
@@ -1646,6 +1663,7 @@
     "**Systems with no code: housing, artifacts, heartrunes, trophies.**\n\nStart these last. They are not on the path of a new player."
   ],
   "done": [
+    "Character select news (2026-11-11): the site's announcement shows in the game on the game VM; the PC also pulls its message of the day from the site.",
     "Website shows the checks (2026-11-11): the home and progress pages count the proven checks of each feature (seen with the real client or with bots) and show no percent; the site reads the new `docs/progress.json` from main.",
     "Game VM and PC stack updated (2026-11-11): the night order programs and data (not committed yet), world migration 0035 applied on the PC and on the game VM; the VM sims load 44 game modes, and the status reports are accepted.",
     "Night order 2026-11-10 (tests only, not seen live): story instances on the open world map (15 more game modes scripted, entrance names), heart rune charge and Detonate, the world clock saved (world migration 0035), mob spells (744 of 765 spell names: ground areas, self heals and buffs), hit reactions by side (retail: 160 captures), weapon tree nodes without a trigger, crits from behind (retail: 510 of 560) and head shots (retail: 346), knockback stopped by walls, faction reputation and tokens from game events (581), lore read XP. The progress page now lists checks with their own proof; no percent.",
