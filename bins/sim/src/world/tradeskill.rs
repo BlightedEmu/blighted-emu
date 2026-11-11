@@ -25,8 +25,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
+use nw_content::factions::faction_name;
 use nw_content::progression::{Mastery, RankPerks};
-use nw_content::rewards::Reward;
+use nw_content::rewards::{EventGrant, Reward};
 use nw_content::tradeskill_xp::{NEUTRAL_MODIFIER, gather_reward};
 
 use super::quest_objects::{gain_experience, grant};
@@ -164,6 +165,7 @@ impl SimWorld {
         if let Some((id, reward)) = &event_grant.progression {
             self.gain_categorical(number, event, id, scale.progression(*reward), times);
         }
+        self.gain_faction(number, event, event_grant, times);
         if event_grant.territory_standing > 0.0 {
             let standing = scale.standing(event_grant.territory_standing);
             match self.current_territory(number) {
@@ -220,8 +222,40 @@ impl SimWorld {
         if let Some((id, reward)) = &event_grant.progression {
             self.gain_categorical(number, event, id, *reward, ONE_FIRING);
         }
+        self.gain_faction(number, event, event_grant, ONE_FIRING);
         if let Some(achievement) = &event_grant.achievement {
             self.earn_achievement(number, achievement, now_ms);
+        }
+    }
+
+    /// The faction of player `number` gains `times` firings of the reputation and the tokens of
+    /// `grant` (game event `event`): its reputation progression and its token currency
+    /// ([`nw_content::factions::faction_name`], [`nw_content::rewards::EventGrants::faction_currency`]). A player of
+    /// no faction gains none (Inferred: the reputation is a faction's).
+    fn gain_faction(&mut self, number: u64, event: &str, grant: &EventGrant, times: u32) {
+        if grant.faction_reputation <= 0.0 && grant.faction_tokens <= 0.0 {
+            return;
+        }
+        let Some(reputation) = self
+            .player_by_number(number)
+            .and_then(|entity| self.world.get::<Player>(entity))
+            .and_then(|player| faction_name(player.faction.faction))
+        else {
+            tracing::debug!(
+                player = number,
+                event,
+                "faction reputation without a faction"
+            );
+            return;
+        };
+        if grant.faction_reputation > 0.0 {
+            self.gain_categorical(number, event, reputation, grant.faction_reputation, times);
+        }
+        let content = Arc::clone(&self.content);
+        if grant.faction_tokens > 0.0
+            && let Some(tokens) = content.event_grants.faction_currency(reputation)
+        {
+            self.gain_categorical(number, event, tokens, grant.faction_tokens, times);
         }
     }
 
@@ -612,6 +646,66 @@ mod tests {
         let player = world.world.get::<Player>(entity).expect("player");
         assert_eq!(player.masteries.experience(&riding), 500);
         assert!(player.flow.has_achievement(&world.achievement_rules, MARK));
+    }
+
+    #[test]
+    fn a_rank_quest_s_event_gives_the_player_s_faction_its_reputation_and_tokens() {
+        // Content bundle 25810808: `98_M_0001_RankUp_success` gives 100 tokens; the
+        // reputation `Marauder` pays in `MarauderTokens`.
+        const EVENT: &str = "98_M_0001_RankUp_success";
+        const REPUTATION: &str = "Marauder";
+        const TOKENS: &str = "MarauderTokens";
+        const TOKEN_REWARD: f64 = 100.0;
+        const REPUTATION_REWARD: f64 = 250.0;
+        let mut world = world_with_spawns(Vec::new());
+        let source = |id: &str, auto_rank_up| ProgressionSource {
+            id: id.to_owned(),
+            max_level: 4,
+            auto_rank_up,
+            ranks: vec![(0, 10_000), (1, 20_000)],
+        };
+        world.content = Arc::new(PlayerContent {
+            progression: Progression::default()
+                .with_progressions([source(REPUTATION, true), source(TOKENS, false)]),
+            event_grants: EventGrants::build([(
+                EVENT.to_owned(),
+                EventGrant {
+                    faction_reputation: REPUTATION_REWARD,
+                    faction_tokens: TOKEN_REWARD,
+                    ..EventGrant::default()
+                },
+            )])
+            .with_faction_currencies([(REPUTATION.to_owned(), TOKENS.to_owned())]),
+            ..PlayerContent::default()
+        });
+        world
+            .admit(&admit_at(PLAYER, 0.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let entity = world.player_by_number(PLAYER).expect("player");
+        let experience = |world: &SimWorld, id: &str| {
+            let mastery = world
+                .content
+                .progression
+                .categorical(id)
+                .expect("progression");
+            world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .masteries
+                .experience(mastery)
+        };
+        world.grant_event_progression(PLAYER, EVENT, NOW);
+        assert_eq!(experience(&world, TOKENS), 0, "no faction, no reputation");
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .faction
+            .faction = nw_content::factions::MARAUDERS;
+        world.grant_event_progression(PLAYER, EVENT, NOW);
+        assert_eq!(experience(&world, REPUTATION), 250);
+        assert_eq!(experience(&world, TOKENS), 100);
     }
 
     #[test]

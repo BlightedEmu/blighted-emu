@@ -147,6 +147,13 @@ pub struct EventGrant {
     /// `LootLimitReachedGameEventID`: the event a firing at the limit fires
     /// (`Mount_FoodDailyXP_LimitReached`, `Riding` 0).
     pub limit_reached: Option<String>,
+    /// `FactionReputation`: the reputation one firing gives the player's faction (Observed,
+    /// content bundle 25810808: 581 events give reputation or tokens, the faction missions and
+    /// rank quests among them).
+    pub faction_reputation: f64,
+    /// `FactionTokens`: the tokens one firing gives the player's faction's currency
+    /// (`98_M_0001_RankUp_success`, the first Marauder rank quest, 100).
+    pub faction_tokens: f64,
 }
 
 impl EventGrant {
@@ -160,7 +167,14 @@ impl EventGrant {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EventGrants {
     by_id: HashMap<String, EventGrant>,
+    /// The token currency of each faction reputation (`CategoricalProgressionData` rows of
+    /// `ProgressionType` `FactionReputation`: their `ProgressionCurrencyId`, `CovenantTokens` of
+    /// `Covenant`), by lowercase reputation id.
+    faction_currencies: HashMap<String, String>,
 }
+
+/// The `ProgressionType` of a faction's reputation.
+const FACTION_REPUTATION_TYPE: &str = "FactionReputation";
 
 /// A `CurrencyReward` cell as its low and high end; `(0, 0)` for an empty or other cell.
 fn coin_range(cell: Option<&str>) -> (u64, u64) {
@@ -212,10 +226,46 @@ impl EventGrants {
                                 .loot_limit_reached_game_event_id
                                 .clone()
                                 .filter(|id| !id.trim().is_empty()),
+                            // Reputation and tokens of a few hundred.
+                            faction_reputation: row.faction_reputation.unwrap_or_default() as f64,
+                            faction_tokens: row.faction_tokens.unwrap_or_default() as f64,
                         },
                     )
                 }),
         )
+        .with_faction_currencies(
+            tables
+                .categorical_progression_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter(|row| row.progression_type.as_deref() == Some(FACTION_REPUTATION_TYPE))
+                .filter_map(|row| {
+                    Some((
+                        row.categorical_progression_id.clone(),
+                        row.progression_currency_id.clone()?,
+                    ))
+                }),
+        )
+    }
+
+    /// The same grants with `currencies` (reputation id, token currency id).
+    #[must_use]
+    pub fn with_faction_currencies(
+        mut self,
+        currencies: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.faction_currencies = currencies
+            .into_iter()
+            .map(|(reputation, tokens)| (reputation.to_lowercase(), tokens))
+            .collect();
+        self
+    }
+
+    /// The token currency of faction reputation `reputation` (any case).
+    pub fn faction_currency(&self, reputation: &str) -> Option<&str> {
+        self.faction_currencies
+            .get(&reputation.to_lowercase())
+            .map(String::as_str)
     }
 
     /// The grants of `events` (event id, grant); the first row of an id wins.
@@ -224,7 +274,10 @@ impl EventGrants {
         for (id, grant) in events {
             by_id.entry(id.to_lowercase()).or_insert(grant);
         }
-        Self { by_id }
+        Self {
+            by_id,
+            faction_currencies: HashMap::new(),
+        }
     }
 
     /// The grant of event `id` (any case).

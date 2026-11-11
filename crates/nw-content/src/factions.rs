@@ -36,6 +36,17 @@ pub fn faction_named(name: &str) -> Option<u8> {
         .map(|(_, faction)| *faction)
 }
 
+/// The name of faction `faction` (`Syndicate`, `Marauder`, `Covenant`): also the id of its
+/// reputation's categorical progression (Observed, content bundle 25810808: the three
+/// `FactionReputation` rows of `CategoricalProgressionData` have these ids); `None` for no
+/// faction.
+pub fn faction_name(faction: u8) -> Option<&'static str> {
+    NAMES
+        .iter()
+        .find(|(_, known)| *known == faction)
+        .map(|(name, _)| *name)
+}
+
 /// Whether a player of faction `faction` may take content whose `RequiredFaction` is `cell`:
 /// an empty cell, `None` or a name the data does not have asks for nothing.
 pub fn faction_requirement_met(cell: Option<&str>, faction: u8) -> bool {
@@ -56,6 +67,16 @@ pub const fn joinable(faction: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_faction_names_its_reputation() {
+        assert_eq!(faction_name(COVENANT), Some("Covenant"));
+        assert_eq!(
+            faction_name(SYNDICATE).and_then(faction_named),
+            Some(SYNDICATE)
+        );
+        assert_eq!(faction_name(NO_FACTION), None);
+    }
 
     #[test]
     fn a_required_faction_names_one_or_excludes_one() {
