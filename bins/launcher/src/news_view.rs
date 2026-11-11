@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::Utc;
 use eframe::egui::{
@@ -16,8 +16,7 @@ use eframe::egui::{
 
 use crate::api::LauncherApi;
 use crate::news::{
-    FEED_MIN_AGE, NewsCache, NewsState, Post, PostKind, REFRESH_INTERVAL, color_image, is_pinned,
-    post_date, shown_posts,
+    NewsCache, NewsState, Post, PostKind, color_image, is_pinned, post_date, shown_posts,
 };
 use crate::news_html::{self, Block, BlockKind, Span};
 use crate::theme::{
@@ -92,20 +91,15 @@ impl NewsPanel {
         }
     }
 
-    /// Asks for the news of a server that just connected, unless they were fetched less than
-    /// [`FEED_MIN_AGE`] ago.
+    /// Asks for the news of a server that just connected, unless this launch already has them.
     pub fn connected(&mut self, api: &LauncherApi) {
-        if self
-            .state
-            .refresh_due(api.host(), Instant::now(), FEED_MIN_AGE)
-        {
+        if self.state.refresh_due(api.host()) {
             self.state.start_refresh(api.clone());
         }
     }
 
-    /// Takes the worker results, makes the picture textures, and refreshes the news of the
-    /// connected server every [`REFRESH_INTERVAL`].
-    pub fn update(&mut self, ctx: &egui::Context, connection: Option<&LauncherApi>) {
+    /// Takes the worker results and makes the picture textures.
+    pub fn update(&mut self, ctx: &egui::Context) {
         for (id, picture) in self.state.poll() {
             let texture = ctx.load_texture(
                 format!("news picture {id}"),
@@ -121,13 +115,6 @@ impl NewsPanel {
             .unwrap_or_default();
         self.pictures.retain(|id, _| ids.contains(id));
         self.opened.retain(|id| ids.contains(id));
-        if let Some(api) = connection {
-            let now = Instant::now();
-            if self.state.refresh_due(api.host(), now, REFRESH_INTERVAL) {
-                self.state.start_refresh(api.clone());
-            }
-            ctx.request_repaint_after(self.state.next_refresh(api.host(), now));
-        }
         if self.state.busy() {
             ctx.request_repaint_after(WORKER_REPAINT);
         }

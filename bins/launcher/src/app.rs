@@ -1333,8 +1333,7 @@ impl LauncherApp {
 impl eframe::App for LauncherApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_job(ui.ctx());
-        let connection = self.connection.as_ref().map(|(api, _)| api);
-        self.news.update(ui.ctx(), connection);
+        self.news.update(ui.ctx());
         egui::Frame::central_panel(ui.style())
             .inner_margin(0)
             .show(ui, |ui| self.draw(ui));

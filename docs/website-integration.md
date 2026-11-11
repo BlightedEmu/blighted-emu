@@ -12,7 +12,7 @@ starts all of them:
 | World status | `status-reporter` | `POST <site>/api/ingest/status` | every 3 to 15 s (15 s by default) |
 | Leaderboards | `status-reporter` | `POST <site>/api/ingest/leaderboards` | every 15 s or more (5 min by default) |
 | Message of the day | `edge-http` | `GET <site>/api/game/cms/motd` | every 60 s |
-| Launcher news | the player's launcher | `GET <site>/api/news?target=launcher` | at start, then every 10 min |
+| Launcher news | the player's launcher | `GET <site>/api/news?target=launcher` | once at each start |
 
 The site never reads a game database, a metrics page or a file of the game machine.
 
@@ -298,8 +298,8 @@ The launcher then reads the feed from the site:
   them at its own address: a redirect counts as offline.
 
 The launcher shows the 5 newest posts. A `downtime` post younger than 24 hours is pinned at the
-top. It does not ask again within 60 s, matching `Cache-Control: public, max-age=60`, and asks
-every 10 minutes while it is open. Each request has a 5 s time limit. It keeps the last feed and
+top. It asks once each time it starts, when it first connects to a server; it asks again only
+when the player connects to another server. Each request has a 5 s time limit. It keeps the last feed and
 the scaled pictures in its settings folder (`news.json`, `news-pictures/<id>.jpg`) and shows them
 at the next start before it asks. Offline, it shows the cached posts with the date of that copy,
 or "No news" without a copy. A feed that is not valid JSON counts as offline. Login and Play never

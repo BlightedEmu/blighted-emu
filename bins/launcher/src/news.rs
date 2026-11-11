@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The server news: the site's launcher feed, named by the server at
 //! [`nw_protocol::launcher_api::NEWS_SOURCE_PATH`]. The last feed and its scaled pictures are kept
-//! in the settings folder, so the window shows them at once on start; a worker thread refreshes
-//! them. Login and play never wait for the news.
+//! in the settings folder, so the window shows them at once on start; a worker thread fetches
+//! them once per launch, when the launcher first connects to a server. Login and play never wait
+//! for the news.
 
 use std::collections::HashSet;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, FixedOffset, Local, TimeDelta, Utc};
 use eframe::egui::ColorImage;
@@ -24,10 +25,6 @@ use crate::api::{ApiError, LauncherApi};
 
 /// Time limit of each news call: the source, the feed and each picture.
 pub const NEWS_TIMEOUT: Duration = Duration::from_secs(5);
-/// The feed is not fetched again within this time (the site sends `max-age=60`).
-pub const FEED_MIN_AGE: Duration = Duration::from_secs(60);
-/// Time between refreshes while the window is open.
-pub const REFRESH_INTERVAL: Duration = Duration::from_secs(600);
 /// Number of posts shown.
 pub const SHOWN_POSTS: usize = 5;
 /// A downtime post younger than this many hours is pinned at the top.
@@ -481,14 +478,6 @@ pub fn load_cached_pictures(cache: &NewsCache, feed: &Feed, updates: &Sender<New
     }
 }
 
-/// A news fetch that was started.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Attempt {
-    /// The API host it was for; `None` for the cache found at start, which counts for any server.
-    server: Option<String>,
-    at: Instant,
-}
-
 /// The line shown above the posts, when there is one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reach {
@@ -498,14 +487,16 @@ enum Reach {
     Offline,
 }
 
-/// The news state of the window: the shown feed, the refresh plan and the running workers.
+/// The news state of the window: the shown feed, the server it was fetched from and the running
+/// workers.
 pub struct NewsState {
     cache: NewsCache,
     feed: Option<Feed>,
     /// When the shown feed was saved.
     saved: Option<SystemTime>,
     reach: Reach,
-    last: Option<Attempt>,
+    /// The API host of the last fetch in this launch.
+    fetched_from: Option<String>,
     refreshing: Option<Receiver<NewsUpdate>>,
     loading_cache: Option<Receiver<NewsUpdate>>,
 }
@@ -530,17 +521,9 @@ fn spawn(work: impl FnOnce(&Sender<NewsUpdate>) + Send + 'static) -> Receiver<Ne
 }
 
 impl NewsState {
-    /// The state with the cached feed of `cache` shown at once; its pictures load in a worker. A
-    /// cache younger than [`FEED_MIN_AGE`] is not fetched again before that age.
+    /// The state with the cached feed of `cache` shown at once; its pictures load in a worker.
     pub fn open(cache: NewsCache) -> Self {
         let cached = cache.load_feed();
-        let last = cached.as_ref().and_then(|cached| {
-            let age = SystemTime::now().duration_since(cached.saved).ok()?;
-            Some(Attempt {
-                server: None,
-                at: Instant::now().checked_sub(age)?,
-            })
-        });
         let loading_cache = cached.as_ref().map(|cached| {
             let (cache, feed) = (cache.clone(), cached.feed.clone());
             spawn(move |updates| load_cached_pictures(&cache, &feed, updates))
@@ -550,7 +533,7 @@ impl NewsState {
             feed: cached.map(|cached| cached.feed),
             cache,
             reach: Reach::Reached,
-            last,
+            fetched_from: None,
             refreshing: None,
             loading_cache,
         }
@@ -566,34 +549,15 @@ impl NewsState {
         self.refreshing.is_some() || self.loading_cache.is_some()
     }
 
-    /// Whether the news of `server` should be fetched at `now`: no refresh runs, and the last one
-    /// was for another server or is at least `interval` old.
-    pub fn refresh_due(&self, server: &str, now: Instant, interval: Duration) -> bool {
-        if self.refreshing.is_some() {
-            return false;
-        }
-        self.last.as_ref().is_none_or(|last| {
-            last.server.as_deref().is_some_and(|last| last != server)
-                || now.saturating_duration_since(last.at) >= interval
-        })
-    }
-
-    /// Time until the periodic refresh of `server` is due.
-    pub fn next_refresh(&self, server: &str, now: Instant) -> Duration {
-        if self.refresh_due(server, now, REFRESH_INTERVAL) {
-            return Duration::ZERO;
-        }
-        self.last.as_ref().map_or(Duration::ZERO, |last| {
-            REFRESH_INTERVAL.saturating_sub(now.saturating_duration_since(last.at))
-        })
+    /// Whether the news of `server` should be fetched: no refresh runs, and this launch has not
+    /// fetched the news of `server` as its last fetch.
+    pub fn refresh_due(&self, server: &str) -> bool {
+        self.refreshing.is_none() && self.fetched_from.as_deref() != Some(server)
     }
 
     /// Starts a refresh of the news of the server of `api`.
     pub fn start_refresh(&mut self, api: LauncherApi) {
-        self.last = Some(Attempt {
-            server: Some(api.host().to_owned()),
-            at: Instant::now(),
-        });
+        self.fetched_from = Some(api.host().to_owned());
         let cache = self.cache.clone();
         let previous = self.feed.clone();
         self.refreshing = Some(spawn(move |updates| {
@@ -922,22 +886,19 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_shows_at_once_and_is_not_fetched_again_within_a_minute() {
+    fn the_cache_shows_at_once_and_the_news_is_fetched_once_per_server() {
         let dir = tempfile::tempdir().expect("dir");
         let cache = NewsCache::new(dir.path().to_path_buf());
         let empty = NewsState::open(cache.clone());
         assert_eq!(empty.status_line().as_deref(), Some(NO_NEWS));
-        assert!(empty.refresh_due("login.example.org", Instant::now(), FEED_MIN_AGE));
+        assert!(empty.refresh_due("login.example.org"));
         cache
             .save_feed(feed_json("https://example.org", false).as_bytes())
             .expect("save");
         let state = NewsState::open(cache);
         assert_eq!(state.feed().expect("cached").posts.len(), 2);
         assert_eq!(state.status_line(), None);
-        let now = Instant::now();
-        assert!(!state.refresh_due("login.example.org", now, FEED_MIN_AGE));
-        assert!(state.refresh_due("login.example.org", now + FEED_MIN_AGE, FEED_MIN_AGE));
-        assert!(state.next_refresh("login.example.org", now) <= REFRESH_INTERVAL);
+        assert!(state.refresh_due("login.example.org"));
     }
 
     #[test]
@@ -950,8 +911,9 @@ mod tests {
             .expect("save");
         let saved = cache.load_feed().expect("cached").saved;
         let mut state = NewsState::open(cache);
-        state.start_refresh(LauncherApi::new("http://127.0.0.1:9".to_owned()).expect("api"));
-        assert!(!state.refresh_due("127.0.0.1:9", Instant::now(), FEED_MIN_AGE));
+        let api = LauncherApi::new("http://127.0.0.1:9".to_owned()).expect("api");
+        state.start_refresh(api.clone());
+        assert!(!state.refresh_due(api.host()));
         while state.busy() {
             state.poll();
             std::thread::yield_now();
@@ -961,6 +923,7 @@ mod tests {
             Some(format!("{OFFLINE_PREFIX}{}", file_date(saved)))
         );
         assert!(state.feed().is_some());
-        assert!(state.refresh_due("other.example.org", Instant::now(), REFRESH_INTERVAL));
+        assert!(!state.refresh_due(api.host()));
+        assert!(state.refresh_due("other.example.org"));
     }
 }

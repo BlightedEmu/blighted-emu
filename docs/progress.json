@@ -110,6 +110,10 @@
               "proof": "live"
             },
             {
+              "check": "Site news in the launcher (tests only): the 5 newest posts of the site's launcher feed beside Play, with pictures and a cache. It asks once at each start, when it first connects; no timer.",
+              "proof": "tests"
+            },
+            {
               "check": "The newer launcher (saved servers, site news) is not tested on Windows; the Windows player used the package of 2026-11-08.",
               "proof": "none"
             },
@@ -1818,5 +1822,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-11",
-  "lastCommit": "5cb736b8"
+  "lastCommit": "38819f82"
 }
