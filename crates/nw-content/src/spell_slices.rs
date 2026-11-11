@@ -5,10 +5,19 @@
 //! the slice. Without it a client shows nothing where the spell is (live 2026-11-10: "ground
 //! spells are broken (the display and the actual effect)").
 //!
-//! The table file holds, per spell data id, the slice asset and the states other than the
-//! spell state and the ownership, as retail sent them most (mined from the retail captures:
-//! the `cardsurvey` bin and `spellslices.py` of the capture tools). A spell that no capture
-//! shows has no slice here.
+//! The table file holds, per spell data id, the slice asset, the component numbers of the
+//! spell state, the ownership and the position, and the states other than those three, as
+//! retail sent them most (mined from the retail captures: the `cardsurvey` bin and
+//! `spellslices.py` of the capture tools). A spell that no capture shows has no slice here.
+//!
+//! Each slice numbers its replicated components in its own order (Observed: the upgraded Flail
+//! Slam sends its position on component 2 and its spell state on 4; Sacred Ground its spell
+//! state on 1 and its ownership on 2). A state on another component's number is read by the
+//! wrong component: the spell state on component 1 of the Flail Slam crashed the client in
+//! `FUN_14361d110` (live 2026-11-10 and 2026-11-11).
+//!
+//! `unfilled` names the states (`component:class`) that retail sent but whose bytes the
+//! captures do not give (ALC 11, vitals 15): the server cannot fill them.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -66,8 +75,11 @@ struct TableFile {
 struct SpellRow {
     spell: u32,
     asset: String,
-    owned: bool,
+    spell_component: u64,
+    ownership_component: Option<u64>,
+    position_component: Option<u64>,
     members: Vec<String>,
+    unfilled: Vec<String>,
 }
 
 /// The slice of one spell.
@@ -75,10 +87,16 @@ struct SpellRow {
 pub struct SpellSlice {
     /// The slice asset's id.
     pub asset: [u8; ASSET_ID_LEN],
-    /// Whether its spawn group holds the caster's ownership.
-    pub owned: bool,
+    /// The component of its spell state.
+    pub spell_component: u64,
+    /// The component of the caster's ownership, when its spawn group holds one.
+    pub ownership_component: Option<u64>,
+    /// The component of its position, when its spawn group holds one.
+    pub position_component: Option<u64>,
     /// Its other states, each as the bytes of one bundle member (component, class, body).
     pub members: Vec<Vec<u8>>,
+    /// The states retail sent that the captures give no bytes for (`component:class`).
+    pub unfilled: Vec<String>,
 }
 
 /// The slices of the spells, by spell data id (CRC-32 of the lowercase `SpellData` id).
@@ -131,8 +149,11 @@ impl SpellSlices {
                     spell,
                     SpellSlice {
                         asset,
-                        owned: row.owned,
+                        spell_component: row.spell_component,
+                        ownership_component: row.ownership_component,
+                        position_component: row.position_component,
                         members,
+                        unfilled: row.unfilled.clone(),
                     },
                 ))
             })
@@ -165,25 +186,54 @@ mod tests {
     const TABLE: &str = r#"{"spells": [{
         "spell": 1262570873,
         "asset": "094588f7778354589543449b79e2a386",
-        "owned": true,
+        "spell_component": 1,
+        "ownership_component": 2,
+        "position_component": null,
         "members": ["0483310103420000", "05833101032a6600"],
+        "unfilled": [],
         "cards": 8253
+    }, {
+        "spell": 3276096686,
+        "asset": "3e1b0819440a5b919418bd82cf136b90",
+        "spell_component": 4,
+        "ownership_component": null,
+        "position_component": 2,
+        "members": ["0583310103450000"],
+        "unfilled": [],
+        "cards": 581
     }]}"#;
+    /// `Spell_Flail_Slam_AOE_Upgrade` of the retail captures.
+    const FLAIL_SLAM: u32 = 3_276_096_686;
 
     #[test]
     fn a_spell_reads_with_its_slice_and_states() {
         let table = SpellSlices::parse(TABLE).expect("table");
-        assert_eq!(table.len(), 1);
+        assert_eq!(table.len(), 2);
         let slice = table.of(SPELL).expect("slice");
-        assert!(slice.owned);
+        assert_eq!(
+            (slice.spell_component, slice.ownership_component),
+            (1, Some(2))
+        );
+        assert_eq!(slice.position_component, None);
         assert_eq!(slice.asset[..2], [0x09, 0x45]);
         assert_eq!(slice.members.len(), 2);
         assert_eq!(table.of(1), None);
     }
 
     #[test]
+    fn each_slice_keeps_its_own_component_numbers() {
+        let table = SpellSlices::parse(TABLE).expect("table");
+        let slam = table.of(FLAIL_SLAM).expect("slice");
+        assert_eq!(slam.spell_component, 4);
+        assert_eq!(slam.position_component, Some(2));
+        assert_eq!(slam.ownership_component, None);
+    }
+
+    #[test]
     fn a_bad_asset_is_an_error() {
-        let short = r#"{"spells": [{"spell": 7, "asset": "09", "owned": false, "members": []}]}"#;
+        let short = r#"{"spells": [{"spell": 7, "asset": "09", "spell_component": 1,
+            "ownership_component": null, "position_component": null, "members": [],
+            "unfilled": []}]}"#;
         assert!(matches!(
             SpellSlices::parse(short),
             Err(SpellSlicesError::AssetLen { spell: 7, len: 1 })

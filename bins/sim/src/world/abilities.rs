@@ -2714,8 +2714,11 @@ mod tests {
         const SLICES: &str = r#"{"spells": [{
             "spell": 2055668591,
             "asset": "094588f7778354589543449b79e2a386",
-            "owned": true,
+            "spell_component": 1,
+            "ownership_component": 2,
+            "position_component": null,
             "members": ["0483310103420000"],
+            "unfilled": [],
             "cards": 1
         }]}"#;
         const NEAR_M: f32 = 1.0;
@@ -2762,6 +2765,104 @@ mod tests {
             ..ground
         };
         world.cast_ability_spell(caster, "Test", &other, CastKind::Raycast, NOW);
+        world.tick_spell_areas(NOW);
+        assert!(world.spell_entities.is_empty());
+    }
+
+    /// The upgraded Flail Slam's slice numbers its components its own way (retail, 59 of 59
+    /// groups of the survey: position 2, spell state 4, delayed events 5 to 10). The spell
+    /// state on component 1 crashed the client (live 2026-11-10 and 2026-11-11).
+    #[test]
+    fn a_spell_entity_sends_each_state_on_its_slice_s_component() {
+        const SLICES: &str = r#"{"spells": [{
+            "spell": 2055668591,
+            "asset": "3e1b0819440a5b919418bd82cf136b90",
+            "spell_component": 4,
+            "ownership_component": null,
+            "position_component": 2,
+            "members": ["0583310103450000"],
+            "unfilled": [],
+            "cards": 1
+        }]}"#;
+        const NEAR_M: f32 = 1.0;
+        const INTEREST: u16 = 5;
+        let (mut world, caster) = spell_fight(&[]);
+        let slam = SpellRow {
+            cast_distance_m: Some(0.0),
+            ..spell()
+        };
+        Arc::make_mut(&mut world.content).spell_slices =
+            nw_content::spell_slices::SpellSlices::parse(SLICES).expect("slices");
+        let at = world.caster(caster).expect("caster").from;
+        world.cast_ability_spell(caster, "Test", &slam, CastKind::Plain, NOW);
+        world.tick_spell_areas(NOW);
+        let number = world
+            .stations
+            .numbers_near(at, NEAR_M)
+            .next()
+            .expect("its entity");
+        let slot = super::super::slots::Slot {
+            interest: INTEREST,
+            new: true,
+        };
+        let group = world.stations.group(number, slot).expect("group");
+        let component_of = |wanted: fn(&MemberState) -> bool| {
+            group
+                .members
+                .iter()
+                .find(|member| wanted(&member.state))
+                .map(|member| member.component)
+        };
+        assert_eq!(
+            component_of(|state| matches!(state, MemberState::Spell(_))),
+            Some(4)
+        );
+        assert_eq!(
+            component_of(|state| matches!(state, MemberState::Ownership(_))),
+            None
+        );
+        let position = group
+            .members
+            .iter()
+            .find_map(|member| match &member.state {
+                MemberState::Position(position) => Some((member.component, *position)),
+                _ => None,
+            })
+            .expect("its position");
+        let spell_state = group
+            .members
+            .iter()
+            .find_map(|member| match &member.state {
+                MemberState::Spell(state) => Some(state.clone()),
+                _ => None,
+            })
+            .expect("its spell state");
+        assert_eq!(position.0, 2);
+        assert_eq!(position.1.position, spell_state.start, "the spell's start");
+        assert_eq!(position.1.rotation, spell_state.start_rotation);
+    }
+
+    /// A slice with a state the captures give no bytes for (a vitals state) spawns no entity.
+    #[test]
+    fn a_slice_with_an_unfilled_state_spawns_no_entity() {
+        const SLICES: &str = r#"{"spells": [{
+            "spell": 2055668591,
+            "asset": "212b61e7576556b1b5604f5aaaccbb54",
+            "spell_component": 3,
+            "ownership_component": 4,
+            "position_component": null,
+            "members": [],
+            "unfilled": ["1:15"],
+            "cards": 1
+        }]}"#;
+        let (mut world, caster) = spell_fight(&[]);
+        let area = SpellRow {
+            cast_distance_m: Some(0.0),
+            ..spell()
+        };
+        Arc::make_mut(&mut world.content).spell_slices =
+            nw_content::spell_slices::SpellSlices::parse(SLICES).expect("slices");
+        world.cast_ability_spell(caster, "Test", &area, CastKind::Plain, NOW);
         world.tick_spell_areas(NOW);
         assert!(world.spell_entities.is_empty());
     }

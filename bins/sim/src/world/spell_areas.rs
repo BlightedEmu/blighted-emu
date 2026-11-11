@@ -9,9 +9,10 @@
 //!
 //! When it opens, an area whose spell has a slice ([`nw_content::spell_slices`]) spawns its
 //! spell entity: the card of the slice, the spell state (the spell, the area's centre, the
-//! caster's turn and id), the caster's ownership when the slice holds one, and the slice's other
-//! states. Every player near sees it (Sacred Ground's circle). It goes when the area ends, and
-//! no sooner than [`SPELL_ENTITY_MIN_MS`].
+//! caster's turn and id), the caster's ownership and the entity's position when the slice holds
+//! them, and the slice's other states, each on the slice's own component number. Every player
+//! near sees it (Sacred Ground's circle). It goes when the area ends, and no sooner than
+//! [`SPELL_ENTITY_MIN_MS`]. A slice with a state the server cannot fill spawns no entity.
 //!
 //! A creature's `CAGE-CastSpell` clip casts its spell row the same way
 //! ([`SimWorld::cast_mob_spells`]): its enemies are the players, its friends the mobs (its self
@@ -29,8 +30,8 @@ use nw_messages::buildables::{NO_OWNER_KIND, OwnerIdentification};
 use nw_messages::spell_state::{NO_ATTACHMENT, SPELL_REF_LEN, SpellState};
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    AssetId, BundleMember, DYNAMIC_SLICE_SUB_ID, GdeMetadataReplicatedState, MemberState, Rotation,
-    WorldPosition, raw_id_of_entity,
+    AssetId, BundleMember, DYNAMIC_SLICE_SUB_ID, GdeMetadataReplicatedState, MemberState,
+    PositionInTheWorldReplicatedState, Rotation, WorldPosition, raw_id_of_entity,
 };
 use nw_sim_core::{Position, mob_hit};
 
@@ -50,10 +51,6 @@ const POINT_RADIUS_M: f32 = 1.0;
 const SPELL_ENTITY_MIN_MS: u64 = 1_000;
 /// Names the ids this server makes for spell entities.
 const SPELL_ENTITY_NAMESPACE: u64 = 0x7370_656c_6c65_6e74;
-/// The components of the spell state and of the ownership in a spell entity's group (retail:
-/// 1 and 2 in every group of the 769 spells of the captures).
-const SPELL_COMPONENT: u64 = 1;
-const OWNERSHIP_COMPONENT: u64 = 2;
 /// Retail: `m_aoeRadiusScaling` 1 and permission rule 1 in the spell groups read.
 const RADIUS_SCALE: f32 = 1.0;
 const PERMISSION_RULE: u8 = 1;
@@ -309,12 +306,21 @@ impl SimWorld {
         results
     }
 
-    /// Spawns the spell entity of `area`, when its spell has a slice and its caster is here.
+    /// Spawns the spell entity of `area`, when its spell has a slice that the server can fill
+    /// and its caster is here.
     fn spawn_spell_entity(&mut self, area: &SpellArea) {
         let spell = lowercase_crc32(&area.spell.id);
         let Some(slice) = self.content.spell_slices.of(spell).cloned() else {
             return;
         };
+        if !slice.unfilled.is_empty() {
+            tracing::debug!(
+                spell = %area.spell.id,
+                unfilled = ?slice.unfilled,
+                "spell entity not spawned: states without bytes"
+            );
+            return;
+        }
         let Some(start) = WorldPosition::from_metres(area.centre.x, area.centre.y, area.centre.z)
         else {
             return;
@@ -346,10 +352,11 @@ impl SimWorld {
             return;
         };
         let half = area.yaw / 2.0;
+        let rotation = Rotation::of_quaternion([0.0, 0.0, half.sin(), half.cos()]);
         let spell_state = SpellState {
             spell: Some(spell),
             start: Some(start),
-            start_rotation: Some(Rotation::of_quaternion([0.0, 0.0, half.sin(), half.cos()])),
+            start_rotation: Some(rotation),
             attachment: Some(NO_ATTACHMENT),
             caster: Some(caster_ref(area.source)),
             radius_scale: Some(RADIUS_SCALE),
@@ -372,15 +379,24 @@ impl SimWorld {
                         gde_ref: Some(gde_ref),
                     }),
                 ),
-                member(SPELL_COMPONENT, MemberState::Spell(spell_state)),
+                member(slice.spell_component, MemberState::Spell(spell_state)),
             ];
-            if let Some(owner) = owner.filter(|_| slice.owned) {
+            // Retail: the same place and turn as the spell state's start (the upgraded Flail
+            // Slam, 59 of 59 groups of the survey).
+            if let Some(component) = slice.position_component {
+                members.push(member(
+                    component,
+                    MemberState::Position(PositionInTheWorldReplicatedState {
+                        position: Some(start),
+                        rotation: Some(rotation),
+                        scale: None,
+                    }),
+                ));
+            }
+            if let (Some(component), Some(owner)) = (slice.ownership_component, owner) {
                 let mut ownership = unowned(PERMISSION_RULE, "");
                 ownership.owner = Some(owner);
-                members.push(member(
-                    OWNERSHIP_COMPONENT,
-                    MemberState::Ownership(ownership),
-                ));
+                members.push(member(component, MemberState::Ownership(ownership)));
             }
             members.extend(states);
             Station {
