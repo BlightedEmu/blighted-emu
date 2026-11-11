@@ -536,6 +536,14 @@
             {
               "check": "Spell entities use the component numbers of their own slice (tests only, 2026-11-11): each slice numbers its states its own way (the upgraded Flail Slam: position 2, spell state 4). The server sent the spell state on component 1 for every slice, so 194 of 1,109 spells sent it to the wrong component, and the Flail Slam crashed the client. The table now keeps the spell, ownership and position components per slice, and a slice with a state the captures give no bytes for (54 spells: vitals or animation) spawns no entity.",
               "proof": "tests"
+            },
+            {
+              "check": "A weapon ability chains from another ability's window and starts its cooldown (tests only, 2026-11-11): the action lists name some conditions `name`, not `Name` (the flail's and great sword's `CanAttack_*`, the void gauntlet's, `CanBlock`), and the server did not find 24 of them, so the flail's ability-to-ability links never held. The client played the next ability, but the server never started it: no cooldown on the bar. A press during a link's `CAGE-TransitionBuffered` clip is now kept and taken when its instant clip starts.",
+              "proof": "tests"
+            },
+            {
+              "check": "A weapon ability plays its animation (tests only, 2026-11-11): the client sends no animation state for an ability; retail's server starts it in the own state after the key press (the flail's Trip: `13=08 15=2344 17=<press> 48=01`; the life staff's upper-body slots). The server sent none, so the ability's effects showed with no animation. A table of 95 abilities is mined from 17,488 retail presses; the server now sends each start, an aimed ability's cast, and the end (stand still, or clear the upper slots).",
+              "proof": "tests"
             }
           ]
         },
@@ -1629,7 +1637,7 @@
     }
   ],
   "nextSteps": [
-    "**Flail and spell check (2026-11-11).**\n\nThe game VM runs the fix. See in the game: flail hits land on mobs, the flail Slam ability does not crash the client and its ground effect shows, other weapon abilities with a ground effect still show, and no Amazon account pop-up comes at login.",
+    "**Flail and spell check (2026-11-11).**\n\nThe game VM runs the fix. See in the game: flail hits land on mobs, the flail Slam ability does not crash the client and its ground effect shows, other weapon abilities with a ground effect still show, and no Amazon account pop-up comes at login. Also: use a flail ability late in another one (or press it early); it must start its cooldown on the bar. Also: each flail and life staff ability plays its animation.",
     "**Night order 2026-11-10: live check (all built, tests only).**\n\nSee in the game: a story instance door (Medea), the heart rune charge and Detonate, day and night after a restart, mob spells (ground areas, self heals), reactions from behind and the sides, crits from behind, head shots, knockback stopped by a wall, faction reputation and tokens from a faction quest, lore XP on a first read. The PC and the game VM need world migration 0035 (`world_clock`) and the new data files (dungeon scripts, player abilities) first.",
     "**Mob movement and world events: live check (2026-11-10).**\n\nAll parts are built, in tests only. See in the game: mobs strike from near (homing), walk around obstacles, stop at town gates; world events start when a player walks into their volume, show their status, wait for their start object and come back at their data time; trees and stones block as their own mesh.",
     "**Live check of the new saves (migration 0034).**\n\nMigration 0034 is applied on the PC and on the game VM (2026-11-10), and the game VM runs the new programs. Then: take damage, use an ability, log out during its cooldown, log back in; health and the cooldown must be as they were. Die, log out, log back in: the death screen must show and the respawn must work. Gather a node, restart the sim, and check that the node is still empty.",
