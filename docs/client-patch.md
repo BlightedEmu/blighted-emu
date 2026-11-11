@@ -413,7 +413,7 @@ the retail client.
 ### Windows live test
 
 You need a Windows PC with Steam and New World installed, and the project launcher built
-(`cargo build -p launcher --release`).
+(`cargo build -p launcher --release`, which makes `BlightedLauncher.exe`).
 
 1. Make the patched copy with the proxy patch, then check it:
 
@@ -425,7 +425,7 @@ You need a Windows PC with Steam and New World installed, and the project launch
    Expect `patched copy: OK`. This writes `NewWorld.exe.orig` and `BlightedNewWorld.exe`. It
    never changes `NewWorld.exe`.
 2. Start Steam and log in.
-3. Start `launcher.exe`. In Options, make sure that Game shows `found` for
+3. Start `BlightedLauncher.exe`. In Options, make sure that Game shows `found` for
    `<Bin64>\BlightedNewWorld.exe`. If it does not, type the path or press Find paths.
 4. Log in to the community server in the launcher and press play.
 5. Pass: the game gets to character select with the remote-config layers of the server (the

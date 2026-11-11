@@ -7,6 +7,11 @@ rust-version.workspace = true
 license = "GPL-3.0-or-later"
 publish.workspace = true
 
+# the file name players get: BlightedLauncher (.exe on Windows)
+[[bin]]
+name = "BlightedLauncher"
+path = "src/main.rs"
+
 [dependencies]
 chrono.workspace = true
 eframe.workspace = true
