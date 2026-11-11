@@ -1,5 +1,6 @@
 {
     "javelin": {
+        "enable-agid-account-linking": false,
         "red-button-disable-traffic-mitigation": false,
         "landing-screen-character-transfer": true,
         "landing-screen-character-transfer-direct": true

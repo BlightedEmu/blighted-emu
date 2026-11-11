@@ -417,13 +417,16 @@ pub(crate) mod tests {
     /// asks for (`analytics/enable` and seven `javelin` keys of the publicGameplay `RegionId`
     /// layer; leaderboards note section 1), plus the shop service keys `omni/fcs/*` and the
     /// privacy settings keys `omni/privacy-settings/*` that retail leaves to the client's defaults
-    /// (shop note). The experience multipliers and the free fast travel switch are served once,
+    /// (shop note), plus `javelin/enable-agid-account-linking`, off, which the client turns on
+    /// when no layer names it (its reader in `FUN_145a7fce0` passes the default 1). The
+    /// experience multipliers and the free fast travel switch are served once,
     /// in the `ProductId` layer, from `[experience]` and `[fast_travel]`.
     const SERVED_KEY_PATHS: [(&str, Dimension, &[&str]); 8] = [
         (
             "public",
             Dimension::ProductId,
             &[
+                "javelin/enable-agid-account-linking",
                 "javelin/landing-screen-character-transfer",
                 "javelin/landing-screen-character-transfer-direct",
                 "javelin/red-button-disable-traffic-mitigation",
@@ -822,6 +825,17 @@ pub(crate) mod tests {
         ] {
             assert!(entries.iter().any(|served| served == entry), "{entry}");
         }
+    }
+
+    /// The Amazon Games iD link pop-up (`agid_link_modal_*`) asks for an Amazon account that this
+    /// server does not use, so the public `ProductId` layer turns its switch off.
+    #[test]
+    fn the_amazon_account_link_is_off() {
+        let key = object_key("public", Dimension::ProductId, PRODUCT_ID, VERSIONLESS);
+        assert_eq!(
+            served_json(&sets(), &key)[JAVELIN]["enable-agid-account-linking"],
+            Value::Bool(false)
+        );
     }
 
     #[test]
