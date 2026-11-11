@@ -2,7 +2,7 @@
 
 Date: 2026-09-04.
 
-This note summarizes the 244 saved thread exports under `local-data/open world captures/`. It does not quote posts, names, or links. It does not copy protocol text.
+This note summarizes the 244 saved thread exports under `local-data/captures/ow captures og/`. It does not quote posts, names, or links. It does not copy protocol text.
 
 The game was not run. Easy Anti-Cheat was not analyzed.
 

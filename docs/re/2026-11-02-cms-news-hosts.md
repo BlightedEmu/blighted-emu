@@ -50,7 +50,7 @@ Date: 2026-11-02. Build: Steam `25810808` (`NewWorld.exe` MD5 `ac8791b8…`). La
 
 ### 1.3 Retail replies
 
-From the retail captures under `local-data/captures/open-world/*/content_motd` and
+From the retail captures under `local-data/captures/ow captures extracted/*/content_motd` and
 `content_service` (calls of the retail client to the real hosts):
 
 - **Observed.** The news host answers `200` or `304 Not Modified` with `Server: AmazonS3`,

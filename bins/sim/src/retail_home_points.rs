@@ -2,8 +2,8 @@
 //! The retail fast travel points of `newworld_vitaeeterna`: the spirit shrine, crow's nest, town
 //! and outpost home points (kinds 11 and 7 of the home point list, 3652), as retail sends them.
 //!
-//! Observed (2026-11-06, every full home point list of 816 retail ledgers in `captures/` and
-//! `open world captures/`): each point has one position and one cooldown in every ledger and for
+//! Observed (2026-11-06, every full home point list of 816 retail ledgers in `captures/`
+//! (`own/` and `ow captures extracted/`): each point has one position and one cooldown in every ledger and for
 //! every character, so the point is fixed game data, not where the player stood. The entity of
 //! each one is the `capital_id` of its level capital (a `FastTravel_Teleporter*` slice, a crow's
 //! nest slice, a settlement's `*_Settlement_Complete` slice or an outpost slice). Every shrine

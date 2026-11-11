@@ -8,7 +8,7 @@ Labels: **Observed** means the captures showed the fact. **Inferred** means a co
 
 ## 1. The set
 
-**Observed.** The source folder `local-data/open world captures/` holds web page exports, videos, and 413 archives: 208 zip, 155 rar, 35 7z and 15 zst. The archives unpack to `local-data/captures/open-world/<archive name>/`. They hold 410 ledgers (`ledger.bin`, the same record format as the first set). The unpacked size is 22 GiB.
+**Observed.** The source folder `local-data/captures/ow captures og/` holds web page exports, videos, and 413 archives: 208 zip, 155 rar, 35 7z and 15 zst. The archives unpack to `local-data/captures/ow captures extracted/<archive name>/`. They hold 410 ledgers (`ledger.bin`, the same record format as the first set). The unpacked size is 22 GiB.
 
 **Observed.** 155 rar archives need `unrar`. `7z` on this system does not unpack their compression method.
 
@@ -55,6 +55,6 @@ Labels: **Observed** means the captures showed the fact. **Inferred** means a co
 
 ## Files read
 
-- `local-data/open world captures/` (archive lists only)
+- `local-data/captures/ow captures og/` (archive lists only)
 - `local-data/captures/**/ledger.bin`
 - `docs/re/2026-09-02-carrier-captures.md`

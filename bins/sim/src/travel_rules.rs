@@ -674,7 +674,7 @@ impl TravelRules {
 
     /// The landmark of type `landmark_type` in area `area` (the 3713's territory id).
     ///
-    /// Observed (2026-11-07, the 751 retail 3713 of `captures/open-world` and `captures/own`):
+    /// Observed (2026-11-07, the 751 retail 3713 of `captures/ow captures extracted` and `captures/own`):
     /// the type and the area name exactly one level landmark in 751 of 751 (406 shrines, 122
     /// settlements, 60 of type 22, 163 inn recalls). The position the client sends is not the
     /// landmark's: up to 3.4 m from a shrine, whose level radius is 0 m.
@@ -689,7 +689,7 @@ impl TravelRules {
     /// any other landmark at its level position.
     ///
     /// Observed (2026-11-07, the first own position after each 3696 of the retail 3713 of
-    /// `captures/own` and `captures/open-world`): the town travels arrived at the town point of
+    /// `captures/own` and `captures/ow captures extracted`): the town travels arrived at the town point of
     /// their area (Monarch's Bluffs 40300: 19 of 19; 30253: 10 of 10; 40352: 8 of 8), and the
     /// outpost travels (type 22) at the outpost point (40325: 12 of 12; 40324: 8 of 9). The
     /// level landmark of a town can lie under the ground: area 30155's at height 104 under the

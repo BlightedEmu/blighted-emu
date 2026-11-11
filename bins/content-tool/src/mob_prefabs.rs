@@ -45,9 +45,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::extra_members;
 
-/// The capture folders scanned by default: the unpacked ledgers and the source archives.
-pub const DEFAULT_CAPTURE_ROOTS: [&str; 2] =
-    ["local-data/captures", "local-data/open world captures"];
+/// The capture folders scanned by default: the own captures and the unpacked open world
+/// captures (the archives in `captures/ow captures og` hold the same ledgers).
+pub const DEFAULT_CAPTURE_ROOTS: [&str; 2] = [
+    "local-data/captures/own",
+    "local-data/captures/ow captures extracted",
+];
 /// Name of a ledger file, alone or as the last part of a zip entry name.
 const LEDGER_FILE_NAME: &str = "ledger.bin";
 /// Separator of the folders in a zip entry name.

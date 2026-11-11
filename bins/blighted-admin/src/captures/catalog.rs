@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 pub const LEDGER_FILE: &str = "ledger.bin";
 /// File name of the capture tool's session facts.
 pub const METADATA_FILE: &str = "metadata.json";
-/// Folder of the open-world sessions in the captures folder.
-pub const OPEN_WORLD_DIR: &str = "open-world";
+/// Folder of the unpacked open-world sessions in the captures folder (one folder per archive).
+pub const OPEN_WORLD_DIR: &str = "ow captures extracted";
 /// End of a saved Discord post's file folder.
 const POST_FOLDER_END: &str = ".html_Files";
 /// Start of a saved Discord post's name.
@@ -246,7 +246,7 @@ mod tests {
     fn an_open_world_session_gets_its_post_title() {
         let root = tempfile::tempdir().expect("dir");
         let captures = root.path().join("captures");
-        ledger(&captures, "open-world/run-1-abc/run_1/dtls");
+        ledger(&captures, "ow captures extracted/run-1-abc/run_1/dtls");
         let post = root
             .path()
             .join("discord")

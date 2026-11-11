@@ -916,7 +916,7 @@ mod tests {
         use nw_content::progression::Progression;
         use nw_formats::objectstream::lowercase_crc32;
         /// Retail Hermit's Rally: the first race of the mount quest chain on Moonshadow.
-        const LEDGER: &str = "local-data/captures/open-world/01-Get_Mounts-cd14fc4d0041e80e/\
+        const LEDGER: &str = "local-data/captures/ow captures extracted/01-Get_Mounts-cd14fc4d0041e80e/\
             ef_tour_0-Hermit-s-Rally/ledger.bin";
         const OPEN_WORLD_LEVEL: &str = "newworld_vitaeeterna";
         const HORSE: &str = "Mount_Horse_1";

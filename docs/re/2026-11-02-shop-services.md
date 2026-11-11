@@ -55,7 +55,7 @@ From the retail captures under `local-data/captures` (folders `catalog` and `ent
 - **Observed.** The capture of the privacy settings service (`POST .../privacy-settings`) is a
   separate host, read from `omni.privacy-settings.client-endpoint` (`FUN_14160ad60`). Our live
   run showed no connection to it.
-- **Observed** (`captures/open-world/unlock_store_content-a3d37ef02324761e/privacy`, call 52):
+- **Observed** (`captures/ow captures extracted/unlock_store_content-a3d37ef02324761e/privacy`, call 52):
   `POST /players/<persona>/games/new-world/privacy-settings` on
   `client.agsprivacysettingsservice.amazongames.com`, body `{"settings": [5 names]}` (friend
   requests, online status, private text, public or group text, voice). Reply `200`

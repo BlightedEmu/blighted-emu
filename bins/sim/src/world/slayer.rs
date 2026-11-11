@@ -87,7 +87,7 @@ mod pull {
 /// sequence (`13=19 15=b247`) for both.
 ///
 /// - Unstuck (2026-11-08, the first slayer change after each of the 56 retail 3980 of `captures/`
-///   and `open world captures/`): `13=19 15=b247`, with the interactor off, in 38 (the others:
+///   (`own/` and `ow captures extracted/`): `13=19 15=b247`, with the interactor off, in 38 (the others:
 ///   the state that went on, a fall or a swim). At the move, standing still `13=1f 15=b910` with
 ///   the interactor on, in 26 of the 56 (most others: a fall `13=0f` or a swim). Without the
 ///   stand the client kept the kneel's pose after the move (live 2026-11-08: arms out, stiff

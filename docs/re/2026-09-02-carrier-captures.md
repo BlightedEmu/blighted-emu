@@ -8,7 +8,7 @@ Labels: **Observed** = seen in the ledgers or in the client type table. **Inferr
 
 Inputs (git-ignored, under `local-data/`):
 
-- 285 `ledger.bin` files from the archives in `local-data/open world captures/`, unpacked into `local-data/captures/`. The files hold decrypted carrier datagrams from retail sessions. They hold personal data of other players, so they stay local.
+- 285 `ledger.bin` files from the archives in `local-data/captures/ow captures og/`, unpacked into `local-data/captures/`. The files hold decrypted carrier datagrams from retail sessions. They hold personal data of other players, so they stay local.
 - The client type table `typeindex.json` in the game folder (7,052 UUIDs; the list position is the type index).
 - The Aeternum-World name map `Catalog/uuid_to_class.json` (AGPL-3.0, 3,486 entries).
 

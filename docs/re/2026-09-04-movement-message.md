@@ -153,7 +153,7 @@ The cursor starts at bit 9. A clear mask bit consumes 0 bytes. The prefix bits b
 - `<re-scratch>/scratch-post-reg/q1_parse.py`
 - Decompile files under `<re-scratch>/scratch-replication/out2`, `out5`, and `out-widths`
 - `NewWorld.exe` at `<game-dir>/Bin64/NewWorld.exe`
-- Ledgers under `local-data/captures/**/ledger.bin` and `local-data/captures/open-world/**/ledger.bin`
+- Ledgers under `local-data/captures/**/ledger.bin` and `local-data/captures/ow captures extracted/**/ledger.bin`
 
 ## Type 11 pass
 

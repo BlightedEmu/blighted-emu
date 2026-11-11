@@ -59,7 +59,7 @@ reads nothing.
 `0x00 0x00` for 9-10. No player component reaches 9 slots.
 
 **Observed.** The capture ground truth agrees: in
-`local-data/captures/open-world/NH-MSQ-10.2-Quest-61c0a783ba281885/fragments.jsonl` every
+`local-data/captures/ow captures extracted/NH-MSQ-10.2-Quest-61c0a783ba281885/fragments.jsonl` every
 type index of the 56 classes (and also type 10, the spawn card) was decoded with RVA
 `0x17b4110` (the generic reader) on every fragment. Only type 11 used its custom decoder
 `0x2a436b0`.
@@ -306,7 +306,7 @@ are real snapshots, never `0x00`.
   `docs/re/2026-09-08-world-entry-live.md`
 - `local-data/Aeternum-World-main/Catalog/uuid_to_class.json`,
   `local-data/azoth-catalog/packets/*.json`,
-  `local-data/captures/open-world/NH-MSQ-10.2-Quest-61c0a783ba281885/fragments.jsonl`
+  `local-data/captures/ow captures extracted/NH-MSQ-10.2-Quest-61c0a783ba281885/fragments.jsonl`
   (counts, sizes, decoder RVAs only)
 - `crates/nw-messages/src/{alc.rs,wire.rs,player_components.rs,slots.rs}`
 - `~/steam-1063730.crash1.log`, `~/steam-1063730.crash2.log`, `~/steam-1063730.log`

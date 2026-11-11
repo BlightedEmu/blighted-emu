@@ -2,7 +2,7 @@
 
 Date: 2026-09-10. Build: Steam `25810808`. Labels: **Observed**, **Inferred**, **Unknown**.
 
-Source: capture `local-data/captures/open-world/01-starting-zone-*/12-1_getoffbeach-Soul-Survivor.zip`
+Source: capture `local-data/captures/ow captures extracted/01-starting-zone-*/12-1_getoffbeach-Soul-Survivor.zip`
 (a full login through the end of the tutorial, about 12 minutes), read with a scratch tool
 (field values and lengths only). The other nine starting-zone captures (the tutorial quest
 chain: skinning knife, boar feast, crewmates, survivors, pillage ship, recover items, demon

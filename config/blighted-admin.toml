@@ -15,8 +15,8 @@ max_spawns_per_request = 5000
 [captures]
 # Capture ledgers (`ledger.bin`) in any folder below this one.
 captures_dir = "local-data/captures"
-# The saved Discord threads that name the open-world sessions.
-discord_dir = "local-data/open world captures"
+# The saved Discord threads that name the open-world sessions (with their original archives).
+discord_dir = "local-data/captures/ow captures og"
 # The archive that local-data/azoth-catalog/archive.py saves from the Azoth catalog site.
 azoth_dir = "local-data/azoth-catalog"
 # The client type table, in the install folder (NW_GAME_DIR).

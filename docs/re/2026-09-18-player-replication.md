@@ -4,7 +4,7 @@ Date: 2026-09-18. Build: Steam `25810808`. Labels: **Observed**, **Inferred**, *
 
 Sources: retail ledgers `duel_capture`, `3v3_arena_group`, `arvaysa_ES_attacker_war_45vs45`,
 `arvaysa_walk_running_crouch_prone`, `brim_runtoggle_spam`, `arv_charged_attack_hold`
-(`local-data/captures/open-world/`); scratch scanners over them (counts, child values and a few
+(`local-data/captures/ow captures extracted/`); scratch scanners over them (counts, child values and a few
 bodies; no capture bytes kept in the repo besides the test vectors below); the client decompile
 (`local-data/re-sweep`, strings only).
 

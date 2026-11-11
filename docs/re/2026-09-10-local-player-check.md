@@ -11,7 +11,7 @@ Labels: **Observed**, **Inferred**, **Unknown**.
 Method. Current-build Ghidra project `<re-scratch>/ghidra-25810808`,
 program `/NewWorld.exe`, headless `-readOnly -noanalysis`, heap 32 GB, worker
 copies `ghidra-25810808-w2`/`w3`/`w4`. Scripts `RefsDecomp.java`, `Callers.java`,
-`DumpVtSlot.java`. Captures: `local-data/captures/open-world/*/fragments.jsonl`
+`DumpVtSlot.java`. Captures: `local-data/captures/ow captures extracted/*/fragments.jsonl`
 and ledgers (equality only). REA `open_binary` was not used in this pass; a
 prior pass on `Bin64/NewWorld.exe` timed out at 330 s with no Evidence ID.
 

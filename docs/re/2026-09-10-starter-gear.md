@@ -4,7 +4,7 @@ Date: 2026-09-10. Build: Steam `25810808`. Labels: **Observed**, **Inferred**, *
 
 Sources: content bundle `25810808` (`ArchetypeData`, `BackstoryDefinition`,
 `MasterItemDefinitions`), the retail capture
-`local-data/captures/open-world/01-starting-zone-*/12-1_getoffbeach-Soul-Survivor.zip` (a new
+`local-data/captures/ow captures extracted/01-starting-zone-*/12-1_getoffbeach-Soul-Survivor.zip` (a new
 wanderer character), and client reader functions on the old build `22469132` (scratch Ghidra
 project in `<re-scratch>`). The wire grammar was checked on 41 retail ledgers.
 

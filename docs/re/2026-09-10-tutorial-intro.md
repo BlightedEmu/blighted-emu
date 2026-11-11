@@ -3,7 +3,7 @@
 Date: 2026-09-10. Build: Steam `25810808`. Labels: **Observed**, **Inferred**, **Unknown**.
 
 Sources: the retail capture
-`local-data/captures/open-world/01-starting-zone-*/12-1_getoffbeach-Soul-Survivor.zip` (a new
+`local-data/captures/ow captures extracted/01-starting-zone-*/12-1_getoffbeach-Soul-Survivor.zip` (a new
 character from login to the end of the tutorial), the client `Game.log` of our live run, client
 slices and datasheets (`ftue_intro2_cinematic_trigger.dynamicslice`,
 `javelindata_cinematicvideoregistry`, `javelindata_achievements`), and Ghidra on build `25810808`

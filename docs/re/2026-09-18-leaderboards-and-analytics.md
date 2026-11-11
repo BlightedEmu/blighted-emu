@@ -5,7 +5,7 @@ Date: 2026-09-18. Build: Steam `25810808`. Labels: **Observed**, **Inferred**, *
 Sources: the 16 retail remote config replies of 2026-09-18
 (`local-data/remote-config/retail-2026-09-18/`); the client decompile (`local-data/re-sweep`,
 streamed with `zcat | grep`); string reads from `NewWorld.exe`; the retail HTTPS captures
-`Hive_leaderboards` and `Check_Leaderboard` (`local-data/captures/open-world/`, EU and US
+`Hive_leaderboards` and `Check_Leaderboard` (`local-data/captures/ow captures extracted/`, EU and US
 players opening the leaderboard screen; shapes and counts only, no ids or values kept here);
 the content bundle tables `LeaderboardData`, `LeaderboardStatData` and `GameEventData`.
 
