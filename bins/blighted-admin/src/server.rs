@@ -40,8 +40,9 @@ const INDEX: &str = "index.html";
 const LIVE_PAGE: &str = "live.html";
 /// The home page.
 pub const HOME_PAGE_ROUTE: &str = "/";
-/// The map and captures pages, served from the web files.
+/// The map page, served from the web files.
 pub const MAP_PAGE_ROUTE: &str = "/web/map.html";
+/// The captures page, served from the web files.
 pub const CAPTURES_PAGE_ROUTE: &str = "/web/captures.html";
 /// The live page.
 pub const LIVE_PAGE_ROUTE: &str = "/live";
