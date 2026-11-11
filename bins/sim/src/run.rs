@@ -253,13 +253,18 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
     };
     let player_sequences = match PlayerSequences::load(&config.content_dir, &build) {
         Ok(table) => {
-            tracing::info!(stances = table.len(), "player sequence table");
+            tracing::info!(
+                stances = table.len(),
+                abilities = table.abilities_len(),
+                "player sequence table"
+            );
             table
         }
         Err(error) => {
             tracing::warn!(
                 %error,
-                "no player sequence table: the server starts no attack, block, aim, dodge or jump"
+                "no player sequence table: the server starts no attack, ability, block, aim, dodge \
+                 or jump"
             );
             PlayerSequences::default()
         }

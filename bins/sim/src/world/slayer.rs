@@ -18,13 +18,16 @@
 //! the state, that record's own included ([`SequenceClock`] has the wire form).
 
 use nw_content::player_sequences::{
-    Direction, PlayerSequences, SlotsChange, StanceSequences, StatePlay,
+    AbilityPlay, Direction, FirstPlay, PlayerSequences, SlotsChange, StanceSequences, StatePlay,
 };
 use nw_messages::{
     RemoteUpper, SecondSlayerState, SequenceClock, SequenceTime, SlayerInput, SlayerState,
     SlotChange, UpperSlots,
 };
 use nw_sim_core::Intent;
+
+/// The value of a slot's state, sequence or marker that clears it (retail `19=00 21=00 48=00`).
+const CLEARED_SLOT: u64 = 0;
 
 /// How many own states carry one slayer change (Observed: retail sent a follow-up in the state
 /// that started it and the next one, 15c1 and 15c2 at 206528 to 206577 ms).
@@ -356,6 +359,21 @@ enum Pending {
     Attack(u64),
     /// A state the server started: its state and sequence (movement, dodge, jump).
     State(u64, u64),
+    /// A full-body weapon ability the server started ([`SlayerTrack::ability_started`]).
+    Ability(FirstPlay),
+}
+
+/// The weapon ability whose animation the slayer state plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AbilityOn {
+    /// CRC-32 of its lowercase id.
+    ability: u32,
+    /// It plays in the first slot (a full-body ability).
+    first: bool,
+    /// It plays a third slot state (an aimed ability).
+    third: bool,
+    /// Its cast went out.
+    cast: bool,
 }
 
 /// The weapon in the player's hand.
@@ -476,6 +494,10 @@ pub(super) struct SlayerTrack {
     /// The newest slayer state, and how many more own states carry it.
     current: Option<SlayerState>,
     repeats: u8,
+    /// The weapon ability the slayer state plays, from its start to its end.
+    ability: Option<AbilityOn>,
+    /// The counter of the newest record.
+    newest_counter: u16,
     /// Seconds into the newest state's sequence.
     sequence_s: f32,
     /// The frame time of the newest record.
@@ -503,6 +525,7 @@ impl SlayerTrack {
     /// the right-click and the draw change the upper slots.
     pub(super) fn record(&mut self, record: SlayerRecord, table: &PlayerSequences) {
         self.newest_frame_s = record.frame_s;
+        self.newest_counter = record.counter;
         self.sequence_s += record.frame_s;
         let stance = record.weapon.and_then(|weapon| table.stance(weapon.stance));
         let drawn = record.weapon.is_some_and(|weapon| weapon.drawn);
@@ -729,6 +752,100 @@ impl SlayerTrack {
         slots_of(stance.alt_fire?, record.counter).map(Shot::Aimed)
     }
 
+    /// The server started weapon ability `ability` (CRC-32 of its lowercase id) for the key
+    /// press in record `started`: the next own state plays its animation `play`, started there.
+    /// A full-body ability takes the first slot (its state and sequence, the second slot started
+    /// with it as retail's `13=08 14=<press> 15=<sequence> 17=<press>`); every ability sets the
+    /// slots past it and the marker it names.
+    pub(super) fn ability_started(&mut self, ability: u32, play: &AbilityPlay, started: u16) {
+        if let Some(first) = play.first {
+            self.pending = Some((Pending::Ability(first), started, self.newest_frame_s));
+            self.sequence_s = self.newest_frame_s;
+            self.follow_up = None;
+        }
+        let second_started = UpperSlots {
+            second: SlotChange {
+                started: Some(started),
+                ..SlotChange::default()
+            },
+            ..UpperSlots::default()
+        };
+        let slots = slots_of(play.slots, started).unwrap_or_default();
+        self.upper = Some(merge(
+            self.upper.unwrap_or_default(),
+            merge(second_started, slots),
+        ));
+        self.ability = Some(AbilityOn {
+            ability,
+            first: play.first.is_some(),
+            third: play
+                .slots
+                .third_state
+                .is_some_and(|state| state != CLEARED_SLOT),
+            cast: false,
+        });
+    }
+
+    /// Weapon ability `ability` cast its first spell: an aimed one plays its cast `play.cast`,
+    /// started in the newest record (retail Sacred Ground: `16=33 18=993 19=00 21=00 48=03` at
+    /// the click; Inferred: the server sends it at the cast, about 300 ms after the click).
+    pub(super) fn ability_cast(&mut self, ability: u32, play: &AbilityPlay) {
+        let Some(on) = self
+            .ability
+            .as_mut()
+            .filter(|on| on.ability == ability && !on.cast)
+        else {
+            return;
+        };
+        on.cast = true;
+        if let Some(cast) = play
+            .cast
+            .and_then(|cast| slots_of(cast, self.newest_counter))
+        {
+            self.upper = Some(merge(self.upper.unwrap_or_default(), cast));
+        }
+    }
+
+    /// Weapon ability `ability` ended: a full-body one goes back to the movement it stands or
+    /// moves in, an upper-body one clears the second slot (and the third, when it aimed), and
+    /// the marker goes back to 0 (retail: `13=1f 14=<record> 15=<idle> 48=00` after the flail's
+    /// Trip, `16=2d 17=<record> 18=00 48=00` after the life staff's Orb of Protection). Another
+    /// ability's end, after a new one started, changes nothing.
+    pub(super) fn ability_ended(&mut self, ability: u32) {
+        let Some(on) = self.ability.filter(|on| on.ability == ability) else {
+            return;
+        };
+        self.ability = None;
+        let counter = self.newest_counter;
+        let mut end = UpperSlots {
+            marker: Some(CLEARED_SLOT),
+            ..UpperSlots::default()
+        };
+        if on.first {
+            let (state, sequence) = self.card_movement();
+            self.pending = Some((
+                Pending::State(state, sequence),
+                counter,
+                self.newest_frame_s,
+            ));
+            self.sequence_s = self.newest_frame_s;
+        } else {
+            end.second = SlotChange {
+                state: Some(loadout::CLOSED_STATE),
+                started: Some(counter),
+                sequence: Some(CLEARED_SLOT),
+            };
+        }
+        if on.third {
+            end.third = SlotChange {
+                state: Some(CLEARED_SLOT),
+                started: Some(counter),
+                sequence: Some(CLEARED_SLOT),
+            };
+        }
+        self.upper = Some(merge(self.upper.unwrap_or_default(), end));
+    }
+
     /// A mob pulls the player at `now_ms`: the next own state starts the pull state, and the
     /// player stands still again [`pull::LENGTH_MS`] later.
     pub(super) fn pulled(&mut self, now_ms: u64) {
@@ -918,6 +1035,16 @@ impl SlayerTrack {
                     started: Some(counter),
                     sequence,
                     second: None,
+                },
+                Pending::Ability(first) => SlayerState {
+                    state: Some(first.state),
+                    started: Some(counter),
+                    sequence: first.sequence,
+                    second: Some(SecondSlayerState {
+                        started: counter,
+                        playing: None,
+                        stopped: false,
+                    }),
                 },
                 Pending::Sequence(sequence) => {
                     let state = SlayerState {
@@ -2017,5 +2144,138 @@ mod tests {
         assert_eq!(tick(&mut track), None, "the slot ends");
         track.close_loadout(CLEARED_IN + 1);
         assert_eq!(tick(&mut track), None, "a close with no open sends nothing");
+    }
+
+    /// The flail's Trip (retail `general-other-01`: the press at 0x0fe4, the server's
+    /// `13=08 14=0fe4 15=2344 17=0fe4 48=01` 34 ms later).
+    fn trip() -> AbilityPlay {
+        AbilityPlay {
+            ability: "Ability_Flail_Trip".to_owned(),
+            first: Some(FirstPlay {
+                state: 8,
+                sequence: 2344,
+            }),
+            slots: SlotsChange {
+                marker: Some(1),
+                ..SlotsChange::default()
+            },
+            cast: None,
+            seen: 15,
+        }
+    }
+
+    /// The life staff's Sacred Ground: its aim, then its cast.
+    fn sacred_ground() -> AbilityPlay {
+        AbilityPlay {
+            ability: "Ability_Lifestaff_SacredGround".to_owned(),
+            first: None,
+            slots: SlotsChange {
+                second_state: Some(36),
+                second_sequence: Some(142),
+                third_state: Some(46),
+                third_sequence: Some(449),
+                marker: Some(33),
+                ..SlotsChange::default()
+            },
+            cast: Some(SlotsChange {
+                second_state: Some(33),
+                second_sequence: Some(993),
+                third_state: Some(0),
+                third_sequence: Some(0),
+                marker: Some(3),
+                ..SlotsChange::default()
+            }),
+            seen: 417,
+        }
+    }
+
+    const PRESS_RECORD: u16 = 0x0fe4;
+    const TRIP: u32 = 1;
+    const GROUND: u32 = 2;
+
+    #[test]
+    fn a_full_body_ability_plays_in_the_first_slot_from_its_press_then_stands() {
+        let table = table();
+        let mut track = spawned();
+        track.record(quiet_record(PRESS_RECORD, Intent::default()), &table);
+        track.ability_started(TRIP, &trip(), PRESS_RECORD);
+        let due = own_state(&mut track, PRESS_RECORD + 1);
+        let state = due.state.expect("the ability");
+        assert_eq!(
+            (state.state, state.started, state.sequence),
+            (Some(8), Some(PRESS_RECORD), 2344)
+        );
+        assert_eq!(
+            state.second.map(|second| second.started),
+            Some(PRESS_RECORD)
+        );
+        let slots = due.slots.expect("the marker");
+        assert_eq!(slots.marker, Some(1));
+        assert_eq!(slots.second.started, Some(PRESS_RECORD));
+        let end_record = PRESS_RECORD + 40;
+        track.record(quiet_record(end_record, Intent::default()), &table);
+        track.ability_ended(GROUND);
+        track.ability_ended(TRIP);
+        track.ability_ended(TRIP);
+        let end = own_state(&mut track, end_record + 1);
+        let stand = end.state.expect("the stand");
+        assert_eq!(
+            (stand.state, stand.started),
+            (Some(movement::IDLE_STATE), Some(end_record)),
+            "back to standing still, once"
+        );
+        assert_eq!(end.slots.expect("the marker").marker, Some(0));
+    }
+
+    #[test]
+    fn an_aimed_ability_plays_its_aim_then_its_cast_then_clears_its_slots() {
+        let table = table();
+        let mut track = spawned();
+        track.record(quiet_record(PRESS_RECORD, Intent::default()), &table);
+        track.ability_started(GROUND, &sacred_ground(), PRESS_RECORD);
+        let aim = own_state(&mut track, PRESS_RECORD + 1);
+        assert_eq!(aim.state, None, "the first slot keeps the walk");
+        let slots = aim.slots.expect("the aim");
+        assert_eq!(
+            (
+                slots.second.state,
+                slots.second.started,
+                slots.second.sequence
+            ),
+            (Some(36), Some(PRESS_RECORD), Some(142))
+        );
+        assert_eq!(
+            (slots.third.state, slots.third.started, slots.third.sequence),
+            (Some(46), Some(PRESS_RECORD), Some(449))
+        );
+        assert_eq!(slots.marker, Some(33));
+        let click = PRESS_RECORD + 18;
+        track.record(quiet_record(click, Intent::default()), &table);
+        track.ability_cast(GROUND, &sacred_ground());
+        track.ability_cast(GROUND, &sacred_ground());
+        let cast = own_state(&mut track, click + 1).slots.expect("the cast");
+        assert_eq!(
+            (cast.second.state, cast.second.started, cast.second.sequence),
+            (Some(33), Some(click), Some(993))
+        );
+        assert_eq!((cast.third.state, cast.marker), (Some(0), Some(3)));
+        let end_record = click + 30;
+        track.record(quiet_record(end_record, Intent::default()), &table);
+        track.ability_ended(GROUND);
+        let end = own_state(&mut track, end_record + 1);
+        assert_eq!(end.state, None);
+        let cleared = end.slots.expect("the end");
+        assert_eq!(
+            (
+                cleared.second.state,
+                cleared.second.started,
+                cleared.second.sequence
+            ),
+            (Some(loadout::CLOSED_STATE), Some(end_record), Some(0))
+        );
+        assert_eq!(
+            (cleared.third.state, cleared.third.sequence, cleared.marker),
+            (Some(0), Some(0), Some(0))
+        );
     }
 }

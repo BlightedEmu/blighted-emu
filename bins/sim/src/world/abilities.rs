@@ -22,7 +22,8 @@ use nw_bus::{ConnectionRef, PlayerAbilityCooldown};
 use nw_content::attribute_bonuses::AbilityStats;
 use nw_content::combat::CombatData;
 use nw_content::player_abilities::{
-    AbilityList, FragmentRow, ListAction, SpellProjectile, SpellRow, TransitionTo,
+    AbilityList, FragmentRow, FragmentTransition, ListAction, SpellProjectile, SpellRow,
+    TransitionTo,
 };
 use nw_content::player_attacks::stance_tags;
 use nw_content::status_effects::StatusEffectRules;
@@ -138,6 +139,8 @@ pub(super) trait Holder {
 struct Press {
     /// The key: 0, 1 or 2.
     key: usize,
+    /// The client frame of its input record.
+    frame: u16,
     /// CRC-32 of the lowercase id of the ability mapped to it.
     ability: u32,
     /// The time of the first tick that read it; `None` until that tick. A press comes with its
@@ -165,6 +168,10 @@ struct Running {
     started_ms: u64,
     /// Each of its tag activities: off, or on with the case it started with (`None`: no case).
     tag_activities: Vec<Option<Option<TagCase>>>,
+    /// The transitions of its fragment, by index, whose input and condition held while their
+    /// buffered clip played ([`FragmentTransition::buffer_start_ms`]), each with the ability
+    /// press of then: each is taken once its instant clip starts, for that press.
+    buffered: Vec<(usize, Option<Press>)>,
 }
 
 /// A running cooldown.
@@ -195,8 +202,9 @@ impl Running {
 
 /// What a transition clip of a running action does.
 enum Step<'a> {
-    /// The action stops and this action of this list starts.
-    Action(&'a AbilityList, usize),
+    /// The action stops and this action of this list starts, for the press a buffered clip kept
+    /// (`None`: the newest press).
+    Action(&'a AbilityList, usize, Option<Press>),
     /// The action goes on with this fragment.
     Fragment(&'a str),
 }
@@ -215,6 +223,38 @@ pub(super) enum AbilityEvent {
     },
     /// Apply the status effects `effects` to the player.
     Effects(Vec<String>),
+    /// The ability whose lowercase id has CRC-32 `ability` started for the key press of client
+    /// frame `frame`: its animation starts (`SlayerTrack::ability_started`).
+    Started {
+        /// CRC-32 of the lowercase ability id.
+        ability: u32,
+        /// The press's client frame.
+        frame: u16,
+    },
+    /// The action that plays ability `ability` cast its first spell.
+    Casting {
+        /// CRC-32 of the lowercase ability id.
+        ability: u32,
+    },
+    /// The action that played ability `ability` stopped, and no transition handed it on.
+    Ended {
+        /// CRC-32 of the lowercase ability id.
+        ability: u32,
+    },
+}
+
+/// The running action that plays the ability of the newest chain started by a press: the
+/// chain's start action, or the action a transition moved it on to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AbilityOwner {
+    /// Its list ([`list_key`]).
+    list: usize,
+    /// Its index in the list.
+    action: usize,
+    /// CRC-32 of the lowercase ability id.
+    ability: u32,
+    /// It cast a spell.
+    cast: bool,
 }
 
 /// The most heart rune charge, in points: a point is a percent of the client's `chrgPcnt` (the
@@ -429,6 +469,10 @@ pub(super) struct AbilityRun {
     cooldowns: Vec<Cooldown>,
     /// The cooldowns started since the last send, with the key of their press.
     cooldown_changes: Vec<(usize, AbilityCooldown)>,
+    /// The action that plays the newest pressed ability.
+    owner: Option<AbilityOwner>,
+    /// The abilities whose action stopped since the last tick's events.
+    ended: Vec<u32>,
     /// The mana.
     pub mana: Mana,
     /// The heart rune charge.
@@ -627,6 +671,7 @@ impl AbilityRun {
             if let Some(ability) = mapped(key).filter(|ability| *ability != 0) {
                 self.press = Some(Press {
                     key,
+                    frame,
                     ability,
                     read_ms: None,
                     used: false,
@@ -655,7 +700,30 @@ impl AbilityRun {
         for list in lists {
             self.tick_list(lists, list, holder, (now_ms, server_ms), &mut events);
         }
+        events.extend(
+            std::mem::take(&mut self.ended)
+                .into_iter()
+                .map(|ability| AbilityEvent::Ended { ability }),
+        );
         events
+    }
+
+    /// The chain of the press just used starts with action `index` of list `list`: it owns the
+    /// press's ability, whose animation starts.
+    fn own_press(&mut self, list: &AbilityList, index: usize, events: &mut Vec<AbilityEvent>) {
+        let Some(press) = self.press else {
+            return;
+        };
+        self.owner = Some(AbilityOwner {
+            list: list_key(list),
+            action: index,
+            ability: press.ability,
+            cast: false,
+        });
+        events.push(AbilityEvent::Started {
+            ability: press.ability,
+            frame: press.frame,
+        });
     }
 
     /// One tick of list `list` of `lists` at `now_ms` (`server_ms` on the server clock): a
@@ -675,6 +743,48 @@ impl AbilityRun {
         let stats = holder.stats();
         let key = list_key(list);
         let tags = holder.tags();
+        let holds = |world: &RunWorld<'_>, transition: &FragmentTransition| {
+            transition
+                .input
+                .as_ref()
+                .is_none_or(|input| world.input(input))
+                && transition
+                    .condition
+                    .as_ref()
+                    .is_none_or(|condition| condition.holds_in(world))
+        };
+        let kept: Vec<(usize, usize)> = self
+            .running_in(list)
+            .filter_map(|running| {
+                let fragment = running.fragment_in(list)?;
+                let since_ms = now_ms.saturating_sub(running.started_ms);
+                let world = self.world(lists, list, holder, &tags, Some(running.action), now_ms);
+                Some(
+                    fragment
+                        .transitions
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, transition)| {
+                            transition.buffer_start_ms.is_some_and(|buffer_start_ms| {
+                                (buffer_start_ms..transition.start_ms).contains(&since_ms)
+                            }) && !running.buffered.iter().any(|(own, _)| own == index)
+                                && holds(&world, transition)
+                        })
+                        .map(|(index, _)| (running.action, index))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .flatten()
+            .collect();
+        for (action, index) in kept {
+            if let Some(running) = self
+                .running
+                .iter_mut()
+                .find(|running| running.list == key && running.action == action)
+            {
+                running.buffered.push((index, self.press));
+            }
+        }
         let steps: Vec<(usize, Step<'_>)> = self
             .running_in(list)
             .filter_map(|running| {
@@ -684,20 +794,20 @@ impl AbilityRun {
                 fragment
                     .transitions
                     .iter()
-                    .filter(|transition| {
-                        since_ms >= transition.start_ms
+                    .enumerate()
+                    .filter_map(|(index, transition)| {
+                        let kept = running
+                            .buffered
+                            .iter()
+                            .find(|(own, _)| *own == index)
+                            .map(|(_, press)| *press);
+                        (since_ms >= transition.start_ms
                             && (since_ms < transition.end_ms
                                 || transition.start_ms >= transition.end_ms)
-                            && transition
-                                .input
-                                .as_ref()
-                                .is_none_or(|input| world.input(input))
-                            && transition
-                                .condition
-                                .as_ref()
-                                .is_none_or(|condition| condition.holds_in(&world))
+                            && (kept.is_some() || holds(&world, transition)))
+                        .then_some((transition, kept.flatten()))
                     })
-                    .find_map(|transition| match &transition.to {
+                    .find_map(|(transition, kept)| match &transition.to {
                         TransitionTo::Action(name) => std::iter::once(list)
                             .chain(lists.iter().copied().filter(|other| list_key(other) != key))
                             .find_map(|target| {
@@ -710,7 +820,7 @@ impl AbilityRun {
                             .filter(|(target, next)| {
                                 !self.running_in(target).any(|other| other.action == *next)
                             })
-                            .map(|(target, next)| Step::Action(target, next)),
+                            .map(|(target, next)| Step::Action(target, next, kept)),
                         TransitionTo::Fragment(name) => list
                             .fragment(name)
                             .filter(|next| next.name != fragment.name)
@@ -721,8 +831,35 @@ impl AbilityRun {
             .collect();
         for (from, step) in steps {
             match step {
-                Step::Action(target, to) => {
+                Step::Action(target, to, kept) => {
+                    let hands_on = self
+                        .owner
+                        .is_some_and(|owner| owner.list == key && owner.action == from);
+                    // A transition to the start of an ability (the flail's abilities chain from
+                    // each other's windows) begins its chain and uses the press, as a start from
+                    // the press does.
+                    let starts_chain = target.actions[to]
+                        .ability
+                        .as_ref()
+                        .is_some_and(|ability| ability.move_name.is_some());
+                    if hands_on
+                        && !starts_chain
+                        && let Some(owner) = self.owner.as_mut()
+                    {
+                        owner.list = list_key(target);
+                        owner.action = to;
+                    }
                     self.leave(list, &[from]);
+                    if starts_chain {
+                        self.chain += 1;
+                        self.chain_cast.clear();
+                        if kept.is_some() {
+                            self.press = kept;
+                        }
+                        if let Some(press) = self.press.as_mut() {
+                            press.used = true;
+                        }
+                    }
                     self.start(
                         lists,
                         target,
@@ -732,6 +869,9 @@ impl AbilityRun {
                         (now_ms, server_ms),
                         events,
                     );
+                    if starts_chain {
+                        self.own_press(target, to, events);
+                    }
                 }
                 Step::Fragment(fragment) => self.switch_fragment(key, from, fragment, now_ms),
             }
@@ -802,6 +942,7 @@ impl AbilityRun {
             );
             if starts_chain && let Some(press) = self.press.as_mut() {
                 press.used = true;
+                self.own_press(list, index, events);
             }
         }
         self.update_tags(lists, list, holder, &tags, now_ms);
@@ -858,6 +999,16 @@ impl AbilityRun {
                 continue;
             }
             self.mana.current -= cost;
+            if let Some(owner) = self
+                .owner
+                .as_mut()
+                .filter(|owner| owner.list == key && owner.action == action_index && !owner.cast)
+            {
+                owner.cast = true;
+                events.push(AbilityEvent::Casting {
+                    ability: owner.ability,
+                });
+            }
             events.push(AbilityEvent::Cast {
                 action: list.actions[action_index].name.clone(),
                 spell: Box::new(cast.spell.clone()),
@@ -908,6 +1059,7 @@ impl AbilityRun {
         {
             running.fragment = Some(fragment.to_owned());
             running.started_ms = now_ms;
+            running.buffered.clear();
         }
     }
 
@@ -970,6 +1122,7 @@ impl AbilityRun {
             started_ms: now_ms,
             tag_activities: vec![None; list.actions[index].tag_activities.len()],
             charge_taken: false,
+            buffered: Vec::new(),
         });
         if let Some(ability) = &list.actions[index].ability {
             for id in &ability.starts_cooldowns {
@@ -988,6 +1141,13 @@ impl AbilityRun {
             .into_iter()
             .partition(|running| running.list == key && actions.contains(&running.action));
         self.running = kept;
+        if let Some(owner) = self.owner.filter(|owner| {
+            left.iter()
+                .any(|running| running.list == owner.list && running.action == owner.action)
+        }) {
+            self.owner = None;
+            self.ended.push(owner.ability);
+        }
         for case in left
             .into_iter()
             .flat_map(|running| running.tag_activities)
@@ -1526,6 +1686,21 @@ impl SimWorld {
                         spell,
                         kind,
                     } => casts.push((entity, action, spell, kind)),
+                    AbilityEvent::Started { ability, frame } => {
+                        if let Some(play) = data.player_sequences().ability(ability) {
+                            player.slayer.ability_started(
+                                ability,
+                                play,
+                                super::members::own_state_counter(frame),
+                            );
+                        }
+                    }
+                    AbilityEvent::Casting { ability } => {
+                        if let Some(play) = data.player_sequences().ability(ability) {
+                            player.slayer.ability_cast(ability, play);
+                        }
+                    }
+                    AbilityEvent::Ended { ability } => player.slayer.ability_ended(ability),
                 }
             }
         }
@@ -2139,6 +2314,37 @@ mod tests {
         (key == 0).then(|| lowercase_crc32(SMITE))
     }
 
+    /// How many abilities `events` start.
+    fn starts(events: &[AbilityEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, AbilityEvent::Started { .. }))
+            .count()
+    }
+
+    /// A pressed ability's action ends: its animation ends with it, once.
+    #[test]
+    fn an_ability_ends_when_its_action_stops() {
+        let list = list();
+        let mut run = AbilityRun::default();
+        run.press(&[key_1(10)], mapped, no_inputs);
+        run.tick(&[&list], &Staff, 0, SERVER_MS);
+        let ended = |events: Vec<AbilityEvent>| {
+            events
+                .into_iter()
+                .filter(|event| matches!(event, AbilityEvent::Ended { .. }))
+                .collect::<Vec<_>>()
+        };
+        assert!(ended(run.tick(&[&list], &Staff, 100, SERVER_MS)).is_empty());
+        assert_eq!(
+            ended(run.tick(&[&list], &Staff, FRAGMENT_MS, SERVER_MS)),
+            [AbilityEvent::Ended {
+                ability: lowercase_crc32(SMITE)
+            }]
+        );
+        assert!(ended(run.tick(&[&list], &Staff, FRAGMENT_MS + 100, SERVER_MS)).is_empty());
+    }
+
     /// The fire staff's Incinerate: the intro's fragment moves on to the loop by a transition
     /// clip, and the loop starts the cooldown. Here the loop is in the weapon's second list,
     /// whose one action is fewer than the first list's two running ones (the run once read the
@@ -2175,6 +2381,7 @@ mod tests {
             condition: None,
             start_ms: TRANSITION_MS,
             end_ms: FRAGMENT_MS,
+            buffer_start_ms: None,
         }];
         let second = AbilityList {
             weapon_classes: vec!["LifeStaff".to_owned()],
@@ -2225,6 +2432,118 @@ mod tests {
         );
     }
 
+    /// The list of [`list`] with a second ability that only a transition of the start's
+    /// fragment starts (the flail's abilities: `CanAttack_Flail_*` from 1.4 s of each other's
+    /// fragment, buffered from 0.1 s); `buffer_start_ms` is its buffered clip's start.
+    fn chained_list(buffer_start_ms: Option<u64>) -> AbilityList {
+        let mut chained = list();
+        chained.fragments[0].transitions = vec![FragmentTransition {
+            to: TransitionTo::Action(CHAINED.to_owned()),
+            input: None,
+            condition: Some(Condition::AbilityMove {
+                ability: CHAINED.to_owned(),
+                back_ticks: 0,
+            }),
+            start_ms: CHAIN_WINDOW_MS,
+            end_ms: FRAGMENT_MS,
+            buffer_start_ms,
+        }];
+        chained.actions.push(ListAction {
+            charge_take: None,
+            name: CHAINED.to_owned(),
+            fragment: CHAINED.to_owned(),
+            activation: None,
+            deactivation: None,
+            tag_activities: Vec::new(),
+            ability: Some(AbilityUse {
+                move_name: Some(CHAINED.to_owned()),
+                starts_cooldowns: vec![CHAINED.to_owned()],
+                ..AbilityUse::default()
+            }),
+            casts: Vec::new(),
+        });
+        chained.fragments.push(FragmentRow {
+            name: CHAINED.to_owned(),
+            scopes: Vec::new(),
+            length_ms: FRAGMENT_MS,
+            markers: Vec::new(),
+            transitions: Vec::new(),
+            hit: None,
+        });
+        chained
+            .cooldowns_ms
+            .insert(CHAINED.to_owned(), CHAINED_COOLDOWN_MS);
+        chained
+    }
+
+    const CHAINED: &str = "Ability_Flail_Slam";
+    const CHAINED_COOLDOWN_MS: u64 = 12_000;
+    const CHAIN_WINDOW_MS: u64 = 500;
+
+    fn mapped_chained(key: usize) -> Option<u32> {
+        (key == 0).then(|| lowercase_crc32(CHAINED))
+    }
+
+    /// The running ability's start and how many cooldowns of the chained ability the client got.
+    fn chained_run(list: &AbilityList, press_ms: u64) -> (bool, usize) {
+        let mut run = AbilityRun::default();
+        run.press(&[key_1(10)], mapped, no_inputs);
+        run.tick(&[list], &Staff, 0, SERVER_MS);
+        run.take_cooldown_changes();
+        run.press(&[key_1(11)], mapped_chained, no_inputs);
+        for now_ms in [
+            press_ms,
+            CHAIN_WINDOW_MS - 1,
+            CHAIN_WINDOW_MS,
+            CHAIN_WINDOW_MS + 50,
+        ] {
+            if now_ms >= press_ms {
+                run.tick(&[list], &Staff, now_ms, SERVER_MS);
+            }
+        }
+        let chained = list
+            .actions
+            .iter()
+            .position(|action| action.name == CHAINED)
+            .expect("chained action");
+        let started = run.running.iter().any(|running| running.action == chained);
+        let cooldowns = run
+            .take_cooldown_changes()
+            .iter()
+            .filter(|(key, cooldown)| *key == 0 && cooldown.ability == lowercase_crc32(CHAINED))
+            .count();
+        (started, cooldowns)
+    }
+
+    #[test]
+    fn a_press_in_a_transition_window_starts_the_chained_ability_and_its_cooldown() {
+        assert_eq!(
+            chained_run(&chained_list(None), CHAIN_WINDOW_MS + 50),
+            (true, 1)
+        );
+    }
+
+    #[test]
+    fn a_buffered_press_starts_the_chained_ability_when_its_window_opens() {
+        const BUFFER_START_MS: u64 = 100;
+        const PRESS_MS: u64 = 300;
+        assert_eq!(
+            chained_run(&chained_list(Some(BUFFER_START_MS)), PRESS_MS),
+            (true, 1),
+            "kept by the buffer"
+        );
+        assert_eq!(
+            chained_run(&chained_list(None), PRESS_MS),
+            (false, 0),
+            "without a buffer, a press before the window is lost"
+        );
+        assert_eq!(
+            chained_run(&chained_list(Some(BUFFER_START_MS)), BUFFER_START_MS - 50),
+            (false, 0),
+            "before the buffer"
+        );
+    }
+
     #[test]
     fn a_key_press_runs_the_ability_chain_once_with_its_cooldown_mana_and_cast() {
         let list = list();
@@ -2237,7 +2556,13 @@ mod tests {
         let start = run.tick(&[&list], &Staff, 0, SERVER_MS);
         assert_eq!(
             start,
-            [AbilityEvent::Effects(vec!["Smite_Self".to_owned()])]
+            [
+                AbilityEvent::Effects(vec!["Smite_Self".to_owned()]),
+                AbilityEvent::Started {
+                    ability: lowercase_crc32(SMITE),
+                    frame: 10
+                }
+            ]
         );
         let changes = run.take_cooldown_changes();
         assert_eq!(changes.len(), 1);
@@ -2265,11 +2590,17 @@ mod tests {
         );
         // A second press during the cooldown starts nothing.
         run.press(&[key_1(11)], mapped, no_inputs);
-        assert!(run.tick(&[&list], &Staff, 2_000, SERVER_MS).is_empty());
+        assert_eq!(
+            run.tick(&[&list], &Staff, 2_000, SERVER_MS),
+            [AbilityEvent::Ended {
+                ability: lowercase_crc32(SMITE)
+            }],
+            "the first press's ability ended; the second starts nothing"
+        );
         assert!(run.take_cooldown_changes().is_empty());
         // After the cooldown it runs again.
         run.press(&[key_1(12)], mapped, no_inputs);
-        assert_eq!(run.tick(&[&list], &Staff, 5_000, SERVER_MS).len(), 1);
+        assert_eq!(starts(&run.tick(&[&list], &Staff, 5_000, SERVER_MS)), 1);
     }
 
     /// A press comes with its input message, between two ticks. The start's test names the press
@@ -2284,10 +2615,7 @@ mod tests {
         let mut run = AbilityRun::default();
         assert!(run.tick(&[&list], &Staff, 0, SERVER_MS).is_empty());
         run.press(&[key_1(10)], mapped, no_inputs);
-        assert_eq!(
-            run.tick(&[&list], &Staff, TICK_MS, SERVER_MS),
-            [AbilityEvent::Effects(vec!["Smite_Self".to_owned()])]
-        );
+        assert_eq!(starts(&run.tick(&[&list], &Staff, TICK_MS, SERVER_MS)), 1);
         let mut late = AbilityRun::default();
         late.mana.current = 0.0;
         late.press(&[key_1(10)], mapped, no_inputs);
@@ -2326,7 +2654,7 @@ mod tests {
         assert!(run.take_cooldown_changes().is_empty(), "no cooldown");
         run.mana.current = MANA_MAX;
         run.press(&[key_1(11)], mapped, no_inputs);
-        assert_eq!(run.tick(&[&list], &Staff, 100, SERVER_MS).len(), 1);
+        assert_eq!(starts(&run.tick(&[&list], &Staff, 100, SERVER_MS)), 1);
         assert_eq!(run.take_cooldown_changes().len(), 1);
     }
 
@@ -2833,7 +3161,7 @@ mod tests {
             .members
             .iter()
             .find_map(|member| match &member.state {
-                MemberState::Spell(state) => Some(state.clone()),
+                MemberState::Spell(state) => Some(*state),
                 _ => None,
             })
             .expect("its spell state");
