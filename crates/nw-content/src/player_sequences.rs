@@ -19,11 +19,21 @@
 //! the block and the aim (right-click) and every movement state are the server's. The client
 //! starts the attacks of a combo and the heavy attack itself (input row 1), and the server
 //! follows some of them ([`FollowUp`]).
+//!
+//! The client sends no slayer state for a weapon ability either (input row 1 is empty at every
+//! ability key press): the server starts the ability's animation in the own state after the
+//! press, 31 to 42 ms later ([`AbilityPlay`]; ability animation study 2026-11-11, 17,488 answered
+//! presses of 95 abilities in 1,195 ledgers: `blighted-emu-tools`
+//! `scratch-work/capdecode/src/bin/abilityslayer.rs` and `abilityplays.py`). Without it the
+//! client shows the ability's effects but no animation (live 2026-11-11: Flail Trip, the life
+//! staff's abilities).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use nw_formats::objectstream::lowercase_crc32;
 
 use crate::player_attacks::stance_key;
 
@@ -264,12 +274,45 @@ pub struct FollowUp {
     pub seen: u32,
 }
 
+/// The first-slot state of an ability's animation (children 13 and 15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstPlay {
+    /// `slayerStateId` (child 13): 8 for the full-body abilities.
+    pub state: u64,
+    /// `slayerSequenceId` (child 15).
+    pub sequence: u64,
+}
+
+/// The animation the server starts for one weapon ability, in the own state after its key's
+/// press (each slot it sets starts in the press's state): a full-body ability plays in the
+/// first slot (the flail's Trip: `13=08 15=2344 17=<press> 48=01`), an upper-body one in the
+/// slots past it (the life staff's Orb of Protection: `16=33 17=<press> 18=3039 48=03`; an aimed
+/// one also in the third: Sacred Ground's `16=36 18=142 19=46 21=449 48=33`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbilityPlay {
+    /// The ability id (its `CooldownData` and `AbilityData` id, as retail's cooldown names it).
+    pub ability: String,
+    /// The first slot; `None` for an upper-body ability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first: Option<FirstPlay>,
+    /// The slots past the first and the marker.
+    #[serde(default)]
+    pub slots: SlotsChange,
+    /// What an aimed ability's cast sends (Sacred Ground's `16=33 18=993 19=00 21=00 48=03`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast: Option<SlotsChange>,
+    /// How many presses showed the start.
+    pub seen: u32,
+}
+
 /// The file form of the table.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct TableFile {
     hold_records: u16,
     stances: Vec<StanceSequences>,
     follow_ups: Vec<FollowUp>,
+    #[serde(default)]
+    abilities: Vec<AbilityPlay>,
 }
 
 /// The table.
@@ -281,6 +324,8 @@ pub struct PlayerSequences {
     pub hold_records: u16,
     by_key: HashMap<u32, StanceSequences>,
     follow_ups: HashMap<u64, FollowUp>,
+    /// The ability animations, by CRC-32 of the lowercase ability id.
+    abilities: HashMap<u32, AbilityPlay>,
 }
 
 impl PlayerSequences {
@@ -303,11 +348,25 @@ impl PlayerSequences {
     /// Returns [`PlayerSequencesError::Json`] when the text is not the table.
     pub fn parse(text: &str) -> Result<Self, PlayerSequencesError> {
         let file: TableFile = serde_json::from_str(text)?;
-        Ok(Self::of_parts(
-            file.hold_records,
-            file.stances,
-            file.follow_ups,
-        ))
+        Ok(
+            Self::of_parts(file.hold_records, file.stances, file.follow_ups)
+                .with_abilities(file.abilities),
+        )
+    }
+
+    /// The same table with the ability animations `abilities`.
+    #[must_use]
+    pub fn with_abilities(mut self, abilities: Vec<AbilityPlay>) -> Self {
+        self.abilities = abilities
+            .into_iter()
+            .map(|play| (lowercase_crc32(&play.ability), play))
+            .collect();
+        self
+    }
+
+    /// The animation of the ability whose lowercase id has CRC-32 `ability`.
+    pub fn ability(&self, ability: u32) -> Option<&AbilityPlay> {
+        self.abilities.get(&ability)
     }
 
     /// The table of `stances` and `follow_ups`, with the charge after `hold_records`.
@@ -326,6 +385,7 @@ impl PlayerSequences {
                 .into_iter()
                 .map(|follow_up| (follow_up.client, follow_up))
                 .collect(),
+            abilities: HashMap::new(),
         }
     }
 
@@ -347,6 +407,11 @@ impl PlayerSequences {
     /// Whether it has no stance.
     pub fn is_empty(&self) -> bool {
         self.by_key.is_empty()
+    }
+
+    /// Abilities in the table ([`AbilityPlay`]).
+    pub fn abilities_len(&self) -> usize {
+        self.abilities.len()
     }
 }
 
@@ -371,8 +436,48 @@ mod tests {
              "alt_fire": {"second_sequence": 94, "marker": 41},
              "reload": {"second_state": 36, "second_sequence": 4225}}
         ],
-        "follow_ups": [{"client": 5051, "server": 484, "at_release": true, "seen": 9}]
+        "follow_ups": [{"client": 5051, "server": 484, "at_release": true, "seen": 9}],
+        "abilities": [
+            {"ability": "Ability_Flail_Trip", "first": {"state": 8, "sequence": 2344},
+             "slots": {"marker": 1}, "seen": 15},
+            {"ability": "Ability_Lifestaff_SacredGround",
+             "slots": {"second_state": 36, "second_sequence": 142, "third_state": 46,
+                       "third_sequence": 449, "marker": 33},
+             "cast": {"second_state": 33, "second_sequence": 993, "third_state": 0,
+                      "third_sequence": 0, "marker": 3}, "seen": 417}
+        ]
     }"#;
+
+    #[test]
+    fn an_ability_animation_is_found_by_the_crc_of_its_lowercase_id() {
+        let table = PlayerSequences::parse(TABLE).expect("table");
+        let trip = table
+            .ability(lowercase_crc32("ability_flail_trip"))
+            .expect("trip");
+        assert_eq!(
+            trip.first,
+            Some(FirstPlay {
+                state: 8,
+                sequence: 2344
+            })
+        );
+        assert_eq!(trip.slots.marker, Some(1));
+        let ground = table
+            .ability(lowercase_crc32("Ability_Lifestaff_SacredGround"))
+            .expect("sacred ground");
+        assert_eq!(ground.first, None, "an upper-body ability");
+        assert_eq!(
+            ground.cast.map(|cast| cast.second_sequence),
+            Some(Some(993))
+        );
+        assert_eq!(table.ability(lowercase_crc32("Ability_Unknown")), None);
+        assert_eq!(table.abilities_len(), 2);
+        let old =
+            PlayerSequences::parse(r#"{"hold_records": 19, "stances": [], "follow_ups": []}"#)
+                .expect("a table without abilities");
+        assert_eq!(old.ability(lowercase_crc32("Ability_Flail_Trip")), None);
+        assert_eq!(old.abilities_len(), 0);
+    }
 
     #[test]
     fn the_table_reads_by_stance_key() {
