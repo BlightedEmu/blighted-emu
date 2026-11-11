@@ -57,7 +57,10 @@ pub struct FragmentMarker {
 /// A `CAGE-TransitionInstant` clip of a fragment: while it plays, the action it names takes the
 /// place of the action that plays the fragment when its input is on and its condition holds
 /// (the fire staff's `Ability_Fire_Staff_Incinerate_Intro` goes on to its `_Loop`, which only
-/// starts this way).
+/// starts this way). A `CAGE-TransitionBuffered` clip before it on its layer to the same place
+/// keeps a key press for it: when the input and condition hold while the buffered clip plays,
+/// the transition is taken once the instant clip starts (the flail's abilities: buffered from
+/// 0.1 s, instant from 1.4 s of `Ability_Flail_Slam`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FragmentTransition {
     /// Where it leads.
@@ -70,6 +73,10 @@ pub struct FragmentTransition {
     pub start_ms: u64,
     /// When it ends, ms after the fragment starts.
     pub end_ms: u64,
+    /// When its `CAGE-TransitionBuffered` clip starts, ms after the fragment starts; `None`
+    /// without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buffer_start_ms: Option<u64>,
 }
 
 /// Where a transition clip leads.

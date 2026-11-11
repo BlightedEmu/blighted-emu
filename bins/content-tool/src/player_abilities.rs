@@ -21,7 +21,7 @@ use nw_content::player_abilities::{
 };
 use nw_content::player_attacks::stance_tags;
 use nw_formats::input_profile::input_actions;
-use nw_formats::mannequin::{ActionList, Condition, Fragment, GridList};
+use nw_formats::mannequin::{ActionList, Condition, Fragment, GridList, ProcClip};
 
 use crate::melee_shapes::ms;
 use crate::player_attacks::{
@@ -34,6 +34,8 @@ const MS_PER_S: u64 = 1_000;
 const INPUT_PROFILE: &str = "libs/config/defaultprofile.xml";
 /// The clip that moves a running action on to another, and its parameters.
 const TRANSITION_CLIP: &str = "CAGE-TransitionInstant";
+/// The clip that keeps a press for the instant clip after it on its layer.
+const BUFFERED_TRANSITION_CLIP: &str = "CAGE-TransitionBuffered";
 const TRANSITION_ACTION: &str = "NewAction";
 const TRANSITION_FRAGMENT: &str = "NewFragment";
 const TRANSITION_INPUT: &str = "Input";
@@ -222,7 +224,9 @@ fn markers_of(fragments: &[&Fragment], end_ms: u64) -> Vec<FragmentMarker> {
 /// or to a `NewFragment` that no action plays ([`TransitionTo::Fragment`]); a
 /// clip without an end lasts to `end_ms`. A clip's named condition is the one of `list`, else of
 /// another of the action lists `all` (the bow's aim fragment tests the archery list's); a name
-/// that none has stays a test that never holds.
+/// that none has stays a test that never holds. The buffer of a clip is the
+/// `CAGE-TransitionBuffered` clip of its layer that starts last before it with the same
+/// `NewAction` and `NewFragment`.
 fn transitions_of(
     fragments: &[&Fragment],
     end_ms: u64,
@@ -231,8 +235,12 @@ fn transitions_of(
 ) -> Vec<FragmentTransition> {
     let mut transitions: Vec<FragmentTransition> = fragments
         .iter()
-        .flat_map(|fragment| fragment.clips_of(TRANSITION_CLIP))
-        .filter_map(|clip| {
+        .flat_map(|fragment| {
+            fragment
+                .clips_of(TRANSITION_CLIP)
+                .map(move |clip| (clip, buffer_start_of(fragment, clip)))
+        })
+        .filter_map(|(clip, buffer_start_ms)| {
             let named = |key| clip.param(key).filter(|value| !value.is_empty());
             let to = named(TRANSITION_ACTION)
                 .map(|action| TransitionTo::Action(action.to_owned()))
@@ -261,11 +269,34 @@ fn transitions_of(
                 }),
                 start_ms: ms(clip.start_s),
                 end_ms: clip.end_s.map_or(end_ms, ms),
+                buffer_start_ms,
             })
         })
         .collect();
     transitions.sort_by_key(|transition| transition.start_ms);
     transitions
+}
+
+/// The start (ms) of the `CAGE-TransitionBuffered` clip of `fragment` that keeps a press for the
+/// instant clip `instant`: on its layer, to the same place, the last that starts before it.
+fn buffer_start_of(fragment: &Fragment, instant: &ProcClip) -> Option<u64> {
+    let place = |clip: &ProcClip| {
+        (
+            clip.param(TRANSITION_ACTION).unwrap_or_default().to_owned(),
+            clip.param(TRANSITION_FRAGMENT)
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    };
+    fragment
+        .clips_of(BUFFERED_TRANSITION_CLIP)
+        .filter(|buffered| {
+            buffered.layer == instant.layer
+                && buffered.start_s < instant.start_s
+                && place(buffered) == place(instant)
+        })
+        .map(|buffered| ms(buffered.start_s))
+        .max()
 }
 
 /// The cooldown and mana cost ids `condition` tests, into `cooldowns` and `costs`.
@@ -595,6 +626,59 @@ mod tests {
                     Some("attack_shoot")
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn a_buffered_clip_keeps_a_press_for_the_instant_clip_after_it() {
+        use nw_formats::mannequin::AnimDatabase;
+
+        /// The flail's Slam fragment, cut (`player_flail.adb`, build 25810808): one layer
+        /// buffers the Blast from 0.1 s and takes it from 1.4 s; another layer has an instant
+        /// clip with no buffer.
+        const ADB: &str = r#"<AnimDB><FragmentList>
+ <Slam><Fragment Tags="Flail"><ProcLayer>
+  <Blend ExitTime="0.1"/><Procedural type="CAGE-TransitionBuffered"><ProceduralParams><Condition value="CanAttack_Flail_Blast"/><NewFragment value=""/><NewAction value="Ability_Flail_Blast"/></ProceduralParams></Procedural>
+  <Blend ExitTime="1.3"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Condition value="CanAttack_Flail_Blast"/><NewFragment value=""/><NewAction value="Ability_Flail_Blast"/></ProceduralParams></Procedural>
+ </ProcLayer><ProcLayer>
+  <Blend ExitTime="1.4"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Input value="attack_primary_virtual"/><NewFragment value=""/><NewAction value="Attack"/></ProceduralParams></Procedural>
+ </ProcLayer></Fragment></Slam>
+</FragmentList></AnimDB>"#;
+        const ACTIONS: &str = r#"<ActionList><Actions>
+ <Action Name="Ability_Flail_Blast" FragmentName="Blast"/>
+</Actions>
+<Conditions><And name="CanAttack_Flail_Blast"><IfMannequinTag TagName="Flail"/></And></Conditions>
+</ActionList>"#;
+        const LENGTH_MS: u64 = 2_067;
+        let adb = AnimDatabase::parse(ADB).expect("adb");
+        let list = ActionList::parse(ACTIONS).expect("actions");
+        let slam = adb.best("Slam", &["Flail"]).expect("fragment");
+        let transitions = transitions_of(&[slam], LENGTH_MS, &list, &[]);
+        let windows: Vec<(&TransitionTo, Option<u64>, u64)> = transitions
+            .iter()
+            .map(|transition| {
+                (
+                    &transition.to,
+                    transition.buffer_start_ms,
+                    transition.start_ms,
+                )
+            })
+            .collect();
+        assert_eq!(
+            windows,
+            [
+                (
+                    &TransitionTo::Action("Ability_Flail_Blast".to_owned()),
+                    Some(100),
+                    1_400
+                ),
+                (&TransitionTo::Action("Attack".to_owned()), None, 1_400),
+            ]
+        );
+        assert_eq!(
+            transitions[0].condition,
+            list.resolved_condition("CanAttack_Flail_Blast"),
+            "the lower-case name resolves"
         );
     }
 
