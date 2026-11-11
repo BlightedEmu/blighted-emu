@@ -38,6 +38,7 @@ mod stats;
 mod status_effects;
 mod trading_post;
 mod travel;
+mod world_clock;
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_db;
@@ -119,6 +120,7 @@ pub use travel::{
     PLOT_ID_LEN, SavedCamp, SavedHome, SavedHomeRecord, SavedHousingItem, SavedTravel,
 };
 pub use uuid::Uuid;
+pub use world_clock::world_clock_start;
 
 /// What Discord says about a user at one login.
 #[derive(Debug, Clone, PartialEq, Eq)]

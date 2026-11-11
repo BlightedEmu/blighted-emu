@@ -37,7 +37,7 @@ use nw_db::{
     save_character_quests, save_published_look, submit_stats,
 };
 use nw_db::{Purchase, buy_entitlement};
-use nw_db::{SavedGatherNode, level_gather_nodes, save_gather_node};
+use nw_db::{SavedGatherNode, level_gather_nodes, save_gather_node, world_clock_start};
 use nw_db::{clear_new_account_titles, company_listings, earn_account_titles, stored_players};
 use nw_messages::ArenaClientMsg;
 use nw_messages::EconomyCall;
@@ -413,10 +413,22 @@ pub async fn serve(
     let mob_ai = Arc::clone(&settings.mob_ai);
     let design = Arc::clone(&settings.design);
     let (handoff_results, mut answers) = mpsc::channel(RESULT_QUEUE);
+    // The world's clock anchor, kept over restarts and the same on every sim (world migration
+    // 0035); this start when the database cannot give it.
+    let start_ns = started_at_ms
+        .saturating_sub(SERVER_EPOCH_UNIX_MS)
+        .saturating_mul(NS_PER_MS);
+    let clock_ns = match world_clock_start(&databases.world, start_ns).await {
+        Ok(clock_ns) => clock_ns,
+        Err(error) => {
+            tracing::error!(%error, "world clock not read: this start is the clock anchor");
+            start_ns
+        }
+    };
     let mut state = Loop {
         world: SimWorld::new(
             settings.world,
-            WorldIds::random(started_at_ms.saturating_sub(SERVER_EPOCH_UNIX_MS))?,
+            WorldIds::random(clock_ns / NS_PER_MS)?,
             ground,
             me,
             settings.combat.clone(),
