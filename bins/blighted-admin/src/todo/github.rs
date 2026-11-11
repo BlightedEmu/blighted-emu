@@ -127,9 +127,11 @@ mod tests {
     #[test]
     fn an_issue_url_names_owner_repo_and_number() {
         assert_eq!(
-            parse_issue_url("https://github.com/PikkonMG/blighted-emu/issues/12#issuecomment-1"),
+            parse_issue_url(
+                "https://github.com/example-owner/blighted-emu/issues/12#issuecomment-1"
+            ),
             Some(IssueRef {
-                owner: "PikkonMG".to_owned(),
+                owner: "example-owner".to_owned(),
                 repo: "blighted-emu".to_owned(),
                 number: 12,
             })
