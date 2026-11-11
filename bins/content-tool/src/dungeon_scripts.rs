@@ -211,6 +211,16 @@ const DOUBLED_SEPARATOR: &str = "//";
 /// The file names of the open world's spawn group slices start with one of these (lower case).
 const SPAWN_GROUP_PREFIXES: [&str; 2] = ["worldevent_", "worldboss_"];
 
+/// The wanted script path that capital slice name `slice_name` places, if any. A story
+/// instance's capital names its script without the slices folder
+/// (`Dungeon/MedeaWindsward/MedeaScript` in the open world's `06sw_medea_script` capitals), so
+/// the name is tried as it is and under that folder.
+fn placed_script(slice_name: &str, wanted: impl Fn(&str) -> bool) -> Option<String> {
+    let bare = capital_script_path(slice_name);
+    let in_slices = format!("{SLICES_DIR}/{bare}");
+    [bare, in_slices].into_iter().find(|script| wanted(script))
+}
+
 /// The pak path of the slice a capital names: a level script capital names it without its
 /// extension (`Dungeon/LevelScripts/AmrineDungeon`), a generated one with it and with a doubled
 /// separator (`CoatGen\\\\efc337e6\\WorldEvent_SpawnGroup_Single_Master_3815808514.dynamicslice`).
@@ -258,8 +268,7 @@ fn script_placements(
         let capitals = parse_capitals(&bytes)
             .map_err(|source| DungeonScriptsBuildError::Capitals { path, source })?;
         for capital in capitals {
-            let script = capital_script_path(&capital.slice_name);
-            if wanted(&script) {
+            if let Some(script) = placed_script(&capital.slice_name, &wanted) {
                 found.push((
                     script,
                     Transform::placed(
@@ -1218,6 +1227,25 @@ mod tests {
             (ALIAS.to_owned(), alias),
             (CHEST.to_owned(), chest),
         ]))
+    }
+
+    #[test]
+    fn a_story_instance_script_is_found_without_its_slices_folder() {
+        let wanted = script_slice_path("Dungeon/MedeaWindsward/MedeaScript");
+        assert_eq!(
+            placed_script("Dungeon/MedeaWindsward/MedeaScript", |path| path == wanted).as_deref(),
+            Some(wanted.as_str())
+        );
+        let generated =
+            "CoatGen\\\\efc337e6\\WorldEvent_SpawnGroup_Single_Master_3815808514.dynamicslice";
+        assert_eq!(
+            placed_script(generated, is_spawn_group).as_deref(),
+            Some("coatgen/efc337e6/worldevent_spawngroup_single_master_3815808514.dynamicslice")
+        );
+        assert_eq!(
+            placed_script("Dungeon/Other/OtherScript", |path| path == wanted),
+            None
+        );
     }
 
     #[test]

@@ -40,7 +40,7 @@ use super::{
     handoff_offer, owner_in, quests_of, send_now, unix_ns,
 };
 use crate::login::phase_id;
-use crate::player_content::ENTRANCE_PREFIX;
+use crate::player_content::entrance_rest;
 
 /// Interaction kinds of the client's `InteractionUIActions` (`sheathe/interact_enum.tsv`).
 pub mod kind {
@@ -310,8 +310,7 @@ pub(super) fn entrance_mode<'a>(
         .split('.')
         .next()?
         .to_lowercase();
-    let rest = name
-        .strip_prefix(ENTRANCE_PREFIX)?
+    let rest = entrance_rest(&name)?
         .replace(LOCKED_INFIX, "")
         .replace(VERSION_SUFFIX, "");
     // A trailing number of more digits than a map number is a hash (`_1970794647`).
@@ -323,23 +322,48 @@ pub(super) fn entrance_mode<'a>(
         }
         _ => rest,
     };
-    let key = letters_and_digits(&rest);
-    let mut found = modes.filter(|mode| {
-        let id = mode.id.to_lowercase();
-        let map = mode.map.map_name.to_lowercase();
-        let map = MAP_PREFIXES
+    let names: Vec<(&InstanceMode, [String; 3])> = modes
+        .map(|mode| {
+            let id = mode.id.to_lowercase();
+            let map = mode.map.map_name.to_lowercase();
+            let map = MAP_PREFIXES
+                .iter()
+                .find_map(|prefix| map.strip_prefix(prefix))
+                .unwrap_or(&map);
+            let names = [
+                letters_and_digits(&id),
+                letters_and_digits(id.strip_prefix(DUNGEON_PREFIX).unwrap_or(&id)),
+                letters_and_digits(map),
+            ];
+            (mode, names)
+        })
+        .collect();
+    // The name's words, longest first, with and without their number-only words: a word after
+    // the mode's name is a variant (`Entrance_QuestIsabella_Simple`), a number-only word a stage
+    // (`DungeonEntranceTrial_00_BrimstoneSandworm`). The first key that names any mode decides:
+    // two modes for it give none.
+    let words: Vec<&str> = rest.split('_').filter(|word| !word.is_empty()).collect();
+    for count in (1..=words.len()).rev() {
+        let head = &words[..count];
+        let without_numbers: Vec<&str> = head
             .iter()
-            .find_map(|prefix| map.strip_prefix(prefix))
-            .unwrap_or(&map);
-        [
-            letters_and_digits(&id),
-            letters_and_digits(id.strip_prefix(DUNGEON_PREFIX).unwrap_or(&id)),
-            letters_and_digits(map),
-        ]
-        .contains(&key)
-    });
-    let mode = found.next()?;
-    found.next().is_none().then_some(mode)
+            .copied()
+            .filter(|word| !word.chars().all(|c| c.is_ascii_digit()))
+            .collect();
+        for key in [
+            letters_and_digits(&head.concat()),
+            letters_and_digits(&without_numbers.concat()),
+        ] {
+            let mut found = names
+                .iter()
+                .filter(|(_, names)| names.contains(&key))
+                .map(|(mode, _)| *mode);
+            if let Some(mode) = found.next() {
+                return found.next().is_none().then_some(mode);
+            }
+        }
+    }
+    None
 }
 
 /// Digits of a map number at the end of an entrance name (`brimstone00`).
@@ -1178,6 +1202,26 @@ mod tests {
     fn modes() -> Vec<InstanceMode> {
         vec![
             mode(
+                "QuestMedea",
+                "NewWorld_VitaeEterna",
+                InstanceKind::SoloTrial,
+            ),
+            mode(
+                "QuestApophis",
+                "NewWorld_VitaeEterna",
+                InstanceKind::SoloTrial,
+            ),
+            mode(
+                "QuestIsabella",
+                "NW_ORI_SM_QuestIsabella",
+                InstanceKind::SoloTrial,
+            ),
+            mode(
+                "TrialBrimstoneSandworm",
+                "NewWorld_VitaeEterna",
+                InstanceKind::RaidTrial,
+            ),
+            mode(
                 "DungeonAmrine",
                 "NW_Dungeon_Windsward_00",
                 InstanceKind::Expedition,
@@ -1250,6 +1294,31 @@ mod tests {
             None
         );
         assert_eq!(found("Dungeon/Entrance/DungeonEntrance_FirstLight02"), None);
+        // The story instance forms of the open world's capitals.
+        assert_eq!(
+            found("Dungeon/MedeaWindsward/4_1_Trial_Entrance_QuestMedea").as_deref(),
+            Some("QuestMedea")
+        );
+        assert_eq!(
+            found("Dungeon/MedeaWindsward/4__Trial_Entrance_QuestMedea_Locked").as_deref(),
+            Some("QuestMedea")
+        );
+        assert_eq!(
+            found("Dungeon/ApophisBrimstone/Entrance_QuestApophis_V2").as_deref(),
+            Some("QuestApophis")
+        );
+        assert_eq!(
+            found("Dungeon/IsabellaShattered/Entrance_QuestIsabella_Persisting_Collision_V2")
+                .as_deref(),
+            Some("QuestIsabella"),
+            "a variant word after the name"
+        );
+        assert_eq!(
+            found("Dungeon/Entrance/DungeonEntranceTrial_00_BrimstoneSandworm").as_deref(),
+            Some("TrialBrimstoneSandworm"),
+            "a stage number before the name"
+        );
+        assert_eq!(found("IO_Season_04_Q03_Boat_Entrance"), None);
         assert_eq!(found("POIs/Settlement/Townboard"), None);
     }
 

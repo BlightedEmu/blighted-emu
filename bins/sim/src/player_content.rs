@@ -897,9 +897,23 @@ pub struct PlayerContent {
     pub quest_guide: crate::world::QuestGuide,
 }
 
-/// The lower-case start of an expedition entrance's slice name
-/// (`Dungeon/Entrance/DungeonEntrance_Amrine`, `DungeonEntranceTrial_Season_01`).
-pub const ENTRANCE_PREFIX: &str = "dungeonentrance";
+/// The lower-case words an instance entrance's slice name starts with, after its stage number
+/// and a `Trial_` (Observed in the open world's capitals: `DungeonEntrance_Amrine`,
+/// `DungeonEntranceTrial_Season_01`, `RaidEntrance_MonarchsBluffs00`,
+/// `4_1_Trial_Entrance_QuestMedea`, `Entrance_QuestApophis_V2`).
+pub const ENTRANCE_WORDS: [&str; 3] = ["dungeonentrance", "raidentrance", "entrance"];
+/// The word before the entrance word of a story instance's entrance (`3_2_Trial_Entrance_...`).
+const TRIAL_WORD: &str = "trial_";
+
+/// What follows the entrance word in the lower-case slice file name `name`
+/// (`_questmedea` of `4_1_trial_entrance_questmedea`); `None` for a slice that is no entrance.
+pub fn entrance_rest(name: &str) -> Option<&str> {
+    let name = name.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
+    let name = name.strip_prefix(TRIAL_WORD).unwrap_or(name);
+    ENTRANCE_WORDS
+        .iter()
+        .find_map(|word| name.strip_prefix(word))
+}
 
 /// The expedition entrances among the capitals of `level`: each one's slice name by its entity
 /// id (`capital_id`).
@@ -912,7 +926,7 @@ pub fn dungeon_entrances(level: &WorldFile) -> HashMap<u64, String> {
                 .slice_name
                 .rsplit('/')
                 .next()
-                .is_some_and(|name| name.to_lowercase().starts_with(ENTRANCE_PREFIX))
+                .is_some_and(|name| entrance_rest(&name.to_lowercase()).is_some())
         })
         .filter_map(|capital| Some((capital_id(&capital.id)?, capital.slice_name.clone())))
         .collect()
