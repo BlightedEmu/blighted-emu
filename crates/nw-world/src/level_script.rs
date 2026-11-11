@@ -15,6 +15,10 @@
 //! - `EncounterManagerComponent`: an encounter's top stages and its activation;
 //! - `EncounterComponent`: one stage (a wave or a phase): its child stages, its spawn timeline
 //!   (`SpawnDefinition`), its objectives and its start and end actions;
+//! - the spawn rules of a spawner entity, on a component of its kind beside its spawner (the
+//!   area spawner's `m_liveCount`, `m_minRespawnRange`, `m_maxRespawnRange`, `m_spawnOnEnable`,
+//!   `m_respawnAfterDeath`, `m_maintainPopulation`; the point spawner's `m_minRespawnCooldown`,
+//!   `m_maxRespawnCooldown`, `m_spawnOnInitialize`; the client's field names);
 //! - `DetectionVolumeComponent`: the radius of an encounter's player volume;
 //! - `GatherableControllerComponent`: a loot container's loot table.
 //!
@@ -171,6 +175,35 @@ pub struct Spawner {
     pub on_initialize: bool,
     /// `m_spawnOnTrigger`.
     pub on_trigger: bool,
+}
+
+/// The kind of a spawner entity's spawn rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpawnerKind {
+    /// An area spawner (`m_liveCount`).
+    Area,
+    /// A point spawner (`m_minRespawnCooldown`).
+    Point,
+}
+
+/// The spawn rules of a spawner entity: how many it keeps alive, when it spawns again, and
+/// whether it spawns when it is enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SpawnerRules {
+    /// The kind of spawner.
+    pub kind: SpawnerKind,
+    /// `m_liveCount`: how many spawns it keeps alive (an area spawner; 0 for a point spawner).
+    pub live_count: u32,
+    /// The time to its next spawn after one ends, seconds: `m_minRespawnRange` and
+    /// `m_maxRespawnRange` of an area spawner, the cooldowns of a point spawner.
+    pub respawn_s: [f32; 2],
+    /// It spawns when it is enabled (`m_spawnOnEnable` of an area spawner,
+    /// `m_spawnOnInitialize` of a point spawner).
+    pub spawn_on_enable: bool,
+    /// `m_respawnAfterDeath`: it spawns again after its spawn died.
+    pub respawn_after_death: bool,
+    /// `m_maintainPopulation`.
+    pub maintain_population: bool,
 }
 
 /// The vitals row of a spawner slice's mob (`AIVariantProviderComponent`).
@@ -382,8 +415,12 @@ pub struct ScriptEntity {
     pub stage: Option<EncounterStage>,
     /// The radius of its detection volume's sphere, metres.
     pub detection_radius_m: Option<f32>,
+    /// Its detection volume's first query shape (`m_shape`) and that volume's offset.
+    pub detection_shape: Option<(Element, [f32; 3])>,
     /// Its loot container's loot table (`m_lootTableId`).
     pub loot_table: Option<String>,
+    /// The spawn rules of its spawner.
+    pub rules: Option<SpawnerRules>,
 }
 
 /// The entities of one script slice, in stream order.
@@ -440,6 +477,10 @@ impl SliceScript {
 }
 
 /// The names of the fields read, as their name CRCs.
+/// The name CRC of a `DetectionVolumeComponent`'s shape offset (its text is Unknown; a vector,
+/// 0 in the volumes seen).
+pub const DETECTION_OFFSET_NAME: u32 = 0x0a63_b9da;
+
 struct Names {
     id: u32,
     name: u32,
@@ -487,8 +528,17 @@ struct Names {
     recursive: u32,
     local_player_only: u32,
     shape: u32,
+    detection_offset: u32,
     radius: u32,
     loot_table: u32,
+    live_count: u32,
+    min_respawn_range: u32,
+    max_respawn_range: u32,
+    min_respawn_cooldown: u32,
+    max_respawn_cooldown: u32,
+    spawn_on_enable: u32,
+    respawn_after_death: u32,
+    maintain_population: u32,
 }
 
 impl Names {
@@ -540,8 +590,17 @@ impl Names {
             recursive: lowercase_crc32("m_applyRecursively"),
             local_player_only: lowercase_crc32("m_localPlayerOnly"),
             shape: lowercase_crc32("m_shape"),
+            detection_offset: DETECTION_OFFSET_NAME,
             radius: lowercase_crc32("m_radius"),
             loot_table: lowercase_crc32("m_lootTableId"),
+            live_count: lowercase_crc32("m_liveCount"),
+            min_respawn_range: lowercase_crc32("m_minRespawnRange"),
+            max_respawn_range: lowercase_crc32("m_maxRespawnRange"),
+            min_respawn_cooldown: lowercase_crc32("m_minRespawnCooldown"),
+            max_respawn_cooldown: lowercase_crc32("m_maxRespawnCooldown"),
+            spawn_on_enable: lowercase_crc32("m_spawnOnEnable"),
+            respawn_after_death: lowercase_crc32("m_respawnAfterDeath"),
+            maintain_population: lowercase_crc32("m_maintainPopulation"),
         }
     }
 }
@@ -762,6 +821,54 @@ fn manager(component: &Element, names: &Names) -> Result<EncounterManager, Level
     })
 }
 
+/// The spawn rules of a component of a spawner's kind: an area spawner holds `m_liveCount`, a
+/// point spawner `m_minRespawnCooldown`; `None` for another component.
+fn spawner_rules(
+    component: &Element,
+    names: &Names,
+) -> Result<Option<SpawnerRules>, LevelScriptError> {
+    // A time is a big-endian `f32`, or an `f64` (Observed: `m_minRespawnRange` of the build's
+    // area spawners has 8 bytes).
+    let seconds = |name: u32| -> Result<f32, LevelScriptError> {
+        let Some(element) = find(component, name, FIELD_DEPTH) else {
+            return Ok(0.0);
+        };
+        match <[u8; size_of::<f64>()]>::try_from(element.value.as_slice()) {
+            // Seconds of a respawn time.
+            #[allow(clippy::cast_possible_truncation, reason = "seconds of a respawn time")]
+            Ok(bytes) => Ok(f64::from_be_bytes(bytes) as f32),
+            Err(_) => element.as_f32().map_err(LevelScriptError::from),
+        }
+    };
+    if find(component, names.live_count, FIELD_DEPTH).is_some() {
+        return Ok(Some(SpawnerRules {
+            kind: SpawnerKind::Area,
+            live_count: number(component, names.live_count)?,
+            respawn_s: [
+                seconds(names.min_respawn_range)?,
+                seconds(names.max_respawn_range)?,
+            ],
+            spawn_on_enable: flag(component, names.spawn_on_enable)?,
+            respawn_after_death: flag(component, names.respawn_after_death)?,
+            maintain_population: flag(component, names.maintain_population)?,
+        }));
+    }
+    if find(component, names.min_respawn_cooldown, FIELD_DEPTH).is_some() {
+        return Ok(Some(SpawnerRules {
+            kind: SpawnerKind::Point,
+            live_count: 0,
+            respawn_s: [
+                seconds(names.min_respawn_cooldown)?,
+                seconds(names.max_respawn_cooldown)?,
+            ],
+            spawn_on_enable: flag(component, names.on_initialize)?,
+            respawn_after_death: flag(component, names.respawn_after_death)?,
+            maintain_population: flag(component, names.maintain_population)?,
+        }));
+    }
+    Ok(None)
+}
+
 fn spawner(component: &Element, names: &Names) -> Result<Spawner, LevelScriptError> {
     Ok(Spawner {
         slice: asset(find(component, names.slice_asset, FIELD_DEPTH))?,
@@ -801,6 +908,9 @@ fn entity(element: &Element, names: &Names) -> Result<ScriptEntity, LevelScriptE
                 .flatten();
             continue;
         }
+        if read.rules.is_none() {
+            read.rules = spawner_rules(component, names)?;
+        }
         match component.type_id {
             ENCOUNTER_MANAGER_TYPE => read.manager = Some(manager(component, names)?),
             ENCOUNTER_STAGE_TYPE => read.stage = Some(stage(component, names)?),
@@ -820,6 +930,16 @@ fn entity(element: &Element, names: &Names) -> Result<ScriptEntity, LevelScriptE
                     .and_then(|shape| find(shape, names.radius, FIELD_DEPTH))
                     .map(Element::as_f32)
                     .transpose()?;
+                read.detection_shape = component
+                    .child(names.shape)
+                    .and_then(|shapes| shapes.children.first())
+                    .map(|shape| {
+                        let offset = component
+                            .child(names.detection_offset)
+                            .and_then(|offset| offset.as_vec3().ok())
+                            .unwrap_or_default();
+                        (shape.clone(), offset)
+                    });
             }
             GATHERABLE_CONTROLLER_TYPE => {
                 let table = text(component, names.loot_table, LOOT_TABLE_DEPTH)?;
@@ -1221,6 +1341,66 @@ mod tests {
                 local_player_only: false,
             }]
         );
+    }
+
+    /// The rules of a spawn group's area spawner component, and of a point spawner's, are read
+    /// from the component of their kind on the spawner entity.
+    #[test]
+    fn a_spawner_entity_keeps_the_spawn_rules_of_its_kind() {
+        let area = named(
+            "element",
+            vec![named(
+                "m_serverFacetPtr",
+                vec![
+                    value("m_liveCount", &1_u32.to_be_bytes()),
+                    value("m_minRespawnRange", &900.0_f32.to_be_bytes()),
+                    value("m_maxRespawnRange", &1_200.0_f64.to_be_bytes()),
+                    value("m_spawnOnEnable", &[1]),
+                    value("m_respawnAfterDeath", &[1]),
+                    value("m_maintainPopulation", &[0]),
+                ],
+            )],
+        );
+        let point = named(
+            "element",
+            vec![
+                value("m_minRespawnCooldown", &30.0_f32.to_be_bytes()),
+                value("m_maxRespawnCooldown", &60.0_f32.to_be_bytes()),
+                value("m_spawnOnInitialize", &[0]),
+            ],
+        );
+        let slice = |component: Element| {
+            named(
+                "root",
+                vec![named(
+                    "Components",
+                    vec![named(
+                        "element",
+                        vec![named("Entities", vec![entity(1, "Group", vec![component])])],
+                    )],
+                )],
+            )
+        };
+        let rules = |component| {
+            slice_script(&slice(component)).expect("script").entities[0]
+                .rules
+                .expect("rules")
+        };
+        assert_eq!(
+            rules(area),
+            SpawnerRules {
+                kind: SpawnerKind::Area,
+                live_count: 1,
+                respawn_s: [900.0, 1_200.0],
+                spawn_on_enable: true,
+                respawn_after_death: true,
+                maintain_population: false,
+            }
+        );
+        let point = rules(point);
+        assert_eq!(point.kind, SpawnerKind::Point);
+        assert_eq!(point.respawn_s, [30.0, 60.0]);
+        assert!(!point.spawn_on_enable);
     }
 
     #[test]

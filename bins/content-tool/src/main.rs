@@ -383,11 +383,13 @@ fn print_roads(report: &RoadsReport) {
 
 fn print_collision(report: &CollisionReport, took: std::time::Duration) {
     println!(
-        "collision {}: {} placements ({} variant capitals, {} of an unknown variant), {} slices, {} solid entities as the level loads (no shape named {}, query shape kind not read {}, inactive {}, mesh without physics geometry {}, mesh with physics geometry but no .rnr {}, asset missing {}), {} physics assets ({} shapes of kinds not read), {} shapes, {} bodies, {} deferred slices with {} bodies, {} quest volumes, {} placed triangles, {} file bytes, {} index bytes, {:.1} s -> {}",
+        "collision {}: {} placements ({} variant capitals, {} of an unknown variant, {} from region slice data of which {} without collision), {} slices, {} solid entities as the level loads (no shape named {}, query shape kind not read {}, inactive {}, mesh without physics geometry {}, mesh with physics geometry but no .rnr {}, asset missing {}), {} physics assets ({} shapes of kinds not read), {} shapes, {} bodies, {} deferred slices with {} bodies, {} quest volumes, {} placed triangles, {} file bytes, {} index bytes, {:.1} s -> {}",
         report.level,
         report.placements,
         report.variant_placements,
         report.unknown_variants,
+        report.slice_data_variants,
+        report.slice_data_without_collision,
         report.slices,
         report.solid_entities,
         report.shapeless_entities,
@@ -408,6 +410,17 @@ fn print_collision(report: &CollisionReport, took: std::time::Duration) {
         report.index_bytes,
         took.as_secs_f64(),
         report.path.display()
+    );
+    println!(
+        "collision {}: {} distribution rows ({} not placed), {} engine triggers, {} mob-only bodies, {} player-only bodies, {} navigation marks ({} marks not read)",
+        report.level,
+        report.distribution_rows,
+        report.distribution_unplaced,
+        report.triggers,
+        report.ai_bodies,
+        report.player_only,
+        report.nav_marks,
+        report.unread_marks
     );
 }
 
@@ -765,8 +778,11 @@ fn print_dungeon_scripts(report: &DungeonScriptsReport) {
         report.chests
     );
     println!(
-        "open world spawn groups: {} encounters",
-        report.open_world_encounters
+        "open world spawn groups: {} encounters; {} encounters with spawner rules; {} detection volumes placed, {} of a shape not read",
+        report.open_world_encounters,
+        report.encounters_with_spawner_rules,
+        report.detectors,
+        report.unread_detectors
     );
     println!(
         "target slices: {} spawner mobs ({} without a level), {} other slices",

@@ -2376,7 +2376,10 @@ mod tests {
                 break;
             }
             let here = at(&mobs, 0);
-            top_mps = top_mps.max(here.horizontal_distance(last) * MS_PER_S / TICK_MS as f32);
+            // The run, not the attack's homing lunge (`mob_homing`) once it is in reach.
+            if here.horizontal_distance(player.position) > TEST_REACH_M {
+                top_mps = top_mps.max(here.horizontal_distance(last) * MS_PER_S / TICK_MS as f32);
+            }
             last = here;
         }
         assert!(struck.is_some(), "it reached and struck");

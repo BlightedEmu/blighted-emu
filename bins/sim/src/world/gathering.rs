@@ -129,6 +129,9 @@ pub(super) struct OpenGather {
     mob: Option<u64>,
     /// A water gather (kind 15): no node to deplete, and a done state that names no gatherable.
     water: bool,
+    /// The encounter start object gathered ([`super::encounter_roots::EncounterObjects`]): the
+    /// gather's end takes it away, and its stage counts it.
+    object: Option<u64>,
     end_ms: u64,
 }
 
@@ -145,6 +148,31 @@ impl OpenGather {
 }
 
 impl SimWorld {
+    /// The nodes depleted since the last call, for the world database.
+    pub(crate) fn take_depleted_nodes(&mut self) -> Vec<DepletedNode> {
+        let (now_ms, server_ms) = (self.last_now_ms, self.server_ms);
+        self.nodes.take_unsaved(|at_ms| {
+            at_ms
+                .saturating_sub(now_ms)
+                .saturating_add(server_ms)
+                .saturating_add(SERVER_EPOCH_UNIX_MS)
+        })
+    }
+
+    /// Holds again the depleted nodes the world database kept for this level, at sim ms
+    /// `now_ms` and Unix ms `now_unix_ms`: each grows back at its saved time.
+    pub(crate) fn restore_depleted_nodes(
+        &mut self,
+        saved: &[DepletedNode],
+        now_ms: u64,
+        now_unix_ms: u64,
+    ) {
+        for node in saved {
+            let left_ms = node.respawn_at_unix_ms.saturating_sub(now_unix_ms);
+            self.nodes.restore(node, now_ms.saturating_add(left_ms));
+        }
+    }
+
     /// Player `number` (`entity`) asks at `now_ms` to gather `request` in the open world: a node
     /// of the level (flint, a bush), a loot crate or a dead mob to skin, named by its gatherable
     /// and `name` (a crate's variant name, empty for a node). A known gatherable that nobody
@@ -175,9 +203,14 @@ impl SimWorld {
             return;
         };
         let mob = entity_of_raw_id(&request.target).filter(|mob| spawn_index(*mob).is_some());
-        // The node must be one of the level's gatherables of that kind (or a dead mob to skin)
-        // within reach of the player: a client cannot gather from anywhere.
+        let object = self
+            .encounter_objects
+            .at(&request.target, position, GATHER_REACH_M);
+        // The node must be one of the level's gatherables of that kind (or a dead mob to skin,
+        // or an encounter's start object) within reach of the player: a client cannot gather
+        // from anywhere.
         let point = match mob {
+            None if object.is_some() => Some(None),
             Some(mob) => self
                 .mobs
                 .places(mob)
@@ -226,6 +259,19 @@ impl SimWorld {
         let tool_efficiency =
             (!gatherable.by_hand).then(|| self.gather_efficiency(entity, &gatherable));
         let started = match (mob, point) {
+            (None, _) if let Some(object) = object => {
+                // One player gathers a start object at a time.
+                if self
+                    .open_gathers
+                    .iter()
+                    .any(|open| open.object == Some(object))
+                {
+                    tracing::debug!(player = number, object, "start object gathered by another");
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            }
             (Some(mob), _) => self.start_skinning(mob, number),
             (None, Some((point, at))) => self
                 .nodes
@@ -276,6 +322,7 @@ impl SimWorld {
             table,
             mob,
             water: false,
+            object,
             end_ms: now_ms.saturating_add(duration_ms),
         });
     }
@@ -314,6 +361,7 @@ impl SimWorld {
             gatherable,
             mob: None,
             water: true,
+            object: None,
             end_ms: now_ms.saturating_add(duration_ms),
         });
     }
@@ -549,6 +597,8 @@ impl SimWorld {
                 self.skinned.insert(mob, now_ms);
             }
             None if gather.water => {}
+            // A start object goes: its encounter's stage counts it.
+            None if let Some(object) = gather.object => self.encounter_objects.remove(object),
             // A container stays for everyone else: only its opener's tracker locks it.
             None if self.lockout_of(gather).is_some() => self.nodes.release(&gather.request.target),
             None => {
@@ -883,6 +933,8 @@ impl SimWorld {
 #[derive(Debug, Clone, PartialEq)]
 struct Node {
     gde_ref: [u8; RAW_ID_LEN],
+    /// The level gatherable point it stands at.
+    point: usize,
     /// Where its first gatherer stood (Inferred: a node is within reach of its gatherer).
     position: Position,
     /// The player who gathers it now.
@@ -893,6 +945,22 @@ struct Node {
     sent: bool,
     /// Counts its state changes, so each player gets each one once.
     version: u32,
+    /// Its depletion is not saved yet.
+    unsaved: bool,
+}
+
+/// A depleted gather node as the world database keeps it, so a sim restart does not grow it
+/// back before its time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DepletedNode {
+    /// Its id (`GdeRef`).
+    pub gde_ref: [u8; RAW_ID_LEN],
+    /// The level gatherable point it stands at.
+    pub point: usize,
+    /// Where its first gatherer stood.
+    pub position: Position,
+    /// When it grows back, Unix ms.
+    pub respawn_at_unix_ms: u64,
 }
 
 impl Node {
@@ -974,11 +1042,13 @@ impl Nodes {
             (None, None) => {
                 self.nodes.push(Node {
                     gde_ref,
+                    point,
                     position,
                     gatherer: None,
                     respawn_at_ms: None,
                     sent,
                     version: 0,
+                    unsaved: false,
                 });
                 let index = self.nodes.len() - 1;
                 self.by_ref.insert(gde_ref, index);
@@ -1046,7 +1116,49 @@ impl Nodes {
             node.gatherer = None;
             node.respawn_at_ms = Some(respawn_at_ms);
             node.version += 1;
+            node.unsaved = true;
         }
+    }
+
+    /// The depletions since the last call, for the world database; `unix_of` turns a sim ms
+    /// into Unix ms.
+    pub(super) fn take_unsaved(&mut self, unix_of: impl Fn(u64) -> u64) -> Vec<DepletedNode> {
+        self.nodes
+            .iter_mut()
+            .filter_map(|node| {
+                if !std::mem::take(&mut node.unsaved) {
+                    return None;
+                }
+                Some(DepletedNode {
+                    gde_ref: node.gde_ref,
+                    point: node.point,
+                    position: node.position,
+                    respawn_at_unix_ms: unix_of(node.respawn_at_ms?),
+                })
+            })
+            .collect()
+    }
+
+    /// Holds again the saved depleted node `saved`, which grows back at sim ms `respawn_at_ms`;
+    /// a node or point this sim already holds is left as it is. Its depleted state goes to the
+    /// players near it.
+    pub(super) fn restore(&mut self, saved: &DepletedNode, respawn_at_ms: u64) {
+        if self.by_ref.contains_key(&saved.gde_ref) || self.by_point.contains_key(&saved.point) {
+            return;
+        }
+        self.nodes.push(Node {
+            gde_ref: saved.gde_ref,
+            point: saved.point,
+            position: saved.position,
+            gatherer: None,
+            respawn_at_ms: Some(respawn_at_ms),
+            sent: true,
+            version: 1,
+            unsaved: false,
+        });
+        let index = self.nodes.len() - 1;
+        self.by_ref.insert(saved.gde_ref, index);
+        self.by_point.insert(saved.point, index);
     }
 
     /// The depleted nodes whose time came at `now_ms` grow back.
@@ -1171,6 +1283,42 @@ pub(crate) mod tests {
         );
         nodes.tick(RESPAWN_AT_MS);
         assert_eq!(nodes.numbers_near(AT, RADIUS_M).count(), 0, "nor after it grows back");
+    }
+
+    #[test]
+    fn a_depletion_is_saved_once_and_a_restored_node_stays_depleted_until_its_time() {
+        const UNIX_OF_ZERO_MS: u64 = 1_798_761_600_000;
+        let mut nodes = Nodes::default();
+        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT), Ok(()));
+        nodes.deplete(&FLINT, RESPAWN_AT_MS);
+        let saved = nodes.take_unsaved(|at_ms| at_ms + UNIX_OF_ZERO_MS);
+        assert_eq!(
+            saved,
+            [DepletedNode {
+                gde_ref: FLINT,
+                point: FLINT_POINT,
+                position: AT,
+                respawn_at_unix_ms: RESPAWN_AT_MS + UNIX_OF_ZERO_MS,
+            }]
+        );
+        assert!(nodes.take_unsaved(|at_ms| at_ms).is_empty(), "saved once");
+        // A new sim holds it again: depleted, shown, and refused until its time.
+        let mut restarted = Nodes::default();
+        restarted.restore(&saved[0], RESPAWN_AT_MS);
+        assert_eq!(
+            restarted.start(FLINT, FLINT_POINT, AT, PLAYER, SENT),
+            Err(NodeBusy::Depleted)
+        );
+        assert_eq!(restarted.numbers_near(AT, RADIUS_M).count(), 1);
+        restarted.tick(RESPAWN_AT_MS);
+        assert_eq!(
+            restarted.start(FLINT, FLINT_POINT, AT, PLAYER, SENT),
+            Ok(())
+        );
+        assert!(
+            restarted.take_unsaved(|at_ms| at_ms).is_empty(),
+            "a load is no new save"
+        );
     }
 
     #[test]

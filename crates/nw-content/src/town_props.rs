@@ -9,6 +9,11 @@
 //! (the `cardsurvey` bin and `townprops.py` of the capture tools): its slice asset and the
 //! states of its spawn group as retail sent them. A settlement that no capture shows has no
 //! props here.
+//!
+//! The open world's encounter roots (encounter states note, 2026-11-10) use the same table
+//! form in their own file ([`encounter_roots_path`]): one row per encounter slice, with its
+//! slice path and the usual states of its root group; so do their start objects
+//! ([`encounter_objects_path`]).
 
 use std::path::{Path, PathBuf};
 
@@ -16,12 +21,30 @@ use serde::Deserialize;
 
 const FILE_PREFIX: &str = "town-props-";
 const FILE_SUFFIX: &str = ".json";
+/// The start of the encounter roots table's file name.
+const ENCOUNTER_ROOTS_PREFIX: &str = "encounter-roots-";
+/// The start of the encounter start objects table's file name.
+const ENCOUNTER_OBJECTS_PREFIX: &str = "encounter-objects-";
 /// The bytes of an asset id.
 pub const ASSET_ID_LEN: usize = 16;
 
 /// The table file of client build `client_build` in content directory `dir`.
 pub fn town_props_path(dir: &Path, client_build: &str) -> PathBuf {
     dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
+}
+
+/// The encounter start objects table of client build `client_build` in content directory `dir`.
+pub fn encounter_objects_path(dir: &Path, client_build: &str) -> PathBuf {
+    dir.join(format!(
+        "{ENCOUNTER_OBJECTS_PREFIX}{client_build}{FILE_SUFFIX}"
+    ))
+}
+
+/// The encounter roots table of client build `client_build` in content directory `dir`.
+pub fn encounter_roots_path(dir: &Path, client_build: &str) -> PathBuf {
+    dir.join(format!(
+        "{ENCOUNTER_ROOTS_PREFIX}{client_build}{FILE_SUFFIX}"
+    ))
 }
 
 /// A bad table file.
@@ -64,6 +87,8 @@ struct TableFile {
 #[derive(Deserialize)]
 struct PropRow {
     asset: String,
+    #[serde(default)]
+    slice: Option<String>,
     members: Vec<String>,
 }
 
@@ -75,6 +100,8 @@ pub struct TownProp {
     pub asset: [u8; ASSET_ID_LEN],
     /// Its states.
     pub members: Vec<Vec<u8>>,
+    /// Its slice's pak path, when the table names it.
+    pub slice: Option<String>,
 }
 
 /// The props of a level.
@@ -90,7 +117,15 @@ impl TownProps {
     ///
     /// Returns [`TownPropsError`] when the file cannot be read or is not the table.
     pub fn load(dir: &Path, client_build: &str) -> Result<Self, TownPropsError> {
-        let path = town_props_path(dir, client_build);
+        Self::load_file(town_props_path(dir, client_build))
+    }
+
+    /// The table in file `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TownPropsError`] when the file cannot be read or is not the table.
+    pub fn load_file(path: PathBuf) -> Result<Self, TownPropsError> {
         let text =
             std::fs::read_to_string(&path).map_err(|source| TownPropsError::Io { path, source })?;
         Self::parse(&text)
@@ -123,7 +158,11 @@ impl TownProps {
                     .iter()
                     .map(|member| bytes(member))
                     .collect::<Result<_, _>>()?;
-                Ok(TownProp { asset, members })
+                Ok(TownProp {
+                    asset,
+                    members,
+                    slice: row.slice.clone(),
+                })
             })
             .collect::<Result<_, TownPropsError>>()?;
         Ok(Self { props })

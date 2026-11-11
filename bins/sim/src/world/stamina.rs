@@ -99,6 +99,20 @@ impl Default for Stamina {
 }
 
 impl Stamina {
+    /// The stamina a saved player had, from 0 to the max (a login); the client gets it with
+    /// the next change.
+    pub(super) fn restored(cur: f32) -> Self {
+        let cur = cur.clamp(0.0, MAX_STAMINA);
+        Self {
+            cur,
+            change: StaminaState {
+                cur: Some(cur),
+                ..StaminaState::default()
+            },
+            ..Self::default()
+        }
+    }
+
     /// The stamina now.
     pub(super) const fn current(&self) -> f32 {
         self.cur

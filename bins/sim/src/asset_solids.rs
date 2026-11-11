@@ -111,6 +111,7 @@ mod tests {
                 bodies: vec![Body { geometry: 0, place }],
             }],
             volumes: Vec::new(),
+            ..LevelCollision::default()
         }
     }
 

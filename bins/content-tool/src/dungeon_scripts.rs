@@ -21,6 +21,7 @@ use nw_formats::azcs::AzcsError;
 use nw_formats::objectstream::{Element, ObjectStreamError, parse_object_stream};
 use nw_formats::pak::PakError;
 use nw_world::capitals::parse_capitals;
+use nw_world::collision::Affine;
 use nw_world::dungeon_scripts::{
     Chest, DungeonScripts, DungeonScriptsError, Encounter, LevelScript, OPEN_WORLD_LEVEL,
     ObjectiveSpec, Spawn, Stage, StageAction, StageObjective, Target, TargetMob, TargetSlice,
@@ -34,7 +35,7 @@ use nw_world::metadata::{MetadataRecords, SkipCounts, read_metadata};
 use nw_world::records::{Capital, PatrolPath};
 use nw_world::spawner_slices::SpawnerSlice;
 
-use crate::collision::PakIndex;
+use crate::collision::{PakIndex, detector_volume};
 use crate::roads::without_azcs;
 
 /// The folder of the levels' data in the paks.
@@ -176,6 +177,12 @@ pub struct DungeonScriptsReport {
     pub chests: usize,
     /// Encounters of the open world's spawn groups, of [`Self::encounters`].
     pub open_world_encounters: usize,
+    /// Encounters whose spawner entity has spawn rules (an area or a point spawner).
+    pub encounters_with_spawner_rules: usize,
+    /// Encounters with a detection volume of a shape this reader places.
+    pub detectors: usize,
+    /// Encounters whose detection volume's shape is of a kind not read (they keep its radius).
+    pub unread_detectors: usize,
     /// Target slices with a mob from their spawner slice.
     pub spawner_mobs: usize,
     /// Target slices without one (creature slices: the sim's prefab table; props).
@@ -530,6 +537,10 @@ pub fn build_level(
             let mut builder = EncounterBuilder::new(source, levels, report);
             let mut encounter =
                 builder.encounter(&entity.name, &spawned.path, &spawned_script, placed)?;
+            encounter.spawner = entity.rules;
+            if entity.rules.is_some() {
+                report.encounters_with_spawner_rules += 1;
+            }
             assign_creatures(&mut encounter, points);
             report.encounters += 1;
             report.stages += encounter.stages.len();
@@ -576,6 +587,22 @@ fn read_script(
 #[allow(clippy::cast_possible_truncation, reason = "world metres")]
 fn position_of(transform: &Transform) -> [f32; 3] {
     transform.translation.map(|value| value as f32)
+}
+
+/// `transform` as a collision place: its basis rows and its translation.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "world metres and unit factors"
+)]
+fn affine_of(transform: &Transform) -> Affine {
+    let mut place = [[0.0; 4]; 3];
+    for (row, out) in place.iter_mut().enumerate() {
+        for (column, value) in out.iter_mut().take(3).enumerate() {
+            *value = transform.basis[row][column] as f32;
+        }
+        out[3] = transform.translation[row] as f32;
+    }
+    place
 }
 
 /// Builds one encounter, resolving its targets once each.
@@ -702,19 +729,32 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
         }
         #[allow(clippy::cast_possible_truncation, reason = "degrees")]
         let yaw_deg = placed.yaw_degrees() as f32;
+        let root_place = placed.then(&script.placement_of(root.id));
+        let detector = root.detection_shape.as_ref().and_then(|(shape, offset)| {
+            let detector = detector_volume(shape, *offset, &affine_of(&root_place));
+            if detector.is_none() {
+                self.report.unread_detectors += 1;
+            }
+            detector
+        });
+        if detector.is_some() {
+            self.report.detectors += 1;
+        }
         Ok(Encounter {
             name: name.to_owned(),
             slice: path.to_owned(),
-            position: position_of(&placed.then(&script.placement_of(root.id))),
+            position: position_of(&root_place),
             yaw_deg,
             auto_activate: manager.auto_activate,
             auto_activate_delay_ms: manager.auto_activate_delay_ms,
             grace_period_s: manager.grace_period_s,
             reset_event: manager.reset_event.clone(),
             detection_radius_m: root.detection_radius_m,
+            detector,
             top_stages: manager.stages.iter().filter_map(index_of).collect(),
             stages,
             targets: std::mem::take(&mut self.targets),
+            spawner: None,
         })
     }
 

@@ -92,6 +92,13 @@ pub trait Ground {
     fn water_flags(&self, _x: f32, _y: f32) -> Option<u32> {
         None
     }
+
+    /// Whether a mob may not stand with its feet at `_feet`: inside a solid, on a floor that a
+    /// level designer's navigation mark takes away, or in water deeper than a body wades. Never
+    /// where the implementation knows only the terrain.
+    fn no_stand(&self, _feet: Position) -> bool {
+        false
+    }
 }
 
 /// The ground a reference names.
@@ -123,6 +130,10 @@ impl<T: Ground + ?Sized> Ground for &T {
     fn water_flags(&self, x: f32, y: f32) -> Option<u32> {
         (**self).water_flags(x, y)
     }
+
+    fn no_stand(&self, feet: Position) -> bool {
+        (**self).no_stand(feet)
+    }
 }
 
 /// The ground a shared value holds.
@@ -153,6 +164,10 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
 
     fn water_flags(&self, x: f32, y: f32) -> Option<u32> {
         (**self).water_flags(x, y)
+    }
+
+    fn no_stand(&self, feet: Position) -> bool {
+        (**self).no_stand(feet)
     }
 }
 

@@ -528,6 +528,30 @@ fn player_progression(saved: SavedProgression, now_ns: u64) -> PlayerProgression
                 end_us: cooldown.end_us,
             })
             .collect(),
+        vitals: saved
+            .log_out_state
+            .vitals
+            .map(|vitals| nw_bus::VitalsAtSave {
+                health: vitals.health,
+                mana_milli: vitals.mana_milli,
+                stamina_milli: vitals.stamina_milli,
+            }),
+        // Their ends are on the server clock, as the consumable cooldowns: they run on while
+        // the player is away.
+        ability_cooldowns: saved
+            .log_out_state
+            .ability_cooldowns
+            .into_iter()
+            .map(|cooldown| nw_bus::PlayerAbilityCooldown {
+                ability: cooldown.ability,
+                key: cooldown.key,
+                start_us: cooldown.start_us,
+                end_us: cooldown.end_us,
+            })
+            .collect(),
+        pvp_wanted: saved.log_out_state.pvp_wanted,
+        cyclic_turns: saved.log_out_state.cyclic_turns,
+        fishing_bait: saved.log_out_state.fishing_bait,
     }
 }
 
@@ -894,6 +918,22 @@ mod tests {
                     ..saved_food(true)
                 },
             ],
+            log_out_state: nw_db::SavedLogOutState {
+                vitals: Some(nw_db::SavedVitals {
+                    health: 0,
+                    mana_milli: 50_000,
+                    stamina_milli: 72_500,
+                }),
+                ability_cooldowns: vec![nw_db::SavedAbilityCooldown {
+                    ability: 0x5e1c_77a0,
+                    key: 1,
+                    start_us: 846_118_000_000_000,
+                    end_us: 846_118_015_000_000,
+                }],
+                pvp_wanted: true,
+                cyclic_turns: std::collections::BTreeMap::from([("puzzlestone_a".to_owned(), 3)]),
+                fishing_bait: Some("FishingBaitT2".to_owned()),
+            },
         };
         assert_eq!(
             player_progression(saved, SAVED_NS + AWAY_NS),
@@ -984,6 +1024,20 @@ mod tests {
                         repeat: None,
                     },
                 ],
+                vitals: Some(nw_bus::VitalsAtSave {
+                    health: 0,
+                    mana_milli: 50_000,
+                    stamina_milli: 72_500,
+                }),
+                ability_cooldowns: vec![nw_bus::PlayerAbilityCooldown {
+                    ability: 0x5e1c_77a0,
+                    key: 1,
+                    start_us: 846_118_000_000_000,
+                    end_us: 846_118_015_000_000,
+                }],
+                pvp_wanted: true,
+                cyclic_turns: std::collections::BTreeMap::from([("puzzlestone_a".to_owned(), 3)]),
+                fishing_bait: Some("FishingBaitT2".to_owned()),
             }
         );
     }

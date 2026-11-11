@@ -550,6 +550,46 @@ pub struct PlayerProgression {
     /// Its running consumable cooldowns, by group (world migration 0029).
     #[serde(default)]
     pub consumable_cooldowns: Vec<PlayerConsumableCooldown>,
+    /// Its vitals at the save; `None` for a character that never saved them, which comes back
+    /// full (world migration 0034).
+    #[serde(default)]
+    pub vitals: Option<VitalsAtSave>,
+    /// Its running ability cooldowns, by ability (world migration 0034).
+    #[serde(default)]
+    pub ability_cooldowns: Vec<PlayerAbilityCooldown>,
+    /// It wants its PvP flag on: the flag was on or on its way on (world migration 0034).
+    #[serde(default)]
+    pub pvp_wanted: bool,
+    /// Its puzzle-stone turns, by lowercase stone id (world migration 0034).
+    #[serde(default)]
+    pub cyclic_turns: BTreeMap<String, u32>,
+    /// The bait on its fishing pole: its item id (world migration 0034).
+    #[serde(default)]
+    pub fishing_bait: Option<String>,
+}
+
+/// A player's health, mana and stamina; mana and stamina in thousandths.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VitalsAtSave {
+    /// The health; 0 for a player that was dead.
+    pub health: u32,
+    /// The mana, in thousandths.
+    pub mana_milli: u32,
+    /// The stamina, in thousandths.
+    pub stamina_milli: u32,
+}
+
+/// One running ability cooldown of a player (the 2932 `cdmapN` entry of its press key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerAbilityCooldown {
+    /// The CRC-32 of the lowercase ability id.
+    pub ability: u32,
+    /// The key (0 to 2) of the press that started it.
+    pub key: u8,
+    /// When it started, microseconds since 2000-01-01.
+    pub start_us: u64,
+    /// When it ends, microseconds since 2000-01-01.
+    pub end_us: u64,
 }
 
 /// One running consumable cooldown of a player (the item component's ccdmap entry).
@@ -1459,6 +1499,20 @@ mod tests {
                     ends_ns: u64::MAX,
                 }),
             }],
+            vitals: Some(VitalsAtSave {
+                health: u32::MAX,
+                mana_milli: u32::MAX,
+                stamina_milli: u32::MAX,
+            }),
+            ability_cooldowns: vec![PlayerAbilityCooldown {
+                ability: u32::MAX,
+                key: 2,
+                start_us: u64::MAX,
+                end_us: u64::MAX,
+            }],
+            pvp_wanted: true,
+            cyclic_turns: BTreeMap::from([("puzzlestone_a".to_owned(), u32::MAX)]),
+            fishing_bait: Some("FishingBaitT2".to_owned()),
         }
     }
 

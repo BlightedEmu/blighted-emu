@@ -71,6 +71,10 @@ impl<G: Ground + ?Sized> Ground for AmongCharacters<'_, G> {
     fn water_flags(&self, x: f32, y: f32) -> Option<u32> {
         self.ground.water_flags(x, y)
     }
+
+    fn no_stand(&self, feet: Position) -> bool {
+        self.ground.no_stand(feet)
+    }
 }
 
 #[cfg(test)]

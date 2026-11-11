@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::collision::{Affine, Geometry, shape_contains};
+use crate::level_script::SpawnerRules;
 use crate::records::PatrolPath;
 use crate::slice_data::GUID_LEN;
 
@@ -180,6 +182,22 @@ pub struct Stage {
     pub end_actions: Vec<StageAction>,
 }
 
+/// An encounter's detection volume in the world.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Detector {
+    /// Its shape in its own space.
+    pub shape: Geometry,
+    /// World from the shape's space.
+    pub place: Affine,
+}
+
+impl Detector {
+    /// Whether the world point `point` is inside it.
+    pub fn contains(&self, point: [f32; 3]) -> bool {
+        shape_contains(&self.shape, &self.place, point)
+    }
+}
+
 /// One encounter of a level.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Encounter {
@@ -201,12 +219,20 @@ pub struct Encounter {
     pub reset_event: String,
     /// The radius of its player volume, metres.
     pub detection_radius_m: Option<f32>,
+    /// Its detection volume in the world: the root's first query shape at its place (a shape
+    /// takes no entity scale); `None` for a root without one.
+    #[serde(default)]
+    pub detector: Option<Detector>,
     /// Indexes of its top stages in [`Encounter::stages`], in order.
     pub top_stages: Vec<usize>,
     /// Every stage.
     pub stages: Vec<Stage>,
     /// Every spawn or tracked target.
     pub targets: Vec<Target>,
+    /// The spawn rules of the spawner that spawns it (the spawn group's area spawner: its
+    /// respawn range and whether it spawns when enabled); `None` when its spawner has none.
+    #[serde(default)]
+    pub spawner: Option<SpawnerRules>,
 }
 
 /// A loot container of a level script.

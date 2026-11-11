@@ -61,6 +61,8 @@ use nw_world::WorldFile;
 use nw_world::records::{AiBehaviour, AiProfile, PathMode, PatrolPath};
 use serde::Deserialize;
 
+use crate::mob_homing::{self, Body, HOMING_CLIP, HomingClip, HomingRun, PARAM_TRUE};
+use crate::mob_path::{PathPlan, find_path};
 use crate::mobs::MobReach;
 
 /// A moving mob keeps its own height when the level's ground lies more than this far below it
@@ -97,6 +99,23 @@ const DETOUR_LEG_M: f32 = 4.0;
 /// step, half of the mob time of a sim of 366 players went to the checks (mob part 11.1 ms, 5.5
 /// ms without them).
 const REACH_RECHECK_M: f32 = FLOOR_STEP_M;
+/// A reach answer that took a way search holds while the mob and its target stay this near
+/// where it ran (our engineering limit: a search costs as much as hundreds of checks).
+const PATH_RECHECK_M: f32 = 3.0;
+/// The least time between two way searches of one mob, ms (our engineering limit).
+const PATH_RETRY_MS: u64 = 1_000;
+/// A way serves a goal this near the goal it was searched for, m (our engineering limit: about a
+/// navigation config's pick around its target).
+const PATH_GOAL_SLACK_M: f32 = 3.0;
+/// A place of a way is reached this near, m (our engineering limit: half a floor step; the way
+/// was checked from that place, so a place left farther away can put a corner of a solid on the
+/// line to the next one).
+const WAYPOINT_REACHED_M: f32 = FLOOR_STEP_M * HALF;
+/// A mob in a fight keeps a place of its way out each this far, for its way home when no search
+/// finds one, m (our engineering limit).
+const TRAIL_STEP_M: f32 = 2.0;
+/// The most places of a trail; a longer trail keeps every second place (our engineering limit).
+const TRAIL_MAX: usize = 256;
 /// The slice config param that gives the engine key `Difficulty_Tier` (Inferred: Janszoon's
 /// slice, `corrupted_sailor_starterbeach_named_00`, sets `DifficultyTier` 1 and no
 /// `Difficulty_Tier`; his great axeman trees attack only at a tier, and tier 1 picks the
@@ -145,12 +164,9 @@ const BROKEN_GUARD_MS: u64 = 1_000;
 const MS_PER_SECOND_F32: f32 = 1_000.0;
 /// The procedural clips of a fragment and their parameters (Observed in `npc_boar_anims.adb`).
 const DAMAGE_CLIP: &str = "CAGE-Damage";
-const HOMING_CLIP: &str = "Homing";
 const DAMAGE_ROW_PARAM: &str = "DamageTableRow";
 const SHAPE_RADIUS_PARAM: &str = "MeleeAttackShapeRadius";
 const SHAPE_HALF_HEIGHT_PARAM: &str = "MeleeAttackCapsuleHalfHeight";
-const HOMING_RADIUS_PARAM: &str = "Radius";
-const HOMING_ANGLE_PARAM: &str = "MaxAngle";
 /// A ranged attack clip and its parameters (Observed: Janszoon's `Officer_AnchorToss` in
 /// `npc_damned_anims.adb`).
 const RANGED_CLIP: &str = "CAGE-RangedAttack";
@@ -158,8 +174,6 @@ const RANGED_ATTACK_PARAM: &str = "RangedAttackName";
 const SLICE_OVERRIDE_PARAM: &str = "SliceOverride";
 const LEAD_TARGET_PARAM: &str = "AILeadTarget";
 const LEAD_MAX_ANGLE_PARAM: &str = "AILeadTargetMaxAngle";
-/// The value of a true clip parameter.
-const PARAM_TRUE: &str = "true";
 /// The navigation config of a run (Observed: the boar's `Run` nodes name `RunToTarget`; retail
 /// boar runs reached 6.96 m/s, its maximum 7.0).
 const RUN_CONFIG: &str = "RunToTarget";
@@ -266,8 +280,6 @@ struct Names {
     damage_row: Option<NameId>,
     shape_radius: Option<NameId>,
     shape_half_height: Option<NameId>,
-    homing_radius: Option<NameId>,
-    homing_angle: Option<NameId>,
     ranged_clip: Option<NameId>,
     ranged_attack: Option<NameId>,
     slice_override: Option<NameId>,
@@ -319,8 +331,6 @@ impl MobAi {
             damage_row: name(DAMAGE_ROW_PARAM),
             shape_radius: name(SHAPE_RADIUS_PARAM),
             shape_half_height: name(SHAPE_HALF_HEIGHT_PARAM),
-            homing_radius: name(HOMING_RADIUS_PARAM),
-            homing_angle: name(HOMING_ANGLE_PARAM),
             ranged_clip: name(RANGED_CLIP),
             ranged_attack: name(RANGED_ATTACK_PARAM),
             slice_override: name(SLICE_OVERRIDE_PARAM),
@@ -771,9 +781,11 @@ fn height_over(floor: Option<f32>, z: f32) -> f32 {
 /// level has no height or its ground lies far below, it keeps its height), and the rise between
 /// two steps must stay within
 /// `max_slope_deg` (the slice's `m_maxSlope`; no limit without one) and below
-/// [`MAX_STEP_RISE_M`], and no wall may stand at knee height between two steps. `None` when the
-/// line is too steep, climbs too high, meets a wall, or when a body standing on a floor would
-/// step off an edge more than
+/// [`MAX_STEP_RISE_M`], no wall may stand at knee height between two steps, and no step may go
+/// from a place where a mob may stand to one where it may not ([`Ground::no_stand`]: a solid, a
+/// navigation mark, deep water; a mob already in such a place walks out). `None` when the
+/// line is too steep, climbs too high, meets a wall or a closed place, or when a body standing
+/// on a floor would step off an edge more than
 /// [`MAX_STEP_DOWN_M`] high: kept at its height it walked on in the air (live
 /// login-world-entry-01: boars off the wreck's deck 3.7 to 12.1 m above the floor for up to 84
 /// s; retail newchar: no body more than 3 m over the floor for longer than a jump). The server has no navigation mesh (the level `.bai` files are not read, their format
@@ -798,6 +810,7 @@ pub fn floor_line(
         z: height_after_move(ground, from),
         ..from
     };
+    let mut free = !ground.no_stand(last);
     for step in 1..=steps {
         // A few hundred steps.
         #[allow(clippy::cast_precision_loss, reason = "a few hundred steps")]
@@ -829,6 +842,11 @@ pub fn floor_line(
         if ground.blocked(knee(last), knee(stand)) {
             return None;
         }
+        let closed = ground.no_stand(stand);
+        if free && closed {
+            return None;
+        }
+        free = !closed;
         last = stand;
     }
     Some(last)
@@ -865,6 +883,51 @@ fn reaches(ground: &dyn Ground, from: Position, to: Position, max_slope_deg: Opt
                 .and_then(|side| floor_line(ground, side, to, max_slope_deg))
                 .is_some()
         })
+    }
+}
+
+/// Steers `mover` toward `goal` over `dt_s` along the way `path` when it serves that goal (a
+/// way searched for a goal more than [`PATH_GOAL_SLACK_M`] away is dropped): to the way's next
+/// place, then on. Whether it arrived at `goal`. At the end of a way that does not reach its
+/// goal (the place nearest it) the mob stands.
+fn steer_along(
+    path: &mut Option<PathPlan>,
+    mover: &mut Mover,
+    goal: Position,
+    steering: &Steering,
+    dt_s: f32,
+) -> bool {
+    if path
+        .as_ref()
+        .is_some_and(|plan| plan.goal.horizontal_distance(goal) > PATH_GOAL_SLACK_M)
+    {
+        *path = None;
+    }
+    let Some(plan) = path.as_mut() else {
+        return mover.steer_to(goal, steering, dt_s);
+    };
+    match plan.next_point() {
+        Some(point) => {
+            // The move's own arrival distance is for its goal, not for the places on the way.
+            let to_point = Steering {
+                arrival_m: 0.0,
+                ..*steering
+            };
+            if mover.steer_to(point, &to_point, dt_s)
+                || mover.position.horizontal_distance(point) <= WAYPOINT_REACHED_M
+            {
+                plan.advance();
+            }
+            false
+        }
+        None if plan.complete => {
+            *path = None;
+            mover.steer_to(goal, steering, dt_s)
+        }
+        None => {
+            mover.speed_mps = 0.0;
+            false
+        }
     }
 }
 
@@ -1124,6 +1187,14 @@ struct MindState {
     /// The turn of a facing task: its start, its end and its start yaw.
     turn: Option<(u64, u64, f32)>,
     windows: Vec<Window>,
+    /// The `Homing` clips of the attack it plays.
+    homing: Vec<HomingRun>,
+    /// The way it walks around solids to its motion's goal ([`crate::mob_path`]).
+    path: Option<PathPlan>,
+    /// When it may search for a way again.
+    next_path_ms: u64,
+    /// Its places of the way out of a fight, for its way home ([`TRAIL_STEP_M`]).
+    trail: Vec<Position>,
     target: Option<u64>,
     target_at: Option<Position>,
     threat: Threat,
@@ -1204,15 +1275,18 @@ struct ReachCheck {
     from: Position,
     to: Position,
     reachable: bool,
+    /// How far the mob and its target may move before the answer is checked again
+    /// ([`REACH_RECHECK_M`], or [`PATH_RECHECK_M`] for an answer of a way search).
+    recheck_m: f32,
 }
 
 impl ReachCheck {
-    /// The answer for a mob at `from` and its target at `to`, while both stay within
-    /// [`REACH_RECHECK_M`] of the places of the check.
+    /// The answer for a mob at `from` and its target at `to`, while both stay within the
+    /// check's `recheck_m` of the places of the check.
     fn answer(self, from: Position, to: Position) -> Option<bool> {
         let near = |checked: Position, now: Position| {
-            checked.horizontal_distance(now) < REACH_RECHECK_M
-                && (checked.z - now.z).abs() < REACH_RECHECK_M
+            checked.horizontal_distance(now) < self.recheck_m
+                && (checked.z - now.z).abs() < self.recheck_m
         };
         (near(self.from, from) && near(self.to, to)).then_some(self.reachable)
     }
@@ -1256,6 +1330,141 @@ impl MindState {
     fn stop_moving(&mut self) {
         self.motion = None;
         self.speed_mps = 0.0;
+    }
+
+    /// Whether a way search reaches `to` from `at` (its answer and how long it holds): a way
+    /// that ends at the target serves the mob's next move to it. A mob whose last search is not
+    /// [`PATH_RETRY_MS`] old keeps its last answer.
+    fn search_reach(
+        &mut self,
+        ground: &dyn Ground,
+        at: Position,
+        to: Position,
+        max_slope: Option<f32>,
+        now_ms: u64,
+    ) -> (bool, f32) {
+        if now_ms < self.next_path_ms {
+            return (
+                self.reach.is_some_and(|check| check.reachable),
+                REACH_RECHECK_M,
+            );
+        }
+        self.next_path_ms = now_ms + PATH_RETRY_MS;
+        let plan = find_path(ground, at, to, max_slope).filter(|plan| plan.complete);
+        let reachable = plan.is_some();
+        if reachable {
+            self.path = plan;
+        }
+        (reachable, PATH_RECHECK_M)
+    }
+
+    /// A way from `at` to `goal` when the straight move failed: a way search, or for a mob on
+    /// its way home with no way found, its trail of the way out walked back. `false` when no
+    /// way is found or the last search is not [`PATH_RETRY_MS`] old.
+    fn plan_way(
+        &mut self,
+        ai: &MobAi,
+        ground: &dyn Ground,
+        at: Position,
+        goal: Position,
+        now_ms: u64,
+    ) -> bool {
+        if now_ms < self.next_path_ms {
+            return false;
+        }
+        self.next_path_ms = now_ms + PATH_RETRY_MS;
+        let max_slope = ai.arch(self.archetype).and_then(|arch| arch.max_slope_deg);
+        let plan = find_path(ground, at, goal, max_slope);
+        let plan = if plan.as_ref().is_some_and(|plan| plan.complete)
+            || !self.resetting(ai)
+            || self.trail.is_empty()
+        {
+            plan
+        } else {
+            let mut points: Vec<Position> = self.trail.iter().rev().copied().collect();
+            points.push(goal);
+            Some(PathPlan {
+                goal,
+                points,
+                next: 0,
+                complete: true,
+            })
+        };
+        self.path = plan;
+        self.path.is_some()
+    }
+
+    /// Keeps the mob's place `at` in its trail while it fights (each [`TRAIL_STEP_M`]).
+    fn keep_trail(&mut self, ai: &MobAi, at: Position) {
+        if self.target.is_none() || self.resetting(ai) {
+            return;
+        }
+        if self
+            .trail
+            .last()
+            .is_some_and(|last| last.horizontal_distance(at) < TRAIL_STEP_M)
+        {
+            return;
+        }
+        self.trail.push(at);
+        if self.trail.len() > TRAIL_MAX {
+            let mut keep = false;
+            self.trail.retain(|_| {
+                keep = !keep;
+                keep
+            });
+        }
+    }
+
+    /// The attack it plays ends: its damage windows and its homing clips with it.
+    fn end_attack(&mut self) {
+        self.windows.clear();
+        self.homing.clear();
+    }
+
+    /// One step at `now_ms` of the homing clips of its attack, for a mob at `at` whose target
+    /// stands at `target`; a `rooted` mob only turns. A mob that its tree moves is not homed
+    /// (the move steers it).
+    fn home_in(
+        &mut self,
+        ai: &MobAi,
+        at: &mut Position,
+        target: Option<Position>,
+        ground: &dyn Ground,
+        now_ms: u64,
+        rooted: bool,
+    ) {
+        if self.homing.is_empty() || self.motion.is_some() {
+            return;
+        }
+        let max_slope = ai.arch(self.archetype).and_then(|arch| arch.max_slope_deg);
+        let mut body = Body {
+            position: *at,
+            yaw: self.yaw,
+        };
+        mob_homing::step(
+            &mut self.homing,
+            now_ms,
+            &mut body,
+            target,
+            rooted,
+            |from, to| {
+                floor_line(ground, from, to, max_slope).map(|end| Position {
+                    z: height_after_move(ground, end),
+                    ..end
+                })
+            },
+        );
+        if body
+            != (Body {
+                position: *at,
+                yaw: self.yaw,
+            })
+        {
+            *at = body.position;
+            self.yaw = body.yaw;
+            self.turned = true;
+        }
     }
 
     fn motion_goal(&self) -> Option<Position> {
@@ -1342,11 +1551,17 @@ impl MindState {
                 .reach
                 .and_then(|check| check.answer(at, position))
                 .unwrap_or_else(|| {
-                    let reachable = reaches(around.ground, at, position, max_slope);
+                    let (reachable, recheck_m) = if reaches(around.ground, at, position, max_slope)
+                    {
+                        (true, REACH_RECHECK_M)
+                    } else {
+                        self.search_reach(around.ground, at, position, max_slope, around.now_ms)
+                    };
                     self.reach = Some(ReachCheck {
                         from: at,
                         to: position,
                         reachable,
+                        recheck_m,
                     });
                     reachable
                 });
@@ -1556,7 +1771,7 @@ impl MindState {
         now_ms: u64,
     ) {
         self.show(ai, slot, task, now_ms);
-        self.windows.clear();
+        self.end_attack();
         self.turn = None;
         let Some(cage) = ai.cage_action(action) else {
             return;
@@ -1566,19 +1781,25 @@ impl MindState {
             // and 1683 ms for 77 to 107 degrees, trace finding a).
             self.turn = done_at_ms.map(|end| (now_ms, end, self.yaw));
         }
-        self.open_windows(ai, tags, cage, now_ms, false);
+        self.open_windows(ai, tags, cage, now_ms, done_at_ms, false);
     }
 
-    /// The damage windows and ranged clips of `cage`, which starts at `now_ms`, for a mob with
-    /// the tags `tags`. An action that a move plays (`moving`, a `NavigationAction`: the boar's
-    /// `Attack_Charge`) keeps a damage clip without an end open for the whole run: it strikes
-    /// when the run gets to its target ([`ON_CONTACT_MS`]).
+    /// The damage windows, ranged clips and homing clips of `cage`, which starts at `now_ms`
+    /// and ends at `ends_ms` (`None`: Unknown), for a mob with the tags `tags`. An action that a
+    /// move plays (`moving`, a `NavigationAction`: the boar's `Attack_Charge`) keeps a damage
+    /// clip without an end open for the whole run: it strikes when the run gets to its target
+    /// ([`ON_CONTACT_MS`]).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the action, its times and how it plays"
+    )]
     fn open_windows(
         &mut self,
         ai: &MobAi,
         tags: &[NameId],
         cage: &CageAction,
         now_ms: u64,
+        ends_ms: Option<u64>,
         moving: bool,
     ) {
         let has_tag = |tag| tags.contains(&tag);
@@ -1598,10 +1819,32 @@ impl MindState {
         } else {
             weapon
         };
-        let homing = body
+        // The homing clips of one database, as the damage clips (the body's first).
+        let is_homing = |window: &&ProcWindow| Some(window.kind) == ai.names.homing_clip;
+        let homing_windows = if body.iter().any(|window| is_homing(&window)) {
+            body
+        } else {
+            weapon
+        };
+        let clips: Vec<HomingClip> = homing_windows
             .iter()
-            .chain(weapon)
-            .find(|window| Some(window.kind) == ai.names.homing_clip);
+            .filter(is_homing)
+            .map(|window| {
+                HomingClip::from_params(
+                    window.start_s,
+                    window.end_s,
+                    window
+                        .params
+                        .iter()
+                        .map(|(name, value)| (ai.name(*name), ai.name(*value))),
+                )
+            })
+            .collect();
+        self.homing = clips
+            .iter()
+            .map(|clip| HomingRun::new(*clip, now_ms, ends_ms))
+            .collect();
+        let homing = clips.first();
         for window in windows.iter().filter(is_damage) {
             let Some(row) = param_of(window, ai.names.damage_row) else {
                 continue;
@@ -1709,9 +1952,10 @@ impl MindState {
         };
         let max_slope = ai.arch(self.archetype).and_then(|arch| arch.max_slope_deg);
         let outcome = match &mut motion.kind {
-            MotionKind::To(goal) => mover
-                .steer_to(*goal, &motion.steering, dt_s)
-                .then_some(MotionOutcome::Arrived),
+            MotionKind::To(goal) => {
+                steer_along(&mut self.path, &mut mover, *goal, &motion.steering, dt_s)
+                    .then_some(MotionOutcome::Arrived)
+            }
             MotionKind::Follow { goal, config } => match target {
                 None => Some(MotionOutcome::Failed),
                 Some(target) => {
@@ -1731,8 +1975,7 @@ impl MindState {
                         *goal = Some((picked, target.position));
                     }
                     goal.and_then(|(point, _)| {
-                        mover
-                            .steer_to(point, &motion.steering, dt_s)
+                        steer_along(&mut self.path, &mut mover, point, &motion.steering, dt_s)
                             .then_some(MotionOutcome::Arrived)
                     })
                 }
@@ -1750,15 +1993,27 @@ impl MindState {
                 }
             },
         };
+        let goal = match motion.kind {
+            MotionKind::To(goal) => Some(goal),
+            MotionKind::Follow { goal, .. } => goal.map(|(point, _)| point),
+            MotionKind::Strafe { .. } => None,
+        };
         let outcome = match floor_move(ground, *at, mover.position, max_slope) {
             Some(on_floor) => {
                 *at = Position {
                     z: height_after_move(ground, on_floor),
                     ..on_floor
                 };
+                self.keep_trail(ai, *at);
                 outcome
             }
-            // It cannot go on: no floor ahead within its slope.
+            // The straight move is closed: it searches a way around and walks it from its next
+            // step.
+            None if goal.is_some_and(|goal| self.plan_way(ai, ground, *at, goal, now_ms)) => {
+                mover.speed_mps = 0.0;
+                outcome
+            }
+            // It cannot go on: no floor ahead within its slope, and no way around.
             None => {
                 tracing::debug!(
                     x = at.x,
@@ -1867,6 +2122,10 @@ impl TreeMind {
                 task_slot: None,
                 turn: None,
                 windows: Vec::new(),
+                homing: Vec::new(),
+                path: None,
+                next_path_ms: 0,
+                trail: Vec::new(),
                 target: None,
                 target_at: None,
                 threat: Threat::default(),
@@ -1973,7 +2232,7 @@ impl TreeMind {
         self.state.reaction_until_ms = Some(now_ms + length_ms);
         self.reaction(ai, at, now_ms, action, true);
         self.state.stop_moving();
-        self.state.windows.clear();
+        self.state.end_attack();
     }
 
     /// The tags, markers and status effects its CAGE conditions read at `now_ms`, with the
@@ -2316,7 +2575,7 @@ impl TreeMind {
             self.reaction(ai, at, now_ms, action, true);
         }
         self.state.stop_moving();
-        self.state.windows.clear();
+        self.state.end_attack();
     }
 
     /// The engine's reaction action `action` (the grid's `Reaction`, or a broken guard's)
@@ -2350,7 +2609,7 @@ impl TreeMind {
         }
         let state = &mut self.state;
         state.stop_moving();
-        state.windows.clear();
+        state.end_attack();
         state.shown = None;
         state.engine_runs.clear();
         state.blocking = false;
@@ -2393,7 +2652,7 @@ impl TreeMind {
             // a hit reaction, and its tree waits until the stun ends, as a stunned player can
             // neither move nor attack.
             self.state.stop_moving();
-            self.state.windows.clear();
+            self.state.end_attack();
             return thought;
         }
         let had = self.state.target;
@@ -2401,6 +2660,10 @@ impl TreeMind {
         let perceived = self.state.perceive(ai, *at, passive, around);
         self.log_target_change(ai, had, *at);
         let perceived_target = self.state.target;
+        // Out of the fight and home: the trail of its way out is done with.
+        if self.state.target.is_none() && !self.state.resetting(ai) {
+            self.state.trail.clear();
+        }
         if had.is_none() {
             thought.acquired = self.state.target;
         }
@@ -2418,14 +2681,19 @@ impl TreeMind {
         let dt_s = dt_ms as f32 / MS_PER_S;
         // Inferred: a root (`NoDodge`: the roots and tethers) holds the mob where it stands; it
         // still turns and attacks.
+        let target_at = perceived.target.map(|target| target.position);
         if control.may_dodge() {
             self.state
                 .move_and_turn(ai, &mut self.brain, at, perceived.target, around, dt_s);
+            self.state
+                .home_in(ai, at, target_at, around.ground, now_ms, false);
             // A run that got to its target strikes now: the tree's next action starts in this
             // step and takes the windows of the run away.
             self.state.fire_windows(ai, now_ms, &mut thought);
         } else {
             self.state.speed_mps = 0.0;
+            self.state
+                .home_in(ai, at, target_at, around.ground, now_ms, true);
         }
         let others = Others {
             entity: around.entity,
@@ -2557,7 +2825,7 @@ impl TreeMind {
                 }
                 Command::EndTask { slot } => {
                     if self.state.task_slot == Some(slot) {
-                        self.state.windows.clear();
+                        self.state.end_attack();
                         self.state.turn = None;
                     }
                 }
@@ -2606,7 +2874,7 @@ impl TreeMind {
                         .and_then(|shown| ai.cage_action(shown.action));
                     if let Some(cage) = moved {
                         self.state
-                            .open_windows(ai, self.brain.tags(), cage, now_ms, true);
+                            .open_windows(ai, self.brain.tags(), cage, now_ms, None, true);
                     }
                 }
                 Command::Strafe {
@@ -2897,26 +3165,19 @@ fn param_of(window: &ProcWindow, name: Option<NameId>) -> Option<NameId> {
 
 /// How the swing of a damage window reaches (Inferred: the joint the shape hangs on is Unknown
 /// without the creature's skeleton): the shape reaches its radius plus its length (twice the
-/// capsule's half height) in front of the body; the swing lunges toward its target as far as
-/// the entry's `Homing` `Radius` and turns to a target within its `MaxAngle` (Observed values:
-/// the boar's gore homing radius 5, angle 180). Without a homing clip it does not lunge.
-fn window_reach(ai: &MobAi, window: &ProcWindow, homing: Option<&ProcWindow>) -> MobReach {
-    let number = |clip: &ProcWindow, name: Option<NameId>| {
-        param_of(clip, name).and_then(|value| ai.name(value).trim().parse::<f32>().ok())
+/// capsule's half height) in front of the body. The body itself moves in by the entry's
+/// `Homing` clips ([`mob_homing`]), so the swing does not lunge at the hit; it faces a target
+/// within the clip's `MaxAngle` (Observed: the boar's gore homing angle 180). Without a homing
+/// clip it faces where it aimed.
+fn window_reach(ai: &MobAi, window: &ProcWindow, homing: Option<&HomingClip>) -> MobReach {
+    let number = |name: Option<NameId>| {
+        param_of(window, name).and_then(|value| ai.name(value).trim().parse::<f32>().ok())
     };
-    let radius = number(window, ai.names.shape_radius).unwrap_or(0.0);
-    let half_height = number(window, ai.names.shape_half_height).unwrap_or(0.0);
-    let (lunge_max_m, lunge_turn_rad) = homing.map_or((0.0, 0.0), |homing| {
-        (
-            number(homing, ai.names.homing_radius).unwrap_or(0.0),
-            number(homing, ai.names.homing_angle)
-                .unwrap_or(0.0)
-                .to_radians(),
-        )
-    });
+    let radius = number(ai.names.shape_radius).unwrap_or(0.0);
+    let half_height = number(ai.names.shape_half_height).unwrap_or(0.0);
     MobReach {
-        lunge_max_m,
-        lunge_turn_rad,
+        lunge_max_m: 0.0,
+        lunge_turn_rad: homing.map_or(0.0, |clip| clip.max_angle_rad),
         reach_m: radius + CAPSULE_ENDS * half_height,
     }
 }
@@ -3254,9 +3515,12 @@ pub mod test_support {
     use nw_formats::objectstream::lowercase_crc32;
 
     use super::{
-        AiRates, COMBAT_LEASH_KEY, DAMAGE_CLIP, DAMAGE_ROW_PARAM, DEATH_ALIAS, HOMING_ANGLE_PARAM,
-        HOMING_CLIP, HOMING_RADIUS_PARAM, LookAssets, MobAi, REACTION_ALIAS, RUN_CONFIG,
-        SHAPE_HALF_HEIGHT_PARAM, SHAPE_RADIUS_PARAM,
+        AiRates, COMBAT_LEASH_KEY, DAMAGE_CLIP, DAMAGE_ROW_PARAM, DEATH_ALIAS, LookAssets, MobAi,
+        REACTION_ALIAS, RUN_CONFIG, SHAPE_HALF_HEIGHT_PARAM, SHAPE_RADIUS_PARAM,
+    };
+    use crate::mob_homing::{
+        HOMING_CLIP, MAX_ANGLE_PARAM, MOVE_TO_DISTANCE_PARAM, MOVE_TO_DURATION_PARAM,
+        MOVE_TO_TARGET_PARAM, RADIUS_PARAM, TURN_RATE_PARAM,
     };
 
     /// The slice asset of the test archetype.
@@ -3284,9 +3548,14 @@ pub mod test_support {
     pub const TEST_MOB_TABLE: &str = "TestMobTable";
     /// The row of its hits.
     pub const TEST_MOB_ROW: &str = "Test_Mob_Attack";
-    /// Its homing: radius and angle.
-    pub const TEST_HOMING_RADIUS_M: &str = "2";
+    /// Its homing: radius, angle, turn rate (degrees per second) and its move to 1 m from the
+    /// target in 0.3 s.
+    const TEST_HOMING_RADIUS_M: &str = "4";
     const TEST_HOMING_ANGLE_DEG: &str = "180";
+    const TEST_HOMING_TURN_DEG_S: &str = "1080";
+    /// How near its homing draws it to its target.
+    pub const TEST_HOMING_DISTANCE_M: f32 = 1.0;
+    const TEST_HOMING_DURATION_S: &str = "0.3";
     const TEST_SHAPE_RADIUS_M: &str = "0.4";
     const TEST_SHAPE_HALF_HEIGHT_M: &str = "0.2";
     const TEST_HIT_LENGTH_S: f32 = 0.2;
@@ -3328,8 +3597,20 @@ pub mod test_support {
                 start_s: 0.0,
                 end_s: Some(TEST_HIT_S),
                 params: vec![
-                    param(&mut build, HOMING_RADIUS_PARAM, TEST_HOMING_RADIUS_M),
-                    param(&mut build, HOMING_ANGLE_PARAM, TEST_HOMING_ANGLE_DEG),
+                    param(&mut build, RADIUS_PARAM, TEST_HOMING_RADIUS_M),
+                    param(&mut build, MAX_ANGLE_PARAM, TEST_HOMING_ANGLE_DEG),
+                    param(&mut build, TURN_RATE_PARAM, TEST_HOMING_TURN_DEG_S),
+                    param(
+                        &mut build,
+                        MOVE_TO_TARGET_PARAM,
+                        crate::mob_homing::PARAM_TRUE,
+                    ),
+                    param(
+                        &mut build,
+                        MOVE_TO_DISTANCE_PARAM,
+                        &TEST_HOMING_DISTANCE_M.to_string(),
+                    ),
+                    param(&mut build, MOVE_TO_DURATION_PARAM, TEST_HOMING_DURATION_S),
                 ],
             },
             ProcWindow {
@@ -3636,6 +3917,7 @@ mod tests {
             from: START,
             to: east(20.0),
             reachable: false,
+            recheck_m: REACH_RECHECK_M,
         };
         let short = REACH_RECHECK_M * 0.9;
         assert_eq!(check.answer(east(short), east(20.0 - short)), Some(false));
@@ -3798,6 +4080,57 @@ mod tests {
             !reaches(&Wall, START, east(5.0), None),
             "a long wall stays a wall"
         );
+    }
+
+    /// Flat ground with two walls across the way east of [`START`], their gaps at opposite
+    /// ends: no one turn passes them.
+    struct TwoWalls;
+
+    impl Ground for TwoWalls {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(GROUND_Z)
+        }
+
+        fn no_stand(&self, feet: Position) -> bool {
+            let (x, y) = (feet.x - START.x, feet.y - START.y);
+            ((4.0..=5.0).contains(&x) && (-20.0..=6.0).contains(&y))
+                || ((9.0..=10.0).contains(&x) && (-6.0..=20.0).contains(&y))
+        }
+    }
+
+    #[test]
+    fn a_mob_walks_a_way_around_two_walls_to_its_target() {
+        use super::test_support::TEST_REACH_M;
+        const STEP_MS: usize = 33;
+        const UNTIL_MS: u64 = 30_000;
+        let ai = test_ai(&[]);
+        let player = east(14.0);
+        assert!(
+            !reaches(&TwoWalls, START, player, None),
+            "no one turn passes"
+        );
+        let seen = [Seen {
+            entity: 7,
+            position: player,
+        }];
+        let around = |now_ms| Surroundings {
+            now_ms,
+            seen: &seen,
+            ground: &TwoWalls,
+            health_share: 1.0,
+            entity: 1,
+            tagged: &[],
+            held: None,
+        };
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let mut at = START;
+        let mut nearest = f32::MAX;
+        for now_ms in (0..UNTIL_MS).step_by(STEP_MS) {
+            mind.step(&ai, &mut at, &around(now_ms));
+            assert!(!TwoWalls.no_stand(at), "never in a wall: {at:?}");
+            nearest = nearest.min(at.horizontal_distance(player));
+        }
+        assert!(nearest <= TEST_REACH_M, "it got to its target: {nearest}");
     }
 
     #[test]
@@ -3970,7 +4303,7 @@ mod tests {
     }
 
     #[test]
-    fn a_damage_window_reaches_by_its_shape_and_lunges_by_its_homing() {
+    fn a_damage_window_reaches_by_its_shape_and_faces_by_its_homing() {
         let mut data = test_ai_data();
         let mut name = |text: &str| {
             data.name_id(text).unwrap_or_else(|| {
@@ -3987,24 +4320,62 @@ mod tests {
                 (name(SHAPE_HALF_HEIGHT_PARAM), name("0.2")),
             ],
         };
-        let homing = ProcWindow {
-            kind: name(HOMING_CLIP),
-            start_s: 0.0,
-            end_s: None,
-            params: vec![
-                (name(HOMING_RADIUS_PARAM), name("5")),
-                (name(HOMING_ANGLE_PARAM), name("180")),
+        let homing = crate::mob_homing::HomingClip::from_params(
+            0.0,
+            None,
+            [
+                (crate::mob_homing::RADIUS_PARAM, "5"),
+                (crate::mob_homing::MAX_ANGLE_PARAM, "180"),
             ],
-        };
+        );
         let ai = MobAi::new(data, AiRates::default(), LookAssets::new());
         // The boar gore's clips (`npc_boar_anims.adb`): radius 0.4, half height 0.2, homing
-        // radius 5 and angle 180.
+        // radius 5 and angle 180. Its body moves in by the homing, so the hit does not lunge.
         let reach = window_reach(&ai, &damage, Some(&homing));
         assert!((reach.reach_m - 0.8).abs() < 1e-6);
-        assert!((reach.lunge_max_m - 5.0).abs() < 1e-6);
+        assert!(reach.lunge_max_m.abs() < f32::EPSILON);
         assert!((reach.lunge_turn_rad - std::f32::consts::PI).abs() < 1e-6);
         let still = window_reach(&ai, &damage, None);
         assert_eq!((still.lunge_max_m, still.lunge_turn_rad), (0.0, 0.0));
+    }
+
+    /// The test attack's homing clip draws the mob in to 1 m of its target before its damage
+    /// window, and the mob turns to face it.
+    #[test]
+    fn an_attack_draws_the_mob_in_by_its_homing_before_its_hit() {
+        use super::test_support::TEST_HOMING_DISTANCE_M;
+        const STEP_MS: usize = 33;
+        const UNTIL_MS: u64 = 5_000;
+        let ai = test_ai(&[]);
+        let ground = FlatGround(GROUND_Z);
+        let player = east(2.8);
+        let seen = [Seen {
+            entity: 7,
+            position: player,
+        }];
+        let around = |now_ms| Surroundings {
+            now_ms,
+            seen: &seen,
+            ground: &ground,
+            health_share: 1.0,
+            entity: 1,
+            tagged: &[],
+            held: None,
+        };
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let mut at = START;
+        let hit_at = (0..UNTIL_MS).step_by(STEP_MS).find_map(|now_ms| {
+            let thought = mind.step(&ai, &mut at, &around(now_ms));
+            (!thought.hits.is_empty()).then_some(at)
+        });
+        let hit_at = hit_at.expect("it attacks");
+        let left = hit_at.horizontal_distance(player);
+        assert!(
+            (left - TEST_HOMING_DISTANCE_M).abs() < 0.1,
+            "drawn in to 1 m: {left}"
+        );
+        let facing = yaw_gap(mind.yaw(), yaw_toward(hit_at, player));
+        assert!(facing.abs() < 0.1, "faces the player: {facing}");
     }
 
     /// A tree's `TriggerEntity` node runs the slice components of that trigger name (any case),

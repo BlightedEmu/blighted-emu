@@ -771,6 +771,12 @@ pub struct PlayerContent {
     pub quick_course_paths: QuickCoursePaths,
     /// The settlement and fort props the server spawns; empty until the sim loads their file.
     pub town_props: nw_content::town_props::TownProps,
+    /// The root groups of the open world's encounter slices, in the town props table form;
+    /// empty until the sim loads their file.
+    pub encounter_roots: nw_content::town_props::TownProps,
+    /// The start objects of the open world's encounters, in the town props table form; empty
+    /// until the sim loads their file.
+    pub encounter_objects: nw_content::town_props::TownProps,
     /// The slice each spell spawns; empty until the sim loads the spell slice file.
     pub spell_slices: nw_content::spell_slices::SpellSlices,
     /// The loot value of a player's level by its experience.
@@ -1264,6 +1270,8 @@ impl PlayerContent {
             shop: ShopConfig::default(),
             quick_course_paths: QuickCoursePaths::default(),
             town_props: nw_content::town_props::TownProps::default(),
+            encounter_roots: nw_content::town_props::TownProps::default(),
+            encounter_objects: nw_content::town_props::TownProps::default(),
             spell_slices: nw_content::spell_slices::SpellSlices::default(),
             player_loot_levels: PlayerLootLevels::from_tables(tables),
             poi_tags: PoiTags::from_tables(tables),

@@ -29,8 +29,11 @@
 //! - an encounter starts when a player comes within the sim's wake radius of it, not with the
 //!   sim (Inferred: 329 encounters hold 1,875 mobs that would stand awake with no player near);
 //! - when no player is that near for its grace period, it resets and waits again;
-//! - an ended encounter starts again after the mob respawn time (Inferred: the retail time of
-//!   a world event is Unknown);
+//! - an ended encounter starts again after its spawner's respawn time: a time in the spawn
+//!   group's area spawner's `m_minRespawnRange` to `m_maxRespawnRange` (seconds), or the mob
+//!   respawn time when its spawner has no range (Inferred);
+//! - an encounter whose spawner does not spawn when it is enabled (`m_spawnOnEnable` 0: it
+//!   waits for its trigger) does not start when a player comes near;
 //! - a sim runs the encounters of its own cells.
 
 use nw_bus::Point;
@@ -41,6 +44,7 @@ use nw_world::dungeon_scripts::{
 use nw_world::records::PatrolPath;
 use uuid::Uuid;
 
+use super::encounter_roots::EncounterObjects;
 use super::loot_bag::LimitsSent;
 use super::{Body, Player, SimWorld, Vitals};
 use crate::mob_ai::script_mob_ai;
@@ -48,6 +52,14 @@ use crate::objectives::Event;
 
 /// Milliseconds in a second.
 const MS_PER_S: u64 = 1_000;
+const MS_PER_S_F64: f64 = 1_000.0;
+/// The SplitMix64 steps (Steele, Lea and Flood) that pick a respawn time in its range.
+const SPLITMIX_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+const SPLITMIX_MUL_A: u64 = 0xBF58_476D_1CE4_E5B9;
+const SPLITMIX_MUL_B: u64 = 0x94D0_49BB_1331_11EB;
+/// The high bits of a mixed value that make the share: 53, a double's mantissa.
+const SHARE_BITS: u32 = 53;
+const SHARE_SHIFT: u32 = u64::BITS - SHARE_BITS;
 /// `EventType` values of an entity event (`slice_triggers`).
 const EVENT_TRIGGER: u32 = 0;
 const EVENT_ACTIVATE: u32 = 2;
@@ -73,15 +85,22 @@ pub(super) trait ScriptHost {
         at: [f32; 3],
         waypoints: Option<&PatrolPath>,
     ) -> Option<u64>;
-    /// Removes encounter mob `entity`.
+    /// Spawns a start object of slice `slice` at `at` (a target slice without a mob); its
+    /// entity, or `None` when the slice is no start object.
+    fn spawn_object(&mut self, slice: &str, at: [f32; 3]) -> Option<u64>;
+    /// Removes encounter mob or start object `entity`.
     fn remove(&mut self, entity: u64);
-    /// The health of mob `entity`; `None` when it is gone.
+    /// The health of mob `entity` (a standing start object has [`OBJECT_HEALTH`]); `None` when
+    /// it is gone.
     fn health(&self, entity: u64) -> Option<u32>;
     /// The boss phase of mob `entity`.
     fn boss_phase(&self, entity: u64) -> Option<u32>;
     /// A random number below `below`.
     fn pick(&mut self, below: u32) -> u32;
 }
+
+/// The health a standing start object reports: it is not dead until it is gathered.
+const OBJECT_HEALTH: u32 = 1;
 
 /// What the players of the instance are doing in one tick.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -227,6 +246,32 @@ impl DungeonRun {
     }
 
     /// The place of each encounter.
+    /// The client statuses of encounter `index` ([`super::encounter_roots`]): its manager's,
+    /// and each stage's in stage order. An idle or due encounter has not started; a done one
+    /// succeeded.
+    pub(super) fn client_status(&self, index: usize) -> Option<(u32, Vec<u32>)> {
+        use super::encounter_roots::{
+            STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_NOT_STARTED, STATUS_SUCCEEDED,
+        };
+        let run = self.encounters.get(index)?;
+        let manager = match run.status {
+            EncounterStatus::Idle | EncounterStatus::Due(_) => STATUS_NOT_STARTED,
+            EncounterStatus::Running => STATUS_IN_PROGRESS,
+            EncounterStatus::Done => STATUS_SUCCEEDED,
+        };
+        let stages = run
+            .stages
+            .iter()
+            .map(|stage| match stage.status {
+                StageStatus::Pending => STATUS_NOT_STARTED,
+                StageStatus::Running => STATUS_IN_PROGRESS,
+                StageStatus::Done => STATUS_SUCCEEDED,
+                StageStatus::Failed => STATUS_FAILED,
+            })
+            .collect();
+        Some((manager, stages))
+    }
+
     pub(super) fn places(&self) -> impl Iterator<Item = [f32; 3]> + '_ {
         self.script
             .encounters
@@ -316,6 +361,15 @@ fn position([x, y, z]: [f32; 3]) -> Position {
     Position { x, y, z }
 }
 
+/// Whether a player at `at` is in `encounter`'s detection volume; an encounter without one
+/// (or of a shape not read) detects within `radius_m` of its place.
+fn detects(encounter: &Encounter, at: Position, radius_m: f32) -> bool {
+    match &encounter.detector {
+        Some(detector) => detector.contains([at.x, at.y, at.z]),
+        None => at.horizontal_distance(position(encounter.position)) <= radius_m,
+    }
+}
+
 /// The open world's part of an encounter's tick: whether the encounter runs its stages in this
 /// tick. It waits idle until a player is near, resets when every player left for its grace
 /// period, and starts again [`OpenWorldRules::respawn_ms`] after its end.
@@ -327,17 +381,16 @@ fn open_world_step(
     rules: OpenWorldRules,
     now_ms: u64,
 ) -> bool {
-    let place = position(encounter.position);
     let near = view
         .everyone
         .iter()
-        .any(|player| player.horizontal_distance(place) <= rules.near_m);
+        .any(|player| detects(encounter, *player, rules.near_m));
     match run.status {
-        EncounterStatus::Idle => near,
+        EncounterStatus::Idle => near && starts_when_enabled(encounter),
         EncounterStatus::Done => {
             bury(run, host, now_ms);
             let done = *run.done_ms.get_or_insert(now_ms);
-            if now_ms.saturating_sub(done) >= rules.respawn_ms {
+            if now_ms.saturating_sub(done) >= respawn_ms(encounter, rules, done) {
                 reset(run, host);
             }
             false
@@ -356,6 +409,46 @@ fn open_world_step(
     }
 }
 
+/// Whether an open world encounter starts by itself when a player comes near: its manager
+/// activates it, or its spawner spawns when it is enabled (or names no rules).
+fn starts_when_enabled(encounter: &Encounter) -> bool {
+    encounter.auto_activate
+        || encounter
+            .spawner
+            .is_none_or(|spawner| spawner.spawn_on_enable)
+}
+
+/// How long after its end at `done_ms` an open world encounter starts again: a time in its
+/// spawner's respawn range (picked by the end time, so that a run holds one time), else the
+/// rules' mob respawn time.
+fn respawn_ms(encounter: &Encounter, rules: OpenWorldRules, done_ms: u64) -> u64 {
+    let Some([low_s, high_s]) = encounter
+        .spawner
+        .map(|spawner| spawner.respawn_s)
+        .filter(|[low, high]| *high > 0.0 && high >= low)
+    else {
+        return rules.respawn_ms;
+    };
+    // SplitMix64 of the end time: a share of the range.
+    let mut mixed = done_ms.wrapping_add(SPLITMIX_GAMMA);
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(SPLITMIX_MUL_A);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(SPLITMIX_MUL_B);
+    mixed ^= mixed >> 31;
+    // A share of a range of minutes.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a share of a range of minutes"
+    )]
+    let ms = {
+        let share = (mixed >> SHARE_SHIFT) as f64 / (1_u64 << SHARE_BITS) as f64;
+        let seconds = f64::from(low_s) + share * f64::from(high_s - low_s);
+        (seconds * MS_PER_S_F64).round() as u64
+    };
+    ms
+}
+
 fn tick_encounter(
     encounter: &Encounter,
     run: &mut EncounterRun,
@@ -372,11 +465,10 @@ fn tick_encounter(
     let radius = encounter
         .detection_radius_m
         .unwrap_or(DEFAULT_VOLUME_RADIUS_M);
-    let place = position(encounter.position);
     run.engaged = view
         .living
         .iter()
-        .any(|player| player.horizontal_distance(place) <= radius);
+        .any(|player| detects(encounter, *player, radius));
     let reset_asked = !encounter.reset_event.is_empty()
         && run
             .events
@@ -637,6 +729,13 @@ fn spawn_one(
     let Some(target) = encounter.targets.get(spawn.target) else {
         return;
     };
+    let at_of = |number: u32| {
+        usize::try_from(number)
+            .ok()
+            .and_then(|number| spawn.locations.get(number % spawn.locations.len().max(1)))
+            .copied()
+            .unwrap_or(encounter.position)
+    };
     let mobs: Vec<(usize, &TargetMob, u32)> = target
         .slices
         .iter()
@@ -646,7 +745,24 @@ fn spawn_one(
     let per_spawn = |slice: usize| target.slices[slice].mobs_per_spawn.max(ONE);
     let total: u32 = mobs.iter().map(|(_, _, weight)| weight).sum();
     if mobs.is_empty() {
-        tracing::debug!(target = %target.name, "encounter spawn of no mob");
+        // A target of no mob: its slices that are start objects stand at the locations.
+        for number in 0..spawn.count {
+            for (slice, target_slice) in target.slices.iter().enumerate() {
+                match host.spawn_object(&target_slice.path, at_of(number)) {
+                    Some(entity) => run.mobs.push(EncounterMob {
+                        entity,
+                        target: spawn.target,
+                        slice,
+                        stage,
+                        died_ms: None,
+                        gone: false,
+                    }),
+                    None => {
+                        tracing::debug!(slice = %target_slice.path, "encounter spawn of no mob")
+                    }
+                }
+            }
+        }
         return;
     }
     for number in 0..spawn.count {
@@ -658,11 +774,7 @@ fn spawn_one(
         }) else {
             continue;
         };
-        let at = usize::try_from(number)
-            .ok()
-            .and_then(|number| spawn.locations.get(number % spawn.locations.len().max(1)))
-            .copied()
-            .unwrap_or(encounter.position);
+        let at = at_of(number);
         for _ in 0..per_spawn(slice) {
             match host.spawn(mob, at, target.slices[slice].waypoints.as_ref()) {
                 Some(entity) => run.mobs.push(EncounterMob {
@@ -889,11 +1001,26 @@ impl ScriptHost for SimHost<'_> {
         }
     }
 
+    fn spawn_object(&mut self, slice: &str, at: [f32; 3]) -> Option<u64> {
+        self.world.encounter_objects.spawn(slice, at)
+    }
+
     fn remove(&mut self, entity: u64) {
-        self.world.remove_gm(&[entity]);
+        if EncounterObjects::is_object(entity) {
+            self.world.encounter_objects.remove(entity);
+        } else {
+            self.world.remove_gm(&[entity]);
+        }
     }
 
     fn health(&self, entity: u64) -> Option<u32> {
+        if EncounterObjects::is_object(entity) {
+            return self
+                .world
+                .encounter_objects
+                .stands(entity)
+                .then_some(OBJECT_HEALTH);
+        }
         self.world.mobs.health(entity)
     }
 
@@ -1028,6 +1155,15 @@ impl SimWorld {
                 near_m: self.combat.wake_radius_m,
                 respawn_ms: self.combat.mob_respawn_ms,
             };
+            self.encounter_roots = super::encounter_roots::EncounterRoots::build(
+                &self.content.encounter_roots,
+                &script.encounters,
+            );
+            tracing::info!(
+                roots = self.encounter_roots.len(),
+                "open world encounter roots"
+            );
+            self.encounter_objects = EncounterObjects::build(&self.content.encounter_objects);
             self.world_events = Some(DungeonRun::of_open_world(script, rules));
         }
         let Some(mut run) = self.world_events.take() else {
@@ -1052,6 +1188,11 @@ impl SimWorld {
                     encounter = %run.script.encounters[index].name,
                     "open world encounter done"
                 );
+            }
+        }
+        for (index, owned) in owned.iter().enumerate() {
+            if let Some((manager, stages)) = run.client_status(index) {
+                self.encounter_roots.set(index, *owned, manager, &stages);
             }
         }
         self.world_events = Some(run);
@@ -1126,6 +1267,8 @@ mod tests {
     const INTRO_S: u32 = 20;
     const GRACE_S: u32 = 20;
     const BOSS_VITALS: &str = "Withered_Brute_Named_08";
+    /// The name part of the test host's start object slices.
+    const START_OBJECT: &str = "io_worldevent_";
     const ADD_VITALS: &str = "Risen_DG_Windsward_00";
     const LEVEL: u32 = 25;
     const T0: u64 = 1_000;
@@ -1151,6 +1294,14 @@ mod tests {
             self.health.insert(self.next, 100);
             self.spawned.push((mob.vitals_id.clone(), at));
             Some(self.next)
+        }
+        fn spawn_object(&mut self, slice: &str, at: [f32; 3]) -> Option<u64> {
+            slice.contains(START_OBJECT).then(|| {
+                self.next += 1;
+                self.health.insert(self.next, OBJECT_HEALTH);
+                self.spawned.push((slice.to_owned(), at));
+                self.next
+            })
         }
         fn remove(&mut self, entity: u64) {
             self.health.remove(&entity);
@@ -1307,6 +1458,91 @@ mod tests {
     }
 
     #[test]
+    fn a_detection_volume_detects_inside_its_shape_and_no_volume_within_the_radius() {
+        // A long box along x: 40 m by 4 m, at the encounter's place.
+        let boxed = Encounter {
+            position: PLACE,
+            detector: Some(nw_world::dungeon_scripts::Detector {
+                shape: nw_world::collision::Geometry::Box {
+                    half_extents: [20.0, 2.0, 10.0],
+                },
+                place: nw_world::collision::place_of([0.0, 0.0, 0.0, 1.0], 1.0, PLACE),
+            }),
+            ..Encounter::default()
+        };
+        let at = |dx: f32, dy: f32| position([PLACE[0] + dx, PLACE[1] + dy, PLACE[2]]);
+        assert!(
+            detects(&boxed, at(18.0, 0.0), RADIUS_M),
+            "far along the box"
+        );
+        assert!(
+            !detects(&boxed, at(0.0, 5.0), RADIUS_M),
+            "beside the box, near its middle"
+        );
+        let plain = Encounter {
+            position: PLACE,
+            ..Encounter::default()
+        };
+        assert!(detects(&plain, at(0.0, 5.0), RADIUS_M));
+        assert!(!detects(&plain, at(RADIUS_M + 1.0, 0.0), RADIUS_M));
+    }
+
+    #[test]
+    fn a_start_object_stands_until_it_is_gathered_and_then_its_stage_ends() {
+        let object = Target {
+            name: "StartObject".to_owned(),
+            slices: vec![TargetSlice {
+                path: format!("slices/quest/{START_OBJECT}encstart.dynamicslice"),
+                ..TargetSlice::default()
+            }],
+        };
+        let interact = Stage {
+            name: "Wave_01 - Objective: Interact IO".to_owned(),
+            spawns: vec![Spawn {
+                target: 0,
+                count: 1,
+                ..Spawn::default()
+            }],
+            objectives: vec![objective(
+                ObjectiveSpec::SliceDestroyed {
+                    target: Some(0),
+                    required: 1,
+                },
+                0,
+                false,
+            )],
+            ..Stage::default()
+        };
+        let encounter = Encounter {
+            position: PLACE,
+            auto_activate: true,
+            top_stages: vec![0],
+            stages: vec![interact],
+            targets: vec![object],
+            ..Encounter::default()
+        };
+        let mut run = DungeonRun::new(Uuid::nil(), script(vec![encounter]));
+        let mut host = Host::default();
+        run.tick(&mut host, &view(&[PLACE]), &[], T0);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
+        assert_eq!(host.spawned.len(), 1, "the start object stands");
+        assert!(host.spawned[0].0.contains(START_OBJECT));
+        assert_eq!(stage_status(&run, 0), StageStatus::Running);
+        assert_eq!(
+            run.client_status(0),
+            Some((
+                super::super::encounter_roots::STATUS_IN_PROGRESS,
+                vec![super::super::encounter_roots::STATUS_IN_PROGRESS]
+            ))
+        );
+        // The gather ends the object.
+        host.health.clear();
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 2);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 3);
+        assert_eq!(stage_status(&run, 0), StageStatus::Done);
+    }
+
+    #[test]
     fn the_boss_spawns_waits_for_a_player_and_its_death_ends_the_encounter() {
         let mut run = DungeonRun::new(Uuid::nil(), script(vec![boss_encounter()]));
         let mut host = Host::default();
@@ -1336,6 +1572,47 @@ mod tests {
         assert_eq!(run.chests_of(0).count(), 1);
         run.tick(&mut host, &view(&[PLACE]), &[], T0 + 4 + CORPSE_MS);
         assert_eq!(host.removed, [1], "the body goes after its corpse time");
+    }
+
+    /// A spawn group's area spawner gives the respawn range of its encounter, and one that does
+    /// not spawn when enabled keeps its encounter from starting by itself.
+    #[test]
+    fn an_encounter_respawns_in_its_spawner_s_range_and_starts_by_its_spawner() {
+        use nw_world::level_script::{SpawnerKind, SpawnerRules};
+        const RESPAWN_MS: u64 = 60_000;
+        let rules = OpenWorldRules {
+            near_m: 100.0,
+            respawn_ms: RESPAWN_MS,
+        };
+        let area = SpawnerRules {
+            kind: SpawnerKind::Area,
+            live_count: 1,
+            respawn_s: [900.0, 1_200.0],
+            spawn_on_enable: true,
+            respawn_after_death: true,
+            maintain_population: false,
+        };
+        let plain = boss_encounter();
+        assert_eq!(respawn_ms(&plain, rules, T0), RESPAWN_MS, "no rules");
+        let grouped = Encounter {
+            spawner: Some(area),
+            ..boss_encounter()
+        };
+        for done in [T0, T0 + 1, T0 + 77_777] {
+            let ms = respawn_ms(&grouped, rules, done);
+            assert!((900_000..=1_200_000).contains(&ms), "{ms}");
+            assert_eq!(ms, respawn_ms(&grouped, rules, done), "one time per end");
+        }
+        assert!(starts_when_enabled(&grouped));
+        let triggered = Encounter {
+            spawner: Some(SpawnerRules {
+                spawn_on_enable: false,
+                ..area
+            }),
+            auto_activate: false,
+            ..boss_encounter()
+        };
+        assert!(!starts_when_enabled(&triggered), "it waits for its trigger");
     }
 
     #[test]

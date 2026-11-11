@@ -14,6 +14,8 @@ pub mod instance_link;
 pub mod invite_rules;
 pub mod login;
 pub mod mob_ai;
+pub mod mob_homing;
+pub mod mob_path;
 pub mod mobs;
 pub mod objectives;
 pub mod placed_points;

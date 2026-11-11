@@ -333,12 +333,13 @@ impl Default for PlayerFishing {
 impl PlayerFishing {
     /// The fishing of a player whose client expects step `next_sequence` next (a handoff's;
     /// 0 for a join).
-    pub(super) fn continuing(next_sequence: u16) -> Self {
+    pub(super) fn continuing(next_sequence: u16, bait: Option<String>) -> Self {
         Self {
             steps: Steps {
                 next: next_sequence,
                 ..Steps::default()
             },
+            bait,
             ..Self::default()
         }
     }

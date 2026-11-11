@@ -7,13 +7,21 @@
 //! level's own). The level's roads ([`nw_world::roads`]) and water ([`nw_world::water`]) go with
 //! it: the road share and the water surface of a place are the maps' where the level ground holds
 //! them, else its terrain's.
+//!
+//! A mob's level ground ([`LevelGround::with_marks`]) stands on the solids of the mobs' `AI`
+//! filter and knows the level designers' navigation marks: a mob does not stand inside a solid,
+//! on a floor a mark takes away, or in water deeper than a swimming body's feet (Inferred: no
+//! mob of the AI data swims, and a body this deep swims, [`SWIM_DEPTH_M`]).
 
 use std::sync::Arc;
 
-use nw_world::collision_index::{CollisionIndex, FLOOR_SEARCH_ABOVE_M, MAX_WALKABLE_SLOPE_DEG};
+use nw_world::collision_index::{
+    CollisionIndex, FLOOR_SEARCH_ABOVE_M, MAX_WALKABLE_SLOPE_DEG, NavMarkIndex,
+};
 use nw_world::roads::RoadMap;
 use nw_world::water::WaterMap;
 
+use crate::character::{STEP_UP_M, SWIM_DEPTH_M};
 use crate::movement::{Ground, Position};
 
 /// The terrain of `terrain` and the structures of `collision`.
@@ -23,6 +31,7 @@ pub struct LevelGround<T> {
     collision: Arc<CollisionIndex>,
     roads: Option<Arc<RoadMap>>,
     water: Option<Arc<WaterMap>>,
+    marks: Option<Arc<NavMarkIndex>>,
 }
 
 impl<T: Ground> LevelGround<T> {
@@ -33,6 +42,17 @@ impl<T: Ground> LevelGround<T> {
             collision,
             roads: None,
             water: None,
+            marks: None,
+        }
+    }
+
+    /// The same ground as a mob's: with the navigation marks of `marks`, and its solids and
+    /// water closed to a standing mob ([`Ground::no_stand`]).
+    #[must_use]
+    pub fn with_marks(self, marks: Arc<NavMarkIndex>) -> Self {
+        Self {
+            marks: Some(marks),
+            ..self
         }
     }
 
@@ -130,6 +150,25 @@ impl<T: Ground> Ground for LevelGround<T> {
             |water| water.flags_at(x, y),
         )
     }
+
+    /// A mob's ground only ([`Self::with_marks`]): the knee (a step above the feet) inside a
+    /// solid, a mark under the feet, or the feet deeper under the water map's surface than a
+    /// swimming body's.
+    fn no_stand(&self, feet: Position) -> bool {
+        let Some(marks) = &self.marks else {
+            return self.terrain.no_stand(feet);
+        };
+        let at = [feet.x, feet.y, feet.z];
+        self.collision
+            .contains([feet.x, feet.y, feet.z + STEP_UP_M])
+            || marks.takes_floor(at)
+            || self
+                .water
+                .as_ref()
+                .and_then(|water| water.surface_at(feet.x, feet.y))
+                .is_some_and(|surface| surface - feet.z > SWIM_DEPTH_M)
+            || self.terrain.no_stand(feet)
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +195,50 @@ mod tests {
             ..LevelCollision::default()
         });
         LevelGround::new(FlatGround(TERRAIN_Z), Arc::new(collision))
+    }
+
+    /// A mob may not stand in the deck box, nor on a deck marked as no floor, nor in a gate
+    /// volume; a player's ground holds no such rule.
+    #[test]
+    fn a_mob_does_not_stand_in_a_solid_or_on_a_marked_floor() {
+        use nw_world::collision::{NavMark, NavMarkKind};
+        let player = ship();
+        let feet = |x: f32, z: f32| Position { x, y: 0.0, z };
+        let in_deck = feet(0.0, DECK_Z - 0.8);
+        assert!(
+            !player.no_stand(in_deck),
+            "the players' ground has no marks"
+        );
+        let mark = |kind, geometry, x: f32, z: f32| {
+            let mut place = IDENTITY_AFFINE;
+            place[0][3] = x;
+            place[2][3] = z;
+            NavMark {
+                kind,
+                geometry,
+                place,
+            }
+        };
+        let deck_place = {
+            let mut place = IDENTITY_AFFINE;
+            place[2][3] = DECK_Z - 0.5;
+            place
+        };
+        let marks = NavMarkIndex::of(
+            player.collision(),
+            &[
+                NavMark {
+                    place: deck_place,
+                    ..mark(NavMarkKind::NoFloorTop, 0, 0.0, 0.0)
+                },
+                mark(NavMarkKind::NoFloorVolume, 0, 40.0, TERRAIN_Z),
+            ],
+        );
+        let mob = ship().with_marks(Arc::new(marks));
+        assert!(mob.no_stand(in_deck), "inside the deck box");
+        assert!(mob.no_stand(feet(1.0, DECK_Z)), "on the marked deck's top");
+        assert!(mob.no_stand(feet(40.0, TERRAIN_Z)), "in the gate volume");
+        assert!(!mob.no_stand(feet(20.0, TERRAIN_Z)), "on the open terrain");
     }
 
     #[test]

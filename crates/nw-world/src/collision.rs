@@ -2,9 +2,12 @@
 //! The level collision file (level-collision note 2026-09-20): the solid shapes of a level that
 //! a player's character collides with, as the client builds them from the level data.
 //!
-//! Each placed entity with a `GameRigidBodyComponent` whose collision filter blocks the
-//! `Player` filter is a [`Body`]: one shape of its physics asset (`.rnr`) or of its own
-//! collision shape, placed in the world. Shapes are kept once in [`LevelCollision::geometries`]
+//! Each placed entity with a `GameRigidBodyComponent`, or with the engine's static physics and a
+//! mesh or primitive collider, whose collision filter blocks the `Player` filter is a [`Body`]:
+//! one shape of its physics asset (`.rnr`) or of its own collision shape, placed in the world.
+//! The solids of the mobs' `AI` filter differ a little: [`LevelCollision::ai_bodies`] block only
+//! the mobs, [`LevelCollision::player_only`] only the players. The level designers' navigation
+//! marks are [`NavMark`]s. Shapes are kept once in [`LevelCollision::geometries`]
 //! and shared by the bodies that place them. The solids of slices that a spawner places later
 //! (an encounter's fog wall, an event's walls: not on initialize) are kept apart as
 //! [`DeferredSlice`]s, which the server adds while it shows them. The file is the shared header of
@@ -27,7 +30,7 @@ pub const COLLISION_MAGIC: [u8; 4] = *b"NWCO";
 pub const COLLISION_FORMAT_VERSION: u16 = 1;
 /// Version of the record types. Raise it when a type in this module changes; the golden test
 /// fails until it is raised.
-pub const COLLISION_SCHEMA_VERSION: u32 = 3;
+pub const COLLISION_SCHEMA_VERSION: u32 = 4;
 /// Header fields of the collision file.
 pub const COLLISION_CONTAINER: ContainerSpec = ContainerSpec {
     magic: COLLISION_MAGIC,
@@ -58,6 +61,59 @@ pub struct LevelCollision {
     pub deferred: Vec<DeferredSlice>,
     /// The quest trigger volumes of the level as it loads.
     pub volumes: Vec<QuestVolume>,
+    /// The placed shapes that block the mobs' `AI` filter and not the `Player` filter.
+    pub ai_bodies: Vec<Body>,
+    /// The bodies (by index into [`Self::bodies`]) that block the `Player` filter and not the
+    /// `AI` filter.
+    pub player_only: Vec<u32>,
+    /// The level designers' navigation marks of the level as it loads.
+    pub nav_marks: Vec<NavMark>,
+}
+
+/// A level designer's navigation mark (the navigation obstacle mesh component, `m_navArea` 0
+/// `UNWALKABLE` or 3 `UNWALKABLE_SOLID`): where a mob has no floor.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct NavMark {
+    /// What the mark takes away.
+    pub kind: NavMarkKind,
+    /// Its shape, by index into [`LevelCollision::geometries`].
+    pub geometry: u32,
+    /// World from the shape's space.
+    pub place: Affine,
+}
+
+/// What a navigation mark takes away from the mobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NavMarkKind {
+    /// No floor inside the shape (`m_meshSource` 6, its own inline shapes: a town gate).
+    NoFloorVolume,
+    /// No floor on top of the solid (`m_meshSource` 3, the rigid body of its entity).
+    NoFloorTop,
+}
+
+/// Which characters a solid blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SolidFor {
+    /// It blocks the `Player` filter.
+    pub player: bool,
+    /// It blocks the mobs' `AI` filter.
+    pub ai: bool,
+}
+
+impl SolidFor {
+    /// It blocks anyone.
+    pub const fn any(self) -> bool {
+        self.player || self.ai
+    }
+}
+
+/// The filter a collision query takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryFilter {
+    /// A player's character.
+    Player,
+    /// A mob.
+    Ai,
 }
 
 /// A quest trigger volume (finding "trigger volumes"): an entity with an
@@ -80,18 +136,44 @@ pub struct QuestVolume {
 impl QuestVolume {
     /// Whether the world point `point` is inside the volume.
     pub fn contains(&self, point: Vec3) -> bool {
-        let Some(inverse) = invert(&self.place) else {
-            return false;
-        };
-        let local = transform_point(&inverse, point);
-        match &self.shape {
-            Geometry::Box { half_extents } => local
-                .iter()
-                .zip(half_extents)
-                .all(|(value, half)| value.abs() <= *half),
-            Geometry::Sphere { radius } => dot(local, local) <= radius * radius,
-            _ => false,
+        shape_contains(&self.shape, &self.place, point)
+    }
+}
+
+/// Whether the world point `point` is inside `shape` placed by `place` (world from the shape's
+/// space): a box, a sphere, a cylinder or a capsule; never inside a mesh or a convex solid.
+pub fn shape_contains(shape: &Geometry, place: &Affine, point: Vec3) -> bool {
+    let Some(inverse) = invert(place) else {
+        return false;
+    };
+    let local = transform_point(&inverse, point);
+    match shape {
+        Geometry::Box { half_extents } => local
+            .iter()
+            .zip(half_extents)
+            .all(|(value, half)| value.abs() <= *half),
+        Geometry::Sphere { radius } => dot(local, local) <= radius * radius,
+        Geometry::Cylinder { from, to, radius } => {
+            let (axis, offset) = (sub(*to, *from), sub(local, *from));
+            let length_squared = dot(axis, axis);
+            let along = dot(offset, axis);
+            if length_squared <= 0.0 || !(0.0..=length_squared).contains(&along) {
+                return false;
+            }
+            dot(offset, offset) - along * along / length_squared <= radius * radius
         }
+        Geometry::Capsule { from, to, radius } => {
+            let (axis, offset) = (sub(*to, *from), sub(local, *from));
+            let length_squared = dot(axis, axis);
+            let share = if length_squared > 0.0 {
+                (dot(offset, axis) / length_squared).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let nearest = sub(offset, axis.map(|value| value * share));
+            dot(nearest, nearest) <= radius * radius
+        }
+        Geometry::Mesh { .. } | Geometry::Convex { .. } => false,
     }
 }
 
@@ -185,6 +267,23 @@ impl LevelCollision {
             .filter(|(distance, _)| *distance <= within)
             .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(_, deferred)| deferred)
+    }
+
+    /// The bodies that block `filter` as the level loads.
+    pub fn bodies_for(&self, filter: QueryFilter) -> Vec<Body> {
+        match filter {
+            QueryFilter::Player => self.bodies.clone(),
+            QueryFilter::Ai => {
+                let passed: std::collections::HashSet<u32> =
+                    self.player_only.iter().copied().collect();
+                (0u32..)
+                    .zip(&self.bodies)
+                    .filter(|(index, _)| !passed.contains(index))
+                    .map(|(_, body)| *body)
+                    .chain(self.ai_bodies.iter().copied())
+                    .collect()
+            }
+        }
     }
 
     /// Encodes the collision with its header.
@@ -371,7 +470,13 @@ mod tests {
         86, 111, 108, 95, 49, 54, 95, 83, 101, 97, 114, 99, 104, 86, 97, 117, 108, 116, 1, 0, 0,
         64, 64, 0, 0, 128, 64, 0, 0, 0, 63, 0, 0, 0, 0, 0, 0, 128, 191, 0, 0, 0, 0, 0, 0, 200, 66,
         0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 72, 67, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63,
-        0, 0, 240, 65,
+        0, 0, 240, 65, // ai_bodies: one sphere body in place.
+        1, 2, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0,
+        // player_only: body 0.
+        1, 0, // nav_marks: the top of box 1 in place.
+        1, 1, 1, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0,
     ];
 
     /// One geometry of every kind and one body.
@@ -430,7 +535,58 @@ mod tests {
                     [0.0, 0.0, 1.0, 30.0],
                 ],
             }],
+            ai_bodies: vec![Body {
+                geometry: 2,
+                place: IDENTITY_AFFINE,
+            }],
+            player_only: vec![0],
+            nav_marks: vec![NavMark {
+                kind: NavMarkKind::NoFloorTop,
+                geometry: 1,
+                place: IDENTITY_AFFINE,
+            }],
         }
+    }
+
+    #[test]
+    fn the_mobs_bodies_leave_out_the_player_only_ones_and_add_their_own() {
+        let level = sample();
+        assert_eq!(level.bodies_for(QueryFilter::Player), level.bodies);
+        assert_eq!(level.bodies_for(QueryFilter::Ai), level.ai_bodies);
+    }
+
+    #[test]
+    fn a_cylinder_and_a_capsule_hold_the_points_within_their_radius_along_their_axis() {
+        let place = place_of([0.0, 0.0, 0.0, 1.0], 1.0, [10.0, 20.0, 30.0]);
+        let cylinder = Geometry::Cylinder {
+            from: [0.0; 3],
+            to: [0.0, 0.0, 4.0],
+            radius: 2.0,
+        };
+        assert!(shape_contains(&cylinder, &place, [11.5, 20.0, 33.0]));
+        assert!(
+            !shape_contains(&cylinder, &place, [12.5, 20.0, 33.0]),
+            "out of its radius"
+        );
+        assert!(
+            !shape_contains(&cylinder, &place, [10.0, 20.0, 35.0]),
+            "above its top cap"
+        );
+        let capsule = Geometry::Capsule {
+            from: [0.0; 3],
+            to: [0.0, 0.0, 4.0],
+            radius: 2.0,
+        };
+        assert!(
+            shape_contains(&capsule, &place, [10.0, 20.0, 35.5]),
+            "in its round end"
+        );
+        assert!(!shape_contains(&capsule, &place, [10.0, 20.0, 36.5]));
+        let mesh = Geometry::Mesh {
+            points: Vec::new(),
+            triangles: Vec::new(),
+        };
+        assert!(!shape_contains(&mesh, &place, [10.0, 20.0, 30.0]));
     }
 
     #[test]

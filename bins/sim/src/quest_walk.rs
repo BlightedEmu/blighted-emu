@@ -58,6 +58,7 @@ pub fn walk(config_path: &Path, report_path: &Path, only: Option<&str>) -> Resul
         Arc::clone(&level.content),
     );
     world.set_mob_ai(spawn_ai);
+    world.set_mob_ground(level.mob_ground.clone());
     world.set_design(&level.design);
     let lower_only = only.map(str::to_lowercase);
     let quests: Vec<(String, String)> = level

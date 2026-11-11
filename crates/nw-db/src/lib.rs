@@ -18,7 +18,9 @@ mod entitlements;
 mod entity;
 mod error;
 mod faction;
+mod gather_nodes;
 mod items;
+mod log_out_state;
 mod meta_achievements;
 mod migrate;
 mod mounts;
@@ -63,11 +65,13 @@ pub use entitlements::{
 pub use entity::{MAX_ENTITY_NUMBER, next_entity_number};
 pub use error::DbError;
 pub use faction::SavedFaction;
+pub use gather_nodes::{NODE_ID_LEN, SavedGatherNode, level_gather_nodes, save_gather_node};
 pub use items::{
     AccountSkins, SavedInventory, SavedItem, SavedItemRolls, SavedLoadout, SavedPlace,
     SavedStoredItem, character_inventory, character_items, collect_account_skins,
     save_character_items,
 };
+pub use log_out_state::{SavedAbilityCooldown, SavedLogOutState, SavedVitals};
 pub use meta_achievements::SavedSlot;
 pub use migrate::{GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 pub use mounts::{DYE_LEN, SavedMount, SavedMounts};

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The progression of a character besides its items and quests (world migrations 0006 to
 //! 0008, 0010 for its travel state, 0012 for its mounts, 0013 for its ability slots and meta
-//! achievements, 0024 for its recipe cooldowns, 0025 for its faction and 0026 for its consumable
-//! status effects): its experience, coins, achievement bits, loot limit counts, weapon
-//! masteries, spent points, travel state, mounts, mapped ability slots, meta achievements,
-//! recipe cooldown counts, faction and held consumable effects. `sim` saves it; the director
+//! achievements, 0024 for its recipe cooldowns, 0025 for its faction, 0026 for its consumable
+//! status effects and 0034 for its log out state): its experience, coins, achievement bits, loot
+//! limit counts, weapon masteries, spent points, travel state, mounts, mapped ability slots, meta
+//! achievements, recipe cooldown counts, faction, held consumable effects, vitals and ability
+//! cooldowns. `sim` saves it; the director
 //! loads it at a join.
 //!
 //! Each save carries the time its state was taken; an older state never overwrites a newer one.
@@ -20,6 +21,9 @@ use crate::consumable_cooldowns::{
 };
 use crate::error::DbError;
 use crate::faction::{SavedFaction, character_faction, save_character_faction};
+use crate::log_out_state::{
+    SavedLogOutState, character_log_out_state, save_character_log_out_state,
+};
 use crate::meta_achievements::{SavedMeta, SavedSlot, character_meta, save_character_meta};
 use crate::mounts::{SavedMounts, character_mounts, save_character_mounts};
 use crate::music::{SavedMusic, character_music, save_character_music};
@@ -103,6 +107,9 @@ pub struct SavedProgression {
     pub status_effects: Vec<SavedStatusEffect>,
     /// The running consumable cooldowns, by group (world migration 0029).
     pub consumable_cooldowns: Vec<SavedConsumableCooldown>,
+    /// The vitals, ability cooldowns, PvP flag wish, stone turns and fishing bait (world
+    /// migration 0034).
+    pub log_out_state: SavedLogOutState,
 }
 
 type ProgressionRow = (bool, i64, i64, Vec<i32>);
@@ -192,6 +199,7 @@ pub async fn character_progression(
     let faction = character_faction(world, character_id).await?;
     let status_effects = character_status_effects(world, character_id).await?;
     let consumable_cooldowns = character_consumable_cooldowns(world, character_id).await?;
+    let log_out_state = character_log_out_state(world, character_id).await?;
     Ok(Some(SavedProgression {
         experience: from_column(experience, "experience")?,
         coins: from_column(coins, "coins")?,
@@ -250,6 +258,7 @@ pub async fn character_progression(
         faction,
         status_effects,
         consumable_cooldowns,
+        log_out_state,
     }))
 }
 
@@ -427,6 +436,8 @@ pub async fn save_character_progression(
         &progression.consumable_cooldowns,
     )
     .await?;
+    save_character_log_out_state(&mut transaction, character_id, &progression.log_out_state)
+        .await?;
     transaction.commit().await?;
     Ok(SaveOutcome::Saved)
 }
@@ -547,6 +558,24 @@ mod infra_tests {
                 repeat: Some((1_790_860_002_000_000_000, 1_790_860_303_500_000_000)),
                 saved_ns: 1_790_860_000_000_000_000,
             }],
+            // The retail run that ended dead (health 0) and came back dead; half the mana, a
+            // used dodge, a running ability cooldown, a turned stone and a bait.
+            log_out_state: SavedLogOutState {
+                vitals: Some(crate::SavedVitals {
+                    health: 0,
+                    mana_milli: 50_000,
+                    stamina_milli: 72_500,
+                }),
+                ability_cooldowns: vec![crate::SavedAbilityCooldown {
+                    ability: 0x5e1c_77a0,
+                    key: 1,
+                    start_us: 846_118_000_000_000,
+                    end_us: 846_118_015_000_000,
+                }],
+                pvp_wanted: true,
+                cyclic_turns: BTreeMap::from([("puzzlestone_a".to_owned(), 3)]),
+                fishing_bait: Some("FishingBaitT2".to_owned()),
+            },
         }
     }
 

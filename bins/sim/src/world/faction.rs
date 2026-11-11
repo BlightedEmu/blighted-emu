@@ -55,6 +55,17 @@ pub(super) struct PvpFlagWait {
 }
 
 impl PvpFlagWait {
+    /// The wait of a player that wants its flag on but does not have it: the flag goes on after
+    /// the countdown outside a sanctuary (a login of a player whose flag was on or on its way
+    /// on, Inferred: as a sanctuary takes the flag off and keeps it pending).
+    pub(super) const fn wanted(wanted: bool) -> Self {
+        Self {
+            pending: wanted,
+            ends_ms: None,
+            in_sanctuary: None,
+        }
+    }
+
     /// Whether the flag is on its way on.
     pub(super) const fn is_pending(&self) -> bool {
         self.pending
@@ -160,6 +171,10 @@ impl SimWorld {
                 // A first check outside changes nothing the client shows (its default is 0).
                 if was.is_some() || inside {
                     change.has_sanctuary = Some(inside);
+                }
+                // A wait that came with the player: its client learns it is pending.
+                if was.is_none() && player.pvp_wait.pending {
+                    change.pvp_flag_pending = Some(true);
                 }
                 if inside && player.pvp_flagged {
                     player.pvp_flagged = false;

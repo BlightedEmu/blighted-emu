@@ -2480,7 +2480,8 @@ impl SimWorld {
     }
 
     /// Whether the swing `intent` of a mob at `at` reaches its target's body at `body`. A mob
-    /// with a reach (its damage window's, or its pace's) lunges first, when the target is within
+    /// with a reach (its damage window's, or its pace's) lunges first (a damage window's reach
+    /// has no lunge: its `Homing` clips moved the body in, `crate::mob_homing`), when the target is within
     /// its lunge turn of where it aimed: toward the body, up to its longest lunge, to where it
     /// stops or the bodies touch; then its wedge must touch the body (collision note: every
     /// retail mob hit landed 0.79 to 1.65 m from the player). A paced mob without one hits
@@ -2515,7 +2516,7 @@ impl SimWorld {
             let lunge_m = (body.horizontal_distance(at) - stop_m).clamp(0.0, reach.lunge_max_m);
             let from = self
                 .mobs
-                .lunge_over(intent.mob, body, lunge_m, &*self.ground)
+                .lunge_over(intent.mob, body, lunge_m, &*self.mob_ground)
                 .unwrap_or(at);
             (from, toward)
         } else {
@@ -4894,17 +4895,18 @@ mod tests {
         );
     }
 
-    /// The strike of the test tree's damage window (`mob_ai::test_support`): it lunges up to
-    /// its homing radius and its shape reaches 0.8 m in front of the body.
+    /// A strike of the test tree's damage row (`mob_ai::test_support`) with a reach that lunges
+    /// up to 2 m; its shape reaches 0.8 m in front of the body.
     fn test_strike() -> crate::mob_ai::Strike {
-        use crate::mob_ai::test_support::{TEST_HOMING_RADIUS_M, TEST_MOB_ROW, TEST_MOB_TABLE};
+        use crate::mob_ai::test_support::{TEST_MOB_ROW, TEST_MOB_TABLE};
         const SHAPE_REACH_M: f32 = 0.8;
+        const LUNGE_M: f32 = 2.0;
         crate::mob_ai::Strike {
             table: TEST_MOB_TABLE.to_owned(),
             row: TEST_MOB_ROW.to_owned(),
             weapon: None,
             reach: MobReach {
-                lunge_max_m: TEST_HOMING_RADIUS_M.parse().expect("radius"),
+                lunge_max_m: LUNGE_M,
                 lunge_turn_rad: std::f32::consts::PI,
                 reach_m: SHAPE_REACH_M,
             },

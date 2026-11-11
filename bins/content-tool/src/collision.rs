@@ -19,6 +19,22 @@
 //! `ftue_v2_corruptedwall` slice, whose inactive `mainvfxwall` box stands 82 m wide across the
 //! path at 480, 296, which the retail player walked through in both newchar captures).
 //!
+//! An entity with the engine's static physics component (`EnabledInitially` not 0) and a mesh
+//! collider or a primitive collider is solid too, by its `CollisionFilter` (`Static` when it names
+//! none): a mesh collider's shape is the physics asset of the entity's mesh, a primitive
+//! collider's the entity's box, sphere, cylinder or capsule shape component, at the entity's
+//! scale. An engine collider without the static physics component is a trigger: no solid.
+//!
+//! Each region's `region.distribution` ([`crate::distribution`]) places the trees and stones: a
+//! slice and its variant per row, on the terrain or the water.
+//!
+//! Each solid is kept for the filters it blocks: the `Player` filter and the mobs' `AI` filter.
+//! A navigation obstacle component whose `m_navArea` is `UNWALKABLE` (0) or `UNWALKABLE_SOLID`
+//! (3) is a [`NavMark`]: with `m_meshSource` 3 the top of its entity's rigid body is no floor for
+//! a mob, with 6 its own `m_inlineShape` shapes hold no floor (the area names in the order the
+//! client lists them: `UNWALKABLE`, `WATER`, `STEEP_SLOPE`, `UNWALKABLE_SOLID`, the jump links,
+//! `WALKABLE_SOLID`, `WALKABLE`).
+//!
 //! A capital with a `variantName` places its slice as that variant shows it: the slice's
 //! `VariationDataComponent` names a variation table (a `VariationData` datasheet) and binds
 //! columns to actions on its entities (`Change Mesh` on `StartMesh`); the variant's row gives the
@@ -28,8 +44,12 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, AssetCatalogError, GUID_LEN, paths_of};
+use nw_formats::asset_catalog::{
+    ASSET_CATALOG_ENTRY, AssetCatalogError, DYNAMIC_SLICE_EXTENSION, GUID_LEN, paths_of,
+    slice_assets_in,
+};
 use nw_formats::azcs::{AzcsError, decode_azcs, is_azcs};
 use nw_formats::cgf::has_physics_geometry;
 use nw_formats::chunk_file::ChunkFileError;
@@ -40,10 +60,17 @@ use nw_formats::rnr::{RNR_EXTENSION, RnrError, Shape, ShapeKind, parse_rnr};
 use nw_oodle::KrakenDecompressor;
 use nw_world::capitals::parse_capitals;
 use nw_world::collision::{
-    Affine, Body, DeferredSlice, Geometry, IDENTITY_AFFINE, LevelCollision, QuestVolume,
-    collision_file_path, compose, hull_planes, place_of,
+    Affine, Body, DeferredSlice, Geometry, IDENTITY_AFFINE, LevelCollision, NavMark, NavMarkKind,
+    QuestVolume, SolidFor, collision_file_path, compose, hull_planes, place_of,
 };
 use nw_world::collision_index::CollisionIndex;
+use nw_world::level_script::DETECTION_OFFSET_NAME;
+use nw_world::records::WorldFile;
+use nw_world::water::{WaterMap, water_file_path};
+use nw_world::world_file::world_file_path;
+
+use crate::distribution::{DistributionError, parse_distribution, region_origin};
+use crate::slice_meta::{SliceMeta, SliceMetaError, SliceVariant, parse_slice_meta};
 
 use crate::world::{LEVELS_PREFIX, in_parallel};
 
@@ -52,6 +79,24 @@ const COLLISION_FILTERS_ENTRY: &str = "sharedassets/physics/default.collisionfil
 /// The filter of the player's character (`slices/player.dynamicslice`: the capsule shape
 /// component's `m_strFilter`).
 const PLAYER_FILTER: &str = "Player";
+/// The filter of a mob (`default.collisionfilters`: `AI`, the filter of the creature slices'
+/// character shapes).
+const AI_FILTER: &str = "AI";
+/// The filter of the engine's static physics component when it names none (Inferred from the
+/// filter's name: the static world).
+const DEFAULT_ENGINE_FILTER: &str = "Static";
+/// A region's trees and stones.
+const REGION_DISTRIBUTION_FILE: &str = "region.distribution";
+/// A region's slice data: the meshes of its distribution's slice variants.
+const REGION_SLICE_DATA_FILE: &str = "region.slicedata";
+/// The slices folder a distribution's short slice names lie under.
+const SLICES_FOLDER: &str = "slices/";
+/// `m_navArea` values that hold no floor (the client's area names: `UNWALKABLE` is 0,
+/// `UNWALKABLE_SOLID` 3).
+const NO_FLOOR_AREAS: [u64; 2] = [0, 3];
+/// `m_meshSource` values a mark is read from: the rigid body of its entity, its inline shapes.
+const MARK_SOURCE_RIGID_BODY: u64 = 3;
+const MARK_SOURCE_INLINE: u64 = 6;
 /// Placements of slices in a capitals file.
 const CAPITALS_EXTENSION: &str = ".capitals.json";
 /// The chunk lists of capitals.
@@ -134,6 +179,34 @@ pub(crate) mod types {
     /// client's reflection, `FUN_1442dbfb0`).
     pub const VARIATION_DATA: [u8; 16] =
         *b"\x4a\x2d\x9c\x0a\xb1\x47\x41\x86\xa9\xe0\x58\x05\xb6\x10\xd3\xcc";
+    /// The engine's static physics component (`95d89791-6397-41bc-aac5-95282c8ad9d4`:
+    /// `EnabledInitially`, `CollisionFilter`).
+    pub const STATIC_PHYSICS: [u8; 16] =
+        *b"\x95\xd8\x97\x91\x63\x97\x41\xbc\xaa\xc5\x95\x28\x2c\x8a\xd9\xd4";
+    /// The engine's mesh collider (`2d559eb0-f6fe-46e0-9fce-e8f375177724`).
+    pub const MESH_COLLIDER: [u8; 16] =
+        *b"\x2d\x55\x9e\xb0\xf6\xfe\x46\xe0\x9f\xce\xe8\xf3\x75\x17\x77\x24";
+    /// The engine's primitive collider (`9cb3707a-73b3-4ee5-84ea-3cf86e0e3722`): the shape of
+    /// its entity's shape component.
+    pub const PRIMITIVE_COLLIDER: [u8; 16] =
+        *b"\x9c\xb3\x70\x7a\x73\xb3\x4e\xe5\x84\xea\x3c\xf8\x6e\x0e\x37\x22";
+    /// The engine's box shape (`5edf4b9e-0d3d-40b8-8c91-5142bcfc30a6`: `Dimensions`, the full
+    /// size).
+    pub const BOX_SHAPE: [u8; 16] =
+        *b"\x5e\xdf\x4b\x9e\x0d\x3d\x40\xb8\x8c\x91\x51\x42\xbc\xfc\x30\xa6";
+    /// The engine's sphere shape (`e24cbff0-2531-4f8d-a8ab-47af4d54bcd2`: `Radius`).
+    pub const SPHERE_SHAPE: [u8; 16] =
+        *b"\xe2\x4c\xbf\xf0\x25\x31\x4f\x8d\xa8\xab\x47\xaf\x4d\x54\xbc\xd2";
+    /// The engine's cylinder shape (`b0c6aa97-e754-4e33-8d32-33e267db622f`: `Height`, `Radius`).
+    pub const CYLINDER_SHAPE: [u8; 16] =
+        *b"\xb0\xc6\xaa\x97\xe7\x54\x4e\x33\x8d\x32\x33\xe2\x67\xdb\x62\x2f";
+    /// The engine's capsule shape (`967ec13d-364d-4696-ab5c-c00cc05a2305`: `Height`, `Radius`).
+    pub const CAPSULE_SHAPE: [u8; 16] =
+        *b"\x96\x7e\xc1\x3d\x36\x4d\x46\x96\xab\x5c\xc0\x0c\xc0\x5a\x23\x05";
+    /// The navigation obstacle mesh component (`500a7bfe-52fe-aa45-6b0e-b1253a4d7bf7`:
+    /// `m_navArea`, `m_meshSource`, `m_registerWithNavMesh`, `m_inlineShape`).
+    pub const NAV_OBSTACLE: [u8; 16] =
+        *b"\x50\x0a\x7b\xfe\x52\xfe\xaa\x45\x6b\x0e\xb1\x25\x3a\x4d\x7b\xf7";
 }
 
 /// An asset id: GUID and sub id.
@@ -199,6 +272,25 @@ pub enum CollisionError {
         /// Why.
         source: RnrError,
     },
+    /// A region's distribution file cannot be read.
+    #[error("{path}: {source}")]
+    Distribution {
+        /// The entry.
+        path: String,
+        /// Why.
+        source: DistributionError,
+    },
+    /// A region's slice data file cannot be read.
+    #[error("{path}: {source}")]
+    SliceMeta {
+        /// The entry.
+        path: String,
+        /// Why.
+        source: SliceMetaError,
+    },
+    /// The collision filter file has no filter of this name.
+    #[error("{COLLISION_FILTERS_ENTRY} has no filter {0}")]
+    NoFilter(String),
     /// The level has no capitals.
     #[error("level {0} has no capitals")]
     NoLevel(String),
@@ -325,6 +417,8 @@ enum ShapeSource {
     MeshPath(String),
     /// The rigid body's own query shape, placed in the entity's space.
     Own(Geometry, Affine),
+    /// An engine primitive collider's shape, in the entity's space at the entity's scale.
+    Engine(Geometry),
 }
 
 /// One spawner of a slice: where it places the slice, the slice, and whether it spawns when the
@@ -347,6 +441,10 @@ struct SolidEntity {
     entity: Option<u64>,
     /// It is in the gatherable's depleted state ([`DEPLETED_GROUP`]).
     depleted: bool,
+    /// The filters it blocks (none for a mark's own volume).
+    solid_for: SolidFor,
+    /// The navigation mark it carries.
+    mark: Option<NavMarkKind>,
 }
 
 /// What one slice holds that the collision needs.
@@ -359,8 +457,14 @@ struct SliceSolids {
     /// Solid entities whose query shape is of a kind no slice of the build uses with a rigid
     /// body (`QueryShapePoint`, `QueryShapePolygonPrismTEMP`).
     unread: usize,
-    /// Entities with a rigid body that do not activate as the level loads.
+    /// Entities with a rigid body, or an engine collider with static physics, that do not
+    /// activate as the level loads.
     inactive: usize,
+    /// Engine colliders without the static physics component (triggers: no solid).
+    triggers: usize,
+    /// Navigation marks of a kind not read (another area, another shape source, not
+    /// registered, or a source 3 mark on an entity without a rigid body).
+    unread_marks: usize,
     /// The slice's variation data component, when it has one.
     variation: Option<Variation>,
     /// Each quest trigger volume: its tag, its place in the slice and its shape.
@@ -404,6 +508,40 @@ struct SliceEntity {
     volume_tag: Option<String>,
     /// Its `DetectionVolumeComponent`'s first query shape and offset.
     detection: Option<(Element, [f32; AXES])>,
+    /// Its engine collider parts.
+    engine: EngineCollider,
+    /// Its navigation obstacle component.
+    nav_mark: Option<NavMarkRead>,
+}
+
+/// The engine collider components of an entity.
+#[derive(Debug, Default)]
+struct EngineCollider {
+    /// Its static physics component: `Some(filter)` when it is enabled at the start.
+    static_filter: Option<String>,
+    /// Its static physics component is off at the start (`EnabledInitially` 0).
+    static_off: bool,
+    /// It has a mesh collider.
+    mesh_collider: bool,
+    /// It has a primitive collider.
+    primitive_collider: bool,
+    /// Its shape component's shape, centred on the entity.
+    shape: Option<Geometry>,
+}
+
+impl EngineCollider {
+    const fn has_collider(&self) -> bool {
+        self.mesh_collider || self.primitive_collider
+    }
+}
+
+/// A navigation obstacle component as read.
+#[derive(Debug, Clone)]
+struct NavMarkRead {
+    area: u64,
+    source: u64,
+    registered: bool,
+    inline: Vec<Element>,
 }
 
 /// A `GameRigidBodyComponent`'s configuration.
@@ -414,10 +552,6 @@ struct RigidBody {
     shape: Option<Element>,
     centre: [f32; AXES],
 }
-
-/// The name CRC of a `DetectionVolumeComponent`'s shape offset (its text is Unknown; a vector,
-/// 0 in the volumes seen).
-const DETECTION_OFFSET_NAME: u32 = 0x0a63_b9da;
 
 /// Name CRCs of the fields read here.
 struct Names {
@@ -448,6 +582,15 @@ struct Names {
     target_tag: u32,
     detection_shape: u32,
     detection_offset: u32,
+    enabled_initially: u32,
+    collision_filter: u32,
+    dimensions: u32,
+    engine_radius: u32,
+    engine_height: u32,
+    nav_area: u32,
+    mesh_source: u32,
+    register_with_nav_mesh: u32,
+    inline_shape: u32,
 }
 
 impl Names {
@@ -480,6 +623,15 @@ impl Names {
             target_tag: lowercase_crc32("m_targetTag"),
             detection_shape: lowercase_crc32("m_shape"),
             detection_offset: DETECTION_OFFSET_NAME,
+            enabled_initially: lowercase_crc32("EnabledInitially"),
+            collision_filter: lowercase_crc32("CollisionFilter"),
+            dimensions: lowercase_crc32("Dimensions"),
+            engine_radius: lowercase_crc32("Radius"),
+            engine_height: lowercase_crc32("Height"),
+            nav_area: lowercase_crc32("m_navArea"),
+            mesh_source: lowercase_crc32("m_meshSource"),
+            register_with_nav_mesh: lowercase_crc32("m_registerWithNavMesh"),
+            inline_shape: lowercase_crc32("m_inlineShape"),
         }
     }
 }
@@ -499,7 +651,7 @@ fn asset_key(element: &Element) -> Option<AssetKey> {
 }
 
 /// The [`Affine`] of a stored `Transform` value (big-endian floats; the 3 x 3 part by columns).
-fn transform_of(element: &Element) -> Option<Affine> {
+pub(crate) fn transform_of(element: &Element) -> Option<Affine> {
     if element.value.len() != TRANSFORM_FLOATS * size_of::<f32>() {
         return None;
     }
@@ -628,6 +780,40 @@ fn read_component(component: &Element, names: &Names, entity: &mut SliceEntity) 
                 .and_then(asset_key)
                 .map(|slice| (slice, on_initialize));
         }
+        types::STATIC_PHYSICS => {
+            let enabled = descendant(component, names.enabled_initially)
+                .and_then(unsigned)
+                .is_none_or(|enabled| enabled != 0);
+            if enabled {
+                entity.engine.static_filter = Some(
+                    descendant(component, names.collision_filter)
+                        .and_then(|filter| filter.as_string().ok())
+                        .map(str::trim)
+                        .filter(|filter| !filter.is_empty())
+                        .unwrap_or(DEFAULT_ENGINE_FILTER)
+                        .to_owned(),
+                );
+            } else {
+                entity.engine.static_off = true;
+            }
+        }
+        types::MESH_COLLIDER => entity.engine.mesh_collider = true,
+        types::PRIMITIVE_COLLIDER => entity.engine.primitive_collider = true,
+        types::BOX_SHAPE | types::SPHERE_SHAPE | types::CYLINDER_SHAPE | types::CAPSULE_SHAPE => {
+            entity.engine.shape = engine_shape(component, names);
+        }
+        types::NAV_OBSTACLE => {
+            let number = |name: u32| component.child(name).and_then(unsigned);
+            entity.nav_mark = Some(NavMarkRead {
+                area: number(names.nav_area).unwrap_or(u64::MAX),
+                source: number(names.mesh_source).unwrap_or(u64::MAX),
+                registered: number(names.register_with_nav_mesh).is_none_or(|flag| flag != 0),
+                inline: component
+                    .child(names.inline_shape)
+                    .map(|shapes| shapes.children.clone())
+                    .unwrap_or_default(),
+            });
+        }
         // Other spawners (an encounter's spawn group, an event's) name their slice in their
         // server part and place it on a trigger, not when the level loads.
         _ => {
@@ -635,6 +821,53 @@ fn read_component(component: &Element, names: &Names, entity: &mut SliceEntity) 
                 entity.spawn = Some((slice, false));
             }
         }
+    }
+}
+
+/// The value of an unsigned integer element of 1, 2, 4 or 8 big-endian bytes.
+fn unsigned(element: &Element) -> Option<u64> {
+    match element.value.len() {
+        1 => element.as_u8().ok().map(u64::from),
+        2 => element.as_u16().ok().map(u64::from),
+        4 => element.as_u32().ok().map(u64::from),
+        8 => element.as_u64().ok(),
+        _ => None,
+    }
+}
+
+/// The shape of an engine shape component, centred on its entity: a box of its `Dimensions`
+/// (the full size), a sphere of its `Radius`, a cylinder or a capsule standing along z, its
+/// `Height` from end to end (a capsule's with its round ends). `None` without its sizes.
+fn engine_shape(component: &Element, names: &Names) -> Option<Geometry> {
+    let float = |name: u32| descendant(component, name).and_then(|value| value.as_f32().ok());
+    match component.type_id {
+        types::BOX_SHAPE => {
+            let size = descendant(component, names.dimensions)?.as_vec3().ok()?;
+            Some(Geometry::Box {
+                half_extents: size.map(|side| side * HALF),
+            })
+        }
+        types::SPHERE_SHAPE => Some(Geometry::Sphere {
+            radius: float(names.engine_radius)?,
+        }),
+        types::CYLINDER_SHAPE => {
+            let half = float(names.engine_height)? * HALF;
+            Some(Geometry::Cylinder {
+                from: [0.0, 0.0, -half],
+                to: [0.0, 0.0, half],
+                radius: float(names.engine_radius)?,
+            })
+        }
+        types::CAPSULE_SHAPE => {
+            let radius = float(names.engine_radius)?;
+            let half = (float(names.engine_height)? * HALF - radius).max(0.0);
+            Some(Geometry::Capsule {
+                from: [0.0, 0.0, -half],
+                to: [0.0, 0.0, half],
+                radius,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -661,8 +894,25 @@ fn slice_asset_in(element: &Element, names: &Names) -> Option<AssetKey> {
     })
 }
 
-/// The solids and spawns of a slice root, for the filters in `solid_filters`.
-fn slice_solids(root: &Element, names: &Names, solid_filters: &HashSet<String>) -> SliceSolids {
+/// The filters that block each kind of character.
+#[derive(Debug, Clone, Default)]
+struct SolidFilters {
+    player: HashSet<String>,
+    ai: HashSet<String>,
+}
+
+impl SolidFilters {
+    /// Which characters a body of `filter` blocks.
+    fn of(&self, filter: &str) -> SolidFor {
+        SolidFor {
+            player: self.player.contains(filter),
+            ai: self.ai.contains(filter),
+        }
+    }
+}
+
+/// The solids and spawns of a slice root, for the filters in `filters`.
+fn slice_solids(root: &Element, names: &Names, filters: &SolidFilters) -> SliceSolids {
     let entities = slice_entities(root, names);
     let parents: HashMap<u64, (Option<u64>, &str)> = entities
         .iter()
@@ -687,14 +937,81 @@ fn slice_solids(root: &Element, names: &Names, solid_filters: &HashSet<String>) 
                 on_initialize: on_initialize && !entity.inactive,
             });
         }
+        let depleted = in_depleted_group(entity, &parents);
+        let solid = |source, solid_for, mark| SolidEntity {
+            place,
+            source,
+            entity: entity.id,
+            depleted,
+            solid_for,
+            mark,
+        };
+        if entity.inactive {
+            if entity.body.is_some() || entity.engine.has_collider() {
+                solids.inactive += 1;
+            }
+            continue;
+        }
+        let mark = entity
+            .nav_mark
+            .as_ref()
+            .filter(|mark| mark.registered && NO_FLOOR_AREAS.contains(&mark.area));
+        let top_mark = mark
+            .filter(|mark| mark.source == MARK_SOURCE_RIGID_BODY && entity.body.is_some())
+            .map(|_| NavMarkKind::NoFloorTop);
+        match mark {
+            Some(mark) if mark.source == MARK_SOURCE_INLINE => {
+                for shape in &mark.inline {
+                    match query_shape(shape, [0.0; AXES], names) {
+                        Some(own) => solids.bodies.push(solid(
+                            Some(own),
+                            SolidFor::default(),
+                            Some(NavMarkKind::NoFloorVolume),
+                        )),
+                        None => solids.unread_marks += 1,
+                    }
+                }
+            }
+            _ if top_mark.is_some() => {}
+            _ => {
+                if entity.nav_mark.is_some() {
+                    solids.unread_marks += 1;
+                }
+            }
+        }
+        if entity.engine.has_collider() {
+            match &entity.engine.static_filter {
+                Some(filter) => {
+                    let solid_for = filters.of(filter);
+                    if solid_for.any() {
+                        if entity.engine.mesh_collider {
+                            solids.bodies.push(solid(
+                                entity.mesh.map(ShapeSource::Mesh),
+                                solid_for,
+                                None,
+                            ));
+                        }
+                        if entity.engine.primitive_collider {
+                            match &entity.engine.shape {
+                                Some(shape) => solids.bodies.push(solid(
+                                    Some(ShapeSource::Engine(shape.clone())),
+                                    solid_for,
+                                    None,
+                                )),
+                                None => solids.unread += 1,
+                            }
+                        }
+                    }
+                }
+                None if entity.engine.static_off => solids.inactive += 1,
+                None => solids.triggers += 1,
+            }
+        }
         let Some(body) = &entity.body else {
             continue;
         };
-        if entity.inactive {
-            solids.inactive += 1;
-            continue;
-        }
-        if !solid_filters.contains(&body.filter) {
+        let solid_for = filters.of(&body.filter);
+        if !solid_for.any() {
             continue;
         }
         let source = if let Some(rnr) = body.rnr {
@@ -709,12 +1026,7 @@ fn slice_solids(root: &Element, names: &Names, solid_filters: &HashSet<String>) 
         } else {
             entity.mesh.map(ShapeSource::Mesh)
         };
-        solids.bodies.push(SolidEntity {
-            place,
-            source,
-            entity: entity.id,
-            depleted: in_depleted_group(entity, &parents),
-        });
+        solids.bodies.push(solid(source, solid_for, top_mark));
     }
     solids
 }
@@ -822,6 +1134,23 @@ fn query_shape(shape: &Element, centre: [f32; AXES], names: &Names) -> Option<Sh
     Some(ShapeSource::Own(geometry, place))
 }
 
+/// The world volume of a `DetectionVolumeComponent`'s first query shape `shape` with the
+/// volume's offset `offset`, on an entity at world place `place`: a box, a sphere, a cylinder or
+/// a capsule, without the entity's scale ([`without_scale`]); `None` for another kind.
+pub(crate) fn detector_volume(
+    shape: &Element,
+    offset: [f32; AXES],
+    place: &Affine,
+) -> Option<nw_world::dungeon_scripts::Detector> {
+    let ShapeSource::Own(geometry, local) = query_shape(shape, offset, &Names::new())? else {
+        return None;
+    };
+    Some(nw_world::dungeon_scripts::Detector {
+        shape: geometry,
+        place: compose(&without_scale(place), &local),
+    })
+}
+
 /// `place` with each axis column brought to unit length: its rotation and translation, no scale.
 ///
 /// A rigid body's own query shape does not take its entity's scale: the client's query shapes
@@ -868,12 +1197,17 @@ fn capsule(height: f32, radius: f32, axis: [f32; AXES]) -> Geometry {
     }
 }
 
-/// The filters that block `player` (`default.collisionfilters`): a filter blocks it when the
-/// categories it is in meet the categories the player collides with, each with its base
-/// filters' (Inferred from the file's content: per filter its name, its description, its base
-/// filters, the categories it is in and the categories it collides with; `Structure` is in
-/// `Static` by its base and `Player` collides with `Static` by its base `Character`).
-fn blocking_filters(root: &Element, player: &str) -> HashSet<String> {
+/// The filters that block the filter `mover` (`default.collisionfilters`: `Player` or `AI`): a
+/// filter blocks it when the categories it is in meet the categories the mover collides with,
+/// each with its base filters' (Inferred from the file's content: per filter its name, its
+/// description, its base filters, the categories it is in and the categories it collides with;
+/// `Structure` is in `Static` by its base and `Player` collides with `Static` by its base
+/// `Character`).
+///
+/// # Errors
+///
+/// [`CollisionError::NoFilter`] when the file has no filter `mover`.
+fn blocking_filters(root: &Element, mover: &str) -> Result<HashSet<String>, CollisionError> {
     /// Name CRCs of the filter fields (no name in the install; meaning from the content).
     const FILTERS: u32 = 0x7877_678d;
     const BASES: u32 = 0xa1ef_e138;
@@ -923,12 +1257,15 @@ fn blocking_filters(root: &Element, player: &str) -> HashSet<String> {
         }
         out
     };
-    let collides = resolved(player, |filter| &filter.collides);
-    filters
+    if !filters.contains_key(mover) {
+        return Err(CollisionError::NoFilter(mover.to_owned()));
+    }
+    let collides = resolved(mover, |filter| &filter.collides);
+    Ok(filters
         .keys()
         .filter(|name| !resolved(name, |filter| &filter.categories).is_disjoint(&collides))
         .cloned()
-        .collect()
+        .collect())
 }
 
 /// One collision filter's lists, each without its base filters' entries.
@@ -1073,9 +1410,14 @@ pub struct CollisionReport {
     pub placements: usize,
     /// Capitals that place a variant of their slice.
     pub variant_placements: usize,
-    /// Of those, the ones whose variant no variation table of their slice holds (placed as the
-    /// slice is).
+    /// Of those, the ones whose variant no variation table of their slice holds and no region
+    /// slice data names (placed as the slice is).
     pub unknown_variants: usize,
+    /// Distribution rows whose variant only the region's slice data names: placed with its
+    /// meshes.
+    pub slice_data_variants: usize,
+    /// Of those, the ones whose variant has no collision (`hasCollision` 0).
+    pub slice_data_without_collision: usize,
     /// Distinct slices read.
     pub slices: usize,
     /// Solid entities placed when the level loads.
@@ -1109,6 +1451,20 @@ pub struct CollisionReport {
     pub placed_triangles: usize,
     /// The bytes the loaded index holds.
     pub index_bytes: usize,
+    /// Engine colliders without static physics (triggers: no solid).
+    pub triggers: usize,
+    /// Navigation marks not read (see `SliceSolids::unread_marks`).
+    pub unread_marks: usize,
+    /// Placed shapes that block only the mobs.
+    pub ai_bodies: usize,
+    /// Placed shapes that block only the players.
+    pub player_only: usize,
+    /// Navigation marks placed.
+    pub nav_marks: usize,
+    /// Rows of the regions' distribution files.
+    pub distribution_rows: usize,
+    /// Of those, rows whose slice is not in the catalog or whose place has no terrain.
+    pub distribution_unplaced: usize,
 }
 
 /// One slice to place: the slice, its place, its spawn depth, and the deferred slice it belongs
@@ -1119,8 +1475,11 @@ struct Pending {
     place: Affine,
     depth: usize,
     deferred: Option<usize>,
-    /// The variant the capital places (`variantName`).
-    variant: Option<String>,
+    /// The variant the capital or the distribution row places (`variantName`).
+    variant: Option<Arc<str>>,
+    /// The region's slice data of a distribution row's slice and variant: its meshes when no
+    /// variation table holds the variant.
+    meta: Option<Arc<SliceMeta>>,
 }
 
 /// The slices placed so far and those still to read.
@@ -1129,8 +1488,16 @@ struct Placements {
     total: usize,
 }
 
-/// A solid entity placed in the world, and the deferred slice it belongs to.
-type PlacedSolid = (Affine, ShapeSource, Option<usize>);
+/// A solid entity placed in the world.
+#[derive(Debug, Clone)]
+struct PlacedSolid {
+    place: Affine,
+    source: ShapeSource,
+    /// The deferred slice it belongs to (`None`: the level as it loads).
+    deferred: Option<usize>,
+    solid_for: SolidFor,
+    mark: Option<NavMarkKind>,
+}
 
 /// Builds, writes and reloads the collision file of `level`.
 ///
@@ -1149,7 +1516,10 @@ pub fn build_level_collision(
         COLLISION_FILTERS_ENTRY,
         &index.read(COLLISION_FILTERS_ENTRY)?,
     )?;
-    let solid_filters = blocking_filters(&filters_root, PLAYER_FILTER);
+    let filters = SolidFilters {
+        player: blocking_filters(&filters_root, PLAYER_FILTER)?,
+        ai: blocking_filters(&filters_root, AI_FILTER)?,
+    };
     let catalog = index.read(ASSET_CATALOG_ENTRY)?;
     let variation_tables = variation_tables(index)?;
     let mut placements = level_placements(index, level)?;
@@ -1161,6 +1531,9 @@ pub fn build_level_collision(
         level: level.to_owned(),
         ..CollisionReport::default()
     };
+    let rows = distribution_placements(index, level, &catalog, client_build, out_dir, &mut report)?;
+    placements.total += rows.len();
+    placements.pending.extend(rows);
     while !placements.pending.is_empty() {
         let wanted: HashSet<AssetKey> = placements
             .pending
@@ -1174,7 +1547,7 @@ pub fn build_level_collision(
         let mut path_list: Vec<String> = by_path.keys().map(|path| (*path).clone()).collect();
         path_list.sort();
         for (path, read) in index.read_each(&path_list, |path, bytes| {
-            stream_of(path, &bytes).map(|root| slice_solids(&root, &names, &solid_filters))
+            stream_of(path, &bytes).map(|root| slice_solids(&root, &names, &filters))
         }) {
             let solids = read??;
             solids_by_slice.insert(by_path[&path], solids);
@@ -1186,18 +1559,67 @@ pub fn build_level_collision(
             let solids = &solids_by_slice[&pending.slice];
             report.unread_entities += solids.unread;
             report.inactive_entities += solids.inactive;
+            report.triggers += solids.triggers;
+            report.unread_marks += solids.unread_marks;
             let row = pending.variant.as_ref().map(|variant| {
                 report.variant_placements += 1;
                 let row = solids
                     .variation
                     .as_ref()
                     .and_then(|variation| variation_tables.get(&variation.table))
-                    .and_then(|table| table.get(variant));
-                if row.is_none() {
+                    .and_then(|table| table.get(&**variant));
+                if row.is_none() && pending.meta.is_none() {
                     report.unknown_variants += 1;
                 }
                 row
             });
+            // A variant that only the region's slice data names: its meshes take the place of the
+            // slice's mesh entities, and block whom those entities block.
+            if let (Some(None), Some(meta)) = (row, &pending.meta) {
+                report.slice_data_variants += 1;
+                if !meta.has_collision {
+                    report.slice_data_without_collision += 1;
+                }
+                let mesh_slot = |body: &&SolidEntity| {
+                    !body.depleted
+                        && matches!(
+                            body.source,
+                            None | Some(ShapeSource::Mesh(_) | ShapeSource::MeshPath(_))
+                        )
+                };
+                let blocks = solids
+                    .bodies
+                    .iter()
+                    .find(mesh_slot)
+                    .map(|body| body.solid_for);
+                for body in solids
+                    .bodies
+                    .iter()
+                    .filter(|body| !body.depleted && !mesh_slot(body))
+                {
+                    if let Some(source) = &body.source {
+                        placed_solids.push(PlacedSolid {
+                            place: compose(&pending.place, &body.place),
+                            source: source.clone(),
+                            deferred: pending.deferred,
+                            solid_for: body.solid_for,
+                            mark: body.mark,
+                        });
+                    }
+                }
+                if let Some(solid_for) = blocks.filter(|_| meta.has_collision) {
+                    for mesh in &meta.meshes {
+                        placed_solids.push(PlacedSolid {
+                            place: compose(&pending.place, &mesh.place),
+                            source: ShapeSource::Mesh(mesh.mesh),
+                            deferred: pending.deferred,
+                            solid_for,
+                            mark: None,
+                        });
+                    }
+                }
+                continue;
+            }
             for body in &solids.bodies {
                 let body = match (row, &solids.variation) {
                     (Some(Some(row)), Some(variation)) => varied(body, variation, row),
@@ -1207,11 +1629,13 @@ pub fn build_level_collision(
                     continue;
                 };
                 match body.source {
-                    Some(source) => placed_solids.push((
-                        compose(&pending.place, &body.place),
+                    Some(source) => placed_solids.push(PlacedSolid {
+                        place: compose(&pending.place, &body.place),
                         source,
-                        pending.deferred,
-                    )),
+                        deferred: pending.deferred,
+                        solid_for: body.solid_for,
+                        mark: body.mark,
+                    }),
                     None => report.shapeless_entities += 1,
                 }
             }
@@ -1247,6 +1671,7 @@ pub fn build_level_collision(
                     depth: pending.depth + 1,
                     deferred,
                     variant: None,
+                    meta: None,
                 });
             }
         }
@@ -1256,7 +1681,7 @@ pub fn build_level_collision(
     report.slices = solids_by_slice.len();
     report.solid_entities = placed_solids
         .iter()
-        .filter(|(_, _, deferred)| deferred.is_none())
+        .filter(|solid| solid.deferred.is_none() && solid.solid_for.any())
         .count();
     report.volumes = volumes.len();
     let collision = LevelCollision {
@@ -1281,6 +1706,9 @@ pub fn build_level_collision(
         .len();
     report.geometries = reloaded.geometries.len();
     report.bodies = reloaded.bodies.len();
+    report.ai_bodies = reloaded.ai_bodies.len();
+    report.player_only = reloaded.player_only.len();
+    report.nav_marks = reloaded.nav_marks.len();
     report.deferred_slices = reloaded.deferred.len();
     report.deferred_bodies = reloaded
         .deferred
@@ -1464,7 +1892,8 @@ fn level_placements(index: &PakIndex, level: &str) -> Result<Placements, Collisi
                     place,
                     depth: 0,
                     deferred: None,
-                    variant: capital.variant_name.clone(),
+                    variant: capital.variant_name.as_deref().map(Arc::from),
+                    meta: None,
                 });
             }
         }
@@ -1483,6 +1912,7 @@ fn level_placements(index: &PakIndex, level: &str) -> Result<Placements, Collisi
                 depth: 0,
                 deferred: None,
                 variant: None,
+                meta: None,
             });
         }
     }
@@ -1492,8 +1922,137 @@ fn level_placements(index: &PakIndex, level: &str) -> Result<Placements, Collisi
     })
 }
 
+/// The placements of the trees and stones of `level`'s regions (their `region.distribution`
+/// files): each row's slice (by its path among the catalog's slices) and variant, on the terrain
+/// of the level's world file or on its water (the world and water files in `out_dir`, which the
+/// `world` and `water` builds write first; a level without a water file has only its terrain).
+///
+/// # Errors
+///
+/// Returns [`CollisionError`] when a distribution file does not read, or a level with rows has
+/// no world file.
+fn distribution_placements(
+    index: &PakIndex,
+    level: &str,
+    catalog: &[u8],
+    client_build: &str,
+    out_dir: &Path,
+    report: &mut CollisionReport,
+) -> Result<Vec<Pending>, CollisionError> {
+    let folder = format!("{LEVELS_PREFIX}{level}{PATH_SEPARATOR}{REGIONS_DIR}");
+    let files =
+        index.paths(|path| path.starts_with(&folder) && path.ends_with(REGION_DISTRIBUTION_FILE));
+    let mut files_with_rows = Vec::new();
+    for (path, read) in index.read_each(&files, |path, bytes| {
+        parse_distribution(&bytes).map_err(|source| CollisionError::Distribution {
+            path: path.to_owned(),
+            source,
+        })
+    }) {
+        let file = read??;
+        if !file.rows.is_empty() {
+            files_with_rows.push((path, file));
+        }
+    }
+    if files_with_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let world = WorldFile::load(&world_file_path(out_dir, client_build, level), client_build)?;
+    let water = WaterMap::load(&water_file_path(out_dir, client_build, level), client_build).ok();
+    let slices = slice_assets_in(catalog, "")?;
+    let region_of = |path: &str| {
+        path.strip_prefix(&folder)
+            .and_then(|rest| rest.split(PATH_SEPARATOR).next())
+            .map(str::to_owned)
+    };
+    let meta_files =
+        index.paths(|path| path.starts_with(&folder) && path.ends_with(REGION_SLICE_DATA_FILE));
+    let mut metas_by_region = HashMap::new();
+    for (path, read) in index.read_each(&meta_files, |path, bytes| {
+        parse_slice_meta(&bytes).map_err(|source| CollisionError::SliceMeta {
+            path: path.to_owned(),
+            source,
+        })
+    }) {
+        if let Some(region) = region_of(&path) {
+            metas_by_region.insert(region, read??);
+        }
+    }
+    let mut pending = Vec::new();
+    for (path, file) in files_with_rows {
+        let Some(region) = region_of(&path) else {
+            continue;
+        };
+        let Some(origin) = region_origin(&region) else {
+            continue;
+        };
+        let metas: Vec<Option<Arc<SliceMeta>>> = file
+            .slices
+            .iter()
+            .zip(&file.variants)
+            .map(|(slice, variant)| {
+                metas_by_region
+                    .get(&region)
+                    .and_then(|metas| metas.get(&SliceVariant::of(slice, variant)))
+                    .filter(|_| !variant.is_empty())
+                    .cloned()
+                    .map(Arc::new)
+            })
+            .collect();
+        let keys: Vec<Option<AssetKey>> = file
+            .slices
+            .iter()
+            .map(|name| slice_key_of(&slices, name))
+            .collect();
+        let variants: Vec<Option<Arc<str>>> = file
+            .variants
+            .iter()
+            .map(|variant| (!variant.is_empty()).then(|| Arc::from(variant.as_str())))
+            .collect();
+        report.distribution_rows += file.rows.len();
+        for row in &file.rows {
+            let slice_index = usize::from(row.slice);
+            let x = origin[0] + row.at[0];
+            let y = origin[1] + row.at[1];
+            let (Some(slice), Some(terrain)) = (keys[slice_index], world.height_at(x, y)) else {
+                report.distribution_unplaced += 1;
+                continue;
+            };
+            let z = row.height.height(
+                terrain,
+                water.as_ref().and_then(|water| water.surface_at(x, y)),
+            );
+            pending.push(Pending {
+                slice,
+                place: place_of(row.rotation, row.scale, [x, y, z]),
+                depth: 0,
+                deferred: None,
+                variant: variants[slice_index].clone(),
+                meta: metas[slice_index].clone(),
+            });
+        }
+    }
+    Ok(pending)
+}
+
+/// The asset id of a distribution's slice name `name` among the catalog's slices `slices` (by
+/// pak path): the name as a pak path under [`SLICES_FOLDER`] or as it is, with the dynamic slice
+/// extension.
+fn slice_key_of(slices: &HashMap<String, AssetKey>, name: &str) -> Option<AssetKey> {
+    let path = pak_path(name);
+    let stem = path.strip_suffix(DYNAMIC_SLICE_EXTENSION).unwrap_or(&path);
+    let stem = stem.strip_prefix(SLICES_FOLDER).unwrap_or(stem);
+    [
+        format!("{SLICES_FOLDER}{stem}{DYNAMIC_SLICE_EXTENSION}"),
+        format!("{stem}{DYNAMIC_SLICE_EXTENSION}"),
+    ]
+    .iter()
+    .find_map(|path| slices.get(path).copied())
+}
+
 /// The collision of the placed solids: their physics assets read, flattened and shared; the
-/// solids of each of `deferred` (a slice and its spawner's place) kept apart.
+/// solids of each of `deferred` (a slice and its spawner's place) kept apart (those that block
+/// the players); each placed shape kept by the filters it blocks, and the navigation marks.
 fn place_solids(
     index: &PakIndex,
     catalog: &[u8],
@@ -1504,9 +2063,9 @@ fn place_solids(
 ) -> Result<LevelCollision, CollisionError> {
     let wanted: HashSet<AssetKey> = placed
         .iter()
-        .filter_map(|(_, source, _)| match source {
+        .filter_map(|solid| match &solid.source {
             ShapeSource::Rnr(key) | ShapeSource::Mesh(key) => Some(*key),
-            ShapeSource::MeshPath(_) | ShapeSource::Own(..) => None,
+            ShapeSource::MeshPath(_) | ShapeSource::Own(..) | ShapeSource::Engine(_) => None,
         })
         .collect();
     let asset_paths = paths_of(catalog, &wanted)?;
@@ -1518,17 +2077,17 @@ fn place_solids(
             .cloned(),
         ShapeSource::Mesh(key) => asset_paths.get(key).map(|path| mesh_rnr_path(path)),
         ShapeSource::MeshPath(path) => Some(mesh_rnr_path(path)),
-        ShapeSource::Own(..) => None,
+        ShapeSource::Own(..) | ShapeSource::Engine(_) => None,
     };
     let mesh_path_of = |source: &ShapeSource| match source {
         ShapeSource::Mesh(key) => asset_paths.get(key).cloned(),
         ShapeSource::MeshPath(path) => Some(path.clone()),
-        ShapeSource::Rnr(_) | ShapeSource::Own(..) => None,
+        ShapeSource::Rnr(_) | ShapeSource::Own(..) | ShapeSource::Engine(_) => None,
     };
     let path_list: Vec<String> = {
         let unique: BTreeSet<String> = placed
             .iter()
-            .filter_map(|(_, source, _)| rnr_path_of(source))
+            .filter_map(|solid| rnr_path_of(&solid.source))
             .collect();
         unique.into_iter().collect()
     };
@@ -1557,35 +2116,63 @@ fn place_solids(
     report.assets = shapes_by_path.len();
     let unread_meshes: Vec<String> = placed
         .iter()
-        .filter_map(|(_, source, _)| mesh_path_of(source))
+        .filter_map(|solid| mesh_path_of(&solid.source))
         .filter(|path| !shapes_by_path.contains_key(&mesh_rnr_path(path)))
         .collect::<BTreeSet<String>>()
         .into_iter()
         .collect();
     let physics_meshes = meshes_with_physics(index, &unread_meshes)?;
     let mut own_shapes: HashMap<String, u32> = HashMap::new();
-    let mut bodies = Vec::new();
+    let mut sorted = SortedBodies::default();
     let mut deferred_bodies: Vec<Vec<Body>> = vec![Vec::new(); deferred.len()];
-    for (place, source, group) in placed {
-        let target = match group {
-            Some(group) => &mut deferred_bodies[*group],
-            None => &mut bodies,
+    for solid in placed {
+        let PlacedSolid {
+            place,
+            source,
+            deferred: group,
+            solid_for,
+            mark,
+        } = solid;
+        let mut put = |bodies: &mut dyn Iterator<Item = Body>| match group {
+            Some(group) => {
+                if solid_for.player {
+                    deferred_bodies[*group].extend(bodies);
+                }
+            }
+            None => {
+                for body in bodies {
+                    sorted.put(body, *solid_for, *mark);
+                }
+            }
         };
-        if let ShapeSource::Own(shape, local) = source {
-            let key = format!("{shape:?}");
-            let geometry = *own_shapes.entry(key).or_insert_with(|| {
+        let mut own = |shape: &Geometry| {
+            *own_shapes.entry(format!("{shape:?}")).or_insert_with(|| {
                 geometries.push(shape.clone());
                 small_index(geometries.len() - 1)
-            });
-            target.push(Body {
-                geometry,
-                place: compose(&without_scale(place), local),
-            });
-            continue;
+            })
+        };
+        match source {
+            ShapeSource::Own(shape, local) => {
+                let body = Body {
+                    geometry: own(shape),
+                    place: compose(&without_scale(place), local),
+                };
+                put(&mut std::iter::once(body));
+                continue;
+            }
+            ShapeSource::Engine(shape) => {
+                let body = Body {
+                    geometry: own(shape),
+                    place: *place,
+                };
+                put(&mut std::iter::once(body));
+                continue;
+            }
+            ShapeSource::Rnr(_) | ShapeSource::Mesh(_) | ShapeSource::MeshPath(_) => {}
         }
         let shapes = rnr_path_of(source).and_then(|path| shapes_by_path.get(&path));
         let Some(shapes) = shapes else {
-            if group.is_none() {
+            if group.is_none() && solid_for.any() {
                 match source {
                     ShapeSource::Mesh(_) | ShapeSource::MeshPath(_) => {
                         match mesh_path_of(source).and_then(|path| physics_meshes.get(&path)) {
@@ -1599,7 +2186,7 @@ fn place_solids(
             }
             continue;
         };
-        target.extend(shapes.iter().map(|(local, geometry)| Body {
+        put(&mut shapes.iter().map(|(local, geometry)| Body {
             geometry: *geometry,
             place: compose(place, local),
         }));
@@ -1618,10 +2205,43 @@ fn place_solids(
     Ok(LevelCollision {
         level: level.to_owned(),
         geometries,
-        bodies,
+        bodies: sorted.bodies,
         deferred,
         volumes: Vec::new(),
+        ai_bodies: sorted.ai_bodies,
+        player_only: sorted.player_only,
+        nav_marks: sorted.nav_marks,
     })
+}
+
+/// The placed shapes of the level as it loads, by the filters they block, and the marks.
+#[derive(Debug, Default)]
+struct SortedBodies {
+    bodies: Vec<Body>,
+    ai_bodies: Vec<Body>,
+    player_only: Vec<u32>,
+    nav_marks: Vec<NavMark>,
+}
+
+impl SortedBodies {
+    /// Keeps `body` for the filters `solid_for` blocks, and as a mark of `mark`.
+    fn put(&mut self, body: Body, solid_for: SolidFor, mark: Option<NavMarkKind>) {
+        if solid_for.player {
+            if !solid_for.ai {
+                self.player_only.push(small_index(self.bodies.len()));
+            }
+            self.bodies.push(body);
+        } else if solid_for.ai {
+            self.ai_bodies.push(body);
+        }
+        if let Some(kind) = mark {
+            self.nav_marks.push(NavMark {
+                kind,
+                geometry: body.geometry,
+                place: body.place,
+            });
+        }
+    }
 }
 
 /// The `.rnr` path of the mesh at `mesh_path`: the same path with the physics asset's extension.
@@ -1755,10 +2375,235 @@ mod tests {
         )
     }
 
+    /// Filters where only `filter` blocks, and only the players.
+    fn player_filters(filter: &str) -> SolidFilters {
+        SolidFilters {
+            player: [filter.to_owned()].into(),
+            ai: HashSet::new(),
+        }
+    }
+
+    /// A slice of one entity at the origin with `components`.
+    fn one_entity(components: Vec<Element>) -> Element {
+        let entity = list("element", vec![list("Components", components)]);
+        list(
+            "root",
+            vec![list(
+                "Components",
+                vec![list("element", vec![list("Entities", vec![entity])])],
+            )],
+        )
+    }
+
+    fn float(name: &str, value: f32) -> Element {
+        element(name, [0; 16], value.to_be_bytes().to_vec(), Vec::new())
+    }
+
+    fn vector(name: &str, value: [f32; 3]) -> Element {
+        let bytes = value.iter().flat_map(|part| part.to_be_bytes()).collect();
+        element(name, [0; 16], bytes, Vec::new())
+    }
+
+    fn static_physics(enabled: u8, filter: &str) -> Element {
+        element(
+            "element",
+            types::STATIC_PHYSICS,
+            Vec::new(),
+            vec![list(
+                "Configuration",
+                vec![
+                    element("EnabledInitially", [0; 16], vec![enabled], Vec::new()),
+                    string("CollisionFilter", filter),
+                ],
+            )],
+        )
+    }
+
+    fn component(type_id: [u8; 16], children: Vec<Element>) -> Element {
+        element("element", type_id, Vec::new(), children)
+    }
+
+    /// An engine box collider of `size` with static physics of `filter`.
+    fn engine_box(enabled: u8, filter: &str, size: [f32; 3]) -> Element {
+        one_entity(vec![
+            static_physics(enabled, filter),
+            component(types::PRIMITIVE_COLLIDER, Vec::new()),
+            component(
+                types::BOX_SHAPE,
+                vec![list("Configuration", vec![vector("Dimensions", size)])],
+            ),
+        ])
+    }
+
+    #[test]
+    fn an_engine_collider_with_static_physics_is_solid_by_its_filter() {
+        let names = Names::new();
+        let filters = SolidFilters {
+            player: ["Structure".to_owned()].into(),
+            ai: ["Structure".to_owned(), "Tree".to_owned()].into(),
+        };
+        let solids = slice_solids(&engine_box(1, "Tree", [2.0, 4.0, 6.0]), &names, &filters);
+        assert_eq!(solids.bodies.len(), 1);
+        let body = &solids.bodies[0];
+        assert_eq!(
+            body.source,
+            Some(ShapeSource::Engine(Geometry::Box {
+                half_extents: [1.0, 2.0, 3.0]
+            }))
+        );
+        assert_eq!(
+            body.solid_for,
+            SolidFor {
+                player: false,
+                ai: true
+            },
+            "a tree stops the mobs only here"
+        );
+        let off = slice_solids(&engine_box(0, "Tree", [1.0; 3]), &names, &filters);
+        assert!(off.bodies.is_empty());
+        assert_eq!(off.inactive, 1, "EnabledInitially 0");
+        let trigger = one_entity(vec![component(types::MESH_COLLIDER, Vec::new())]);
+        let trigger = slice_solids(&trigger, &names, &filters);
+        assert!(trigger.bodies.is_empty());
+        assert_eq!(trigger.triggers, 1, "no static physics: a trigger");
+    }
+
+    #[test]
+    fn engine_round_shapes_stand_along_z_on_their_middle() {
+        let names = Names::new();
+        let shape = |type_id, height: f32, radius: f32| {
+            engine_shape(
+                &component(
+                    type_id,
+                    vec![list(
+                        "Configuration",
+                        vec![float("Height", height), float("Radius", radius)],
+                    )],
+                ),
+                &names,
+            )
+        };
+        assert_eq!(
+            shape(types::CAPSULE_SHAPE, 4.0, 0.5),
+            Some(Geometry::Capsule {
+                from: [0.0, 0.0, -1.5],
+                to: [0.0, 0.0, 1.5],
+                radius: 0.5
+            })
+        );
+        assert_eq!(
+            shape(types::CYLINDER_SHAPE, 2.0, 1.0),
+            Some(Geometry::Cylinder {
+                from: [0.0, 0.0, -1.0],
+                to: [0.0, 0.0, 1.0],
+                radius: 1.0
+            })
+        );
+        assert_eq!(
+            shape(types::SPHERE_SHAPE, 0.0, 3.0),
+            Some(Geometry::Sphere { radius: 3.0 })
+        );
+    }
+
+    /// A navigation obstacle of `area` from `source` with one inline box of half size 5.
+    fn nav_obstacle(area: u8, source: u8) -> Element {
+        component(
+            types::NAV_OBSTACLE,
+            vec![
+                element("m_navArea", [0; 16], vec![area], Vec::new()),
+                element("m_meshSource", [0; 16], vec![source], Vec::new()),
+                element("m_registerWithNavMesh", [0; 16], vec![1], Vec::new()),
+                list(
+                    "m_inlineShape",
+                    vec![element(
+                        "element",
+                        types::QUERY_SHAPE_BOX,
+                        Vec::new(),
+                        vec![vector("m_box", [5.0; 3])],
+                    )],
+                ),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_gate_mark_is_a_volume_without_a_solid_and_a_body_mark_takes_its_top() {
+        let names = Names::new();
+        let filters = player_filters("Structure");
+        let gate = slice_solids(&one_entity(vec![nav_obstacle(3, 6)]), &names, &filters);
+        assert_eq!(gate.bodies.len(), 1);
+        assert_eq!(gate.bodies[0].mark, Some(NavMarkKind::NoFloorVolume));
+        assert!(!gate.bodies[0].solid_for.any(), "the gate stays open");
+        let walkable = slice_solids(&one_entity(vec![nav_obstacle(63, 6)]), &names, &filters);
+        assert!(walkable.bodies.is_empty());
+        assert_eq!(walkable.unread_marks, 1);
+        let mut roof = slice("Structure");
+        roof.children[0].children[0].children[0].children[0].children[0]
+            .children
+            .push(nav_obstacle(0, 3));
+        let roof = slice_solids(&roof, &names, &filters);
+        assert_eq!(roof.bodies.len(), 1);
+        assert_eq!(roof.bodies[0].mark, Some(NavMarkKind::NoFloorTop));
+    }
+
+    #[test]
+    fn placed_bodies_are_sorted_by_the_filters_they_block() {
+        let body = |geometry| Body {
+            geometry,
+            place: IDENTITY_AFFINE,
+        };
+        let both = SolidFor {
+            player: true,
+            ai: true,
+        };
+        let mut sorted = SortedBodies::default();
+        sorted.put(body(0), both, None);
+        sorted.put(body(1), SolidFor { ai: false, ..both }, None);
+        sorted.put(
+            body(2),
+            SolidFor {
+                player: false,
+                ..both
+            },
+            None,
+        );
+        sorted.put(
+            body(3),
+            SolidFor::default(),
+            Some(NavMarkKind::NoFloorVolume),
+        );
+        assert_eq!(sorted.bodies, [body(0), body(1)]);
+        assert_eq!(sorted.player_only, [1]);
+        assert_eq!(sorted.ai_bodies, [body(2)]);
+        assert_eq!(sorted.nav_marks.len(), 1);
+        assert_eq!(sorted.nav_marks[0].geometry, 3);
+    }
+
+    #[test]
+    fn a_distribution_slice_name_is_found_by_its_path() {
+        let slices: HashMap<String, AssetKey> = [(
+            "slices/nature/trees/oak.dynamicslice".to_owned(),
+            ([4; GUID_LEN], 2),
+        )]
+        .into();
+        for name in [
+            "Slices\\Nature\\Trees\\Oak.dynamicslice",
+            "nature/trees/oak",
+            "slices/nature/trees/oak.dynamicslice",
+        ] {
+            assert_eq!(
+                slice_key_of(&slices, name),
+                Some(([4; GUID_LEN], 2)),
+                "{name}"
+            );
+        }
+        assert_eq!(slice_key_of(&slices, "nature/trees/pine"), None);
+    }
+
     #[test]
     fn a_solid_entity_is_placed_by_its_slice_matrix_with_its_mesh_s_physics() {
         let names = Names::new();
-        let filters: HashSet<String> = ["Structure".to_owned()].into();
+        let filters = player_filters("Structure");
         let solids = slice_solids(&slice("Structure"), &names, &filters);
         assert_eq!(solids.bodies.len(), 1);
         let SolidEntity { place, source, .. } = &solids.bodies[0];
@@ -1775,7 +2620,7 @@ mod tests {
     #[test]
     fn an_inactive_entity_has_no_solid_and_spawns_nothing_as_the_level_loads() {
         let names = Names::new();
-        let filters: HashSet<String> = ["Structure".to_owned()].into();
+        let filters = player_filters("Structure");
         let mut root = slice("Structure");
         for entity in &mut root.children[0].children[0].children[0].children {
             entity
@@ -1902,7 +2747,7 @@ mod tests {
     #[test]
     fn a_variant_shows_its_own_start_mesh_and_not_its_depleted_state() {
         let names = Names::new();
-        let filters: HashSet<String> = ["Tree".to_owned()].into();
+        let filters = player_filters("Tree");
         let solids = slice_solids(&gatherable(), &names, &filters);
         let variation = solids.variation.clone().expect("variation component");
         assert_eq!(variation.table, "Gatherable_Trees");
@@ -1939,6 +2784,11 @@ mod tests {
             source: Some(ShapeSource::Rnr(([1; GUID_LEN], 100))),
             entity: Some(9),
             depleted: false,
+            solid_for: SolidFor {
+                player: true,
+                ai: true,
+            },
+            mark: None,
         };
         let flag = |action: &str, column: &str| VariationBinding {
             entity: 9,
@@ -2149,7 +2999,7 @@ mod tests {
             }],
             ..Element::default()
         };
-        let blocking = blocking_filters(&root, "Player");
+        let blocking = blocking_filters(&root, "Player").expect("a player filter");
         let mut names: Vec<&str> = blocking.iter().map(String::as_str).collect();
         names.sort_unstable();
         assert_eq!(names, ["Static", "Structure"]);

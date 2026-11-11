@@ -71,6 +71,7 @@ mod crafting;
 mod dungeon_script;
 pub mod economy;
 mod encounter;
+mod encounter_roots;
 mod events;
 mod faction;
 mod fall_damage;
@@ -135,6 +136,7 @@ mod walked_floor;
 use asset_script::Step;
 use combat_status::CombatTimer;
 use encounter::{BAG_PREFIX, Order, Shove, Tutorial};
+pub(crate) use gathering::DepletedNode;
 use gathering::{GATHERABLE_ENTITY_BASE, Nodes, OpenGather};
 use gear::{Gear, Stow, unix_ns};
 use level_assets::{ASSET_ENTITY_BASE, AssetViews, asset_gde_ref, spell_gde_ref};
@@ -207,6 +209,28 @@ pub const REPLICATION_CHANNEL: u8 = 1;
 /// rejected and never spawned. A fresh login starts above that mark; a handed-off player keeps
 /// its own running sequence (see [`SimWorld::take`]).
 const FIRST_LOGIN_BUNDLE_SEQUENCE: u64 = 2;
+
+/// Thousandths per unit of a saved mana or stamina ([`nw_bus::VitalsAtSave`]).
+const VITALS_MILLI_PER_UNIT: f32 = 1_000.0;
+
+/// `value` (mana or stamina, at least 0 and at most some hundreds) in thousandths.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "mana and stamina are at least 0 and at most some hundreds"
+)]
+fn to_milli(value: f32) -> u32 {
+    (value.max(0.0) * VITALS_MILLI_PER_UNIT).round() as u32
+}
+
+/// A saved mana or stamina in thousandths, as its value.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "mana and stamina are at most some hundreds"
+)]
+fn from_milli(milli: u32) -> f32 {
+    milli as f32 / VITALS_MILLI_PER_UNIT
+}
 
 /// Wait after a fresh login before the one-time own spawn card goes out. The card is sent once
 /// before the client spawns (see [`Neighbourhood`]); a card sent on the login tick reaches the
@@ -811,6 +835,8 @@ struct Player {
     cyclic_turns: HashMap<String, u32>,
     /// The version of each gather node its client has, by slot key.
     node_versions: HashMap<u64, u32>,
+    /// The version of each encounter root its client has ([`encounter_roots`]).
+    encounter_root_versions: HashMap<u64, u32>,
     /// The version of each loot bag its client has, by slot key.
     bag_versions: HashMap<u64, u32>,
     /// Its loot tracker's bags.
@@ -883,6 +909,19 @@ impl Player {
                     end_us: cooldown.end_us,
                 })
                 .collect(),
+            vitals: self.health_sent.map(|health| nw_bus::VitalsAtSave {
+                health,
+                mana_milli: to_milli(self.abilities.mana.current),
+                stamina_milli: to_milli(self.stamina.current()),
+            }),
+            ability_cooldowns: self.abilities.carried_cooldowns(),
+            pvp_wanted: self.pvp_flagged || self.pvp_wait.is_pending(),
+            cyclic_turns: self
+                .cyclic_turns
+                .iter()
+                .map(|(stone, turns)| (stone.clone(), *turns))
+                .collect(),
+            fishing_bait: self.fishing.bait().map(str::to_owned),
         }
     }
 
@@ -948,6 +987,9 @@ pub struct SimWorld {
     settings: WorldSettings,
     ids: WorldIds,
     ground: Arc<dyn Ground + Send + Sync>,
+    /// The mobs' ground: the solids of their `AI` filter and the navigation marks (the players'
+    /// ground until [`Self::set_mob_ground`]).
+    mob_ground: Arc<dyn Ground + Send + Sync>,
     /// The floor the players walked on: where a server push may go.
     walked_floor: walked_floor::WalkedFloor,
     /// What the viewers were last sent of each player ([`replica`]).
@@ -976,6 +1018,10 @@ pub struct SimWorld {
     dungeon_run: Option<dungeon_script::DungeonRun>,
     /// The encounters of the open world, on the sim of its level.
     world_events: Option<dungeon_script::DungeonRun>,
+    /// The root groups of the open world's encounters ([`encounter_roots`]).
+    encounter_roots: encounter_roots::EncounterRoots,
+    /// The start objects of the open world's encounters ([`encounter_roots`]).
+    encounter_objects: encounter_roots::EncounterObjects,
     /// The expedition requests for the director since the last tick.
     instance_requests: Vec<(ConnectionRef, nw_bus::InstanceRequest)>,
     /// The level of each instance game mode, by its CRC: an instance names its own frame.
@@ -1246,6 +1292,8 @@ impl SimWorld {
             coin_moves: HashMap::new(),
             dungeon_run: None,
             world_events: None,
+            encounter_roots: encounter_roots::EncounterRoots::default(),
+            encounter_objects: encounter_roots::EncounterObjects::default(),
             instance_requests: Vec::new(),
             instance_levels,
             combat,
@@ -1253,6 +1301,7 @@ impl SimWorld {
             by_connection: HashMap::new(),
             settings,
             ids,
+            mob_ground: Arc::clone(&ground),
             ground,
             me,
             cells: None,
@@ -1266,6 +1315,11 @@ impl SimWorld {
     /// Whether the player of `connection` is here.
     pub fn has(&self, connection: &ConnectionRef) -> bool {
         self.by_connection.contains_key(connection)
+    }
+
+    /// The mobs' ground (`run::LoadedLevel::mob_ground`); set before the first cells.
+    pub fn set_mob_ground(&mut self, ground: Arc<dyn Ground + Send + Sync>) {
+        self.mob_ground = ground;
     }
 
     /// The design overrides of the level's spawns (`mob_ai::resolve_ai`); set before the first
@@ -1340,9 +1394,16 @@ impl SimWorld {
                 Position::from(admit.position),
                 self.settings.ocean_level_m,
             ),
-            health: Health::full(
-                self.player_max_health(admit.progression.experience, &admit.progression.attributes),
-            ),
+            // A saved player comes back with the health it had, dead too (retail: a run that
+            // ended at health 0 started its next part at 0 and respawned); a new one is full.
+            health: {
+                let max = self
+                    .player_max_health(admit.progression.experience, &admit.progression.attributes);
+                admit
+                    .progression
+                    .vitals
+                    .map_or(Health::full(max), |vitals| Health::at(vitals.health, max))
+            },
             // A fresh login gets spawn protection until its client spawns; a resume was already
             // in the world.
             spawned: !admit.login,
@@ -2486,7 +2547,7 @@ impl SimWorld {
         self.share_mob_effects();
         let intents = self
             .mobs
-            .tick(&seen, now_ms, &*self.ground, self.settings.tick_threads);
+            .tick(&seen, now_ms, &*self.mob_ground, self.settings.tick_threads);
         self.add_tree_statuses();
         intents
     }
@@ -4384,6 +4445,8 @@ impl SimWorld {
             mob_looks: &content.mob_looks,
             level: &content.tutorial_level,
             nodes: &self.nodes,
+            encounter_roots: &self.encounter_roots,
+            encounter_objects: &self.encounter_objects,
             stations: (!self.is_tutorial()).then_some(&self.stations),
             quest_objects: &content.quest_objects,
             view_radius_m: self.settings.interest_radius_m,
@@ -4471,6 +4534,19 @@ impl SimWorld {
     ) {
         nw_messages::hold_raw_id(self.raw_ids, arrival.number);
         let kept_effects = std::mem::take(&mut arrival.progression.status_effects);
+        // A player that comes in at health 0 is dead: it respawns as any dead player does.
+        let mut vitals = Vitals::new(arrival.health, arrival.spawned);
+        if arrival.health.is_dead() {
+            vitals.dead_since_ms = Some(self.last_now_ms);
+        }
+        let mut abilities = abilities::AbilityRun::default();
+        if let Some(saved) = arrival.progression.vitals {
+            abilities.mana.restore(from_milli(saved.mana_milli));
+        }
+        abilities.restore_cooldowns(
+            &arrival.progression.ability_cooldowns,
+            (self.last_now_ms, self.server_ms),
+        );
         let arrival_masteries = tradeskill::arrival_masteries(
             &arrival.progression.masteries,
             arrival.backstory.as_deref(),
@@ -4542,7 +4618,9 @@ impl SimWorld {
                     defer_throttle_clear: false,
                     auto_pin: arrival.auto_pin,
                     pvp_flagged: arrival.pvp_flagged,
-                    pvp_wait: faction::PvpFlagWait::default(),
+                    pvp_wait: faction::PvpFlagWait::wanted(
+                        arrival.progression.pvp_wanted && !arrival.pvp_flagged,
+                    ),
                     own_places: OwnPlaces::default(),
                     footing: Footing::SPAWN,
                     footing_sent: Footing::SPAWN,
@@ -4638,8 +4716,13 @@ impl SimWorld {
                     deaths_door_sent: false,
                     health_max_sent: None,
                     life_ms: 0,
-                    stamina: Stamina::default(),
-                    abilities: abilities::AbilityRun::default(),
+                    stamina: arrival
+                        .progression
+                        .vitals
+                        .map_or_else(Stamina::default, |saved| {
+                            Stamina::restored(from_milli(saved.stamina_milli))
+                        }),
+                    abilities,
                     attack_playing: None,
                     // The clock of the last tick: a sim ticks before its first admit.
                     mount: mount::PlayerMount::of(
@@ -4647,7 +4730,10 @@ impl SimWorld {
                         self.last_now_ms,
                         self.server_ms,
                     ),
-                    fishing: fishing::PlayerFishing::continuing(arrival.fishing_sequence),
+                    fishing: fishing::PlayerFishing::continuing(
+                        arrival.fishing_sequence,
+                        arrival.progression.fishing_bait.clone(),
+                    ),
                     music: music::PlayerMusicState::of(&arrival.progression.music),
                     notifications: notifications::ShownNotifications::of(
                         &arrival.progression.notifications,
@@ -4657,8 +4743,14 @@ impl SimWorld {
                     extra_members: Vec::new(),
                     social: social_states::PlayerSocial::default(),
                     gathers: 0,
-                    cyclic_turns: HashMap::new(),
+                    cyclic_turns: arrival
+                        .progression
+                        .cyclic_turns
+                        .iter()
+                        .map(|(stone, turns)| (stone.clone(), *turns))
+                        .collect(),
                     node_versions: HashMap::new(),
+                    encounter_root_versions: HashMap::new(),
                     bag_versions: HashMap::new(),
                     ended_gather: None,
                     statics: StaticViews::default(),
@@ -4673,7 +4765,7 @@ impl SimWorld {
                     no_handoff_before_ms,
                 },
                 Body { motion },
-                Vitals::new(arrival.health, arrival.spawned),
+                vitals,
             ))
             .id();
         self.by_connection.insert(arrival.connection, entity);
@@ -4965,6 +5057,10 @@ struct Neighbourhood<'a> {
     level: &'a FtueLevel,
     /// The open world's gather nodes.
     nodes: &'a Nodes,
+    /// The open world's encounter roots.
+    encounter_roots: &'a encounter_roots::EncounterRoots,
+    /// The open world encounters' start objects.
+    encounter_objects: &'a encounter_roots::EncounterObjects,
     /// The level's crafting stations; none in the tutorial.
     stations: Option<&'a crafting::Stations>,
     /// The level's quest objects that the client knows by GDE id.
@@ -5046,6 +5142,14 @@ impl Neighbourhood<'_> {
                 numbers.extend(player.statics.numbers());
                 numbers.extend(player.assets.numbers());
                 numbers.extend(self.nodes.numbers_near(own_position, self.view_radius_m));
+                numbers.extend(
+                    self.encounter_roots
+                        .numbers_near(own_position, self.view_radius_m),
+                );
+                numbers.extend(
+                    self.encounter_objects
+                        .numbers_near(own_position, self.view_radius_m),
+                );
                 if let Some(stations) = self.stations {
                     numbers.extend(stations.numbers_near(own_position, self.view_radius_m));
                 }
@@ -5277,6 +5381,9 @@ impl Neighbourhood<'_> {
                 // by a revive ([`HealthChange::incapacitated`]).
                 let was_at_door = player.deaths_door_sent;
                 let life = match player.health_sent {
+                    // A player that comes in dead (a saved death, or a dead one handed over):
+                    // its client shows the death screen and asks for a respawn.
+                    None if health == 0 => Some(VitalsData::player_dead(player.life_ms)),
                     Some(sent) if sent > 0 && health == 0 => {
                         player.deaths_door_sent = vitals.downed();
                         Some(if vitals.downed() {
@@ -5530,6 +5637,26 @@ impl Neighbourhood<'_> {
                     if let Some(slot) = player.slots.slot(number) {
                         let player = &mut **player;
                         groups.extend(self.nodes.group(number, slot, &mut player.node_versions));
+                    }
+                    continue;
+                }
+                if number >= encounter_roots::ENCOUNTER_OBJECT_ENTITY_BASE {
+                    groups.extend(
+                        player
+                            .slots
+                            .slot(number)
+                            .and_then(|slot| self.encounter_objects.group(number, slot)),
+                    );
+                    continue;
+                }
+                if number >= encounter_roots::ENCOUNTER_ROOT_ENTITY_BASE {
+                    if let Some(slot) = player.slots.slot(number) {
+                        let player = &mut **player;
+                        groups.extend(self.encounter_roots.group(
+                            number,
+                            slot,
+                            &mut player.encounter_root_versions,
+                        ));
                     }
                     continue;
                 }
@@ -10434,6 +10561,92 @@ mod tests {
     }
 
     #[test]
+    fn a_login_comes_back_with_its_saved_vitals_cooldowns_pvp_wish_turns_and_bait() {
+        const JOINER: u64 = 2;
+        const MANA_MILLI: u32 = 42_500;
+        const STAMINA_MILLI: u32 = 30_000;
+        const ABILITY: u32 = 0x5e1c_77a0;
+        const ENDED_ABILITY: u32 = 0x0bad_f00d;
+        const KEY: u8 = 1;
+        const LEFT_MS: u64 = 12_000;
+        const STONE: &str = "puzzlestone_a";
+        const BAIT: &str = "FishingBaitT2";
+        // A server clock some days after 2000-01-01, so the saved times before it are valid.
+        const SERVER_MS: u64 = 846_118_000_000;
+        let server_us = SERVER_MS * 1_000;
+        let mut world = limited_flint_world();
+        world.server_ms = SERVER_MS;
+        world.last_now_ms = NOW;
+        let mut admit = admit_at(JOINER, CELL_M / 2.0, true);
+        admit.progression = PlayerProgression {
+            vitals: Some(nw_bus::VitalsAtSave {
+                health: 0,
+                mana_milli: MANA_MILLI,
+                stamina_milli: STAMINA_MILLI,
+            }),
+            ability_cooldowns: vec![
+                nw_bus::PlayerAbilityCooldown {
+                    ability: ABILITY,
+                    key: KEY,
+                    start_us: server_us - 3_000_000,
+                    end_us: server_us + LEFT_MS * 1_000,
+                },
+                nw_bus::PlayerAbilityCooldown {
+                    ability: ENDED_ABILITY,
+                    key: 0,
+                    start_us: server_us - 9_000_000,
+                    end_us: server_us - 1_000_000,
+                },
+            ],
+            pvp_wanted: true,
+            cyclic_turns: BTreeMap::from([(STONE.to_owned(), 3)]),
+            fishing_bait: Some(BAIT.to_owned()),
+            ..saved_progression()
+        };
+        world.admit(&admit, NOW, SERVER_MS).expect("admit");
+        let entity = world.player_by_number(JOINER).expect("player");
+        let vitals = world.world.get::<Vitals>(entity).expect("vitals");
+        assert_eq!(
+            vitals.health.current(),
+            0,
+            "a player saved dead comes back dead"
+        );
+        assert!(vitals.fallen(), "and may respawn");
+        let mut player = world.world.get_mut::<Player>(entity).expect("player");
+        assert_eq!(to_milli(player.abilities.mana.current), MANA_MILLI);
+        assert_eq!(to_milli(player.stamina.current()), STAMINA_MILLI);
+        assert!(player.pvp_wait.is_pending() && !player.pvp_flagged);
+        assert_eq!(player.cyclic_turns.get(STONE), Some(&3));
+        assert_eq!(player.fishing.bait(), Some(BAIT));
+        let changes = player.abilities.take_cooldown_changes();
+        assert_eq!(
+            changes.len(),
+            1,
+            "only the running cooldown comes back: {changes:?}"
+        );
+        assert_eq!(changes[0].0, usize::from(KEY));
+        assert_eq!(changes[0].1.end_us, server_us + LEFT_MS * 1_000);
+        // Once the client has the health, the save holds the same state again.
+        player.health_sent = Some(0);
+        let carried = player.progression();
+        assert_eq!(
+            carried.vitals,
+            Some(nw_bus::VitalsAtSave {
+                health: 0,
+                mana_milli: MANA_MILLI,
+                stamina_milli: STAMINA_MILLI,
+            })
+        );
+        assert_eq!(
+            carried.ability_cooldowns,
+            admit.progression.ability_cooldowns[..1]
+        );
+        assert!(carried.pvp_wanted);
+        assert_eq!(carried.cyclic_turns, admit.progression.cyclic_turns);
+        assert_eq!(carried.fishing_bait.as_deref(), Some(BAIT));
+    }
+
+    #[test]
     fn a_handoff_carries_the_progression_and_the_taker_saves_it() {
         let mut old = world();
         old.set_table(&table(&["sim-a", "sim-b"])).expect("table");
@@ -12043,6 +12256,7 @@ mod tests {
                 bodies: vec![Body { geometry: 0, place }],
             }],
             volumes: Vec::new(),
+            ..LevelCollision::default()
         };
         let mut content = PlayerContent::default();
         content.tutorial_level.assets = vec![AssetEntity {

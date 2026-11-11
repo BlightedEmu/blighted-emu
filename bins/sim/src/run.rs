@@ -29,8 +29,8 @@ use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 use nw_sim_core::{LevelGround, level_bounds};
 use nw_world::WorldFile;
 use nw_world::camps::{CampSlices, camp_slices_path};
-use nw_world::collision::{LevelCollision, collision_file_path};
-use nw_world::collision_index::CollisionIndex;
+use nw_world::collision::{LevelCollision, QueryFilter, collision_file_path};
+use nw_world::collision_index::{CollisionIndex, NavMarkIndex};
 use nw_world::dungeon_scripts::{DungeonScripts, dungeon_scripts_path};
 use nw_world::quick_courses::{QuickCoursePaths, quick_courses_path};
 use nw_world::roads::{RoadMap, road_file_path};
@@ -139,6 +139,8 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
 pub struct LoadedLevel {
     /// The ground: terrain, collision, water and roads.
     pub ground: Arc<LevelGround<Arc<WorldFile>>>,
+    /// The mobs' ground: the solids of their `AI` filter and the navigation marks.
+    pub mob_ground: Arc<LevelGround<Arc<WorldFile>>>,
     /// The combat rows of the configured mobs and the player attack tables.
     pub combat: Arc<CombatData>,
     /// The player content: kits, quests, items, places and rewards.
@@ -165,10 +167,20 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
         LevelCollision::load(&collision_path, &build).map_err(RunError::Collision)?;
     let deferred = level_collision.deferred.clone();
     let quest_volumes = level_collision.volumes.clone();
+    let mob_bodies = level_collision.bodies_for(QueryFilter::Ai);
+    let nav_marks = level_collision.nav_marks.clone();
     let collision = Arc::new(CollisionIndex::new(LevelCollision {
         deferred: Vec::new(),
         ..level_collision
     }));
+    let mob_collision = Arc::new(collision.with_bodies(mob_bodies));
+    let marks = Arc::new(NavMarkIndex::of(&collision, &nav_marks));
+    tracing::info!(
+        bodies = mob_collision.body_count(),
+        marks = marks.len(),
+        closed_meshes = collision.closed_mesh_count(),
+        "mob collision"
+    );
     let deferred_level = LevelCollision {
         deferred,
         ..LevelCollision::default()
@@ -180,28 +192,40 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
         "level collision"
     );
     let roads_path = road_file_path(&config.content_dir, &build, &config.level);
-    let level_ground = LevelGround::new(Arc::clone(&world_file), Arc::clone(&collision));
     let water_path = water_file_path(&config.content_dir, &build, &config.level);
-    let level_ground = match WaterMap::load(&water_path, &build) {
+    let water = match WaterMap::load(&water_path, &build) {
         Ok(water) => {
             tracing::info!(regions = water.regions.len(), "level water");
-            level_ground.with_water(Arc::new(water))
+            Some(Arc::new(water))
         }
         Err(error) => {
             tracing::warn!(%error, "no water file: the sea level is the only water");
-            level_ground
+            None
         }
     };
-    let ground = match RoadMap::load(&roads_path, &build) {
+    let roads = match RoadMap::load(&roads_path, &build) {
         Ok(roads) => {
             tracing::info!(regions = roads.regions.len(), "level roads");
-            level_ground.with_roads(Arc::new(roads))
+            Some(Arc::new(roads))
         }
         Err(error) => {
             tracing::warn!(%error, "no road file: no road sprint boost");
-            level_ground
+            None
         }
     };
+    let ground_over = |collision: Arc<CollisionIndex>| {
+        let ground = LevelGround::new(Arc::clone(&world_file), collision);
+        let ground = match &water {
+            Some(water) => ground.with_water(Arc::clone(water)),
+            None => ground,
+        };
+        match &roads {
+            Some(roads) => ground.with_roads(Arc::clone(roads)),
+            None => ground,
+        }
+    };
+    let ground = ground_over(Arc::clone(&collision));
+    let mob_ground = ground_over(mob_collision).with_marks(marks);
     let gameplay = load_gameplay(&config.edge_config, config.world_id)?;
     let mut bundle = ContentBundle::load(&bundle_path(&config.content_dir, &build), &build)
         .map_err(RunError::Bundle)?;
@@ -404,6 +428,36 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             nw_content::town_props::TownProps::default()
         }
     };
+    content.encounter_roots = match nw_content::town_props::TownProps::load_file(
+        nw_content::town_props::encounter_roots_path(&config.content_dir, &build),
+    ) {
+        Ok(roots) => {
+            tracing::info!(slices = roots.len(), "encounter roots");
+            roots
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "no encounter roots: the world events show no encounter states"
+            );
+            nw_content::town_props::TownProps::default()
+        }
+    };
+    content.encounter_objects = match nw_content::town_props::TownProps::load_file(
+        nw_content::town_props::encounter_objects_path(&config.content_dir, &build),
+    ) {
+        Ok(objects) => {
+            tracing::info!(slices = objects.len(), "encounter start objects");
+            objects
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "no encounter start objects: world events that wait for one do not go on"
+            );
+            nw_content::town_props::TownProps::default()
+        }
+    };
     content.spell_slices =
         match nw_content::spell_slices::SpellSlices::load(&config.content_dir, &build) {
             Ok(slices) => {
@@ -466,6 +520,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
     );
     Ok(LoadedLevel {
         ground: Arc::new(ground),
+        mob_ground: Arc::new(mob_ground),
         combat,
         content,
         design,
@@ -630,5 +685,13 @@ async fn serve_async(
         let _ = nw_common::shutdown::stop_signal().await;
     };
     let databases = Databases { world: db, global };
-    Ok(serve_loop(settings, level.ground, bus, databases, shutdown).await?)
+    Ok(serve_loop(
+        settings,
+        level.ground,
+        level.mob_ground,
+        bus,
+        databases,
+        shutdown,
+    )
+    .await?)
 }

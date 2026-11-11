@@ -6,15 +6,20 @@
 //!
 //! A query takes the line into each candidate body's own space (the inverse of its place), so a
 //! shape is stored once and placed many times; a line's parameter is the same in both spaces.
+//!
+//! A convex shape and a closed mesh (each edge of its triangles shared by exactly two of them,
+//! once each way) are solid: [`CollisionIndex::contains`] holds the points inside them. An open
+//! mesh (a deck slab of one face) is only its surface.
 
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use nw_formats::rigid::{Vec3, add, cross, dot, length, scale, sub};
 
 use crate::collision::{
-    Affine, Body, Geometry, LevelCollision, invert, transform_point, transform_vector,
+    Affine, Body, Geometry, LevelCollision, NavMark, NavMarkKind, invert, transform_point,
+    transform_vector,
 };
 
 /// The highest surface above a body's feet that can be its floor, m: the highest obstacle the
@@ -40,6 +45,11 @@ const ROUND_SIDES: u32 = 8;
 /// A convex corner is on a face when it is this near the face's plane, m (our choice: well
 /// under the millimetre of the asset data, as the hull check of `collision`).
 const FACE_TOLERANCE_M: f32 = 1e-3;
+/// The direction of the line that counts a closed mesh's faces above a point (a little off the
+/// vertical, so that it misses the edges of a grid of faces; our choice).
+const PARITY_DIRECTION: Vec3 = [0.000_37, 0.000_71, 1.0];
+/// A floor this near the feet is the floor they stand on, m (our choice: under a step).
+const ON_TOP_M: f32 = 0.1;
 
 /// An axis-aligned box.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -217,6 +227,8 @@ struct Shapes {
     geometries: Vec<Geometry>,
     local_bounds: Vec<Bounds>,
     trees: Vec<Option<MeshTree>>,
+    /// Each mesh is closed (a solid); `false` for the other kinds.
+    closed: Vec<bool>,
 }
 
 /// Placed shapes as world-space triangles, for a view of the level.
@@ -248,9 +260,66 @@ impl CollisionIndex {
         let shapes = Shapes {
             local_bounds: geometries.iter().map(geometry_bounds).collect(),
             trees: geometries.iter().map(mesh_tree).collect(),
+            closed: geometries.iter().map(is_closed_mesh).collect(),
             geometries,
         };
         Self::over(Arc::new(shapes), bodies)
+    }
+
+    /// The number of closed meshes among the shapes.
+    pub fn closed_mesh_count(&self) -> usize {
+        self.shapes.closed.iter().filter(|closed| **closed).count()
+    }
+
+    /// Whether `point` is inside a solid body: a box, sphere, capsule, cylinder, convex hull or
+    /// closed mesh (an open mesh holds no inside).
+    pub fn contains(&self, point: Vec3) -> bool {
+        let Some((column, row)) = self.grid.cell_of(point[0], point[1]) else {
+            return false;
+        };
+        self.grid.bodies_in(column, row).iter().any(|&index| {
+            let placed = &self.bodies[index as usize];
+            let bounds = &placed.bounds;
+            (0..AXES).all(|axis| (bounds.min[axis]..=bounds.max[axis]).contains(&point[axis]))
+                && self.body_contains(placed, point)
+        })
+    }
+
+    /// Whether `point` is inside the solid of `placed`.
+    fn body_contains(&self, placed: &PlacedBody, point: Vec3) -> bool {
+        let Some(inverse) = invert(&placed.body.place) else {
+            return false;
+        };
+        let local = transform_point(&inverse, point);
+        let index = placed.body.geometry as usize;
+        match self.shapes.geometries.get(index) {
+            Some(Geometry::Mesh { points, triangles }) => {
+                let (Some(true), Some(Some(tree))) =
+                    (self.shapes.closed.get(index), self.shapes.trees.get(index))
+                else {
+                    return false;
+                };
+                let reach = Cell::new(f32::INFINITY);
+                let mut crossings = 0_u32;
+                mesh_hits(
+                    tree,
+                    points,
+                    triangles,
+                    local,
+                    PARITY_DIRECTION,
+                    &reach,
+                    Faces::Both,
+                    &mut |hit| {
+                        if hit.t > 0.0 {
+                            crossings += 1;
+                        }
+                    },
+                );
+                crossings % 2 == 1
+            }
+            Some(geometry) => shape_contains(geometry, local),
+            None => false,
+        }
     }
 
     /// An index over other `bodies` of this index's level, sharing its shapes (the solids of a
@@ -1077,6 +1146,135 @@ fn convex_triangles(points: &[Vec3], planes: &[[f32; 4]]) -> (Vec<Vec3>, Vec<[u3
 }
 
 /// The tree of a mesh geometry; `None` for the other kinds.
+/// Whether `local` is inside the round or convex `geometry` (a mesh: see
+/// [`CollisionIndex::contains`]).
+fn shape_contains(geometry: &Geometry, local: Vec3) -> bool {
+    let along_segment = |from: Vec3, to: Vec3| {
+        let axis = sub(to, from);
+        let squared = dot(axis, axis);
+        let share = if squared > f32::EPSILON {
+            dot(sub(local, from), axis) / squared
+        } else {
+            0.0
+        };
+        (
+            share,
+            sub(local, add(from, scale(axis, share.clamp(0.0, 1.0)))),
+        )
+    };
+    match geometry {
+        Geometry::Box { half_extents } => local
+            .iter()
+            .zip(half_extents)
+            .all(|(value, half)| value.abs() <= *half),
+        Geometry::Sphere { radius } => dot(local, local) <= radius * radius,
+        Geometry::Capsule { from, to, radius } => {
+            let (_, away) = along_segment(*from, *to);
+            dot(away, away) <= radius * radius
+        }
+        Geometry::Cylinder { from, to, radius } => {
+            let (share, away) = along_segment(*from, *to);
+            (0.0..=1.0).contains(&share) && dot(away, away) <= radius * radius
+        }
+        Geometry::Convex { planes, .. } => planes
+            .iter()
+            .all(|plane| dot([plane[0], plane[1], plane[2]], local) <= plane[3]),
+        Geometry::Mesh { .. } => false,
+    }
+}
+
+/// Whether `geometry` is a closed mesh: with its corners welded by place, each edge of its
+/// triangles is used by exactly two of them, once in each direction. Triangles with two equal
+/// corners are left out.
+fn is_closed_mesh(geometry: &Geometry) -> bool {
+    let Geometry::Mesh { points, triangles } = geometry else {
+        return false;
+    };
+    if triangles.is_empty() {
+        return false;
+    }
+    let mut welded: HashMap<[u32; AXES], u32> = HashMap::new();
+    let corner_of: Vec<u32> = points
+        .iter()
+        .map(|point| {
+            let next = small_index(welded.len());
+            *welded.entry(point.map(f32::to_bits)).or_insert(next)
+        })
+        .collect();
+    // Per edge (low corner, high corner): the faces on it and their directions' balance.
+    let mut edges: HashMap<(u32, u32), (u32, i32)> = HashMap::new();
+    for triangle in triangles {
+        let Some(corners) = triangle
+            .iter()
+            .map(|&corner| corner_of.get(corner as usize).copied())
+            .collect::<Option<Vec<u32>>>()
+        else {
+            return false;
+        };
+        if corners[0] == corners[1] || corners[1] == corners[2] || corners[0] == corners[2] {
+            continue;
+        }
+        for (from, to) in [(0, 1), (1, 2), (2, 0)] {
+            let (a, b) = (corners[from], corners[to]);
+            let edge = edges.entry((a.min(b), a.max(b))).or_insert((0, 0));
+            edge.0 += 1;
+            edge.1 += if a < b { 1 } else { -1 };
+        }
+    }
+    !edges.is_empty()
+        && edges
+            .values()
+            .all(|&(faces, balance)| faces == 2 && balance == 0)
+}
+
+/// The level designers' navigation marks of a level ([`NavMark`]): where a mob has no floor.
+#[derive(Debug, Clone, Default)]
+pub struct NavMarkIndex {
+    volumes: CollisionIndex,
+    tops: CollisionIndex,
+}
+
+impl NavMarkIndex {
+    /// The marks `marks` over the shapes of `level`'s index.
+    pub fn of(level: &CollisionIndex, marks: &[NavMark]) -> Self {
+        let of_kind = |kind: NavMarkKind| {
+            marks
+                .iter()
+                .filter(|mark| mark.kind == kind)
+                .map(|mark| Body {
+                    geometry: mark.geometry,
+                    place: mark.place,
+                })
+                .collect()
+        };
+        Self {
+            volumes: level.with_bodies(of_kind(NavMarkKind::NoFloorVolume)),
+            tops: level.with_bodies(of_kind(NavMarkKind::NoFloorTop)),
+        }
+    }
+
+    /// The number of marks.
+    pub fn len(&self) -> usize {
+        self.volumes.body_count() + self.tops.body_count()
+    }
+
+    /// There are no marks.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether a mark takes away the floor of a body whose feet are at `feet`: they stand in a
+    /// mark's volume, or on the top of a marked solid.
+    pub fn takes_floor(&self, feet: Vec3) -> bool {
+        let above = [feet[0], feet[1], feet[2] + ON_TOP_M];
+        self.volumes.contains(above)
+            || self
+                .tops
+                .floor_at(feet[0], feet[1], feet[2])
+                .is_some_and(|top| (top - feet[2]).abs() <= ON_TOP_M)
+    }
+}
+
 fn mesh_tree(geometry: &Geometry) -> Option<MeshTree> {
     let Geometry::Mesh { points, triangles } = geometry else {
         return None;

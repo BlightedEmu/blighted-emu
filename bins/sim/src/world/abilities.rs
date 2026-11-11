@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
-use nw_bus::ConnectionRef;
+use nw_bus::{ConnectionRef, PlayerAbilityCooldown};
 use nw_content::attribute_bonuses::AbilityStats;
 use nw_content::combat::CombatData;
 use nw_content::player_abilities::{
@@ -175,6 +175,8 @@ struct Cooldown {
     key: usize,
     /// When it started on the client's clock (µs since 2000-01-01).
     start_us: u64,
+    /// When it ends on the client's clock (µs since 2000-01-01).
+    end_us: u64,
 }
 
 impl Running {
@@ -263,6 +265,11 @@ impl Mana {
         #[allow(clippy::cast_precision_loss)]
         let back = self.regen_per_s * (steps * MANA_STEP_MS) as f32 / MS_PER_S;
         self.current = (self.current + back).min(self.max);
+    }
+
+    /// Sets the mana a saved player had, from 0 to the max (a login).
+    pub(super) fn restore(&mut self, current: f32) {
+        self.current = current.clamp(0.0, self.max);
     }
 
     /// Gives `amount` of mana (below 0: takes it), from 0 to the max.
@@ -978,17 +985,19 @@ impl AbilityRun {
             .retain(|cooldown| cooldown.ability != ability && cooldown.end_ms > now_ms);
         let key = self.press.map_or(0, |press| press.key);
         let start_us = server_ms.saturating_mul(US_PER_MS);
+        let end_us = start_us + time_ms * US_PER_MS;
         self.cooldowns.push(Cooldown {
             ability,
             end_ms: now_ms + time_ms,
             key,
             start_us,
+            end_us,
         });
         self.cooldown_changes.push((
             key,
             AbilityCooldown {
                 ability,
-                end_us: start_us + time_ms * US_PER_MS,
+                end_us,
                 start_us,
             },
         ));
@@ -1018,11 +1027,56 @@ impl AbilityRun {
                 ((cooldown.end_ms - now_ms) as f64 * (1.0 + share).max(0.0)).round() as u64;
             cooldown.end_ms = now_ms + left_ms;
             let end_us = server_ms.saturating_add(left_ms).saturating_mul(US_PER_MS);
+            cooldown.end_us = end_us;
             self.cooldown_changes.push((
                 cooldown.key,
                 AbilityCooldown {
                     ability: cooldown.ability,
                     end_us,
+                    start_us: cooldown.start_us,
+                },
+            ));
+        }
+    }
+
+    /// The cooldowns to save: each one that was started, with its press key and its start and
+    /// end on the client's clock. One that ended stays until its ability starts again; the load
+    /// leaves it out.
+    pub(super) fn carried_cooldowns(&self) -> Vec<PlayerAbilityCooldown> {
+        self.cooldowns
+            .iter()
+            .map(|cooldown| PlayerAbilityCooldown {
+                ability: cooldown.ability,
+                key: u8::try_from(cooldown.key).unwrap_or(u8::MAX),
+                start_us: cooldown.start_us,
+                end_us: cooldown.end_us,
+            })
+            .collect()
+    }
+
+    /// Runs again the saved cooldowns `saved` that have not ended at sim ms `now_ms` (server
+    /// ms `server_ms`): each goes on to its saved end, and the client gets it with the key of
+    /// its press (retail sends a running cooldown as a 2932 change of that key).
+    pub(super) fn restore_cooldowns(
+        &mut self,
+        saved: &[PlayerAbilityCooldown],
+        (now_ms, server_ms): (u64, u64),
+    ) {
+        let server_us = server_ms.saturating_mul(US_PER_MS);
+        for cooldown in saved.iter().filter(|cooldown| cooldown.end_us > server_us) {
+            let key = usize::from(cooldown.key);
+            self.cooldowns.push(Cooldown {
+                ability: cooldown.ability,
+                end_ms: now_ms + (cooldown.end_us - server_us) / US_PER_MS,
+                key,
+                start_us: cooldown.start_us,
+                end_us: cooldown.end_us,
+            });
+            self.cooldown_changes.push((
+                key,
+                AbilityCooldown {
+                    ability: cooldown.ability,
+                    end_us: cooldown.end_us,
                     start_us: cooldown.start_us,
                 },
             ));

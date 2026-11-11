@@ -37,6 +37,7 @@ use nw_db::{
     save_character_quests, save_published_look, submit_stats,
 };
 use nw_db::{Purchase, buy_entitlement};
+use nw_db::{SavedGatherNode, level_gather_nodes, save_gather_node};
 use nw_db::{clear_new_account_titles, company_listings, earn_account_titles, stored_players};
 use nw_messages::ArenaClientMsg;
 use nw_messages::EconomyCall;
@@ -58,7 +59,7 @@ use nw_messages::{
 use nw_messages::{FishingClientMsg, MusicClientMsg};
 use nw_messages::{GameModeClientMsg, TitlesUnlockMsg, WarClientMsg, WarSignupClientMsg};
 use nw_reflect::Envelope;
-use nw_sim_core::{Ground, GroundCheck, TickClock};
+use nw_sim_core::{Ground, GroundCheck, Position, TickClock};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -79,8 +80,8 @@ use crate::stats::stat_updates;
 use crate::world::economy::{EconomyResult, run_job};
 use crate::world::send_now;
 use crate::world::{
-    Departure, GmChat, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
-    answer_lines,
+    Departure, DepletedNode, GmChat, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld,
+    WorldSettings, answer_lines,
 };
 use nw_world::script::LevelDesign;
 
@@ -369,6 +370,11 @@ struct Loop {
     quest_queue: SaveQueue<QuestSave>,
     progression_queue: SaveQueue<ProgressionSave>,
     saves: JoinSet<SaveResult>,
+    /// The depleted gather node saves that run; each gives back its node and whether it was
+    /// saved.
+    node_saves: JoinSet<(DepletedNode, bool)>,
+    /// The depleted gather nodes whose save failed: the next save round tries them again.
+    node_retries: Vec<DepletedNode>,
     /// The database look-ups of client calls.
     lookups: JoinSet<LookupAnswer>,
     /// The trading post jobs that run (economy module).
@@ -384,7 +390,7 @@ struct Loop {
 }
 
 /// Serves admits, inputs, handoffs, ghosts, the cell table, ticks, saves and heartbeats on the
-/// ground of `ground` until `shutdown` finishes; then saves every player once more and waits at
+/// ground of `ground` (the mobs on `mob_ground`) until `shutdown` finishes; then saves every player once more and waits at
 /// most [`SHUTDOWN_SAVE_WAIT`] for the saves.
 ///
 /// # Errors
@@ -393,6 +399,7 @@ struct Loop {
 pub async fn serve(
     settings: LoopSettings,
     ground: Arc<dyn Ground + Send + Sync>,
+    mob_ground: Arc<dyn Ground + Send + Sync>,
     bus: Bus,
     databases: Databases,
     shutdown: impl Future<Output = ()>,
@@ -441,6 +448,8 @@ pub async fn serve(
         quest_queue: SaveQueue::default(),
         progression_queue: SaveQueue::default(),
         saves: JoinSet::new(),
+        node_saves: JoinSet::new(),
+        node_retries: Vec::new(),
         lookups: JoinSet::new(),
         economy_jobs: JoinSet::new(),
         skin_jobs: JoinSet::new(),
@@ -451,7 +460,9 @@ pub async fn serve(
         started_at_ms,
     };
     state.world.set_mob_ai(mob_ai);
+    state.world.set_mob_ground(mob_ground);
     state.world.set_design(&design);
+    state.load_depleted_nodes().await;
     let mut clock = TickClock::new(0);
     let mut poll = tokio::time::interval(POLL);
     let mut save_timer = tokio::time::interval(state.settings.save_interval);
@@ -506,6 +517,7 @@ pub async fn serve(
             },
             Some(answer) = answers.recv() => state.handoff_done(answer),
             Some(saved) = state.saves.join_next() => state.saved(saved),
+            Some(saved) = state.node_saves.join_next() => state.node_saved(saved),
             Some(answer) = state.lookups.join_next() => state.looked_up(answer),
             Some(done) = state.economy_jobs.join_next() => state.economy_done(done),
             Some(done) = state.skin_jobs.join_next() => state.skins_done(done),
@@ -1805,6 +1817,74 @@ impl Loop {
         for (character, progression) in self.progression_queue.retry() {
             self.spawn_progression_save(character, progression);
         }
+        let mut nodes = std::mem::take(&mut self.node_retries);
+        nodes.extend(self.world.take_depleted_nodes());
+        for node in nodes {
+            self.spawn_node_save(node);
+        }
+    }
+
+    /// Holds again the depleted gather nodes the world database kept for this level. A load
+    /// that fails is logged and the sim starts with every node grown.
+    async fn load_depleted_nodes(&mut self) {
+        let now_unix_ms = unix_ms();
+        match level_gather_nodes(&self.db, &self.settings.level, now_unix_ms).await {
+            Ok(saved) => {
+                let nodes: Vec<DepletedNode> = saved
+                    .iter()
+                    .filter_map(|node| {
+                        Some(DepletedNode {
+                            gde_ref: node.gde_ref,
+                            point: usize::try_from(node.point).ok()?,
+                            position: Position {
+                                x: node.position[0],
+                                y: node.position[1],
+                                z: node.position[2],
+                            },
+                            respawn_at_unix_ms: node.respawn_at_unix_ms,
+                        })
+                    })
+                    .collect();
+                tracing::info!(nodes = nodes.len(), "depleted gather nodes loaded");
+                self.world
+                    .restore_depleted_nodes(&nodes, self.now_ms(), now_unix_ms);
+            }
+            Err(error) => tracing::error!(%error, "depleted gather nodes not loaded"),
+        }
+    }
+
+    /// Saves depleted gather node `node` as a task.
+    fn spawn_node_save(&mut self, node: DepletedNode) {
+        let db = self.db.clone();
+        let level = self.settings.level.clone();
+        self.node_saves.spawn(async move {
+            let saved = SavedGatherNode {
+                gde_ref: node.gde_ref,
+                point: u32::try_from(node.point).unwrap_or(u32::MAX),
+                position: [node.position.x, node.position.y, node.position.z],
+                respawn_at_unix_ms: node.respawn_at_unix_ms,
+            };
+            let ok = match save_gather_node(&db, &level, &saved).await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::error!(%error, "gather node save failed");
+                    false
+                }
+            };
+            (node, ok)
+        });
+    }
+
+    /// A gather node save ended; a failed one waits for the next save round.
+    fn node_saved(&mut self, result: Result<(DepletedNode, bool), tokio::task::JoinError>) {
+        match result {
+            Ok((_, true)) => {}
+            Ok((node, false)) => {
+                metrics::counter!(METRIC_FAILED_SAVES).increment(1);
+                self.node_retries.push(node);
+            }
+            Err(error) => tracing::error!(%error, "gather node save task failed"),
+        }
     }
 
     fn save(&mut self, departure: &Departure) {
@@ -1991,16 +2071,20 @@ impl Loop {
             while let Some(saved) = self.saves.join_next().await {
                 self.saved(saved);
             }
+            while let Some(saved) = self.node_saves.join_next().await {
+                self.node_saved(saved);
+            }
         })
         .await;
         let waiting = self.queue.waiting()
             + self.item_queue.waiting()
             + self.quest_queue.waiting()
-            + self.progression_queue.waiting();
+            + self.progression_queue.waiting()
+            + self.node_retries.len();
         if drained.is_err() || waiting > 0 {
             tracing::error!(
                 waiting,
-                "positions, items, quests or progression not saved at shutdown"
+                "positions, items, quests, progression or gather nodes not saved at shutdown"
             );
         }
     }
@@ -2091,6 +2175,26 @@ fn saved_progression(progression: &PlayerProgression, taken_at_ms: u64) -> Saved
                 end_us: cooldown.end_us,
             })
             .collect(),
+        log_out_state: nw_db::SavedLogOutState {
+            vitals: progression.vitals.map(|vitals| nw_db::SavedVitals {
+                health: vitals.health,
+                mana_milli: vitals.mana_milli,
+                stamina_milli: vitals.stamina_milli,
+            }),
+            ability_cooldowns: progression
+                .ability_cooldowns
+                .iter()
+                .map(|cooldown| nw_db::SavedAbilityCooldown {
+                    ability: cooldown.ability,
+                    key: cooldown.key,
+                    start_us: cooldown.start_us,
+                    end_us: cooldown.end_us,
+                })
+                .collect(),
+            pvp_wanted: progression.pvp_wanted,
+            cyclic_turns: progression.cyclic_turns.clone(),
+            fishing_bait: progression.fishing_bait.clone(),
+        },
     }
 }
 
