@@ -154,10 +154,14 @@ The account-age chat restriction stays on. The server answers it with `accountIn
 
 ## Fifth change: AWS proxy (`--aws-proxy`)
 
-This change is for Windows, and for Linux when the server uses other ports than 443 and 80 (see
-"Servers on other ports" below). Windows has no `bwrap` sandbox to give the game process a
-private hosts file and trust file. On Linux, the hosts file cannot change a port, so only the
-proxy reaches a server on other ports.
+This change is for Windows only. Windows has no `bwrap` sandbox to give the game process a
+private hosts file and trust file.
+
+Do not use it on Linux. Wine's WinHTTP cannot use the proxy: every call fails at once with error
+12007 (name not resolved), and the news client then falls back to Amazon's own bucket
+`ags-nw-cms.s3.us-west-2.amazonaws.com` (seen live 2026-11-11 in a WinHTTP trace of the game).
+The AWS SDK writes the proxy as `http://127.0.0.1:47443`; Windows reads that, and Wine most
+likely takes `http` as the proxy's host name (Inferred from the error, not read in Wine's code).
 
 The game has four AWS SDK clients that call fixed Amazon names with certificate checks on:
 remote-config (S3), analytics (Kinesis), analytics credentials (STS) and the news client (the
@@ -382,13 +386,21 @@ When `public_https_port` is not 443:
    `-ChannelService` argument, the channel document, the remote-config service endpoints and the
    Discord callback). For Discord login, register the callback with the port in the Discord
    Developer Portal.
-3. The launcher sends the Amazon names of the game to that port through its loopback proxy.
+3. The Amazon names of the game still need port 443 (and the region ping port 80) on the server's
+   address, because a Linux client reaches them through the private hosts file, which cannot
+   change a port. When another program owns ports 443 and 80 there (for example a web proxy in
+   front of a website), it must pass these six names to `edge-http`: TLS on 443 for
+   `ags-javelin-remote-config.s3.amazonaws.com`, `kinesis.us-east-1.amazonaws.com`,
+   `sts.us-east-1.amazonaws.com`, `d1hkbwzm1bktgo.cloudfront.net` and
+   `client.content-service.amazongames.com` with the mirror certificate (`[aws_mirror]`), and
+   plain HTTP on 80 for `dynamodb.us-east-1.amazonaws.com`. Keep the `Host` header. Windows
+   clients use the launcher's loopback proxy instead, which sends these names to the public port.
 
 When `public_ping_port` is not 80, the launcher's proxy sends the region ping to it.
 
-The launcher runs the loopback proxy on Windows and on Linux. With other ports, the client must
-be patched with `--aws-proxy` on Linux too. An unpatched client on Linux uses the private hosts
-file, which leads to ports 443 and 80 only.
+The launcher runs the loopback proxy on Windows and on Linux, but only a Windows client can use
+it (fifth change). A Linux client uses the private hosts file, which leads to ports 443 and 80
+only, so point 3 above is needed for Linux players.
 
 Unknown: the game client reads a link with a port (`game.example.org:8443/s/<session>`). The
 client already takes a port in `-GatewayAddr`, so it probably does. It is not live-checked yet.
