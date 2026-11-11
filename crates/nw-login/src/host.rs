@@ -138,12 +138,35 @@ async fn by_host(State(routes): State<HostRoutes>, request: Request) -> Response
         Some(host) if host == &*routes.bucket_host => routes.remote_config,
         Some(CMS_HOST) => routes.cms,
         Some(CMS_IMAGE_HOST) => routes.cms_images,
-        _ => return ApiError::UnknownHost.into_response(),
+        _ => {
+            tracing::debug!(host = ?host, path = request.uri().path(), "request for an unknown host");
+            return ApiError::UnknownHost.into_response();
+        }
     };
-    match target.oneshot(request).await {
+    let logged = host
+        .as_deref()
+        .filter(|host| is_game_document_host(host, &routes.bucket_host))
+        .map(|host| (host.to_owned(), request.uri().path().to_owned()));
+    let response = match target.oneshot(request).await {
         Ok(response) => response,
         Err(never) => match never {},
+    };
+    if let Some((host, path)) = logged {
+        tracing::info!(
+            host,
+            path,
+            status = response.status().as_u16(),
+            "game document request"
+        );
     }
+    response
+}
+
+/// Whether `host` serves the documents the game client reads once per start or minute: the
+/// remote config sets on `bucket_host` and the news documents and their pictures. A request for
+/// one is logged, so a log shows whether the client reached the server for them.
+fn is_game_document_host(host: &str, bucket_host: &str) -> bool {
+    host == bucket_host || host == CMS_HOST || host == CMS_IMAGE_HOST
 }
 
 /// Every route of `edge-http`, chosen by host name.
@@ -354,6 +377,16 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = get(&app, "d2c74t4zimux3r.cloudfront.net", &key).await;
         assert_eq!(status, StatusCode::MISDIRECTED_REQUEST);
+    }
+
+    #[test]
+    fn the_remote_config_and_news_hosts_are_game_document_hosts() {
+        let bucket = "ags-javelin-remote-config.s3.amazonaws.com";
+        assert!(is_game_document_host(bucket, bucket));
+        assert!(is_game_document_host(CMS_HOST, bucket));
+        assert!(is_game_document_host(CMS_IMAGE_HOST, bucket));
+        assert!(!is_game_document_host(LOGIN_HOST, bucket));
+        assert!(!is_game_document_host(GAME_HOST, bucket));
     }
 
     #[tokio::test]
