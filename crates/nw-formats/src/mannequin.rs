@@ -228,6 +228,16 @@ impl Node {
             .map(|(_, value)| value.as_str())
     }
 
+    /// The value of attribute `key` in any case; `None` when the element has none. The action
+    /// lists name some conditions `name` and most `Name` (the flail's `CanAttack_Flail_Slam`,
+    /// build 25810808), and the client finds both: it chains the flail's abilities on them.
+    pub fn attribute_any_case(&self, key: &str) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value.as_str())
+    }
+
     /// The first child element `name`.
     ///
     /// # Errors
@@ -2096,7 +2106,9 @@ impl ActionList {
             .flat_map(|conditions| &conditions.children)
             .filter_map(|condition| {
                 Some((
-                    condition.attribute(ACTION_LIST_NAME_ATTRIBUTE)?.to_owned(),
+                    condition
+                        .attribute_any_case(ACTION_LIST_NAME_ATTRIBUTE)?
+                        .to_owned(),
                     Condition::of(condition),
                 ))
             })
@@ -2786,6 +2798,35 @@ mod tests {
         assert!(
             list.action("Ability_Life_Staff_Smite")
                 .is_some_and(|action| action.ability.is_some())
+        );
+    }
+
+    /// The flail list names its ability conditions with a lower-case `name` (build 25810808).
+    #[test]
+    fn a_named_condition_is_found_by_a_name_in_any_case() {
+        let text = r#"<ActionList><Actions/>
+<Conditions>
+ <And name="CanAttack_Flail_Slam"><IfMannequinTag TagName="Flail"/></And>
+ <And Name="Slam_Upgrade_Standard_Damage"><IfMannequinTag TagName="Upgrade"/></And>
+</Conditions></ActionList>"#;
+        let list = ActionList::parse(text).expect("list");
+        let names: Vec<&str> = list
+            .conditions
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["CanAttack_Flail_Slam", "Slam_Upgrade_Standard_Damage"]
+        );
+        let state = CageState {
+            tags: &["Flail"],
+            markers: &[],
+            inputs: &[],
+        };
+        assert!(
+            list.resolved_condition("CanAttack_Flail_Slam")
+                .is_some_and(|condition| condition.holds_in(&state))
         );
     }
 
