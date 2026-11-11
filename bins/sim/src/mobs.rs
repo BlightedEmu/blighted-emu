@@ -42,11 +42,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::combat::CombatSettings;
 use crate::mob_ai::{
-    COMBAT_LEASH_KEY, GuardHit, HeldEffects, MobAi, RemoteFact, Shown, SpawnAi, Strike, Summon,
-    Surroundings, TaggedMob, TreeMind, floor_line, height_after_move,
+    COMBAT_LEASH_KEY, GuardHit, HeldEffects, MobAi, RemoteFact, Shown, SpawnAi, SpellCast, Strike,
+    Summon, Surroundings, TaggedMob, TreeMind, floor_line, height_after_move,
 };
 use crate::objectives::KillTypes;
 
+/// How far apart the points a knockback checks on its way are (our choice: a lunge's floor step).
+const KNOCKBACK_STEP_M: f32 = 0.5;
 /// A mob farther than this from its spawn does not fall asleep: its tree walks it home first
 /// (Observed: a retail beach corrupted sailor 29 m from where it started walked home with
 /// `Reset_Move` while the player was 75 m away; live 2026-10-29: Janszoon fell asleep 51 m
@@ -434,6 +436,8 @@ pub struct Mobs {
     /// The status effects the mobs' trees put on them (`true`) or took off since the last
     /// [`Mobs::take_status_changes`]: (mob, effect id, put on).
     status_changes: Vec<(u64, String, bool)>,
+    /// The spells the mobs' clips cast since the last [`Mobs::take_casts`]: (mob, cast).
+    casts: Vec<(u64, SpellCast)>,
 }
 
 /// Metres between mobs spawned together (a GM command, a tree's summon), on a ring around the
@@ -588,6 +592,8 @@ struct Step {
     orders: Vec<(u64, u32)>,
     /// The status effects its tree put on it or took off.
     status_changes: Vec<(NameId, bool)>,
+    /// The spells its clips cast.
+    casts: Vec<SpellCast>,
 }
 
 /// A mob that a tree spawned.
@@ -640,6 +646,7 @@ impl TickView<'_> {
             remote_facts: Vec::new(),
             orders: Vec::new(),
             status_changes: Vec::new(),
+            casts: Vec::new(),
         };
         if let Mind::Tree(mind) = &mob.mind
             && !mind.due(self.now_ms)
@@ -691,6 +698,7 @@ impl TickView<'_> {
         step.remote_facts = thought.remote_facts;
         step.orders = thought.orders;
         step.status_changes = mind.take_status_changes();
+        step.casts = thought.casts;
         step.hits = thought
             .hits
             .into_iter()
@@ -739,6 +747,7 @@ impl Mobs {
             triggers: Vec::new(),
             held: FxHashMap::default(),
             status_changes: Vec::new(),
+            casts: Vec::new(),
         }
     }
 
@@ -1131,6 +1140,53 @@ impl Mobs {
         Some(landed)
     }
 
+    /// Mob `entity` goes `metres` straight away from `from` over `ground`: its feet follow the
+    /// floor, and a wall or a step too high on the way stops it there (as a lunge's line,
+    /// [`floor_line`]). Where it lands; `None` for a mob that is not here or stands on `from`.
+    pub fn knock_back(
+        &mut self,
+        entity: u64,
+        from: Position,
+        metres: f32,
+        ground: &dyn Ground,
+    ) -> Option<Position> {
+        let index = spawn_index(entity)?;
+        let at = self.live.get(&index)?.position;
+        let length = at.horizontal_distance(from);
+        if length <= f32::EPSILON || metres <= 0.0 {
+            return None;
+        }
+        let (east, north) = ((at.x - from.x) / length, (at.y - from.y) / length);
+        // A knockback of a few metres.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a knockback of a few metres"
+        )]
+        let steps = (metres / KNOCKBACK_STEP_M).ceil() as u32;
+        let mut landed = None;
+        for step in 1..=steps {
+            // A few steps.
+            #[allow(clippy::cast_precision_loss, reason = "a few steps")]
+            let gone = (step as f32 * KNOCKBACK_STEP_M).min(metres);
+            let end = Position {
+                x: at.x + east * gone,
+                y: at.y + north * gone,
+                z: at.z,
+            };
+            let Some(on_floor) = floor_line(ground, at, end, None) else {
+                break;
+            };
+            landed = Some(on_floor);
+        }
+        let landed = landed.map(|on_floor| Position {
+            z: height_after_move(ground, on_floor),
+            ..on_floor
+        })?;
+        self.live.get_mut(&index)?.position = landed;
+        Some(landed)
+    }
+
     /// The combat leash of the slice of `spawn`; no limit without one.
     fn leash_of(&self, spawn: &VitalsSpawn) -> f32 {
         self.archetype(spawn, None)
@@ -1442,6 +1498,8 @@ impl Mobs {
                 let effect = self.ai.name(effect).to_owned();
                 self.status_changes.push((mob, effect, on));
             }
+            self.casts
+                .extend(step.casts.into_iter().map(|cast| (mob, cast)));
             intents.extend(step.hits);
             if let Some(target) = step.acquired {
                 acquired.push((step.index, target));
@@ -1520,6 +1578,11 @@ impl Mobs {
     /// (mob, effect id, put on).
     pub fn take_status_changes(&mut self) -> Vec<(u64, String, bool)> {
         std::mem::take(&mut self.status_changes)
+    }
+
+    /// The spells the mobs' `CAGE-CastSpell` clips cast since the last call: (mob, cast).
+    pub fn take_casts(&mut self) -> Vec<(u64, SpellCast)> {
+        std::mem::take(&mut self.casts)
     }
 
     /// Respawns the dead world and GM mobs whose respawn time came.
@@ -2573,6 +2636,47 @@ mod tests {
             "on the slope: {landed:?}"
         );
         assert_eq!(at(&mobs, 0), landed);
+    }
+
+    /// Flat ground with a wall 2 m east of [`SPAWN_X`].
+    struct WallEast;
+
+    const WALL_M: f32 = 2.0;
+
+    impl Ground for WallEast {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(HEIGHT)
+        }
+
+        fn blocked(&self, from: Position, to: Position) -> bool {
+            from.x.min(to.x) <= SPAWN_X + WALL_M && from.x.max(to.x) >= SPAWN_X + WALL_M
+        }
+    }
+
+    #[test]
+    fn a_knocked_back_mob_goes_away_from_the_hit_and_stops_at_a_wall() {
+        const KNOCKBACK_M: f32 = 4.0;
+        let mut open = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
+        open.set_cells(every);
+        let west = player_at(SPAWN_X - 1.0).position;
+        let landed = open
+            .knock_back(mob_entity(0), west, KNOCKBACK_M, &Flat)
+            .expect("knocked back");
+        assert!(
+            (landed.x - (SPAWN_X + KNOCKBACK_M)).abs() < 1e-3,
+            "{landed:?}"
+        );
+        let mut walled = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
+        walled.set_cells(every);
+        let stopped = walled
+            .knock_back(mob_entity(0), west, KNOCKBACK_M, &WallEast)
+            .expect("as far as the wall");
+        assert!(
+            stopped.x < SPAWN_X + WALL_M,
+            "short of the wall: {stopped:?}"
+        );
+        assert!(stopped.x > SPAWN_X, "it moved: {stopped:?}");
+        assert_eq!(at(&walled, 0), stopped);
     }
 
     /// A mob that stands on a deck the ground does not hold keeps its height while it runs (the

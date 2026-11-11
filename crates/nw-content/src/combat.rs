@@ -14,9 +14,10 @@ use thiserror::Error;
 
 use crate::Tables;
 use crate::gameplay_config::ITEM_CLASS_SEPARATOR;
-use crate::player_abilities::{AbilityList, PlayerAbilities};
+use crate::player_abilities::{AbilityList, PlayerAbilities, SpellRow};
 use crate::player_attacks::{PlayerAttacks, Stance, stance_key};
 use crate::player_sequences::PlayerSequences;
+use crate::status_effects::RowKey;
 
 /// Separates the status effects of an `AddStatusEffects` cell.
 const EFFECT_SEPARATOR: char = '+';
@@ -313,6 +314,29 @@ pub struct AttackRow {
     pub category: DamageCategory,
     /// The extra damage of its first affix with one (`Affixes`, `AffixStatData`).
     pub affix: Option<AffixDamage>,
+    /// A hit of it from behind the target is a crit (not `NoBackstab`; Observed: 510 of 560
+    /// retail melee hits that could crit from behind a mob were crits, 857 of 3,772 from its
+    /// front, 160 open world ledgers).
+    pub backstab: bool,
+    /// A ranged hit of it on the head is a head shot (not `NoHeadshot`).
+    pub headshot: bool,
+    /// The heart rune charge points its hit gives: to the attacker (`AttackRuneCharge`,
+    /// `AttackBlockedRuneCharge` when blocked) and to the target (`HitRuneCharge`,
+    /// `HitBlockedRuneCharge`); 0 without a number.
+    pub rune_charge: RuneChargeRow,
+}
+
+/// The heart rune charge points of a `DamageData` row.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RuneChargeRow {
+    /// `AttackRuneCharge`.
+    pub attack: f64,
+    /// `AttackBlockedRuneCharge`.
+    pub attack_blocked: f64,
+    /// `HitRuneCharge`.
+    pub hit: f64,
+    /// `HitBlockedRuneCharge`.
+    pub hit_blocked: f64,
 }
 
 impl AttackRow {
@@ -322,6 +346,17 @@ impl AttackRow {
     pub fn block_stamina(&self, weapon: &WeaponRow, block_stability: f64) -> f64 {
         weapon.block_stamina_damage * self.block_stamina_mod * (1.0 - block_stability / PERCENT)
     }
+}
+
+/// A spell a creature casts: the `SpellData` row a `CAGE-CastSpell` clip names by `SpellName`
+/// (Observed: 744 of the 765 names of the creature clips have a row, most in
+/// `javelindata_spelltable_ai`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MobSpell {
+    /// Its row, without a projectile flight (the ranged attack database is not in the tables).
+    pub row: SpellRow,
+    /// It has a `RangedAttackProfile`: it flies from the creature to where it opens.
+    pub flies: bool,
 }
 
 /// The plain content of the combat datasheets.
@@ -341,8 +376,13 @@ pub struct CombatSource {
     pub ranged_profiles: Vec<(String, String)>,
     /// `MasterItemDefinitions`: (item id, `ItemStatsRef`) of the items that have stats.
     pub item_stats: Vec<(String, String)>,
+    /// `WeaponItemDefinitions`: (id, `EquipAbility`) of the rows that grant an ability while
+    /// worn (a heart rune's `Ability_Rune_Detonate`).
+    pub equip_abilities: Vec<(String, String)>,
     /// `ArmorItemDefinitions` by id.
     pub armors: Vec<(String, ArmorRow)>,
+    /// `SpellData`: every spell row, as a creature casts it.
+    pub mob_spells: Vec<MobSpell>,
     /// `ConsumableItemDefinitions`: the consumables with a cooldown.
     pub consumables: Vec<ConsumableRow>,
     /// `StatusEffectData`: (status id, health, health share) of the effects that heal.
@@ -540,6 +580,21 @@ impl CombatSource {
                     )
                 })
                 .collect(),
+            mob_spells: tables
+                .spell_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .map(|row| MobSpell {
+                    row: SpellRow::of_data(row, None, None, None),
+                    flies: row.ranged_attack_profile.is_some(),
+                })
+                .collect(),
+            equip_abilities: tables
+                .weapon_item_definitions
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter_map(|row| Some((row.weapon_id.clone(), row.equip_ability.clone()?)))
+                .collect(),
             item_stats: tables
                 .master_item_definitions
                 .iter()
@@ -580,6 +635,14 @@ impl CombatSource {
                         cell.split(AFFIX_SEPARATOR)
                             .find_map(|affix| affixes.get(affix.trim()).copied())
                     }),
+                    backstab: row.no_backstab != Some(true),
+                    headshot: row.no_headshot != Some(true),
+                    rune_charge: RuneChargeRow {
+                        attack: row.attack_rune_charge.unwrap_or_default(),
+                        attack_blocked: row.attack_blocked_rune_charge.unwrap_or_default(),
+                        hit: row.hit_rune_charge.unwrap_or_default(),
+                        hit_blocked: row.hit_blocked_rune_charge.unwrap_or_default(),
+                    },
                 })
                 .collect(),
             vision_offsets: tables
@@ -668,6 +731,13 @@ pub struct CombatData {
     item_pvp_damage: HashMap<String, f64>,
     /// Every attack row, by lower-case table unique id and row id.
     table_attacks: HashMap<(String, String), AttackRow>,
+    /// The heart rune charge of every attack row, by its row key (a hit names its row so).
+    rune_charges: HashMap<RowKey, RuneChargeRow>,
+    /// The ability each item grants while worn (its stats row's `EquipAbility`), by lower-case
+    /// item id.
+    item_equip_abilities: HashMap<String, String>,
+    /// The spells creatures cast, by lower-case spell id.
+    mob_spells: HashMap<String, MobSpell>,
     /// The player's damage table (lower-case unique id).
     player_table: String,
     /// The basic attacks of each weapon stance.
@@ -719,6 +789,26 @@ impl CombatData {
                     row.clone(),
                 )
             })
+            .collect();
+        let equip_abilities: HashMap<&str, &str> = source
+            .equip_abilities
+            .iter()
+            .map(|(weapon, ability)| (weapon.as_str(), ability.as_str()))
+            .collect();
+        let item_equip_abilities = source
+            .item_stats
+            .iter()
+            .filter_map(|(item, stats)| {
+                Some((
+                    item.to_lowercase(),
+                    (*equip_abilities.get(stats.as_str())?).to_owned(),
+                ))
+            })
+            .collect();
+        let rune_charges = source
+            .attacks
+            .iter()
+            .map(|row| (RowKey::of(&row.table, &row.damage_id), row.rune_charge))
             .collect();
         let player_table = rows.damage_table.to_lowercase();
         let weapons: HashMap<String, WeaponRow> = source
@@ -869,6 +959,13 @@ impl CombatData {
             item_heals,
             item_pvp_damage,
             table_attacks,
+            rune_charges,
+            item_equip_abilities,
+            mob_spells: source
+                .mob_spells
+                .into_iter()
+                .map(|spell| (spell.row.id.to_lowercase(), spell))
+                .collect(),
             player_table,
             player_attacks: PlayerAttacks::default(),
             player_abilities: PlayerAbilities::default(),
@@ -946,6 +1043,11 @@ impl CombatData {
             .get(&(table.to_lowercase(), damage_id.to_owned()))
     }
 
+    /// The heart rune charge of the attack row of key `row` (all 0 for a row it does not know).
+    pub fn rune_charge(&self, row: RowKey) -> RuneChargeRow {
+        self.rune_charges.get(&row).copied().unwrap_or_default()
+    }
+
     /// This data with the basic attacks of the weapon stances, `attacks`.
     #[must_use]
     pub fn with_player_attacks(self, attacks: PlayerAttacks) -> Self {
@@ -978,6 +1080,25 @@ impl CombatData {
                 self.player_abilities.lists_for(&classes)
             })
             .unwrap_or_default()
+    }
+
+    /// The ability item `item_id` (any case) grants while worn (a heart rune's).
+    pub fn equip_ability_of_item(&self, item_id: &str) -> Option<&str> {
+        self.item_equip_abilities
+            .get(&item_id.to_lowercase())
+            .map(String::as_str)
+    }
+
+    /// The spell `name` (any case) a creature's `CAGE-CastSpell` clip casts.
+    pub fn mob_spell(&self, name: &str) -> Option<&MobSpell> {
+        self.mob_spells.get(&name.to_lowercase())
+    }
+
+    /// The heart rune's ability lists ([`crate::player_abilities::HEARTGEM_CLASS`]): on while a
+    /// rune is in its slot, beside the lists of the weapon in hand.
+    pub fn rune_lists(&self) -> Vec<&AbilityList> {
+        self.player_abilities
+            .lists_for(&[crate::player_abilities::HEARTGEM_CLASS])
     }
 
     /// The same data with the player sequence table `sequences`.
@@ -1240,6 +1361,53 @@ mod tests {
         }
     }
 
+    /// A heart rune of the build: its stats row grants its ability while worn.
+    const RUNE_ITEM: &str = "RuneDetonateT3A";
+    const RUNE_STATS: &str = "RuneDetonateT1";
+    const RUNE_ABILITY: &str = "Ability_Rune_Detonate";
+
+    /// The dryad shaman's bomb (`javelindata_spelltable_ai`, build 25810808).
+    const MOB_SPELL: &str = "Dryad_Bomb";
+    const MOB_SPELL_ROW: &str = "Mushroom";
+    const MOB_SPELL_RADIUS_M: f32 = 3.0;
+
+    fn mob_bomb() -> MobSpell {
+        let row: crate::generated::SpellData = serde_json::from_value(serde_json::json!({
+            "spell_id": MOB_SPELL,
+            "radius": MOB_SPELL_RADIUS_M,
+            "damage_table_row": MOB_SPELL_ROW,
+            "status_effects": "Slow, Rooted",
+            "target_types": "Enemy",
+            "ranged_attack_profile": "AI_Ranged_AOE",
+        }))
+        .expect("row");
+        MobSpell {
+            row: SpellRow::of_data(&row, None, None, None),
+            flies: row.ranged_attack_profile.is_some(),
+        }
+    }
+
+    #[test]
+    fn a_creature_clip_finds_its_spell_by_name_in_any_case() {
+        let data = CombatData::build(source(), &rows()).expect("data");
+        let spell = data.mob_spell("dryad_bomb").expect("spell");
+        assert!(spell.flies);
+        assert_eq!(spell.row.damage_row.as_deref(), Some(MOB_SPELL_ROW));
+        assert_eq!(spell.row.radius_m, Some(MOB_SPELL_RADIUS_M));
+        assert_eq!(spell.row.status_effects, ["Slow", "Rooted"]);
+        assert!(data.mob_spell("Dryad_Unknown").is_none());
+    }
+
+    #[test]
+    fn a_worn_heart_rune_grants_its_stats_row_ability() {
+        let data = CombatData::build(source(), &rows()).expect("data");
+        assert_eq!(
+            data.equip_ability_of_item("runedetonatet3a"),
+            Some(RUNE_ABILITY)
+        );
+        assert_eq!(data.equip_ability_of_item(SWORD_ITEM), None);
+    }
+
     fn source() -> CombatSource {
         CombatSource {
             base_types: vec![("Boar_20".to_owned(), boar())],
@@ -1283,11 +1451,14 @@ mod tests {
                 ("Sword".to_owned(), SWORD_PVP_ADJUSTMENT),
                 ("Bow".to_owned(), BOW_PVP_ADJUSTMENT),
             ],
+            equip_abilities: vec![(RUNE_STATS.to_owned(), RUNE_ABILITY.to_owned())],
+            mob_spells: vec![mob_bomb()],
             item_stats: vec![
                 (SWORD_ITEM.to_owned(), "SwordT1".to_owned()),
                 ("Shield".to_owned(), "NoWeaponRow".to_owned()),
                 (ICE_GAUNTLET_ITEM.to_owned(), ICE_GAUNTLET_STATS.to_owned()),
                 (CHEST_ITEM.to_owned(), CHEST_STATS.to_owned()),
+                (RUNE_ITEM.to_owned(), RUNE_STATS.to_owned()),
             ],
             armors: vec![(CHEST_STATS.to_owned(), CHEST)],
             attacks: [(LIGHT, 1.0, 0), (HEAVY, 1.2, 1), (PELLET, 0.19, 0)]
@@ -1302,6 +1473,9 @@ mod tests {
                     blockable: true,
                     category: DamageCategory::Physical,
                     affix: None,
+                    backstab: true,
+                    headshot: true,
+                    rune_charge: RuneChargeRow::default(),
                 })
                 .to_vec(),
             vision_offsets: vec![("Beast".to_owned(), VISION_OFFSET)],

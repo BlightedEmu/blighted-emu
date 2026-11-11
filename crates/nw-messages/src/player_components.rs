@@ -177,7 +177,7 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 58] = [
     (45, 2932),
     (ABILITY_COMPONENT, ABILITY_TYPE_INDEX),
     (PLAYER_MANA_COMPONENT, MANA_TYPE_INDEX),
-    (48, 5257),
+    (CHARGE_COMPONENT, CHARGE_TYPE_INDEX),
     (49, 3152),
     (50, 4321),
     (GROUPS_STATE_COMPONENT, GROUPS_STATE_TYPE_INDEX),
@@ -216,8 +216,11 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 58] = [
 
 /// Type index of `MB::PlayerNameTagComponentReplicatedState` (component 54).
 pub const PLAYER_NAME_TAG_TYPE_INDEX: u64 = 100;
-/// Type index of `MB::ChargeComponentReplicatedState` (component 48).
-const CHARGE_TYPE_INDEX: u64 = 5257;
+/// Type index of `MB::ChargeComponentReplicatedState` (component 48): slot 0 child 0
+/// `chrgPcnt`, the heart rune charge in whole percent.
+pub const CHARGE_TYPE_INDEX: u64 = 5257;
+/// The own player component of the charge state.
+pub const CHARGE_COMPONENT: u64 = 48;
 /// Type index of `MB::AudioProxyComponentReplicatedState` (component 13).
 const AUDIO_PROXY_TYPE_INDEX: u64 = 603;
 /// Type index of `MB::IncapacitatedReplicatedState`: slot 0 child 0 `enabled`.

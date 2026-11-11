@@ -174,6 +174,12 @@ const RANGED_ATTACK_PARAM: &str = "RangedAttackName";
 const SLICE_OVERRIDE_PARAM: &str = "SliceOverride";
 const LEAD_TARGET_PARAM: &str = "AILeadTarget";
 const LEAD_MAX_ANGLE_PARAM: &str = "AILeadTargetMaxAngle";
+/// A spell clip and its parameters (Observed: 2,667 `CAGE-CastSpell` clips of the creature
+/// databases, every one with `SpellName`, `AIAimAtTarget` and `ProjectileSpeed`).
+const CAST_CLIP: &str = "CAGE-CastSpell";
+const SPELL_NAME_PARAM: &str = "SpellName";
+const AIM_AT_TARGET_PARAM: &str = "AIAimAtTarget";
+const PROJECTILE_SPEED_PARAM: &str = "ProjectileSpeed";
 /// The navigation config of a run (Observed: the boar's `Run` nodes name `RunToTarget`; retail
 /// boar runs reached 6.96 m/s, its maximum 7.0).
 const RUN_CONFIG: &str = "RunToTarget";
@@ -285,6 +291,10 @@ struct Names {
     slice_override: Option<NameId>,
     lead_target: Option<NameId>,
     lead_max_angle: Option<NameId>,
+    cast_clip: Option<NameId>,
+    spell_name: Option<NameId>,
+    aim_at_target: Option<NameId>,
+    projectile_speed: Option<NameId>,
     run_config: Option<NameId>,
     reset: Option<NameId>,
     reset_no_heal: Option<NameId>,
@@ -336,6 +346,10 @@ impl MobAi {
             slice_override: name(SLICE_OVERRIDE_PARAM),
             lead_target: name(LEAD_TARGET_PARAM),
             lead_max_angle: name(LEAD_MAX_ANGLE_PARAM),
+            cast_clip: name(CAST_CLIP),
+            spell_name: name(SPELL_NAME_PARAM),
+            aim_at_target: name(AIM_AT_TARGET_PARAM),
+            projectile_speed: name(PROJECTILE_SPEED_PARAM),
             run_config: name(RUN_CONFIG),
             reset: name(RESET_EFFECT),
             reset_no_heal: name(RESET_NO_HEAL_EFFECT),
@@ -992,14 +1006,50 @@ pub struct Shown {
 /// charge struck nobody).
 const ON_CONTACT_MS: u64 = u64::MAX;
 
-/// A damage window of the action a mob plays (`CAGE-Damage` of its fragment entry), or the
-/// moment its `CAGE-RangedAttack` clip fires.
+/// A moment of the action a mob plays: a damage window (`CAGE-Damage` of its fragment entry),
+/// the moment its `CAGE-RangedAttack` clip fires, or the moment its `CAGE-CastSpell` clip casts.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Window {
     at_ms: u64,
-    row: NameId,
-    reach: MobReach,
-    ranged: Option<RangedWindow>,
+    act: WindowAct,
+}
+
+/// What a [`Window`] does when it comes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum WindowAct {
+    /// It strikes the target with its damage row.
+    Strike {
+        row: NameId,
+        reach: MobReach,
+        ranged: Option<RangedWindow>,
+    },
+    /// It casts its spell.
+    Cast(CastWindow),
+}
+
+/// The parameters of a `CAGE-CastSpell` clip.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CastWindow {
+    spell: NameId,
+    /// `AIAimAtTarget`.
+    aim: bool,
+    /// `ProjectileSpeed`, m/s.
+    speed_mps: f32,
+}
+
+/// A spell a mob's `CAGE-CastSpell` clip casts ([`nw_content::combat::MobSpell`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpellCast {
+    /// `SpellName`.
+    pub spell: String,
+    /// The mob's target and where it was, when it has one.
+    pub target: Option<(u64, Position)>,
+    /// `AIAimAtTarget`: it opens on the target, not on the mob.
+    pub aim: bool,
+    /// `ProjectileSpeed`: how fast a spell that flies gets there, m/s.
+    pub speed_mps: f32,
+    /// The unique id of the creature's damage table, for the spell's damage row.
+    pub table: Option<String>,
 }
 
 /// The parameters of a `CAGE-RangedAttack` clip.
@@ -1056,6 +1106,8 @@ pub struct WindowHit {
 pub struct Thought {
     /// The hits whose damage windows came.
     pub hits: Vec<WindowHit>,
+    /// The spells whose clips came.
+    pub casts: Vec<SpellCast>,
     /// The target it took this step, when it had none.
     pub acquired: Option<u64>,
     /// A reset that heals ended: refill its health (Inferred: the `ResetAI` row of
@@ -1705,32 +1757,42 @@ impl MindState {
             .iter()
             .partition(|window| now_ms >= window.at_ms);
         self.windows = later;
-        let (Some(target), Some(target_at)) = (self.target, self.target_at) else {
-            return;
-        };
         let Some(arch) = ai.arch(self.archetype) else {
             return;
         };
-        let Some(table) = arch.damage_table_id else {
-            return;
-        };
+        let table = arch.damage_table_id.map(|table| ai.name(table).to_owned());
+        let target = self.target.zip(self.target_at);
         for window in due {
-            thought.hits.push(WindowHit {
-                target,
-                target_at,
-                strike: Strike {
-                    table: ai.name(table).to_owned(),
-                    row: ai.name(window.row).to_owned(),
-                    weapon: arch.main_hand_item.map(|item| ai.name(item).to_owned()),
-                    reach: window.reach,
-                    ranged: window.ranged.map(|ranged| RangedClip {
-                        attack: ai.name(ranged.attack).to_owned(),
-                        slice: ranged.slice.map(|slice| ai.name(slice).to_lowercase()),
-                        lead: ranged.lead,
-                        lead_max_rad: ranged.lead_max_rad,
-                    }),
-                },
-            });
+            match window.act {
+                WindowAct::Cast(cast) => thought.casts.push(SpellCast {
+                    spell: ai.name(cast.spell).to_owned(),
+                    target,
+                    aim: cast.aim,
+                    speed_mps: cast.speed_mps,
+                    table: table.clone(),
+                }),
+                WindowAct::Strike { row, reach, ranged } => {
+                    let (Some((target, target_at)), Some(table)) = (target, &table) else {
+                        continue;
+                    };
+                    thought.hits.push(WindowHit {
+                        target,
+                        target_at,
+                        strike: Strike {
+                            table: table.clone(),
+                            row: ai.name(row).to_owned(),
+                            weapon: arch.main_hand_item.map(|item| ai.name(item).to_owned()),
+                            reach,
+                            ranged: ranged.map(|ranged| RangedClip {
+                                attack: ai.name(ranged.attack).to_owned(),
+                                slice: ranged.slice.map(|slice| ai.name(slice).to_lowercase()),
+                                lead: ranged.lead,
+                                lead_max_rad: ranged.lead_max_rad,
+                            }),
+                        },
+                    });
+                }
+            }
         }
     }
 
@@ -1863,9 +1925,11 @@ impl MindState {
             };
             self.windows.push(Window {
                 at_ms,
-                row,
-                reach: window_reach(ai, window, homing),
-                ranged: None,
+                act: WindowAct::Strike {
+                    row,
+                    reach: window_reach(ai, window, homing),
+                    ranged: None,
+                },
             });
         }
         // A ranged clip written in both databases is one shot, as a damage clip.
@@ -1892,17 +1956,49 @@ impl MindState {
             let at_ms = now_ms + (window.start_s * MS_PER_S).round() as u64;
             self.windows.push(Window {
                 at_ms,
-                row,
-                reach: window_reach(ai, window, homing),
-                ranged: Some(RangedWindow {
-                    attack,
-                    slice: param_of(window, ai.names.slice_override)
-                        .filter(|slice| !ai.name(*slice).trim().is_empty()),
-                    lead: text(ai.names.lead_target) == Some(PARAM_TRUE),
-                    lead_max_rad: text(ai.names.lead_max_angle)
-                        .and_then(|degrees| degrees.parse::<f32>().ok())
-                        .unwrap_or(0.0)
-                        .to_radians(),
+                act: WindowAct::Strike {
+                    row,
+                    reach: window_reach(ai, window, homing),
+                    ranged: Some(RangedWindow {
+                        attack,
+                        slice: param_of(window, ai.names.slice_override)
+                            .filter(|slice| !ai.name(*slice).trim().is_empty()),
+                        lead: text(ai.names.lead_target) == Some(PARAM_TRUE),
+                        lead_max_rad: text(ai.names.lead_max_angle)
+                            .and_then(|degrees| degrees.parse::<f32>().ok())
+                            .unwrap_or(0.0)
+                            .to_radians(),
+                    }),
+                },
+            });
+        }
+        // A spell clip written in both databases is one cast, as a damage clip.
+        let is_cast = |window: &&ProcWindow| Some(window.kind) == ai.names.cast_clip;
+        let cast_windows = if body.iter().any(|window| is_cast(&window)) {
+            body
+        } else {
+            weapon
+        };
+        for window in cast_windows.iter().filter(is_cast) {
+            let Some(spell) = param_of(window, ai.names.spell_name) else {
+                continue;
+            };
+            let text = |name| param_of(window, name).map(|value| ai.name(value).trim());
+            // Seconds of a fragment.
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "seconds of a fragment"
+            )]
+            let at_ms = now_ms + (window.start_s * MS_PER_S).round() as u64;
+            self.windows.push(Window {
+                at_ms,
+                act: WindowAct::Cast(CastWindow {
+                    spell,
+                    aim: text(ai.names.aim_at_target) == Some(PARAM_TRUE),
+                    speed_mps: text(ai.names.projectile_speed)
+                        .and_then(|speed| speed.parse::<f32>().ok())
+                        .unwrap_or(0.0),
                 }),
             });
         }

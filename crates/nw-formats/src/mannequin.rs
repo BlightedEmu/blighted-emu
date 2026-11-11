@@ -117,6 +117,14 @@ const MANA_COST_TEST_ELEMENT: &str = "IfManaCost";
 const COMPARISON_ATTRIBUTE: &str = "ComparisonType";
 const LESS_THAN: &str = "LessThan";
 const LESS_THAN_OR_EQUAL: &str = "LessThanOrEqual";
+const EQUAL: &str = "Equal";
+/// `<IfChargeAmount ComparisonType ComparisonValue>`: the heart rune charge test.
+const CHARGE_TEST_ELEMENT: &str = "IfChargeAmount";
+const COMPARISON_VALUE_ATTRIBUTE: &str = "ComparisonValue";
+/// `<ConsumeCharge><Default OnEnter="Take" ChargeToConsume>`: the action takes heart rune charge.
+const CONSUME_CHARGE_ELEMENT: &str = "ConsumeCharge";
+const CHARGE_TO_CONSUME_ATTRIBUTE: &str = "ChargeToConsume";
+const TAKE_VALUE: &str = "Take";
 const COST_ID_ATTRIBUTE: &str = "CostID";
 const COOLDOWN_TEST_ELEMENT: &str = "IfCooldownTimer";
 const ABILITY_ID_ATTRIBUTE: &str = "AbilityID";
@@ -1048,6 +1056,14 @@ pub enum Condition {
         /// `ComparisonType`.
         compare: ManaCompare,
     },
+    /// `<IfChargeAmount ComparisonType ComparisonValue>`: the heart rune charge (0 to 100)
+    /// compares with the value so (the rune list: `Equal` `100`, a full charge).
+    ChargeAmount {
+        /// `ComparisonType`.
+        compare: ManaCompare,
+        /// `ComparisonValue`, charge points.
+        value: u32,
+    },
     /// `<IfHasStatusEffect StatusEffect>`: the character has the effect.
     StatusEffect(String),
     /// `<IfAbilityActive AbilityName>`: the passive ability (an upgrade perk) is on.
@@ -1068,8 +1084,9 @@ pub enum Condition {
     Other(String),
 }
 
-/// How an `IfManaCost` compares the mana with the cost (`ComparisonType`; the retail lists use
-/// these three: 83 `GreaterThanOrEqual`, 8 `LessThan`, 5 `LessThanOrEqual`).
+/// How an `IfManaCost` compares the mana with the cost, or an `IfChargeAmount` the charge with
+/// its value (`ComparisonType`; the retail mana tests use 83 `GreaterThanOrEqual`, 8 `LessThan`
+/// and 5 `LessThanOrEqual`, the heart rune tests `Equal`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ManaCompare {
     /// `GreaterThanOrEqual`: the mana covers the cost.
@@ -1078,6 +1095,8 @@ pub enum ManaCompare {
     Below,
     /// `LessThanOrEqual`.
     AtMost,
+    /// `Equal`.
+    Equal,
 }
 
 impl ManaCompare {
@@ -1087,6 +1106,7 @@ impl ManaCompare {
             Self::AtLeast => mana >= cost,
             Self::Below => mana < cost,
             Self::AtMost => mana <= cost,
+            Self::Equal => (mana - cost).abs() < f32::EPSILON,
         }
     }
 }
@@ -1124,6 +1144,10 @@ pub trait CageWorld {
     }
     /// The mana compares with cost `cost` as `compare` says.
     fn mana_cost(&self, _cost: &str, _compare: ManaCompare) -> bool {
+        false
+    }
+    /// Its heart rune charge compares with `value` so.
+    fn charge_amount(&self, _compare: ManaCompare, _value: u32) -> bool {
         false
     }
     /// It has status effect `effect`.
@@ -1234,11 +1258,14 @@ impl Condition {
             COOLDOWN_TEST_ELEMENT => Self::Cooldown(attribute(ABILITY_ID_ATTRIBUTE)),
             MANA_COST_TEST_ELEMENT => Self::ManaCost {
                 cost: attribute(COST_ID_ATTRIBUTE),
-                compare: match node.attribute(COMPARISON_ATTRIBUTE) {
-                    Some(LESS_THAN) => ManaCompare::Below,
-                    Some(LESS_THAN_OR_EQUAL) => ManaCompare::AtMost,
-                    _ => ManaCompare::AtLeast,
-                },
+                compare: compare_of(node.attribute(COMPARISON_ATTRIBUTE)),
+            },
+            CHARGE_TEST_ELEMENT => Self::ChargeAmount {
+                compare: compare_of(node.attribute(COMPARISON_ATTRIBUTE)),
+                value: node
+                    .attribute(COMPARISON_VALUE_ATTRIBUTE)
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or_default(),
             },
             STATUS_EFFECT_TEST_ELEMENT => Self::StatusEffect(attribute(STATUS_EFFECT_ATTRIBUTE)),
             ABILITY_ACTIVE_TEST_ELEMENT => Self::AbilityActive(attribute(ABILITY_NAME_ATTRIBUTE)),
@@ -1287,6 +1314,7 @@ impl Condition {
             } => world.ability_move(ability, *back_ticks),
             Self::Cooldown(ability) => world.cooldown(ability),
             Self::ManaCost { cost, compare } => world.mana_cost(cost, *compare),
+            Self::ChargeAmount { compare, value } => world.charge_amount(*compare, *value),
             Self::StatusEffect(effect) => world.status_effect(effect),
             Self::AbilityActive(ability) => world.ability_active(ability),
             Self::ItemInSlot(slot) => world.item_in_slot(slot),
@@ -1340,6 +1368,7 @@ impl Condition {
             Self::AbilityMove { .. } => ABILITY_MOVE_TEST_ELEMENT,
             Self::Cooldown(_) => COOLDOWN_TEST_ELEMENT,
             Self::ManaCost { .. } => MANA_COST_TEST_ELEMENT,
+            Self::ChargeAmount { .. } => CHARGE_TEST_ELEMENT,
             Self::StatusEffect(_) => STATUS_EFFECT_TEST_ELEMENT,
             Self::AbilityActive(_) => ABILITY_ACTIVE_TEST_ELEMENT,
             Self::ItemInSlot(_) => ITEM_IN_SLOT_TEST_ELEMENT,
@@ -1481,6 +1510,18 @@ pub struct Action {
     pub block_activities: Vec<BlockActivity>,
     /// Its stamina activities (mob lists).
     pub stamina: StaminaActivities,
+    /// The heart rune charge it takes when it starts.
+    pub charge_take: Option<ChargeTake>,
+}
+
+/// A `ConsumeCharge` activity: the heart rune charge an action takes as it starts, when its
+/// condition holds.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChargeTake {
+    /// `ChargeToConsume`, charge points (0 to 100).
+    pub amount: u32,
+    /// The condition of its `IfThenElse` branch.
+    pub condition: Condition,
 }
 
 /// How a cast activity aims its spell.
@@ -1905,6 +1946,42 @@ fn block_activities(action: &Node) -> Vec<BlockActivity> {
     found
 }
 
+/// A `ComparisonType` value as a comparison; `GreaterThanOrEqual` and an unknown one compare
+/// as at least.
+fn compare_of(value: Option<&str>) -> ManaCompare {
+    match value {
+        Some(LESS_THAN) => ManaCompare::Below,
+        Some(LESS_THAN_OR_EQUAL) => ManaCompare::AtMost,
+        Some(EQUAL) => ManaCompare::Equal,
+        _ => ManaCompare::AtLeast,
+    }
+}
+
+/// The heart rune charge `action` takes (`ConsumeCharge` with `OnEnter="Take"`), with the
+/// condition of its `IfThenElse` branch (`True` outside one).
+fn charge_take(action: &Node) -> Option<ChargeTake> {
+    let mut found = None;
+    walk_activities(action, &mut |activity, condition| {
+        if activity.name != CONSUME_CHARGE_ELEMENT {
+            return false;
+        }
+        let take = activity
+            .children
+            .iter()
+            .find(|entry| entry.name == DEFAULT_ELEMENT)
+            .filter(|entry| entry.attribute(ON_ENTER_ATTRIBUTE) == Some(TAKE_VALUE))
+            .and_then(|entry| entry.attribute(CHARGE_TO_CONSUME_ATTRIBUTE))
+            .and_then(|amount| amount.parse().ok());
+        if let Some(amount) = take
+            && found.is_none()
+        {
+            found = Some(ChargeTake { amount, condition });
+        }
+        true
+    });
+    found
+}
+
 /// The stamina activities of `action` (the first of each kind).
 fn stamina_activities(action: &Node) -> StaminaActivities {
     let mut found = StaminaActivities::default();
@@ -2078,6 +2155,10 @@ impl ActionList {
                                 ..activity
                             })
                             .collect(),
+                        charge_take: charge_take(action).map(|take| ChargeTake {
+                            condition: take.condition.resolved(&conditions, 0),
+                            ..take
+                        }),
                         stamina: {
                             let found = stamina_activities(action);
                             StaminaActivities {
@@ -2477,6 +2558,46 @@ mod tests {
         let options = |wanted: &[&str]| adb.options("Attack_Primary", wanted).len();
         assert_eq!(options(&["2H_Melee", "Greatsword"]), 1);
         assert_eq!(options(&["1H_Melee", "Sword"]), 0);
+    }
+
+    #[test]
+    fn a_rune_action_tests_a_full_charge_and_takes_it() {
+        // The shape of the build's `Rune_Detonate` (playeractions_ability_runes.actionlist).
+        let text = r#"<ActionList><Actions>
+  <Action Name="Rune_Detonate">
+    <ActivationCondition><And>
+      <IfInput InputName="rune_ability" IgnoreSlowdown="true"/>
+      <IfChargeAmount ComparisonType="Equal" ComparisonValue="100"/>
+    </And></ActivationCondition>
+    <Activities>
+      <ConsumeCharge><Default OnEnter="Take" OnExit="NoEffect" ChargeToConsume="100"/></ConsumeCharge>
+    </Activities>
+  </Action>
+</Actions></ActionList>"#;
+        let list = ActionList::parse(text).expect("list");
+        let action = list.action("Rune_Detonate").expect("action");
+        // The activation holds its children: here one `And`.
+        let Some(Condition::All(outer)) = &action.activation else {
+            panic!("an activation: {:?}", action.activation);
+        };
+        let [Condition::All(parts)] = outer.as_slice() else {
+            panic!("an And: {outer:?}");
+        };
+        assert_eq!(
+            parts[1],
+            Condition::ChargeAmount {
+                compare: ManaCompare::Equal,
+                value: 100
+            }
+        );
+        assert_eq!(
+            action.charge_take,
+            Some(ChargeTake {
+                amount: 100,
+                condition: Condition::True
+            })
+        );
+        assert!(ManaCompare::Equal.holds(100.0, 100.0) && !ManaCompare::Equal.holds(99.0, 100.0));
     }
 
     #[test]

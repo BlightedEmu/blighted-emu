@@ -87,6 +87,91 @@ pub(super) const ALERT_MS: u64 = 1_000;
 const LOOK_POSE_START_S: f32 = 0.3335;
 /// Milliseconds per second, as a float.
 const MS_PER_SECOND_F32: f32 = 1_000.0;
+/// A hit from within this angle of a mob's facing is from the front, and from beyond
+/// [`BACK_HIT_RAD`] from behind; between them it is from a side (Observed: 160 retail open
+/// world ledgers, the own player's place at each creature reaction start: `_F` 1,379 times
+/// within 22.5 degrees and 128 at 45; `_L` at +45 to +90, `_R` at -45 to -90; `_B` at 135 to
+/// 180; the bounds between are Inferred).
+const FRONT_HIT_RAD: f32 = std::f32::consts::FRAC_PI_4;
+const BACK_HIT_RAD: f32 = 3.0 * std::f32::consts::FRAC_PI_4;
+/// The ends of the reaction fragment names by side (`r_R2_F`, `r_R2_B`, `r_R2_L`, `r_R2_R`: the
+/// four of every reaction in the creature animation table).
+const FRONT_END: &str = "_F";
+const SIDE_ENDS: [(HitSide, &str); 3] = [
+    (HitSide::Back, "_B"),
+    (HitSide::Left, "_L"),
+    (HitSide::Right, "_R"),
+];
+
+/// Where a hit on a mob comes from, by its facing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HitSide {
+    Front,
+    Back,
+    Left,
+    Right,
+}
+
+impl HitSide {
+    /// The side of a hit from `from` on a mob at `at` that faces `yaw` (`None`: it never
+    /// turned, so from the front).
+    pub(super) fn of(at: Position, yaw: Option<f32>, from: Position) -> Self {
+        let Some(yaw) = yaw else {
+            return Self::Front;
+        };
+        let gap = yaw_gap(yaw, yaw_toward(at, from));
+        if gap.abs() <= FRONT_HIT_RAD {
+            Self::Front
+        } else if gap.abs() >= BACK_HIT_RAD {
+            Self::Back
+        } else if gap > 0.0 {
+            Self::Left
+        } else {
+            Self::Right
+        }
+    }
+}
+
+/// The reactions of one strength, by side: each side's falls back to the front's when the
+/// creature has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SideReactions {
+    front: FragmentEntry,
+    back: FragmentEntry,
+    left: FragmentEntry,
+    right: FragmentEntry,
+}
+
+impl SideReactions {
+    /// The reactions of `front` in `creature`: the fragments of its name with the other side
+    /// ends, played by its action.
+    fn of(front: FragmentEntry, creature: &CreatureAnimation) -> Self {
+        let name = usize::from(front.fragment)
+            .checked_sub(1)
+            .and_then(|index| creature.fragments().get(index))
+            .and_then(|name| name.strip_suffix(FRONT_END));
+        let side = |wanted: HitSide| {
+            let (_, end) = SIDE_ENDS.iter().find(|(side, _)| *side == wanted)?;
+            let fragment = creature.fragment(&format!("{}{end}", name?))?;
+            Some(entry(fragment, front.action, DEFAULT_ENTRY_TAIL))
+        };
+        Self {
+            front,
+            back: side(HitSide::Back).unwrap_or(front),
+            left: side(HitSide::Left).unwrap_or(front),
+            right: side(HitSide::Right).unwrap_or(front),
+        }
+    }
+
+    fn of_side(&self, side: HitSide) -> FragmentEntry {
+        match side {
+            HitSide::Front => self.front,
+            HitSide::Back => self.back,
+            HitSide::Left => self.left,
+            HitSide::Right => self.right,
+        }
+    }
+}
 
 /// What a mob does, as one full-body fragment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,10 +190,10 @@ pub(super) enum Fragment {
     Alert,
     /// It swings.
     Attack,
-    /// It reels from a first hit.
-    ReactLight,
-    /// It reels from a second hit.
-    ReactHeavy,
+    /// It reels from a first hit, from that side.
+    ReactLight(HitSide),
+    /// It reels from a second hit, from that side.
+    ReactHeavy(HitSide),
     /// It dies.
     Death,
     /// It plays a move of its pace (an attack of a boss).
@@ -171,7 +256,7 @@ pub(super) struct Animations {
     attack: FragmentEntry,
     death: FragmentEntry,
     /// The full-body reactions to a first and a second hit; `None` when it has none.
-    reactions: Option<(FragmentEntry, FragmentEntry)>,
+    reactions: Option<(SideReactions, SideReactions)>,
     /// The alert when it first sees its target; `None` for a creature that has none.
     alert: Option<FragmentEntry>,
     /// The look pose that plays while it fights (its scope bit and entry); `None` for a
@@ -208,8 +293,8 @@ impl Animations {
             Fragment::Alert => self.alert?,
             Fragment::Attack => self.attack,
             Fragment::Death => self.death,
-            Fragment::ReactLight => self.reactions?.0,
-            Fragment::ReactHeavy => self.reactions?.1,
+            Fragment::ReactLight(side) => self.reactions?.0.of_side(side),
+            Fragment::ReactHeavy(side) => self.reactions?.1.of_side(side),
             Fragment::Play(played) => entry(played.fragment, played.action, played.tail),
             Fragment::Tree(played) => entry(
                 played.fragment,
@@ -264,7 +349,13 @@ impl Animations {
         let walk = pick(Role::Walk);
         let chase = pick(Role::Chase);
         let light = pick(Role::ReactLight);
-        let reactions = light.map(|light| (light, pick(Role::ReactHeavy).unwrap_or(light)));
+        let reactions = light.map(|light| {
+            let heavy = pick(Role::ReactHeavy).unwrap_or(light);
+            (
+                SideReactions::of(light, creature),
+                SideReactions::of(heavy, creature),
+            )
+        });
         let death = pick(Role::Death).unwrap_or(idle);
         let fights_quietly = retail.is_some_and(|retail| retail.fights_quietly);
         let look_pose = pick(Role::LookPose)
@@ -821,7 +912,12 @@ impl MobTimeline {
     /// reaction, the second the heavy one and starts the limit; while the limit runs, a hit only
     /// makes it longer (retail plays an additive reaction then; not sent here). How long the
     /// reaction plays, when one plays.
-    fn hurt(&mut self, now_ms: u64, (light_ms, heavy_ms): (u64, u64)) -> Option<u64> {
+    fn hurt(
+        &mut self,
+        now_ms: u64,
+        (light_ms, heavy_ms): (u64, u64),
+        side: HitSide,
+    ) -> Option<u64> {
         if now_ms.saturating_sub(self.last_hurt_ms) >= REACTION_LIMIT_MS {
             self.reactions_in_chain = 0;
         }
@@ -833,11 +929,11 @@ impl MobTimeline {
         self.reactions_in_chain += 1;
         self.reacted = true;
         let (fragment, length_ms) = if self.reactions_in_chain == 1 {
-            (Fragment::ReactLight, light_ms)
+            (Fragment::ReactLight(side), light_ms)
         } else {
             self.reactions_in_chain = 0;
             self.reaction_limit_until_ms = now_ms + REACTION_LIMIT_MS;
-            (Fragment::ReactHeavy, heavy_ms)
+            (Fragment::ReactHeavy(side), heavy_ms)
         };
         self.reaction = Some((fragment, now_ms + length_ms));
         Some(length_ms)
@@ -1033,8 +1129,8 @@ pub(super) struct MobTimelines {
     by_mob: HashMap<u64, MobTimeline>,
     /// Mobs that swung since the last frame.
     attacked: HashSet<u64>,
-    /// Mobs that the player hit since the last frame.
-    hurt: HashSet<u64>,
+    /// Mobs that a player hit since the last frame, and where the player stood.
+    hurt: HashMap<u64, Position>,
     /// Mobs that started a move since the last frame: its fragment and length.
     played: HashMap<u64, (MoveFragment, u64)>,
     /// When each mob last started a reaction (server ms).
@@ -1054,9 +1150,9 @@ impl MobTimelines {
         self.played.insert(mob, (fragment, length_ms));
     }
 
-    /// A player hit mob `mob`.
-    pub(super) fn hurt(&mut self, mob: u64) {
-        self.hurt.insert(mob);
+    /// A player at `from` hit mob `mob`.
+    pub(super) fn hurt(&mut self, mob: u64, from: Position) {
+        self.hurt.insert(mob, from);
     }
 
     /// The frame of mob `mob` in `pose` at server time `now_ms` (ms since 2000-01-01); its first
@@ -1081,10 +1177,15 @@ impl MobTimelines {
         let reaction_ms = animations
             .filter(|animations| animations.reactions.is_some())
             .map(|animations| animations.reaction_ms);
-        if self.hurt.remove(&mob)
+        let facing = pose.tree.and_then(|tree| tree.facing).or(timeline.yaw);
+        if let Some(from) = self.hurt.remove(&mob)
             && let Some(reaction_ms) = reaction_ms
             && !pose.dead
-            && let Some(length_ms) = timeline.hurt(now_ms, reaction_ms)
+            && let Some(length_ms) = timeline.hurt(
+                now_ms,
+                reaction_ms,
+                HitSide::of(timeline.position, facing, from),
+            )
         {
             self.reeled_ms.insert(mob, now_ms);
             self.reactions.insert(mob, length_ms);
@@ -1111,7 +1212,7 @@ impl MobTimelines {
     pub(super) fn keep_only(&mut self, shown: &HashSet<u64>) {
         self.by_mob.retain(|mob, _| shown.contains(mob));
         self.attacked.retain(|mob| shown.contains(mob));
-        self.hurt.retain(|mob| shown.contains(mob));
+        self.hurt.retain(|mob, _| shown.contains(mob));
         self.played.retain(|mob, _| shown.contains(mob));
         self.reeled_ms.retain(|mob, _| shown.contains(mob));
         self.reactions.retain(|mob, _| shown.contains(mob));
@@ -1246,6 +1347,37 @@ mod tests {
         tags
     }
 
+    /// Retail: a hit from behind plays the `_B` reaction, from the left `_L`, from the right `_R`
+    /// (160 open world ledgers); a mob that never turned reels to the front.
+    #[test]
+    fn a_hit_plays_the_reaction_of_its_side() {
+        const FACING_NORTH: f32 = 0.0;
+        let mob = at(0.0);
+        let from = |dx: f32, dy: f32| Position {
+            x: mob.x + dx,
+            y: mob.y + dy,
+            z: mob.z,
+        };
+        let yaw = Some(FACING_NORTH);
+        assert_eq!(HitSide::of(mob, yaw, from(0.0, 2.0)), HitSide::Front);
+        assert_eq!(HitSide::of(mob, yaw, from(0.0, -2.0)), HitSide::Back);
+        assert_eq!(HitSide::of(mob, yaw, from(-2.0, 0.0)), HitSide::Left);
+        assert_eq!(HitSide::of(mob, yaw, from(2.0, 0.0)), HitSide::Right);
+        assert_eq!(HitSide::of(mob, None, from(0.0, -2.0)), HitSide::Front);
+        let table = table();
+        let row = table.get(&FTUE_SAILOR.asset).expect("a row");
+        let sailor = sailor();
+        let back = sailor
+            .entry(Fragment::ReactLight(HitSide::Back))
+            .expect("back");
+        assert_eq!(Some(back.fragment), row.fragment("r_R2_B"));
+        let front = sailor
+            .entry(Fragment::ReactLight(HitSide::Front))
+            .expect("front");
+        assert_eq!(Some(front.fragment), row.fragment("r_R2_F"));
+        assert_eq!(back.action, front.action, "one reaction action");
+    }
+
     #[test]
     fn the_files_give_the_retail_tutorial_entries_and_tags() {
         // The retail values (mob-animation note, sections 3.4 and 4; creature-animation note,
@@ -1258,7 +1390,9 @@ mod tests {
         assert_eq!(sailor.attack, entry(109, 71, 0x85));
         assert_eq!(sailor.death, entry(99, 46, 0xa5));
         assert_eq!(
-            sailor.reactions,
+            sailor
+                .reactions
+                .map(|(light, heavy)| (light.front, heavy.front)),
             Some((entry(16, 39, 0x6a), entry(12, 39, 0xab)))
         );
         assert_eq!(sailor.alert, Some(entry(2, 2, 0x85)));
@@ -1279,7 +1413,9 @@ mod tests {
             assert_eq!(legion.attack, entry(39, 2, 0x3e));
             assert_eq!(legion.death, entry(151, 50, 0x40));
             assert_eq!(
-                legion.reactions,
+                legion
+                    .reactions
+                    .map(|(light, heavy)| (light.front, heavy.front)),
                 Some((entry(110, 32, 0x96), entry(114, 32, 0x0d)))
             );
             assert_eq!(legion.alert, Some(entry(7, 12, 0x53)));
@@ -1305,7 +1441,9 @@ mod tests {
         assert_eq!(risen.attack, entry(67, 11, 0x78));
         assert_eq!(risen.death, entry(4, 22, 0x8f));
         assert_eq!(
-            risen.reactions,
+            risen
+                .reactions
+                .map(|(light, heavy)| (light.front, heavy.front)),
             Some((entry(13, 20, 0xc9), entry(42, 20, 0x5b)))
         );
         assert_eq!(risen.alert, Some(entry(37, 2, 0xa4)));
@@ -1320,7 +1458,9 @@ mod tests {
         assert_eq!(thorpe.attack, entry(58, 28, 0xa5));
         assert_eq!(thorpe.death, entry(5, 63, 0x14));
         assert_eq!(
-            thorpe.reactions,
+            thorpe
+                .reactions
+                .map(|(light, heavy)| (light.front, heavy.front)),
             Some((entry(27, 45, 0x47), entry(31, 45, 0x43)))
         );
         assert_eq!((thorpe.alert, thorpe.look_pose), (None, None));
@@ -1454,7 +1594,7 @@ mod tests {
         assert_eq!(stab.entry.fragment, STAB.fragment);
         assert_eq!(stab.tags, thorpe.calm_tags, "no reaction yet");
         now += STAB_MS;
-        timelines.hurt(MOB);
+        timelines.hurt(MOB, at(0.0));
         let reaction = changed(&mut timelines, now, &fighting);
         assert_eq!(reaction.tags, thorpe.alert_tags);
         now += THORPE_REACTION_MS.0;
@@ -1752,7 +1892,7 @@ mod tests {
         timelines.advance(MOB, START, &fighting, Some(&sailor));
         let swing_started = START + SPAWN_MS;
         assert!(!timelines.reeled_since(MOB, swing_started));
-        timelines.hurt(MOB);
+        timelines.hurt(MOB, at(0.0));
         let reeled = swing_started + TICK_MS;
         timelines.advance(MOB, reeled, &fighting, Some(&sailor));
         assert!(timelines.reeled_since(MOB, swing_started));
@@ -1773,34 +1913,34 @@ mod tests {
             _ => None,
         };
         let mut now = START + SPAWN_MS;
-        timelines.hurt(MOB);
+        timelines.hurt(MOB, at(0.0));
         let light = timelines.advance(MOB, now, &fighting, Some(&sailor)).step;
         assert_eq!(
             fragment_of(light),
-            Some(sailor.reactions.expect("known").0.fragment)
+            Some(sailor.reactions.expect("known").0.front.fragment)
         );
         now += TICK_MS;
-        timelines.hurt(MOB);
+        timelines.hurt(MOB, at(0.0));
         let heavy = timelines.advance(MOB, now, &fighting, Some(&sailor)).step;
         assert_eq!(
             fragment_of(heavy),
-            Some(sailor.reactions.expect("known").1.fragment)
+            Some(sailor.reactions.expect("known").1.front.fragment)
         );
         // While the limit runs, a hit does not start another reaction.
         now += CREATURE_REACTION_MS.1;
         timelines.advance(MOB, now, &fighting, Some(&sailor));
-        timelines.hurt(MOB);
+        timelines.hurt(MOB, at(0.0));
         now += TICK_MS;
         let limited = timelines.advance(MOB, now, &fighting, Some(&sailor)).step;
         assert_ne!(
             fragment_of(limited),
-            Some(sailor.reactions.expect("known").0.fragment)
+            Some(sailor.reactions.expect("known").0.front.fragment)
         );
         // A creature without reactions does not reel.
         let plain = without_reactions();
         let mut plains = MobTimelines::default();
         plains.advance(MOB, START, &fighting, Some(&plain));
-        plains.hurt(MOB);
+        plains.hurt(MOB, at(0.0));
         let step = plains
             .advance(MOB, START + SPAWN_MS, &fighting, Some(&plain))
             .step;
@@ -1985,7 +2125,7 @@ mod tests {
         let mut timelines = MobTimelines::default();
         timelines.advance(MOB, START, &tree_pose(None, calm, None), Some(&risen));
         let now = START + SPAWN_MS;
-        timelines.hurt(MOB);
+        timelines.hurt(MOB, at(0.0));
         let frame = timelines.advance(MOB, now, &tree_pose(None, calm, None), Some(&risen));
         let entry = frame
             .step
@@ -1994,7 +2134,7 @@ mod tests {
             .expect("a reaction");
         assert_eq!(
             entry.fragment,
-            risen.reactions.expect("reactions").0.fragment
+            risen.reactions.expect("reactions").0.front.fragment
         );
         assert_eq!(
             timelines.take_reaction(MOB),

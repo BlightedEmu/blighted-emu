@@ -53,8 +53,8 @@ use super::gear::{Gear, unix_ns};
 use super::hit_shape::{
     MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, SweptShape, Wedge, body_frame, homing_score, turn,
 };
-use super::mob_timeline::yaw_toward;
-use super::passives::HitMods;
+use super::mob_timeline::{HitSide, yaw_toward};
+use super::passives::{HitAim, HitMods};
 use super::projectile::{AimLine, Shot, ShotHit};
 use super::stamina::{Dodge, Guard};
 use super::{Body, MESSAGE_CHANNEL, Outgoing, Placement, Player, Position, SimWorld};
@@ -641,7 +641,35 @@ struct Strike<'a> {
     /// The weapon in the hand and its gear score; `None`: the config's weapon.
     held: Option<(WeaponRow, u32)>,
     row: &'a AttackRow,
+    /// It is a ranged shot that met the target's head.
+    headshot: bool,
 }
+
+/// How [`SimWorld::hit_paced`] counts a hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Pace {
+    /// The attack interval applies (a second target of one swing is not a second attack).
+    pub(super) paced: bool,
+    /// It is a ranged shot that met the target's head ([`super::projectile::meets_head`]).
+    pub(super) headshot: bool,
+}
+
+impl Pace {
+    /// A hit that is no head shot.
+    pub(super) const fn of(paced: bool) -> Self {
+        Self {
+            paced,
+            headshot: false,
+        }
+    }
+}
+
+/// The crit chance of a hit from behind and of a head shot: a hit from behind is a crit
+/// (Observed: 510 of 560 retail melee hits that could crit from behind a mob were crits); a head
+/// shot does a crit's damage, marked `Headshot` and not `Crit` (Observed: no retail head shot of
+/// 346 carries `Crit`; Inferred: its damage, 1.07 to 1.55 times a body shot in 6 ledgers, as a
+/// crit's 1.17 to 1.62).
+const CERTAIN_CRIT: f64 = 1.0;
 
 /// What an attack sees of its target.
 struct TargetView {
@@ -682,7 +710,7 @@ impl SimWorld {
         reach_m: Option<f32>,
         now_ms: u64,
     ) -> Result<AttackOutcome, AttackRefusal> {
-        self.hit_paced(attacker, target, damage_id, reach_m, true, now_ms)
+        self.hit_paced(attacker, target, damage_id, reach_m, Pace::of(true), now_ms)
     }
 
     /// A hit on another player (`PvP_Flag` toggles 2525; both players must be flagged, a player
@@ -812,17 +840,18 @@ impl SimWorld {
         Ok(outcome)
     }
 
-    /// As [`SimWorld::hit`]; the attack interval applies only when `paced` (a second target of
-    /// one swing is not a second attack).
+    /// As [`SimWorld::hit`]; the attack interval applies only when `pace` is paced (a second
+    /// target of one swing is not a second attack), and a head shot does a crit's damage.
     pub(super) fn hit_paced(
         &mut self,
         attacker: &ConnectionRef,
         target: u64,
         damage_id: &str,
         reach_m: Option<f32>,
-        paced: bool,
+        pace: Pace,
         now_ms: u64,
     ) -> Result<AttackOutcome, AttackRefusal> {
+        let paced = pace.paced;
         let entity = *self
             .by_connection
             .get(attacker)
@@ -898,6 +927,7 @@ impl SimWorld {
                 view: &view,
                 held,
                 row: &row,
+                headshot: pace.headshot,
             },
             now_ms,
             |amount, crit, killed, scale| {
@@ -942,6 +972,7 @@ impl SimWorld {
             view,
             held,
             row,
+            headshot,
         } = strike;
         let weapon = held.map_or_else(|| *self.combat.data.weapon(), |(weapon, _)| weapon);
         let plain_share = held
@@ -958,11 +989,22 @@ impl SimWorld {
         });
         let armor_share = rent_share(plain_share, rend, row.category);
         let row_key = RowKey::of(&row.table, &row.damage_id);
+        let aim = HitAim {
+            headshot: headshot && row.headshot,
+            behind: row.backstab && self.stands_behind(entity, target, view.position),
+        };
         // The passives that the hit fires change its crit before the roll.
-        let mods = self.passive_hit_mods(entity, target, &[Trigger::Hit], Some(row_key), now_ms);
+        let hit_triggers: Vec<Trigger> = std::iter::once(Trigger::Hit)
+            .chain(aim.triggers())
+            .collect();
+        let mods = self.passive_hit_mods(entity, target, &hit_triggers, Some(row_key), now_ms);
         let (crit_chance, crit_multiplier) = self.player_crit(entity, &weapon);
         let (crit_chance, crit_multiplier) = (
-            crit_chance + mods.crit_chance,
+            if aim.headshot || aim.behind {
+                CERTAIN_CRIT
+            } else {
+                crit_chance + mods.crit_chance
+            },
             crit_multiplier + mods.crit_damage,
         );
         let attack = PlayerAttack {
@@ -994,6 +1036,8 @@ impl SimWorld {
             return Ok(AttackOutcome::Hit { target, amount: 0 });
         }
         let mut hit = player_hit(&attack, armor_share, &mut self.dice);
+        // A head shot does a crit's damage without being a crit.
+        hit.crit &= !aim.headshot;
         let block = (view.owner.is_none() && row.blockable)
             .then(|| self.mob_blocks(entity, target))
             .flatten();
@@ -1011,7 +1055,7 @@ impl SimWorld {
         } else {
             HitMods::default()
         };
-        let passive_scale = mods.dealt_scale() * crit_mods.dealt_scale();
+        let passive_scale = mods.dealt_scale_for(aim) * crit_mods.dealt_scale_for(aim);
         let through = block.map_or(1.0, |guard| f64::from(1.0 - guard.mitigation));
         // A hit of a few thousand points.
         hit.amount =
@@ -1031,8 +1075,26 @@ impl SimWorld {
             )),
         };
         let killed = matches!(outcome, AttackOutcome::Killed { .. });
+        // The hit fills the attacker's heart rune: the row's `AttackRuneCharge`, or
+        // `AttackBlockedRuneCharge` when the mob's block takes it.
+        let points = if block.is_some() {
+            row.rune_charge.attack_blocked
+        } else {
+            row.rune_charge.attack
+        };
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            // A charge of some points.
+            #[allow(clippy::cast_possible_truncation, reason = "charge points up to 100")]
+            player.abilities.charge.gain(points as f32);
+        }
         if matches!(outcome, AttackOutcome::Hit { .. }) {
-            self.mob_timelines.hurt(target);
+            if let Some(from) = self
+                .world
+                .get::<Body>(entity)
+                .map(|body| body.motion.position())
+            {
+                self.mob_timelines.hurt(target, from);
+            }
             if view.owner.is_none() && block.is_none() {
                 self.player_hit_effects(target, number, row_key, hit.amount);
             }
@@ -1049,6 +1111,7 @@ impl SimWorld {
         ]
         .into_iter()
         .flatten()
+        .chain(aim.triggers())
         .collect();
         self.run_passives(
             (entity, target),
@@ -1067,8 +1130,21 @@ impl SimWorld {
         } else {
             message
         };
+        let message = if aim.headshot {
+            message.headshot()
+        } else {
+            message
+        };
         self.send_reliable(attacker.clone(), &ServerMessage::DamageDealt(message));
         Ok(outcome)
+    }
+
+    /// Whether player `entity` stands behind mob `mob` at `at` ([`HitSide::of`]; a mob of
+    /// another sim faces Unknown: not from behind).
+    fn stands_behind(&self, entity: Entity, mob: u64, at: Position) -> bool {
+        self.world.get::<Body>(entity).is_some_and(|body| {
+            HitSide::of(at, self.mobs.facing(mob), body.motion.position()) == HitSide::Back
+        })
     }
 
     /// The guard of mob `mob` of this sim when its block is up and player `entity` stands in
@@ -1202,6 +1278,7 @@ impl SimWorld {
                         view: &view,
                         held: Some(held),
                         row,
+                        headshot: false,
                     },
                     now_ms,
                     |amount, crit, killed, scale| {
@@ -2099,7 +2176,14 @@ impl SimWorld {
             .map(|target| {
                 let paced = swing.hits.is_empty();
                 swing.hits.push(target);
-                self.hit_paced(&swing.attacker, target, &damage_id, None, paced, now_ms)
+                self.hit_paced(
+                    &swing.attacker,
+                    target,
+                    &damage_id,
+                    None,
+                    Pace::of(paced),
+                    now_ms,
+                )
             })
             .collect()
     }
@@ -2856,6 +2940,21 @@ impl SimWorld {
                 now_ms,
             );
         }
+        // The hit fills the player's heart rune: its row's `HitRuneCharge`, or
+        // `HitBlockedRuneCharge` for a block that held.
+        if let Some(row) = row {
+            let charge = self.combat.data.rune_charge(row);
+            let points = if matches!(guard, Some(Guard::Held)) {
+                charge.hit_blocked
+            } else {
+                charge.hit
+            };
+            if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                // A charge of some points.
+                #[allow(clippy::cast_possible_truncation, reason = "charge points up to 100")]
+                player.abilities.charge.gain(points as f32);
+            }
+        }
         passed
     }
 
@@ -2896,31 +2995,14 @@ impl SimWorld {
             .into_iter()
             .filter_map(|(intent, move_hit)| {
                 let defender = self.player_by_number(intent.target);
-                // The same hit for a player of this sim and one of another (a ghost).
-                let style = self.mob_hit_style(&intent, move_hit, defender);
-                // The player's rend effects lower its armor; a ghost's take theirs at home.
-                let armor_share = rent_share(
-                    self.worn_armor_share(intent.target, intent.mob, style.category),
-                    defender.map_or(1.0, |defender| {
-                        self.player_armor_scale(defender, style.category)
-                    }),
-                    style.category,
-                );
-                let mob = self.mobs.get(intent.mob)?;
-                let at = mob.position;
-                let mut hit = mob_hit(&mob.attack, armor_share);
-                let scaled = f64::from(hit.amount)
-                    * style.damage_scale
-                    * self.mob_hit_scale(intent.mob, style.tag);
-                // A hit of a few hundred points.
-                hit.amount = scaled.round() as u32;
+                let (amount, style, at) = self.mob_intent_hit(&intent, move_hit, defender)?;
                 tracing::debug!(
                     mob = intent.mob,
                     target = intent.target,
                     x = at.x,
                     y = at.y,
                     z = at.z,
-                    amount = hit.amount,
+                    amount,
                     "mob attack"
                 );
                 if let Some(clip) = intent
@@ -2928,7 +3010,7 @@ impl SimWorld {
                     .as_ref()
                     .and_then(|strike| strike.ranged.as_ref())
                 {
-                    self.fire_mob_shot(&intent, clip, hit.amount, style, at, now_ms);
+                    self.fire_mob_shot(&intent, clip, amount, style, at, now_ms);
                     return None;
                 }
                 if let Some(entity) = defender {
@@ -2944,9 +3026,37 @@ impl SimWorld {
                         return None;
                     }
                 }
-                self.land_mob_hit(intent.target, intent.mob, hit.amount, style, now_ms)
+                self.land_mob_hit(intent.target, intent.mob, amount, style, now_ms)
             })
             .collect()
+    }
+
+    /// The amount and style of the hit of `intent` on its target `defender` (`None`: a player
+    /// ghost), and where the mob is: its attack's hit after the target's armor, scaled by its
+    /// row and its effects.
+    pub(super) fn mob_intent_hit(
+        &mut self,
+        intent: &MobAttackIntent,
+        move_hit: Option<MoveHit>,
+        defender: Option<Entity>,
+    ) -> Option<(u32, MobHitStyle, Position)> {
+        // The same hit for a player of this sim and one of another (a ghost).
+        let style = self.mob_hit_style(intent, move_hit, defender);
+        // The player's rend effects lower its armor; a ghost's take theirs at home.
+        let armor_share = rent_share(
+            self.worn_armor_share(intent.target, intent.mob, style.category),
+            defender.map_or(1.0, |defender| {
+                self.player_armor_scale(defender, style.category)
+            }),
+            style.category,
+        );
+        let mob = self.mobs.get(intent.mob)?;
+        let at = mob.position;
+        let hit = mob_hit(&mob.attack, armor_share);
+        let scaled =
+            f64::from(hit.amount) * style.damage_scale * self.mob_hit_scale(intent.mob, style.tag);
+        // A hit of a few hundred points.
+        Some((scaled.round() as u32, style, at))
     }
 
     /// Lands a mob's hit of `amount` in `style` on the player `target`: on a player of this sim
@@ -3681,6 +3791,40 @@ mod tests {
             scale: (1.0 - world.combat.armor_share) as f32,
         };
         DamageDealtMsg::melee(1, mob(), item, false, false)
+    }
+
+    /// Retail: 510 of 560 melee hits that could crit from behind a mob were crits; the test
+    /// sword never crits from the front.
+    #[test]
+    fn a_hit_from_behind_a_mob_is_a_crit() {
+        let mut world = fight();
+        tick(&mut world, NOW);
+        let dealt_from = |world: &mut SimWorld, to: nw_bus::Point, now: u64| {
+            world.teleport_player(1, to, now);
+            world.take_messages();
+            world
+                .attack(&connection(1), mob(), LIGHT, now)
+                .expect("hit");
+            messages_to(&world.take_messages(), 1)
+                .into_iter()
+                .find_map(|message| match message {
+                    ServerMessage::DamageDealt(dealt) => Some(dealt),
+                    _ => None,
+                })
+                .expect("a 2071")
+        };
+        let at = world.mobs.get(mob()).expect("mob").position;
+        let yaw = world.mobs.facing(mob()).expect("a tree mob faces");
+        // One metre behind and one ahead, along its facing (-sin, cos).
+        let place = |ahead: f32| nw_bus::Point {
+            x: at.x - yaw.sin() * ahead,
+            y: at.y + yaw.cos() * ahead,
+            z: at.z,
+        };
+        let front = dealt_from(&mut world, place(1.0), NOW + TICK_MS);
+        assert!(!front.is_crit(), "from the front: {front:?}");
+        let back = dealt_from(&mut world, place(-1.0), NOW + TICK_MS + INTERVAL_MS);
+        assert!(back.is_crit(), "from behind: {back:?}");
     }
 
     #[test]
@@ -5312,6 +5456,9 @@ mod tests {
                 blockable: true,
                 category: DamageCategory::Physical,
                 affix,
+                backstab: true,
+                headshot: true,
+                rune_charge: nw_content::combat::RuneChargeRow::default(),
             });
         }
         let mut world = fight();

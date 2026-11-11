@@ -13,9 +13,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use nw_formats::mannequin::{AbilityUse, CageWorld, CastKind, Condition, TagActivity};
+use nw_formats::mannequin::{AbilityUse, CageWorld, CastKind, ChargeTake, Condition, TagActivity};
 use serde::{Deserialize, Serialize};
 
+use crate::generated::SpellData;
 use crate::player_attacks::{BasicAttack, Flight};
 
 const FILE_PREFIX: &str = "player-abilities-";
@@ -159,7 +160,46 @@ pub struct SpellRow {
     pub secondary: Option<Box<SpellRow>>,
 }
 
+/// The separator of a spell row's status effects (`A,B`).
+const SPELL_EFFECT_SEPARATOR: char = ',';
+/// A text cell that is on (`ClearOnExit`).
+const CELL_TRUE: &str = "1";
+
 impl SpellRow {
+    /// The spell of the `SpellData` row `row`: its `ManaCost` id costs `mana_cost`, it flies as
+    /// `projectile` and its projectile casts `secondary` where it ends.
+    pub fn of_data(
+        row: &SpellData,
+        mana_cost: Option<f32>,
+        projectile: Option<SpellProjectile>,
+        secondary: Option<SpellRow>,
+    ) -> Self {
+        Self {
+            id: row.spell_id.clone(),
+            types: row.spell_types.clone(),
+            shape: row.shape_types.clone(),
+            // Lengths of metres.
+            radius_m: row.radius.map(|radius| radius as f32),
+            cast_distance_m: row.cast_distance.map(|distance| distance as f32),
+            duration_ms: row.duration,
+            damage_row: row.damage_table_row.clone(),
+            status_effects: row
+                .status_effects
+                .iter()
+                .flat_map(|effects| effects.split(SPELL_EFFECT_SEPARATOR))
+                .map(str::trim)
+                .filter(|effect| !effect.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            target_types: row.target_types.clone(),
+            mana_cost,
+            projectile,
+            clear_on_exit: row.clear_on_exit.as_deref() == Some(CELL_TRUE),
+            clear_on_end: row.clear_on_end == Some(true),
+            secondary: secondary.map(Box::new),
+        }
+    }
+
     /// Whether its area lasts: a `Duration` above 0 (-1 and 0 are one pass).
     pub fn lasting_ms(&self) -> Option<u64> {
         self.duration_ms
@@ -208,6 +248,9 @@ pub struct ListAction {
     pub ability: Option<AbilityUse>,
     /// The spells it casts.
     pub casts: Vec<AbilityCast>,
+    /// The heart rune charge it takes as it starts (`ConsumeCharge`).
+    #[serde(default)]
+    pub charge_take: Option<ChargeTake>,
 }
 
 impl ListAction {
@@ -219,6 +262,12 @@ impl ListAction {
             .collect()
     }
 }
+
+/// The item class of a heart rune: the player grid's rune list has no `WeaponRequirements` and
+/// runs while an item of this class is in the heart rune slot (Observed: the rune items
+/// `RuneDetonateT1` ... are of class `HeartGem`, and the rune actions set the weapon option
+/// `heart-gem-slot`).
+pub const HEARTGEM_CLASS: &str = "HeartGem";
 
 /// One ability list of the player grid.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -347,6 +396,7 @@ mod tests {
         AbilityList {
             weapon_classes: vec!["LifeStaff".to_owned()],
             actions: vec![ListAction {
+                charge_take: None,
                 name: "Smite".to_owned(),
                 fragment: "Smite".to_owned(),
                 activation: Some(Condition::True),

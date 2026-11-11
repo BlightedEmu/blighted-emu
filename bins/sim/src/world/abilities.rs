@@ -29,14 +29,15 @@ use nw_content::status_effects::StatusEffectRules;
 use nw_formats::mannequin::{CageWorld, CastKind, Condition, ManaCompare, TagCase, TagChange};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::paperdoll::slot;
-use nw_messages::{AbilityCooldown, InputRecord, LookDir};
+use nw_messages::player_components::{CHARGE_COMPONENT, CHARGE_TYPE_INDEX};
+use nw_messages::{AbilityCooldown, BundleMember, InputRecord, LookDir, MemberState};
 use nw_sim_core::{Position, weapon_damage_scale};
 
 use super::gear::Gear;
 use super::hit_shape::PLAYER_CAPSULE;
 use super::points::Attributes;
 use super::progression::Masteries;
-use super::projectile::{AimLine, Shot, ShotHit, first_on_line, flight_ms};
+use super::projectile::{AimLine, Shot, ShotHit, first_on_line, flight_ms, meets_head};
 use super::spell_areas::SpellArea;
 use super::status_effects::StatusEffects;
 use super::{Player, SimWorld};
@@ -150,6 +151,8 @@ struct Press {
 /// An action that runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Running {
+    /// It took its heart rune charge ([`ListAction::charge_take`]).
+    charge_taken: bool,
     /// Its list ([`list_key`]): a weapon has up to three lists (the spear's own and the shared
     /// `Ranged+Magic+Spear+Hatchet` one), each with its own action indices.
     list: usize,
@@ -213,6 +216,84 @@ pub(super) enum AbilityEvent {
     /// Apply the status effects `effects` to the player.
     Effects(Vec<String>),
 }
+
+/// The most heart rune charge, in points: a point is a percent of the client's `chrgPcnt` (the
+/// rune list tests `IfChargeAmount Equal 100`, a full charge).
+const MAX_CHARGE: f32 = 100.0;
+
+/// A player's heart rune charge (`MB::ChargeComponentReplicatedState`, own component 48): the
+/// damage rows' `AttackRuneCharge` and `HitRuneCharge` points fill it (Observed: player attack
+/// rows hold 0.3 to 2 points a hit, mob rows 0.1625 for the player they hit, and retail's own
+/// `chrgPcnt` rose 1 to 4 a step in a fight), and a rune action's `ConsumeCharge` takes it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct RuneCharge {
+    points: f32,
+    /// The whole percent the client has; `None` before the first send.
+    sent: Option<u8>,
+}
+
+impl RuneCharge {
+    /// The charge now, points.
+    pub(super) const fn points(&self) -> f32 {
+        self.points
+    }
+
+    /// Adds `points` (a hit's rune charge), up to the most.
+    pub(super) fn gain(&mut self, points: f32) {
+        if points > 0.0 {
+            self.points = (self.points + points).min(MAX_CHARGE);
+        }
+    }
+
+    /// Takes `amount` points (a rune's `ConsumeCharge`), down to 0.
+    fn take(&mut self, amount: u32) {
+        // A charge of some tens of points.
+        #[allow(clippy::cast_precision_loss, reason = "charge points up to 100")]
+        let amount = amount as f32;
+        self.points = (self.points - amount).max(0.0);
+    }
+
+    /// The whole percent to send when it changed since the last send.
+    pub(super) fn take_change(&mut self) -> Option<u8> {
+        // The charge is clamped to 0 ..= 100.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a percent from 0 to 100"
+        )]
+        let percent = self.points.floor() as u8;
+        (self.sent != Some(percent)).then(|| {
+            self.sent = Some(percent);
+            percent
+        })
+    }
+}
+
+/// The ability lists on for a player with `gear` and weapon item `item` in hand: the weapon's,
+/// and the heart rune's while a rune is in its slot.
+fn lists_on<'a>(data: &'a CombatData, gear: Option<&Gear>, item: &str) -> Vec<&'a AbilityList> {
+    let mut lists = data.ability_lists_of_item(item);
+    if gear.is_some_and(|gear| gear.worn_item(slot::HEART_GEM).is_some()) {
+        lists.extend(data.rune_lists());
+    }
+    lists
+}
+
+/// The own charge state of `percent` (`chrgPcnt`; the own card's is `01 01 00`).
+pub(super) fn charge_member(percent: u8) -> BundleMember {
+    BundleMember {
+        component: CHARGE_COMPONENT,
+        state: MemberState::Recorded {
+            class: CHARGE_TYPE_INDEX,
+            body: vec![CHARGE_SLOT, CHARGE_CHILD, percent],
+        },
+    }
+}
+
+/// The slot byte of a charge state: slot 0.
+const CHARGE_SLOT: u8 = 0x01;
+/// The child mask of a charge state: child 0, `chrgPcnt`.
+const CHARGE_CHILD: u8 = 0x01;
 
 /// A player's mana.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -350,6 +431,8 @@ pub(super) struct AbilityRun {
     cooldown_changes: Vec<(usize, AbilityCooldown)>,
     /// The mana.
     pub mana: Mana,
+    /// The heart rune charge.
+    pub charge: RuneCharge,
 }
 
 /// The tests of a list, for the run of one player and the action `current` that tests. The lists
@@ -464,6 +547,13 @@ impl CageWorld for RunWorld<'_> {
             .cooldowns
             .iter()
             .any(|cooldown| cooldown.ability == crc && cooldown.end_ms > self.now_ms)
+    }
+
+    fn charge_amount(&self, compare: ManaCompare, value: u32) -> bool {
+        // A charge of some tens of points.
+        #[allow(clippy::cast_precision_loss, reason = "charge points up to 100")]
+        let value = value as f32;
+        compare.holds(self.run.charge.points().floor(), value)
     }
 
     fn mana_cost(&self, cost: &str, compare: ManaCompare) -> bool {
@@ -633,7 +723,15 @@ impl AbilityRun {
             match step {
                 Step::Action(target, to) => {
                     self.leave(list, &[from]);
-                    self.start(lists, target, to, self.chain, stats, (now_ms, server_ms), events);
+                    self.start(
+                        lists,
+                        target,
+                        to,
+                        self.chain,
+                        stats,
+                        (now_ms, server_ms),
+                        events,
+                    );
                 }
                 Step::Fragment(fragment) => self.switch_fragment(key, from, fragment, now_ms),
             }
@@ -693,16 +791,31 @@ impl AbilityRun {
                 self.chain = chain;
                 self.chain_cast.clear();
             }
-            self.start(lists, list, index, chain, stats, (now_ms, server_ms), events);
+            self.start(
+                lists,
+                list,
+                index,
+                chain,
+                stats,
+                (now_ms, server_ms),
+                events,
+            );
             if starts_chain && let Some(press) = self.press.as_mut() {
                 press.used = true;
             }
         }
         self.update_tags(lists, list, holder, &tags, now_ms);
         let mut casts = Vec::new();
+        let mut charge_takes = Vec::new();
         for running in self.running_in(list) {
             let action = &list.actions[running.action];
             let world = self.world(lists, list, holder, &tags, Some(running.action), now_ms);
+            if !running.charge_taken
+                && let Some(take) = &action.charge_take
+                && take.condition.holds_in(&world)
+            {
+                charge_takes.push((running.action, take.amount));
+            }
             // An action that casts by raycast shows its aim first with a targeting cast of the
             // spell (Sacred Ground: `CastSpellTargeting` of the plain spell while the staff
             // readies, then `CastSpellRaycast` of the plain spell or of the upgrade the player
@@ -724,6 +837,17 @@ impl AbilityRun {
                 if !cast_before && cast.condition.holds_in(&world) {
                     casts.push((running.action, cast_index));
                 }
+            }
+        }
+        let key = list_key(list);
+        for (action_index, amount) in charge_takes {
+            self.charge.take(amount);
+            if let Some(running) = self
+                .running
+                .iter_mut()
+                .find(|running| running.list == key && running.action == action_index)
+            {
+                running.charge_taken = true;
             }
         }
         for (action_index, cast_index) in casts {
@@ -794,7 +918,10 @@ impl AbilityRun {
     /// `Ability_Life_Staff_HealingWave` on `UpperBody`, whose own end test is only the
     /// `Magic_AimExit` marker of a left aim; live 2026-11-10: that aim ran on after the cast, and
     /// no press cast again). A fragment without known scopes takes none.
-    #[allow(clippy::too_many_arguments, reason = "the arguments of `enter` and the lists")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the arguments of `enter` and the lists"
+    )]
     fn start(
         &mut self,
         lists: &[&AbilityList],
@@ -842,6 +969,7 @@ impl AbilityRun {
             fragment: None,
             started_ms: now_ms,
             tag_activities: vec![None; list.actions[index].tag_activities.len()],
+            charge_taken: false,
         });
         if let Some(ability) = &list.actions[index].ability {
             for id in &ability.starts_cooldowns {
@@ -1286,7 +1414,7 @@ impl SimWorld {
         let Some((item, _)) = player.gear.as_ref().and_then(Gear::main_weapon) else {
             return;
         };
-        let lists = data.ability_lists_of_item(item);
+        let lists = lists_on(&data, player.gear.as_ref(), item);
         let mapped: Vec<Option<u32>> = (0..nw_messages::MAX_MAPPED_SLOTS)
             .map(|key| ability_of_key(&lists, player.masteries.mapped_to(key)))
             .collect();
@@ -1334,7 +1462,7 @@ impl SimWorld {
             let Some((item, _)) = held else {
                 continue;
             };
-            let lists = data.ability_lists_of_item(item);
+            let lists = lists_on(&data, player.gear.as_ref(), item);
             if lists.is_empty() {
                 continue;
             }
@@ -1348,7 +1476,7 @@ impl SimWorld {
                     })
                     .collect()
             });
-            let abilities_on = held_abilities(
+            let mut abilities_on = held_abilities(
                 (
                     &player.masteries,
                     player.gear.as_ref(),
@@ -1356,6 +1484,15 @@ impl SimWorld {
                     &player.status_effects,
                 ),
                 &content,
+            );
+            // A worn heart rune grants its ability (`Ability_Rune_Detonate`): the rune list's
+            // actions test it.
+            abilities_on.extend(
+                player
+                    .gear
+                    .as_ref()
+                    .and_then(|gear| gear.worn_item(slot::HEART_GEM))
+                    .and_then(|rune| data.equip_ability_of_item(rune)),
             );
             let stats = content
                 .attribute_bonuses
@@ -1503,6 +1640,7 @@ impl SimWorld {
                 let hit = ShotHit {
                     damage_id: enemy_row,
                     effects,
+                    headshot: meets_head(&shot, (caster.from, aim), mob, &places),
                 };
                 self.launch(&caster.connection, (shot, hit), mob, flight_s, now_ms);
             }
@@ -1905,6 +2043,7 @@ mod tests {
     /// cooldown, and a follow-up while the start's fragment plays that casts at its marker.
     fn list() -> AbilityList {
         let start = ListAction {
+            charge_take: None,
             name: SMITE.to_owned(),
             fragment: SMITE.to_owned(),
             activation: Some(Condition::All(vec![
@@ -1941,6 +2080,7 @@ mod tests {
             casts: Vec::new(),
         };
         let follow_up = ListAction {
+            charge_take: None,
             name: FOLLOW_UP.to_owned(),
             fragment: String::new(),
             activation: Some(Condition::All(vec![
@@ -2004,6 +2144,26 @@ mod tests {
     /// whose one action is fewer than the first list's two running ones (the run once read the
     /// first list's action numbers in the second list and panicked).
     #[test]
+    fn the_rune_charge_fills_to_full_sends_whole_percents_and_a_rune_takes_it() {
+        let mut charge = RuneCharge::default();
+        assert_eq!(charge.take_change(), Some(0), "the first send");
+        charge.gain(1.3);
+        charge.gain(0.1625);
+        assert_eq!(charge.take_change(), Some(1));
+        assert_eq!(charge.take_change(), None, "no change");
+        charge.gain(500.0);
+        assert!(
+            (charge.points() - MAX_CHARGE).abs() < f32::EPSILON,
+            "a full charge at most"
+        );
+        assert_eq!(charge.take_change(), Some(100));
+        charge.take(100);
+        assert_eq!(charge.points(), 0.0);
+        charge.take(100);
+        assert_eq!(charge.points(), 0.0, "not below 0");
+    }
+
+    #[test]
     fn a_transition_clip_moves_the_running_action_on_into_another_list() {
         const LOOP: &str = "Ability_Life_Staff_Smite_Loop";
         const LOOP_COOLDOWN_MS: u64 = 9_000;
@@ -2019,6 +2179,7 @@ mod tests {
         let second = AbilityList {
             weapon_classes: vec!["LifeStaff".to_owned()],
             actions: vec![ListAction {
+                charge_take: None,
                 name: LOOP.to_owned(),
                 fragment: LOOP.to_owned(),
                 activation: None,
@@ -2436,6 +2597,52 @@ mod tests {
         world.tick_spell_areas(NOW + GROUND_MS as u64);
         assert!(!holds_ground(&mut world, 1), "the area ended");
         assert!(world.spell_areas.is_empty());
+    }
+
+    /// A mob's spell area hits each player in it once by its row of the mob's damage table,
+    /// and its self buff holds on the mob that cast it.
+    #[test]
+    fn a_mob_spell_area_hits_the_players_in_it_once_and_its_self_buff_holds_on_the_mob() {
+        use crate::mob_ai::test_support::{TEST_MOB_ROW, TEST_MOB_TABLE};
+        let (mut world, _) = spell_fight(&[MOB_X]);
+        with_ground_effect(&mut world);
+        join(&mut world, 2, MOB_X + 1.0);
+        let mob = mob_entity(0);
+        let at = world.mobs.get(mob).expect("mob").position;
+        let blast = SpellRow {
+            radius_m: Some(SPLASH_M),
+            damage_row: Some(TEST_MOB_ROW.to_owned()),
+            ..spell()
+        };
+        let area = |spell: &SpellRow| {
+            SpellArea::of_mob(
+                mob,
+                Some(TEST_MOB_TABLE.to_owned()),
+                spell,
+                (at, 0.0),
+                NOW,
+                1.0,
+            )
+        };
+        world.open_spell_area(area(&blast));
+        assert!(world.tick_spell_areas(NOW).is_empty(), "no player attack");
+        let hits = world.take_spell_area_mob_hits();
+        assert!(
+            matches!(hits.as_slice(), [AttackOutcome::Hit { target: 2, .. }]),
+            "the near player only: {hits:?}"
+        );
+        world.tick_spell_areas(NOW + TICK_MS);
+        assert!(world.take_spell_area_mob_hits().is_empty(), "once");
+        let buff = SpellRow {
+            status_effects: vec![GROUND.to_owned()],
+            target_types: Some(SELF_TARGET.to_owned()),
+            ..spell()
+        };
+        world.open_spell_area(area(&buff));
+        world.tick_spell_areas(NOW + TICK_MS);
+        let held = world.mob_effects.get(&mob).expect("effects");
+        assert!(holds_effect(held, &world.content.status_effects, GROUND));
+        assert!(!holds_ground(&mut world, 2), "not on the player");
     }
 
     /// Before, a spell's effects came without a heal base, so the life staff's heals
@@ -3037,8 +3244,14 @@ mod retail_tests {
             }
         }
         assert_eq!(cast_ticks.len(), 2, "one cast per press: {cast_ticks:?}");
-        assert!(cast_ticks[0] >= LONG_AIM_TICK, "the first at its late click");
-        assert!(cast_ticks[1] >= SECOND_CLICK_TICK, "the second at its click");
+        assert!(
+            cast_ticks[0] >= LONG_AIM_TICK,
+            "the first at its late click"
+        );
+        assert!(
+            cast_ticks[1] >= SECOND_CLICK_TICK,
+            "the second at its click"
+        );
     }
 
     #[test]

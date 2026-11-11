@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The passive abilities that combat events trigger: the `AbilityData` rows with `OnHit`,
-//! `OnCrit`, `OnKill`, `OnHitTaken`, `OnBlockedHit`, `OnBlockedHitTaken`, `OnBlockBreak` or
-//! `OnTargetBlockBreak` set (1,249 rows of the player tables of build 25810808: weapon mastery
+//! `OnCrit`, `OnKill`, `OnHitTaken`, `OnBlockedHit`, `OnBlockedHitTaken`, `OnBlockBreak`,
+//! `OnTargetBlockBreak`, `OnHeadShot` or `OnHitBehind` set (1,249 rows of the player tables of build 25810808: weapon mastery
 //! passives and upgrades, item, gem, artifact and set perks, attribute thresholds).
 //!
 //! A row is a trigger, the conditions of the event it needs and the effects it has. The engine
@@ -24,9 +24,18 @@
 //!   `ExcludeFromGameModes`, and `RequireReaction` (the hit dealt damage).
 //! - Effects: `SelfApplyStatusEffect`, `OtherApplyStatusEffect`, `RemoveStatusEffects`,
 //!   `BaseDamage` (a share added to the hit's damage), `BaseDamageReduction` (a share taken from
-//!   a hit taken), `CritChance`, `CritDamage`, `DmgPctToHealth` (a share of the hit healed),
-//!   `Mana` (a share of the mana max), `Stamina` (points), and `CooldownTimer` seconds for
+//!   a hit taken), `CritChance`, `CritDamage`, `HeadshotDamage` and `HitFromBehindDamage` (a
+//!   share added to a head shot, to a hit from behind), `DmgPctToHealth` (a share of the hit healed),
+//!   `Mana` (a share of the mana max), `Stamina` (points), `Knockback` (metres the target goes
+//!   back), and `CooldownTimer` seconds for
 //!   `CooldownID` under `CDRImmediatelyOptions`.
+//!
+//! A weapon tree node without a trigger whose effects all change a hit (`BaseDamage`,
+//! `BaseDamageReduction`, `CritChance`, `CritDamage`: the fire staff's
+//! `Passive_Firestaff_FireMage_CritDmg`, the flame thrower's `Upgrade_Firestaff_FlameThrower_Dmg`)
+//! holds while its conditions hold: every hit of the holder and every hit on it fire it
+//! ([`ALWAYS_ON_TRIGGERS`]; **Inferred**: the row names no event, and its effects only change a
+//! hit). An active ability's own row (`IsActiveAbility`) is no passive.
 //!
 //! A row with any other condition column ([`PassiveAbility::unread_conditions`]) never fires:
 //! the engine cannot tell whether it holds. Effect columns the engine does not carry out are
@@ -55,6 +64,9 @@ const ACTIVE_WEAPON_SCOPE: &str = "ActiveWeapon";
 /// The `CDRImmediatelyOptions` that shortens every ability but the named one.
 const ALL_EXCEPT_SCOPE: &str = "AllExcept";
 
+/// The events that fire a node that names none: the holder's hits and the hits on it.
+pub const ALWAYS_ON_TRIGGERS: [Trigger; 2] = [Trigger::Hit, Trigger::HitTaken];
+
 /// A combat event that fires passive abilities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Trigger {
@@ -74,6 +86,10 @@ pub enum Trigger {
     BlockBreak,
     /// The holder broke the target's guard (`OnTargetBlockBreak`).
     TargetBlockBreak,
+    /// The holder's ranged hit was a head shot (`OnHeadShot`).
+    HeadShot,
+    /// The holder hit the target from behind (`OnHitBehind`).
+    HitBehind,
 }
 
 impl Trigger {
@@ -81,7 +97,13 @@ impl Trigger {
     pub const fn by_holder(self) -> bool {
         matches!(
             self,
-            Self::Hit | Self::Crit | Self::Kill | Self::BlockedHit | Self::TargetBlockBreak
+            Self::Hit
+                | Self::Crit
+                | Self::Kill
+                | Self::BlockedHit
+                | Self::TargetBlockBreak
+                | Self::HeadShot
+                | Self::HitBehind
         )
     }
 }
@@ -289,12 +311,19 @@ pub enum Effect {
     CritChance(f64),
     /// Added to the holder's crit multiplier for the hit (`CritDamage`).
     CritDamage(f64),
+    /// A share added to the holder's head shot (`HeadshotDamage`).
+    HeadshotShare(f64),
+    /// A share added to the holder's hit from behind (`HitFromBehindDamage`).
+    BehindShare(f64),
     /// A share of the hit's damage healed (`DmgPctToHealth`).
     LifeSteal(f64),
     /// A share of the mana max given (`Mana`; below 0 taken).
     ManaShare(f64),
     /// Stamina points given (`Stamina`).
     Stamina(f64),
+    /// Metres the holder's hit knocks its target back (`Knockback`; Inferred unit: the player
+    /// rows hold 1 to 4, the warhammer's 4).
+    Knockback(f64),
     /// Seconds added to cooldowns (`CooldownTimer`; below 0 shorter).
     Cooldown {
         /// Which cooldowns.
@@ -309,7 +338,12 @@ impl Effect {
     pub const fn changes_hit(&self) -> bool {
         matches!(
             self,
-            Self::DamageShare(_) | Self::TakenShare(_) | Self::CritChance(_) | Self::CritDamage(_)
+            Self::DamageShare(_)
+                | Self::TakenShare(_)
+                | Self::CritChance(_)
+                | Self::CritDamage(_)
+                | Self::HeadshotShare(_)
+                | Self::BehindShare(_)
         )
     }
 }
@@ -354,14 +388,24 @@ impl PassiveAbility {
             (row.on_blocked_hit_taken, Trigger::BlockedHitTaken),
             (row.on_block_break, Trigger::BlockBreak),
             (row.on_target_block_break, Trigger::TargetBlockBreak),
+            (row.on_head_shot, Trigger::HeadShot),
+            (row.on_hit_behind, Trigger::HitBehind),
         ]
         .into_iter()
         .filter(|(set, _)| *set == Some(true))
         .map(|(_, trigger)| trigger)
         .collect();
-        if triggers.is_empty() {
+        let effects = effects_of(row);
+        let triggers = if !triggers.is_empty() {
+            triggers
+        } else if row.is_active_ability != Some(true)
+            && !effects.is_empty()
+            && effects.iter().all(Effect::changes_hit)
+        {
+            ALWAYS_ON_TRIGGERS.to_vec()
+        } else {
             return None;
-        }
+        };
         let stackable = row.is_stackable_ability == Some(true);
         Some(Self {
             id: row.ability_id.clone(),
@@ -373,7 +417,7 @@ impl PassiveAbility {
                 .collect(),
             helps: filled(row.required_equipped_ability_id.as_deref()).map(str::to_owned),
             conditions: conditions_of(row),
-            effects: effects_of(row),
+            effects,
             // An activation cooldown is a few seconds.
             cooldown_ms: (row.activation_cooldown.unwrap_or_default().max(0.0) * MS_PER_SECOND)
                 .round() as u64,
@@ -597,9 +641,12 @@ fn effects_of(row: &AbilityData) -> Vec<Effect> {
         (row.base_damage_reduction, Effect::TakenShare),
         (row.crit_chance, Effect::CritChance),
         (row.crit_damage, Effect::CritDamage),
+        (row.headshot_damage, Effect::HeadshotShare),
+        (row.hit_from_behind_damage, Effect::BehindShare),
         (row.dmg_pct_to_health, Effect::LifeSteal),
         (row.mana, Effect::ManaShare),
         (row.stamina.map(|points| points as f64), Effect::Stamina),
+        (row.knockback, Effect::Knockback),
     ];
     effects.extend(
         shares
@@ -707,13 +754,8 @@ const UNREAD_EFFECTS: &[Filled] = &[
     ("DamageTableRowOverride", |row| {
         text(&row.damage_table_row_override)
     }),
-    ("Knockback", |row| number(row.knockback)),
     ("ThreatDamage", |row| number(row.threat_damage)),
     ("ArmorPenetration", |row| number(row.armor_penetration)),
-    ("HeadshotDamage", |row| number(row.headshot_damage)),
-    ("HitFromBehindDamage", |row| {
-        number(row.hit_from_behind_damage)
-    }),
     ("CritDamageReduction", |row| {
         number(row.crit_damage_reduction)
     }),
@@ -881,6 +923,51 @@ mod tests {
             }))),
             None
         );
+    }
+
+    #[test]
+    fn a_head_shot_and_a_hit_from_behind_fire_their_rows_and_raise_their_hits() {
+        let head = PassiveAbility::of_row(&row(serde_json::json!({
+            "ability_id": "Test_HeadshotDamage",
+            "on_head_shot": true,
+            "headshot_damage": 0.1
+        })))
+        .expect("passive");
+        assert_eq!(head.triggers, [Trigger::HeadShot]);
+        assert_eq!(head.effects, [Effect::HeadshotShare(0.1)]);
+        assert!(head.fires(), "{:?}", head.unread_effects);
+        let behind = PassiveAbility::of_row(&row(serde_json::json!({
+            "ability_id": "Test_BackstabDamage",
+            "hit_from_behind_damage": 0.2
+        })))
+        .expect("an always-on node");
+        assert_eq!(behind.effects, [Effect::BehindShare(0.2)]);
+        assert!(Trigger::HitBehind.by_holder() && Trigger::HeadShot.by_holder());
+    }
+
+    #[test]
+    fn a_tree_node_without_a_trigger_that_changes_hits_fires_on_every_hit() {
+        // Retail rows of build 25810808.
+        let node = PassiveAbility::of_row(&row(serde_json::json!({
+            "ability_id": "Passive_Firestaff_FireMage_CritDmg",
+            "crit_damage": 0.15,
+            "tree_id": 1,
+            "weapon_tag": "FireMagic"
+        })))
+        .expect("passive");
+        assert_eq!(node.triggers, ALWAYS_ON_TRIGGERS);
+        assert_eq!(node.effects, [Effect::CritDamage(0.15)]);
+        assert!(
+            node.conditions
+                .contains(&Condition::WeaponTag("FireMagic".to_owned()))
+        );
+        assert!(node.fires());
+        let active = PassiveAbility::of_row(&row(serde_json::json!({
+            "ability_id": "Ability_Firestaff_FlameThrower",
+            "base_damage": 0.1,
+            "is_active_ability": true
+        })));
+        assert_eq!(active, None, "an active ability's own row");
     }
 
     #[test]

@@ -278,6 +278,9 @@ pub mod test_support {
             blockable: true,
             category: DamageCategory::Physical,
             affix: None,
+            backstab: true,
+            headshot: true,
+            rune_charge: nw_content::combat::RuneChargeRow::default(),
         }
     }
 
@@ -300,7 +303,8 @@ pub mod test_support {
             .map(|damage_id| AttackRow {
                 damage_id,
                 coefficient: 1.0,
-                can_crit: false,
+                // The test sword never crits by its chance (0); a hit from behind does.
+                can_crit: true,
                 threat: 0,
                 damage_type: None,
                 table: table.to_owned(),
@@ -308,6 +312,9 @@ pub mod test_support {
                 blockable: true,
                 category: DamageCategory::Physical,
                 affix: None,
+                backstab: true,
+                headshot: true,
+                rune_charge: nw_content::combat::RuneChargeRow::default(),
             })
             .collect()
     }

@@ -39,6 +39,13 @@ const RAW_7_LEN: usize = 7;
 const ITEM_LEN: usize = 9;
 /// The hit volume of a hit: the lowercase CRC-32 of `torso` (mob-cards note, section 4.3).
 const HIT_VOLUME_TORSO: u32 = 0x275f_bc85;
+/// The hit volume of a head shot: the lowercase CRC-32 of `head` (Observed: 346 retail ranged
+/// hits flagged `Headshot` in 160 open world ledgers, all on the volumes `0xa7f3f69c` (293) and
+/// `0xd100f0ff`).
+const HIT_VOLUME_HEAD: u32 = 0xa7f3_f69c;
+/// Hit flags: a head shot (`Headshot`, the ninth name of `eDamageDealtInfo_NetworkData_Flags`;
+/// Observed: never with `Crit` on the 346 retail head shots).
+const HIT_FLAG_HEADSHOT: u16 = 0x0100;
 /// The camera shake of a hit: the lowercase CRC-32 of `small`.
 const CAMERA_SHAKE_SMALL: u32 = 0x7545_ea13;
 /// Hit flags (little-endian `u16`): the hit can crit.
@@ -228,6 +235,25 @@ impl DamageDealtMsg {
     /// Whether the hit is marked `Resisted`.
     pub fn is_resisted(&self) -> bool {
         u16::from_le_bytes(self.raw_2) & HIT_FLAG_RESISTED != 0
+    }
+
+    /// The same hit as a head shot: marked `Headshot`, on the head volume.
+    #[must_use]
+    pub fn headshot(mut self) -> Self {
+        let flags = u16::from_le_bytes(self.raw_2) | HIT_FLAG_HEADSHOT;
+        self.raw_2 = flags.to_le_bytes();
+        self.u32_d = HIT_VOLUME_HEAD;
+        self
+    }
+
+    /// Whether the hit is marked `Crit`.
+    pub fn is_crit(&self) -> bool {
+        u16::from_le_bytes(self.raw_2) & HIT_FLAG_CRIT != 0
+    }
+
+    /// Whether the hit is marked `Headshot`.
+    pub fn is_headshot(&self) -> bool {
+        u16::from_le_bytes(self.raw_2) & HIT_FLAG_HEADSHOT != 0
     }
 }
 

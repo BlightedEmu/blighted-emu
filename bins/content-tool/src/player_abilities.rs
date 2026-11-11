@@ -16,8 +16,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use nw_content::generated::{SpellData, Tables};
 use nw_content::player_abilities::{
-    AbilityCast, AbilityList, FragmentMarker, FragmentRow, FragmentTransition, ListAction,
-    PlayerAbilities, SpellProjectile, SpellRow, TransitionTo,
+    AbilityCast, AbilityList, FragmentMarker, FragmentRow, FragmentTransition, HEARTGEM_CLASS,
+    ListAction, PlayerAbilities, SpellProjectile, SpellRow, TransitionTo,
 };
 use nw_content::player_attacks::stance_tags;
 use nw_formats::input_profile::input_actions;
@@ -30,12 +30,8 @@ use crate::player_attacks::{
 
 /// Milliseconds per second.
 const MS_PER_S: u64 = 1_000;
-/// The separator of a spell row's status effects (`A,B`).
-const EFFECT_SEPARATOR: char = ',';
 /// The client's input profile: the actions of every input number.
 const INPUT_PROFILE: &str = "libs/config/defaultprofile.xml";
-/// A text cell that is on (`ClearOnExit`).
-const CELL_TRUE: &str = "1";
 /// The clip that moves a running action on to another, and its parameters.
 const TRANSITION_CLIP: &str = "CAGE-TransitionInstant";
 const TRANSITION_ACTION: &str = "NewAction";
@@ -44,6 +40,8 @@ const TRANSITION_INPUT: &str = "Input";
 const TRANSITION_CONDITION: &str = "Condition";
 /// The input profile's input that is always on: a transition that names it needs no input.
 const ALWAYS_ON_INPUT: &str = "Test_AlwaysTrue";
+/// The player grid's heart rune ability list (`playerdata/cage/`).
+const RUNE_LIST_FILE: &str = "playeractions_ability_runes.actionlist";
 
 /// What the build made and left out.
 #[derive(Debug, Default)]
@@ -148,30 +146,12 @@ impl<'a> AbilityRows<'a> {
             }
             _ => None,
         };
-        Some(SpellRow {
-            id: row.spell_id.clone(),
-            types: row.spell_types.clone(),
-            shape: row.shape_types.clone(),
-            // Lengths of metres.
-            radius_m: row.radius.map(|radius| radius as f32),
-            cast_distance_m: row.cast_distance.map(|distance| distance as f32),
-            duration_ms: row.duration,
-            damage_row: row.damage_table_row.clone(),
-            status_effects: row
-                .status_effects
-                .iter()
-                .flat_map(|effects| effects.split(EFFECT_SEPARATOR))
-                .map(str::trim)
-                .filter(|effect| !effect.is_empty())
-                .map(str::to_owned)
-                .collect(),
-            target_types: row.target_types.clone(),
-            mana_cost: row.mana_cost.as_deref().and_then(|cost| self.mana_of(cost)),
+        Some(SpellRow::of_data(
+            row,
+            row.mana_cost.as_deref().and_then(|cost| self.mana_of(cost)),
             projectile,
-            clear_on_exit: row.clear_on_exit.as_deref() == Some(CELL_TRUE),
-            clear_on_end: row.clear_on_end == Some(true),
-            secondary: secondary.map(Box::new),
-        })
+            secondary,
+        ))
     }
 }
 
@@ -376,16 +356,19 @@ fn list_of(
             |hit| hit.length_ms,
         );
         let transitions = transitions_of(&found, length_ms, action_list, &sources.actions);
-        wanted.extend(transitions.iter().filter_map(|transition| match &transition.to {
-            TransitionTo::Fragment(fragment) => Some((action_name.clone(), fragment.clone())),
-            TransitionTo::Action(_) => None,
-        }));
+        wanted.extend(
+            transitions
+                .iter()
+                .filter_map(|transition| match &transition.to {
+                    TransitionTo::Fragment(fragment) => {
+                        Some((action_name.clone(), fragment.clone()))
+                    }
+                    TransitionTo::Action(_) => None,
+                }),
+        );
         fragments.push(FragmentRow {
             name: fragment_name.clone(),
-            scopes: sources
-                .controller
-                .scopes_of(&fragment_name, &tags)
-                .to_vec(),
+            scopes: sources.controller.scopes_of(&fragment_name, &tags).to_vec(),
             length_ms,
             markers: markers_of(&found, length_ms),
             transitions,
@@ -415,6 +398,7 @@ fn list_of(
                 deactivation: action.deactivation.clone(),
                 tag_activities: action.tag_activities.clone(),
                 ability: action.ability.clone(),
+                charge_take: action.charge_take.clone(),
                 casts: action
                     .casts
                     .iter()
@@ -469,8 +453,9 @@ pub fn build_abilities(
     let lists: Vec<AbilityList> = sources
         .grid
         .iter()
-        .filter(|list| !list.weapon_classes.is_empty())
+        .filter_map(rune_or_weapon_list)
         .filter_map(|list| {
+            let list = &list;
             let path = list.pak_path();
             let Some(index) = sources.action_paths.iter().position(|own| *own == path) else {
                 report
@@ -495,6 +480,19 @@ pub fn build_abilities(
     report.skipped.sort();
     report.skipped.dedup();
     (PlayerAbilities { lists, inputs }, report)
+}
+
+/// The grid's ability list `list` as the engine runs it: a list with `WeaponRequirements` as it
+/// is, the heart rune list ([`RUNE_LIST_FILE`]) on the heart rune item class, any other list
+/// (the character's own actions) not at all.
+fn rune_or_weapon_list(list: &GridList) -> Option<GridList> {
+    if !list.weapon_classes.is_empty() {
+        return Some(list.clone());
+    }
+    list.pak_path().ends_with(RUNE_LIST_FILE).then(|| GridList {
+        weapon_classes: vec![HEARTGEM_CLASS.to_owned()],
+        ..list.clone()
+    })
 }
 
 /// The client's input action names in input-number order, from the input profile of

@@ -117,6 +117,25 @@ pub(super) struct Fired<'a> {
     pub(super) copies: u32,
 }
 
+/// Where a hit met its target: on the head (a ranged head shot), from behind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct HitAim {
+    pub(super) headshot: bool,
+    pub(super) behind: bool,
+}
+
+impl HitAim {
+    /// The passive triggers of a hit so aimed, besides `OnHit`.
+    pub(super) fn triggers(self) -> impl Iterator<Item = Trigger> {
+        [
+            self.headshot.then_some(Trigger::HeadShot),
+            self.behind.then_some(Trigger::HitBehind),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
 /// What the fired abilities change in a hit.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct HitMods {
@@ -128,6 +147,10 @@ pub(super) struct HitMods {
     pub(super) crit_chance: f64,
     /// Added to the holder's crit multiplier.
     pub(super) crit_damage: f64,
+    /// A share added to the holder's head shot.
+    pub(super) headshot_share: f64,
+    /// A share added to the holder's hit from behind.
+    pub(super) behind_share: f64,
 }
 
 impl HitMods {
@@ -142,6 +165,8 @@ impl HitMods {
                     Effect::TakenShare(share) => mods.taken_share += share * copies,
                     Effect::CritChance(chance) => mods.crit_chance += chance * copies,
                     Effect::CritDamage(damage) => mods.crit_damage += damage * copies,
+                    Effect::HeadshotShare(share) => mods.headshot_share += share * copies,
+                    Effect::BehindShare(share) => mods.behind_share += share * copies,
                     _ => {}
                 }
             }
@@ -149,9 +174,16 @@ impl HitMods {
         mods
     }
 
-    /// The multiple of the holder's hit.
-    pub(super) fn dealt_scale(self) -> f64 {
-        (1.0 + self.damage_share).max(0.0)
+    /// The multiple of the holder's hit aimed as `aim`: its head shot and from-behind shares
+    /// count only on such a hit.
+    pub(super) fn dealt_scale_for(self, aim: HitAim) -> f64 {
+        let headshot = if aim.headshot {
+            self.headshot_share
+        } else {
+            0.0
+        };
+        let behind = if aim.behind { self.behind_share } else { 0.0 };
+        (1.0 + self.damage_share + headshot + behind).max(0.0)
     }
 
     /// The multiple of a hit on the holder.
@@ -514,10 +546,17 @@ impl SimWorld {
         let Some(number) = self.world.get::<Player>(entity).map(|player| player.number) else {
             return;
         };
+        let by_holder = triggers.iter().any(|trigger| trigger.by_holder());
+        let mut knockback_m = 0.0;
         for Fired { ability, copies } in &fired {
             let copies_f = f64::from(*copies);
             for effect in &ability.effects {
                 match effect {
+                    Effect::Knockback(metres) => {
+                        if by_holder {
+                            knockback_m += metres * copies_f;
+                        }
+                    }
                     Effect::Apply {
                         side: Side::Holder,
                         ids,
@@ -595,13 +634,39 @@ impl SimWorld {
                     Effect::DamageShare(_)
                     | Effect::TakenShare(_)
                     | Effect::CritChance(_)
-                    | Effect::CritDamage(_) => {}
+                    | Effect::CritDamage(_)
+                    | Effect::HeadshotShare(_)
+                    | Effect::BehindShare(_) => {}
                 }
             }
             if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                 player.passives.fired(ability, now_ms);
             }
         }
+        if knockback_m > 0.0 {
+            self.knock_back_mob(entity, mob, knockback_m);
+        }
+    }
+
+    /// Mob `mob` goes `metres` back from player `entity`, stopped by the first wall on its way
+    /// ([`crate::mobs::Mobs::knock_back`]).
+    fn knock_back_mob(&mut self, entity: Entity, mob: u64, metres: f64) {
+        let Some(from) = self
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position())
+        else {
+            return;
+        };
+        // A knockback of a few metres.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a knockback of a few metres"
+        )]
+        let landed = self
+            .mobs
+            .knock_back(mob, from, metres as f32, &*self.mob_ground);
+        tracing::debug!(mob, metres, ?landed, "mob knocked back");
     }
 }
 
@@ -774,7 +839,26 @@ mod tests {
             copies: 2,
         }]);
         assert!((mods.damage_share - 0.2).abs() < 1e-9);
-        assert!((mods.dealt_scale() - 1.2).abs() < 1e-9);
+        assert!((mods.dealt_scale_for(HitAim::default()) - 1.2).abs() < 1e-9);
+        let aimed = HitMods {
+            headshot_share: 0.1,
+            behind_share: 0.3,
+            ..mods
+        };
+        assert!(
+            (aimed.dealt_scale_for(HitAim::default()) - 1.2).abs() < 1e-9,
+            "a plain hit"
+        );
+        let head = HitAim {
+            headshot: true,
+            behind: false,
+        };
+        assert!((aimed.dealt_scale_for(head) - 1.3).abs() < 1e-9);
+        assert_eq!(
+            head.triggers().collect::<Vec<_>>(),
+            [Trigger::HeadShot],
+            "its own trigger"
+        );
         assert!((mods.taken_scale() - 1.0).abs() < 1e-9);
     }
 

@@ -1099,6 +1099,8 @@ pub struct SimWorld {
     effect_flights: Vec<abilities::EffectFlight>,
     /// The spell areas of player abilities, open or still to open.
     spell_areas: Vec<spell_areas::SpellArea>,
+    /// The hits of the mobs' spell areas on players this tick.
+    spell_area_mob_hits: Vec<AttackOutcome>,
     /// The spell entities in the world: their slot key and when each one goes.
     spell_entities: Vec<(u64, u64)>,
     /// The projectiles mobs fired, on their way to where they aimed.
@@ -1280,6 +1282,7 @@ impl SimWorld {
             projectile_flights: Vec::new(),
             effect_flights: Vec::new(),
             spell_areas: Vec::new(),
+            spell_area_mob_hits: Vec::new(),
             spell_entities: Vec::new(),
             mob_shots: Vec::new(),
             scripted_swings: Vec::new(),
@@ -2490,6 +2493,7 @@ impl SimWorld {
         self.tick_fishing(now_ms);
         self.tick_music(now_ms);
         player_attacks.extend(self.tick_abilities(now_ms));
+        mob_hits.extend(self.take_spell_area_mob_hits());
         self.tick_meta_achievements();
         self.tick_travel(now_ms);
         self.tick_phasing();
@@ -2549,6 +2553,7 @@ impl SimWorld {
             .mobs
             .tick(&seen, now_ms, &*self.mob_ground, self.settings.tick_threads);
         self.add_tree_statuses();
+        self.cast_mob_spells(now_ms);
         intents
     }
 
@@ -5430,6 +5435,9 @@ impl Neighbourhood<'_> {
                 player.health_sent = Some(health);
                 player.health_max_sent = Some(health_max);
                 let stamina = player.stamina.take_change();
+                if let Some(percent) = player.abilities.charge.take_change() {
+                    player.extra_members.push(abilities::charge_member(percent));
+                }
                 player.combat.tick(self.now_ms);
                 let combat_status = player.combat.take_change(self.now_ms, self.server_time);
                 if let Some(state) = objectives.as_ref() {

@@ -13,6 +13,7 @@ use nw_content::player_attacks::Flight;
 use nw_sim_core::Position;
 
 use super::SimWorld;
+use super::attack::Pace;
 use super::hit_shape::PLAYER_CAPSULE;
 use super::mob_timeline::yaw_toward;
 use crate::combat::{AttackOutcome, AttackRefusal};
@@ -20,6 +21,10 @@ use crate::mobs::Capsule;
 
 /// Milliseconds per second.
 const MS_PER_SECOND: f32 = 1_000.0;
+/// The top share of a body's height that is its head (Inferred: a 1.8 m body's head is about
+/// 0.27 m; the retail head volumes hang on the skeleton's head joint, which the server does not
+/// animate).
+const HEAD_SHARE: f32 = 0.15;
 
 /// How a projectile or hit scan of one attack meets bodies.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,6 +89,8 @@ pub(super) struct ShotHit<'a> {
     /// The status effects it puts on a mob it hurts, with the number of the player they come
     /// from (an ability spell's `StatusEffects`).
     pub(super) effects: Option<(&'a [String], u64)>,
+    /// It meets the head of the mob it flies to ([`meets_head`]).
+    pub(super) headshot: bool,
 }
 
 impl<'a> ShotHit<'a> {
@@ -92,6 +99,7 @@ impl<'a> ShotHit<'a> {
         Self {
             damage_id: Some(damage_id),
             effects: None,
+            headshot: false,
         }
     }
 }
@@ -109,6 +117,8 @@ pub(super) struct ProjectileFlight {
     splash_m: f32,
     /// [`ShotHit::effects`].
     effects: Option<(Vec<String>, u64)>,
+    /// [`ShotHit::headshot`].
+    headshot: bool,
 }
 
 /// A flight of `flight_s` seconds in whole milliseconds.
@@ -165,40 +175,52 @@ impl AimLine {
     }
 }
 
+/// Where `shot` from a shooter standing at `from` along `aim` passes a body at `at`: how far
+/// along its line (m), how far beside it (m), how long it flies there (s) and how far its line
+/// rose from where it left the shooter (m; below 0 it sank); `None` behind the shooter or
+/// beyond its flight. It climbs or sinks with the aim's pitch and falls by its gravity.
+fn line_at(
+    shot: &Shot,
+    from: Position,
+    aim: AimLine,
+    at: Position,
+) -> Option<(f32, f32, f32, f32)> {
+    let yaw = aim.yaw;
+    // Yaw 0 faces +y; yaw grows toward -x (see `yaw_toward`).
+    let (east, north) = (-yaw.sin(), yaw.cos());
+    let (dx, dy) = (at.x - from.x, at.y - from.y);
+    let along = dx * east + dy * north;
+    if along < 0.0 {
+        return None;
+    }
+    let aside = (dx * north - dy * east).abs();
+    let (time_s, drop_m) = match &shot.flight {
+        Some(flight) => {
+            let time_s = flight.time_to(along)?;
+            (time_s, flight.drop_at(time_s))
+        }
+        None => (0.0, 0.0),
+    };
+    Some((along, aside, time_s, along * (-aim.pitch).tan() - drop_m))
+}
+
 /// The first body of `bodies` (mob, place, capsule) that `shot` from a shooter standing at `from`
 /// along `aim` meets, with how long it flies to it (seconds); `None` when it meets none. It meets
 /// a body whose edge is within its range and its radius of its line, before its flight ends,
-/// while it is level with the body: it leaves within the shooter's body height, climbs or sinks
-/// with the aim's pitch and falls by its gravity on the way.
+/// while it is level with the body: it leaves within the shooter's body height ([`line_at`]).
 pub(super) fn first_on_line(
     shot: &Shot,
     from: Position,
     aim: AimLine,
     bodies: &[(u64, Position, Capsule)],
 ) -> Option<(u64, f32)> {
-    let yaw = aim.yaw;
-    // Yaw 0 faces +y; yaw grows toward -x (see `yaw_toward`).
-    let (east, north) = (-yaw.sin(), yaw.cos());
     bodies
         .iter()
         .filter_map(|(mob, at, body)| {
-            let (dx, dy) = (at.x - from.x, at.y - from.y);
-            let along = dx * east + dy * north;
-            let aside = (dx * north - dy * east).abs();
-            if along < 0.0
-                || along > shot.range_m + body.radius_m
-                || aside > shot.radius_m + body.radius_m
-            {
+            let (along, aside, time_s, rise_m) = line_at(shot, from, aim, *at)?;
+            if along > shot.range_m + body.radius_m || aside > shot.radius_m + body.radius_m {
                 return None;
             }
-            let (time_s, drop_m) = match &shot.flight {
-                Some(flight) => {
-                    let time_s = flight.time_to(along)?;
-                    (time_s, flight.drop_at(time_s))
-                }
-                None => (0.0, 0.0),
-            };
-            let rise_m = along * (-aim.pitch).tan() - drop_m;
             let low = from.z + rise_m - shot.radius_m;
             let high = from.z + PLAYER_CAPSULE.height_m + rise_m + shot.radius_m;
             let level = low < at.z + body.height_m && at.z < high;
@@ -206,6 +228,26 @@ pub(super) fn first_on_line(
         })
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(mob, _, time_s)| (mob, time_s))
+}
+
+/// Whether `shot` from `from` along `aim` meets mob `target` of `bodies` on its head: its
+/// line, which leaves the middle of the shooter's body, passes in the top [`HEAD_SHARE`] of the
+/// body.
+pub(super) fn meets_head(
+    shot: &Shot,
+    (from, aim): (Position, AimLine),
+    target: u64,
+    bodies: &[(u64, Position, Capsule)],
+) -> bool {
+    bodies
+        .iter()
+        .find(|(mob, _, _)| *mob == target)
+        .is_some_and(|(_, at, body)| {
+            line_at(shot, from, aim, *at).is_some_and(|(_, _, _, rise_m)| {
+                let height = from.z + PLAYER_CAPSULE.height_m * HALF + rise_m;
+                height >= at.z + body.height_m * (1.0 - HEAD_SHARE)
+            })
+        })
 }
 
 impl SimWorld {
@@ -225,7 +267,14 @@ impl SimWorld {
         let Some((target, flight_s)) = met else {
             return vec![Ok(AttackOutcome::Missed)];
         };
-        self.launch(attacker, (shot, hit), target, flight_s, now_ms);
+        let headshot = meets_head(&shot, (position, aim), target, places);
+        self.launch(
+            attacker,
+            (shot, ShotHit { headshot, ..hit }),
+            target,
+            flight_s,
+            now_ms,
+        );
         Vec::new()
     }
 
@@ -248,6 +297,7 @@ impl SimWorld {
             effects: hit
                 .effects
                 .map(|(effects, source)| (effects.to_vec(), source)),
+            headshot: hit.headshot,
         });
     }
 
@@ -311,7 +361,12 @@ impl SimWorld {
                     }
                     continue;
                 };
-                let result = self.hit_paced(&flight.attacker, mob, damage_id, None, paced, now_ms);
+                // Only the mob it flew to takes it on the head; the splash does not.
+                let pace = Pace {
+                    paced,
+                    headshot: paced && flight.headshot,
+                };
+                let result = self.hit_paced(&flight.attacker, mob, damage_id, None, pace, now_ms);
                 if let (Ok(AttackOutcome::Hit { target, .. }), Some((effects, source))) =
                     (&result, &flight.effects)
                 {
@@ -398,6 +453,25 @@ mod tests {
             Some(7),
             "the yaw convention of yaw_toward"
         );
+    }
+
+    #[test]
+    fn a_bolt_in_the_top_of_a_body_is_a_head_shot() {
+        // The bolt's line leaves 0.9 m over the shooter's feet and stays level: on a body whose
+        // feet are 0.72 m lower it passes in the top 0.27 m; on a level body, at its middle.
+        let low = Position {
+            z: FROM.z - 0.72,
+            ..at(0.0, 20.0)
+        };
+        let head = [(1, low, BODY)];
+        assert_eq!(
+            first_on_line(&BOLT, FROM, NORTH, &head).map(|(mob, _)| mob),
+            Some(1)
+        );
+        assert!(meets_head(&BOLT, (FROM, NORTH), 1, &head));
+        let level = [(1, at(0.0, 20.0), BODY)];
+        assert!(!meets_head(&BOLT, (FROM, NORTH), 1, &level));
+        assert!(!meets_head(&BOLT, (FROM, NORTH), 2, &head), "no such mob");
     }
 
     #[test]
