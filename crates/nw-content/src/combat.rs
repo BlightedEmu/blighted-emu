@@ -710,6 +710,14 @@ pub enum CombatDataError {
     /// No `WeaponItemDefinitions` row.
     #[error("no weapon row `{0}`")]
     MissingWeapon(String),
+    /// Two rows of one damage table whose ids differ only in case.
+    #[error("damage table `{table}` has two rows `{damage_id}` (ids differ only in case)")]
+    DuplicateAttackRow {
+        /// The table's unique id.
+        table: String,
+        /// The row id.
+        damage_id: String,
+    },
 }
 
 /// What a `sim` looks up during a tick.
@@ -729,7 +737,10 @@ pub struct CombatData {
     /// The open-world PvP damage factor of each weapon item whose class the balance table
     /// adjusts (1 + `WeaponBaseDamageAdjustment`), by lower-case item id.
     item_pvp_damage: HashMap<String, f64>,
-    /// Every attack row, by lower-case table unique id and row id.
+    /// Every attack row, by lower-case table unique id and lower-case row id. The game data names
+    /// rows in other cases than their tables do (the flail stance's `1h_Flail_LightAttack1` for
+    /// the row `1H_Flail_LightAttack1`), and retail flail hits land, so a row id matches in any
+    /// case.
     table_attacks: HashMap<(String, String), AttackRow>,
     /// The heart rune charge of every attack row, by its row key (a hit names its row so).
     rune_charges: HashMap<RowKey, RuneChargeRow>,
@@ -780,16 +791,16 @@ impl CombatData {
             .find(|(id, _)| *id == rows.weapon_id)
             .map(|(_, weapon)| *weapon)
             .ok_or_else(|| CombatDataError::MissingWeapon(rows.weapon_id.clone()))?;
-        let table_attacks: HashMap<(String, String), AttackRow> = source
-            .attacks
-            .iter()
-            .map(|row| {
-                (
-                    (row.table.to_lowercase(), row.damage_id.clone()),
-                    row.clone(),
-                )
-            })
-            .collect();
+        let mut table_attacks: HashMap<(String, String), AttackRow> = HashMap::new();
+        for row in &source.attacks {
+            let key = (row.table.to_lowercase(), row.damage_id.to_lowercase());
+            if table_attacks.insert(key, row.clone()).is_some() {
+                return Err(CombatDataError::DuplicateAttackRow {
+                    table: row.table.clone(),
+                    damage_id: row.damage_id.clone(),
+                });
+            }
+        }
         let equip_abilities: HashMap<&str, &str> = source
             .equip_abilities
             .iter()
@@ -1037,10 +1048,10 @@ impl CombatData {
         self.table_attack(&self.player_table, damage_id)
     }
 
-    /// The attack row `damage_id` of the table of unique id `table` (any case).
+    /// The attack row `damage_id` of the table of unique id `table` (both in any case).
     pub fn table_attack(&self, table: &str, damage_id: &str) -> Option<&AttackRow> {
         self.table_attacks
-            .get(&(table.to_lowercase(), damage_id.to_owned()))
+            .get(&(table.to_lowercase(), damage_id.to_lowercase()))
     }
 
     /// The heart rune charge of the attack row of key `row` (all 0 for a row it does not know).
@@ -1530,6 +1541,31 @@ mod tests {
             Some(0.15)
         );
         assert_eq!(data.table_attack("NoTable", LIGHT), None);
+    }
+
+    /// The flail stance names `1h_Flail_LightAttack1`; the player table holds
+    /// `1H_Flail_LightAttack1` (build 25810808).
+    #[test]
+    fn an_attack_row_id_matches_in_any_case() {
+        let data = CombatData::build(source(), &rows()).expect("data");
+        let stance_spelling = LIGHT.to_lowercase();
+        assert_eq!(
+            data.attack(&stance_spelling).map(|row| row.damage_id.as_str()),
+            Some(LIGHT)
+        );
+    }
+
+    #[test]
+    fn two_rows_of_one_table_that_differ_only_in_case_are_refused() {
+        let mut source = source();
+        source.attacks.push(AttackRow {
+            damage_id: LIGHT.to_uppercase(),
+            ..source.attacks[0].clone()
+        });
+        assert!(matches!(
+            CombatData::build(source, &rows()),
+            Err(CombatDataError::DuplicateAttackRow { .. })
+        ));
     }
 
     #[test]
