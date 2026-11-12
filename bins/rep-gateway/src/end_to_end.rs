@@ -391,6 +391,7 @@ async fn start_sim(
         let served = serve_sim(
             settings,
             Arc::new(NoGround),
+            Arc::new(NoGround),
             bus,
             databases,
             std::future::pending(),

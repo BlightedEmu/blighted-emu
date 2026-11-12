@@ -2654,6 +2654,7 @@ mod tests {
             let server = tokio::spawn(serve(
                 settings.clone(),
                 Arc::new(NoGround),
+                Arc::new(NoGround),
                 bus.clone(),
                 Databases {
                     world: db.clone(),
