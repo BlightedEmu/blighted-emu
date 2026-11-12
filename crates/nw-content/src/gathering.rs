@@ -616,7 +616,10 @@ mod tests {
     fn only_gatherables_of_the_plant_slots_have_the_plant_layout() {
         assert!(gatherable_of("HempT1", Some("Harvesting")).plant_layout());
         assert!(gatherable_of("IronVeinFinishSmall", Some("Mining")).plant_layout());
-        assert!(gatherable_of("honeylarge", Some("None")).plant_layout(), "any case");
+        assert!(
+            gatherable_of("honeylarge", Some("None")).plant_layout(),
+            "any case"
+        );
         assert!(
             !gatherable_of("Gimmick_BreakingWallsCannon_Vignette", Some("None")).plant_layout(),
             "the Fire Cannon has its controller in slot 2"

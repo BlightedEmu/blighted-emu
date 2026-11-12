@@ -403,6 +403,10 @@ pub(crate) fn read_entries(
     Ok(read)
 }
 
+/// One animation database as read: its entries' base layers and its fragments, in the same
+/// order, or why it could not be read.
+pub(crate) type ReadDatabase = Result<(Vec<AdbEntry>, AnimDatabase), String>;
+
 /// The animation databases `paths` of the paks, each with the fragments of its sub databases
 /// ([`AnimDatabase::sub_databases`], to any depth): its entries' base layers and its fragments,
 /// in the same order, or why it could not be read.
@@ -413,7 +417,7 @@ pub(crate) fn read_entries(
 pub(crate) fn read_databases(
     source: &GameSource,
     paths: &HashSet<String>,
-) -> Result<HashMap<String, Result<(Vec<AdbEntry>, AnimDatabase), String>>, ToolError> {
+) -> Result<HashMap<String, ReadDatabase>, ToolError> {
     let mut bytes = read_entries(source, paths)?;
     let mut wanted = paths.clone();
     loop {
@@ -438,10 +442,7 @@ pub(crate) fn read_databases(
 }
 
 /// The database `path` of `bytes` with the fragments of its sub databases.
-fn database_of(
-    path: &str,
-    bytes: &HashMap<String, Vec<u8>>,
-) -> Result<(Vec<AdbEntry>, AnimDatabase), String> {
+fn database_of(path: &str, bytes: &HashMap<String, Vec<u8>>) -> ReadDatabase {
     let text = text_of(bytes.get(path))
         .ok_or_else(|| "animation database missing or not UTF-8".to_owned())?;
     let mut entries = adb_entries(text).map_err(|error| error.to_string())?;

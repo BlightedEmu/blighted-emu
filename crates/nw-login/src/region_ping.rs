@@ -156,7 +156,9 @@ mod tests {
             .header(HOST, PING_HOST)
             .body(Body::empty())
             .expect("request");
-        let response = tower::ServiceExt::oneshot(app, ping).await.expect("response");
+        let response = tower::ServiceExt::oneshot(app, ping)
+            .await
+            .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
         let prelogin = test_http::request("POST", crate::voice::PRELOGIN_PATH, "a=1");
         let (status, _) = test_http::send(&plain_router(None), prelogin).await;

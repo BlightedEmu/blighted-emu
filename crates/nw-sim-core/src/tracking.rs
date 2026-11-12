@@ -1213,9 +1213,8 @@ mod tests {
                 SEA,
             );
             if !tracked.on_floor {
-                fall_top = Some(fall_top.map_or(tracked.position.z, |top| {
-                    top.max(tracked.position.z)
-                }));
+                fall_top =
+                    Some(fall_top.map_or(tracked.position.z, |top| top.max(tracked.position.z)));
             }
         }
         let landed = body.position();
