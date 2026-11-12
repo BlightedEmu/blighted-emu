@@ -27,6 +27,9 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "io-util"] }
 tokio-rustls.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+rfd.workspace = true
+
 [dev-dependencies]
 axum.workspace = true
 tempfile.workspace = true

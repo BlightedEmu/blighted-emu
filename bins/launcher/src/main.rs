@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! `launcher`: the player launcher window.
 
+// A window program on Windows: no console window opens beside the launcher.
+#![windows_subsystem = "windows"]
+
+use std::fmt::Display;
 use std::process::ExitCode;
 
 use eframe::egui;
@@ -22,14 +26,14 @@ fn main() -> ExitCode {
     let path = match default_settings_path() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("error: {error}");
+            report_start_error(&error);
             return ExitCode::FAILURE;
         }
     };
     let mut settings = match Settings::load(&path) {
         Ok(settings) => settings,
         Err(error) => {
-            eprintln!("error: {error}");
+            report_start_error(&error);
             return ExitCode::FAILURE;
         }
     };
@@ -55,8 +59,22 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error}");
+            report_start_error(&error);
             ExitCode::FAILURE
         }
     }
+}
+
+/// Shows an error that stops the launcher before or while its window opens: a message box on
+/// Windows, where the launcher has no console, and standard error elsewhere.
+fn report_start_error(error: &dyn Display) {
+    #[cfg(windows)]
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title(APP_NAME)
+        .set_description(error.to_string())
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+    #[cfg(not(windows))]
+    eprintln!("error: {error}");
 }

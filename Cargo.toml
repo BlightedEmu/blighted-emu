@@ -45,6 +45,8 @@ open = { version = "5.4.4", default-features = false }
 png = { version = "0.18.1", default-features = false }
 postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
 prettyplease = { version = "0.3.0", default-features = false }
+# Windows launcher only: a message box for errors before its window opens (it has no console).
+rfd = { version = "0.18.0", default-features = false }
 proc-macro2 = { version = "1.0.107", default-features = false, features = ["proc-macro"] }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 quick-xml = { version = "0.42.0", default-features = false, features = ["serialize"] }
