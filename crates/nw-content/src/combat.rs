@@ -13,6 +13,7 @@ use nw_formats::objectstream::lowercase_crc32;
 use thiserror::Error;
 
 use crate::Tables;
+use crate::character_points::{ATTRIBUTE_COUNT, DEXTERITY, FOCUS, INTELLIGENCE, STRENGTH};
 use crate::gameplay_config::ITEM_CLASS_SEPARATOR;
 use crate::player_abilities::{AbilityList, PlayerAbilities, SpellRow};
 use crate::player_attacks::{PlayerAttacks, Stance, stance_key};
@@ -184,6 +185,16 @@ pub struct ArmorRow {
 /// Milliseconds per second.
 const MS_PER_SECOND: f64 = 1_000.0;
 
+/// The `Scaling*` cells `cells` (attribute id, cell) of a weapon row, by attribute id; an empty
+/// cell is 0.
+fn weapon_scaling(cells: [(u32, Option<f64>); 4]) -> [f64; ATTRIBUTE_COUNT] {
+    let mut scaling = [0.0; ATTRIBUTE_COUNT];
+    for (attribute, cell) in cells {
+        scaling[attribute as usize] = cell.unwrap_or(0.0);
+    }
+    scaling
+}
+
 /// The player weapon.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WeaponRow {
@@ -193,6 +204,11 @@ pub struct WeaponRow {
     pub crit_chance: f64,
     /// Crit damage multiplier.
     pub crit_multiplier: f64,
+    /// `ScalingStrength`, `ScalingDexterity`, `ScalingIntelligence` and `ScalingFocus`, by
+    /// attribute id ([`crate::character_points::ATTRIBUTE_NAMES`]; Constitution scales no
+    /// weapon): the share of its damage each point of the attribute's `ModifierValueSum` adds
+    /// ([`crate::attribute_damage`]).
+    pub scaling: [f64; ATTRIBUTE_COUNT],
     /// It fires spread shots (a blunderbuss): its attacks come as 2719 requests.
     pub spread_shot: bool,
     /// The shots it holds when loaded (`MaxLoadedAmmo`; the blunderbuss 2, melee weapons 0).
@@ -499,6 +515,12 @@ impl CombatSource {
                             base_damage: row.base_damage.map_or(0.0, |damage| damage as f64),
                             crit_chance: row.crit_chance.unwrap_or(0.0),
                             crit_multiplier: row.crit_damage_multiplier.unwrap_or(PLAIN_MOD),
+                            scaling: weapon_scaling([
+                                (FOCUS, row.scaling_focus),
+                                (STRENGTH, row.scaling_strength),
+                                (DEXTERITY, row.scaling_dexterity),
+                                (INTELLIGENCE, row.scaling_intelligence),
+                            ]),
                             spread_shot: row.ranged_attack_profile.as_deref()
                                 == Some(SPREAD_SHOT_PROFILE),
                             max_loaded_ammo: row
@@ -1362,6 +1384,7 @@ mod tests {
             base_damage: SWORD_BASE,
             crit_chance: 0.03,
             crit_multiplier: 1.3,
+            scaling: [0.0; ATTRIBUTE_COUNT],
             spread_shot: false,
             max_loaded_ammo: 0,
             reload_ms: 0,
@@ -1550,7 +1573,8 @@ mod tests {
         let data = CombatData::build(source(), &rows()).expect("data");
         let stance_spelling = LIGHT.to_lowercase();
         assert_eq!(
-            data.attack(&stance_spelling).map(|row| row.damage_id.as_str()),
+            data.attack(&stance_spelling)
+                .map(|row| row.damage_id.as_str()),
             Some(LIGHT)
         );
     }

@@ -6,8 +6,12 @@
 //! ([`crate::facet::component::GAME_MODE_PARTICIPANT`]). Layouts after the header, from the
 //! retail bodies:
 //!
-//! - 6211: one byte (1 subscribe, 0 unsubscribe; 8 calls, both values).
-//! - 6272: one byte, the picked role (1 and 3 in the captures).
+//! - 6211: one byte (1 subscribe, 0 unsubscribe; 8 calls, both values). The server answers it
+//!   with the player's 3312 slot 1 (`isReplicatingGroupActivity`) and, on a subscribe, slot 2
+//!   (`groupActivityEligibility`), 0.1 to 0.2 s later (Observed: every call of the arena
+//!   ledgers `3v3` 6 of 6, `20261010-125035-658` 3 of 3, `3v3_arena_group_2` 14).
+//! - 6272: one byte, the picked role: every queue join sends 1 at once and the picked role
+//!   (3 or 4) 1.5 to 2.7 s later (arena flow study; Inferred: 3 DPS, 4 healer).
 //! - 1980: one big-endian `u32`, a client event id (meaning Unknown).
 //! - 5741: a text (the match id, a UUID in the one capture) and one byte (1).
 //! - 5450 and 5449 and 1234: the header alone.
@@ -15,9 +19,13 @@
 //!   first `u16` names the activity (0x3016, 0x3116, 0x3316 in the captures; meaning
 //!   Unknown), the other two are Unknown.
 //! - 6295: one byte (1), the same activity `u16` as the 6254 it follows, and a `u16` (0).
-//! - 6414: a big-endian `u32` (the same value as the 6824 of the same match; meaning
-//!   Unknown), then a character reference (tag 5 and 16 bytes, or tag 0 and an empty text).
-//! - 6824: the same `u32` as 6414 and one ready byte (1 ready).
+//! - 6414: a big-endian `u32`, the CRC of the game mode (`91b99a18` OutpostRush,
+//!   `1fad9d42` Arena3v3), then a character reference (tag 5 and 16 bytes, or tag 0 and an empty
+//!   text).
+//! - 6824: the CRC of the game mode (`1fad9d42` in every retail arena ready-up, 4 of 4) and one
+//!   ready byte (1 ready).
+//! - 6297 and 6296: the header alone (role selection cancel and its answer, `Hive_3v3_group`).
+//! - 6228: three zero bytes (a match that not every player accepted; `3v3`, `Hive_3v3_group`).
 //! - 6970: a text, the cutscene name (empty in the one capture).
 //! - 1066: the CRC of the game mode (big-endian `u32`) and one byte (1 for a group queue; 4
 //!   retail calls, both values).
@@ -27,9 +35,9 @@
 
 use crate::combat::{read_string, write_string};
 use crate::entity_ids::RAW_ID_LEN;
-use crate::facet::FacetHeader;
+use crate::facet::{FacetHeader, component};
 use crate::social::CharacterRef;
-use crate::wire::{MessageError, Reader, Writer};
+use crate::wire::{BodyCodec, MessageError, Reader, Writer};
 
 /// Type index of `GameModeParticipantComponentServerFacet_RequestModifyGroupEligibilityDataSubscription`.
 pub const MODIFY_GROUP_ELIGIBILITY_SUBSCRIPTION_TYPE_INDEX: u64 = 6211;
@@ -61,6 +69,24 @@ pub const LEAVE_QUEUE_FOR_GAME_MODE_TYPE_INDEX: u64 = 1066;
 pub const LEAVE_GAME_MODE_TYPE_INDEX: u64 = 3309;
 /// Type index of `GameModeParticipantComponentServerFacet_RequestLeaveQueueForAllGameModes`.
 pub const LEAVE_QUEUE_FOR_ALL_GAME_MODES_TYPE_INDEX: u64 = 2385;
+/// Type index of `GameModeParticipantComponentServerFacet_RequestCancelMatchmakingRoleSelectionPhase`.
+pub const CANCEL_ROLE_SELECTION_TYPE_INDEX: u64 = 6297;
+/// Type index of `GameModeParticipantComponentClientFacet_OnMatchmakingRoleSelectionPhaseCanceled`.
+pub const ROLE_SELECTION_CANCELED_TYPE_INDEX: u64 = 6296;
+/// Type index of `GameModeParticipantComponentClientFacet_OnMatchmakingMatchCancelled`.
+pub const MATCHMAKING_MATCH_CANCELLED_TYPE_INDEX: u64 = 6228;
+/// Bytes after the header of every retail 6228 (all zero; meaning Unknown).
+pub const MATCH_CANCELLED_LEN: usize = 3;
+/// Type index of `VitalsComponentClientFacet_ClientSyncDeathRecapForAllGameModeParticipants`.
+pub const DEATH_RECAP_FOR_ALL_TYPE_INDEX: u64 = 4977;
+/// The hex digits of each hyphen-separated group of a UUID text.
+const UUID_GROUP_DIGITS: [usize; 5] = [8, 4, 4, 4, 12];
+/// The separator of a UUID text.
+const UUID_SEPARATOR: char = '-';
+/// Hex digits per byte.
+const DIGITS_PER_BYTE: usize = 2;
+/// The radix of a hex digit.
+const HEX_RADIX: u32 = 16;
 
 /// The most activities of one 6254 (a body is at most `0x30000` bytes and an entry 5).
 const MAX_ACTIVITIES: usize = 0x1_0000;
@@ -92,8 +118,13 @@ pub enum GameModeClientMsg {
     SetMatchmakingRole {
         /// The header.
         header: FacetHeader,
-        /// The role (1 and 3 in retail).
+        /// The role (1 at once, then 3 or 4 in retail).
         role: u8,
+    },
+    /// 6297: close the role picking screen.
+    CancelRoleSelection {
+        /// The header.
+        header: FacetHeader,
     },
     /// 1980: a client event in a game mode.
     ReceivedClientEvent {
@@ -123,12 +154,12 @@ pub enum GameModeClientMsg {
         /// The ticked activities.
         activities: Vec<QueueActivity>,
     },
-    /// 6824: the player readied up (or unreadied) for match `match_id`.
+    /// 6824: the player readied up (or unreadied) in game mode `game_mode`.
     SetReadiedUpStatus {
         /// The header.
         header: FacetHeader,
-        /// The match (the same value as in the 6414 of the match; meaning Unknown).
-        match_id: u32,
+        /// The CRC of the game mode the player is in.
+        game_mode: u32,
         /// Whether the player is ready.
         ready: bool,
     },
@@ -197,6 +228,9 @@ impl GameModeClientMsg {
             MATCHMAKING_LOGIN_CONFIRMED_TYPE_INDEX => {
                 read(|header, _| Ok(Self::MatchmakingLoginConfirmed { header }))
             }
+            CANCEL_ROLE_SELECTION_TYPE_INDEX => {
+                read(|header, _| Ok(Self::CancelRoleSelection { header }))
+            }
             JOIN_QUEUE_FOR_ACTIVITIES_TYPE_INDEX => read(|header, reader| {
                 let count = usize::from(reader.u8()?);
                 if count > MAX_ACTIVITIES || count * ACTIVITY_BYTES > reader.remaining() {
@@ -219,7 +253,7 @@ impl GameModeClientMsg {
             SET_READIED_UP_STATUS_TYPE_INDEX => read(|header, reader| {
                 Ok(Self::SetReadiedUpStatus {
                     header,
-                    match_id: reader.u32()?,
+                    game_mode: reader.u32()?,
                     ready: reader.boolean()?,
                 })
             }),
@@ -257,6 +291,7 @@ impl GameModeClientMsg {
             Self::ReceivedClientEvent { .. } => RECEIVED_CLIENT_EVENT_TYPE_INDEX,
             Self::AcceptMatch { .. } => ACCEPT_MATCHMAKING_MATCH_TYPE_INDEX,
             Self::MatchmakingLoginConfirmed { .. } => MATCHMAKING_LOGIN_CONFIRMED_TYPE_INDEX,
+            Self::CancelRoleSelection { .. } => CANCEL_ROLE_SELECTION_TYPE_INDEX,
             Self::JoinQueueForActivities { .. } => JOIN_QUEUE_FOR_ACTIVITIES_TYPE_INDEX,
             Self::SetReadiedUpStatus { .. } => SET_READIED_UP_STATUS_TYPE_INDEX,
             Self::LeaveQueueForGameMode { .. } => LEAVE_QUEUE_FOR_GAME_MODE_TYPE_INDEX,
@@ -273,6 +308,7 @@ impl GameModeClientMsg {
             | Self::ReceivedClientEvent { header, .. }
             | Self::AcceptMatch { header, .. }
             | Self::MatchmakingLoginConfirmed { header }
+            | Self::CancelRoleSelection { header }
             | Self::JoinQueueForActivities { header, .. }
             | Self::SetReadiedUpStatus { header, .. }
             | Self::LeaveQueueForGameMode { header, .. }
@@ -303,7 +339,7 @@ impl GameModeClientMsg {
                 write_string(&mut writer, match_id.as_bytes())?;
                 writer.u8(*flag);
             }
-            Self::MatchmakingLoginConfirmed { .. } => {}
+            Self::MatchmakingLoginConfirmed { .. } | Self::CancelRoleSelection { .. } => {}
             Self::JoinQueueForActivities { activities, .. } => {
                 let count =
                     u8::try_from(activities.len()).map_err(|_| MessageError::CountTooLarge {
@@ -319,9 +355,9 @@ impl GameModeClientMsg {
                 }
             }
             Self::SetReadiedUpStatus {
-                match_id, ready, ..
+                game_mode, ready, ..
             } => {
-                writer.u32(*match_id).boolean(*ready);
+                writer.u32(*game_mode).boolean(*ready);
             }
             Self::LeaveQueueForGameMode {
                 game_mode, group, ..
@@ -363,12 +399,22 @@ pub enum GameModeServerMsg {
         /// A value of Unknown meaning (0 in retail).
         extra: u16,
     },
+    /// 6296: the role picking screen closed (the answer to 6297).
+    RoleSelectionCanceled {
+        /// The header.
+        header: FacetHeader,
+    },
+    /// 6228: the found match was cancelled: not every player accepted it.
+    MatchCancelled {
+        /// The header.
+        header: FacetHeader,
+    },
     /// 6414: a player was removed from the game mode.
     GameModePlayerRemoved {
         /// The header.
         header: FacetHeader,
-        /// The match (the same value as in a 6824 of the match; meaning Unknown).
-        match_id: u32,
+        /// The CRC of the game mode.
+        game_mode: u32,
         /// The removed player.
         player: CharacterRef,
     },
@@ -389,6 +435,8 @@ impl GameModeServerMsg {
             QUEUE_GROUP_REMOVED_TYPE_INDEX
                 | MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX
                 | START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX
+                | ROLE_SELECTION_CANCELED_TYPE_INDEX
+                | MATCHMAKING_MATCH_CANCELLED_TYPE_INDEX
                 | GAME_MODE_PLAYER_REMOVED_TYPE_INDEX
                 | STOP_CUTSCENE_WITH_NAME_TYPE_INDEX
         )
@@ -402,6 +450,8 @@ impl GameModeServerMsg {
             Self::StartMatchmakingRoleSelection { .. } => {
                 START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX
             }
+            Self::RoleSelectionCanceled { .. } => ROLE_SELECTION_CANCELED_TYPE_INDEX,
+            Self::MatchCancelled { .. } => MATCHMAKING_MATCH_CANCELLED_TYPE_INDEX,
             Self::GameModePlayerRemoved { .. } => GAME_MODE_PLAYER_REMOVED_TYPE_INDEX,
             Self::StopCutsceneWithName { .. } => STOP_CUTSCENE_WITH_NAME_TYPE_INDEX,
         }
@@ -413,6 +463,8 @@ impl GameModeServerMsg {
             Self::QueueGroupRemoved { header }
             | Self::MatchmakingLoginRequested { header }
             | Self::StartMatchmakingRoleSelection { header, .. }
+            | Self::RoleSelectionCanceled { header }
+            | Self::MatchCancelled { header }
             | Self::GameModePlayerRemoved { header, .. }
             | Self::StopCutsceneWithName { header, .. } => *header,
         }
@@ -430,6 +482,11 @@ impl GameModeServerMsg {
         let message = match type_index {
             QUEUE_GROUP_REMOVED_TYPE_INDEX => Self::QueueGroupRemoved { header },
             MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX => Self::MatchmakingLoginRequested { header },
+            ROLE_SELECTION_CANCELED_TYPE_INDEX => Self::RoleSelectionCanceled { header },
+            MATCHMAKING_MATCH_CANCELLED_TYPE_INDEX => {
+                reader.bytes(MATCH_CANCELLED_LEN)?;
+                Self::MatchCancelled { header }
+            }
             START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX => Self::StartMatchmakingRoleSelection {
                 header,
                 flag: reader.u8()?,
@@ -438,7 +495,7 @@ impl GameModeServerMsg {
             },
             GAME_MODE_PLAYER_REMOVED_TYPE_INDEX => Self::GameModePlayerRemoved {
                 header,
-                match_id: reader.u32()?,
+                game_mode: reader.u32()?,
                 player: CharacterRef::read(&mut reader)?,
             },
             STOP_CUTSCENE_WITH_NAME_TYPE_INDEX => Self::StopCutsceneWithName {
@@ -465,7 +522,12 @@ impl GameModeServerMsg {
         let mut writer = Writer::new();
         self.header().write(&mut writer);
         match self {
-            Self::QueueGroupRemoved { .. } | Self::MatchmakingLoginRequested { .. } => {}
+            Self::QueueGroupRemoved { .. }
+            | Self::MatchmakingLoginRequested { .. }
+            | Self::RoleSelectionCanceled { .. } => {}
+            Self::MatchCancelled { .. } => {
+                writer.bytes(&[0; MATCH_CANCELLED_LEN]);
+            }
             Self::StartMatchmakingRoleSelection {
                 flag,
                 activity,
@@ -475,9 +537,9 @@ impl GameModeServerMsg {
                 writer.u8(*flag).u16(*activity).u16(*extra);
             }
             Self::GameModePlayerRemoved {
-                match_id, player, ..
+                game_mode, player, ..
             } => {
-                writer.u32(*match_id);
+                writer.u32(*game_mode);
                 player.write(&mut writer);
             }
             Self::StopCutsceneWithName { name, .. } => {
@@ -485,6 +547,95 @@ impl GameModeServerMsg {
             }
         }
         Ok(writer.finish())
+    }
+}
+
+/// 4977: a player of the game mode died; every participant gets it.
+///
+/// Observed (arena flow study: `3v3` 447.906 s and 478.639 s, `20261010-125035-658` 411.564 s,
+/// `arena-4165c8761c29c499`; 8 of 8 arena deaths): the dead player's vitals header (the one of its
+/// 4299), then the dead character's UUID and the killer's, each as a text of 36 bytes (length
+/// byte `24`, then the hyphenated lowercase UUID), 90 bytes in all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeathRecapForAllMsg {
+    /// The dead player's vitals header.
+    pub header: FacetHeader,
+    /// The dead player's character.
+    pub dead: [u8; RAW_ID_LEN],
+    /// The killer's character.
+    pub killer: [u8; RAW_ID_LEN],
+}
+
+impl DeathRecapForAllMsg {
+    /// The recap of the death of player `dead_number` (character `dead`) to `killer`.
+    pub fn of(dead_number: u64, dead: [u8; RAW_ID_LEN], killer: [u8; RAW_ID_LEN]) -> Self {
+        Self {
+            header: FacetHeader::of_child(component::VITALS, component::STATS_CHILD, dead_number),
+            dead,
+            killer,
+        }
+    }
+}
+
+/// The 4977 text of `character`: its hyphenated lowercase UUID.
+fn character_text(character: [u8; RAW_ID_LEN]) -> String {
+    let digits: String = character.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut text = String::new();
+    let mut at = 0;
+    for (group, len) in UUID_GROUP_DIGITS.into_iter().enumerate() {
+        if group > 0 {
+            text.push(UUID_SEPARATOR);
+        }
+        text.push_str(&digits[at..at + len]);
+        at += len;
+    }
+    text
+}
+
+/// The character of a 4977 text.
+fn read_character(reader: &mut Reader<'_>) -> Result<[u8; RAW_ID_LEN], MessageError> {
+    let bad = || MessageError::LengthMismatch {
+        field: "DeathRecapForAllMsg character",
+    };
+    let text = read_string(reader)?;
+    let text = String::from_utf8_lossy(&text);
+    let digits: String = text
+        .chars()
+        .filter(|digit| *digit != UUID_SEPARATOR)
+        .collect();
+    if digits.len() != RAW_ID_LEN * DIGITS_PER_BYTE {
+        return Err(bad());
+    }
+    let mut character = [0; RAW_ID_LEN];
+    for (index, byte) in character.iter_mut().enumerate() {
+        let pair = &digits[index * DIGITS_PER_BYTE..(index + 1) * DIGITS_PER_BYTE];
+        *byte = u8::from_str_radix(pair, HEX_RADIX).map_err(|_| bad())?;
+    }
+    Ok(character)
+}
+
+impl BodyCodec for DeathRecapForAllMsg {
+    const TYPE_INDEX: u64 = DEATH_RECAP_FOR_ALL_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        write_string(&mut writer, character_text(self.dead).as_bytes())?;
+        write_string(&mut writer, character_text(self.killer).as_bytes())?;
+        Ok(writer.finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let header = FacetHeader::read(&mut reader)?;
+        let dead = read_character(&mut reader)?;
+        let killer = read_character(&mut reader)?;
+        reader.finish()?;
+        Ok(Self {
+            header,
+            dead,
+            killer,
+        })
     }
 }
 
@@ -497,8 +648,8 @@ mod tests {
     const HEADER: &str = "b67cfc1a4d9fe84e2896c8c14210296e";
     /// The activity of the retail 6254 and 6295 (Outpost Rush).
     const ACTIVITY: u16 = 0x3116;
-    /// The match value of the retail 6824 and 6414.
-    const MATCH_ID: u32 = 0x91b9_9a18;
+    /// The game mode of the retail 6824 and 6414 (OutpostRush).
+    const GAME_MODE: u32 = 0x91b9_9a18;
     /// The match id text of the retail 5741.
     const MATCH_TEXT: &str = "019ee134-cb70-7ea0-8511-951c6721fb0f";
 
@@ -514,7 +665,7 @@ mod tests {
 
     #[test]
     fn the_retail_client_calls_read_and_write_back() {
-        let cases: [(u64, &str); 10] = [
+        let cases: [(u64, &str); 11] = [
             (MODIFY_GROUP_ELIGIBILITY_SUBSCRIPTION_TYPE_INDEX, "01"),
             // Retail 3v3 arena group and expedition runs.
             (LEAVE_QUEUE_FOR_GAME_MODE_TYPE_INDEX, "1fad9d4201"),
@@ -526,6 +677,8 @@ mod tests {
             (SET_MATCHMAKING_ROLE_TYPE_INDEX, "03"),
             (RECEIVED_CLIENT_EVENT_TYPE_INDEX, "9bb080d0"),
             (MATCHMAKING_LOGIN_CONFIRMED_TYPE_INDEX, ""),
+            // Retail `Hive_3v3_group` 1397.158 s.
+            (CANCEL_ROLE_SELECTION_TYPE_INDEX, ""),
             (JOIN_QUEUE_FOR_ACTIVITIES_TYPE_INDEX, "013116000001"),
             (SET_READIED_UP_STATUS_TYPE_INDEX, "91b99a1801"),
             (
@@ -566,8 +719,11 @@ mod tests {
 
     #[test]
     fn the_retail_server_pushes_read_and_write_back() {
-        let cases: [(u64, &str); 4] = [
+        let cases: [(u64, &str); 6] = [
             (QUEUE_GROUP_REMOVED_TYPE_INDEX, ""),
+            // Retail `Hive_3v3_group` 1397.189 s and 1573.390 s.
+            (ROLE_SELECTION_CANCELED_TYPE_INDEX, ""),
+            (MATCHMAKING_MATCH_CANCELLED_TYPE_INDEX, "000000"),
             (MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX, ""),
             (START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX, "0131160000"),
             (
@@ -583,7 +739,7 @@ mod tests {
             assert_eq!(push.encode().expect("writes"), hex(&body));
         }
         let GameModeServerMsg::GameModePlayerRemoved {
-            match_id, player, ..
+            game_mode, player, ..
         } = server(
             GAME_MODE_PLAYER_REMOVED_TYPE_INDEX,
             &format!("{HEADER}91b99a18053478731ca555476da9a0b79343e3acbe"),
@@ -591,7 +747,7 @@ mod tests {
         else {
             panic!("a removal");
         };
-        assert_eq!(match_id, MATCH_ID);
+        assert_eq!(game_mode, GAME_MODE);
         assert!(player.0.is_some());
         // Retail `Hive catacomes`: stop the cutscene with an empty name.
         let stop = server(
@@ -601,6 +757,25 @@ mod tests {
         assert_eq!(
             stop.encode().expect("writes"),
             hex("7134484c503933ace34e14f344a974cc00")
+        );
+    }
+
+    /// Retail `20261010-125035-658` 411.564 s with made-up ids (arena flow study, section 5.4).
+    #[test]
+    fn a_retail_death_recap_for_all_reads_and_writes_back() {
+        let body = hex(&[
+            "ced4d31dedf93e30a1a1a1a1a1a1a1a1",
+            "2465316531653165312d653165312d653165312d653165312d653165316531653165316531",
+            "2465326532653265322d653265322d653265322d653265322d653265326532653265326532",
+        ]
+        .concat());
+        let recap = DeathRecapForAllMsg::decode(&body).expect("reads");
+        assert_eq!(recap.dead, [0xe1; RAW_ID_LEN]);
+        assert_eq!(recap.killer, [0xe2; RAW_ID_LEN]);
+        assert_eq!(recap.encode().expect("writes"), body);
+        assert_eq!(
+            DeathRecapForAllMsg::of(7, recap.dead, recap.killer).header,
+            FacetHeader::of_child(component::VITALS, component::STATS_CHILD, 7)
         );
     }
 

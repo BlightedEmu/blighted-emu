@@ -11,9 +11,15 @@
 //! (`GroupDataComponentReplicatedState`), which [`crate::views`] sends. The kick vote (3498)
 //! stays refused: no capture holds a vote, and its messages (`OnKickVoteInitiated`,
 //! `OnKickVoteEnded`) have no captured layout.
+//!
+//! A role choice (5390) sets the role child of the player's member block in its group entity
+//! (Observed, `raid_group_influence_race` 71.624 s and 75.675 s). Raids stay out: no capture
+//! holds the convert-to-raid vote (5317, 5318 and their answers 5311, 5309), so no group here
+//! grows past one group; the raid move (3501) and swap (541) reorder the members of the group.
 
 use nw_bus::GroupAnswer;
 use nw_db::SocialGroup;
+use nw_messages::social::group_data::CHOOSABLE_ROLES;
 use nw_messages::social::groups::{
     ERROR_INVITEE_OFFLINE, INVITE_ENDED_ANSWERED, REMOVED_LEFT, REPLY_ACCEPT,
 };
@@ -24,8 +30,9 @@ use crate::effects::StoreOp;
 use crate::voice::new_group_channel;
 use crate::world::{GroupInvite, METRIC_CALLS, REFUSED, RESULT_LABEL, SocialWorld};
 
-/// Most members of a group: the five of an expedition group (Inferred; the largest retail group
-/// of the captures, `dungeon_dynasty_tank_`, had four members at its end).
+/// Most members of a group: the client's `Hud.LocalPlayer.Group.MaxMembers` (Observed: 5, set in
+/// `FUN_14344f6c0` beside `Hud.LocalPlayer.Raid.MaxGroups` 10) and the five member blocks of the
+/// group entity.
 pub(crate) const GROUP_MEMBER_LIMIT: usize = 5;
 /// The last byte of every retail 1677.
 const INVITE_REMOVED_FLAG: u8 = 0;
@@ -79,7 +86,24 @@ impl SocialWorld {
             GroupCall::SwapRaidMembers { first, second } => {
                 self.swap_raid_members(character, &first, &second);
             }
+            GroupCall::ChooseRole { role } => self.choose_role(character, role),
         }
+    }
+
+    /// Sets the role `role` of `character`; its group's entity shows it. A role outside
+    /// [`CHOOSABLE_ROLES`] is refused.
+    fn choose_role(&mut self, character: Uuid, role: u8) {
+        let Some(person) = self
+            .people
+            .get_mut(&character)
+            .filter(|_| CHOOSABLE_ROLES.contains(&role))
+        else {
+            metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
+            return;
+        };
+        person.group_role = role;
+        // Its group's members see the new role in their group entity.
+        self.touch(character);
     }
 
     /// A ping of `character` goes to every other member of its group, as it came.
@@ -112,8 +136,8 @@ impl SocialWorld {
     }
 
     /// Moves a raid member to the first place of raid group `group` (the members in join
-    /// order, [`GROUP_MEMBER_LIMIT`] per group) and saves the group; every member's group
-    /// state goes out again. A group this raid does not have is refused.
+    /// order, [`GROUP_MEMBER_LIMIT`] per group, the first group 0) and saves the group; every
+    /// member's group state goes out again. A group this raid does not have is refused.
     fn move_raid_member(&mut self, character: Uuid, member: &str, group: u8) {
         let Some(member) = Uuid::parse_str(member).ok() else {
             metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
@@ -130,13 +154,9 @@ impl SocialWorld {
             metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
             return;
         };
-        // Raid groups are 1-based in the retail calls (1 and 2 and 3 seen).
-        let Some(first) = usize::from(group.saturating_sub(1)).checked_mul(GROUP_MEMBER_LIMIT)
-        else {
-            metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
-            return;
-        };
-        if group == 0 || first >= raid.members.len() {
+        // Raid groups are indexes from 0 (Observed: 0 to 3 in `raid_group_influence_race`).
+        let first = usize::from(group) * GROUP_MEMBER_LIMIT;
+        if first >= raid.members.len() {
             metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
             return;
         }
@@ -686,7 +706,7 @@ mod tests {
             [character(1), character(3), character(2)]
         );
         let mut move_args = text(&character(2).hyphenated().to_string());
-        move_args.push(1);
+        move_args.push(0);
         call(
             &mut world,
             1,
@@ -698,8 +718,98 @@ mod tests {
         assert_eq!(
             world.groups[&group].members,
             [character(2), character(1), character(3)],
-            "group 1 starts at the first member"
+            "group 0 starts at the first member"
         );
+        let mut past_the_members = text(&character(2).hyphenated().to_string());
+        past_the_members.push(1);
+        call(
+            &mut world,
+            1,
+            "sim-a",
+            MOVE_RAID_MEMBER_TYPE_INDEX,
+            &past_the_members,
+            NOW_MS,
+        );
+        assert_eq!(
+            world.groups[&group].members,
+            [character(2), character(1), character(3)],
+            "a group past the members is refused"
+        );
+    }
+
+    #[test]
+    fn a_chosen_role_shows_in_the_group_entity_and_an_unknown_role_is_refused() {
+        use nw_messages::payload::MemberState;
+        use nw_messages::social::group_data::{GROUP_DATA_TYPE_INDEX, ROLE_NONE};
+        use nw_messages::social::groups::CHOOSE_ROLE_TYPE_INDEX;
+
+        let mut world = world();
+        join(&mut world, 1, "Ann", "sim-a");
+        join(&mut world, 2, "Bob", "sim-a");
+        call(
+            &mut world,
+            1,
+            "sim-a",
+            GROUP_INVITE_TYPE_INDEX,
+            &invite_args(2),
+            NOW_MS,
+        );
+        let invite = *world.group_invites.keys().next().expect("an open invite");
+        let mut reply = invite.to_vec();
+        reply.extend(REPLY_ACCEPT.to_be_bytes());
+        call(
+            &mut world,
+            2,
+            "sim-a",
+            REPLY_TO_INVITE_TYPE_INDEX,
+            &reply,
+            NOW_MS,
+        );
+        let tank = *CHOOSABLE_ROLES.start();
+        let effects = call(
+            &mut world,
+            2,
+            "sim-a",
+            CHOOSE_ROLE_TYPE_INDEX,
+            &[tank],
+            NOW_MS,
+        );
+        assert_eq!(world.people[&character(2)].group_role, tank);
+        let roles: Vec<Option<u8>> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::GroupEntity { delivery, .. } if delivery.character == character(1) => {
+                    delivery.view.as_ref()
+                }
+                _ => None,
+            })
+            .map(|view| {
+                match MemberState::decode(GROUP_DATA_TYPE_INDEX, &view.body).expect("reads") {
+                    MemberState::GroupData(state) => state.members[1].role,
+                    other => panic!("group data: {other:?}"),
+                }
+            })
+            .collect();
+        assert_eq!(roles, [Some(tank)], "the other member sees the role");
+        let past = *CHOOSABLE_ROLES.end() + 1;
+        call(
+            &mut world,
+            2,
+            "sim-a",
+            CHOOSE_ROLE_TYPE_INDEX,
+            &[past],
+            NOW_MS,
+        );
+        assert_eq!(world.people[&character(2)].group_role, tank, "refused");
+        call(
+            &mut world,
+            1,
+            "sim-a",
+            CHOOSE_ROLE_TYPE_INDEX,
+            &[ROLE_NONE],
+            NOW_MS,
+        );
+        assert_eq!(world.people[&character(1)].group_role, ROLE_NONE, "refused");
     }
 
     #[test]

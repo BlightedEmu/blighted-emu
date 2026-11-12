@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Generic invites between two players of this sim (economy note
 //! `local-data/scratch-work/run15/economy/REPORT.md`, section 4): the `Trade` activity, which
-//! starts a player trade when the invited player accepts.
+//! starts a player trade when the invited player accepts, and the `Duel` activity, which starts
+//! a duel ([`super::duel`]; retail `duel_capture`: 3404 with the activity `9bb4a762`, the
+//! CRC-32 of `duel`, then 3406).
 //!
 //! The invite (3404) names the invited character. When both players play here, have no other
 //! invite or trade, and stand within the activity's `MaxDistance`, the invite goes into the
@@ -13,7 +15,7 @@
 //! [`end::ELIGIBILITY_FAILED`] to the caller (retail: 1 to an accept that failed). An invite
 //! that runs out is cleared at the next economy round.
 //!
-//! The other activities (duel, musical performance, shard) are not served here: their invite is
+//! The other activities (musical performance, shard) are not served here: their invite is
 //! refused with [`end::SYSTEM_ERROR`].
 
 use std::collections::HashMap;
@@ -27,10 +29,12 @@ use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{BundleMember, EconomyMessage, FacetHeader, MemberState, ServerMessage};
 use uuid::Uuid;
 
+use super::duel::DUEL_MODE;
 use super::{Body, Player, SimWorld, send_now};
 
-/// The activity this sim serves (`GenericInvites` `ActivityCrc`).
+/// The activities this sim serves (`GenericInvites` `ActivityCrc`).
 const TRADE_ACTIVITY: &str = "Trade";
+const SERVED_ACTIVITIES: [&str; 2] = [TRADE_ACTIVITY, DUEL_MODE];
 /// Nanoseconds per millisecond: the expiry is server nanoseconds since 2000-01-01.
 const NS_PER_MS: u64 = 1_000_000;
 /// The activity of a failure that names no invite.
@@ -101,7 +105,11 @@ impl SimWorld {
             .content
             .invites
             .activity(activity)
-            .filter(|rules| rules.name.eq_ignore_ascii_case(TRADE_ACTIVITY))
+            .filter(|rules| {
+                SERVED_ACTIVITIES
+                    .iter()
+                    .any(|served| rules.name.eq_ignore_ascii_case(served))
+            })
             .ok_or(end::SYSTEM_ERROR)?;
         let (duration_ms, max_distance_m) = (rules.duration_ms, rules.max_distance_m);
         let character = std::str::from_utf8(target)
@@ -117,7 +125,9 @@ impl SimWorld {
             })
             .ok_or(end::ELIGIBILITY_FAILED)?;
         let busy = |world: &Self, number| {
-            world.economy.invites.of(number).is_some() || world.trading(number)
+            world.economy.invites.of(number).is_some()
+                || world.trading(number)
+                || world.duels.dueling(number)
         };
         if invitee_number == number || busy(self, number) || busy(self, invitee_number) {
             return Err(end::ELIGIBILITY_FAILED);
@@ -162,7 +172,8 @@ impl SimWorld {
         tracing::debug!(
             inviter = number,
             invitee = invitee_number,
-            "trade invite sent"
+            activity,
+            "invite sent"
         );
         Ok(())
     }
@@ -200,12 +211,16 @@ impl SimWorld {
             );
             return;
         }
-        let max_distance_m = self
-            .content
-            .invites
-            .activity(invite.activity)
-            .map_or(0.0, |rules| rules.max_distance_m);
-        if !self.within(inviter, entity, max_distance_m) || !self.start_trade(inviter, entity) {
+        let rules = self.content.invites.activity(invite.activity);
+        let max_distance_m = rules.map_or(0.0, |rules| rules.max_distance_m);
+        let duel = rules.is_some_and(|rules| rules.name.eq_ignore_ascii_case(DUEL_MODE));
+        let started = self.within(inviter, entity, max_distance_m)
+            && if duel {
+                self.start_duel(inviter, entity)
+            } else {
+                self.start_trade(inviter, entity)
+            };
+        if !started {
             self.invite_failed(entity, number, invite.activity, end::ELIGIBILITY_FAILED);
         }
     }

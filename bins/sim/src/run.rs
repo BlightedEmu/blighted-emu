@@ -463,6 +463,16 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             nw_content::town_props::TownProps::default()
         }
     };
+    content.war_forts = match nw_content::war_forts::WarForts::load(&config.content_dir, &build) {
+        Ok(forts) => {
+            tracing::info!(forts = forts.len(), "war forts");
+            forts
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no war forts table: no war instance runs on this sim");
+            nw_content::war_forts::WarForts::default()
+        }
+    };
     content.spell_slices =
         match nw_content::spell_slices::SpellSlices::load(&config.content_dir, &build) {
             Ok(slices) => {
@@ -472,6 +482,39 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             Err(error) => {
                 tracing::warn!(%error, "no spell slices: a cast spell shows nothing");
                 nw_content::spell_slices::SpellSlices::default()
+            }
+        };
+    content.shot_entities =
+        match nw_content::shot_entities::ShotEntities::load(&config.content_dir, &build) {
+            Ok(shots) => {
+                tracing::info!(damage_rows = shots.len(), "shot entities");
+                shots
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no shot entities: no player sees a shot fly");
+                nw_content::shot_entities::ShotEntities::default()
+            }
+        };
+    content.dungeon_gates =
+        match nw_content::dungeon_gates::DungeonGates::load(&config.content_dir, &build) {
+            Ok(gates) => {
+                tracing::info!(gates = gates.gate_count(), "dungeon gates");
+                gates
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no dungeon gates: an instance shows no gate or door");
+                nw_content::dungeon_gates::DungeonGates::default()
+            }
+        };
+    content.dungeon_gate_rules =
+        match nw_content::dungeon_gates::GateRules::load(&config.content_dir, &build) {
+            Ok(rules) => {
+                tracing::info!(levels = rules.levels.len(), "dungeon gate rules");
+                rules
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no dungeon gate rules: every gate is open from the start");
+                nw_content::dungeon_gates::GateRules::default()
             }
         };
     tracing::info!(

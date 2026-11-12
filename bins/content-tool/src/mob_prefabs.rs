@@ -1268,7 +1268,7 @@ mod tests {
         member(
             EVENT_COMPONENT,
             MemberState::DelayedEvent(DelayedEventState {
-                total_delay: Some(7),
+                total_delay_s: Some(7.0),
                 completed: Some(completed),
             }),
         )

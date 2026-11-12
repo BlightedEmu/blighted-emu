@@ -350,24 +350,32 @@ impl BodyCodec for LevelInfoChangedMsg {
         Ok(writer.finish())
     }
 
+    /// A known level reads as its [`LevelSpec`]; any other level as a private instance level of
+    /// its map name, terrain path and frame ([`LevelSpec::instance`]: an expedition, raid, trial
+    /// or arena 1635, Observed `NW_Arena01` and `NW_Arena_3v3_04` in the arena flow study). Its
+    /// strings live for the rest of the process: decode such bodies in tools and tests only.
     fn decode(body: &[u8]) -> Result<Self, MessageError> {
         let mut reader = Reader::new(body);
         let name = read_string(&mut reader)?;
-        let level = LEVELS
-            .into_iter()
-            .find(|level| level.map_name == name)
-            .ok_or(MessageError::LengthMismatch {
-                field: "LevelInfoChangedMsg level name",
-            })?;
-        if read_string(&mut reader)? != level.coatlicue_path {
-            return Err(MessageError::LengthMismatch {
-                field: "LevelInfoChangedMsg terrain path",
-            });
-        }
-        reader.f32()?;
-        reader.f32()?;
-        reader.f32()?;
-        reader.f32()?;
+        let path = read_string(&mut reader)?;
+        let frame = [reader.f32()?, reader.f32()?, reader.f32()?, reader.f32()?];
+        let level = match LEVELS.into_iter().find(|level| level.map_name == name) {
+            Some(level) if level.coatlicue_path == path => level,
+            Some(_) => {
+                return Err(MessageError::LengthMismatch {
+                    field: "LevelInfoChangedMsg terrain path",
+                });
+            }
+            None => {
+                let name = std::str::from_utf8(name).map_err(|_| MessageError::LengthMismatch {
+                    field: "LevelInfoChangedMsg level name",
+                })?;
+                let path = std::str::from_utf8(path).map_err(|_| MessageError::LengthMismatch {
+                    field: "LevelInfoChangedMsg terrain path",
+                })?;
+                LevelSpec::instance(&name.to_lowercase(), name, path, frame)
+            }
+        };
         let reserved = reader.u64()?;
         let count = reader.prefixed()?;
         let mut phasing = Vec::new();
@@ -453,15 +461,45 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_level_name_is_rejected() {
+    fn a_known_name_with_another_terrain_path_is_rejected() {
         let message = LevelInfoChangedMsg::open_world(1, 1, 1);
         let mut body = message.encode().expect("encode");
-        // Corrupt the first byte of the map name (after its 1-byte length prefix).
-        body[1] ^= 0xff;
+        // Corrupt the last byte of the terrain path (after the name and the path's prefix).
+        let path_end =
+            1 + OPEN_WORLD_LEVEL.map_name.len() + 1 + OPEN_WORLD_LEVEL.coatlicue_path.len();
+        body[path_end - 1] ^= 0xff;
         assert!(matches!(
             LevelInfoChangedMsg::decode(&body),
             Err(MessageError::LengthMismatch { .. })
         ));
+    }
+
+    /// Retail `20261010-125035-658` 298.748 s: the 1635 of the arena `NW_Arena01` (no id in it).
+    #[test]
+    fn the_retail_arena_level_reads_and_writes_back() {
+        const ARENA_BODY: &str = concat!(
+            "0a4e575f4172656e61303114636f61746c696375652f4e575f4172656e613031",
+            "44580000445000004478000044700000",
+            "8b2cbbb86ac5c8890103000000008b2cbbb86ac5c88900000002",
+            "01020100000000c4baa4bd6d"
+        );
+        let body: Vec<u8> = (0..ARENA_BODY.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&ARENA_BODY[at..at + 2], 16).expect("hex"))
+            .collect();
+        let message = LevelInfoChangedMsg::decode(&body).expect("decode");
+        assert_eq!(message.level.folder, "nw_arena01");
+        assert_eq!(message.level.map_name, b"NW_Arena01");
+        assert_eq!(message.level.phasing_origin, [864.0, 832.0]);
+        assert_eq!(message.level.phasing_bounds, [992.0, 960.0]);
+        assert!(message.level.private);
+        assert_eq!(message.reserved, 0x8b2c_bbb8_6ac5_c889);
+        assert_eq!(message.client_context, 2);
+        assert_eq!(
+            message,
+            LevelInfoChangedMsg::of_level(message.level, 2, 0xc4_baa4_bd6d, message.reserved)
+        );
+        assert_eq!(message.encode().expect("encode"), body);
     }
 
     /// The captured tutorial body length (new-player-start note).

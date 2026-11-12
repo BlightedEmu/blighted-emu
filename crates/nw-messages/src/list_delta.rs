@@ -14,7 +14,7 @@ use crate::items::{FULL_FORM, FullList, VERSION_PRESENT, read_number};
 use crate::wire::{MessageError, Reader, Writer};
 
 /// Entries per delta group.
-const DELTA_GROUP: usize = 8;
+pub(crate) const DELTA_GROUP: usize = 8;
 
 /// One changed or appended element of a list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

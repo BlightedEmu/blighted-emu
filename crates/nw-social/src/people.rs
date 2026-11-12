@@ -30,9 +30,6 @@ use crate::privacy::Audience;
 use crate::voice::{TokenAction, VoiceService, channel_layer};
 use crate::world::{METRIC_CALLS, REFUSED, RESULT_LABEL, SocialWorld};
 
-/// The pronoun of a character of this server: it has no pronoun choice (0 is the value of 251
-/// of 350 retail player data entries).
-const DEFAULT_PRONOUN: u8 = 0;
 /// The 6675 of a player in no phase (retail `Hive 3v3 group`: every field 0).
 const NO_PHASE_STATE: u8 = 0;
 /// The phase of a player in the open world (retail: 0 outside instances); an offline player's
@@ -140,7 +137,7 @@ impl SocialWorld {
         Some(PlayerDataView {
             character: character.hyphenated().to_string().into_bytes(),
             name: person.name.as_bytes().to_vec(),
-            pronoun: DEFAULT_PRONOUN,
+            pronoun: person.settings.pronoun,
             icon: person
                 .settings
                 .icon

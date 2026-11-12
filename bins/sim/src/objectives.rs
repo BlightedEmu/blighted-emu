@@ -457,11 +457,15 @@ pub(crate) enum TaskKind {
         place: Option<String>,
     },
     /// Done after `count` kills of mobs of the type; with a `place` (a `POITag`), only kills
-    /// while the player is in it count (`EnforceLocationRequirement`).
+    /// while the player is in it count (`EnforceLocationRequirement`); with a `game_mode` (its
+    /// `GameModeId`, the perk tasks of the artifact objectives: `DungeonGreatCleave00`,
+    /// `OutpostRush`), only kills in an instance of that game mode count (Inferred from the
+    /// column: no capture shows a kill of such a task).
     KillContribution {
         enemy: String,
         count: u32,
         place: Option<String>,
+        game_mode: Option<String>,
     },
     /// Done when the player gets the item (a tutorial weapon take's drop id, its
     /// `FailOnCondition`); without one, when it loots a container.
@@ -1116,6 +1120,7 @@ fn kind_of(row: &TaskRow) -> TaskKind {
             enemy: row.kill_enemy_type.clone().unwrap_or_default(),
             count,
             place: place(),
+            game_mode: filled(&row.game_mode_id),
         },
         // Retail takes the items back at the turn-in, for a quest as for a mission (the two
         // `MI_Alkahest` of `02A_Side02_02_02_02_Task_Fetch` left bag slot 175 at the turn-in of
@@ -1354,6 +1359,15 @@ fn kind_of(row: &TaskRow) -> TaskKind {
 }
 
 impl ObjectiveTree {
+    /// Whether the server runs every task of the tree: none is of a type it does not run
+    /// ([`TaskKind::NotRun`]), so the objective can end.
+    pub fn runs(&self) -> bool {
+        !self
+            .tasks
+            .iter()
+            .any(|task| matches!(task.kind, TaskKind::NotRun(_)))
+    }
+
     /// The tree under task `root` of `rows`; `None` when `root` is not a row. A sub-task that is
     /// not a row, or that is already one of its own parents, is left out.
     pub fn build(rows: &[TaskRow], root: &str) -> Option<Self> {
@@ -1673,6 +1687,12 @@ enum TaskState {
     Active { progress: u32, due_ms: Option<u64> },
     /// Done.
     Done,
+    /// Stopped with its progress kept: a later step of a consecutive container whose earlier
+    /// stay-active equip step went back to waiting. Observed: retail sends such a task
+    /// `Inactive` with its progress (`artifact_perk_unlock`, 0.603 s:
+    /// `Task_Perk3_Artifact_Set3_MediumHead` progress 5, state 4, the item not worn). Inferred:
+    /// it counts again from that progress when the item is worn again.
+    Paused { progress: u32 },
 }
 
 /// One player's run of an objective tree.
@@ -1688,6 +1708,9 @@ pub struct ObjectiveRun {
     places: Option<Vec<String>>,
     /// The sections of each done `TaskQuickCourse`, its tracker's last progress.
     course_sections: Vec<(usize, u32)>,
+    /// The game mode of the instance the player is in ([`Event::GameModeEntered`]); `None` in
+    /// the open world. A run that goes to another sim starts without one.
+    game_mode: Option<String>,
 }
 
 /// Whether `enemy` names a mob of `vitals_id`, `categories` and spawn categories
@@ -1814,6 +1837,7 @@ impl ObjectiveRun {
             listed: Vec::new(),
             places: None,
             course_sections: Vec::new(),
+            game_mode: None,
         };
         let mut effects = Vec::new();
         if !run.states.is_empty() {
@@ -1835,6 +1859,7 @@ impl ObjectiveRun {
                         due_in_ms: due_ms.map(|due| due.saturating_sub(now_ms)),
                     },
                     TaskState::Done => QuestTask::Done,
+                    TaskState::Paused { progress } => QuestTask::Paused { progress },
                 })
                 .collect(),
             listed: self
@@ -1874,6 +1899,7 @@ impl ObjectiveRun {
                     due_ms: due_in_ms.map(|left| now_ms.saturating_add(left)),
                 },
                 QuestTask::Done => TaskState::Done,
+                QuestTask::Paused { progress } => TaskState::Paused { progress },
             })
             .collect();
         // A save keeps no ride's sections: a done ride shows 1 after a load.
@@ -1883,6 +1909,7 @@ impl ObjectiveRun {
             listed,
             places: None,
             course_sections: Vec::new(),
+            game_mode: None,
         })
     }
 
@@ -1963,11 +1990,16 @@ impl ObjectiveRun {
             .map(|index| {
                 let task = &self.tree.tasks[*index];
                 // A listed task that is idle had progress, then its partial container stopped it.
+                // A done container with a done stay-active child runs on with it (Observed:
+                // retail `Loadouts`, 0.371 s: `Task_ContainerEquip_Artifact_Set1_LightFeet`
+                // progress 2, state 3, its equip step state 3).
                 let status = match self.states[*index] {
-                    TaskState::Done if task.stay_active => TaskStatus::DoneActive,
+                    TaskState::Done if task.stay_active || self.has_stay_active_child(*index) => {
+                        TaskStatus::DoneActive
+                    }
                     TaskState::Done => TaskStatus::Done,
                     TaskState::Active { .. } => TaskStatus::Running,
-                    TaskState::Idle => TaskStatus::Stopped,
+                    TaskState::Idle | TaskState::Paused { .. } => TaskStatus::Stopped,
                 };
                 let progress = match (&task.kind, self.states[*index]) {
                     (TaskKind::Consecutive | TaskKind::Partial | TaskKind::Simple, _) => {
@@ -1994,7 +2026,9 @@ impl ObjectiveRun {
                         .iter()
                         .find(|(task, _)| task == index)
                         .map_or(1, |(_, sections)| *sections),
-                    (_, TaskState::Active { progress, .. }) => progress,
+                    (_, TaskState::Active { progress, .. } | TaskState::Paused { progress }) => {
+                        progress
+                    }
                     _ => 1,
                 };
                 TaskProgress {
@@ -2037,6 +2071,7 @@ impl ObjectiveRun {
             self.places = Some(places.iter().map(|place| place.to_lowercase()).collect());
         }
         self.sync_patrols(now_ms);
+        self.sync_unworn(facts.held);
         let mut effects = Vec::new();
         for index in 0..self.states.len() {
             let TaskState::Active { progress, due_ms } = self.states[index] else {
@@ -2123,6 +2158,85 @@ impl ObjectiveRun {
             }
         }
         effects
+    }
+
+    /// Puts each done stay-active equip task whose item `held` no longer wears back to waiting,
+    /// with the containers above it, and pauses the later steps of its consecutive containers.
+    /// Observed (retail `equipping_gear-items`, an armour artifact): the equip at 20.034 s sent
+    /// `Task_Equip_*` progress 1 state 3 and its consecutive container progress 1; the unequip
+    /// at 36.165 s sent the equip task progress 0 state 1 and the container progress 0. Only the
+    /// 73 artifact equip tasks of build 25810808 are stay-active equip tasks.
+    fn sync_unworn(&mut self, held: &[(&str, u32, bool)]) {
+        let tree = Arc::clone(&self.tree);
+        for (index, task) in tree.tasks.iter().enumerate() {
+            let TaskKind::EquipItem(item) = &task.kind else {
+                continue;
+            };
+            let worn = held
+                .iter()
+                .any(|(id, _, worn)| *worn && id.eq_ignore_ascii_case(item));
+            if !task.stay_active || worn || self.states[index] != TaskState::Done {
+                continue;
+            }
+            self.states[index] = TaskState::Active {
+                progress: 0,
+                due_ms: None,
+            };
+            let mut child = index;
+            while let Some(parent) = tree.tasks[child].parent {
+                if self.states[parent] == TaskState::Done {
+                    self.states[parent] = TaskState::Active {
+                        progress: 0,
+                        due_ms: None,
+                    };
+                }
+                if tree.tasks[parent].kind == TaskKind::Consecutive {
+                    let later = tree.tasks[parent]
+                        .children
+                        .iter()
+                        .skip_while(|sibling| **sibling != child)
+                        .skip(1);
+                    for sibling in later {
+                        self.pause(*sibling);
+                    }
+                }
+                child = parent;
+            }
+        }
+    }
+
+    /// Pauses task `index` and its children while they wait, keeping their progress.
+    fn pause(&mut self, index: usize) {
+        if let TaskState::Active { progress, .. } = self.states[index] {
+            self.states[index] = TaskState::Paused { progress };
+        }
+        let tree = Arc::clone(&self.tree);
+        for child in &tree.tasks[index].children {
+            self.pause(*child);
+        }
+    }
+
+    /// Lets paused task `index` and its paused children wait again from their kept progress.
+    fn unpause(&mut self, index: usize) {
+        if let TaskState::Paused { progress } = self.states[index] {
+            self.states[index] = TaskState::Active {
+                progress,
+                due_ms: None,
+            };
+        }
+        let tree = Arc::clone(&self.tree);
+        for child in &tree.tasks[index].children {
+            self.unpause(*child);
+        }
+    }
+
+    /// Whether a child of task `index` is done and runs on: a stay-active task, or a container
+    /// with such a child.
+    fn has_stay_active_child(&self, index: usize) -> bool {
+        self.tree.tasks[index].children.iter().any(|child| {
+            self.states[*child] == TaskState::Done
+                && (self.tree.tasks[*child].stay_active || self.has_stay_active_child(*child))
+        })
     }
 
     /// The items the waiting gather tasks drop for a corpse of `vitals_id` and `categories`
@@ -2286,6 +2400,15 @@ impl ObjectiveRun {
         })
     }
 
+    /// Whether the player is in an instance of `game_mode` (`None`: anywhere).
+    fn is_in_game_mode(&self, game_mode: Option<&str>) -> bool {
+        game_mode.is_none_or(|wanted| {
+            self.game_mode
+                .as_deref()
+                .is_some_and(|mode| mode.eq_ignore_ascii_case(wanted))
+        })
+    }
+
     /// Lists task `index` in the tracker once it has progress.
     fn list(&mut self, index: usize) {
         if !self.listed.contains(&index) {
@@ -2296,6 +2419,9 @@ impl ObjectiveRun {
     /// The effects of `event` at `now_ms`.
     pub fn event(&mut self, event: Event<'_>, now_ms: u64) -> Vec<Effect> {
         let mut effects = Vec::new();
+        if let Event::GameModeEntered(mode) = event {
+            self.game_mode = Some(mode.to_owned());
+        }
         // Only tasks waiting before the event take it: a task it starts does not.
         let waiting: Vec<usize> = (0..self.states.len())
             .filter(|index| matches!(self.states[*index], TaskState::Active { .. }))
@@ -2347,6 +2473,7 @@ impl ObjectiveRun {
                         enemy,
                         count,
                         place,
+                        game_mode,
                     },
                     Event::Killed {
                         vitals_id,
@@ -2355,7 +2482,8 @@ impl ObjectiveRun {
                     },
                 ) => (
                     kills_count(enemy, vitals_id, categories, spawn_categories)
-                        && self.is_in(place.as_deref()),
+                        && self.is_in(place.as_deref())
+                        && self.is_in_game_mode(game_mode.as_deref()),
                     1,
                     *count,
                 ),
@@ -2629,11 +2757,17 @@ impl ObjectiveRun {
         let siblings = &tree.tasks[parent].children;
         match tree.tasks[parent].kind {
             TaskKind::Consecutive => {
+                // A later step done before goes on done, and a paused one waits again (an
+                // artifact's perk steps when its item is worn again, [`ObjectiveRun::sync_unworn`]).
                 let next = siblings
                     .iter()
                     .skip_while(|sibling| **sibling != index)
-                    .nth(1);
+                    .skip(1)
+                    .find(|sibling| self.states[**sibling] != TaskState::Done);
                 match next {
+                    Some(next) if matches!(self.states[*next], TaskState::Paused { .. }) => {
+                        self.unpause(*next);
+                    }
                     Some(next) => self.activate(*next, now_ms, effects),
                     None => self.complete(parent, now_ms, effects),
                 }
@@ -3814,6 +3948,125 @@ pub(crate) mod tests {
         let (mut run, _) = ObjectiveRun::start(tree, NOW);
         run.event(Event::Died, NOW);
         assert!(!run.finished(), "no fake success: the quest waits");
+    }
+
+    /// The tree of an artifact objective (build 25810808 `Objective_Artifact_Set1_MediumFeet`,
+    /// made-up ids): equip, then two perk kills; the craft achievement beside them.
+    fn artifact_rows() -> Vec<TaskRow> {
+        const PERK_KILLS: i64 = 2;
+        vec![
+            container("Root", "SimpleTaskContainer", &["EquipSteps", "Craft"]),
+            container(
+                "EquipSteps",
+                "ConsecutiveTaskContainer",
+                &["Equip", "Perks"],
+            ),
+            TaskRow {
+                stay_active: true,
+                ..with_item("Equip", "TaskEquipItem", ARTIFACT)
+            },
+            container("Perks", "SimpleTaskContainer", &["Wolves", "Ogres"]),
+            TaskRow {
+                kill_enemy_type: Some("IceWolf".to_owned()),
+                target_qty: Some(PERK_KILLS),
+                ..row("Wolves", "TaskKillContribution")
+            },
+            TaskRow {
+                kill_enemy_type: Some("Ogre".to_owned()),
+                game_mode_id: Some("DungeonTest00".to_owned()),
+                ..row("Ogres", "TaskKillContribution")
+            },
+            TaskRow {
+                stay_active: true,
+                ..with_item("Craft", "TaskAchievement", "FC_Artifact_Test")
+            },
+        ]
+    }
+
+    const ARTIFACT: &str = "Artifact_Test_MediumFeet";
+
+    fn kill(vitals_id: &str) -> Event<'_> {
+        Event::Killed {
+            vitals_id,
+            categories: &[],
+            spawn_categories: &[],
+        }
+    }
+
+    fn status_of(run: &ObjectiveRun, id: &str) -> Option<(u32, TaskStatus)> {
+        let task = lowercase_crc32(id);
+        run.progress()
+            .into_iter()
+            .find(|entry| entry.task == task)
+            .map(|entry| (entry.progress, entry.status))
+    }
+
+    #[test]
+    fn an_artifact_s_perk_steps_count_while_it_is_worn_and_pause_while_it_is_not() {
+        let tree = Arc::new(ObjectiveTree::build(&artifact_rows(), "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        let worn = [(ARTIFACT, 1, true)];
+        let in_bag = [(ARTIFACT, 1, false)];
+        run.event(kill("IceWolf"), NOW);
+        assert_eq!(
+            status_of(&run, "Wolves"),
+            None,
+            "no kill counts before the equip"
+        );
+        run.sync_held(&worn, NOW);
+        assert_eq!(status_of(&run, "Equip"), Some((1, TaskStatus::DoneActive)));
+        run.event(kill("IceWolf"), NOW);
+        assert_eq!(status_of(&run, "Wolves"), Some((1, TaskStatus::Running)));
+        // Retail `equipping_gear-items`, 36.165 s: the unequip puts the equip step back.
+        run.sync_held(&in_bag, NOW);
+        assert_eq!(status_of(&run, "Equip"), Some((0, TaskStatus::Running)));
+        assert_eq!(
+            status_of(&run, "EquipSteps"),
+            Some((0, TaskStatus::Running))
+        );
+        assert_eq!(status_of(&run, "Wolves"), Some((1, TaskStatus::Stopped)));
+        run.event(kill("IceWolf"), NOW);
+        assert_eq!(status_of(&run, "Wolves"), Some((1, TaskStatus::Stopped)));
+        run.sync_held(&worn, NOW);
+        run.event(kill("IceWolf"), NOW);
+        assert_eq!(status_of(&run, "Wolves"), Some((2, TaskStatus::Done)));
+        assert!(!run.finished());
+    }
+
+    #[test]
+    fn a_kill_task_with_a_game_mode_counts_only_in_its_instance_and_a_done_step_stays_done() {
+        let tree = Arc::new(ObjectiveTree::build(&artifact_rows(), "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        let worn = [(ARTIFACT, 1, true)];
+        run.sync_held(&worn, NOW);
+        run.event(kill("Ogre"), NOW);
+        assert_eq!(status_of(&run, "Ogres"), None, "an open-world kill");
+        run.event(Event::GameModeEntered("DungeonTest00"), NOW);
+        run.event(kill("Ogre"), NOW);
+        run.event(kill("IceWolf"), NOW);
+        run.event(kill("IceWolf"), NOW);
+        // Retail `Loadouts`, 0.371 s: the worn artifact's done steps run on (state 3).
+        assert_eq!(status_of(&run, "Perks"), Some((2, TaskStatus::Done)));
+        assert_eq!(
+            status_of(&run, "EquipSteps"),
+            Some((2, TaskStatus::DoneActive))
+        );
+        // Retail `artifact_perk_unlock`, 0.603 s: an unworn artifact keeps its done perks and
+        // its consecutive container counts them (progress 1, state 1).
+        run.sync_held(&[(ARTIFACT, 1, false)], NOW);
+        assert_eq!(status_of(&run, "Perks"), Some((2, TaskStatus::Done)));
+        assert_eq!(
+            status_of(&run, "EquipSteps"),
+            Some((1, TaskStatus::Running))
+        );
+        let saved = run.export(NOW);
+        let resumed = ObjectiveRun::resume(
+            Arc::new(ObjectiveTree::build(&artifact_rows(), "Root").expect("tree")),
+            &saved,
+            NOW,
+        )
+        .expect("fits");
+        assert_eq!(resumed.progress(), run.progress());
     }
 
     #[test]

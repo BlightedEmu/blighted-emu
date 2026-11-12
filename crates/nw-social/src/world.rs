@@ -10,6 +10,7 @@ use nw_bus::{
 };
 use nw_db::{CoinReturn, Company, LinkKind, SocialGroup, SocialRecords, SocialSettings};
 use nw_messages::FacetHeader;
+use nw_messages::social::group_data::ROLE_NONE;
 use nw_messages::social::players::{ONLINE_STATE_OFFLINE, ONLINE_STATE_ONLINE};
 use nw_messages::social::{ICON_LEN, PlayerPush, SocialCall, SocialFacet, SocialPush};
 use uuid::Uuid;
@@ -81,6 +82,8 @@ pub(crate) struct Person {
     pub(crate) throttle: ChatThrottle,
     /// What its group shows of its health.
     pub(crate) vitals: GroupVitals,
+    /// The role it chose for its groups (5390, [`crate::groups`]); kept for the service's run.
+    pub(crate) group_role: u8,
 }
 
 impl Person {
@@ -102,6 +105,7 @@ impl Person {
             group: None,
             throttle: ChatThrottle::default(),
             vitals: GroupVitals::default(),
+            group_role: ROLE_NONE,
         }
     }
 }
@@ -146,6 +150,16 @@ pub(crate) enum Transfer {
     Refund(CoinMove),
     /// Coin owed to the player that goes to it now.
     Debt(CoinReturn),
+    /// An upkeep payment: its coins leave the treasury, and the claim's due time moves, in one
+    /// database transaction.
+    Upkeep {
+        /// The treasury coins.
+        coins: CoinMove,
+        /// The territory id of the claim.
+        territory: u16,
+        /// When the player asked, Unix milliseconds.
+        at_ms: u64,
+    },
 }
 
 /// The social state of one world.
@@ -180,6 +194,8 @@ pub struct SocialWorld {
     pub(crate) sent: HashMap<Uuid, SentViews>,
     /// Unix milliseconds of each company invite made since the start, by (company, invitee).
     pub(crate) company_invite_ms: HashMap<(Uuid, Uuid), u64>,
+    /// The territory claims each company owns, as the service last read them.
+    pub(crate) claim_counts: HashMap<Uuid, u32>,
 }
 
 impl SocialWorld {
@@ -306,7 +322,13 @@ impl SocialWorld {
             touched: BTreeSet::new(),
             sent: HashMap::new(),
             company_invite_ms: HashMap::new(),
+            claim_counts: HashMap::new(),
         }
+    }
+
+    /// Takes the territory claims each company owns now, from the world database.
+    pub fn set_claim_counts(&mut self, counts: Vec<(Uuid, u32)>) {
+        self.claim_counts = counts.into_iter().collect();
     }
 
     /// Takes one input of sim `sim` at Unix milliseconds `now_ms`.
@@ -340,6 +362,7 @@ impl SocialWorld {
                 type_index,
                 body,
             } => self.call(character, type_index, &body, now_ms),
+            SocialInput::PayUpkeep(payment) => self.pay_upkeep(payment),
         }
         self.refresh_views(now_ms);
         std::mem::take(&mut self.out)
@@ -391,10 +414,12 @@ impl SocialWorld {
         let came_online = person.online.is_none();
         let look_changed = person.settings.level != player.level
             || person.settings.icon != Some(player.icon)
-            || person.settings.faction != player.faction;
+            || person.settings.faction != player.faction
+            || person.settings.pronoun != player.pronoun;
         person.settings.level = player.level;
         person.settings.icon = Some(player.icon);
         person.settings.faction = player.faction;
+        person.settings.pronoun = player.pronoun;
         if came_online {
             person.settings.last_online_ms = Some(now_ms);
         }
@@ -644,6 +669,7 @@ pub(crate) mod tests {
             name: name.to_owned(),
             level: 10,
             icon: [1; ICON_LEN],
+            pronoun: 0,
             sim: sim(on),
             level_name: "newworld_vitaeeterna".to_owned(),
             territories: vec![1],

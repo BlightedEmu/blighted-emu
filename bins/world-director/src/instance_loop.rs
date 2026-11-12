@@ -1,27 +1,40 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The I/O of the instances in the director's loop: the requests of the sims, the group queries
-//! to the social service, the openings and closings on the instance sims, and the instance sim
-//! processes the director starts and stops ([`crate::instances`] decides).
+//! to the social service, the openings and closings on the instance sims, the instance sim
+//! processes the director starts and stops ([`crate::instances`] decides), and the matchmaking
+//! queue of the arena ([`crate::matchmaking`] decides): its news to the players' sims and the
+//! instance of each accepted match.
 //!
 //! The loop owns the instances, so two requests never take the same free sim; every bus call
 //! runs in its own task and reports back to the loop ([`InstanceEvent`]).
+//!
+//! It also opens the instance of each territory war ([`crate::war_instances`] decides): it reads
+//! the wars every [`WAR_READ_INTERVAL`], opens a due war's instance on a free instance sim of the
+//! open world level, and tells every sim ([`WarInstanceNews`]) so they move the roster in.
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nw_bus::{
     Bus, BusId, GroupAnswer, GroupQuery, Incoming, InstanceCommand, InstanceOpened,
-    InstanceRefusal, InstanceReply, InstanceRequest, SimSlot, subject,
+    InstanceRefusal, InstanceReply, InstanceRequest, QueueCall, QueueNews, QueueNewsKind, SimSlot,
+    WAR_GAME_MODE, WarInstance, WarInstanceNews, subject,
 };
+use nw_content::war_forts::WarForts;
+use nw_db::{DbError, PgPool, TerritoryWar, territory_wars};
+use nw_world::dungeon_scripts::OPEN_WORLD_LEVEL;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::instances::{
-    Decision, InstanceSettings, InstanceTable, Instances, Launch, LaunchSettings, Launches, granted,
+    Decision, InstanceSettings, InstanceTable, Instances, Launch, LaunchSettings, Launches,
+    OpenInstance, granted,
 };
+use crate::matchmaking::{MatchOpening, Matchmaker, OpenedMatch, Outcome};
 use crate::sims::SimRegistry;
+use crate::war_instances::{WarInstances, WarOpening};
 
 /// Instance events that may wait for the loop.
 pub const INSTANCE_QUEUE: usize = 256;
@@ -31,6 +44,12 @@ pub const METRIC_INSTANCE_REQUESTS: &str = "director_instance_requests_total";
 pub const METRIC_INSTANCES: &str = "director_instances";
 /// Metric: instance sims the director started and runs.
 pub const METRIC_LAUNCHED_SIMS: &str = "director_launched_sims";
+/// Metric: players in the matchmaking queue.
+pub const METRIC_QUEUED: &str = "director_queued_players";
+/// Metric: arena matches opened, by `result`.
+pub const METRIC_MATCHES: &str = "director_matches_total";
+const OPENED: &str = "opened";
+const NOT_OPENED: &str = "not_opened";
 const RESULT_LABEL: &str = "result";
 const GRANTED: &str = "granted";
 /// The environment variables of a started instance sim (`NW_SIM_` overrides of
@@ -45,6 +64,11 @@ const INSTANCE_ROLE: &str = "instance";
 const ANY_LOCAL_PORT: &str = "127.0.0.1:0";
 /// The smallest phase id: a phase id must not be 0 (the client drops a 0-phase entry).
 const MIN_PHASE: u64 = 1;
+/// How often the director reads the wars for their instances (an operator value: a war's
+/// instance opens at most this late).
+pub const WAR_READ_INTERVAL: Duration = Duration::from_secs(10);
+/// Metric: war instances opened, by `result`.
+pub const METRIC_WAR_INSTANCES: &str = "director_war_instances_total";
 
 /// A result of a bus call of the instances, for the loop.
 #[derive(Debug)]
@@ -60,6 +84,26 @@ pub enum InstanceEvent {
     Opened {
         /// The instance.
         instance: Uuid,
+        /// Whether it opened.
+        ok: bool,
+    },
+    /// The instance sim answered the opening of the arena match `match_id`.
+    MatchOpened {
+        /// The match.
+        match_id: Uuid,
+        /// Its instance.
+        instance: OpenInstance,
+        /// Whether it opened.
+        ok: bool,
+    },
+    /// The wars were read ([`WAR_READ_INTERVAL`]).
+    WarsRead(Result<Vec<TerritoryWar>, DbError>),
+    /// The instance sim answered the opening of the instance of war `war`.
+    WarOpened {
+        /// The war.
+        war: WarInstance,
+        /// Its instance.
+        instance: OpenInstance,
         /// Whether it opened.
         ok: bool,
     },
@@ -86,6 +130,24 @@ pub struct InstanceLoop {
     events: mpsc::Sender<InstanceEvent>,
     /// The requests that wait for an instance's opening, by instance.
     waiting: HashMap<Uuid, Vec<Waiting>>,
+    /// The matchmaking queue of the arena.
+    matchmaker: Matchmaker,
+    /// The territory wars' instances; `None` when the loop reads no war.
+    wars: Option<WarLink>,
+}
+
+/// What the loop needs for the wars' instances.
+struct WarLink {
+    /// The world database the wars are read from.
+    db: PgPool,
+    /// The forts a capture shows: a war of another fort gets no instance.
+    forts: WarForts,
+    /// The wars that have an instance or wait for one.
+    instances: WarInstances,
+    /// When the next read is due.
+    next_read: Instant,
+    /// A read runs.
+    reading: bool,
 }
 
 impl InstanceLoop {
@@ -105,7 +167,30 @@ impl InstanceLoop {
             children: HashMap::new(),
             events,
             waiting: HashMap::new(),
+            matchmaker: Matchmaker::default(),
+            wars: None,
         }
+    }
+
+    /// The loop that also opens the instances of the territory wars of `db`, for the forts of
+    /// its settings (none in a world without instances).
+    #[must_use]
+    pub fn with_wars(mut self, db: PgPool) -> Self {
+        let Some(forts) = self
+            .settings
+            .as_ref()
+            .map(|settings| settings.war_forts.clone())
+        else {
+            return self;
+        };
+        self.wars = Some(WarLink {
+            db,
+            forts,
+            instances: WarInstances::default(),
+            next_read: Instant::now(),
+            reading: false,
+        });
+        self
     }
 
     /// The open instances, for a join.
@@ -173,11 +258,241 @@ impl InstanceLoop {
                     }
                 }
             }
+            InstanceEvent::MatchOpened {
+                match_id,
+                instance,
+                ok,
+            } => {
+                self.instances.opened(instance.id, ok);
+                metrics::gauge!(METRIC_INSTANCES).set(self.instances.len() as f64);
+                let result = if ok { OPENED } else { NOT_OPENED };
+                metrics::counter!(METRIC_MATCHES, RESULT_LABEL => result).increment(1);
+                let opened = ok.then(|| OpenedMatch {
+                    instance: instance.id,
+                    sim: instance.sim.clone(),
+                    phase: instance.phase,
+                });
+                let outcomes = self.matchmaker.opened(match_id, opened);
+                self.carry_out(outcomes, sims);
+            }
             InstanceEvent::AdmitFailed {
                 instance,
                 character,
             } => self.instances.remove_member(instance, character),
+            InstanceEvent::WarsRead(read) => self.wars_read(read, sims),
+            InstanceEvent::WarOpened { war, instance, ok } => {
+                self.instances.opened(instance.id, ok);
+                metrics::gauge!(METRIC_INSTANCES).set(self.instances.len() as f64);
+                let result = if ok { OPENED } else { NOT_OPENED };
+                metrics::counter!(METRIC_WAR_INSTANCES, RESULT_LABEL => result).increment(1);
+                if let Some(link) = self.wars.as_mut() {
+                    link.instances.opened(war.war, ok.then_some(instance.id));
+                }
+                if ok {
+                    tracing::info!(war = %war.war, territory = war.territory, instance = %instance.id, sim = %instance.sim.id, "war instance opened");
+                    self.publish_war_news(WarInstanceNews {
+                        war,
+                        instance: instance.id,
+                        sim: instance.sim.clone(),
+                        phase: instance.phase,
+                    });
+                }
+            }
         }
+    }
+
+    /// Starts a read of the wars when one is due and none runs.
+    fn read_wars(&mut self) {
+        let Some(link) = self.wars.as_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        if link.reading || now < link.next_read {
+            return;
+        }
+        link.reading = true;
+        link.next_read = now + WAR_READ_INTERVAL;
+        let (db, events) = (link.db.clone(), self.events.clone());
+        tokio::spawn(async move {
+            let read = territory_wars(&db, unix_ms()).await;
+            // The loop may have stopped; then the wars no longer matter.
+            let _ = events.send(InstanceEvent::WarsRead(read)).await;
+        });
+    }
+
+    /// The wars that a read found: the instance of each due war opens.
+    fn wars_read(&mut self, read: Result<Vec<TerritoryWar>, DbError>, sims: &SimRegistry) {
+        let running: Vec<(Uuid, Uuid)> = self.instances.wars().collect();
+        let Some(link) = self.wars.as_mut() else {
+            return;
+        };
+        link.reading = false;
+        let wars = match read {
+            Ok(wars) => wars,
+            Err(error) => {
+                tracing::warn!(%error, "territory wars not read");
+                return;
+            }
+        };
+        link.instances.sync(running.into_iter());
+        let openings = link.instances.due(&wars, &link.forts, unix_ms());
+        for opening in openings {
+            self.open_war(opening, sims);
+        }
+    }
+
+    /// Opens the instance of the war of `opening` on a free instance sim of the open world level.
+    fn open_war(&mut self, opening: WarOpening, sims: &SimRegistry) {
+        let Some(timeout) = self.settings.as_ref().map(|settings| settings.open_timeout) else {
+            return;
+        };
+        let request = InstanceRequest {
+            game_mode: WAR_GAME_MODE.to_owned(),
+            level: OPEN_WORLD_LEVEL.to_owned(),
+            requester: opening.war.war,
+            capacity: u32::try_from(opening.members.len()).unwrap_or(u32::MAX),
+            min_group: 0,
+            timeout_seconds: None,
+        };
+        self.launches.wanted(OPEN_WORLD_LEVEL, Instant::now());
+        let free = sims.free_instance_sims(OPEN_WORLD_LEVEL);
+        let war = opening.war;
+        let opened = self.instances.open_war(
+            war,
+            &request,
+            (opening.members, opening.ends_at_ms),
+            &free,
+            (Uuid::new_v4(), random_phase()),
+            unix_ms(),
+        );
+        let open = match opened {
+            Ok(open) => open,
+            Err(reason) => {
+                tracing::warn!(war = %war.war, territory = war.territory, ?reason, "war instance not opened");
+                metrics::counter!(METRIC_WAR_INSTANCES, RESULT_LABEL => NOT_OPENED).increment(1);
+                if let Some(link) = self.wars.as_mut() {
+                    link.instances.opened(war.war, None);
+                }
+                return;
+            }
+        };
+        let (bus, world_id, events) = (self.bus.clone(), self.world_id, self.events.clone());
+        tokio::spawn(async move {
+            let ok = open_on_sim(&bus, world_id, timeout, &open).await;
+            let _ = events
+                .send(InstanceEvent::WarOpened {
+                    war,
+                    instance: open,
+                    ok,
+                })
+                .await;
+        });
+    }
+
+    fn publish_war_news(&self, news: WarInstanceNews) {
+        let (bus, world_id) = (self.bus.clone(), self.world_id);
+        tokio::spawn(async move {
+            if let Err(error) = bus.publish(subject::sims_war(world_id), &news).await {
+                tracing::warn!(%error, war = %news.war.war, "war instance news not sent");
+            }
+        });
+    }
+
+    /// A queue call of a sim's player. In a world without instances no match can open: a join
+    /// is dropped at once (Inferred: the closest retail end of a queue).
+    pub fn queue_call(&mut self, call: QueueCall, sims: &SimRegistry) {
+        let Some(settings) = self.settings.clone() else {
+            if let QueueCall::Join(join) = call {
+                let news = QueueNews {
+                    character: join.character,
+                    game_mode: join.game_mode,
+                    kind: QueueNewsKind::Dropped,
+                };
+                self.publish_news(join.sim, news);
+            }
+            return;
+        };
+        let outcomes = match call {
+            QueueCall::Join(join) => {
+                self.launches.wanted(&join.level, Instant::now());
+                self.matchmaker.join(join);
+                self.matchmaker
+                    .tick(&settings.queues, unix_ms(), Uuid::new_v4)
+            }
+            QueueCall::Leave { character } => self.matchmaker.leave(character),
+            QueueCall::Accept {
+                character,
+                match_id,
+            } => self.matchmaker.accept(character, match_id),
+        };
+        metrics::gauge!(METRIC_QUEUED).set(self.matchmaker.queued() as f64);
+        self.carry_out(outcomes, sims);
+    }
+
+    /// Sends the news and opens the matches of `outcomes`.
+    fn carry_out(&mut self, outcomes: Vec<Outcome>, sims: &SimRegistry) {
+        for outcome in outcomes {
+            match outcome {
+                Outcome::News { sim, news } => self.publish_news(sim, news),
+                Outcome::Open(opening) => self.open_match(opening, sims),
+            }
+        }
+    }
+
+    fn publish_news(&self, sim: BusId, news: QueueNews) {
+        let (bus, world_id) = (self.bus.clone(), self.world_id);
+        tokio::spawn(async move {
+            if let Err(error) = bus.publish(subject::sim_queue(world_id, &sim), &news).await {
+                tracing::warn!(%error, character = %news.character, "queue news not sent");
+            }
+        });
+    }
+
+    /// Opens the instance of the accepted match `opening` on a free instance sim of its level.
+    fn open_match(&mut self, opening: MatchOpening, sims: &SimRegistry) {
+        let Some(timeout) = self.settings.as_ref().map(|settings| settings.open_timeout) else {
+            return;
+        };
+        let request = InstanceRequest {
+            game_mode: opening.game_mode.clone(),
+            level: opening.level.clone(),
+            requester: opening.members.first().copied().unwrap_or(opening.match_id),
+            capacity: u32::try_from(opening.members.len()).unwrap_or(u32::MAX),
+            min_group: 0,
+            timeout_seconds: None,
+        };
+        self.launches.wanted(&opening.level, Instant::now());
+        let free = sims.free_instance_sims(&opening.level);
+        let opened = self.instances.open_match(
+            opening.match_id,
+            &request,
+            opening.members,
+            &free,
+            (Uuid::new_v4(), random_phase()),
+            unix_ms(),
+        );
+        let open = match opened {
+            Ok(open) => open,
+            Err(reason) => {
+                tracing::warn!(match_id = %opening.match_id, level = %opening.level, ?reason, "match not opened");
+                metrics::counter!(METRIC_MATCHES, RESULT_LABEL => NOT_OPENED).increment(1);
+                let outcomes = self.matchmaker.opened(opening.match_id, None);
+                self.carry_out(outcomes, sims);
+                return;
+            }
+        };
+        let (bus, world_id, events) = (self.bus.clone(), self.world_id, self.events.clone());
+        let match_id = opening.match_id;
+        tokio::spawn(async move {
+            let ok = open_on_sim(&bus, world_id, timeout, &open).await;
+            let _ = events
+                .send(InstanceEvent::MatchOpened {
+                    match_id,
+                    instance: open,
+                    ok,
+                })
+                .await;
+        });
     }
 
     fn decide(
@@ -259,29 +574,7 @@ impl InstanceLoop {
                 let (bus, world_id, events) =
                     (self.bus.clone(), self.world_id, self.events.clone());
                 tokio::spawn(async move {
-                    let command = InstanceCommand::Open {
-                        instance: open.id,
-                        game_mode: open.game_mode.clone(),
-                        phase: open.phase,
-                        members: open.members.clone(),
-                        ends_at_ms: open.ends_at_ms,
-                    };
-                    let opened = bus
-                        .request::<InstanceCommand, InstanceOpened>(
-                            subject::sim_instance(world_id, &open.sim.id),
-                            &command,
-                            timeout,
-                        )
-                        .await;
-                    let ok = matches!(opened, Ok(InstanceOpened::Opened));
-                    if !ok {
-                        tracing::warn!(
-                            instance = %open.id,
-                            sim = %open.sim.id,
-                            ?opened,
-                            "instance not opened"
-                        );
-                    }
+                    let ok = open_on_sim(&bus, world_id, timeout, &open).await;
                     let _ = events
                         .send(InstanceEvent::Opened {
                             instance: open.id,
@@ -313,11 +606,18 @@ impl InstanceLoop {
     }
 
     /// Each heartbeat interval: ends the instances that ran out of time or stayed empty, adopts
-    /// the ones a restarted director does not know, and starts and stops instance sims.
+    /// the ones a restarted director does not know, starts and stops instance sims, and runs the
+    /// matchmaking queue (the accept windows that ended, the matches it can form).
     pub fn timer(&mut self, sims: &SimRegistry) {
         let Some(settings) = self.settings.clone() else {
             return;
         };
+        let outcomes = self
+            .matchmaker
+            .tick(&settings.queues, unix_ms(), Uuid::new_v4);
+        metrics::gauge!(METRIC_QUEUED).set(self.matchmaker.queued() as f64);
+        self.carry_out(outcomes, sims);
+        self.read_wars();
         let running = sims.running_instances();
         self.instances
             .adopt(&running, |slot| sims.level_of(&slot.id));
@@ -394,6 +694,43 @@ impl InstanceLoop {
         }
         metrics::gauge!(METRIC_LAUNCHED_SIMS).set(self.children.len() as f64);
     }
+}
+
+/// Asks the sim of `open` to run it (within `timeout`); whether it does.
+async fn open_on_sim(
+    bus: &Bus,
+    world_id: Uuid,
+    timeout: std::time::Duration,
+    open: &OpenInstance,
+) -> bool {
+    let command = match open.war {
+        Some(war) => InstanceCommand::OpenWar {
+            instance: open.id,
+            phase: open.phase,
+            members: open.members.clone(),
+            ends_at_ms: open.ends_at_ms,
+            war,
+        },
+        None => InstanceCommand::Open {
+            instance: open.id,
+            game_mode: open.game_mode.clone(),
+            phase: open.phase,
+            members: open.members.clone(),
+            ends_at_ms: open.ends_at_ms,
+        },
+    };
+    let opened = bus
+        .request::<InstanceCommand, InstanceOpened>(
+            subject::sim_instance(world_id, &open.sim.id),
+            &command,
+            timeout,
+        )
+        .await;
+    let ok = matches!(opened, Ok(InstanceOpened::Opened));
+    if !ok {
+        tracing::warn!(instance = %open.id, sim = %open.sim.id, ?opened, "instance not opened");
+    }
+    ok
 }
 
 /// Starts one instance sim process of `level` with id `id`.

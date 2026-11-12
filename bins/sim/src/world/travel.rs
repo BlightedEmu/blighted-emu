@@ -86,6 +86,7 @@ use crate::objectives::Event;
 use crate::travel_rules::{HousingRules, ShrinePoint, TravelRules};
 
 use super::camps::{CampEntity, CampPlacement};
+use super::housing_states::{HouseViews, decoration_points, house_decoration};
 use super::quest_objects::gain_experience;
 use super::statics::interaction_enabled;
 use super::{
@@ -169,9 +170,6 @@ const SINGLE_POINT: u32 = 0;
 const NO_HOUSE_RESPONSE: u8 = 0;
 /// The house flags retail sets on 756 of 804 owned houses.
 const HOUSE_HANDSHAKE: bool = true;
-/// The decoration score and trophies of a house: the trophy items (house buffs) are not run
-/// here.
-const NO_DECORATION_SCORE: f32 = 0.0;
 
 /// Why a camp placement is refused (the 441 result of each is Unknown: all answer
 /// [`PLACEMENT_REFUSED`]).
@@ -270,6 +268,8 @@ pub(super) struct TravelState {
     homes_version: u64,
     /// The session's start (server ms since 2000) and the played time then (ms).
     session: Option<(u64, u64)>,
+    /// Its replicated housing states ([`super::housing_states`]).
+    pub(super) houses: HouseViews,
 }
 
 impl TravelState {
@@ -298,6 +298,31 @@ impl TravelState {
     /// How many houses the player owns.
     pub(super) fn houses(&self) -> u32 {
         u32::try_from(self.saved.homes.len()).unwrap_or(u32::MAX)
+    }
+
+    /// The homes it owns.
+    pub(super) fn homes(&self) -> &[OwnedHome] {
+        &self.saved.homes
+    }
+
+    /// The homes it owns, to change.
+    pub(super) fn homes_mut(&mut self) -> &mut [OwnedHome] {
+        &mut self.saved.homes
+    }
+
+    /// The plot of the house it is in.
+    pub(super) const fn inside(&self) -> Option<[u8; RAW_ID_LEN]> {
+        self.inside
+    }
+
+    /// The plot of its last housing interaction.
+    pub(super) const fn plot(&self) -> Option<[u8; RAW_ID_LEN]> {
+        self.plot
+    }
+
+    /// Its client gets the housing state again.
+    pub(super) const fn mark_housing_due(&mut self) {
+        self.due.housing = true;
     }
 
     fn home(&self, plot: &[u8; RAW_ID_LEN]) -> Option<&OwnedHome> {
@@ -354,7 +379,7 @@ fn rotation_bits(placement: &ItemPlacement) -> [u32; 4] {
 }
 
 /// The level id of a raw id (its first 8 bytes, little-endian).
-fn id_of_raw(raw: &[u8; RAW_ID_LEN]) -> u64 {
+pub(super) fn id_of_raw(raw: &[u8; RAW_ID_LEN]) -> u64 {
     let mut bytes = [0; size_of::<u64>()];
     bytes.copy_from_slice(&raw[..size_of::<u64>()]);
     u64::from_le_bytes(bytes)
@@ -401,7 +426,7 @@ fn housing(number: u64, answer: fn(FacetHeader) -> TravelServerMsg) -> ServerMes
 
 impl SimWorld {
     /// The Unix milliseconds of the last tick's server time.
-    fn unix_ms(&self) -> u64 {
+    pub(super) fn unix_ms(&self) -> u64 {
         unix_ns(self.server_ms) / NS_PER_MS
     }
 
@@ -505,14 +530,8 @@ impl SimWorld {
             }
             TravelClientMsg::Unstuck { .. } => self.unstuck_request(entity, number, now_ms),
             TravelClientMsg::SetCampSkin { skin, .. } => self.set_camp_skin(entity, number, skin),
-            TravelClientMsg::EnterPlot { id, facet, .. } => {
-                if let Some(mut player) = self.world.get_mut::<Player>(entity)
-                    && let Some(plot) = player.travel.plot
-                    && let Some(home) = player.travel.home_mut(&plot)
-                {
-                    home.record.house_data = id;
-                    home.record.house_data_facet = facet;
-                }
+            TravelClientMsg::EnterPlot { facet, .. } => {
+                self.note_house_visit(entity, facet);
                 self.enter_plot(entity, number);
             }
             TravelClientMsg::ExitPlot { plot, .. } => self.exit_plot(entity, number, &plot),
@@ -540,11 +559,15 @@ impl SimWorld {
             TravelClientMsg::PlaceStructure { placement, .. } => {
                 self.place_camp(entity, number, &placement, now_ms);
             }
-            call @ (TravelClientMsg::CancelPlacingStructure { .. }
-            | TravelClientMsg::InteractHousingItem { .. }
-            | TravelClientMsg::HousingItemInteractionEnded { .. }) => {
-                // Retail answers none of these (the build mode cancel, the use of a piece of
-                // furniture and its end): the client plays them on its own.
+            TravelClientMsg::InteractHousingItem { index, .. } => {
+                self.use_housing_item(entity, Some(index));
+            }
+            TravelClientMsg::HousingItemInteractionEnded { .. } => {
+                self.use_housing_item(entity, None);
+            }
+            call @ TravelClientMsg::CancelPlacingStructure { .. } => {
+                // Retail answers none of these (the build mode cancel): the client plays it on
+                // its own.
                 tracing::debug!(
                     player = number,
                     type_index = call.type_index(),
@@ -890,6 +913,7 @@ impl SimWorld {
     /// The channels, unstuck moves and markers due at `now_ms`, the travel states due, and the
     /// breadcrumbs of the players who stand somewhere new.
     pub(super) fn tick_travel(&mut self, now_ms: u64) {
+        self.tick_housing_states();
         self.send_travel_states();
         if self.is_tutorial() {
             return;
@@ -956,6 +980,7 @@ impl SimWorld {
     /// (after its card).
     fn send_travel_states(&mut self) {
         let server_ms = self.server_ms;
+        let unix_ms = self.unix_ms();
         let rules = &self.content.travel;
         let achievement_rules = &self.achievement_rules;
         let mut query = self.world.query::<&mut Player>();
@@ -984,7 +1009,7 @@ impl SimWorld {
             }
             if due.housing {
                 player.travel.houses_version = player.travel.houses_version.saturating_add(1);
-                let body = housing_state(&player.travel).body();
+                let body = housing_state(&player.travel, rules, unix_ms).body();
                 members.push((PLAYER_HOUSING_COMPONENT, PLAYER_HOUSING_TYPE_INDEX, body));
             }
             if due.homes {
@@ -1580,14 +1605,7 @@ impl SimWorld {
         let Some((plot, points)) = self.world.get::<Player>(entity).and_then(|player| {
             let raw = player.travel.plot?;
             Some(match player.travel.home(&raw) {
-                Some(home) => (
-                    home_ref(home),
-                    home.items
-                        .iter()
-                        .filter_map(|placed| rules.furniture(placed.item))
-                        .map(|furniture| furniture.ranking_points)
-                        .sum(),
-                ),
+                Some(home) => (home_ref(home), decoration_points(&home.items, rules)),
                 None => (entity_ref(id_of_raw(&raw)), 0.0),
             })
         }) else {
@@ -1602,6 +1620,7 @@ impl SimWorld {
                 plot,
             })],
         );
+        self.show_plot_houses(entity);
     }
 
     /// The data of the territories player `number` resides in (3695): one per territory of its
@@ -2014,13 +2033,16 @@ impl SimWorld {
     }
 }
 
-/// The housing state of `travel`: retail's channeling flag alone without a house; with houses,
-/// the purchase flag and the owned houses; inside a house, the plot and the house entity.
-fn housing_state(travel: &TravelState) -> PlayerHousingState {
+/// The housing state of `travel` at `unix_ms` with the furniture of `rules`: retail's channeling
+/// flag alone without a house; with houses, the purchase flag and the owned houses (each with
+/// its trophies and decoration score, [`house_decoration`]); inside a house, the plot and the
+/// house entity, and in another player's house its owner.
+fn housing_state(travel: &TravelState, rules: &TravelRules, unix_ms: u64) -> PlayerHousingState {
     let homes = &travel.saved.homes;
     let houses = homes
         .iter()
-        .map(|home| OwnedHouse {
+        .map(|home| (home, house_decoration(home, rules, unix_ms)))
+        .map(|(home, decoration)| OwnedHouse {
             plot: home_ref(home),
             house_data: HouseDataRef {
                 id: home.record.house_data,
@@ -2033,9 +2055,9 @@ fn housing_state(travel: &TravelState) -> PlayerHousingState {
             taxes_due_ns: unix_ms_ns(home.record.taxes_due_ms),
             purchased_ns: unix_ms_ns(home.purchased_ms),
             territory: home.record.territory,
-            buff_items_active: HOUSE_HANDSHAKE,
-            trophies: Vec::new(),
-            decoration_score: NO_DECORATION_SCORE,
+            buff_items_active: decoration.active,
+            trophies: decoration.trophies,
+            decoration_score: decoration.score,
             flag: HOUSE_HANDSHAKE,
             handshake: HOUSE_HANDSHAKE,
             fast_travel_ready_ns: unix_ms_ns(home.record.fast_travel_ready_ms),
@@ -2043,10 +2065,16 @@ fn housing_state(travel: &TravelState) -> PlayerHousingState {
         })
         .collect::<Vec<_>>();
     let owned = !houses.is_empty();
-    let inside = travel
-        .inside
-        .and_then(|plot| travel.home(&plot))
-        .map(|home| (home_ref(home).facet, home.record.house_data_facet));
+    let visit = travel.inside.and(travel.houses.visit());
+    let inside = match visit {
+        Some(visit) => Some((visit.plot_facet, visit.house_data_facet)),
+        None => travel
+            .inside
+            .and_then(|plot| travel.home(&plot))
+            .map(|home| (home_ref(home).facet, home.record.house_data_facet)),
+    };
+    // A visitor without a house of its own is phased too (Inferred: no capture shows one).
+    let phased = owned || travel.houses.visit().is_some();
     PlayerHousingState {
         has_purchased_house: owned.then_some(true),
         owned_houses: owned.then_some(FullList {
@@ -2054,13 +2082,13 @@ fn housing_state(travel: &TravelState) -> PlayerHousingState {
             elements: houses,
         }),
         last_house_request_response: owned.then_some(NO_HOUSE_RESPONSE),
-        is_within_a_plot: owned.then_some(inside.is_some()),
+        is_within_a_plot: phased.then_some(inside.is_some()),
         is_fast_travel_channeling: Some(travel.channel.is_some()),
-        phased_plot: owned.then_some(inside.map_or(NO_PHASED_ENTITY, |(plot, _)| plot)),
-        phased_house_data: owned.then_some(inside.map_or(NO_PHASED_ENTITY, |(_, data)| {
+        phased_plot: phased.then_some(inside.map_or(NO_PHASED_ENTITY, |(plot, _)| plot)),
+        phased_house_data: phased.then_some(inside.map_or(NO_PHASED_ENTITY, |(_, data)| {
             if data == 0 { NO_PHASED_ENTITY } else { data }
         })),
-        phased_owner: None,
+        phased_owner: visit.map(|visit| visit.owner.clone()),
         debug_data: None,
     }
 }
@@ -2335,6 +2363,8 @@ mod tests {
                 Furniture {
                     item_id: BED.to_owned(),
                     ranking_points: BED_POINTS,
+                    duplicate_limit: None,
+                    trophy_effect: None,
                 },
             )]),
         )
@@ -3601,7 +3631,7 @@ mod tests {
             "a never used inn is ready"
         );
         assert_eq!(
-            housing_state(&player.travel).is_fast_travel_channeling,
+            housing_state(&player.travel, &world.content.travel, 0).is_fast_travel_channeling,
             Some(false)
         );
     }

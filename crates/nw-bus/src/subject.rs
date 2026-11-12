@@ -60,6 +60,22 @@ pub fn sim_instance(world: Uuid, sim: &BusId) -> String {
     format!("nw.{world}.sim.{sim}.instance")
 }
 
+/// Director to every sim: a territory war's instance opened ([`crate::instance::WarInstanceNews`]):
+/// each open-world sim moves its players of the war's roster in.
+pub fn sims_war(world: Uuid) -> String {
+    format!("nw.{world}.sims.war")
+}
+
+/// Sim to director: the matchmaking queue calls of its players ([`crate::matchmaking`]).
+pub fn director_queue(world: Uuid) -> String {
+    format!("nw.{world}.director.queue")
+}
+
+/// Director to a sim: what happened to its queued players ([`crate::matchmaking`]).
+pub fn sim_queue(world: Uuid, sim: &BusId) -> String {
+    format!("nw.{world}.sim.{sim}.queue")
+}
+
 /// Director to the social service, request/reply: the group of a character.
 pub fn social_group(world: Uuid) -> String {
     format!("nw.{world}.social.group")
@@ -198,5 +214,7 @@ mod tests {
             format!("{prefix}.sim.inst-1.instance")
         );
         assert_eq!(social_group(world), format!("{prefix}.social.group"));
+        assert_eq!(director_queue(world), format!("{prefix}.director.queue"));
+        assert_eq!(sim_queue(world, &sim), format!("{prefix}.sim.inst-1.queue"));
     }
 }

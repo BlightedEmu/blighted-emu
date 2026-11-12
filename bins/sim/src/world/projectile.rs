@@ -17,7 +17,7 @@ use super::attack::Pace;
 use super::hit_shape::PLAYER_CAPSULE;
 use super::mob_timeline::yaw_toward;
 use crate::combat::{AttackOutcome, AttackRefusal};
-use crate::mobs::Capsule;
+use crate::mobs::{Capsule, spawn_index};
 
 /// Milliseconds per second.
 const MS_PER_SECOND: f32 = 1_000.0;
@@ -119,6 +119,8 @@ pub(super) struct ProjectileFlight {
     effects: Option<(Vec<String>, u64)>,
     /// [`ShotHit::headshot`].
     headshot: bool,
+    /// The slot key of its projectile entity ([`super::shot_entity`]), when it has one.
+    entity: Option<u64>,
 }
 
 /// A flight of `flight_s` seconds in whole milliseconds.
@@ -264,6 +266,7 @@ impl SimWorld {
     ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
         let met = first_on_line(&shot, position, aim, places);
         tracing::debug!(attacker = ?attacker, damage_id = ?hit.damage_id, ?aim, met = ?met, "player cast");
+        let entity = self.shot_entity_of(attacker, &shot, &hit, (position, aim), now_ms);
         let Some((target, flight_s)) = met else {
             return vec![Ok(AttackOutcome::Missed)];
         };
@@ -271,26 +274,43 @@ impl SimWorld {
         self.launch(
             attacker,
             (shot, ShotHit { headshot, ..hit }),
-            target,
+            (target, entity),
             flight_s,
             now_ms,
         );
         Vec::new()
     }
 
-    /// Sends `shot` of `attacker` with the hit `hit` to mob `target`, which it gets to after
-    /// `flight_s` from `now_ms`.
+    /// Spawns the projectile entity of `shot` with the hit `hit`, which the player of
+    /// `attacker` fires from `position` along `aim` at `now_ms` ([`super::shot_entity`]); gives
+    /// its slot key. A hit scan and a shot of effects alone have none.
+    pub(super) fn shot_entity_of(
+        &mut self,
+        attacker: &ConnectionRef,
+        shot: &Shot,
+        hit: &ShotHit<'_>,
+        origin: (Position, AimLine),
+        now_ms: u64,
+    ) -> Option<u64> {
+        shot.flight?;
+        let shooter = self.by_connection.get(attacker).copied()?;
+        self.spawn_shot_entity(shooter, hit.damage_id?, origin, now_ms)
+    }
+
+    /// Sends `shot` of `attacker` with the hit `hit` to `target`, which it gets to after
+    /// `flight_s` from `now_ms`; `entity` is the slot key of its projectile entity.
     pub(super) fn launch(
         &mut self,
         attacker: &ConnectionRef,
         (shot, hit): (Shot, ShotHit<'_>),
-        target: u64,
+        (target, entity): (u64, Option<u64>),
         flight_s: f32,
         now_ms: u64,
     ) {
         self.projectile_flights.push(ProjectileFlight {
             attacker: attacker.clone(),
             target,
+            entity,
             damage_id: hit.damage_id.map(str::to_owned),
             land_ms: now_ms.saturating_add(flight_ms(flight_s)),
             splash_m: shot.splash_m,
@@ -319,9 +339,10 @@ impl SimWorld {
             .or(facing)
     }
 
-    /// Lands the projectiles that got to their mob at `now_ms`: a splash also hits the other
-    /// living mobs within its radius of that mob, and each mob it hurts takes its effects; a
-    /// projectile of effects alone puts them on each living mob it reaches.
+    /// Lands the projectiles that got to their target (a mob or a PvP foe) at `now_ms`: a splash
+    /// also hits the other living mobs and foes within its radius of that target, and each one
+    /// it hurts takes its effects; a projectile of effects alone puts them on each living target
+    /// it reaches.
     pub(super) fn projectile_flights_due(
         &mut self,
         now_ms: u64,
@@ -332,50 +353,94 @@ impl SimWorld {
         self.projectile_flights = later;
         let mut results = Vec::new();
         for flight in due {
-            let splashed: Vec<u64> = if flight.splash_m > 0.0 {
-                let centre = self
-                    .mob_states()
-                    .find(|(mob, _, _)| *mob == flight.target)
-                    .map(|(_, at, _)| at);
-                centre.map_or_else(Vec::new, |centre| {
-                    self.mob_states()
-                        .filter(|(mob, at, state)| {
-                            *mob != flight.target
-                                && state.health > 0
-                                && at.horizontal_distance(centre) <= flight.splash_m
-                        })
-                        .map(|(mob, _, _)| mob)
-                        .collect()
-                })
-            } else {
-                Vec::new()
-            };
+            // The projectile entity shows the hit where its target is now.
+            if let Some((entity, at)) = flight.entity.zip(self.target_at(flight.target)) {
+                let impact = Position {
+                    z: at.z + PLAYER_CAPSULE.height_m * HALF,
+                    ..at
+                };
+                self.shot_entity_hit(entity, flight.target, impact, now_ms);
+            }
+            let splashed = self.splashed(&flight);
             let first = std::iter::once((flight.target, true));
-            for (mob, paced) in first.chain(splashed.into_iter().map(|mob| (mob, false))) {
+            for (target, paced) in first.chain(splashed.into_iter().map(|other| (other, false))) {
                 let Some(damage_id) = &flight.damage_id else {
-                    let alive = self
-                        .mob_states()
-                        .any(|(own, _, state)| own == mob && state.health > 0);
-                    if let (true, Some((effects, source))) = (alive, &flight.effects) {
-                        self.spell_effects_on_mob(mob, effects, *source, false);
+                    if let Some((effects, source)) = &flight.effects {
+                        self.spell_effects_on_target(&flight.attacker, target, effects, *source);
                     }
                     continue;
                 };
-                // Only the mob it flew to takes it on the head; the splash does not.
+                // Only the target it flew to takes it on the head; the splash does not.
                 let pace = Pace {
                     paced,
                     headshot: paced && flight.headshot,
                 };
-                let result = self.hit_paced(&flight.attacker, mob, damage_id, None, pace, now_ms);
+                let result =
+                    self.hit_paced(&flight.attacker, target, damage_id, None, pace, now_ms);
                 if let (Ok(AttackOutcome::Hit { target, .. }), Some((effects, source))) =
                     (&result, &flight.effects)
                 {
-                    self.spell_effects_on_mob(*target, effects, *source, false);
+                    self.spell_effects_on_target(&flight.attacker, *target, effects, *source);
                 }
                 results.push(result);
             }
         }
         results
+    }
+
+    /// The other living targets within the splash of `flight` around the target it flew to:
+    /// mobs, and the PvP foes of its attacker.
+    fn splashed(&mut self, flight: &ProjectileFlight) -> Vec<u64> {
+        if flight.splash_m <= 0.0 {
+            return Vec::new();
+        }
+        let Some(centre) = self.target_at(flight.target) else {
+            return Vec::new();
+        };
+        let foes = self
+            .by_connection
+            .get(&flight.attacker)
+            .copied()
+            .map_or_else(Vec::new, |attacker| self.foe_places(attacker));
+        let mobs = self
+            .mob_states()
+            .filter(|(_, _, state)| state.health > 0)
+            .map(|(mob, at, _)| (mob, at));
+        mobs.chain(foes.into_iter().map(|(foe, at, _)| (foe, at)))
+            .filter(|(other, at)| {
+                *other != flight.target && at.horizontal_distance(centre) <= flight.splash_m
+            })
+            .map(|(other, _)| other)
+            .collect()
+    }
+
+    /// Puts the spell `effects` of player `source`, whose connection is `attacker`, on the
+    /// living target `target` of its attack: a mob, or a player.
+    pub(super) fn spell_effects_on_target(
+        &mut self,
+        attacker: &ConnectionRef,
+        target: u64,
+        effects: &[String],
+        source: u64,
+    ) {
+        if spawn_index(target).is_some() {
+            let alive = self
+                .mob_states()
+                .any(|(mob, _, state)| mob == target && state.health > 0);
+            if alive {
+                self.spell_effects_on_mob(target, effects, source, false);
+            }
+            return;
+        }
+        let Some(entity) = self.player_by_number(target) else {
+            return;
+        };
+        let hit_amount = self
+            .by_connection
+            .get(attacker)
+            .copied()
+            .map_or(0.0, |caster| self.spell_heal_base(caster));
+        self.spell_effects_on_player(entity, effects, (source, hit_amount), false);
     }
 }
 

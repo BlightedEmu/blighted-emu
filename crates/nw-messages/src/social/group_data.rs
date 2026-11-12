@@ -58,8 +58,14 @@ pub const FLAG_DEAD: u8 = 0x08;
 pub const FLAG_LEADER: u8 = 0x01;
 /// The matchmaking role of every member block of a retail full card, the empty ones too.
 pub const MATCHMAKING_ROLE_NONE: u8 = 1;
-/// The role of a member that chose none (the inviter's block of the retail join card).
+/// The role of a member that chose none (the inviter's block of the retail join card; the
+/// client's `GroupFinderRole` `Invalid`, `FUN_14345ba40`).
 pub const ROLE_NONE: u8 = 0;
+/// The roles a player may choose with 5390: the client's `GroupFinderRole` values 2 and 3 (two
+/// short names) and 4 (`Healer`) of `FUN_14345ba40`, below `Count` (5); 0 is `Invalid` and 1
+/// `Pending`. The retail calls chose 2, 3 and 4 (Observed); which of 2 and 3 is the tank is
+/// Unknown.
+pub const CHOOSABLE_ROLES: core::ops::RangeInclusive<u8> = 2..=4;
 /// The icon and colour index of a group without one (retail join card: `ff` both).
 pub const NO_GROUP_INDEX: u8 = u8::MAX;
 /// Health or mana in full, in percent.
@@ -161,6 +167,8 @@ pub struct GroupMemberView {
     pub name: String,
     /// Its icon.
     pub icon: PlayerIconData,
+    /// Its role ([`ROLE_NONE`] or one of [`CHOOSABLE_ROLES`]).
+    pub role: u8,
     /// Health in percent.
     pub health: u8,
     /// Mana in percent.
@@ -207,7 +215,7 @@ impl GroupDataState {
         for (index, block) in state.members.iter_mut().enumerate() {
             *block = match members.get(index) {
                 Some(member) => GroupMemberBlock {
-                    role: Some(ROLE_NONE),
+                    role: Some(member.role),
                     matchmaking_role: Some(MATCHMAKING_ROLE_NONE),
                     health: Some(member.health),
                     mana: Some(member.mana),
@@ -560,6 +568,11 @@ mod tests {
             character: [id; RAW_ID_LEN],
             name: format!("M{id}"),
             icon: PlayerIconData::default(),
+            role: if leader {
+                ROLE_NONE
+            } else {
+                *CHOOSABLE_ROLES.end()
+            },
             health: FULL_PERCENT,
             mana: FULL_PERCENT,
             connected: true,
@@ -575,6 +588,9 @@ mod tests {
             Some([FLAG_CONNECTED | FLAG_LEADER, 0])
         );
         assert_eq!(state.members[1].flags, Some([FLAG_CONNECTED, 0]));
+        assert_eq!(state.members[0].role, Some(ROLE_NONE));
+        assert_eq!(state.members[1].role, Some(*CHOOSABLE_ROLES.end()));
+        assert_eq!(state.members[2].role, None, "an empty block sends no role");
         assert_eq!(state.members[2].flags, Some([0, 0]));
         assert_eq!(state.members[2].card, Some(GroupMemberCard::default()));
         assert_eq!(state.places[1].level, Some(5));

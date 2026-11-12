@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use nw_bus::{
     Bus, BusError, BusId, CellTable, Incoming, InstanceRequest, Join, JoinReply, Publisher,
-    SimHeartbeat, heartbeat_silence, subject,
+    QueueCall, SimHeartbeat, heartbeat_silence, subject,
 };
 use nw_db::PgPool;
 use nw_login::queue::QueueStore;
@@ -109,9 +109,13 @@ pub async fn serve<Q: QueueStore>(
     let mut instance_requests = bus
         .subscribe::<InstanceRequest>(subject::director_instance(world_id))
         .await?;
+    let mut queue_calls = bus
+        .subscribe::<QueueCall>(subject::director_queue(world_id))
+        .await?;
     bus.flush().await?;
     let (admits, mut admitted) = mpsc::channel(ADMIT_QUEUE);
     let (instance_events, mut instance_results) = mpsc::channel(INSTANCE_QUEUE);
+    let war_db = db.clone();
     let mut state = Loop {
         context: Arc::new(JoinContext {
             world_id,
@@ -128,7 +132,8 @@ pub async fn serve<Q: QueueStore>(
             world_id,
             bus.clone(),
             instance_events,
-        ),
+        )
+        .with_wars(war_db),
         tables: Publisher::start(bus, TABLE_QUEUE),
         settings,
         store,
@@ -156,6 +161,10 @@ pub async fn serve<Q: QueueStore>(
                 Err(error) => tracing::warn!(%error, "bad instance request"),
             },
             Some(event) = instance_results.recv() => state.instances.event(event, &state.sims),
+            Some(call) = queue_calls.next() => match call {
+                Ok(call) => state.instances.queue_call(call.message, &state.sims),
+                Err(error) => tracing::warn!(%error, "bad queue call"),
+            },
             _ = timer.tick() => state.timer(),
         }
     }

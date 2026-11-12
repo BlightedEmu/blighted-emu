@@ -106,6 +106,9 @@ pub struct RecipeDetails {
     /// client showed after the station's tax: 69 for one craft of a 184-coin recipe, 18 for 40
     /// crafts of a 1-coin recipe).
     pub fee: u32,
+    /// `IsRefining`: a refining recipe, whose fee the territory's refining fee scales; every
+    /// other recipe's fee the crafting fee scales.
+    pub refining: bool,
     /// `BaseGearScore`: the gear score a craft starts from; `None`: the item's own.
     pub base_gear_score: Option<u32>,
     /// `BaseTier`: the tier its ingredients are measured against, and the tier of its rank
@@ -332,6 +335,7 @@ impl Recipes {
                         recipe_level: count(row.recipe_level),
                         game_event: row.game_event_id.clone().filter(|event| !event.is_empty()),
                         fee: count(row.crafting_fee),
+                        refining: row.is_refining.unwrap_or_default(),
                         base_gear_score: row
                             .base_gear_score
                             .and_then(|value| u32::try_from(value).ok()),

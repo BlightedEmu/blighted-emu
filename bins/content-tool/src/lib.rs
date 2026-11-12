@@ -7,6 +7,7 @@ pub mod ai_data;
 #[cfg(all(test, feature = "ai-replay"))]
 mod ai_replay;
 pub mod ai_trace;
+pub mod breach_tiers;
 pub mod build;
 pub mod camp_slices;
 pub mod capture;
@@ -16,6 +17,7 @@ pub mod collision;
 pub mod combat;
 pub mod creature_animations;
 pub mod distribution;
+pub mod dungeon_gates;
 pub mod dungeon_scripts;
 pub mod error;
 pub mod extra_members;

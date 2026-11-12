@@ -2,8 +2,19 @@
 //! Changes of the faction component's state, `MB::FactionComponentReplicatedState` (3152, own
 //! component 49): slot 1 children 0 `pvpFlagPending`, 1 `notifyPending`, 2
 //! `pvpFlagPendingEndTime` (u64 unix ns), 3 `lastFactionChangeTimepoint` (u64 unix ns) and 4
-//! `factionChangeCount` (u16); slot 2 children 0 `faction`, 1 `pvpFlag` and 2 `hasSanctuary`
-//! (member layout table; one byte each for the flags).
+//! `factionChangeCount` (u16), 5 `ffaPendingEndTime` (u64 unix ns) and 6
+//! `ffaAntiGroupingIsCursing`; slot 2 children 0 `faction`, 1 `pvpFlag`, 2 `hasSanctuary`, 3
+//! `ffaFlag` and 4 `ffaAntiGroupingCurseStacks` (member layout table; one byte each for the
+//! flags). The two anti-grouping children are not written: their rule is Unknown.
+//!
+//! **Observed** (the free-for-all zone, `FFA_ExitFFAAndCleanse`, `FFA_KillPlayerAndLoot`,
+//! `FFA_LightningStrikeDeath`): 0.17 s after the client enters a free-for-all area (2297) the
+//! own state gets `ffaPendingEndTime` (`02 20 <time>`, 30 s ahead); at that time the own state
+//! gets `06 22 01 <0> 0a 01 01` (`notifyPending` 1, the end time 0, `pvpFlag` 1, `ffaFlag` 1);
+//! a player that leaves before it gets the end time 0 alone (`02 20 <0>`). 0.1 s after the
+//! client leaves the area (6416) the end time is set again, 5 s ahead, and at that time the
+//! own state gets `06 20 <0> 0a 00 00`. Other players get the public slot: the card of a
+//! player in the zone held `04 0f 02 01 00 01`, and a change `04 0a 01 01` or `04 0a 00 00`.
 //!
 //! **Observed**: the first join sets the faction alone (`Hive_join_yellow_faction_quest`, the
 //! bundle after the 3161: `04 01 03`); a change from one faction to another sets the time and the
@@ -34,10 +45,15 @@ const NOTIFY_PENDING_CHILD: u8 = 1;
 const PVP_PENDING_END_CHILD: u8 = 2;
 const CHANGED_AT_CHILD: u8 = 3;
 const CHANGES_CHILD: u8 = 4;
-/// `faction`, `pvpFlag` and `hasSanctuary` (slot 2).
+/// `ffaPendingEndTime` (u64 unix ns; slot 1).
+const FFA_PENDING_END_CHILD: u8 = 5;
+/// `faction`, `pvpFlag`, `hasSanctuary` and `ffaFlag` (slot 2).
 const FACTION_CHILD: u8 = 0;
 const PVP_FLAG_CHILD: u8 = 1;
 const SANCTUARY_CHILD: u8 = 2;
+const FFA_FLAG_CHILD: u8 = 3;
+/// The faction value of a player with no faction.
+const NO_FACTION: u8 = 0;
 
 /// A change of some children of the faction state; `None` children stay as they are.
 ///
@@ -65,6 +81,10 @@ pub struct FactionStateChange {
     pub pvp_flag: Option<bool>,
     /// `hasSanctuary`: the player is in a sanctuary.
     pub has_sanctuary: Option<bool>,
+    /// `ffaPendingEndTime`: unix ns when the free-for-all flag goes on or off; 0 for none.
+    pub ffa_pending_end_ns: Option<u64>,
+    /// `ffaFlag`: the player is flagged for free-for-all PvP.
+    pub ffa_flag: Option<bool>,
 }
 
 impl FactionStateChange {
@@ -80,11 +100,13 @@ impl FactionStateChange {
             self.pvp_flag_pending_end_ns.is_some(),
             self.last_faction_change_ns.is_some(),
             self.faction_change_count.is_some(),
+            self.ffa_pending_end_ns.is_some(),
         ];
         let public = [
             self.faction.is_some(),
             self.pvp_flag.is_some(),
             self.has_sanctuary.is_some(),
+            self.ffa_flag.is_some(),
         ];
         let mut slots = 0;
         if owner.contains(&true) {
@@ -112,6 +134,9 @@ impl FactionStateChange {
                             writer.u64(self.last_faction_change_ns.unwrap_or_default())
                         }
                         CHANGES_CHILD => writer.u16(self.faction_change_count.unwrap_or_default()),
+                        FFA_PENDING_END_CHILD => {
+                            writer.u64(self.ffa_pending_end_ns.unwrap_or_default())
+                        }
                         // The mask holds no other child.
                         _ => writer,
                     };
@@ -129,6 +154,7 @@ impl FactionStateChange {
                         FACTION_CHILD => writer.u8(self.faction.unwrap_or_default()),
                         PVP_FLAG_CHILD => writer.u8(flag(self.pvp_flag)),
                         SANCTUARY_CHILD => writer.u8(flag(self.has_sanctuary)),
+                        FFA_FLAG_CHILD => writer.u8(flag(self.ffa_flag)),
                         // The mask holds no other child.
                         _ => writer,
                     };
@@ -152,6 +178,51 @@ impl FactionStateChange {
                 body: self.body()?,
             },
         })
+    }
+}
+
+/// The public slot of a player's faction state: what other players get of it.
+///
+/// **Observed**: the card of another player holds `pvpFlag` and `ffaFlag` always and the
+/// faction of a player that has one (`04 0a 00 00` for no faction, the public part of both
+/// retail new characters; `04 0b <faction> 00 00` in `general-other-01`). Inferred:
+/// `hasSanctuary` goes with the card only when it is set (one retail card of a player in the
+/// free-for-all zone held it as 0, `04 0f 02 01 00 01`; the card of a new character does not).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PublicFaction {
+    /// `faction`.
+    pub faction: u8,
+    /// `pvpFlag`.
+    pub pvp_flag: bool,
+    /// `hasSanctuary`.
+    pub sanctuary: bool,
+    /// `ffaFlag`.
+    pub ffa_flag: bool,
+}
+
+impl PublicFaction {
+    /// The state of the card of the player.
+    pub fn card(&self) -> FactionStateChange {
+        FactionStateChange {
+            faction: (self.faction != NO_FACTION).then_some(self.faction),
+            pvp_flag: Some(self.pvp_flag),
+            has_sanctuary: self.sanctuary.then_some(true),
+            ffa_flag: Some(self.ffa_flag),
+            ..FactionStateChange::default()
+        }
+    }
+
+    /// The change from `seen`, what the viewers hold: the children that differ. `None` when
+    /// none does.
+    pub fn change_from(&self, seen: &Self) -> Option<FactionStateChange> {
+        let change = FactionStateChange {
+            faction: (self.faction != seen.faction).then_some(self.faction),
+            pvp_flag: (self.pvp_flag != seen.pvp_flag).then_some(self.pvp_flag),
+            has_sanctuary: (self.sanctuary != seen.sanctuary).then_some(self.sanctuary),
+            ffa_flag: (self.ffa_flag != seen.ffa_flag).then_some(self.ffa_flag),
+            ..FactionStateChange::default()
+        };
+        (change != FactionStateChange::default()).then_some(change)
     }
 }
 
@@ -278,5 +349,69 @@ mod tests {
             ..change()
         };
         assert_eq!(toggle_off.body().expect("off"), [0x02, 0x03, 0x00, 0x01]);
+    }
+
+    #[test]
+    fn the_free_for_all_changes_are_the_retail_bodies() {
+        /// The end time of the retail entry (`FFA_ExitFFAAndCleanse`).
+        const ENDS_NS: u64 = 0x18cc_17b0_ec50_433c;
+        let pending = FactionStateChange {
+            ffa_pending_end_ns: Some(ENDS_NS),
+            ..FactionStateChange::default()
+        };
+        assert_eq!(
+            pending.body().expect("pending"),
+            [2, 32, 24, 204, 23, 176, 236, 80, 67, 60]
+        );
+        let on = FactionStateChange {
+            notify_pending: Some(true),
+            ffa_pending_end_ns: Some(0),
+            pvp_flag: Some(true),
+            ffa_flag: Some(true),
+            ..FactionStateChange::default()
+        };
+        assert_eq!(
+            on.body().expect("on"),
+            [6, 34, 1, 0, 0, 0, 0, 0, 0, 0, 0, 10, 1, 1]
+        );
+        let off = FactionStateChange {
+            ffa_pending_end_ns: Some(0),
+            pvp_flag: Some(false),
+            ffa_flag: Some(false),
+            ..FactionStateChange::default()
+        };
+        assert_eq!(
+            off.body().expect("off"),
+            [6, 32, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0]
+        );
+    }
+
+    #[test]
+    fn other_players_get_the_public_slot_alone() {
+        let none = PublicFaction::default();
+        assert_eq!(none.card().body().expect("card"), [0x04, 0x0a, 0x00, 0x00]);
+        let flagged = PublicFaction {
+            faction: 2,
+            pvp_flag: true,
+            sanctuary: false,
+            ffa_flag: true,
+        };
+        assert_eq!(
+            flagged.card().body().expect("card"),
+            [0x04, 0x0b, 0x02, 0x01, 0x01]
+        );
+        // The retail change of a player whose free-for-all flag goes on, and none for no change.
+        assert_eq!(
+            flagged
+                .change_from(&PublicFaction {
+                    faction: 2,
+                    ..PublicFaction::default()
+                })
+                .expect("a change")
+                .body()
+                .expect("change"),
+            [0x04, 0x0a, 0x01, 0x01]
+        );
+        assert_eq!(flagged.change_from(&flagged), None);
     }
 }

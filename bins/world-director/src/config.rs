@@ -72,6 +72,62 @@ pub struct InstancesConfig {
     /// (each with `role = "instance"` and the level of its expeditions).
     #[serde(default)]
     pub launch: Option<LaunchConfig>,
+    /// The matchmaking queue of the arena.
+    #[serde(default = "MatchConfig::arena")]
+    pub arena: MatchConfig,
+    /// The matchmaking queue of Outpost Rush.
+    #[serde(default = "MatchConfig::outpost_rush")]
+    pub outpost_rush: MatchConfig,
+}
+
+/// The players of an arena match by default: a full 3v3.
+pub const DEFAULT_MATCH_SIZE: u32 = nw_content::instances::ARENA_MATCH_PLAYERS;
+/// How long the players have to accept a found match by default (Observed: the solo pop of
+/// retail `3v3` ended 46.7 s after it, the arena row's `RaidInviteDurationSec` is 45).
+pub const DEFAULT_ACCEPT_TIMEOUT_MS: u64 = 45_000;
+/// The players of an Outpost Rush match by default: two teams of the row's `TeamCapacity` 20.
+pub const DEFAULT_OUTPOST_RUSH_MATCH_SIZE: u32 = nw_content::instances::OUTPOST_RUSH_MATCH_PLAYERS;
+/// How long the players have to accept an Outpost Rush match by default (Inferred: the
+/// `OutpostRush` row's `RaidInviteDurationSec` 90, as the arena's window is its row's 45).
+pub const DEFAULT_OUTPOST_RUSH_ACCEPT_TIMEOUT_MS: u64 = 90_000;
+/// The teams of a match: the match size is a multiple of it.
+const MATCH_TEAMS: u32 = 2;
+
+/// The `[instances.arena]` and `[instances.outpost_rush]` sections: the size of a match (6 for
+/// a 3v3 arena, 2 makes the 1v1 matches retail made when few players queued; 40 for Outpost
+/// Rush, a small even size for tests) and the accept window.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MatchConfig {
+    /// Players of a match: two teams of half of it.
+    pub match_size: u32,
+    /// How long the players have to accept a found match.
+    pub accept_timeout_ms: u64,
+}
+
+impl MatchConfig {
+    /// The arena's retail values.
+    pub const fn arena() -> Self {
+        Self {
+            match_size: DEFAULT_MATCH_SIZE,
+            accept_timeout_ms: DEFAULT_ACCEPT_TIMEOUT_MS,
+        }
+    }
+
+    /// Outpost Rush's retail values.
+    pub const fn outpost_rush() -> Self {
+        Self {
+            match_size: DEFAULT_OUTPOST_RUSH_MATCH_SIZE,
+            accept_timeout_ms: DEFAULT_OUTPOST_RUSH_ACCEPT_TIMEOUT_MS,
+        }
+    }
+
+    /// Whether the match is two teams of the same size with an accept window.
+    const fn is_valid(&self) -> bool {
+        self.match_size != 0
+            && self.match_size.is_multiple_of(MATCH_TEAMS)
+            && self.accept_timeout_ms != 0
+    }
 }
 
 /// The `[instances.launch]` section: the command that starts one instance sim. The director
@@ -176,6 +232,17 @@ impl DirectorConfig {
                     "instances.open_timeout_ms",
                     "must be below admit_timeout_ms",
                 );
+            }
+            for (section, queue) in [
+                ("instances.arena", &instances.arena),
+                ("instances.outpost_rush", &instances.outpost_rush),
+            ] {
+                if !queue.is_valid() {
+                    return invalid(
+                        section,
+                        "match_size must be an even number above 0 and accept_timeout_ms above 0",
+                    );
+                }
             }
             if let Some(launch) = &instances.launch
                 && (launch.program.is_empty()
@@ -311,6 +378,26 @@ mod tests {
             });
         }
         assert!(bad.validate().is_err());
+        let mut bad = config.clone();
+        if let Some(instances) = bad.instances.as_mut() {
+            instances.arena.match_size = 3;
+        }
+        assert!(bad.validate().is_err(), "two teams of the same size");
+        let mut one_vs_one = config.clone();
+        if let Some(instances) = one_vs_one.instances.as_mut() {
+            instances.arena.match_size = 2;
+        }
+        assert!(one_vs_one.validate().is_ok(), "a 1v1 as retail made");
+        assert_eq!(MatchConfig::arena().match_size, 6);
+        assert_eq!(MatchConfig::outpost_rush().match_size, 40);
+        let mut odd_rush = one_vs_one.clone();
+        if let Some(instances) = odd_rush.instances.as_mut() {
+            instances.outpost_rush.match_size = 5;
+        }
+        assert!(
+            odd_rush.validate().is_err(),
+            "two Outpost Rush teams of the same size"
+        );
         let mut none = config;
         none.instances = None;
         assert!(none.validate().is_ok(), "a world without instances");

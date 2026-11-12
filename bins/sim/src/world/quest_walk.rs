@@ -914,6 +914,7 @@ impl SimWorld {
                 enemy,
                 count,
                 place,
+                ..
             } if enemy.eq_ignore_ascii_case(PLAYER_ENEMY) => StepPlan::Stop(
                 Outcome::NotWalked,
                 format!("needs {} kills of other players (PvP)", remaining(*count)),
@@ -922,6 +923,7 @@ impl SimWorld {
                 enemy,
                 count,
                 place,
+                ..
             } => self.walk_kill(level, enemy, remaining(*count), place.as_deref()),
             TaskKind::HaveItem(Some(item)) => self.walk_get_item(item, 1, None, false, false),
             TaskKind::HaveItem(None) => event(FlowEvent::ContainerLooted, 1),

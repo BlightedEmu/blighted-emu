@@ -14,8 +14,10 @@ use nw_bus::{
     AdminAction, AdminReply, ConnectionRef, Point, RunningEvent, SocialDelivery, SocialFacetKind,
     SocialHeader,
 };
+use nw_messages::CLAIM_KEYS;
 use nw_messages::social::{ChatCall, ChatChannel, ChatMessage, ChatPush, SocialCall, SocialPush};
 
+use super::land_claims::{NO_SUCH_CLAIM, OwnerChange};
 use super::{Body, Player, SimWorld};
 
 /// The first character of a GM chat command.
@@ -28,8 +30,17 @@ const OFF: &str = "off";
 /// The words of the event commands.
 const START: &str = "start";
 const STOP: &str = "stop";
+/// The word of `!owner` that takes a claim from its owner.
+const CLEAR: &str = "clear";
+/// The words of `!war`.
+const CANCEL: &str = "cancel";
+const WIN: &str = "win";
+const ATTACKER: &str = "attacker";
+const DEFENDER: &str = "defender";
+/// Milliseconds per minute (`!war`'s start).
+const MS_PER_MINUTE: u64 = 60_000;
 /// The answer to a command the sim carried out.
-const DONE: &str = "Done.";
+pub(super) const DONE: &str = "Done.";
 /// The answer when the named player is not on this sim.
 const NOT_HERE: &str = "That player is not on this server.";
 /// The answer to a word that is no command.
@@ -57,7 +68,7 @@ struct Verb {
 }
 
 /// Every command, in the order of `!help`.
-const VERBS: [Verb; 24] = [
+const VERBS: [Verb; 26] = [
     Verb {
         name: "help",
         usage: "!help",
@@ -319,7 +330,59 @@ const VERBS: [Verb; 24] = [
         usage: "!events",
         read: |words| words.is_empty().then_some(Command::Events),
     },
+    Verb {
+        name: "owner",
+        usage: "!owner <territory id> <company name|clear>",
+        read: |words| {
+            let (territory, company) = words.split_first()?;
+            let territory = number::<u16>(territory)?;
+            let change = match company {
+                [] => return None,
+                [word] if word.eq_ignore_ascii_case(CLEAR) => OwnerChange::Clear,
+                name => OwnerChange::Set(name.join(" ")),
+            };
+            Some(Command::Owner { territory, change })
+        },
+    },
+    Verb {
+        name: "war",
+        usage: "!war <territory id> <minutes to start> <company name> | <territory id> win <attacker|defender> | <territory id> cancel",
+        read: |words| {
+            let (territory, rest) = words.split_first()?;
+            let territory = number::<u16>(territory)?;
+            let change = match rest {
+                [word] if word.eq_ignore_ascii_case(CANCEL) => WarCommand::Cancel,
+                [word, side] if word.eq_ignore_ascii_case(WIN) => WarCommand::Win {
+                    attacker: if side.eq_ignore_ascii_case(ATTACKER) {
+                        true
+                    } else if side.eq_ignore_ascii_case(DEFENDER) {
+                        false
+                    } else {
+                        return None;
+                    },
+                },
+                [minutes, name @ ..] if !name.is_empty() => WarCommand::Declare {
+                    minutes: number::<u64>(minutes)?,
+                    attacker: name.join(" "),
+                },
+                _ => return None,
+            };
+            Some(Command::War { territory, change })
+        },
+    },
 ];
+
+/// What `!war` asks for ([`super::wars`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WarCommand {
+    /// The company named `attacker` declares a war on the territory's owner, starting in
+    /// `minutes`.
+    Declare { minutes: u64, attacker: String },
+    /// The war gets its result: the attacker won, or the defender.
+    Win { attacker: bool },
+    /// The war is taken back.
+    Cancel,
+}
 
 /// Who a command acts on.
 #[derive(Debug, Clone, PartialEq)]
@@ -372,6 +435,17 @@ enum Command {
     },
     State {
         target: Target,
+    },
+    /// The owner of the claim of a territory ([`super::land_claims`]): answered once the world
+    /// database took the change.
+    Owner {
+        territory: u16,
+        change: OwnerChange,
+    },
+    /// A war of a territory ([`super::wars`]): answered once the world database took it.
+    War {
+        territory: u16,
+        change: WarCommand,
     },
 }
 
@@ -657,7 +731,10 @@ impl SimWorld {
         };
         match outcome {
             Outcome::Lines(lines) => {
-                self.answer_gm_chat(connection, lines);
+                // A command answered later (`!owner`) has no lines yet.
+                if !lines.is_empty() {
+                    self.answer_gm_chat(connection, lines);
+                }
                 Some(GmChat::Answered)
             }
             Outcome::Kick(entity) => Some(GmChat::Kick(entity)),
@@ -778,6 +855,51 @@ impl SimWorld {
                 Some(entity) => self.quest_plan_lines(entity, &objective),
                 None => vec![NOT_HERE.to_owned()],
             },
+            Command::Owner { territory, change } => {
+                let Some(connection) = self
+                    .world
+                    .get::<Player>(sender)
+                    .map(|player| player.connection.clone())
+                else {
+                    return Outcome::Lines(vec![NOT_HERE.to_owned()]);
+                };
+                match self.territories.ask(territory, change, connection) {
+                    Ok(()) => Vec::new(),
+                    Err(refusal) => vec![refusal.to_owned()],
+                }
+            }
+            Command::War { territory, change } => {
+                let Some(connection) = self
+                    .world
+                    .get::<Player>(sender)
+                    .map(|player| player.connection.clone())
+                else {
+                    return Outcome::Lines(vec![NOT_HERE.to_owned()]);
+                };
+                if !CLAIM_KEYS.contains(&territory) {
+                    return Outcome::Lines(vec![NO_SUCH_CLAIM.to_owned()]);
+                }
+                let unix_ms = self.unix_ms();
+                match change {
+                    WarCommand::Declare { minutes, attacker } => {
+                        let starts_ms =
+                            unix_ms.saturating_add(minutes.saturating_mul(MS_PER_MINUTE));
+                        self.wars
+                            .declare(territory, attacker, starts_ms, connection);
+                        Vec::new()
+                    }
+                    WarCommand::Win { attacker } => {
+                        match self.wars.resolve(territory, attacker, unix_ms, connection) {
+                            Ok(()) => Vec::new(),
+                            Err(refusal) => vec![refusal.to_owned()],
+                        }
+                    }
+                    WarCommand::Cancel => {
+                        self.wars.cancel(territory, connection);
+                        Vec::new()
+                    }
+                }
+            }
         };
         Outcome::Lines(lines)
     }
@@ -1147,6 +1269,48 @@ mod tests {
         chat(&mut world, GM, "!where");
         let lines = answers(&mut world, GM);
         assert_eq!(lines[0].body, "0.0 10.0 50.0");
+    }
+
+    #[test]
+    fn owner_reads_a_company_name_of_many_words_or_clear() {
+        assert_eq!(
+            read("!owner 6 Made Up Company"),
+            Some(Ok(Command::Owner {
+                territory: 6,
+                change: OwnerChange::Set("Made Up Company".to_owned()),
+            }))
+        );
+        assert_eq!(
+            read("!owner 12 CLEAR"),
+            Some(Ok(Command::Owner {
+                territory: 12,
+                change: OwnerChange::Clear,
+            }))
+        );
+        let usage = Some(Err(
+            "Usage: !owner <territory id> <company name|clear>".to_owned()
+        ));
+        assert_eq!(read("!owner 6"), usage);
+        assert_eq!(read("!owner six Made Up Company"), usage);
+    }
+
+    #[test]
+    fn owner_asks_the_database_for_a_claim_and_refuses_another_id() {
+        let mut world = world();
+        chat(&mut world, GM, "!owner 1 Made Up Company");
+        let lines = answers(&mut world, GM);
+        assert_eq!(lines[0].body, crate::world::land_claims::NO_SUCH_CLAIM);
+        assert_eq!(
+            world.take_territory_jobs(NOW).len(),
+            1,
+            "only the first read"
+        );
+        chat(&mut world, GM, "!owner 6 Made Up Company");
+        assert!(
+            answers(&mut world, GM).is_empty(),
+            "the answer waits for the database"
+        );
+        assert_eq!(world.take_territory_jobs(NOW).len(), 1, "the change");
     }
 
     #[test]

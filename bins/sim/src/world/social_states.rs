@@ -18,6 +18,7 @@ use nw_messages::social::states::{
     GUILDS_STATE_COMPONENT, GUILDS_STATE_TYPE_INDEX,
 };
 use nw_messages::title_choice::{SOCIAL_COMPONENT, SOCIAL_TYPE_INDEX};
+use nw_messages::wire::RAW_ID_LEN;
 use uuid::Uuid;
 
 use super::attack::Vitals;
@@ -29,6 +30,8 @@ use super::{Player, SimWorld};
 pub(super) const GROUP_ENTITY_BASE: u64 = 1 << 35;
 /// Percent of a full bar.
 const PERCENT: u64 = 100;
+/// The `guildId` of no company.
+const NO_COMPANY: [u8; RAW_ID_LEN] = [0; RAW_ID_LEN];
 
 /// The player component and class of a replicated social state.
 const fn member_of(kind: SocialStateKind) -> (u64, u64) {
@@ -60,12 +63,24 @@ pub(super) struct PlayerSocial {
     groups_seen: u64,
     /// The vitals last told to the social service.
     vitals_sent: Option<(u8, u8, bool)>,
+    /// The company the player is in, from its company state (`guildId`; all zero is none).
+    company: Option<[u8; RAW_ID_LEN]>,
 }
 
 impl PlayerSocial {
     /// The entity number of the player's group entity.
     pub(super) fn group_entity_number(&self) -> Option<u64> {
         self.group_entity.as_ref().map(|entity| entity.number)
+    }
+
+    /// The group the player is in; `None` when it is in none.
+    pub(super) fn group(&self) -> Option<Uuid> {
+        self.group_entity.as_ref().map(|entity| entity.group)
+    }
+
+    /// The company the player is in; `None` when it is in none.
+    pub(super) const fn company(&self) -> Option<[u8; RAW_ID_LEN]> {
+        self.company
     }
 
     /// The bundle group of the group entity `number` in `slot`: the group data and, in a new
@@ -126,9 +141,12 @@ fn percent(current: u32, max: u32) -> u8 {
 
 impl SimWorld {
     /// Puts the social service's states of `deliveries` into their players: the own states into
-    /// the next own bundle, the group entities into the players' entities. A player that is not
-    /// here is skipped.
+    /// the next own bundle, the group entities into the players' entities, and the paid territory
+    /// upkeeps into the claims ([`SimWorld::upkeep_paid`]). A player that is not here is skipped.
     pub fn apply_social_states(&mut self, deliveries: &SocialDeliveries) {
+        if !deliveries.upkeep_paid.is_empty() {
+            self.upkeep_paid(&deliveries.upkeep_paid);
+        }
         for delivery in &deliveries.own_states {
             self.apply_own_state(delivery);
         }
@@ -155,6 +173,11 @@ impl SimWorld {
             return;
         };
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            if let MemberState::Guilds(guilds) = &state
+                && let Some(company) = guilds.guild_id
+            {
+                player.social.company = (company != NO_COMPANY).then_some(company);
+            }
             player.extra_members.push(BundleMember { component, state });
         }
     }
@@ -206,7 +229,7 @@ mod tests {
     use nw_bus::GroupEntityView;
     use nw_messages::appearance::PlayerIconData;
     use nw_messages::social::group_data::{GROUP_CARD_COMPONENT, GroupMemberView};
-    use nw_messages::social::states::GroupsState;
+    use nw_messages::social::states::{GroupsState, GuildsState};
     use nw_messages::wire::Writer;
 
     use super::*;
@@ -228,6 +251,7 @@ mod tests {
             character: *character.as_bytes(),
             name: "Ann".to_owned(),
             icon: PlayerIconData::default(),
+            role: nw_messages::social::group_data::ROLE_NONE,
             health,
             mana: FULL_PERCENT,
             connected: true,
@@ -278,6 +302,35 @@ mod tests {
             member.component == GROUPS_STATE_COMPONENT
                 && member.state == MemberState::Groups(state.clone())
         }));
+    }
+
+    #[test]
+    fn a_company_state_names_the_players_company_and_a_zero_id_none() {
+        /// A made-up company id.
+        const COMPANY: [u8; RAW_ID_LEN] = [7; RAW_ID_LEN];
+        let (mut world, character) = admitted();
+        let deliver = |world: &mut SimWorld, guild_id| {
+            let mut writer = Writer::new();
+            GuildsState {
+                guild_id: Some(guild_id),
+                ..GuildsState::default()
+            }
+            .write(&mut writer)
+            .expect("writes");
+            world.apply_social_states(&SocialDeliveries {
+                own_states: vec![OwnStateDelivery {
+                    character,
+                    kind: SocialStateKind::Guilds,
+                    body: writer.finish(),
+                }],
+                ..SocialDeliveries::default()
+            });
+        };
+        assert_eq!(side(&mut world).company(), None);
+        deliver(&mut world, COMPANY);
+        assert_eq!(side(&mut world).company(), Some(COMPANY));
+        deliver(&mut world, NO_COMPANY);
+        assert_eq!(side(&mut world).company(), None, "it left");
     }
 
     #[test]

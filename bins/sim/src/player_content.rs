@@ -4,6 +4,7 @@
 
 use nw_bus::MISSION_BOARD_ID_LEN;
 use nw_content::attribute_bonuses::AttributeBonuses;
+use nw_content::attribute_damage::AttributeDamage;
 use nw_content::camps::CampRules;
 use nw_content::charms::ItemNames;
 use nw_content::chest_lockouts::ChestLockouts;
@@ -28,6 +29,7 @@ use nw_content::leaderboards::LeaderboardStats;
 use nw_content::loot::{LootTables, MobLoot, PlayerLootLevels};
 use nw_content::loot_limits::{LootLimitRules, LootLimits, ResetClock};
 use nw_content::meta_achievements::MetaAchievementRules;
+use nw_content::mission_weights::MissionWeights;
 use nw_content::mounts::MountRules;
 use nw_content::music::MusicRules;
 use nw_content::music_charts::MusicCharts;
@@ -43,6 +45,7 @@ use nw_content::salvage::Salvage;
 use nw_content::skins::{DyeCatalog, SkinCatalog};
 use nw_content::starting_ranks::StartingRanks;
 use nw_content::status_effects::StatusEffectRules;
+use nw_content::store::EffectTokens;
 use nw_content::titles::TitleRules;
 use nw_content::tradeskill_xp::{BonusChances, TradeskillCurves};
 use nw_formats::objectstream::lowercase_crc32;
@@ -195,6 +198,13 @@ pub struct MissionRow {
     pub patrol_duration: Option<i64>,
     /// `TaskTimerOverride` (seconds): the duration of its timer task.
     pub timer: Option<i64>,
+    /// `MissionGoalType`, lowercase: the type a board slot draws
+    /// ([`nw_content::mission_weights`]).
+    pub goal_type: String,
+    /// `IsPvpMission`.
+    pub pvp: bool,
+    /// `MinLevel` and `MaxLevel`: the player levels a board offers it to; `None` for no limit.
+    pub levels: (Option<u32>, Option<u32>),
 }
 
 impl MissionRow {
@@ -304,6 +314,12 @@ fn mission_rows(tables: &Tables) -> Vec<MissionRow> {
             patrol_place: cell(row.patrol_poi1.as_ref()),
             patrol_duration: row.patrol_duration,
             timer: row.task_timer_override,
+            goal_type: row.mission_goal_type.to_lowercase(),
+            pvp: row.is_pvp_mission.unwrap_or_default(),
+            levels: (
+                row.min_level.and_then(|level| u32::try_from(level).ok()),
+                row.max_level.and_then(|level| u32::try_from(level).ok()),
+            ),
         })
         .collect()
 }
@@ -366,6 +382,11 @@ impl QuestBook {
     /// Mission `id` (any case).
     pub fn mission(&self, id: &str) -> Option<&MissionRow> {
         self.missions.get(&id.to_lowercase())
+    }
+
+    /// Every mission.
+    pub fn missions(&self) -> impl Iterator<Item = &MissionRow> {
+        self.missions.values()
     }
 
     /// The id of the mission whose lowercase `MissionID` has the CRC-32 `crc`.
@@ -767,6 +788,8 @@ pub struct PlayerContent {
     pub store: StoreTable,
     /// Whether the store sells, and its prices (`[shop]` of the edge config).
     pub shop: ShopConfig,
+    /// The status effect each status effect token starts when spent (5818).
+    pub effect_tokens: EffectTokens,
     /// The quick course paths; empty until the sim loads the quick course file.
     pub quick_course_paths: QuickCoursePaths,
     /// The settlement and fort props the server spawns; empty until the sim loads their file.
@@ -777,12 +800,23 @@ pub struct PlayerContent {
     /// The start objects of the open world's encounters, in the town props table form; empty
     /// until the sim loads their file.
     pub encounter_objects: nw_content::town_props::TownProps,
+    /// The forts of the territory wars ([`nw_content::war_forts`]); empty until the sim loads
+    /// their file.
+    pub war_forts: nw_content::war_forts::WarForts,
     /// The slice each spell spawns; empty until the sim loads the spell slice file.
     pub spell_slices: nw_content::spell_slices::SpellSlices,
+    /// The projectile entity of each shot ([`nw_content::shot_entities`]).
+    pub shot_entities: nw_content::shot_entities::ShotEntities,
+    /// The gates of each instance level ([`nw_content::dungeon_gates`]).
+    pub dungeon_gates: nw_content::dungeon_gates::DungeonGates,
+    /// The mined rules that open and close them.
+    pub dungeon_gate_rules: nw_content::dungeon_gates::GateRules,
     /// The loot value of a player's level by its experience.
     pub player_loot_levels: PlayerLootLevels,
     /// The point-of-interest tags of each territory, for go-to and exit tasks.
     pub poi_tags: PoiTags,
+    /// The upkeep cost of each territory claim.
+    pub upkeep_costs: nw_content::territory_upkeep::UpkeepCosts,
     /// The level's quest objects that the player breaks with its weapons.
     pub quest_objects: QuestObjects,
     /// The leaderboards each stat feeds.
@@ -796,8 +830,12 @@ pub struct PlayerContent {
     pub kill_rewards: KillRewards,
     /// The meta achievements of the achievements window.
     pub meta_achievements: MetaAchievementRules,
+    /// The live season's pass: reward track, journey, activity card and tracked stats.
+    pub seasons: nw_content::seasons::SeasonCatalog,
     /// The lowercase ids of the items that `javelin.disabled-item-classes` disables.
     pub disabled_items: HashSet<String>,
+    /// The artifact objective that equipping each artifact starts.
+    pub artifact_objectives: nw_content::artifacts::ArtifactObjectives,
     /// The loot limits and their resets; `None` applies no limit.
     pub loot_limits: Option<LootLimitRules>,
     /// The level table and the weapon masteries.
@@ -816,6 +854,18 @@ pub struct PlayerContent {
     pub music_charts: MusicCharts,
     /// The item weights and the player's equip load limits.
     pub equip_loads: EquipLoads,
+    /// How level and attributes scale a weapon's damage ([`nw_content::attribute_damage`]).
+    pub attribute_damage: AttributeDamage,
+    /// The goal types of each board slot ([`nw_content::mission_weights`]).
+    pub mission_weights: MissionWeights,
+    /// The AFK rules ([`nw_content::afk_modes`]).
+    pub afk_modes: nw_content::afk_modes::AfkModes,
+    /// The free-for-all areas: the `TerritoryID` of each `TerritoryDefinitions` row with
+    /// `IsFFA` (8 areas of the Cursed Mists in the retail data).
+    pub ffa_areas: std::collections::HashSet<u16>,
+    /// What each cursed item becomes when its holder's free-for-all flag goes off: item id to
+    /// `MasterItemDefinitions.FFAConvertedItemId` (the cursed resources and doubloons).
+    pub ffa_conversions: HashMap<String, String>,
     /// The status effects worn perks hold ([`nw_content::perk_effects`]).
     pub perk_effects: PerkEffects,
     /// The abilities attribute values hold and their mana and cooldown shares
@@ -1282,18 +1332,25 @@ impl PlayerContent {
             quick_courses: QuickCourseRules::from_tables(tables),
             store: StoreTable::default(),
             shop: ShopConfig::default(),
+            effect_tokens: EffectTokens::from_tables(tables),
             quick_course_paths: QuickCoursePaths::default(),
             town_props: nw_content::town_props::TownProps::default(),
             encounter_roots: nw_content::town_props::TownProps::default(),
             encounter_objects: nw_content::town_props::TownProps::default(),
+            war_forts: nw_content::war_forts::WarForts::default(),
             spell_slices: nw_content::spell_slices::SpellSlices::default(),
+            shot_entities: nw_content::shot_entities::ShotEntities::default(),
+            dungeon_gates: nw_content::dungeon_gates::DungeonGates::default(),
+            dungeon_gate_rules: nw_content::dungeon_gates::GateRules::default(),
             player_loot_levels: PlayerLootLevels::from_tables(tables),
             poi_tags: PoiTags::from_tables(tables),
+            upkeep_costs: nw_content::territory_upkeep::UpkeepCosts::from_tables(tables),
             quest_objects,
             leaderboards: LeaderboardStats::from_tables(tables),
             kill_experience: KillExperience::from_tables(tables),
             kill_rewards: KillRewards::from_tables(tables),
             meta_achievements: MetaAchievementRules::from_tables(tables),
+            seasons: nw_content::seasons::SeasonCatalog::from_tables(tables),
             disabled_items: disabled_items(
                 tables
                     .master_item_definitions
@@ -1302,6 +1359,7 @@ impl PlayerContent {
                     .map(|row| (row.item_id.as_str(), row.item_class.as_deref())),
                 &gameplay,
             ),
+            artifact_objectives: nw_content::artifacts::ArtifactObjectives::from_tables(tables),
             loot_limits: Some(LootLimitRules {
                 limits: LootLimits::from_tables(tables),
                 clock: loot_reset,
@@ -1310,6 +1368,25 @@ impl PlayerContent {
             progression: Progression::of_tables(tables),
             titles: TitleRules::from_tables(tables),
             equip_loads: EquipLoads::from_tables(tables),
+            attribute_damage: AttributeDamage::from_tables(tables),
+            mission_weights: MissionWeights::from_tables(tables),
+            afk_modes: nw_content::afk_modes::AfkModes::from_tables(tables),
+            ffa_areas: tables
+                .territory_definition
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter(|row| row.is_ffa == Some(true))
+                .filter_map(|row| u16::try_from(row.territory_id).ok())
+                .collect(),
+            ffa_conversions: tables
+                .master_item_definitions
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter_map(|row| {
+                    let into = row.ffa_converted_item_id.as_ref()?;
+                    Some((row.item_id.clone(), into.clone()))
+                })
+                .collect(),
             perk_effects: PerkEffects::from_tables(tables),
             attribute_bonuses: AttributeBonuses::from_tables(tables),
             passive_abilities: PassiveAbilities::from_tables(tables),
@@ -1374,6 +1451,20 @@ impl PlayerContent {
             overburdened_percent: ratios.overburdened_percent as f32,
         };
         Some(limits.category(self.equip_loads.load(items) as f32))
+    }
+
+    /// The share the equip load category `load` adds to the damage of a player's hits
+    /// (`EquipLoadDamageMult*`); 0 without the player's limits.
+    pub fn equip_load_damage(&self, load: EquipLoad) -> f64 {
+        self.equip_loads.limits.map_or(0.0, |limits| {
+            let mods = limits.damage_mods;
+            match load {
+                EquipLoad::Fast => mods.fast,
+                EquipLoad::Normal => mods.normal,
+                EquipLoad::Slow => mods.slow,
+                EquipLoad::Overburdened => mods.overburdened,
+            }
+        })
     }
 
     /// Whether item `item_id` (any case) is disabled.
@@ -1560,6 +1651,7 @@ mod tests {
                     normal_percent: 26.0,
                     slow_percent: 46.0,
                     overburdened_percent: 100.0,
+                    damage_mods: nw_content::equip_load::EquipLoadDamage::default(),
                 }),
             ),
             ..PlayerContent::default()

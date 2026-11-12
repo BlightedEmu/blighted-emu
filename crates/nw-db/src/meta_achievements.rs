@@ -27,6 +27,8 @@ pub(crate) struct SavedMeta {
     pub completed: Vec<(String, bool)>,
     /// The title it shows.
     pub title: Option<u32>,
+    /// The pronoun type it chose.
+    pub pronoun: u8,
 }
 
 type SlotRow = (String, i16, String);
@@ -50,12 +52,13 @@ pub(crate) async fn character_meta(
             .bind(character_id)
             .fetch_all(world)
             .await?;
-    let title: Option<i64> =
-        sqlx::query_scalar("SELECT shown_title FROM player_character WHERE character_id = $1")
-            .bind(character_id)
-            .fetch_optional(world)
-            .await?
-            .flatten();
+    let (title, pronoun): (Option<i64>, i16) = sqlx::query_as(
+        "SELECT shown_title, pronoun_type FROM player_character WHERE character_id = $1",
+    )
+    .bind(character_id)
+    .fetch_optional(world)
+    .await?
+    .unwrap_or_default();
     let completed: Vec<CompletedRow> = sqlx::query_as(
         "SELECT meta_achievement, pending FROM character_meta_achievement \
          WHERE character_id = $1 ORDER BY position",
@@ -82,6 +85,7 @@ pub(crate) async fn character_meta(
         title: title
             .map(|title| from_column(title, "shown title"))
             .transpose()?,
+        pronoun: from_column(i64::from(pronoun), "pronoun type")?,
     })
 }
 
@@ -92,11 +96,14 @@ pub(crate) async fn save_character_meta(
     character_id: Uuid,
     meta: &SavedMeta,
 ) -> Result<(), DbError> {
-    sqlx::query("UPDATE player_character SET shown_title = $2 WHERE character_id = $1")
-        .bind(character_id)
-        .bind(meta.title.map(i64::from))
-        .execute(&mut **transaction)
-        .await?;
+    sqlx::query(
+        "UPDATE player_character SET shown_title = $2, pronoun_type = $3 WHERE character_id = $1",
+    )
+    .bind(character_id)
+    .bind(meta.title.map(i64::from))
+    .bind(i16::from(meta.pronoun))
+    .execute(&mut **transaction)
+    .await?;
     sqlx::query("DELETE FROM character_ability_slot WHERE character_id = $1")
         .bind(character_id)
         .execute(&mut **transaction)

@@ -16,12 +16,25 @@
 //! - 4932 `RewardTrackComponentServerFacet_RequestPurchaseReward` (slot, item, cost) and 4910
 //!   `RequestResetRewardTrack`: the PvP reward track (`pvp_track_unlocked`); retail answers
 //!   through the track's replicated state and the bag, no message.
+//! - 6420 `PlayerAppearanceComponentServerFacet_PurchaseAppearanceChange`: the barber, which
+//!   spends one `Ent_Barbershop_Token` ([`crate::appearance::AppearanceChangeRequest`]). Retail
+//!   answers it with a debit request: 5936 and 1285 with status [`DEBIT_REQUEST_STATUS`] and the
+//!   debited token, the 1285 with the token's new count (`buy_barbertoken_and_change_style`, ten
+//!   calls; `Hive_Transmog`, one).
+//! - 5818 `StatusEffectsComponentServerFacet_RequestTokenDebit` (header + the entitlement alias):
+//!   the use of a status effect token (`Ent_StatusEffect_Token_Gather_1`, `PremiumEmote_Firework3`;
+//!   `Playthrough_Part_02` five calls from 1792686628775, `Fireworks` one). Retail answers with a
+//!   debit request on the player's `EntitlementComponent`: 5936 about 0.2 s later and 1285 with
+//!   the token's new count, status [`DEBIT_REQUEST_STATUS`], done set.
 
 use crate::BodyCodec;
+use crate::appearance::{AppearanceChangeRequest, PURCHASE_APPEARANCE_CHANGE_TYPE_INDEX};
 use crate::combat::{read_string, write_string};
 use crate::facet::FacetHeader;
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
 
+/// `StatusEffectsComponentServerFacet_RequestTokenDebit`.
+pub const REQUEST_TOKEN_DEBIT_TYPE_INDEX: u64 = 5818;
 /// `PlayerComponentServerFacet_RequestSetIsInStore`.
 pub const SET_IS_IN_STORE_TYPE_INDEX: u64 = 4908;
 /// `EntitlementComponentServerFacet_ClientInitializeTransaction`.
@@ -36,10 +49,22 @@ pub const RESET_REWARD_TRACK_TYPE_INDEX: u64 = 4910;
 pub const REQUEST_INITIALIZED_TYPE_INDEX: u64 = 5936;
 /// `EntitlementComponentClientFacet_OnRequestSuccess`.
 pub const REQUEST_SUCCESS_TYPE_INDEX: u64 = 1285;
-/// The request status of both answers (every retail answer: 2; its meaning is Unknown).
+/// The request status of both answers to a store purchase (every retail answer: 2; its meaning
+/// is Unknown).
 pub const RETAIL_REQUEST_STATUS: u32 = 2;
+/// The request status of both answers to a debit of a consumable (Observed: 4 on every answer to
+/// the barber 6420 and to the token calls 5818; its meaning is Unknown).
+pub const DEBIT_REQUEST_STATUS: u32 = 4;
 /// The kind of a durable entitlement, such as a mount (retail: 0).
 pub const DURABLE_ENTITLEMENT_KIND: u32 = 0;
+/// The kind of a consumable entitlement, such as the barbershop token (Observed: 1 on every
+/// retail record of `Ent_Barbershop_Token` and of the `Ent_StatusEffect_Token_*` tokens).
+pub const CONSUMABLE_ENTITLEMENT_KIND: u32 = 1;
+/// The six bytes after the entitlement of every retail debit: `00 00 00 00 01 00`. They hold the
+/// amount 1 (every retail debit spends one); which bytes it is and what the others are is Unknown.
+pub const RETAIL_DEBIT_TAIL: [u8; DEBIT_TAIL_LEN] = [0, 0, 0, 0, 1, 0];
+/// Bytes after the entitlement of a debit.
+pub const DEBIT_TAIL_LEN: usize = 6;
 /// The kind of the store currency's wallet (retail: 2, the `Marks of Fortune` record).
 pub const WALLET_ENTITLEMENT_KIND: u32 = 2;
 
@@ -100,6 +125,16 @@ pub struct EntitlementRecord {
     pub byte_c: u8,
 }
 
+/// One entitlement a request debits (Observed: `Ent_Barbershop_Token` for the barber,
+/// `Ent_StatusEffect_Token_Gather_1` and the other tokens for 5818).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntitlementDebit {
+    /// The entitlement alias, the game data's `UniqueTagID`.
+    pub entitlement: Vec<u8>,
+    /// [`RETAIL_DEBIT_TAIL`].
+    pub tail: [u8; DEBIT_TAIL_LEN],
+}
+
 /// The body of a store answer (5936 and 1285).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntitlementRequest {
@@ -109,13 +144,14 @@ pub struct EntitlementRequest {
     pub request: [u8; RAW_ID_LEN],
     /// The transaction number, decimal text (retail 19 digits).
     pub transaction: Vec<u8>,
-    /// [`RETAIL_REQUEST_STATUS`].
+    /// [`RETAIL_REQUEST_STATUS`] for a purchase, [`DEBIT_REQUEST_STATUS`] for a debit.
     pub status: u32,
-    /// A byte (retail 0).
-    pub byte_a: u8,
+    /// The entitlements the request debits: none for a purchase.
+    pub debits: Vec<EntitlementDebit>,
     /// The entitlements the request changed: none in 5936.
     pub entitlements: Vec<EntitlementRecord>,
-    /// A flag (retail true).
+    /// A flag (retail: true for a purchase and a 5818 debit, false for a barber debit; its
+    /// meaning is Unknown).
     pub done: bool,
 }
 
@@ -124,7 +160,12 @@ impl EntitlementRequest {
         self.header.write(writer);
         writer.bytes(&self.request);
         write_string(writer, &self.transaction)?;
-        writer.u32(self.status).u8(self.byte_a);
+        writer.u32(self.status);
+        writer.prefixed(self.debits.len() as u64)?;
+        for debit in &self.debits {
+            write_string(writer, &debit.entitlement)?;
+            writer.bytes(&debit.tail);
+        }
         writer.prefixed(self.entitlements.len() as u64)?;
         for record in &self.entitlements {
             write_string(writer, &record.id)?;
@@ -152,7 +193,14 @@ impl EntitlementRequest {
         let request = reader.raw_id()?;
         let transaction = read_string(reader)?;
         let status = reader.u32()?;
-        let byte_a = reader.u8()?;
+        let debit_count = reader.prefixed()?;
+        let mut debits = Vec::new();
+        for _ in 0..debit_count {
+            debits.push(EntitlementDebit {
+                entitlement: read_string(reader)?,
+                tail: reader.array()?,
+            });
+        }
         let count = reader.prefixed()?;
         let mut entitlements = Vec::new();
         for _ in 0..count {
@@ -187,7 +235,7 @@ impl EntitlementRequest {
             request,
             transaction,
             status,
-            byte_a,
+            debits,
             entitlements,
             done: reader.boolean()?,
         })
@@ -271,6 +319,15 @@ pub enum StoreCall {
         /// The header.
         header: FacetHeader,
     },
+    /// 6420: the barber.
+    AppearanceChange(AppearanceChangeRequest),
+    /// 5818: spend one status effect token.
+    TokenDebit {
+        /// The header (the player's `StatusEffectsComponent`).
+        header: FacetHeader,
+        /// The token's entitlement alias, the game data's `UniqueTagID`.
+        entitlement: Vec<u8>,
+    },
 }
 
 impl StoreCall {
@@ -309,6 +366,13 @@ impl StoreCall {
                     item: reader.u32()?,
                     cost: reader.u32()?,
                 },
+                PURCHASE_APPEARANCE_CHANGE_TYPE_INDEX => {
+                    Self::AppearanceChange(AppearanceChangeRequest::read_after(header, reader)?)
+                }
+                REQUEST_TOKEN_DEBIT_TYPE_INDEX => Self::TokenDebit {
+                    header,
+                    entitlement: read_string(reader)?,
+                },
                 _ => Self::ResetRewardTrack { header },
             })
         };
@@ -317,7 +381,9 @@ impl StoreCall {
             | INITIALIZE_TRANSACTION_TYPE_INDEX
             | CLAIM_ENTITLEMENT_TYPE_INDEX
             | PURCHASE_REWARD_TYPE_INDEX
-            | RESET_REWARD_TRACK_TYPE_INDEX => {
+            | RESET_REWARD_TRACK_TYPE_INDEX
+            | PURCHASE_APPEARANCE_CHANGE_TYPE_INDEX
+            | REQUEST_TOKEN_DEBIT_TYPE_INDEX => {
                 let mut reader = Reader::new(body);
                 Some(read(&mut reader).and_then(|call| {
                     reader.finish()?;
@@ -336,6 +402,8 @@ impl StoreCall {
             Self::ClaimEntitlement { .. } => CLAIM_ENTITLEMENT_TYPE_INDEX,
             Self::PurchaseReward { .. } => PURCHASE_REWARD_TYPE_INDEX,
             Self::ResetRewardTrack { .. } => RESET_REWARD_TRACK_TYPE_INDEX,
+            Self::AppearanceChange(_) => PURCHASE_APPEARANCE_CHANGE_TYPE_INDEX,
+            Self::TokenDebit { .. } => REQUEST_TOKEN_DEBIT_TYPE_INDEX,
         }
     }
 
@@ -380,6 +448,14 @@ impl StoreCall {
                 writer.u8(*slot).u32(*item).u32(*cost);
             }
             Self::ResetRewardTrack { header } => header.write(&mut writer),
+            Self::AppearanceChange(call) => call.write(&mut writer),
+            Self::TokenDebit {
+                header,
+                entitlement,
+            } => {
+                header.write(&mut writer);
+                write_string(&mut writer, entitlement)?;
+            }
         }
         Ok(writer.finish())
     }
@@ -391,8 +467,11 @@ mod tests {
     use crate::test_support::hex_bytes;
 
     /// Retail calls: `unlock_store_content` 12633 ms (4908), 23700 ms (898), `ExternalRewards`
-    /// 66150 ms (5107), `pvp_track_unlocked` 31868 ms (4932) and 56565 ms (4910).
-    const CALLS: [(u64, &str); 5] = [
+    /// 66150 ms (5107), `pvp_track_unlocked` 31868 ms (4932) and 56565 ms (4910), and the look
+    /// bytes of the first `buy_barbertoken_and_change_style` barber call (6420) after a made-up
+    /// header, and the 5818 of the first `Playthrough_Part_02` token use (1792686628775) after a
+    /// made-up header.
+    const CALLS: [(u64, &str); 7] = [
         (
             SET_IS_IN_STORE_TYPE_INDEX,
             "07a3b18acf378b0b2896c8c14210296e01",
@@ -412,6 +491,14 @@ mod tests {
         (
             RESET_REWARD_TRACK_TYPE_INDEX,
             "67e3d016f476590a2896c8c14210296e",
+        ),
+        (
+            PURCHASE_APPEARANCE_CHANGE_TYPE_INDEX,
+            "0102030405060708a1a2a3a4a5a6a7a81c000100001a1b0000000004",
+        ),
+        (
+            REQUEST_TOKEN_DEBIT_TYPE_INDEX,
+            "0102030405060708a1a2a3a4a5a6a7a81f456e745f5374617475734566666563745f546f6b656e5f4761746865725f31",
         ),
     ];
 
@@ -440,6 +527,12 @@ mod tests {
             panic!("reward");
         };
         assert_eq!((slot, cost), (7, 50_000));
+        let Some(Ok(StoreCall::TokenDebit { entitlement, .. })) =
+            StoreCall::decode(CALLS[6].0, &hex_bytes(CALLS[6].1))
+        else {
+            panic!("token debit");
+        };
+        assert_eq!(entitlement, b"Ent_StatusEffect_Token_Gather_1");
     }
 
     /// Retail answers to the first purchase of `mount-menu-buying-all-store-horses` (the Ronin
@@ -480,6 +573,55 @@ mod tests {
             (&b"Marks of Fortune"[..], 13_000)
         );
         assert_eq!(wallet.kind, WALLET_ENTITLEMENT_KIND);
+    }
+
+    /// The retail answers to a barber call (`buy_barbertoken_and_change_style` 1781370830402 and
+    /// 1781370830595) with a made-up header, request id, transaction number and service id: the
+    /// debit of one `Ent_Barbershop_Token`, then the token's new count, 14.
+    const DEBIT_STARTED: &str = "0102030405060708a1a2a3a4a5a6a7a811111111222222223333333344444444143132333435363738393031323334353637383930000000040114456e745f42617262657273686f705f546f6b656e0000000001000000";
+    const DEBIT_DONE: &str = "0102030405060708a1a2a3a4a5a6a7a811111111222222223333333344444444143132333435363738393031323334353637383930000000040114456e745f42617262657273686f705f546f6b656e00000000010001164142434445464748494a4b4c4d4e4f5051525354555614456e745f42617262657273686f705f546f6b656e1042617262657273686f7020546f6b656e000000010000000e00000000000000000000000e000000000000000000000000000000000018323032362d30362d31335431373a31333a35302e3733315a0000";
+
+    #[test]
+    fn retail_debit_answers_read_and_write_back() {
+        let started = RequestInitializedMsg::decode(&hex_bytes(DEBIT_STARTED)).expect("5936");
+        assert_eq!(started.encode().expect("encode"), hex_bytes(DEBIT_STARTED));
+        assert_eq!(started.0.status, DEBIT_REQUEST_STATUS);
+        assert_eq!(
+            started.0.debits,
+            [EntitlementDebit {
+                entitlement: b"Ent_Barbershop_Token".to_vec(),
+                tail: RETAIL_DEBIT_TAIL,
+            }]
+        );
+        assert!(started.0.entitlements.is_empty() && !started.0.done);
+        let done = RequestSuccessMsg::decode(&hex_bytes(DEBIT_DONE)).expect("1285");
+        assert_eq!(done.encode().expect("encode"), hex_bytes(DEBIT_DONE));
+        assert_eq!(done.0.debits, started.0.debits);
+        let [token] = &done.0.entitlements[..] else {
+            panic!("one entitlement");
+        };
+        assert_eq!(token.kind, CONSUMABLE_ENTITLEMENT_KIND);
+        assert_eq!((token.amounts, token.total), ([14, 0, 0], 14));
+        assert!(token.instances.is_empty());
+    }
+
+    /// The retail 5936 of the first `Playthrough_Part_02` token use (1792686629266) with a
+    /// made-up header, request id and transaction number: status 4, the debit, done set.
+    const TOKEN_DEBIT_STARTED: &str = "0102030405060708a1a2a3a4a5a6a7a81111111122222222333333334444444414313233343536373839303132333435363738393000000004011f456e745f5374617475734566666563745f546f6b656e5f4761746865725f310000000001000001";
+
+    #[test]
+    fn a_token_debit_answer_is_done_at_once() {
+        let started = RequestInitializedMsg::decode(&hex_bytes(TOKEN_DEBIT_STARTED)).expect("5936");
+        assert_eq!(
+            started.encode().expect("encode"),
+            hex_bytes(TOKEN_DEBIT_STARTED)
+        );
+        assert_eq!(started.0.status, DEBIT_REQUEST_STATUS);
+        assert_eq!(
+            started.0.debits[0].entitlement,
+            b"Ent_StatusEffect_Token_Gather_1"
+        );
+        assert!(started.0.entitlements.is_empty() && started.0.done);
     }
 
     #[test]

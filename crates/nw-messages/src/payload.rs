@@ -34,9 +34,13 @@ use crate::containers::{
 use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
 use crate::fishing::{FISHING_TYPE_INDEX, FishingComponentState};
 use crate::game_events::{GAME_EVENT_TYPE_INDEX, GameEventState};
+use crate::game_mode_participant::{GAME_MODE_PARTICIPANT_TYPE_INDEX, GameModeParticipantState};
+use crate::game_mode_state::{GAME_MODE_TYPE_INDEX, GameModeState};
 use crate::gathering::{GATHERING_TYPE_INDEX, GatheringState};
 use crate::gde::{GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
 use crate::generic_invite::{GENERIC_INVITE_STATE_TYPE_INDEX, GenericInviteState};
+use crate::house_data_state::{HOUSE_DATA_TYPE_INDEX, HouseDataState};
+use crate::housing_plot_state::{HOUSING_PLOT_TYPE_INDEX, HousingPlotState};
 use crate::interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
 use crate::loot::{
     GLOBAL_STORAGE_TYPE_INDEX, GlobalStorageState, LOOT_TRACKER_TYPE_INDEX, LootTrackerState,
@@ -55,7 +59,9 @@ use crate::player_components::{EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PlayerCo
 use crate::position::{POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState};
 use crate::progression::{PROGRESSION_TYPE_INDEX, ProgressionState};
 use crate::progression_points::{PROGRESSION_POINT_TYPE_INDEX, ProgressionPointState};
+use crate::projectile_state::{PROJECTILE_TYPE_INDEX, ProjectileState};
 use crate::social::group_data::{GROUP_DATA_TYPE_INDEX, GroupDataState};
+use crate::social::raid_data::{RAID_DATA_TYPE_INDEX, RaidDataState};
 use crate::social::states::{
     CHAT_STATE_TYPE_INDEX, ChatState, GROUPS_STATE_TYPE_INDEX, GUILDS_STATE_TYPE_INDEX,
     GroupsState, GuildsState, SocialState,
@@ -65,6 +71,12 @@ use crate::status_effects::{STATUS_EFFECTS_TYPE_INDEX, StatusEffectsState};
 use crate::temporary_affiliation::{TEMPORARY_AFFILIATION_TYPE_INDEX, TemporaryAffiliationState};
 use crate::title_choice::SOCIAL_TYPE_INDEX;
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsState};
+use crate::war_roster::{TERRITORY_INTERACTOR_TYPE_INDEX, TerritoryInteractorState};
+use crate::war_states::{
+    BUILDER_TYPE_INDEX, BuilderState, CAPTURE_POINT_TYPE_INDEX, CapturePointState,
+    LAND_CLAIM_TYPE_INDEX, LandClaimState, SIEGE_WARFARE_DATA_TYPE_INDEX, SiegeWarfareDataState,
+    TURRET_TYPE_INDEX, TurretState, WAR_DATA_TYPE_INDEX, WarDataState,
+};
 use crate::wire::{MessageError, Reader, Writer};
 
 /// The state of one member, by class.
@@ -110,6 +122,21 @@ pub enum MemberState {
     Interact(InteractState),
     /// `MB::SpellComponentReplicatedState`.
     Spell(SpellState),
+    /// `MB::ProjectileReplicatedState`: a shot the sim spawns (written only; a capture's own
+    /// reads through the member table).
+    Projectile(ProjectileState),
+    /// `Javelin::GameModeReplicatedState`: a game mode entity the sim runs (written only; a
+    /// capture's own reads through the member table).
+    GameMode(GameModeState),
+    /// `Javelin::GameModeParticipantReplicatedState`: the game modes of a player (written
+    /// only; a capture's own reads through the member table).
+    GameModeParticipant(GameModeParticipantState),
+    /// `Javelin::HouseDataReplicatedState`: the furniture of a house the sim spawns (written
+    /// only; a capture's own reads through the member table).
+    HouseData(HouseDataState),
+    /// `MB::HousingPlotReplicatedState`: the houses of a house plot (written only; a capture's
+    /// own reads through the member table).
+    HousingPlot(HousingPlotState),
     /// The player's currency.
     Currency(CurrencyState),
     /// `MB::ItemManagementComponentReplicatedState`.
@@ -178,6 +205,22 @@ pub enum MemberState {
     Chat(ChatState),
     /// `Javelin::GroupDataComponentReplicatedState` (the group entity).
     GroupData(Box<GroupDataState>),
+    /// `Javelin::RaidDataComponentReplicatedState` (the raid entity).
+    RaidData(RaidDataState),
+    /// `MB::WarDataComponentReplicatedState` (the slot-2 world entity).
+    WarData(Box<WarDataState>),
+    /// `MB::SiegeWarfareDataReplicatedState`.
+    SiegeWarfareData(Box<SiegeWarfareDataState>),
+    /// `Javelin::CapturePointReplicatedState`.
+    CapturePoint(CapturePointState),
+    /// `MB::TurretReplicatedState`.
+    Turret(TurretState),
+    /// `MB::BuilderComponentReplicatedState`.
+    Builder(BuilderState),
+    /// `MB::LandClaimComponentReplicatedState`.
+    LandClaim(LandClaimState),
+    /// `MB::TerritoryInteractorReplicatedState`.
+    TerritoryInteractor(Box<TerritoryInteractorState>),
     /// `MB::StatusEffectsComponentReplicatedState`.
     StatusEffects(StatusEffectsState),
     /// An empty state of a player component class without a reader of its own.
@@ -235,6 +278,11 @@ impl MemberState {
             Self::GatherableController(_) => GATHERABLE_CONTROLLER_TYPE_INDEX,
             Self::Interact(_) => INTERACT_TYPE_INDEX,
             Self::Spell(_) => SPELL_TYPE_INDEX,
+            Self::Projectile(_) => PROJECTILE_TYPE_INDEX,
+            Self::GameMode(_) => GAME_MODE_TYPE_INDEX,
+            Self::GameModeParticipant(_) => GAME_MODE_PARTICIPANT_TYPE_INDEX,
+            Self::HouseData(_) => HOUSE_DATA_TYPE_INDEX,
+            Self::HousingPlot(_) => HOUSING_PLOT_TYPE_INDEX,
             Self::Currency(_) => CURRENCY_TYPE_INDEX,
             Self::ItemManagement(_) => ITEM_MANAGEMENT_TYPE_INDEX,
             Self::Objectives(_) => OBJECTIVES_TYPE_INDEX,
@@ -269,6 +317,14 @@ impl MemberState {
             Self::Guilds(_) => GUILDS_STATE_TYPE_INDEX,
             Self::Chat(_) => CHAT_STATE_TYPE_INDEX,
             Self::GroupData(_) => GROUP_DATA_TYPE_INDEX,
+            Self::RaidData(_) => RAID_DATA_TYPE_INDEX,
+            Self::WarData(_) => WAR_DATA_TYPE_INDEX,
+            Self::SiegeWarfareData(_) => SIEGE_WARFARE_DATA_TYPE_INDEX,
+            Self::CapturePoint(_) => CAPTURE_POINT_TYPE_INDEX,
+            Self::Turret(_) => TURRET_TYPE_INDEX,
+            Self::Builder(_) => BUILDER_TYPE_INDEX,
+            Self::LandClaim(_) => LAND_CLAIM_TYPE_INDEX,
+            Self::TerritoryInteractor(_) => TERRITORY_INTERACTOR_TYPE_INDEX,
             Self::StatusEffects(_) => STATUS_EFFECTS_TYPE_INDEX,
             Self::Empty(state) => state.class,
             Self::Recorded { class, .. } => *class,
@@ -456,6 +512,28 @@ impl MemberState {
             TypeId::FileSlot(GROUP_DATA_TYPE_INDEX) => GroupDataState::read(reader)
                 .map(Box::new)
                 .map(Self::GroupData),
+            TypeId::FileSlot(RAID_DATA_TYPE_INDEX) => {
+                RaidDataState::read(reader).map(Self::RaidData)
+            }
+            TypeId::FileSlot(WAR_DATA_TYPE_INDEX) => {
+                WarDataState::read(reader).map(Box::new).map(Self::WarData)
+            }
+            TypeId::FileSlot(SIEGE_WARFARE_DATA_TYPE_INDEX) => SiegeWarfareDataState::read(reader)
+                .map(Box::new)
+                .map(Self::SiegeWarfareData),
+            TypeId::FileSlot(CAPTURE_POINT_TYPE_INDEX) => {
+                CapturePointState::read(reader).map(Self::CapturePoint)
+            }
+            TypeId::FileSlot(TURRET_TYPE_INDEX) => TurretState::read(reader).map(Self::Turret),
+            TypeId::FileSlot(BUILDER_TYPE_INDEX) => BuilderState::read(reader).map(Self::Builder),
+            TypeId::FileSlot(LAND_CLAIM_TYPE_INDEX) => {
+                LandClaimState::read(reader).map(Self::LandClaim)
+            }
+            TypeId::FileSlot(TERRITORY_INTERACTOR_TYPE_INDEX) => {
+                TerritoryInteractorState::read(reader)
+                    .map(Box::new)
+                    .map(Self::TerritoryInteractor)
+            }
             TypeId::FileSlot(STATUS_EFFECTS_TYPE_INDEX) => {
                 StatusEffectsState::read(reader).map(Self::StatusEffects)
             }
@@ -530,6 +608,11 @@ impl MemberState {
                 state.write(writer);
                 Ok(())
             }
+            Self::Projectile(state) => state.write(writer),
+            Self::GameMode(state) => state.write(writer),
+            Self::GameModeParticipant(state) => state.write(writer),
+            Self::HouseData(state) => state.write(writer),
+            Self::HousingPlot(state) => state.write(writer),
             Self::Currency(state) => {
                 state.write(writer);
                 Ok(())
@@ -548,10 +631,7 @@ impl MemberState {
                 state.write(writer);
                 Ok(())
             }
-            Self::TerritoryInterface(state) => {
-                state.write(writer);
-                Ok(())
-            }
+            Self::TerritoryInterface(state) => state.write(writer),
             Self::BuildableGrid(state) => state.write(writer),
             Self::Ownership(state) => state.write(writer),
             Self::CategoricalProgression(state) => state.write(writer),
@@ -588,6 +668,26 @@ impl MemberState {
             Self::Guilds(state) => state.write(writer),
             Self::Chat(state) => state.write(writer),
             Self::GroupData(state) => state.write(writer),
+            Self::RaidData(state) => state.write(writer),
+            Self::WarData(state) => state.write(writer),
+            Self::SiegeWarfareData(state) => state.write(writer),
+            Self::TerritoryInteractor(state) => state.write(writer),
+            Self::CapturePoint(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::Turret(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::Builder(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::LandClaim(state) => {
+                state.write(writer);
+                Ok(())
+            }
             Self::StatusEffects(state) => state.write(writer),
             Self::Empty(state) => {
                 state.write(writer);

@@ -2132,6 +2132,7 @@ mod tests {
                         mount: STORE_BEAR.to_owned(),
                         product: "Mount_Bear_MTX7_Ronin".to_owned(),
                     }],
+                    tokens: Vec::new(),
                     held_by_all: Vec::new(),
                 },
                 ..PlayerContent::default()

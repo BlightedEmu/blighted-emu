@@ -13,12 +13,18 @@
 //! builds; the right-click, dodge, jump, draw and movement numbers held): light starts 62.6 %
 //! (228 of 364), charge starts 97.8 % (572 of 585), follow-ups 82.2 % (2,353 of 2,861).
 //!
-//! What the client leaves to the server (Observed, retail newchar capture 2026-09-18): a tap of
-//! the attack key from no attack starts the light attack at the release record; a hold of
-//! [`PlayerSequences::hold_records`] records starts the charge; a dodge, a jump, a weapon draw,
-//! the block and the aim (right-click) and every movement state are the server's. The client
-//! starts the attacks of a combo and the heavy attack itself (input row 1), and the server
-//! follows some of them ([`FollowUp`]).
+//! What the client leaves to the server (Observed, attack sequence study 2026-11-11 on the 103
+//! ledgers whose item indexes resolve on the pinned build; `blighted-emu-tools`
+//! `scratch-work/capdecode/src/bin/attackseq.rs`): a press of the attack key from no attack
+//! starts the stance's press start in the press record ([`AttackPress`]: a melee weapon's charge
+//! start in the first slot, a staff's or gauntlet's cast in the second); a release starts what
+//! follows the attack that runs then ([`AttackStep`]); a hold starts what follows it after its
+//! records ([`AttackHold`]). A sequence names an attack, not a stance: one sequence per stance
+//! did not fit retail. A dodge, a jump, a weapon draw, the block and the aim (right-click) and
+//! every movement state are the server's too. The client starts the later attacks of a combo
+//! itself (input row 1), and the server follows some of them ([`FollowUp`]). Unknown (no retail
+//! data on the pinned build): the dagger, and the releases of the bow, the musket and the
+//! blunderbuss.
 //!
 //! The client sends no slayer state for a weapon ability either (input row 1 is empty at every
 //! ability key press): the server starts the ability's animation in the own state after the
@@ -209,15 +215,19 @@ impl Directional {
 pub struct StanceSequences {
     /// The weapon's `MannequinTag` cell (empty: no weapon).
     pub tags: String,
-    /// The light attack the server starts at the release of a tap, standing still.
+    /// What an attack key press starts when no attack or ability runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub light: Option<u64>,
-    /// The same while a movement key is held.
+    pub press: Option<AttackPress>,
+    /// What a release of the attack key starts, by the attack that runs then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub releases: Vec<AttackStep>,
+    /// What a hold of the attack key starts, by the attack that runs then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holds: Vec<AttackHold>,
+    /// Input records from the last start of a second-slot cast to its end (`16=45 18=0 48=0`):
+    /// the median of the retail casts that no new press followed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub light_moving: Option<u64>,
-    /// The charge the server starts when the key is held [`PlayerSequences::hold_records`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub charge: Option<u64>,
+    pub cast_end_records: Option<u16>,
     /// What a right-click press starts (block for a melee weapon, aim for a ranged one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_start: Option<SlotsChange>,
@@ -251,14 +261,80 @@ pub struct StanceSequences {
 }
 
 impl StanceSequences {
-    /// The light attack, moving or standing; one of them when the other is not known.
-    pub fn light_of(&self, moving: bool) -> Option<u64> {
-        if moving {
-            self.light_moving.or(self.light)
-        } else {
-            self.light.or(self.light_moving)
-        }
+    /// What a release of the attack key starts while the attack `running` plays.
+    pub fn release_after(&self, running: RunningAttack) -> Option<RunningAttack> {
+        self.releases
+            .iter()
+            .find(|step| step.after == running)
+            .map(|step| step.start)
     }
+
+    /// What a hold of the attack key starts while the attack `running` plays, and after how
+    /// many input records of the hold.
+    pub fn hold_after(&self, running: RunningAttack) -> Option<(RunningAttack, u16)> {
+        self.holds
+            .iter()
+            .find(|hold| hold.after == running)
+            .map(|hold| (hold.start, hold.records))
+    }
+}
+
+/// The slayer slot an attack plays in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttackSlot {
+    /// The first slot (children 13 to 15): the melee weapons.
+    First,
+    /// The second slot (children 16 to 18): the staffs, the gauntlets, the bow and the guns.
+    Second,
+}
+
+/// An attack that plays: its slot and its sequence. The sequence names the attack: the same
+/// attack has the same number for every player (Observed, attack sequence study 2026-11-11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningAttack {
+    /// Its slot.
+    pub slot: AttackSlot,
+    /// Its sequence (child 15 or 18).
+    pub sequence: u64,
+}
+
+/// The start the retail server sent in the record of an attack key press from no attack: a
+/// melee weapon's charge start in the first slot (the flail's `13=10 14=<record> 15=1319 48=1`),
+/// a staff's or gauntlet's cast in the second (the life staff's `16=33 17=<record> 18=934
+/// 48=3`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttackPress {
+    /// The attack it starts.
+    #[serde(flatten)]
+    pub start: RunningAttack,
+    /// The slot's state (child 13 or 16, wire value).
+    pub state: u64,
+    /// Child 48.
+    pub marker: u64,
+}
+
+/// What the retail server started at a release of the attack key while `after` played (the
+/// flail's light `461` after its press start `1319`; a combo step the client named: `481` after
+/// `5046`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttackStep {
+    /// The attack that plays at the release.
+    pub after: RunningAttack,
+    /// The attack the release starts.
+    pub start: RunningAttack,
+}
+
+/// What the retail server started when the attack key stayed down while `after` played (the
+/// flail's charged attack `583`, 14 records after the press; most stances 19 records).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttackHold {
+    /// The attack that plays while the key is held.
+    pub after: RunningAttack,
+    /// The attack the hold starts.
+    pub start: RunningAttack,
+    /// Input records from the start of `after` to the start (the median of the retail holds).
+    pub records: u16,
 }
 
 /// A server follow-up of an action the client started.
@@ -308,7 +384,6 @@ pub struct AbilityPlay {
 /// The file form of the table.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct TableFile {
-    hold_records: u16,
     stances: Vec<StanceSequences>,
     follow_ups: Vec<FollowUp>,
     #[serde(default)]
@@ -318,10 +393,6 @@ struct TableFile {
 /// The table.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PlayerSequences {
-    /// Input records the attack key is held before the server starts the charge (Observed:
-    /// every retail charge start came 19 records after the press, 572 of 585 with the table's
-    /// sequence).
-    pub hold_records: u16,
     by_key: HashMap<u32, StanceSequences>,
     follow_ups: HashMap<u64, FollowUp>,
     /// The ability animations, by CRC-32 of the lowercase ability id.
@@ -348,10 +419,7 @@ impl PlayerSequences {
     /// Returns [`PlayerSequencesError::Json`] when the text is not the table.
     pub fn parse(text: &str) -> Result<Self, PlayerSequencesError> {
         let file: TableFile = serde_json::from_str(text)?;
-        Ok(
-            Self::of_parts(file.hold_records, file.stances, file.follow_ups)
-                .with_abilities(file.abilities),
-        )
+        Ok(Self::of_parts(file.stances, file.follow_ups).with_abilities(file.abilities))
     }
 
     /// The same table with the ability animations `abilities`.
@@ -369,14 +437,9 @@ impl PlayerSequences {
         self.abilities.get(&ability)
     }
 
-    /// The table of `stances` and `follow_ups`, with the charge after `hold_records`.
-    pub fn of_parts(
-        hold_records: u16,
-        stances: Vec<StanceSequences>,
-        follow_ups: Vec<FollowUp>,
-    ) -> Self {
+    /// The table of `stances` and `follow_ups`.
+    pub fn of_parts(stances: Vec<StanceSequences>, follow_ups: Vec<FollowUp>) -> Self {
         Self {
-            hold_records,
             by_key: stances
                 .into_iter()
                 .map(|stance| (stance_key(&stance.tags), stance))
@@ -421,15 +484,19 @@ mod tests {
 
     /// Two stances and a follow-up as the table file holds them (values of the mined table).
     const TABLE: &str = r#"{
-        "hold_records": 19,
         "stances": [
-            {"tags": "2H_Melee,GreatSword", "light": 4510, "light_moving": 4510, "charge": 57,
+            {"tags": "2H_Melee,GreatSword",
+             "press": {"slot": "first", "sequence": 4120, "state": 10, "marker": 1},
+             "releases": [{"after": {"slot": "first", "sequence": 4120},
+                           "start": {"slot": "first", "sequence": 4510}}],
+             "holds": [{"after": {"slot": "first", "sequence": 4120},
+                        "start": {"slot": "first", "sequence": 57}, "records": 19}],
              "alt_start": {"second_sequence": 2351},
              "alt_moves": {"moving": {"state": 27, "sequence": 1251},
                            "idle": {"state": 31, "sequence": 1673}},
              "dodge": {"forward": {"state": 7, "sequence": 4007},
                        "back": {"state": 7, "sequence": 2100}}},
-            {"tags": "2H_Ranged,Blunderbuss", "light": 461,
+            {"tags": "2H_Ranged,Blunderbuss",
              "alt_start": {"second_sequence": 4248, "third_state": 46, "third_sequence": 407,
                            "marker": 40},
              "alt_end": {"third_state": 0, "third_sequence": 0, "marker": 0},
@@ -472,9 +539,8 @@ mod tests {
         );
         assert_eq!(table.ability(lowercase_crc32("Ability_Unknown")), None);
         assert_eq!(table.abilities_len(), 2);
-        let old =
-            PlayerSequences::parse(r#"{"hold_records": 19, "stances": [], "follow_ups": []}"#)
-                .expect("a table without abilities");
+        let old = PlayerSequences::parse(r#"{"stances": [], "follow_ups": []}"#)
+            .expect("a table without abilities");
         assert_eq!(old.ability(lowercase_crc32("Ability_Flail_Trip")), None);
         assert_eq!(old.abilities_len(), 0);
     }
@@ -482,13 +548,26 @@ mod tests {
     #[test]
     fn the_table_reads_by_stance_key() {
         let table = PlayerSequences::parse(TABLE).expect("table");
-        assert_eq!(table.hold_records, 19);
         assert_eq!(table.len(), 2);
         let sword = table
             .stance(stance_key("2H_Melee,GreatSword"))
             .expect("greatsword");
-        assert_eq!(sword.charge, Some(57));
-        assert_eq!(sword.light_of(true), Some(4510));
+        let first = |sequence| RunningAttack {
+            slot: AttackSlot::First,
+            sequence,
+        };
+        let press = sword.press.expect("the press start");
+        assert_eq!(
+            (press.start, press.state, press.marker),
+            (first(4120), 10, 1)
+        );
+        assert_eq!(sword.release_after(press.start), Some(first(4510)));
+        assert_eq!(sword.hold_after(press.start), Some((first(57), 19)));
+        assert_eq!(
+            sword.release_after(first(4510)),
+            None,
+            "no step after the light"
+        );
         assert_eq!(
             sword.alt_start.map(|change| change.second_sequence),
             Some(Some(2351))
@@ -496,11 +575,7 @@ mod tests {
         let gun = table
             .stance(stance_key("2H_Ranged,Blunderbuss"))
             .expect("blunderbuss");
-        assert_eq!(
-            gun.light_of(true),
-            Some(461),
-            "standing value when moving is unknown"
-        );
+        assert_eq!(gun.press, None, "no mined press start");
         let aim = gun.alt_start.expect("aim");
         assert_eq!((aim.third_state, aim.third_sequence), (Some(46), Some(407)));
         assert!(!aim.is_empty());

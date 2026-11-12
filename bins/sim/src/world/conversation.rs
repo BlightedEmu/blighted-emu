@@ -21,7 +21,7 @@ const TALK_ACCEPTED: u8 = 1;
 /// serves every NPC).
 const TALK_NAME: &[u8] = b"@01_Reese";
 /// The mark before an NPC id in a talk request's name (`@12_JeongIseul`).
-const NPC_NAME_MARK: char = '@';
+pub(super) const NPC_NAME_MARK: char = '@';
 
 impl SimWorld {
     /// Player `number` (`entity`) talks to an NPC that the request names `name` (`@` and the

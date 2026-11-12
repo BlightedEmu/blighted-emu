@@ -242,6 +242,14 @@ impl Condition {
         self.op.compare(left, self.scaled(right, board))
     }
 
+    /// Whether the condition holds with `left` in the place of its left operand (a node that
+    /// compares a result of its own: `EntityQueryCondition`); a missing right operand fails it.
+    pub fn holds_for(&self, left: Value, board: &impl Blackboard) -> bool {
+        self.right
+            .resolve(board)
+            .is_some_and(|right| self.op.compare(left, self.scaled(right, board)))
+    }
+
     /// `right` scaled by the dynamic entity scale when the condition allows it.
     pub fn scaled(&self, right: Value, board: &impl Blackboard) -> Value {
         match (self.allow_dynamic_scaling, board.dynamic_scale(), right) {
@@ -276,6 +284,16 @@ impl ConditionGroup {
             self.conditions.is_empty() || self.conditions.iter().any(|c| c.holds(board))
         } else {
             self.conditions.iter().all(|c| c.holds(board))
+        }
+    }
+
+    /// As [`ConditionGroup::holds`], with `left` in the place of every left operand
+    /// ([`Condition::holds_for`]).
+    pub fn holds_for(&self, left: Value, board: &impl Blackboard) -> bool {
+        if self.any {
+            self.conditions.is_empty() || self.conditions.iter().any(|c| c.holds_for(left, board))
+        } else {
+            self.conditions.iter().all(|c| c.holds_for(left, board))
         }
     }
 }

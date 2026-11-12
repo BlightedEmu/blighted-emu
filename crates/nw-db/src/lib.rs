@@ -31,13 +31,16 @@ mod privacy;
 mod progression;
 mod quests;
 mod recipe_cooldowns;
+mod seasons;
 mod session;
 mod social;
 mod social_graph;
 mod stats;
 mod status_effects;
+mod territory;
 mod trading_post;
 mod travel;
+mod wars;
 mod world_clock;
 
 #[cfg(any(test, feature = "test-util"))]
@@ -55,13 +58,15 @@ pub use admin::{
 pub use analytics::{AnalyticsRecord, delete_old_analytics_events, insert_analytics_events};
 pub use arena::{DUNGEON_ID_LEN, SavedArena, SavedStay};
 pub use character::{
-    character_by_id, character_name_taken, characters_for_account, delete_character,
-    insert_character, release_character_name, reserve_character_name, save_published_look,
+    CHANGED_LOOK_KEY, character_by_id, character_name_taken, characters_for_account,
+    delete_character, insert_character, release_character_name, reserve_character_name,
+    save_changed_look, save_published_look,
 };
 pub use connect::{DatabaseConfig, GlobalDatabase, connect, connect_lazy, connect_options};
 pub use consumable_cooldowns::SavedConsumableCooldown;
 pub use entitlements::{
-    AccountEntitlement, Purchase, Wallet, account_entitlements, buy_entitlement, give_marks, wallet,
+    AccountConsumable, AccountEntitlement, Purchase, Wallet, account_consumables,
+    account_entitlements, buy_consumable, buy_entitlement, give_marks, use_consumable, wallet,
 };
 pub use entity::{MAX_ENTITY_NUMBER, next_entity_number};
 pub use error::DbError;
@@ -90,6 +95,7 @@ pub use progression::{
 };
 pub use quests::{SavedQuests, character_quests, save_character_quests};
 pub use recipe_cooldowns::SavedRecipeCooldown;
+pub use seasons::{SavedCard, SavedSeason};
 pub use session::{create_launcher_session, delete_launcher_session, launcher_session_account};
 pub use social::{
     AccountTitle, StoredPlayer, clear_new_account_titles, earn_account_titles, stored_players,
@@ -109,6 +115,10 @@ pub use stats::{
     leaderboard_entries, leaderboard_page, stat_values, submit_stats,
 };
 pub use status_effects::SavedStatusEffect;
+pub use territory::{
+    TerritoryOwner, UPKEEP_INTERVAL_MS, UPKEEP_PAYABLE_BEFORE_MS, clear_territory_owner,
+    set_territory_owner, territory_claim_counts, territory_owners,
+};
 pub use trading_post::{
     CharacterOrders, Completed, Delivery, DeliveryNotice, MAX_COUNTED_MATCHES, NewOrder, Order,
     OrderEnd, OrderItem, OrderKind, OrderPage, OrderRefusal, OrderSearch, OrderStatus,
@@ -120,6 +130,11 @@ pub use travel::{
     PLOT_ID_LEN, SavedCamp, SavedHome, SavedHomeRecord, SavedHousingItem, SavedTravel,
 };
 pub use uuid::Uuid;
+pub use wars::{
+    Declared, RosterSeat, SeatChange, TerritoryWar, WAR_LENGTH_MS, WAR_RESULT_SHOWN_MS, WarSignup,
+    cancel_war, change_roster, declare_war, leave_war, resolve_war, sign_up_for_war,
+    territory_wars,
+};
 pub use world_clock::world_clock_start;
 
 /// What Discord says about a user at one login.

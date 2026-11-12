@@ -54,6 +54,81 @@ impl SetTitleRequest {
     }
 }
 
+/// 4751 `SocialComponentServerFacet_RequestSetPronounType`: the facet header and the pronoun
+/// type, one byte (Observed, one retail call: 16 header bytes and `00`). The server sends no
+/// facet answer; the pronoun is slot 0 child 1 of the social state (4176), which retail sends
+/// with the title in the first state of each player.
+pub const SET_PRONOUN_TYPE_INDEX: u64 = 4751;
+/// The pronoun types of the client's `ePronounType` (retail player data holds 0, 1 and 2).
+pub const PRONOUN_TYPE_COUNT: u8 = 3;
+
+/// 4751: choose a pronoun type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetPronounRequest {
+    /// The header (the player's `SocialComponent`).
+    pub header: FacetHeader,
+    /// The pronoun type.
+    pub pronoun: u8,
+}
+
+impl SetPronounRequest {
+    /// Decodes `body` when `type_index` is 4751; `None` otherwise.
+    pub fn decode(type_index: u64, body: &[u8]) -> Option<Result<Self, MessageError>> {
+        if type_index != SET_PRONOUN_TYPE_INDEX {
+            return None;
+        }
+        let mut reader = Reader::new(body);
+        let read = |reader: &mut Reader<'_>| -> Result<Self, MessageError> {
+            Ok(Self {
+                header: FacetHeader::read(reader)?,
+                pronoun: reader.u8()?,
+            })
+        };
+        Some(read(&mut reader).and_then(|request| {
+            reader.finish()?;
+            Ok(request)
+        }))
+    }
+
+    /// The body bytes, as the client sends them.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        writer.u8(self.pronoun).finish()
+    }
+}
+
+/// The title and the pronoun type a player shows: what the card of a player carries of its
+/// social state (Observed, Playthrough part 21: the first social state of each other player
+/// held slot 0 children 0 and 1, the title and the pronoun type 0, 1 or 2, and nothing of the
+/// owner's lists).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShownSocial {
+    /// The title; 0 for none.
+    pub title: u32,
+    /// The pronoun type.
+    pub pronoun: u8,
+}
+
+impl ShownSocial {
+    /// The social state that shows both.
+    pub fn state(self) -> MemberState {
+        MemberState::Social(SocialState {
+            title: Some(self.title),
+            pronoun: Some(self.pronoun),
+            ..SocialState::default()
+        })
+    }
+}
+
+/// The own social state change that shows pronoun type `pronoun`.
+pub fn pronoun_state(pronoun: u8) -> MemberState {
+    MemberState::Social(SocialState {
+        pronoun: Some(pronoun),
+        ..SocialState::default()
+    })
+}
+
 /// The own social state change that shows `title` (the retail change after a 2474).
 pub fn title_state(title: u32) -> MemberState {
     MemberState::Social(SocialState::with_title(title))
@@ -98,5 +173,34 @@ mod tests {
         };
         social.write(&mut writer).expect("writes");
         assert_eq!(writer.finish(), RETAIL_CHANGE);
+    }
+
+    /// The retail 4751 body (Playthrough part 21): the header and pronoun type 0.
+    const RETAIL_PRONOUN_CALL: [u8; 17] = [
+        0x51, 0x7a, 0x18, 0x01, 0x68, 0xad, 0xa7, 0x9c, 0x22, 0xfa, 0x3d, 0xe2, 0xe3, 0x97, 0x41,
+        0xa4, 0x00,
+    ];
+
+    #[test]
+    fn a_set_pronoun_call_reads_and_writes_the_retail_bytes() {
+        let call = SetPronounRequest::decode(SET_PRONOUN_TYPE_INDEX, &RETAIL_PRONOUN_CALL)
+            .expect("a pronoun call")
+            .expect("reads");
+        assert_eq!(call.pronoun, 0);
+        assert_eq!(call.encode(), RETAIL_PRONOUN_CALL);
+        assert!(SetPronounRequest::decode(SET_TITLE_TYPE_INDEX, &RETAIL_PRONOUN_CALL).is_none());
+        let MemberState::Social(state) = pronoun_state(2) else {
+            panic!("a social state");
+        };
+        assert_eq!(state.pronoun, Some(2));
+        assert_eq!(state.title, None);
+        let shown = ShownSocial {
+            title: STOIC,
+            pronoun: 1,
+        };
+        let MemberState::Social(card) = shown.state() else {
+            panic!("a social state");
+        };
+        assert_eq!((card.title, card.pronoun), (Some(STOIC), Some(1)));
     }
 }

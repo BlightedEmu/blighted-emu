@@ -77,6 +77,30 @@ pub async fn save_published_look(
     Ok(())
 }
 
+/// The key of the stored appearance (`player_character.appearance`) that holds the look a
+/// barber change gave the character: its twelve look list positions in `PlayerLook` child order.
+/// Without it the look is the one of the creation settings.
+pub const CHANGED_LOOK_KEY: &str = "ChangedLook";
+
+/// Saves `look`, the twelve look list positions a barber change gave `character_id`, in its
+/// stored appearance under [`CHANGED_LOOK_KEY`].
+pub async fn save_changed_look(
+    world: &PgPool,
+    character_id: Uuid,
+    look: &[u8],
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE player_character SET appearance = jsonb_set(appearance, $2, $3) \
+         WHERE character_id = $1",
+    )
+    .bind(character_id)
+    .bind(vec![CHANGED_LOOK_KEY])
+    .bind(serde_json::json!(look))
+    .execute(world)
+    .await?;
+    Ok(())
+}
+
 /// Reserves `name` (compared in lower case) for a character in `world_id`.
 pub async fn reserve_character_name(
     global: &PgPool,
@@ -266,6 +290,35 @@ mod tests {
         .await;
         assert_eq!(before, None, "a new character has no published look");
         assert_eq!(after, Some(LOOK.to_vec()));
+    }
+
+    #[tokio::test]
+    async fn a_changed_look_is_saved_in_the_appearance_beside_the_creation_settings() {
+        /// The look after the first retail barber change: female, race 28.
+        const LOOK: [u8; 12] = [1, 28, 0, 0, 0, 26, 27, 0, 0, 0, 0, 4];
+        let (created, changed) = with_test_schema(async |pool| {
+            WORLD_MIGRATOR.run(pool).await.expect("migrate");
+            let inserted = insert_character(pool, &new_character(Uuid::new_v4()))
+                .await
+                .expect("insert");
+            save_changed_look(pool, inserted.id, &LOOK)
+                .await
+                .expect("save");
+            let after = character_by_id(pool, inserted.id)
+                .await
+                .expect("load")
+                .expect("the character");
+            (inserted.appearance, after.appearance)
+        })
+        .await;
+        assert_eq!(created.get(CHANGED_LOOK_KEY), None);
+        assert_eq!(
+            changed.get(CHANGED_LOOK_KEY),
+            Some(&serde_json::json!(LOOK))
+        );
+        for (key, value) in created.as_object().expect("an object") {
+            assert_eq!(changed.get(key), Some(value), "{key} stays");
+        }
     }
 
     #[tokio::test]

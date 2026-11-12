@@ -67,6 +67,11 @@ pub mod component {
     pub const GLOBAL_STORAGE: u64 = 0xfcf8_f502_9cc7_d818;
     /// The XOR of the player prefab's main entity and the child that holds its global storage.
     pub const GLOBAL_STORAGE_CHILD: u64 = 0x5aee_2731_f432_3d04;
+    /// `EntitlementComponent` (store tokens note, 2026-11-11: the 5936 target less the player
+    /// entity in 10 retail ledgers, `buy_barbertoken_and_change_style`,
+    /// `mount-menu-buying-all-store-horses`, `unlock_store_content`, Playthrough part 2 and
+    /// others).
+    pub const ENTITLEMENT: u64 = 0xc2c5_5427_83bd_9689;
 }
 
 /// Type index of `PlayerComponentServerFacet_OnAckLevelInfoChanged`.
@@ -95,6 +100,10 @@ pub const WHISPER_STARTED_TYPE_INDEX: u64 = 5235;
 pub const HOMING_OVERRIDE_TYPE_INDEX: u64 = 1790;
 /// Type index of `GameModeParticipantComponentClientFacet_OnLeftQueueForGameModeMsg`.
 pub const LEFT_GAME_MODE_QUEUE_TYPE_INDEX: u64 = 4970;
+/// Type index of `PaperdollComponentClientFacet_OnEquipItemFail`.
+pub const EQUIP_ITEM_FAIL_TYPE_INDEX: u64 = 3626;
+/// Type index of `ActionListComponentClientFacet_AFKWarning`.
+pub const AFK_WARNING_TYPE_INDEX: u64 = 2139;
 /// The 1790 word retail sends when a mob picks the player and no homing target is set.
 pub const NO_HOMING_OVERRIDE: u32 = u32::MAX;
 /// The last 4970 word: 1 in all 2,207 retail bodies (meaning Unknown).
@@ -1846,6 +1855,96 @@ impl LeftGameModeQueueMsg {
     }
 }
 
+/// 3626: an equip (3895) failed.
+///
+/// Observed (retail `equipping_gear-items`, 3 messages): the header of the 3895 it answers and
+/// that call's paperdoll slot as a `u32` (slot 45 each time: the client sent the same 3895
+/// twice in one millisecond, and the second, whose item had left the bag, got this answer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EquipItemFailMsg {
+    /// The header of the equip call.
+    pub header: FacetHeader,
+    /// The paperdoll slot of the equip call.
+    pub equip_slot: u32,
+}
+
+impl BodyCodec for EquipItemFailMsg {
+    const TYPE_INDEX: u64 = EQUIP_ITEM_FAIL_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        Ok(writer.u32(self.equip_slot).finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let message = Self {
+            header: FacetHeader::read(&mut reader)?,
+            equip_slot: reader.u32()?,
+        };
+        reader.finish()?;
+        Ok(message)
+    }
+}
+
+/// 2139: the server warns a player that stands still, or takes the warning back.
+///
+/// Observed (19 retail messages, 4 ledgers): the header (the player's `ActionListComponent`),
+/// a flag and a big-endian `f32`. A warning is flag 1 and the seconds left until the server
+/// removes the player (15.0 in a 3v3 arena round, 120.0 in an expedition: the `AfkModeData`
+/// row's `DisconnectSeconds` less its `WarnSeconds`); the message after it is flag 0 and 0.0.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AfkWarningMsg {
+    /// The header (the player's `ActionListComponent`).
+    pub header: FacetHeader,
+    /// The player is warned.
+    pub warned: bool,
+    /// Seconds until the player is removed; 0 when the warning is taken back.
+    pub seconds_left: f32,
+}
+
+impl AfkWarningMsg {
+    /// The warning of player `player`: `seconds_left` until it is removed.
+    pub fn warning(player: u64, seconds_left: f32) -> Self {
+        Self {
+            header: FacetHeader::of(component::ACTION_LIST, player),
+            warned: true,
+            seconds_left,
+        }
+    }
+
+    /// The message that takes back the warning of player `player`.
+    pub fn cleared(player: u64) -> Self {
+        Self {
+            header: FacetHeader::of(component::ACTION_LIST, player),
+            warned: false,
+            seconds_left: 0.0,
+        }
+    }
+}
+
+impl BodyCodec for AfkWarningMsg {
+    const TYPE_INDEX: u64 = AFK_WARNING_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        Ok(writer.boolean(self.warned).f32(self.seconds_left).finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let message = Self {
+            header: FacetHeader::read(&mut reader)?,
+            warned: reader.boolean()?,
+            seconds_left: reader.f32()?,
+        };
+        reader.finish()?;
+        Ok(message)
+    }
+}
+
 impl BodyCodec for LeftGameModeQueueMsg {
     const TYPE_INDEX: u64 = LEFT_GAME_MODE_QUEUE_TYPE_INDEX;
 
@@ -2835,5 +2934,44 @@ mod tests {
             too_many.encode(),
             Err(MessageError::CountTooLarge { .. })
         ));
+    }
+
+    /// A retail AFK warning of a 3v3 arena round and the message that takes it back, with a
+    /// made-up header: flag 1 and 14.99994 seconds, then flag 0 and 0.0.
+    const AFK_WARNING: &str = "0102030405060708111213141516171801416fffa5";
+    const AFK_CLEARED: &str = "010203040506070811121314151617180000000000";
+
+    #[test]
+    fn an_equip_fail_round_trips_the_retail_bytes() {
+        /// The retail body with a made-up header: paperdoll slot 45.
+        const HEADER: &str = "01020304050607081112131415161718";
+        const SLOT: &str = "0000002d";
+        let body = hex(&format!("{HEADER}{SLOT}"));
+        let fail = EquipItemFailMsg::decode(&body).expect("fail");
+        assert_eq!(fail.equip_slot, 45);
+        assert_eq!(fail.encode().expect("encode"), body);
+    }
+
+    #[test]
+    fn an_afk_warning_round_trips_the_retail_bytes() {
+        const ROUND_LEFT_S: f32 = 15.0;
+        const SEND_DELAY_S: f32 = 0.001;
+        let warning = AfkWarningMsg::decode(&hex(AFK_WARNING)).expect("warning");
+        assert!(warning.warned);
+        assert!((ROUND_LEFT_S - warning.seconds_left).abs() < SEND_DELAY_S);
+        assert_eq!(warning.encode().expect("encode"), hex(AFK_WARNING));
+        let cleared = AfkWarningMsg::decode(&hex(AFK_CLEARED)).expect("cleared");
+        assert_eq!(
+            cleared,
+            AfkWarningMsg {
+                header: warning.header,
+                warned: false,
+                seconds_left: 0.0,
+            }
+        );
+        assert_eq!(
+            AfkWarningMsg::cleared(7).encode().expect("encode")[16..],
+            [0; 5]
+        );
     }
 }

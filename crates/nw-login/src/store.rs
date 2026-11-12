@@ -5,8 +5,8 @@
 use std::future::Future;
 
 use nw_db::{
-    Account, AccountEntitlement, AnalyticsRecord, BoardEntry, BoardOrder, BoardPage, Character,
-    DiscordProfile, NewCharacter, PrivacySetting, StatValues, Wallet,
+    Account, AccountConsumable, AccountEntitlement, AnalyticsRecord, BoardEntry, BoardOrder,
+    BoardPage, Character, DiscordProfile, NewCharacter, PrivacySetting, StatValues, Wallet,
 };
 use nw_protocol::launcher_api::LauncherSession;
 use uuid::Uuid;
@@ -212,6 +212,12 @@ pub trait EntitlementStore: Clone + Send + Sync + 'static {
 
     /// The Marks of Fortune of `account`.
     fn wallet(&self, account: Uuid) -> impl Future<Output = Result<Wallet, StoreError>> + Send;
+
+    /// The consumable entitlements `account` holds, with their counts.
+    fn consumables(
+        &self,
+        account: Uuid,
+    ) -> impl Future<Output = Result<Vec<AccountConsumable>, StoreError>> + Send;
 }
 
 /// Stats and leaderboards (global database).

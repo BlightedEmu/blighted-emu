@@ -4,13 +4,14 @@
 //! takes the sword, fills the bag and equips from it (live-tutorial note, section 5). Outside the
 //! tutorial the items are saved (admin studio S5), and a login starts from the saved items.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use nw_bus::{CarriedItem, ItemPlace};
+use nw_content::artifacts::ArtifactKind;
 use nw_content::starter::{EquipSlot, KitItem, StarterKits};
 
 use crate::config::StartTool;
-use nw_messages::items::SYNC_MOVED;
+use nw_messages::items::{SYNC_CONVERTED, SYNC_CRAFT_USED, SYNC_MOVED};
 use nw_messages::paperdoll::slot;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
@@ -136,6 +137,8 @@ struct Stack {
     /// A main-hand weapon that draws the off-hand shield with it
     /// ([`nw_content::starter::draws_shield`]).
     draws_shield: bool,
+    /// The kind of an artifact ([`ArtifactKind::of_item_class`]).
+    artifact: Option<ArtifactKind>,
 }
 
 /// Why an equip request was refused.
@@ -151,6 +154,9 @@ pub(super) enum EquipRefusal {
     NotWorn,
     /// The item's class is disabled (`javelin.disabled-item-classes`).
     Disabled,
+    /// The item is an artifact and another slot wears an artifact of its kind
+    /// ([`nw_content::artifacts`]: one weapon, one armour and one jewellery artifact).
+    ArtifactLimit,
 }
 
 /// Why the server put the drawn weapon away while the player does something else, and when it
@@ -395,6 +401,18 @@ impl Gear {
         self.worn_stacks()
             .map(|(slot_id, stack)| (slot_id, stack.item_id.clone()))
             .collect()
+    }
+
+    /// The mean gear score of the worn items, 0 with none (Inferred for the war sign-up's gear
+    /// score: the client's own weighting of the slots is Unknown).
+    pub(super) fn mean_worn_gear_score(&self) -> u16 {
+        let (sum, count) = self
+            .worn_stacks()
+            .fold((0_u64, 0_u64), |(sum, count), (_, stack)| {
+                (sum + u64::from(stack.item.gear_score), count + 1)
+            });
+        sum.checked_div(count)
+            .map_or(0, |mean| u16::try_from(mean).unwrap_or(u16::MAX))
     }
 
     /// Wears a new stack of one `item` in paperdoll slot `slot_id`; the item worn there goes
@@ -1099,6 +1117,48 @@ impl Gear {
         left == 0
     }
 
+    /// Turns every bag stack of an item that `conversions` maps (item id to the id it becomes,
+    /// `MasterItemDefinitions.FFAConvertedItemId`) into the item it becomes, the same quantity;
+    /// an item `kits` does not know stays as it is. Whether a stack changed.
+    ///
+    /// Observed (retail `FFA_ExitFFAAndCleanse` 246.447 s and `FFA_KillPlayerAndLoot`
+    /// 237.905 s, the bundle that took the free-for-all flag off): every such stack leaves the
+    /// bag first, then each converted item goes in, in the bag's slot order, onto a stack of its
+    /// kind (27 cursed doubloons onto a stack of 1,218: 1,245) or into the first free slot (the
+    /// slot a merged stack freed). Each stack it adds to or makes shows [`SYNC_CONVERTED`]; a
+    /// slot left empty shows [`SYNC_CRAFT_USED`], as retail's did.
+    pub(super) fn convert(
+        &mut self,
+        kits: &StarterKits,
+        conversions: &HashMap<String, String>,
+    ) -> bool {
+        let mut converted: Vec<(&KitItem, u32)> = Vec::new();
+        let mut taken: Vec<(String, u32)> = Vec::new();
+        for stack in self.bag.iter().flatten() {
+            let Some(into) = conversions
+                .get(&stack.item_id)
+                .and_then(|into| kits.item(into))
+            else {
+                continue;
+            };
+            converted.push((into, stack.item.quantity));
+            match taken
+                .iter_mut()
+                .find(|(item_id, _)| *item_id == stack.item_id)
+            {
+                Some((_, quantity)) => *quantity = quantity.saturating_add(stack.item.quantity),
+                None => taken.push((stack.item_id.clone(), stack.item.quantity)),
+            }
+        }
+        for (item_id, quantity) in &taken {
+            self.take_as(item_id, *quantity, SYNC_CRAFT_USED);
+        }
+        for (into, quantity) in &converted {
+            self.add_as(into, *quantity, SYNC_CONVERTED);
+        }
+        !converted.is_empty()
+    }
+
     /// Equips `quantity` of the item of instance `instance` in bag slot `bag_slot` into paperdoll
     /// slot `slot_id`; an item worn there goes back to the bag. An item that `disabled` names
     /// (by item id) stays in the bag. The id of the equipped item.
@@ -1122,6 +1182,18 @@ impl Gear {
         }
         if !fits(stack.kind, slot_id) {
             return Err(EquipRefusal::WrongSlot);
+        }
+        // The item it replaces in `slot_id` does not count (Inferred: the client's count takes a
+        // slot type, `GetArtifactCount`).
+        if let Some(kind) = stack.artifact
+            && self.worn.iter().any(|(worn, other)| {
+                *worn != slot_id
+                    && other
+                        .as_ref()
+                        .is_some_and(|other| other.artifact == Some(kind))
+            })
+        {
+            return Err(EquipRefusal::ArtifactLimit);
         }
         let moved = quantity.clamp(1, stack.item.quantity);
         let whole = moved == stack.item.quantity;
@@ -1197,6 +1269,7 @@ fn stack(character: Uuid, item: &KitItem, quantity: u32) -> Stack {
         perks: item.perk_ids.clone(),
         reason: SYNC_MOVED,
         draws_shield: item.draws_shield,
+        artifact: item.artifact,
     }
 }
 
@@ -1251,6 +1324,56 @@ pub(crate) mod tests {
         )
         .expect("staff");
         gear
+    }
+
+    #[test]
+    fn a_second_artifact_of_a_kind_is_refused_and_one_in_its_own_slot_is_not() {
+        // Retail `ItemClass` cells of artifacts (build 25810808), made-up item ids.
+        const BOW: &str = "Artifact_Test_2hBow";
+        const SPEAR: &str = "Artifact_Test_2hSpear";
+        const MUSKET: &str = "Artifact_Test_2hMusket";
+        const HEAD: &str = "Artifact_Test_HeavyHead";
+        let kits = kits_with(&[
+            (BOW, "Artifact+Weapon+EquippableTwoHand+Bow+Ranged+NoGem"),
+            (SPEAR, "Artifact+Weapon+EquippableTwoHand+Spear+Melee"),
+            (MUSKET, "Artifact+Weapon+EquippableTwoHand+Musket+Ranged"),
+            (HEAD, "Artifact+EquippableHead+Armor+Heavy"),
+        ]);
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("kit");
+        for item_id in [BOW, SPEAR, MUSKET, HEAD] {
+            assert!(gear.add(kits.item(item_id).expect("artifact"), 1));
+        }
+        let bag_slot = |gear: &Gear, item_id: &str| {
+            gear.bag
+                .iter()
+                .position(|stack| stack.as_ref().is_some_and(|stack| stack.item_id == item_id))
+                .and_then(|slot_id| u32::try_from(slot_id).ok())
+                .expect("in the bag")
+        };
+        let equip = |gear: &mut Gear, item_id: &str, slot_id: u32| {
+            gear.equip(
+                bag_slot(gear, item_id),
+                slot_id,
+                1,
+                instance(item_id),
+                none_disabled,
+            )
+        };
+        assert_eq!(
+            equip(&mut gear, BOW, slot::MAIN_HAND_OPTION_1),
+            Ok(BOW.to_owned())
+        );
+        assert_eq!(
+            equip(&mut gear, SPEAR, slot::MAIN_HAND_OPTION_2),
+            Err(EquipRefusal::ArtifactLimit)
+        );
+        // An armour artifact is of another kind.
+        assert_eq!(equip(&mut gear, HEAD, slot::HEAD), Ok(HEAD.to_owned()));
+        // The bow's own slot takes another weapon artifact in its place.
+        assert_eq!(
+            equip(&mut gear, MUSKET, slot::MAIN_HAND_OPTION_1),
+            Ok(MUSKET.to_owned())
+        );
     }
 
     #[test]

@@ -68,6 +68,203 @@ const CRAFT_GEAR_SCORE_COLUMNS: [&str; 5] = [
     "Weaponsmithing",
 ];
 
+/// The tradeskill of each `EXP_*` column, in column order (`EXP_Woodworking` is a text column).
+const EXPERIENCE_COLUMNS: [&str; 10] = [
+    "Fishing",
+    "Harvesting",
+    "Leatherworking",
+    "Logging",
+    "Mining",
+    "Skinning",
+    "Smelting",
+    "Stonecutting",
+    "Weaving",
+    "Woodworking",
+];
+/// The gathering tradeskill of each `MULT_*` column, in column order.
+const GATHER_YIELD_COLUMNS: [&str; 5] = ["Fishing", "Harvesting", "Logging", "Mining", "Skinning"];
+/// The tradeskill of each `ROL_*` column, in column order.
+const LUCK_COLUMNS: [&str; 12] = [
+    "Cooking",
+    "Fishing",
+    "Harvesting",
+    "Jewelcrafting",
+    "Leatherworking",
+    "Logging",
+    "Mining",
+    "Skinning",
+    "Smelting",
+    "Stonecutting",
+    "Weaving",
+    "Woodworking",
+];
+/// Separates the entries of an `EXPCategoricalProgression` cell (`2:1,4:1`).
+const PROGRESSION_SEPARATOR: char = ',';
+/// Separates a progression from its share in an `EXPCategoricalProgression` entry.
+const PROGRESSION_SHARE_SEPARATOR: char = ':';
+/// Separates the tags of a `LootTags` cell (Inferred: as the loot tables' `Conditions`; every
+/// cell of build 25810808 holds one tag).
+const LOOT_TAG_SEPARATOR: char = ',';
+
+/// The reward and tradeskill bonus columns of a status effect (status effect bonuses study
+/// 2026-11-11). Each value is a share added to 1 of the reward it names, or a bonus added to a
+/// loot roll; every held effect adds its value times its potency.
+///
+/// Observed (`Playthrough_Part_02`, five token uses at 1792686628775 to 1792686639126, the
+/// tokens held all through the ledger): `Token_Gather_1` (`EXP_*` 1.0) made a level-modified
+/// `Gather_SkinningT1` (32 x 2.2030358, 70 rounded down) give Skinning 280 = 70 x 2 (remote
+/// multiplier) x (1 + 1) at 3492.2 s; `Token_Weapon_1` (`EXPCategoricalProgression` 1.0 for every
+/// weapon mastery) made a kill of raw 16 give the held sword 64 = 16 x 2 x 2 and the other
+/// weapon 12 = ceil(16 x 0.15) x 2 x 2 at 1505.5 s; `Token_Territory_1` (1.0 for every territory
+/// standing) made the kill's standing 5 give 30 = 5 x 3 x 2 and a chart's 50 give 300 at
+/// 1626.6 s. The other columns keep this form (Inferred: no capture holds a reward with them).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RewardMods {
+    /// The `EXP_*` and `EXPCategoricalProgression` columns: (lowercase
+    /// `CategoricalProgressionId`, share added to its gains).
+    pub progression: Vec<(String, f64)>,
+    /// The `MULT_*` columns: (lowercase gathering tradeskill, share added to its yield).
+    pub gather_yield: Vec<(String, f64)>,
+    /// The `ROL_*` columns: (lowercase tradeskill, bonus added to its loot rolls).
+    pub tradeskill_luck: Vec<(String, f64)>,
+    /// `GlobalRollMod`: the bonus added to the other loot rolls.
+    pub global_luck: f64,
+    /// `TerritoryStandingMod`: the share added to territory standing gains.
+    pub territory_standing: f64,
+    /// `FactionReputationMod`: the share added to faction reputation gains.
+    pub faction_reputation: f64,
+    /// `FactionTokensMod`: the share added to faction token gains.
+    pub faction_tokens: f64,
+    /// `AzothMod`: the share added to azoth gains.
+    pub azoth: f64,
+    /// `LootTags`: the tags its holder's loot rolls hold (`ToolMoteFire`, `EtherealMining`).
+    pub loot_tags: Vec<String>,
+}
+
+impl RewardMods {
+    /// The bonus columns of datasheet row `row`.
+    fn of(row: &StatusEffectData) -> Self {
+        let by_skill = |skills: &[&str], values: &[Option<f64>]| -> Vec<(String, f64)> {
+            skills
+                .iter()
+                .zip(values)
+                .filter_map(|(skill, value)| {
+                    value
+                        .filter(|value| *value != 0.0)
+                        .map(|value| (skill.to_lowercase(), value))
+                })
+                .collect()
+        };
+        // Luck bonuses of a few thousand.
+        let luck = |value: Option<i64>| value.map(|value| value as f64);
+        let woodworking = row
+            .exp_woodworking
+            .as_deref()
+            .and_then(|cell| cell.trim().parse().ok());
+        let mut progression = by_skill(
+            &EXPERIENCE_COLUMNS,
+            &[
+                row.exp_fishing,
+                row.exp_harvesting,
+                row.exp_leatherworking,
+                row.exp_logging,
+                row.exp_mining,
+                row.exp_skinning,
+                row.exp_smelting,
+                row.exp_stonecutting,
+                row.exp_weaving,
+                woodworking,
+            ],
+        );
+        progression.extend(progression_shares(
+            row.exp_categorical_progression.as_deref(),
+        ));
+        Self {
+            progression,
+            gather_yield: by_skill(
+                &GATHER_YIELD_COLUMNS,
+                &[
+                    row.mult_fishing,
+                    row.mult_harvesting,
+                    row.mult_logging,
+                    row.mult_mining,
+                    row.mult_skinning,
+                ],
+            ),
+            tradeskill_luck: by_skill(
+                &LUCK_COLUMNS,
+                &[
+                    luck(row.rol_cooking),
+                    luck(row.rol_fishing),
+                    luck(row.rol_harvesting),
+                    luck(row.rol_jewelcrafting),
+                    luck(row.rol_leatherworking),
+                    luck(row.rol_logging),
+                    luck(row.rol_mining),
+                    luck(row.rol_skinning),
+                    luck(row.rol_smelting),
+                    luck(row.rol_stonecutting),
+                    luck(row.rol_weaving),
+                    luck(row.rol_woodworking),
+                ],
+            ),
+            global_luck: row.global_roll_mod.unwrap_or(0.0),
+            territory_standing: row.territory_standing_mod.unwrap_or(0.0),
+            faction_reputation: row.faction_reputation_mod.unwrap_or(0.0),
+            faction_tokens: row.faction_tokens_mod.unwrap_or(0.0),
+            azoth: row.azoth_mod.unwrap_or(0.0),
+            loot_tags: row
+                .loot_tags
+                .as_deref()
+                .unwrap_or_default()
+                .split(LOOT_TAG_SEPARATOR)
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        }
+    }
+
+    /// The share it adds to the gains of progression `id` (any case).
+    pub fn progression_share(&self, id: &str) -> f64 {
+        share_of(&self.progression, id)
+    }
+
+    /// The share it adds to the yield of gathering tradeskill `tradeskill` (any case).
+    pub fn yield_share(&self, tradeskill: &str) -> f64 {
+        share_of(&self.gather_yield, tradeskill)
+    }
+
+    /// The bonus it adds to the loot rolls of tradeskill `tradeskill` (any case).
+    pub fn luck_of(&self, tradeskill: &str) -> f64 {
+        share_of(&self.tradeskill_luck, tradeskill)
+    }
+}
+
+/// The sum of the values of `values` (lowercase keys) for `key` (any case).
+fn share_of(values: &[(String, f64)], key: &str) -> f64 {
+    values
+        .iter()
+        .filter(|(own, _)| own.eq_ignore_ascii_case(key))
+        .map(|(_, value)| value)
+        .sum()
+}
+
+/// The (lowercase progression id, share) entries of an `EXPCategoricalProgression` cell
+/// (`HatchetAbilityTable:1,SwordAbilityTable:1`, `2:0.15`); an entry without a number is left
+/// out.
+fn progression_shares(cell: Option<&str>) -> Vec<(String, f64)> {
+    cell.unwrap_or_default()
+        .split(PROGRESSION_SEPARATOR)
+        .filter_map(|entry| {
+            let (id, share) = entry.split_once(PROGRESSION_SHARE_SEPARATOR)?;
+            let id = id.trim();
+            let share: f64 = share.trim().parse().ok()?;
+            (!id.is_empty() && share != 0.0).then(|| (id.to_lowercase(), share))
+        })
+        .collect()
+}
+
 /// The rules of one status effect.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatusEffectRule {
@@ -187,6 +384,13 @@ pub struct StatusEffectRule {
     /// `FoodRecoveryT2` use of `general-other-01` (502.111 s), an effect without it. Inferred:
     /// the column is what sends it.
     pub shows_damage_text: bool,
+    /// `StackDuration` is set: a new application adds its duration to the time left
+    /// (the `Token_*` boosts; Observed, `Playthrough_Part_02`: a `Token_Proficiency_1` use at
+    /// 1792686639126 ended at 1792695508531, its 5,400 s after the 3,469 s the token held from an
+    /// earlier session; the other four tokens, not held before, ended 7,200 s after their use).
+    pub stack_duration: bool,
+    /// Its reward and tradeskill bonuses.
+    pub rewards: RewardMods,
 }
 
 /// What a status effect keeps its holder from doing (the flag columns of `StatusEffectData`).
@@ -356,6 +560,10 @@ pub struct EffectSourceRow {
     pub game_event: Option<String>,
     /// `ShowTextInDamageNumbers`.
     pub shows_damage_text: bool,
+    /// `StackDuration` is above 0.
+    pub stack_duration: bool,
+    /// The reward and tradeskill bonus columns.
+    pub rewards: RewardMods,
 }
 
 impl EffectSourceRow {
@@ -510,6 +718,8 @@ impl EffectSourceRow {
             initial_stacks: row.initial_stack_size,
             game_event: row.game_event_id.clone().filter(|event| !event.is_empty()),
             shows_damage_text: row.show_text_in_damage_numbers.unwrap_or(false),
+            stack_duration: row.stack_duration.is_some_and(|stack| stack > 0.0),
+            rewards: RewardMods::of(row),
         }
     }
 }
@@ -754,6 +964,8 @@ fn rule(
             .filter(|stacks| *stacks > 1),
         game_event: row.game_event.clone(),
         shows_damage_text: row.shows_damage_text,
+        stack_duration: row.stack_duration,
+        rewards: row.rewards.clone(),
     }
 }
 
@@ -964,5 +1176,61 @@ mod tests {
                 .on_hit(RowKey::of("WolfDamageTable", "Claw"))
                 .is_empty()
         );
+    }
+
+    /// A `StatusEffectData` row of the cells `cells` (JSON names), the others empty.
+    fn data_row(cells: serde_json::Value) -> StatusEffectData {
+        serde_json::from_value(cells).expect("a status effect row")
+    }
+
+    #[test]
+    fn the_bonus_columns_give_progression_yield_luck_and_reward_shares() {
+        // Build 25810808 `Token_Weapon_1` (cut to two masteries), `Token_Territory_1` (two
+        // standings), `Token_Gather_1`, `Token_Proficiency_1`, `PvP_Flag_Bonus` and
+        // `Status_Perk_Bags_FactionGain`, as one made-up row.
+        let row = data_row(serde_json::json!({
+            "status_id": "Test_AllBonuses",
+            "exp_categorical_progression": "SwordAbilityTable:1,HatchetAbilityTable:1,2:1,x,4:",
+            "exp_mining": 1.0,
+            "exp_woodworking": "1.4999999999999999E-2",
+            "mult_mining": 0.1,
+            "rol_mining": 3000,
+            "global_roll_mod": 1000.0,
+            "faction_reputation_mod": 0.03,
+            "faction_tokens_mod": 0.03,
+            "territory_standing_mod": 0.05,
+            "azoth_mod": 0.03,
+            "loot_tags": "ToolMoteFire",
+            "stack_duration": 1.0,
+        }));
+        let source = EffectSourceRow::of(&row);
+        assert!(source.stack_duration);
+        let mods = &source.rewards;
+        assert_eq!(mods.progression_share("swordabilitytable"), 1.0);
+        assert_eq!(mods.progression_share("2"), 1.0);
+        assert_eq!(mods.progression_share("4"), 0.0, "an entry without a share");
+        assert_eq!(mods.progression_share("Mining"), 1.0);
+        assert!((mods.progression_share("Woodworking") - 0.015).abs() < 1e-12);
+        assert_eq!(mods.progression_share("Skinning"), 0.0);
+        assert_eq!(mods.yield_share("mining"), 0.1);
+        assert_eq!(mods.luck_of("Mining"), 3_000.0);
+        assert_eq!(mods.luck_of("Logging"), 0.0);
+        assert_eq!(mods.global_luck, 1_000.0);
+        assert_eq!(
+            (
+                mods.faction_reputation,
+                mods.faction_tokens,
+                mods.territory_standing,
+                mods.azoth
+            ),
+            (0.03, 0.03, 0.05, 0.03)
+        );
+        assert_eq!(mods.loot_tags, ["ToolMoteFire"]);
+        // A text that is no number in `EXP_Woodworking` (`Mut_Base_Curse4_Minor_Silence`).
+        let silence = data_row(serde_json::json!({
+            "status_id": "Test_Silence",
+            "exp_woodworking": "StatFX_Silence_ON",
+        }));
+        assert_eq!(EffectSourceRow::of(&silence).rewards, RewardMods::default());
     }
 }

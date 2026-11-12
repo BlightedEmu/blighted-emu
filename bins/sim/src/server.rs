@@ -13,7 +13,8 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::world::store_purchase::StoreGrant;
+use crate::world::land_claims::TerritoryDone;
+use crate::world::store_purchase::{GrantAnswer, StoreGrant};
 use crate::world::transmog::SkinJob;
 use nw_bus::InstanceCommand;
 use nw_bus::{
@@ -26,6 +27,7 @@ use nw_bus::{
 use nw_bus::{CoinTransfer, LeaveReason, SocialBatch, SocialDeliveries, SocialInput};
 use nw_bus::{GhostAssembly, ghost_parts};
 use nw_bus::{ItemLookState, ItemState};
+use nw_bus::{QueueCall, QueueNews};
 use nw_common::time::{unix_ms, unix_seconds};
 use nw_content::leaderboards::RotationCalendar;
 use nw_db::{AccountSkins, collect_account_skins};
@@ -36,7 +38,6 @@ use nw_db::{
     save_character_items, save_character_position, save_character_progression,
     save_character_quests, save_published_look, submit_stats,
 };
-use nw_db::{Purchase, buy_entitlement};
 use nw_db::{SavedGatherNode, level_gather_nodes, save_gather_node, world_clock_start};
 use nw_db::{clear_new_account_titles, company_listings, earn_account_titles, stored_players};
 use nw_messages::ArenaClientMsg;
@@ -49,15 +50,17 @@ use nw_messages::{
     BodyCodec, ClientFacetMsg, ClientInputMsg, ConversationClientMsg, GmClientMsg, InputRecord,
     LookupRequest, MetaAchievementRequest, MountClientMsg, NS_PER_MS, ObjectiveInteractorClientMsg,
     PointsClientMsg, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX,
-    RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX, SetTitleRequest, SpreadshotRequestMsg,
-    TravelClientMsg,
+    RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX, SetPronounRequest, SetTitleRequest,
+    SpreadshotRequestMsg, TravelClientMsg,
 };
 use nw_messages::{
     ClientOptionMsg, GuildsRequest, ItemCallMsg, ItemRepairMsg, KickClientMsg, PlayerDataRequest,
     PlayerManagerRejectedMsg, RETAIL_KICK_REASON, ServerMessage, TitleRequest,
 };
 use nw_messages::{FishingClientMsg, MusicClientMsg};
-use nw_messages::{GameModeClientMsg, TitlesUnlockMsg, WarClientMsg, WarSignupClientMsg};
+use nw_messages::{
+    GameModeClientMsg, PayUpkeepCostMsg, TitlesUnlockMsg, WarClientMsg, WarSignupClientMsg,
+};
 use nw_reflect::Envelope;
 use nw_sim_core::{Ground, GroundCheck, Position, TickClock};
 use tokio::sync::mpsc;
@@ -311,6 +314,10 @@ struct Inbox {
     coins: nw_bus::Subscription<CoinTransfer>,
     /// The director's instance commands (open, close, add a member).
     instance: nw_bus::Subscription<InstanceCommand>,
+    /// The director's news of this sim's queued players.
+    queue: nw_bus::Subscription<QueueNews>,
+    /// The director's news of the territory wars' instances (every sim).
+    war_instances: nw_bus::Subscription<nw_bus::WarInstanceNews>,
 }
 
 impl Inbox {
@@ -329,6 +336,8 @@ impl Inbox {
             social: bus.subscribe(subject::sim_social(world_id, sim)).await?,
             coins: bus.subscribe(subject::sim_coins(world_id, sim)).await?,
             instance: bus.subscribe(subject::sim_instance(world_id, sim)).await?,
+            queue: bus.subscribe(subject::sim_queue(world_id, sim)).await?,
+            war_instances: bus.subscribe(subject::sims_war(world_id)).await?,
         };
         bus.flush().await?;
         Ok(inbox)
@@ -358,6 +367,8 @@ struct Loop {
     script_logs: Publisher<ScriptLog>,
     /// Social calls and presence to the world's social service.
     social: Publisher<SocialBatch>,
+    /// The players' matchmaking queue calls to the director.
+    queue_calls: Publisher<QueueCall>,
     /// The social inputs of this tick, in order.
     pending_social: Vec<SocialInput>,
     db: PgPool,
@@ -381,7 +392,9 @@ struct Loop {
     economy_jobs: JoinSet<Option<EconomyResult>>,
     /// The skin collection jobs that run (transmog module).
     skin_jobs: JoinSet<(SkinJob, Result<AccountSkins, nw_db::DbError>)>,
-    store_grants: JoinSet<(StoreGrant, Result<Purchase, nw_db::DbError>)>,
+    store_grants: JoinSet<(StoreGrant, GrantAnswer)>,
+    /// The territory owner reads and changes that run (land claims module).
+    territory_jobs: JoinSet<TerritoryDone>,
     /// The expedition requests that wait for the director.
     instance_link: InstanceLink,
     handoff_results: mpsc::Sender<HandoffResult>,
@@ -450,6 +463,7 @@ pub async fn serve(
         snapshots: Publisher::start(bus.clone(), SIM_QUEUE),
         script_logs: Publisher::start(bus.clone(), SIM_QUEUE),
         social: Publisher::start(bus.clone(), SIM_QUEUE),
+        queue_calls: Publisher::start(bus.clone(), SIM_QUEUE),
         pending_social: Vec::new(),
         settings,
         bus,
@@ -466,6 +480,7 @@ pub async fn serve(
         economy_jobs: JoinSet::new(),
         skin_jobs: JoinSet::new(),
         store_grants: JoinSet::new(),
+        territory_jobs: JoinSet::new(),
         instance_link: InstanceLink::default(),
         handoff_results,
         started: Instant::now(),
@@ -534,6 +549,13 @@ pub async fn serve(
             Some(done) = state.economy_jobs.join_next() => state.economy_done(done),
             Some(done) = state.skin_jobs.join_next() => state.skins_done(done),
             Some(done) = state.store_grants.join_next() => state.store_granted(done),
+            Some(done) = state.territory_jobs.join_next() => match done {
+                Ok(done) => state.world.territories_done(done),
+                Err(error) => {
+                    tracing::error!(%error, "territory job task failed");
+                    state.world.territory_job_lost();
+                }
+            },
             _ = delivery_timer.tick() => state.world.economy_round(),
             Some(command) = inbox.instance.next() => match command {
                 Ok(command) => {
@@ -545,6 +567,14 @@ pub async fn serve(
             Some((connection, reply)) = state.instance_link.next() => {
                 state.world.instance_reply(&connection, reply);
             }
+            Some(news) = inbox.queue.next() => match news {
+                Ok(news) => state.world.queue_news(news.message),
+                Err(error) => tracing::warn!(%error, "bad queue news"),
+            },
+            Some(news) = inbox.war_instances.next() => match news {
+                Ok(news) => state.world.war_instance_news(news.message),
+                Err(error) => tracing::warn!(%error, "bad war instance news"),
+            },
             _ = poll.tick() => state.tick(&mut clock),
             _ = save_timer.tick() => state.save_all(),
             _ = beat_timer.tick() => state.heartbeat(),
@@ -746,6 +776,15 @@ impl Loop {
                     }
                 }
             }
+            Some(index) if let Some(request) = SetPronounRequest::decode(index, &envelope.body) => {
+                match request {
+                    Ok(request) => self.world.set_pronoun(connection, &request),
+                    Err(error) => {
+                        metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
+                        tracing::warn!(type_index = index, %error, "pronoun choice does not read");
+                    }
+                }
+            }
             Some(index) if let Some(request) = SetTitleRequest::decode(index, &envelope.body) => {
                 match request {
                     Ok(request) => self.world.set_title(connection, &request),
@@ -884,6 +923,9 @@ impl Loop {
                         let reply = self.kick(entity);
                         self.world.answer_gm_chat(connection, answer_lines(reply));
                     }
+                    // A leave in a war's instance leaves the war (`world::war_fight`).
+                    None if index == nw_messages::social::groups::LEAVE_GROUP_TYPE_INDEX
+                        && self.world.leave_war(connection) => {}
                     None => {
                         if let Some(character) = self.world.character_of(connection) {
                             self.pending_social.push(SocialInput::Call {
@@ -910,6 +952,15 @@ impl Loop {
             Some(index) if let Some(call) = WarSignupClientMsg::decode(index, &envelope.body) => {
                 match call {
                     Ok(call) => self.world.war_signup_call(connection, call),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(call) = PayUpkeepCostMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => {
+                        let payment = self.world.pay_upkeep_call(connection, &call, unix_ms());
+                        self.pending_social.extend(payment);
+                    }
                     Err(error) => bad_call(index, &error, &envelope.body),
                 }
             }
@@ -1117,31 +1168,46 @@ impl Loop {
         }
     }
 
-    /// Pays and saves each store purchase of the world to its account, each in its own task
-    /// (store purchase module).
-    fn run_store_grants(&mut self) {
-        for grant in self.world.take_store_grants() {
-            let global = self.global_db.clone();
-            self.store_grants.spawn(async move {
-                let bought = buy_entitlement(
-                    &global,
-                    grant.account,
-                    &grant.entitlement,
-                    i64::from(grant.price),
-                )
-                .await;
-                (grant, bought)
-            });
+    /// Runs the territory owner jobs of the world, each in its own task (land claims module).
+    fn run_territory_jobs(&mut self, now_ms: u64) {
+        for job in self.world.take_territory_jobs(now_ms) {
+            let db = self.db.clone();
+            self.territory_jobs.spawn(async move { job.run(&db).await });
         }
     }
 
-    /// Gives the result of a store purchase to the world.
-    fn store_granted(
-        &mut self,
-        done: Result<(StoreGrant, Result<Purchase, nw_db::DbError>), tokio::task::JoinError>,
-    ) {
+    /// Kicks each player the AFK rule removes (AFK module).
+    fn run_afk_removals(&mut self) {
+        for entity in self.world.take_afk_removals() {
+            let reply = self.kick(entity);
+            tracing::info!(player = entity, ?reply, "AFK removal");
+        }
+    }
+
+    /// Runs each store request of the world against its account (a purchase pays and saves; a
+    /// barber change spends a token and saves the look), each in its own task (store purchase
+    /// module).
+    fn run_store_grants(&mut self) {
+        for grant in self.world.take_store_grants() {
+            let (global, world) = (self.global_db.clone(), self.db.clone());
+            self.store_grants
+                .spawn(async move { grant.run(&global, &world).await });
+        }
+    }
+
+    /// Gives the result of a store request to the world; a changed look goes to the social
+    /// service at once (its icon).
+    fn store_granted(&mut self, done: Result<(StoreGrant, GrantAnswer), tokio::task::JoinError>) {
         match done {
-            Ok((grant, bought)) => self.world.store_granted(&grant, bought),
+            Ok((grant, answer)) => {
+                if self.world.store_answered(&grant, answer)
+                    && let Some(player) = self
+                        .world
+                        .social_player_of_number(grant.number, &self.settings.sim_id)
+                {
+                    self.pending_social.push(SocialInput::Updated(player));
+                }
+            }
             Err(error) => tracing::error!(%error, "store grant task failed"),
         }
     }
@@ -1507,6 +1573,14 @@ impl Loop {
                 request,
             );
         }
+        for call in self.world.take_queue_calls() {
+            if !self
+                .queue_calls
+                .send(subject::director_queue(self.settings.world_id), call)
+            {
+                metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
+            }
+        }
         for (state, count) in self.world.mob_counts() {
             metrics::gauge!(METRIC_MOBS, STATE_LABEL => state.label()).set(count as f64);
         }
@@ -1526,7 +1600,9 @@ impl Loop {
         self.add_stats();
         self.run_economy_jobs();
         self.run_skin_jobs();
+        self.run_territory_jobs(now_ms);
         self.run_store_grants();
+        self.run_afk_removals();
         if !output.script_log.is_empty() {
             let subject = subject::sim_script_log(self.settings.world_id, &self.settings.sim_id);
             let log = ScriptLog {
@@ -2143,6 +2219,7 @@ fn saved_progression(progression: &PlayerProgression, taken_at_ms: u64) -> Saved
         meta_counters: progression.meta_counters.clone(),
         meta_completed: progression.meta_completed.clone(),
         title: progression.title,
+        pronoun: progression.pronoun,
         mounts: saved_mounts(&progression.mounts),
         arena: saved_arena(&progression.arena),
         music: nw_db::SavedMusic {
@@ -2207,6 +2284,29 @@ fn saved_progression(progression: &PlayerProgression, taken_at_ms: u64) -> Saved
             cyclic_turns: progression.cyclic_turns.clone(),
             fishing_bait: progression.fishing_bait.clone(),
         },
+        season: saved_season(&progression.season),
+    }
+}
+
+/// The season pass state as the database stores it (its list versions are not saved).
+fn saved_season(season: &nw_bus::PlayerSeason) -> nw_db::SavedSeason {
+    let card = &season.card;
+    nw_db::SavedSeason {
+        season: season.season,
+        redeemed: season.redeemed.clone(),
+        stats: season.stats.clone(),
+        card: nw_db::SavedCard {
+            template: card.template,
+            tasks: card.tasks.clone(),
+            claimed: card.claimed,
+            stamped: card.stamped,
+            wild_stamped: card.wild_stamped,
+            wild_stamps: card.wild_stamps,
+            rerolls: card.rerolls,
+            cards_done: card.cards_done,
+            stats: card.stats.clone(),
+        },
+        first_connect_ns: season.first_connect_ns,
     }
 }
 
@@ -2226,6 +2326,7 @@ fn saved_arena(arena: &nw_bus::PlayerArena) -> nw_db::SavedArena {
         next_group_trial_refresh_ns: arena.next_group_trial_refresh_ns,
         mutation_award: arena.mutation_award,
         last_dungeon_mutated: arena.last_dungeon_mutated,
+        queue_eligible: arena.queue_eligible.clone(),
         stay: arena.stay.as_ref().map(|stay| nw_db::SavedStay {
             instance: stay.instance,
             game_mode: stay.game_mode.clone(),
@@ -4080,6 +4181,7 @@ mod tests {
                 progression: PlayerProgression::default(),
                 achievement_version: 0,
                 pvp_flagged: false,
+                pvp_flag_left_ms: None,
                 auto_pin: true,
             };
             let subject = subject::sim_handoff(world_id, &id);

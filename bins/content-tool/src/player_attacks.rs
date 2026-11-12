@@ -1313,8 +1313,7 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
                     sources.grid = lists;
                 }
             } else if path == PLAYER_CONTROLLER {
-                if let Some(controller) = text().and_then(|text| ControllerDef::parse(text).ok())
-                {
+                if let Some(controller) = text().and_then(|text| ControllerDef::parse(text).ok()) {
                     sources.controller = controller;
                 }
             } else if path.ends_with(ACTION_LIST_SUFFIX) {
@@ -1679,7 +1678,7 @@ mod tests {
         assert_eq!(variant.stance.charged_at_ms, Some(500));
         assert_eq!(
             sword
-                .with_status_effects(&["Sword_Stance_Offense"])
+                .with_effects(|effect| effect == "Sword_Stance_Offense")
                 .charged_at_ms,
             Some(500)
         );

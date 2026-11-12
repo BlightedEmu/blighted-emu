@@ -38,17 +38,21 @@ pub const PRE_RAID_STATUS_TYPE_INDEX: u64 = 715;
 pub const SIEGE_WARFARE_STARTED_TYPE_INDEX: u64 = 3454;
 /// `GroupsComponentClientFacet_OnReceivedSiegeWarfareEnded`.
 pub const SIEGE_WARFARE_ENDED_TYPE_INDEX: u64 = 245;
+/// `GroupsComponentClientFacet_OnSiegeWarfareCompleted`.
+pub const SIEGE_WARFARE_COMPLETED_TYPE_INDEX: u64 = 3455;
 /// `GroupsComponentServerFacet_RequestMoveRaidMember`.
 pub const MOVE_RAID_MEMBER_TYPE_INDEX: u64 = 3501;
 /// `GroupsComponentServerFacet_RequestSwapRaidMembers`.
 pub const SWAP_RAID_MEMBERS_TYPE_INDEX: u64 = 541;
+/// `GroupsComponentServerFacet_RequestChooseRole`.
+pub const CHOOSE_ROLE_TYPE_INDEX: u64 = 5390;
 
 /// Bytes after the header of every retail 2407 (all zero in the war, raid and healer
 /// ledgers; meaning Unknown).
 pub const PING_DATA_LEN: usize = 14;
 
 /// The group calls of the client.
-pub(crate) const CALL_TYPES: [u64; 8] = [
+pub(crate) const CALL_TYPES: [u64; 9] = [
     GROUP_INVITE_TYPE_INDEX,
     REPLY_TO_INVITE_TYPE_INDEX,
     LEAVE_GROUP_TYPE_INDEX,
@@ -57,6 +61,7 @@ pub(crate) const CALL_TYPES: [u64; 8] = [
     GROUP_PING_TYPE_INDEX,
     MOVE_RAID_MEMBER_TYPE_INDEX,
     SWAP_RAID_MEMBERS_TYPE_INDEX,
+    CHOOSE_ROLE_TYPE_INDEX,
 ];
 
 /// The answer of an accepted invite (27 of 27 retail answers; the client sends no other in the
@@ -119,7 +124,9 @@ pub enum GroupCall {
     MoveRaidMember {
         /// The member's character id as UUID text.
         character: String,
-        /// The group the member goes to (1 and 2 in retail).
+        /// The index of the group the member goes to in the raid's `groupIds`, from 0
+        /// (Observed: 0 to 3 in `raid_group_influence_race` 43.292 to 65.476 s, each move
+        /// followed by the member's groups state naming that group).
         group: u8,
     },
     /// 541: swap two raid members (two character ids as UUID text).
@@ -128,6 +135,14 @@ pub enum GroupCall {
         first: String,
         /// The second member's character id as UUID text.
         second: String,
+    },
+    /// 5390: choose the player's role in its group (Observed: one byte after the header in all
+    /// 7 retail calls, values 2, 3 and 4; `raid_group_influence_race` 71.624 s and 75.675 s: the
+    /// group entity's role child of the player's member block took the value 48 to 68 ms
+    /// later).
+    ChooseRole {
+        /// The role (the client's `GroupFinderRole`).
+        role: u8,
     },
 }
 
@@ -168,6 +183,7 @@ impl GroupCall {
                     second: read_text(reader)?,
                 })
             })(),
+            CHOOSE_ROLE_TYPE_INDEX => reader.u8().map(|role| Self::ChooseRole { role }),
             _ => return None,
         };
         Some(call)
@@ -184,6 +200,7 @@ impl GroupCall {
             Self::Ping { .. } => GROUP_PING_TYPE_INDEX,
             Self::MoveRaidMember { .. } => MOVE_RAID_MEMBER_TYPE_INDEX,
             Self::SwapRaidMembers { .. } => SWAP_RAID_MEMBERS_TYPE_INDEX,
+            Self::ChooseRole { .. } => CHOOSE_ROLE_TYPE_INDEX,
         }
     }
 
@@ -224,6 +241,9 @@ impl GroupCall {
             Self::SwapRaidMembers { first, second } => {
                 write_text(&mut writer, first)?;
                 write_text(&mut writer, second)?;
+            }
+            Self::ChooseRole { role } => {
+                writer.u8(*role);
             }
         }
         Ok(writer.finish())
@@ -288,6 +308,13 @@ pub enum GroupPush {
         /// The value after it.
         value: u64,
     },
+    /// 3455: the player's game mode ended for it (Observed: a big-endian `u32` of 0 as the
+    /// player leaves an arena match, `3v3` 647.789 s, `20261010-125035-658` 516.049 s,
+    /// `arena-4165c8761c29c499` 171.998 s, 3 of 3; meaning of the value Unknown).
+    SiegeWarfareCompleted {
+        /// The value.
+        value: u32,
+    },
 }
 
 impl GroupPush {
@@ -301,6 +328,7 @@ impl GroupPush {
             Self::PreRaidStatus { .. } => PRE_RAID_STATUS_TYPE_INDEX,
             Self::SiegeWarfareStarted { .. } => SIEGE_WARFARE_STARTED_TYPE_INDEX,
             Self::SiegeWarfareEnded { .. } => SIEGE_WARFARE_ENDED_TYPE_INDEX,
+            Self::SiegeWarfareCompleted { .. } => SIEGE_WARFARE_COMPLETED_TYPE_INDEX,
         }
     }
 
@@ -339,6 +367,9 @@ impl GroupPush {
             }
             Self::SiegeWarfareEnded { flag, value } => {
                 writer.u8(*flag).u64(*value);
+            }
+            Self::SiegeWarfareCompleted { value } => {
+                writer.u32(*value);
             }
         }
         Ok(())
@@ -387,6 +418,9 @@ impl GroupPush {
                     value: reader.u64()?,
                 })
             })(),
+            SIEGE_WARFARE_COMPLETED_TYPE_INDEX => reader
+                .u32()
+                .map(|value| Self::SiegeWarfareCompleted { value }),
             _ => return None,
         };
         Some(push)
@@ -489,6 +523,19 @@ mod tests {
             GroupCall::SwapRaidMembers { .. }
         ));
         assert_eq!(
+            call(MOVE_RAID_MEMBER_TYPE_INDEX, &[member, vec![0]].concat()),
+            GroupCall::MoveRaidMember {
+                character: "561138d6-1b4f-4d0a-a0f0-eb0d09e02782".to_owned(),
+                group: 0,
+            },
+            "the first group is 0"
+        );
+        // Retail `raid_group_influence_race` 71.624 s: role 3, one byte after the header.
+        assert_eq!(
+            call(CHOOSE_ROLE_TYPE_INDEX, &[3]),
+            GroupCall::ChooseRole { role: 3 }
+        );
+        assert_eq!(
             call(GROUP_PING_TYPE_INDEX, &[0; PING_DATA_LEN]),
             GroupCall::Ping {
                 data: [0; PING_DATA_LEN]
@@ -510,6 +557,10 @@ mod tests {
                     value: 0x18c0_66e7_6a1b_6afc,
                 },
                 "0118c066e76a1b6afc".to_owned(),
+            ),
+            (
+                GroupPush::SiegeWarfareCompleted { value: 0 },
+                "00000000".to_owned(),
             ),
         ] {
             let push = SocialPush::Group(push);
@@ -612,6 +663,7 @@ mod tests {
                 first: CHARACTER.to_owned(),
                 second: "00000000-0000-4000-8000-000000000009".to_owned(),
             },
+            GroupCall::ChooseRole { role: 4 },
         ]
         .map(SocialCall::Group);
         crate::social::assert_calls_round_trip(ROUND_TRIP_HEADER, &calls);

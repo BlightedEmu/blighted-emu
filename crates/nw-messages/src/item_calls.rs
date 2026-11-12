@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The client's item calls besides equip, unequip and swap ([`crate::facet`]): use, drop,
 //! storage moves, locks and loadouts (run-15 items study), gems and charms, moves by UI item
-//! class and storage searches (run-15 items2 study), and the server's loadout status.
+//! class and storage searches (run-15 items2 study), and the server's loadout status and
+//! converted-items call (6526).
 //!
 //! Every body starts with a [`FacetHeader`]. Layouts are the Azoth catalog's where it
 //! has one (2917, 1838, 826, 2801, 2942, 2549) and the retail open-world bodies' otherwise
@@ -10,7 +11,7 @@
 //! the player's own entity as their container in every retail body: the container they act on
 //! is the one the player has open.
 
-use crate::facet::FacetHeader;
+use crate::facet::{FacetHeader, header_only_message};
 use crate::wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};
 
 /// Type index of `ContainerComponentServerFacet_ServerUseItem`.
@@ -77,6 +78,13 @@ const MAX_CALL_ENTRIES: u64 = 500;
 pub const PAPERDOLL: u64 = 0x2468_2af2_564e_7814;
 /// The XOR of the player prefab's main entity and the child that holds its paperdoll.
 pub const PAPERDOLL_CHILD: u64 = 0xb390_f4d0_0323_708d;
+/// The container component of the player entity (its bag), on the paperdoll's child
+/// [`PAPERDOLL_CHILD`]: solved from the 2917 and 6526 headers of 8 retail characters (target =
+/// (entity XOR child) + component; the child came out as the paperdoll's, and, as there, the
+/// top bit and bit 0 are open and every choice gives the same targets).
+pub const CONTAINER: u64 = 0xf625_8cc0_2df2_5991;
+/// Type index of `ContainerComponentClientFacet_OnItemsConverted`.
+pub const ITEMS_CONVERTED_TYPE_INDEX: u64 = 6526;
 
 /// The location of an item reference to a bag slot (retail 2549 on bag slot 402, 5579 on bag
 /// slots 36, 48 and 51).
@@ -925,6 +933,24 @@ impl BodyCodec for LoadoutStatusMsg {
     }
 }
 
+header_only_message!(
+    /// 6526: items of the player's bag became their free-for-all conversions (the header alone;
+    /// its header names the player's [`CONTAINER`]). Observed: retail `FFA_ExitFFAAndCleanse`
+    /// 246.46 s and `FFA_KillPlayerAndLoot` 237.92 s, 13 ms after the bundle that took the
+    /// free-for-all flag off and changed the bag.
+    ItemsConvertedMsg,
+    ITEMS_CONVERTED_TYPE_INDEX
+);
+
+impl ItemsConvertedMsg {
+    /// The call to the bag of the player of entity number `player`.
+    pub fn to(player: u64) -> Self {
+        Self {
+            header: FacetHeader::of_child(CONTAINER, PAPERDOLL_CHILD, player),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1163,6 +1189,31 @@ mod tests {
         let retail = hex(RETAIL_STATUS);
         assert_eq!(status.encode().expect("encode"), retail);
         assert_eq!(LoadoutStatusMsg::decode(&retail), Ok(status));
+    }
+
+    /// The 6526 body is the header alone, with the target retail's 2917 of the same character
+    /// names (`47046ce3757c5dd2`, its bag), and a call to a player names its own bag.
+    #[test]
+    fn the_items_converted_call_names_the_players_bag() {
+        const RETAIL_BAG_TARGET: u64 = 0x4704_6ce3_757c_5dd2;
+        const MADE_UP_PLAYER: u64 = 41;
+        let target = (PLAYER_FACET ^ PAPERDOLL_CHILD).wrapping_add(CONTAINER);
+        assert_eq!(target, RETAIL_BAG_TARGET, "the solved component");
+        let converted = ItemsConvertedMsg {
+            header: FacetHeader {
+                target,
+                entity: PLAYER_FACET,
+            },
+        };
+        let body = hex("47046ce3757c5dd2e34e14f344a974cc");
+        assert_eq!(converted.encode().expect("encode"), body);
+        assert_eq!(ItemsConvertedMsg::decode(&body), Ok(converted));
+        let to = ItemsConvertedMsg::to(MADE_UP_PLAYER).header;
+        assert_eq!(
+            to.target,
+            (to.entity ^ PAPERDOLL_CHILD).wrapping_add(CONTAINER)
+        );
+        assert_eq!(to.entity, crate::facet::facet_entity(MADE_UP_PLAYER));
     }
 
     #[test]

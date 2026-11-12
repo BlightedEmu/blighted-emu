@@ -20,18 +20,22 @@
 use std::collections::HashMap;
 
 use nw_bus::{
-    GHOST_VISIBLE_ITEMS, GhostItem, GhostMount, GhostName, GhostSlayer, GhostSlotChange,
-    GhostUpperSlots, ItemLookState, PlayerGhost,
+    GHOST_VISIBLE_ITEMS, GhostItem, GhostMount, GhostName, GhostPvpFlags, GhostSlayer,
+    GhostSlotChange, GhostUpperSlots, ItemLookState, PlayerGhost,
 };
+use nw_messages::appearance::{
+    LOOK_UNCHANGED, PLAYER_APPEARANCE_COMPONENT, PlayerAppearanceState, next_change_flag,
+};
+use nw_messages::faction_state::{FactionStateChange, PublicFaction};
 use nw_messages::mount::riding_active_map;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     AlcStamp, AlcState, BundleGroup, BundleMember, CardPlace, DamageReceiverState, Hands,
     HealthChange, InputPosition, ItemLook, KnownStamp, LookDir, MemberState, MessageError,
     PaperdollPublic, PaperdollState, PlayerGear, PlayerIdentity, PlayerLook, PlayerStates,
-    ProgressionState, RemoteSequenceClock, RemoteStep, RemoteUpper, SPAWN_MOVEMENT,
-    SecondSlayerState, ShownItem, SlayerState, SlotChange, StepPlace, UpperSlots, VitalsData,
-    put_looking_through_loadout, put_member,
+    ProgressionState, RemoteSequenceClock, RemoteStep, RemoteUpper, SOCIAL_COMPONENT,
+    SPAWN_MOVEMENT, SecondSlayerState, ShownItem, ShownSocial, SlayerState, SlotChange, StepPlace,
+    UpperSlots, VitalsData, put_looking_through_loadout, put_member,
 };
 use nw_sim_core::Position;
 
@@ -100,6 +104,10 @@ pub(super) struct ReplicaSource {
     /// The mount it rides as others see it (mount state slots 2 and 3; Observed: other players'
     /// cards carried the ridden mount, or 0 and the flags 0x04 for a player on foot).
     pub(super) mount: GhostMount,
+    /// The title and the pronoun type it shows (its social state for others).
+    pub(super) social: ShownSocial,
+    /// Its faction and PvP flags (the public slot of its faction state).
+    pub(super) faction: PublicFaction,
 }
 
 impl ReplicaSource {
@@ -138,6 +146,14 @@ impl ReplicaSource {
             attached: self.hands.attached,
             off_hand: self.hands.off_hand,
             looking_through_loadout: self.looking_through_loadout,
+            title: self.social.title,
+            pronoun: self.social.pronoun,
+            faction: self.faction.faction,
+            pvp_flags: GhostPvpFlags {
+                pvp: self.faction.pvp_flag,
+                sanctuary: self.faction.sanctuary,
+                free_for_all: self.faction.ffa_flag,
+            },
             mount: self.mount,
             items,
             action: self.action.map(|action| GhostSlayer {
@@ -224,6 +240,16 @@ impl ReplicaSource {
             target: ghost.target,
             looking_through_loadout: ghost.looking_through_loadout,
             mount: ghost.mount,
+            social: ShownSocial {
+                title: ghost.title,
+                pronoun: ghost.pronoun,
+            },
+            faction: PublicFaction {
+                faction: ghost.faction,
+                pvp_flag: ghost.pvp_flags.pvp,
+                sanctuary: ghost.pvp_flags.sanctuary,
+                ffa_flag: ghost.pvp_flags.free_for_all,
+            },
         }
     }
 
@@ -278,6 +304,13 @@ pub(super) struct ReplicaMemory {
     hands: Hands,
     looking_through_loadout: bool,
     mount: GhostMount,
+    social: ShownSocial,
+    faction: PublicFaction,
+    /// Its look, and the change flag of the look the viewers have (Inferred: the viewers get
+    /// the owner's change with its own flag, 1, 0, 1, ... from the card's 0, as the owner does;
+    /// no capture holds another player's barber change).
+    look: Option<PlayerLook>,
+    look_flag: u8,
     /// The start and sequence of its action.
     action: Option<(Option<u16>, u64)>,
     /// How many more states carry its action.
@@ -305,6 +338,12 @@ pub(super) struct Replica {
     loadout_change: Option<bool>,
     /// The change of its mount state as others see it.
     mount_change: Option<BundleMember>,
+    /// The change of the title or the pronoun type it shows.
+    social_change: Option<ShownSocial>,
+    /// The change of its look (a barber change).
+    look_change: Option<PlayerAppearanceState>,
+    /// The change of its faction or PvP flags as others see them.
+    faction_change: Option<FactionStateChange>,
     block_changed: bool,
     /// It started an action: the others see it now.
     action_changed: bool,
@@ -372,6 +411,17 @@ impl Replica {
             .filter(|seen| seen.looking_through_loadout != source.looking_through_loadout)
             .map(|_| source.looking_through_loadout);
         let mount_change = seen.and_then(|seen| remote_member(Some(seen.mount), source.mount));
+        let social_change = seen
+            .filter(|seen| seen.social != source.social)
+            .map(|_| source.social);
+        let look_flag = seen.map_or(LOOK_UNCHANGED, |seen| seen.look_flag);
+        let look_change = seen
+            .filter(|seen| seen.look != source.look)
+            .and_then(|seen| seen.look.zip(source.look))
+            .map(|(before, after)| {
+                PlayerAppearanceState::change(&before, &after, next_change_flag(look_flag))
+            });
+        let faction_change = seen.and_then(|seen| source.faction.change_from(&seen.faction));
         let (health_change, block_changed, life_ms) = match seen {
             None => (None, false, source.spawned_ms),
             Some(seen) => {
@@ -404,6 +454,12 @@ impl Replica {
             hands: source.hands,
             looking_through_loadout: source.looking_through_loadout,
             mount: source.mount,
+            social: source.social,
+            faction: source.faction,
+            look: source.look,
+            look_flag: look_change
+                .and_then(|change| change.change_flag)
+                .unwrap_or(look_flag),
             action,
             // The card carries the spawn's state: the echoes start with the next state.
             action_echoes: if seen.is_some() {
@@ -422,6 +478,9 @@ impl Replica {
             paperdoll_change,
             loadout_change,
             mount_change,
+            social_change,
+            look_change,
+            faction_change,
             block_changed,
             action_changed,
             sends_action: action_echoes_left > 0,
@@ -440,6 +499,9 @@ impl Replica {
             || self.paperdoll_change.is_some()
             || self.loadout_change.is_some()
             || self.mount_change.is_some()
+            || self.social_change.is_some()
+            || self.look_change.is_some()
+            || self.faction_change.is_some()
             || self.block_changed
             || self.action_changed
             || self.anchor_moved
@@ -491,6 +553,7 @@ impl Replica {
                     name: source.name.as_str(),
                     home_world,
                     life,
+                    social: source.social,
                 }),
                 look: source.look,
                 health: Some((source.health, source.max_health)),
@@ -526,6 +589,7 @@ impl Replica {
             // Retail sends `lookingThroughLoadout` on every first card of another player, false
             // too (general-other-01: slot 2 child 4 `00`).
             put_looking_through_loadout(&mut group.members, source.looking_through_loadout);
+            put_member(&mut group.members, source.faction.card().member()?);
             if let Some(mount) = remote_member(None, source.mount) {
                 put_member(&mut group.members, mount);
             }
@@ -578,6 +642,21 @@ impl Replica {
             put_looking_through_loadout(&mut members, looking);
         }
         members.extend(self.mount_change.clone());
+        if let Some(social) = self.social_change {
+            members.push(BundleMember {
+                component: SOCIAL_COMPONENT,
+                state: social.state(),
+            });
+        }
+        if let Some(change) = self.look_change {
+            members.push(BundleMember {
+                component: PLAYER_APPEARANCE_COMPONENT,
+                state: MemberState::Appearance(change),
+            });
+        }
+        if let Some(faction) = self.faction_change {
+            members.push(faction.member()?);
+        }
         if self.block_changed {
             members.push(BundleMember {
                 component: DAMAGE_RECEIVER_COMPONENT,
@@ -749,6 +828,8 @@ pub(super) mod tests {
             target: None,
             looking_through_loadout: false,
             mount: GhostMount::default(),
+            social: ShownSocial::default(),
+            faction: PublicFaction::default(),
         }
     }
 
@@ -877,6 +958,43 @@ pub(super) mod tests {
                 .iter()
                 .all(|(child, _)| !(16..=24).contains(child) && *child != 48),
             "no upper slot after the echo"
+        );
+    }
+
+    #[test]
+    fn viewers_get_a_barber_change_with_its_own_flag() {
+        let look = PlayerLook::of_choices([0, 30, 0, 0, 0, 26, 27, 0, 0, 0, 0, 4]);
+        let styled = ReplicaSource {
+            look: Some(look),
+            ..source()
+        };
+        let (_, seen) = Replica::new(styled.clone(), AT, None, SPAWNED_MS + 10);
+        let female = PlayerLook {
+            gender: 1,
+            race: 28,
+            ..look
+        };
+        let changed = ReplicaSource {
+            look: Some(female),
+            ..styled.clone()
+        };
+        let (first, seen) = Replica::new(changed.clone(), AT, Some(seen), SPAWNED_MS + 20);
+        assert!(first.changed(), "every viewer gets the change now");
+        assert_eq!(
+            first.look_change,
+            Some(PlayerAppearanceState::change(
+                &look,
+                &female,
+                next_change_flag(LOOK_UNCHANGED)
+            ))
+        );
+        let (quiet, seen) = Replica::new(changed, AT, Some(seen), SPAWNED_MS + 30);
+        assert_eq!(quiet.look_change, None);
+        let (back, _) = Replica::new(styled, AT, Some(seen), SPAWNED_MS + 40);
+        assert_eq!(
+            back.look_change.and_then(|change| change.change_flag),
+            Some(LOOK_UNCHANGED),
+            "the second change sets the flag back"
         );
     }
 

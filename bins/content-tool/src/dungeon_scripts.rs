@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use nw_content::Tables;
 use nw_content::instances::InstanceCatalog;
+use nw_content::mob_prefabs::{ASSET_ID_LEN, MobPrefabs};
 use nw_formats::azcs::AzcsError;
 use nw_formats::objectstream::{Element, ObjectStreamError, parse_object_stream};
 use nw_formats::pak::PakError;
@@ -29,12 +30,13 @@ use nw_world::dungeon_scripts::{
 };
 use nw_world::level_script::{
     Action, AliasSlice, AssetRef, DYNAMIC_SLICE_SUFFIX, LevelScriptError, ObjectiveKind,
-    SliceScript, Transform, VitalsVariant, alias_slices, pak_path, slice_script,
+    ScriptEntity, SliceScript, Transform, VitalsVariant, alias_slices, pak_path, slice_script,
 };
 use nw_world::metadata::{MetadataRecords, SkipCounts, read_metadata};
 use nw_world::records::{Capital, PatrolPath};
 use nw_world::spawner_slices::SpawnerSlice;
 
+use crate::breach_tiers::{BreachTier, load_breach_tiers};
 use crate::collision::{PakIndex, detector_volume};
 use crate::roads::without_azcs;
 
@@ -46,6 +48,17 @@ const CAPITALS_SUFFIX: &str = ".capitals.json";
 const SLICES_DIR: &str = "slices";
 /// The suffix of an alias asset.
 const ALIAS_SUFFIX: &str = ".aliasasset";
+/// The marks of a slice's difficulty at the end of its file name (`corruption_swarmer_dt3`,
+/// `darkness_hazard_corruption_minor_l2`; Observed in the corrupted breaches' aliases).
+const DIFFICULTY_MARKS: [&str; 2] = ["dt", "l"];
+/// The mark of a vitals row's difficulty at the end of its id (`Corruption_Swarmer_DT3`).
+const ROW_DIFFICULTY_MARK: &str = "_DT";
+/// The difficulties of a corrupted breach (Observed: the reward lists name `DT1` to `DT6`).
+const FIRST_DIFFICULTY: u32 = 1;
+const LAST_DIFFICULTY: u32 = 6;
+/// Metres within which a retail map point is a breach place's (the map points of one place lay
+/// within a few metres of its encounter root in the breach ledgers; our margin).
+const TIER_MATCH_M: f32 = 15.0;
 /// The scale of a capital without one.
 const UNIT_SCALE: f32 = 1.0;
 /// The suffix of a metadata file.
@@ -58,7 +71,7 @@ const NOT_CREATURE_DIRS: [&str; 2] = ["/spellslices/", "/targeting/"];
 /// `nw_dungeon_windsward_00` lie at 0.0 m from its 5 encounters; best guess for the margin).
 const ENCOUNTER_POINT_MATCH_M: f32 = 1.0;
 
-/// Failure while building the dungeon script file.
+/// Failure while building the dungeon script file or the gates file.
 #[derive(Debug, thiserror::Error)]
 pub enum DungeonScriptsBuildError {
     /// A pak cannot be read.
@@ -107,6 +120,12 @@ pub enum DungeonScriptsBuildError {
     /// The file cannot be written or read back.
     #[error(transparent)]
     File(#[from] DungeonScriptsError),
+    /// The gates file cannot be written or read back.
+    #[error(transparent)]
+    Gates(#[from] nw_content::dungeon_gates::DungeonGatesError),
+    /// The breach tiers file cannot be read.
+    #[error(transparent)]
+    Tiers(#[from] crate::breach_tiers::BreachTiersError),
     /// The file read back is not the one written.
     #[error("{0}: the file read back differs from the one written")]
     Reload(PathBuf),
@@ -179,6 +198,15 @@ pub struct DungeonScriptsReport {
     pub open_world_encounters: usize,
     /// Encounters whose spawner entity has spawn rules (an area or a point spawner).
     pub encounters_with_spawner_rules: usize,
+    /// Encounters of an alias spawner (one per alias slice and spawn point), of
+    /// [`Self::encounters`].
+    pub grouped_encounters: usize,
+    /// Mobs of grouped encounters' difficulties that come from a sibling difficulty's row.
+    pub sibling_mobs: usize,
+    /// Grouped encounters whose difficulty a retail map point at their place gives.
+    pub observed_difficulties: usize,
+    /// Grouped encounters whose difficulty is their group's or the nearest group's.
+    pub inferred_difficulties: usize,
     /// Encounters with a detection volume of a shape this reader places.
     pub detectors: usize,
     /// Encounters whose detection volume's shape is of a kind not read (they keep its radius).
@@ -208,8 +236,11 @@ const NO_ROTATION: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 /// The separator of a pak path, and the doubled one of a generated capital's slice name.
 const PATH_SEPARATOR: &str = "/";
 const DOUBLED_SEPARATOR: &str = "//";
+/// The file names of the corrupted breaches' spawn groups start with this (lower case:
+/// `Darkness_SpawnGroup_Minor_Master`, `_Major_Master` and their `_Special_` kinds).
+const BREACH_GROUP_PREFIX: &str = "darkness_spawngroup_";
 /// The file names of the open world's spawn group slices start with one of these (lower case).
-const SPAWN_GROUP_PREFIXES: [&str; 2] = ["worldevent_", "worldboss_"];
+const SPAWN_GROUP_PREFIXES: [&str; 3] = ["worldevent_", "worldboss_", BREACH_GROUP_PREFIX];
 
 /// The wanted script path that capital slice name `slice_name` places, if any. A story
 /// instance's capital names its script without the slices folder
@@ -233,9 +264,21 @@ fn capital_script_path(slice_name: &str) -> String {
     }
 }
 
+/// Whether the slice at `path` is a corrupted breach spawn group: the only spawn groups whose
+/// alias spawner's encounters the file holds (the alias spawners of other levels and world
+/// events are left out: no retail capture of theirs was studied).
+fn is_breach_group(path: &str) -> bool {
+    file_name(path).starts_with(BREACH_GROUP_PREFIX)
+}
+
+/// The file name of the pak path `path`.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
 /// Whether the slice at `path` is a spawn group of the open world.
 fn is_spawn_group(path: &str) -> bool {
-    let file = path.rsplit('/').next().unwrap_or(path);
+    let file = file_name(path);
     SPAWN_GROUP_PREFIXES
         .iter()
         .any(|prefix| file.starts_with(prefix))
@@ -409,6 +452,72 @@ fn is_creature(path: &str) -> bool {
     path.starts_with(CREATURE_DIR) && !NOT_CREATURE_DIRS.iter().any(|dir| path.contains(dir))
 }
 
+/// One instance level script placed in its level.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PlacedScript {
+    /// The level folder.
+    pub(crate) folder: String,
+    /// The level script's pak path.
+    pub(crate) script: String,
+    /// Where a capital of the level places it.
+    pub(crate) placement: Transform,
+    /// The game modes that run it.
+    pub(crate) modes: Vec<String>,
+}
+
+/// The level script of every instance game mode of `tables` (`InstanceCatalog`, its
+/// `SlicePath`) that a capital of its level places, once per script; the modes without a slice
+/// path or a capital go to `skipped`.
+///
+/// # Errors
+///
+/// Returns [`DungeonScriptsBuildError`] when a capitals file cannot be read.
+pub(crate) fn placed_scripts(
+    index: &PakIndex,
+    tables: &Tables,
+    skipped: &mut Vec<String>,
+) -> Result<Vec<PlacedScript>, DungeonScriptsBuildError> {
+    let catalog = InstanceCatalog::from_tables(tables);
+    let slice_paths: HashMap<&str, &str> = tables
+        .game_mode_map_data
+        .iter()
+        .flat_map(|table| &table.rows)
+        .filter_map(|row| Some((row.game_mode_id.as_str(), row.slice_path.as_deref()?)))
+        .collect();
+    // Level folder → script path → game modes.
+    let mut wanted: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    for mode in catalog.modes() {
+        match slice_paths.get(mode.id.as_str()) {
+            Some(slice) => wanted
+                .entry(mode.map.folder.clone())
+                .or_default()
+                .entry(script_slice_path(slice))
+                .or_default()
+                .push(mode.id.clone()),
+            None => skipped.push(mode.id.clone()),
+        }
+    }
+    let mut placed = Vec::new();
+    for (folder, by_script) in wanted {
+        let scripts_here: Vec<String> = by_script.keys().cloned().collect();
+        let placements = script_placements(index, &folder, |script| {
+            scripts_here.iter().any(|known| known == script)
+        })?;
+        for (script, modes) in by_script {
+            match placements.iter().find(|(path, _)| *path == script) {
+                Some((_, placement)) => placed.push(PlacedScript {
+                    folder: folder.clone(),
+                    script,
+                    placement: *placement,
+                    modes,
+                }),
+                None => skipped.extend(modes),
+            }
+        }
+    }
+    Ok(placed)
+}
+
 /// Builds the dungeon script file of `tables` from the paks of `index` into `out_dir`.
 ///
 /// # Errors
@@ -421,59 +530,41 @@ pub fn build_dungeon_scripts(
     client_build: &str,
     out_dir: &Path,
 ) -> Result<DungeonScriptsReport, DungeonScriptsBuildError> {
-    let catalog = InstanceCatalog::from_tables(tables);
-    let slice_paths: HashMap<&str, &str> = tables
-        .game_mode_map_data
-        .iter()
-        .flat_map(|table| &table.rows)
-        .filter_map(|row| Some((row.game_mode_id.as_str(), row.slice_path.as_deref()?)))
-        .collect();
     let levels = vitals_levels(tables);
     let names = vitals_names(tables);
+    let prefabs = MobPrefabs::load(out_dir, client_build)
+        .map(|prefabs| prefab_mobs(&prefabs, &names))
+        .unwrap_or_default();
+    let mobs = MobSources {
+        levels: &levels,
+        prefabs: Some(&prefabs),
+    };
     let mut report = DungeonScriptsReport::default();
-    // Level folder → script path → game modes.
-    let mut wanted: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
-    for mode in catalog.modes() {
-        match slice_paths.get(mode.id.as_str()) {
-            Some(slice) => wanted
-                .entry(mode.map.folder.clone())
-                .or_default()
-                .entry(script_slice_path(slice))
-                .or_default()
-                .push(mode.id.clone()),
-            None => report.skipped_modes.push(mode.id.clone()),
-        }
-    }
     let mut slices = PakSlices::new(index);
     let mut scripts = DungeonScripts::default();
-    for (folder, by_script) in &wanted {
-        let scripts_here: Vec<String> = by_script.keys().cloned().collect();
-        let placements = script_placements(index, folder, |script| {
-            scripts_here.iter().any(|known| known == script)
-        })?;
-        let points = encounter_points(index, folder, &names)?;
-        for (script, modes) in by_script {
-            let Some((_, placement)) = placements.iter().find(|(path, _)| path == script) else {
-                report.skipped_modes.extend(modes.iter().cloned());
-                continue;
-            };
-            let Some(mut level) = build_level(
-                &mut slices,
-                script,
-                *placement,
-                &levels,
-                &points,
-                &mut report,
-            )?
-            else {
-                report.skipped_modes.extend(modes.iter().cloned());
-                continue;
-            };
-            level.level.clone_from(folder);
-            report.levels += 1;
-            for mode in modes {
-                scripts.game_modes.insert(mode.clone(), level.clone());
-            }
+    let mut points_of: HashMap<String, Vec<EncounterPoint>> = HashMap::new();
+    for placed in placed_scripts(index, tables, &mut report.skipped_modes)? {
+        if !points_of.contains_key(&placed.folder) {
+            let points = encounter_points(index, &placed.folder, &names)?;
+            points_of.insert(placed.folder.clone(), points);
+        }
+        let points = points_of.get(&placed.folder).map_or(&[][..], Vec::as_slice);
+        let Some(mut level) = build_level(
+            &mut slices,
+            &placed.script,
+            placed.placement,
+            mobs,
+            points,
+            &mut report,
+        )?
+        else {
+            report.skipped_modes.extend(placed.modes);
+            continue;
+        };
+        level.level.clone_from(&placed.folder);
+        report.levels += 1;
+        for mode in placed.modes {
+            scripts.game_modes.insert(mode, level.clone());
         }
     }
     let points = encounter_points(index, OPEN_WORLD_LEVEL, &names)?;
@@ -482,20 +573,15 @@ pub fn build_dungeon_scripts(
         ..LevelScript::default()
     };
     for (script, placement) in script_placements(index, OPEN_WORLD_LEVEL, is_spawn_group)? {
-        let Some(group) = build_level(
-            &mut slices,
-            &script,
-            placement,
-            &levels,
-            &points,
-            &mut report,
-        )?
+        let Some(group) = build_level(&mut slices, &script, placement, mobs, &points, &mut report)?
         else {
             continue;
         };
         open_world.encounters.extend(group.encounters);
         open_world.chests.extend(group.chests);
     }
+    let tiers = load_breach_tiers(out_dir, client_build)?;
+    finish_grouped_encounters(&mut open_world.encounters, &tiers, &levels, &mut report);
     report.open_world_encounters = open_world.encounters.len();
     scripts
         .game_modes
@@ -519,11 +605,11 @@ pub fn build_level(
     source: &mut impl SliceSource,
     script: &str,
     placement: Transform,
-    levels: &HashMap<String, u32>,
+    mobs: MobSources<'_>,
     points: &[EncounterPoint],
     report: &mut DungeonScriptsReport,
 ) -> Result<Option<LevelScript>, DungeonScriptsBuildError> {
-    let Some(level_script) = read_script(source, script, report)? else {
+    let Some(level_script) = read_script(source, script, &mut report.missing_slices)? else {
         return Ok(None);
     };
     let mut level = LevelScript {
@@ -531,56 +617,157 @@ pub fn build_level(
         ..LevelScript::default()
     };
     for entity in &level_script.entities {
-        let Some(spawned) = entity
-            .spawner
-            .as_ref()
-            .and_then(|spawner| spawner.slice.as_ref())
-        else {
+        let Some(spawner) = entity.spawner.as_ref() else {
             continue;
         };
-        let Some(spawned_script) = read_script(source, &spawned.path, report)? else {
-            continue;
-        };
-        let placed = placement.then(&level_script.placement_of(entity.id));
-        if spawned_script.manager().is_some() {
-            let mut builder = EncounterBuilder::new(source, levels, report);
-            let mut encounter =
-                builder.encounter(&entity.name, &spawned.path, &spawned_script, placed)?;
-            encounter.spawner = entity.rules;
-            if entity.rules.is_some() {
-                report.encounters_with_spawner_rules += 1;
+        let own_place = placement.then(&level_script.placement_of(entity.id));
+        if let Some(spawned) = &spawner.slice {
+            let Some(spawned_script) =
+                read_script(source, &spawned.path, &mut report.missing_slices)?
+            else {
+                continue;
+            };
+            if spawned_script.manager().is_some() {
+                let encounter = build_encounter(
+                    source,
+                    MobSources {
+                        prefabs: None,
+                        ..mobs
+                    },
+                    report,
+                    (entity, &spawned.path, &spawned_script, own_place),
+                    points,
+                )?;
+                level.encounters.push(encounter);
+            } else if let Some(table) = spawned_script.loot_table() {
+                report.chests += 1;
+                level.chests.push(Chest {
+                    name: entity.name.clone(),
+                    slice: spawned.path.clone(),
+                    position: position_of(&own_place),
+                    loot_table: table.to_owned(),
+                });
             }
-            assign_creatures(&mut encounter, points);
-            report.encounters += 1;
-            report.stages += encounter.stages.len();
-            report.spawns += encounter
-                .stages
-                .iter()
-                .map(|stage| stage.spawns.len())
-                .sum::<usize>();
-            level.encounters.push(encounter);
-        } else if let Some(table) = spawned_script.loot_table() {
-            report.chests += 1;
-            level.chests.push(Chest {
-                name: entity.name.clone(),
-                slice: spawned.path.clone(),
-                position: position_of(&placed),
-                loot_table: table.to_owned(),
-            });
+        } else if let Some(alias) = spawner
+            .alias
+            .as_ref()
+            .filter(|alias| is_breach_group(script) && alias.path.ends_with(ALIAS_SUFFIX))
+        {
+            let places = spawn_points(&level_script, entity.id)
+                .map(|point| placement.then(&level_script.placement_of(point)))
+                .collect::<Vec<_>>();
+            let places = if places.is_empty() {
+                vec![own_place]
+            } else {
+                places
+            };
+            let group = format!("{script}#{}", entity.id);
+            for choice in read_alias(source, &alias.path, &mut report.missing_slices)? {
+                let path = choice.slice.path;
+                let Some(spawned_script) = read_script(source, &path, &mut report.missing_slices)?
+                else {
+                    continue;
+                };
+                if spawned_script.manager().is_none() {
+                    continue;
+                }
+                for place in &places {
+                    // The level's encounter points are no help here: the metadata lists every
+                    // difficulty's mob of every breach kind at a group's place, so the mobs of a
+                    // grouped encounter come from the mob prefab table
+                    // ([`finish_grouped_encounters`]).
+                    let mut encounter = build_encounter(
+                        source,
+                        mobs,
+                        report,
+                        (entity, &path, &spawned_script, *place),
+                        &[],
+                    )?;
+                    encounter.spawn_group = Some(group.clone());
+                    report.grouped_encounters += 1;
+                    level.encounters.push(encounter);
+                }
+            }
         }
     }
     Ok(Some(level))
 }
 
-/// The script of the slice at `path`; `None` (and the path noted) when it is not there.
-fn read_script(
+/// The encounter of `spawned_script` (the slice at `path`), spawned by the level script entity
+/// `entity` at `placed`, with the encounter points `points` of its level.
+fn build_encounter(
+    source: &mut impl SliceSource,
+    mobs: MobSources<'_>,
+    report: &mut DungeonScriptsReport,
+    (entity, path, spawned_script, placed): (&ScriptEntity, &str, &SliceScript, Transform),
+    points: &[EncounterPoint],
+) -> Result<Encounter, DungeonScriptsBuildError> {
+    let mut builder = EncounterBuilder::new(source, mobs, report);
+    let mut encounter = builder.encounter(&entity.name, path, spawned_script, placed)?;
+    encounter.spawner = entity.rules;
+    encounter.rewards = spawned_script.rewards().cloned();
+    if entity.rules.is_some() {
+        report.encounters_with_spawner_rules += 1;
+    }
+    assign_creatures(&mut encounter, points);
+    report.encounters += 1;
+    report.stages += encounter.stages.len();
+    report.spawns += encounter
+        .stages
+        .iter()
+        .map(|stage| stage.spawns.len())
+        .sum::<usize>();
+    Ok(encounter)
+}
+
+/// The spawn points of the alias spawner entity `spawner` of `script`: the script's entities
+/// with no spawner, encounter, stage or mob of their own (Observed: the corrupted breaches'
+/// `Darkness_SpawnGroup_Minor_Master` holds `sp01` to `sp07`, 70 to 320 m from the group, and the
+/// retail minor breaches stood at such points; `Darkness_SpawnGroup_Major_Master` holds `sp01`
+/// at the group's own place, where the retail major breaches stood).
+fn spawn_points(script: &SliceScript, spawner: u64) -> impl Iterator<Item = u64> + '_ {
+    script
+        .entities
+        .iter()
+        .filter(move |entity| {
+            entity.id != spawner
+                && entity.spawner.is_none()
+                && entity.manager.is_none()
+                && entity.stage.is_none()
+                && entity.variant.is_none()
+        })
+        .map(|entity| entity.id)
+}
+
+/// The entries of the alias asset at `path`; none (and the path noted in `missing`) when it is
+/// not there.
+fn read_alias(
     source: &mut impl SliceSource,
     path: &str,
-    report: &mut DungeonScriptsReport,
+    missing: &mut Vec<String>,
+) -> Result<Vec<AliasSlice>, DungeonScriptsBuildError> {
+    let Some(root) = source.root(path)? else {
+        if !missing.iter().any(|known| known == path) {
+            missing.push(path.to_owned());
+        }
+        return Ok(Vec::new());
+    };
+    alias_slices(&root).map_err(|source| DungeonScriptsBuildError::Script {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+/// The script of the slice at `path`; `None` (and the path noted in `missing`) when it is not
+/// there.
+pub(crate) fn read_script(
+    source: &mut impl SliceSource,
+    path: &str,
+    missing: &mut Vec<String>,
 ) -> Result<Option<SliceScript>, DungeonScriptsBuildError> {
     let Some(root) = source.root(path)? else {
-        if !report.missing_slices.iter().any(|known| known == path) {
-            report.missing_slices.push(path.to_owned());
+        if !missing.iter().any(|known| known == path) {
+            missing.push(path.to_owned());
         }
         return Ok(None);
     };
@@ -594,7 +781,7 @@ fn read_script(
 
 /// World metres of a transform's translation.
 #[allow(clippy::cast_possible_truncation, reason = "world metres")]
-fn position_of(transform: &Transform) -> [f32; 3] {
+pub(crate) fn position_of(transform: &Transform) -> [f32; 3] {
     transform.translation.map(|value| value as f32)
 }
 
@@ -617,7 +804,7 @@ fn affine_of(transform: &Transform) -> Affine {
 /// Builds one encounter, resolving its targets once each.
 struct EncounterBuilder<'a, S> {
     source: &'a mut S,
-    levels: &'a HashMap<String, u32>,
+    mobs: MobSources<'a>,
     report: &'a mut DungeonScriptsReport,
     targets: Vec<Target>,
     /// Target index by (slice path, alias path).
@@ -625,14 +812,10 @@ struct EncounterBuilder<'a, S> {
 }
 
 impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
-    fn new(
-        source: &'a mut S,
-        levels: &'a HashMap<String, u32>,
-        report: &'a mut DungeonScriptsReport,
-    ) -> Self {
+    fn new(source: &'a mut S, mobs: MobSources<'a>, report: &'a mut DungeonScriptsReport) -> Self {
         Self {
             source,
-            levels,
+            mobs,
             report,
             targets: Vec::new(),
             target_index: HashMap::new(),
@@ -764,6 +947,9 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
             stages,
             targets: std::mem::take(&mut self.targets),
             spawner: None,
+            spawn_group: None,
+            difficulty: None,
+            rewards: None,
         })
     }
 
@@ -835,16 +1021,7 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
     }
 
     fn alias(&mut self, path: &str) -> Result<Vec<AliasSlice>, DungeonScriptsBuildError> {
-        let Some(root) = self.source.root(path)? else {
-            if !self.report.missing_slices.iter().any(|known| known == path) {
-                self.report.missing_slices.push(path.to_owned());
-            }
-            return Ok(Vec::new());
-        };
-        alias_slices(&root).map_err(|source| DungeonScriptsBuildError::Script {
-            path: path.to_owned(),
-            source,
-        })
+        read_alias(&mut *self.source, path, &mut self.report.missing_slices)
     }
 
     fn target_slice(
@@ -852,14 +1029,32 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
         slice: &AssetRef,
         percent: u32,
     ) -> Result<TargetSlice, DungeonScriptsBuildError> {
-        let (variant, mobs_per_spawn) = self.mob_of(&slice.path, NESTED_DEPTH)?;
-        let mob = variant.map(|variant| {
+        let found = self.mob_of(slice, NESTED_DEPTH)?;
+        let mobs_per_spawn = found.count;
+        let level_of = |vitals_id: &str| {
+            self.mobs
+                .levels
+                .get(&vitals_id.to_lowercase())
+                .copied()
+                .unwrap_or_default()
+        };
+        let difficulty_mobs = found
+            .by_difficulty
+            .iter()
+            .map(|(difficulty, vitals_id)| {
+                (
+                    *difficulty,
+                    TargetMob {
+                        vitals_id: vitals_id.clone(),
+                        category_id: String::new(),
+                        level: level_of(vitals_id),
+                    },
+                )
+            })
+            .collect();
+        let mob = found.variant.map(|variant| {
             let level = match variant.level {
-                0 => self
-                    .levels
-                    .get(&variant.vitals_id.to_lowercase())
-                    .copied()
-                    .unwrap_or_default(),
+                0 => level_of(&variant.vitals_id),
                 level => level,
             };
             if level == 0 {
@@ -883,6 +1078,8 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
             mob,
             mobs_per_spawn: mobs_per_spawn.max(ONE_MOB),
             waypoints: self.waypoints(&slice.path)?,
+            difficulty: slice_difficulty(&slice.path),
+            difficulty_mobs,
         })
     }
 
@@ -899,17 +1096,24 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
             .map(|spawner| spawner.at(&origin)))
     }
 
-    /// The mob the slice at `path` spawns and how many of it one spawn makes: its own vitals
-    /// row, or the mobs of the slices its spawners and its stages spawn, at most `depth` slices
-    /// down (each open world spawn group spawns its encounter slice, which may spawn a nested
-    /// one). `None` for a slice that leads to no mob.
+    /// The mob the slice `slice` spawns and how many of it one spawn makes: its own vitals
+    /// row, the mob the retail captures showed for its asset (only with the mob prefab table:
+    /// a grouped encounter's), or the mobs of the slices its spawners and its stages spawn, at
+    /// most `depth` slices down (each open world spawn group spawns its encounter slice, which
+    /// may spawn a nested one). No mob for a slice that leads to none. With the table, the mobs
+    /// of the nested slices of one difficulty each (`_dt<n>`) are kept by difficulty.
     fn mob_of(
         &mut self,
-        path: &str,
+        slice: &AssetRef,
         depth: u32,
-    ) -> Result<(Option<VitalsVariant>, u32), DungeonScriptsBuildError> {
-        let Some(script) = read_script(&mut *self.source, path, &mut *self.report)? else {
-            return Ok((None, 0));
+    ) -> Result<SliceMobs, DungeonScriptsBuildError> {
+        let Some(script) = read_script(
+            &mut *self.source,
+            &slice.path,
+            &mut self.report.missing_slices,
+        )?
+        else {
+            return Ok(SliceMobs::default());
         };
         if let Some(variant) = script.variant() {
             // A spawner slice with more than one spawner entity makes one mob for each (the
@@ -919,16 +1123,34 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
                 .iter()
                 .filter(|entity| entity.variant.is_some())
                 .count();
-            return Ok((
-                Some(variant.clone()),
-                u32::try_from(spawners).unwrap_or(ONE_MOB),
-            ));
+            return Ok(SliceMobs {
+                variant: Some(variant.clone()),
+                count: u32::try_from(spawners).unwrap_or(ONE_MOB),
+                by_difficulty: BTreeMap::new(),
+            });
+        }
+        if let Some(vitals_id) = self
+            .mobs
+            .prefabs
+            .and_then(|prefabs| prefabs.get(&slice.guid))
+        {
+            return Ok(SliceMobs {
+                variant: Some(VitalsVariant {
+                    vitals_id: vitals_id.clone(),
+                    category_id: String::new(),
+                    level: 0,
+                }),
+                count: ONE_MOB,
+                by_difficulty: slice_difficulty(&slice.path)
+                    .map(|difficulty| BTreeMap::from([(difficulty, vitals_id.clone())]))
+                    .unwrap_or_default(),
+            });
         }
         if depth == 0 {
-            return Ok((None, 0));
+            return Ok(SliceMobs::default());
         }
         // Each spawn: its slice, else its alias (the first slice of the alias that is a mob).
-        let spawned: Vec<(Option<String>, Option<String>, u32)> = script
+        let spawned: Vec<(Option<AssetRef>, Option<AssetRef>, u32)> = script
             .entities
             .iter()
             .flat_map(|entity| match &entity.stage {
@@ -937,8 +1159,8 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
                     .iter()
                     .map(|spawn| {
                         (
-                            path_of(spawn.slice.as_ref()),
-                            path_of(spawn.alias.as_ref()),
+                            named(spawn.slice.as_ref()),
+                            named(spawn.alias.as_ref()),
                             spawn.count,
                         )
                     })
@@ -948,42 +1170,260 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
                     .iter()
                     .map(|spawner| {
                         (
-                            path_of(spawner.slice.as_ref()),
-                            path_of(spawner.alias.as_ref()),
+                            named(spawner.slice.as_ref()),
+                            named(spawner.alias.as_ref()),
                             ONE_MOB,
                         )
                     })
                     .collect(),
             })
             .collect();
-        let (mut found, mut total) = (None, 0);
+        let mut found = SliceMobs::default();
         for (slice, alias, count) in spawned {
-            let mut candidates: Vec<String> = slice.into_iter().collect();
-            if let Some(alias) = alias.filter(|alias| alias.ends_with(ALIAS_SUFFIX)) {
+            let mut candidates: Vec<AssetRef> = slice.into_iter().collect();
+            if let Some(alias) = alias.filter(|alias| alias.path.ends_with(ALIAS_SUFFIX)) {
                 candidates.extend(
-                    self.alias(&alias)?
+                    self.alias(&alias.path)?
                         .into_iter()
-                        .map(|entry| entry.slice.path),
+                        .map(|entry| entry.slice),
                 );
             }
-            for nested in candidates {
-                let (variant, mobs) = self.mob_of(&nested, depth - 1)?;
-                if variant.is_some() {
-                    total += count * mobs;
-                    found = variant;
-                    break;
+            let mut by_difficulty = BTreeMap::new();
+            let mut first = None;
+            for nested in &candidates {
+                let mobs = self.mob_of(nested, depth - 1)?;
+                for (difficulty, vitals_id) in &mobs.by_difficulty {
+                    by_difficulty
+                        .entry(*difficulty)
+                        .or_insert_with(|| vitals_id.clone());
+                }
+                if first.is_none() && mobs.variant.is_some() {
+                    first = Some(mobs);
                 }
             }
+            if let Some(mobs) = first {
+                found.count += count * mobs.count;
+                found.variant = mobs.variant;
+                found.by_difficulty = by_difficulty;
+            }
         }
-        Ok((found, total))
+        Ok(found)
     }
 }
 
-/// The pak path of the asset `asset` names; `None` for no asset or an empty reference.
-fn path_of(asset: Option<&AssetRef>) -> Option<String> {
-    asset
-        .map(|asset| asset.path.clone())
-        .filter(|path| !path.is_empty())
+/// The mobs a slice leads to ([`EncounterBuilder::mob_of`]).
+#[derive(Debug, Default)]
+struct SliceMobs {
+    /// Its mob.
+    variant: Option<VitalsVariant>,
+    /// How many mobs one spawn makes.
+    count: u32,
+    /// The vitals row of each difficulty, when its nested slices hold one per difficulty.
+    by_difficulty: BTreeMap<u32, String>,
+}
+
+/// What the builder knows of the mobs.
+#[derive(Debug, Clone, Copy)]
+pub struct MobSources<'a> {
+    /// The level of each vitals row, by lower-case id ([`vitals_levels`]).
+    pub levels: &'a HashMap<String, u32>,
+    /// The vitals row of each creature slice asset the retail captures showed ([`prefab_mobs`]);
+    /// used for the encounters of an alias spawner only, `None` for the others.
+    pub prefabs: Option<&'a HashMap<[u8; ASSET_ID_LEN], String>>,
+}
+
+/// `asset` when it names a pak path.
+fn named(asset: Option<&AssetRef>) -> Option<AssetRef> {
+    asset.filter(|asset| !asset.path.is_empty()).cloned()
+}
+
+/// The difficulty of the slice at `path` (its file name ends in `_dt<n>` or `_l<n>`).
+fn slice_difficulty(path: &str) -> Option<u32> {
+    let stem = path
+        .rsplit('/')
+        .next()?
+        .strip_suffix(DYNAMIC_SLICE_SUFFIX)?;
+    let (_, last) = stem.rsplit_once('_')?;
+    DIFFICULTY_MARKS
+        .iter()
+        .find_map(|mark| last.strip_prefix(mark))
+        .and_then(|number| number.parse().ok())
+}
+
+/// The vitals row id of the creature slice asset of each mob the retail captures showed (the
+/// mob prefab table's asset seen most often of each row; of two rows with one asset, the lower
+/// CRC).
+fn prefab_mobs(
+    prefabs: &MobPrefabs,
+    names: &HashMap<u32, String>,
+) -> HashMap<[u8; ASSET_ID_LEN], String> {
+    let mut by_asset: BTreeMap<[u8; ASSET_ID_LEN], u32> = BTreeMap::new();
+    for (vitals, asset) in prefabs.default_assets() {
+        by_asset
+            .entry(asset)
+            .and_modify(|known| *known = (*known).min(vitals))
+            .or_insert(vitals);
+    }
+    by_asset
+        .into_iter()
+        .filter_map(|(asset, vitals)| Some((asset, names.get(&vitals)?.clone())))
+        .collect()
+}
+
+/// Gives the grouped encounters (the corrupted breaches) the mobs of the difficulties no capture
+/// showed and their difficulty (their target slices have the mobs the retail captures showed for
+/// their assets, [`EncounterBuilder::mob_of`], Observed):
+///
+/// - a slice or nested slice of a difficulty without a mob takes the row of a sibling
+///   difficulty's with that difficulty's mark (`Corruption_Impaler_DT2` gives
+///   `Corruption_Impaler_DT5` when the vitals table has it; Inferred from the rows' names);
+/// - the difficulty is the number of the retail map point at the encounter's place (Observed,
+///   [`crate::breach_tiers`]); an encounter without one takes the most common difficulty of its
+///   group, a group without one that of the nearest group with one (Inferred).
+fn finish_grouped_encounters(
+    encounters: &mut [Encounter],
+    tiers: &[BreachTier],
+    levels: &HashMap<String, u32>,
+    report: &mut DungeonScriptsReport,
+) {
+    for encounter in encounters
+        .iter_mut()
+        .filter(|encounter| encounter.spawn_group.is_some())
+    {
+        for target in &mut encounter.targets {
+            fill_sibling_mobs(target, levels, report);
+        }
+        encounter.difficulty = observed_difficulty(encounter.position, tiers);
+        if encounter.difficulty.is_some() {
+            report.observed_difficulties += 1;
+        }
+    }
+    let mut by_group: BTreeMap<String, BTreeMap<u32, usize>> = BTreeMap::new();
+    for encounter in encounters.iter() {
+        if let (Some(group), Some(difficulty)) = (&encounter.spawn_group, encounter.difficulty) {
+            *by_group
+                .entry(group.clone())
+                .or_default()
+                .entry(difficulty)
+                .or_default() += 1;
+        }
+    }
+    let group_difficulty: BTreeMap<&String, u32> = by_group
+        .iter()
+        .filter_map(|(group, counts)| {
+            let (difficulty, _) = counts.iter().rev().max_by_key(|(_, seen)| **seen)?;
+            Some((group, *difficulty))
+        })
+        .collect();
+    let known: Vec<([f32; 3], u32)> = encounters
+        .iter()
+        .filter_map(|encounter| {
+            let group = encounter.spawn_group.as_ref()?;
+            Some((encounter.position, *group_difficulty.get(group)?))
+        })
+        .collect();
+    for encounter in encounters
+        .iter_mut()
+        .filter(|encounter| encounter.spawn_group.is_some() && encounter.difficulty.is_none())
+    {
+        let of_group = encounter
+            .spawn_group
+            .as_ref()
+            .and_then(|group| group_difficulty.get(group))
+            .copied();
+        encounter.difficulty = of_group.or_else(|| {
+            known
+                .iter()
+                .min_by(|(a, _), (b, _)| {
+                    distance_2d(*a, encounter.position)
+                        .total_cmp(&distance_2d(*b, encounter.position))
+                })
+                .map(|(_, difficulty)| *difficulty)
+        });
+        if encounter.difficulty.is_some() {
+            report.inferred_difficulties += 1;
+        }
+    }
+}
+
+/// Gives the difficulty slices of `target` without a mob, and the missing difficulties of the
+/// nested slices' mobs, a sibling difficulty's row with their mark (see
+/// [`finish_grouped_encounters`]).
+fn fill_sibling_mobs(
+    target: &mut Target,
+    levels: &HashMap<String, u32>,
+    report: &mut DungeonScriptsReport,
+) {
+    let siblings: Vec<(u32, String)> = target
+        .slices
+        .iter()
+        .filter_map(|slice| Some((slice.difficulty?, slice.mob.as_ref()?.vitals_id.clone())))
+        .collect();
+    for slice in &mut target.slices {
+        if slice.mob.is_none()
+            && let Some(difficulty) = slice.difficulty
+            && let Some(mob) = sibling_mob(&siblings, difficulty, levels)
+        {
+            slice.mob = Some(mob);
+            report.sibling_mobs += 1;
+        }
+        if slice.difficulty_mobs.is_empty() {
+            continue;
+        }
+        let nested: Vec<(u32, String)> = slice
+            .difficulty_mobs
+            .iter()
+            .map(|(difficulty, mob)| (*difficulty, mob.vitals_id.clone()))
+            .collect();
+        for difficulty in FIRST_DIFFICULTY..=LAST_DIFFICULTY {
+            if slice.difficulty_mobs.contains_key(&difficulty) {
+                continue;
+            }
+            if let Some(mob) = sibling_mob(&nested, difficulty, levels) {
+                slice.difficulty_mobs.insert(difficulty, mob);
+                report.sibling_mobs += 1;
+            }
+        }
+    }
+}
+
+/// The mob of `difficulty` from the rows `siblings` of other difficulties: a row whose id ends
+/// in its difficulty's mark, with the mark of `difficulty`, when the vitals table has that row.
+fn sibling_mob(
+    siblings: &[(u32, String)],
+    difficulty: u32,
+    levels: &HashMap<String, u32>,
+) -> Option<TargetMob> {
+    siblings.iter().find_map(|(known, vitals)| {
+        let mark = format!("{ROW_DIFFICULTY_MARK}{known}");
+        let base = vitals
+            .len()
+            .checked_sub(mark.len())
+            .filter(|&at| vitals.is_char_boundary(at) && vitals[at..].eq_ignore_ascii_case(&mark))
+            .map(|at| &vitals[..at])?;
+        let vitals_id = format!("{base}{ROW_DIFFICULTY_MARK}{difficulty}");
+        let level = *levels.get(&vitals_id.to_lowercase())?;
+        Some(TargetMob {
+            vitals_id,
+            category_id: String::new(),
+            level,
+        })
+    })
+}
+
+/// The difficulty of the retail map point nearest `place` within [`TIER_MATCH_M`].
+fn observed_difficulty(place: [f32; 3], tiers: &[BreachTier]) -> Option<u32> {
+    tiers
+        .iter()
+        .map(|tier| (distance_2d([tier.x, tier.y, 0.0], place), tier.difficulty))
+        .filter(|(distance, _)| *distance <= TIER_MATCH_M)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, difficulty)| difficulty)
+}
+
+/// The distance of two places on the ground plane.
+fn distance_2d(a: [f32; 3], b: [f32; 3]) -> f32 {
+    (a[0] - b[0]).hypot(a[1] - b[1])
 }
 
 /// The `EventType` value of `event`.
@@ -1267,7 +1707,10 @@ mod tests {
             &mut source,
             SCRIPT,
             placement,
-            &levels,
+            MobSources {
+                levels: &levels,
+                prefabs: None,
+            },
             &points,
             &mut report,
         )
@@ -1334,7 +1777,10 @@ mod tests {
             &mut source,
             SCRIPT,
             Transform::default(),
-            &HashMap::new(),
+            MobSources {
+                levels: &HashMap::new(),
+                prefabs: None,
+            },
             &[],
             &mut report,
         )
@@ -1366,5 +1812,90 @@ mod tests {
         assert!(!is_creature(
             "slices/dungeon/raids/typhon_pillar.dynamicslice"
         ));
+    }
+
+    #[test]
+    fn a_breach_slice_names_its_difficulty_at_the_end() {
+        assert_eq!(
+            slice_difficulty("slices/characters/corruption_swarmer_dt3.dynamicslice"),
+            Some(3)
+        );
+        assert_eq!(
+            slice_difficulty(
+                "slices/darkness/events/general/hazards/darkness_hazard_corruption_minor_l2.dynamicslice"
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            slice_difficulty(
+                "slices/darkness/events/general/darkness_ai_swarmer_wander_00.dynamicslice"
+            ),
+            None
+        );
+        assert!(is_breach_group(
+            "coatgen/16c655c7/darkness_spawngroup_minor_master_3023200876.dynamicslice"
+        ));
+        assert!(!is_breach_group(
+            "coatgen/efc337e6/worldevent_spawngroup_single_master_3815808514.dynamicslice"
+        ));
+    }
+
+    #[test]
+    fn a_missing_difficulty_takes_its_sibling_s_row_with_its_mark() {
+        let levels = HashMap::from([
+            ("corruption_impaler_dt2".to_owned(), 30),
+            ("corruption_impaler_dt5".to_owned(), 60),
+        ]);
+        let siblings = [(2, "Corruption_Impaler_DT2".to_owned())];
+        let mob = sibling_mob(&siblings, 5, &levels).expect("row");
+        assert_eq!(
+            (mob.vitals_id.as_str(), mob.level),
+            ("Corruption_Impaler_DT5", 60)
+        );
+        assert!(sibling_mob(&siblings, 6, &levels).is_none(), "no such row");
+        let other = [(6, "Corruption_Swarmer_07SM06_DARKNESS".to_owned())];
+        assert!(
+            sibling_mob(&other, 5, &levels).is_none(),
+            "a row without the mark"
+        );
+    }
+
+    #[test]
+    fn a_breach_takes_its_place_s_map_difficulty_else_its_group_s_or_the_nearest() {
+        const GROUP_A: &str = "a#1";
+        const GROUP_B: &str = "b#1";
+        let at = |x: f32, group: &str| Encounter {
+            position: [x, 0.0, 0.0],
+            spawn_group: Some(group.to_owned()),
+            ..Encounter::default()
+        };
+        let mut encounters = vec![
+            at(0.0, GROUP_A),
+            at(100.0, GROUP_A),
+            at(1_000.0, GROUP_B),
+            at(5.0, ""),
+        ];
+        encounters[3].spawn_group = None;
+        let tiers = [BreachTier {
+            x: 3.0,
+            y: 4.0,
+            difficulty: 3,
+            ledgers: 2,
+        }];
+        let mut report = DungeonScriptsReport::default();
+        finish_grouped_encounters(&mut encounters, &tiers, &HashMap::new(), &mut report);
+        let difficulties: Vec<Option<u32>> = encounters
+            .iter()
+            .map(|encounter| encounter.difficulty)
+            .collect();
+        assert_eq!(
+            difficulties,
+            [Some(3), Some(3), Some(3), None],
+            "the map point, its group, the nearest group; none for an encounter of no group"
+        );
+        assert_eq!(
+            (report.observed_difficulties, report.inferred_difficulties),
+            (1, 2)
+        );
     }
 }

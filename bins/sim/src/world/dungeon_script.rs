@@ -35,11 +35,35 @@
 //! - an encounter whose spawner does not spawn when it is enabled (`m_spawnOnEnable` 0: it
 //!   waits for its trigger) does not start when a player comes near;
 //! - a sim runs the encounters of its own cells.
+//!
+//! The corrupted breaches are the open world encounters of an alias spawner (breaches note
+//! 2026-11-11): each `Darkness_SpawnGroup_Minor_Master` spawns one of four minor breach slices
+//! (monolith, portal, grove, hive) at one of its seven spawn points, each
+//! `Darkness_SpawnGroup_Major_Master` one of two major ones (portal, monolith) at its own place
+//! (Observed: the slices, and the retail breaches stood at those places). The script holds one
+//! encounter per slice and point, of one spawn group ([`Encounter::spawn_group`]):
+//!
+//! - one encounter of a group is its choice; the others wait idle and show no root. When the
+//!   choice comes back after its respawn time, the group picks again (Inferred: `m_liveCount` 1,
+//!   the alias' equal `Percent` weights; the retail pick is Unknown);
+//! - a group chooses only encounters whose every objective can be met at their difficulty: each
+//!   tracked target, and each spawn of a stage that counts its own spawns, has a slice of that
+//!   difficulty that is a mob or a start object ([`completable`]). The carapaces, membranes and
+//!   difficulty 5 and 6 cores have no retail entity table yet, so the breaches that need them
+//!   never start (an encounter that cannot end would hold its place's mobs for nothing);
+//! - a breach runs at its place's difficulty ([`Encounter::difficulty`], Observed per place from
+//!   the retail world map): its spawns of a target with one slice per difficulty spawn that
+//!   difficulty's slice and mob ([`TargetSlice::difficulty`], [`TargetSlice::difficulty_mobs`]);
+//! - its success fires its difficulty's reward event ([`Encounter::rewards`]) and the global
+//!   success event for each player within the rewards' radius (Observed: each won retail breach
+//!   gave the own player `Darkness_<Minor|Major>_DT<n>_T<k>` at the manager's succeeded status,
+//!   16 to 50 ms after it; the radius rule is Inferred from the slice's 500 m field).
 
 use nw_bus::Point;
 use nw_sim_core::Position;
 use nw_world::dungeon_scripts::{
-    Encounter, LevelScript, OPEN_WORLD_LEVEL, ObjectiveSpec, Spawn, StageAction, TargetMob,
+    Encounter, LevelScript, OPEN_WORLD_LEVEL, ObjectiveSpec, Spawn, StageAction, Target, TargetMob,
+    TargetSlice,
 };
 use nw_world::records::PatrolPath;
 use uuid::Uuid;
@@ -61,9 +85,9 @@ const SPLITMIX_MUL_B: u64 = 0x94D0_49BB_1331_11EB;
 const SHARE_BITS: u32 = 53;
 const SHARE_SHIFT: u32 = u64::BITS - SHARE_BITS;
 /// `EventType` values of an entity event (`slice_triggers`).
-const EVENT_TRIGGER: u32 = 0;
-const EVENT_ACTIVATE: u32 = 2;
-const EVENT_DEACTIVATE: u32 = 3;
+pub(super) const EVENT_TRIGGER: u32 = 0;
+pub(super) const EVENT_ACTIVATE: u32 = 2;
+pub(super) const EVENT_DEACTIVATE: u32 = 3;
 /// The volume radius of an encounter whose slice has none: the most common sphere radius of the
 /// encounter slices' detection volumes (best guess).
 const DEFAULT_VOLUME_RADIUS_M: f32 = 30.0;
@@ -215,6 +239,63 @@ pub(crate) struct DungeonRun {
     completed: bool,
     /// The rules of the open world; `None` for an instance.
     open_world: Option<OpenWorldRules>,
+    /// The entity events the stages sent since the last take: (encounter, entity, event).
+    sent_events: Vec<(usize, u64, u32)>,
+    /// The spawn groups of the encounters ([`Encounter::spawn_group`]).
+    groups: Vec<SpawnGroup>,
+    /// The group of each encounter, by index.
+    group_of: Vec<Option<usize>>,
+}
+
+/// The encounters of one alias spawner: one of them is its choice at a time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpawnGroup {
+    /// Its encounters, by index.
+    members: Vec<usize>,
+    /// The member that is its choice (an index into `members`).
+    chosen: usize,
+}
+
+impl SpawnGroup {
+    /// The member picked by `seed` (a share of the members by [`mixed`]).
+    fn pick(&mut self, seed: u64) {
+        let count = u64::try_from(self.members.len()).unwrap_or(u64::MAX).max(1);
+        self.chosen = usize::try_from(mixed(seed) % count).unwrap_or_default();
+    }
+
+    fn choice(&self) -> Option<usize> {
+        self.members.get(self.chosen).copied()
+    }
+}
+
+/// The spawn groups of `script`'s encounters and the group of each encounter whose objectives can
+/// be met (`can_end`, by index); each group's first choice is picked by its index.
+fn spawn_groups(script: &LevelScript, can_end: &[bool]) -> (Vec<SpawnGroup>, Vec<Option<usize>>) {
+    let mut by_name: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut groups: Vec<SpawnGroup> = Vec::new();
+    let group_of = script
+        .encounters
+        .iter()
+        .enumerate()
+        .map(|(index, encounter)| {
+            let name = encounter.spawn_group.as_deref()?;
+            let group = *by_name.entry(name).or_insert_with(|| {
+                groups.push(SpawnGroup {
+                    members: Vec::new(),
+                    chosen: 0,
+                });
+                groups.len() - 1
+            });
+            if can_end.get(index).copied().unwrap_or(true) {
+                groups[group].members.push(index);
+            }
+            Some(group)
+        })
+        .collect();
+    for (index, group) in (0_u64..).zip(groups.iter_mut()) {
+        group.pick(index);
+    }
+    (groups, group_of)
 }
 
 impl DungeonRun {
@@ -228,24 +309,83 @@ impl DungeonRun {
                 ..EncounterRun::default()
             })
             .collect();
+        let (groups, group_of) = spawn_groups(&script, &[]);
         Self {
             instance,
             script,
             encounters,
             completed: false,
             open_world: None,
+            sent_events: Vec::new(),
+            groups,
+            group_of,
         }
     }
 
-    /// The run of the open world's `script` by `rules`: every encounter idle.
-    pub(super) fn of_open_world(script: LevelScript, rules: OpenWorldRules) -> Self {
+    /// Whether encounter `index` may run: it is of no spawn group, or its group's choice.
+    pub(super) fn chosen(&self, index: usize) -> bool {
+        self.group_of
+            .get(index)
+            .copied()
+            .flatten()
+            .and_then(|group| self.groups.get(group))
+            .is_none_or(|group| group.choice() == Some(index))
+    }
+
+    /// The rewards of encounter `index` at its difficulty: its place, the radius, and its
+    /// difficulty's game event and the global success event (those it names).
+    pub(super) fn rewards_of(&self, index: usize) -> Option<([f32; 3], f32, Vec<&str>)> {
+        let encounter = self.script.encounters.get(index)?;
+        let rewards = encounter.rewards.as_ref()?;
+        let difficulty = usize::try_from(encounter.difficulty?).ok()?;
+        let events = difficulty
+            .checked_sub(1)
+            .and_then(|at| rewards.events.get(at))
+            .into_iter()
+            .chain(std::iter::once(&rewards.global_event))
+            .map(String::as_str)
+            .filter(|event| !event.is_empty())
+            .collect();
+        Some((encounter.position, rewards.radius_m, events))
+    }
+
+    /// The run of the open world's `script` by `rules`: every encounter idle; a spawn group
+    /// chooses among its encounters that [`completable`] finds can end with the start object
+    /// slices `is_object`.
+    pub(super) fn of_open_world(
+        script: LevelScript,
+        rules: OpenWorldRules,
+        is_object: &impl Fn(&str) -> bool,
+    ) -> Self {
+        let can_end: Vec<bool> = script
+            .encounters
+            .iter()
+            .map(|encounter| encounter.spawn_group.is_none() || completable(encounter, is_object))
+            .collect();
+        let (groups, group_of) = spawn_groups(&script, &can_end);
         Self {
             open_world: Some(rules),
+            groups,
+            group_of,
             ..Self::new(Uuid::nil(), script)
         }
     }
 
-    /// The place of each encounter.
+    /// Its level script.
+    pub(super) fn script(&self) -> &LevelScript {
+        &self.script
+    }
+
+    /// Whether a living player is within encounter `index`'s volume.
+    pub(super) fn engaged(&self, index: usize) -> bool {
+        self.encounters.get(index).is_some_and(|run| run.engaged)
+    }
+
+    /// The entity events its stages sent since the last call: (encounter, entity, event).
+    pub(super) fn take_entity_events(&mut self) -> Vec<(usize, u64, u32)> {
+        std::mem::take(&mut self.sent_events)
+    }
+
     /// The client statuses of encounter `index` ([`super::encounter_roots`]): its manager's,
     /// and each stage's in stage order. An idle or due encounter has not started; a done one
     /// succeeded.
@@ -299,19 +439,36 @@ impl DungeonRun {
     ) -> Vec<ScriptOutcome> {
         let mut outcomes = Vec::new();
         for (index, encounter) in self.script.encounters.iter().enumerate() {
+            let group = self.group_of.get(index).copied().flatten();
+            let chosen = group
+                .and_then(|group| self.groups.get(group))
+                .is_none_or(|group| group.choice() == Some(index));
             let run = &mut self.encounters[index];
-            if !owned.get(index).copied().unwrap_or(true) {
+            if !owned.get(index).copied().unwrap_or(true) || !chosen {
                 if run.status != EncounterStatus::Idle {
                     reset(run, host);
                 }
                 continue;
             }
-            if let Some(rules) = self.open_world
-                && !open_world_step(encounter, run, host, view, rules, now_ms)
-            {
-                continue;
+            if let Some(rules) = self.open_world {
+                let was_done = run.status == EncounterStatus::Done;
+                let runs = open_world_step(encounter, run, host, view, rules, now_ms);
+                if was_done
+                    && run.status == EncounterStatus::Idle
+                    && let Some(group) = group.and_then(|group| self.groups.get_mut(group))
+                {
+                    // It came back after its respawn time: the group picks its next choice.
+                    group.pick(now_ms);
+                }
+                if !runs {
+                    continue;
+                }
             }
+            let before = run.entity_events.len();
             tick_encounter(encounter, run, host, view, now_ms);
+            for (entity, event, _) in run.entity_events.get(before..).unwrap_or_default() {
+                self.sent_events.push((index, *entity, *event));
+            }
             if run.status == EncounterStatus::Done && !run.reported {
                 run.reported = true;
                 outcomes.push(ScriptOutcome::EncounterDone(index));
@@ -430,10 +587,7 @@ fn respawn_ms(encounter: &Encounter, rules: OpenWorldRules, done_ms: u64) -> u64
         return rules.respawn_ms;
     };
     // SplitMix64 of the end time: a share of the range.
-    let mut mixed = done_ms.wrapping_add(SPLITMIX_GAMMA);
-    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(SPLITMIX_MUL_A);
-    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(SPLITMIX_MUL_B);
-    mixed ^= mixed >> 31;
+    let mixed = mixed(done_ms);
     // A share of a range of minutes.
     #[allow(
         clippy::cast_precision_loss,
@@ -447,6 +601,14 @@ fn respawn_ms(encounter: &Encounter, rules: OpenWorldRules, done_ms: u64) -> u64
         (seconds * MS_PER_S_F64).round() as u64
     };
     ms
+}
+
+/// The SplitMix64 mix (Steele, Lea and Flood) of `seed`.
+const fn mixed(seed: u64) -> u64 {
+    let mut mixed = seed.wrapping_add(SPLITMIX_GAMMA);
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(SPLITMIX_MUL_A);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(SPLITMIX_MUL_B);
+    mixed ^ (mixed >> 31)
 }
 
 fn tick_encounter(
@@ -736,18 +898,27 @@ fn spawn_one(
             .copied()
             .unwrap_or(encounter.position)
     };
+    let difficulty = encounter.difficulty;
     let mobs: Vec<(usize, &TargetMob, u32)> = target
         .slices
         .iter()
         .enumerate()
-        .filter_map(|(index, slice)| Some((index, slice.mob.as_ref()?, slice.percent.max(ONE))))
+        .filter(|(_, slice)| of_difficulty(target, slice, difficulty))
+        .filter_map(|(index, slice)| {
+            Some((index, mob_at(slice, difficulty)?, slice.percent.max(ONE)))
+        })
         .collect();
     let per_spawn = |slice: usize| target.slices[slice].mobs_per_spawn.max(ONE);
     let total: u32 = mobs.iter().map(|(_, _, weight)| weight).sum();
     if mobs.is_empty() {
         // A target of no mob: its slices that are start objects stand at the locations.
         for number in 0..spawn.count {
-            for (slice, target_slice) in target.slices.iter().enumerate() {
+            for (slice, target_slice) in target
+                .slices
+                .iter()
+                .enumerate()
+                .filter(|(_, slice)| of_difficulty(target, slice, difficulty))
+            {
                 match host.spawn_object(&target_slice.path, at_of(number)) {
                     Some(entity) => run.mobs.push(EncounterMob {
                         entity,
@@ -793,6 +964,59 @@ fn spawn_one(
             }
         }
     }
+}
+
+/// Whether every objective of `encounter` can be met at its difficulty: each target a stage
+/// objective tracks, and each spawn under a stage that counts its own spawns, has a slice of the
+/// difficulty that spawns a mob or a start object (`is_object`).
+fn completable(encounter: &Encounter, is_object: &impl Fn(&str) -> bool) -> bool {
+    let difficulty = encounter.difficulty;
+    let spawnable = |target: usize| {
+        encounter.targets.get(target).is_some_and(|target| {
+            target
+                .slices
+                .iter()
+                .filter(|slice| of_difficulty(target, slice, difficulty))
+                .any(|slice| mob_at(slice, difficulty).is_some() || is_object(&slice.path))
+        })
+    };
+    encounter.stages.iter().enumerate().all(|(index, stage)| {
+        stage
+            .objectives
+            .iter()
+            .all(|objective| match objective.kind {
+                ObjectiveSpec::SliceDestroyed {
+                    target: Some(target),
+                    ..
+                } => spawnable(target),
+                ObjectiveSpec::SliceDestroyed { target: None, .. } => encounter
+                    .stages
+                    .iter()
+                    .enumerate()
+                    .filter(|(under, _)| is_under(encounter, *under, index))
+                    .flat_map(|(_, stage)| &stage.spawns)
+                    .all(|spawn| spawnable(spawn.target)),
+                _ => true,
+            })
+    })
+}
+
+/// Whether `slice` of `target` spawns at `difficulty`: the target holds no slice of one
+/// difficulty, or the encounter has none, or the slice is of it.
+fn of_difficulty(target: &Target, slice: &TargetSlice, difficulty: Option<u32>) -> bool {
+    let by_difficulty = target.slices.iter().any(|slice| slice.difficulty.is_some());
+    match difficulty {
+        Some(difficulty) if by_difficulty => slice.difficulty == Some(difficulty),
+        _ => true,
+    }
+}
+
+/// The mob `slice` spawns at `difficulty`: its nested slices' mob of that difficulty, else its
+/// own.
+fn mob_at(slice: &TargetSlice, difficulty: Option<u32>) -> Option<&TargetMob> {
+    difficulty
+        .and_then(|difficulty| slice.difficulty_mobs.get(&difficulty))
+        .or(slice.mob.as_ref())
 }
 
 /// Whether encounter mob `mob` is one of target `target`: its slice or its vitals row is one of
@@ -929,15 +1153,11 @@ fn run_actions(
         match action {
             StageAction::EntityEvent { entity, event, .. } => {
                 // The event counts for the stage objectives that wait for it
-                // (`EntityActiveStateChanged`). Unknown: what it does to the level entity it names
-                // (a door, a gate, a timeline): the entity is a static entity of the level slice,
-                // and no retail capture holds the message that opens, starts or hides one (dungeon2
-                // report: the door messages are not decoded), so the sim sends nothing for it.
-                tracing::debug!(
-                    entity,
-                    event,
-                    "stage entity event: its world effect is Unknown"
-                );
+                // (`EntityActiveStateChanged`), and the sim sends its effect on the entity of the
+                // encounter slice it names on the encounter's root group
+                // ([`super::encounter_roots::EncounterRoots::entity_event`]; dungeon gates note,
+                // Observed). The gates and doors are no targets of these events: they are entities
+                // of the level script ([`super::gates`]).
                 run.entity_events.push((*entity, *event, now_ms));
             }
             StageAction::DestroySlice { target } => {
@@ -1070,6 +1290,10 @@ impl SimWorld {
                 let mobs: Vec<u64> = old.mobs().collect();
                 self.remove_gm(&mobs);
             }
+            let salt = running
+                .as_ref()
+                .map_or(0, |(instance, _)| instance.as_u64_pair().0);
+            self.start_gates(running.as_ref().map(|(_, mode)| mode.as_str()), salt);
             self.dungeon_run = running.and_then(|(instance, game_mode)| {
                 let script = self.content.dungeon_scripts.game_mode(&game_mode)?.clone();
                 tracing::info!(
@@ -1081,6 +1305,15 @@ impl SimWorld {
                 );
                 Some(DungeonRun::new(instance, script))
             });
+            self.encounter_roots = self.dungeon_run.as_ref().map_or_else(
+                super::encounter_roots::EncounterRoots::default,
+                |run| {
+                    super::encounter_roots::EncounterRoots::build(
+                        &self.content.encounter_roots,
+                        &run.script.encounters,
+                    )
+                },
+            );
         }
         let Some(mut run) = self.dungeon_run.take() else {
             return;
@@ -1095,6 +1328,9 @@ impl SimWorld {
             mutated: true,
         };
         let outcomes = run.tick(host, &view, &[], now_ms);
+        let owned = vec![true; run.script.encounters.len()];
+        self.show_encounters(&mut run, &owned, now_ms);
+        self.tick_gates(&run, now_ms);
         for outcome in outcomes {
             match outcome {
                 ScriptOutcome::EncounterDone(index) => {
@@ -1164,7 +1400,9 @@ impl SimWorld {
                 "open world encounter roots"
             );
             self.encounter_objects = EncounterObjects::build(&self.content.encounter_objects);
-            self.world_events = Some(DungeonRun::of_open_world(script, rules));
+            let objects = &self.encounter_objects;
+            let run = DungeonRun::of_open_world(script, rules, &|slice| objects.is_kind(slice));
+            self.world_events = Some(run);
         }
         let Some(mut run) = self.world_events.take() else {
             return;
@@ -1188,14 +1426,59 @@ impl SimWorld {
                     encounter = %run.script.encounters[index].name,
                     "open world encounter done"
                 );
+                if let Some((at, radius_m, events)) = run.rewards_of(index) {
+                    let events: Vec<String> = events.into_iter().map(str::to_owned).collect();
+                    self.reward_encounter(position(at), radius_m, &events, now_ms);
+                }
             }
         }
+        self.show_encounters(&mut run, &owned, now_ms);
+        self.world_events = Some(run);
+    }
+
+    /// The encounter roots after a step of `run` at `now_ms`: each root shows its encounter's
+    /// statuses when this sim owns it (`owned`, by encounter), and the stages' entity events go
+    /// out on it.
+    fn show_encounters(&mut self, run: &mut DungeonRun, owned: &[bool], now_ms: u64) {
         for (index, owned) in owned.iter().enumerate() {
             if let Some((manager, stages)) = run.client_status(index) {
-                self.encounter_roots.set(index, *owned, manager, &stages);
+                let shown = *owned && run.chosen(index);
+                self.encounter_roots.set(index, shown, manager, &stages);
             }
         }
-        self.world_events = Some(run);
+        for (index, entity, event) in run.take_entity_events() {
+            let Some(encounter) = run.script.encounters.get(index) else {
+                continue;
+            };
+            let components = self
+                .content
+                .dungeon_gates
+                .slice_entities(&encounter.slice)
+                .iter()
+                .find(|known| known.entity == entity)
+                .map_or(&[][..], |known| known.components.as_slice());
+            self.encounter_roots
+                .entity_event(index, components, event, now_ms);
+        }
+        self.encounter_roots.tick(now_ms);
+    }
+
+    /// Each player within `radius_m` of `at` gets the game events `events` (a won breach's
+    /// rewards, see the module text).
+    fn reward_encounter(&mut self, at: Position, radius_m: f32, events: &[String], now_ms: u64) {
+        let numbers: Vec<u64> = {
+            let mut query = self.world.query::<(&Player, &Body)>();
+            query
+                .iter(&self.world)
+                .filter(|(_, body)| body.motion.position().horizontal_distance(at) <= radius_m)
+                .map(|(player, _)| player.number)
+                .collect()
+        };
+        for number in numbers {
+            for event in events {
+                self.fire_game_event(number, event, now_ms);
+            }
+        }
     }
 
     /// Every player of the instance finished its game mode (`TaskCompleteDungeon`).
@@ -1626,7 +1909,7 @@ mod tests {
             respawn_ms: RESPAWN_MS,
         };
         let far = [PLACE[0] + NEAR_M * 3.0, PLACE[1], PLACE[2]];
-        let mut run = DungeonRun::of_open_world(script(vec![boss_encounter()]), rules);
+        let mut run = DungeonRun::of_open_world(script(vec![boss_encounter()]), rules, &|_| false);
         let mut host = Host::default();
         run.tick(&mut host, &view(&[far]), &[], T0);
         run.tick(&mut host, &view(&[far]), &[], T0 + 1);
@@ -1834,5 +2117,213 @@ mod tests {
                 .entity_events
                 .contains(&(7, EVENT_ACTIVATE, T0 + 2))
         );
+    }
+
+    /// The mobs of a breach-like target: one slice per difficulty (`_dt1` twice, `_dt2`), as the
+    /// corrupted breaches' aliases list them, and a wave slice with a mob per difficulty.
+    fn breach_targets() -> Vec<Target> {
+        let tier = |difficulty: u32, vitals: &str| TargetSlice {
+            path: format!("slices/characters/corruption_swarmer_dt{difficulty}.dynamicslice"),
+            percent: 100,
+            difficulty: Some(difficulty),
+            mob: Some(TargetMob {
+                vitals_id: vitals.to_owned(),
+                category_id: String::new(),
+                level: LEVEL,
+            }),
+            ..TargetSlice::default()
+        };
+        let wave = TargetSlice {
+            path: "slices/darkness/events/general/darkness_ai_swarmer_wander_00.dynamicslice"
+                .to_owned(),
+            mob: Some(TargetMob {
+                vitals_id: SWARMER_DT1.to_owned(),
+                category_id: String::new(),
+                level: LEVEL,
+            }),
+            difficulty_mobs: [(2, SWARMER_DT2), (3, SWARMER_DT3)]
+                .into_iter()
+                .map(|(difficulty, vitals)| {
+                    (
+                        difficulty,
+                        TargetMob {
+                            vitals_id: vitals.to_owned(),
+                            category_id: String::new(),
+                            level: LEVEL,
+                        },
+                    )
+                })
+                .collect(),
+            ..TargetSlice::default()
+        };
+        vec![
+            Target {
+                name: "alias_darkness_corruption_swarmer.aliasasset".to_owned(),
+                slices: vec![
+                    tier(1, SWARMER_DT1),
+                    tier(1, SWARMER_DT1),
+                    tier(2, SWARMER_DT2),
+                ],
+            },
+            Target {
+                name: "darkness_ai_swarmer_wander_00.dynamicslice".to_owned(),
+                slices: vec![wave],
+            },
+        ]
+    }
+
+    const SWARMER_DT1: &str = "Corruption_Swarmer_DT1";
+    const SWARMER_DT2: &str = "Corruption_Swarmer_DT2";
+    const SWARMER_DT3: &str = "Corruption_Swarmer_DT3";
+    const GROUP: &str = "coatgen/test/darkness_spawngroup_minor_master_1.dynamicslice#7";
+    const DT2_EVENT: &str = "Darkness_Minor_DT2_T1";
+    const GLOBAL_EVENT: &str = "Darkness_Any_GlobalSuccess";
+
+    /// A breach of the group at `place` and `difficulty`: its one stage spawns one of each
+    /// target and ends when the first target's mob dies.
+    fn breach(place: [f32; 3], difficulty: u32) -> Encounter {
+        Encounter {
+            name: "Darkness_SpawnGroup_Minor_Master".to_owned(),
+            position: place,
+            auto_activate: true,
+            grace_period_s: GRACE_S,
+            detection_radius_m: Some(RADIUS_M),
+            top_stages: vec![0],
+            stages: vec![Stage {
+                name: "Wave_01 - Objective".to_owned(),
+                spawns: [0, 1]
+                    .into_iter()
+                    .map(|target| Spawn {
+                        target,
+                        count: 1,
+                        ..Spawn::default()
+                    })
+                    .collect(),
+                objectives: vec![objective(
+                    ObjectiveSpec::SliceDestroyed {
+                        target: Some(0),
+                        required: 1,
+                    },
+                    0,
+                    false,
+                )],
+                ..Stage::default()
+            }],
+            targets: breach_targets(),
+            spawn_group: Some(GROUP.to_owned()),
+            difficulty: Some(difficulty),
+            rewards: Some(nw_world::level_script::DifficultyRewards {
+                radius_m: 500.0,
+                events: vec!["Darkness_Minor_DT1_T1".to_owned(), DT2_EVENT.to_owned()],
+                global_event: GLOBAL_EVENT.to_owned(),
+            }),
+            ..Encounter::default()
+        }
+    }
+
+    fn open_rules() -> OpenWorldRules {
+        OpenWorldRules {
+            near_m: 100.0,
+            respawn_ms: 60_000,
+        }
+    }
+
+    #[test]
+    fn a_breach_spawns_its_difficulty_s_slice_and_nested_mob() {
+        let mut run =
+            DungeonRun::of_open_world(script(vec![breach(PLACE, 2)]), open_rules(), &|_| false);
+        let mut host = Host::default();
+        run.tick(&mut host, &view(&[PLACE]), &[], T0);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
+        let spawned: Vec<&str> = host.spawned.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            spawned,
+            [SWARMER_DT2, SWARMER_DT2],
+            "the alias slice, the wave's mob"
+        );
+        let mut low =
+            DungeonRun::of_open_world(script(vec![breach(PLACE, 1)]), open_rules(), &|_| false);
+        let mut host = Host::default();
+        low.tick(&mut host, &view(&[PLACE]), &[], T0);
+        low.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
+        let spawned: Vec<&str> = host.spawned.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            spawned,
+            [SWARMER_DT1, SWARMER_DT1],
+            "a wave without a mob of the difficulty spawns its own"
+        );
+    }
+
+    #[test]
+    fn one_breach_of_a_group_runs_and_the_group_picks_again_after_its_respawn() {
+        let other = [PLACE[0] + 150.0, PLACE[1], PLACE[2]];
+        let mut run = DungeonRun::of_open_world(
+            script(vec![breach(PLACE, 2), breach(other, 2)]),
+            open_rules(),
+            &|_| false,
+        );
+        let chosen: Vec<bool> = (0..2).map(|index| run.chosen(index)).collect();
+        assert_eq!(chosen.iter().filter(|chosen| **chosen).count(), 1);
+        let (at, away) = if chosen[0] {
+            (PLACE, other)
+        } else {
+            (other, PLACE)
+        };
+        let mut host = Host::default();
+        run.tick(&mut host, &view(&[away]), &[], T0);
+        run.tick(&mut host, &view(&[away]), &[], T0 + 1);
+        assert!(host.spawned.is_empty(), "the other point waits");
+        run.tick(&mut host, &view(&[at]), &[], T0 + 2);
+        run.tick(&mut host, &view(&[at]), &[], T0 + 3);
+        assert_eq!(host.spawned.len(), 2);
+        host.kill(SWARMER_DT2);
+        let outcomes = run.tick(&mut host, &view(&[at]), &[], T0 + 4);
+        let done = usize::from(!chosen[0]);
+        assert!(outcomes.contains(&ScriptOutcome::EncounterDone(done)));
+        let (_, radius_m, events) = run.rewards_of(done).expect("rewards");
+        assert!((radius_m - 500.0).abs() < f32::EPSILON);
+        assert_eq!(
+            events,
+            [DT2_EVENT, GLOBAL_EVENT],
+            "its difficulty's event, then any's"
+        );
+        // The area spawner's respawn time (no rules here: the mob respawn time).
+        let back = T0 + 5 + open_rules().respawn_ms;
+        run.tick(&mut host, &view(&[at]), &[], T0 + 5);
+        run.tick(&mut host, &view(&[at]), &[], back);
+        assert_eq!(
+            (0..2).filter(|index| run.chosen(*index)).count(),
+            1,
+            "the group picked its next choice"
+        );
+    }
+
+    #[test]
+    fn a_breach_that_cannot_end_at_its_difficulty_is_never_chosen() {
+        // Difficulty 3: the tracked alias has no slice of it, so its objective cannot be met.
+        let run =
+            DungeonRun::of_open_world(script(vec![breach(PLACE, 3)]), open_rules(), &|_| false);
+        assert!(!run.chosen(0));
+        let object = Encounter {
+            targets: vec![Target {
+                name: "alias_darkness_minor_portal_core.aliasasset".to_owned(),
+                slices: vec![TargetSlice {
+                    path: "slices/darkness/events/general/core/darkness_core_minor_portal_dt3.dynamicslice"
+                        .to_owned(),
+                    difficulty: Some(3),
+                    ..TargetSlice::default()
+                }],
+            }],
+            ..breach(PLACE, 3)
+        };
+        let is_core = |slice: &str| slice.contains("darkness_core_");
+        assert!(
+            completable(&object, &is_core),
+            "a start object of the difficulty"
+        );
+        assert!(!completable(&object, &|_| false));
+        let plain =
+            DungeonRun::of_open_world(script(vec![boss_encounter()]), open_rules(), &|_| false);
+        assert!(plain.chosen(0), "an encounter of no group always may run");
     }
 }

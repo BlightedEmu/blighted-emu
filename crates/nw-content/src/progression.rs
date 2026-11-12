@@ -602,7 +602,21 @@ fn rank_reward_sources(tables: &Tables) -> Vec<(String, i64, i64)> {
         .collect()
 }
 
+/// The rank tables of the other categorical progressions: the `CategoricalProgressionRankData`
+/// tables other than `WeaponMastery`, and the season pass levels (`SeasonPassRankData`: level,
+/// `MaximumInfluence`). The `SeasonPass` progression names `SeasonPass_Season1`; every season's
+/// table has 2,750 points a level (content bundle 25810808), and retail's 911 entry of it matched
+/// that (Observed, newchar 2026-09-18 9.37 s: rank 39 with 433 points for 107,683 season
+/// experience).
 fn progression_sources(tables: &Tables) -> Vec<ProgressionSource> {
+    let season_levels = tables.season_pass_rank_data.iter().map(|table| {
+        let rows = table
+            .rows
+            .iter()
+            .map(|row| (row.level, row.maximum_influence))
+            .collect();
+        (table.unique_id.to_lowercase(), rows)
+    });
     let rank_tables: HashMap<String, Vec<(i64, i64)>> = tables
         .categorical_progression_rank_data
         .iter()
@@ -619,6 +633,7 @@ fn progression_sources(tables: &Tables) -> Vec<ProgressionSource> {
                 .collect();
             (table.unique_id.to_lowercase(), rows)
         })
+        .chain(season_levels)
         .collect();
     tables
         .categorical_progression_data

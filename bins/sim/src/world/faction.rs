@@ -21,15 +21,48 @@
 //! sanctuary volumes); Observed: a spirit shrine is one too ([`SHRINE_SANCTUARY_REACH_M`]); a toggle outside a sanctuary starts the countdown at once, a toggle with
 //! the flag on takes it off (`pvpFlag` 0, `notifyPending` 1), and entering a sanctuary during a
 //! countdown stops it (`pvpFlagPendingEndTime` 0): the captured run toggled in a sanctuary only.
-//! A countdown does not survive a handoff to another sim (the handoff carries the flag alone).
+//! A handoff to another sim carries what is left of a countdown; the next sim runs the rest.
+//!
+//! The free-for-all flag ([`FfaWatch`]; Observed in `FFA_ExitFFAAndCleanse`,
+//! `FFA_KillPlayerAndLoot` and `FFA_LightningStrikeDeath`, the bodies are in
+//! [`nw_messages::faction_state`]): a player whose client says it is in a free-for-all area
+//! (`TerritoryDefinitions.IsFFA`; retail set the countdown 0.17 s after the client's 2297 of
+//! such an area) gets `ffaPendingEndTime` [`FFA_ON_DELAY_MS`] ahead; at that time its `pvpFlag`
+//! and `ffaFlag` go on. A player that leaves before that time gets the end time 0. A flagged
+//! player that leaves gets the end time [`FFA_OFF_DELAY_MS`] ahead (0.1 s after its client's
+//! 6416), and at that time both flags go off. Two players with the free-for-all flag are foes
+//! whatever their factions ([`SimWorld::pvp_foes`]). A player whose own PvP flag is on gets
+//! the free-for-all flag alone (five retail ledgers). When the flag goes off, the bag's cursed
+//! items become their `FFAConvertedItemId` items in the same bundle (`Gear::convert`), and the client gets 6526 after it (Observed: `FFA_ExitFFAAndCleanse` 246.447 s
+//! and 246.46 s, `FFA_KillPlayerAndLoot` 237.905 s and 237.92 s); a bag with nothing to convert
+//! gets no 6526 (Inferred: both retail exits had cursed items).
+//!
+//! The flag bonus: retail gives the status effect `PvP_Flag_Bonus` with every PvP flag on, its
+//! own or the zone's, and ends it with the flag (Observed in 10 of the 13 free-for-all ledgers,
+//! `FFA_ExitFFAAndCleanse` 107.514 s on and 246.512 s off; `FFA_KillPlayerAndLoot` 133.371 s, the
+//! same bundle as the flag; a lightweight effect of value 0). Its row gives luck: `GlobalRollMod`
+//! 1000 and `ROL_*` 3000 for each gathering tradeskill ([`super::gathering::LootBonuses`]).
+//!
+//! Inferred: a flagged player that comes back during the off countdown keeps its flags (the
+//! end time 0); a player whose own PvP flag was on keeps `pvpFlag` when the free-for-all flag
+//! goes off, and the change names `ffaFlag` alone (as at its entry; no retail exit of such a
+//! player); a handoff starts the watch again. Not built (Unknown rules): the anti-grouping
+//! curse (`ffaAntiGroupingIsCursing`, `ffaAntiGroupingCurseStacks`, effect `FFA_PvP_Curse`), the
+//! zone's balance table (`FFAZoneBalanceData`), and a death in the zone (the cursed share that
+//! drops for the killer, the conversion of the rest at the death and the killer's loot roll;
+//! findings note 2026-11-11 `ffa-zone-rest`).
 
 use bevy_ecs::entity::Entity;
 use nw_content::factions::{NO_FACTION, joinable};
-use nw_messages::faction_state::{FactionChange, FactionStateChange};
+use nw_messages::faction_state::{FactionChange, FactionStateChange, PublicFaction};
+use nw_messages::{ItemsConvertedMsg, ServerMessage};
 
 use super::gear::unix_ns;
-use super::{Body, Player, SimWorld};
+use super::{Body, Player, SimWorld, send_now};
 use crate::travel_rules::SHRINE_LANDMARK_TYPE;
+
+/// The status effect a player holds while a PvP flag is on (Observed, see the module note).
+const PVP_FLAG_BONUS: &str = "PvP_Flag_Bonus";
 
 /// The PvP flag countdown after the player leaves a sanctuary. Observed: in
 /// `Hive_flag_pvp_on_and_off` the flag went on 30.0 s after the bundle that left the sanctuary
@@ -43,6 +76,93 @@ pub(super) const PVP_FLAG_DELAY_MS: u64 = 30_000;
 /// is Inferred (the samples lag the crossing by up to 300 ms).
 const SHRINE_SANCTUARY_REACH_M: f32 = 6.5;
 
+/// The free-for-all flag goes on this long after the player came into a free-for-all area.
+/// Observed: 30.0 s in `FFA_ExitFFAAndCleanse` (77.307 s to 107.267 s) and in
+/// `FFA_KillPlayerAndLoot` (103.324 s to 133.355 s).
+const FFA_ON_DELAY_MS: u64 = 30_000;
+/// The free-for-all flag goes off this long after the player left the area. Observed: 5.0 s
+/// in `FFA_ExitFFAAndCleanse` (241.429 s to 246.447 s) and `FFA_KillPlayerAndLoot` (232.873 s
+/// to 237.905 s).
+const FFA_OFF_DELAY_MS: u64 = 5_000;
+
+/// A player's free-for-all flag and its countdown.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct FfaWatch {
+    /// The flag is on (`ffaFlag`).
+    flagged: bool,
+    /// Sim ms when the flag changes: on for an unflagged player, off for a flagged one.
+    changes_ms: Option<u64>,
+}
+
+impl FfaWatch {
+    /// Whether the free-for-all flag is on.
+    pub(super) const fn flagged(&self) -> bool {
+        self.flagged
+    }
+
+    /// Follows a player that is in a free-for-all area or not (`inside`) at sim ms `now_ms`
+    /// (server ms `server_ms`); `pvp_flagged` is its own PvP flag. The state change for its
+    /// client, when there is one.
+    fn step(
+        &mut self,
+        inside: bool,
+        pvp_flagged: bool,
+        now_ms: u64,
+        server_ms: u64,
+    ) -> Option<FactionStateChange> {
+        let ends_ns = |delay_ms: u64| unix_ns(server_ms.saturating_add(delay_ms));
+        let change = match (self.flagged, inside, self.changes_ms) {
+            // It came in, or it went out with its flag on: the countdown starts.
+            (false, true, None) | (true, false, None) => {
+                let delay_ms = if self.flagged {
+                    FFA_OFF_DELAY_MS
+                } else {
+                    FFA_ON_DELAY_MS
+                };
+                self.changes_ms = Some(now_ms.saturating_add(delay_ms));
+                FactionStateChange {
+                    ffa_pending_end_ns: Some(ends_ns(delay_ms)),
+                    ..FactionStateChange::default()
+                }
+            }
+            // It left before the flag went on, or came back before it went off.
+            (false, false, Some(_)) | (true, true, Some(_)) => {
+                self.changes_ms = None;
+                FactionStateChange {
+                    ffa_pending_end_ns: Some(0),
+                    ..FactionStateChange::default()
+                }
+            }
+            // A player with its own PvP flag on gets the free-for-all flag alone (`06 20 <0>
+            // 08 01`, retail `FFA_BallLightningDeath` 103.216 s, `FFA_TreasureMaps` 82.689 s and
+            // three more ledgers).
+            (false, true, Some(ends_ms)) if now_ms >= ends_ms => {
+                self.flagged = true;
+                self.changes_ms = None;
+                FactionStateChange {
+                    notify_pending: (!pvp_flagged).then_some(true),
+                    ffa_pending_end_ns: Some(0),
+                    pvp_flag: (!pvp_flagged).then_some(true),
+                    ffa_flag: Some(true),
+                    ..FactionStateChange::default()
+                }
+            }
+            (true, false, Some(ends_ms)) if now_ms >= ends_ms => {
+                self.flagged = false;
+                self.changes_ms = None;
+                FactionStateChange {
+                    ffa_pending_end_ns: Some(0),
+                    pvp_flag: (!pvp_flagged).then_some(false),
+                    ffa_flag: Some(false),
+                    ..FactionStateChange::default()
+                }
+            }
+            _ => return None,
+        };
+        Some(change)
+    }
+}
+
 /// A player's PvP flag on its way on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct PvpFlagWait {
@@ -52,23 +172,38 @@ pub(super) struct PvpFlagWait {
     ends_ms: Option<u64>,
     /// Whether the player is in a sanctuary (`hasSanctuary`); `None` before the first check.
     in_sanctuary: Option<bool>,
+    /// What was left of the countdown on the sim the player came from (ms); the first check
+    /// outside a sanctuary runs this rest, not a whole countdown.
+    carried_left_ms: Option<u64>,
 }
 
 impl PvpFlagWait {
     /// The wait of a player that wants its flag on but does not have it: the flag goes on after
     /// the countdown outside a sanctuary (a login of a player whose flag was on or on its way
     /// on, Inferred: as a sanctuary takes the flag off and keeps it pending).
-    pub(super) const fn wanted(wanted: bool) -> Self {
+    /// `carried_left_ms` is the rest of a countdown that ran on the sim it came from.
+    pub(super) const fn wanted(wanted: bool, carried_left_ms: Option<u64>) -> Self {
         Self {
             pending: wanted,
             ends_ms: None,
             in_sanctuary: None,
+            carried_left_ms,
         }
+    }
+
+    /// What is left of a running countdown at sim ms `now_ms`.
+    pub(super) fn left_ms(&self, now_ms: u64) -> Option<u64> {
+        self.ends_ms.map(|ends_ms| ends_ms.saturating_sub(now_ms))
     }
 
     /// Whether the flag is on its way on.
     pub(super) const fn is_pending(&self) -> bool {
         self.pending
+    }
+
+    /// Whether the player is in a sanctuary (`hasSanctuary`), as the last check saw it.
+    pub(super) fn in_sanctuary(&self) -> bool {
+        self.in_sanctuary == Some(true)
     }
 }
 use crate::objectives::Event;
@@ -117,6 +252,8 @@ impl SimWorld {
             return;
         };
         let wait = player.pvp_wait;
+        // A toggle starts a whole countdown: the rest of a carried one no longer counts.
+        player.pvp_wait.carried_left_ms = None;
         let change = if player.pvp_flagged {
             player.pvp_flagged = false;
             FactionStateChange {
@@ -151,9 +288,13 @@ impl SimWorld {
 
     /// Follows each player's sanctuary and PvP flag countdown at sim ms `now_ms`.
     pub(super) fn tick_pvp_flags(&mut self, now_ms: u64) {
-        let end_ns = unix_ns(self.server_ms.saturating_add(PVP_FLAG_DELAY_MS));
-        let settlements = &self.content.settlements;
-        let travel = &self.content.travel;
+        let server_ms = self.server_ms;
+        let content = &self.content;
+        let settlements = &content.settlements;
+        let travel = &content.travel;
+        let ffa_areas = &content.ffa_areas;
+        let effects = &content.status_effects;
+        let mut converted = Vec::new();
         let mut query = self.world.query::<(&mut Player, &Body)>();
         for (mut player, body) in query.iter_mut(&mut self.world) {
             let at = body.motion.position();
@@ -168,6 +309,8 @@ impl SimWorld {
             let was = player.pvp_wait.in_sanctuary;
             if was != Some(inside) {
                 player.pvp_wait.in_sanctuary = Some(inside);
+                // Only the first check after a handoff runs the rest of a carried countdown.
+                let carried_left_ms = player.pvp_wait.carried_left_ms.take();
                 // A first check outside changes nothing the client shows (its default is 0).
                 if was.is_some() || inside {
                     change.has_sanctuary = Some(inside);
@@ -184,8 +327,10 @@ impl SimWorld {
                 } else if inside && player.pvp_wait.ends_ms.take().is_some() {
                     change.pvp_flag_pending_end_ns = Some(0);
                 } else if !inside && player.pvp_wait.pending {
-                    player.pvp_wait.ends_ms = Some(now_ms.saturating_add(PVP_FLAG_DELAY_MS));
-                    change.pvp_flag_pending_end_ns = Some(end_ns);
+                    let left_ms = carried_left_ms.unwrap_or(PVP_FLAG_DELAY_MS);
+                    player.pvp_wait.ends_ms = Some(now_ms.saturating_add(left_ms));
+                    change.pvp_flag_pending_end_ns =
+                        Some(unix_ns(server_ms.saturating_add(left_ms)));
                 }
             }
             if player.pvp_wait.pending && player.pvp_wait.ends_ms.is_some_and(|ends| now_ms >= ends)
@@ -201,6 +346,44 @@ impl SimWorld {
             if change != FactionStateChange::default() {
                 push_state(&mut player, &change);
             }
+            let in_ffa = player
+                .territories
+                .iter()
+                .any(|area| ffa_areas.contains(area));
+            let pvp_flagged = player.pvp_flagged;
+            if let Some(change) = player.ffa.step(in_ffa, pvp_flagged, now_ms, server_ms) {
+                push_state(&mut player, &change);
+                if change.ffa_flag == Some(false)
+                    && player
+                        .gear
+                        .as_mut()
+                        .is_some_and(|gear| gear.convert(&content.kits, &content.ffa_conversions))
+                {
+                    converted.push((player.connection.clone(), player.number));
+                }
+            }
+            let flagged = player.pvp_flagged || player.ffa.flagged();
+            let number = player.number;
+            player
+                .status_effects
+                .hold_while(effects, PVP_FLAG_BONUS, flagged, number, server_ms);
+        }
+        for (connection, number) in converted {
+            let message = ServerMessage::ItemsConverted(ItemsConvertedMsg::to(number));
+            send_now(&mut self.after_bundles, &connection, &[message]);
+        }
+    }
+}
+
+impl Player {
+    /// Its faction and PvP flags as other players get them: the PvP flag is its own or the
+    /// free-for-all zone's.
+    pub(super) fn public_faction(&self) -> PublicFaction {
+        PublicFaction {
+            faction: self.faction.faction,
+            pvp_flag: self.pvp_flagged || self.ffa.flagged(),
+            sanctuary: self.pvp_wait.in_sanctuary(),
+            ffa_flag: self.ffa.flagged(),
         }
     }
 }
@@ -437,6 +620,46 @@ mod tests {
     /// Retail ledgers: a spirit shrine is a sanctuary out to [`SHRINE_SANCTUARY_REACH_M`] of its
     /// landmark, so a flagged player who walks onto one is flagged no more.
     #[test]
+    fn the_flag_bonus_is_held_while_a_pvp_flag_is_on() {
+        use nw_content::status_effects::{EffectSourceRow, StatusEffectRules, StatusEffectSource};
+        let (mut world, entity) = world();
+        Arc::make_mut(&mut world.content).status_effects =
+            StatusEffectRules::build(StatusEffectSource {
+                effects: vec![EffectSourceRow {
+                    status_id: PVP_FLAG_BONUS.to_owned(),
+                    lightweight: true,
+                    ..EffectSourceRow::default()
+                }],
+                ..StatusEffectSource::default()
+            });
+        let bonus = nw_formats::objectstream::lowercase_crc32(PVP_FLAG_BONUS);
+        let holds = |world: &SimWorld| {
+            world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .status_effects
+                .holds(bonus)
+        };
+        world.tick_pvp_flags(NOW);
+        assert!(!holds(&world));
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .pvp_flagged = true;
+        world.tick_pvp_flags(NOW);
+        assert!(holds(&world), "on with the own flag");
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .pvp_flagged = false;
+        world.tick_pvp_flags(NOW);
+        assert!(!holds(&world), "off with the flag");
+    }
+
+    #[test]
     fn a_spirit_shrine_is_a_sanctuary_within_its_reach() {
         /// The shrine landmark, far from every settlement (there is none in this world).
         const SHRINE_X_M: f32 = 2_000.0;
@@ -472,5 +695,172 @@ mod tests {
             [vec![0x06, 0x01, 0x01, 0x06, 0x00, 0x01]],
             "the same change as a settlement's sanctuary"
         );
+    }
+
+    #[test]
+    fn the_free_for_all_flag_goes_on_after_the_entry_and_off_after_the_exit() {
+        const ENTERED_MS: u64 = 50_000;
+        const SERVER_MS: u64 = 800_000_000_000;
+        let mut watch = FfaWatch::default();
+        assert_eq!(watch.step(false, false, ENTERED_MS - 1, SERVER_MS), None);
+        let pending = watch
+            .step(true, false, ENTERED_MS, SERVER_MS)
+            .expect("the countdown");
+        assert_eq!(
+            pending.ffa_pending_end_ns,
+            Some(unix_ns(SERVER_MS + FFA_ON_DELAY_MS))
+        );
+        assert_eq!(
+            watch.step(true, false, ENTERED_MS + FFA_ON_DELAY_MS - 1, SERVER_MS),
+            None
+        );
+        let on = watch
+            .step(true, false, ENTERED_MS + FFA_ON_DELAY_MS, SERVER_MS)
+            .expect("the flag");
+        assert_eq!(
+            (on.pvp_flag, on.ffa_flag, on.ffa_pending_end_ns),
+            (Some(true), Some(true), Some(0))
+        );
+        assert!(watch.flagged());
+        // Out: the flag stays for the off countdown, then both flags go off.
+        let left_ms = ENTERED_MS + 100_000;
+        let leaving = watch
+            .step(false, false, left_ms, SERVER_MS)
+            .expect("the countdown");
+        assert_eq!(
+            leaving.ffa_pending_end_ns,
+            Some(unix_ns(SERVER_MS + FFA_OFF_DELAY_MS))
+        );
+        assert!(watch.flagged());
+        let off = watch
+            .step(false, false, left_ms + FFA_OFF_DELAY_MS, SERVER_MS)
+            .expect("the flags off");
+        assert_eq!((off.pvp_flag, off.ffa_flag), (Some(false), Some(false)));
+        assert!(!watch.flagged());
+    }
+
+    #[test]
+    fn a_player_that_leaves_before_the_flag_keeps_no_flag_and_its_own_flag_stays() {
+        const NOW_MS: u64 = 10_000;
+        const SERVER_MS: u64 = 800_000_000_000;
+        let mut watch = FfaWatch::default();
+        watch.step(true, false, NOW_MS, SERVER_MS);
+        let stopped = watch
+            .step(false, false, NOW_MS + 1_000, SERVER_MS)
+            .expect("the countdown ends");
+        assert_eq!(
+            (stopped.ffa_pending_end_ns, stopped.ffa_flag),
+            (Some(0), None)
+        );
+        assert_eq!(
+            watch.step(false, false, NOW_MS + FFA_ON_DELAY_MS, SERVER_MS),
+            None
+        );
+        // A player with its own PvP flag on gets the zone's flag alone (retail `06 20 <0> 08
+        // 01`) and keeps `pvpFlag` when the zone's flag goes off.
+        let mut flagged = FfaWatch::default();
+        flagged.step(true, true, NOW_MS, SERVER_MS);
+        let on = flagged
+            .step(true, true, NOW_MS + FFA_ON_DELAY_MS, SERVER_MS)
+            .expect("the zone flag on");
+        let mut retail_on = vec![0x06, 0x20];
+        retail_on.extend([0; 8]);
+        retail_on.extend([0x08, 0x01]);
+        let MemberState::Recorded { body, .. } = on.member().expect("encode").state else {
+            panic!("a recorded faction state");
+        };
+        assert_eq!(body, retail_on);
+        flagged.step(false, true, NOW_MS + FFA_ON_DELAY_MS + 1, SERVER_MS);
+        let off = flagged
+            .step(
+                false,
+                true,
+                NOW_MS + FFA_ON_DELAY_MS + 1 + FFA_OFF_DELAY_MS,
+                SERVER_MS,
+            )
+            .expect("the zone flag off");
+        assert_eq!((off.pvp_flag, off.ffa_flag), (None, Some(false)));
+    }
+
+    /// Retail `FFA_ExitFFAAndCleanse` 246.447 s: at the flag's end the cursed doubloons join the
+    /// doubloon stack, the cursed hide becomes hide in the first free slot, the item without a
+    /// conversion stays, and the client gets 6526 after the bundle.
+    #[test]
+    fn the_flag_off_converts_the_cursed_items_and_tells_the_client() {
+        const CURSED_COIN: &str = "CK_PVPResource_DoubloonToken";
+        const COIN: &str = "CK_PVEResource_DoubloonToken";
+        const CURSED_HIDE: &str = "Cursed10ws_RawhideT52";
+        const HIDE: &str = "RawhideT52";
+        const KEEP: &str = "MadeUpKeepsake";
+        const STACK: Option<u32> = Some(10_000);
+        const COINS_HELD: u32 = 1_218;
+        const CURSED_COINS: u32 = 27;
+        const CURSED_HIDES: u32 = 39;
+        const ENTERED_MS: u64 = 1_000;
+        /// A free-for-all area (the retail client's 2297 named 0x23f5).
+        const FFA_AREA: u16 = 0x23f5;
+        let (mut world, entity) = world();
+        let kits = crate::world::gear::tests::kits_with_stacks(&[
+            (CURSED_COIN, "Resource", STACK),
+            (COIN, "Resource", STACK),
+            (CURSED_HIDE, "Resource", STACK),
+            (HIDE, "Resource", STACK),
+            (KEEP, "Resource", STACK),
+        ]);
+        {
+            let content = Arc::make_mut(&mut world.content);
+            content.ffa_areas = [FFA_AREA].into_iter().collect();
+            content.ffa_conversions = [(CURSED_COIN, COIN), (CURSED_HIDE, HIDE)]
+                .into_iter()
+                .map(|(from, into)| (from.to_owned(), into.to_owned()))
+                .collect();
+            content.kits = kits.clone();
+        }
+        let item = |id: &str| kits.item(id).expect("item").clone();
+        let slot_of = |gear: &crate::world::gear::Gear, id: &str| {
+            gear.bag_stacks()
+                .into_iter()
+                .find(|(_, item_id, _, _)| item_id == id)
+                .map(|(slot, ..)| slot)
+        };
+        let cursed_coin_slot = {
+            let mut player = world.world.get_mut::<Player>(entity).expect("player");
+            let mut gear = crate::world::gear::tests::gear_with_staff();
+            assert!(gear.add(&item(COIN), COINS_HELD));
+            assert!(gear.add(&item(CURSED_COIN), CURSED_COINS));
+            assert!(gear.add(&item(KEEP), 1));
+            assert!(gear.add(&item(CURSED_HIDE), CURSED_HIDES));
+            let slot = slot_of(&gear, CURSED_COIN);
+            player.gear = Some(gear);
+            player.territories = vec![FFA_AREA];
+            slot
+        };
+        world.tick_pvp_flags(ENTERED_MS);
+        world.tick_pvp_flags(ENTERED_MS + FFA_ON_DELAY_MS);
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .territories
+            .clear();
+        let left_ms = ENTERED_MS + FFA_ON_DELAY_MS + 1;
+        world.tick_pvp_flags(left_ms);
+        world.after_bundles.clear();
+        world.tick_pvp_flags(left_ms + FFA_OFF_DELAY_MS);
+        let player = world.world.get::<Player>(entity).expect("player");
+        let gear = player.gear.as_ref().expect("gear");
+        assert_eq!(gear.bag_count(COIN), COINS_HELD + CURSED_COINS);
+        assert_eq!(gear.bag_count(HIDE), CURSED_HIDES);
+        assert_eq!(gear.bag_count(KEEP), 1);
+        assert_eq!(gear.bag_count(CURSED_COIN) + gear.bag_count(CURSED_HIDE), 0);
+        assert_eq!(
+            slot_of(gear, HIDE),
+            cursed_coin_slot,
+            "the hide takes the slot the merged doubloons freed"
+        );
+        assert_eq!(world.after_bundles.len(), 1, "6526 after the bundle");
+        world.after_bundles.clear();
+        world.tick_pvp_flags(left_ms + FFA_OFF_DELAY_MS * 2);
+        assert!(world.after_bundles.is_empty(), "one 6526 per flag end");
     }
 }

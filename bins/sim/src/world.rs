@@ -61,32 +61,41 @@ use uuid::Uuid;
 
 mod abilities;
 mod admin;
+mod afk;
+mod arena_match;
 mod asset_script;
 mod attack;
+mod barber;
 mod camps;
 mod charms;
 mod combat_status;
 mod conversation;
 mod crafting;
+mod duel;
 mod dungeon_script;
 pub mod economy;
 mod encounter;
 mod encounter_roots;
 mod events;
 mod faction;
+mod faction_board;
 mod fall_damage;
 mod fishing;
 mod game_mode;
+mod game_mode_entity;
+mod gates;
 mod gathering;
 mod gear;
 mod gm_chat;
 mod gm_client;
+mod governance;
 mod hit_shape;
+mod housing_states;
 pub(crate) mod instances;
 mod invites;
 mod item_calls;
 mod kill_rewards;
-mod land_claims;
+pub(crate) mod land_claims;
 mod level_assets;
 mod level_flow;
 mod loot_bag;
@@ -100,6 +109,7 @@ mod mount;
 mod music;
 mod mutations;
 mod notifications;
+mod outpost_rush;
 mod passives;
 mod points;
 mod progression;
@@ -107,6 +117,7 @@ mod projectile;
 mod quest_objects;
 mod quest_tracker;
 mod quest_walk;
+mod queue;
 mod quick_course;
 mod repair;
 mod replica;
@@ -114,6 +125,8 @@ mod revive;
 mod rolled_loot;
 mod salvage;
 mod scripts;
+mod seasons;
+mod shot_entity;
 mod slayer;
 mod slots;
 pub mod social;
@@ -132,6 +145,8 @@ mod trading_post_cards;
 pub mod transmog;
 mod travel;
 mod walked_floor;
+mod war_fight;
+mod wars;
 
 use asset_script::Step;
 use combat_status::CombatTimer;
@@ -675,6 +690,8 @@ struct Player {
     pvp_flagged: bool,
     /// The PvP flag on its way on ([`faction`]).
     pvp_wait: faction::PvpFlagWait,
+    /// Its free-for-all flag ([`faction::FfaWatch`]).
+    ffa: faction::FfaWatch,
     /// The own places its client has ([`own_group`]).
     own_places: OwnPlaces,
     /// The ground and water under its body after its newest moves ([`SimWorld::footing_of`]).
@@ -735,6 +752,15 @@ struct Player {
     /// The title it shows (2474), and whether its client was not told of it yet.
     title: Option<u32>,
     title_changed: bool,
+    /// The pronoun type it chose (4751), and whether its client was not told of it yet.
+    pronoun: u8,
+    pronoun_changed: bool,
+    /// The barber change of its look that its client was not sent yet, and the change flag its
+    /// look has now ([`barber`]; Inferred: a new sim starts it again from the first body's).
+    look_change: Option<nw_messages::PlayerAppearanceState>,
+    look_flag: u8,
+    /// Its still time for the AFK rule ([`afk`]).
+    afk: afk::AfkWatch,
     /// The level its client was last sent; `None` before the first card.
     level_sent: Option<u32>,
     /// Whether its account has the game master rank: the sim takes its client's GM messages.
@@ -765,6 +791,8 @@ struct Player {
     open_board: Option<[u8; nw_bus::MISSION_BOARD_ID_LEN]>,
     /// The version of its objective interactor's mission list.
     board_version: u64,
+    /// The missions its faction's board offers it ([`faction_board`]).
+    faction_offers: Option<faction_board::BoardOffers>,
     /// Its client asks for an interaction in its inputs: the interaction ends at the first input
     /// without one (retail gives a gather's put-away weapon back then, [`Stow::Gather`]).
     interacting: bool,
@@ -816,6 +844,8 @@ struct Player {
     music: music::PlayerMusicState,
     /// How often each event notification was shown to it ([`notifications`]).
     notifications: notifications::ShownNotifications,
+    /// Its season pass ([`seasons`]).
+    season: seasons::SeasonPass,
     /// Its combat status timer.
     combat: CombatTimer,
     /// The version of its replicated lists that this server sends besides the gear.
@@ -854,12 +884,17 @@ struct Player {
     travel: travel::TravelState,
     /// Its expeditions, raids and trials ([`instances`]).
     arena: instances::ArenaPlayer,
-    /// The war of its newest war sign-up or list call ([`game_mode`]).
-    game_mode: game_mode::GameModePlayer,
+    /// What its client has of the wars, and the war board it uses ([`wars`]).
+    war: wars::WarView,
+    /// Its matchmaking queue ([`queue`]).
+    queue: queue::QueuePlayer,
     /// The weekly mutations its client has ([`mutations`]).
     mutation_view: mutations::ScheduleView,
-    /// Whether its client has the slot-2 world entity and its claims ([`land_claims`]).
-    slot_2_spawned: bool,
+    /// The claims version its client has; `None` while it has not the slot-2 world entity
+    /// ([`land_claims`]).
+    claims_sent: Option<u64>,
+    /// The governor's desk it has open ([`governance`]).
+    desk: governance::PlayerDesk,
     frozen: bool,
     handoffs: u64,
     no_handoff_before_ms: u64,
@@ -883,6 +918,7 @@ impl Player {
             meta_counters: self.meta.carried_counters(),
             meta_completed: self.meta.carried_completed(),
             title: self.title,
+            pronoun: self.pronoun,
             arena: self.arena.carried(),
             music: self.music.carried(),
             notifications: self.notifications.carried(),
@@ -922,6 +958,7 @@ impl Player {
                 .map(|(stone, turns)| (stone.clone(), *turns))
                 .collect(),
             fishing_bait: self.fishing.bait().map(str::to_owned),
+            season: self.season.carried(),
         }
     }
 
@@ -1014,8 +1051,14 @@ pub struct SimWorld {
     /// The company treasury coin moves done here, by move id, with their answer and sim ms
     /// ([`social_bus`]): a repeat of a move gets its answer and moves nothing.
     coin_moves: HashMap<Uuid, (nw_bus::CoinReply, u64)>,
+    /// The territory claims and the companies that own them ([`land_claims`]).
+    territories: land_claims::Territories,
+    /// The territory wars as this sim last read them ([`wars`]).
+    wars: wars::Wars,
     /// The encounters of the running instance's level script.
     dungeon_run: Option<dungeon_script::DungeonRun>,
+    /// The gates of the running instance ([`gates`]).
+    dungeon_gates: Option<gates::LevelGates>,
     /// The encounters of the open world, on the sim of its level.
     world_events: Option<dungeon_script::DungeonRun>,
     /// The root groups of the open world's encounters ([`encounter_roots`]).
@@ -1025,7 +1068,9 @@ pub struct SimWorld {
     /// The expedition requests for the director since the last tick.
     instance_requests: Vec<(ConnectionRef, nw_bus::InstanceRequest)>,
     /// The level of each instance game mode, by its CRC: an instance names its own frame.
-    instance_levels: HashMap<u32, LevelSpec>,
+    instance_levels: HashMap<(u32, String), LevelSpec>,
+    /// The framed level of each war fort's instance, by territory ([`war_fight`]).
+    war_levels: HashMap<u16, LevelSpec>,
     /// This world's hold on the raw ids of its players, its shown mobs and the ghosts it adopted
     /// (GDE id note, "Dynamic entities").
     raw_ids: IdHolder,
@@ -1083,6 +1128,8 @@ pub struct SimWorld {
     deaths: Vec<Departure>,
     /// Hit, death and facet messages since the last [`SimWorld::take_messages`].
     combat_messages: Vec<Outgoing>,
+    /// The players the AFK rule removes, until the server loop takes them ([`afk`]).
+    afk_removals: Vec<u64>,
     /// Messages that go out after the bundles of this tick: an answer that must reach the client
     /// after the states it names (the craft progress after its items, crafting module).
     after_bundles: Vec<Outgoing>,
@@ -1103,6 +1150,14 @@ pub struct SimWorld {
     spell_area_mob_hits: Vec<AttackOutcome>,
     /// The spell entities in the world: their slot key and when each one goes.
     spell_entities: Vec<(u64, u64)>,
+    /// The projectile entities of the shots that fly or stick ([`shot_entity`]).
+    live_shots: Vec<shot_entity::LiveShot>,
+    /// The duels of this sim's players ([`duel`]).
+    duels: duel::Duels,
+    /// The arena match of this instance sim ([`arena_match`]).
+    arena_matches: arena_match::ArenaMatches,
+    /// The matchmaking queue calls for the director since the last tick ([`queue`]).
+    queue_calls: Vec<nw_bus::QueueCall>,
     /// The projectiles mobs fired, on their way to where they aimed.
     mob_shots: Vec<mob_shot::MobShot>,
     /// Swings that a tutorial script started, for the next tick.
@@ -1214,6 +1269,8 @@ struct Arrival {
     quests: PlayerQuests,
     /// Its PvP flag: off at a login, carried by a handoff.
     pvp_flagged: bool,
+    /// What is left of its PvP flag countdown (ms), carried by a handoff.
+    pvp_flag_left_ms: Option<u64>,
     /// Whether its client auto-pins a new quest: on at a login, carried by a handoff.
     auto_pin: bool,
 }
@@ -1229,10 +1286,13 @@ impl SimWorld {
         content: Arc<PlayerContent>,
     ) -> Self {
         // Only an instance sim names the levels of the game modes.
-        let instance_levels = if settings.instance_role {
-            instances::instance_levels(&content.instances)
+        let (instance_levels, war_levels) = if settings.instance_role {
+            (
+                instances::instance_levels(&content.instances),
+                war_fight::war_levels(&content.war_forts),
+            )
         } else {
-            HashMap::new()
+            (HashMap::new(), HashMap::new())
         };
         Self {
             achievement_rules: AchievementRules::of(
@@ -1275,6 +1335,7 @@ impl SimWorld {
             replica_memory: HashMap::new(),
             mob_trails: mob_trail::MobTrails::default(),
             combat_messages: Vec::new(),
+            afk_removals: Vec::new(),
             after_bundles: Vec::new(),
             drinks: Vec::new(),
             swings: Vec::new(),
@@ -1284,6 +1345,10 @@ impl SimWorld {
             spell_areas: Vec::new(),
             spell_area_mob_hits: Vec::new(),
             spell_entities: Vec::new(),
+            live_shots: Vec::new(),
+            duels: duel::Duels::default(),
+            arena_matches: arena_match::ArenaMatches::default(),
+            queue_calls: Vec::new(),
             mob_shots: Vec::new(),
             scripted_swings: Vec::new(),
             stat_events: Vec::new(),
@@ -1293,12 +1358,16 @@ impl SimWorld {
             instance_sim: settings.instance_role,
             instance_run: None,
             coin_moves: HashMap::new(),
+            territories: land_claims::Territories::default(),
+            wars: wars::Wars::of_world(ids.calendar_block.value),
             dungeon_run: None,
+            dungeon_gates: None,
             world_events: None,
             encounter_roots: encounter_roots::EncounterRoots::default(),
             encounter_objects: encounter_roots::EncounterObjects::default(),
             instance_requests: Vec::new(),
             instance_levels,
+            war_levels,
             combat,
             world: World::new(),
             by_connection: HashMap::new(),
@@ -1433,6 +1502,7 @@ impl SimWorld {
             entitlements: admit.entitlements.iter().cloned().collect(),
             quests: admit.quests.clone(),
             pvp_flagged: false,
+            pvp_flag_left_ms: None,
             auto_pin: true,
         };
         self.check(&arrival)?;
@@ -1596,6 +1666,7 @@ impl SimWorld {
             entitlements: offer.entitlements.iter().cloned().collect(),
             quests: offer.quests.clone(),
             pvp_flagged: offer.pvp_flagged,
+            pvp_flag_left_ms: offer.pvp_flag_left_ms,
             auto_pin: offer.auto_pin,
         };
         self.check(&arrival)?;
@@ -1723,13 +1794,9 @@ impl SimWorld {
             if !was_spawned && let Some(quest) = player.quest.as_mut() {
                 quest.in_game();
             }
-            // The season states (retail sends both in one bundle) start the client's pin of the
-            // tracked quest.
+            // The season states go with the next tick ([`SimWorld::tick_seasons`]): retail sends
+            // both in one bundle once the client is in game, and they start its quest pins.
             if !was_spawned {
-                player.extra_members.extend([
-                    nw_messages::seasons::seasons_rewards_initialized(),
-                    nw_messages::seasons::seasons_tracked_stats_initialized(),
-                ]);
                 // Whether the account is in probation, which blocks global and trade chat:
                 // retail sent `accountInProbation` 1.9 to 9.4 s after every captured spawn,
                 // apart from the own card.
@@ -2048,6 +2115,8 @@ impl SimWorld {
     /// Removes a player.
     pub fn leave(&mut self, connection: &ConnectionRef) -> Option<Departure> {
         let entity = *self.by_connection.get(connection)?;
+        // A leave of a running arena match bars the queue: the saved departure holds it.
+        self.arena_left_sim(entity);
         let departure = self.departure(entity);
         self.remove_player(connection, entity);
         departure
@@ -2064,7 +2133,10 @@ impl SimWorld {
                 tutorial.end(&mut self.mobs);
             }
         }
+        self.queue_left_sim(entity);
+        self.arena_left_sim(entity);
         self.despawn_camp(entity);
+        self.despawn_houses(entity);
         self.world.despawn(entity);
     }
 
@@ -2477,6 +2549,11 @@ impl SimWorld {
         self.tick_stamina(now_ms);
         self.server_ms = server_time;
         self.tick_pvp_flags(now_ms);
+        self.tick_duels();
+        self.tick_arena();
+        self.tick_war_fight();
+        self.tick_queue();
+        self.tick_afk(now_ms);
         self.tick_max_health();
         self.tick_status_effects(now_ms);
         self.tick_deaths_door(now_ms);
@@ -2495,6 +2572,7 @@ impl SimWorld {
         player_attacks.extend(self.tick_abilities(now_ms));
         mob_hits.extend(self.take_spell_area_mob_hits());
         self.tick_meta_achievements();
+        self.tick_seasons();
         self.tick_travel(now_ms);
         self.tick_phasing();
         let gameplay_seconds = gameplay_started.elapsed().as_secs_f64();
@@ -2719,6 +2797,32 @@ impl SimWorld {
         self.begin_quest(number, objective, take, now_ms)
     }
 
+    /// Starts the artifact objective of item `item_id` for player `number` when the player
+    /// equips it (`OnEquipObjectiveID`; Inferred from the column: every artifact ledger shows
+    /// the objectives already held at login), in the artifact quests' journal limit
+    /// (`javelin.objectives-max-artifact-quests`). One the player runs or finished stays as it is.
+    fn start_artifact_objective(&mut self, number: u64, item_id: &str, now_ms: u64) {
+        let Some(objective) = self
+            .content
+            .artifact_objectives
+            .of_item(item_id)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        match self.accept_quest(number, &objective, None, now_ms) {
+            Ok(()) | Err(QuestRefusal::Active | QuestRefusal::Done) => {}
+            Err(refusal) => {
+                tracing::debug!(
+                    player = number,
+                    objective,
+                    ?refusal,
+                    "no artifact objective"
+                );
+            }
+        }
+    }
+
     /// Starts quest `objective` for player `number`, as [`SimWorld::begin_quest`] without a
     /// mission take.
     pub(crate) fn start_quest(
@@ -2929,6 +3033,10 @@ impl SimWorld {
             Event::ObjectiveDone(&quest.def.id),
             self.last_now_ms,
         );
+        if let Some(entity) = self.player_by_number(number) {
+            let mission = quest.def.mission.is_some();
+            self.season_event(entity, seasons::SeasonEvent::QuestDone { mission });
+        }
         // Another quest's step can wait for this success event (`09A_S5_SavePrivateer` on
         // `09A_S5_Success`, `Mission_Success_Procurer_T1`).
         if let Some(event) = success_event.as_deref() {
@@ -3612,7 +3720,10 @@ impl SimWorld {
             self.mount_interaction(entity, now_ms);
             match request.kind {
                 TALK_KIND => self.talk(entity, number, request, name, now_ms),
-                TOWN_BOARD_KIND => self.open_board(entity, number, request, name),
+                TOWN_BOARD_KIND => self.open_board(entity, number, request, name, now_ms),
+                governance::GOVERNOR_DESK_KIND => {
+                    self.open_governor_desk(entity, number, request, name);
+                }
                 CRAFTING_STATION_KIND => self.open_station(entity, number, request),
                 LORE_KIND => self.read_lore(entity, number, request, name, now_ms),
                 GATHER_KIND => self.gather_open_world(entity, number, request, name, now_ms),
@@ -3883,8 +3994,10 @@ impl SimWorld {
             return Ok(());
         };
         let ended_cutscene = player.flow.cutscene();
+        let mut equip_fail = None;
         let equipped = match message {
             ClientFacetMsg::EquipItem {
+                header,
                 bag_slot,
                 equip_slot,
                 quantity,
@@ -3896,6 +4009,10 @@ impl SimWorld {
                 })
                 .inspect_err(|refusal| {
                     tracing::debug!(?refusal, bag_slot, equip_slot, "equip refused");
+                    // Retail answers a failed equip with its slot (3626).
+                    equip_fail = Some(ServerMessage::EquipItemFail(
+                        nw_messages::EquipItemFailMsg { header, equip_slot },
+                    ));
                 })
                 .ok()
             }),
@@ -3938,6 +4055,9 @@ impl SimWorld {
             }
         };
         send_now(&mut self.combat_messages, connection, &answers);
+        if let Some(fail) = equip_fail {
+            send_now(&mut self.combat_messages, connection, &[fail]);
+        }
         if !self.tutorials.contains_key(&number) {
             let event = match message {
                 ClientFacetMsg::CinematicStarted { cinematic, .. } => {
@@ -3953,6 +4073,10 @@ impl SimWorld {
                 ClientFacetMsg::EquipItem { .. } => equipped.as_deref().map(Event::Equipped),
                 _ => None,
             };
+            // An artifact's objective starts before the equip counts for its equip step.
+            if let Some(item_id) = equipped.as_deref() {
+                self.start_artifact_objective(number, item_id, now_ms);
+            }
             if let Some(event) = event {
                 self.quest_event(number, event, now_ms);
             }
@@ -4200,6 +4324,8 @@ impl SimWorld {
             target: vitals.lock_target(),
             looking_through_loadout: player.looking_through_loadout,
             mount: player.mount.remote(),
+            social: player.shown_social(),
+            faction: player.public_faction(),
         }
     }
 
@@ -4460,6 +4586,9 @@ impl SimWorld {
             progression: &content.progression,
             mutations: &content.mutations,
             mutation_unix_s: self.unix_s(),
+            territories: &self.territories,
+            wars: &self.wars,
+            war_unix_ms: self.unix_ms(),
             replicas,
             local_player_card: self.settings.local_player_card,
             world_id: self.settings.world_id,
@@ -4557,6 +4686,12 @@ impl SimWorld {
             arrival.backstory.as_deref(),
             &self.content,
         );
+        let season = seasons::SeasonPass::arrive(
+            &arrival.progression.season,
+            &self.content.seasons,
+            unix_ns(self.server_ms),
+            &mut self.dice,
+        );
         let entity = self
             .world
             .spawn((
@@ -4625,7 +4760,9 @@ impl SimWorld {
                     pvp_flagged: arrival.pvp_flagged,
                     pvp_wait: faction::PvpFlagWait::wanted(
                         arrival.progression.pvp_wanted && !arrival.pvp_flagged,
+                        arrival.pvp_flag_left_ms,
                     ),
+                    ffa: faction::FfaWatch::default(),
                     own_places: OwnPlaces::default(),
                     footing: Footing::SPAWN,
                     footing_sent: Footing::SPAWN,
@@ -4670,7 +4807,13 @@ impl SimWorld {
                         &arrival.progression.meta_completed,
                     ),
                     title: arrival.progression.title,
-                    title_changed: arrival.progression.title.is_some(),
+                    // The card carries both ([`Player::shown_social`]).
+                    title_changed: false,
+                    pronoun: arrival.progression.pronoun,
+                    pronoun_changed: false,
+                    look_change: None,
+                    look_flag: nw_messages::appearance::LOOK_UNCHANGED,
+                    afk: afk::AfkWatch::default(),
                     level_sent: None,
                     game_master: arrival.game_master,
                     account_in_probation: arrival.account_in_probation,
@@ -4695,6 +4838,7 @@ impl SimWorld {
                     open_interaction: None,
                     open_board: None,
                     board_version: 0,
+                    faction_offers: None,
                     interacting: false,
                     territories: Vec::new(),
                     last_zone: None,
@@ -4762,9 +4906,12 @@ impl SimWorld {
                     assets: AssetViews::default(),
                     solids: None,
                     arena: instances::ArenaPlayer::of(arrival.progression.arena.clone()),
-                    game_mode: game_mode::GameModePlayer::default(),
+                    season,
+                    war: wars::WarView::default(),
+                    queue: queue::QueuePlayer::default(),
                     mutation_view: mutations::ScheduleView::default(),
-                    slot_2_spawned: false,
+                    claims_sent: None,
+                    desk: governance::PlayerDesk::default(),
                     frozen: false,
                     handoffs,
                     no_handoff_before_ms,
@@ -5082,6 +5229,12 @@ struct Neighbourhood<'a> {
     mutations: &'a MutationCatalog,
     /// Unix seconds of this tick, for the mutation week.
     mutation_unix_s: u64,
+    /// The territory claims and their owners.
+    territories: &'a land_claims::Territories,
+    /// The territory wars.
+    wars: &'a wars::Wars,
+    /// Unix ms of this tick, for the wars' phases.
+    war_unix_ms: u64,
     /// Every player as the players who see it get it this tick.
     replicas: HashMap<u64, Replica>,
     local_player_card: bool,
@@ -5164,6 +5317,8 @@ impl Neighbourhood<'_> {
                     self.view_radius_m,
                 ));
                 numbers.extend(player.social.group_entity_number());
+                let desk_player = &mut **player;
+                numbers.extend(desk_player.desk.number_in(&desk_player.territories));
                 numbers.extend(
                     self.performances
                         .numbers_near(own_position, self.view_radius_m),
@@ -5344,6 +5499,16 @@ impl Neighbourhood<'_> {
                         component: nw_messages::SOCIAL_COMPONENT,
                         state: nw_messages::title_state(player.title.unwrap_or_default()),
                     }),
+                    // The chosen pronoun type (4751; title choice module).
+                    std::mem::take(&mut player.pronoun_changed).then(|| BundleMember {
+                        component: nw_messages::SOCIAL_COMPONENT,
+                        state: nw_messages::pronoun_state(player.pronoun),
+                    }),
+                    // A barber change of the look (6420; barber module).
+                    player.look_change.take().map(|change| BundleMember {
+                        component: nw_messages::appearance::PLAYER_APPEARANCE_COMPONENT,
+                        state: MemberState::Appearance(change),
+                    }),
                 ];
                 // The coins: whole with the first card, then after each change (retail own c60
                 // with each quest reward, beach-quests note).
@@ -5454,6 +5619,7 @@ impl Neighbourhood<'_> {
                     tracing::debug!(player = player.number, first, ?state, "progression sent");
                 }
                 let card_name = first.then(|| player.name.clone());
+                let social = player.shown_social();
                 let life = SimWorld::own_life(vitals, player.own_spawned_ms, self.server_time);
                 let states = PlayerStates {
                     character_id: *player.character.as_bytes(),
@@ -5461,6 +5627,7 @@ impl Neighbourhood<'_> {
                         name,
                         home_world: *self.world_id.as_bytes(),
                         life,
+                        social,
                     }),
                     look: player.look,
                     health: Some((vitals.health.current(), vitals.health.max())),
@@ -5572,10 +5739,11 @@ impl Neighbourhood<'_> {
                         self.mutation_unix_s,
                         &mut player.mutation_view,
                     )?;
-                    if let Some(spawn) =
-                        land_claims::spawn_members_once(&mut player.slot_2_spawned)?
-                    {
+                    if let Some(spawn) = self.territories.members_due(&mut player.claims_sent)? {
                         slot_2 = Some(land_claims::with_slot_2_members(slot_2, spawn));
+                    }
+                    if let Some(wars) = self.wars.member_due(&mut player.war, self.war_unix_ms) {
+                        slot_2 = Some(land_claims::with_slot_2_members(slot_2, vec![wars]));
                     }
                     slot_2_groups.extend(slot_2);
                 }
@@ -5645,6 +5813,17 @@ impl Neighbourhood<'_> {
                     if let Some(slot) = player.slots.slot(number) {
                         let player = &mut **player;
                         groups.extend(self.nodes.group(number, slot, &mut player.node_versions));
+                    }
+                    continue;
+                }
+                if number >= governance::DESK_ENTITY_BASE {
+                    if let Some(slot) = player.slots.slot(number) {
+                        groups.extend(player.desk.group(
+                            number,
+                            slot,
+                            self.territories,
+                            nw_common::time::unix_ms(),
+                        ));
                     }
                     continue;
                 }
@@ -5887,6 +6066,7 @@ fn handoff_offer(
         progression: player.progression(),
         achievement_version: player.flow.achievement_version(),
         pvp_flagged: player.pvp_flagged,
+        pvp_flag_left_ms: player.pvp_wait.left_ms(now_ms),
         auto_pin: player.auto_pin,
     }
 }
@@ -6866,9 +7046,10 @@ mod tests {
             join(&mut world, number, CELL_M / 2.0 + number as f32);
         }
         // The world has no weekly mutations, so no scheduler group, but each client gets the
-        // slot-2 entity once (its position, card and claims); the arrival's arena state takes
-        // the place of the card's own.
-        const SLOT_2_SPAWN_MEMBERS: u64 = 3;
+        // slot-2 entity once: its position, card, claims, global map data (3780) and war data
+        // (1739), as in the retail spawn group (wars study 2026-11-12: 1739 goes in the same
+        // group as 3780 and 3086); the arrival's arena state takes the place of the card's own.
+        const SLOT_2_SPAWN_MEMBERS: u64 = 5;
         assert_eq!(
             tick(&mut world, NOW + OWN_CARD_DELAY_MS).bundle_members,
             PLAYERS * (2 + PLAYER_EMPTY_COMPONENTS.len() as u64)
@@ -7869,12 +8050,12 @@ mod tests {
             "the accept names the chest: {started:?}"
         );
         assert!(gathering(&started, true), "and runs the gather");
-        for season in [
-            nw_messages::seasons::seasons_rewards_initialized(),
-            nw_messages::seasons::seasons_tracked_stats_initialized(),
+        for class in [
+            nw_messages::seasons::SEASONS_REWARDS_TYPE_INDEX,
+            nw_messages::seasons::SEASONS_TRACKED_STATS_TYPE_INDEX,
         ] {
             assert!(
-                started.contains(&season.state),
+                started.iter().any(|state| state.type_index() == class),
                 "the client in game gets the season states that start its quest pins"
             );
         }
@@ -8749,6 +8930,30 @@ mod tests {
             },
             now,
         );
+        // The same equip again, as a retail client sent it: the knife left the bag, so the
+        // equip fails and the answer names its slot (3626).
+        world.take_messages();
+        facet(
+            &mut world,
+            ClientFacetMsg::EquipItem {
+                header,
+                bag_slot: knife,
+                equip_slot: KNIFE_SLOT,
+                quantity: 1,
+                instance: gear::instance_id(character, KNIFE),
+                flag: 0,
+            },
+            now,
+        );
+        assert!(
+            messages_to(&world.take_messages(), 1).contains(&ServerMessage::EquipItemFail(
+                nw_messages::EquipItemFailMsg {
+                    header,
+                    equip_slot: KNIFE_SLOT,
+                }
+            )),
+            "a failed equip is answered"
+        );
         world.interact(&who, request(corpse, gather, 4), &[], now);
         let accepted = step(&mut world, &mut now, TICK_MS);
         assert_eq!(answers(&accepted), [(gather, 1, Vec::new())]);
@@ -9445,6 +9650,67 @@ mod tests {
     }
 
     #[test]
+    fn a_barber_change_goes_with_the_next_own_bundle() {
+        use nw_messages::appearance::{AppearanceChangeRequest, LOOK_CHANGED};
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        let mut admit = admit_at(1, CELL_M / 2.0, true);
+        admit.look = Some(SAVED_LOOK);
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let entity = world.player_by_number(1).expect("player");
+        // A player at the barber has spawned: only then do the own changes go each tick.
+        world
+            .world
+            .get_mut::<Vitals>(entity)
+            .expect("vitals")
+            .spawned = true;
+        tick(&mut world, NOW + OWN_CARD_DELAY_MS);
+        let mut changed = SAVED_LOOK;
+        changed[2] += 1;
+        world.barber_change(
+            entity,
+            &AppearanceChangeRequest {
+                header: nw_messages::FacetHeader {
+                    target: 0,
+                    entity: 0,
+                },
+                look: PlayerLook::of_choices(changed),
+            },
+        );
+        let grants = world.take_store_grants();
+        let [grant] = &grants[..] else {
+            panic!("one token use");
+        };
+        let held = nw_db::AccountConsumable {
+            entitlement: grant.entitlement.clone(),
+            amount: 0,
+            purchases: 1,
+            updated_at_ms: 0,
+        };
+        assert!(world.store_answered(grant, store_purchase::GrantAnswer::Barber(Ok(Some(held)))));
+        let messages = tick(&mut world, NOW + OWN_CARD_DELAY_MS + 33).messages;
+        let bundle = bundle_of(&messages, &connection(1)).expect("bundle");
+        let own = SlotRead::of(&bundle)
+            .expect("read")
+            .updates
+            .into_iter()
+            .find(SlotUpdate::is_local_player)
+            .expect("own group");
+        let change = PlayerAppearanceState::change(
+            &PlayerLook::of_choices(SAVED_LOOK),
+            &PlayerLook::of_choices(changed),
+            LOOK_CHANGED,
+        );
+        assert!(
+            own.members
+                .iter()
+                .any(|member| member.state == MemberState::Appearance(change)),
+            "the skin tone, the icon and the flag: {:?}",
+            own.members
+        );
+    }
+
+    #[test]
     fn the_own_card_carries_the_saved_look_and_the_health() {
         let mut world = world_with_spawns(Vec::new());
         world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
@@ -9867,12 +10133,21 @@ mod tests {
         assert!(sequences(&world, &next.messages, &b).contains(&sequence_bytes(FOLLOW_UP)));
     }
 
+    /// A tap of the attack key with the weapon sheathed: the press opens the stance's chain and
+    /// the release starts the light that follows the press start (attack sequence study
+    /// 2026-11-11; the sequences of the test stance are made up).
     #[test]
     fn a_sheathed_tap_starts_the_light_attack_and_keeps_it() {
+        use nw_content::player_sequences::{AttackSlot, PlayerSequences};
         /// The slayer sequence child (slayer note).
         const SEQUENCE: usize = 15;
-        /// The standing light of `1H_Melee,Sword` in the mined table.
-        const SWORD_LIGHT: u64 = 495;
+        /// The press start of the test sword stance: state 10 and the chain marker 1 (the
+        /// first-slot press form).
+        const SWORD_PRESS: u64 = 7_001;
+        const PRESS_STATE: u64 = 10;
+        const PRESS_MARKER: u64 = 1;
+        /// The light that follows the press start at the release.
+        const SWORD_LIGHT: u64 = 7_002;
         const PRESS_COUNTER: u16 = 0x6ba;
         const RELEASE_COUNTER: u16 = 0x6bd;
         const NEXT_COUNTER: u16 = 0x6be;
@@ -9890,7 +10165,15 @@ mod tests {
         )
         .expect("combat")
         .with_player_attacks(crate::combat::test_support::test_player_attacks())
-        .with_player_sequences(crate::combat::test_support::test_player_sequences());
+        .with_player_sequences(PlayerSequences::of_parts(
+            vec![slayer::tests::attacks(
+                crate::combat::test_support::TEST_SWORD_STANCE,
+                (AttackSlot::First, SWORD_PRESS, PRESS_STATE, PRESS_MARKER),
+                SWORD_LIGHT,
+                None,
+            )],
+            Vec::new(),
+        ));
         let mut combat = test_combat();
         combat.spawns = Vec::new().into();
         combat.data = Arc::new(data);
@@ -10082,7 +10365,7 @@ mod tests {
         assert!(
             carded.iter().any(|state| matches!(
                 state,
-                MemberState::Appearance(look) if look.look == Some(PlayerLook::of_choices(SAVED_LOOK))
+                MemberState::Appearance(look) if look.look() == Some(PlayerLook::of_choices(SAVED_LOOK))
             )),
             "its look: {carded:?}"
         );
@@ -11145,6 +11428,93 @@ mod tests {
         world.admit(&admit, NOW, SERVER_TIME).expect("admit");
         tick(&mut world, NOW);
         world
+    }
+
+    /// Retail `Hivefactionquests` at 40.974 s: a faction board offers missions of the player's
+    /// faction and of the board's territory, keeps them until they expire, and a take sends the
+    /// element taken and starts the mission.
+    #[test]
+    fn a_faction_board_offers_its_missions_and_a_take_starts_one() {
+        use crate::player_content::MissionRow;
+        use nw_content::mission_weights::{FACTION_PVE_BUCKET, MissionWeights};
+        use nw_messages::list_delta::ReplicatedList;
+        const COVENANT: u8 = 3;
+        const TERRITORY: u16 = 6;
+        const HUNT: &str = "FM_C_Hunt_0607";
+        const PROVIDER: [u8; nw_bus::MISSION_BOARD_ID_LEN] = [7; nw_bus::MISSION_BOARD_ID_LEN];
+        const EXPIRATION_MS: u64 = 300_000;
+        let mut world = quest_world();
+        let hunt = |id: &str, faction: &str| MissionRow {
+            id: id.to_owned(),
+            objective: MISSION_TEMPLATE.to_owned(),
+            required_faction: Some(faction.to_owned()),
+            items: Some(gear::tests::FLINT.to_owned()),
+            items_count: Some(1),
+            goal_type: "hunt".to_owned(),
+            ..MissionRow::default()
+        };
+        {
+            let content = Arc::make_mut(&mut world.content);
+            content.quests = std::mem::take(&mut content.quests).with_missions([
+                hunt(HUNT, "Covenant"),
+                hunt("FM_C_Hunt_0801", "Covenant"),
+                hunt("FM_M_Hunt_0607", "Marauder"),
+                MissionRow {
+                    levels: (Some(60), None),
+                    ..hunt("FM_C_Hunt_0660", "Covenant")
+                },
+            ]);
+            content.mission_weights = MissionWeights::new([(FACTION_PVE_BUCKET, 1, "Hunt", 1)]);
+        }
+        let entity = world.player_by_number(1).expect("player");
+        {
+            let mut player = world.world.get_mut::<Player>(entity).expect("player");
+            player.faction.faction = COVENANT;
+            player.territories = vec![TERRITORY];
+        }
+        let (expiration_ns, offers) = world.faction_offers(entity, PROVIDER, NOW);
+        assert_eq!(offers.len(), 1, "its faction, its territory, its level");
+        assert_eq!(
+            offers[0].mission,
+            nw_formats::objectstream::lowercase_crc32(HUNT)
+        );
+        assert!(offers[0].available);
+        assert_eq!(
+            world.faction_offers(entity, PROVIDER, NOW + EXPIRATION_MS - 1),
+            (expiration_ns, offers.clone()),
+            "the same offers until they expire"
+        );
+        world.take_faction_mission(1, faction_board::Taken::Index(0), NOW + 1);
+        assert!(
+            world
+                .quests_of_player(1)
+                .iter()
+                .any(|quest| quest.def.id == HUNT),
+            "the mission runs"
+        );
+        let player = world.world.get::<Player>(entity).expect("player");
+        let change = player
+            .extra_members
+            .iter()
+            .rev()
+            .find_map(|member| match &member.state {
+                MemberState::ObjectiveInteractor(state) => state.missions.clone(),
+                _ => None,
+            })
+            .expect("the board's change");
+        let ReplicatedList::Changes(changes) = change else {
+            panic!("the taken element alone: {change:?}");
+        };
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].index, 0);
+        assert!(!changes[0].value.available && changes[0].value.taken_at_ns > 0);
+        assert_eq!(changes[0].value.instance, offers[0].instance);
+        let (_, later) = world.faction_offers(entity, PROVIDER, NOW + EXPIRATION_MS);
+        assert_ne!(
+            later.first().map(|offer| offer.instance),
+            Some(offers[0].instance),
+            "new offers after the expiration"
+        );
     }
 
     fn flint_of(world: &mut SimWorld) -> u32 {

@@ -24,6 +24,14 @@ pub const ATTRIBUTE_NAMES: [&str; ATTRIBUTE_COUNT] = [
 pub const ATTRIBUTE_COUNT: usize = 5;
 /// The attribute id of Constitution.
 pub const CONSTITUTION: u32 = 0;
+/// The attribute id of Focus.
+pub const FOCUS: u32 = 1;
+/// The attribute id of Strength.
+pub const STRENGTH: u32 = 2;
+/// The attribute id of Dexterity.
+pub const DEXTERITY: u32 = 3;
+/// The attribute id of Intelligence.
+pub const INTELLIGENCE: u32 = 4;
 /// The `IsAbility` cell of a progression point that is an ability-tree point.
 const IS_ABILITY: &str = "1";
 /// The `Category` of a territory standing bonus pool (`ProgressionPoolData`).

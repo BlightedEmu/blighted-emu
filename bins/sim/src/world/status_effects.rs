@@ -79,6 +79,21 @@ pub(super) enum Origin {
     World,
 }
 
+/// The kind of a categorical progression gain, for the bonus columns of its kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GainKind {
+    /// A tradeskill, a weapon mastery or another progression.
+    Progression,
+    /// A territory's standing.
+    Standing,
+    /// A faction's reputation.
+    FactionReputation,
+    /// A faction's tokens.
+    FactionTokens,
+    /// The azoth currency.
+    Azoth,
+}
+
 /// One application of an effect.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Application {
@@ -130,11 +145,13 @@ struct Held {
     kept: Option<Kept>,
 }
 
-/// What a save and a handoff keep of a used consumable's effect (world migration 0026; retail
-/// `target-lock-test`: `FoodRecoveryT2` held with 303.5 s left 1.5 s after the login).
+/// What a save and a handoff keep of a used consumable's or a spent token's effect (world
+/// migration 0026; retail `target-lock-test`: `FoodRecoveryT2` held with 303.5 s left 1.5 s
+/// after the login; the `Token_*` boosts have `ReapplyAfterPersistenceReload`, and
+/// `Playthrough_Part_02` held a `Token_Proficiency_1` from an earlier session).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Kept {
-    /// The `ConsumableID` of the consumable that added it.
+    /// The `ConsumableID` of the consumable that added it, or the entitlement of the token.
     consumable_id: String,
     /// Its `StatusID`.
     status_id: String,
@@ -184,6 +201,8 @@ pub(super) struct StatusEffects {
     equip_load: Option<EquipLoad>,
     /// The effects its worn perks hold (effect, potency), by effect.
     perk_effects: Vec<(u32, f64)>,
+    /// The effects the trophies of its houses hold (effect, potency), by effect.
+    trophy_effects: Vec<(u32, f64)>,
     /// The newest state, and whether its client has not got it yet.
     state: Option<StatusEffectsState>,
     state_due: bool,
@@ -320,17 +339,23 @@ impl StatusEffects {
                             .any(|category| rule.remove_categories.contains(category))
                 })
         });
-        let ends_ms = application
+        let duration_ms = application
             .duration_ms
             .or(rule.duration_ms)
-            .map(|ms| now_ms.saturating_add(self.scaled_duration(rules, rule, ms)));
+            .map(|ms| self.scaled_duration(rules, rule, ms));
+        let ends_ms = duration_ms.map(|ms| now_ms.saturating_add(ms));
         match self.index(crc) {
             Some(index) => {
                 let held = &mut self.held[index];
                 held.stacks = held.stacks.saturating_add(1).min(rule.stack_max);
                 // The wire count is one byte.
                 held.applications = held.applications.wrapping_add(1);
-                if rule.refresh_duration {
+                if rule.stack_duration {
+                    held.ends_ms = match (held.ends_ms, duration_ms) {
+                        (Some(end), Some(ms)) => Some(end.max(now_ms).saturating_add(ms)),
+                        (_, _) => ends_ms,
+                    };
+                } else if rule.refresh_duration {
                     held.ends_ms = ends_ms;
                 }
                 held.source = application.source;
@@ -367,8 +392,8 @@ impl StatusEffects {
             .and_then(|held| held.ends_ms)
     }
 
-    /// Marks the held effect of `rule` as one that consumable `consumable_id` added: a save and
-    /// a handoff keep it.
+    /// Marks the held effect of `rule` as one that consumable `consumable_id` (or the token of
+    /// that entitlement) added: a save and a handoff keep it.
     fn keep(&mut self, rule: &StatusEffectRule, consumable_id: &str) {
         if let Some(index) = self.index(rule.crc) {
             self.held[index].kept = Some(Kept {
@@ -405,15 +430,15 @@ impl StatusEffects {
             .collect()
     }
 
-    /// Holds again, from server time `now_ms`, the kept effect `kept` that `consumable` added,
-    /// as it was: its end, stacks and the consumable's potency, applied by `source`. `false`,
-    /// changing nothing, for an effect the data or the consumable does not have, one that
+    /// Holds again, from server time `now_ms`, the kept effect `kept` that a consumable or a
+    /// token added, as it was: its end, stacks and the potency `potency` of one stack, applied
+    /// by `source`. `false`, changing nothing, for an effect the data does not have, one that
     /// ended, or one it already holds.
     fn restore(
         &mut self,
         rules: &StatusEffectRules,
-        consumable: &Consumable,
         kept: &PlayerStatusEffect,
+        potency: f64,
         source: u64,
         now_ms: u64,
     ) -> bool {
@@ -421,10 +446,7 @@ impl StatusEffects {
             return false;
         };
         let ends_ms = server_ms_of(kept.ends_ns);
-        if ends_ms <= now_ms
-            || self.holds(rule.crc)
-            || !consumable.status_effects.contains(&rule.crc)
-        {
+        if ends_ms <= now_ms || self.holds(rule.crc) {
             return false;
         }
         self.held.push(Held {
@@ -434,7 +456,7 @@ impl StatusEffects {
             origin: Origin::Consumable,
             added_ms: now_ms,
             ends_ms: Some(ends_ms),
-            potency: consumable.potency,
+            potency,
             stacks: kept.stacks.clamp(1, rule.stack_max.max(1)),
             applications: 1,
             next_tick_ms: rule
@@ -443,13 +465,57 @@ impl StatusEffects {
             hit_amount: 0.0,
             hits_taken: 0,
             kept: Some(Kept {
-                consumable_id: consumable.id.clone(),
+                consumable_id: kept.consumable_id.clone(),
                 status_id: rule.id.clone(),
                 runs_offline: rule.runs_offline,
             }),
         });
         self.changed = true;
         true
+    }
+
+    /// Adds the effect `id` (a `StatusID`) that the token `entitlement` starts, applied by
+    /// `holder` at server time `now_ms` ([`Self::add`]); a save and a handoff keep it. `false`
+    /// for an id the data does not have.
+    pub(super) fn add_token(
+        &mut self,
+        rules: &StatusEffectRules,
+        entitlement: &str,
+        id: &str,
+        holder: u64,
+        now_ms: u64,
+    ) -> bool {
+        let Some(rule) = rules.by_id(id) else {
+            return false;
+        };
+        let added = self.add(rules, rule.crc, Application::plain(holder), now_ms);
+        if added {
+            self.keep(rule, entitlement);
+        }
+        added
+    }
+
+    /// Holds the effect `id` (a `StatusID`) while `on`, applied by `holder` at server time
+    /// `now_ms`, and ends it otherwise (a rule of the world, such as `PvP_Flag_Bonus` while a PvP
+    /// flag is on).
+    pub(super) fn hold_while(
+        &mut self,
+        rules: &StatusEffectRules,
+        id: &str,
+        on: bool,
+        holder: u64,
+        now_ms: u64,
+    ) {
+        let Some(rule) = rules.by_id(id) else {
+            return;
+        };
+        match (on, self.holds(rule.crc)) {
+            (true, false) => {
+                self.add(rules, rule.crc, Application::plain(holder), now_ms);
+            }
+            (false, true) => self.remove(rule.crc),
+            _ => {}
+        }
     }
 
     /// Adds the effect named `id` (a `StatusID`) of potency `potency`, applied by `source`, at
@@ -788,6 +854,49 @@ impl StatusEffects {
         (column(false), column(true))
     }
 
+    /// The multiple the held effects give a gain of `kind` of categorical progression `id`: one
+    /// plus their shares for it (`EXP_*`, `EXPCategoricalProgression`) and for its kind
+    /// (`TerritoryStandingMod`, `FactionReputationMod`, `FactionTokensMod`, `AzothMod`); see
+    /// [`nw_content::status_effects::RewardMods`] for the retail numbers.
+    pub(super) fn gain_scale(&self, rules: &StatusEffectRules, id: &str, kind: GainKind) -> f64 {
+        self.scale_of(rules, |rule| {
+            let rewards = &rule.rewards;
+            let of_kind = match kind {
+                GainKind::Progression => 0.0,
+                GainKind::Standing => rewards.territory_standing,
+                GainKind::FactionReputation => rewards.faction_reputation,
+                GainKind::FactionTokens => rewards.faction_tokens,
+                GainKind::Azoth => rewards.azoth,
+            };
+            rewards.progression_share(id) + of_kind
+        })
+    }
+
+    /// The multiple the held effects give the yield of gathers of tradeskill `tradeskill`
+    /// (`MULT_*`: `Token_Proficiency_1` 0.1, the tool and armor yield perks).
+    pub(super) fn yield_scale(&self, rules: &StatusEffectRules, tradeskill: &str) -> f64 {
+        self.scale_of(rules, |rule| rule.rewards.yield_share(tradeskill))
+    }
+
+    /// The luck the held effects give the loot rolls of tradeskill `tradeskill` (`ROL_*`:
+    /// `PvP_Flag_Bonus` 3000 for each gathering tradeskill), or, for `None`, the other rolls
+    /// (`GlobalRollMod`: `PvP_Flag_Bonus` 1000), on the tables' `MaxRoll` scale; at least 0.
+    pub(super) fn luck(&self, rules: &StatusEffectRules, tradeskill: Option<&str>) -> u32 {
+        let luck = self.sum_of(rules, |rule| match tradeskill {
+            Some(tradeskill) => rule.rewards.luck_of(tradeskill),
+            None => rule.rewards.global_luck,
+        });
+        // A luck of a few thousand on a 100,000 roll.
+        luck.max(0.0).round() as u32
+    }
+
+    /// The loot tags the held effects give the holder's loot rolls (`LootTags`).
+    pub(super) fn loot_tags(&self, rules: &StatusEffectRules) -> Vec<String> {
+        self.rules(rules)
+            .flat_map(|rule| rule.rewards.loot_tags.iter().cloned())
+            .collect()
+    }
+
     /// The sum over the held effects of `value`, each times its potency.
     fn sum_of(&self, rules: &StatusEffectRules, value: impl Fn(&StatusEffectRule) -> f64) -> f64 {
         self.held
@@ -852,10 +961,36 @@ impl StatusEffects {
         holder: u64,
         now_ms: u64,
     ) {
-        if self.perk_effects == wanted && wanted.iter().all(|(crc, _)| self.holds(*crc)) {
-            return;
-        }
         let old = std::mem::take(&mut self.perk_effects);
+        self.perk_effects = self.keep_standing(rules, old, wanted, holder, now_ms);
+    }
+
+    /// Keeps the held trophy effects those of `wanted` (effect, potency, by effect), added by
+    /// `holder` at server time `now_ms`, as [`Self::set_perk_effects`] does for the perks.
+    pub(super) fn set_trophy_effects(
+        &mut self,
+        rules: &StatusEffectRules,
+        wanted: Vec<(u32, f64)>,
+        holder: u64,
+        now_ms: u64,
+    ) {
+        let old = std::mem::take(&mut self.trophy_effects);
+        self.trophy_effects = self.keep_standing(rules, old, wanted, holder, now_ms);
+    }
+
+    /// Changes the held effects of a standing source from `old` to `wanted` (effect, potency, by
+    /// effect), added by `holder` at server time `now_ms`, and returns the source's new list.
+    fn keep_standing(
+        &mut self,
+        rules: &StatusEffectRules,
+        old: Vec<(u32, f64)>,
+        wanted: Vec<(u32, f64)>,
+        holder: u64,
+        now_ms: u64,
+    ) -> Vec<(u32, f64)> {
+        if old == wanted && wanted.iter().all(|(crc, _)| self.holds(*crc)) {
+            return old;
+        }
         for held in old.iter().filter(|held| !wanted.contains(held)) {
             self.remove(held.0);
         }
@@ -871,7 +1006,7 @@ impl StatusEffects {
             };
             self.add(rules, crc, application, now_ms);
         }
-        self.perk_effects = wanted;
+        wanted
     }
 
     /// The owner's state of the held effects at own clock `clock`, with `version`: the local and the lightweight maps by key, a map that is empty only when it
@@ -1049,10 +1184,11 @@ impl SimWorld {
         }
     }
 
-    /// Player `entity` holds again the used consumables' effects `kept` that it had (at a
-    /// login, from the save; at a handoff, from the sim before), with the repeats of their
-    /// vitals changes, from the server time now. An effect whose consumable the data does not
-    /// have is dropped.
+    /// Player `entity` holds again the used consumables' and the spent tokens' effects `kept`
+    /// that it had (at a login, from the save; at a handoff, from the sim before), with the
+    /// repeats of the consumables' vitals changes, from the server time now. An effect whose
+    /// consumable the data does not have, or that its consumable or token does not add, is
+    /// dropped.
     pub(super) fn restore_consumable_effects(
         &mut self,
         entity: Entity,
@@ -1061,18 +1197,38 @@ impl SimWorld {
         let now_ms = self.server_ms;
         let rules = &self.content.status_effects;
         let items = &self.content.item_rules;
+        let tokens = &self.content.effect_tokens;
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
         let player = &mut *player;
         for effect in kept {
+            let crc = lowercase_crc32(&effect.status_id);
             let Some(consumable) = items.consumable(&effect.consumable_id) else {
-                tracing::debug!(player = player.number, consumable = %effect.consumable_id, "kept effect of an unknown consumable");
+                let started = tokens
+                    .effect_of(&effect.consumable_id)
+                    .is_some_and(|id| id.eq_ignore_ascii_case(&effect.status_id));
+                if !started
+                    || !player.status_effects.restore(
+                        rules,
+                        effect,
+                        PLAIN_POTENCY,
+                        player.number,
+                        now_ms,
+                    )
+                {
+                    tracing::debug!(player = player.number, consumable = %effect.consumable_id, "kept effect of an unknown consumable or token");
+                }
                 continue;
             };
-            if !player
-                .status_effects
-                .restore(rules, consumable, effect, player.number, now_ms)
+            if !consumable.status_effects.contains(&crc)
+                || !player.status_effects.restore(
+                    rules,
+                    effect,
+                    consumable.potency,
+                    player.number,
+                    now_ms,
+                )
             {
                 continue;
             }
@@ -1835,6 +1991,151 @@ mod tests {
         assert_eq!(effects.gather_efficiency(&rules, "Logging"), 0.0);
         assert_eq!(effects.craft_gear_score(&rules, "Armoring"), (15.0, 15.0));
         assert_eq!(effects.craft_gear_score(&rules, "Arcana"), (0.0, 0.0));
+    }
+
+    #[test]
+    fn held_bonus_effects_scale_gains_yield_and_luck_and_a_token_stacks_its_time() {
+        use nw_content::status_effects::RewardMods;
+        // Build 25810808 rows: `Token_Weapon_1` (cut to one mastery), `Token_Gather_1` (cut to
+        // Skinning), `Token_Proficiency_1` (5,400 s, `StackDuration` 1), `PvP_Flag_Bonus`,
+        // `Status_Perk_Bags_FactionGain`.
+        const WEAPON: &str = "Token_Weapon_1";
+        const GATHER: &str = "Token_Gather_1";
+        const PROFICIENCY: &str = "Token_Proficiency_1";
+        const PVP: &str = "PvP_Flag_Bonus";
+        const FACTION: &str = "Status_Perk_Bags_FactionGain";
+        const TOKEN_S: f64 = 7_200.0;
+        const PROFICIENCY_S: f64 = 5_400.0;
+        const PROFICIENCY_MS: u64 = 5_400_000;
+        const ENTITLEMENT: &str = "Ent_StatusEffect_Token_Proficiency_1";
+        let token = |id: &str, seconds: f64, rewards: RewardMods| EffectSourceRow {
+            base_duration_s: Some(seconds),
+            lightweight: true,
+            stack_duration: true,
+            rewards,
+            ..row(id)
+        };
+        let rules = StatusEffectRules::build(StatusEffectSource {
+            effects: vec![
+                token(
+                    WEAPON,
+                    TOKEN_S,
+                    RewardMods {
+                        progression: vec![("swordabilitytable".to_owned(), 1.0)],
+                        ..RewardMods::default()
+                    },
+                ),
+                token(
+                    GATHER,
+                    TOKEN_S,
+                    RewardMods {
+                        progression: vec![("skinning".to_owned(), 1.0)],
+                        ..RewardMods::default()
+                    },
+                ),
+                token(
+                    PROFICIENCY,
+                    PROFICIENCY_S,
+                    RewardMods {
+                        gather_yield: vec![("mining".to_owned(), 0.1)],
+                        ..RewardMods::default()
+                    },
+                ),
+                EffectSourceRow {
+                    lightweight: true,
+                    rewards: RewardMods {
+                        tradeskill_luck: vec![("mining".to_owned(), 3_000.0)],
+                        global_luck: 1_000.0,
+                        ..RewardMods::default()
+                    },
+                    ..row(PVP)
+                },
+                EffectSourceRow {
+                    rewards: RewardMods {
+                        faction_reputation: 0.03,
+                        faction_tokens: 0.03,
+                        loot_tags: vec!["EtherealMining".to_owned()],
+                        ..RewardMods::default()
+                    },
+                    ..row(FACTION)
+                },
+            ],
+            ..StatusEffectSource::default()
+        });
+        let mut effects = StatusEffects::default();
+        let scale = |effects: &StatusEffects, id: &str, kind: GainKind| {
+            effects.gain_scale(&rules, id, kind)
+        };
+        assert_eq!(
+            scale(&effects, "SwordAbilityTable", GainKind::Progression),
+            1.0
+        );
+        assert!(effects.add_by_id(&rules, WEAPON, PLAIN_POTENCY, PLAYER, START_MS));
+        assert!(effects.add_by_id(&rules, GATHER, PLAIN_POTENCY, PLAYER, START_MS));
+        assert!(effects.add_by_id(&rules, FACTION, PLAIN_POTENCY, PLAYER, START_MS));
+        // Retail `Playthrough_Part_02`: the held sword 16 x 2 x 2 = 64, Skinning 70 x 2 x 2 = 280.
+        assert_eq!(
+            scale(&effects, "SwordAbilityTable", GainKind::Progression),
+            2.0
+        );
+        assert_eq!(scale(&effects, "Skinning", GainKind::Progression), 2.0);
+        assert_eq!(scale(&effects, "Mining", GainKind::Progression), 1.0);
+        assert!((scale(&effects, "Covenant", GainKind::FactionReputation) - 1.03).abs() < 1e-12);
+        assert_eq!(scale(&effects, "6", GainKind::Standing), 1.0);
+        assert_eq!(effects.loot_tags(&rules), ["EtherealMining"]);
+        // The PvP flag bonus: held while the flag is on.
+        assert_eq!(effects.luck(&rules, Some("Mining")), 0);
+        effects.hold_while(&rules, PVP, true, PLAYER, START_MS);
+        assert_eq!(effects.luck(&rules, Some("Mining")), 3_000);
+        assert_eq!(effects.luck(&rules, Some("Logging")), 0);
+        assert_eq!(effects.luck(&rules, None), 1_000);
+        effects.hold_while(&rules, PVP, false, PLAYER, START_MS);
+        assert_eq!(effects.luck(&rules, None), 0);
+        // A token use adds its time to what is left (retail: 3,469 s left + 5,400 s).
+        const LEFT_MS: u64 = 3_469_000;
+        assert!(effects.add_token(&rules, ENTITLEMENT, PROFICIENCY, PLAYER, START_MS));
+        assert!((effects.yield_scale(&rules, "Mining") - 1.1).abs() < 1e-12);
+        let first_end = START_MS + PROFICIENCY_MS;
+        assert_eq!(effects.ends_ms(crc(&rules, PROFICIENCY)), Some(first_end));
+        let later = first_end - LEFT_MS;
+        assert!(effects.add_token(&rules, ENTITLEMENT, PROFICIENCY, PLAYER, later));
+        assert_eq!(
+            effects.ends_ms(crc(&rules, PROFICIENCY)),
+            Some(later + LEFT_MS + PROFICIENCY_MS)
+        );
+        let kept = effects.kept(|_| None);
+        assert_eq!(kept.len(), 1, "a save keeps the token's effect");
+        assert_eq!(kept[0].consumable_id, ENTITLEMENT);
+        let mut restored = StatusEffects::default();
+        assert!(restored.restore(&rules, &kept[0], PLAIN_POTENCY, PLAYER, later));
+        assert_eq!(
+            restored.ends_ms(crc(&rules, PROFICIENCY)),
+            effects.ends_ms(crc(&rules, PROFICIENCY))
+        );
+    }
+
+    #[test]
+    fn trophies_hold_their_effects_and_go_with_their_house() {
+        // Build 25810808 `HousingRollBonusMiningT3` (`ROL_Mining` 1500, three stacks at most).
+        const TROPHY: &str = "HousingRollBonusMiningT3";
+        const TWO_HOUSES: f64 = 2.0;
+        let rules = StatusEffectRules::build(StatusEffectSource {
+            effects: vec![EffectSourceRow {
+                stack_max: Some(3),
+                rewards: nw_content::status_effects::RewardMods {
+                    tradeskill_luck: vec![("mining".to_owned(), 1_500.0)],
+                    ..nw_content::status_effects::RewardMods::default()
+                },
+                ..row(TROPHY)
+            }],
+            ..StatusEffectSource::default()
+        });
+        let trophy = crc(&rules, TROPHY);
+        let mut effects = StatusEffects::default();
+        effects.set_trophy_effects(&rules, vec![(trophy, TWO_HOUSES)], PLAYER, START_MS);
+        assert_eq!(effects.luck(&rules, Some("Mining")), 3_000);
+        effects.set_trophy_effects(&rules, Vec::new(), PLAYER, START_MS);
+        assert!(!effects.holds(trophy));
     }
 
     #[test]

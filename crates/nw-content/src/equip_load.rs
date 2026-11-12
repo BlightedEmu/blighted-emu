@@ -25,6 +25,24 @@ pub struct EquipLoadRatios {
     pub slow_percent: f64,
     /// `EquipLoadRatioOverburdened`.
     pub overburdened_percent: f64,
+    /// `EquipLoadDamageMultFast`, `...Normal`, `...Slow` and `EquipLoadDamageOverburdened`: the
+    /// share each category adds to the damage of the player's hits (build 25810808: 0.15, 0,
+    /// -0.15; Observed: the retail hits of two characters with a slow load hold -0.15 in their
+    /// additive sum).
+    pub damage_mods: EquipLoadDamage,
+}
+
+/// The share each equip load category adds to the damage of the player's hits.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct EquipLoadDamage {
+    /// Under the normal ratio.
+    pub fast: f64,
+    /// From the normal ratio.
+    pub normal: f64,
+    /// From the slow ratio.
+    pub slow: f64,
+    /// From the overburdened ratio.
+    pub overburdened: f64,
 }
 
 /// The item weights and the limits.
@@ -97,6 +115,16 @@ impl EquipLoads {
                 normal_percent: row.equip_load_ratio_normal as f64,
                 slow_percent: row.equip_load_ratio_slow as f64,
                 overburdened_percent: row.equip_load_ratio_overburdened as f64,
+                damage_mods: EquipLoadDamage {
+                    fast: row.equip_load_damage_mult_fast.unwrap_or(0.0),
+                    normal: row
+                        .equip_load_damage_mult_normal
+                        .map_or(0.0, |share| share as f64),
+                    slow: row.equip_load_damage_mult_slow.unwrap_or(0.0),
+                    overburdened: row
+                        .equip_load_damage_overburdened
+                        .map_or(0.0, |share| share as f64),
+                },
             });
         Self::new(items, armor.chain(weapons), limits)
     }

@@ -4,11 +4,12 @@
 //! keys `omni.fcs.endpoints.*`, which this server fills with `game.<domain>`
 //! ([`crate::remote_config::GAME_HOST_ENDPOINTS`]). Without the keys the client calls Amazon.
 //!
-//! While `[shop] enabled` is on, the catalog offers every mount of the store table
-//! ([`nw_protocol::store_api`]): for 0 Marks of Fortune while `[shop] free` is on (retail's last
-//! weeks, `mount-menu-buying-all-store-horses`, 2026-11-04), else for its price. The entitlement
-//! list holds what every account holds (the expansion), the account's wallet and what the account
-//! got (global database). A purchase goes to the sim over the game connection (898), not to these
+//! While `[shop] enabled` is on, the catalog offers every mount and every token pack (the
+//! barbershop token) of the store table ([`nw_protocol::store_api`]): for 0 Marks of Fortune while
+//! `[shop] free` is on (retail's last weeks, `mount-menu-buying-all-store-horses`, 2026-11-04),
+//! else for its price. The entitlement list holds what every account holds (the expansion), the
+//! account's wallet, what the account got and its consumables with their counts (global
+//! database). A purchase goes to the sim over the game connection (898), not to these
 //! routes. An offer's alias is its mount's store product, every store is hidden with one empty
 //! slot, and a sync is accepted. The shapes, the `ETag` and the `304` follow the retail replies
 //! (`Loadouts` capture: 368 offers, 69 of them mounts).
@@ -29,8 +30,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use data_encoding::BASE64;
 use nw_common::time::iso8601_millis;
-use nw_db::{AccountEntitlement, Wallet};
-use nw_protocol::store_api::{STORE_CURRENCY, STORE_CURRENCY_NAME, StoreEntitlement, StoreTable};
+use nw_db::{AccountConsumable, AccountEntitlement, Wallet};
+use nw_protocol::store_api::{
+    STORE_CURRENCY, STORE_CURRENCY_NAME, StoreEntitlement, StoreMount, StoreTable, StoreToken,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -91,6 +94,11 @@ const DURABLE_SUFFIX: &str = " Durable";
 const STORE_START: &str = "2023-10-03T13:30:00.000Z";
 /// How many of an offer an account may get, and the amount of a held entitlement.
 const ONE: u32 = 1;
+/// The most purchases of a token pack: none (Observed: retail `maxAcquisitionCount` 0 on the
+/// barbershop token offer, which the account had bought 20 times).
+const UNLIMITED_ACQUISITIONS: u32 = 0;
+/// When the token packs start (retail `productStartDate` of `StoreItem_Token_Barbershop_X1`).
+const TOKEN_START: &str = "2024-11-01T08:00:00.000Z";
 /// The discount retail shows on a free offer (10386 of 10386 free retail prices: 99, not 100).
 const FREE_DISCOUNT: u32 = 99;
 
@@ -130,7 +138,7 @@ struct Offer {
     offer_type: &'static str,
     product_start_date: &'static str,
     product_end_date: Option<&'static str>,
-    metadata: &'static str,
+    metadata: Option<&'static str>,
     name: String,
     #[serde(rename = "type")]
     kind: &'static str,
@@ -381,6 +389,21 @@ async fn held_by<E: EntitlementStore>(
     }
 }
 
+/// The consumables the account of `persona` holds; none for a persona that names no account.
+async fn consumables_of<E: EntitlementStore>(
+    shop: &ShopState<E>,
+    persona: &str,
+) -> Result<Vec<AccountConsumable>, ApiError> {
+    match account_of(persona) {
+        Some(account) => shop
+            .entitlements
+            .consumables(account)
+            .await
+            .map_err(|_| ApiError::Unavailable),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// The wallet of the account of `persona`; an empty one for a persona that names no account.
 async fn wallet_of<E: EntitlementStore>(
     shop: &ShopState<E>,
@@ -414,26 +437,81 @@ impl Price {
     }
 }
 
-/// The offer of the store mount entitlement `unlock` for the store product `product`, at
-/// `price`, got `count` times.
-fn offer(unlock: &StoreEntitlement, product: &str, price: Price, count: u32) -> Offer {
+/// What one offer sells, and how the catalog shows it.
+struct OfferShape<'a> {
+    /// The entitlement it gives.
+    entitlement: &'a StoreEntitlement,
+    /// The entitlement's kind.
+    kind: &'static str,
+    /// How many of it one purchase gives.
+    amount: u32,
+    /// The offer's name.
+    name: &'a str,
+    /// Its store product.
+    product: &'a str,
+    /// Its description.
+    description: String,
+    /// Its metadata text.
+    metadata: Option<&'static str>,
+    /// When it starts.
+    start: &'static str,
+    /// How many times an account may buy it.
+    max_acquisitions: u32,
+}
+
+impl<'a> OfferShape<'a> {
+    /// A store mount (retail shape of a mount offer).
+    fn mount(mount: &'a StoreMount) -> Self {
+        Self {
+            entitlement: &mount.unlock,
+            kind: DURABLE,
+            amount: ONE,
+            name: &mount.unlock.name,
+            product: &mount.product,
+            description: format!("{}{DURABLE_SUFFIX}", mount.unlock.name),
+            metadata: Some(MOUNT_OFFER_METADATA),
+            start: STORE_START,
+            max_acquisitions: ONE,
+        }
+    }
+
+    /// A token pack (retail shape of the barbershop token offer: no metadata, an empty
+    /// description).
+    fn token(token: &'a StoreToken) -> Self {
+        Self {
+            entitlement: &token.token,
+            kind: CONSUMABLE,
+            amount: token.amount,
+            name: &token.product_name,
+            product: &token.product,
+            description: String::new(),
+            metadata: None,
+            start: TOKEN_START,
+            max_acquisitions: UNLIMITED_ACQUISITIONS,
+        }
+    }
+}
+
+/// The offer of `shape` at `price`, got `count` times.
+fn offer(shape: &OfferShape<'_>, price: Price, count: u32) -> Offer {
+    let entitlement = shape.entitlement;
     Offer {
         is_refundable: false,
         acquisition_count: count,
         entitlements: [OfferEntitlement {
             metadata: None,
             duration: None,
-            name: unlock.name.clone(),
-            id: unlock.entitlement.clone(),
-            kind: DURABLE,
+            name: entitlement.name.clone(),
+            id: entitlement.entitlement.clone(),
+            kind: shape.kind,
             description: None,
-            alias: unlock.entitlement.clone(),
-            amount: ONE,
+            alias: entitlement.entitlement.clone(),
+            amount: shape.amount,
             external_items: [],
         }],
         items: [],
         end_date: None,
-        start_date: STORE_START,
+        start_date: shape.start,
         in_game_currency_prices: [InGamePrice {
             sales_price_with_discount: price.cost,
             discount_percentage: price.discount(),
@@ -452,20 +530,25 @@ fn offer(unlock: &StoreEntitlement, product: &str, price: Price, count: u32) -> 
             currency_alias: STORE_CURRENCY,
         }],
         offer_type: OFFER_TYPE,
-        product_start_date: STORE_START,
+        product_start_date: shape.start,
         product_end_date: None,
-        metadata: MOUNT_OFFER_METADATA,
-        name: unlock.name.clone(),
+        metadata: shape.metadata,
+        name: shape.name.to_owned(),
         kind: PRODUCT_TYPE,
-        description: format!("{}{DURABLE_SUFFIX}", unlock.name),
-        alias: product.to_owned(),
-        product_id: unlock.entitlement.clone(),
-        offer_id: unlock.entitlement.clone(),
-        max_acquisition_count: ONE,
+        description: shape.description.clone(),
+        alias: shape.product.to_owned(),
+        product_id: entitlement.entitlement.clone(),
+        offer_id: entitlement.entitlement.clone(),
+        max_acquisition_count: shape.max_acquisitions,
         required_items: None,
         external_offer_id: None,
         price: None,
     }
+}
+
+/// ISO 8601 text of Unix milliseconds `ms`.
+fn iso_time(ms: i64) -> String {
+    iso8601_millis(u64::try_from(ms).unwrap_or_default())
 }
 
 /// The ETag of a reply: base64 of the SHA-256 of its body without the ETag. Inferred from the
@@ -583,23 +666,34 @@ async fn catalog<E: EntitlementStore>(
 ) -> Result<Response, ApiError> {
     tokio::time::sleep(CATALOG_REPLY_DELAY).await;
     let held = held_by(&shop, &path.persona).await?;
-    let sold = if shop.settings.enabled {
-        shop.table.mounts.as_slice()
+    let consumables = consumables_of(&shop, &path.persona).await?;
+    let (mounts, tokens) = if shop.settings.enabled {
+        (shop.table.mounts.as_slice(), shop.table.tokens.as_slice())
     } else {
-        &[]
+        (&[][..], &[][..])
     };
-    let offers: Vec<Offer> = sold
-        .iter()
-        .map(|mount| {
-            let entitlement = &mount.unlock.entitlement;
-            let got = held.iter().any(|held| held.entitlement == *entitlement);
-            let price = Price {
-                cost: shop.settings.price(entitlement),
-                listed: shop.settings.list_price(entitlement),
-            };
-            offer(&mount.unlock, &mount.product, price, u32::from(got))
-        })
-        .collect();
+    let settings = &shop.settings;
+    let mount_offers = mounts.iter().map(|mount| {
+        let entitlement = &mount.unlock.entitlement;
+        let got = held.iter().any(|held| held.entitlement == *entitlement);
+        let price = Price {
+            cost: settings.price(entitlement),
+            listed: settings.list_price(entitlement),
+        };
+        offer(&OfferShape::mount(mount), price, u32::from(got))
+    });
+    let token_offers = tokens.iter().map(|token| {
+        let bought = consumables
+            .iter()
+            .find(|held| held.entitlement == token.token.entitlement)
+            .map_or(0, |held| u32::try_from(held.purchases).unwrap_or(u32::MAX));
+        let price = Price {
+            cost: settings.cost(token.list_price),
+            listed: token.list_price,
+        };
+        offer(&OfferShape::token(token), price, bought)
+    });
+    let offers: Vec<Offer> = mount_offers.chain(token_offers).collect();
     Ok(tagged_reply(&headers, |etag| Catalog {
         currency_code: CURRENCY_CODE,
         offers: &offers,
@@ -639,6 +733,7 @@ async fn entitlements<E: EntitlementStore>(
 ) -> Result<Response, ApiError> {
     let held = held_by(&shop, &path.persona).await?;
     let wallet = wallet_of(&shop, &path.persona).await?;
+    let consumables = consumables_of(&shop, &path.persona).await?;
     let account = account_of(&path.persona).unwrap_or_default();
     let everyone = shop
         .table
@@ -653,10 +748,19 @@ async fn entitlements<E: EntitlementStore>(
             },
             |mount| mount.unlock.clone(),
         );
-        HeldEntitlement::of(
-            &name,
-            got.instance,
-            iso8601_millis(u64::try_from(got.granted_at_ms).unwrap_or_default()),
+        HeldEntitlement::of(&name, got.instance, iso_time(got.granted_at_ms))
+    });
+    let tokens = consumables.iter().map(|got| {
+        let name = shop
+            .table
+            .token_of(&got.entitlement)
+            .map_or(got.entitlement.as_str(), |token| token.token.name.as_str());
+        HeldEntitlement::balance(
+            &got.entitlement,
+            name,
+            CONSUMABLE,
+            got.amount,
+            iso_time(got.updated_at_ms),
         )
     });
     Ok((
@@ -669,6 +773,7 @@ async fn entitlements<E: EntitlementStore>(
                     HeldEntitlement::transmog_tokens(),
                 ])
                 .chain(bought)
+                .chain(tokens)
                 .collect(),
             pagination_token: None,
         }),
@@ -705,6 +810,13 @@ mod tests {
     /// A configured price and a configured price for the wolf alone.
     const MOUNT_PRICE: u32 = 15_000;
     const WOLF_PRICE: u32 = 10_000;
+    /// The barbershop token: its entitlement, its product, its listed price, and how many the
+    /// account holds after how many purchases.
+    const TOKEN: &str = "Ent_Barbershop_Token";
+    const TOKEN_PRODUCT: &str = "StoreItem_Token_Barbershop_X1";
+    const TOKEN_PRICE: u32 = 10_000;
+    const TOKENS_HELD: i64 = 14;
+    const TOKEN_PURCHASES: i64 = 20;
 
     fn player(persona: &str) -> String {
         format!("/players/{persona}/games/new-world/platforms/steam")
@@ -739,6 +851,15 @@ mod tests {
                 updated_at_ms: BOUGHT_MS,
             },
         );
+        entitlements.hold_consumable(
+            ACCOUNT,
+            AccountConsumable {
+                entitlement: TOKEN.to_owned(),
+                amount: TOKENS_HELD,
+                purchases: TOKEN_PURCHASES,
+                updated_at_ms: BOUGHT_MS,
+            },
+        );
         ShopState {
             table: Arc::new(StoreTable {
                 mounts: vec![
@@ -750,6 +871,16 @@ mod tests {
                     ),
                     mount(WOLF, "Ira", "Mount_MTX_1_wolf", "Mount_Wolf_1"),
                 ],
+                tokens: vec![StoreToken {
+                    token: StoreEntitlement {
+                        entitlement: TOKEN.to_owned(),
+                        name: "Barbershop Token".to_owned(),
+                    },
+                    product: TOKEN_PRODUCT.to_owned(),
+                    product_name: "Barbershop Token X1".to_owned(),
+                    amount: 1,
+                    list_price: TOKEN_PRICE,
+                }],
                 held_by_all: vec![StoreEntitlement {
                     entitlement: XPACK.to_owned(),
                     name: "Rise of the Angry Earth".to_owned(),
@@ -803,7 +934,7 @@ mod tests {
         ))
         .await;
         let offers = catalog["offers"].as_array().expect("offers");
-        assert_eq!(offers.len(), 2);
+        assert_eq!(offers.len(), 3, "two mounts and the token pack");
         let bear = &offers[0];
         assert_eq!(bear["offerId"], BEAR);
         assert_eq!(bear["productId"], BEAR);
@@ -823,8 +954,25 @@ mod tests {
         assert_eq!(price["currencyId"], STORE_CURRENCY);
         assert_eq!(bear["inGameCurrencyPrices"][0]["salesPriceWithDiscount"], 0);
         assert_eq!(offers[1]["acquisitionCount"], 0, "not got yet");
+        let token = &offers[2];
+        assert_eq!(token["alias"], TOKEN_PRODUCT);
+        assert_eq!(token["name"], "Barbershop Token X1");
+        assert_eq!(token["description"], "");
+        assert_eq!(token["metadata"], Value::Null);
+        assert_eq!(token["productStartDate"], TOKEN_START);
+        assert_eq!(token["acquisitionCount"], TOKEN_PURCHASES);
+        assert_eq!(token["maxAcquisitionCount"], UNLIMITED_ACQUISITIONS);
+        assert_eq!(token["entitlements"][0]["alias"], TOKEN);
+        assert_eq!(token["entitlements"][0]["name"], "Barbershop Token");
+        assert_eq!(token["entitlements"][0]["type"], CONSUMABLE);
+        assert_eq!(token["entitlements"][0]["amount"], 1);
+        let price = &token["virtualCurrencyPrices"][0];
+        assert_eq!(price["salesPriceWithDiscount"], 0, "the store is free");
+        assert_eq!(price["originalPrice"], TOKEN_PRICE);
+        assert_eq!(price["discountPercentage"], FREE_DISCOUNT);
         let stranger = json(&format!("{}/catalog?type=MTX", player("p"))).await;
         assert_eq!(stranger["offers"][0]["acquisitionCount"], 0);
+        assert_eq!(stranger["offers"][2]["acquisitionCount"], 0);
     }
 
     async fn catalog_of(settings: ShopConfig) -> Value {
@@ -862,6 +1010,7 @@ mod tests {
             [
                 (u64::from(MOUNT_PRICE), u64::from(MOUNT_PRICE), 0),
                 (u64::from(WOLF_PRICE), u64::from(WOLF_PRICE), 0),
+                (u64::from(TOKEN_PRICE), u64::from(TOKEN_PRICE), 0),
             ]
         );
     }
@@ -1025,6 +1174,21 @@ mod tests {
                                     "metadata": {}
                                 }],
                                 "totalAmount": 1
+                            },
+                            "lastUpdatedDate": "2026-11-04T12:32:26.000Z",
+                            "externalItems": []
+                        },
+                        {
+                            "name": "Barbershop Token",
+                            "id": TOKEN,
+                            "type": CONSUMABLE,
+                            "alias": TOKEN,
+                            "amount": {
+                                "freeAmount": TOKENS_HELD,
+                                "paidAmount": 0,
+                                "pendingAmount": 0,
+                                "lossAmount": 0,
+                                "totalAmount": TOKENS_HELD
                             },
                             "lastUpdatedDate": "2026-11-04T12:32:26.000Z",
                             "externalItems": []

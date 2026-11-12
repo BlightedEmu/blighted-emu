@@ -52,6 +52,20 @@ empty_timeout_ms = 300000
 open_timeout_ms = 1000
 group_timeout_ms = 500
 
+# The arena matchmaking queue (arena flow study 2026-11-11): the players of one match (6 for a
+# 3v3; 2 makes the 1v1 matches retail made when few players queued) and how long the players
+# have to accept a found match.
+[instances.arena]
+match_size = 6
+accept_timeout_ms = 45000
+
+# The matchmaking queue of Outpost Rush: the players of a match (two teams of half; retail 40,
+# two teams of 20) and how long the players have to accept the match once its instance is open.
+# A small even size (2 or 4) lets a few test players start a match.
+[instances.outpost_rush]
+match_size = 40
+accept_timeout_ms = 90000
+
 # The director starts instance sims itself with this command (on this host, no cloud service)
 # and stops the ones it started when they stay free. Leave it out to start them by hand.
 # [instances.launch]

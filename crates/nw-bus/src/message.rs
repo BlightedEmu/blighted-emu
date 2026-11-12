@@ -449,6 +449,10 @@ pub struct HandoffOffer {
     /// Whether the player toggled its PvP flag on: the client sends no new toggle at a handoff.
     #[serde(default)]
     pub pvp_flagged: bool,
+    /// What is left of its PvP flag countdown (ms); `None` when none runs. The next sim runs
+    /// the rest of it.
+    #[serde(default)]
+    pub pvp_flag_left_ms: Option<u64>,
     /// Whether the client still auto-pins a new quest: the client sends its setting at login
     /// only.
     #[serde(default = "auto_pin_on")]
@@ -523,6 +527,10 @@ pub struct PlayerProgression {
     /// migration 0013).
     #[serde(default)]
     pub title: Option<u32>,
+    /// The pronoun type it chose (4751; world migration 0036); 0 for a character that chose
+    /// none.
+    #[serde(default)]
+    pub pronoun: u8,
     /// Its chosen mount and its dyed or named mounts (world migration 0012).
     #[serde(default)]
     pub mounts: PlayerMounts,
@@ -566,6 +574,51 @@ pub struct PlayerProgression {
     /// The bait on its fishing pole: its item id (world migration 0034).
     #[serde(default)]
     pub fishing_bait: Option<String>,
+    /// Its season pass state (world migration 0041).
+    #[serde(default)]
+    pub season: PlayerSeason,
+}
+
+/// A player's season pass state (world migration 0041), as a join, a handoff and a save carry
+/// it; its season experience is the `SeasonPass` entry of [`PlayerProgression::masteries`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerSeason {
+    /// The CRC-32 of the lowercase `SeasonId` it is for; 0 for none yet.
+    pub season: u32,
+    /// The redeemed rewards: bit `n` of word `n / 64` is `RewardIndex` `n`.
+    pub redeemed: Vec<u64>,
+    /// The season's tracked stats: (CRC-32 of the lowercase `TrackedStatId`, count).
+    pub stats: Vec<(u32, u32)>,
+    /// The activity card.
+    pub card: PlayerActivityCard,
+    /// `firstCharacterConnectTime`: Unix nanoseconds.
+    pub first_connect_ns: u64,
+    /// The versions of the newest season rewards (5485) and tracked stats (5606) lists the
+    /// client has; the taker's lists go on above them. Not saved.
+    pub versions: (u64, u64),
+}
+
+/// A player's activity card, as [`PlayerSeason`] carries it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerActivityCard {
+    /// `cardTemplate`.
+    pub template: u8,
+    /// The CRC-32 of each lowercase `ActivitiesTaskID`; empty for no card yet.
+    pub tasks: Vec<u32>,
+    /// The bit of each task that stamped a square.
+    pub claimed: u32,
+    /// The stamped squares (bit `row * 4 + column`).
+    pub stamped: u16,
+    /// The squares a wild stamp filled.
+    pub wild_stamped: u16,
+    /// `wildStampCount`.
+    pub wild_stamps: u16,
+    /// `rerollCount`.
+    pub rerolls: u8,
+    /// `cardCount`.
+    pub cards_done: u16,
+    /// The card tasks' tracked stats since the card's start: (stat CRC-32, count).
+    pub stats: Vec<(u32, u32)>,
 }
 
 /// A player's health, mana and stamina; mana and stamina in thousandths.
@@ -813,7 +866,8 @@ pub struct RecipeCooldownCount {
 /// `target-lock-test`: `FoodRecoveryT2` held with 303.5 s left 1.5 s after the login).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerStatusEffect {
-    /// The `ConsumableID` of the consumable that added it.
+    /// The `ConsumableID` of the consumable that added it, or the entitlement of the status
+    /// effect token whose use started it (`Ent_StatusEffect_Token_Gather_1`).
     pub consumable_id: String,
     /// The `StatusID` of the effect.
     pub status_id: String,
@@ -878,6 +932,12 @@ pub enum QuestTask {
     },
     /// Done.
     Done,
+    /// Stopped with its progress kept until it waits again (an artifact's perk step while its
+    /// item is not worn).
+    Paused {
+        /// Kills or items so far.
+        progress: u32,
+    },
 }
 
 /// Sim to sim, on the taker's handoff subject. Both go on one subject, so NATS keeps their order.
@@ -918,14 +978,25 @@ pub const MOB_ENTITY_BASE: u64 = 1 << 34;
 /// option tags, and the larger of a mob's state (five 5-byte numbers and a 1-byte flag) and a
 /// player's ([`PlayerGhost`]: about 246 bytes with all its visible items, its view, target,
 /// action and mount, and 13 more bytes per visible item for its look: a 5-byte skin and two
-/// 4-byte dyes), and its upper slayer slots ([`GHOST_UPPER_SLOTS_BYTES`]).
+/// 4-byte dyes), its upper slayer slots ([`GHOST_UPPER_SLOTS_BYTES`]) and its public profile
+/// ([`GHOST_PROFILE_BYTES`]).
 pub const MAX_GHOST_BYTES: usize = 288
     + GHOST_VISIBLE_ITEMS * GHOST_ITEM_LOOK_BYTES
     + GHOST_UPPER_SLOTS_BYTES
     + GHOST_NAME_POSTCARD_BYTES
     + U32_BYTES
     + OPTION_F32_BYTES
-    + OPTION_U64_PAIR_BYTES;
+    + OPTION_U64_PAIR_BYTES
+    + GHOST_PROFILE_BYTES;
+/// Most `postcard` bytes of a player ghost's public profile: the title (a `u32`), the pronoun
+/// and the faction (a `u8` each, one byte) and the three [`GhostPvpFlags`] (one byte each).
+const GHOST_PROFILE_BYTES: usize = U32_BYTES + U8_BYTES + U8_BYTES + GHOST_PVP_FLAGS * BOOL_BYTES;
+/// `postcard` bytes of a `u8`.
+const U8_BYTES: usize = 1;
+/// `postcard` bytes of a `bool`.
+const BOOL_BYTES: usize = 1;
+/// The flags of a [`GhostPvpFlags`].
+const GHOST_PVP_FLAGS: usize = 3;
 /// Most `postcard` bytes of an optional pair of `u64`: the option tag and two 10-byte varints.
 const OPTION_U64_PAIR_BYTES: usize = 21;
 /// Most `postcard` bytes of an optional `f32`: the option tag and 4 bytes.
@@ -996,6 +1067,17 @@ impl GhostName {
     }
 }
 
+/// The PvP flags of a player as other players see them (the public slot of its faction state).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GhostPvpFlags {
+    /// `pvpFlag`.
+    pub pvp: bool,
+    /// `hasSanctuary`.
+    pub sanctuary: bool,
+    /// `ffaFlag`.
+    pub free_for_all: bool,
+}
+
 /// What other players see of a player near a border (replication note): its look, health,
 /// stance, block, facing, clock and the items that show on it, so the players of the other sim
 /// see it move, turn, fight and change weapons, not a statue.
@@ -1046,6 +1128,18 @@ pub struct PlayerGhost {
     pub off_hand: Option<u32>,
     /// It has its inventory open (`lookingThroughLoadout`).
     pub looking_through_loadout: bool,
+    /// The title it shows (0 for none), which its card shows.
+    #[serde(default)]
+    pub title: u32,
+    /// Its pronoun type, which its card shows.
+    #[serde(default)]
+    pub pronoun: u8,
+    /// Its faction, which its card shows.
+    #[serde(default)]
+    pub faction: u8,
+    /// Its PvP flag, its sanctuary flag and its free-for-all flag, which its card shows.
+    #[serde(default)]
+    pub pvp_flags: GhostPvpFlags,
     /// The mount it rides, as other players see it.
     pub mount: GhostMount,
     /// The items that show on it.
@@ -1468,6 +1562,7 @@ mod tests {
             meta_counters: BTreeMap::from([("pve_totalkills".to_owned(), u64::MAX)]),
             meta_completed: vec![("CharacterProgression1".to_owned(), true)],
             title: Some(u32::MAX),
+            pronoun: u8::MAX,
             arena: arena(),
             music: PlayerMusic {
                 next_performance_ms: Some(u64::MAX),
@@ -1513,6 +1608,24 @@ mod tests {
             pvp_wanted: true,
             cyclic_turns: BTreeMap::from([("puzzlestone_a".to_owned(), u32::MAX)]),
             fishing_bait: Some("FishingBaitT2".to_owned()),
+            season: PlayerSeason {
+                season: u32::MAX,
+                redeemed: vec![u64::MAX],
+                stats: vec![(u32::MAX, u32::MAX)],
+                card: PlayerActivityCard {
+                    template: 9,
+                    tasks: vec![u32::MAX],
+                    claimed: u32::MAX,
+                    stamped: u16::MAX,
+                    wild_stamped: u16::MAX,
+                    wild_stamps: 3,
+                    rerolls: 2,
+                    cards_done: u16::MAX,
+                    stats: vec![(1, 2)],
+                },
+                first_connect_ns: u64::MAX,
+                versions: (u64::MAX, 1),
+            },
         }
     }
 
@@ -1532,6 +1645,7 @@ mod tests {
             next_group_trial_refresh_ns: 1_792_746_000_226_725_900,
             mutation_award: true,
             last_dungeon_mutated: true,
+            queue_eligible: vec![(0x1fad_9d42, u64::MAX)],
             stay: Some(crate::instance::InstanceStay {
                 instance: Uuid::from_u128(u128::MAX),
                 game_mode: "DungeonAmrine".to_owned(),
@@ -1540,6 +1654,7 @@ mod tests {
                 return_position: StoredPoint::from_bits([u32::MAX, 0, 1]),
                 activated_ns: u64::MAX,
                 mutation_difficulty: Some(u8::MAX),
+                seat: None,
             }),
         }
     }
@@ -1701,6 +1816,7 @@ mod tests {
             entitlements: vec!["Ent_Mount_MTX_1_wolf".to_owned()],
             achievement_version: 25,
             pvp_flagged: true,
+            pvp_flag_left_ms: Some(u64::MAX),
             auto_pin: false,
             items: Some(vec![CarriedItem {
                 item_id: "PotionHealthT1".to_owned(),
@@ -1722,6 +1838,7 @@ mod tests {
                                 due_in_ms: Some(500),
                             },
                             QuestTask::Idle,
+                            QuestTask::Paused { progress: 5 },
                         ],
                         listed: vec![0, 1],
                         mission: Some(MissionTake {
@@ -1782,6 +1899,7 @@ mod tests {
                     phase: 7,
                     capacity: 5,
                     ends_at_ms: None,
+                    war: None,
                 }),
             }),
         });
@@ -1896,6 +2014,14 @@ mod tests {
                 attached: true,
                 off_hand: Some(u32::MAX),
                 looking_through_loadout: true,
+                title: u32::MAX,
+                pronoun: 2,
+                faction: 3,
+                pvp_flags: GhostPvpFlags {
+                    pvp: true,
+                    sanctuary: false,
+                    free_for_all: true,
+                },
                 mount: GhostMount {
                     mount_id: u32::MAX,
                     flags: u8::MAX,
@@ -1920,7 +2046,8 @@ mod tests {
             }),
             ..ghost
         };
-        assert!(encode(&player).expect("encode").len() <= MAX_GHOST_BYTES);
+        let player_bytes = encode(&player).expect("encode").len();
+        assert!(player_bytes <= MAX_GHOST_BYTES, "{player_bytes} bytes");
         round_trip(Ghost {
             position: POINT,
             ..player

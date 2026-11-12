@@ -23,7 +23,7 @@
 //! (`nw_content::status_effects`).
 
 use crate::alc::{half_bits, half_value};
-use crate::items::{FULL_FORM, FullList, VERSION_PRESENT};
+use crate::keyed_list::KeyedList;
 use crate::slots::{read_children, read_slot_byte, write_known_children};
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -46,8 +46,6 @@ const LOCAL_CHILD: u8 = 0;
 const LIGHTWEIGHT_CHILD: u8 = 1;
 /// Children of the remote group.
 const REMOTE_EFFECTS_CHILD: u8 = 1;
-/// Entries per delta group.
-const DELTA_GROUP: usize = 8;
 /// A remote entry: the stacks bits and the potency bit.
 const REMOTE_STACK_BITS: u8 = 0x7f;
 const REMOTE_POTENCY_BIT: u8 = 0x80;
@@ -55,8 +53,6 @@ const REMOTE_POTENCY_BIT: u8 = 0x80;
 const REMOTE_POTENCY: f32 = 1.0;
 /// The smallest potency retail counts as one (`|potency| > 1.19e-7`, the `f32` epsilon).
 const POTENCY_EPSILON: f32 = f32::EPSILON;
-/// The most delta entries a body may hold (the server writer's delta limit).
-const MAX_CHANGES: u64 = 16_383;
 const FIELD: &str = "status_effects";
 
 /// One effect of the owner's local map (12 bytes).
@@ -135,121 +131,11 @@ impl RemoteEffect {
     }
 }
 
-/// One delta entry of a map: the key, its version (`None`: flag 0), and its new value
-/// (`None`: removed).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MapChange<V> {
-    /// The effect key.
-    pub key: u16,
-    /// The version; retail sends it on the first entry and 0 on the others.
-    pub version: Option<u64>,
-    /// The new value; `None` removes the entry.
-    pub value: Option<V>,
-}
+/// One delta entry of an effect map ([`KeyedList`]).
+pub type MapChange<V> = crate::keyed_list::MapChange<u16, V>;
 
-/// A map child in its full form or as changes.
-#[derive(Debug, Clone, PartialEq)]
-pub enum EffectMap<V> {
-    /// The whole map: (key, value) entries.
-    Full(FullList<(u16, V)>),
-    /// Changed, added and removed entries.
-    Changes(Vec<MapChange<V>>),
-}
-
-impl<V: Copy> EffectMap<V> {
-    /// The whole map of `entries` at `version`.
-    pub fn full(version: u64, entries: Vec<(u16, V)>) -> Self {
-        Self::Full(FullList {
-            version: Some(version),
-            elements: entries,
-        })
-    }
-
-    fn read(
-        reader: &mut Reader<'_>,
-        mut read_value: impl FnMut(&mut Reader<'_>) -> Result<V, MessageError>,
-    ) -> Result<Self, MessageError> {
-        if Reader::new(reader.rest()).wide_prefixed()? == FULL_FORM {
-            return FullList::read(reader, |reader| Ok((reader.u16()?, read_value(reader)?)))
-                .map(Self::Full);
-        }
-        let count = reader.wide_prefixed()?;
-        if count > MAX_CHANGES {
-            return Err(MessageError::CountTooLarge {
-                count,
-                limit: MAX_CHANGES,
-            });
-        }
-        // At most `MAX_CHANGES` entries.
-        let mut left = count as usize;
-        let mut changes = Vec::with_capacity(left);
-        while left > 0 {
-            let mask = reader.u8()?;
-            let in_group = left.min(DELTA_GROUP);
-            for entry in 0..in_group {
-                let key = reader.u16()?;
-                let version = read_version(reader)?;
-                let value = if mask & (1 << entry) != 0 {
-                    Some(read_value(reader)?)
-                } else {
-                    None
-                };
-                changes.push(MapChange {
-                    key,
-                    version,
-                    value,
-                });
-            }
-            left -= in_group;
-        }
-        Ok(Self::Changes(changes))
-    }
-
-    fn write(
-        &self,
-        writer: &mut Writer,
-        mut write_value: impl FnMut(&mut Writer, &V),
-    ) -> Result<(), MessageError> {
-        match self {
-            Self::Full(list) => list.write(writer, |writer, (key, value)| {
-                writer.u16(*key);
-                write_value(writer, value);
-                Ok(())
-            }),
-            Self::Changes(changes) => {
-                writer.wide_prefixed(changes.len() as u64);
-                for group in changes.chunks(DELTA_GROUP) {
-                    let mask = group
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, change)| change.value.is_some())
-                        .fold(0_u8, |mask, (entry, _)| mask | (1 << entry));
-                    writer.u8(mask);
-                    for change in group {
-                        writer.u16(change.key);
-                        match change.version {
-                            Some(version) => writer.u8(VERSION_PRESENT).wide_prefixed(version),
-                            None => writer.u8(0),
-                        };
-                        if let Some(value) = &change.value {
-                            write_value(writer, value);
-                        }
-                    }
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-/// Reads a version: the flag byte, then the version when the flag is 1.
-fn read_version(reader: &mut Reader<'_>) -> Result<Option<u64>, MessageError> {
-    match reader.u8()? {
-        0 => Ok(None),
-        VERSION_PRESENT => Ok(Some(reader.wide_prefixed()?)),
-        value => Err(MessageError::NotBoolean { value }),
-    }
-}
+/// An effect map child in its full form or as changes ([`KeyedList`]).
+pub type EffectMap<V> = KeyedList<u16, V>;
 
 /// The status effects state; a `None` child is not sent.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -331,11 +217,13 @@ impl StatusEffectsState {
                 | (u16::from(self.lightweight.is_some()) << LIGHTWEIGHT_CHILD);
             write_known_children(writer, children, OWNER_CHILDREN, |writer, child| {
                 let written = match (child, &self.local, &self.lightweight) {
-                    (LOCAL_CHILD, Some(map), _) => {
-                        map.write(writer, |writer, effect| effect.write(writer))
-                    }
+                    (LOCAL_CHILD, Some(map), _) => map.write(writer, |writer, effect| {
+                        effect.write(writer);
+                        Ok(())
+                    }),
                     (LIGHTWEIGHT_CHILD, _, Some(map)) => map.write(writer, |writer, value| {
                         writer.u64(*value);
+                        Ok(())
                     }),
                     _ => Ok(()),
                 };
@@ -350,7 +238,10 @@ impl StatusEffectsState {
                 1 << REMOTE_EFFECTS_CHILD,
                 REMOTE_CHILDREN,
                 |writer, _| {
-                    let written = map.write(writer, |writer, effect| effect.write(writer));
+                    let written = map.write(writer, |writer, effect| {
+                        effect.write(writer);
+                        Ok(())
+                    });
                     if result.is_ok() {
                         result = written;
                     }
@@ -364,6 +255,7 @@ impl StatusEffectsState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::items::VERSION_PRESENT;
 
     /// The key of `EquipLoad_CCDurReduction_Heavy` and of `EquipLoad_CritDmgReduction_Heavy`
     /// (build 25810808 tables).

@@ -14,6 +14,7 @@ use content_tool::ai_data::{AiDataReport, DEFAULT_SERVER_PAK, build_ai_data};
 use content_tool::ai_trace::{
     AiTrace, DEFAULT_TRACE_PATH, read_creatures, trace_ledger, write_trace,
 };
+use content_tool::breach_tiers::{build_breach_tiers, write_breach_tiers};
 use content_tool::build::{
     DEFAULT_CONTENT_DIR, DEFAULT_RETAIL_DIR, default_bundle_path, default_retail_bundle_path,
     run_build,
@@ -28,6 +29,7 @@ use content_tool::codegen::run_codegen;
 use content_tool::collision::{CollisionError, CollisionReport, PakIndex, build_level_collision};
 use content_tool::combat::{CombatCheck, DEFAULT_LEVEL, DEFAULT_NWDB_DIR, check, read_nwdb};
 use content_tool::creature_animations::{CreatureAnimationsReport, build_rows};
+use content_tool::dungeon_gates::{DungeonGatesReport, build_dungeon_gates};
 use content_tool::dungeon_scripts::{DungeonScriptsReport, build_dungeon_scripts};
 use content_tool::error::ToolError;
 use content_tool::ftue_entities::{FtueScan, Timeline, read_ledger, write_table};
@@ -298,10 +300,31 @@ enum Command {
         #[arg(long)]
         bundle: Option<PathBuf>,
     },
+    /// Writes the breach tiers file: the difficulty of each corrupted breach place, from the
+    /// world map points of the retail ledgers (read by `dungeon-scripts`).
+    BreachTiers {
+        /// Output folder for `breach-tiers-<build>.json`.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        out_dir: PathBuf,
+        /// Retail `ledger.bin` files.
+        #[arg(required = true)]
+        ledgers: Vec<PathBuf>,
+    },
     /// Writes the dungeon script file: the encounters and loot containers of every instance
     /// level's script slice, from the game paks and the content bundle.
     DungeonScripts {
         /// Output folder for `dungeon-scripts-<build>.json`.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        out_dir: PathBuf,
+        /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+    },
+    /// Writes the gates file: the gates, doors, switches and arena blockers of every instance
+    /// level's script slice, and the replicated entities of its encounter slices, from the game
+    /// paks and the content bundle.
+    DungeonGates {
+        /// Output folder for `dungeon-gates-<build>.json`.
         #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
         out_dir: PathBuf,
         /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
@@ -692,12 +715,29 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             })?;
             print_catacombs(&report);
         }
+        Command::BreachTiers { out_dir, ledgers } => {
+            let tiers = build_breach_tiers(&ledgers)?;
+            let path = write_breach_tiers(&out_dir, &client_build, &tiers)?;
+            println!("{}: {} breach places", path.display(), tiers.len());
+        }
         Command::DungeonScripts { out_dir, bundle } => {
             let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
             let tables = ContentBundle::load(&bundle, &client_build)?.tables;
             let index =
                 PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
             print_dungeon_scripts(&build_dungeon_scripts(
+                &index,
+                &tables,
+                &client_build,
+                &out_dir,
+            )?);
+        }
+        Command::DungeonGates { out_dir, bundle } => {
+            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
+            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
+            let index =
+                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
+            print_dungeon_gates(&build_dungeon_gates(
                 &index,
                 &tables,
                 &client_build,
@@ -738,9 +778,10 @@ fn run(cli: Cli) -> Result<(), ToolError> {
         Command::Store { content_dir } => {
             let report = write_store_table(&content_dir, &client_build)?;
             println!(
-                "{}: {} store mounts, {} entitlements every account holds",
+                "{}: {} store mounts, {} token packs, {} entitlements every account holds",
                 report.path.display(),
                 report.mounts,
+                report.tokens,
                 report.held_by_all
             );
         }
@@ -767,6 +808,29 @@ fn run(cli: Cli) -> Result<(), ToolError> {
     Ok(())
 }
 
+fn print_dungeon_gates(report: &DungeonGatesReport) {
+    println!(
+        "{}: {} levels, {} gates ({} blockers), {} timelines ({} without their asset), {} encounter slices with {} replicated entities",
+        report.path.display(),
+        report.levels,
+        report.gates,
+        report.blockers,
+        report.timelines,
+        report.unread_timelines,
+        report.encounter_slices,
+        report.encounter_entities
+    );
+    if !report.skipped_modes.is_empty() {
+        println!(
+            "game modes without a script: {}",
+            report.skipped_modes.join(", ")
+        );
+    }
+    for path in report.missing_slices.iter().take(SHOWN_FAILURES) {
+        println!("not in the paks: {path}");
+    }
+}
+
 fn print_dungeon_scripts(report: &DungeonScriptsReport) {
     println!(
         "{}: {} levels, {} encounters, {} stages, {} spawns, {} chests",
@@ -778,8 +842,9 @@ fn print_dungeon_scripts(report: &DungeonScriptsReport) {
         report.chests
     );
     println!(
-        "open world spawn groups: {} encounters; {} encounters with spawner rules; {} detection volumes placed, {} of a shape not read",
+        "open world spawn groups: {} encounters; {} of alias spawners; {} encounters with spawner rules; {} detection volumes placed, {} of a shape not read",
         report.open_world_encounters,
+        report.grouped_encounters,
         report.encounters_with_spawner_rules,
         report.detectors,
         report.unread_detectors

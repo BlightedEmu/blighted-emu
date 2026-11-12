@@ -493,6 +493,7 @@ fn player_progression(saved: SavedProgression, now_ns: u64) -> PlayerProgression
         meta_counters: saved.meta_counters,
         meta_completed: saved.meta_completed,
         title: saved.title,
+        pronoun: saved.pronoun,
         mounts: player_mounts(saved.mounts),
         arena: player_arena(saved.arena),
         music: nw_bus::PlayerMusic {
@@ -552,6 +553,29 @@ fn player_progression(saved: SavedProgression, now_ns: u64) -> PlayerProgression
         pvp_wanted: saved.log_out_state.pvp_wanted,
         cyclic_turns: saved.log_out_state.cyclic_turns,
         fishing_bait: saved.log_out_state.fishing_bait,
+        season: player_season(saved.season),
+    }
+}
+
+/// The saved season pass state as a sim keeps it.
+fn player_season(saved: nw_db::SavedSeason) -> nw_bus::PlayerSeason {
+    nw_bus::PlayerSeason {
+        season: saved.season,
+        redeemed: saved.redeemed,
+        stats: saved.stats,
+        card: nw_bus::PlayerActivityCard {
+            template: saved.card.template,
+            tasks: saved.card.tasks,
+            claimed: saved.card.claimed,
+            stamped: saved.card.stamped,
+            wild_stamped: saved.card.wild_stamped,
+            wild_stamps: saved.card.wild_stamps,
+            rerolls: saved.card.rerolls,
+            cards_done: saved.card.cards_done,
+            stats: saved.card.stats,
+        },
+        first_connect_ns: saved.first_connect_ns,
+        versions: (0, 0),
     }
 }
 
@@ -593,6 +617,7 @@ fn player_arena(saved: SavedArena) -> PlayerArena {
         next_group_trial_refresh_ns: saved.next_group_trial_refresh_ns,
         mutation_award: saved.mutation_award,
         last_dungeon_mutated: saved.last_dungeon_mutated,
+        queue_eligible: saved.queue_eligible,
         // The instance sim holds the mutation of a stay's instance; a join does not carry it.
         stay: saved.stay.map(|stay| InstanceStay {
             instance: stay.instance,
@@ -602,6 +627,7 @@ fn player_arena(saved: SavedArena) -> PlayerArena {
             return_position: StoredPoint::from_bits(stay.return_position),
             activated_ns: stay.activated_ns,
             mutation_difficulty: None,
+            seat: None,
         }),
     }
 }
@@ -868,6 +894,7 @@ mod tests {
             meta_counters: std::collections::BTreeMap::from([("pve_totalkills".to_owned(), 4)]),
             meta_completed: vec![("CharacterProgression1".to_owned(), false)],
             title: Some(0x431d_f4ea),
+            pronoun: 1,
             arena: SavedArena {
                 base_entered: 2,
                 ranks: vec![3, 3, 3],
@@ -934,6 +961,18 @@ mod tests {
                 cyclic_turns: std::collections::BTreeMap::from([("puzzlestone_a".to_owned(), 3)]),
                 fishing_bait: Some("FishingBaitT2".to_owned()),
             },
+            season: nw_db::SavedSeason {
+                season: 0x2221_5ad9,
+                redeemed: vec![0b11],
+                stats: vec![(0x1234_5678, 6)],
+                card: nw_db::SavedCard {
+                    template: 1,
+                    tasks: vec![0x199d_1dce],
+                    wild_stamps: 3,
+                    ..nw_db::SavedCard::default()
+                },
+                first_connect_ns: SAVED_NS,
+            },
         };
         assert_eq!(
             player_progression(saved, SAVED_NS + AWAY_NS),
@@ -960,6 +999,7 @@ mod tests {
                 meta_counters: std::collections::BTreeMap::from([("pve_totalkills".to_owned(), 4)]),
                 meta_completed: vec![("CharacterProgression1".to_owned(), false)],
                 title: Some(0x431d_f4ea),
+                pronoun: 1,
                 arena: PlayerArena {
                     base_entered: 2,
                     ranks: vec![3, 3, 3],
@@ -971,6 +1011,7 @@ mod tests {
                         return_position: StoredPoint::from_bits([1, 2, 3]),
                         activated_ns: 4,
                         mutation_difficulty: None,
+                        seat: None,
                     }),
                     ..PlayerArena::default()
                 },
@@ -1038,6 +1079,19 @@ mod tests {
                 pvp_wanted: true,
                 cyclic_turns: std::collections::BTreeMap::from([("puzzlestone_a".to_owned(), 3)]),
                 fishing_bait: Some("FishingBaitT2".to_owned()),
+                season: nw_bus::PlayerSeason {
+                    season: 0x2221_5ad9,
+                    redeemed: vec![0b11],
+                    stats: vec![(0x1234_5678, 6)],
+                    card: nw_bus::PlayerActivityCard {
+                        template: 1,
+                        tasks: vec![0x199d_1dce],
+                        wild_stamps: 3,
+                        ..nw_bus::PlayerActivityCard::default()
+                    },
+                    first_connect_ns: SAVED_NS,
+                    versions: (0, 0),
+                },
             }
         );
     }
@@ -1370,6 +1424,7 @@ mod tests {
             }),
             activated_ns: 0,
             mutation_difficulty: None,
+            seat: None,
         };
         let back = Some(StayRoute::Return(Position {
             x: 42.0,

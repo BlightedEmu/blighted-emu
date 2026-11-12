@@ -19,7 +19,7 @@ use std::sync::Arc;
 use bevy_ecs::entity::Entity;
 use nw_bus::ItemState;
 use nw_bus::LootLimitCount;
-use nw_content::loot::LootRoll;
+use nw_content::loot::{LootContext, LootRoll};
 use nw_content::loot_limits::{LimitCount, LootLimitCounts, LootLimitRules};
 use nw_content::perks::{chance_hit, rarity};
 use nw_content::starter::KitItem;
@@ -70,11 +70,11 @@ const LIFE_EVENT_COMPONENT: u64 = 2;
 const FADE_EVENT_COMPONENT: u64 = 3;
 const SPARE_EVENT_COMPONENT: u64 = 4;
 const INTERACT_COMPONENT: u64 = 5;
-/// `totalDelayDuration` values as retail sends them (binary16 seconds): the life event's 180 s
-/// and the fade's 1.25 s.
-const LIFE_DELAY: u16 = 0x59a0;
-const FADE_DELAY: u16 = 0x3d00;
-const NO_DELAY: u16 = 0;
+/// `totalDelayDuration` values, seconds (retail binary16 `59a0` and `3d00`): the life event's
+/// 180 s and the fade's 1.25 s.
+const LIFE_DELAY: f32 = 180.0;
+const FADE_DELAY: f32 = 1.25;
+const NO_DELAY: f32 = 0.0;
 /// The fade's 1.25 s (retail: the fade completed 1,248 and 1,249 ms after it started).
 const FADE_MS: u64 = 1_250;
 /// When a bag nobody may loot starts to fade: retail 4,950 to 5,000 ms after its spawn for 4,640
@@ -157,7 +157,7 @@ impl LootBag {
         let event = |component, total_delay| BundleMember {
             component,
             state: MemberState::DelayedEvent(DelayedEventState {
-                total_delay: Some(total_delay),
+                total_delay_s: Some(total_delay),
                 completed: Some(false),
             }),
         };
@@ -191,7 +191,7 @@ impl LootBag {
         let event = |component, total_delay, completed| BundleMember {
             component,
             state: MemberState::DelayedEvent(DelayedEventState {
-                total_delay: Some(total_delay),
+                total_delay_s: Some(total_delay),
                 completed,
             }),
         };
@@ -913,7 +913,12 @@ impl SimWorld {
                 let reached = self.reached_loot_limits(killer);
                 // A mutated instance adds its loot tags and its injected creature tables.
                 let tags = self.mutation_loot_tags(&drop.tags);
-                let context = self.loot_context(killer, Some((mob, &tags)), &reached);
+                // The killer's held effects add their luck (`GlobalRollMod`) and loot tags.
+                let bonuses = self.loot_bonuses(killer, &tags, None);
+                let context = LootContext {
+                    tags: &bonuses.tags,
+                    ..self.loot_context(killer, Some((mob, &tags)), &reached)
+                };
                 let dice = &mut self.dice;
                 let mut below = |below| dice.below(below);
                 // A type without a chance rolls at every kill: a sure chance before the
@@ -923,7 +928,9 @@ impl SimWorld {
                     .clamp(0.0, SURE_CHANCE);
                 let rolls_table = chance >= SURE_CHANCE || chance_hit(chance, &mut below);
                 if rolls_table {
-                    content.loot.roll(&drop.table, context, &mut below)
+                    content
+                        .loot
+                        .roll_with_luck(&drop.table, context, bonuses.luck, &mut below)
                 } else {
                     LootRoll::default()
                 }

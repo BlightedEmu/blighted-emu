@@ -5,7 +5,9 @@
 //! table from the content bundle and grant the purchases.
 //!
 //! Retail sold its store mounts for 0 in its last weeks (`mount-menu-buying-all-store-horses`,
-//! 2026-11-04: 35 mounts unlocked for 0 Marks of Fortune). This server keeps that price.
+//! 2026-11-04: 35 mounts unlocked for 0 Marks of Fortune), and its barbershop tokens too
+//! (`buy_barbertoken_and_change_style`: one token for 0, listed at 10000). This server keeps that
+//! price.
 
 use std::path::{Path, PathBuf};
 
@@ -45,11 +47,30 @@ pub struct StoreMount {
     pub product: String,
 }
 
+/// One consumable the store sells: a pack of tokens that the server spends on a use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreToken {
+    /// The consumable entitlement (`Ent_Barbershop_Token`, `Barbershop Token`).
+    #[serde(flatten)]
+    pub token: StoreEntitlement,
+    /// Its store product, the offer's `alias` (`StoreItem_Token_Barbershop_X1`).
+    pub product: String,
+    /// The product's English name, the offer's `name` (`Barbershop Token X1`).
+    pub product_name: String,
+    /// How many tokens one purchase gives.
+    pub amount: u32,
+    /// Its listed price in Marks of Fortune.
+    pub list_price: u32,
+}
+
 /// The store table.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreTable {
     /// Every mount the store sells.
     pub mounts: Vec<StoreMount>,
+    /// Every consumable the store sells (a table written before tokens were sold has none).
+    #[serde(default)]
+    pub tokens: Vec<StoreToken>,
     /// The entitlements every account holds: those the store mounts require (the expansion,
     /// `Ent_Xpack_RiseOfTheAngryEarth_Owner`).
     pub held_by_all: Vec<StoreEntitlement>,
@@ -132,6 +153,13 @@ impl StoreTable {
             .find(|mount| mount.unlock.entitlement == entitlement)
     }
 
+    /// The token pack whose consumable entitlement is `entitlement`.
+    pub fn token_of(&self, entitlement: &str) -> Option<&StoreToken> {
+        self.tokens
+            .iter()
+            .find(|token| token.token.entitlement == entitlement)
+    }
+
     /// The store mount whose `MountId` is `mount` (any case).
     pub fn unlock_of(&self, mount: &str) -> Option<&StoreMount> {
         self.mounts
@@ -153,6 +181,16 @@ mod tests {
                 },
                 mount: "Mount_MTX_7_bear_Ronin".to_owned(),
                 product: "Mount_Bear_MTX7_Ronin".to_owned(),
+            }],
+            tokens: vec![StoreToken {
+                token: StoreEntitlement {
+                    entitlement: "Ent_Barbershop_Token".to_owned(),
+                    name: "Barbershop Token".to_owned(),
+                },
+                product: "StoreItem_Token_Barbershop_X1".to_owned(),
+                product_name: "Barbershop Token X1".to_owned(),
+                amount: 1,
+                list_price: 10_000,
             }],
             held_by_all: vec![StoreEntitlement {
                 entitlement: "Ent_Xpack_RiseOfTheAngryEarth_Owner".to_owned(),
@@ -180,6 +218,20 @@ mod tests {
             Some("Mount_MTX_7_bear_Ronin")
         );
         assert!(read.unlock_of("mount_mtx_7_bear_ronin").is_some());
+        assert_eq!(
+            read.token_of("Ent_Barbershop_Token")
+                .map(|token| token.product.as_str()),
+            Some("StoreItem_Token_Barbershop_X1")
+        );
+        assert!(read.token_of("Ent_Mount_MTX_7_bear_Ronin").is_none());
+        std::fs::write(&path, br#"{"mounts":[],"held_by_all":[]}"#).expect("write");
+        assert!(
+            StoreTable::load(&path)
+                .expect("an older table")
+                .tokens
+                .is_empty(),
+            "a table from before the tokens sells none"
+        );
         assert!(read.mount_of("Ent_Nothing").is_none());
         std::fs::write(&path, b"[]").expect("write");
         assert!(matches!(

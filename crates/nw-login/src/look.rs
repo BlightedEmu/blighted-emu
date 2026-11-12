@@ -17,6 +17,7 @@ use data_encoding::BASE64;
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
+use nw_db::CHANGED_LOOK_KEY;
 use nw_formats::objectstream::{
     Element, lowercase_crc32, parse_object_stream, write_object_stream,
 };
@@ -112,9 +113,13 @@ const RACE_PREFIX: &str = "face";
 /// The head and facial hair names end with this letter in both genders' lists.
 const HAIR_SUFFIX: char = 'm';
 
-/// The look saved with a character, from its stored appearance JSON. `None` when the settings are
-/// missing (bots and tests store `{}`) or a choice is not in its list.
+/// The look saved with a character, from its stored appearance JSON: the look of its last barber
+/// change ([`CHANGED_LOOK_KEY`]), else its creation look. `None` when the settings are missing
+/// (bots and tests store `{}`) or a choice is not in its list.
 pub fn saved_look(appearance: &serde_json::Value) -> Option<PlayerLook> {
+    if let Some(changed) = appearance.get(CHANGED_LOOK_KEY) {
+        return changed_look(changed);
+    }
     let root = saved_visuals(appearance)?;
     let text = |name: &str| root.child(lowercase_crc32(name))?.as_string().ok();
     let gender_name = text(GENDER_NAME)?;
@@ -126,6 +131,40 @@ pub fn saved_look(appearance: &serde_json::Value) -> Option<PlayerLook> {
         *choice = list_position(list, text(list.name)?)?;
     }
     Some(PlayerLook::of_choices(choices))
+}
+
+/// The look of a saved barber change: twelve list positions in [`PlayerLook`] child order, each
+/// in its list.
+fn changed_look(saved: &serde_json::Value) -> Option<PlayerLook> {
+    let positions = saved.as_array()?;
+    let mut choices = [0; LOOK_CHOICES];
+    if positions.len() != LOOK_CHOICES {
+        return None;
+    }
+    for (choice, position) in choices.iter_mut().zip(positions) {
+        *choice = u8::try_from(position.as_u64()?).ok()?;
+    }
+    let look = PlayerLook::of_choices(choices);
+    look_in_lists(&look).then_some(look)
+}
+
+/// Whether every choice of `look` is a row of its character-creation list that a saved creation
+/// look can name: a gender of [`GENDERS`], a face of the gender's race list (not a male `Chroma`
+/// row) and each other choice below its list's rows.
+pub fn look_in_lists(look: &PlayerLook) -> bool {
+    let choices = look.choices();
+    let race_rows = if look.is_female() {
+        FEMALE_RACES
+    } else {
+        MALE_RACES
+    };
+    usize::from(look.gender) < GENDERS.len()
+        && look.race < race_rows
+        && (look.is_female() || !MALE_CHROMA_ROWS.contains(&look.race))
+        && choices[2..]
+            .iter()
+            .zip(CHOICE_LISTS)
+            .all(|(choice, list)| *choice < list.rows)
 }
 
 /// The backstory id that the character's archetype pick saved (for example `Archetype_Mystic`),
@@ -583,6 +622,45 @@ pub(crate) mod tests {
             saved_look(&appearance(params(&names(&names_of)))).map(|look| look.hairstyle),
             Some(0),
             "the first hair row is None"
+        );
+    }
+
+    #[test]
+    fn a_barber_change_overrides_the_creation_look() {
+        // The look after the first retail barber change: female, race 28.
+        const CHANGED: [u8; LOOK_CHOICES] = [1, 28, 0, 0, 0, 26, 27, 0, 0, 0, 0, 4];
+        let mut stored = saved_appearance();
+        stored[CHANGED_LOOK_KEY] = serde_json::json!(CHANGED);
+        assert_eq!(
+            saved_look(&stored).map(|look| look.choices()),
+            Some(CHANGED)
+        );
+        let mut outside = CHANGED;
+        outside[1] = FEMALE_RACES;
+        stored[CHANGED_LOOK_KEY] = serde_json::json!(outside);
+        assert_eq!(saved_look(&stored), None, "a face outside the female list");
+        stored[CHANGED_LOOK_KEY] = serde_json::json!([1, 2, 3]);
+        assert_eq!(saved_look(&stored), None, "not twelve positions");
+    }
+
+    #[test]
+    fn a_look_is_in_its_lists_unless_a_choice_is_past_its_rows_or_a_chroma_face() {
+        let male = PlayerLook::of_choices(MALE_LOOK);
+        assert!(look_in_lists(&male));
+        for (child, outside) in [(0, 2), (1, MALE_RACES), (1, MALE_CHROMA_ROWS[0]), (3, 72)] {
+            let mut choices = MALE_LOOK;
+            choices[child] = outside;
+            assert!(
+                !look_in_lists(&PlayerLook::of_choices(choices)),
+                "{child} {outside}"
+            );
+        }
+        let mut female = MALE_LOOK;
+        female[0] = 1;
+        female[1] = MALE_CHROMA_ROWS[0];
+        assert!(
+            look_in_lists(&PlayerLook::of_choices(female)),
+            "a female face list has no chroma rows"
         );
     }
 

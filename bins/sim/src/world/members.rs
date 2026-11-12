@@ -1702,7 +1702,7 @@ mod tests {
         let death = BundleMember {
             component: 20,
             state: MemberState::DelayedEvent(nw_messages::DelayedEventState {
-                total_delay: None,
+                total_delay_s: None,
                 completed: Some(true),
             }),
         };

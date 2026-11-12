@@ -2,7 +2,9 @@
 //! What the social state asks of the service around it: messages to send, rows to store, and the
 //! two steps of a treasury transfer.
 
-use nw_bus::{BusId, CoinTransfer, GroupEntityDelivery, OwnStateDelivery, SocialDelivery};
+use nw_bus::{
+    BusId, CoinTransfer, GroupEntityDelivery, OwnStateDelivery, SocialDelivery, UpkeepPaid,
+};
 use nw_db::{
     CoinReturn, Company, CompanyInvite, CompanyMember, LinkKind, PlayerReport, SocialGroup,
     SocialSettings, TreasuryReason,
@@ -64,6 +66,13 @@ pub enum Effect {
         change: i64,
         /// Why.
         reason: TreasuryReason,
+    },
+    /// Tell the payer's sim that its territory upkeep payment was taken.
+    UpkeepPaid {
+        /// The sim that has the payer.
+        sim: BusId,
+        /// The payment.
+        paid: UpkeepPaid,
     },
 }
 

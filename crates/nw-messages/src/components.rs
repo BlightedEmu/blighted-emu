@@ -10,6 +10,7 @@
 //! (type 2930) and the player's currency (type 3786). Each table ends every reached captured
 //! body of its class.
 
+use crate::alc::{half_bits, half_value};
 use crate::slots::{children_mask, read_slot_0, write_known};
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -201,11 +202,14 @@ impl CombatStatusState {
     }
 }
 
-/// `MB::DelayedEventComponentReplicatedState` (`FUN_143066370`): a big-endian `u16` and a flag.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// `MB::DelayedEventComponentReplicatedState` (`FUN_143066370`): a binary16 of seconds and a
+/// flag. Observed (Dynasty Shipyard cave monolith, dungeon gates note 2026-11-11): `4300` (3.5)
+/// and `2e66` (0.1) on two events triggered at 140.084, completed at 143.602 and 140.200, and
+/// the loot bag's `59a0` (180 s) life.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct DelayedEventState {
-    /// `totalDelayDuration`.
-    pub total_delay: Option<u16>,
+    /// `totalDelayDuration`, seconds.
+    pub total_delay_s: Option<f32>,
     /// `delayedEventCompleted`.
     pub completed: Option<bool>,
 }
@@ -225,7 +229,7 @@ impl DelayedEventState {
             DELAYED_EVENT_CHILDREN,
             |reader, child| {
                 if child == 0 {
-                    state.total_delay = Some(reader.u16()?);
+                    state.total_delay_s = Some(half_value(reader.u16()?));
                 } else {
                     state.completed = Some(reader.boolean()?);
                 }
@@ -237,14 +241,14 @@ impl DelayedEventState {
 
     /// Writes the state for the bundle path.
     pub fn write(&self, writer: &mut Writer) {
-        let present = [self.total_delay.is_some(), self.completed.is_some()];
+        let present = [self.total_delay_s.is_some(), self.completed.is_some()];
         write_known(
             writer,
             children_mask(&present),
             DELAYED_EVENT_CHILDREN,
             |writer, child| {
                 match child {
-                    0 => self.total_delay.map(|delay| writer.u16(delay)),
+                    0 => self.total_delay_s.map(|delay| writer.u16(half_bits(delay))),
                     _ => self.completed.map(|completed| writer.boolean(completed)),
                 };
             },
@@ -361,8 +365,12 @@ impl DamageReceiverState {
     }
 }
 
-/// `gatherableState` Depleted (client enum): a skinned corpse.
+/// `gatherableState` Depleted (client enum): a skinned corpse, an open gate or door (Observed:
+/// the Amrine boss door's `020c010108` at 356.931, dungeon gates note 2026-11-11).
 pub const DEPLETED_GATHERABLE: u8 = 8;
+/// `gatherableState` Healthy (client enum): a living mob's remains, a node that grew back, a
+/// closed or sealed gate (Observed: the Amrine boss door's `020c010104` at 349.098).
+pub const HEALTHY_GATHERABLE: u8 = 4;
 
 /// `MB::GatherableControllerReplicatedState`: the state of a gatherable or of a creature's
 /// gatherable remains (4 on every living mob of the captures).
@@ -599,7 +607,6 @@ mod tests {
     }
 
     const STAMINA: f32 = 120.5;
-    const DELAY_MS: u16 = 1500;
     const TIME_POINT: u64 = 0x0102_0304_0506_0708;
 
     fn encoded(write: impl FnOnce(&mut Writer)) -> Vec<u8> {
@@ -641,10 +648,12 @@ mod tests {
 
         #[test]
         fn delayed_event_round_trips(
-            total_delay in proptest::option::of(any::<u16>()),
+            total_delay_s in proptest::option::of(
+                any::<u16>().prop_map(half_value).prop_filter("a finite delay", |delay| delay.is_finite()),
+            ),
             completed in proptest::option::of(any::<bool>()),
         ) {
-            let state = DelayedEventState { total_delay, completed };
+            let state = DelayedEventState { total_delay_s, completed };
             let bytes = encoded(|writer| state.write(writer));
             let mut reader = Reader::new(&bytes);
             prop_assert_eq!(DelayedEventState::read(&mut reader).expect("read"), state);
@@ -755,15 +764,30 @@ mod tests {
     }
 
     #[test]
-    fn delayed_event_is_a_u16_then_a_flag() {
-        let mut bytes = vec![0x01, 0b11];
-        bytes.extend(DELAY_MS.to_be_bytes());
-        bytes.push(0);
-        let state = DelayedEventState::read(&mut Reader::new(&bytes)).expect("read");
-        assert_eq!(
-            (state.total_delay, state.completed),
-            (Some(DELAY_MS), Some(false))
-        );
+    fn delayed_event_is_a_binary16_of_seconds_then_a_flag() {
+        // Retail Dynasty Shipyard cave monolith (dungeon gates note): the two `DeathEvent`
+        // delays at 140.084 and their completions.
+        const STARTED_3_5_S: [u8; 4] = [0x01, 0x01, 0x43, 0x00];
+        const STARTED_0_1_S: [u8; 4] = [0x01, 0x01, 0x2e, 0x66];
+        const COMPLETED: [u8; 5] = [0x01, 0x03, 0x00, 0x00, 0x01];
+        const TENTH_S: f32 = 0.1;
+        const HALF_STEP_AT_TENTH_S: f32 = 1.0e-4;
+        for (bytes, delay_s, completed) in [
+            (&STARTED_3_5_S[..], 3.5, None),
+            (&STARTED_0_1_S[..], TENTH_S, None),
+            (&COMPLETED[..], 0.0, Some(true)),
+        ] {
+            let state = DelayedEventState::read(&mut Reader::new(bytes)).expect("read");
+            let read_s = state.total_delay_s.expect("delay");
+            assert!((read_s - delay_s).abs() < HALF_STEP_AT_TENTH_S, "{read_s}");
+            assert_eq!(state.completed, completed);
+            assert_eq!(encoded(|writer| state.write(writer)), bytes);
+            let written = DelayedEventState {
+                total_delay_s: Some(delay_s),
+                completed,
+            };
+            assert_eq!(encoded(|writer| written.write(writer)), bytes);
+        }
     }
 
     #[test]

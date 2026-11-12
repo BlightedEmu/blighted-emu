@@ -34,17 +34,22 @@ pub mod entity_slots;
 pub mod facet;
 pub mod faction_state;
 pub mod game_mode;
+pub mod game_mode_participant;
+pub mod game_mode_state;
 pub mod gathering;
 pub mod gde;
 pub mod gear;
 pub mod generic_invite;
 pub mod gm_client;
 pub mod guild_lookup;
+pub mod house_data_state;
+pub mod housing_plot_state;
 pub mod interactor;
 pub mod item_calls;
 pub mod item_descriptor;
 pub mod item_repair;
 pub mod items;
+pub mod keyed_list;
 pub mod kick;
 pub mod level_info;
 pub mod list_delta;
@@ -63,6 +68,7 @@ pub mod points_client;
 pub mod position;
 pub mod progression;
 pub mod progression_points;
+pub mod projectile_state;
 pub mod quick_course_state;
 pub mod seasons;
 pub mod self_ident;
@@ -78,13 +84,16 @@ pub mod store;
 pub mod test_support;
 pub mod time_change;
 pub mod time_synch;
+pub mod timeline_state;
 pub mod title_choice;
 pub mod titles;
 pub mod travel;
 pub mod travel_states;
 pub mod vitals;
 pub mod war;
+pub mod war_roster;
 pub mod war_signup;
+pub mod war_states;
 pub mod wire;
 
 pub use abilities::{
@@ -144,9 +153,9 @@ pub use components::{
     BOSS_PHASE_TYPE_INDEX, COMBAT_STATUS_TYPE_INDEX, CURRENCY_COMPONENT, CURRENCY_TYPE_INDEX,
     CombatStatusState, CurrencyState, DAMAGE_RECEIVER_TYPE_INDEX, DELAYED_EVENT_TYPE_INDEX,
     DEPLETED_GATHERABLE, DamageReceiverState, DelayedEventState, GATHERABLE_CONTROLLER_TYPE_INDEX,
-    GatherableControllerState, INTERACT_TYPE_INDEX, InteractState, LOOK_TARGETING_TYPE_INDEX,
-    LookTargetingState, MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState,
-    boss_phase_change,
+    GatherableControllerState, HEALTHY_GATHERABLE, INTERACT_TYPE_INDEX, InteractState,
+    LOOK_TARGETING_TYPE_INDEX, LookTargetingState, MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX,
+    StaminaState, boss_phase_change,
 };
 pub use connected::{
     Block1415acc30, CALENDAR_CONNECTED_MSG_TYPE_INDEX, CalendarConnectedMsg, ConnectedBody,
@@ -171,14 +180,14 @@ pub use entity_ids::{
 };
 pub use entity_slots::{EntitySlots, SlotRead, SlotUpdate};
 pub use facet::{
-    AdjustFxScriptsMsg, ClientFacetMsg, CraftIngredient, CraftProgressMsg, CutsceneEndFinalizedMsg,
-    CutsceneGrantedMsg, DisableCollisionMsg, FacetHeader, GameModeSchedulerRefreshedMsg,
-    GatheringInterruptedMsg, HomingOverrideMsg, InteractionEndedMsg, InteractionValidatedMsg,
-    LeftGameModeQueueMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg, StartWhisperMsg,
-    StorageSearchItemsMsg, TargetMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg,
-    UpdatePhasingMsg, facet_entity,
+    AdjustFxScriptsMsg, AfkWarningMsg, ClientFacetMsg, CraftIngredient, CraftProgressMsg,
+    CutsceneEndFinalizedMsg, CutsceneGrantedMsg, DisableCollisionMsg, EquipItemFailMsg,
+    FacetHeader, GameModeSchedulerRefreshedMsg, GatheringInterruptedMsg, HomingOverrideMsg,
+    InteractionEndedMsg, InteractionValidatedMsg, LeftGameModeQueueMsg, PlayerSeenByAiMsg,
+    SelectedAsTargetMsg, StartWhisperMsg, StorageSearchItemsMsg, TargetMsg,
+    TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg, facet_entity,
 };
-pub use game_mode::{GameModeClientMsg, GameModeServerMsg, QueueActivity};
+pub use game_mode::{DeathRecapForAllMsg, GameModeClientMsg, GameModeServerMsg, QueueActivity};
 pub use gathering::{GATHERING_TYPE_INDEX, GatheringState, NO_GATHERABLE};
 pub use gde::{
     AssetId, DYNAMIC_SLICE_SUB_ID, GDE_ID_LEN, GDE_METADATA_COMPONENT, GDE_METADATA_TYPE_INDEX,
@@ -191,7 +200,9 @@ pub use gear::{
 pub use gm_client::GmClientMsg;
 pub use guild_lookup::{GuildsRequest, OtherGuildData, SiegeWindow, UnorderedGuildsMsg};
 pub use interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
-pub use item_calls::{ContainerRef, DropEntry, ItemCallMsg, ItemRef, LoadoutStatusMsg};
+pub use item_calls::{
+    ContainerRef, DropEntry, ItemCallMsg, ItemRef, ItemsConvertedMsg, LoadoutStatusMsg,
+};
 pub use item_repair::ItemRepairMsg;
 pub use items::{FullList, ItemRecord};
 pub use kick::{KickClientMsg, PlayerManagerRejectedMsg, RETAIL_KICK_REASON};
@@ -229,10 +240,9 @@ pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, Member
 pub use player_components::{
     EmptyState, HealthChange, PLAYER_COMPONENT_COMPONENT, PLAYER_COMPONENT_TYPE_INDEX,
     PLAYER_EMPTY_COMPONENTS, PLAYER_VITALS_COMPONENT, PlayerComponentState, PlayerIdentity,
-    SessionStart,
-    PlayerStates, REMOTE_PLAYER_CARD_CLASSES, change_members, empty_state, gear_members,
-    player_members, put_account_in_probation, put_is_changing_mount, put_is_in_store, put_session_start,
-    put_looking_through_loadout, put_member, remote_player_members,
+    PlayerStates, REMOTE_PLAYER_CARD_CLASSES, SessionStart, change_members, empty_state,
+    gear_members, player_members, put_account_in_probation, put_is_changing_mount, put_is_in_store,
+    put_looking_through_loadout, put_member, put_session_start, remote_player_members,
 };
 pub use player_data::{
     NO_GUILD, NO_PLATFORM, NO_PLATFORM_PRESENCE, PlayerDataRequest, PlayerDataResponseMsg,
@@ -262,7 +272,10 @@ pub use time_change::{
     OBSERVED_TIME_CHANGE_U32S_AT_28, SYNC_TIME_CHANGE_MSG_TYPE_INDEX, SyncTimeChangeMsg,
 };
 pub use time_synch::{NS_PER_MS, TimeSynchMsg};
-pub use title_choice::{SOCIAL_COMPONENT, SetTitleRequest, title_state};
+pub use title_choice::{
+    PRONOUN_TYPE_COUNT, SOCIAL_COMPONENT, SetPronounRequest, SetTitleRequest, ShownSocial,
+    pronoun_state, title_state,
+};
 pub use titles::{AvailableTitlesMsg, TitleRequest};
 pub use travel::{
     ItemAnchor, ItemPlacement, LandmarkRef, PlotRef, StructurePlacement, TerritoryResidentData,
@@ -281,7 +294,20 @@ pub use vitals::{
     VitalsState,
 };
 pub use war::{WarClientMsg, WarServerMsg, WarboardManifest};
-pub use war_signup::{SIGNUP_LIST_TRAILER, SignupEntry, WarSignupClientMsg, WarSignupServerMsg};
+pub use war_roster::{
+    GROUP_SLOTS, PERMISSION_LEADER, PERMISSION_MEMBER, PERMISSION_OFFICER, ROSTER_GROUPS,
+    RosterGroup, RosterPlayer, SignupData, TERRITORY_INTERACTOR_TYPE_INDEX,
+    TerritoryInteractorState,
+};
+pub use war_signup::{
+    CallResult, REASON_BANNED, REASON_NONE, REASON_ROSTER_REFUSED, RosterPlace, SIDE_ATTACKER,
+    SIDE_DEFENDER, SignupEntry, WAR_PLAYER_KIND, WarPlayer, WarSignupClientMsg, WarSignupServerMsg,
+};
+pub use war_states::{
+    BuilderState, CapturePointState, LandClaimState, SiegeWarfareDataState, TurretState,
+    WAR_DATA_COMPONENT, WAR_DATA_TYPE_INDEX, WAR_KIND_INVASION, WAR_KIND_WAR, WAR_PHASE_RESOLVED,
+    WAR_PHASE_RUNNING, WAR_PHASE_SCHEDULED, WarDataState, WarEntry, WarSide, WarStatus,
+};
 pub use wire::{
     BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer, entity_of_raw_id, raw_id_of_entity,
 };
@@ -354,4 +380,14 @@ pub mod status_effects;
 pub use status_effects::{
     EffectMap, LightweightValue, LocalEffect, MapChange, RemoteEffect, STATUS_EFFECTS_COMPONENT,
     STATUS_EFFECTS_TYPE_INDEX, StatusEffectsState,
+};
+pub mod territory_governance;
+pub use territory_governance::{
+    EarningsInterval, ProjectEntry, ProjectSlot, ProjectTime, TAX_TYPES, TaxChange, TaxEarnings,
+    TerritoryGovernanceData, TerritoryProgressionData,
+};
+pub mod territory_upkeep;
+pub use territory_upkeep::{
+    ACCESS_OF_A_MEMBER, ACCESS_OF_NO_MEMBER, PAY_UPKEEP_COST_TYPE_INDEX, PayUpkeepCostMsg,
+    TERRITORY_FACET_READY_TYPE_INDEX, TERRITORY_INTERACTOR_COMPONENT, TerritoryFacetReadyMsg,
 };

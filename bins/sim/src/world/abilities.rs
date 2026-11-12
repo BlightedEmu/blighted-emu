@@ -1777,7 +1777,7 @@ impl SimWorld {
         projectile: SpellProjectile,
         now_ms: u64,
     ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
-        let places = self.target_places();
+        let places = self.attack_places(caster.entity);
         let facing = caster.view.map(|view| view.yaw);
         let yaw = Self::aim_yaw(caster.lock_target, facing, caster.from, &places);
         let point = fresh_aim(caster.aim, now_ms).filter(|_| caster.lock_target.is_none());
@@ -1808,6 +1808,13 @@ impl SimWorld {
             })
             .flatten();
         let mut results = Vec::new();
+        let entity = self.shot_entity_of(
+            &caster.connection,
+            &shot,
+            &ShotHit::plain(spell.damage_row.as_deref().unwrap_or_default()),
+            (caster.from, aim),
+            now_ms,
+        );
         match (reaches_enemies, met_mob) {
             (true, Some((mob, flight_s))) => {
                 let effects = (!spell.status_effects.is_empty())
@@ -1817,7 +1824,13 @@ impl SimWorld {
                     effects,
                     headshot: meets_head(&shot, (caster.from, aim), mob, &places),
                 };
-                self.launch(&caster.connection, (shot, hit), mob, flight_s, now_ms);
+                self.launch(
+                    &caster.connection,
+                    (shot, hit),
+                    (mob, entity),
+                    flight_s,
+                    now_ms,
+                );
             }
             (true, None) => results.push(Ok(AttackOutcome::Missed)),
             (false, _) => {}
@@ -1846,13 +1859,19 @@ impl SimWorld {
         results
     }
 
-    /// The living players but `caster`, with their bodies, as a shot meets them (by entity bits).
+    /// The living players but `caster` and its PvP foes ([`SimWorld::pvp_foes`]), with their
+    /// bodies, as a shot meets them (by entity bits).
     fn friend_places(&mut self, caster: Entity) -> Vec<(u64, Position, Capsule)> {
         let mut query = self.world.query::<(Entity, &super::Body, &super::Vitals)>();
-        query
+        let living: Vec<(Entity, Position)> = query
             .iter(&self.world)
             .filter(|(other, _, vitals)| *other != caster && !vitals.health.is_dead())
-            .map(|(other, body, _)| (other.to_bits(), body.motion.position(), PLAYER_CAPSULE))
+            .map(|(other, body, _)| (other, body.motion.position()))
+            .collect();
+        living
+            .into_iter()
+            .filter(|(other, _)| !self.pvp_foes(caster, *other))
+            .map(|(other, at)| (other.to_bits(), at, PLAYER_CAPSULE))
             .collect()
     }
 
@@ -1866,13 +1885,7 @@ impl SimWorld {
         met_mob: Option<(u64, f32)>,
         met_friend: Option<(u64, f32)>,
     ) -> (Position, f32) {
-        let mob = met_mob.and_then(|(mob, flight_s)| {
-            let at = self
-                .mob_states()
-                .find(|(own, _, _)| *own == mob)
-                .map(|(_, at, _)| at)?;
-            Some((at, flight_s))
-        });
+        let mob = met_mob.and_then(|(mob, flight_s)| Some((self.target_at(mob)?, flight_s)));
         let friend = met_friend.and_then(|(bits, flight_s)| {
             let at = self
                 .world
@@ -2018,6 +2031,9 @@ impl SimWorld {
                 continue;
             };
             let mut takers = self.players_within(at, flight.splash_m);
+            if let Some(source) = self.player_by_number(flight.source) {
+                takers.retain(|taker| !self.pvp_foes(source, *taker));
+            }
             if !takers.contains(&flight.target) {
                 takers.push(flight.target);
             }
@@ -3032,6 +3048,98 @@ mod tests {
         };
         let clamped = aimed_point(&far, REACH_M, NOW);
         assert!((clamped.horizontal_distance(from) - REACH_M).abs() < 0.01);
+    }
+
+    /// Retail spawns a projectile entity per shot (projectile study 2026-11-11): a card of the
+    /// slice and its projectile state, the time anchor two ticks later, the hit on the state,
+    /// and the entity gone its stuck lifetime and one second after the hit.
+    #[test]
+    fn a_shot_spawns_its_projectile_entity_and_shows_its_hit() {
+        const SHOTS: &str = r#"{"source": "test", "shots": [
+            {"damage_row": "BowAttack_Hipshot", "row_index": 178,
+             "asset": "62020140260a501ba88c5f0f781b76e4", "component": 1,
+             "position_component": null, "ranged_attack": 250, "weapon_effect": true,
+             "base_speed_mps": 100.0, "flying_lifetime_s": 10.0, "stuck_lifetime_s": 8.0,
+             "seen": 1}]}"#;
+        const ROW: &str = "BowAttack_Hipshot";
+        const NEAR_M: f32 = 1.0;
+        const ANCHOR_MS: u64 = 66;
+        const FLIGHT_MS: u64 = 300;
+        const STUCK_MS: u64 = 8_000;
+        const AFTER_END_MS: u64 = 1_000;
+        const MOB_NUMBER: u64 = 7;
+        let (mut world, caster) = spell_fight(&[]);
+        Arc::make_mut(&mut world.content).shot_entities =
+            nw_content::shot_entities::ShotEntities::parse(SHOTS).expect("shots");
+        let from = world.caster(caster).expect("caster").from;
+        let north = AimLine {
+            yaw: 0.0,
+            pitch: 0.0,
+        };
+        assert_eq!(
+            world.spawn_shot_entity(caster, "No_Such_Row", (from, north), NOW),
+            None,
+            "a row without an entity"
+        );
+        let number = world
+            .spawn_shot_entity(caster, ROW, (from, north), NOW)
+            .expect("the arrow");
+        assert_eq!(
+            world
+                .stations
+                .numbers_near(from, NEAR_M)
+                .collect::<Vec<_>>(),
+            [number]
+        );
+        let state = |world: &SimWorld| {
+            let slot = crate::world::slots::Slot {
+                interest: 1,
+                new: true,
+            };
+            let group = world.stations.group(number, slot).expect("its card");
+            assert!(matches!(
+                group.members[0].state,
+                MemberState::GdeMetadata(_)
+            ));
+            group
+                .members
+                .iter()
+                .find_map(|member| match member.state {
+                    MemberState::Projectile(state) => Some((member.component, state)),
+                    _ => None,
+                })
+                .expect("its projectile state")
+        };
+        let (component, card) = state(&world);
+        assert_eq!(component, 1, "the slice's component");
+        assert_eq!(
+            (card.ranged_attack, card.damage_row),
+            (Some(250), Some(178))
+        );
+        let velocity = card.velocity.expect("velocity");
+        assert!(velocity[0].abs() < 0.01 && (velocity[1] - 100.0).abs() < 0.01);
+        assert!(card.owner.is_some() && card.weapon_effect.is_some());
+        assert_eq!(card.time_anchor_us, None, "the anchor comes later");
+        let known = crate::world::slots::Slot {
+            interest: 1,
+            new: false,
+        };
+        assert_eq!(world.stations.group(number, known), None, "no change yet");
+        world.tick_shot_entities(NOW + ANCHOR_MS);
+        assert!(state(&world).1.time_anchor_us.is_some());
+        let change = world.stations.group(number, known).expect("the anchor");
+        assert_eq!(change.members.len(), 1, "the changed state alone");
+        world.shot_entity_hit(number, MOB_NUMBER, from, NOW + FLIGHT_MS);
+        let hit = state(&world).1;
+        assert!(hit.collided_with.is_some() && hit.flags.is_some());
+        world.tick_shot_entities(NOW + FLIGHT_MS + STUCK_MS + AFTER_END_MS - 1);
+        assert_eq!(world.stations.numbers_near(from, NEAR_M).count(), 1);
+        world.tick_shot_entities(NOW + FLIGHT_MS + STUCK_MS + AFTER_END_MS);
+        assert_eq!(
+            world.stations.numbers_near(from, NEAR_M).count(),
+            0,
+            "gone after its stuck lifetime"
+        );
     }
 
     /// Retail spawns a spell entity per cast (Sacred Ground's circle: slice

@@ -65,6 +65,9 @@ pub struct SavedArena {
     pub last_dungeon_mutated: bool,
     /// The instance stay.
     pub stay: Option<SavedStay>,
+    /// `queueEligibleTimesForGameModes` (world migration 0037): per game mode CRC, the Unix
+    /// nanoseconds from which the character may queue again.
+    pub queue_eligible: Vec<(u32, u64)>,
 }
 
 /// The columns of a `character_arena` row.
@@ -89,6 +92,8 @@ struct ArenaColumns {
     stay_return_level: Option<String>,
     stay_return_bits: Option<Vec<i32>>,
     stay_activated_ns: Option<i64>,
+    queue_eligible_modes: Vec<i64>,
+    queue_eligible_unix_ns: Vec<i64>,
 }
 
 fn dungeon_id(
@@ -110,7 +115,8 @@ pub(crate) async fn character_arena(
          last_dungeon, last_mutated_dungeon, base_entered, mutated_entered, \
          group_trials_entered, next_base_refresh_ns, next_mutated_refresh_ns, \
          next_group_trial_refresh_ns, mutation_award, last_dungeon_mutated, stay_instance, \
-         stay_game_mode, stay_phase, stay_return_level, stay_return_bits, stay_activated_ns \
+         stay_game_mode, stay_phase, stay_return_level, stay_return_bits, stay_activated_ns, \
+         queue_eligible_modes, queue_eligible_unix_ns \
          FROM character_arena WHERE character_id = $1",
     )
     .bind(character_id)
@@ -165,6 +171,17 @@ fn arena_of(row: ArenaColumns) -> Result<SavedArena, DbError> {
         mutation_award: row.mutation_award,
         last_dungeon_mutated: row.last_dungeon_mutated,
         stay,
+        queue_eligible: row
+            .queue_eligible_modes
+            .into_iter()
+            .zip(row.queue_eligible_unix_ns)
+            .map(|(mode, unix_ns)| {
+                Ok((
+                    from_column(mode, "queue_eligible_modes")?,
+                    id_value(unix_ns),
+                ))
+            })
+            .collect::<Result<_, DbError>>()?,
     })
 }
 
@@ -182,9 +199,9 @@ pub(crate) async fn save_character_arena(
          base_entered, mutated_entered, group_trials_entered, next_base_refresh_ns, \
          next_mutated_refresh_ns, next_group_trial_refresh_ns, mutation_award, stay_instance, \
          stay_game_mode, stay_phase, stay_return_level, stay_return_bits, stay_activated_ns, \
-         last_dungeon_mutated) \
+         last_dungeon_mutated, queue_eligible_modes, queue_eligible_unix_ns) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, \
-         $19, $20) \
+         $19, $20, $21, $22) \
          ON CONFLICT (character_id) DO UPDATE SET \
          dungeon_cooldown_since_2000_ns = $2, solo_trial_cooldown_since_2000_ns = $3, \
          ranks = $4, last_dungeon = $5, last_mutated_dungeon = $6, base_entered = $7, \
@@ -192,7 +209,7 @@ pub(crate) async fn save_character_arena(
          next_mutated_refresh_ns = $11, next_group_trial_refresh_ns = $12, \
          mutation_award = $13, stay_instance = $14, stay_game_mode = $15, stay_phase = $16, \
          stay_return_level = $17, stay_return_bits = $18, stay_activated_ns = $19, \
-         last_dungeon_mutated = $20",
+         last_dungeon_mutated = $20, queue_eligible_modes = $21, queue_eligible_unix_ns = $22",
     )
     .bind(character_id)
     .bind(id_column(arena.dungeon_cooldown_since_2000_ns))
@@ -223,6 +240,20 @@ pub(crate) async fn save_character_arena(
     .bind(stay.map(|stay| bits_list(&stay.return_position)))
     .bind(stay.map(|stay| id_column(stay.activated_ns)))
     .bind(arena.last_dungeon_mutated)
+    .bind(
+        arena
+            .queue_eligible
+            .iter()
+            .map(|(mode, _)| i64::from(*mode))
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        arena
+            .queue_eligible
+            .iter()
+            .map(|(_, unix_ns)| id_column(*unix_ns))
+            .collect::<Vec<_>>(),
+    )
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -254,6 +285,8 @@ mod tests {
             stay_return_level: None,
             stay_return_bits: None,
             stay_activated_ns: None,
+            queue_eligible_modes: vec![0x1fad_9d42],
+            queue_eligible_unix_ns: vec![id_column(u64::MAX)],
         }
     }
 
@@ -281,6 +314,7 @@ mod tests {
         assert_eq!(arena.group_trials_entered, u32::MAX);
         assert_eq!(arena.next_base_refresh_ns, 1_792_746_000_226_611_400);
         assert!(arena.last_dungeon_mutated);
+        assert_eq!(arena.queue_eligible, [(0x1fad_9d42, u64::MAX)]);
         assert_eq!(
             arena.stay,
             Some(SavedStay {

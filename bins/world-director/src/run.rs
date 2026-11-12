@@ -11,6 +11,7 @@ use nw_common::config::ConfigError;
 use nw_common::logging::{LoggingError, init_logging};
 use nw_content::client_build::load_client_build;
 use nw_content::container::ContainerError;
+use nw_content::war_forts::WarForts;
 use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 use nw_login::store::StoreError;
 use nw_login::valkey::Valkey;
@@ -20,6 +21,7 @@ use nw_world::world_file::world_file_path;
 
 use crate::config::{DirectorConfig, DirectorConfigError, InstancesConfig, load_director_config};
 use crate::instances::{InstanceSettings, LaunchSettings};
+use crate::matchmaking::{MatchSettings, QueueRules};
 use crate::server::{DirectorSettings, ServeError, serve as serve_loop};
 
 /// Failure while starting or running `world-director`.
@@ -93,7 +95,10 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         admit_timeout: Duration::from_millis(config.admit_timeout_ms),
         heartbeat_interval: Duration::from_millis(config.heartbeat_interval_ms),
         heartbeat_misses: config.heartbeat_misses,
-        instances: config.instances.as_ref().map(instance_settings),
+        instances: config
+            .instances
+            .as_ref()
+            .map(|instances| instance_settings(instances, war_forts(&config, &build))),
     };
     // The heights are needed only for the start position.
     drop(world_file);
@@ -104,8 +109,23 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         .block_on(serve_async(config, password, settings))
 }
 
-/// The instance rules of the `[instances]` section.
-fn instance_settings(config: &InstancesConfig) -> InstanceSettings {
+/// The forts of the territory wars of the content of `config` for client build `build`; none
+/// (and so no war instance) when the table is missing.
+fn war_forts(config: &DirectorConfig, build: &str) -> WarForts {
+    match WarForts::load(&config.content_dir, build) {
+        Ok(forts) => {
+            tracing::info!(forts = forts.len(), "war forts");
+            forts
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no war forts table: no territory war gets an instance");
+            WarForts::default()
+        }
+    }
+}
+
+/// The instance rules of the `[instances]` section, with the forts of the wars `war_forts`.
+fn instance_settings(config: &InstancesConfig, war_forts: WarForts) -> InstanceSettings {
     InstanceSettings {
         empty_timeout: Duration::from_millis(config.empty_timeout_ms),
         open_timeout: Duration::from_millis(config.open_timeout_ms),
@@ -118,6 +138,17 @@ fn instance_settings(config: &InstancesConfig) -> InstanceSettings {
             id_prefix: launch.id_prefix.clone(),
             forget_after: Duration::from_millis(launch.forget_after_ms),
         }),
+        queues: QueueRules {
+            arena: MatchSettings::arena(
+                config.arena.match_size,
+                Duration::from_millis(config.arena.accept_timeout_ms),
+            ),
+            outpost_rush: MatchSettings::outpost_rush(
+                config.outpost_rush.match_size,
+                Duration::from_millis(config.outpost_rush.accept_timeout_ms),
+            ),
+        },
+        war_forts,
     }
 }
 

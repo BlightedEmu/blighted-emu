@@ -161,7 +161,8 @@ impl SocialWorld {
             | Effect::Deliver { .. }
             | Effect::MoveCoins { .. }
             | Effect::OwnState { .. }
-            | Effect::GroupEntity { .. } => Vec::new(),
+            | Effect::GroupEntity { .. }
+            | Effect::UpkeepPaid { .. } => Vec::new(),
         }
     }
 
@@ -511,6 +512,7 @@ impl SocialWorld {
                         .icon
                         .map(|icon| icon_of_bytes(&icon))
                         .unwrap_or_default(),
+                    role: person.group_role,
                     health: person.vitals.health_percent,
                     mana: person.vitals.mana_percent,
                     connected: person.online.is_some(),

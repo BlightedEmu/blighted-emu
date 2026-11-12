@@ -21,8 +21,9 @@ use bevy_ecs::entity::Entity;
 use std::collections::HashMap;
 
 use nw_bus::{
-    ConnectionRef, HandoffOffer, InstanceBeat, InstanceOpened, InstanceRefusal, InstanceReply,
-    InstanceRequest, InstanceStay, PlayerArena, Point, RunningInstance, SimSlot, StoredPoint,
+    ArenaSeat, ConnectionRef, HandoffOffer, InstanceBeat, InstanceOpened, InstanceRefusal,
+    InstanceReply, InstanceRequest, InstanceStay, PlayerArena, Point, RunningInstance, SimSlot,
+    StoredPoint, WAR_GAME_MODE, WarInstance,
 };
 use nw_content::instances::{EntryCounter, InstanceCatalog, InstanceKind, InstanceMode, NO_INDEX};
 use nw_content::loot_limits::ResetCycle;
@@ -35,6 +36,7 @@ use nw_sim_core::Position;
 use uuid::Uuid;
 
 use super::mutations::{InstanceMutation, difficulty_of_request};
+use super::war_fight::WarFight;
 use super::{
     Body, HandoffStart, PHASING_BEFORE_HANDOFF_MS, Player, SimWorld, Vitals, gather_answer,
     handoff_offer, owner_in, quests_of, send_now, unix_ns,
@@ -74,7 +76,7 @@ const DUNGEON_PREFIX: &str = "dungeon";
 const MAP_PREFIXES: [&str; 2] = ["nw_dungeon_", "nw_"];
 
 /// An instance the director gave the player: it enters it at its 946.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct Reservation {
     instance: Uuid,
     sim: SimSlot,
@@ -84,6 +86,9 @@ pub(super) struct Reservation {
     activated_ns: u64,
     /// The mutation difficulty asked for; `None` for a normal run.
     mutation_difficulty: Option<u8>,
+    /// An arena match's seat of the player and the spot it appears at; `None` for the other
+    /// instances (the game mode's first teleport spot).
+    arena: Option<(ArenaSeat, Position)>,
 }
 
 /// A move of the player into or out of an instance.
@@ -121,6 +126,19 @@ pub(super) struct ArenaPlayer {
 }
 
 impl ArenaPlayer {
+    /// Each game mode's CRC and the Unix ns from which the player may queue for it again
+    /// (`queueEligibleTimesForGameModes`).
+    pub(super) fn queue_eligible(&self) -> &[(u32, u64)] {
+        &self.record.queue_eligible
+    }
+
+    /// The player may queue for game mode `crc` again from Unix ns `from_ns` on (a leaver's
+    /// penalty, [`super::arena_match`]).
+    pub(super) fn bar_queue(&mut self, crc: u32, from_ns: u64) {
+        self.record.queue_eligible.retain(|(mode, _)| *mode != crc);
+        self.record.queue_eligible.push((crc, from_ns));
+    }
+
     /// The CRC of the expedition it waits for or may enter; `None` in no expedition queue.
     pub(super) fn queued_game_mode(&self) -> Option<u32> {
         match &self.reservation {
@@ -263,6 +281,9 @@ pub(crate) struct InstanceRun {
     closing: bool,
     /// Its mutation, from the first player that arrived with one.
     mutation: Option<InstanceMutation>,
+    /// The fight of the territory war it runs ([`super::war_fight`]); `None` for every other
+    /// instance.
+    war: Option<WarFight>,
 }
 
 impl InstanceRun {
@@ -280,6 +301,29 @@ impl InstanceRun {
     pub(super) fn set_mutation(&mut self, mutation: InstanceMutation) {
         self.mutation = Some(mutation);
     }
+
+    /// The fight of the war it runs.
+    pub(super) const fn war_fight(&self) -> Option<&WarFight> {
+        self.war.as_ref()
+    }
+
+    /// Takes the fight of its war out, to run it ([`Self::put_war_fight`] puts it back).
+    pub(super) fn take_war_fight(&mut self) -> Option<WarFight> {
+        self.war.take()
+    }
+
+    /// Puts the fight of its war back.
+    pub(super) fn put_war_fight(&mut self, fight: WarFight) {
+        self.war = Some(fight);
+    }
+
+    /// It ends at Unix ms `ends_at_ms` at the latest.
+    pub(super) fn end_at(&mut self, ends_at_ms: u64) {
+        self.ends_at_ms = Some(
+            self.ends_at_ms
+                .map_or(ends_at_ms, |end| end.min(ends_at_ms)),
+        );
+    }
 }
 
 impl InstanceRun {
@@ -291,6 +335,11 @@ impl InstanceRun {
     /// Its game mode id.
     pub(super) fn game_mode(&self) -> &str {
         &self.game_mode
+    }
+
+    /// Its phase id.
+    pub(super) const fn phase(&self) -> u64 {
+        self.phase
     }
 }
 
@@ -373,17 +422,18 @@ fn letters_and_digits(text: &str) -> String {
     text.chars().filter(char::is_ascii_alphanumeric).collect()
 }
 
-/// The level of each game mode of `catalog`, by its CRC (each is built once: its strings live
-/// for the rest of the process).
-pub(crate) fn instance_levels(catalog: &InstanceCatalog) -> HashMap<u32, LevelSpec> {
+/// The level of each map of each game mode of `catalog`, by the mode's CRC and the map's
+/// folder (each is built once: its strings live for the rest of the process).
+pub(crate) fn instance_levels(catalog: &InstanceCatalog) -> HashMap<(u32, String), LevelSpec> {
     catalog
         .modes()
-        .map(|mode| {
-            let map = &mode.map;
-            (
-                mode.crc,
-                LevelSpec::instance(&map.folder, &map.map_name, &map.coatlicue_path, map.frame),
-            )
+        .flat_map(|mode| {
+            mode.maps().map(|map| {
+                (
+                    (mode.crc, map.folder.clone()),
+                    LevelSpec::instance(&map.folder, &map.map_name, &map.coatlicue_path, map.frame),
+                )
+            })
         })
         .collect()
 }
@@ -407,13 +457,20 @@ impl SimWorld {
         FacetHeader::of(PLAYER_ARENA_FACET, number)
     }
 
-    /// The level a player arrives in: the level of the running instance's game mode (its own
-    /// frame) on an instance sim, else the sim's level.
+    /// The level a player arrives in: the framed level of the running war, or the level of the
+    /// running instance's game mode on this sim's map (its own frame) on an instance sim, else
+    /// the sim's level.
     pub(super) fn arrival_level(&self) -> LevelSpec {
+        if let Some(fight) = self.war_fight() {
+            return fight.level();
+        }
         self.instance_run
             .as_ref()
             .and_then(|run| self.content.instances.by_id(&run.game_mode))
-            .and_then(|mode| self.instance_levels.get(&mode.crc))
+            .and_then(|mode| {
+                self.instance_levels
+                    .get(&(mode.crc, self.settings.level.folder.to_owned()))
+            })
             .copied()
             .unwrap_or(self.settings.level)
     }
@@ -541,7 +598,9 @@ impl SimWorld {
         let Some(player) = self.world.get::<Player>(entity) else {
             return false;
         };
-        if (remote && !mode.remote_entry) || mode.generated {
+        // An arena or an Outpost Rush match is entered by the matchmaking queue only
+        // ([`super::queue`]).
+        if (remote && !mode.remote_entry) || mode.generated || mode.kind.is_matched() {
             return false;
         }
         // `RequiredLevel` is the character level the client shows: one above the zero-based
@@ -691,6 +750,7 @@ impl SimWorld {
                     crc,
                     activated_ns,
                     mutation_difficulty,
+                    arena: None,
                 });
                 player.arena.touched = true;
                 ActivateResponse::Success
@@ -703,6 +763,34 @@ impl SimWorld {
         };
         self.answer_activation(entity, number, response);
         self.push_arena_change(entity);
+    }
+
+    /// The arena match the director opened for player `entity`: it goes there at once (its
+    /// client confirmed the matchmaking login, 5450) at the spot `spot` of its seat `seat` (arena
+    /// flow study: retail moved the player right after the 5450, with no 946 between).
+    pub(super) fn enter_match(
+        &mut self,
+        entity: Entity,
+        (instance, sim, phase): (Uuid, SimSlot, u64),
+        crc: u32,
+        seat: ArenaSeat,
+        spot: Position,
+        now_ms: u64,
+    ) {
+        let activated_ns = unix_ns(self.server_ms);
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        player.arena.reservation = Some(Reservation {
+            instance,
+            sim,
+            phase,
+            crc,
+            activated_ns,
+            mutation_difficulty: None,
+            arena: Some((seat, spot)),
+        });
+        self.teleport_in(entity, now_ms);
     }
 
     /// 946: the player goes into its reserved instance.
@@ -757,7 +845,7 @@ impl SimWorld {
             record.solo_trial_cooldown_since_2000_ns = since_2000_ns;
         }
         record.last_dungeon = Some(*reservation.instance.as_bytes());
-        record.stay = Some(InstanceStay {
+        let stay = InstanceStay {
             instance: reservation.instance,
             game_mode: mode.id.clone(),
             phase: reservation.phase,
@@ -765,22 +853,20 @@ impl SimWorld {
             return_position: StoredPoint::of(Point::from(position)),
             activated_ns: reservation.activated_ns,
             mutation_difficulty: reservation.mutation_difficulty,
-        });
-        let [x, y, z] = mode
-            .map
-            .teleports
-            .first()
-            .map(|teleport| teleport.position)
-            .unwrap_or_default();
-        player.arena.transfer = Some(Transfer {
-            target: Some(reservation.sim.clone()),
-            position: Position { x, y, z },
-            phasing_left_ms: None,
-        });
-        player.arena.touched = true;
-        let loading = player.flow.leave();
-        let connection = player.connection.clone();
-        send_now(&mut self.combat_messages, &connection, &loading);
+            seat: reservation.arena.map(|(seat, _)| seat),
+        };
+        let position = reservation.arena.map_or_else(
+            || {
+                let [x, y, z] = mode
+                    .map
+                    .teleports
+                    .first()
+                    .map(|teleport| teleport.position)
+                    .unwrap_or_default();
+                Position { x, y, z }
+            },
+            |(_, spot)| spot,
+        );
         tracing::info!(
             player = player.number,
             instance = %reservation.instance,
@@ -788,7 +874,70 @@ impl SimWorld {
             now_ms,
             "player enters an instance"
         );
+        self.move_into_instance(entity, stay, reservation.sim, position);
+    }
+
+    /// Player `entity` goes to the instance of its `stay` on sim `target`, where it appears at
+    /// `position`: the loading screen now, the handoff after its empty phasing
+    /// ([`Self::instance_transfers`]).
+    fn move_into_instance(
+        &mut self,
+        entity: Entity,
+        stay: InstanceStay,
+        target: SimSlot,
+        position: Position,
+    ) {
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        player.arena.record.stay = Some(stay);
+        player.arena.transfer = Some(Transfer {
+            target: Some(target),
+            position,
+            phasing_left_ms: None,
+        });
+        player.arena.touched = true;
+        let loading = player.flow.leave();
+        let connection = player.connection.clone();
+        send_now(&mut self.combat_messages, &connection, &loading);
         self.push_arena_change(entity);
+    }
+
+    /// Player `entity` of a war's roster goes to the war's instance `(instance, sim, phase)` and
+    /// appears at `arrival` ([`super::war_fight`]); a player in a move or an instance stays.
+    pub(super) fn enter_war_instance(
+        &mut self,
+        entity: Entity,
+        (instance, sim, phase): (Uuid, SimSlot, u64),
+        arrival: Position,
+    ) {
+        let level = self.settings.level.folder.to_owned();
+        let activated_ns = unix_ns(self.server_ms);
+        let Some(position) = self
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position())
+        else {
+            return;
+        };
+        let Some(player) = self.world.get::<Player>(entity) else {
+            return;
+        };
+        if player.arena.transfer.is_some() || player.arena.record.stay.is_some() {
+            return;
+        }
+        tracing::info!(player = player.number, %instance, "player enters its war instance");
+        let stay = InstanceStay {
+            instance,
+            game_mode: WAR_GAME_MODE.to_owned(),
+            phase,
+            return_level: level,
+            return_position: StoredPoint::of(Point::from(position)),
+            activated_ns,
+            mutation_difficulty: None,
+            seat: None,
+        };
+        self.move_into_instance(entity, stay, sim, arrival);
     }
 
     /// 926, 3309 or interaction 74: a player in this instance sim goes back to where it entered
@@ -809,6 +958,7 @@ impl SimWorld {
         };
         // The game mode takes back its items (`ItemClassesToRemoveOnExit`).
         self.remove_instance_items(entity);
+        self.war_exit(entity);
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
@@ -901,6 +1051,12 @@ impl SimWorld {
             refresh(&mut arena.record, clock, now_ns);
         }
         let stayed = arena.record.stay.as_ref().map(|stay| stay.instance);
+        let from_match = !instance_sim
+            && arena
+                .record
+                .stay
+                .as_ref()
+                .is_some_and(|stay| stay.seat.is_some());
         match (instance_sim, stayed) {
             // Back from an instance (or it ended): no stay, and a trial's state and cooldown end
             // (retail: both cleared in the first state after every soul trial's exit).
@@ -934,6 +1090,13 @@ impl SimWorld {
         }
         if let Some(stay) = stay {
             self.adopt_mutation(&stay, number);
+            if let Some(seat) = stay.seat {
+                self.join_arena_match(entity, seat);
+            }
+            self.war_arrived(entity);
+        }
+        if !instance_sim {
+            self.queue_arrived(entity, number, from_match);
         }
         self.push_arena_change(entity);
     }
@@ -985,7 +1148,7 @@ impl SimWorld {
                 reason: format!("unknown game mode {game_mode}"),
             };
         };
-        if mode.map.folder != self.settings.level.folder {
+        if mode.map_of(self.settings.level.folder).is_none() {
             return InstanceOpened::Refused {
                 reason: format!("game mode {game_mode} is not on this level"),
             };
@@ -1004,8 +1167,67 @@ impl SimWorld {
             visited: false,
             closing: false,
             mutation: None,
+            war: None,
         });
         tracing::info!(%instance, game_mode, "instance opened");
+        InstanceOpened::Opened
+    }
+
+    /// Runs the instance `instance` of the territory war `war` (the director's opening): the
+    /// open world level cut to the frame of the war's fort, with only the mobs whose spawns lie
+    /// in the frame ([`super::war_fight`]).
+    pub fn open_war_instance(
+        &mut self,
+        instance: Uuid,
+        phase: u64,
+        (members, ends_at_ms): (Vec<Uuid>, Option<u64>),
+        war: WarInstance,
+        now_ms: u64,
+    ) -> InstanceOpened {
+        if !self.instance_sim {
+            return InstanceOpened::Refused {
+                reason: "this sim has no instance role".to_owned(),
+            };
+        }
+        if let Some(run) = &self.instance_run
+            && run.instance != instance
+        {
+            return InstanceOpened::Refused {
+                reason: format!("this sim runs instance {}", run.instance),
+            };
+        }
+        let content = std::sync::Arc::clone(&self.content);
+        let (Some(fort), Some(level)) = (
+            content.war_forts.fort(war.territory),
+            self.war_levels.get(&war.territory).copied(),
+        ) else {
+            return InstanceOpened::Refused {
+                reason: format!("no capture shows the fort of territory {}", war.territory),
+            };
+        };
+        if self.settings.level.folder != nw_messages::level_info::OPEN_WORLD_LEVEL.folder {
+            return InstanceOpened::Refused {
+                reason: "a war instance runs on the open world level".to_owned(),
+            };
+        }
+        let fight = WarFight::new(war, fort.clone(), level);
+        self.mob_changes.add(self.mobs.set_cells(|_| false));
+        self.mob_changes
+            .add(self.mobs.set_cells(|at| fight.frames(at.x, at.y)));
+        self.instance_run = Some(InstanceRun {
+            instance,
+            game_mode: WAR_GAME_MODE.to_owned(),
+            phase,
+            members,
+            ends_at_ms,
+            opened_ms: now_ms,
+            empty_since_ms: None,
+            visited: false,
+            closing: false,
+            mutation: None,
+            war: Some(fight),
+        });
+        tracing::info!(%instance, war = %war.war, territory = war.territory, "war instance opened");
         InstanceOpened::Opened
     }
 
@@ -1074,11 +1296,16 @@ impl SimWorld {
             self.instance_run = None;
             return Some(InstanceBeat { running: None });
         }
-        let capacity = self
-            .content
-            .instances
-            .by_id(&run.game_mode)
-            .map_or(0, |mode| mode.capacity);
+        let war = run.war.as_ref().map(WarFight::war);
+        // A war's capacity is its roster.
+        let capacity = match war {
+            Some(_) => u32::try_from(run.members.len()).unwrap_or(u32::MAX),
+            None => self
+                .content
+                .instances
+                .by_id(&run.game_mode)
+                .map_or(0, |mode| mode.capacity),
+        };
         Some(InstanceBeat {
             running: Some(RunningInstance {
                 instance: run.instance,
@@ -1090,6 +1317,7 @@ impl SimWorld {
                 phase: run.phase,
                 capacity,
                 ends_at_ms: run.ends_at_ms,
+                war,
             }),
         })
     }
@@ -1179,6 +1407,8 @@ mod tests {
                     position: [1.0, 2.0, 3.0],
                     yaw_deg: 0.0,
                 }],
+                formation: Vec::new(),
+                map_crc: TEST_CRC,
             },
             capacity: 5,
             min_group: 3,
@@ -1196,6 +1426,8 @@ mod tests {
             counter: EntryCounter::BaseDungeon,
             game_mode_index: NO_INDEX,
             generated: false,
+            rotation: Vec::new(),
+            rotation_span_seconds: None,
         }
     }
 
@@ -1394,6 +1626,7 @@ mod tests {
             crc: trial.crc,
             activated_ns: NOW_NS,
             mutation_difficulty: None,
+            arena: None,
         });
         arena.touched = true;
         let queued = arena.change(Some(&trial)).expect("queued");
@@ -1414,6 +1647,7 @@ mod tests {
             return_position: StoredPoint::default(),
             activated_ns: NOW_NS,
             mutation_difficulty: None,
+            seat: None,
         });
         arena.record.dungeon_cooldown_since_2000_ns = 5;
         let inside = arena.change(Some(&trial)).expect("inside");

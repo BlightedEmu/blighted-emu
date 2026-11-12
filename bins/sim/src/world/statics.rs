@@ -571,6 +571,7 @@ mod tests {
             perk_ids: Vec::new(),
             perks: [0; nw_messages::items::PERK_SLOTS],
             draws_shield: false,
+            artifact: None,
         };
         let weapon = |item_id: &str, item_index| KitItem {
             perk_ids: vec!["PerkID_StatSwap_BaseDamage".to_owned()],

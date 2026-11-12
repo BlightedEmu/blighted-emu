@@ -20,7 +20,20 @@
 //!   `m_respawnAfterDeath`, `m_maintainPopulation`; the point spawner's `m_minRespawnCooldown`,
 //!   `m_maxRespawnCooldown`, `m_spawnOnInitialize`; the client's field names);
 //! - `DetectionVolumeComponent`: the radius of an encounter's player volume;
-//! - `GatherableControllerComponent`: a loot container's loot table.
+//! - `GatherableControllerComponent`: a loot container's loot table;
+//! - the replicated components of a level object (a gate, a door, a switch) and of an encounter
+//!   slice's own entities: each one's replica index (field `81e598c5` of its base class, name
+//!   Unknown), which is its component number on the wire (Observed, dungeon gates note
+//!   2026-11-11: every member of the Amrine, Starstone and Dynasty gates and of the Dynasty cave
+//!   monolith fits it), and for a timeline its asset, for a delayed event its delay.
+//!
+//! An entity's place in its slice is its `m_worldTM` when it has one: retail places the
+//! Starstone level script's encounters, doors and arena blockers by it, not by the chain of
+//! their parents' `m_localTM` (Observed: the folder entities `Encounters` and `PortalStone` of
+//! `shatteredobeliskdungeon` stand at (-576, -484, -342) while each child's own transform is
+//! the place retail shows; the boss encounter, the boss door and both arena blockers, 4 of 4;
+//! the entities of the Amrine and Starstone level scripts keep `m_worldTM` equal to `m_localTM`,
+//! 436 of 436).
 //!
 //! An asset reference (`m_sliceAsset`, `m_aliasAsset`, `m_trackedSlice`) is the asset GUID
 //! (16 bytes), its sub id and type, then the hint path as a big-endian `u64` length at byte 48
@@ -60,6 +73,37 @@ pub const DETECTION_VOLUME_TYPE: [u8; UUID_SIZE] = [
 pub const GATHERABLE_CONTROLLER_TYPE: [u8; UUID_SIZE] = [
     0x0b, 0x38, 0x2a, 0xf4, 0x79, 0x46, 0x46, 0x98, 0x92, 0x23, 0x20, 0x6d, 0x11, 0x87, 0xb6, 0x12,
 ];
+/// `{6C2FC842-F451-4B45-9D7D-A6EE954DF025}`: the component whose replica is the position state
+/// (class 13) of a level object (Observed: its replica index is the position member's component
+/// in the Amrine gates; its name is Unknown).
+pub const NETWORK_POSITION_TYPE: [u8; UUID_SIZE] = [
+    0x6c, 0x2f, 0xc8, 0x42, 0xf4, 0x51, 0x4b, 0x45, 0x9d, 0x7d, 0xa6, 0xee, 0x95, 0x4d, 0xf0, 0x25,
+];
+/// `{711F015C-C03B-4735-8C69-B21A224EF2DD}`: a timeline (its replica is a
+/// `TimelineComponentReplicatedState`, class 1647; Observed in the Amrine gates and the Dynasty
+/// cave monolith).
+pub const TIMELINE_TYPE: [u8; UUID_SIZE] = [
+    0x71, 0x1f, 0x01, 0x5c, 0xc0, 0x3b, 0x47, 0x35, 0x8c, 0x69, 0xb2, 0x1a, 0x22, 0x4e, 0xf2, 0xdd,
+];
+/// `{D353F7E8-4266-F749-19A1-AA2C3841FBCA}`: a delayed event (its replica is a
+/// `DelayedEventComponentReplicatedState`, class 3139; Observed in the Dynasty cave monolith).
+pub const DELAYED_EVENT_TYPE: [u8; UUID_SIZE] = [
+    0xd3, 0x53, 0xf7, 0xe8, 0x42, 0x66, 0xf7, 0x49, 0x19, 0xa1, 0xaa, 0x2c, 0x38, 0x41, 0xfb, 0xca,
+];
+/// `{FECC8785-5D77-7138-0BDF-573DE220D90E}`: a placement obstruction (its replica is a
+/// `PlacementObstructionComponentReplicatedState`, class 2187; Observed in the Dynasty cave
+/// monolith).
+pub const PLACEMENT_OBSTRUCTION_TYPE: [u8; UUID_SIZE] = [
+    0xfe, 0xcc, 0x87, 0x85, 0x5d, 0x77, 0x71, 0x38, 0x0b, 0xdf, 0x57, 0x3d, 0xe2, 0x20, 0xd9, 0x0e,
+];
+/// The name CRC of a component's replica index (a big-endian `u32` in its base class; the text
+/// is Unknown).
+pub const REPLICA_INDEX_NAME: u32 = 0x81e5_98c5;
+/// The name CRC of a timeline's asset reference (the `.timeline` file; the text is Unknown).
+pub const TIMELINE_ASSET_NAME: u32 = 0x5e82_df32;
+/// The name CRC of a delayed event's delay, seconds (a big-endian `f32`; the text is Unknown;
+/// Observed: 3.5 and 0.1 on the Dynasty `DeathEvent`, the `totalDelayDuration` retail sent).
+pub const DELAY_NAME: u32 = 0x63bf_7cb0;
 /// Objective classes (`m_objectives` entries).
 pub mod objective_type {
     use super::UUID_SIZE;
@@ -394,6 +438,37 @@ impl Transform {
     }
 }
 
+/// What a replicated component of an entity is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReplicatedKind {
+    /// Its position ([`NETWORK_POSITION_TYPE`]).
+    Position,
+    /// `GatherableControllerComponent`.
+    Gatherable,
+    /// A timeline and its `.timeline` asset.
+    Timeline {
+        /// The asset (`None` when the component names none).
+        asset: Option<AssetRef>,
+    },
+    /// A delayed event and its delay, seconds.
+    DelayedEvent {
+        /// The delay ([`DELAY_NAME`]).
+        delay_s: f32,
+    },
+    /// A placement obstruction.
+    PlacementObstruction,
+}
+
+/// One replicated component of an entity: its kind and its replica index (its component number
+/// on the wire).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplicatedComponent {
+    /// Its kind.
+    pub kind: ReplicatedKind,
+    /// Its replica index ([`REPLICA_INDEX_NAME`]).
+    pub index: u32,
+}
+
 /// One entity of a script slice with the components this reader keeps.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ScriptEntity {
@@ -405,6 +480,10 @@ pub struct ScriptEntity {
     pub parent: Option<u64>,
     /// `m_localTM`.
     pub local: Transform,
+    /// `m_worldTM`: its place in the slice, when the slice holds it.
+    pub world: Option<Transform>,
+    /// Its replicated components of the kinds this reader keeps, with a replica index above 0.
+    pub replicated: Vec<ReplicatedComponent>,
     /// Its spawner.
     pub spawner: Option<Spawner>,
     /// Its vitals row.
@@ -421,6 +500,8 @@ pub struct ScriptEntity {
     pub loot_table: Option<String>,
     /// The spawn rules of its spawner.
     pub rules: Option<SpawnerRules>,
+    /// Its rewards by difficulty.
+    pub rewards: Option<DifficultyRewards>,
 }
 
 /// The entities of one script slice, in stream order.
@@ -436,9 +517,13 @@ impl SliceScript {
         self.entities.iter().find(|entity| entity.id == id)
     }
 
-    /// The transform of entity `id` relative to the slice's placement: its local transform
-    /// after its parents' (a parent chain longer than the slice is cut).
+    /// The transform of entity `id` relative to the slice's placement: its `m_worldTM` when it
+    /// has one (see the module text), else its local transform after its parents' (a parent
+    /// chain longer than the slice is cut).
     pub fn placement_of(&self, id: u64) -> Transform {
+        if let Some(world) = self.entity(id).and_then(|entity| entity.world) {
+            return world;
+        }
         let mut chain = Vec::new();
         let mut at = self.entity(id);
         while let Some(entity) = at {
@@ -468,6 +553,13 @@ impl SliceScript {
             .find_map(|entity| entity.variant.as_ref())
     }
 
+    /// The rewards by difficulty of the slice, when an entity holds them.
+    pub fn rewards(&self) -> Option<&DifficultyRewards> {
+        self.entities
+            .iter()
+            .find_map(|entity| entity.rewards.as_ref())
+    }
+
     /// The loot table of the slice's loot container, when it is one.
     pub fn loot_table(&self) -> Option<&str> {
         self.entities
@@ -480,6 +572,32 @@ impl SliceScript {
 /// The name CRC of a `DetectionVolumeComponent`'s shape offset (its text is Unknown; a vector,
 /// 0 in the volumes seen).
 pub const DETECTION_OFFSET_NAME: u32 = 0x0a63_b9da;
+/// The name CRC of the list of difficulty rewards of a corrupted breach's root (Observed in
+/// `enc_darkness_minor_monolith_00`: a container of type `{B555F388-8F89-5380-AF27-467E63D18147}`
+/// whose entries hold a radius and a list of game events; the field and class names are
+/// Unknown).
+pub const DIFFICULTY_REWARDS_NAME: u32 = 0x09ff_d3f2;
+/// The name CRC of an entry's radius, metres (Observed: 500.0; name Unknown).
+pub const REWARD_RADIUS_NAME: u32 = 0x103c_5ae1;
+/// The name CRC of an entry's game events, one per difficulty from the first (Observed:
+/// `Darkness_Minor_DT1_T1` to `Darkness_Minor_DT6_T1`; name Unknown).
+pub const REWARD_EVENTS_NAME: u32 = 0xc645_56e4;
+/// The name CRC of the game event of any success, beside the rewards (Observed:
+/// `Darkness_Any_GlobalSuccess`; name Unknown).
+pub const GLOBAL_SUCCESS_EVENT_NAME: u32 = 0x83e0_84dc;
+
+/// The rewards of an encounter by its difficulty (a corrupted breach's root): the game event
+/// that difficulty `d` (from 1) fires for the players within the radius at its success, and the
+/// event every success fires.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DifficultyRewards {
+    /// The radius around the encounter, metres.
+    pub radius_m: f32,
+    /// The game event of each difficulty, from difficulty 1.
+    pub events: Vec<String>,
+    /// The game event of any success; empty for none.
+    pub global_event: String,
+}
 
 struct Names {
     id: u32,
@@ -487,6 +605,7 @@ struct Names {
     components: u32,
     entities: u32,
     local_tm: u32,
+    world_tm: u32,
     parent_id: u32,
     entity_id: u32,
     entity_ref: u32,
@@ -549,6 +668,7 @@ impl Names {
             components: lowercase_crc32("Components"),
             entities: lowercase_crc32("Entities"),
             local_tm: lowercase_crc32("m_localTM"),
+            world_tm: lowercase_crc32("m_worldTM"),
             parent_id: lowercase_crc32("m_parentId"),
             entity_id: lowercase_crc32("EntityId"),
             entity_ref: lowercase_crc32("m_entityRef"),
@@ -670,6 +790,33 @@ fn text(element: &Element, name_crc: u32, depth: usize) -> Result<String, LevelS
         .map_or(Ok(""), Element::as_string)
         .map(str::to_owned)
         .map_err(LevelScriptError::from)
+}
+
+/// The difficulty rewards of `component`, when it holds them: the first entry's radius and
+/// events, and the global success event.
+fn difficulty_rewards(component: &Element) -> Result<Option<DifficultyRewards>, LevelScriptError> {
+    let Some(entry) = find(component, DIFFICULTY_REWARDS_NAME, FIELD_DEPTH)
+        .and_then(|rewards| rewards.children.first())
+    else {
+        return Ok(None);
+    };
+    let events = entry
+        .child(REWARD_EVENTS_NAME)
+        .map(|list| {
+            list.children
+                .iter()
+                .map(|event| event.as_string().map(str::to_owned))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok(Some(DifficultyRewards {
+        radius_m: entry
+            .child(REWARD_RADIUS_NAME)
+            .map_or(Ok(0.0), Element::as_f32)?,
+        events,
+        global_event: text(component, GLOBAL_SUCCESS_EVENT_NAME, FIELD_DEPTH)?,
+    }))
 }
 
 /// The id an entity reference holds: `EntityId` → `Id`, or the `Id` right in it.
@@ -878,6 +1025,25 @@ fn spawner(component: &Element, names: &Names) -> Result<Spawner, LevelScriptErr
     })
 }
 
+/// The replicated component `component` is, when it is of a kind this reader keeps and has a
+/// replica index above 0 (0 is the card's, which no kind kept here has).
+fn replicated(component: &Element) -> Result<Option<ReplicatedComponent>, LevelScriptError> {
+    let kind = match component.type_id {
+        NETWORK_POSITION_TYPE => ReplicatedKind::Position,
+        GATHERABLE_CONTROLLER_TYPE => ReplicatedKind::Gatherable,
+        TIMELINE_TYPE => ReplicatedKind::Timeline {
+            asset: asset(find(component, TIMELINE_ASSET_NAME, FIELD_DEPTH))?,
+        },
+        DELAYED_EVENT_TYPE => ReplicatedKind::DelayedEvent {
+            delay_s: find(component, DELAY_NAME, FIELD_DEPTH).map_or(Ok(0.0), Element::as_f32)?,
+        },
+        PLACEMENT_OBSTRUCTION_TYPE => ReplicatedKind::PlacementObstruction,
+        _ => return Ok(None),
+    };
+    let index = find(component, REPLICA_INDEX_NAME, FIELD_DEPTH).map_or(Ok(0), Element::as_u32)?;
+    Ok((index > 0).then_some(ReplicatedComponent { kind, index }))
+}
+
 fn entity(element: &Element, names: &Names) -> Result<ScriptEntity, LevelScriptError> {
     let id = element
         .child(names.id)
@@ -901,6 +1067,11 @@ fn entity(element: &Element, names: &Names) -> Result<ScriptEntity, LevelScriptE
         if let Some(local) = component.child(names.local_tm) {
             let (basis, translation) = transform_from_bytes(&local.value)?;
             read.local = Transform { basis, translation };
+            read.world = component
+                .child(names.world_tm)
+                .map(|world| transform_from_bytes(&world.value))
+                .transpose()?
+                .map(|(basis, translation)| Transform { basis, translation });
             read.parent = component
                 .child(names.parent_id)
                 .map(|parent| reference(parent, names))
@@ -911,6 +1082,10 @@ fn entity(element: &Element, names: &Names) -> Result<ScriptEntity, LevelScriptE
         if read.rules.is_none() {
             read.rules = spawner_rules(component, names)?;
         }
+        if read.rewards.is_none() {
+            read.rewards = difficulty_rewards(component)?;
+        }
+        read.replicated.extend(replicated(component)?);
         match component.type_id {
             ENCOUNTER_MANAGER_TYPE => read.manager = Some(manager(component, names)?),
             ENCOUNTER_STAGE_TYPE => read.stage = Some(stage(component, names)?),
@@ -945,13 +1120,15 @@ fn entity(element: &Element, names: &Names) -> Result<ScriptEntity, LevelScriptE
                 let table = text(component, names.loot_table, LOOT_TABLE_DEPTH)?;
                 read.loot_table = (!table.is_empty()).then_some(table);
             }
-            // A spawner of another class: a component that names a slice asset spawns it
-            // (Observed: the open world's `WorldEvent_SpawnGroup_Single_Master` names its
-            // encounter slice in a component of neither spawner class).
+            // A spawner of another class: a component that names a slice or alias asset spawns
+            // it (Observed: the open world's `WorldEvent_SpawnGroup_Single_Master` names its
+            // encounter slice in a component of neither spawner class; the corrupted breaches'
+            // `Darkness_SpawnGroup_Minor_Master` and `_Major_Master` name an alias of breach
+            // slices there, with an empty `m_sliceAsset`).
             _ if read.spawner.is_none() => {
                 read.spawner = spawner(component, names)
                     .ok()
-                    .filter(|found| found.slice.is_some());
+                    .filter(|found| found.slice.is_some() || found.alias.is_some());
             }
             _ => {}
         }
@@ -1403,6 +1580,87 @@ mod tests {
         assert!(!point.spawn_on_enable);
     }
 
+    /// A transform component with `m_localTM` and `m_worldTM` at `translation` under `parent`.
+    fn world_transform(parent: u64, translation: [f32; 3]) -> Element {
+        let mut component = transform(parent, translation);
+        let local = component.children[0].value.clone();
+        component.children.push(value("m_worldTM", &local));
+        component
+    }
+
+    #[test]
+    fn a_saved_world_transform_places_an_entity_and_its_parents_do_not() {
+        const FOLDER: u64 = 0x51;
+        const DOOR: u64 = 0x52;
+        const FOLDER_AT: [f32; 3] = [-576.0, -484.0, -342.0];
+        const DOOR_AT: [f32; 3] = [-125.2, 63.4, -5.9];
+        let script = slice_script(&slice(vec![
+            entity(
+                FOLDER,
+                "InteractObjects",
+                vec![world_transform(0, FOLDER_AT)],
+            ),
+            entity(DOOR, "DoorBoss", vec![world_transform(FOLDER, DOOR_AT)]),
+        ]))
+        .expect("script");
+        let placed = script.placement_of(DOOR);
+        for (got, want) in placed.translation.iter().zip(DOOR_AT) {
+            assert!((got - f64::from(want)).abs() < 1e-3, "{got} {want}");
+        }
+    }
+
+    #[test]
+    fn replicated_components_keep_their_replica_index() {
+        const GATE: u64 = 0x61;
+        const TIMELINE_PATH: &str = "Timelines/Gate/Gate_Open.timeline";
+        const OPEN_INDEX: u32 = 4;
+        const DELAY_S: f32 = 3.5;
+        let indexed = |type_id, index: u32, mut fields: Vec<Element>| {
+            fields.push(named(
+                "BaseClass1",
+                vec![Element::with_value(
+                    REPLICA_INDEX_NAME,
+                    index.to_be_bytes().to_vec(),
+                )],
+            ));
+            typed(named("element", fields), type_id)
+        };
+        let timeline_asset = {
+            let mut reference = asset_value("asset", [3; GUID_LEN], TIMELINE_PATH);
+            reference.name_crc = Some(TIMELINE_ASSET_NAME);
+            named("m_sequences", vec![named("element", vec![reference])])
+        };
+        let script = slice_script(&slice(vec![entity(
+            GATE,
+            "Timeline_Open",
+            vec![
+                indexed(NETWORK_POSITION_TYPE, 0, Vec::new()),
+                indexed(TIMELINE_TYPE, OPEN_INDEX, vec![timeline_asset]),
+                indexed(
+                    DELAYED_EVENT_TYPE,
+                    OPEN_INDEX + 1,
+                    vec![Element::with_value(
+                        DELAY_NAME,
+                        DELAY_S.to_be_bytes().to_vec(),
+                    )],
+                ),
+            ],
+        )]))
+        .expect("script");
+        let replicated = &script.entities[0].replicated;
+        assert_eq!(replicated.len(), 2, "index 0 is no replica of a kept kind");
+        assert_eq!(replicated[0].index, OPEN_INDEX);
+        assert!(matches!(
+            &replicated[0].kind,
+            ReplicatedKind::Timeline { asset: Some(asset) }
+                if asset.path == "timelines/gate/gate_open.timeline"
+        ));
+        assert_eq!(
+            replicated[1].kind,
+            ReplicatedKind::DelayedEvent { delay_s: DELAY_S }
+        );
+    }
+
     #[test]
     fn placements_follow_the_parent_chain() {
         let script = slice_script(&encounter_slice()).expect("script");
@@ -1504,5 +1762,50 @@ mod tests {
             slice_script(&named("root", Vec::new())),
             Err(LevelScriptError::NoEntities)
         );
+    }
+
+    /// The rewards component of `enc_darkness_minor_monolith_00` (Observed layout, its name CRCs):
+    /// a holder with the rewards list (one entry: radius 500, six events) and the global event.
+    #[test]
+    fn a_breach_root_holds_its_rewards_by_difficulty() {
+        const REWARD_RADIUS_M: f32 = 500.0;
+        const EVENTS: [&str; 2] = ["Darkness_Minor_DT1_T1", "Darkness_Minor_DT2_T1"];
+        let list = |name: u32, items: Vec<Element>| Element::with_children(name, items);
+        let entry = named(
+            "element",
+            vec![
+                Element::with_value(REWARD_RADIUS_NAME, REWARD_RADIUS_M.to_be_bytes().to_vec()),
+                list(
+                    REWARD_EVENTS_NAME,
+                    EVENTS
+                        .iter()
+                        .map(|event| value("element", event.as_bytes()))
+                        .collect(),
+                ),
+            ],
+        );
+        let holder = named(
+            "m_data",
+            vec![
+                list(DIFFICULTY_REWARDS_NAME, vec![entry]),
+                Element::with_value(
+                    GLOBAL_SUCCESS_EVENT_NAME,
+                    b"Darkness_Any_GlobalSuccess".to_vec(),
+                ),
+            ],
+        );
+        let script = slice_script(&slice(vec![entity(
+            ENCOUNTER,
+            "Enc_Darkness_Minor_Monolith_00",
+            vec![named("element", vec![holder])],
+        )]))
+        .expect("script");
+        let rewards = script.rewards().expect("rewards");
+        assert!((rewards.radius_m - REWARD_RADIUS_M).abs() < f32::EPSILON);
+        assert_eq!(rewards.events, EVENTS);
+        assert_eq!(rewards.global_event, "Darkness_Any_GlobalSuccess");
+        let plain =
+            slice_script(&slice(vec![entity(ENCOUNTER, "Plain", Vec::new())])).expect("script");
+        assert!(plain.rewards().is_none());
     }
 }

@@ -1298,7 +1298,7 @@ mod tests {
         BundleMember {
             component: EVENT_COMPONENT,
             state: MemberState::DelayedEvent(DelayedEventState {
-                total_delay: Some(0),
+                total_delay_s: Some(0.0),
                 completed: Some(completed),
             }),
         }

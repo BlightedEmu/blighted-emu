@@ -178,6 +178,7 @@ pub(super) fn camp_members(
             MemberState::TerritoryInterface(TerritoryInterfaceState {
                 functionality_down: None,
                 refs_set: Some(TERRITORY_REFS_SET),
+                ..TerritoryInterfaceState::default()
             }),
         ));
     }
@@ -185,7 +186,7 @@ pub(super) fn camp_members(
         members.push(member(
             *component,
             MemberState::DelayedEvent(DelayedEventState {
-                total_delay: Some(RUIN_DELAY),
+                total_delay_s: Some(RUIN_DELAY),
                 completed: Some(RUIN_COMPLETED),
             }),
         ));

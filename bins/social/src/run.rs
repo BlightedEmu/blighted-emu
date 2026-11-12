@@ -55,6 +55,9 @@ const MS_PER_SECOND: u64 = 1000;
 const METRIC_FAILED_STORES: &str = "social_failed_stores_total";
 /// Metric: stores that failed for a lost or busy database and run again.
 const METRIC_STORE_RETRIES: &str = "social_store_retries_total";
+/// How often the territory claim counts of the companies are read (Inferred: the sims read the
+/// claim owners this often, `sim` `OWNER_READ_MS`; a game master changes owners through a sim).
+const CLAIM_COUNT_READ: Duration = Duration::from_secs(30);
 
 /// Failure while starting or running `social`.
 #[derive(Debug, thiserror::Error)]
@@ -98,6 +101,8 @@ enum Outcome {
     Privacy(Vec<nw_db::AccountPrivacySetting>),
     /// The account of a character.
     Account(Uuid, Uuid),
+    /// The territory claims each company owns.
+    Claims(Vec<(Uuid, u32)>),
 }
 
 /// One job of the store task.
@@ -212,6 +217,23 @@ fn privacy_database(config: &SocialConfig) -> Result<Option<PgPool>, RunError> {
         .map_err(RunError::Database)
 }
 
+/// Reads the territory claim count of every company every [`CLAIM_COUNT_READ`] and sends them
+/// to the loop; a failed read keeps the last counts.
+async fn claim_count_task(db: PgPool, outcomes: mpsc::UnboundedSender<Outcome>) {
+    let mut tick = tokio::time::interval(CLAIM_COUNT_READ);
+    loop {
+        tick.tick().await;
+        match nw_db::territory_claim_counts(&db).await {
+            Ok(counts) => {
+                if outcomes.send(Outcome::Claims(counts)).is_err() {
+                    return;
+                }
+            }
+            Err(error) => tracing::warn!(%error, "claim counts not read; next try soon"),
+        }
+    }
+}
+
 /// Reads the privacy settings that changed since the last read, every `interval`, and sends them
 /// to the loop. The first read gets every stored setting.
 async fn privacy_task(
@@ -275,6 +297,7 @@ async fn serve_loop(
     // outcome comes from one store job or one coin move, which are bounded by STORE_QUEUE and by
     // the transfers the state keeps.
     let (outcomes, mut results) = mpsc::unbounded_channel();
+    let claim_reader = tokio::spawn(claim_count_task(db.clone(), outcomes.clone()));
     let store_task = tokio::spawn(store_task(db, store_jobs, outcomes.clone()));
     let privacy_reader = privacy.map(|global| {
         let interval = Duration::from_millis(config.privacy_poll_ms);
@@ -355,6 +378,10 @@ async fn serve_loop(
                         state.world.account_found(character, account);
                         Vec::new()
                     }
+                    Outcome::Claims(counts) => {
+                        state.world.set_claim_counts(counts);
+                        Vec::new()
+                    }
                 };
                 state.apply(effects).await;
             }
@@ -366,6 +393,7 @@ async fn serve_loop(
     if let Some(reader) = privacy_reader {
         reader.abort();
     }
+    claim_reader.abort();
     // The store task ends when the last sender is gone, after it wrote every waiting change.
     let Loop {
         stores, outcomes, ..
@@ -407,6 +435,9 @@ impl Loop {
                         .or_default()
                         .group_entities
                         .push(delivery);
+                }
+                Effect::UpkeepPaid { sim, paid } => {
+                    self.pending.entry(sim).or_default().upkeep_paid.push(paid);
                 }
                 Effect::Store(op) => self.queue_store(StoreJob::Op(op)).await,
                 Effect::FindAccount { character } => {

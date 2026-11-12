@@ -14,6 +14,9 @@
 //!   next bundle.
 //! - The treasury moves a player's coins through the sim that has the player ([`CoinTransfer`]
 //!   on [`crate::subject::sim_coins`], request/reply).
+//! - A sim asks the service to pay a territory's upkeep from the payer's company treasury
+//!   ([`SocialInput::PayUpkeep`]); the service tells the payer's sim when it is paid
+//!   ([`SocialDeliveries::upkeep_paid`]).
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -49,6 +52,9 @@ pub struct SocialPlayer {
     pub level: u32,
     /// Its icon (`PlayerIconData`, 9 bytes).
     pub icon: [u8; ICON_LEN],
+    /// Its pronoun type (`PlayerDataView` pronoun).
+    #[serde(default)]
+    pub pronoun: u8,
     /// The sim that has the player.
     pub sim: BusId,
     /// The level the player is in (the sim's level: area chat stays in it).
@@ -98,6 +104,31 @@ pub enum SocialInput {
         /// The body.
         body: Vec<u8>,
     },
+    /// A player asks to pay the upkeep of a territory claim from its company's treasury; the
+    /// sim checked the claim and the cost.
+    PayUpkeep(UpkeepPayment),
+}
+
+/// An upkeep payment a player asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpkeepPayment {
+    /// The payer.
+    pub character: Uuid,
+    /// The territory id of the claim.
+    pub territory: u16,
+    /// The cost, hundredths of a coin.
+    pub cost: u64,
+    /// When the player asked, Unix milliseconds.
+    pub at_ms: u64,
+}
+
+/// An upkeep payment the service took from the treasury.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpkeepPaid {
+    /// The payer.
+    pub character: Uuid,
+    /// The territory id of the claim.
+    pub territory: u16,
 }
 
 /// What a player's group shows of its health.
@@ -200,6 +231,9 @@ pub struct SocialDeliveries {
     pub own_states: Vec<OwnStateDelivery>,
     /// The group entity changes.
     pub group_entities: Vec<GroupEntityDelivery>,
+    /// The upkeep payments of this sim's players that the service took.
+    #[serde(default)]
+    pub upkeep_paid: Vec<UpkeepPaid>,
 }
 
 /// Service to sim, request/reply: add `change` coins to a player (a negative change takes them).
@@ -246,6 +280,7 @@ mod tests {
                     name: "Ann".to_owned(),
                     level: 4,
                     icon: [1; ICON_LEN],
+                    pronoun: 1,
                     sim,
                     level_name: "newworld_vitaeeterna".to_owned(),
                     territories: vec![3, 7],
@@ -268,6 +303,12 @@ mod tests {
                     character,
                     reason: LeaveReason::Logout,
                 },
+                SocialInput::PayUpkeep(UpkeepPayment {
+                    character,
+                    territory: 6,
+                    cost: 100_000,
+                    at_ms: 1_000,
+                }),
             ],
         };
         assert_eq!(
@@ -299,6 +340,10 @@ mod tests {
                     view: None,
                 },
             ],
+            upkeep_paid: vec![UpkeepPaid {
+                character,
+                territory: 6,
+            }],
         };
         assert_eq!(
             decode::<SocialDeliveries>(&encode(&deliveries).expect("encode")).expect("decode"),

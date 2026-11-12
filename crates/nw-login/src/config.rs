@@ -290,11 +290,13 @@ impl ShopConfig {
 
     /// What the mount that `entitlement` unlocks costs: 0 in a free store, else its listed price.
     pub fn price(&self, entitlement: &str) -> u32 {
-        if self.free {
-            0
-        } else {
-            self.list_price(entitlement)
-        }
+        self.cost(self.list_price(entitlement))
+    }
+
+    /// What an offer listed at `list_price` costs: 0 in a free store, else that price (a token
+    /// pack's listed price is the store table's, [`nw_protocol::store_api::StoreToken`]).
+    pub const fn cost(&self, list_price: u32) -> u32 {
+        if self.free { 0 } else { list_price }
     }
 }
 
@@ -867,6 +869,12 @@ max_connections = 5
         };
         assert_eq!(free.price(WOLF), 0);
         assert_eq!(free.list_price(WOLF), WOLF_PRICE);
+        assert_eq!(
+            free.cost(WOLF_PRICE),
+            0,
+            "a free store charges no token pack"
+        );
+        assert_eq!(shop.cost(WOLF_PRICE), WOLF_PRICE);
     }
 
     #[test]

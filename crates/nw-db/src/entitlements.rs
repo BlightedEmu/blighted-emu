@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The store of each account (global migration 0005): the store entitlements it holds and its
-//! wallet of Marks of Fortune. A store purchase pays from the wallet (nothing in a free store) and
-//! adds the entitlement; the store service lists both, and the sims let a player use what its
-//! account holds.
+//! wallet of Marks of Fortune; and its consumable entitlements with their counts (global migration
+//! 0009: the barbershop token). A store purchase pays from the wallet (nothing in a free store) and
+//! adds the entitlement, or the offer's amount of a consumable; a use takes one consumable. The
+//! store service lists them all, and the sims let a player use what its account holds.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -122,20 +123,94 @@ async fn open_wallet<'e>(
     Ok(())
 }
 
-/// What a store purchase did.
+/// A consumable entitlement an account holds, and how many.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Purchase {
+pub struct AccountConsumable {
+    /// The game data's `UniqueTagID`.
+    pub entitlement: String,
+    /// How many the account holds.
+    pub amount: i64,
+    /// How many store purchases it made of it.
+    pub purchases: i64,
+    /// When the amount last changed, Unix milliseconds.
+    pub updated_at_ms: i64,
+}
+
+type ConsumableRow = (String, i64, i64, i64);
+
+/// The columns of one consumable, its time in Unix milliseconds.
+const CONSUMABLE_COLUMNS: &str =
+    "entitlement, amount, purchases, CAST(EXTRACT(EPOCH FROM updated_at) * 1000 AS BIGINT)";
+
+fn consumable_of(
+    (entitlement, amount, purchases, updated_at_ms): ConsumableRow,
+) -> AccountConsumable {
+    AccountConsumable {
+        entitlement,
+        amount,
+        purchases,
+        updated_at_ms,
+    }
+}
+
+/// The consumable entitlements `account` holds, by entitlement; one it used up has amount 0.
+///
+/// # Errors
+///
+/// Returns [`DbError`] when the query fails.
+pub async fn account_consumables(
+    global: &PgPool,
+    account: Uuid,
+) -> Result<Vec<AccountConsumable>, DbError> {
+    let rows: Vec<ConsumableRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {CONSUMABLE_COLUMNS} FROM account_consumable WHERE account_id = $1 \
+         ORDER BY entitlement"
+    )))
+    .bind(account)
+    .fetch_all(global)
+    .await?;
+    Ok(rows.into_iter().map(consumable_of).collect())
+}
+
+/// `account` uses `amount` of the consumable `entitlement`: the count it holds now, or `None`
+/// when it holds fewer (nothing changed).
+///
+/// # Errors
+///
+/// Returns [`DbError`] when the query fails.
+pub async fn use_consumable(
+    global: &PgPool,
+    account: Uuid,
+    entitlement: &str,
+    amount: i64,
+) -> Result<Option<AccountConsumable>, DbError> {
+    let row: Option<ConsumableRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "UPDATE account_consumable SET amount = amount - $3, updated_at = now() \
+         WHERE account_id = $1 AND entitlement = $2 AND amount >= $3 \
+         RETURNING {CONSUMABLE_COLUMNS}"
+    )))
+    .bind(account)
+    .bind(entitlement)
+    .bind(amount)
+    .fetch_optional(global)
+    .await?;
+    Ok(row.map(consumable_of))
+}
+
+/// What a store purchase did; `H` is what the account holds of the offer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Purchase<H = AccountEntitlement> {
     /// The account paid the price and now holds the entitlement.
     Bought {
         /// The entitlement.
-        held: AccountEntitlement,
+        held: H,
         /// The wallet after the payment.
         wallet: Wallet,
     },
-    /// The account already held the entitlement; nothing was paid.
+    /// The account already held the entitlement; nothing was paid (never for a consumable).
     AlreadyHeld {
         /// The entitlement.
-        held: AccountEntitlement,
+        held: H,
         /// The wallet.
         wallet: Wallet,
     },
@@ -160,13 +235,7 @@ pub async fn buy_entitlement(
     price: i64,
 ) -> Result<Purchase, DbError> {
     let mut transaction = global.begin().await?;
-    open_wallet(&mut *transaction, account).await?;
-    let before: WalletRow = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {WALLET_COLUMNS} FROM account_wallet WHERE account_id = $1 FOR UPDATE"
-    )))
-    .bind(account)
-    .fetch_one(&mut *transaction)
-    .await?;
+    let before = locked_wallet(&mut transaction, account).await?;
     let held: Option<EntitlementRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM account_entitlement WHERE account_id = $1 AND entitlement = $2"
     )))
@@ -174,7 +243,6 @@ pub async fn buy_entitlement(
     .bind(entitlement)
     .fetch_optional(&mut *transaction)
     .await?;
-    let before = wallet_of(before);
     if let Some(held) = held {
         return Ok(Purchase::AlreadyHeld {
             held: of_row(held),
@@ -184,14 +252,7 @@ pub async fn buy_entitlement(
     if before.marks < price {
         return Ok(Purchase::TooPoor { wallet: before });
     }
-    let after: WalletRow = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "UPDATE account_wallet SET marks_of_fortune = marks_of_fortune - $2, updated_at = now() \
-         WHERE account_id = $1 RETURNING {WALLET_COLUMNS}"
-    )))
-    .bind(account)
-    .bind(price)
-    .fetch_one(&mut *transaction)
-    .await?;
+    let after = pay(&mut transaction, account, price).await?;
     let held: EntitlementRow = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "INSERT INTO account_entitlement (account_id, entitlement, instance_id) \
          VALUES ($1, $2, $3) RETURNING {COLUMNS}"
@@ -204,8 +265,78 @@ pub async fn buy_entitlement(
     transaction.commit().await?;
     Ok(Purchase::Bought {
         held: of_row(held),
-        wallet: wallet_of(after),
+        wallet: after,
     })
+}
+
+/// `account` buys `amount` of the consumable `entitlement` for `price` Marks of Fortune (0 for a
+/// free store), in one transaction: a wallet below the price buys nothing.
+///
+/// # Errors
+///
+/// Returns [`DbError`] when the account does not exist or a query fails.
+pub async fn buy_consumable(
+    global: &PgPool,
+    account: Uuid,
+    entitlement: &str,
+    amount: i64,
+    price: i64,
+) -> Result<Purchase<AccountConsumable>, DbError> {
+    let mut transaction = global.begin().await?;
+    let before = locked_wallet(&mut transaction, account).await?;
+    if before.marks < price {
+        return Ok(Purchase::TooPoor { wallet: before });
+    }
+    let after = pay(&mut transaction, account, price).await?;
+    let held: ConsumableRow = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO account_consumable (account_id, entitlement, amount, purchases) \
+         VALUES ($1, $2, $3, 1) ON CONFLICT (account_id, entitlement) \
+         DO UPDATE SET amount = account_consumable.amount + $3, \
+         purchases = account_consumable.purchases + 1, updated_at = now() \
+         RETURNING {CONSUMABLE_COLUMNS}"
+    )))
+    .bind(account)
+    .bind(entitlement)
+    .bind(amount)
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(Purchase::Bought {
+        held: consumable_of(held),
+        wallet: after,
+    })
+}
+
+/// The wallet of `account` in `transaction`, locked until it ends; an empty one is opened first.
+async fn locked_wallet(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    account: Uuid,
+) -> Result<Wallet, DbError> {
+    open_wallet(&mut **transaction, account).await?;
+    let row: WalletRow = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {WALLET_COLUMNS} FROM account_wallet WHERE account_id = $1 FOR UPDATE"
+    )))
+    .bind(account)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(wallet_of(row))
+}
+
+/// Takes `price` Marks of Fortune from the wallet of `account` in `transaction`; the wallet after.
+async fn pay(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    account: Uuid,
+    price: i64,
+) -> Result<Wallet, DbError> {
+    let row: WalletRow = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "UPDATE account_wallet SET marks_of_fortune = marks_of_fortune - $2, updated_at = now() \
+         WHERE account_id = $1 RETURNING {WALLET_COLUMNS}"
+    )))
+    .bind(account)
+    .bind(price)
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(wallet_of(row))
 }
 
 #[cfg(all(test, feature = "infra"))]
@@ -271,5 +402,54 @@ mod infra_tests {
         assert!(names.contains(&BEAR) && names.contains(&WOLF));
         assert_eq!(taken.marks, GIVEN - PRICE - 1);
         assert!(below, "a wallet never goes below 0");
+    }
+
+    #[tokio::test]
+    async fn a_consumable_adds_up_and_a_use_takes_one_until_none_is_left() {
+        const TOKEN: &str = "Ent_Barbershop_Token";
+        const TOKEN_PRICE: i64 = 10_000;
+        let (none, bought, again, poor, used, refused, listed) = with_test_schema(async |pool| {
+            GLOBAL_MIGRATOR.run(pool).await.expect("migrate");
+            let account = create_password_account(pool, "barber", "$argon2id$x")
+                .await
+                .expect("account");
+            let none = use_consumable(pool, account.id, TOKEN, 1)
+                .await
+                .expect("none held");
+            let bought = buy_consumable(pool, account.id, TOKEN, 1, 0)
+                .await
+                .expect("buy");
+            let again = buy_consumable(pool, account.id, TOKEN, 1, 0)
+                .await
+                .expect("again");
+            let poor = buy_consumable(pool, account.id, TOKEN, 1, TOKEN_PRICE)
+                .await
+                .expect("poor");
+            let used = use_consumable(pool, account.id, TOKEN, 2)
+                .await
+                .expect("use");
+            let refused = use_consumable(pool, account.id, TOKEN, 1)
+                .await
+                .expect("used up");
+            let listed = account_consumables(pool, account.id).await.expect("list");
+            (none, bought, again, poor, used, refused, listed)
+        })
+        .await;
+        assert_eq!(none, None, "an account with no row holds none");
+        assert!(matches!(bought, Purchase::Bought { ref held, .. } if held.amount == 1));
+        assert!(matches!(
+            again,
+            Purchase::Bought { ref held, .. } if (held.amount, held.purchases) == (2, 2)
+        ));
+        assert!(matches!(poor, Purchase::TooPoor { wallet } if wallet.marks == 0));
+        assert_eq!(used.map(|held| held.amount), Some(0));
+        assert_eq!(refused, None, "no use below 0");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|held| (held.entitlement.as_str(), held.amount))
+                .collect::<Vec<_>>(),
+            [(TOKEN, 0)]
+        );
     }
 }

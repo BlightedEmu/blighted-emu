@@ -2,7 +2,8 @@
 //! Mission boards (finding "mission board", retail board capture 2026-06-13). The player opens
 //! a town project board (interaction kind 51); the server accepts the interaction and names the
 //! board in the player's objective interactor state (3829) with an empty mission list (retail
-//! 21.328 s and 21.342 s). The client takes a town mission by its id and its project (3819); the
+//! 21.328 s and 21.342 s). The same interaction on a faction representative (an NPC) opens the
+//! faction board, whose state lists the missions it offers ([`super::faction_board`]). The client takes a town mission by its id and its project (3819); the
 //! mission runs its objective template with its own values ([`crate::player_content::MissionRow`])
 //! and counts against the missions journal limit. The client turns a mission in at the board by
 //! its instance (2461): that is the interact of its `ReturnToGiver` task.
@@ -14,6 +15,8 @@ use nw_messages::list_delta::ReplicatedList;
 use nw_messages::objective_interactor::{OBJECTIVE_INTERACTOR_COMPONENT, ObjectiveInteractorState};
 use nw_messages::{BundleMember, InteractionRequest, MemberState, ObjectiveInteractorClientMsg};
 
+use super::conversation::NPC_NAME_MARK;
+use super::faction_board::Taken;
 use super::gathering::GATHER_ACCEPTED;
 use super::gear::unix_ns;
 use super::{Body, Player, SimWorld, gather_answer, send_now};
@@ -25,36 +28,48 @@ use nw_sim_core::Position;
 pub(super) const TURN_IN_TAGS: [&str; 2] = ["ReturnToGiver", "ReturnToAnyGiver"];
 
 impl SimWorld {
-    /// Player `number` (`entity`) opens the town project board of `request` (its name `name`):
-    /// the interaction is accepted and the player's objective interactor names the board, with
-    /// no offered missions (retail: the client lists the town missions itself and takes one by
-    /// its id).
+    /// Player `number` (`entity`) opens the board of `request` (its name `name`) at `now_ms`:
+    /// the interaction is accepted and the player's objective interactor names the board. A
+    /// town project board has no offered missions (retail: the client lists the town missions
+    /// itself and takes one by its id); a faction representative's board (the name of an NPC)
+    /// offers its missions until they expire.
     pub(super) fn open_board(
         &mut self,
         entity: Entity,
         number: u64,
         request: InteractionRequest,
         name: &[u8],
+        now_ms: u64,
     ) {
         let at = self
             .world
             .get::<Body>(entity)
             .map(|body| body.motion.position());
-        let provider = at.and_then(|at| self.zone_plot_near(at));
+        let provider = at
+            .and_then(|at| self.zone_plot_near(at))
+            .unwrap_or(request.target);
+        let faction_board = name
+            .first()
+            .is_some_and(|byte| char::from(*byte) == NPC_NAME_MARK);
+        let (expiration_time, elements) = if faction_board {
+            let (expiration_ns, missions) = self.faction_offers(entity, provider, now_ms);
+            (Some(expiration_ns), missions)
+        } else {
+            (None, Vec::new())
+        };
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
         let answer = gather_answer(number, request, GATHER_ACCEPTED, name);
         send_now(&mut self.combat_messages, &player.connection, &[answer]);
-        let provider = provider.unwrap_or(request.target);
         player.open_board = Some(provider);
         player.board_version += 1;
         let state = ObjectiveInteractorState {
             provider: Some(provider),
-            expiration_time: None,
+            expiration_time,
             missions: Some(ReplicatedList::Full(FullList {
                 version: Some(player.board_version),
-                elements: Vec::new(),
+                elements,
             })),
             community_goals: None,
         };
@@ -98,13 +113,11 @@ impl SimWorld {
             ObjectiveInteractorClientMsg::CompleteObjective { instance, .. } => {
                 self.turn_in_mission(number, instance, now_ms);
             }
-            ObjectiveInteractorClientMsg::SelectObjective { .. }
-            | ObjectiveInteractorClientMsg::SelectPvpMission { .. } => {
-                tracing::info!(
-                    player = number,
-                    ?call,
-                    "faction board take: no faction board offers yet"
-                );
+            ObjectiveInteractorClientMsg::SelectObjective { index, .. } => {
+                self.take_faction_mission(number, Taken::Index(index), now_ms);
+            }
+            ObjectiveInteractorClientMsg::SelectPvpMission { mission, .. } => {
+                self.take_faction_mission(number, Taken::Mission(mission), now_ms);
             }
         }
     }

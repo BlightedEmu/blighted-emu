@@ -537,14 +537,9 @@ impl SimConfig {
             }),
             SimRole::Instance => instances
                 .of_level(&self.level)
-                .next()
-                .map(|mode| {
-                    LevelSpec::instance(
-                        &mode.map.folder,
-                        &mode.map.map_name,
-                        &mode.map.coatlicue_path,
-                        mode.map.frame,
-                    )
+                .find_map(|mode| mode.map_of(&self.level))
+                .map(|map| {
+                    LevelSpec::instance(&map.folder, &map.map_name, &map.coatlicue_path, map.frame)
                 })
                 .ok_or(SimConfigError::Invalid {
                     key: "level",

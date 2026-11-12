@@ -25,8 +25,17 @@
 //! deposit becomes a debt to the player, an unanswered withdrawal goes back to the treasury. Only
 //! a sim that moved the coins, saved the player and stopped before any answer can so give coins
 //! twice.
+//!
+//! **Territory upkeep** (territory upkeep study 2026-11-11): a member's sim asks for a payment
+//! (2738, [`nw_bus::SocialInput::PayUpkeep`]) after it checked the claim and the cost. The
+//! service checks the member's right and the treasury, then the database takes the cost from the
+//! treasury and moves the claim's due time in one transaction (it refuses a company that does
+//! not own the claim, or a payment before the upkeep is payable); the payer's sim is told
+//! ([`Effect::UpkeepPaid`]) and the members get the new treasury (Observed: the company state
+//! with the treasury came 136 ms after the retail payment, `pay-territory-tax` 1783335287246).
+//! Retail sent the payer no answer message, so a refused payment gets none here either.
 
-use nw_bus::{CoinReply, CoinTransfer};
+use nw_bus::{CoinReply, CoinTransfer, UpkeepPaid, UpkeepPayment};
 use nw_db::{CoinReturn, TreasuryReason, WITHDRAWAL_WINDOW_MS};
 use nw_messages::social::guilds::{
     TREASURY_DAILY_LIMIT, TREASURY_NO_PRIVILEGE, TREASURY_NOT_ENOUGH_TREASURY_FUNDS,
@@ -51,6 +60,15 @@ pub(crate) const TREASURY_TRANSFER_FAILED: u32 = 8;
 pub(crate) const NOTHING_DEPOSITED: u64 = 0;
 /// Metric: coin moves the sim did not answer in time.
 const METRIC_UNANSWERED_MOVES: &str = "social_coin_moves_unanswered_total";
+/// Metric: upkeep payments by `result`.
+const METRIC_UPKEEP: &str = "social_upkeep_payments_total";
+/// An upkeep payment the treasury took.
+const PAID: &str = "paid";
+/// The right that pays a territory's upkeep. Observed: a consul paid the one retail upkeep
+/// (`pay-territory-tax`: the payer's 3147 `guildRank` 1 at the call). Inferred: the consul's
+/// territory taxation privilege (`GuildPrivilegeId` `TerritoryTaxation`), so governors and
+/// consuls pay; which ranks have it in retail is Unknown (no capture carries the rank data).
+const UPKEEP_RIGHT: Right = Right::Has(Privilege::TerritoryTaxation);
 
 /// How a coin move of the sim ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +137,12 @@ impl SocialWorld {
             Transfer::Refund(_) | Transfer::DepositReturn(_) | Transfer::Debt(_) => {
                 TreasuryReason::Refund
             }
+            Transfer::Upkeep {
+                territory, at_ms, ..
+            } => TreasuryReason::Upkeep {
+                territory,
+                now_ms: at_ms,
+            },
         };
         let ticket = self.ticket();
         self.transfers.insert(ticket, transfer);
@@ -253,6 +277,43 @@ impl SocialWorld {
         self.change_treasury(Transfer::Withdraw(coins), coins, -change_of(amount));
     }
 
+    /// Pays `payment` from the payer's company treasury, when the payer's rank has the
+    /// [`UPKEEP_RIGHT`] and the treasury holds the cost; the database checks the claim.
+    pub(crate) fn pay_upkeep(&mut self, payment: UpkeepPayment) {
+        let refused = |why: &str| {
+            metrics::counter!(METRIC_UPKEEP, RESULT_LABEL => REFUSED).increment(1);
+            tracing::info!(character = %payment.character, territory = payment.territory, why,
+                "upkeep payment refused");
+        };
+        let Some((company, rank)) = self.company_of(payment.character) else {
+            refused("not a member");
+            return;
+        };
+        if !may(rank, UPKEEP_RIGHT) {
+            refused("rank without the right");
+            return;
+        }
+        let funds = self
+            .companies
+            .get(&company)
+            .map_or(0, |state| state.record.treasury);
+        if funds < payment.cost {
+            refused("treasury too low");
+            return;
+        }
+        let coins = CoinMove {
+            character: payment.character,
+            company,
+            amount: payment.cost,
+        };
+        let transfer = Transfer::Upkeep {
+            coins,
+            territory: payment.territory,
+            at_ms: payment.at_ms,
+        };
+        self.change_treasury(transfer, coins, -change_of(payment.cost));
+    }
+
     /// The coins of transfer `ticket` moved (`Some` reply) or the sim did not answer (`None`).
     pub fn coins_moved(
         &mut self,
@@ -305,7 +366,11 @@ impl SocialWorld {
             (Some(Transfer::Debt(debt)), MoveResult::Refused | MoveResult::Unanswered) => {
                 self.owed.entry(debt.character).or_default().push(debt);
             }
-            (Some(Transfer::DepositReturn(_) | Transfer::Refund(_)), _) | (None, _) => {}
+            (
+                Some(Transfer::DepositReturn(_) | Transfer::Refund(_) | Transfer::Upkeep { .. }),
+                _,
+            )
+            | (None, _) => {}
         }
         self.refresh_views(now_ms);
         std::mem::take(&mut self.out)
@@ -325,7 +390,8 @@ impl SocialWorld {
             Transfer::Deposit(coins)
             | Transfer::Withdraw(coins)
             | Transfer::Refund(coins)
-            | Transfer::DepositReturn(coins) => coins,
+            | Transfer::DepositReturn(coins)
+            | Transfer::Upkeep { coins, .. } => coins,
             Transfer::Debt(_) => return Vec::new(),
         };
         if let TreasuryOutcome::Stored(balance) = outcome
@@ -369,6 +435,21 @@ impl SocialWorld {
                 tracing::error!(company = %coins.company, amount = coins.amount,
                     "treasury refund refused; the coins go to the player");
                 self.owe(coins);
+            }
+            Transfer::Upkeep { territory, .. } if stored => {
+                metrics::counter!(METRIC_UPKEEP, RESULT_LABEL => PAID).increment(1);
+                if let Some(sim) = self.sim_of(coins.character) {
+                    let paid = UpkeepPaid {
+                        character: coins.character,
+                        territory,
+                    };
+                    self.out.push(Effect::UpkeepPaid { sim, paid });
+                }
+            }
+            Transfer::Upkeep { territory, .. } => {
+                metrics::counter!(METRIC_UPKEEP, RESULT_LABEL => REFUSED).increment(1);
+                tracing::info!(company = %coins.company, territory, ?outcome,
+                    "upkeep not paid: not the owner, not payable yet, or too little coin");
             }
             Transfer::Refund(_) | Transfer::DepositReturn(_) | Transfer::Debt(_) => {}
         }
@@ -715,6 +796,97 @@ mod tests {
                 amount: WITHDRAWAL,
                 result: TREASURY_NOT_A_MEMBER
             })
+        );
+    }
+    /// A made-up claim and its upkeep cost.
+    const TERRITORY: u16 = 6;
+    const UPKEEP: u64 = 100_000;
+
+    fn pay(world: &mut SocialWorld, number: u128) -> Vec<Effect> {
+        world.input(
+            &sim("sim-a"),
+            SocialInput::PayUpkeep(UpkeepPayment {
+                character: character(number),
+                territory: TERRITORY,
+                cost: UPKEEP,
+                at_ms: NOW_MS,
+            }),
+            NOW_MS,
+        )
+    }
+
+    fn upkeep_change(effects: &[Effect]) -> Option<(u64, i64, TreasuryReason)> {
+        effects.iter().find_map(|effect| match effect {
+            Effect::Treasury {
+                ticket,
+                change,
+                reason,
+                ..
+            } => Some((*ticket, *change, *reason)),
+            _ => None,
+        })
+    }
+
+    fn told(effects: &[Effect]) -> Vec<UpkeepPaid> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::UpkeepPaid { paid, .. } => Some(*paid),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_governor_pays_the_upkeep_from_the_treasury_and_its_sim_is_told() {
+        let (mut world, company) = company_holding(UPKEEP + DEPOSIT);
+        let (ticket, change, reason) = upkeep_change(&pay(&mut world, 1)).expect("a change");
+        assert_eq!(change, -change_of(UPKEEP));
+        assert_eq!(
+            reason,
+            TreasuryReason::Upkeep {
+                territory: TERRITORY,
+                now_ms: NOW_MS
+            }
+        );
+        let effects = world.treasury_changed(ticket, TreasuryOutcome::Stored(DEPOSIT), NOW_MS);
+        assert_eq!(world.companies[&company].record.treasury, DEPOSIT);
+        assert_eq!(
+            told(&effects),
+            [UpkeepPaid {
+                character: character(1),
+                territory: TERRITORY
+            }]
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::OwnState { .. })),
+            "the members see the new treasury"
+        );
+    }
+
+    #[test]
+    fn an_upkeep_payment_without_the_right_the_coin_or_the_claim_is_refused() {
+        let (mut world, _) = company_holding(UPKEEP);
+        assert_eq!(upkeep_change(&pay(&mut world, 2)), None, "a settler");
+        join(&mut world, 3, "Cid", "sim-a");
+        assert_eq!(upkeep_change(&pay(&mut world, 3)), None, "no company");
+        let (mut poor, _) = company_holding(UPKEEP - 1);
+        assert_eq!(upkeep_change(&pay(&mut poor, 1)), None, "too little coin");
+        let (ticket, ..) = upkeep_change(&pay(&mut world, 1)).expect("asked");
+        let effects = world.treasury_changed(ticket, TreasuryOutcome::Refused, NOW_MS);
+        assert!(told(&effects).is_empty(), "the database refused the claim");
+        assert_eq!(
+            world
+                .companies
+                .values()
+                .next()
+                .expect("company")
+                .record
+                .treasury,
+            UPKEEP,
+            "nothing taken"
         );
     }
 }

@@ -15,10 +15,17 @@
 //! no name. The flyout then reads the `faction` of `GetClaimOwnerData`.
 //!
 //! The body is the generic slot reader: one slot of 18 children (`crate::slots`), each list in
-//! its full form ([`FullList`]). The names are the registered field names; the parts of a
-//! governance entry are the `GovernanceTaxData` names (`FUN_142f93d80`).
+//! its full form or as changes ([`ReplicatedList`]). The names are the registered field names;
+//! the parts of a governance entry are the `GovernanceTaxData` names (`FUN_142f93d80`).
+//!
+//! Observed (territory ownership study 2026-11-11, every retail ledger of the capture index):
+//! 32,456 bodies, 25,958 with full lists and 6,498 with changes (1 to 4 changed claims of a
+//! child, the delta form of `crate::list_delta`); all of them read and write back to the same
+//! bytes. The first state of a client has every list in full; the changes come with the
+//! re-sends (a governance or progression entry of one claim, the darkness of some claims).
 
-use crate::items::FullList;
+use crate::buildables::{GUILD_ID_LEN, GuildCrest};
+use crate::list_delta::ReplicatedList;
 use crate::mutation_scheduler::MUTATION_SCHEDULER_INTEREST;
 use crate::payload::{BundleGroup, BundleMember, MemberState};
 use crate::slots::{read_slot_byte, read_wide_children, write_wide_children};
@@ -63,10 +70,6 @@ const POS_DATA: u8 = 14;
 const PROGRESSION: u8 = 15;
 const OWNER_DATA: u8 = 16;
 const WAR_DEC_THRESHOLD_MET_FACTION: u8 = 17;
-/// Bytes of a guild id.
-const GUILD_ID_LEN: usize = 16;
-/// Components of a crest colour (red, green, blue, alpha).
-const COLOR_COMPONENTS: usize = 4;
 /// Coordinates of a claim position.
 const POSITION_LEN: usize = 3;
 /// The most entries of a progression array (a count beyond it is a misread body).
@@ -197,39 +200,43 @@ fn progression_count(reader: &mut Reader<'_>) -> Result<u64, MessageError> {
     Ok(count)
 }
 
-/// One claim's owner: the company, its crest and its faction (Observed on owned claims: a
-/// company id, its name, two crest icons with their colours, an empty text, the faction 1 to 3
-/// and a Unix nanosecond time).
-#[derive(Debug, Clone, Default, PartialEq)]
+/// One claim's owner: the company, its crest and its faction (Observed on every retail claim,
+/// all of them owned: a company id, its name, its crest, a text, the faction 1 to 3 and a Unix
+/// nanosecond time days to weeks before the capture; `pay-territory-tax` 2026-07-06).
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClaimOwner {
     /// The company id; all zero for no owner.
     pub guild_id: [u8; GUILD_ID_LEN],
     /// The company name.
     pub guild_name: Vec<u8>,
-    /// The crest background icon.
-    pub crest_background: u16,
-    /// The crest background colour.
-    pub crest_background_color: [f32; COLOR_COMPONENTS],
-    /// The crest foreground icon.
-    pub crest_foreground: u16,
-    /// The crest foreground colour.
-    pub crest_foreground_color: [f32; COLOR_COMPONENTS],
-    /// The text after the crest (Observed: always empty).
+    /// The company crest.
+    pub crest: GuildCrest,
+    /// The text after the crest (Observed: empty in 336,336 of 336,453 retail entries; what the
+    /// others hold is Unknown).
     pub text: Vec<u8>,
     /// The owner's faction; 0 for none.
     pub faction: u8,
-    /// The time, Unix nanoseconds.
+    /// Since when the company owns the claim, Unix nanoseconds (Inferred: the times lie days to
+    /// weeks before each capture, a different one per claim of the same company).
     pub time_ns: u64,
 }
 
 impl ClaimOwner {
+    /// A claim no company owns: a zero id, no name, the crest of no guild, no faction, no time
+    /// (Inferred: the zero of each value; no retail claim is unowned).
+    pub const NONE: Self = Self {
+        guild_id: [0; GUILD_ID_LEN],
+        guild_name: Vec::new(),
+        crest: GuildCrest::NONE,
+        text: Vec::new(),
+        faction: 0,
+        time_ns: 0,
+    };
+
     fn write(&self, writer: &mut Writer) {
         writer.bytes(&self.guild_id);
         write_text(writer, &self.guild_name);
-        writer.u16(self.crest_background);
-        write_color(writer, &self.crest_background_color);
-        writer.u16(self.crest_foreground);
-        write_color(writer, &self.crest_foreground_color);
+        self.crest.write(writer);
         write_text(writer, &self.text);
         writer.u8(self.faction).u64(self.time_ns);
     }
@@ -238,10 +245,7 @@ impl ClaimOwner {
         Ok(Self {
             guild_id: reader.array()?,
             guild_name: read_text(reader)?,
-            crest_background: reader.u16()?,
-            crest_background_color: read_color(reader)?,
-            crest_foreground: reader.u16()?,
-            crest_foreground_color: read_color(reader)?,
+            crest: GuildCrest::read(reader)?,
             text: read_text(reader)?,
             faction: reader.u8()?,
             time_ns: reader.u64()?,
@@ -249,56 +253,46 @@ impl ClaimOwner {
     }
 }
 
-fn write_color(writer: &mut Writer, color: &[f32; COLOR_COMPONENTS]) {
-    for component in color {
-        writer.f32(*component);
-    }
-}
-
-fn read_color(reader: &mut Reader<'_>) -> Result<[f32; COLOR_COMPONENTS], MessageError> {
-    Ok([reader.f32()?, reader.f32()?, reader.f32()?, reader.f32()?])
-}
-
 /// The manager state: `None` children are not in the body.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LandClaimManagerState {
     /// `fcpLockTimers` (Observed: `0xffff` for a claim without a lock).
-    pub fcp_lock_timers: Option<FullList<u16>>,
+    pub fcp_lock_timers: Option<ReplicatedList<u16>>,
     /// `fcpLockAnchor`.
     pub fcp_lock_anchor: Option<u64>,
     /// `replicatedClaimKeys`: the territory id of each claim.
-    pub claim_keys: Option<FullList<u16>>,
+    pub claim_keys: Option<ReplicatedList<u16>>,
     /// `replicatedConflictFaction`.
-    pub conflict_faction: Option<FullList<u8>>,
+    pub conflict_faction: Option<ReplicatedList<u8>>,
     /// `replicatedConflictLotteryEndTime`.
-    pub conflict_lottery_end_time: Option<FullList<u64>>,
+    pub conflict_lottery_end_time: Option<ReplicatedList<u64>>,
     /// `replicatedConflictStartTime`.
-    pub conflict_start_time: Option<FullList<u64>>,
+    pub conflict_start_time: Option<ReplicatedList<u64>>,
     /// `replicatedDarknessThreshold` (Observed: 0 to 3).
-    pub darkness_threshold: Option<FullList<u32>>,
+    pub darkness_threshold: Option<ReplicatedList<u32>>,
     /// `replicatedDarknessCycleEndTime`.
-    pub darkness_cycle_end_time: Option<FullList<u64>>,
+    pub darkness_cycle_end_time: Option<ReplicatedList<u64>>,
     /// `replicatedFactionControlPointData` (Observed: 29 bytes, not one per claim).
-    pub faction_control_point_data: Option<FullList<u8>>,
+    pub faction_control_point_data: Option<ReplicatedList<u8>>,
     /// `replicatedFaction1InfluencePercentages` to `replicatedFaction3InfluencePercentages`.
-    pub faction_influence: [Option<FullList<u8>>; 3],
+    pub faction_influence: [Option<ReplicatedList<u8>>; 3],
     /// `replicatedGovernance`.
-    pub governance: Option<FullList<GovernanceTaxData>>,
+    pub governance: Option<ReplicatedList<GovernanceTaxData>>,
     /// `replicatedInfluenceRaceStartTime`.
-    pub influence_race_start_time: Option<FullList<u64>>,
+    pub influence_race_start_time: Option<ReplicatedList<u64>>,
     /// `replicatedPosData`: each claim's position.
-    pub positions: Option<FullList<[f32; POSITION_LEN]>>,
+    pub positions: Option<ReplicatedList<[f32; POSITION_LEN]>>,
     /// `replicatedProgression`.
-    pub progression: Option<FullList<ClaimProgression>>,
+    pub progression: Option<ReplicatedList<ClaimProgression>>,
     /// `replicatedOwnerData`.
-    pub owners: Option<FullList<ClaimOwner>>,
+    pub owners: Option<ReplicatedList<ClaimOwner>>,
     /// `replicatedWarDecThresholdMetFaction`.
-    pub war_dec_threshold_met_faction: Option<FullList<u8>>,
+    pub war_dec_threshold_met_faction: Option<ReplicatedList<u8>>,
 }
 
 fn write_list<T>(
     writer: &mut Writer,
-    list: Option<&FullList<T>>,
+    list: Option<&ReplicatedList<T>>,
     mut write_element: impl FnMut(&mut Writer, &T) -> Result<(), MessageError>,
 ) -> Result<(), MessageError> {
     list.map_or(Ok(()), |list| {
@@ -363,19 +357,19 @@ impl LandClaimManagerState {
         }
         writer.u8(SLOT_0);
         write_wide_children(writer, mask, MANAGER_CHILDREN, |writer, child| {
-            let u8_list = |writer: &mut Writer, list: Option<&FullList<u8>>| {
+            let u8_list = |writer: &mut Writer, list: Option<&ReplicatedList<u8>>| {
                 write_list(writer, list, |writer, value| {
                     writer.u8(*value);
                     Ok(())
                 })
             };
-            let u64_list = |writer: &mut Writer, list: Option<&FullList<u64>>| {
+            let u64_list = |writer: &mut Writer, list: Option<&ReplicatedList<u64>>| {
                 write_list(writer, list, |writer, value| {
                     writer.u64(*value);
                     Ok(())
                 })
             };
-            let u16_list = |writer: &mut Writer, list: Option<&FullList<u16>>| {
+            let u16_list = |writer: &mut Writer, list: Option<&ReplicatedList<u16>>| {
                 write_list(writer, list, |writer, value| {
                     writer.u16(*value);
                     Ok(())
@@ -432,7 +426,7 @@ impl LandClaimManagerState {
         })
     }
 
-    /// Reads a body (lists in their full form only).
+    /// Reads a body (each list in its full form or as changes).
     ///
     /// # Errors
     ///
@@ -443,9 +437,14 @@ impl LandClaimManagerState {
             return Ok(state);
         }
         read_wide_children(reader, FIELD, MANAGER_CHILDREN, |reader, child| {
-            let u8_list = |reader: &mut Reader<'_>| FullList::read(reader, |reader| reader.u8());
-            let u16_list = |reader: &mut Reader<'_>| FullList::read(reader, |reader| reader.u16());
-            let u64_list = |reader: &mut Reader<'_>| FullList::read(reader, |reader| reader.u64());
+            let u8_list =
+                |reader: &mut Reader<'_>| ReplicatedList::read(reader, FIELD, |reader| reader.u8());
+            let u16_list = |reader: &mut Reader<'_>| {
+                ReplicatedList::read(reader, FIELD, |reader| reader.u16())
+            };
+            let u64_list = |reader: &mut Reader<'_>| {
+                ReplicatedList::read(reader, FIELD, |reader| reader.u64())
+            };
             match child {
                 FCP_LOCK_TIMERS => state.fcp_lock_timers = Some(u16_list(reader)?),
                 FCP_LOCK_ANCHOR => state.fcp_lock_anchor = Some(reader.u64()?),
@@ -456,7 +455,8 @@ impl LandClaimManagerState {
                 }
                 CONFLICT_START_TIME => state.conflict_start_time = Some(u64_list(reader)?),
                 DARKNESS_THRESHOLD => {
-                    state.darkness_threshold = Some(FullList::read(reader, |reader| reader.u32())?);
+                    state.darkness_threshold =
+                        Some(ReplicatedList::read(reader, FIELD, |reader| reader.u32())?);
                 }
                 DARKNESS_CYCLE_END_TIME => state.darkness_cycle_end_time = Some(u64_list(reader)?),
                 FACTION_CONTROL_POINT_DATA => {
@@ -467,20 +467,27 @@ impl LandClaimManagerState {
                         Some(u8_list(reader)?);
                 }
                 GOVERNANCE => {
-                    state.governance = Some(FullList::read(reader, GovernanceTaxData::read)?);
+                    state.governance = Some(ReplicatedList::read(
+                        reader,
+                        FIELD,
+                        GovernanceTaxData::read,
+                    )?);
                 }
                 INFLUENCE_RACE_START_TIME => {
                     state.influence_race_start_time = Some(u64_list(reader)?);
                 }
                 POS_DATA => {
-                    state.positions = Some(FullList::read(reader, |reader| {
+                    state.positions = Some(ReplicatedList::read(reader, FIELD, |reader| {
                         Ok([reader.f32()?, reader.f32()?, reader.f32()?])
                     })?);
                 }
                 PROGRESSION => {
-                    state.progression = Some(FullList::read(reader, ClaimProgression::read)?);
+                    state.progression =
+                        Some(ReplicatedList::read(reader, FIELD, ClaimProgression::read)?);
                 }
-                OWNER_DATA => state.owners = Some(FullList::read(reader, ClaimOwner::read)?),
+                OWNER_DATA => {
+                    state.owners = Some(ReplicatedList::read(reader, FIELD, ClaimOwner::read)?)
+                }
                 _ => state.war_dec_threshold_met_faction = Some(u8_list(reader)?),
             }
             Ok(())
@@ -543,6 +550,8 @@ impl LandClaimManagerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::items::FullList;
+    use crate::list_delta::ListChange;
     use crate::member_layouts::{layout, skip_body};
 
     /// The retail governance entry of every claim: house fee 0.2, crafting and refining fees
@@ -558,30 +567,38 @@ mod tests {
             .collect()
     }
 
+    /// A first state's list of `elements`.
+    fn full<T>(elements: Vec<T>) -> Option<ReplicatedList<T>> {
+        Some(ReplicatedList::Full(FullList::first(elements)))
+    }
+
     fn full_state() -> LandClaimManagerState {
         let claims = CLAIM_KEYS.len();
-        let list = |value| FullList::first(vec![value; claims]);
         LandClaimManagerState {
-            fcp_lock_timers: Some(FullList::first(vec![u16::MAX; claims])),
+            fcp_lock_timers: full(vec![u16::MAX; claims]),
             fcp_lock_anchor: Some(0),
-            claim_keys: Some(FullList::first(CLAIM_KEYS.to_vec())),
-            conflict_faction: Some(list(0)),
-            conflict_lottery_end_time: Some(FullList::first(vec![0; claims])),
-            conflict_start_time: Some(FullList::first(vec![0; claims])),
-            darkness_threshold: Some(FullList::first(vec![0; claims])),
-            darkness_cycle_end_time: Some(FullList::first(vec![0; claims])),
-            faction_control_point_data: Some(list(0)),
-            faction_influence: [Some(list(0)), Some(list(0)), Some(list(0))],
-            governance: Some(FullList::first(vec![
-                GovernanceTaxData::read(
-                    &mut Reader::new(&bytes(RETAIL_GOVERNANCE))
-                )
+            claim_keys: full(CLAIM_KEYS.to_vec()),
+            conflict_faction: full(vec![0; claims]),
+            conflict_lottery_end_time: full(vec![0; claims]),
+            conflict_start_time: full(vec![0; claims]),
+            darkness_threshold: full(vec![0; claims]),
+            darkness_cycle_end_time: full(vec![0; claims]),
+            faction_control_point_data: full(vec![0; claims]),
+            faction_influence: [
+                full(vec![0; claims]),
+                full(vec![0; claims]),
+                full(vec![0; claims]),
+            ],
+            governance: full(vec![
+                GovernanceTaxData::read(&mut Reader::new(&bytes(
+                    RETAIL_GOVERNANCE
+                )))
                 .expect("governance");
                 claims
-            ])),
-            influence_race_start_time: Some(FullList::first(vec![0; claims])),
-            positions: Some(FullList::first(vec![FIRST_POSITION; claims])),
-            progression: Some(FullList::first(vec![
+            ]),
+            influence_race_start_time: full(vec![0; claims]),
+            positions: full(vec![FIRST_POSITION; claims]),
+            progression: full(vec![
                 ClaimProgression {
                     tiers: vec![ProgressionTier { id: 11, tier: 2 }],
                     entries: vec![ProgressionEntry {
@@ -592,16 +609,16 @@ mod tests {
                     level: 28,
                 };
                 claims
-            ])),
-            owners: Some(FullList::first(vec![
+            ]),
+            owners: full(vec![
                 ClaimOwner {
                     guild_name: b"Company".to_vec(),
                     faction: 2,
-                    ..ClaimOwner::default()
+                    ..ClaimOwner::NONE
                 };
                 claims
-            ])),
-            war_dec_threshold_met_faction: Some(list(0)),
+            ]),
+            war_dec_threshold_met_faction: full(vec![0; claims]),
         }
     }
 
@@ -657,6 +674,82 @@ mod tests {
             group.members[0].state.type_index(),
             LAND_CLAIM_MANAGER_TYPE_INDEX
         );
+    }
+
+    /// A retail re-send that changes one governance entry (`S8_ledger` 1782965690981): claim
+    /// index 2 (territory 6) failed to pay its upkeep; no other child is in the body.
+    const RETAIL_UPKEEP_FAILED: &str = "01802001010201be5f3e4ccccd3f0000003f0000003f8000000101";
+    /// The same change back to paid (`Playthrough_Part_20` 1793559790536).
+    const RETAIL_UPKEEP_PAID: &str = "01802001010201c2060f3e4ccccd3f0000003f0000003f8000000100";
+    /// A claim owner in the retail form (a 2026-07 owner delta), with a made-up company id and
+    /// name: the id, the name, the crest (background 253 and foreground 169 with their colours),
+    /// an empty text, faction 2 and the owner time.
+    const MADE_UP_OWNER: &str = concat!(
+        "11111111111111111111111111111111",
+        "0a4d61646520557020436f",
+        "00fd3d1090913e78f8fa3db0b0b13f800000",
+        "00a93e78f8fa3da0a0a13de0e0e23f800000",
+        "00",
+        "02",
+        "18d8f4664d5feee0"
+    );
+
+    #[test]
+    fn a_retail_governance_change_reads_and_writes_back_the_same_bytes() {
+        for (hex, failed) in [(RETAIL_UPKEEP_FAILED, true), (RETAIL_UPKEEP_PAID, false)] {
+            let body = bytes(hex);
+            let state = LandClaimManagerState::decode(&body).expect("decode");
+            let Some(ReplicatedList::Changes(changes)) = &state.governance else {
+                panic!("a governance change");
+            };
+            let [ListChange { index, value, .. }] = changes.as_slice() else {
+                panic!("one change");
+            };
+            assert_eq!(*index, 2);
+            assert_eq!(value.failed_to_pay_upkeep, failed);
+            assert_eq!(value.crafting_fee, 0.5);
+            assert_eq!(
+                LandClaimManagerState {
+                    governance: None,
+                    ..state.clone()
+                },
+                LandClaimManagerState::default(),
+                "nothing else changes"
+            );
+            assert_eq!(state.encode().expect("encode"), body);
+        }
+    }
+
+    #[test]
+    fn a_claim_owner_in_the_retail_form_reads_and_writes_back() {
+        let body = bytes(MADE_UP_OWNER);
+        let owner = ClaimOwner::read(&mut Reader::new(&body)).expect("read");
+        assert_eq!(owner.guild_id, [0x11; GUILD_ID_LEN]);
+        assert_eq!(owner.guild_name, b"Made Up Co");
+        assert_eq!(owner.crest.background, 253);
+        assert_eq!(owner.crest.foreground, 169);
+        assert_eq!(owner.crest.background_color[3], 1.0);
+        assert!(owner.text.is_empty());
+        assert_eq!(owner.faction, 2);
+        assert_eq!(owner.time_ns, 0x18d8_f466_4d5f_eee0);
+        let mut writer = Writer::new();
+        owner.write(&mut writer);
+        assert_eq!(writer.finish(), body);
+    }
+
+    #[test]
+    fn an_owner_change_reads_back() {
+        let owner = ClaimOwner::read(&mut Reader::new(&bytes(MADE_UP_OWNER))).expect("read");
+        let state = LandClaimManagerState {
+            owners: Some(ReplicatedList::Changes(vec![ListChange {
+                index: 9,
+                version: 41,
+                value: owner,
+            }])),
+            ..LandClaimManagerState::default()
+        };
+        let body = state.encode().expect("encode");
+        assert_eq!(LandClaimManagerState::decode(&body), Ok(state));
     }
 
     #[test]

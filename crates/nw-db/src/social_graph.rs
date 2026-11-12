@@ -7,6 +7,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::{DbError, is_unique_violation};
+use crate::territory::move_upkeep_due;
 
 /// Bytes of a stored crest.
 pub const CREST_LEN: usize = 36;
@@ -27,6 +28,7 @@ const COMPANY_NAME_INDEX: &str = "company_name_idx";
 const LANGUAGE_FIELD: &str = "language";
 pub(crate) const LEVEL_FIELD: &str = "level";
 const FACTION_FIELD: &str = "faction";
+const PRONOUN_FIELD: &str = "pronoun type";
 const RANK_FIELD: &str = "rank";
 const ICON_FIELD: &str = "icon";
 const CREST_FIELD: &str = "crest";
@@ -75,6 +77,14 @@ pub enum TreasuryReason {
     Withdraw,
     /// A withdrawal whose coin could not reach the member went back.
     Refund,
+    /// A member paid the upkeep of a territory the company owns (world migration 0039): the
+    /// change also moves the claim's due time, in the same transaction.
+    Upkeep {
+        /// The territory id of the claim.
+        territory: u16,
+        /// When the payment is taken, Unix milliseconds.
+        now_ms: u64,
+    },
 }
 
 impl TreasuryReason {
@@ -83,6 +93,7 @@ impl TreasuryReason {
             Self::Deposit => "deposit",
             Self::Withdraw => "withdraw",
             Self::Refund => "refund",
+            Self::Upkeep { .. } => "upkeep",
         }
     }
 }
@@ -119,6 +130,8 @@ pub struct SocialSettings {
     pub level: u32,
     /// The faction when last online.
     pub faction: u8,
+    /// The pronoun type when last online.
+    pub pronoun: u8,
     /// Unix milliseconds when last online.
     pub last_online_ms: Option<u64>,
     /// Unix milliseconds when it last left or lost its company.
@@ -137,6 +150,7 @@ impl Default for SocialSettings {
             icon: None,
             level: 0,
             faction: 0,
+            pronoun: 0,
             last_online_ms: None,
             company_left_at_ms: None,
         }
@@ -281,6 +295,8 @@ pub struct CompanyListing {
     pub crest: [u8; CREST_LEN],
     /// Its member count.
     pub members: u32,
+    /// The territory claims it owns (world migration 0038).
+    pub claims: u32,
     /// The hour its sieges start.
     pub siege_hour: f32,
 }
@@ -294,6 +310,7 @@ type SettingsRow = (
     bool,
     Option<Vec<u8>>,
     i64,
+    i16,
     i16,
     Option<f64>,
     Option<f64>,
@@ -322,7 +339,10 @@ fn seconds_of(ms: Option<u64>) -> Option<f64> {
     ms.map(|ms| ms as f64 * SECONDS_PER_MS)
 }
 
-fn fixed<const N: usize>(bytes: Vec<u8>, field: &'static str) -> Result<[u8; N], DbError> {
+pub(crate) fn fixed<const N: usize>(
+    bytes: Vec<u8>,
+    field: &'static str,
+) -> Result<[u8; N], DbError> {
     bytes.try_into().map_err(|_| DbError::OutOfRange { field })
 }
 
@@ -331,8 +351,20 @@ pub(crate) fn narrow<T: TryFrom<i64>>(value: i64, field: &'static str) -> Result
 }
 
 fn settings_of(row: SettingsRow) -> Result<(Uuid, SocialSettings), DbError> {
-    let (id, filter, language, streamer, crossplay, voice, icon, level, faction, online, left) =
-        row;
+    let (
+        id,
+        filter,
+        language,
+        streamer,
+        crossplay,
+        voice,
+        icon,
+        level,
+        faction,
+        pronoun,
+        online,
+        left,
+    ) = row;
     Ok((
         id,
         SocialSettings {
@@ -348,6 +380,7 @@ fn settings_of(row: SettingsRow) -> Result<(Uuid, SocialSettings), DbError> {
             icon: icon.map(|bytes| fixed(bytes, ICON_FIELD)).transpose()?,
             level: narrow(level, LEVEL_FIELD)?,
             faction: narrow(i64::from(faction), FACTION_FIELD)?,
+            pronoun: narrow(i64::from(pronoun), PRONOUN_FIELD)?,
             last_online_ms: ms_of(online),
             company_left_at_ms: ms_of(left),
         },
@@ -419,7 +452,8 @@ pub async fn load_social(world: &PgPool) -> Result<SocialRecords, DbError> {
     .collect();
     let settings = sqlx::query_as::<_, SettingsRow>(
         "SELECT character_id, profanity_filter, language, streamer_mode, crossplay, \
-         voice_active, icon, level, faction, extract(epoch FROM last_online)::float8, \
+         voice_active, icon, level, faction, pronoun_type, \
+         extract(epoch FROM last_online)::float8, \
          extract(epoch FROM company_left_at)::float8 FROM character_social",
     )
     .fetch_all(world)
@@ -534,8 +568,9 @@ pub async fn load_social(world: &PgPool) -> Result<SocialRecords, DbError> {
     })
 }
 
-/// One row of [`company_listings`]: id, name, governor, faction, crest, members, siege hour.
-type CompanyListingRow = (Uuid, String, Option<Uuid>, i16, Vec<u8>, i64, f32);
+/// One row of [`company_listings`]: id, name, governor, faction, crest, members, claims, siege
+/// hour.
+type CompanyListingRow = (Uuid, String, Option<Uuid>, i16, Vec<u8>, i64, i64, f32);
 
 /// The companies of `ids` that the world has, in no set order.
 ///
@@ -553,6 +588,7 @@ pub async fn company_listings(
           AND m.rank = 0 ORDER BY m.joined_at LIMIT 1), \
          c.faction, c.crest, \
          (SELECT COUNT(*) FROM company_member m WHERE m.company_id = c.company_id), \
+         (SELECT COUNT(*) FROM territory_owner t WHERE t.company_id = c.company_id), \
          c.siege_hour FROM company c WHERE c.company_id = ANY($1)",
     )
     .bind(ids)
@@ -560,7 +596,7 @@ pub async fn company_listings(
     .await?;
     rows.into_iter()
         .map(
-            |(id, name, governor, faction, crest, members, siege_hour)| {
+            |(id, name, governor, faction, crest, members, claims, siege_hour)| {
                 Ok(CompanyListing {
                     id,
                     name,
@@ -568,6 +604,7 @@ pub async fn company_listings(
                     faction: narrow(i64::from(faction), FACTION_FIELD)?,
                     crest: fixed(crest, CREST_FIELD)?,
                     members: narrow(members, COUNT_FIELD)?,
+                    claims: narrow(claims, COUNT_FIELD)?,
                     siege_hour,
                 })
             },
@@ -588,11 +625,13 @@ pub async fn save_social_settings(
 ) -> Result<(), DbError> {
     sqlx::query(
         "INSERT INTO character_social (character_id, profanity_filter, language, streamer_mode, \
-         crossplay, voice_active, icon, level, faction, last_online, company_left_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($11)) \
+         crossplay, voice_active, icon, level, faction, last_online, company_left_at, \
+         pronoun_type) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), to_timestamp($11), $12) \
          ON CONFLICT (character_id) DO UPDATE SET profanity_filter = $2, language = $3, \
          streamer_mode = $4, crossplay = $5, voice_active = $6, icon = $7, level = $8, \
-         faction = $9, last_online = to_timestamp($10), company_left_at = to_timestamp($11)",
+         faction = $9, last_online = to_timestamp($10), company_left_at = to_timestamp($11), \
+         pronoun_type = $12",
     )
     .bind(character)
     .bind(settings.profanity_filter)
@@ -605,6 +644,7 @@ pub async fn save_social_settings(
     .bind(i16::from(settings.faction))
     .bind(seconds_of(settings.last_online_ms))
     .bind(seconds_of(settings.company_left_at_ms))
+    .bind(i16::from(settings.pronoun))
     .execute(world)
     .await?;
     Ok(())
@@ -871,8 +911,9 @@ pub async fn remove_company_invite(
 }
 
 /// Adds `change` to the treasury of `company` for `character`, with its log row, in one
-/// transaction. `Ok(None)` when the treasury holds less than a negative change takes; else the
-/// balance after it.
+/// transaction. `Ok(None)` when the treasury holds less than a negative change takes, or, for an
+/// upkeep payment, when the company does not own the claim or its upkeep is not payable yet
+/// (`crate::territory::move_upkeep_due`); else the balance after it.
 ///
 /// # Errors
 ///
@@ -886,6 +927,13 @@ pub async fn change_treasury(
     reason: TreasuryReason,
 ) -> Result<Option<u64>, DbError> {
     let mut transaction = world.begin().await?;
+    if let TreasuryReason::Upkeep { territory, now_ms } = reason
+        && move_upkeep_due(&mut transaction, company, territory, now_ms)
+            .await?
+            .is_none()
+    {
+        return Ok(None);
+    }
     let balance: Option<i64> = sqlx::query_scalar(
         "UPDATE company SET treasury = treasury + $2 \
          WHERE company_id = $1 AND treasury + $2 >= 0 RETURNING treasury",
@@ -1099,6 +1147,7 @@ mod infra_tests {
                 icon: Some([1; ICON_LEN]),
                 level: 42,
                 faction: 2,
+                pronoun: 1,
                 last_online_ms: Some(1_798_761_600_000),
                 ..SocialSettings::default()
             };

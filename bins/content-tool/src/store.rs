@@ -18,6 +18,8 @@ pub struct StoreReport {
     pub path: PathBuf,
     /// The mounts the store sells.
     pub mounts: usize,
+    /// The token packs the store sells.
+    pub tokens: usize,
     /// The entitlements every account holds.
     pub held_by_all: usize,
 }
@@ -35,6 +37,7 @@ pub fn write_store_table(content_dir: &Path, client_build: &str) -> Result<Store
     Ok(StoreReport {
         path,
         mounts: table.mounts.len(),
+        tokens: table.tokens.len(),
         held_by_all: table.held_by_all.len(),
     })
 }

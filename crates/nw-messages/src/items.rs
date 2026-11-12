@@ -39,6 +39,10 @@ pub const SYNC_CRAFT_USED: u8 = 2;
 /// 2 light rations). With another reason the live client said "Crafting attempt failed" after
 /// each good craft and cancelled it (2026-10-29 play test).
 pub const SYNC_CRAFTED: u8 = 3;
+/// Sync reason of a bag stack that a free-for-all conversion (`FFAConvertedItemId`) made or
+/// added to (retail `FFA_ExitFFAAndCleanse` 246.447 s and `FFA_KillPlayerAndLoot` 237.905 s: 5
+/// of 5 stacks); the slot of a stack it took shows [`SYNC_CRAFT_USED`].
+pub const SYNC_CONVERTED: u8 = 40;
 /// Sync reason of the bag stack a salvage took from, or of its emptied slot (retail
 /// `MSQ6-lv28` 888.480 s, `Playthrough_Part_03` 218.774 s, `20261008-145727-200` 699.612 s: 20 of
 /// 20 salvages).

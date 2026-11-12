@@ -9,6 +9,7 @@ pub mod client;
 pub mod ghost_parts;
 pub mod id;
 pub mod instance;
+pub mod matchmaking;
 pub mod message;
 pub mod publisher;
 pub mod snapshot;
@@ -22,21 +23,24 @@ pub use client::{Bus, BusError, Incoming, Subscription};
 pub use ghost_parts::{GhostAssembly, ghost_parts};
 pub use id::{BusId, BusIdError, MAX_BUS_ID_LEN};
 pub use instance::{
-    GroupAnswer, GroupQuery, InstanceBeat, InstanceCommand, InstanceOpened, InstanceRefusal,
-    InstanceReply, InstanceRequest, InstanceStay, PlayerArena, RunningInstance,
+    ArenaSeat, GroupAnswer, GroupQuery, InstanceBeat, InstanceCommand, InstanceOpened,
+    InstanceRefusal, InstanceReply, InstanceRequest, InstanceStay, PlayerArena, RunningInstance,
+    WAR_GAME_MODE, WarInstance, WarInstanceNews,
 };
+pub use matchmaking::{MatchPlace, QueueCall, QueueJoin, QueueNews, QueueNewsKind};
 pub use message::{
     Admit, AdmitReply, CarriedItem, CarriedMount, CellTable, ConnectionRef, DYE_CHANNELS,
     EffectRepeat, GHOST_VISIBLE_ITEMS, GatewayOutput, Ghost, GhostItem, GhostMount, GhostName,
-    GhostSlayer, GhostSlotChange, GhostUpperSlots, Ghosts, HandoffMessage, HandoffOffer,
-    HandoffReply, Heartbeat, Hit, HomeRecord, HousingItem, InputBatch, ItemLookState, ItemPlace,
-    ItemState, Join, JoinReply, LootLimitCount, MAX_BATCH_BYTES, MAX_BUS_MESSAGE_BYTES,
+    GhostPvpFlags, GhostSlayer, GhostSlotChange, GhostUpperSlots, Ghosts, HandoffMessage,
+    HandoffOffer, HandoffReply, Heartbeat, Hit, HomeRecord, HousingItem, InputBatch, ItemLookState,
+    ItemPlace, ItemState, Join, JoinReply, LootLimitCount, MAX_BATCH_BYTES, MAX_BUS_MESSAGE_BYTES,
     MAX_GHOST_BYTES, MISSION_BOARD_ID_LEN, MOB_ENTITY_BASE, MOUNT_DYE_LEN, MissionTake, MobGhost,
-    OutputBatch, OwnedHome, PlacedCamp, PlayerAbilityCooldown, PlayerConsumableCooldown,
-    PlayerFaction, PlayerGhost, PlayerInventory, PlayerMounts, PlayerMusic, PlayerProgression,
-    PlayerQuests, PlayerStatusEffect, PlayerTravel, Point, QuestRun, QuestTask,
-    RecipeCooldownCount, ResumeOf, SavedLoadout, SimHeartbeat, SimInput, SimSlot, StoredItem,
-    StoredPoint, VitalsAtSave, decode, encode, heartbeat_silence, split_batches,
+    OutputBatch, OwnedHome, PlacedCamp, PlayerAbilityCooldown, PlayerActivityCard,
+    PlayerConsumableCooldown, PlayerFaction, PlayerGhost, PlayerInventory, PlayerMounts,
+    PlayerMusic, PlayerProgression, PlayerQuests, PlayerSeason, PlayerStatusEffect, PlayerTravel,
+    Point, QuestRun, QuestTask, RecipeCooldownCount, ResumeOf, SavedLoadout, SimHeartbeat,
+    SimInput, SimSlot, StoredItem, StoredPoint, VitalsAtSave, decode, encode, heartbeat_silence,
+    split_batches,
 };
 pub use publisher::Publisher;
 pub use snapshot::{
@@ -46,5 +50,5 @@ pub use social::ICON_LEN as SOCIAL_ICON_LEN;
 pub use social::{
     CoinReply, CoinTransfer, GroupEntityDelivery, GroupEntityView, LeaveReason, OwnStateDelivery,
     PlayerVitals, SocialBatch, SocialDeliveries, SocialDelivery, SocialFacetKind, SocialHeader,
-    SocialInput, SocialPlayer, SocialStateKind,
+    SocialInput, SocialPlayer, SocialStateKind, UpkeepPaid, UpkeepPayment,
 };

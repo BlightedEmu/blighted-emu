@@ -34,6 +34,7 @@ use crate::position::SaveOutcome;
 use crate::recipe_cooldowns::{
     SavedRecipeCooldown, character_recipe_cooldowns, save_character_recipe_cooldowns,
 };
+use crate::seasons::{SavedSeason, character_season, save_character_season};
 use crate::status_effects::{
     SavedStatusEffect, character_status_effects, save_character_status_effects,
 };
@@ -93,6 +94,8 @@ pub struct SavedProgression {
     pub meta_completed: Vec<(String, bool)>,
     /// The title it shows (CRC-32 of the lowercase `TitleID`; world migration 0013).
     pub title: Option<u32>,
+    /// The pronoun type it chose (world migration 0036).
+    pub pronoun: u8,
     /// The expedition, raid and trial state (world migration 0015).
     pub arena: SavedArena,
     /// The musical performance lockout (world migration 0018).
@@ -110,6 +113,8 @@ pub struct SavedProgression {
     /// The vitals, ability cooldowns, PvP flag wish, stone turns and fishing bait (world
     /// migration 0034).
     pub log_out_state: SavedLogOutState,
+    /// The season pass state (world migration 0041).
+    pub season: SavedSeason,
 }
 
 type ProgressionRow = (bool, i64, i64, Vec<i32>);
@@ -200,6 +205,7 @@ pub async fn character_progression(
     let status_effects = character_status_effects(world, character_id).await?;
     let consumable_cooldowns = character_consumable_cooldowns(world, character_id).await?;
     let log_out_state = character_log_out_state(world, character_id).await?;
+    let season = character_season(world, character_id).await?;
     Ok(Some(SavedProgression {
         experience: from_column(experience, "experience")?,
         coins: from_column(coins, "coins")?,
@@ -251,6 +257,7 @@ pub async fn character_progression(
         meta_counters: meta.counters,
         meta_completed: meta.completed,
         title: meta.title,
+        pronoun: meta.pronoun,
         arena,
         music,
         notifications,
@@ -259,6 +266,7 @@ pub async fn character_progression(
         status_effects,
         consumable_cooldowns,
         log_out_state,
+        season,
     }))
 }
 
@@ -415,6 +423,7 @@ pub async fn save_character_progression(
         counters: progression.meta_counters.clone(),
         completed: progression.meta_completed.clone(),
         title: progression.title,
+        pronoun: progression.pronoun,
     };
     save_character_meta(&mut transaction, character_id, &meta).await?;
     save_character_arena(&mut transaction, character_id, &progression.arena).await?;
@@ -438,6 +447,7 @@ pub async fn save_character_progression(
     .await?;
     save_character_log_out_state(&mut transaction, character_id, &progression.log_out_state)
         .await?;
+    save_character_season(&mut transaction, character_id, &progression.season).await?;
     transaction.commit().await?;
     Ok(SaveOutcome::Saved)
 }
@@ -523,6 +533,7 @@ mod infra_tests {
                 ("AchievementsEarnedCount3".to_owned(), true),
             ],
             title: Some(0x431d_f4ea),
+            pronoun: 2,
             arena: arena(),
             music: SavedMusic {
                 next_performance_ms: Some(846_118_000_000),
@@ -576,6 +587,21 @@ mod infra_tests {
                 cyclic_turns: BTreeMap::from([("puzzlestone_a".to_owned(), 3)]),
                 fishing_bait: Some("FishingBaitT2".to_owned()),
             },
+            // A made-up season state: two redeemed rewards and a card with one stamp.
+            season: crate::SavedSeason {
+                season: 0x2221_5ad9,
+                redeemed: vec![0b11],
+                stats: vec![(0x1234_5678, 6)],
+                card: crate::SavedCard {
+                    template: 1,
+                    tasks: vec![0x199d_1dce],
+                    claimed: 1,
+                    stamped: 2,
+                    wild_stamps: 3,
+                    ..crate::SavedCard::default()
+                },
+                first_connect_ns: 1_790_860_000_000_000_000,
+            },
         }
     }
 
@@ -596,6 +622,7 @@ mod infra_tests {
             next_group_trial_refresh_ns: 1_781_406_000_122_932_600,
             mutation_award: true,
             last_dungeon_mutated: true,
+            queue_eligible: vec![(0x1fad_9d42, 1_781_895_720_027_468_500)],
             stay: Some(crate::SavedStay {
                 instance: Uuid::from_u128(0x2d30),
                 game_mode: "DungeonAmrine".to_owned(),

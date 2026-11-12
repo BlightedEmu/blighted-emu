@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The sim's side of the instance bus (`nw_bus::instance`): the expedition requests of its
 //! players to the director and their answers, and the director's commands to an instance sim
-//! (open, close, add a member). The world decides ([`crate::world::instances`]); this module
+//! (open, open a war's instance, close, add a member). The world decides ([`crate::world::instances`]); this module
 //! only carries the messages.
 
 use std::time::Duration;
@@ -82,6 +82,25 @@ pub fn command(world: &mut SimWorld, bus: &Bus, command: Incoming<InstanceComman
             tokio::spawn(async move {
                 if let Err(error) = bus.reply(&command, &opened).await {
                     tracing::warn!(%error, "instance opening not answered");
+                }
+            });
+        }
+        InstanceCommand::OpenWar {
+            instance,
+            phase,
+            members,
+            ends_at_ms,
+            war,
+        } => {
+            let opened =
+                world.open_war_instance(instance, phase, (members, ends_at_ms), war, now_ms);
+            if let InstanceOpened::Refused { reason } = &opened {
+                tracing::warn!(%instance, %reason, "war instance not opened");
+            }
+            let bus = bus.clone();
+            tokio::spawn(async move {
+                if let Err(error) = bus.reply(&command, &opened).await {
+                    tracing::warn!(%error, "war instance opening not answered");
                 }
             });
         }

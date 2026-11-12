@@ -10,6 +10,7 @@ use nw_protocol::store_api::StoreTableError;
 
 use crate::ai_data::AiDataError;
 use crate::ai_trace::AiTraceError;
+use crate::breach_tiers::BreachTiersError;
 use crate::catacombs::CatacombCheckError;
 use crate::codegen::CodegenError;
 use crate::collision::CollisionError;
@@ -73,6 +74,9 @@ pub enum ToolError {
     /// The dungeon script file cannot be built.
     #[error(transparent)]
     DungeonScripts(#[from] DungeonScriptsBuildError),
+    /// The breach tiers file cannot be made.
+    #[error(transparent)]
+    BreachTiers(#[from] BreachTiersError),
     /// The camp slice file cannot be written.
     #[error(transparent)]
     CampSlices(#[from] nw_world::camps::CampSlicesError),

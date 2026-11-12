@@ -121,6 +121,20 @@ pub enum InstanceCommand {
         /// The instance.
         instance: Uuid,
     },
+    /// Run the instance of a territory war: the open world level cut to the frame of the fort
+    /// (request/reply: [`InstanceOpened`]).
+    OpenWar {
+        /// The instance.
+        instance: Uuid,
+        /// The phase id of the instance.
+        phase: u64,
+        /// The characters that may enter: the war's roster.
+        members: Vec<Uuid>,
+        /// Unix milliseconds when it ends at the latest.
+        ends_at_ms: Option<u64>,
+        /// The war.
+        war: WarInstance,
+    },
     /// Add a character that joined the group after the opening.
     Admit {
         /// The instance.
@@ -128,6 +142,35 @@ pub enum InstanceCommand {
         /// The character.
         character: Uuid,
     },
+}
+
+/// The game mode name of a war instance in the director's and the sims' instance records
+/// (Inferred: no `GameModeData` row is a war; the client never sees this name).
+pub const WAR_GAME_MODE: &str = "TerritoryWar";
+
+/// The territory war an instance runs: the open world level cut to the frame of the
+/// territory's fort (the 512 m square of the war forts table, Observed in the 1635 of every
+/// retail war instance; each sim reads the frame from its own table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WarInstance {
+    /// The war.
+    pub war: Uuid,
+    /// Its territory.
+    pub territory: u16,
+}
+
+/// Director to every sim ([`crate::subject::sims_war`]): the instance of a war is open; each
+/// open-world sim moves its players of the war's roster to it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WarInstanceNews {
+    /// The war.
+    pub war: WarInstance,
+    /// The instance.
+    pub instance: Uuid,
+    /// The instance sim.
+    pub sim: SimSlot,
+    /// The instance's phase id.
+    pub phase: u64,
 }
 
 /// The answer to [`InstanceCommand::Open`].
@@ -175,6 +218,10 @@ pub struct RunningInstance {
     /// its game mode limits it.
     #[serde(default)]
     pub ends_at_ms: Option<u64>,
+    /// The territory war it runs ([`InstanceCommand::OpenWar`]), so a restarted director knows
+    /// the war has its instance.
+    #[serde(default)]
+    pub war: Option<WarInstance>,
 }
 
 /// A player's stay in an instance, as its arena state keeps it (world migration 0015): the
@@ -196,6 +243,19 @@ pub struct InstanceStay {
     /// The mutation difficulty the player activated the instance with (1 to 3); `None` for a
     /// normal run. The instance sim takes it from the first player that arrives.
     pub mutation_difficulty: Option<u8>,
+    /// The player's team and place in an arena match; `None` in every other instance. A join
+    /// does not carry it (not saved): a player who comes back to a match is no participant.
+    #[serde(default)]
+    pub seat: Option<ArenaSeat>,
+}
+
+/// A player's seat in an arena match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArenaSeat {
+    /// Its team (0 or 1).
+    pub team: u8,
+    /// Its place in the team, from 0.
+    pub place: u8,
 }
 
 /// A player's arena state as a join, a handoff and a save carry it (world migration 0015): the
@@ -233,6 +293,10 @@ pub struct PlayerArena {
     pub last_dungeon_mutated: bool,
     /// The instance the player is in, or entered last and has not left.
     pub stay: Option<InstanceStay>,
+    /// `queueEligibleTimesForGameModes` (world migration 0037): per game mode CRC, the Unix
+    /// nanoseconds from which the player may queue for it again.
+    #[serde(default)]
+    pub queue_eligible: Vec<(u32, u64)>,
 }
 
 #[cfg(test)]
@@ -285,6 +349,7 @@ mod tests {
                 }),
                 activated_ns: 1_792_670_400_250_000_000,
                 mutation_difficulty: Some(2),
+                seat: Some(ArenaSeat { team: 1, place: 2 }),
             }),
             ..PlayerArena::default()
         };
@@ -303,11 +368,40 @@ mod tests {
                 phase: 9,
                 capacity: 5,
                 ends_at_ms: Some(1_792_670_400_250),
+                war: None,
             }),
         };
         assert_eq!(
             decode::<InstanceBeat>(&encode(&beat).expect("encode")).expect("decode"),
             beat
+        );
+        let war = WarInstance {
+            war: Uuid::from_u128(5),
+            territory: 8,
+        };
+        let open = InstanceCommand::OpenWar {
+            instance: Uuid::from_u128(2),
+            phase: 9,
+            members: vec![Uuid::from_u128(1)],
+            ends_at_ms: Some(1_792_670_400_250),
+            war,
+        };
+        assert_eq!(
+            decode::<InstanceCommand>(&encode(&open).expect("encode")).expect("decode"),
+            open
+        );
+        let news = WarInstanceNews {
+            war,
+            instance: Uuid::from_u128(2),
+            sim: SimSlot {
+                id: BusId::try_from("inst-1".to_owned()).expect("id"),
+                generation: 7,
+            },
+            phase: 9,
+        };
+        assert_eq!(
+            decode::<WarInstanceNews>(&encode(&news).expect("encode")).expect("decode"),
+            news
         );
     }
 }

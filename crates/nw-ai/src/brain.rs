@@ -203,7 +203,8 @@ pub trait World {
     fn position(&self, of: PositionType) -> Option<[f32; 3]>;
     /// How many action targets the tracker's targeting fields find.
     fn action_targets(&self, params: &TrackerParams) -> u32;
-    /// Whether an `EntityQueryCondition` passes (its rule is **Unknown**: the sim owns it).
+    /// Whether an `EntityQueryCondition` passes: the sim counts the entities the query finds
+    /// and holds the count against the node's entry conditions.
     fn entity_query(&self, params: &EntityQueryParams, board: &dyn Blackboard) -> bool;
     /// How many entities have the tag.
     fn entities_with_tag(&self, tag: &str) -> u32;

@@ -187,16 +187,26 @@ pub struct Hit {
 /// A player's attack with its weapon.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlayerAttack {
-    /// The weapon's base damage.
+    /// The weapon's base damage at its gear score ([`weapon_damage_scale`]).
     pub base_damage: f64,
-    /// The attack's damage coefficient.
+    /// The attack's damage coefficient (`DmgCoef`).
     pub coefficient: f64,
+    /// `W`: the multiple of the damage from the player's level and attributes (1 for a new
+    /// character).
+    pub scaling: f64,
     /// Whether the attack can crit.
     pub can_crit: bool,
     /// The weapon's crit chance, 0 to 1.
     pub crit_chance: f64,
     /// The weapon's crit damage multiplier.
     pub crit_multiplier: f64,
+}
+
+impl PlayerAttack {
+    /// Rolls whether the attack crits.
+    pub fn rolls_crit(&self, dice: &mut Dice) -> bool {
+        self.can_crit && dice.chance(self.crit_chance)
+    }
 }
 
 /// A mob's attack.
@@ -257,28 +267,41 @@ pub fn armor_share(armor: f64, gear_score: u32) -> f64 {
 }
 
 /// The multiple of a weapon's `BaseDamage` at gear score `gear_score`: 1 at and below
-/// [`MIN_WEAPON_GEAR_SCORE`], then compounding by [`BASE_DAMAGE_COMPOUND_INCREASE`] per
+/// [`MIN_WEAPON_GEAR_SCORE`], then compounding by [`BASE_DAMAGE_COMPOUND_INCREASE`] per whole
 /// [`BASE_DAMAGE_GEAR_SCORE_INTERVAL`], by the diminished increase above
-/// [`DIMINISHING_GEAR_SCORE_THRESHOLD`]. Inferred from the file's field names; the floor at the
-/// minimum fits the retail tutorial hits of gear score 60 and 75 weapons (`1hSwordT2_FTUE`, base
-/// 80: 68.000 before armor, a whole share of its base); the compound above 100 is not checked
-/// against a capture.
+/// [`DIMINISHING_GEAR_SCORE_THRESHOLD`]. Observed for gear scores 60 to 300 (damage study
+/// 2026-11-11: the retail hits fit to 5 digits; a gear score of 133 fits only with whole
+/// intervals, 6 of them). Inferred above 500 (two gear scores of one character fit, with other
+/// modifiers on them).
 pub fn weapon_damage_scale(gear_score: u32) -> f64 {
-    let interval = f64::from(BASE_DAMAGE_GEAR_SCORE_INTERVAL);
     let full = gear_score
         .clamp(MIN_WEAPON_GEAR_SCORE, DIMINISHING_GEAR_SCORE_THRESHOLD)
-        .saturating_sub(MIN_WEAPON_GEAR_SCORE);
-    let diminished = gear_score.saturating_sub(DIMINISHING_GEAR_SCORE_THRESHOLD);
-    (1.0 + BASE_DAMAGE_COMPOUND_INCREASE).powf(f64::from(full) / interval)
+        .saturating_sub(MIN_WEAPON_GEAR_SCORE)
+        / BASE_DAMAGE_GEAR_SCORE_INTERVAL;
+    let diminished = gear_score.saturating_sub(DIMINISHING_GEAR_SCORE_THRESHOLD)
+        / BASE_DAMAGE_GEAR_SCORE_INTERVAL;
+    (1.0 + BASE_DAMAGE_COMPOUND_INCREASE).powf(f64::from(full))
         * (1.0 + BASE_DAMAGE_COMPOUND_INCREASE * COMPOUND_DIMINISHING_MULTIPLIER)
-            .powf(f64::from(diminished) / interval)
+            .powf(f64::from(diminished))
 }
 
-/// A player's hit on a target with `armor_share` of the damage taken off.
-pub fn player_hit(attack: &PlayerAttack, armor_share: f64, dice: &mut Dice) -> Hit {
-    let crit = attack.can_crit && dice.chance(attack.crit_chance);
-    let multiplier = if crit { attack.crit_multiplier } else { 1.0 };
-    let raw = attack.base_damage * attack.coefficient * multiplier * (1.0 - armor_share);
+/// A player's hit on a target with `armor_share` of the damage taken off: the base damage
+/// times the coefficient and the scaling, times `1 + modifier`, with a crit's
+/// `CritDamageMultiplier - 1` added to the modifier. Observed (damage study 2026-11-11): the
+/// retail crit adds into the same sum as the other modifiers (the equip load, perks, attribute
+/// thresholds), it does not multiply the hit; `crit` is the roll ([`PlayerAttack::rolls_crit`]).
+/// A sum below -1 leaves the least hit.
+pub fn player_hit(attack: &PlayerAttack, crit: bool, modifier: f64, armor_share: f64) -> Hit {
+    let crit_share = if crit {
+        attack.crit_multiplier - 1.0
+    } else {
+        0.0
+    };
+    let raw = attack.base_damage
+        * attack.coefficient
+        * attack.scaling
+        * (1.0 + modifier + crit_share).max(0.0)
+        * (1.0 - armor_share);
     Hit {
         amount: to_whole(raw).max(MIN_HIT),
         crit,
@@ -343,6 +366,7 @@ mod tests {
         PlayerAttack {
             base_damage: SWORD_BASE,
             coefficient: HEAVY_COEFFICIENT,
+            scaling: 1.0,
             can_crit,
             crit_chance,
             crit_multiplier: CRIT_MULTIPLIER,
@@ -371,6 +395,8 @@ mod tests {
         assert!((weapon_damage_scale(500) - at_500).abs() < 1e-9);
         let at_600 = at_500 * (1.0 + 0.0112 * 0.6667_f64).powi(20);
         assert!((weapon_damage_scale(600) - at_600).abs() < 1e-9);
+        // Retail: a gear score of 133 fits only with its 6 whole intervals.
+        assert!((weapon_damage_scale(133) - 1.0112_f64.powi(6)).abs() < 1e-9);
     }
 
     #[test]
@@ -455,7 +481,7 @@ mod tests {
 
     #[test]
     fn a_player_hit_uses_weapon_coefficient_and_armor() {
-        let hit = player_hit(&sword(false, 0.0), ARMOR_SHARE, &mut Dice::new(SEED));
+        let hit = player_hit(&sword(false, 0.0), false, 0.0, ARMOR_SHARE);
         assert_eq!(
             hit,
             Hit {
@@ -471,9 +497,11 @@ mod tests {
             base_damage: 0.1,
             ..sword(false, 0.0)
         };
+        assert_eq!(player_hit(&weak, false, 0.0, ARMOR_SHARE).amount, MIN_HIT);
         assert_eq!(
-            player_hit(&weak, ARMOR_SHARE, &mut Dice::new(SEED)).amount,
-            MIN_HIT
+            player_hit(&sword(false, 0.0), false, -2.0, ARMOR_SHARE).amount,
+            MIN_HIT,
+            "a sum below -1"
         );
         let mob = MobAttack {
             base_damage: 0.0,
@@ -484,22 +512,58 @@ mod tests {
     }
 
     #[test]
-    fn a_crit_multiplies_only_when_the_attack_can_crit() {
-        let always = player_hit(&sword(true, 1.0), ARMOR_SHARE, &mut Dice::new(SEED));
-        assert_eq!(
-            always,
-            Hit {
-                amount: 65,
-                crit: true
-            }
-        );
-        let never = player_hit(&sword(false, 1.0), ARMOR_SHARE, &mut Dice::new(SEED));
-        assert!(!never.crit);
+    fn an_attack_rolls_a_crit_only_when_it_can_crit() {
+        assert!(sword(true, 1.0).rolls_crit(&mut Dice::new(SEED)));
+        assert!(!sword(false, 1.0).rolls_crit(&mut Dice::new(SEED)));
         let mut dice = Dice::new(SEED);
         let crits = (0..ROLLS)
-            .filter(|_| player_hit(&sword(true, HALF), ARMOR_SHARE, &mut dice).crit)
+            .filter(|_| sword(true, HALF).rolls_crit(&mut dice))
             .count();
         assert!((400..600).contains(&crits), "{crits} of {ROLLS}");
+    }
+
+    /// The retail hits of the damage study (2026-11-11), before the target's share.
+    #[test]
+    fn a_crit_adds_to_the_sum_of_the_modifiers_as_retail() {
+        const CLOSE: f64 = 5e-4;
+        let raw = |attack: &PlayerAttack, crit: bool, modifier: f64| {
+            attack.base_damage
+                * attack.coefficient
+                * attack.scaling
+                * (1.0
+                    + modifier
+                    + if crit {
+                        attack.crit_multiplier - 1.0
+                    } else {
+                        0.0
+                    })
+        };
+        // The tutorial sword at level 1 with a slow equip load: 80 x (1 - 0.15) = 68.000.
+        let tutorial = PlayerAttack {
+            base_damage: 80.0,
+            coefficient: 1.0,
+            scaling: 1.0,
+            can_crit: true,
+            crit_chance: 0.0,
+            crit_multiplier: 1.3,
+        };
+        assert!((raw(&tutorial, false, -0.15) - 68.0).abs() < CLOSE);
+        assert_eq!(player_hit(&tutorial, false, -0.15, 0.0).amount, 68);
+        // A hatchet crit at level 8 with Strength 40: 67 x 1.503125 x (1 - 0.11 + 0.4).
+        let hatchet = PlayerAttack {
+            base_damage: 67.0,
+            scaling: 1.503_125,
+            crit_multiplier: 1.4,
+            ..tutorial
+        };
+        assert!((raw(&hatchet, true, -0.11) - 129.915).abs() < CLOSE);
+        assert_eq!(player_hit(&hatchet, true, -0.11, 0.0).amount, 130);
+        assert!(player_hit(&hatchet, true, -0.11, 0.0).crit);
+        // The crit of the first tests' sword: 64 x 1.2 x (1 + 0.3) x (1 - 0.35).
+        assert_eq!(
+            player_hit(&sword(true, 1.0), true, 0.0, ARMOR_SHARE).amount,
+            65
+        );
     }
 
     #[test]

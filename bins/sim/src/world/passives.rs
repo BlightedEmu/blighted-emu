@@ -16,8 +16,12 @@
 //! other effects run with the state after it, and their cooldowns start. A stackable ability
 //! counts each held copy up to its `IsStackableMax`: its numbers grow with the copies.
 //!
-//! Not run: the passives of mobs (`AIAbilityTable`), PvP hits, and a hit on a mob of another
-//! sim gives no effect to that mob.
+//! The other side of an event is a mob or, in PvP, a player of this sim: its view, its status
+//! effects and its distance are read the same way, and an ability's effect on the other side
+//! goes on that player.
+//!
+//! Not run: the passives of mobs (`AIAbilityTable`), a knockback of a player (Unknown), and a
+//! hit on a mob of another sim gives no effect to that mob.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -37,6 +41,7 @@ use super::attack::Vitals;
 use super::gear::Gear;
 use super::status_effects::StatusEffects;
 use super::{Body, Player, SimWorld};
+use crate::mobs::spawn_index;
 use crate::player_content::PlayerContent;
 
 /// The vitals category of every player (`VitalsCategories` of `Player`), lowercase.
@@ -174,16 +179,18 @@ impl HitMods {
         mods
     }
 
-    /// The multiple of the holder's hit aimed as `aim`: its head shot and from-behind shares
-    /// count only on such a hit.
-    pub(super) fn dealt_scale_for(self, aim: HitAim) -> f64 {
+    /// The share these abilities add to the holder's hit aimed as `aim`: its head shot and
+    /// from-behind shares count only on such a hit. It goes into the additive sum of the hit's
+    /// modifiers ([`nw_sim_core::player_hit`]; Observed: retail's attribute threshold abilities
+    /// and base damage perks add there, as a crit does).
+    pub(super) fn dealt_share_for(self, aim: HitAim) -> f64 {
         let headshot = if aim.headshot {
             self.headshot_share
         } else {
             0.0
         };
         let behind = if aim.behind { self.behind_share } else { 0.0 };
-        (1.0 + self.damage_share + headshot + behind).max(0.0)
+        self.damage_share + headshot + behind
     }
 
     /// The multiple of a hit on the holder.
@@ -442,20 +449,56 @@ impl SimWorld {
         })
     }
 
-    /// The distance in the ground plane between player `entity` and mob `mob` (Inferred: the
-    /// data's distances are a few metres, as reaches are).
-    fn distance_to_mob(&self, entity: Entity, mob: u64) -> f32 {
-        let at = self
-            .world
-            .get::<Body>(entity)
-            .map(|body| body.motion.position());
-        let mob_at = self.mobs.get(mob).map(|live| live.position);
-        at.zip(mob_at)
-            .map_or(f32::MAX, |(at, mob_at)| at.horizontal_distance(mob_at))
+    /// The player of this sim with entity number `number`.
+    fn player_entity(&self, number: u64) -> Option<Entity> {
+        self.by_connection.values().copied().find(|entity| {
+            self.world
+                .get::<Player>(*entity)
+                .is_some_and(|player| player.number == number)
+        })
     }
 
-    /// The abilities of player `entity` that `triggers` of a hit between it and mob `mob` (of
-    /// damage row `row`; `dealt` whether it dealt damage) fire at `now_ms`, by `content`.
+    /// The view of the other side `other` of an event: a mob of this sim, or a player.
+    fn other_view(&self, other: u64, content: &PlayerContent) -> Option<SideView> {
+        if spawn_index(other).is_some() {
+            return self.mob_view(other);
+        }
+        let entity = self.player_entity(other)?;
+        self.player_facts(entity, content).map(|facts| facts.view)
+    }
+
+    /// The status effects the other side `other` of an event holds.
+    fn other_effects(&self, other: u64) -> Option<&StatusEffects> {
+        if spawn_index(other).is_some() {
+            return self.mob_effects.get(&other);
+        }
+        let entity = self.player_entity(other)?;
+        self.world
+            .get::<Player>(entity)
+            .map(|player| &player.status_effects)
+    }
+
+    /// The distance in the ground plane between player `entity` and the other side `other` of
+    /// an event (Inferred: the data's distances are a few metres, as reaches are).
+    fn distance_to_other(&self, entity: Entity, other: u64) -> f32 {
+        let place = |entity: Entity| {
+            self.world
+                .get::<Body>(entity)
+                .map(|body| body.motion.position())
+        };
+        let other_at = if spawn_index(other).is_some() {
+            self.mobs.get(other).map(|live| live.position)
+        } else {
+            self.player_entity(other).and_then(place)
+        };
+        place(entity)
+            .zip(other_at)
+            .map_or(f32::MAX, |(at, other_at)| at.horizontal_distance(other_at))
+    }
+
+    /// The abilities of player `entity` that `triggers` of a hit between it and the other side
+    /// `mob` (a mob, or a player in PvP; of damage row `row`; `dealt` whether it dealt damage)
+    /// fire at `now_ms`, by `content`.
     fn fired_on_player<'a>(
         &self,
         content: &'a PlayerContent,
@@ -470,7 +513,7 @@ impl SimWorld {
         if facts.abilities.is_empty() {
             return Vec::new();
         }
-        let other = self.mob_view(mob);
+        let other = self.other_view(mob, content);
         let Some(player) = self.world.get::<Player>(entity) else {
             return Vec::new();
         };
@@ -478,7 +521,7 @@ impl SimWorld {
             triggers,
             row,
             dealt,
-            distance_m: self.distance_to_mob(entity, mob),
+            distance_m: self.distance_to_other(entity, mob),
             holder: facts.view,
             other,
             weapon_tags: &facts.weapon_tags,
@@ -493,7 +536,7 @@ impl SimWorld {
             &event,
             (
                 &content.status_effects,
-                (Some(&player.status_effects), self.mob_effects.get(&mob)),
+                (Some(&player.status_effects), self.other_effects(mob)),
             ),
             now_ms,
         )
@@ -577,10 +620,19 @@ impl SimWorld {
                         side: Side::Other,
                         ids,
                     } => {
-                        if self.mobs.get(mob).is_none() {
+                        let effects = if spawn_index(mob).is_some() {
+                            self.mobs
+                                .get(mob)
+                                .is_some()
+                                .then(|| self.mob_effects.entry(mob).or_default())
+                        } else {
+                            self.player_entity(mob)
+                                .and_then(|other| self.world.get_mut::<Player>(other))
+                                .map(|player| &mut player.into_inner().status_effects)
+                        };
+                        let Some(effects) = effects else {
                             continue;
-                        }
-                        let effects = self.mob_effects.entry(mob).or_default();
+                        };
                         for id in ids {
                             effects.add_by_id(rules, id, PASSIVE_POTENCY, number, server_ms);
                         }
@@ -643,7 +695,7 @@ impl SimWorld {
                 player.passives.fired(ability, now_ms);
             }
         }
-        if knockback_m > 0.0 {
+        if knockback_m > 0.0 && spawn_index(mob).is_some() {
             self.knock_back_mob(entity, mob, knockback_m);
         }
     }
@@ -839,21 +891,21 @@ mod tests {
             copies: 2,
         }]);
         assert!((mods.damage_share - 0.2).abs() < 1e-9);
-        assert!((mods.dealt_scale_for(HitAim::default()) - 1.2).abs() < 1e-9);
+        assert!((mods.dealt_share_for(HitAim::default()) - 0.2).abs() < 1e-9);
         let aimed = HitMods {
             headshot_share: 0.1,
             behind_share: 0.3,
             ..mods
         };
         assert!(
-            (aimed.dealt_scale_for(HitAim::default()) - 1.2).abs() < 1e-9,
+            (aimed.dealt_share_for(HitAim::default()) - 0.2).abs() < 1e-9,
             "a plain hit"
         );
         let head = HitAim {
             headshot: true,
             behind: false,
         };
-        assert!((aimed.dealt_scale_for(head) - 1.3).abs() < 1e-9);
+        assert!((aimed.dealt_share_for(head) - 0.3).abs() < 1e-9);
         assert_eq!(
             head.triggers().collect::<Vec<_>>(),
             [Trigger::HeadShot],

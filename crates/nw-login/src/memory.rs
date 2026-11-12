@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use nw_db::{
-    Account, AccountEntitlement, AnalyticsRecord, BoardEntry, BoardOrder, BoardPage, Character,
-    DiscordProfile, NewCharacter, PrivacySetting, StatValues, Wallet,
+    Account, AccountConsumable, AccountEntitlement, AnalyticsRecord, BoardEntry, BoardOrder,
+    BoardPage, Character, DiscordProfile, NewCharacter, PrivacySetting, StatValues, Wallet,
 };
 use nw_protocol::launcher_api::LauncherSession;
 use uuid::Uuid;
@@ -619,11 +619,12 @@ struct Stats {
     last_values: Option<ValuesRequest>,
 }
 
-/// The store of each account in memory: its entitlements and its wallet.
+/// The store of each account in memory: its entitlements, its wallet and its consumables.
 #[derive(Default)]
 struct AccountStores {
     held: HashMap<Uuid, Vec<AccountEntitlement>>,
     wallets: HashMap<Uuid, Wallet>,
+    consumables: HashMap<Uuid, Vec<AccountConsumable>>,
 }
 
 /// Store entitlements and wallets in memory, by account.
@@ -639,6 +640,15 @@ impl MemoryEntitlements {
     /// The wallet of `account` is `wallet`.
     pub(crate) fn set_wallet(&self, account: Uuid, wallet: Wallet) {
         lock(&self.0).wallets.insert(account, wallet);
+    }
+
+    /// `account` holds the consumable `held`.
+    pub(crate) fn hold_consumable(&self, account: Uuid, held: AccountConsumable) {
+        lock(&self.0)
+            .consumables
+            .entry(account)
+            .or_default()
+            .push(held);
     }
 }
 
@@ -656,6 +666,14 @@ impl EntitlementStore for MemoryEntitlements {
             .wallets
             .get(&account)
             .copied()
+            .unwrap_or_default())
+    }
+
+    async fn consumables(&self, account: Uuid) -> Result<Vec<AccountConsumable>, StoreError> {
+        Ok(lock(&self.0)
+            .consumables
+            .get(&account)
+            .cloned()
             .unwrap_or_default())
     }
 }

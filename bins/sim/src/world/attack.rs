@@ -18,15 +18,15 @@
 //! combo link starts the link's step, else the stance's first; the hold picks the step's light,
 //! heavy or charged attack. A melee attack sweeps its `CAGE-Damage` shapes through their windows
 //! against every target ([`SimWorld::sweep`]); a projectile or a hit scan fires
-//! ([`SimWorld::player_swings_due`]). The stance's variants of status effects
-//! ([`nw_content::player_attacks::Stance::variants`]) do not apply: the sim keeps no player status
-//! effects.
+//! ([`SimWorld::player_swings_due`]). A stance effect the player holds gives the stance's variant
+//! ([`nw_content::player_attacks::Stance::with_effects`]).
 
 use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use nw_bus::{BusId, ConnectionRef, Hit};
 use std::sync::Arc;
 
+use nw_content::character_points::ATTRIBUTE_COUNT;
 use nw_content::combat::{
     AffixDamage, AttackRow, DamageCategory, LevelRow, MobGuard, RangedBlock, WeaponRow,
 };
@@ -713,8 +713,98 @@ impl SimWorld {
         self.hit_paced(attacker, target, damage_id, reach_m, Pace::of(true), now_ms)
     }
 
-    /// A hit on another player (`PvP_Flag` toggles 2525; both players must be flagged, a player
-    /// who is not is no target). The damage rolls as a hit on a mob does ([`player_hit`]: the
+    /// Whether player `other` is a foe of player `entity`: the two fight each other in a duel
+    /// ([`super::duel`]), or they are foes in open-world PvP: both hold the PvP flag (`PvP_Flag`
+    /// toggles 2525), they are of two different factions, and they are not in one group; or
+    /// both hold the free-for-all flag ([`super::faction::FfaWatch`]) and are not in one group,
+    /// whatever their factions.
+    /// Inferred from the game's rule: the flag opens a player to the two other factions only,
+    /// the free-for-all zone opens it to every player, and a group's members never hurt each
+    /// other; no retail capture holds a refused hit to read the rule from. In an arena match only
+    /// the match's rule holds ([`super::arena_match`]: two teams, in a round; Inferred).
+    pub(super) fn pvp_foes(&self, entity: Entity, other: Entity) -> bool {
+        let number = |entity: Entity| self.world.get::<Player>(entity).map(|player| player.number);
+        if number(entity)
+            .zip(number(other))
+            .is_some_and(|(first, second)| first != second && self.duels.fighting(first, second))
+        {
+            return true;
+        }
+        if self.in_arena_match() {
+            return number(entity)
+                .zip(number(other))
+                .is_some_and(|(first, second)| self.arena_foes(first, second));
+        }
+        // In a war's instance only the war's rule holds ([`super::war_fight`]: two sides).
+        if let Some(foes) = self.war_foes(entity, other) {
+            return foes;
+        }
+        // In an Outpost Rush match only its rule holds ([`super::outpost_rush`]: two teams).
+        if let Some(foes) = self.outpost_rush_foes(entity, other) {
+            return foes;
+        }
+        let side = |entity: Entity| {
+            self.world.get::<Player>(entity).map(|player| {
+                (
+                    player.pvp_flagged.then_some(player.faction.faction),
+                    player.ffa.flagged(),
+                    player.social.group_entity_number(),
+                )
+            })
+        };
+        let (
+            Some((faction, free_for_all, group)),
+            Some((other_faction, other_free_for_all, other_group)),
+        ) = (side(entity), side(other))
+        else {
+            return false;
+        };
+        let flagged_foes = faction
+            .zip(other_faction)
+            .is_some_and(|(faction, other_faction)| faction != other_faction);
+        entity != other
+            && (flagged_foes || (free_for_all && other_free_for_all))
+            && (group.is_none() || group != other_group)
+    }
+
+    /// The PvP foes of player `entity` ([`SimWorld::pvp_foes`]) that an attack can meet, alive or
+    /// on death's door, by their numbers, with their bodies.
+    pub(super) fn foe_places(&mut self, entity: Entity) -> Vec<(u64, Position, Capsule)> {
+        let mut query = self.world.query::<(Entity, &Player, &Body, &Vitals)>();
+        let candidates: Vec<(Entity, u64, Position)> = query
+            .iter(&self.world)
+            .filter(|(_, _, _, vitals)| !vitals.health.is_dead() || vitals.downed())
+            .map(|(other, player, body, _)| (other, player.number, body.motion.position()))
+            .collect();
+        candidates
+            .into_iter()
+            .filter(|(other, _, _)| self.pvp_foes(entity, *other))
+            .map(|(_, number, at)| (number, at, PLAYER_CAPSULE))
+            .collect()
+    }
+
+    /// Everything an attack of player `entity` can meet: the mobs ([`SimWorld::target_places`])
+    /// and its PvP foes ([`SimWorld::foe_places`]).
+    pub(super) fn attack_places(&mut self, entity: Entity) -> Vec<(u64, Position, Capsule)> {
+        let mut places = self.target_places();
+        places.extend(self.foe_places(entity));
+        places
+    }
+
+    /// Where the target `target` of an attack is: a mob (here or a ghost) or a player.
+    pub(super) fn target_at(&mut self, target: u64) -> Option<Position> {
+        if spawn_index(target).is_some() {
+            return self
+                .mob_states()
+                .find(|(mob, _, _)| *mob == target)
+                .map(|(_, at, _)| at);
+        }
+        let entity = self.player_by_number(target)?;
+        Some(self.world.get::<Body>(entity)?.motion.position())
+    }
+
+    /// A hit on another player, a PvP foe of the attacker ([`SimWorld::pvp_foes`]; any other
+    /// player is no target). The damage rolls as a hit on a mob does ([`player_hit`]: the
     /// weapon's base damage, the row's coefficient and the crit), times the open-world PvP
     /// balance of the weapon's class ([`nw_content::combat::CombatData::pvp_damage_factor`]) and
     /// the attacker's status effects; the target's worn armor takes its share against the
@@ -731,19 +821,10 @@ impl SimWorld {
             row,
             reach_m,
         } = pvp;
-        let flagged = |world: &Self, entity: Entity| {
-            world
-                .world
-                .get::<Player>(entity)
-                .is_some_and(|player| player.pvp_flagged)
-        };
-        if !flagged(self, entity) {
-            return Err(AttackRefusal::UnknownTarget);
-        }
         let target_entity = self
             .player_by_number(target)
             .ok_or(AttackRefusal::UnknownTarget)?;
-        if target_entity == entity || !flagged(self, target_entity) {
+        if !self.pvp_foes(entity, target_entity) {
             return Err(AttackRefusal::UnknownTarget);
         }
         let at = self
@@ -785,6 +866,7 @@ impl SimWorld {
         let attack = PlayerAttack {
             base_damage: weapon.base_damage * gear_score.map_or(1.0, weapon_damage_scale),
             coefficient: row.coefficient,
+            scaling: self.damage_scaling(entity, &weapon),
             can_crit: row.can_crit,
             crit_chance,
             crit_multiplier,
@@ -798,8 +880,35 @@ impl SimWorld {
             row.category,
         );
         let tag = row.damage_type.unwrap_or(HIT_TAG);
-        let mut hit = player_hit(&attack, armor_share, &mut self.dice);
-        let scale = pvp_factor * self.player_hit_scale(entity, target, tag);
+        // The attacker's passives the hit fires add to the sum of its modifiers (a crit fires
+        // its own); the target's passives that a hit taken fires lower it.
+        let row_key = RowKey::of(&row.table, &row.damage_id);
+        let mods = self.passive_hit_mods(entity, target, &[Trigger::Hit], Some(row_key), now_ms);
+        let attack = PlayerAttack {
+            crit_chance: (attack.crit_chance + mods.crit_chance).clamp(0.0, 1.0),
+            crit_multiplier: attack.crit_multiplier + mods.crit_damage,
+            ..attack
+        };
+        let crit = attack.rolls_crit(&mut self.dice);
+        let crit_mods = if crit {
+            self.passive_hit_mods(entity, target, &[Trigger::Crit], Some(row_key), now_ms)
+        } else {
+            HitMods::default()
+        };
+        let modifier = self.equip_load_damage(entity)
+            + mods.dealt_share_for(HitAim::default())
+            + crit_mods.dealt_share_for(HitAim::default());
+        let mut hit = player_hit(&attack, crit, modifier, armor_share);
+        let taken = self
+            .passive_hit_mods(
+                target_entity,
+                number,
+                &[Trigger::HitTaken],
+                Some(row_key),
+                now_ms,
+            )
+            .taken_scale();
+        let scale = pvp_factor * taken * self.player_hit_scale(entity, target, tag);
         // A hit of a few thousand points.
         #[allow(
             clippy::cast_possible_truncation,
@@ -814,7 +923,7 @@ impl SimWorld {
             affix: row.affix,
             damage_scale: PLAIN_DAMAGE_FACTOR,
             block_stamina: 0.0,
-            row: Some(RowKey::of(&row.table, &row.damage_id)),
+            row: Some(row_key),
             ranged: false,
             blockable: row.blockable,
             category: row.category,
@@ -826,6 +935,27 @@ impl SimWorld {
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             player.combat.hit(now_ms, killed);
         }
+        self.duel_hit(number, target);
+        let triggers: Vec<Trigger> = [
+            Some(Trigger::Hit),
+            hit.crit.then_some(Trigger::Crit),
+            killed.then_some(Trigger::Kill),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        self.run_passives(
+            (entity, target),
+            &triggers,
+            (Some(row_key), hit.amount),
+            now_ms,
+        );
+        self.run_passives(
+            (target_entity, number),
+            &[Trigger::HitTaken],
+            (Some(row_key), hit.amount),
+            now_ms,
+        );
         let item = DamageItem {
             tag,
             amount: amount_of(hit.amount),
@@ -1011,6 +1141,7 @@ impl SimWorld {
             base_damage: weapon.base_damage
                 * held.map_or(1.0, |(_, gear_score)| weapon_damage_scale(gear_score)),
             coefficient: row.coefficient,
+            scaling: self.damage_scaling(entity, &weapon),
             can_crit: row.can_crit,
             crit_chance,
             crit_multiplier,
@@ -1035,9 +1166,21 @@ impl SimWorld {
             );
             return Ok(AttackOutcome::Hit { target, amount: 0 });
         }
-        let mut hit = player_hit(&attack, armor_share, &mut self.dice);
+        let rolled_crit = attack.rolls_crit(&mut self.dice);
         // A head shot does a crit's damage without being a crit.
-        hit.crit &= !aim.headshot;
+        let crit = rolled_crit && !aim.headshot;
+        // The passives the hit fires add to the sum of its modifiers (a crit fires its own),
+        // with the share of the attacker's equip load.
+        let crit_mods = if crit {
+            self.passive_hit_mods(entity, target, &[Trigger::Crit], Some(row_key), now_ms)
+        } else {
+            HitMods::default()
+        };
+        let modifier = self.equip_load_damage(entity)
+            + mods.dealt_share_for(aim)
+            + crit_mods.dealt_share_for(aim);
+        let mut hit = player_hit(&attack, rolled_crit, modifier, armor_share);
+        hit.crit = crit;
         let block = (view.owner.is_none() && row.blockable)
             .then(|| self.mob_blocks(entity, target))
             .flatten();
@@ -1046,20 +1189,12 @@ impl SimWorld {
             let loss = row.block_stamina(&weapon, NO_BLOCK_STABILITY) as f32;
             self.mobs.guard_hit(target, loss, now_ms)
         });
-        // The status effects of the player and of the mob scale the hit (`Dmg*`, `Abs*`), and
-        // so do the passives it fires (a crit fires its own).
+        // The status effects of the player and of the mob scale the hit (`Dmg*`, `Abs*`).
         let effects_scale =
             self.player_hit_scale(entity, target, row.damage_type.unwrap_or(HIT_TAG));
-        let crit_mods = if hit.crit {
-            self.passive_hit_mods(entity, target, &[Trigger::Crit], Some(row_key), now_ms)
-        } else {
-            HitMods::default()
-        };
-        let passive_scale = mods.dealt_scale_for(aim) * crit_mods.dealt_scale_for(aim);
         let through = block.map_or(1.0, |guard| f64::from(1.0 - guard.mitigation));
         // A hit of a few thousand points.
-        hit.amount =
-            (f64::from(hit.amount) * effects_scale * passive_scale * through).round() as u32;
+        hit.amount = (f64::from(hit.amount) * effects_scale * through).round() as u32;
         let threat = row.threat.saturating_add(u64::from(hit.amount));
         let outcome = match &view.owner {
             None => self
@@ -1242,14 +1377,24 @@ impl SimWorld {
         } else {
             SIX_PELLET_CONFIG
         };
-        self.send_reliable(
-            shooter.clone(),
-            &ServerMessage::SpreadshotProcessed(SpreadshotProcessedMsg {
-                request: request.clone(),
-                damage: lowercase_crc32(&row.damage_id),
-                config,
-            }),
-        );
+        // The shooter and every player that sees it get the shot (Observed: retail's 2570 is in
+        // 104 ledgers, its request 2719 in 25: the others are remote shooters' shots). A spread
+        // shot is a hit scan: it has no projectile entity.
+        let processed = ServerMessage::SpreadshotProcessed(SpreadshotProcessedMsg {
+            request: request.clone(),
+            damage: lowercase_crc32(&row.damage_id),
+            config,
+        });
+        let viewers: Vec<ConnectionRef> = self
+            .players_within(position, self.settings.interest_radius_m)
+            .into_iter()
+            .filter_map(|viewer| Some(self.world.get::<Player>(viewer)?.connection.clone()))
+            .filter(|connection| connection != shooter)
+            .collect();
+        self.send_reliable(shooter.clone(), &processed);
+        for viewer in viewers {
+            self.send_reliable(viewer, &processed);
+        }
         request
             .pellet_targets()
             .into_iter()
@@ -1421,20 +1566,33 @@ impl SimWorld {
         point: Option<u64>,
         now_ms: u64,
     ) -> Result<Position, RespawnRefusal> {
+        if self.in_arena_match() {
+            return Err(RespawnRefusal::InArenaMatch);
+        }
         let min_ms = self.combat.min_respawn_ms;
         let entity = self
             .by_connection
             .get(connection)
             .copied()
             .ok_or(RespawnRefusal::NotInWorld)?;
-        let mut vitals = self
+        let vitals = self
             .world
-            .get_mut::<Vitals>(entity)
+            .get::<Vitals>(entity)
             .ok_or(RespawnRefusal::NotInWorld)?;
         let since = vitals.dead_since_ms.ok_or(RespawnRefusal::NotDead)?;
         if now_ms.saturating_sub(since) < min_ms {
             return Err(RespawnRefusal::TooSoon);
         }
+        // In a war's instance the dead respawn at their side's place at a wave
+        // ([`super::war_fight`]); in an Outpost Rush match at their team's spot
+        // ([`super::outpost_rush`]).
+        let war_place = match self.outpost_rush_respawn(entity) {
+            Some(spot) => Some(spot),
+            None => self.war_respawn(entity, now_ms)?,
+        };
+        let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) else {
+            return Err(RespawnRefusal::NotInWorld);
+        };
         vitals.health.refill();
         vitals.dead_since_ms = None;
         let number = self
@@ -1447,7 +1605,9 @@ impl SimWorld {
             .get::<Body>(entity)
             .map(|body| body.motion.position())
             .ok_or(RespawnRefusal::NotInWorld)?;
-        let to = if self.is_tutorial() {
+        let to = if let Some(at) = war_place {
+            at
+        } else if self.is_tutorial() {
             self.tutorials
                 .get(&number)
                 .map_or(TUTORIAL_START, Tutorial::respawn_at)
@@ -1533,6 +1693,17 @@ impl SimWorld {
             let weapon = held.unwrap_or(*data.weapon());
             (data.stance(weapon.stance), None)
         };
+        // A stance effect the player holds (the great sword's `Greatsword_Stance_Offense`)
+        // gives the stance's variant: its own attacks and charge times.
+        let stance = stance.map(|stance| {
+            let effects = self
+                .world
+                .get::<Player>(entity)
+                .map(|player| &player.status_effects);
+            stance.with_effects(|effect| {
+                effects.is_some_and(|effects| effects.holds(lowercase_crc32(effect)))
+            })
+        });
         let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) else {
             return Vec::new();
         };
@@ -1744,6 +1915,7 @@ impl SimWorld {
             }
         }
         self.player_swings = later;
+        self.tick_shot_entities(now_ms);
         results.extend(self.projectile_flights_due(now_ms));
         results
     }
@@ -2062,7 +2234,7 @@ impl SimWorld {
         else {
             return done(AttackRefusal::NotInWorld);
         };
-        let places = self.target_places();
+        let places = self.attack_places(entity);
         match swing.attack.hit.clone() {
             AttackHit::Melee { homing, shapes, .. } => {
                 let landed = self.sweep(swing, homing.as_ref(), &shapes, position, &places, now_ms);
@@ -2449,7 +2621,12 @@ impl SimWorld {
             .zip(level_of_player(entity))
             .map(|(attacker, own)| i64::from(attacker) - i64::from(own));
         let mode = self.instance_run.as_ref().map(|run| run.game_mode());
-        self.content.deaths_door.takes(mode, gap)
+        // The loser of a duel goes down; it does not die (Observed: retail `duel_capture`).
+        let duel = self
+            .world
+            .get::<Player>(entity)
+            .is_some_and(|player| self.duels.fighting(player.number, attacker));
+        duel || self.content.deaths_door.takes(mode, gap)
     }
 
     /// Player `entity` (`target`) died to `attacker`: its mobs forget it, its quests count the
@@ -2485,6 +2662,7 @@ impl SimWorld {
             connection,
             &ServerMessage::DeathRecap(DeathRecapMsg::of(target)),
         );
+        self.arena_death(target, attacker);
     }
 
     /// Where `attacker` stands: a mob or a player, here or as a ghost; the origin when it is
@@ -2641,6 +2819,44 @@ impl SimWorld {
             (weapon.crit_chance + chance).clamp(0.0, 1.0),
             weapon.crit_multiplier + damage,
         )
+    }
+
+    /// `W` of a hit of player `entity` with `weapon`: the multiple of the weapon's damage from
+    /// the player's level and from each attribute the weapon scales with
+    /// ([`nw_content::attribute_damage::AttributeDamage::scaling`]). An attribute counts with
+    /// the points its held effects add (food). Unknown: attribute points of worn gear are not
+    /// counted (the sim does not read them).
+    fn damage_scaling(&self, entity: Entity, weapon: &WeaponRow) -> f64 {
+        let content = &self.content;
+        let Some(player) = self.world.get::<Player>(entity) else {
+            return PLAIN_DAMAGE_FACTOR;
+        };
+        // The progression counts levels from 0; the damage rule from 1.
+        let level = content.progression.level_of(player.experience) + 1;
+        let mut values = [0; ATTRIBUTE_COUNT];
+        for (index, value) in values.iter_mut().enumerate() {
+            let id = u32::try_from(index).unwrap_or(u32::MAX);
+            *value = player
+                .attributes
+                .value(&content.progression.points, id)
+                .saturating_add(
+                    player
+                        .status_effects
+                        .attribute_bonus(&content.status_effects, index),
+                );
+        }
+        content
+            .attribute_damage
+            .scaling(level, values, weapon.scaling)
+    }
+
+    /// The share the equip load of player `entity` adds to the damage of its hits
+    /// (`EquipLoadDamageMult*`: light 0.15, medium 0, heavy -0.15 in build 25810808).
+    fn equip_load_damage(&self, entity: Entity) -> f64 {
+        self.world
+            .get::<Player>(entity)
+            .and_then(|player| player.status_effects.equip_load())
+            .map_or(0.0, |load| self.content.equip_load_damage(load))
     }
 
     /// The multiple of player `entity`'s armor against a hit of `category` from its held effects
@@ -3876,11 +4092,16 @@ mod tests {
         const AFTER_COOLDOWN_MS: u64 = 1_000;
         /// Between two attacks: past the attack interval, inside the cooldown.
         const NEXT_ATTACK_MS: u64 = 500;
+        /// The passive's `BaseDamage`: it adds into the sum `M` of the hit formula.
+        const BASE_DAMAGE: f64 = 0.5;
+        /// 64 x (1 + 0.5) x (1 - 0.35) = 62.4, rounded: the formula rounds once, after the
+        /// sum (package 1 combat finding), not the rounded plain hit x 1.5.
+        const BOOSTED_HIT: u32 = 62;
         let rows: [nw_content::generated::AbilityData; 1] =
             [serde_json::from_value(serde_json::json!({
                 "ability_id": PASSIVE,
                 "on_hit": true,
-                "base_damage": 0.5,
+                "base_damage": BASE_DAMAGE,
                 "damage_table_row": LIGHT,
                 "activation_cooldown": COOLDOWN_S
             }))
@@ -3901,11 +4122,7 @@ mod tests {
         let boosted = dealt(&mut world, NOW);
         let plain = dealt(&mut world, NOW + NEXT_ATTACK_MS);
         assert_eq!(plain, SWORD_HIT, "inside the cooldown: the plain hit");
-        assert_eq!(
-            boosted,
-            (f64::from(SWORD_HIT) * 1.5).round() as u32,
-            "BaseDamage 0.5 adds half"
-        );
+        assert_eq!(boosted, BOOSTED_HIT, "BaseDamage 0.5 adds half of the base");
         assert_eq!(
             dealt(&mut world, NOW + AFTER_COOLDOWN_MS),
             boosted,
@@ -5951,13 +6168,101 @@ mod tests {
         );
     }
 
-    fn flag(world: &mut SimWorld, number: u64) {
+    /// The Syndicate and the Marauders (`FactionData`).
+    const SYNDICATE: u8 = 1;
+    const MARAUDERS: u8 = 2;
+
+    /// Puts the PvP flag on player `number`, a member of `faction`.
+    fn flag_of(world: &mut SimWorld, number: u64, faction: u8) {
         let entity = world.player_by_number(number).expect("player");
+        let mut player = world.world.get_mut::<Player>(entity).expect("player");
+        player.pvp_flagged = true;
+        player.faction.faction = faction;
+    }
+
+    /// Puts the PvP flag on player `number`: player 1 is of the Syndicate, the others of the
+    /// Marauders.
+    fn flag(world: &mut SimWorld, number: u64) {
+        let faction = if number == 1 { SYNDICATE } else { MARAUDERS };
+        flag_of(world, number, faction);
+    }
+
+    /// Retail `duel_capture`: the two players of a duel can hurt each other from the end of
+    /// its countdown, with no PvP flag; the one whose health reaches 0 goes down, stands up
+    /// with its whole health 3 s later, and both leave the duel 8 s after its end.
+    #[test]
+    fn a_duel_lets_its_two_players_fight_and_the_loser_stands_up() {
+        const PLAYER_2: u64 = 2;
+        const COUNTDOWN_MS: u64 = 6_000;
+        const STAND_UP_MS: u64 = 3_000;
+        const LEAVE_MS: u64 = 8_000;
+        let mut world = fight();
+        join(&mut world, PLAYER_2, MOB_X + 3.0);
+        let first = world.player_by_number(1).expect("player");
+        let second = world.player_by_number(PLAYER_2).expect("player");
+        assert!(world.start_duel(first, second));
+        assert!(!world.start_duel(first, second), "one duel at a time");
+        assert_eq!(
+            world.attack(&connection(1), PLAYER_2, LIGHT, NOW),
+            Err(AttackRefusal::UnknownTarget),
+            "no hit in the countdown"
+        );
+        world.server_ms += COUNTDOWN_MS;
+        world.tick_duels();
+        assert!(world.pvp_foes(first, second) && world.pvp_foes(second, first));
+        let outcome = world
+            .attack(&connection(1), PLAYER_2, LIGHT, NOW)
+            .expect("a duel hit");
+        assert!(matches!(outcome, AttackOutcome::Hit { .. }), "{outcome:?}");
+        let max = health_of(&mut world, PLAYER_2).max();
         world
             .world
-            .get_mut::<Player>(entity)
-            .expect("player")
-            .pvp_flagged = true;
+            .get_mut::<Vitals>(second)
+            .expect("vitals")
+            .health = Health::at(1, max);
+        world
+            .attack(&connection(1), PLAYER_2, LIGHT, NOW + 1_000)
+            .expect("the last hit");
+        let vitals = *world.world.get::<Vitals>(second).expect("vitals");
+        assert!(
+            vitals.downed() && vitals.dead_since_ms.is_none(),
+            "down, not dead"
+        );
+        assert!(!world.pvp_foes(first, second), "the duel ended");
+        assert!(world.duels.dueling(1), "the players are still in the mode");
+        world.server_ms += STAND_UP_MS;
+        world.tick_duels();
+        let vitals = *world.world.get::<Vitals>(second).expect("vitals");
+        assert!(!vitals.fallen());
+        assert_eq!(vitals.health.current(), max, "its whole health");
+        world.server_ms += LEAVE_MS - STAND_UP_MS;
+        world.tick_duels();
+        assert!(!world.duels.dueling(1) && !world.duels.dueling(PLAYER_2));
+        assert!(world.start_duel(first, second), "a new duel can start");
+    }
+
+    #[test]
+    fn flagged_players_of_one_faction_are_no_foes() {
+        const PLAYER_2: u64 = 2;
+        let mut world = fight();
+        join(&mut world, PLAYER_2, MOB_X + 3.0);
+        flag_of(&mut world, 1, SYNDICATE);
+        flag_of(&mut world, PLAYER_2, SYNDICATE);
+        let attacker = world.player_by_number(1).expect("player");
+        assert!(world.foe_places(attacker).is_empty(), "one faction");
+        assert_eq!(
+            world.attack(&connection(1), PLAYER_2, LIGHT, NOW),
+            Err(AttackRefusal::UnknownTarget)
+        );
+        flag_of(&mut world, PLAYER_2, MARAUDERS);
+        let foes = world.foe_places(attacker);
+        assert_eq!(foes.len(), 1, "the other faction is a foe");
+        assert_eq!(foes[0].0, PLAYER_2);
+        assert_eq!(
+            world.attack_places(attacker).len(),
+            world.target_places().len() + 1,
+            "an attack meets the mobs and the foe"
+        );
     }
 
     #[test]

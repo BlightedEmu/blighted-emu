@@ -15,8 +15,9 @@
 //! player's, `MinPOIContLevel` the point of interest's (nwdb.info shows them as "Enemy Level",
 //! `{!clvl}`, `{!plvl}` and "POI Level", one above the data: `MinContLevel:0-18` is
 //! `{!clvl}1-19`, `Level:64` is `{!plvl}65+`, the threshold 0 of an `EnemyLevel` table is
-//! "Enemy Level 1+"; so levels are compared 0-based, see [`loot_level`]). `GlobalMod` rolls
-//! plainly (its bonus is Unknown). `[LIM]X` names loot limit `X`: the table rolls only while the
+//! "Enemy Level 1+"; so levels are compared 0-based, see [`loot_level`]). `GlobalMod` is held
+//! by every roll; a roll of a lucky player adds its luck by the table's `RollBonusSetting`
+//! ([`LootTables::roll_with_luck`]). `[LIM]X` names loot limit `X`: the table rolls only while the
 //! player's count of `X` is below its limit, and a table with `TriggerLimitOnVisit` counts a
 //! visit on `X` each time it rolls (Inferred, see [`crate::loot_limits`]; 38 tables of build
 //! 25810808). Any other name is a tag the roll must hold (Inferred: the
@@ -58,7 +59,8 @@ const LIST_SEPARATOR: char = ',';
 /// The `AndOr` value of a table that drops every entry its roll reaches.
 const AND: &str = "AND";
 /// The condition of a table whose roll gets a global loot bonus (Inferred from its name; the
-/// creature master table has it). The server adds no bonus, so the roll is a plain one.
+/// creature master table has it). Every roll holds it; the luck comes by the table's
+/// `RollBonusSetting` ([`LootTables::roll_with_luck`]).
 const GLOBAL_MOD: &str = "GlobalMod";
 /// The prefix of a condition that names a loot limit.
 const LIMIT_PREFIX: &str = "[LIM]";
@@ -73,6 +75,8 @@ const POI_LEVEL: &str = "MinPOIContLevel";
 const SALVAGE_TIER: &str = "SalvageItemTier";
 const SALVAGE_RARITY: &str = "SalvageItemRarity";
 const SALVAGE_GEAR_SCORE: &str = "SalvageItemGearScore";
+/// The luck of a roll that takes none.
+const NO_LUCK: u32 = 0;
 /// How deep `[LTID]` entries may nest (retail tables nest 3 deep).
 const MAX_DEPTH: u8 = 8;
 /// Most table rolls and bucket picks of one roll: a design table that rolls itself with a large
@@ -681,7 +685,25 @@ impl LootTables {
         context: LootContext<'_>,
         below: &mut impl FnMut(u32) -> u32,
     ) -> LootRoll {
-        self.walk(table, context, None, &[], below)
+        self.walk(table, context, None, &[], NO_LUCK, below)
+    }
+
+    /// What loot table `table` drops in `context` for a player of luck `luck` (on the tables'
+    /// `MaxRoll` scale), with `below(n)` a random number below `n`: every table with a
+    /// `RollBonusSetting` adds the luck to its random roll by that setting, unless one of its
+    /// conditions names a roll bonus (Inferred, status effect bonuses study 2026-11-11: the
+    /// gather tables have no condition and a setting, `TreeTiny`'s `LoggingResources` threshold
+    /// 101000 is above its `MaxRoll` 100000, so only a bonus reaches it; `IgnoreBonus` tables and
+    /// tables without a setting take none). The `ROL_*` and `GlobalRollMod` status effect columns
+    /// give the luck ([`crate::status_effects::RewardMods`]).
+    pub fn roll_with_luck(
+        &self,
+        table: &str,
+        context: LootContext<'_>,
+        luck: u32,
+        below: &mut impl FnMut(u32) -> u32,
+    ) -> LootRoll {
+        self.walk(table, context, None, &[], luck, below)
     }
 
     /// What loot table `table` drops in `context` with the roll bonuses `bonuses` (a fishing
@@ -695,7 +717,7 @@ impl LootTables {
         bonuses: &[RollBonus<'_>],
         below: &mut impl FnMut(u32) -> u32,
     ) -> LootRoll {
-        self.walk(table, context, None, bonuses, below)
+        self.walk(table, context, None, bonuses, NO_LUCK, below)
     }
 
     /// What the salvage of an item with the values `salvage` drops from loot table `table` in
@@ -707,7 +729,7 @@ impl LootTables {
         salvage: SalvageLevels,
         below: &mut impl FnMut(u32) -> u32,
     ) -> LootRoll {
-        self.walk(table, context, Some(salvage), &[], below)
+        self.walk(table, context, Some(salvage), &[], NO_LUCK, below)
     }
 
     fn walk(
@@ -716,6 +738,7 @@ impl LootTables {
         context: LootContext<'_>,
         salvage: Option<SalvageLevels>,
         bonuses: &[RollBonus<'_>],
+        luck: u32,
         below: &mut impl FnMut(u32) -> u32,
     ) -> LootRoll {
         let mut drops: BTreeMap<String, u32> = BTreeMap::new();
@@ -726,6 +749,7 @@ impl LootTables {
             context,
             salvage,
             bonuses,
+            luck,
             below,
             steps: 0,
             path: Vec::new(),
@@ -747,6 +771,8 @@ struct Walk<'a, 'b, F> {
     context: LootContext<'a>,
     salvage: Option<SalvageLevels>,
     bonuses: &'b [RollBonus<'b>],
+    /// The luck every table with a `RollBonusSetting` adds when no condition names a bonus.
+    luck: u32,
     below: &'b mut F,
     steps: u32,
     /// The lowercase ids of the tables on the path, outermost first.
@@ -794,14 +820,14 @@ impl<F: FnMut(u32) -> u32> Walk<'_, '_, F> {
         match table.roll {
             Roll::Random(max) => {
                 let rolled = (self.below)(max.max(1));
-                let bonus = table
-                    .bonus_setting
-                    .zip(table.required.iter().find_map(|tag| {
-                        self.bonuses
-                            .iter()
-                            .find(|bonus| bonus.name.eq_ignore_ascii_case(tag))
-                            .map(|bonus| bonus.value)
-                    }));
+                let named = table.required.iter().find_map(|tag| {
+                    self.bonuses
+                        .iter()
+                        .find(|bonus| bonus.name.eq_ignore_ascii_case(tag))
+                        .map(|bonus| bonus.value)
+                });
+                let luck = (self.luck > NO_LUCK).then_some(self.luck);
+                let bonus = table.bonus_setting.zip(named.or(luck));
                 Some(bonus.map_or(rolled, |(setting, bonus)| setting.apply(rolled, bonus, max)))
             }
             Roll::Level(kind) => self.context.level(kind, self.salvage),
@@ -1872,5 +1898,52 @@ mod tests {
         );
         assert_eq!(RollBonusSetting::of("Other"), None);
         assert_eq!(RollBonusSetting::AddToRoll.apply(u32::MAX, 1, 0), u32::MAX);
+    }
+
+    #[test]
+    fn luck_adds_to_every_table_with_a_setting_and_only_luck_passes_max_roll() {
+        // Build 25810808 `TreeTiny`, cut: wood always, `LoggingResources` at 101000 over
+        // `MaxRoll` 100000 (only a bonus reaches it); both `AddToRoll`.
+        let rows = vec![
+            loot(
+                "TreeTiny",
+                &[(1, "WoodT1"), (2, "[LTID]LoggingResources")],
+                Some("AND"),
+                None,
+            ),
+            loot("TreeTiny_Qty", &[(1, "1"), (2, "1")], None, None),
+            probs("TreeTiny_Probs", &[(1, "0"), (2, "101000")], 100_000),
+            loot("LoggingResources", &[(1, "Sap")], Some("OR"), None),
+            loot("LoggingResources_Qty", &[(1, "1")], None, None),
+            probs("LoggingResources_Probs", &[(1, "0")], 100_000),
+        ];
+        let source = || LootSource {
+            rows: rows.clone(),
+            bucket_items: Vec::new(),
+        };
+        let with_setting = LootTables::build(source()).with_roll_bonus_settings([
+            ("TreeTiny".to_owned(), RollBonusSetting::AddToRoll),
+            ("LoggingResources".to_owned(), RollBonusSetting::AddToRoll),
+        ]);
+        // The highest roll below 100000.
+        let mut top = |n: u32| n.saturating_sub(1);
+        let items = |roll: LootRoll| roll.items;
+        let wood = ("WoodT1".to_owned(), 1);
+        assert_eq!(
+            items(with_setting.roll_with_luck("TreeTiny", LEVELS, NO_LUCK, &mut top)),
+            std::slice::from_ref(&wood)
+        );
+        // `PvP_Flag_Bonus` `ROL_Logging` 3000: 99999 + 3000 passes 101000.
+        const PVP_FLAG_LUCK: u32 = 3_000;
+        assert_eq!(
+            items(with_setting.roll_with_luck("TreeTiny", LEVELS, PVP_FLAG_LUCK, &mut top)),
+            [("Sap".to_owned(), 1), wood.clone()]
+        );
+        let no_setting = LootTables::build(source());
+        assert_eq!(
+            items(no_setting.roll_with_luck("TreeTiny", LEVELS, PVP_FLAG_LUCK, &mut top)),
+            [wood],
+            "a table without a setting (or IgnoreBonus) takes no luck"
+        );
     }
 }

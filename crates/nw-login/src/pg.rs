@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use nw_db::{
-    Account, AccountEntitlement, AnalyticsRecord, BoardEntry, BoardOrder, BoardPage, Character,
-    DbError, DiscordProfile, NewCharacter, PgPool, PrivacySetting, StatValues, Wallet,
-    account_by_id, account_entitlements, privacy_settings, set_privacy_settings, wallet,
+    Account, AccountConsumable, AccountEntitlement, AnalyticsRecord, BoardEntry, BoardOrder,
+    BoardPage, Character, DbError, DiscordProfile, NewCharacter, PgPool, PrivacySetting,
+    StatValues, Wallet, account_by_id, account_consumables, account_entitlements, privacy_settings,
+    set_privacy_settings, wallet,
 };
 use uuid::Uuid;
 
@@ -375,6 +376,12 @@ impl EntitlementStore for PgEntitlements {
     }
     async fn wallet(&self, account: Uuid) -> Result<Wallet, StoreError> {
         wallet(&self.pool, account)
+            .await
+            .map_err(StoreError::unavailable)
+    }
+
+    async fn consumables(&self, account: Uuid) -> Result<Vec<AccountConsumable>, StoreError> {
+        account_consumables(&self.pool, account)
             .await
             .map_err(StoreError::unavailable)
     }

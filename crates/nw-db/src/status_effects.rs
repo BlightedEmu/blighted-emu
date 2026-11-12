@@ -14,7 +14,8 @@ use crate::progression::{from_column, to_column};
 pub struct SavedStatusEffect {
     /// The `StatusID` of the effect.
     pub status_id: String,
-    /// The `ConsumableID` of the consumable that added it.
+    /// The `ConsumableID` of the consumable that added it, or the entitlement of the status
+    /// effect token whose use started it (`Ent_StatusEffect_Token_Gather_1`).
     pub consumable_id: String,
     /// Unix nanoseconds when it ends.
     pub ends_ns: u64,

@@ -1268,10 +1268,17 @@ impl SimWorld {
         };
         let number = player.number;
         if let Some(mastery) = content.progression.tradeskill(FISHING_TRADESKILL) {
+            // The held effects' share (`EXP_Fishing`: the summer medley foods) is Inferred, in
+            // the form the gathers have (`Token_Gather_1`, `Playthrough_Part_02`).
+            let bonus = player.status_effects.gain_scale(
+                &content.status_effects,
+                FISHING_TRADESKILL,
+                super::status_effects::GainKind::Progression,
+            );
             let gain = progression_gain(
                 f64::from(fight.fishing_xp),
                 ONCE,
-                content.gameplay.xp.progression(FISHING_TRADESKILL),
+                content.gameplay.xp.progression(FISHING_TRADESKILL) * bonus,
             );
             gain_progression(&mut player, &content, mastery, gain);
         }

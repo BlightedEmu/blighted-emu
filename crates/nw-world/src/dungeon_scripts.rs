@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::collision::{Affine, Geometry, shape_contains};
-use crate::level_script::SpawnerRules;
+use crate::level_script::{DifficultyRewards, SpawnerRules};
 use crate::records::PatrolPath;
 use crate::slice_data::GUID_LEN;
 
@@ -58,6 +58,16 @@ pub struct TargetSlice {
     /// `wp-nopath` with the task `POI_Ritual_Channeling_LOOP`); `None` for a slice without one.
     #[serde(default)]
     pub waypoints: Option<PatrolPath>,
+    /// The difficulty the slice is for, when its alias holds one slice per difficulty (its file
+    /// name ends in `_dt<n>` or `_l<n>`: the corrupted breaches' aliases list `_dt1`, `_dt1`,
+    /// `_dt2` to `_dt6`); `None` for a slice of any difficulty.
+    #[serde(default)]
+    pub difficulty: Option<u32>,
+    /// The mob of each difficulty, when the slice spawns nested slices of one difficulty each
+    /// (a corrupted breach's wave slice `darkness_ai_minor_portal_wave_standardwave_01_a`);
+    /// empty for a slice of one mob.
+    #[serde(default)]
+    pub difficulty_mobs: BTreeMap<u32, TargetMob>,
 }
 
 /// The mobs of one spawn of a spawner slice.
@@ -233,6 +243,20 @@ pub struct Encounter {
     /// respawn range and whether it spawns when enabled); `None` when its spawner has none.
     #[serde(default)]
     pub spawner: Option<SpawnerRules>,
+    /// The alias spawner that spawns it, when one does (`<level script path>#<entity id>`): it
+    /// spawns one slice of its alias at one of its spawn points, so the encounters of one group
+    /// are the choices of one spawn (Observed: `Darkness_SpawnGroup_Minor_Master` spawns one of
+    /// four breach slices at one of seven points, `m_liveCount` 1).
+    #[serde(default)]
+    pub spawn_group: Option<String>,
+    /// Its difficulty (from 1): its spawns of a slice per difficulty spawn that difficulty's
+    /// slice, and its success fires that difficulty's reward; `None` for an encounter of one
+    /// difficulty.
+    #[serde(default)]
+    pub difficulty: Option<u32>,
+    /// Its rewards by difficulty (a corrupted breach's root).
+    #[serde(default)]
+    pub rewards: Option<DifficultyRewards>,
 }
 
 /// A loot container of a level script.
@@ -411,6 +435,8 @@ mod tests {
                     }),
                     mobs_per_spawn: 1,
                     waypoints: None,
+                    difficulty: None,
+                    difficulty_mobs: BTreeMap::new(),
                 }],
             }],
             ..Encounter::default()

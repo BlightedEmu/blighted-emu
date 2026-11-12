@@ -58,10 +58,10 @@ const AWAY_FROM_HOME_M: f32 = 10.0;
 /// A player scans for mobs to wake again after moving this far (about 2 s of running); far less
 /// than the wake radius, so a mob wakes before the player can reach it.
 pub const WAKE_RESCAN_M: f32 = 10.0;
-/// The starts of the vitals categories of the encounters that the open map does not run
-/// ([`without_unrun_encounters`]): the invasion's mobs (`VitalsCategoryData` `Invasion_Bomber`,
-/// `Invasion_Grunt`, `Invasion_Sniper`, ...) and the corrupted breaches' (`Darkness`,
-/// `DarknessAI`).
+/// The starts of the vitals categories of the encounter spawns that do not stand as spawns
+/// ([`is_unrun`]): the invasion's mobs (`VitalsCategoryData` `Invasion_Bomber`,
+/// `Invasion_Grunt`, `Invasion_Sniper`, ...), which the open map does not run, and the corrupted
+/// breaches' (`Darkness`, `DarknessAI`), which the encounter runner spawns.
 const UNRUN_ENCOUNTER_CATEGORIES: [&str; 2] = ["Invasion_", "Darkness"];
 
 /// The first mob's number after [`MOB_ENTITY_BASE`]. A number whose low 32 bits are all zero
@@ -527,9 +527,11 @@ pub fn sim_spawns(
 /// each an encounter spawn and named by no task:
 /// - the invasion's 29,235: the forts' siege encounters (`Siege_Fort_BrimstoneSands`, ...), up
 ///   to 2,226 at one point; the open map runs no invasion (Inferred: a war game mode of its own).
-/// - the breaches' 29,664: each place of a breach (`Enc_Darkness_...`) holds its mob seven
-///   times, once for each tier of levels 25 to 70 (`corruption_swarmer_dt1` to `_dt6`, `_dt1`
-///   twice), of which one runs at a time (Inferred); the open map runs no breach.
+/// - the breaches' 29,664: the export lists, at each breach spawn group's place, the mob of every
+///   difficulty of every breach kind the group may spawn (`corruption_swarmer_dt1` to `_dt6`,
+///   `_dt1` twice in the aliases); the encounter runner spawns a breach's mobs of its own
+///   difficulty itself (`world::dungeon_script`, breaches note 2026-11-11), so none of these
+///   stands as a spawn.
 ///
 /// With the categories that start so, 59,214 of the open map's 115,965 spawns are left out (sim
 /// log 2026-10-31). Awake, one fort's 2,226 ran the sim's mob tick to 175 ms (live hunt). Retail

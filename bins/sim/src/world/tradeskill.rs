@@ -16,10 +16,17 @@
 //! rounded down (Observed: Arcana 18 x 5 x 2 x 1.05 = 188.99 gave 188; 2898 x 2 x 1.05 = 6085.8
 //! gave 6085).
 //!
+//! The held status effects raise each gain by their share for it ([`GainKind`],
+//! [`super::status_effects::StatusEffects::gain_scale`]): the firing's points times the remote
+//! multiplier times one plus the shares (Observed, `Playthrough_Part_02` with the `Token_*`
+//! boosts held: Skinning 70 x 2 x 2 = 280, territory standing 5 x 3 x 2 = 30).
+//!
 //! Observed and not explained (retail newchar 2026-09-18, `Mount-quest`): a Light Ration craft
 //! gave Cooking 16 where 4.6 x 1 x 2 = 9.2, a Mount Vittles craft 216 where 6.9 x 6 x 2 = 82.8;
-//! the smelting, arcana and research crafts of the other ledgers match the formula exactly. The
-//! cooking factor is Unknown and not applied.
+//! the smelting, arcana and research crafts of the other ledgers match the formula exactly. No
+//! `StatusEffectData` row has a Cooking experience column (`EXP_*` has no Cooking, and no
+//! `EXPCategoricalProgression` cell names it), and the two ratios differ (1.74 and 2.61), so no
+//! held effect explains it. The cooking factor is Unknown and not applied.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -31,6 +38,8 @@ use nw_content::rewards::{EventGrant, Reward};
 use nw_content::tradeskill_xp::{NEUTRAL_MODIFIER, gather_reward};
 
 use super::quest_objects::{gain_experience, grant};
+use super::seasons::SeasonEvent;
+use super::status_effects::GainKind;
 use super::{Player, SimWorld};
 use crate::charting::{NEUTRAL_STANDING_MODIFIER, RANK_UP_EVENT};
 use crate::player_content::PlayerContent;
@@ -46,6 +55,17 @@ pub(super) struct EventScale {
 
 /// The units of a firing that counts once.
 const ONE_UNIT: f64 = 1.0;
+/// The `CategoricalProgressionId` of azoth (`AzothMod` raises its gains).
+const AZOTH_CURRENCY: &str = "Azoth_Currency";
+
+/// The kind of a gain of categorical progression `id` that is no standing and no faction's.
+fn kind_of(id: &str) -> GainKind {
+    if id.eq_ignore_ascii_case(AZOTH_CURRENCY) {
+        GainKind::Azoth
+    } else {
+        GainKind::Progression
+    }
+}
 
 impl EventScale {
     /// A firing that gives its reward as it is (a salvage, a node gather, a fishing event).
@@ -163,14 +183,16 @@ impl SimWorld {
             total.saturating_add(event_grant.coins_rolled(&mut |below| dice.below(below)))
         });
         if let Some((id, reward)) = &event_grant.progression {
-            self.gain_categorical(number, event, id, scale.progression(*reward), times);
+            let points = scale.progression(*reward);
+            self.gain_categorical(number, event, id, kind_of(id), points, times);
         }
         self.gain_faction(number, event, event_grant, times);
         if event_grant.territory_standing > 0.0 {
             let standing = scale.standing(event_grant.territory_standing);
             match self.current_territory(number) {
                 Some(territory) => {
-                    self.gain_categorical(number, event, &territory, standing, times);
+                    let kind = GainKind::Standing;
+                    self.gain_categorical(number, event, &territory, kind, standing, times);
                 }
                 None => {
                     tracing::debug!(player = number, event, "standing outside a territory");
@@ -206,7 +228,8 @@ impl SimWorld {
             return;
         };
         if let Some(territory) = self.current_territory(number) {
-            self.gain_categorical(number, event, &territory, standing, ONE_FIRING);
+            let kind = GainKind::Standing;
+            self.gain_categorical(number, event, &territory, kind, standing, ONE_FIRING);
         }
     }
 
@@ -220,7 +243,7 @@ impl SimWorld {
             return;
         };
         if let Some((id, reward)) = &event_grant.progression {
-            self.gain_categorical(number, event, id, *reward, ONE_FIRING);
+            self.gain_categorical(number, event, id, kind_of(id), *reward, ONE_FIRING);
         }
         self.gain_faction(number, event, event_grant, ONE_FIRING);
         if let Some(achievement) = &event_grant.achievement {
@@ -249,23 +272,27 @@ impl SimWorld {
             return;
         };
         if grant.faction_reputation > 0.0 {
-            self.gain_categorical(number, event, reputation, grant.faction_reputation, times);
+            let (kind, points) = (GainKind::FactionReputation, grant.faction_reputation);
+            self.gain_categorical(number, event, reputation, kind, points, times);
         }
         let content = Arc::clone(&self.content);
         if grant.faction_tokens > 0.0
             && let Some(tokens) = content.event_grants.faction_currency(reputation)
         {
-            self.gain_categorical(number, event, tokens, grant.faction_tokens, times);
+            let (kind, points) = (GainKind::FactionTokens, grant.faction_tokens);
+            self.gain_categorical(number, event, tokens, kind, points, times);
         }
     }
 
     /// Categorical progression `id` of player `number` gains `times` firings of `per_firing`
-    /// points under its remote multiplier, for game event `event`.
-    fn gain_categorical(
+    /// points under its remote multiplier times the bonus of the player's held effects for a
+    /// gain of `kind` of it, for game event `event`; the player's season stats count the gain.
+    pub(super) fn gain_categorical(
         &mut self,
         number: u64,
         event: &str,
         id: &str,
+        kind: GainKind,
         per_firing: f64,
         times: u32,
     ) {
@@ -274,15 +301,32 @@ impl SimWorld {
             tracing::debug!(player = number, event, progression = %id, "progression of no known table");
             return;
         };
-        let Some(mut player) = self
-            .player_by_number(number)
-            .and_then(|entity| self.world.get_mut::<Player>(entity))
-        else {
+        let Some(entity) = self.player_by_number(number) else {
             return;
         };
-        let gain = event_gain(per_firing, times, content.gameplay.xp.progression(id));
-        tracing::debug!(player = number, event, progression = %id, gain, "progression gained");
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        let bonus = player
+            .status_effects
+            .gain_scale(&content.status_effects, id, kind);
+        let gain = event_gain(
+            per_firing,
+            times,
+            content.gameplay.xp.progression(id) * bonus,
+        );
+        tracing::debug!(player = number, event, progression = %id, gain, bonus, "progression gained");
+        let rank_of = |player: &Player| mastery.rank_of(player.masteries.experience(mastery)).0;
+        let rank_before = rank_of(&player);
         gain_progression(&mut player, &content, mastery, gain);
+        let ranks = u32::from(rank_of(&player).saturating_sub(rank_before));
+        let id = mastery.id.as_str();
+        let progression = SeasonEvent::Progression {
+            id,
+            points: gain,
+            ranks,
+        };
+        self.season_event(entity, progression);
     }
 
     /// The territory player `number` is in: the latest territory it entered whose id is a
@@ -401,6 +445,25 @@ mod tests {
         assert_eq!(progression_gain(0.2, 1, 1.0), 0);
         assert_eq!(progression_gain(-1.0, 1, 1.0), 0);
         assert_eq!(progression_gain(f64::MAX, 2, 2.0), u32::MAX);
+    }
+
+    #[test]
+    fn a_held_token_doubles_the_gain_after_the_remote_multiplier() {
+        // Retail `Playthrough_Part_02` 3492.2 s, `Token_Gather_1` held: `Gather_SkinningT1` 32 at
+        // the level modifier 2.2030358 (70) under Skinning's 2, times 1 + 1: 280.
+        const TOKEN_SCALE: f64 = 2.0;
+        assert_eq!(
+            event_gain(
+                EventScale::gather(2.203_035_8).progression(32.0),
+                ONE_FIRING,
+                2.0 * TOKEN_SCALE
+            ),
+            280
+        );
+        // 1626.6 s, `Token_Territory_1` held: a chart's standing 50 under the standing's 3: 300.
+        assert_eq!(event_gain(50.0, ONE_FIRING, 3.0 * TOKEN_SCALE), 300);
+        assert_eq!(kind_of("azoth_currency"), GainKind::Azoth);
+        assert_eq!(kind_of("Skinning"), GainKind::Progression);
     }
 
     #[test]

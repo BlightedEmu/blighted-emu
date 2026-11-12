@@ -513,6 +513,7 @@ mod tests {
             phase: 1,
             capacity: 5,
             ends_at_ms: None,
+            war: None,
         }
     }
 

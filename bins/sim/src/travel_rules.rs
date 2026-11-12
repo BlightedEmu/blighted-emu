@@ -163,13 +163,21 @@ pub struct TeleporterRule {
     pub delay_ms: u64,
 }
 
-/// A piece of furniture: its `HouseItemID` and `RankingPoints`.
+/// A piece of furniture: its `HouseItemID`, `RankingPoints`, `RankingPointsDuplicateLimit` and
+/// its trophy effect.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Furniture {
     /// The bag item it is.
     pub item_id: String,
     /// `RankingPoints`.
     pub ranking_points: f64,
+    /// `RankingPointsDuplicateLimit`: how many copies of it in one house count; `None` for no
+    /// limit.
+    pub duplicate_limit: Option<u32>,
+    /// Its `HousingStatusEffect` (a `StatusID`): it is a trophy, the house's trophy list names it
+    /// (Observed: every trophy of 800 retail housing states is such an item), and its owner
+    /// holds the effect ([`crate::world::housing_states`]).
+    pub trophy_effect: Option<String>,
 }
 
 /// The housing rules.
@@ -832,6 +840,15 @@ fn furniture(tables: &Tables, kits: &StarterKits) -> HashMap<u32, Furniture> {
                         .as_deref()
                         .and_then(|points| points.trim().parse().ok())
                         .unwrap_or_default(),
+                    duplicate_limit: row
+                        .ranking_points_duplicate_limit
+                        .and_then(|limit| u32::try_from(limit).ok()),
+                    trophy_effect: row
+                        .housing_status_effect
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|effect| !effect.is_empty())
+                        .map(str::to_owned),
                 },
             ))
         })

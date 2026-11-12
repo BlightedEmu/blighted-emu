@@ -249,6 +249,7 @@ mod tests {
             faction: 1,
             crest: [0; nw_messages::social::CREST_LEN],
             members: 3,
+            claims: 2,
             siege_hour: 18.0,
         };
         let answers = guilds_answers(&request, std::slice::from_ref(&listing));
@@ -262,6 +263,7 @@ mod tests {
             answer.guilds[0].master,
             ADA.hyphenated().to_string().as_bytes()
         );
+        assert_eq!(answer.guilds[0].claims, listing.claims, "its owned claims");
         assert_eq!(answers[0], answers[1]);
         assert_eq!(
             guilds_answers(&request, &[]).len(),

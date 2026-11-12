@@ -13,6 +13,14 @@
 //! runs at efficiency 1. A gatherable may ask for a tradeskill rank or an item in the bag
 //! ([`nw_content::gathering::GatherRule`]); without them the request is refused. The gather's
 //! game event gives its tradeskill experience ([`SimWorld::grant_event`]).
+//!
+//! The gatherer's held status effects (status effect bonuses study 2026-11-11, [`LootBonuses`]):
+//! the gather's loot roll adds their luck for the tradeskill (`ROL_*`; a gather without a
+//! tradeskill, such as a chest, their `GlobalRollMod`) by each table's `RollBonusSetting`
+//! ([`nw_content::loot::LootTables::roll_with_luck`]) and holds their `LootTags`; each stack the
+//! roll gives grows by their yield share for the tradeskill (`MULT_*`: `Token_Proficiency_1`
+//! 0.1), a fraction left rolled. Inferred: the form is the data's (a share added to 1, a bonus
+//! added to the roll); no retail gather was measured with and without a yield or luck effect.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -21,7 +29,7 @@ use bevy_ecs::entity::Entity;
 use nw_content::chest_lockouts::Lockout;
 use nw_content::corpse_times::{DEFAULT_CORPSE_MS, SKINNED_CORPSE_MS, corpse_ms};
 use nw_content::gathering::Gatherable;
-use nw_content::loot::{LootContext, TABLE_PREFIX, loot_level};
+use nw_content::loot::{LootContext, LootRoll, TABLE_PREFIX, loot_level};
 use nw_content::tradeskill_xp::NEUTRAL_MODIFIER;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::items::SYNC_MOVED;
@@ -104,6 +112,33 @@ const WATER_GATHERABLE: &str = "Water";
 /// level point is its trunk, and a position a moment old still pass).
 const GATHER_REACH_M: f32 = 15.0;
 
+/// The stack a gather's yield share `scale` makes of a stack of `quantity`: the whole part of
+/// `quantity x scale`, and one more when `below(n)` (a number below `n`) falls under its
+/// fraction (Inferred: a yield of 10 % on a single item gives a second one a tenth of the time).
+pub(super) fn with_yield(quantity: u32, scale: f64, below: &mut impl FnMut(u32) -> u32) -> u32 {
+    let grown = f64::from(quantity) * scale.max(0.0);
+    let whole = grown.floor();
+    // Fractions in ten-thousandths.
+    let fraction = ((grown - whole) * f64::from(YIELD_STEPS)).round() as u32;
+    // A stack of a few hundred at most.
+    let extra = u32::from(fraction > 0 && below(YIELD_STEPS) < fraction);
+    (whole as u32).saturating_add(extra)
+}
+
+/// The resolution of a yield fraction's roll.
+const YIELD_STEPS: u32 = 10_000;
+
+/// What a player's held status effects give its loot rolls.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(super) struct LootBonuses {
+    /// The luck added to the tables' rolls ([`super::status_effects::StatusEffects::luck`]).
+    pub(super) luck: u32,
+    /// The loot tags the rolls hold, with the mob's.
+    pub(super) tags: Vec<String>,
+    /// The multiple of each stack a gather of a tradeskill gives (`MULT_*`); 1 for another roll.
+    pub(super) yield_scale: f64,
+}
+
 /// Why a gather request is refused besides a busy node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GatherRefusal {
@@ -130,7 +165,8 @@ pub(super) struct OpenGather {
     /// A water gather (kind 15): no node to deplete, and a done state that names no gatherable.
     water: bool,
     /// The encounter start object gathered ([`super::encounter_roots::EncounterObjects`]): the
-    /// gather's end takes it away, and its stage counts it.
+    /// gather's end takes it away, and its stage counts it; or the switch of the instance's gates
+    /// ([`super::gates`]) whose rules the gather's end fires.
     object: Option<u64>,
     end_ms: u64,
 }
@@ -205,7 +241,8 @@ impl SimWorld {
         let mob = entity_of_raw_id(&request.target).filter(|mob| spawn_index(*mob).is_some());
         let object = self
             .encounter_objects
-            .at(&request.target, position, GATHER_REACH_M);
+            .at(&request.target, position, GATHER_REACH_M)
+            .or_else(|| self.gate_switch_at(&request.target, position, GATHER_REACH_M));
         // The node must be one of the level's gatherables of that kind (or a dead mob to skin,
         // or an encounter's start object) within reach of the player: a client cannot gather
         // from anywhere.
@@ -424,6 +461,37 @@ impl SimWorld {
         }
     }
 
+    /// What the held status effects of player `number` give a loot roll with the mob's loot
+    /// tags `mob_tags`: of a gather of tradeskill `tradeskill`, their luck and yield for it; of
+    /// another roll (`None`: a kill, a chest), their `GlobalRollMod` and no yield. Their
+    /// `LootTags` join the mob's.
+    pub(super) fn loot_bonuses(
+        &mut self,
+        number: u64,
+        mob_tags: &[String],
+        tradeskill: Option<&str>,
+    ) -> LootBonuses {
+        let mut bonuses = LootBonuses {
+            tags: mob_tags.to_vec(),
+            yield_scale: NEUTRAL_MODIFIER,
+            ..LootBonuses::default()
+        };
+        let entity = self.player_by_number(number);
+        let rules = &self.content.status_effects;
+        let Some(effects) = entity
+            .and_then(|entity| self.world.get::<Player>(entity))
+            .map(|player| &player.status_effects)
+        else {
+            return bonuses;
+        };
+        bonuses.luck = effects.luck(rules, tradeskill);
+        bonuses.tags.extend(effects.loot_tags(rules));
+        if let Some(tradeskill) = tradeskill {
+            bonuses.yield_scale = effects.yield_scale(rules, tradeskill);
+        }
+        bonuses
+    }
+
     /// Whether player `entity` may gather `gatherable`: one that needs its tradeskill's tool
     /// (`Restriction` ToolRequired) only with an item in the tool's slot (Inferred: retail
     /// answered the skinning knife's absence with the client's "No equipped Knife" prompt, live
@@ -571,13 +639,25 @@ impl SimWorld {
 
     fn end_gather(&mut self, gather: &OpenGather, now_ms: u64) {
         let content = std::sync::Arc::clone(&self.content);
-        let tags = gather
+        let mob_tags = gather
             .mob
             .and_then(|mob| self.mobs.vitals_of(mob))
             .and_then(|vitals| content.mob_loot.of(vitals))
             .map_or(&[][..], |drop| drop.tags.as_slice());
+        let bonuses = self.loot_bonuses(
+            gather.number,
+            mob_tags,
+            gather.gatherable.tradeskill.as_deref(),
+        );
         let reached = self.reached_loot_limits(gather.number);
-        let levels = self.loot_context(gather.number, gather.mob.map(|mob| (mob, tags)), &reached);
+        let levels = LootContext {
+            tags: &bonuses.tags,
+            ..self.loot_context(
+                gather.number,
+                gather.mob.map(|mob| (mob, mob_tags)),
+                &reached,
+            )
+        };
         let dice = &mut self.dice;
         let rolled = gather
             .table
@@ -585,7 +665,20 @@ impl SimWorld {
             .map(|table| {
                 content
                     .loot
-                    .roll(table, levels, &mut |below| dice.below(below))
+                    .roll_with_luck(table, levels, bonuses.luck, &mut |below| dice.below(below))
+            })
+            .map(|rolled| LootRoll {
+                items: rolled
+                    .items
+                    .into_iter()
+                    .map(|(item, quantity)| {
+                        let grown = with_yield(quantity, bonuses.yield_scale, &mut |below| {
+                            dice.below(below)
+                        });
+                        (item, grown)
+                    })
+                    .collect(),
+                ..rolled
             })
             .unwrap_or_default();
         let hints = rolled.gear_scores.clone();
@@ -597,8 +690,12 @@ impl SimWorld {
                 self.skinned.insert(mob, now_ms);
             }
             None if gather.water => {}
-            // A start object goes: its encounter's stage counts it.
-            None if let Some(object) = gather.object => self.encounter_objects.remove(object),
+            // A start object goes: its encounter's stage counts it. A switch of the instance's
+            // gates ([`super::gates`]) stays: its rules change it.
+            None if let Some(object) = gather.object => {
+                self.encounter_objects.remove(object);
+                self.gate_switch_used(object);
+            }
             // A container stays for everyone else: only its opener's tracker locks it.
             None if self.lockout_of(gather).is_some() => self.nodes.release(&gather.request.target),
             None => {
@@ -692,6 +789,17 @@ impl SimWorld {
                 super::meta_achievements::MetaEvent::Gathered { tradeskill },
             );
         }
+        let items = gathered
+            .iter()
+            .fold(0_u32, |sum, (_, quantity)| sum.saturating_add(*quantity));
+        self.season_event(
+            entity,
+            super::seasons::SeasonEvent::Gathered {
+                gatherable: &gather.gatherable.id,
+                tradeskill: gather.gatherable.tradeskill.as_deref(),
+                items,
+            },
+        );
     }
 
     /// The cyclic gatherables (variant id) and their states that player `entity` gathers with a
@@ -1226,6 +1334,31 @@ pub(crate) mod tests {
     use crate::player_content::PlayerContent;
     use crate::world::gear;
     use crate::world::tests::{NOW, SERVER_TIME, admit_at, connection, world_with_spawns};
+
+    #[test]
+    fn a_yield_share_grows_each_stack_and_rolls_its_fraction() {
+        // `Token_Proficiency_1` `MULT_*` 0.1.
+        const PROFICIENCY: f64 = 1.1;
+        let mut low = |_: u32| 0;
+        let mut high = |n: u32| n - 1;
+        assert_eq!(
+            with_yield(10, PROFICIENCY, &mut high),
+            11,
+            "no fraction to roll"
+        );
+        assert_eq!(
+            with_yield(1, PROFICIENCY, &mut low),
+            2,
+            "a roll under a tenth"
+        );
+        assert_eq!(with_yield(1, PROFICIENCY, &mut high), 1);
+        assert_eq!(
+            with_yield(4, NEUTRAL_MODIFIER, &mut low),
+            4,
+            "no share, no roll"
+        );
+        assert_eq!(with_yield(3, -1.0, &mut low), 0);
+    }
 
     const FLINT: [u8; RAW_ID_LEN] = [0x5b; RAW_ID_LEN];
     /// The level point of the flint node.

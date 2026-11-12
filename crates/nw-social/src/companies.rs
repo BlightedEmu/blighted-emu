@@ -10,9 +10,12 @@
 //! `TREASURY_SUCCESS`, a deposit 5201.
 //!
 //! The rights of the four ranks are the client's `GuildPrivilegeId` privileges ([`Privilege`]);
-//! which rank has which is a best guess ([`RANK_PRIVILEGES`]: no capture shows a lower rank
-//! acting and the rank data is the company service's). The join wait, the least level and the
-//! treasury maximum are [`CompanyRules`].
+//! which rank has which is a best guess ([`RANK_PRIVILEGES`]: the rank data is the company
+//! service's; the one lower rank seen acting is a consul that paid a territory upkeep,
+//! `pay-territory-tax`). The join wait, the least level and the treasury maximum are
+//! [`CompanyRules`]. A company's claim count is the world database's territory owners
+//! ([`SocialWorld::set_claim_counts`]; Observed: retail list entries carry `m_numClaims`, and the
+//! client asks for a list ordered by it, 3638).
 //!
 //! The client shows its own company from the `GuildsComponentReplicatedState`, which
 //! [`crate::views`] sends.
@@ -44,8 +47,8 @@ pub const NEW_COMPANY_SIEGE_HOUR: f32 = 14.0;
 /// The 5429 copies a creator or a joining player got (`creating_a_company`,
 /// `ranks-rights-compagny`: three each time).
 pub const JOIN_UPDATE_COPIES: usize = 3;
-/// The war and territory counts of a company: this server has no wars or territory owners.
-const NO_COUNT: u32 = 0;
+/// The war count of a company: this server runs no wars.
+const NO_WARS: u32 = 0;
 /// The id of no company.
 const NO_COMPANY: [u8; 16] = [0; 16];
 
@@ -217,8 +220,8 @@ pub fn other_guild(listing: &CompanyListing) -> OtherGuildData {
         faction: listing.faction,
         crest: crest_of_bytes(&listing.crest),
         members: listing.members,
-        claims: NO_COUNT,
-        wars: NO_COUNT,
+        claims: listing.claims,
+        wars: NO_WARS,
         siege_window: SiegeWindow {
             start_hour: listing.siege_hour,
             // The empty text of 17,556 of 18,114 retail entries: this server has no region rule.
@@ -369,6 +372,7 @@ impl SocialWorld {
             faction: company.record.faction,
             crest: company.record.crest,
             members: u32::try_from(company.members.len()).unwrap_or(u32::MAX),
+            claims: self.claim_counts.get(&id).copied().unwrap_or_default(),
             siege_hour: company.record.siege_hour,
         })
     }
@@ -710,8 +714,7 @@ impl SocialWorld {
             let ordered = match order {
                 ListOrder::Name => by_name,
                 ListOrder::Members => a.members.cmp(&b.members).then(by_name),
-                // No company owns territory here: every claim count is 0.
-                ListOrder::Claims => by_name,
+                ListOrder::Claims => a.claims.cmp(&b.claims).then(by_name),
             };
             if descending {
                 ordered.reverse()
@@ -748,9 +751,9 @@ pub(crate) mod tests {
     use nw_messages::social::guilds::{
         CREATE_GUILD_TYPE_INDEX, CREATE_INVITE_TYPE_INDEX, GUILD_DATA_UPDATED_TYPE_INDEX,
         INVITE_RESPONDED_TYPE_INDEX, KICKED_TYPE_INDEX, LEAVE_GUILD_TYPE_INDEX,
-        LIST_BY_NAME_TYPE_INDEX, NAME_AVAILABILITY_TYPE_INDEX, NAME_AVAILABLE_TYPE_INDEX,
-        ORDERED_GUILDS_TYPE_INDEX, REMOVE_MEMBER_TYPE_INDEX, RESPOND_TO_INVITE_TYPE_INDEX,
-        SET_MEMBER_RANK_TYPE_INDEX,
+        LIST_BY_CLAIMS_TYPE_INDEX, LIST_BY_NAME_TYPE_INDEX, NAME_AVAILABILITY_TYPE_INDEX,
+        NAME_AVAILABLE_TYPE_INDEX, ORDERED_GUILDS_TYPE_INDEX, REMOVE_MEMBER_TYPE_INDEX,
+        RESPOND_TO_INVITE_TYPE_INDEX, SET_MEMBER_RANK_TYPE_INDEX,
     };
 
     use super::*;
@@ -1036,5 +1039,47 @@ pub(crate) mod tests {
         assert!(first.ends_with(&text("1")), "the next page's token");
         let second = page(&mut world, 1, "1");
         assert!(second.ends_with(&text("")), "the last page");
+    }
+
+    #[test]
+    fn the_list_by_claims_counts_and_sorts_the_owned_claims() {
+        /// Claims of two made-up companies.
+        const ALPHA_CLAIMS: u32 = 1;
+        const BETA_CLAIMS: u32 = 2;
+        const PAGE_SIZE: u16 = 10;
+        let (mut world, alpha) = company_of_two();
+        join(&mut world, 3, "Cid", "sim-a");
+        create(&mut world, 3, "Beta");
+        let beta = world.people[&character(3)].company.expect("Cid's").0;
+        world.set_claim_counts(vec![(alpha, ALPHA_CLAIMS), (beta, BETA_CLAIMS)]);
+        assert_eq!(world.listing(alpha).expect("Alpha").claims, ALPHA_CLAIMS);
+        let mut args = [8; 16].to_vec();
+        args.push(1);
+        args.extend(PAGE_SIZE.to_be_bytes());
+        args.extend(text(""));
+        let effects = call(
+            &mut world,
+            3,
+            "sim-a",
+            LIST_BY_CLAIMS_TYPE_INDEX,
+            &args,
+            NOW_MS,
+        );
+        let page = deliveries(&effects, ORDERED_GUILDS_TYPE_INDEX)
+            .pop()
+            .expect("a page")
+            .args;
+        let at = |name: &[u8]| {
+            page.windows(name.len())
+                .position(|window| window == name)
+                .expect("listed")
+        };
+        assert!(at(b"Beta") < at(b"Alpha"), "the most claims first");
+        world.set_claim_counts(Vec::new());
+        assert_eq!(
+            world.listing(beta).expect("Beta").claims,
+            0,
+            "no claim left"
+        );
     }
 }

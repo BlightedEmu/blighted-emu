@@ -62,7 +62,7 @@ use crate::social::states::{
 };
 use crate::status_effects::{STATUS_EFFECTS_TYPE_INDEX, StatusEffectsState};
 use crate::temporary_affiliation::TEMPORARY_AFFILIATION_TYPE_INDEX;
-use crate::title_choice::{SOCIAL_COMPONENT, SOCIAL_TYPE_INDEX};
+use crate::title_choice::{SOCIAL_COMPONENT, SOCIAL_TYPE_INDEX, ShownSocial};
 use crate::travel_states::PLAYER_HOME_TYPE_INDEX;
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsData, VitalsSlot1, VitalsState};
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
@@ -242,6 +242,8 @@ const REWARD_TRACK_TYPE_INDEX: u64 = 4913;
 const ITEM_SKINNING_TYPE_INDEX: u64 = 3765;
 /// Type index of `MB::StatMultiplierTableComponentReplicatedState` (component 43).
 const STAT_MULTIPLIER_TABLE_TYPE_INDEX: u64 = 1525;
+/// Type index of `MB::ReactionTrackingReplicatedState` (component 31).
+const REACTION_TRACKING_TYPE_INDEX: u64 = 1927;
 
 /// The classes of the player components that the card of another player carries, besides the
 /// card and the position. Retail sends these in every card of another player and never the own
@@ -269,7 +271,14 @@ pub const REMOTE_PLAYER_CARD_CLASSES: [u64; 13] = [
 /// new characters of newchar-retail-2026-09-18 and newchar-linux-2026-09-12 (counts: retail first
 /// own groups of the 482 captured sessions with the same body). A full list's version (a counter
 /// of the retail session, 12236 to 17921 in those captures) is our [`crate::items::FIRST_VERSION`].
-const NEW_CHARACTER_FIRST_BODIES: [(u64, &[u8]); 8] = [
+const NEW_CHARACTER_FIRST_BODIES: [(u64, &[u8]); 10] = [
+    // Slot 1: the full multiplier table and two empty lists ([`STAT_MULTIPLIER_FIRST_BODY`]).
+    (
+        STAT_MULTIPLIER_TABLE_TYPE_INDEX,
+        &STAT_MULTIPLIER_FIRST_BODY,
+    ),
+    // All nine children: no hit yet ([`REACTION_TRACKING_FIRST_BODY`]).
+    (REACTION_TRACKING_TYPE_INDEX, &REACTION_TRACKING_FIRST_BODY),
     // Slot 0 children 0 to 2: all 0 (482 of 482 retail first groups).
     (
         POINTS_ACCUMULATOR_TYPE_INDEX,
@@ -349,6 +358,93 @@ const RETAIL_FIRST_BODIES: [(u64, &[u8]); 6] = [
     // Slot 0 child 0 `enabled`: 0 (every retail own card that has it, component 64).
     (INCAPACITATED_TYPE_INDEX, &[0x01, 0x01, 0x00]),
     (OBJECTIVE_INTERACTOR_TYPE_INDEX, &[0x01, 0x08, 0x00]),
+];
+
+/// The stats of the stat multiplier table (`StatMultiplierData` rows, keys 1 to 84).
+const STAT_MULTIPLIERS: u8 = 84;
+/// The multiplier of a stat that nothing changes: 1.0 in ten-thousandths.
+const PLAIN_STAT_MULTIPLIER: u32 = 10_000;
+/// The keys whose entry carries the flag 1 (Observed in both new-character cards; Inferred from
+/// the row order: the "Max" stats, `MaxHealth`, `MaxFood`, `MaxDrink`, `MaxStamina`, `MaxMana`,
+/// `PhysicalArmorMaxHealth`).
+const FLAGGED_STAT_KEYS: [u8; 6] = [1, 8, 10, 12, 49, 61];
+/// The table's hash buckets and the step from one sent bucket to the next: retail sends the
+/// keys bucket by bucket (key modulo the buckets), each bucket's keys in rising order.
+const STAT_BUCKETS: u8 = 81;
+const STAT_BUCKET_STEP: u8 = 29;
+/// Bytes of one table entry: the key, the multiplier, the flag.
+const STAT_ENTRY_LEN: usize = 6;
+/// Bytes before the entries: the slot byte (slot 1), the child byte (three children), the full
+/// form, the version flag, the version and the count.
+const STAT_HEAD: [u8; 6] = [0x02, 0x07, 0x00, 0x01, 0x03, STAT_MULTIPLIERS];
+/// Bytes after the entries: the empty `staminaCostReductionMultipliers` and
+/// `xpIncreaseMultipliers` lists.
+const STAT_TAIL: [u8; 8] = [0x00, 0x01, 0x03, 0x00, 0x00, 0x01, 0x03, 0x00];
+const STAT_BODY_LEN: usize =
+    STAT_HEAD.len() + STAT_MULTIPLIERS as usize * STAT_ENTRY_LEN + STAT_TAIL.len();
+
+/// The stat multiplier table of a new character (class 1525; player state study 2026-11-11):
+/// every stat at 1.0. Observed: the 518 bytes of the retail new-character card
+/// (`01-starting-zone` Soul Survivor at 1790513755416; the same table in
+/// newchar-retail-2026-09-18, whose key 1 held 10112). Before, the server sent no slot.
+const STAT_MULTIPLIER_FIRST_BODY: [u8; STAT_BODY_LEN] = {
+    let mut body = [0; STAT_BODY_LEN];
+    let mut at = 0;
+    while at < STAT_HEAD.len() {
+        body[at] = STAT_HEAD[at];
+        at += 1;
+    }
+    let mut bucket_index: u16 = 0;
+    while bucket_index < STAT_BUCKETS as u16 {
+        let bucket = ((STAT_BUCKET_STEP as u16 * bucket_index) % STAT_BUCKETS as u16) as u8;
+        // The keys of the bucket: the bucket itself (no key 0) and the one a table size above.
+        let mut round = 0;
+        while round < 2 {
+            let key = bucket + round * STAT_BUCKETS;
+            if key >= 1 && key <= STAT_MULTIPLIERS {
+                let value = PLAIN_STAT_MULTIPLIER.to_be_bytes();
+                body[at] = key;
+                body[at + 1] = value[0];
+                body[at + 2] = value[1];
+                body[at + 3] = value[2];
+                body[at + 4] = value[3];
+                let mut flagged = 0;
+                while flagged < FLAGGED_STAT_KEYS.len() {
+                    if FLAGGED_STAT_KEYS[flagged] == key {
+                        body[at + 5] = 1;
+                    }
+                    flagged += 1;
+                }
+                at += STAT_ENTRY_LEN;
+            }
+            round += 1;
+        }
+        bucket_index += 1;
+    }
+    let mut tail = 0;
+    while tail < STAT_TAIL.len() {
+        body[at + tail] = STAT_TAIL[tail];
+        tail += 1;
+    }
+    body
+};
+/// The stat multiplier table as another client gets it: slot 2 alone, `remoteMultiplierTable`
+/// with the max health multiplier (key 1). Observed: every retail remote card holds this list
+/// (33,837 of 33,837; `04 01 00 01 08 01 01 00002a2f 01` for a player with 1.0799). Inferred:
+/// the plain multiplier for a player with no change.
+const STAT_MULTIPLIER_PUBLIC_FIRST_BODY: [u8; 12] = {
+    let value = PLAIN_STAT_MULTIPLIER.to_be_bytes();
+    [
+        0x04, 0x01, 0x00, 0x01, 0x03, 0x01, 0x01, value[0], value[1], value[2], value[3], 0x01,
+    ]
+};
+/// The reaction tracking state of a player no hit reached yet (class 1927): all nine children,
+/// `damagingGDEID` (1, `00000000ffffffff`), the others 0. Observed: 3,631 first bodies of 362
+/// retail ledgers. Before, the server sent no slot.
+const REACTION_TRACKING_FIRST_BODY: [u8; 37] = [
+    0x01, 0xff, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x03, 0x00, 0x00,
 ];
 
 /// The first body of player component `class`: retail's when it is in
@@ -883,6 +979,9 @@ pub struct PlayerIdentity<'a> {
     pub home_world: [u8; RAW_ID_LEN],
     /// Its life block: alive since its spawn, or dead.
     pub life: VitalsData,
+    /// The title and the pronoun type it shows. A character with neither sends none (the
+    /// first social state of both retail new characters is empty).
+    pub social: ShownSocial,
 }
 
 /// A change of a player's health.
@@ -956,6 +1055,12 @@ fn public_state(state: MemberState) -> MemberState {
         }) => MemberState::Recorded {
             class: FACTION_TYPE_INDEX,
             body: FACTION_PUBLIC_FIRST_BODY.to_vec(),
+        },
+        MemberState::Empty(EmptyState {
+            class: STAT_MULTIPLIER_TABLE_TYPE_INDEX,
+        }) => MemberState::Recorded {
+            class: STAT_MULTIPLIER_TABLE_TYPE_INDEX,
+            body: STAT_MULTIPLIER_PUBLIC_FIRST_BODY.to_vec(),
         },
         other => other,
     }
@@ -1133,6 +1238,12 @@ fn player_state(states: PlayerStates<'_>, component: u64, class: u64) -> MemberS
         && let Some(status) = states.combat_status
     {
         return MemberState::CombatStatus(status);
+    }
+    if class == SOCIAL_TYPE_INDEX
+        && let Some(identity) = states.identity
+        && identity.social != ShownSocial::default()
+    {
+        return identity.social.state();
     }
     if let Some(gear) = states.gear {
         match class {
@@ -1475,6 +1586,7 @@ mod tests {
                 name: "Testname",
                 home_world: WORLD,
                 life,
+                social: ShownSocial::default(),
             }),
             look: None,
             health: Some(HEALTH),
@@ -2357,5 +2469,38 @@ mod tests {
             ..states
         };
         assert!(change_members(states).is_empty(), "nothing to send");
+    }
+    /// The stat multiplier table of the retail new-character card (`01-starting-zone` Soul
+    /// Survivor at 1790513755416, 518 bytes) and the default reaction tracking state.
+    #[test]
+    fn the_new_character_stat_table_and_reaction_state_are_the_retail_bodies() {
+        const RETAIL_STAT_TABLE: &str = "0207000103545100002710001d00002710003a00002710000600002710002300002710004000002710000c00\
+            002710012900002710004600002710001200002710002f00002710004c000027100018000027100035000027\
+            10000100002710015200002710001e00002710003b0000271000070000271000240000271000410000271000\
+            0d00002710002a00002710004700002710001300002710003000002710004d00002710001900002710003600\
+            002710000200002710005300002710001f00002710003c000027100008000027100125000027100042000027\
+            10000e00002710002b00002710004800002710001400002710003100002710014e00002710001a0000271000\
+            3700002710000300002710005400002710002000002710003d00002710010900002710002600002710004300\
+            002710000f00002710002c00002710004900002710001500002710003200002710004f00002710001b000027\
+            10003800002710000400002710002100002710003e00002710000a0000271001270000271000440000271000\
+            1000002710002d00002710004a00002710001600002710003300002710005000002710001c00002710003900\
+            002710000500002710002200002710003f00002710000b000027100028000027100045000027100011000027\
+            10002e00002710004b00002710001700002710003400002710000001030000010300";
+        const RETAIL_REACTION: &str =
+            "01ff000100000000ffffffff00000000000000000000000000000000000000000000030000";
+        let hex =
+            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
+        assert_eq!(
+            hex(first_body(STAT_MULTIPLIER_TABLE_TYPE_INDEX)),
+            RETAIL_STAT_TABLE
+        );
+        assert_eq!(
+            hex(first_body(REACTION_TRACKING_TYPE_INDEX)),
+            RETAIL_REACTION
+        );
+        assert_eq!(
+            hex(&STAT_MULTIPLIER_PUBLIC_FIRST_BODY),
+            "040100010301010000271001"
+        );
     }
 }

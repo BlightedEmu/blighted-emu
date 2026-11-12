@@ -571,16 +571,13 @@ impl Stance {
         self.schedule(0)?.released(held_ms)
     }
 
-    /// The stance of a character with the status effects `effects` (any case): the first
-    /// variant whose effect is among them, else itself.
-    pub fn with_status_effects(&self, effects: &[&str]) -> &Self {
+    /// The stance of a character that holds the status effects `holds` says it does (by the
+    /// effect's id as the variant names it): the first variant whose effect it holds, else
+    /// itself.
+    pub fn with_effects(&self, holds: impl Fn(&str) -> bool) -> &Self {
         self.variants
             .iter()
-            .find(|variant| {
-                effects
-                    .iter()
-                    .any(|effect| effect.eq_ignore_ascii_case(&variant.status_effect))
-            })
+            .find(|variant| holds(&variant.status_effect))
             .map_or(self, |variant| &variant.stance)
     }
 
@@ -888,15 +885,15 @@ mod tests {
             }],
             ..base.clone()
         };
-        assert_eq!(stance.with_status_effects(&[]).charged_at_ms, Some(667));
+        assert_eq!(stance.with_effects(|_| false).charged_at_ms, Some(667));
         assert_eq!(
             stance
-                .with_status_effects(&["greatsword_stance_offense"])
+                .with_effects(|effect| effect.eq_ignore_ascii_case("greatsword_stance_offense"))
                 .charged_at_ms,
             Some(500)
         );
         assert_eq!(
-            stance.with_status_effects(&["Greatsword_Stance_Defense"]),
+            stance.with_effects(|effect| effect == "Greatsword_Stance_Defense"),
             &stance
         );
     }

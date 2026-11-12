@@ -74,6 +74,10 @@ pub enum RespawnRefusal {
     /// The player died less than `min_respawn_ms` ago.
     #[error("too soon after the death")]
     TooSoon,
+    /// The player is in an arena match: the match stands the dead up between rounds (Inferred:
+    /// no retail arena death respawned).
+    #[error("the arena match stands the player up")]
+    InArenaMatch,
 }
 
 impl RespawnRefusal {
@@ -83,6 +87,7 @@ impl RespawnRefusal {
             Self::NotInWorld => "not_in_world",
             Self::NotDead => "not_dead",
             Self::TooSoon => "too_soon",
+            Self::InArenaMatch => "in_arena_match",
         }
     }
 }
@@ -241,6 +246,7 @@ pub mod test_support {
                     base_damage: TEST_SWORD_DAMAGE,
                     crit_chance: 0.0,
                     crit_multiplier: 1.0,
+                    scaling: [0.0; nw_content::character_points::ATTRIBUTE_COUNT],
                     spread_shot: false,
                     max_loaded_ammo: 0,
                     reload_ms: 0,

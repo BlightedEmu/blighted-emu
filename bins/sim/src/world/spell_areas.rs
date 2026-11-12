@@ -98,6 +98,8 @@ pub(super) struct SpellArea {
     mobs_in: Vec<u64>,
     /// The players that hold its effects.
     players_in: Vec<Entity>,
+    /// The PvP foes of a player's area that hold its effects.
+    foes_in: Vec<Entity>,
     /// The yaw of the caster's look at the cast: the turn of its entity.
     yaw: f32,
     /// Its spell entity is in the world.
@@ -166,6 +168,7 @@ impl SpellArea {
             hit: Vec::new(),
             mobs_in: Vec::new(),
             players_in: Vec::new(),
+            foes_in: Vec::new(),
             yaw,
             shown: false,
         }
@@ -293,6 +296,7 @@ impl SimWorld {
                 open.push(area);
             } else if area.spell.lasting_ms().is_some() && area.spell.clear_on_end {
                 self.clear_area(&area, &area.mobs_in, &area.players_in);
+                self.clear_area(&area, &[], &area.foes_in);
             }
         }
         self.spell_areas = open;
@@ -432,8 +436,8 @@ impl SimWorld {
         }
     }
 
-    /// A pass of the area of the player `caster` (its connection and entity): the mobs are its
-    /// enemies, the players its friends.
+    /// A pass of the area of the player `caster` (its connection and entity): the mobs and its
+    /// PvP foes ([`SimWorld::pvp_foes`]) are its enemies, the other players its friends.
     fn player_area_pass(
         &mut self,
         area: &mut SpellArea,
@@ -445,6 +449,7 @@ impl SimWorld {
         let effects = area.spell.status_effects.clone();
         let mut results = Vec::new();
         if ENEMY_TARGETS.contains(&targets.as_str()) {
+            results.extend(self.foe_area_pass(area, (connection, caster), now_ms));
             let inside = self.living_mobs_within(area.centre, radius);
             for mob in &inside {
                 let first = !area.hit.contains(mob);
@@ -483,7 +488,9 @@ impl SimWorld {
             let inside = if targets == SELF_TARGET {
                 vec![caster]
             } else {
-                self.players_within(area.centre, radius)
+                let mut inside = self.players_within(area.centre, radius);
+                inside.retain(|player| !self.pvp_foes(caster, *player));
+                inside
             };
             for player in &inside {
                 let held = area.players_in.contains(player);
@@ -501,6 +508,59 @@ impl SimWorld {
                 self.clear_area(area, &[], &left(&area.players_in, &inside));
                 area.players_in.retain(|player| inside.contains(player));
             }
+        }
+        results
+    }
+
+    /// The part of a pass of the area of the player `caster` on its PvP foes inside it: each
+    /// takes the damage row once, and holds the effects while it stands in the area, as a mob
+    /// does.
+    fn foe_area_pass(
+        &mut self,
+        area: &mut SpellArea,
+        (connection, caster): (&ConnectionRef, Entity),
+        now_ms: u64,
+    ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
+        let radius = area.spell.radius_m.unwrap_or(POINT_RADIUS_M);
+        let effects = area.spell.status_effects.clone();
+        let inside: Vec<(u64, Entity)> = self
+            .foe_places(caster)
+            .into_iter()
+            .filter(|(_, at, _)| at.horizontal_distance(area.centre) <= radius)
+            .filter_map(|(number, _, _)| Some((number, self.player_by_number(number)?)))
+            .collect();
+        let mut results = Vec::new();
+        for (number, foe) in &inside {
+            let first = !area.hit.contains(number);
+            if first {
+                area.hit.push(*number);
+                let hurt = match area.spell.damage_row.as_deref() {
+                    Some(row) => {
+                        let result =
+                            self.hit_paced(connection, *number, row, None, Pace::of(false), now_ms);
+                        let hurt = matches!(result, Ok(AttackOutcome::Hit { .. }));
+                        results.push(result);
+                        hurt
+                    }
+                    None => true,
+                };
+                if hurt && !effects.is_empty() {
+                    area.foes_in.push(*foe);
+                }
+            }
+            if area.foes_in.contains(foe) {
+                self.spell_effects_on_player(
+                    *foe,
+                    &effects,
+                    (area.source, area.hit_amount),
+                    !first,
+                );
+            }
+        }
+        if area.spell.clear_on_exit {
+            let here: Vec<Entity> = inside.iter().map(|(_, foe)| *foe).collect();
+            self.clear_area(area, &[], &left(&area.foes_in, &here));
+            area.foes_in.retain(|foe| here.contains(foe));
         }
         results
     }

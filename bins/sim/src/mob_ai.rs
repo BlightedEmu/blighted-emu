@@ -136,6 +136,12 @@ const DOES_LEASH_KEY: &str = "DoesLeash";
 const LEASH_OPT_OUT_PARAM: &str = "Leash_Opt_Out";
 /// `Target_Vitals_State` and `Vitals_State` of a living entity (see the module notes).
 const ALIVE_VITALS_STATE: i64 = 4;
+/// The vitals state filter of an `EntityQueryCondition` that filters nothing (Inferred: "Check
+/// For Players" holds it in `MatchingVitalsState` and in `NotMatchingVitalsState` at once).
+const NO_VITALS_STATE_FILTER: i64 = 6;
+/// The largest `Radius` of an `EntityQueryCondition` (Observed: the client logs "Invalid (> 200)
+/// radius specified in EntityQueryCondition").
+const ENTITY_QUERY_MAX_RADIUS_M: f32 = 200.0;
 /// `Health_Percent` is 0 to 100 (module notes).
 const PERCENT: f32 = 100.0;
 const MS_PER_S: f32 = 1_000.0;
@@ -1659,6 +1665,7 @@ impl MindState {
             ground: None,
             picks: Cell::new(self.picks),
             others: Others::NONE,
+            seen: &[],
             held: None,
         }
     }
@@ -2803,6 +2810,7 @@ impl TreeMind {
             view.health_share = around.health_share;
             view.ground = Some(around.ground);
             view.others = others;
+            view.seen = around.seen;
             view.held = around.held;
             self.brain.tick(&ai.runtime, &view, &mut out);
             view.picks.get()
@@ -3321,6 +3329,8 @@ struct View<'a> {
     picks: Cell<Rng48>,
     /// The other mobs its remote actions reach.
     others: Others<'a>,
+    /// The living players near it ([`Surroundings::seen`]).
+    seen: &'a [Seen],
     /// The status effects the sim holds on it.
     held: Option<&'a HeldEffects>,
 }
@@ -3469,9 +3479,66 @@ impl World for View<'_> {
         }
     }
 
-    fn entity_query(&self, _params: &EntityQueryParams, _board: &dyn Blackboard) -> bool {
-        // The rule of `EntityQueryCondition` is Unknown (study section 2.2): it never passes.
-        false
+    fn entity_query(&self, params: &EntityQueryParams, board: &dyn Blackboard) -> bool {
+        // Inferred from the three query nodes of the data ("Check Enemies Dead": `Player`,
+        // vitals state 4, radius 0 and 200; "Check For Players": `Player`, radius 100; all with
+        // the entry condition `Unused Equal 0`): the node counts the entities with `TagFilter`
+        // within `Radius` of `Center` (the mob without one) in `MatchingVitalsState` and not in
+        // `NotMatchingVitalsState`, and its entry conditions compare that count (their left
+        // operand is the placeholder text `Unused`) with their right operand. A state of 6
+        // (past the last state: both fields of "Check For Players" hold it) is no filter, and a
+        // radius of 0 is the node's limit of 200 m. The threat filter is 2 with an empty text
+        // in every node (Inferred: no filter). Only living entities are known here, so a query
+        // for another state than alive finds none (Unknown: the states of the dead).
+        let state = |param: &Param| match param.resolve(&board) {
+            Some(Value::Int(state)) if state != NO_VITALS_STATE_FILTER => Some(state),
+            _ => None,
+        };
+        let wants_alive = state(&params.matching_vitals_state)
+            .is_none_or(|state| state == ALIVE_VITALS_STATE)
+            && state(&params.not_matching_vitals_state)
+                .is_none_or(|state| state != ALIVE_VITALS_STATE);
+        let centre = match params.center.resolve(&board) {
+            Some(Value::Vec3([x, y, z])) => Position { x, y, z },
+            _ => self.at,
+        };
+        // A radius of a few hundred metres.
+        #[allow(clippy::cast_possible_truncation, reason = "a radius of at most 200 m")]
+        let radius_m = params
+            .radius
+            .number(&board)
+            .map(|radius| radius as f32)
+            .filter(|radius| *radius > 0.0)
+            .map_or(ENTITY_QUERY_MAX_RADIUS_M, |radius| {
+                radius.min(ENTITY_QUERY_MAX_RADIUS_M)
+            });
+        let within = |at: Position| at.horizontal_distance(centre) <= radius_m;
+        let tag = self.ai.name(params.tag_filter);
+        let found = if !wants_alive {
+            0
+        } else if tag.is_empty() || tag == PLAYER_TAG {
+            self.seen
+                .iter()
+                .filter(|player| within(player.position))
+                .count()
+        } else {
+            self.others
+                .tagged
+                .iter()
+                .filter(|mob| {
+                    mob.entity != self.others.entity
+                        && within(mob.position)
+                        && mob.tags.iter().any(|own| self.ai.name(*own) == tag)
+                })
+                .count()
+        };
+        let found = Value::Int(i64::try_from(found).unwrap_or(i64::MAX));
+        let entry = &params.gates.entry;
+        if entry.is_empty() {
+            // Inferred: a query with no condition passes when it finds an entity.
+            return found != Value::Int(0);
+        }
+        entry.holds_for(found, &board)
     }
 
     fn entities_with_tag(&self, tag: &str) -> u32 {
@@ -4626,6 +4693,74 @@ mod tests {
             thought.remote_triggers,
             [(9, trigger), (9, trigger), (8, trigger)],
             "the nearest, then every tagged mob but itself"
+        );
+    }
+
+    /// The data's "Check Enemies Dead" query: `Player`, vitals state 4, not 6, `Unused Equal 0`.
+    /// It passes when no living player is within its radius (0: the node's limit of 200 m).
+    #[test]
+    fn an_entity_query_holds_its_count_against_its_entry_condition() {
+        const QUERY_RADIUS_M: f32 = 100.0;
+        let mut data = test_ai_data();
+        let player = name_in(&mut data, PLAYER_TAG);
+        let unused = name_in(&mut data, "Unused");
+        let none = name_in(&mut data, "");
+        let ai = MobAi::new(data, AiRates::default(), LookAssets::new());
+        let mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let query = |radius: f32| EntityQueryParams {
+            gates: nw_ai::node::Gates {
+                entry: nw_ai::value::ConditionGroup {
+                    any: false,
+                    conditions: vec![nw_ai::value::Condition {
+                        left: Param::literal(Value::Text(unused)),
+                        op: nw_ai::value::CompareOp::Equal,
+                        right: Param::literal(Value::Int(0)),
+                        auto_plan: false,
+                        allow_dynamic_scaling: true,
+                    }],
+                },
+                ..nw_ai::node::Gates::default()
+            },
+            center: Param {
+                key: None,
+                value: None,
+            },
+            radius: Param::literal(Value::Float(radius)),
+            tag_filter: player,
+            matching_vitals_state: Param::literal(Value::Int(ALIVE_VITALS_STATE)),
+            not_matching_vitals_state: Param::literal(Value::Int(NO_VITALS_STATE_FILTER)),
+            in_threat_filter: Param::literal(Value::Int(2)),
+            in_threat_filter_string: none,
+        };
+        let player_at = |distance_m: f32| {
+            [Seen {
+                entity: 1,
+                position: Position {
+                    x: START.x + distance_m,
+                    ..START
+                },
+            }]
+        };
+        let passes = |seen: &[Seen], radius: f32| {
+            let mut view = mind.state.view(&ai, START, 0, false);
+            view.seen = seen;
+            view.entity_query(&query(radius), &NoBoard)
+        };
+        assert!(
+            passes(&[], QUERY_RADIUS_M),
+            "no player: the enemies are dead"
+        );
+        assert!(
+            !passes(&player_at(50.0), QUERY_RADIUS_M),
+            "a living player inside"
+        );
+        assert!(
+            passes(&player_at(150.0), QUERY_RADIUS_M),
+            "a player beyond the radius"
+        );
+        assert!(
+            !passes(&player_at(150.0), 0.0),
+            "a radius of 0 is the limit of 200 m"
         );
     }
 

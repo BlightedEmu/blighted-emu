@@ -8,10 +8,11 @@
 //!
 //! A craft needs a station of the recipe's name and tier ([`Recipe::made_at`]), its tradeskill's
 //! rank at the recipe's `RecipeLevel`, the ingredients in the bag and the fee in the wallet: the
-//! recipes' `CraftingFee`, whatever fee the client sent (retail took the client's shown fee at 34
-//! of 34 crafts, so the shown fee is the server's own; the discounts that lower it, territory
-//! standing and a settlement's tax, are not run here, Inferred: without them it is the recipes'
-//! fee). Each craft fires the recipe's game event: its tradeskill experience
+//! recipes' `CraftingFee` at the territory's crafting or refining fee
+//! ([`super::land_claims::station_fee`]), whatever fee the client sent (retail took the client's
+//! shown fee at 34 of 34 crafts, so the shown fee is the server's own; the territory standing
+//! discount that lowers it is Unknown and not run here). Each craft fires the recipe's game
+//! event: its tradeskill experience
 //! ([`SimWorld::grant_event`]).
 //!
 //! The stations are the level's ([`nw_world::stations`]): a client shows a station's interaction
@@ -30,7 +31,7 @@ use nw_content::crafting::{
 use nw_content::perks::PERK_SLOTS;
 use nw_content::recipe_cooldowns::RecipeCooldown;
 use nw_content::town_props::TownProps;
-use nw_content::tradeskill_xp::bonus_crafts;
+use nw_content::tradeskill_xp::{ROLL_BONUS_SCALE, bonus_crafts};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::crafting_state::{CraftingCooldown, CraftingState};
 use nw_messages::facet::component;
@@ -48,6 +49,7 @@ use nw_world::stations::CraftingStation;
 use uuid::Uuid;
 
 use super::gear::unix_ns;
+use super::land_claims::station_fee;
 use super::loot_bag::LimitsSent;
 use super::rolled_loot::rolled_values;
 use super::slots::Slot;
@@ -72,19 +74,12 @@ const STATION_REFUSED: u8 = 2;
 const CRAFT_MS: u64 = 1_057;
 /// The crafts one request makes when it asks for none.
 const ONE_CRAFT: u32 = 1;
-/// How far above the range this server computes a craft's gear score may be: the crafting
-/// status effects the client counts and this server does not hold (best guess, the largest
-/// bonuses of `StatusEffectData` from sources this server does not run: three
-/// `HousingMinGearBonus_AllCraftingT3` trophies 3 x 5, an earring perk 5 and a tradeskill
-/// mastery 5). The held effects, tradeskill food among them, add their own `MGS_*` and
-/// `MaxGS_*` ([`super::status_effects::StatusEffects::craft_gear_score`]).
-const CRAFT_STATUS_GS_ALLOWANCE: u32 = 25;
 /// The values of a built station that no data sets, as the retail campfire and town station
 /// groups have them: no foundation events, a territory whose references are set, a ruin timer
 /// that is not armed, and no guild, owner, raid or faction.
 pub(super) const CHECK_FOUNDATION_EVENTS: bool = false;
 pub(super) const TERRITORY_REFS_SET: bool = true;
-pub(super) const RUIN_DELAY: u16 = 0;
+pub(super) const RUIN_DELAY: f32 = 0.0;
 pub(super) const RUIN_COMPLETED: bool = false;
 pub(super) const NO_GUILD_ID: [u8; nw_messages::buildables::GUILD_ID_LEN] =
     [0; nw_messages::buildables::GUILD_ID_LEN];
@@ -115,7 +110,14 @@ pub(super) struct Stations {
     camps: BTreeMap<u64, Station>,
     /// The camps placed in this sim so far.
     camps_placed: u64,
+    /// The state changes of camps for the viewers that have their card: by slot key, the
+    /// changed members and the ticks left that send them.
+    changes: BTreeMap<u64, (Vec<BundleMember>, u8)>,
 }
+
+/// How many ticks send a camp's state change to the viewers that have its card. Retail sent
+/// each change of a projectile in 2 to 5 bundles in a row (Observed; 3 is Inferred).
+const CHANGE_TICKS: u8 = 3;
 
 /// The `GdeRef` of a level entity with GDE id `id`: the id's little-endian bytes, then the
 /// open world's zero phase.
@@ -180,6 +182,7 @@ fn station_members(
             MemberState::TerritoryInterface(TerritoryInterfaceState {
                 functionality_down: None,
                 refs_set: Some(TERRITORY_REFS_SET),
+                ..TerritoryInterfaceState::default()
             }),
         ));
     }
@@ -203,7 +206,7 @@ fn station_members(
         members.push(member(
             component,
             MemberState::DelayedEvent(DelayedEventState {
-                total_delay: Some(RUIN_DELAY),
+                total_delay_s: Some(RUIN_DELAY),
                 completed: Some(RUIN_COMPLETED),
             }),
         ));
@@ -292,6 +295,7 @@ impl Stations {
             by_ref,
             camps: BTreeMap::new(),
             camps_placed: 0,
+            changes: BTreeMap::new(),
         }
     }
 
@@ -307,6 +311,40 @@ impl Stations {
     /// Takes the camp of slot key `number` away: it leaves every view.
     pub(super) fn remove_camp(&mut self, number: u64) {
         self.camps.remove(&number);
+        self.changes.remove(&number);
+    }
+
+    /// Changes the camp or level station of slot key `number`: `merge` puts the change into its
+    /// spawn members
+    /// (a viewer that gets its card later gets the state as it is then), and the viewers that
+    /// have its card get the members `changed` for [`CHANGE_TICKS`] ticks. A change that comes
+    /// while another still goes out goes with it.
+    pub(super) fn change_camp(
+        &mut self,
+        number: u64,
+        merge: impl FnOnce(&mut Vec<BundleMember>),
+        changed: Vec<BundleMember>,
+    ) {
+        let station = match self.camps.get_mut(&number) {
+            Some(camp) => Some(camp),
+            None => Self::level_index(number).and_then(|at| self.stations.get_mut(at)),
+        };
+        let Some(station) = station else {
+            return;
+        };
+        merge(&mut station.members);
+        let (members, ticks) = self.changes.entry(number).or_default();
+        members.extend(changed);
+        *ticks = CHANGE_TICKS;
+    }
+
+    /// Counts one tick off every state change that goes out; a change whose ticks are over
+    /// goes out no more.
+    pub(super) fn tick_changes(&mut self) {
+        self.changes.retain(|_, (_, ticks)| {
+            *ticks = ticks.saturating_sub(1);
+            *ticks > 0
+        });
     }
 
     /// The slot keys of the stations within `radius_m` of `position`.
@@ -330,19 +368,42 @@ impl Stations {
     }
 
     /// The group of the station of slot key `number` in `slot`: its spawn members when the slot
-    /// is new (the station came into view), else none.
+    /// is new (the station came into view), else the members of a state change that goes out
+    /// ([`Stations::change_camp`]), else none.
     pub(super) fn group(&self, number: u64, slot: Slot) -> Option<BundleGroup> {
         let station = match self.camps.get(&number) {
             Some(camp) => camp,
-            None => {
-                let index = usize::try_from(number.checked_sub(STATION_ENTITY_BASE)?).ok()?;
-                self.stations.get(index)?
-            }
+            None => self.stations.get(Self::level_index(number)?)?,
         };
-        slot.new.then(|| BundleGroup {
+        let members = if slot.new {
+            station.members.clone()
+        } else {
+            self.changes.get(&number)?.0.clone()
+        };
+        Some(BundleGroup {
             interest: u64::from(slot.interest),
-            members: station.members.clone(),
+            members,
         })
+    }
+
+    /// The index in the level's stations of slot key `number`.
+    fn level_index(number: u64) -> Option<usize> {
+        usize::try_from(number.checked_sub(STATION_ENTITY_BASE)?).ok()
+    }
+
+    /// The slot key of the level station or prop whose `GdeRef` is `gde_ref`.
+    pub(super) fn number_of(&self, gde_ref: &[u8; RAW_ID_LEN]) -> Option<u64> {
+        let index = u64::try_from(*self.by_ref.get(gde_ref)?).ok()?;
+        Some(STATION_ENTITY_BASE + index)
+    }
+
+    /// The spawn members of the camp or level station of slot key `number`.
+    pub(super) fn members(&self, number: u64) -> Option<&[BundleMember]> {
+        let station = match self.camps.get(&number) {
+            Some(camp) => camp,
+            None => self.stations.get(Self::level_index(number)?)?,
+        };
+        Some(&station.members)
     }
 
     /// The station whose `GdeRef` is `gde_ref`.
@@ -464,7 +525,7 @@ impl SimWorld {
 
     /// Player `number` (`entity`) crafts `crafts` of the recipe whose lowercase id has the CRC-32
     /// `recipe` at `now_ms`, from the `picked` ingredients (its client shows the fee `fee`; the
-    /// server charges the recipes' own): at a station of the recipe's name and tier, at the
+    /// server charges the recipes' own at the territory's rate): at a station of the recipe's name and tier, at the
     /// recipe's level, with every ingredient in the bag and the fee in the wallet. The ingredients and the fee are taken with the
     /// output, [`CRAFT_MS`] later ([`SimWorld::crafts_due`]): retail newchar 2026-09-18 changed
     /// the bag (1755) only after the result (2993) at 535.01 s, the request at 533.94 s took
@@ -509,7 +570,7 @@ impl SimWorld {
                     .allows(&recipe.id, cooldown, crafts, now_ns)
             })
         });
-        let charged = details.fee.saturating_mul(crafts);
+        let charged = station_fee(&details, crafts);
         if fee != charged {
             tracing::debug!(
                 player = number,
@@ -644,10 +705,15 @@ impl SimWorld {
 
     /// The rolls of the gear item `recipe` makes for player `entity` from the `taken` stacks
     /// and `perk_items`: the gear score `choice` asks for (its range's lowest for none), held
-    /// between the lowest of the craft's range and its highest (both raised by the player's
-    /// held crafting effects) plus
-    /// [`CRAFT_STATUS_GS_ALLOWANCE`] and under the item's `MaxCraftGS`, and the perk each perk
-    /// item's bucket gives the item. `None` for an item without rolls of its own.
+    /// between the lowest of the craft's range and its highest, both raised by the `MGS_*` and
+    /// `MaxGS_*` of the player's held effects
+    /// ([`super::status_effects::StatusEffects::craft_gear_score`]: tradeskill food, the worn
+    /// crafting perks, the trophies of its houses), and under the item's `MaxCraftGS`, and the
+    /// perk each perk item's bucket gives the item. `None` for an item without rolls of its own.
+    /// Not counted (Unknown or not run here): the town buffs of a territory's upgrades
+    /// (`*LSB` effects, no owned territory), the tradeskill mastery perks (`*Mastery1` to `3`:
+    /// no source in the data the sim runs). No retail craft of a gear item with a known bonus
+    /// effect was measured.
     fn craft_roll(
         &mut self,
         entity: Entity,
@@ -694,10 +760,7 @@ impl SimWorld {
         let wanted = if choice.gear_score == 0 {
             range.min
         } else {
-            choice.gear_score.clamp(
-                range.min,
-                range.max.saturating_add(CRAFT_STATUS_GS_ALLOWANCE),
-            )
+            choice.gear_score.clamp(range.min, range.max)
         };
         let gear_score = row
             .max_craft_gear_score
@@ -897,6 +960,14 @@ impl SimWorld {
             self.quest_event(craft.number, Event::Crafted(&craft.recipe), now_ms);
             let families = super::item_families(&self.content, &craft.item);
             self.quest_event(craft.number, Event::CraftedFamilies(&families), now_ms);
+            self.season_event(
+                entity,
+                super::seasons::SeasonEvent::Crafted {
+                    item: &craft.item,
+                    classes: &families,
+                    count: craft.quantity,
+                },
+            );
             for achievement in &craft.achievements {
                 self.earn_achievement(craft.number, achievement, now_ms);
             }
@@ -908,8 +979,10 @@ impl SimWorld {
 
     /// How many of `crafts` crafts of the recipe whose wire id is `recipe_crc` player `entity`
     /// makes a bonus item of: each rolls the recipe's `BonusItemChance` plus the `RollBonus` of
-    /// the player's rank in `tradeskill` ([`nw_content::tradeskill_xp`]); a recipe without a
-    /// chance makes none. **Best guess:** a bonus is one more craft's output (retail's measured
+    /// the player's rank in `tradeskill` ([`nw_content::tradeskill_xp`]) plus the luck its held
+    /// effects give the tradeskill (`ROL_*`: the refining and cooking perks, food and trophies;
+    /// Inferred, on the rank's scale: a `RollBonus` of 1100 is a chance of 0.11, and the
+    /// effects' values, 100 to 3000, are of its size); a recipe without a chance makes none. **Best guess:** a bonus is one more craft's output (retail's measured
     /// recipes all make one item, so one item or `OutputQty` could not be told apart).
     fn bonus_crafts(
         &mut self,
@@ -926,8 +999,19 @@ impl SimWorld {
             let (rank, _) = self.tradeskill_perks(entity, tradeskill);
             content.tradeskill_curves.roll_bonus(tradeskill, rank)
         });
+        let effect_bonus =
+            tradeskill
+                .zip(self.world.get::<Player>(entity))
+                .map_or(0.0, |(tradeskill, player)| {
+                    let luck = player
+                        .status_effects
+                        .luck(&content.status_effects, Some(tradeskill));
+                    f64::from(luck) / ROLL_BONUS_SCALE
+                });
         let dice = &mut self.dice;
-        bonus_crafts(chance + rank_bonus, crafts, &mut |below| dice.below(below))
+        bonus_crafts(chance + rank_bonus + effect_bonus, crafts, &mut |below| {
+            dice.below(below)
+        })
     }
 
     /// The client of player `number` (`entity`) cancels its craft with a request of header
@@ -1248,8 +1332,10 @@ mod tests {
     #[test]
     fn a_batch_craft_takes_its_fee_and_gives_its_items_and_tradeskill_experience() {
         const CRAFTS: u32 = 2;
-        // The client shows a fee other than the recipes' own: the recipes' is taken.
+        // The client shows a fee other than the recipes' own: the recipes' is taken, at the
+        // territory's crafting fee 0.5 (two crafts of a 1-coin recipe cost 1).
         const CLIENT_FEE: u32 = 0;
+        const CHARGED: u32 = 1;
         let (mut world, entity) = at_the_smelter(ORE_PER_CRAFT * CRAFTS, COINS);
         let crc = lowercase_crc32(INGOT);
         world.craft(
@@ -1275,7 +1361,7 @@ mod tests {
         world.crafts_due(NOW + CRAFT_MS);
         assert!(world.crafts.is_empty());
         assert_eq!(bag_count(&world, entity, ORE), 0, "taken at the end");
-        assert_eq!(coins(&world), COINS - u64::from(FEE_PER_CRAFT * CRAFTS));
+        assert_eq!(coins(&world), COINS - u64::from(CHARGED));
         assert_eq!(bag_count(&world, entity, INGOT), CRAFTS);
         let smelting = world
             .content
@@ -1733,8 +1819,37 @@ mod tests {
     #[test]
     fn a_gear_craft_makes_each_item_at_the_picked_gear_score_held_to_its_range() {
         const CRAFTS: u32 = 2;
-        const PICKED: u32 = 420;
-        let (mut world, entity) = rolled_ingots(ORE_PER_CRAFT * CRAFTS);
+        const PICKED: u32 = 410;
+        // A made-up meal of `MaxGS_Smelting` 15 (as the `FoodArmorer*` meals 5 to 15).
+        const MEAL: &str = "Test_SmeltingMeal";
+        const MEAL_MOST: u32 = 15;
+        const RANGE_LOW: u32 = 400;
+        let with_meal = |ore: u32| {
+            let (mut world, entity) = rolled_ingots(ore);
+            let mut content = (*world.content).clone();
+            content.status_effects = nw_content::status_effects::StatusEffectRules::build(
+                nw_content::status_effects::StatusEffectSource {
+                    effects: vec![nw_content::status_effects::EffectSourceRow {
+                        status_id: MEAL.to_owned(),
+                        craft_gear_score: vec![("Smelting".to_owned(), 0, i64::from(MEAL_MOST))],
+                        ..nw_content::status_effects::EffectSourceRow::default()
+                    }],
+                    ..nw_content::status_effects::StatusEffectSource::default()
+                },
+            );
+            world.content = Arc::new(content);
+            let rules = world.content.status_effects.clone();
+            assert!(
+                world
+                    .world
+                    .get_mut::<Player>(entity)
+                    .expect("player")
+                    .status_effects
+                    .add_by_id(&rules, MEAL, 1.0, NUMBER, NOW)
+            );
+            (world, entity)
+        };
+        let (mut world, entity) = with_meal(ORE_PER_CRAFT * CRAFTS);
         let choice = CraftChoice {
             gear_score: PICKED,
             perk_items: Vec::new(),
@@ -1753,9 +1868,9 @@ mod tests {
         );
         world.crafts_due(NOW + CRAFT_MS);
         assert_eq!(ingot_gear_scores(&world, entity), [PICKED, PICKED]);
-        // The range is the item's 400 with no bonus: a pick above it stops at the status
-        // allowance, no pick takes the lowest.
-        let (mut world, entity) = rolled_ingots(ORE_PER_CRAFT * CRAFTS);
+        // The range is the item's 400 with no bonus: a pick above it stops at the most the held
+        // meal adds, no pick takes the lowest; without the meal every pick is 400.
+        let (mut world, entity) = with_meal(ORE_PER_CRAFT * CRAFTS);
         let too_high = CraftChoice {
             gear_score: 900,
             perk_items: Vec::new(),
@@ -1775,7 +1890,11 @@ mod tests {
         world.crafts_due(NOW + CRAFT_MS);
         let mut scores = ingot_gear_scores(&world, entity);
         scores.sort_unstable();
-        assert_eq!(scores, [400, 400 + CRAFT_STATUS_GS_ALLOWANCE]);
+        assert_eq!(scores, [RANGE_LOW, RANGE_LOW + MEAL_MOST]);
+        let (mut world, entity) = rolled_ingots(ORE_PER_CRAFT);
+        world.craft(entity, NUMBER, crc, 1, FEE_PER_CRAFT, &[], &too_high, NOW);
+        world.crafts_due(NOW + CRAFT_MS);
+        assert_eq!(ingot_gear_scores(&world, entity), [RANGE_LOW]);
     }
 
     #[test]

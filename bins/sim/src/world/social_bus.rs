@@ -45,6 +45,7 @@ impl SimWorld {
             name: player.name.clone(),
             level: self.content.progression.level_of(player.experience),
             icon: icon_bytes(&icon),
+            pronoun: player.pronoun,
             sim: sim.clone(),
             level_name: self.settings.level.folder.to_owned(),
             territories: player.territories.clone(),
@@ -62,6 +63,16 @@ impl SimWorld {
         sim: &nw_bus::BusId,
     ) -> Option<SocialPlayer> {
         self.social_player_of(*self.by_connection.get(connection)?, sim)
+    }
+
+    /// The social view of the player numbered `number` on sim `sim`, when it is here.
+    pub fn social_player_of_number(
+        &mut self,
+        number: u64,
+        sim: &nw_bus::BusId,
+    ) -> Option<SocialPlayer> {
+        let entity = self.player_by_number(number)?;
+        self.social_player_of(entity, sim)
     }
 
     /// The social view of every player of this sim `sim`.

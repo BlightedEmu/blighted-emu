@@ -2,7 +2,10 @@
 //! The experience of a mob kill (progression note, section 7; [`nw_content::kill_rewards`]):
 //! the killer's character experience, the mastery of the weapon in its hand and, by a share,
 //! the mastery of its other worn weapon, each times the remote config's multiplier of its
-//! progression, and the kill's meta achievement counters.
+//! progression and the share the killer's held effects add to it (`Token_Weapon_1`; Observed,
+//! `Playthrough_Part_02` 1505.5 s with the token held: a kill of raw 16 gave the held sword 64
+//! = 16 x 2 x 2 and the other weapon 12 = ceil(16 x 0.15) x 2 x 2), and the kill's meta
+//! achievement counters and season stats.
 //!
 //! A killer on another sim gets nothing here, as it gets no loot (its sim does not hear of the
 //! kill). A tutorial mob's character experience comes from the tutorial's own order (its
@@ -16,6 +19,8 @@ use nw_messages::paperdoll::slot;
 use super::gear::Gear;
 use super::meta_achievements::MetaEvent;
 use super::quest_objects::gain_experience;
+use super::seasons::SeasonEvent;
+use super::status_effects::GainKind;
 use super::tradeskill::progression_gain;
 use super::{Player, SimWorld};
 use crate::player_content::PlayerContent;
@@ -49,22 +54,41 @@ impl SimWorld {
                 let Some(mastery) = content.progression.mastery(&mastery_id) else {
                     continue;
                 };
-                let multiplier = content.gameplay.xp.progression(&mastery_id);
+                let multiplier = content.gameplay.xp.progression(&mastery_id)
+                    * player.status_effects.gain_scale(
+                        &content.status_effects,
+                        &mastery_id,
+                        GainKind::Progression,
+                    );
                 player.masteries.gain(
                     mastery,
                     progression_gain(f64::from(points), ONCE, multiplier),
                 );
             }
         }
-        let categories = content
+        let (vitals_id, categories) = content
             .kill_types
             .of(vitals)
-            .map(|(_, categories)| categories.to_vec())
+            .map(|(id, categories)| (id, categories.to_vec()))
             .unwrap_or_default();
         self.meta_event(
             entity,
             MetaEvent::Kill {
                 categories: &categories,
+            },
+        );
+        let weapon = self
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref()?.main_weapon())
+            .and_then(|(item, _)| content.kill_rewards.weapon_mastery(item));
+        self.season_event(
+            entity,
+            SeasonEvent::Kill {
+                vitals_id,
+                categories: &categories,
+                level: mob_level,
+                weapon,
             },
         );
     }
@@ -112,6 +136,9 @@ mod tests {
     use nw_content::kill_rewards::{KillRewards, MobRow};
     use nw_content::progression::Progression;
     use nw_content::rewards::KillExperience;
+    use nw_content::status_effects::{
+        EffectSourceRow, RewardMods, StatusEffectRules, StatusEffectSource,
+    };
     use nw_formats::objectstream::lowercase_crc32;
     use nw_world::records::VitalsSpawn;
 
@@ -130,6 +157,8 @@ mod tests {
     const SOLO: f64 = 1.0;
     /// Retail `javelin.xp-multipliers` of the character and of each weapon mastery.
     const RETAIL_MULTIPLIER: f64 = 2.0;
+    /// The weapon experience boost (build 25810808 `Token_Weapon_1`).
+    const TOKEN: &str = "Token_Weapon_1";
 
     fn content() -> PlayerContent {
         PlayerContent {
@@ -217,11 +246,52 @@ mod tests {
             })
             .collect();
         assert!(gained == [20, 4] || gained == [4, 20], "{gained:?}");
+        // `Token_Weapon_1` (cut to the two masteries) doubles both.
+        let mut content = (*world.content).clone();
+        content.status_effects = StatusEffectRules::build(StatusEffectSource {
+            effects: vec![EffectSourceRow {
+                status_id: TOKEN.to_owned(),
+                lightweight: true,
+                rewards: RewardMods {
+                    progression: vec![
+                        (SWORD_MASTERY.to_lowercase(), 1.0),
+                        (STAFF_MASTERY.to_lowercase(), 1.0),
+                    ],
+                    ..RewardMods::default()
+                },
+                ..EffectSourceRow::default()
+            }],
+            ..StatusEffectSource::default()
+        });
+        world.content = Arc::new(content);
+        {
+            let rules = world.content.status_effects.clone();
+            let mut player = world.world.get_mut::<Player>(entity).expect("player");
+            assert!(
+                player
+                    .status_effects
+                    .add_by_id(&rules, TOKEN, 1.0, PLAYER, 0)
+            );
+        }
+        world.reward_kill(mob, PLAYER);
+        let player = world.world.get::<Player>(entity).expect("player");
+        let doubled: Vec<u32> = [SWORD_MASTERY, STAFF_MASTERY]
+            .iter()
+            .map(|id| {
+                let mastery = world.content.progression.mastery(id).expect("mastery");
+                player.masteries.experience(mastery)
+            })
+            .collect();
+        assert!(
+            doubled == [20 + 40, 4 + 8] || doubled == [4 + 8, 20 + 40],
+            "{doubled:?}"
+        );
         world.reward_kill(mob, PLAYER + 1);
         let player = world.world.get::<Player>(entity).expect("player");
         assert_eq!(
-            player.experience, 20,
-            "a killer that is not here gets nothing"
+            player.experience, 40,
+            "the token leaves the character's experience alone, and a killer that is not here \
+             gets nothing"
         );
     }
 }

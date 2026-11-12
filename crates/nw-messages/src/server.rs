@@ -2,6 +2,7 @@
 //! Every server message of M4 with a known layout (M4 spec section 5.2), by type index.
 
 use crate::abilities::MasteryTreeRespecResponseMsg;
+use crate::appearance::AppearancePurchasedMsg;
 use crate::arena::ArenaServerMsg;
 use crate::bundle::ReplicatedStateBundle;
 use crate::client_add_entry::ClientAddEntryMsg;
@@ -11,17 +12,17 @@ use crate::connected::{CalendarConnectedMsg, TimingConfigurationConnectedMsg};
 use crate::day_phase::SyncDayPhaseMsg;
 use crate::economy::EconomyMessage;
 use crate::facet::{
-    AdjustFxScriptsMsg, CraftProgressMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg,
-    DisableCollisionMsg, GameModeSchedulerRefreshedMsg, GatheringInterruptedMsg, HomingOverrideMsg,
-    InteractionEndedMsg, InteractionValidatedMsg, LeftGameModeQueueMsg, PlayerSeenByAiMsg,
-    SelectedAsTargetMsg, StartWhisperMsg, StorageSearchItemsMsg, TeleportWithLoadingScreenMsg,
-    UnselectedAsTargetMsg, UpdatePhasingMsg,
+    AdjustFxScriptsMsg, AfkWarningMsg, CraftProgressMsg, CutsceneEndFinalizedMsg,
+    CutsceneGrantedMsg, DisableCollisionMsg, EquipItemFailMsg, GameModeSchedulerRefreshedMsg,
+    GatheringInterruptedMsg, HomingOverrideMsg, InteractionEndedMsg, InteractionValidatedMsg,
+    LeftGameModeQueueMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg, StartWhisperMsg,
+    StorageSearchItemsMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg,
 };
 use crate::fishing::FishingServerMsg;
-use crate::game_mode::GameModeServerMsg;
+use crate::game_mode::{DeathRecapForAllMsg, GameModeServerMsg};
 use crate::guild_lookup::UnorderedGuildsMsg;
 use crate::inventories::InventoriesMsg;
-use crate::item_calls::LoadoutStatusMsg;
+use crate::item_calls::{ItemsConvertedMsg, LoadoutStatusMsg};
 use crate::kick::{KickClientMsg, PlayerManagerRejectedMsg};
 use crate::level_info::LevelInfoChangedMsg;
 use crate::lookups::{JoinableSubArmiesMsg, LobbyCountsMsg, PendingMetaAchievementsMsg};
@@ -40,6 +41,7 @@ use crate::spreadshot::SpreadshotProcessedMsg;
 use crate::storage_search::StorageSearchReadyMsg;
 use crate::storage_search::StorageSearchResultsMsg;
 use crate::store::{RequestInitializedMsg, RequestSuccessMsg};
+use crate::territory_upkeep::TerritoryFacetReadyMsg;
 use crate::time_change::SyncTimeChangeMsg;
 use crate::time_synch::TimeSynchMsg;
 use crate::titles::{AvailableTitlesMsg, TitlesUnlockMsg};
@@ -109,8 +111,12 @@ pub enum ServerMessage {
     RequestInitialized(RequestInitializedMsg),
     /// 1285.
     RequestSuccess(RequestSuccessMsg),
+    /// 6855.
+    AppearancePurchased(AppearancePurchasedMsg),
     /// 4299.
     DeathRecap(DeathRecapMsg),
+    /// 4977: a death in the game mode, for every participant.
+    DeathRecapForAll(DeathRecapForAllMsg),
     /// 4298.
     OnHealed(OnHealedMsg),
     /// 6310.
@@ -129,6 +135,8 @@ pub enum ServerMessage {
     StorageSearchResults(StorageSearchResultsMsg),
     /// 5497.
     LoadoutStatus(LoadoutStatusMsg),
+    /// 6526.
+    ItemsConverted(ItemsConvertedMsg),
     /// 3743.
     InteractionValidated(InteractionValidatedMsg),
     /// 3746.
@@ -143,6 +151,10 @@ pub enum ServerMessage {
     HomingOverride(HomingOverrideMsg),
     /// 4970.
     LeftGameModeQueue(LeftGameModeQueueMsg),
+    /// 2139.
+    AfkWarning(AfkWarningMsg),
+    /// 3626.
+    EquipItemFail(EquipItemFailMsg),
     /// 3916.
     UnselectedAsTarget(UnselectedAsTargetMsg),
     /// 1793.
@@ -215,6 +227,8 @@ pub enum ServerMessage {
     TitlesUnlock(TitlesUnlockMsg),
     /// 7047.
     StorageSearchReady(StorageSearchReadyMsg),
+    /// 2722.
+    TerritoryFacetReady(TerritoryFacetReadyMsg),
 }
 
 impl ServerMessage {
@@ -264,7 +278,13 @@ impl ServerMessage {
             RequestSuccessMsg::TYPE_INDEX => {
                 RequestSuccessMsg::decode(body).map(Self::RequestSuccess)
             }
+            AppearancePurchasedMsg::TYPE_INDEX => {
+                AppearancePurchasedMsg::decode(body).map(Self::AppearancePurchased)
+            }
             DeathRecapMsg::TYPE_INDEX => DeathRecapMsg::decode(body).map(Self::DeathRecap),
+            DeathRecapForAllMsg::TYPE_INDEX => {
+                DeathRecapForAllMsg::decode(body).map(Self::DeathRecapForAll)
+            }
             OnHealedMsg::TYPE_INDEX => OnHealedMsg::decode(body).map(Self::OnHealed),
             UpdatePhasingMsg::TYPE_INDEX => UpdatePhasingMsg::decode(body).map(Self::UpdatePhasing),
             CutsceneGrantedMsg::TYPE_INDEX => {
@@ -286,6 +306,9 @@ impl ServerMessage {
                 StorageSearchResultsMsg::decode(body).map(Self::StorageSearchResults)
             }
             LoadoutStatusMsg::TYPE_INDEX => LoadoutStatusMsg::decode(body).map(Self::LoadoutStatus),
+            ItemsConvertedMsg::TYPE_INDEX => {
+                ItemsConvertedMsg::decode(body).map(Self::ItemsConverted)
+            }
             InteractionValidatedMsg::TYPE_INDEX => {
                 InteractionValidatedMsg::decode(body).map(Self::InteractionValidated)
             }
@@ -307,6 +330,8 @@ impl ServerMessage {
             LeftGameModeQueueMsg::TYPE_INDEX => {
                 LeftGameModeQueueMsg::decode(body).map(Self::LeftGameModeQueue)
             }
+            AfkWarningMsg::TYPE_INDEX => AfkWarningMsg::decode(body).map(Self::AfkWarning),
+            EquipItemFailMsg::TYPE_INDEX => EquipItemFailMsg::decode(body).map(Self::EquipItemFail),
             UnselectedAsTargetMsg::TYPE_INDEX => {
                 UnselectedAsTargetMsg::decode(body).map(Self::UnselectedAsTarget)
             }
@@ -341,6 +366,9 @@ impl ServerMessage {
             TitlesUnlockMsg::TYPE_INDEX => TitlesUnlockMsg::decode(body).map(Self::TitlesUnlock),
             StorageSearchReadyMsg::TYPE_INDEX => {
                 StorageSearchReadyMsg::decode(body).map(Self::StorageSearchReady)
+            }
+            TerritoryFacetReadyMsg::TYPE_INDEX => {
+                TerritoryFacetReadyMsg::decode(body).map(Self::TerritoryFacetReady)
             }
             index if GameModeServerMsg::is_type(index) => {
                 GameModeServerMsg::decode(index, body).map(Self::GameMode)
@@ -422,7 +450,9 @@ impl ServerMessage {
             Self::AdjustFxScripts(_) => AdjustFxScriptsMsg::TYPE_INDEX,
             Self::RequestInitialized(_) => RequestInitializedMsg::TYPE_INDEX,
             Self::RequestSuccess(_) => RequestSuccessMsg::TYPE_INDEX,
+            Self::AppearancePurchased(_) => AppearancePurchasedMsg::TYPE_INDEX,
             Self::DeathRecap(_) => DeathRecapMsg::TYPE_INDEX,
+            Self::DeathRecapForAll(_) => DeathRecapForAllMsg::TYPE_INDEX,
             Self::OnHealed(_) => OnHealedMsg::TYPE_INDEX,
             Self::UpdatePhasing(_) => UpdatePhasingMsg::TYPE_INDEX,
             Self::CutsceneGranted(_) => CutsceneGrantedMsg::TYPE_INDEX,
@@ -432,6 +462,7 @@ impl ServerMessage {
             Self::StorageSearchItems(_) => StorageSearchItemsMsg::TYPE_INDEX,
             Self::StorageSearchResults(_) => StorageSearchResultsMsg::TYPE_INDEX,
             Self::LoadoutStatus(_) => LoadoutStatusMsg::TYPE_INDEX,
+            Self::ItemsConverted(_) => ItemsConvertedMsg::TYPE_INDEX,
             Self::InteractionValidated(_) => InteractionValidatedMsg::TYPE_INDEX,
             Self::InteractionEnded(_) => InteractionEndedMsg::TYPE_INDEX,
             Self::GatheringInterrupted(_) => GatheringInterruptedMsg::TYPE_INDEX,
@@ -439,6 +470,8 @@ impl ServerMessage {
             Self::SelectedAsTarget(_) => SelectedAsTargetMsg::TYPE_INDEX,
             Self::HomingOverride(_) => HomingOverrideMsg::TYPE_INDEX,
             Self::LeftGameModeQueue(_) => LeftGameModeQueueMsg::TYPE_INDEX,
+            Self::AfkWarning(_) => AfkWarningMsg::TYPE_INDEX,
+            Self::EquipItemFail(_) => EquipItemFailMsg::TYPE_INDEX,
             Self::UnselectedAsTarget(_) => UnselectedAsTargetMsg::TYPE_INDEX,
             Self::DisableCollision(_) => DisableCollisionMsg::TYPE_INDEX,
             Self::CraftProgress(_) => CraftProgressMsg::TYPE_INDEX,
@@ -476,6 +509,7 @@ impl ServerMessage {
             Self::CombatEffect(message) => message.type_index(),
             Self::TitlesUnlock(_) => TitlesUnlockMsg::TYPE_INDEX,
             Self::StorageSearchReady(_) => StorageSearchReadyMsg::TYPE_INDEX,
+            Self::TerritoryFacetReady(_) => TerritoryFacetReadyMsg::TYPE_INDEX,
         }
     }
 
@@ -516,7 +550,9 @@ impl ServerMessage {
             Self::AdjustFxScripts(message) => message.encode(),
             Self::RequestInitialized(message) => message.encode(),
             Self::RequestSuccess(message) => message.encode(),
+            Self::AppearancePurchased(message) => message.encode(),
             Self::DeathRecap(message) => message.encode(),
+            Self::DeathRecapForAll(message) => message.encode(),
             Self::OnHealed(message) => message.encode(),
             Self::UpdatePhasing(message) => message.encode(),
             Self::CutsceneGranted(message) => message.encode(),
@@ -526,6 +562,7 @@ impl ServerMessage {
             Self::StorageSearchItems(message) => message.encode(),
             Self::StorageSearchResults(message) => message.encode(),
             Self::LoadoutStatus(message) => message.encode(),
+            Self::ItemsConverted(message) => message.encode(),
             Self::InteractionValidated(message) => message.encode(),
             Self::InteractionEnded(message) => message.encode(),
             Self::GatheringInterrupted(message) => message.encode(),
@@ -533,6 +570,8 @@ impl ServerMessage {
             Self::SelectedAsTarget(message) => message.encode(),
             Self::HomingOverride(message) => message.encode(),
             Self::LeftGameModeQueue(message) => message.encode(),
+            Self::AfkWarning(message) => message.encode(),
+            Self::EquipItemFail(message) => message.encode(),
             Self::UnselectedAsTarget(message) => message.encode(),
             Self::DisableCollision(message) => message.encode(),
             Self::CraftProgress(message) => message.encode(),
@@ -568,6 +607,7 @@ impl ServerMessage {
             Self::CombatEffect(message) => Ok(message.encode()),
             Self::TitlesUnlock(message) => message.encode(),
             Self::StorageSearchReady(message) => message.encode(),
+            Self::TerritoryFacetReady(message) => message.encode(),
         }
     }
 }

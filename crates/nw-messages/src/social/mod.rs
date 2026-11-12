@@ -19,6 +19,7 @@ pub mod group_data;
 pub mod groups;
 pub mod guilds;
 pub mod players;
+pub mod raid_data;
 pub mod states;
 mod text;
 pub mod voice;

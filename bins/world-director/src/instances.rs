@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use nw_bus::{
     BusId, GroupAnswer, InstanceRefusal, InstanceReply, InstanceRequest, RunningInstance, SimSlot,
+    WarInstance,
 };
 use uuid::Uuid;
 
@@ -32,6 +33,11 @@ pub struct InstanceSettings {
     pub group_timeout: Duration,
     /// How to start instance sims; `None` when the operator starts them.
     pub launch: Option<LaunchSettings>,
+    /// The matchmaking queue of the arena and of Outpost Rush.
+    pub queues: crate::matchmaking::QueueRules,
+    /// The forts of the territory wars ([`crate::war_instances`]): a war of a fort without an
+    /// entry gets no instance.
+    pub war_forts: nw_content::war_forts::WarForts,
 }
 
 /// How the director starts instance sim processes.
@@ -74,6 +80,8 @@ pub struct OpenInstance {
     pub ends_at_ms: Option<u64>,
     /// Whether the sim confirmed the opening.
     pub confirmed: bool,
+    /// The territory war it runs ([`crate::war_instances`]); `None` for every other instance.
+    pub war: Option<WarInstance>,
 }
 
 /// What to do with a request.
@@ -191,10 +199,28 @@ impl Instances {
         if count > request.capacity {
             return refuse(InstanceRefusal::TooManyMembers);
         }
+        match self.take_free_sim(request, owner, members, free, ids, now_ms) {
+            Ok(instance) => Decision::Open(instance),
+            Err(reason) => refuse(reason),
+        }
+    }
+
+    /// A new instance of `request` for `owner` with `members` on a free sim of `free` that no
+    /// open instance holds; `ids` are its id and phase.
+    fn take_free_sim(
+        &mut self,
+        request: &InstanceRequest,
+        owner: Uuid,
+        members: Vec<Uuid>,
+        free: &[SimSlot],
+        ids: (Uuid, u64),
+        now_ms: u64,
+    ) -> Result<OpenInstance, InstanceRefusal> {
         let taken: Vec<&SimSlot> = self.open.values().map(|open| &open.sim).collect();
-        let Some(sim) = free.iter().find(|sim| !taken.contains(sim)) else {
-            return refuse(InstanceRefusal::NoInstanceSim);
-        };
+        let sim = free
+            .iter()
+            .find(|sim| !taken.contains(sim))
+            .ok_or(InstanceRefusal::NoInstanceSim)?;
         let (id, phase) = ids;
         let instance = OpenInstance {
             id,
@@ -209,10 +235,56 @@ impl Instances {
                 .timeout_seconds
                 .map(|seconds| now_ms.saturating_add(seconds.saturating_mul(MS_PER_SECOND))),
             confirmed: false,
+            war: None,
         };
         self.by_owner.insert(owner, id);
         self.open.insert(id, instance.clone());
-        Decision::Open(instance)
+        Ok(instance)
+    }
+
+    /// A new instance for the accepted arena match `match_id` (its owner) with its players
+    /// `members`, on a free sim of `free`: an arena match always gets its own instance, whatever
+    /// instance its players were in before.
+    pub fn open_match(
+        &mut self,
+        match_id: Uuid,
+        request: &InstanceRequest,
+        members: Vec<Uuid>,
+        free: &[SimSlot],
+        ids: (Uuid, u64),
+        now_ms: u64,
+    ) -> Result<OpenInstance, InstanceRefusal> {
+        // An earlier instance that still names a player gives it up: the player goes to the match.
+        for open in self.open.values_mut() {
+            open.members.retain(|member| !members.contains(member));
+        }
+        self.take_free_sim(request, match_id, members, free, ids, now_ms)
+    }
+
+    /// A new instance for the territory war `war` (its owner) with its roster `members` until
+    /// Unix ms `ends_at_ms`, on a free sim of `free`: like an arena match, a war always gets its
+    /// own instance.
+    pub fn open_war(
+        &mut self,
+        war: WarInstance,
+        request: &InstanceRequest,
+        (members, ends_at_ms): (Vec<Uuid>, u64),
+        free: &[SimSlot],
+        ids: (Uuid, u64),
+        now_ms: u64,
+    ) -> Result<OpenInstance, InstanceRefusal> {
+        let mut instance = self.open_match(war.war, request, members, free, ids, now_ms)?;
+        instance.war = Some(war);
+        instance.ends_at_ms = Some(ends_at_ms);
+        self.open.insert(instance.id, instance.clone());
+        Ok(instance)
+    }
+
+    /// The territory wars the open instances run: war and instance.
+    pub fn wars(&self) -> impl Iterator<Item = (Uuid, Uuid)> + '_ {
+        self.open
+            .values()
+            .filter_map(|open| open.war.map(|war| (war.war, open.id)))
     }
 
     /// The answer of the sim to the opening of `instance`: kept when it opened, else dropped.
@@ -324,6 +396,7 @@ impl Instances {
                     owner,
                     ends_at_ms: report.ends_at_ms,
                     confirmed: true,
+                    war: report.war,
                 },
             );
         }
@@ -541,7 +614,87 @@ mod tests {
             open_timeout: Duration::from_millis(500),
             group_timeout: Duration::from_millis(300),
             launch: None,
+            queues: crate::matchmaking::QueueRules {
+                arena: crate::matchmaking::MatchSettings::arena(6, Duration::from_secs(45)),
+                outpost_rush: crate::matchmaking::MatchSettings::outpost_rush(
+                    40,
+                    Duration::from_secs(90),
+                ),
+            },
+            war_forts: nw_content::war_forts::WarForts::default(),
         }
+    }
+
+    #[test]
+    fn an_arena_match_gets_its_own_instance_even_for_players_of_an_open_one() {
+        let mut instances = Instances::default();
+        let free = [slot("inst-1"), slot("inst-2")];
+        let Decision::Open(old) = instances.decide(
+            &request(1),
+            &group(&[1, 2, 3]),
+            &free,
+            (Uuid::from_u128(7), PHASE),
+            NOW_MS,
+        ) else {
+            panic!("opens");
+        };
+        let opened = instances
+            .open_match(
+                Uuid::from_u128(40),
+                &request(1),
+                vec![character(1), character(5)],
+                &free,
+                (Uuid::from_u128(8), PHASE),
+                NOW_MS,
+            )
+            .expect("a free sim");
+        assert_ne!(opened.sim, old.sim);
+        assert_eq!(opened.owner, Uuid::from_u128(40));
+        assert_eq!(
+            instances.get(&old.id).map(|open| open.members.clone()),
+            Some(vec![character(2), character(3)]),
+            "the old instance gives the player up"
+        );
+        assert_eq!(
+            instances.open_match(
+                Uuid::from_u128(41),
+                &request(1),
+                vec![character(6)],
+                &free,
+                (Uuid::from_u128(9), PHASE),
+                NOW_MS,
+            ),
+            Err(InstanceRefusal::NoInstanceSim)
+        );
+    }
+
+    #[test]
+    fn a_war_gets_its_own_instance_until_its_end_and_is_listed() {
+        let mut instances = Instances::default();
+        let war = WarInstance {
+            war: Uuid::from_u128(77),
+            territory: 8,
+        };
+        let end_ms = NOW_MS + TRIAL_SECONDS * MS_PER_SECOND;
+        let open = instances
+            .open_war(
+                war,
+                &request(1),
+                (vec![character(1), character(2)], end_ms),
+                &[slot("inst-1")],
+                (Uuid::from_u128(7), PHASE),
+                NOW_MS,
+            )
+            .expect("a free sim");
+        assert_eq!(open.war, Some(war));
+        assert_eq!(open.ends_at_ms, Some(end_ms));
+        assert_eq!(open.owner, war.war);
+        assert_eq!(
+            instances.get(&open.id).and_then(|open| open.war),
+            Some(war),
+            "kept with its war"
+        );
+        assert_eq!(instances.wars().collect::<Vec<_>>(), [(war.war, open.id)]);
     }
 
     #[test]
@@ -691,6 +844,7 @@ mod tests {
                     phase: open.phase,
                     capacity: open.capacity,
                     ends_at_ms: open.ends_at_ms,
+                    war: None,
                 }),
             )]
         };
@@ -730,6 +884,7 @@ mod tests {
                 phase: PHASE,
                 capacity,
                 ends_at_ms: Some(NOW_MS + TRIAL_SECONDS * MS_PER_SECOND),
+                war: None,
             }),
         )]
     }

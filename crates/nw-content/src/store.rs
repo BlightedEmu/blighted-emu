@@ -13,13 +13,20 @@
 //! A mount without a product is not sold: the client leaves out an offer whose alias names no
 //! product (`entitlementsdatahandler.luac`: "No StoreProductData in JavelinData_StoreProducts.csv
 //! found"). Build 25810808 sells 47 of the 52.
+//!
+//! The store also sells the consumables of [`SOLD_TOKENS`], those this server can honour: the
+//! barbershop token, which the barber spends (6420), and the boost tokens whose status effects
+//! the sim applies (the 5818 debit starts the effect, [`EffectTokens`]): gathering experience,
+//! weapon experience, territory standing and gathering yield. Not sold: the season experience
+//! boost (the sim has no season pass), the premium emotes (it has no emote system), the dyes
+//! and the season pass tiers (Observed, catalog of `buy_barbertoken_and_change_style`).
 
 use std::collections::{BTreeMap, HashMap};
 
-use nw_protocol::store_api::{StoreEntitlement, StoreMount, StoreTable};
+use nw_protocol::store_api::{StoreEntitlement, StoreMount, StoreTable, StoreToken};
 
 use crate::bundle::english;
-use crate::generated::{EntitlementData, Tables};
+use crate::generated::{EntitlementData, StoreProductData, Tables};
 
 /// `RewardType` of a mount entitlement.
 const MOUNT_REWARD: &str = "Mount";
@@ -30,6 +37,128 @@ const STORE_SOURCE: &str = "Store";
 const REQUIRED_SEPARATOR: char = ',';
 /// Between the parts of a `MountId`; the last part is the mount's variant.
 const MOUNT_ID_SEPARATOR: char = '_';
+
+/// One consumable the store sells.
+struct SoldToken {
+    /// The entitlement: its `UniqueTagID`.
+    entitlement: &'static str,
+    /// Its `RewardType`: what spends it.
+    reward_type: &'static str,
+    /// The entitlement's name (its row has no `DisplayName`).
+    name: &'static str,
+    /// The store product: its `UniqueTagID`.
+    product: &'static str,
+    /// Tokens per purchase.
+    amount: u32,
+    /// Listed price in Marks of Fortune.
+    list_price: u32,
+}
+
+/// The `RewardType` of an entitlement that starts a status effect (its `Reward(s)`).
+const STATUS_EFFECT_REWARD: &str = "StatusEffect";
+/// Boost tokens per retail purchase (Observed: each boost offer of the catalog holds 5).
+const BOOST_TOKENS: u32 = 5;
+/// The listed price of a boost token offer (Observed: `originalPrice` 5000 on each).
+const BOOST_PRICE: u32 = 5_000;
+
+/// The consumables the store sells. The barbershop token: Observed, retail catalog offer
+/// `StoreItem_Token_Barbershop_X1` (`buy_barbertoken_and_change_style`): one `Consumable`
+/// `Ent_Barbershop_Token` named `Barbershop Token`, `originalPrice` 10000, sold for 0; the
+/// purchase raised the count from 14 to 15. The boosts: Observed, the same catalog's offers
+/// `Token_GatheringXP_Boost`, `Token_WeaponXP_Boost`, `Token_TerritoryStanding_Boost` and
+/// `Token_Proficiency_Boost`, each 5 of its `Ent_StatusEffect_Token_*` named as here, listed at
+/// 5000.
+const SOLD_TOKENS: [SoldToken; 5] = [
+    SoldToken {
+        entitlement: "Ent_Barbershop_Token",
+        reward_type: "BarbershopToken",
+        name: "Barbershop Token",
+        product: "StoreItem_Token_Barbershop_X1",
+        amount: 1,
+        list_price: 10_000,
+    },
+    SoldToken {
+        entitlement: "Ent_StatusEffect_Token_Gather_1",
+        reward_type: STATUS_EFFECT_REWARD,
+        name: "Gathering XP Boost Token",
+        product: "Token_GatheringXP_Boost",
+        amount: BOOST_TOKENS,
+        list_price: BOOST_PRICE,
+    },
+    SoldToken {
+        entitlement: "Ent_StatusEffect_Token_Weapon_1",
+        reward_type: STATUS_EFFECT_REWARD,
+        name: "Weapon XP Boost Token",
+        product: "Token_WeaponXP_Boost",
+        amount: BOOST_TOKENS,
+        list_price: BOOST_PRICE,
+    },
+    SoldToken {
+        entitlement: "Ent_StatusEffect_Token_Territory_1",
+        reward_type: STATUS_EFFECT_REWARD,
+        name: "Territory Standing Boost Token",
+        product: "Token_TerritoryStanding_Boost",
+        amount: BOOST_TOKENS,
+        list_price: BOOST_PRICE,
+    },
+    SoldToken {
+        entitlement: "Ent_StatusEffect_Token_Proficiency_1",
+        reward_type: STATUS_EFFECT_REWARD,
+        name: "Proficiency Boost Token",
+        product: "Token_Proficiency_Boost",
+        amount: BOOST_TOKENS,
+        list_price: BOOST_PRICE,
+    },
+];
+
+/// The status effect each enabled consumable entitlement of `RewardType` `StatusEffect` starts
+/// when the 5818 `RequestTokenDebit` spends it: its `Reward(s)`, a `StatusID` (build 25810808:
+/// the five `Ent_StatusEffect_Token_*` boosts and the premium emote timers; Observed,
+/// `Playthrough_Part_02`: each debit of `Ent_StatusEffect_Token_Gather_1` and the other boosts
+/// was followed by its `Token_*` effect).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EffectTokens {
+    /// The `StatusID` by lowercase entitlement.
+    by_entitlement: HashMap<String, String>,
+}
+
+impl EffectTokens {
+    /// The tokens of the entitlement rows of `tables`.
+    pub fn from_tables(tables: &Tables) -> Self {
+        Self::build(
+            tables
+                .entitlement_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter(|row| {
+                    row.is_enabled
+                        && row.is_consumable == Some(true)
+                        && row.reward_type.as_deref() == Some(STATUS_EFFECT_REWARD)
+                })
+                .filter_map(|row| {
+                    let effect = row.reward_s.as_deref()?.trim();
+                    (!effect.is_empty()).then_some((row.unique_tag_id.as_str(), effect))
+                }),
+        )
+    }
+
+    /// The tokens of the (entitlement, `StatusID`) pairs `pairs`.
+    pub fn build<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        Self {
+            by_entitlement: pairs
+                .into_iter()
+                .map(|(entitlement, effect)| (entitlement.to_lowercase(), effect.to_owned()))
+                .collect(),
+        }
+    }
+
+    /// The `StatusID` the token `entitlement` (any case) starts; `None` for another entitlement.
+    pub fn effect_of(&self, entitlement: &str) -> Option<&str> {
+        self.by_entitlement
+            .get(&entitlement.to_lowercase())
+            .map(String::as_str)
+    }
+}
 
 /// The store products by lowercase `DisplayName`: the `UniqueTagID` of each.
 #[derive(Debug, Default)]
@@ -91,7 +220,52 @@ pub fn store_table(tables: &Tables, text: &BTreeMap<String, String>) -> StoreTab
             .flat_map(|table| &table.rows)
             .map(|row| (row.unique_tag_id.as_str(), row.display_name.as_str())),
     );
-    store_table_of(&rows, text, &mount_names, &products)
+    let product_rows: Vec<&StoreProductData> = tables
+        .store_product_data
+        .iter()
+        .flat_map(|table| &table.rows)
+        .collect();
+    StoreTable {
+        tokens: sold_tokens(&rows, &product_rows, text),
+        ..store_table_of(&rows, text, &mount_names, &products)
+    }
+}
+
+/// The tokens of [`SOLD_TOKENS`] that the game data has: an enabled consumable entitlement of
+/// that reward type, and an enabled product, with its English name from `text`.
+fn sold_tokens(
+    rows: &[&EntitlementData],
+    products: &[&StoreProductData],
+    text: &BTreeMap<String, String>,
+) -> Vec<StoreToken> {
+    SOLD_TOKENS
+        .iter()
+        .filter(|sold| {
+            rows.iter().any(|row| {
+                row.unique_tag_id == sold.entitlement
+                    && row.is_enabled
+                    && row.is_consumable == Some(true)
+                    && row.reward_type.as_deref() == Some(sold.reward_type)
+            })
+        })
+        .filter_map(|sold| {
+            let product = products
+                .iter()
+                .find(|row| row.unique_tag_id == sold.product && row.is_enabled != 0)?;
+            Some(StoreToken {
+                token: StoreEntitlement {
+                    entitlement: sold.entitlement.to_owned(),
+                    name: sold.name.to_owned(),
+                },
+                product: sold.product.to_owned(),
+                product_name: english(text, &product.display_name)
+                    .unwrap_or(sold.product)
+                    .to_owned(),
+                amount: sold.amount,
+                list_price: sold.list_price,
+            })
+        })
+        .collect()
 }
 
 /// The store table of the entitlement rows `rows`, with the English names of `text`, the
@@ -130,6 +304,7 @@ pub fn store_table_of(
     required.sort_unstable();
     required.dedup();
     StoreTable {
+        tokens: Vec::new(),
         mounts: sold
             .iter()
             .filter_map(|row| {
@@ -283,6 +458,99 @@ mod tests {
             unsold.mounts.is_empty(),
             "a mount without a product is not sold"
         );
+    }
+
+    fn product(id: &str, enabled: bool) -> StoreProductData {
+        StoreProductData {
+            description: None,
+            display_name: format!("@{id}_name"),
+            is_enabled: i64::from(enabled),
+            landscape_image: String::new(),
+            portrait_image: String::new(),
+            square_image: String::new(),
+            store_product_type: "TokenSingle".to_owned(),
+            thumbnail_image: String::new(),
+            type_description: String::new(),
+            unique_tag_id: id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_store_sells_the_barbershop_token_when_the_data_has_it_and_its_product() {
+        const TOKEN: &str = "Ent_Barbershop_Token";
+        const PRODUCT: &str = "StoreItem_Token_Barbershop_X1";
+        let mut token = row(TOKEN, "BarbershopToken", "Store", "BarbershopToken", "");
+        token.is_consumable = Some(true);
+        token.display_name = None;
+        let mut boost = row(
+            "Ent_StatusEffect_Token_Weapon_1",
+            "StatusEffect",
+            "SeasonRewardTrack",
+            "Token_Weapon_1",
+            "",
+        );
+        boost.is_consumable = Some(true);
+        let text = BTreeMap::from([(format!("{PRODUCT}_name"), "Barbershop Token X1".to_owned())]);
+        let sold = sold_tokens(&[&token, &boost], &[&product(PRODUCT, true)], &text);
+        assert_eq!(
+            sold,
+            [StoreToken {
+                token: StoreEntitlement {
+                    entitlement: TOKEN.to_owned(),
+                    name: "Barbershop Token".to_owned(),
+                },
+                product: PRODUCT.to_owned(),
+                product_name: "Barbershop Token X1".to_owned(),
+                amount: 1,
+                list_price: 10_000,
+            }]
+        );
+        assert!(sold_tokens(&[&token], &[&product(PRODUCT, false)], &text).is_empty());
+        assert!(sold_tokens(&[&boost], &[&product(PRODUCT, true)], &text).is_empty());
+        token.is_consumable = Some(false);
+        assert!(sold_tokens(&[&token], &[&product(PRODUCT, true)], &text).is_empty());
+    }
+
+    #[test]
+    fn the_store_sells_the_boosts_it_honours_and_a_debit_names_the_token_s_effect() {
+        const WEAPON: &str = "Ent_StatusEffect_Token_Weapon_1";
+        const SEASON: &str = "Ent_StatusEffect_Token_Season_1";
+        let boost = |id: &str, effect: &str| {
+            let mut boost = row(id, STATUS_EFFECT_REWARD, "SeasonRewardTrack", effect, "");
+            boost.is_consumable = Some(true);
+            boost
+        };
+        let weapon = boost(WEAPON, "Token_Weapon_1");
+        let season = boost(SEASON, "Token_Season_1");
+        let products = [
+            product("Token_WeaponXP_Boost", true),
+            product("Token_SeasonXP_Boost", true),
+        ];
+        let text = BTreeMap::from([(
+            "Token_WeaponXP_Boost_name".to_owned(),
+            "Weapon XP Boost Token".to_owned(),
+        )]);
+        let sold = sold_tokens(&[&weapon, &season], &[&products[0], &products[1]], &text);
+        assert_eq!(
+            sold,
+            [StoreToken {
+                token: StoreEntitlement {
+                    entitlement: WEAPON.to_owned(),
+                    name: "Weapon XP Boost Token".to_owned(),
+                },
+                product: "Token_WeaponXP_Boost".to_owned(),
+                product_name: "Weapon XP Boost Token".to_owned(),
+                amount: BOOST_TOKENS,
+                list_price: BOOST_PRICE,
+            }],
+            "the season boost is not sold: the sim has no season pass"
+        );
+        let tokens = EffectTokens::build([(WEAPON, "Token_Weapon_1"), (SEASON, "Token_Season_1")]);
+        assert_eq!(
+            tokens.effect_of("ent_statuseffect_token_weapon_1"),
+            Some("Token_Weapon_1")
+        );
+        assert_eq!(tokens.effect_of("Ent_Barbershop_Token"), None);
     }
 
     #[test]

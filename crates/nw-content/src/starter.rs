@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use crate::Tables;
+use crate::artifacts::ArtifactKind;
 use crate::gameplay_config::ITEM_CLASS_SEPARATOR;
 use crate::perks::{PERK_SLOTS, PerkTable, parts};
 
@@ -222,6 +223,8 @@ pub struct KitItem {
     pub perks: [u32; PERK_SLOTS],
     /// A main-hand weapon that draws the off-hand shield with it ([`draws_shield`]).
     pub draws_shield: bool,
+    /// The artifact kind of an artifact ([`ArtifactKind::of_item_class`]).
+    pub artifact: Option<ArtifactKind>,
 }
 
 /// The kits of one backstory.
@@ -273,6 +276,7 @@ impl StarterKits {
                 perk_ids: Vec::new(),
                 perks: [0; PERK_SLOTS],
                 draws_shield: false,
+                artifact: None,
             });
         }
         self
@@ -307,6 +311,10 @@ impl StarterKits {
                     perk_ids: row.perks.clone(),
                     perks: perk_slots(&source.perk_indexes, &row.perks),
                     draws_shield: row.item_class.as_deref().is_some_and(draws_shield),
+                    artifact: row
+                        .item_class
+                        .as_deref()
+                        .and_then(ArtifactKind::of_item_class),
                 };
                 (row.item_id.clone(), item)
             })

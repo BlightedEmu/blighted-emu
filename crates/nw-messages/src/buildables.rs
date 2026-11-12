@@ -6,7 +6,8 @@
 //! - `MB::BuildableControllerReplicatedState` (type 1594, constructor `FUN_1447b8e60`): the
 //!   build state and the resources committed to it.
 //! - `MB::PlacementObstructionComponentReplicatedState` (type 2187, `FUN_1429a7eb0`).
-//! - `MB::TerritoryInterfaceComponentReplicatedState` (type 1746, `FUN_1429e4ea0`): slot 0 only.
+//! - `MB::TerritoryInterfaceComponentReplicatedState` (type 1746, `FUN_1429e4ea0`): slot 0 on a
+//!   station (a town desk and board add slots 1 and 2, [`crate::territory_governance`]).
 //! - `MB::BuildableGridComponentReplicatedState` (type 2134, `FUN_142981120`).
 //! - `MB::OwnershipComponentReplicatedState` (type 3217, `FUN_14360c430`): the class bytes
 //!   `91 32` of every retail campfire group. This server sent 3218, an index without a class,
@@ -19,7 +20,11 @@
 use crate::combat::{read_string, write_string};
 use crate::item_descriptor::ItemDescriptor;
 use crate::items::FullList;
-use crate::slots::{SLOT_0, children_mask, read_slot_0, write_children};
+use crate::slots::{
+    SLOT_0, children_mask, read_children, read_slot_0, read_slot_byte, write_children,
+    write_known_children,
+};
+use crate::territory_governance::{TerritoryGovernanceData, TerritoryProgressionData};
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
 
 /// Type index of `MB::BuildableControllerReplicatedState`.
@@ -40,8 +45,17 @@ const BUILDABLE_CHILDREN: u8 = 9;
 /// Children of the placement obstruction: `hasCompletionObstruction`.
 const OBSTRUCTION_CHILDREN: u8 = 1;
 /// Children of the territory interface's slot 0: `territoryFunctionalityDown`,
-/// `territoryRefsSet` (its slots 1 and 2, progression and governance data, are not read).
+/// `territoryRefsSet`.
 const TERRITORY_CHILDREN: u8 = 2;
+/// Slots of the territory interface: 0, 1 (`territoryProgressionData`) and 2
+/// (`territoryGovernanceData`), one child each in slots 1 and 2.
+const TERRITORY_SLOTS: u8 = 3;
+const TERRITORY_PROGRESSION_SLOT: u8 = 1 << 1;
+const TERRITORY_GOVERNANCE_SLOT: u8 = 1 << 2;
+const TERRITORY_DATA_CHILDREN: u8 = 1;
+/// The child bitmap of a slot of one child.
+const ONE_CHILD: u16 = 1;
+const TERRITORY_FIELD: &str = "territory interface";
 /// Children of the buildable grid: `gridSidesActive`.
 const GRID_CHILDREN: u8 = 1;
 /// Children of the ownership state: `guildID`, `guildOwner`, `guildCrestData`,
@@ -240,13 +254,18 @@ impl PlacementObstructionState {
     }
 }
 
-/// `MB::TerritoryInterfaceComponentReplicatedState`, slot 0.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// `MB::TerritoryInterfaceComponentReplicatedState`: slot 0, and the town's progression (slot 1)
+/// and governance data (slot 2, [`crate::territory_governance`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TerritoryInterfaceState {
     /// `territoryFunctionalityDown`.
     pub functionality_down: Option<bool>,
     /// `territoryRefsSet` (retail 1 on the campfires).
     pub refs_set: Option<bool>,
+    /// `territoryProgressionData`.
+    pub progression: Option<TerritoryProgressionData>,
+    /// `territoryGovernanceData`.
+    pub governance: Option<TerritoryGovernanceData>,
 }
 
 impl TerritoryInterfaceState {
@@ -254,36 +273,90 @@ impl TerritoryInterfaceState {
     ///
     /// # Errors
     ///
-    /// Returns [`MessageError`] when the body ends early, a flag is not 0 or 1, or slot 1 or 2
-    /// is set.
+    /// Returns [`MessageError`] when the body ends early, a flag is not 0 or 1, a slot beyond 2
+    /// is set, or a list is too long.
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let slots = read_slot_byte(reader, TERRITORY_FIELD, TERRITORY_SLOTS)?;
         let mut state = Self::default();
-        read_slot_0(
-            reader,
-            "territory interface",
-            TERRITORY_CHILDREN,
-            |reader, child| {
-                if child == 0 {
-                    state.functionality_down = Some(reader.boolean()?);
-                } else {
-                    state.refs_set = Some(reader.boolean()?);
-                }
-                Ok(())
-            },
-        )?;
+        if slots & SLOT_0 != 0 {
+            read_children(
+                reader,
+                TERRITORY_FIELD,
+                TERRITORY_CHILDREN,
+                |reader, child| {
+                    if child == 0 {
+                        state.functionality_down = Some(reader.boolean()?);
+                    } else {
+                        state.refs_set = Some(reader.boolean()?);
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        if slots & TERRITORY_PROGRESSION_SLOT != 0 {
+            read_children(
+                reader,
+                TERRITORY_FIELD,
+                TERRITORY_DATA_CHILDREN,
+                |reader, _| {
+                    state.progression = Some(TerritoryProgressionData::read(reader)?);
+                    Ok(())
+                },
+            )?;
+        }
+        if slots & TERRITORY_GOVERNANCE_SLOT != 0 {
+            read_children(
+                reader,
+                TERRITORY_FIELD,
+                TERRITORY_DATA_CHILDREN,
+                |reader, _| {
+                    state.governance = Some(TerritoryGovernanceData::read(reader)?);
+                    Ok(())
+                },
+            )?;
+        }
         Ok(state)
     }
 
     /// Writes the state for the bundle path.
-    pub fn write(&self, writer: &mut Writer) {
-        let present = [self.functionality_down.is_some(), self.refs_set.is_some()];
-        write_known_slot_0(writer, &present, TERRITORY_CHILDREN, |writer, child| {
-            if child == 0 {
-                self.functionality_down.map(|down| writer.boolean(down));
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when a list is too long for its count.
+    pub fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
+        let slot_0 = children_mask(&[self.functionality_down.is_some(), self.refs_set.is_some()]);
+        let slots = if slot_0 == 0 { 0 } else { SLOT_0 }
+            | if self.progression.is_some() {
+                TERRITORY_PROGRESSION_SLOT
             } else {
-                self.refs_set.map(|set| writer.boolean(set));
+                0
             }
-        });
+            | if self.governance.is_some() {
+                TERRITORY_GOVERNANCE_SLOT
+            } else {
+                0
+            };
+        writer.u8(slots);
+        if slot_0 != 0 {
+            write_known_children(writer, slot_0, TERRITORY_CHILDREN, |writer, child| {
+                if child == 0 {
+                    self.functionality_down.map(|down| writer.boolean(down));
+                } else {
+                    self.refs_set.map(|set| writer.boolean(set));
+                }
+            });
+        }
+        if let Some(progression) = &self.progression {
+            write_children(writer, ONE_CHILD, TERRITORY_DATA_CHILDREN, |writer, _| {
+                progression.write(writer)
+            })?;
+        }
+        if let Some(governance) = &self.governance {
+            write_children(writer, ONE_CHILD, TERRITORY_DATA_CHILDREN, |writer, _| {
+                governance.write(writer)
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -696,13 +769,14 @@ mod tests {
             MemberState::TerritoryInterface(TerritoryInterfaceState {
                 functionality_down: None,
                 refs_set: Some(true),
+                ..TerritoryInterfaceState::default()
             })
         );
     }
 
     #[test]
-    fn a_territory_slot_beyond_0_is_not_read() {
-        // Slot 1 (progression data) has no reader here.
-        assert!(TerritoryInterfaceState::read(&mut Reader::new(&[0b10, 0x01])).is_err());
+    fn a_territory_slot_beyond_2_is_not_read() {
+        // The class has three slots.
+        assert!(TerritoryInterfaceState::read(&mut Reader::new(&[0b1000, 0x01])).is_err());
     }
 }

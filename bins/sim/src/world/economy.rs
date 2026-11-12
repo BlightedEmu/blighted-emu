@@ -1576,6 +1576,8 @@ impl SimWorld {
                 count_call("reward_track_reset", false);
                 tracing::info!("reward track reset refused: no track here");
             }
+            StoreCall::AppearanceChange(request) => self.barber_change(entity, request),
+            StoreCall::TokenDebit { entitlement, .. } => self.token_debit(entity, entitlement),
         }
     }
 
@@ -1775,8 +1777,8 @@ impl SimWorld {
         }
     }
 
-    /// Answers a season call: this server has no season rewards or activity cards (the season
-    /// states of its players are empty), so each call is refused in the retail answer form.
+    /// Answers a season call in the retail answer form, once the season pass carried it out or
+    /// refused it ([`super::seasons`]).
     fn seasons_call(&mut self, entity: Entity, call: &SeasonsCall) {
         let Some(connection) = self
             .world
@@ -1785,8 +1787,9 @@ impl SimWorld {
         else {
             return;
         };
-        count_call("seasons", false);
-        let answer = economy(EconomyMessage::Seasons(call.answer(response::FAILURE)));
+        let result = self.season_call(entity, call);
+        count_call("seasons", result == response::SUCCESS);
+        let answer = economy(EconomyMessage::Seasons(call.answer(result)));
         send_now(&mut self.combat_messages, &connection, &[answer]);
     }
 

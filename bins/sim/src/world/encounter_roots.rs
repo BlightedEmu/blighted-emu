@@ -16,6 +16,15 @@
 //! `eEncounterStatus_*` names in their order in our `NewWorld.exe` (Inferred: 0 to 4); a history
 //! starts as retail's waiting stages do, `(0, 0) (1, 1)`.
 //!
+//! A stage's entity event on an entity of the encounter slice (dungeon gates note 2026-11-11,
+//! Observed in the Dynasty Shipyard cave monolith) goes out on the root group, at the component
+//! number of the target's component ([`EncounterRoots::entity_event`]): `Activate` on a
+//! timeline starts it (1647, the root's next version), `Trigger` on a delayed event sends its
+//! `totalDelayDuration` and, the delay later, its completion, and `Activate` or `Deactivate` on
+//! a placement obstruction sets it to 1 or 0. Retail sent nothing for `Trigger` on a timeline
+//! nor for `Activate` on a delayed event (4 of 4), and neither does the sim. Inferred: a started
+//! timeline ends after its length as a gate's does ([`super::gates`]).
+//!
 //! The start objects ([`EncounterObjects`]) are the gatherable slices a stage spawns and its
 //! destroyed objective counts (`Wave_01 - Objective: Interact IO`): retail sends each one a card
 //! of its slice with a variation, position, gatherable controller, delayed event and placement
@@ -24,16 +33,20 @@
 
 use std::collections::HashMap;
 
+use nw_content::dungeon_gates::EntityComponent;
 use nw_content::town_props::TownProps;
 use nw_messages::position::{PositionInTheWorldReplicatedState, Rotation, WorldPosition};
+use nw_messages::timeline_state::{TIMELINE_TYPE_INDEX, TimelineState};
 use nw_messages::{
-    AssetId, BundleGroup, BundleMember, DYNAMIC_SLICE_SUB_ID, GdeMetadataReplicatedState,
-    MemberState,
+    AssetId, BundleGroup, BundleMember, DYNAMIC_SLICE_SUB_ID, DelayedEventState,
+    GdeMetadataReplicatedState, MemberState, PlacementObstructionState, Reader,
 };
 use nw_sim_core::Position;
 use nw_world::dungeon_scripts::Encounter;
 
 use super::crafting::{CARD_COMPONENT, dynamic_ref};
+use super::dungeon_script::{EVENT_ACTIVATE, EVENT_DEACTIVATE, EVENT_TRIGGER};
+use super::gates::{merge_members, seconds_ms, timeline_member};
 use super::slots::Slot;
 
 /// The entity numbers of the encounter roots start here.
@@ -62,8 +75,18 @@ pub(super) const STATUS_IN_PROGRESS: u32 = 2;
 pub(super) const STATUS_SUCCEEDED: u32 = 3;
 /// `eEncounterStatus_Failed`.
 pub(super) const STATUS_FAILED: u32 = 4;
-/// The most entries a stage history keeps: the longest retail history of the captures.
-const MAX_HISTORY: usize = 5;
+/// The most entries a stage history keeps (Observed: the corrupted breach ledgers of
+/// 2026-10-28 send histories of up to 10 entries, the longest from sequence 150 to 159: the
+/// stage's newest 10, as a ring).
+const MAX_HISTORY: usize = 10;
+/// The entity event changes a root keeps for its viewers (Inferred: a viewer catches up within a
+/// tick; a stage sends at most a few at once).
+const MAX_EVENT_CHANGES: usize = 16;
+/// The completion of a delayed event (retail `0583310103000001`: no delay left, completed).
+const DELAY_DONE: DelayedEventState = DelayedEventState {
+    total_delay_s: Some(0.0),
+    completed: Some(true),
+};
 
 /// The status history of one stage.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,9 +155,57 @@ struct Root {
     shown: bool,
     /// Counts its state changes, so each player gets each one once.
     version: u32,
+    /// The member changes of stage entity events, with the version each came with.
+    changes: Vec<(u32, BundleMember)>,
+}
+
+/// A root change that goes out later.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DueChange {
+    /// A started timeline ends.
+    TimelineEnd { component: u64, length_s: f32 },
+    /// A triggered delayed event completes.
+    DelayDone { component: u64 },
 }
 
 impl Root {
+    /// The highest version of its timeline states (one counter per entity, Inferred).
+    fn timeline_version(&self) -> u64 {
+        self.members
+            .iter()
+            .filter_map(|member| match &member.state {
+                MemberState::Recorded { class, body } if *class == TIMELINE_TYPE_INDEX => {
+                    TimelineState::read(&mut Reader::new(body)).ok()?.version()
+                }
+                _ => None,
+            })
+            .max()
+            .unwrap_or_default()
+    }
+
+    /// `member` changes: a new viewer gets it in the spawn group, a viewer that has the root
+    /// gets it once.
+    fn change(&mut self, member: BundleMember) {
+        merge_members(&mut self.members, std::slice::from_ref(&member));
+        self.version += 1;
+        self.changes.push((self.version, member));
+        if self.changes.len() > MAX_EVENT_CHANGES {
+            self.changes.remove(0);
+        }
+    }
+
+    /// Its timeline `component` starts or ends (`length_s` given) at its next version.
+    fn play(&mut self, component: u64, length_s: Option<f32>) {
+        let version = self.timeline_version() + 1;
+        let state = match length_s {
+            Some(length_s) => TimelineState::end(version, length_s),
+            None => TimelineState::start(version),
+        };
+        if let Some(member) = timeline_member(component, &state) {
+            self.change(member);
+        }
+    }
+
     fn manager_member(&self) -> BundleMember {
         let mut body = STATE_HEAD.to_vec();
         body.extend_from_slice(&self.manager.to_be_bytes());
@@ -152,7 +223,7 @@ impl Root {
 }
 
 /// The card of slice `asset` with id `gde_ref`.
-fn card(asset: [u8; 16], gde_ref: [u8; nw_messages::RAW_ID_LEN]) -> BundleMember {
+pub(super) fn card(asset: [u8; 16], gde_ref: [u8; nw_messages::RAW_ID_LEN]) -> BundleMember {
     BundleMember {
         component: CARD_COMPONENT,
         state: MemberState::GdeMetadata(GdeMetadataReplicatedState {
@@ -167,7 +238,7 @@ fn card(asset: [u8; 16], gde_ref: [u8; nw_messages::RAW_ID_LEN]) -> BundleMember
 
 /// The position state of component `component` at `at`, turned by `half_yaw` (radians, half
 /// the yaw).
-fn place_member(component: u64, at: [f32; 3], half_yaw: f32) -> BundleMember {
+pub(super) fn place_member(component: u64, at: [f32; 3], half_yaw: f32) -> BundleMember {
     let [x, y, z] = at;
     BundleMember {
         component,
@@ -206,6 +277,8 @@ pub(super) struct EncounterRoots {
     roots: Vec<Root>,
     /// The root of each encounter index.
     by_encounter: HashMap<usize, usize>,
+    /// Changes that go out later: (due time, root, change).
+    due: Vec<(u64, usize, DueChange)>,
 }
 
 impl EncounterRoots {
@@ -269,6 +342,7 @@ impl EncounterRoots {
                 manager: STATUS_NOT_STARTED,
                 shown: false,
                 version: 0,
+                changes: Vec::new(),
             });
         }
         roots
@@ -300,6 +374,91 @@ impl EncounterRoots {
         }
     }
 
+    /// A stage of encounter `encounter` sent entity event `event` at `now_ms` to an entity of
+    /// its slice whose replicated components are `components` (see the module text).
+    pub(super) fn entity_event(
+        &mut self,
+        encounter: usize,
+        components: &[EntityComponent],
+        event: u32,
+        now_ms: u64,
+    ) {
+        let Some(&index) = self.by_encounter.get(&encounter) else {
+            return;
+        };
+        let Some(root) = self.roots.get_mut(index) else {
+            return;
+        };
+        for component in components {
+            match (*component, event) {
+                (
+                    EntityComponent::Timeline {
+                        component,
+                        length_s,
+                    },
+                    EVENT_ACTIVATE,
+                ) => {
+                    root.play(component, None);
+                    self.due.push((
+                        now_ms.saturating_add(seconds_ms(length_s)),
+                        index,
+                        DueChange::TimelineEnd {
+                            component,
+                            length_s,
+                        },
+                    ));
+                }
+                (EntityComponent::DelayedEvent { component, delay_s }, EVENT_TRIGGER) => {
+                    root.change(BundleMember {
+                        component,
+                        state: MemberState::DelayedEvent(DelayedEventState {
+                            total_delay_s: Some(delay_s),
+                            completed: None,
+                        }),
+                    });
+                    self.due.push((
+                        now_ms.saturating_add(seconds_ms(delay_s)),
+                        index,
+                        DueChange::DelayDone { component },
+                    ));
+                }
+                (
+                    EntityComponent::PlacementObstruction { component },
+                    EVENT_ACTIVATE | EVENT_DEACTIVATE,
+                ) => root.change(BundleMember {
+                    component,
+                    state: MemberState::PlacementObstruction(PlacementObstructionState {
+                        has_completion_obstruction: Some(u8::from(event == EVENT_ACTIVATE)),
+                    }),
+                }),
+                _ => {}
+            }
+        }
+    }
+
+    /// Sends the changes due at `now_ms` (timeline ends, delayed event completions).
+    pub(super) fn tick(&mut self, now_ms: u64) {
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.due)
+            .into_iter()
+            .partition(|(at_ms, _, _)| *at_ms <= now_ms);
+        self.due = later;
+        for (_, index, change) in due {
+            let Some(root) = self.roots.get_mut(index) else {
+                continue;
+            };
+            match change {
+                DueChange::TimelineEnd {
+                    component,
+                    length_s,
+                } => root.play(component, Some(length_s)),
+                DueChange::DelayDone { component } => root.change(BundleMember {
+                    component,
+                    state: MemberState::DelayedEvent(DELAY_DONE),
+                }),
+            }
+        }
+    }
+
     /// The entity numbers of the shown roots within `radius_m` of `position`.
     pub(super) fn numbers_near(
         &self,
@@ -325,7 +484,8 @@ impl EncounterRoots {
     ) -> Option<BundleGroup> {
         let index = usize::try_from(number.checked_sub(ENCOUNTER_ROOT_ENTITY_BASE)?).ok()?;
         let root = self.roots.get(index)?;
-        if !slot.new && sent.get(&number) == Some(&root.version) {
+        let known = sent.get(&number).copied();
+        if !slot.new && known == Some(root.version) {
             return None;
         }
         sent.insert(number, root.version);
@@ -336,7 +496,12 @@ impl EncounterRoots {
                 .chain(root.state_members())
                 .collect()
         } else {
-            root.state_members().collect()
+            let unsent = root
+                .changes
+                .iter()
+                .filter(move |(version, _)| known.is_none_or(|known| *version > known))
+                .map(|(_, member)| member.clone());
+            root.state_members().chain(unsent).collect()
         };
         Some(BundleGroup {
             interest: u64::from(slot.interest),
@@ -425,6 +590,11 @@ impl EncounterObjects {
             },
         );
         Some(number)
+    }
+
+    /// Whether `slice` is the slice of a start object of the table.
+    pub(super) fn is_kind(&self, slice: &str) -> bool {
+        self.kinds.contains_key(slice)
     }
 
     /// Whether `entity` is a start object's number.
@@ -695,19 +865,107 @@ mod tests {
     }
 
     #[test]
+    fn stage_entity_events_go_out_on_the_root_at_the_target_s_component() {
+        // The minor grove root: timelines 0x0a and 0x0b (version 7), placement obstruction 9.
+        const TIMELINE: u64 = 0x0a;
+        const OBSTRUCTION: u64 = 9;
+        const DELAYED: u64 = 0x13;
+        const DELAY_S: f32 = 3.5;
+        const NOW: u64 = 1_000;
+        let mut roots = EncounterRoots::build(&table(), &[encounter(STAGES)]);
+        roots.set(0, true, STATUS_IN_PROGRESS, &[STATUS_NOT_STARTED; STAGES]);
+        let number = ENCOUNTER_ROOT_ENTITY_BASE;
+        let mut sent = HashMap::new();
+        roots.group(number, slot(true), &mut sent).expect("whole");
+        roots.entity_event(
+            0,
+            &[
+                EntityComponent::Timeline {
+                    component: TIMELINE,
+                    length_s: 1.0,
+                },
+                EntityComponent::DelayedEvent {
+                    component: DELAYED,
+                    delay_s: DELAY_S,
+                },
+            ],
+            EVENT_ACTIVATE,
+            NOW,
+        );
+        roots.entity_event(
+            0,
+            &[EntityComponent::DelayedEvent {
+                component: DELAYED,
+                delay_s: DELAY_S,
+            }],
+            EVENT_TRIGGER,
+            NOW,
+        );
+        roots.entity_event(
+            0,
+            &[EntityComponent::PlacementObstruction {
+                component: OBSTRUCTION,
+            }],
+            EVENT_DEACTIVATE,
+            NOW,
+        );
+        let change = roots.group(number, slot(false), &mut sent).expect("change");
+        let member = |component: u64| {
+            change
+                .members
+                .iter()
+                .find(|member| member.component == component)
+                .map(|member| member.encode().expect("member"))
+        };
+        assert_eq!(
+            body_of(&change, TIMELINE),
+            TimelineState::start(8).body().expect("start"),
+            "Activate starts the timeline at the root's next version"
+        );
+        // Retail Dynasty cave monolith: `05833101014300` and `078b22010100` (component bytes
+        // differ here).
+        assert_eq!(
+            member(DELAYED).expect("delay")[3..],
+            [0x01, 0x01, 0x43, 0x00]
+        );
+        assert_eq!(
+            member(OBSTRUCTION).expect("obstruction")[3..],
+            [0x01, 0x01, 0x00]
+        );
+        roots.tick(NOW + 3_499);
+        roots.tick(NOW + 3_500);
+        let done = roots.group(number, slot(false), &mut sent).expect("done");
+        assert!(done.members.iter().any(|member| {
+            member.component == DELAYED && member.state == MemberState::DelayedEvent(DELAY_DONE)
+        }));
+        assert!(
+            done.members
+                .iter()
+                .all(|member| member.component != OBSTRUCTION),
+            "a change goes to a viewer once"
+        );
+    }
+
+    #[test]
     fn a_history_keeps_its_newest_entries() {
+        // A repeated wave, as the breaches' sub-waves run: in progress and waiting by turns.
+        const TURNS: u32 = 5;
         let mut history = History::default();
-        for status in [
-            STATUS_IN_PROGRESS,
-            STATUS_SUCCEEDED,
-            STATUS_NOT_STARTED,
-            STATUS_FAILED,
-        ] {
-            assert!(history.set(status));
+        for _ in 0..TURNS {
+            assert!(history.set(STATUS_IN_PROGRESS));
+            assert!(history.set(STATUS_NOT_STARTED));
         }
-        assert!(!history.set(STATUS_FAILED), "the same status adds nothing");
+        assert!(history.set(STATUS_SUCCEEDED));
+        assert!(
+            !history.set(STATUS_SUCCEEDED),
+            "the same status adds nothing"
+        );
         assert_eq!(history.entries.len(), MAX_HISTORY);
-        assert_eq!(history.entries.first(), Some(&(1, STATUS_NOT_STARTED)));
-        assert_eq!(history.entries.last(), Some(&(5, STATUS_FAILED)));
+        assert_eq!(history.entries.first(), Some(&(3, STATUS_NOT_STARTED)));
+        assert_eq!(history.entries.last(), Some(&(12, STATUS_SUCCEEDED)));
+        // Retail breach body (2026-10-28 ledgers): its first and last bytes.
+        let body = history.body();
+        assert_eq!(&body[..3], &[1, 1, 10]);
+        assert_eq!(&body[body.len() - 8..], &[0, 0, 0, 12, 0, 0, 0, 3]);
     }
 }
