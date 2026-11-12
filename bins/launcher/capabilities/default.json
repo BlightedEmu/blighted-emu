@@ -1,0 +1,27 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the launcher page may call: its own commands and events, nothing else.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:event:default",
+    "allow-view",
+    "allow-connect",
+    "allow-rename-server",
+    "allow-remove-server",
+    "allow-log-in",
+    "allow-discord-log-in",
+    "allow-play",
+    "allow-log-out",
+    "allow-set-options",
+    "allow-find-paths",
+    "allow-set-theme",
+    "allow-open-link",
+    "allow-news-view",
+    "allow-news-picture",
+    "allow-update-view",
+    "allow-install-update"
+  ]
+}

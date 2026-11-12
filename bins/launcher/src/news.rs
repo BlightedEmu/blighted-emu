@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The server news: the site's launcher feed, named by the server at
 //! [`nw_protocol::launcher_api::NEWS_SOURCE_PATH`]. The last feed and its scaled pictures are kept
-//! in the settings folder, so the window shows them at once on start; a worker thread fetches
+//! in the settings folder, so the page shows them at once on start; a worker thread fetches
 //! them once per launch, when the launcher first connects to a server. Login and play never wait
 //! for the news.
 
@@ -12,16 +12,16 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, FixedOffset, Local, TimeDelta, Utc};
-use eframe::egui::ColorImage;
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::{ImageFormat, ImageReader, Limits, RgbImage};
 use nw_protocol::launcher_api::is_forbidden_host;
 use reqwest::Url;
 use reqwest::blocking::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::{ApiError, LauncherApi};
+use crate::news_html::{Block, plain_text, render};
 
 /// Time limit of each news call: the source, the feed and each picture.
 pub const NEWS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -247,12 +247,6 @@ pub fn scaled_picture(jpeg: &[u8]) -> Result<RgbImage, NewsError> {
     Ok(picture.to_rgb8())
 }
 
-/// The egui image of a picture.
-pub fn color_image(picture: &RgbImage) -> ColorImage {
-    let size = [picture.width(), picture.height()].map(|side| side as usize);
-    ColorImage::from_rgb(size, picture.as_raw())
-}
-
 fn encode_jpeg(picture: &RgbImage) -> Result<Vec<u8>, NewsError> {
     let mut bytes = Vec::new();
     JpegEncoder::new_with_quality(&mut bytes, PICTURE_QUALITY).encode_image(picture)?;
@@ -316,9 +310,14 @@ impl NewsCache {
         std::fs::write(self.picture_path(id), jpeg)
     }
 
-    /// The cached picture of post `id`.
-    pub fn load_picture(&self, id: i64) -> Option<RgbImage> {
-        scaled_picture(&std::fs::read(self.picture_path(id)).ok()?).ok()
+    /// The cached JPEG of post `id`, as saved by [`Self::save_picture`].
+    pub fn load_picture(&self, id: i64) -> Option<Vec<u8>> {
+        std::fs::read(self.picture_path(id)).ok()
+    }
+
+    /// Whether post `id` has a cached picture.
+    pub fn has_picture(&self, id: i64) -> bool {
+        self.picture_path(id).is_file()
     }
 
     /// Deletes each cached picture whose post id is not in `keep`. Other files stay.
@@ -364,8 +363,8 @@ pub enum NewsUpdate {
     NoNews,
     /// The server or the feed could not be read, or the feed is not valid.
     Offline,
-    /// The scaled picture of a post.
-    Picture(i64, RgbImage),
+    /// The picture of a post is in the cache.
+    Picture(i64),
 }
 
 /// The ids of the posts with a picture.
@@ -394,38 +393,34 @@ fn fetch_feed(
     Ok(Some(feed))
 }
 
-/// Downloads, checks, scales and caches the picture of post `id`.
+/// Downloads, checks, scales and caches the picture of post `id`. The page shows pictures from
+/// the cache only, so a picture that cannot be cached is not shown.
 fn download_picture(
     client: &Client,
     cache: &NewsCache,
     id: i64,
     url: &str,
-) -> Result<RgbImage, NewsError> {
+) -> Result<(), NewsError> {
     let jpeg = fetch(client, checked_url(url)?, MAX_PICTURE_BYTES)?;
     let picture = scaled_picture(&jpeg)?;
-    // A picture that cannot be cached is still shown; it is downloaded again next time.
-    let _ = cache.save_picture(id, &encode_jpeg(&picture)?);
-    Ok(picture)
+    cache.save_picture(id, &encode_jpeg(&picture)?)?;
+    Ok(())
 }
 
-/// The picture of `post`: the cached one when `previous` had the same picture address, else a
-/// fresh download. `None` when the post has none or it cannot be read.
-fn post_picture(
-    client: &Client,
-    cache: &NewsCache,
-    previous: Option<&Feed>,
-    post: &Post,
-) -> Option<RgbImage> {
-    let url = post.picture_url.as_deref()?;
+/// Whether the picture of `post` is in the cache after this call: the cached one is kept when
+/// `previous` had the same picture address, else it is downloaded. False when the post has none
+/// or it cannot be read.
+fn cache_picture(client: &Client, cache: &NewsCache, previous: Option<&Feed>, post: &Post) -> bool {
+    let Some(url) = post.picture_url.as_deref() else {
+        return false;
+    };
     let unchanged = previous.is_some_and(|feed| {
         feed.posts
             .iter()
             .any(|old| old.id == post.id && old.picture_url.as_deref() == Some(url))
     });
-    unchanged
-        .then(|| cache.load_picture(post.id))
-        .flatten()
-        .or_else(|| download_picture(client, cache, post.id, url).ok())
+    (unchanged && cache.has_picture(post.id))
+        || download_picture(client, cache, post.id, url).is_ok()
 }
 
 /// Refreshes the news of the server of `api`: the feed first, then the pictures of the shown
@@ -458,20 +453,8 @@ pub fn refresh(
     // A picture that cannot be deleted only takes disk space.
     let _ = cache.prune_pictures(&posts_with_pictures(&feed));
     for post in shown_posts(&feed, Utc::now()) {
-        if let Some(picture) = post_picture(&client, cache, previous, post)
-            && updates.send(NewsUpdate::Picture(post.id, picture)).is_err()
-        {
-            return;
-        }
-    }
-}
-
-/// Sends the cached pictures of the shown posts of `feed` to `updates`.
-pub fn load_cached_pictures(cache: &NewsCache, feed: &Feed, updates: &Sender<NewsUpdate>) {
-    for post in shown_posts(feed, Utc::now()) {
-        if post.picture_url.is_some()
-            && let Some(picture) = cache.load_picture(post.id)
-            && updates.send(NewsUpdate::Picture(post.id, picture)).is_err()
+        if cache_picture(&client, cache, previous, post)
+            && updates.send(NewsUpdate::Picture(post.id)).is_err()
         {
             return;
         }
@@ -487,8 +470,42 @@ enum Reach {
     Offline,
 }
 
-/// The news state of the window: the shown feed, the server it was fetched from and the running
-/// workers.
+/// One post as the page shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostView {
+    /// The site's post id; the page asks for its picture by it.
+    pub id: i64,
+    /// The kind, as a label ([`PostKind::label`]).
+    pub kind: String,
+    /// The date ([`post_date`]).
+    pub date: String,
+    /// Title.
+    pub title: String,
+    /// The body, read by [`crate::news_html`]; the page puts it in as text only.
+    pub blocks: Vec<Block>,
+    /// The body as one line ([`plain_text`]), for the closed post.
+    pub preview: String,
+    /// Whether it is a downtime post (its badge uses the warning colour).
+    pub downtime: bool,
+    /// Whether the cache holds its picture.
+    pub has_picture: bool,
+    /// Whether it is a fresh downtime pinned at the top ([`is_pinned`]).
+    pub pinned: bool,
+}
+
+/// The news as the page shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewsView {
+    /// The line above the posts ([`NewsState::status_line`]).
+    pub status_line: Option<String>,
+    /// The shown posts, pinned first.
+    pub posts: Vec<PostView>,
+}
+
+/// The news state of the launcher: the shown feed, the server it was fetched from and the
+/// running refresh.
 pub struct NewsState {
     cache: NewsCache,
     feed: Option<Feed>,
@@ -498,19 +515,6 @@ pub struct NewsState {
     /// The API host of the last fetch in this launch.
     fetched_from: Option<String>,
     refreshing: Option<Receiver<NewsUpdate>>,
-    loading_cache: Option<Receiver<NewsUpdate>>,
-}
-
-/// Moves the waiting updates of the worker in `slot` to `updates`; empties the slot when the
-/// worker ended.
-fn drain(slot: &mut Option<Receiver<NewsUpdate>>, updates: &mut Vec<NewsUpdate>) {
-    while let Some(receiver) = slot {
-        match receiver.try_recv() {
-            Ok(update) => updates.push(update),
-            Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => *slot = None,
-        }
-    }
 }
 
 /// Runs `work` in a worker thread; returns the receiver of its updates.
@@ -521,13 +525,9 @@ fn spawn(work: impl FnOnce(&Sender<NewsUpdate>) + Send + 'static) -> Receiver<Ne
 }
 
 impl NewsState {
-    /// The state with the cached feed of `cache` shown at once; its pictures load in a worker.
+    /// The state with the cached feed of `cache` shown at once.
     pub fn open(cache: NewsCache) -> Self {
         let cached = cache.load_feed();
-        let loading_cache = cached.as_ref().map(|cached| {
-            let (cache, feed) = (cache.clone(), cached.feed.clone());
-            spawn(move |updates| load_cached_pictures(&cache, &feed, updates))
-        });
         Self {
             saved: cached.as_ref().map(|cached| cached.saved),
             feed: cached.map(|cached| cached.feed),
@@ -535,8 +535,12 @@ impl NewsState {
             reach: Reach::Reached,
             fetched_from: None,
             refreshing: None,
-            loading_cache,
         }
+    }
+
+    /// The cache the pictures are read from.
+    pub fn cache(&self) -> &NewsCache {
+        &self.cache
     }
 
     /// The feed shown.
@@ -544,9 +548,9 @@ impl NewsState {
         self.feed.as_ref()
     }
 
-    /// Whether a worker runs.
+    /// Whether a refresh runs.
     pub fn busy(&self) -> bool {
-        self.refreshing.is_some() || self.loading_cache.is_some()
+        self.refreshing.is_some()
     }
 
     /// Whether the news of `server` should be fetched: no refresh runs, and this launch has not
@@ -565,39 +569,71 @@ impl NewsState {
         }));
     }
 
-    fn apply(&mut self, update: NewsUpdate, pictures: &mut Vec<(i64, RgbImage)>) {
+    fn apply(&mut self, update: NewsUpdate) {
         match update {
             NewsUpdate::Feed(feed) => {
                 self.feed = Some(feed);
                 self.saved = Some(SystemTime::now());
                 self.reach = Reach::Reached;
-                // The refresh sends the pictures of the fresh feed; an older cached picture
-                // must not arrive after them.
-                self.loading_cache = None;
             }
             NewsUpdate::NoNews => {
                 self.feed = None;
                 self.saved = None;
                 self.reach = Reach::Reached;
-                self.loading_cache = None;
             }
             NewsUpdate::Offline => self.reach = Reach::Offline,
-            NewsUpdate::Picture(id, picture) => pictures.push((id, picture)),
+            // The picture is in the cache now; the next view shows it.
+            NewsUpdate::Picture(_) => {}
         }
     }
 
-    /// Takes the results of the workers, the cache loader's first; returns the pictures that
-    /// arrived, oldest first.
-    pub fn poll(&mut self) -> Vec<(i64, RgbImage)> {
-        let mut updates = Vec::new();
-        for slot in [&mut self.loading_cache, &mut self.refreshing] {
-            drain(slot, &mut updates);
+    /// Takes the results of the refresh; true when the view changed.
+    pub fn poll(&mut self) -> bool {
+        let mut changed = false;
+        while let Some(receiver) = &self.refreshing {
+            match receiver.try_recv() {
+                Ok(update) => {
+                    self.apply(update);
+                    changed = true;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => self.refreshing = None,
+            }
         }
-        let mut pictures = Vec::new();
-        for update in updates {
-            self.apply(update, &mut pictures);
+        changed
+    }
+
+    /// The news as the page shows it now.
+    pub fn view(&self) -> NewsView {
+        let now = Utc::now();
+        let posts = self
+            .feed
+            .as_ref()
+            .map(|feed| {
+                shown_posts(feed, now)
+                    .into_iter()
+                    .map(|post| {
+                        let blocks = render(&post.body_html);
+                        PostView {
+                            id: post.id,
+                            kind: post.kind.label().to_owned(),
+                            date: post_date(post.created_at),
+                            title: post.title.clone(),
+                            preview: plain_text(&blocks),
+                            blocks,
+                            downtime: post.kind == PostKind::Downtime,
+                            has_picture: post.picture_url.is_some()
+                                && self.cache.has_picture(post.id),
+                            pinned: is_pinned(post, now),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        NewsView {
+            status_line: self.status_line(),
+            posts,
         }
-        pictures
     }
 
     /// The line above the posts: the offline note with the date of the shown news, or "No
@@ -801,11 +837,6 @@ mod tests {
         ));
         let small = encode_jpeg(&RgbImage::new(10, 5)).expect("jpeg");
         assert_eq!(scaled_picture(&small).expect("small").width(), 10);
-        let image = color_image(&picture);
-        assert_eq!(
-            image.size,
-            [PICTURE_WIDTH as usize, (PICTURE_WIDTH / 2) as usize]
-        );
     }
 
     #[test]
@@ -839,18 +870,20 @@ mod tests {
         let cache = NewsCache::new(dir.path().to_path_buf());
         let updates = run_refresh(&base, &cache, None);
         let feed = match &updates[..] {
-            [NewsUpdate::Feed(feed), NewsUpdate::Picture(7, picture)] => {
-                assert_eq!(picture.width(), PICTURE_WIDTH);
-                feed.clone()
-            }
+            [NewsUpdate::Feed(feed), NewsUpdate::Picture(7)] => feed.clone(),
             _ => panic!("expected the feed, then one picture"),
         };
+        let cached = cache.load_picture(7).expect("cached picture");
+        assert_eq!(
+            scaled_picture(&cached).expect("jpeg").width(),
+            PICTURE_WIDTH
+        );
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!(cache.load_feed().expect("cached").feed, feed);
         let again = run_refresh(&base, &cache, Some(&feed));
         assert!(matches!(
             &again[..],
-            [NewsUpdate::Feed(_), NewsUpdate::Picture(7, _)]
+            [NewsUpdate::Feed(_), NewsUpdate::Picture(7)]
         ));
         assert_eq!(hits.load(Ordering::SeqCst), 1, "the cached picture is used");
     }
@@ -925,5 +958,28 @@ mod tests {
         assert!(state.feed().is_some());
         assert!(!state.refresh_due(api.host()));
         assert!(state.refresh_due("other.example.org"));
+    }
+
+    #[test]
+    fn the_view_lists_the_shown_posts_with_their_cached_pictures() {
+        let dir = tempfile::tempdir().expect("dir");
+        let cache = NewsCache::new(dir.path().to_path_buf());
+        cache
+            .save_feed(feed_json("https://example.org", true).as_bytes())
+            .expect("save");
+        let state = NewsState::open(cache.clone());
+        let view = state.view();
+        assert_eq!(view.status_line, None);
+        assert_eq!(view.posts.len(), 2);
+        assert_eq!(view.posts[0].title, "Open test");
+        assert_eq!(view.posts[0].kind, "News");
+        assert!(!view.posts[0].has_picture, "not cached yet");
+        assert_eq!(view.posts[0].blocks, render("<p>Hi</p>"));
+        cache
+            .save_picture(7, &encode_jpeg(&RgbImage::new(4, 4)).expect("jpeg"))
+            .expect("picture");
+        assert!(state.view().posts[0].has_picture);
+        let json = serde_json::to_value(state.view()).expect("json");
+        assert!(json["posts"][0].get("hasPicture").is_some());
     }
 }

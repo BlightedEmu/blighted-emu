@@ -54,38 +54,48 @@ exceptions = [
     { crate = "voice-server", allow = ["AGPL-3.0-or-later"] },
     { crate = "launcher", allow = ["GPL-3.0-or-later"] },
     # Font files that egui draws text with; OFL and the Ubuntu font licence allow bundling.
-    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+    # Launcher only (Tauri): the HTML reader of tauri-utils and the folder lookup of tauri.
+    { crate = "cssparser", allow = ["MPL-2.0"] },
+    { crate = "cssparser-macros", allow = ["MPL-2.0"] },
+    { crate = "dtoa-short", allow = ["MPL-2.0"] },
+    { crate = "selectors", allow = ["MPL-2.0"] },
+    { crate = "option-ext", allow = ["MPL-2.0"] },
 ]
 
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
 skip = [
-    { crate = "toml_datetime@0.6.11", reason = "figment 0.10 (config) uses toml 0.8; bevy_ecs macros (build time only) use toml_edit 0.25" },
-    { crate = "toml_edit@0.22.27", reason = "figment 0.10 (config) uses toml 0.8; bevy_ecs macros (build time only) use toml_edit 0.25" },
-    { crate = "winnow@0.7.15", reason = "figment 0.10 (config) uses toml 0.8; bevy_ecs macros (build time only) use toml_edit 0.25" },
     { crate = "base64@0.22.1", reason = "sqlx-core and metrics-exporter-prometheus use base64 0.22; hyper-util (reqwest) uses 0.23" },
+    { crate = "bitflags@1.3.2", reason = "launcher: gtk-rs 0.18 and webkit2gtk (wry on Linux) use bitflags 1; the rest uses 2" },
     { crate = "block-buffer@0.10.4", reason = "sqlx-core uses sha2 0.10; sqlx-postgres and edge-http use digest 0.11" },
-    { crate = "calloop-wayland-source@0.3.0", reason = "launcher: smithay-client-toolkit 0.19 (winit) and 0.20 (clipboard)" },
-    { crate = "calloop@0.13.0", reason = "launcher: winit 0.30 uses calloop 0.13; smithay-clipboard uses 0.14" },
     { crate = "cpufeatures@0.2.17", reason = "sqlx-core uses sha2 0.10; argon2 and sha2 0.11 use cpufeatures 0.3" },
     { crate = "crypto-common@0.1.7", reason = "sqlx-core uses digest 0.10; the rest of the graph uses digest 0.11" },
     { crate = "digest@0.10.7", reason = "sqlx-core uses sha2 0.10; argon2, hmac, and sha2 0.11 use digest 0.11" },
     { crate = "getrandom@0.2.17", reason = "ring for rustls uses getrandom 0.2; uuid and sqlx use getrandom 0.4" },
     { crate = "getrandom@0.3.4", reason = "password salt and metrics rand 0.9 use getrandom 0.3; uuid uses 0.4" },
+    { crate = "hashbrown@0.12.3", reason = "launcher: tauri-utils uses indexmap 1 (schemars 0.8), which uses hashbrown 0.12" },
     { crate = "hashbrown@0.16.1", reason = "sqlx-core and metrics-util use hashbrown 0.16; indexmap uses 0.17" },
-    { crate = "linux-raw-sys@0.4.15", reason = "launcher: rustix 0.38 (winit) beside rustix 1 (tempfile, polling)" },
-    { crate = "miniz_oxide@0.8.9", reason = "launcher: png (window icon) uses miniz_oxide 0.8; flate2 uses 0.9" },
-    { crate = "quick-xml@0.41.0", reason = "launcher: wayland-scanner uses quick-xml 0.41; nw-formats uses 0.42" },
+    { crate = "heck@0.4.1", reason = "launcher: glib-macros 0.18 (gtk-rs) uses heck 0.4; sqlx-macros uses 0.5" },
+    { crate = "indexmap@1.9.3", reason = "launcher: tauri-utils (schemars 0.8) uses indexmap 1; the rest uses 2" },
+    { crate = "miniz_oxide@0.8.9", reason = "png (content-tool, and tauri's icon code) uses miniz_oxide 0.8; flate2 uses 0.9" },
+    { crate = "proc-macro-crate@1.3.1", reason = "launcher: gtk-rs 0.18 macros use proc-macro-crate 1 and 2; tao uses 3" },
+    { crate = "proc-macro-crate@2.0.0", reason = "launcher: gtk-rs 0.18 macros use proc-macro-crate 1 and 2; tao uses 3" },
     { crate = "rand@0.9.5", reason = "metrics-exporter-prometheus uses rand 0.9; sqlx-postgres uses rand 0.10" },
     { crate = "rand_core@0.9.5", reason = "metrics rand 0.9 uses rand_core 0.9; sqlx rand 0.10 uses rand_core 0.10" },
-    { crate = "rustix@0.38.44", reason = "launcher: winit 0.30 and calloop 0.13 use rustix 0.38" },
+    { crate = "serde_spanned@0.6.9", reason = "figment 0.10 (config) uses toml 0.8; tauri uses toml 1" },
     { crate = "sha2@0.10.9", reason = "sqlx-core pins sha2 0.10; edge-http and sqlx-postgres use sha2 0.11" },
-    { crate = "smithay-client-toolkit@0.19.2", reason = "launcher: winit uses 0.19; smithay-clipboard uses 0.20" },
+    { crate = "syn@1.0.109", reason = "launcher: gtk-rs 0.18 macros (glib-macros, gtk3-macros) use syn 1" },
     { crate = "syn@2.0.119", reason = "figment's env parser (pear_codegen) uses syn 2; serde_derive uses syn 3" },
     { crate = "thiserror-impl@1.0.69", reason = "launcher: macro crate of thiserror 1" },
-    { crate = "thiserror@1.0.69", reason = "launcher: winit stack (calloop 0.13, ndk) uses thiserror 1" },
-    { crate = "windows-sys@0.52.0", reason = "ring, glutin and winit use windows-sys 0.52; eframe and tokio use 0.61" },
+    { crate = "thiserror@1.0.69", reason = "launcher: gtk-rs 0.18 (cairo-rs, under wry on Linux) uses thiserror 1" },
+    { crate = "toml@0.8.23", reason = "figment 0.10 (config) uses toml 0.8; tauri uses toml 1" },
+    { crate = "toml_datetime@0.6.11", reason = "figment 0.10 (config) uses toml 0.8; bevy_ecs macros (build time only) use toml_edit 0.25" },
+    { crate = "toml_edit@0.19.15", reason = "launcher: proc-macro-crate 1 (gtk-rs 0.18 macros) uses toml_edit 0.19" },
+    { crate = "toml_edit@0.20.7", reason = "launcher: proc-macro-crate 2 (gtk-rs 0.18 macros) uses toml_edit 0.20" },
+    { crate = "toml_edit@0.22.27", reason = "figment 0.10 (config) uses toml 0.8; bevy_ecs macros (build time only) use toml_edit 0.25" },
+    { crate = "winnow@0.5.40", reason = "launcher: toml_edit 0.19 and 0.20 (gtk-rs 0.18 macros) use winnow 0.5" },
+    { crate = "winnow@0.7.15", reason = "figment 0.10 (config) uses toml 0.8; bevy_ecs macros (build time only) use toml_edit 0.25" },
 ]
 
 [sources]

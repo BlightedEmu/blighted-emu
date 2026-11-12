@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 
 use crate::mirror::{BWRAP_PROGRAM, NetworkFiles, bwrap_arguments};
 
@@ -139,16 +139,133 @@ pub fn is_retail_prefix(prefix: &Path) -> bool {
 /// The player's extra variables, set before the launcher's own so they cannot replace them.
 pub type Environment = [(String, String)];
 
+/// The folder an AppImage is mounted at, set by the AppImage runtime.
+const APPDIR_ENV: &str = "APPDIR";
+/// Variables the AppImage runtime and its start hooks set for the launcher alone: the runtime's
+/// own names, and the GTK back end and theme the hooks force (`apprun-hooks` of the AppImage).
+const APPIMAGE_OWN_VARIABLES: [&str; 6] = [
+    APPDIR_ENV,
+    "APPIMAGE",
+    "ARGV0",
+    "OWD",
+    "GDK_BACKEND",
+    "GTK_THEME",
+];
+/// Separator of a path list such as `LD_LIBRARY_PATH`.
+const PATH_LIST_SEPARATOR: char = ':';
+
+/// A change to the environment the game inherits from the launcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvFix {
+    /// The variable is not passed on.
+    Remove(String),
+    /// The variable is passed on with this value.
+    Set(String, String),
+}
+
+/// The changes that keep a launcher running as an AppImage from passing its own library and GTK
+/// paths on to `bwrap` and Proton. `variables` is the launcher's environment. With no `APPDIR`
+/// there is nothing to change. Else the runtime's own variables go, a path list loses its entries
+/// inside the AppImage, and any other variable that points into the AppImage goes.
+pub fn appimage_fixes(variables: &[(String, String)]) -> Vec<EnvFix> {
+    let Some(appdir) = variables
+        .iter()
+        .find(|(name, value)| name == APPDIR_ENV && !value.is_empty())
+        .map(|(_, value)| value.as_str())
+    else {
+        return Vec::new();
+    };
+    variables
+        .iter()
+        .filter_map(|(name, value)| {
+            if APPIMAGE_OWN_VARIABLES.contains(&name.as_str()) {
+                return Some(EnvFix::Remove(name.clone()));
+            }
+            if !value.contains(appdir) {
+                return None;
+            }
+            let kept: Vec<&str> = value
+                .split(PATH_LIST_SEPARATOR)
+                .filter(|entry| !entry.is_empty() && !entry.starts_with(appdir))
+                .collect();
+            if value.contains(PATH_LIST_SEPARATOR) && !kept.is_empty() {
+                Some(EnvFix::Set(
+                    name.clone(),
+                    kept.join(&PATH_LIST_SEPARATOR.to_string()),
+                ))
+            } else {
+                Some(EnvFix::Remove(name.clone()))
+            }
+        })
+        .collect()
+}
+
+/// Applies `fixes` to `command`.
+fn apply_fixes(command: &mut Command, fixes: &[EnvFix]) {
+    for fix in fixes {
+        match fix {
+            EnvFix::Remove(name) => command.env_remove(name),
+            EnvFix::Set(name, value) => command.env(name, value),
+        };
+    }
+}
+
+/// Why no program opened a link.
+#[cfg(not(windows))]
+const NO_LINK_OPENER: &str = "no program on this PC opens links";
+
+/// The programs that can open `target` (`xdg-open` and the others the `open` crate tries), each
+/// with `fixes` applied.
+#[cfg(not(windows))]
+fn clean_open_commands(target: &str, fixes: &[EnvFix]) -> Vec<Command> {
+    open::commands(target)
+        .into_iter()
+        .map(|mut command| {
+            apply_fixes(&mut command, fixes);
+            command
+        })
+        .collect()
+}
+
+/// Opens `target` (a web or mail address) in the player's own program. On Linux the program gets
+/// the same clean environment as the game ([`appimage_fixes`]): the AppImage's own library and
+/// GTK paths must not reach the browser either.
+///
+/// # Errors
+/// No program could open it.
+pub fn open_outside(target: &str) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        open::that(target)
+    }
+    #[cfg(not(windows))]
+    {
+        let inherited: Vec<(String, String)> = std::env::vars().collect();
+        let mut last_error = std::io::Error::other(NO_LINK_OPENER);
+        for mut command in clean_open_commands(target, &appimage_fixes(&inherited)) {
+            match command.status() {
+                Ok(status) if status.success() => return Ok(()),
+                Ok(status) => last_error = std::io::Error::other(status.to_string()),
+                Err(error) => last_error = error,
+            }
+        }
+        Err(last_error)
+    }
+}
+
 /// `bwrap <private files> -- <proton> run <exe> <arguments>` with the player's `environment` and
 /// the Steam compatibility environment, so a patched game executable runs under Proton without
-/// Steam's own launcher and without Easy Anti-Cheat, and sees the private network files.
+/// Steam's own launcher and without Easy Anti-Cheat, and sees the private network files. The
+/// `fixes` ([`appimage_fixes`]) apply first, so a player's variable still wins.
 pub fn direct_command(
     launch: &DirectLaunch,
     files: &NetworkFiles,
     arguments: &[String],
     environment: &Environment,
+    fixes: &[EnvFix],
 ) -> Command {
     let mut command = Command::new(BWRAP_PROGRAM);
+    apply_fixes(&mut command, fixes);
     command
         .args(bwrap_arguments(files))
         .arg(&launch.proton)
@@ -285,38 +402,44 @@ pub fn windows_command(
     command
 }
 
-/// Starts the patched game on Windows and returns at once. The caller starts
+/// Starts the patched game on Windows and returns its process at once. The caller starts
 /// [`crate::aws_proxy::AwsProxy`] first, so the game's AWS calls reach the server.
 #[cfg(any(windows, test))]
 pub fn start_game_windows(
     launch: &WindowsLaunch,
     arguments: &[String],
     environment: &Environment,
-) -> Result<(), GameError> {
+) -> Result<Child, GameError> {
     let mut command = windows_command(launch, arguments, environment);
     let program = launch.exe.clone();
     command
         .spawn()
-        .map(drop)
         .map_err(|source| GameError::Start { program, source })
 }
 
-/// Starts the game with the private network `files` and returns at once.
+/// Starts the game with the private network `files` and returns its process (`bwrap`, which
+/// lives as long as the game) at once.
 pub fn start_game(
     launch: &DirectLaunch,
     files: &NetworkFiles,
     arguments: &[String],
     environment: &Environment,
-) -> Result<(), GameError> {
+) -> Result<Child, GameError> {
     std::fs::create_dir_all(&launch.compat_data).map_err(|source| GameError::Prefix {
         path: launch.compat_data.clone(),
         source,
     })?;
-    let mut command = direct_command(launch, files, arguments, environment);
+    let inherited: Vec<(String, String)> = std::env::vars().collect();
+    let mut command = direct_command(
+        launch,
+        files,
+        arguments,
+        environment,
+        &appimage_fixes(&inherited),
+    );
     let program = PathBuf::from(command.get_program());
     command
         .spawn()
-        .map(drop)
         .map_err(|source| GameError::Start { program, source })
 }
 
@@ -497,6 +620,7 @@ mod tests {
             &files(),
             &template(&["-LoginChannelOverride", KEY]),
             &player_environment(),
+            &[],
         );
         assert_eq!(command.get_program(), OsStr::new(BWRAP_PROGRAM));
         let args: Vec<_> = command
@@ -624,5 +748,82 @@ mod tests {
         )
         .expect("arguments");
         assert_eq!(arguments[2], "-CognitoPool");
+    }
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn no_appimage_means_no_fixes() {
+        let variables = pairs(&[("HOME", "/home/a"), ("LD_LIBRARY_PATH", "/usr/lib")]);
+        assert!(appimage_fixes(&variables).is_empty());
+    }
+
+    #[test]
+    fn appimage_paths_are_removed_from_lists() {
+        let variables = pairs(&[
+            ("APPDIR", "/tmp/.mount_Bl1"),
+            ("APPIMAGE", "/home/a/BlightedLauncher.AppImage"),
+            ("LD_LIBRARY_PATH", "/tmp/.mount_Bl1/usr/lib:/usr/lib"),
+            ("GTK_PATH", "/tmp/.mount_Bl1/usr/lib/gtk-3.0"),
+            ("XDG_DATA_DIRS", "/tmp/.mount_Bl1/usr/share:/usr/share"),
+            ("GDK_BACKEND", "x11"),
+            ("HOME", "/home/a"),
+        ]);
+        let fixes = appimage_fixes(&variables);
+        assert!(fixes.contains(&EnvFix::Remove("APPDIR".into())));
+        assert!(fixes.contains(&EnvFix::Remove("APPIMAGE".into())));
+        assert!(fixes.contains(&EnvFix::Remove("GDK_BACKEND".into())));
+        assert!(fixes.contains(&EnvFix::Set("LD_LIBRARY_PATH".into(), "/usr/lib".into())));
+        assert!(fixes.contains(&EnvFix::Remove("GTK_PATH".into())));
+        assert!(fixes.contains(&EnvFix::Set("XDG_DATA_DIRS".into(), "/usr/share".into())));
+        assert!(!fixes.iter().any(
+            |fix| matches!(fix, EnvFix::Remove(name) | EnvFix::Set(name, _) if name == "HOME")
+        ));
+    }
+
+    #[test]
+    fn the_direct_command_applies_fixes_before_player_values() {
+        let fixes = [
+            EnvFix::Remove("GTK_PATH".into()),
+            EnvFix::Set("LD_LIBRARY_PATH".into(), "/usr/lib".into()),
+        ];
+        let command = direct_command(
+            &launch(OWN_PREFIX),
+            &files(),
+            &template(&["-LoginChannelOverride", KEY]),
+            &pairs(&[("LD_LIBRARY_PATH", "/opt/x")]),
+            &fixes,
+        );
+        let gtk_path = command
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new("GTK_PATH"))
+            .map(|(_, value)| value);
+        assert_eq!(gtk_path, Some(None));
+        assert_eq!(
+            command_envs(&command)
+                .get("LD_LIBRARY_PATH")
+                .map(String::as_str),
+            Some("/opt/x")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn link_programs_get_the_appimage_fixes() {
+        let fixes = [EnvFix::Remove("GTK_PATH".into())];
+        let commands = clean_open_commands("https://example.org", &fixes);
+        assert!(!commands.is_empty());
+        for command in &commands {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(name, value)| name == OsStr::new("GTK_PATH") && value.is_none())
+            );
+        }
     }
 }

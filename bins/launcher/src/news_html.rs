@@ -5,6 +5,7 @@
 //! text, and a link to another scheme shows as plain text.
 
 use reqwest::Url;
+use serde::Serialize;
 
 /// The tags this reader knows.
 const PARAGRAPH: &str = "p";
@@ -28,7 +29,7 @@ pub const BULLET: &str = "\u{2022}";
 const FIRST_NUMBER: usize = 1;
 
 /// How a run of text looks.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct SpanStyle {
     /// Inside `strong`.
     pub strong: bool,
@@ -39,7 +40,7 @@ pub struct SpanStyle {
 }
 
 /// A run of text with one style and one link.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Span {
     /// The text; `\n` for a `br`.
     pub text: String,
@@ -50,7 +51,8 @@ pub struct Span {
 }
 
 /// What a block is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum BlockKind {
     /// A paragraph.
     Paragraph,
@@ -64,7 +66,7 @@ pub enum BlockKind {
 }
 
 /// A paragraph or a list item.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Block {
     /// Paragraph or list item.
     pub kind: BlockKind,
@@ -444,14 +446,6 @@ pub fn plain_text(blocks: &[Block]) -> String {
         .join(" ")
 }
 
-/// Whether any block has a link.
-pub fn has_link(blocks: &[Block]) -> bool {
-    blocks
-        .iter()
-        .flat_map(|block| &block.spans)
-        .any(|span| span.link.is_some())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,7 +612,23 @@ mod tests {
             "<p>One<br>two</p><ul><li>Item</li></ul><p><a href=\"https://x.example.org\">Link</a></p>",
         );
         assert_eq!(plain_text(&blocks), format!("One two {BULLET} Item Link"));
-        assert!(has_link(&blocks));
-        assert!(!has_link(&render("<p>none</p>")));
+    }
+
+    #[test]
+    fn script_and_bad_links_stay_text() {
+        let blocks = render(
+            r#"<p><script>alert(1)</script><a href="javascript:alert(1)">x</a><img src=x onerror=alert(1)></p>"#,
+        );
+        let json = serde_json::to_string(&blocks).expect("json");
+        assert!(!json.contains("javascript:"), "{json}");
+        assert!(
+            blocks
+                .iter()
+                .flat_map(|block| &block.spans)
+                .all(|span| span.link.is_none())
+        );
+        let text = plain_text(&blocks);
+        assert!(text.contains("<script>"), "{text}");
+        assert!(text.contains("<img"), "{text}");
     }
 }

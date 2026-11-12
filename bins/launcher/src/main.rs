@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! `launcher`: the player launcher window.
+//! `BlightedLauncher`: the player launcher window.
 
 // A window program on Windows: no console window opens beside the launcher.
 #![windows_subsystem = "windows"]
@@ -7,19 +7,16 @@
 use std::fmt::Display;
 use std::process::ExitCode;
 
-use eframe::egui;
-use launcher::app::LauncherApp;
+use launcher::commands::{self, AppState};
+use launcher::install_crypto_provider;
+use launcher::news::{NewsCache, NewsState};
+use launcher::session::Session;
 use launcher::settings::{Settings, default_settings_path};
 use launcher::steam;
-use launcher::theme;
-use launcher::{install_crypto_provider, window_icon};
+use launcher::updates::{self, UpdateState};
 
-/// Window title.
+/// Title of the error box. The window title is in `tauri.conf.json`.
 const APP_NAME: &str = "Blighted New World launcher";
-/// Window size at start (wide enough for the play column beside the news), and the smallest
-/// size (one column).
-const WINDOW_SIZE: [f32; 2] = [1080.0, 720.0];
-const MIN_WINDOW_SIZE: [f32; 2] = [420.0, 520.0];
 
 fn main() -> ExitCode {
     install_crypto_provider();
@@ -30,6 +27,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // A settings file that cannot be read stops the start, so it is never overwritten.
     let mut settings = match Settings::load(&path) {
         Ok(settings) => settings,
         Err(error) => {
@@ -41,29 +39,36 @@ fn main() -> ExitCode {
     settings.options.fill_from_env(lookup);
     let found = steam::scan(lookup);
     settings.options.fill_from_scan(&found);
-    let icon = match window_icon() {
-        Ok(icon) => icon,
-        Err(error) => {
-            report_start_error(&error);
-            return ExitCode::FAILURE;
-        }
-    };
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(APP_NAME)
-            .with_icon(icon)
-            .with_inner_size(WINDOW_SIZE)
-            .with_min_inner_size(MIN_WINDOW_SIZE),
-        ..Default::default()
-    };
-    let result = eframe::run_native(
-        APP_NAME,
-        options,
-        Box::new(move |creation| {
-            theme::install(&creation.egui_ctx, settings.theme);
-            Ok(Box::new(LauncherApp::new(path, settings, found)))
-        }),
-    );
+    let session = Session::new(path, settings, found);
+    let news = NewsState::open(NewsCache::new(session.settings_dir()));
+    let result = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(AppState::new(session, news))
+        .manage(UpdateState::default())
+        .invoke_handler(tauri::generate_handler![
+            commands::view,
+            commands::connect,
+            commands::rename_server,
+            commands::remove_server,
+            commands::log_in,
+            commands::discord_log_in,
+            commands::play,
+            commands::log_out,
+            commands::set_options,
+            commands::find_paths,
+            commands::set_theme,
+            commands::open_link,
+            commands::news_view,
+            commands::news_picture,
+            commands::update_view,
+            commands::install_update,
+        ])
+        .setup(|app| {
+            commands::start(app.handle());
+            updates::start_check(app.handle().clone());
+            Ok(())
+        })
+        .run(tauri::generate_context!());
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -84,5 +89,5 @@ fn report_start_error(error: &dyn Display) {
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
     #[cfg(not(windows))]
-    eprintln!("error: {error}");
+    eprintln!("{APP_NAME}: {error}");
 }

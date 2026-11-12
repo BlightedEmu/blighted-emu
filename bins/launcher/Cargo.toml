@@ -13,8 +13,8 @@ name = "BlightedLauncher"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
-eframe.workspace = true
 image.workspace = true
 nw-protocol.workspace = true
 open.workspace = true
@@ -22,6 +22,8 @@ reqwest = { workspace = true, features = ["blocking"] }
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tauri.workspace = true
+tauri-plugin-updater.workspace = true
 thiserror.workspace = true
 # The loopback proxy (bins/launcher/src/aws_proxy.rs) needs an async runtime and TLS.
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "io-util"] }
@@ -31,7 +33,7 @@ tokio-rustls.workspace = true
 rfd.workspace = true
 
 [build-dependencies]
-embed-resource.workspace = true
+tauri-build.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

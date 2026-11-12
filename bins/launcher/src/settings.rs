@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::options::LaunchOptions;
 use crate::server::api_base_url;
-use crate::theme::ThemeChoice;
 
 /// Folder under the user config folder.
 pub const SETTINGS_DIR: &str = "blighted-launcher";
@@ -19,6 +18,17 @@ pub const SETTINGS_FILE: &str = "settings.json";
 /// File mode of the settings file on Unix: owner read and write only.
 #[cfg(unix)]
 const OWNER_ONLY_MODE: u32 = 0o600;
+
+/// The theme the player picked; night is the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeChoice {
+    /// The website's dark violet theme.
+    #[default]
+    Night,
+    /// A light theme of the same colours.
+    Day,
+}
 
 /// One saved server.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,7 +53,7 @@ pub struct Settings {
     pub profiles: Vec<ServerProfile>,
     /// The address of the selected saved server.
     pub selected: Option<String>,
-    /// The window theme; files of older launchers have none and give night.
+    /// The page theme; files of older launchers have none and give night.
     pub theme: ThemeChoice,
     /// How the game starts; files of older launchers have none and give empty options.
     pub options: LaunchOptions,

@@ -16,7 +16,9 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 clap = { version = "4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "env"] }
 crc32fast = { version = "1.5.2", default-features = false, features = ["std"] }
 data-encoding = { version = "2.11.1", default-features = false, features = ["alloc"] }
-eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+# Launcher only: the news pictures go to its page as data addresses (the same major version as
+# tauri's own, so there is one copy).
+base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 figment = { version = "0.10.19", default-features = false, features = ["toml", "env"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 getrandom = { version = "0.3.4", default-features = false, features = ["std"] }
@@ -45,8 +47,13 @@ open = { version = "5.4.4", default-features = false }
 png = { version = "0.18.1", default-features = false }
 postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
 prettyplease = { version = "0.3.0", default-features = false }
-# Windows launcher only: puts the icon into the program file (llvm-rc when cross-building).
-embed-resource = { version = "3.0.12", default-features = false }
+# Launcher only: the window is a web page in a Tauri shell. Default features: the system web
+# view (wry) and the window code.
+tauri = { version = "2.12.5" }
+# Launcher only: Tauri's build step (config, icon in the Windows program file, permissions).
+tauri-build = { version = "2.7.4" }
+# Launcher only: signed self-updates from the launcher's GitHub Releases.
+tauri-plugin-updater = { version = "2.14.1" }
 # Windows launcher only: a message box for errors before its window opens (it has no console).
 rfd = { version = "0.18.0", default-features = false }
 proc-macro2 = { version = "1.0.107", default-features = false, features = ["proc-macro"] }

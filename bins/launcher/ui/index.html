@@ -1,0 +1,133 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="en" data-theme="night">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blighted New World launcher</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <aside class="side">
+    <img class="crest" src="img/crest.png" alt="">
+    <h1 class="wordmark">Blighted<br><em>New World</em></h1>
+
+    <section class="server">
+      <div>
+        <div class="label">Server</div>
+        <b id="server-name"></b> <span class="meta" id="server-address"></span>
+      </div>
+      <button type="button" class="link-button" id="change-server">Change server</button>
+    </section>
+
+    <section class="servers" id="servers" hidden>
+      <ul class="server-list" id="server-list"></ul>
+      <label class="field-label" for="server-input">Server address</label>
+      <div class="row">
+        <input class="field" id="server-input" placeholder="example.org" autocomplete="off" spellcheck="false">
+        <button type="button" class="button" id="connect">Connect</button>
+      </div>
+      <p class="hint" id="new-server-hint" hidden>A new address is saved here once it connects.</p>
+      <div id="saved-as" hidden>
+        <label class="field-label" for="saved-name">Saved as</label>
+        <div class="row">
+          <input class="field" id="saved-name" placeholder="Server name" autocomplete="off">
+          <button type="button" class="button" id="remove-server" title="Forget this server and its login.">Remove</button>
+        </div>
+      </div>
+    </section>
+
+    <p class="status" id="status"><span class="dot"></span><b id="status-word"></b> <span id="status-detail"></span></p>
+
+    <dl class="facts" id="facts" hidden>
+      <dt>Login</dt><dd id="fact-login"></dd>
+      <dt id="fact-sign-up-label">Sign-up</dt><dd id="fact-sign-up"></dd>
+    </dl>
+
+    <section class="account" id="account">
+      <p class="hint" id="no-server">Connect to a server first.</p>
+      <form id="password-login" hidden>
+        <input class="field" id="username" placeholder="Username" autocomplete="username" spellcheck="false">
+        <input class="field" id="password" type="password" placeholder="Password" autocomplete="current-password">
+        <div class="row">
+          <button type="submit" class="button primary" id="log-in">Log In</button>
+          <button type="button" class="button" id="make-account">Make Account</button>
+        </div>
+      </form>
+      <div id="discord-login" hidden>
+        <p class="hint">Your browser opens Discord's login page.</p>
+        <button type="button" class="button primary wide" id="discord-log-in">Log In with Discord</button>
+      </div>
+      <div id="logged-in" hidden>
+        <button type="button" class="play" id="play">PLAY</button>
+        <button type="button" class="link-button" id="log-out">Log out</button>
+      </div>
+    </section>
+
+    <footer class="side-foot"><span class="meta" id="version"></span></footer>
+  </aside>
+
+  <main class="main">
+    <nav class="top">
+      <div class="tabs" role="tablist">
+        <button type="button" class="tab" role="tab" data-tab="news">News</button>
+        <button type="button" class="tab" role="tab" data-tab="options">Options</button>
+        <button type="button" class="tab" role="tab" data-tab="settings">Settings</button>
+      </div>
+      <button type="button" class="update-state" id="update-state" disabled></button>
+    </nav>
+
+    <section class="page" data-page="news">
+      <h2 class="page-title">News</h2>
+      <p class="meta" id="news-status" hidden></p>
+      <div id="news-posts"></div>
+    </section>
+
+    <section class="page" data-page="options" hidden>
+      <h2 class="page-title">Options</h2>
+      <div class="option-rows" id="path-rows"></div>
+      <div class="option-row" id="proton-pick-row" hidden>
+        <label class="field-label" for="proton-pick">Proton build</label>
+        <select class="field" id="proton-pick"></select>
+      </div>
+      <fieldset class="switches" id="switches" hidden>
+        <legend class="field-label">Proton switches</legend>
+      </fieldset>
+      <label class="field-label" for="environment">Extra environment</label>
+      <p class="hint">One NAME=value per line.</p>
+      <textarea class="field mono" id="environment" rows="3" spellcheck="false"></textarea>
+      <div class="row"><button type="button" class="button" id="find-paths">Find Paths</button></div>
+    </section>
+
+    <section class="page" data-page="settings" hidden>
+      <h2 class="page-title">Settings</h2>
+      <div class="field-label">Theme</div>
+      <div class="row pickers">
+        <button type="button" class="picker" data-theme-choice="night">Night</button>
+        <button type="button" class="picker" data-theme-choice="day">Day</button>
+      </div>
+      <div class="field-label">Saved in</div>
+      <p class="mono meta" id="settings-file"></p>
+    </section>
+  </main>
+
+  <div class="popup" id="update-popup" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="update-title">
+      <div class="label">Update available</div>
+      <h2 id="update-title">Launcher <em id="update-version"></em> is ready</h2>
+      <p id="update-text"></p>
+      <ul id="update-notes"></ul>
+      <div class="progress" id="update-progress" hidden>
+        <div class="row spread"><span class="label" id="update-step">Downloading</span><span class="meta" id="update-percent"></span></div>
+        <div class="track"><div class="fill" id="update-fill"></div></div>
+      </div>
+      <p class="error" id="update-error" hidden></p>
+      <div class="row end">
+        <button type="button" class="button" id="update-later">Later</button>
+        <button type="button" class="button primary" id="update-now">Update now</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
