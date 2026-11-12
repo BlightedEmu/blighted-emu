@@ -9,10 +9,10 @@ use std::process::ExitCode;
 
 use eframe::egui;
 use launcher::app::LauncherApp;
-use launcher::install_crypto_provider;
 use launcher::settings::{Settings, default_settings_path};
 use launcher::steam;
 use launcher::theme;
+use launcher::{install_crypto_provider, window_icon};
 
 /// Window title.
 const APP_NAME: &str = "Blighted New World launcher";
@@ -41,9 +41,17 @@ fn main() -> ExitCode {
     settings.options.fill_from_env(lookup);
     let found = steam::scan(lookup);
     settings.options.fill_from_scan(&found);
+    let icon = match window_icon() {
+        Ok(icon) => icon,
+        Err(error) => {
+            report_start_error(&error);
+            return ExitCode::FAILURE;
+        }
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(APP_NAME)
+            .with_icon(icon)
             .with_inner_size(WINDOW_SIZE)
             .with_min_inner_size(MIN_WINDOW_SIZE),
         ..Default::default()

@@ -30,6 +30,9 @@ tokio-rustls.workspace = true
 [target.'cfg(windows)'.dependencies]
 rfd.workspace = true
 
+[build-dependencies]
+embed-resource.workspace = true
+
 [dev-dependencies]
 axum.workspace = true
 tempfile.workspace = true
