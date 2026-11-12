@@ -136,6 +136,18 @@
             {
               "check": "The Amazon account link pop-up is off (tests only, 2026-11-11): the served remote config sets `enable-agid-account-linking` to false.",
               "proof": "tests"
+            },
+            {
+              "check": "New launcher window (tests only, 2026-11-12): the window is a web page in the website's look (Tauri), with the same login, Play, saved servers, options and news as before. The settings file stays where it was, so saved servers and logins carry over. Not seen on Windows yet.",
+              "proof": "tests"
+            },
+            {
+              "check": "Launcher self-update (tests only): at each start the launcher reads the newest GitHub Release. A newer version shows an update pop-up; **Update now** installs a signed update and opens the new launcher. It is off while the game runs, and a failed check stays quiet.",
+              "proof": "tests"
+            },
+            {
+              "check": "Launcher releases: a hand-started workflow builds the Windows setup file and the Linux AppImage and publishes the release only when both pass. It has not run yet; the first release (0.1.0) is not made.",
+              "proof": "none"
             }
           ]
         },
@@ -2202,7 +2214,8 @@
     "**Systems with no code: housing, artifacts, heartrunes, trophies.**\n\nStart these last. They are not on the path of a new player.",
     "**Store tokens and the barber (2026-11-11, tests only).** Run the global migration 0009 and `content-tool store` (the table gains the token pack), then in the game: buy a barbershop token in the store (the count shows 1), open the barber, change the face and the hair: the token count goes down, the look changes at once and after a new login, and a second player sees the new look.",
     "**Group finder and raids: what is missing.**\n\n- Capture a group finder session: make a listing, apply from a second account, accept, decline, and turn a listing into a group.\n- Capture a group of five that turns into a raid (the vote), then a sixth player who joins the raid.\n- Then build the listing flow and raid forming from those forms.",
-    "**Artifacts (2026-11-12): live check (tests only).**\n\n- Give a player an artifact (for example `Artifact_Set1_MediumFeet`) and equip it: the journal gets its artifact objective and its equip step shows done.\n- Take it off: the equip step waits again; put it back on: it shows done again.\n- Wear a weapon artifact, then try a second weapon artifact in the other weapon slot: the equip fails. An armour artifact still goes on.\n- Kill the mobs of a perk task while the item is worn: the task counts; take it off and kill more: the count stays.\n\nStill open: the perk unlock (which perk each task opens), PvP kills and fort captures for the perk tasks. Start at the client's `PerkConditionComponent::OnObjectiveTaskCompleted` and the finding `2026-11-12-artifacts-and-mob-items.md`."
+    "**Artifacts (2026-11-12): live check (tests only).**\n\n- Give a player an artifact (for example `Artifact_Set1_MediumFeet`) and equip it: the journal gets its artifact objective and its equip step shows done.\n- Take it off: the equip step waits again; put it back on: it shows done again.\n- Wear a weapon artifact, then try a second weapon artifact in the other weapon slot: the equip fails. An armour artifact still goes on.\n- Kill the mobs of a perk task while the item is worn: the task counts; take it off and kill more: the count stays.\n\nStill open: the perk unlock (which perk each task opens), PvP kills and fort captures for the perk tasks. Start at the client's `PerkConditionComponent::OnObjectiveTaskCompleted` and the finding `2026-11-12-artifacts-and-mob-items.md`.",
+    "Launcher 0.1.0: set the two signing secrets on GitHub, merge to `main`, run the launcher release workflow, then release 0.1.1 to see the update pop-up on 0.1.0."
   ],
   "done": [
     "Outpost Rush (2026-11-12, tests only): the queue with its own activity, the director's flow that opens the match at the pop and moves each player at its accept, the match on the Trench and Vertical maps with the three outposts, the capture rule, the score with the multiplier for three held outposts, kills, respawn, the time limit, the end and the return.",
@@ -2390,5 +2403,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-12",
-  "lastCommit": "77065956"
+  "lastCommit": "1a0f58a2"
 }
