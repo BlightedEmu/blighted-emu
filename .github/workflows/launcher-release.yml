@@ -1,0 +1,163 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Builds and publishes a launcher release. It runs only when the owner starts it by hand
+# ("Run workflow" on GitHub, or `gh workflow run launcher-release.yml --ref main`), and only from
+# main. The two builds never touch releases: the release is made only after both pass, as a draft
+# first, and is published only when it holds every file. A failed run leaves no tag and no
+# public release; a draft that a cancelled run left is deleted by the next run.
+name: launcher release
+
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "Release notes, one '- ' line per change"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launcher-release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Refuse any branch but main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Launcher releases are built from main only."
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Read the launcher version
+        id: version
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -I -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "launcher"))')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Launcher version: $version"
+      - name: Refuse a version that is already released
+        env:
+          TAG: launcher-v${{ steps.version.outputs.version }}
+        run: |
+          if [ -n "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
+            echo "::error::The tag $TAG already exists. Raise the version in bins/launcher/Cargo.toml."
+            exit 1
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::A release $TAG already exists. Raise the version in bins/launcher/Cargo.toml."
+            exit 1
+          fi
+
+  build-windows:
+    needs: check
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the Tauri command
+        run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: Build the setup file
+        working-directory: bins/launcher
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri build --bundles nsis
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: launcher-windows
+          if-no-files-found: error
+          path: |
+            target/release/bundle/nsis/BlightedLauncher_${{ env.VERSION }}_x64-setup.exe
+            target/release/bundle/nsis/BlightedLauncher_${{ env.VERSION }}_x64-setup.exe.sig
+
+  build-linux:
+    needs: check
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the system web view and bundle tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+      - name: Install the Tauri command
+        run: cargo install tauri-cli --version 2.12.4 --locked
+      - name: Build the AppImage
+        working-directory: bins/launcher
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri build --bundles appimage
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: launcher-linux
+          if-no-files-found: error
+          path: |
+            target/release/bundle/appimage/BlightedLauncher_${{ env.VERSION }}_amd64.AppImage
+            target/release/bundle/appimage/BlightedLauncher_${{ env.VERSION }}_amd64.AppImage.sig
+
+  release:
+    needs: [check, build-windows, build-linux]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.check.outputs.version }}
+      TAG: launcher-v${{ needs.check.outputs.version }}
+      NOTES: ${{ inputs.notes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: launcher-*
+          merge-multiple: true
+          path: dist
+      - name: Write latest.json
+        run: |
+          python3 -I scripts/launcher-release-manifest.py \
+            --version "$VERSION" \
+            --notes "$NOTES" \
+            --pub-date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" \
+            --windows "dist/BlightedLauncher_${VERSION}_x64-setup.exe" \
+            --linux "dist/BlightedLauncher_${VERSION}_amd64.AppImage" \
+            --out dist/latest.json
+      - name: Delete a draft left by a cancelled run
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2> /dev/null | grep -q true; then
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
+          fi
+      - name: Make the draft release
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+            --title "BlightedLauncher $VERSION" --notes "$NOTES" \
+            "dist/BlightedLauncher_${VERSION}_x64-setup.exe" \
+            "dist/BlightedLauncher_${VERSION}_x64-setup.exe.sig" \
+            "dist/BlightedLauncher_${VERSION}_amd64.AppImage" \
+            "dist/BlightedLauncher_${VERSION}_amd64.AppImage.sig" \
+            dist/latest.json
+      - name: Check that the draft holds every file
+        run: |
+          printf '%s\n' \
+            "BlightedLauncher_${VERSION}_x64-setup.exe" \
+            "BlightedLauncher_${VERSION}_x64-setup.exe.sig" \
+            "BlightedLauncher_${VERSION}_amd64.AppImage" \
+            "BlightedLauncher_${VERSION}_amd64.AppImage.sig" \
+            latest.json | sort > expected.txt
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort > found.txt
+          diff expected.txt found.txt
+      - name: Publish the release
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+      - name: Delete the draft of a failed or cancelled run
+        if: failure() || cancelled()
+        run: gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
