@@ -4021,10 +4021,25 @@ mod tests {
             admit(&bus, world_id, sim.id(), &player).await;
             let id = sim.id().clone();
             let step = |metres: f32| move_to(connection.clone(), BORDER_X + metres);
+            // Only a time sync ends the spawn hold, and it comes after the player's own card.
+            // Forwarded like the first step: no direct input has reached the sim yet.
+            tokio::time::sleep(OWN_CARD_WAIT).await;
+            send_inputs(
+                &bus,
+                world_id,
+                &id,
+                true,
+                vec![time_sync(connection.clone())],
+            )
+            .await;
             send_inputs(&bus, world_id, &id, true, vec![step(1.0)]).await;
-            wait_for_x(&mut gateway, &id, BORDER_X + 1.0).await;
+            tokio::time::timeout(WAIT, wait_for_x(&mut gateway, &id, BORDER_X + 1.0))
+                .await
+                .expect("a forwarded input moves the player");
             send_inputs(&bus, world_id, &id, false, vec![step(2.0)]).await;
-            wait_for_x(&mut gateway, &id, BORDER_X + 2.0).await;
+            tokio::time::timeout(WAIT, wait_for_x(&mut gateway, &id, BORDER_X + 2.0))
+                .await
+                .expect("a direct input moves the player");
             send_inputs(&bus, world_id, &id, true, vec![step(3.0)]).await;
             assert!(
                 tokio::time::timeout(QUIET, wait_for_x(&mut gateway, &id, BORDER_X + 3.0))
