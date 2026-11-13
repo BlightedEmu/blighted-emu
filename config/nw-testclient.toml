@@ -26,9 +26,11 @@ registration_timeout_seconds = 30
 position_tolerance_m = 0.1
 # pair: the first client walks these points (east, north of where it stands, in metres) at the
 # walking speed of the datasheets, then sends one move this far east, which sim must refuse.
+# It must be above the move budget of config/sim.toml (run_speed_mps x (1 + speed_margin) x
+# burst_seconds = 3.25 x 4 x 8 = 104 m); 156 m is 1.5 times that, as in the rep-gateway test.
 route_m = [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]]
 route_speed_mps = 1.65
-jump_m = 50.0
+jump_m = 156.0
 # pair and swarm: largest distance of a seen position from the route, in metres.
 path_tolerance_m = 1.0
 

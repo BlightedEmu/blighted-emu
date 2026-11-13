@@ -104,7 +104,8 @@ const STOP_AFTER: Duration = Duration::from_millis(1500);
 const RESUMED_AFTER: Duration = Duration::from_millis(3500);
 /// The move after the resume, east of the start.
 const RESUME_STEP_M: f32 = 1.0;
-const JUMP_M: f32 = 50.0;
+/// How far past the move budget of the sim the far move reaches, as a share of the budget.
+const JUMP_BUDGET_SHARE: f32 = 1.5;
 /// M4 spec section 1.2 criterion 3.3.
 const PATH_TOLERANCE_M: f32 = 1.0;
 /// M4 spec section 1.2 criterion 3.5.
@@ -219,6 +220,14 @@ async fn a_client_logs_in_and_registers_with_the_gateway_once() {
         assert_eq!(again.status, Some(REGISTRATION_STATUS_REFUSED));
     })
     .await;
+}
+
+/// The far move, east, in metres: `JUMP_BUDGET_SHARE` times the distance budget of the sim
+/// (its speed limit times `burst_seconds`), so a change to `config/sim.toml` cannot make the
+/// move small enough to be accepted.
+fn jump_m(config: &SimConfig) -> f32 {
+    let limits = config.move_limits().expect("move limits");
+    limits.max_speed_mps * limits.burst_seconds * JUMP_BUDGET_SHARE
 }
 
 /// The committed `config/sim.toml`.
@@ -416,7 +425,7 @@ async fn two_clients_see_each_other_across_the_border_and_a_saved_position_retur
             first: stack.edge.new_account(FIRST_CHARACTER_NAME),
             second: second.clone(),
             route: Route::new(ROUTE_M.to_vec(), WALK_SPEED_MPS).expect("route"),
-            jump_m: JUMP_M,
+            jump_m: jump_m(&sim_config()),
             hold: PAIR_HOLD,
             registration_timeout: WAIT,
         };
