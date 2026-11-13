@@ -64,7 +64,7 @@
               "proof": "none"
             },
             {
-              "check": "284 tree and stone rows name a variant that no variation table holds: they stand as their plain slice (the region's slice data file is not read yet).",
+              "check": "284 tree and stone rows name a variant that no variation table holds: they stand as their plain slice (the region's slice data file, read since 2026-11-11, does not hold them either).",
               "proof": "none"
             }
           ]
@@ -236,8 +236,40 @@
               "proof": "none"
             },
             {
-              "check": "The world clock is saved (world migration 0035): day and night go on over a restart, and all sims share it.",
+              "check": "The world clock anchor is saved (world migration 0035) and every sim reads it again each 30 s, so all sims of a world have one time of day, also after a restart (tests only, 2026-11-12).",
               "proof": "tests"
+            },
+            {
+              "check": "Day and night run on the retail cycle: an hour of day and half an hour of night, measured from 10,282 day phase messages of 607 retail ledgers; the answer to the client's time request carries the phase now, and each change of the phase sends it alone, as retail (tests only, 2026-11-12).",
+              "proof": "tests"
+            },
+            {
+              "check": "Fishing bait works by the world's day phase, not by a fixed day (tests only, 2026-11-12).",
+              "proof": "tests"
+            },
+            {
+              "check": "A game master reads the time of day with `!time` and sets it with `!time <hour>:<minute>`; every sim follows the set time and sends it to its clients (tests only, 2026-11-12).",
+              "proof": "tests"
+            },
+            {
+              "check": "Spawns, gatherables and open world encounters with a time of day (tests only, 2026-11-12): the world file carries the flags of every time of day entity (598 spawns, 621 gatherable points and 555 slices of the open world); a mob of such a spawn goes when its time ends and a new one spawns when its time comes, as retail did at the night's start; an encounter starts only in its time and resets at its end; a node out of its time takes no gather.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not seen in the game yet: the mobs, encounters and nodes of the night or of the day.",
+              "proof": "none"
+            },
+            {
+              "check": "Fishing perks (tests only, 2026-11-12): the 39 fishing perks of the pole and the armour work: luck and size add to the catch roll, cast distance makes the cast farther by its share, line strength lowers the line's tension gain; the 18 perks of the day or of the night hold only in their phase, the salt and fresh water perks only in their water.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not seen in the game yet: a cast with a fishing perk or with a Focus threshold bonus.",
+              "proof": "none"
+            },
+            {
+              "check": "Not seen with a real client: the sky after a phase change and after a set time.",
+              "proof": "none"
             }
           ]
         },
@@ -373,7 +405,7 @@
               "proof": "none"
             },
             {
-              "check": "A player that stands still gets the retail AFK warning with the seconds left (the rule of its game mode, or the 24 hour default of the open world), the warning ends at a move, and the server removes a player that stays still.",
+              "check": "A player that stands still gets the retail AFK warning with the seconds left (the rule of its game mode, or the 24 hour default of the open world), the warning ends at a move, and the server removes a player that stays still with the rejection 1630 reason 13, the client's \"kicked for being away too long\" error (was the anti-cheat kick 271 reason 5).",
               "proof": "tests"
             }
           ]
@@ -389,6 +421,14 @@
             {
               "check": "Full live test with many players: not done.",
               "proof": "none"
+            },
+            {
+              "check": "Crouch and prone show to other players (tests only, 2026-11-12): each change of posture and each crouching or prone start, stop and stand sends retail's slayer sequence (four retail captures, 15 presses of the two toggles); a change to prone holds a move's start for 20 input records as on retail.",
+              "proof": "tests"
+            },
+            {
+              "check": "A player that talks to an NPC or reads a town board keeps its place for other players (tests only, 2026-11-12): the talk or board camera moved the server's body up to 4.8 m away and 1.7 m into the air. In a replay of six retail captures the places more than 0.3 m too high went from 4.0 % to 1.7 %. Places where the level's collision lacks a floor can still be up to about 0.8 m too high.",
+              "proof": "tests"
             }
           ]
         },
@@ -460,6 +500,46 @@
             {
               "check": "A stance effect a player holds (the great sword's and the sword's offense and defense stances) gives the stance's own attacks and charge times (tests only, 2026-11-11).",
               "proof": "tests"
+            },
+            {
+              "check": "A weapon ability's own hit sweeps and deals its damage row: flail Trip, Blast, Burst and Defensive Strike, and the melee abilities of the sword, spear, hatchet, great axe, war hammer, rapier and great sword",
+              "proof": "tests"
+            },
+            {
+              "check": "Other players see light and heavy attacks (tests only, 2026-11-12): a start that plays in a new slayer state carries that state for the viewers (retail: 3,042 of 3,921 remote starts in one capture named a new state, none of the attacks the client names in row 1 did in our copy before), and the press start carries the second slot's start as retail's.",
+              "proof": "tests"
+            },
+            {
+              "check": "Retail tutorial taps start light attacks (tests only, 2026-11-12): the retail tutorial's sword and great sword key messages give retail's attacks one for one (22 and 20, same kinds, each within 200 ms). A buffered combo step starts one input record after its link's instant clip, and at the key's release when a new press holds the key then.",
+              "proof": "tests"
+            },
+            {
+              "check": "A player's own hit reaction after a mob's hit (tests only, 2026-11-12): the rules of the client's reaction action list (power level 1 to 3 a stagger, 4 and up a knockdown, a guard break `r_B0_Break`, a held block, level 0 and grit only an upper body shake), the fragment of the reaction table by side, the reaction state `13=4` with its slot clears and the end `16=2d` as retail, the stun of the attack row's `HitStun` (retail: the end in frames follows it), the keys, abilities, dodge, block and quick slots held until the end record, the movement held and the root motion, the buffered combo step dropped, the sprint delay. The great sword's tutorial presses with the six retail reactions replayed give retail's attacks one for one.",
+              "proof": "tests"
+            },
+            {
+              "check": "Animation clips that start after the clip before (`ExitTime -1`) get their start from that clip's length (tests only, 2026-11-12): the knockdowns are 2,467 ms long, no longer 67 ms; no attack length changed, and the retail tutorial's attacks still match.",
+              "proof": "tests"
+            },
+            {
+              "check": "Every hit reaction plays a sequence (tests only, 2026-11-12): 49 entries have a retail sequence; every other one takes the nearest entry's (same kind, same weapon, nearest level and side). That pick is our own rule.",
+              "proof": "tests"
+            },
+            {
+              "check": "The upper body shake after a held block or a level 0 hit, in the fourth slot as retail (tests only, 2026-11-12).",
+              "proof": "tests"
+            },
+            {
+              "check": "A player's hit on a player: the target's block and dodge take it, and it shakes the target by the attack's power level (tests only, 2026-11-12). Not captured on retail.",
+              "proof": "tests"
+            },
+            {
+              "check": "The dodge out of a stun lock once the hits' breakout count reaches 2, and no stamina regen during a reaction that started while blocking (tests only, 2026-11-12). How the client counts is our own reading of the action data.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not seen with a real client: the hit reactions, the shake, the PvP reactions and the dodge out of a stun lock.",
+              "proof": "none"
             }
           ]
         },
@@ -532,7 +612,15 @@
               "proof": "none"
             },
             {
-              "check": "Mobs do not block: the wire form of a hit a mob blocks and the mob stamina rule are Unknown.",
+              "check": "The mob stamina rule (tests only, 2026-11-12): a blocked hit takes the weapon's block stamina damage x the row's block stamina mod x the guard's block stamina cost, and the guard regains 1.5 x its tick rate per tick delay (3 per second for most mobs; Inferred, fitted); 71 of 81 retail fresh-guard sequences (light, charged and ability hits) fit, the weapon value alone at most 38.",
+              "proof": "tests"
+            },
+            {
+              "check": "A guarded mob's card carries its block stamina as retail sends it (no later changes, as on retail)",
+              "proof": "tests"
+            },
+            {
+              "check": "Two great sword charged hits on Dynasty warriors that did not break a full guard (Dynasty Shipyard expedition): cause Unknown (same vitals rows, rows and no stamina buff; other group members' hits are not in the capture).",
               "proof": "none"
             }
           ]
@@ -582,6 +670,10 @@
               "proof": "tests"
             },
             {
+              "check": "A hit clip that names its own damage row hits with that row (tests only, 2026-11-12): the flail's Arcane Smite strikes its standard sphere, and with a kite shield and its second upgrade its stagger sphere and row.",
+              "proof": "tests"
+            },
+            {
               "check": "A weapon ability plays its animation (tests only, 2026-11-11): the client sends no animation state for an ability; retail's server starts it in the own state after the key press (the flail's Trip: `13=08 15=2344 17=<press> 48=01`; the life staff's upper-body slots). The server sent none, so the ability's effects showed with no animation. A table of 95 abilities is mined from 17,488 retail presses; the server now sends each start, an aimed ability's cast, and the end (stand still, or clear the upper slots).",
               "proof": "tests"
             },
@@ -600,6 +692,14 @@
             {
               "check": "Open: a shot that misses sends no world hit (the sim has no impact point), the weapon effect of a gem is not sent (the default goes out), and damage rows that no capture shows have no entity.",
               "proof": "none"
+            },
+            {
+              "check": "The upgraded flail Slam opens its second area, which holds its damage over time",
+              "proof": "tests"
+            },
+            {
+              "check": "Placed ability instances (tests only, 2026-11-12): a player's Sacred Ground, Beacon, Ice Storm, Ice Shower, Ice Pylon, Oblivion, Meteor Storm, Sandworm or trap takes a slot of its type in the own state 2267 while its spell entity is in the world (the time, the entity's raw id and id, as retail), the slot empties when the entity goes, a full row of the type's limit puts out the oldest, and the own spawn group repeats the changed slots.",
+              "proof": "tests"
             }
           ]
         },
@@ -644,8 +744,12 @@
               "proof": "tests"
             },
             {
-              "check": "Not applied: the character experience increases (no effect the server runs has one), the group experience share, the riding objective bonus, fishing luck, yield and size, and the carry weight mods.",
+              "check": "Not applied: the character experience increases (no effect the server runs has one), the group experience share, the riding objective bonus, and the fishing yield and size of held effects.",
               "proof": "none"
+            },
+            {
+              "check": "Carry weight effects (tests only, 2026-11-12): held effects lighten the bag by item class (`ItemClassWeightMods`) and raise the encumbrance limit (`Encumbrance`: potions, music); a single swing chance (`INS*`) is read.",
+              "proof": "tests"
             },
             {
               "check": "Other players' view of a player's boost tokens (retail shows four of the five in the remote map; the rule is not known).",
@@ -849,6 +953,18 @@
               "proof": "tests"
             },
             {
+              "check": "A mob past its leash walks home where the level has no height data (tests only, 2026-11-12): a position pick without a path check now keeps the point's own height there, as a body's move does; before, the pick failed and the mob stood past its leash.",
+              "proof": "tests"
+            },
+            {
+              "check": "A mob sees a player as far and as wide as on retail (tests only, 2026-11-12): the slice's vision angle is the angle to each side of the facing, so the common mob sees 12 m (13 yd) up to 75 degrees aside, not 37.5. Retail first alerts of these mobs came at a median 8.5 m (9.3 yd), 90% within 14 m (15.3 yd).",
+              "proof": "tests"
+            },
+            {
+              "check": "A mob keeps a player it fights until its leash ends the chase (tests only, 2026-11-12): the 30 m (33 yd) combat vision no longer drops the target. Retail mobs still ran at players 40 m (44 yd) away and turned home near their 70 m (77 yd) leash.",
+              "proof": "tests"
+            },
+            {
               "check": "Since 2026-11-10 (tests only): world events start and track players by the encounter's own detection volume (box, sphere, cylinder or capsule; 559 encounters have one), a stage that waits for a start object spawns it and ends when a player gathers it (44 start object slices from retail captures), and players near an event get its root entity with the event's status and each stage's status history, as retail sends them (240 of the 329 open world encounters; the other 89 slices are in no retail capture).",
               "proof": "tests"
             },
@@ -919,6 +1035,30 @@
             {
               "check": "Mob passives (`AIAbilityTable`): no link from a mob to its table was found yet.",
               "proof": "none"
+            },
+            {
+              "check": "A mob that cannot reach its new target counts the 6 s from its pick, not from the sim start",
+              "proof": "tests"
+            },
+            {
+              "check": "Goats and prey act on a held target (`Target_Score`)",
+              "proof": "tests"
+            },
+            {
+              "check": "Turkeys and elk run away from a near player until it is past their sight",
+              "proof": "tests"
+            },
+            {
+              "check": "A clip written twice in the animation data is one mob hit (the pistoleer's five hits at once)",
+              "proof": "tests"
+            },
+            {
+              "check": "A mob sent to the point where it stands shows no move (pistoleers walking in place)",
+              "proof": "tests"
+            },
+            {
+              "check": "A mob ranged attack with no projectile slice flies straight at its clip speed",
+              "proof": "tests"
             }
           ]
         },
@@ -984,6 +1124,10 @@
             {
               "check": "Temple door and growth explode (level not yet checked).",
               "proof": "none"
+            },
+            {
+              "check": "The weapon pick after the beach bag completes when the bag was taken before its trigger",
+              "proof": "tests"
             }
           ]
         },
@@ -1145,6 +1289,38 @@
             {
               "check": "The faction join works. A faction board offers its missions as retail (tests only, 2026-11-11): three PvE missions and the PvP missions of the player's faction and the board's territory, drawn by the game's mission weights, kept for 300 s; a take sends the taken element and starts the mission. A mission with a task the server does not run (most PvP missions) is not offered.",
               "proof": "tests"
+            },
+            {
+              "check": "The Fire Cannon of A Most Mysterious Tablet plays its timeline, fires and breaks the wall as on retail",
+              "proof": "live"
+            },
+            {
+              "check": "A used Fire Cannon grows back in its own bundle slots",
+              "proof": "tests"
+            },
+            {
+              "check": "The mysterious tablet breaks to a weapon hit and gives the rune shards, and the quest runs to its end",
+              "proof": "tests"
+            },
+            {
+              "check": "The crown chamber door of Monarch's Bluffs (Broken Oath) as retail (tests ran 2026-11-12): a player with the dagger achievement near the locked plot gets the door slice with its retail states (closed door, gatherable state, interact state, place of the plot), the game table gives the plot its slice and achievement, and the door interaction moves the player through. The turn of the real level plot is not yet compared with the retail door's.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not made: the other locked plot doors of the same table (the Corbenic castle door, the Season 2 egg chamber, temple, map room and chest room doors): no retail capture shows them.",
+              "proof": "none"
+            },
+            {
+              "check": "The holdout trial (Strength of a Soul) runs as a world event (tests ran 2026-11-12): setup, the start glyph, the 60 s holdout with its guardian waves, 60 s to get out and the cleanup, with the root's stage states as retail; the one-way door spawns at the holdout's start at its retail place and turn with its retail states (closed door) and goes 10 s after the end. Not yet as retail: the glyph goes at the gather (retail 3 s later), and the trial's tracker entry on the event is not sent.",
+              "proof": "tests"
+            },
+            {
+              "check": "The stronghold siren world event stands at its retail place with its 18 stages and shows its two closed teleport doors on its root as retail (tests ran 2026-11-12). Its place comes from the retail capture: no client file places it.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not made: the doors of level entities with no slice asset (Nighthaven and main story levels).",
+              "proof": "none"
             }
           ]
         },
@@ -1200,6 +1376,10 @@
             },
             {
               "check": "Perks and nodes on head shots and hits from behind (`OnHeadShot`, `OnHitBehind`, their damage shares) fire.",
+              "proof": "tests"
+            },
+            {
+              "check": "Weapon key 2 is read from `Use_MainHandSlot_2`, and the swap weapon key swaps weapons: skills and kill experience follow the weapon in the hand",
               "proof": "tests"
             }
           ]
@@ -1320,6 +1500,26 @@
             {
               "check": "Gathering experience takes the held boost effects (a gather token doubles it, as retail; tests only).",
               "proof": "tests"
+            },
+            {
+              "check": "A supply crate rolls its container items at the player's loot level (crates gave nothing from loot level 8 on)",
+              "proof": "tests"
+            },
+            {
+              "check": "Attribute threshold bonuses on gathering (tests only, 2026-11-12): the gathering speed of the 25 and 200 rows, the yield of the 250 rows and the luck of Constitution 50 and the 350 rows, from the status effect each threshold ability holds.",
+              "proof": "tests"
+            },
+            {
+              "check": "Single swing gathers (tests only, 2026-11-12): Strength 300 (\"25% chance to mine an ore with a single swing\") and Constitution 300 (the same for trees) end a tool gather at the next gather step. Inferred: the client times the swing (every mining and logging node has `WaitForImpact`).",
+              "proof": "tests"
+            },
+            {
+              "check": "Lighter resources (tests only, 2026-11-12): the 150 rows make ore, stone, gems, wood, rawhide, alchemy items and fiber weigh 10% less in the bag; the 50 and 100 rows raise the encumbrance limit (fast travel).",
+              "proof": "tests"
+            },
+            {
+              "check": "The client's own weight and limit display with the attribute bonuses: live check.",
+              "proof": "none"
             }
           ]
         },
@@ -1396,6 +1596,18 @@
             {
               "check": "Result of the live run: Unknown.",
               "proof": "none"
+            },
+            {
+              "check": "Attribute threshold bonuses on fishing (tests only, 2026-11-12): Focus 50 makes the cast 3 % farther, and Focus 25, 200 and 250 add 0.5, 1.5 and 2.0 to the fish size roll, from the status effect each threshold ability holds.",
+              "proof": "tests"
+            },
+            {
+              "check": "Fishing luck (tests only, 2026-11-12): the fishing luck of held effects and of Constitution 50 and Focus 350 (\"chance at finding rare items while fishing\") goes to the catch's fish rarity roll; the modifiers sent with the hook stay as retail sent them. Inferred: how retail adds it (no capture with and without a luck).",
+              "proof": "tests"
+            },
+            {
+              "check": "Lighter fish (tests only, 2026-11-12): Focus 150 and the bag perks make fish and other item classes weigh less in the bag (fast travel weight and cost).",
+              "proof": "tests"
             }
           ]
         },
@@ -1428,8 +1640,8 @@
               "proof": "code"
             },
             {
-              "check": "Barber without a token or with a look outside the character-creation lists: retail's refusal is Unknown; the server sends nothing more.",
-              "proof": "none"
+              "check": "Barber refusals (tests only, 2026-11-12): a look outside the character-creation lists gets 6436 `OnPurchaseError` on the call's header; a token use that fails first gets 3113 `OnRequestFail` for its debit, then 6436. The layouts come from the client's handlers (no capture holds either); the order is our own.",
+              "proof": "tests"
             },
             {
               "check": "Barber: the character select screen still shows the creation look.",
@@ -1470,12 +1682,16 @@
               "proof": "tests"
             },
             {
-              "check": "Not sold: the season boost (no season pass), the premium emotes (no emote system), the dyes and the season pass tiers. A token use without a token: retail's answer is not known.",
+              "check": "Not sold: the season boost (no season pass), the premium emotes (no emote system), the dyes and the season pass tiers.",
               "proof": "none"
             },
             {
-              "check": "A refused store purchase: retail's answer is Unknown.",
-              "proof": "none"
+              "check": "A token use of an unknown token (tests only, 2026-11-12): 5818 for an entitlement that is no status effect token gets 3113 `OnRequestFail` alone (no 5936), as the other refusals. Inferred: no capture holds a refused token use.",
+              "proof": "tests"
+            },
+            {
+              "check": "A refused store purchase (tests only, 2026-11-12): a closed store, an offer outside the store table, a wallet below the price or a failed save gets 3113 `OnRequestFail` with the request and a reason text; a refused status effect token use too. A claim of an entitlement (5107) gets 5108 `OnClaimEntitlementFail`. Retail's status, text and code are Unknown (our own values).",
+              "proof": "tests"
             },
             {
               "check": "Not checked live.",
@@ -1591,6 +1807,10 @@
               "proof": "tests"
             },
             {
+              "check": "Camp build as retail: the placed camp comes unbuilt (state 3, then 4), the owner's build interaction is accepted after its hold, one unit of each cost leaves the bag per 767 ms in the retail list forms, the builder state and interactor count follow the build, a cancel keeps what is in, and the built camp (state 5) fires BindCamp; the completion call (5361) goes once the camp's group is out.",
+              "proof": "tests"
+            },
+            {
               "check": "Live check.",
               "proof": "none"
             },
@@ -1679,6 +1899,22 @@
               "proof": "tests"
             },
             {
+              "check": "The social service owns the raids of wars and matches: a raid member's groups state names its raid group and keeps its own group for after the raid, it takes no group invite, and it leaves the raid when it goes offline; the raid ends with its last member. Raids are known by their raid entity id, so two sims that count the same raid ids keep their raids apart.",
+              "proof": "tests"
+            },
+            {
+              "check": "An arena or Outpost Rush player joins its team's raid (raid type 3) at its arrival in the match, in the group of its team place.",
+              "proof": "tests"
+            },
+            {
+              "check": "Invasion raids (raid type 2): no invasion is built, so no invasion raid is made.",
+              "proof": "none"
+            },
+            {
+              "check": "Expedition, catacombs and capture the flag raids (raid type 3), as retail: an expedition or catacombs run makes one raid of its instance at the arrival, five players to a group in arrival order; a capture the flag player joins its team's raid at its arrival. A soul trial makes no raid (six retail soul trial ledgers have none).",
+              "proof": "tests"
+            },
+            {
               "check": "A player chooses its group role (5390); the other members see it in the group entity, and a role the client does not offer is refused.",
               "proof": "tests"
             },
@@ -1687,15 +1923,27 @@
               "proof": "tests"
             },
             {
-              "check": "Not made: forming a raid. The convert-to-raid vote (5317, 5318) and its answers (5311, 5309) are in no capture, so no group grows past five members and no raid entity is sent; the raid permission call (2422) has one sample and an unclear effect.",
+              "check": "A group turns into a players' raid (raid type 4) by the convert-to-raid vote: any member starts it (5317), the others vote (5318); every accept, or the vote's end with no deny, converts it, one deny ends it, and wrong steps get the client's errors (5308, 5310). The wire forms come from the client's readers: no retail ledger holds the vote.",
+              "proof": "tests"
+            },
+            {
+              "check": "A players' raid as retail shows it: four groups of five, the starter as leader, the raid fields with raid type 4 and create source 2, the raid entity with lifetime 0, the leader and assistant marks in the group entities, the zero fields after the raid.",
+              "proof": "tests"
+            },
+            {
+              "check": "Players' raid invites, moves, swaps, permissions and leaves: an invite names the raid group to fill (else the first with room, 20 at most); the leader and assistants move and swap members; the leader promotes and demotes, and a new leader makes the old one an assistant; a leaving leader hands the raid on and the raid ends with one member left.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not made: the raid kick (3500), the raid voice channel, the leader AFK demotion, and players' raids that last through a restart of the social service.",
               "proof": "none"
             },
             {
-              "check": "Not made: the group finder. Its listing, application and accept calls (3509, 3510, 3515, 105) and a list answer with entries are in no capture; the group finder group state (1091) is not sent.",
+              "check": "Not made: the group finder. Its listing, application and accept calls (3509, 3510, 3515, 105) and a list answer with entries are in none of our 1,195 retail ledgers (the Azoth catalog has recordings of all four calls, not their bytes); the group finder group state (1091) is not sent.",
               "proof": "none"
             },
             {
-              "check": "Raid groups for players: a group of five that turns into a raid. The vote calls are in no retail capture.",
+              "check": "Live: a group that turns into a raid in the client, with the vote and the raid window.",
               "proof": "none"
             }
           ]
@@ -1721,6 +1969,10 @@
               "proof": "tests"
             },
             {
+              "check": "Land claim entities: each territory's claim plot shows to players near it as on retail (the claim's id, the owner company's name, crest and faction, built, interaction off); a new owner reaches the players who see it.",
+              "proof": "tests"
+            },
+            {
               "check": "Station fees: the recipe fee times the crafts times the territory's crafting or refining rate (0.5: the game data lets no governor change the rates), rounded down, at least 1 coin.",
               "proof": "tests"
             },
@@ -1738,6 +1990,10 @@
             },
             {
               "check": "Upkeep payment: a governor or consul of the owner pays the game data's cost (100,000 for every claim) from the company treasury; the payment and the move of the due time by one week are one database change; the desk then shows the new times and the members the new treasury.",
+              "proof": "tests"
+            },
+            {
+              "check": "A refused upkeep payment (by the server or by the company service: no right, too little coin, not payable) shows the payer's desk its governance data again, so the desk does not wait (tests only, 2026-11-12). Retail has no upkeep result message.",
               "proof": "tests"
             },
             {
@@ -1787,17 +2043,25 @@
               "proof": "tests"
             },
             {
+              "check": "Dungeon entrances are network entities as retail (tests only, 2026-11-12): each open-world entrance of 30 entrance slices that retail captures show gets its card and spawn states, and its `DungeonEntranceReplicatedState` lists the runs started there. A run is added when an activation opens an instance (the starter's group as the key) and removed when the director ends the instance; every player who sees the entrance, on any sim, gets the change. Entrances whose slice no capture shows stay level objects.",
+              "proof": "tests"
+            },
+            {
+              "check": "A run started by a player in a raid keys its dungeon entrance element with the raid id and a zero group, as the 8 retail gorgon raid runs do.",
+              "proof": "tests"
+            },
+            {
               "check": "Stage events on entities of an encounter go out as retail (tests only, 2026-11-11): a timeline start, a delayed event and its end (the delay is a half float of seconds), a placement obstruction off.",
               "proof": "tests"
             },
             {
-              "check": "Open: the game mode entity of an expedition (its script state, timers and the objective panel) is not sent yet; the dungeon entrance state is not sent; the rules of a gate mined from more than one retail run can disagree (the pressure plates of two levels).",
+              "check": "Open: the game mode entity of an expedition (its script state, timers and the objective panel) is not sent yet; the rules of a gate mined from more than one retail run can disagree (the pressure plates of two levels).",
               "proof": "none"
             }
           ]
         },
         {
-          "name": "Game modes (queues, arenas, Outpost Rush)",
+          "name": "Game modes (queues, arenas, Outpost Rush, capture the flag)",
           "proof": "tests",
           "checks": [
             {
@@ -1841,16 +2105,40 @@
               "proof": "tests"
             },
             {
-              "check": "Capture the flag and catacombs queue joins are still refused at once (their game modes do not run).",
-              "proof": "code"
+              "check": "Catacombs queue as retail (activity `0c16`): 5039 answered allowed, the join (6254, 6295), the two role picks, the queue entry `2736ba35` with activity 6; a join without the fill byte is matched alone with status 1 and the match id and no pop; a join with it pops when the team of 3 is full or after the fill wait, with the players found and 3 desired players; the accept, 5449, 5450, status 5 and the move into the run's start room.",
+              "proof": "tests"
+            },
+            {
+              "check": "The director forms catacombs runs: one team of 3, at most one healer, a fill wait (60 s by default) and an accept window; a waiting team does not hold back the matches of other modes.",
+              "proof": "tests"
+            },
+            {
+              "check": "Catacombs run level: a layout per run from the generation tables, seeded by the run's instance id; the 1635 of `NW_Catacomb_00` in the layout's frame; 1234 and 4970 after the arrival; the gameplay and art tile entities of every room (card and position, turned with the tile), taken away at the run's end.",
+              "proof": "tests"
+            },
+            {
+              "check": "Catacombs room spawns: each room spawns the slots of its gameplay tile for its room kind (the room table's `AliasCategory1`: key, gate, boss, named enemy, hazard, hallway, reward, start), a gate on each open side (a key gate next to a locked room), its checkpoint and the slots retail rooms of that kind showed (level-up shrine, levers, small silver chest, power-up spawner with a different power-up at each point); the encounter slices run with their stages and mobs, one entry of an alias slot drawn per run; a player arrives at the start room's checkpoint, 12 m from the tile's centre. Which slots a room spawns and the draws are Inferred.",
+              "proof": "tests"
+            },
+            {
+              "check": "Catacombs room states as retail: every gameplay tile holds its game mode state (2343) with its room's state (gate, hazard, parkour, key, reward, hallway, named enemy, boss, start), the run's participant lists and the linked mode 1; a gate, key, hallway, named enemy or boss room goes to state 7 when its encounters end. The state numbers come from the retail ledgers; the client holds no state names.",
+              "proof": "tests"
+            },
+            {
+              "check": "Catacombs run entity: the run's own game mode entity with the map of the level (origin, tile size, size, a map picture and turns per tile, the visited tiles, the room icons as the rooms are found); the start when the players left the start room (run state 1, run timer of 1800 s, three respawns per player, the start tile's extraction state); the participant flags `11 02 02` on arrival, `31 02 02` from the start, and the boss fight flag in the boss room.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not made: the start tile's later state 3 and the boss room's extraction state 5 (their triggers are not known), deaths that take respawns, extraction, the run's end and its end reasons, the leave (3309) of a run, the time out, the rewards (catacombs currencies, score board 839) and the tiles' collision. The map pictures of `tile4_d` and `tile5_d` are not known.",
+              "proof": "none"
             },
             {
               "check": "Not made: the arena hazards' damage, the arena rewards and the score board stats (839); no live arena match yet.",
               "proof": "none"
             },
             {
-              "check": "Not made: the team raids of an arena match (a raid entity per team with ten groups, each player's group and raid id); the match names its raid ids only.",
-              "proof": "none"
+              "check": "The team raids of arena, Outpost Rush and capture the flag matches: a raid entity per team with ten groups, each player's group and raid id at its arrival.",
+              "proof": "tests"
             },
             {
               "check": "Not made: the queue for random activities (6322): one retail sample, and the activity list of its answer is not understood.",
@@ -1881,15 +2169,83 @@
               "proof": "tests"
             },
             {
-              "check": "Not made: Outpost Rush on the original open world map (it needs a framed instance of the open world).",
+              "check": "Outpost Rush on the island (the first map, a frame of the open world level): the island is back in the map rotation, which turns every hour on a clock one hour behind Unix time as in 13 retail matches; its instance runs the open world level in the island's frame (the 1635 of the frame, only the mobs whose spawns lie in it); the island's three outposts, fort barriers and team spots; the team affiliations at the arrival and their end on every map.",
+              "proof": "tests"
+            },
+            {
+              "check": "Outpost Rush Baroness on all three maps (the island, Trench and Vertical, the same boss mob as retail): she spawns 600 s after the match start and 600 s after each death at her retail place and level; her death freezes the score of the killer's foe team for 60 s and 0.45 s for each point of its lead; on the island her two barriers stand closed for the whole match as retail.",
+              "proof": "tests"
+            },
+            {
+              "check": "Outpost Rush event feed as retail: the ten event slots of the game mode state filled in turn; the armory of each outpost at the match's start, the boss spawned, and the boss killed with the freeze's seconds and the killing team.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not made: the Outpost Rush events of the parts not made (outpost attacked, corrupted portal soon, open and closed, command post built and upgraded), the island's summoning circles and stones, azoth portal, armories and gates.",
               "proof": "none"
             },
             {
-              "check": "Not made: the Outpost Rush capture point entities (333), gates and structures, turrets, resources and the armory, summons, the boss and its score freeze, the event feed and the end statistics.",
+              "check": "Outpost Rush fort barriers as retail: the three barriers of each fort of Trench and Vertical (the game mode slices' spawners, placed by the retail places) spawn with the match with their card, ownership, place and door (2330, `doorState` Closed); their ownership has raid 0 in the pregame and the fort team's raid once the match runs; they go at the end. The door state never changes in 148 retail ledgers.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not made: the Outpost Rush capture point entities (333), outpost gates and structures, turrets, resources and the armory, summons and the end statistics.",
               "proof": "none"
             },
             {
               "check": "Not made: Outpost Rush rewards, the score board stats (839), a backfill into a running match; no live Outpost Rush match yet.",
+              "proof": "none"
+            },
+            {
+              "check": "Capture the flag queue as retail: the join (6254 with activity 3016, 6295), the two role picks, the queue entry with activity 4, the pop with 20 desired players and the entry value 10, the invite from the director, and the move at the own accept (5449, 5450, status 5). Both maps (NW_CTF_002_Wide, NW_CTF_003_Long) with their team spots.",
+              "proof": "tests"
+            },
+            {
+              "check": "The director forms capture the flag matches: two teams of the set match size (20 by default from the game data), at most two healers a team, the match opens at the pop and each player moves at its own accept.",
+              "proof": "tests"
+            },
+            {
+              "check": "Capture the flag match on its instance sim: the game mode entity (2343 on component 1) with the retail values and timers, the pregame of 180 s, play of 600 s, the overtime of 300 s after a tie and the postgame of 60 s; participant flags, team affiliations, character ids and ready-up.",
+              "proof": "tests"
+            },
+            {
+              "check": "Capture the flag level entities of both maps (NW_CTF_002_Wide, NW_CTF_003_Long) at their retail places: flags, platforms, power-ups, jump pads, spawn spots, and the six start barriers with the closed door that go when the match starts.",
+              "proof": "tests"
+            },
+            {
+              "check": "Capture the flag flags: take by the trigger interaction (two 3743), the carried flag on the carrier with its flag effect, the ghost flag at the base, the drop at the carrier's death, the return by the own team, the reset after 20 s with its warning 5 s before, the interact buffers (2 s after a drop or return, 5 s after a score), and the capture at the own base only while the own flag is home.",
+              "proof": "tests"
+            },
+            {
+              "check": "Capture the flag score and stats: a capture gives 1 point, 3 points win at once, the leader wins at the time limit, a tie runs the overtime that the next capture ends, and a tie at the end of the overtime is a tie, as the client's game mode script; the score sequences of all five retail capture the flag ledgers end as in the ledger; kills, deaths, flag carrier kills, returns and captures as the retail end values.",
+              "proof": "tests"
+            },
+            {
+              "check": "Capture the flag power-ups (speed, damage, healing) give their effect and come back after 30 s; jump pads give their effect, the carrier's own to a flag carrier.",
+              "proof": "tests"
+            },
+            {
+              "check": "Capture the flag leave: a leave of a running match bars the queue, a carrier who leaves gives its flag back to its base, a team with no player left loses, and the players go back at the end of the postgame.",
+              "proof": "tests"
+            },
+            {
+              "check": "Capture the flag end rewards: each player gets its team's end event (a win, a loss or a tie): coins, PvP experience, faction reputation and tokens, azoth and umbral shards up to their caps, the event's loot table items, and the season stats that count the event; the amounts are the reward table's war values of the event's level times the event's reward modifiers (25,000 coins and 1,350 PvP experience for a win, as retail). The team affiliations are cleared at the end.",
+              "proof": "tests"
+            },
+            {
+              "check": "Capture the flag carried flag: its ownership names the carrier's company (read from the world database), faction, team raid and PvP flag, and the flag turns with the carrier's look.",
+              "proof": "tests"
+            },
+            {
+              "check": "Capture the flag triggers from the client slices: the dropzone (an upright cylinder of 2.25 m radius and 6 m height), the power-ups (a sphere of 1.25 m, 1 m up) and the jump pads (a sphere of 2.6 m, 0.2 m up), each met by the player's body.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not made: the end event entry of the game event state (497) that the client shows as the reward summary; the server sends no game event state yet.",
+              "proof": "none"
+            },
+            {
+              "check": "Not made: the Outpost Rush outpost gates (buildable gates with health, damage, a build grid and an interaction).",
               "proof": "none"
             }
           ]
@@ -1927,7 +2283,35 @@
               "proof": "tests"
             },
             {
-              "check": "How a company declares a war in retail (influence race, the declare call, its cost and window): no capture holds it.",
+              "check": "PvP faction missions give their faction influence in the mission's territory (50, 100 or 200 points from the success event); the influence lives in the world database, loses one percent about every 90 s outside a conflict and goes back to zero when a conflict ends.",
+              "proof": "tests"
+            },
+            {
+              "check": "Every client sees each claim's influence percent per faction, its race start, its conflict faction and start and its lottery end in the claims state.",
+              "proof": "tests"
+            },
+            {
+              "check": "A conflict starts 15 minutes before the owner's siege hour, at least 13 h 45 min after the race start, for the attacking faction with the most influence.",
+              "proof": "tests"
+            },
+            {
+              "check": "A company declares a war in a conflict (`Declare_War` right, its faction, the cost from its treasury or the player's wallet, the siege window); a refusal answers with the cost and window the server holds.",
+              "proof": "tests"
+            },
+            {
+              "check": "The first declaration starts a 10-minute lottery; one declaring company gets the war at the siege hour of the next day, the others get their coin back.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not made: the war declaration threshold faction of the claims state; retail sets it at 7 % to 54 % with no rule the captures show.",
+              "proof": "none"
+            },
+            {
+              "check": "Not made: the message that shows a lost lottery; no capture holds a lottery.",
+              "proof": "none"
+            },
+            {
+              "check": "Not made: influence from faction control points and towers.",
               "proof": "none"
             },
             {
@@ -1939,8 +2323,20 @@
               "proof": "tests"
             },
             {
-              "check": "The raid invite before the move into the war instance (the invite reply and the invite removal): where the invite comes from is not in the captures.",
-              "proof": "none"
+              "check": "The pre-raid status (715) of the war roster, as retail: a player gets selected, unselected, promoted or demoted as its roster seat changes, and war ended before the war's end in the instance.",
+              "proof": "tests"
+            },
+            {
+              "check": "The raid invite before the move into the war instance, as retail: the player's groups state gets an inbound invite of the side's raid group and raid id, no inviter, the war as its activity, source 4; the client's accept (3495) ends it with the retail 1677 and brings the move; a declined invite moves nobody.",
+              "proof": "tests"
+            },
+            {
+              "check": "Each side of a war in the war data names its raid from the war's first state on: the side's number as the raid id, the raid's ten group ids, the raid entity's id and its key, as retail.",
+              "proof": "tests"
+            },
+            {
+              "check": "A roster player that moves into its war joins its side's raid in its roster group: its groups state names the raid group, the raid, the other side's raid and raid type 1; it gets the raid entity (RaidData with its card) and the raid's other nine group entities; a member count change goes alone; leaving the instance clears the raid.",
+              "proof": "tests"
             },
             {
               "check": "A war instance for the forts no capture shows (territories 2, 5, 6, 12, 13, 14, 16).",
@@ -1967,11 +2363,123 @@
               "proof": "tests"
             },
             {
-              "check": "Siege weapons and structures: turret aim and fire, building defensive structures, their damage and repair.",
+              "check": "Fort turrets in the war instance: the repeaters and cannons each captured fort showed spawn with the instance, owned by their side's company; a player of that side uses one (interaction `UseTurret`, accepted with 3743), one player at a time; the use ends when the aim calls stop or the interaction is cancelled.",
+              "proof": "tests"
+            },
+            {
+              "check": "Repeater fire: each shot the client fires (4145) gets the hit point of its line (2720) from the slice's range and the ground, spends one ammo, keeps the slice's fire delay, and heats the turret (overheat at capacity, cool-down and use block while hot).",
+              "proof": "tests"
+            },
+            {
+              "check": "Cannon fire: each shot (4274) spawns the ball entity and sends 327 to the shooter; the ball flies with the slice's gravity to its impact; ammo falls and firing is blocked for the slice's cooldown.",
+              "proof": "tests"
+            },
+            {
+              "check": "Turret hit damage as retail: the amount (now the shooter level's base damage times the row coefficient) and the 2720 result byte are not proven by any capture.",
               "proof": "none"
             },
             {
-              "check": "Invasions, as the retail captures show them: sign-up and roster at the war board, a teleport into the fort's instance, siege warfare start and end messages, fort waves with timelines, turrets and siege structures, and the war board stats. None of it is built: it needs the war instance.",
+              "check": "Turret refill and repair: an interaction for an item cost on a turret of the player's side spends one ammo kit and adds the slice's `AddAmmo` ammo up to the most (retail: a repeater went from 130 to 200 for one bag item), else one repair kit for the slice's `AddHealth` health; a full and whole turret, a turret of the other side or a player without a kit is refused. Which kit retail takes is not proven.",
+              "proof": "tests"
+            },
+            {
+              "check": "Damage to turrets: turrets are invulnerable until the war starts and from the result; a hit from a turret of the other side sends the health with the hit flags and the committed siege supplies by the health share; at no health the turret breaks (dead vitals, ruined buildable state, interact off) until the result makes it whole, full of ammo and invulnerable again.",
+              "proof": "tests"
+            },
+            {
+              "check": "Player weapon hits on siege structures in the war instance: a swing or shot of a player meets the whole structures of the other side from the start to the result and takes the base damage of its level times the attack row coefficient; the structure loses health and breaks as on a turret hit.",
+              "proof": "tests"
+            },
+            {
+              "check": "The status effect that retail turrets carried while they lost health is the artifact bow perk mark `Status_Perk_Artifact_Set1_Bow_StaticCharge` (no damage over time); the effects of player weapon perks on structures are not applied.",
+              "proof": "none"
+            },
+            {
+              "check": "The ammo refill call 2175: no capture holds it and its client sender is not found.",
+              "proof": "none"
+            },
+            {
+              "check": "Fort structure builds (2646): a player of the structure side builds the ballista, repeater, explosive launcher, fire barrel dropper or horn of the socket tier for the blueprint `SiegeSupply`; about one second later the old structure leaves and the new one comes at its place with a new reference, every member of its slice and its side company ownership; a choice of the same kind changes nothing.",
+              "proof": "tests"
+            },
+            {
+              "check": "Fort droppers, horns and supply generators spawn in the war instance with their retail members and take damage like turrets.",
+              "proof": "tests"
+            },
+            {
+              "check": "Ballista and explosive launcher shots: each fires the projectile of its slices (bolt or shell entity, ranged attack and damage row) on the cannon path.",
+              "proof": "tests"
+            },
+            {
+              "check": "Fire barrel dropper use (trigger 33): accept, owner, pour timer, trigger 3135, barrel entity and 2900, the barrel falls and opens its burning area (timers, damage every 0.5 s in 5 m for 15 s).",
+              "proof": "tests"
+            },
+            {
+              "check": "Explosive launcher shell opens its explosion area where it lands and hits once in 5 m.",
+              "proof": "tests"
+            },
+            {
+              "check": "Horn of resilience blow: its area gives `HornOfResilience_T<n>` to the players of its side in 40 m; the horn is off until its 7 s timer.",
+              "proof": "tests"
+            },
+            {
+              "check": "T1 and T2 explosive launcher builds from a template built from the T3 one (no retail template; Inferred).",
+              "proof": "tests"
+            },
+            {
+              "check": "Damage of a siege area on players and structures as retail deals it (no capture holds a player health change under a barrel or shell).",
+              "proof": "none"
+            },
+            {
+              "check": "Supply generators: item generation state 3002 (idle when full, active from a take, a new cycle time each 10 s), `SiegeSupply` output into the generator container up to 300/400/500, players open it (kind 24) and take with 2942 and 2939.",
+              "proof": "tests"
+            },
+            {
+              "check": "An invasion shows in the war data as kind 2 with no attacking company and an empty attacker side; it runs 1,500 s and goes to the defender when its time runs out.",
+              "proof": "tests"
+            },
+            {
+              "check": "Each owned territory with an invasion fort has a darkness level (0 to 3) and a cycle end on the daily clock in the claims; the level steps once a cycle and its third step schedules an invasion at the owner's siege hour (the stepping rule is our design: no capture shows a step).",
+              "proof": "tests"
+            },
+            {
+              "check": "Invasion sign-up is for the defending side only; the free roster places fill with the sign-ups from 450 s before the start.",
+              "proof": "tests"
+            },
+            {
+              "check": "The roster gets the raid invite (raid type 2, no opposing raid) with the pre-raid status, and the accept moves the player into the fort instance.",
+              "proof": "tests"
+            },
+            {
+              "check": "The fort's invasion encounter runs its defense stage and eight waves with the mobs, places and times of the retail captures; a wave starts on its schedule once the wave before it is dead.",
+              "proof": "tests"
+            },
+            {
+              "check": "Siege mobs wear down the fort's structures; the invasion is lost when the corrupted hold the claim point with no defender (our design: no capture shows the retail loss rule).",
+              "proof": "tests"
+            },
+            {
+              "check": "At the end every player gets the pre-raid status, the result message with its time, the fort's invasion reward event and a battle token; a loss fails the encounter and cleans it up 10 s later.",
+              "proof": "tests"
+            },
+            {
+              "check": "A lost invasion lowers some raised territory upgrades by one tier (one in three each, our design from the two retail losses); the claims show the tiers and their sum.",
+              "proof": "tests"
+            },
+            {
+              "check": "The invasion mobs walk the retail lanes (the lanes are server data no capture shows; ours walk straight to the claim point).",
+              "proof": "none"
+            },
+            {
+              "check": "Siege mobs show their cow launchers (the sim spawns them with the plain grunt and bomber look).",
+              "proof": "none"
+            },
+            {
+              "check": "A player who signs up after the invasion's instance opened gets the invite (retail invited such a player; here only the roster at the opening moves).",
+              "proof": "none"
+            },
+            {
+              "check": "Town projects raise the territory upgrades (no capture shows them; only a game master sets a tier).",
               "proof": "none"
             }
           ]
@@ -2007,6 +2515,10 @@
             {
               "check": "Not checked live.",
               "proof": "none"
+            },
+            {
+              "check": "The season is the account's, as on retail, where a new character came in with the account's season rank 39 (tests only, 2026-11-12, global migration 0010): every character of an account has the account's season experience and season pass state. The season a character kept before is moved into its account once, at the first load.",
+              "proof": "tests"
             }
           ]
         },
@@ -2173,6 +2685,8 @@
     }
   ],
   "nextSteps": [
+    "**Day and night (2026-11-12): live check (tests only).**\n\n- Stay in the world past a change of the phase (an hour of day, half an hour of night): the sky turns, and the sim log shows no error.\n- `!time 21:00` as a game master: the sky goes to night on every sim of the world within 30 s.\n- Fish with a night bait at night and with a day bait by day.\n\nStill open: night-only and day-only spawns and gatherables, and the fishing perks of the day or the night.",
+    "**Combat, mobs and tutorial fixes (2026-11-12): live check (tests only).**\n\n- Flail: Trip, Blast, Burst and Defensive Strike hit a mob for damage; the upgraded Slam leaves its damage over time.\n- Weapon key 2 and the swap weapon key: the skills on the bar fire, and the kill experience goes to the weapon in the hand.\n- Light attacks of every player hit. If one does not, read the sim's `attack key starts no attack` lines: they give the key state.\n- Cynefin Mine and Hiraeth Peak: mobs that aggro attack; the Lost Pistoleers shoot once per shot and do not walk in place; turkeys and elk run away.\n- A supply crate gives items at loot level 8 and up.\n- A Most Mysterious Tablet: the Fire Cannon plays its timeline. The shot and the wall break are not built (Unknown message header).\n- Tutorial: taking the beach bag before its trigger still completes the weapon pick.\n- Character select: the Link Account pop-up does not open with a copy made by the new patch script.\n\nStill open: why the light attacks of some players started no swing live (Unknown: the retail tutorial taps give every light attack in the test), a second player's view of light and heavy attacks (live check), the missing `Tutorial_TargetLock2` step in the retail tutorial replay test (Unknown), and the client mob block bar (retail sends no stamina change).",
     "**Outpost Rush (2026-11-12): live check (tests only).**\n\n- Set `[instances.outpost_rush] match_size` to 2 or 4 and start an instance sim of `nw_opr_004_trench` or `nw_opr_005_vertical`.\n- Queue bots for Outpost Rush: the pop, the invite, the accept and the move; then the pregame, an outpost capture, the score, a kill, the respawn at the team spot, the end at 1000 points and the return.",
     "**Seasons (2026-11-12): live check (tests only).**\n\n- Apply world migration 0041 and run the new programs (the season pass levels now load as the `SeasonPass` progression).\n- Log in: the quest pin still works, the season window opens and shows Season 10, level 0, an activity card of 21 tasks and 3 wild stamps.\n- Stamp three squares of a row with wild stamps, then the fourth: the season points rise by 50 three times and by 300 once, and a wild stamp comes back.\n- Kill 10 mobs of a card task's kind (for example Lost): the task shows done; stamp a square of its type with it.\n- After four stamps take a new card: 150 season points, a new card, the done card count rises. Reroll twice; a third reroll is refused.\n- Reach level 1 and redeem the level 1 free reward: the reward's box comes into the bag and shows redeemed; log out and in: it stays redeemed.\n\nStill open: the premium track, entitlement rewards, the wild stamp award, the pattern bonus, the stats this server does not read, and the season per account. Start at `bins/sim/src/world/seasons.rs` and the finding `2026-11-12-seasons.md`.",
     "**Wars (2026-11-12): live check (tests only).**\n\n- Give a territory an owner (`!owner`), then declare a war on it with another company (`!war <territory id> <minutes> <company name>`). The map's war screen shows the war and its start time.\n- A player of the attacker's faction signs up at the war board (remote board use from the map): the sign-up shows in the list and the count; leave and sign up again.\n- The attacker company's governor opens the roster: add the signed-up players to groups, swap, move, set an officer, kick one; the kicked player's new sign-up is refused.\n- Wait for the start: the war shows as running; give the result (`!war <territory id> win attacker`): the territory changes owner on every sim.\n- A running war's entry now carries the world's value in its game mode field: the war screen must still show the war as running (tests only).\n\n**War instance (2026-11-12): live check (tests only).**\n\n- Mine the war forts table on the PC (the `warforts` tool of the capture tools) into the content folder; start an instance sim of the open world level.\n- Declare a war on territory 8 (`!war 8 16 <company name>`), sign up two players of the two sides and put them on the rosters.\n- About 15 minutes before the start both players get the loading screen and arrive in the fort's instance (512 m frame); at the start the capture points show.\n- The attacker stands in an outer point: its progress rises; the defender in it stops it. Take the three outer points: the claim point opens; take it: the war ends for the attacker and the territory changes owner.\n- Leave with the group leave: the player goes back to where it was. A player who stays goes back 3 minutes after the result.\n\nStill open: the raid invite, the war camps and the respawn timer as retail runs them, the capture point radius and the rate rule by player count (Inferred), forts no capture shows, the fort gates and walls, turrets and siege structures, invasions, the player's war declaration. Start at `bins/sim/src/world/war_fight.rs` and the findings `2026-11-12-wars-and-sieges.md`, section \"The framed instance and the war fight (built)\".",
@@ -2186,7 +2700,7 @@
     "**Mob movement and world events: live check (2026-11-10).**\n\nAll parts are built, in tests only. See in the game: mobs strike from near (homing), walk around obstacles, stop at town gates; world events start when a player walks into their volume, show their status, wait for their start object and come back at their data time; trees and stones block as their own mesh.",
     "**Live check of the new saves (migration 0034).**\n\nMigration 0034 is applied on the PC and on the game VM (2026-11-10), and the game VM runs the new programs. Then: take damage, use an ability, log out during its cooldown, log back in; health and the cooldown must be as they were. Die, log out, log back in: the death screen must show and the respawn must work. Gather a node, restart the sim, and check that the node is still empty.",
     "**Heavy attacks stop from time to time (reported live 2026-11-10, two players, cause not known).**\n\nHeavy attacks work for a while, then stop. Sometimes they come back, sometimes they do not. No pattern found yet. To do: find a stop in the sim log (the attack key held past the hold time with no charge state after it) and compare the records before it with a heavy attack that worked.",
-    "**Bugs from the two-player test on the game VM (2026-11-09), not fixed yet.**\n\nReported live by two players. (1) Other players' animations (first): their light and heavy attacks, casts and weapon swaps do not show; their walk glides (the server starts the move state again every 0.3 to 0.8 s); a life staff shows held like a musket; a player floats on the other's screen (others get the server's estimate of the body, not the client's place). (2) Ground-target abilities (life staff Sacred Ground) do nothing. (3) Assigning weapon points does nothing (respec now has the right table; check live). (4) Hits do not register as they should (hit box). (5) A Windows client crashed when it opened the keyboard and mouse settings. (6) Voice chat fails on the VM and works on the PC (port or something else: Unknown). (7) A spinner stays on in the inventory's currency bar, next to the coins, after Tab opens the inventory. (8) The admin web panel does not give flails by item id (several flail ids tried). (9) In the K window (attributes, weapon masteries) the attributes tab opens empty, for both players; when it started is Unknown. (10) Life staff heals do not appear to work. (11) Mana drain does not work. (13) Crouch and prone (the Z key) do not show to the other player: the server reads the two keys for its body estimate only and starts no slayer state for them, for the own client or for others. (12) `!tp <player>` put the game master under the ground: the teleport goes to the other player's place as the server estimates it (the same estimate that makes players float), not its client's place. From the second player's report (2026-11-09): (14) the void blade turns off at the wrong times; (15) the buff and debuff bar does not show; (16) the button that moves all items into storage does not move dye (drag and drop does); (17) the quest step \"Visit the Prydwen Trading Post\" does not complete at the trading post. From the first player (2026-11-10, after the ability and heal fixes): (18) Orb of Protection gives its buffs, but their time shows as 10957 days (they end at the right time); (19) Sacred Ground and the other aimed heal still do nothing for the caster (they open 25 m ahead); (20) life staff light attacks often do not connect with a red crosshair on the target (hit box); (21) Boatswain Bridget does not act as on retail (captures exist); (22) quest \"Amidst the Wreckage\": the corrupted growths do not play their explosion when destroyed; (23) voice chat on the VM fails about every minute; (24) quest \"Lessons of a Pirate Life\": the pigs on the boat stand, on retail they lie asleep; (25) quest \"Memories of Grace\": some corrupted mariners walk with half of their legs in the ground. (26) quest \"Demon Storm\" (destroy the corruption nexus): the Tempest High Priest stands and does nothing, with no aggro range; he started to fight only about a minute after the first hit. (27) a boar stands in the air next to a stone pillar, on the way to Prydwen in the quest \"Bearer of Bad Tidings\" (screenshot 2026-11-10). (28) Torok the Beast (level 5 boar boss) does not use all its retail attacks; it does not charge a player who runs away (captures to check). (29) Towns and outposts feel empty. Measured on one retail trip into Prydwen (`12a_msq_16_fasttravel`): the retail server spawned 193 entities, 102 of them with a slice of their own: 13 settlement crafting stations and their 12 station buildings (tiered: `settlement_station_*_tN`, `craftingstation_tN_*_complete`), the trading post and its building, 16 lanterns and torches, a fireplace, 5 house plots and 5 houses, 37 trees, a camp. The level file holds many of these slices (71 settlement stations, 870 lanterns, 208 house plots), but retail sends each one a spawn card with its slice asset and place, and our server sends cards for the crafting stations only. The trading post has two retail entities at one place: the logic entity (built 2026-11-10) and the building `craftingstation_t5_tradingpost_complete` (card and place only), which our server does not send yet, so no trading post shows (2026-11-10). (30) Fall damage from a wall jump is not right (2026-11-10; details to get). Checked 2026-11-10 for (22): in the retail capture `12-5_survivors` no entity spawns when a growth is destroyed (the `corrupted_miner_bomb_poi` cards about every 5.6 s there are thrown bombs: a card, an ownership and a projectile state), so the explosion is in the states of the growth itself; not compared yet.",
+    "**Bugs from the two-player test on the game VM (2026-11-09), not fixed yet.**\n\nReported live by two players. (1) Other players' animations (first): their light and heavy attacks, casts and weapon swaps do not show; their walk glides (the server starts the move state again every 0.3 to 0.8 s); a life staff shows held like a musket; a player floats on the other's screen (cause found 2026-11-12: an NPC talk or town board camera moved the server's body; fixed in code, tests only, check live). (2) Ground-target abilities (life staff Sacred Ground) do nothing. (3) Assigning weapon points does nothing (respec now has the right table; check live). (4) Hits do not register as they should (hit box). (5) A Windows client crashed when it opened the keyboard and mouse settings. (6) Voice chat fails on the VM and works on the PC (port or something else: Unknown). (7) A spinner stays on in the inventory's currency bar, next to the coins, after Tab opens the inventory. (8) The admin web panel does not give flails by item id (several flail ids tried). (9) In the K window (attributes, weapon masteries) the attributes tab opens empty, for both players; when it started is Unknown. (10) Life staff heals do not appear to work. (11) Mana drain does not work. (13) Crouch and prone (the Z key) do not show to the other player (built 2026-11-12 from retail's sequences, tests only, check live). (12) `!tp <player>` put the game master under the ground: the teleport goes to the other player's place as the server estimates it (the same estimate that makes players float), not its client's place. From the second player's report (2026-11-09): (14) the void blade turns off at the wrong times; (15) the buff and debuff bar does not show; (16) the button that moves all items into storage does not move dye (drag and drop does); (17) the quest step \"Visit the Prydwen Trading Post\" does not complete at the trading post. From the first player (2026-11-10, after the ability and heal fixes): (18) Orb of Protection gives its buffs, but their time shows as 10957 days (they end at the right time); (19) Sacred Ground and the other aimed heal still do nothing for the caster (they open 25 m ahead); (20) life staff light attacks often do not connect with a red crosshair on the target (hit box); (21) Boatswain Bridget does not act as on retail (captures exist); (22) quest \"Amidst the Wreckage\": the corrupted growths do not play their explosion when destroyed; (23) voice chat on the VM fails about every minute; (24) quest \"Lessons of a Pirate Life\": the pigs on the boat stand, on retail they lie asleep; (25) quest \"Memories of Grace\": some corrupted mariners walk with half of their legs in the ground. (26) quest \"Demon Storm\" (destroy the corruption nexus): the Tempest High Priest stands and does nothing, with no aggro range; he started to fight only about a minute after the first hit. (27) a boar stands in the air next to a stone pillar, on the way to Prydwen in the quest \"Bearer of Bad Tidings\" (screenshot 2026-11-10). (28) Torok the Beast (level 5 boar boss) does not use all its retail attacks; it does not charge a player who runs away (captures to check). (29) Towns and outposts feel empty. Measured on one retail trip into Prydwen (`12a_msq_16_fasttravel`): the retail server spawned 193 entities, 102 of them with a slice of their own: 13 settlement crafting stations and their 12 station buildings (tiered: `settlement_station_*_tN`, `craftingstation_tN_*_complete`), the trading post and its building, 16 lanterns and torches, a fireplace, 5 house plots and 5 houses, 37 trees, a camp. The level file holds many of these slices (71 settlement stations, 870 lanterns, 208 house plots), but retail sends each one a spawn card with its slice asset and place, and our server sends cards for the crafting stations only. The trading post has two retail entities at one place: the logic entity (built 2026-11-10) and the building `craftingstation_t5_tradingpost_complete` (card and place only), which our server does not send yet, so no trading post shows (2026-11-10). (30) Fall damage from a wall jump is not right (2026-11-10; details to get). Checked 2026-11-10 for (22): in the retail capture `12-5_survivors` no entity spawns when a growth is destroyed (the `corrupted_miner_bomb_poi` cards about every 5.6 s there are thrown bombs: a card, an ownership and a projectile state), so the explosion is in the states of the growth itself; not compared yet.",
     "**Voice with two players.**\n\nSeen live on 2026-11-08 with one player: the rooms join and the player hears itself (`echo = true` in the local voice server). Still to see: two games in one room hear each other, and the speaking icon (whether retail shows one for the own voice is Unknown). Turn `echo` off for that test.",
     "**Live check of the town points on the map.**\n\nBuilt (2026-11-06). Seen live on 2026-11-07: walking into a town gave the \"town visited\" line, and the visit was still saved after a new login (`visited_towns`). Still to see: which map icon changes, and a fast travel to that town (use `!azoth 1000`, or set `[fast_travel] free = true`). Then check one Brimstone shrine (its point moved by 0.4 m to the retail place). Towns from before this build count only after one new visit, because the server did not keep them before.",
     "**Fix the quests the quest walk found broken.**\n\nWalk of 2026-11-09 after the item drop fix: 17,648 of 18,441 quests end (16,976 before), 495 do not. The fix (proven on retail side quest captures): a quest's have-and-return items drop into the kill's loot bag, from containers at the task's chance and from quest objects, and go back at the turn-in, as a mission's did. Next: 314 kill steps whose mob spawns nowhere on the level (where those mobs come from is Unknown), 83 game events and 62 achievements nothing gives, 42 faction control point steps, and 85 item steps (enemies that do not spawn, dungeon drops, season items). The list is in `local-data/reports/quest-walk-all-2026-11-09b.md`; the causes are in `local-data/findings/2026-11-09-quest-drops-and-passives.md`.",
@@ -2213,11 +2727,24 @@
     "**Put the status reporter beside the public website.**\n\nThe website lives in its own repo (`blighted-emu-website`). `status-reporter` is built and was seen with a local copy of the site (2026-11-08). Still to do: run it on the game VM with the public site's address and a secret shared with the site's `WORLDS`, and see the real client's round trip and a leaderboard row on the site.",
     "**Systems with no code: housing, artifacts, heartrunes, trophies.**\n\nStart these last. They are not on the path of a new player.",
     "**Store tokens and the barber (2026-11-11, tests only).** Run the global migration 0009 and `content-tool store` (the table gains the token pack), then in the game: buy a barbershop token in the store (the count shows 1), open the barber, change the face and the hair: the token count goes down, the look changes at once and after a new login, and a second player sees the new look.",
-    "**Group finder and raids: what is missing.**\n\n- Capture a group finder session: make a listing, apply from a second account, accept, decline, and turn a listing into a group.\n- Capture a group of five that turns into a raid (the vote), then a sixth player who joins the raid.\n- Then build the listing flow and raid forming from those forms.",
+    "**Group finder and raids: what is missing.**\n\n- Capture a group finder session: make a listing, apply from a second account, accept, decline, and turn a listing into a group.\n- Capture a group that turns into a raid (the vote), then a sixth player who joins the raid: it checks the players' raid built from the client (2026-11-12, tests only).\n- Then build the listing flow from those forms.",
     "**Artifacts (2026-11-12): live check (tests only).**\n\n- Give a player an artifact (for example `Artifact_Set1_MediumFeet`) and equip it: the journal gets its artifact objective and its equip step shows done.\n- Take it off: the equip step waits again; put it back on: it shows done again.\n- Wear a weapon artifact, then try a second weapon artifact in the other weapon slot: the equip fails. An armour artifact still goes on.\n- Kill the mobs of a perk task while the item is worn: the task counts; take it off and kill more: the count stays.\n\nStill open: the perk unlock (which perk each task opens), PvP kills and fort captures for the perk tasks. Start at the client's `PerkConditionComponent::OnObjectiveTaskCompleted` and the finding `2026-11-12-artifacts-and-mob-items.md`.",
-    "Launcher 0.1.0: set the two signing secrets on GitHub, merge to `main`, run the launcher release workflow, then release 0.1.1 to see the update pop-up on 0.1.0."
+    "Launcher 0.1.0: set the two signing secrets on GitHub, merge to `main`, run the launcher release workflow, then release 0.1.1 to see the update pop-up on 0.1.0.",
+    "**War declaration (2026-11-12): live check (tests only).**\n\n- Players of one faction finish PvP faction missions in a territory another faction's company owns: the map shows their influence rise, and fall again about one percent each 90 s.\n- At 15 minutes before the owner's siege hour the territory goes into conflict for the faction with the most influence; a consul of a company of that faction that did the missions declares war from the treasury or the wallet.\n- Ten minutes after the first declaration the lottery draws one company: the war shows for the next day's siege hour, and the other companies get their coin back.\n\nStill open: the war declaration threshold faction, the lost-lottery message and influence from control points."
   ],
   "done": [
+    "Capture the flag time limit rule checked against the client script and all five retail ledgers: the leader wins, a tie runs the overtime (one ledger only seemed to run it at 1-0: it lost the record of a capture), tests only (2026-11-12).",
+    "Players' raids from the convert-to-raid vote (leader, assistants, invites, moves, swaps, leave) and the war roster's pre-raid status, tests only (2026-11-12).",
+    "War raid invite before the move, expedition, catacombs and capture the flag raids, raid keyed dungeon entrance runs, tests only (2026-11-12).",
+    "Dungeon entrances as network entities with their run list (state 3105), tests only (2026-11-12).",
+    "Fishing luck, single swing gathers, carry weight and encumbrance bonuses, and the answer to an unknown token use, tests only (2026-11-12).",
+    "Land claim entities of the territories (the claim plot of each claim, with its owner company), tests only (2026-11-12).",
+    "Placed ability instances (state 2267) and the AFK removal as the client's AFK error (1630 reason 13), tests only (2026-11-12).",
+    "Attribute threshold bonuses on fishing (Focus cast distance, fish size) and gathering (speed, yield, luck), tests only (2026-11-12).",
+    "Refusal answers for the barber (6436), the store (3113), entitlement claims (5108) and upkeep payments (the desk data again), tests only (2026-11-12).",
+    "Combat (2026-11-12, tests only): other players see light and heavy attacks (the slayer state goes with a start in a new state); the retail tutorial taps start light attacks; the mob block stamina rule is checked against 46 retail sequences.",
+    "Camp build (2026-11-12, tests only): a placed camp is built by its owner unit by unit as the retail camp tutorial shows, with the builder state, the interactor count, the committed resource list in its retail full and delta forms, the completion call and the BindCamp event at the end.",
+    "Other players' place and posture (2026-11-12, tests only): a camera that leaves a body at rest (an NPC's talk, a town board) no longer moves the server's body, which made a player float for others; crouch and prone send retail's slayer sequences for each change of posture and each move.",
     "Outpost Rush (2026-11-12, tests only): the queue with its own activity, the director's flow that opens the match at the pop and moves each player at its accept, the match on the Trench and Vertical maps with the three outposts, the capture rule, the score with the multiplier for three held outposts, kills, respawn, the time limit, the end and the return.",
     "Seasons (2026-11-12, tests only): the season rewards and tracked stats states from server state, the activity card's stamps, new cards and rerolls, the tracked stats from the sim's events, and the free reward track and journey rewards, saved with the character (world migration 0041).",
     "The framed war instance and the war fight (2026-11-12, tests only): the director opens a war's instance of the open world map cut to the fort's frame, the roster moves in, the capture points run the retail capture order, only the two sides fight, and the claim point's capture gives the attacker the territory.",
@@ -2399,9 +2926,11 @@
     "Fix: map pin steps no longer skip the real step (`93fa629e`, 2026-10-03).",
     "Objective, use item and territory steps (`d7886c1c`, `c26fde84`, `70f2533c`, 2026-10-03).",
     "Fix: quest items from loot-container objects (Truffle Fever) and kills by spawner category (`ed5044db`, `956d6a8b`, 2026-10-03).",
-    "Artifacts (2026-11-12, tests only): the artifact objective starts at the equip, the equip limit of one artifact of each kind, the equip step that follows the worn item, the paused perk steps, and kill tasks bound to a game mode."
+    "Artifacts (2026-11-12, tests only): the artifact objective starts at the equip, the equip limit of one artifact of each kind, the equip step that follows the worn item, the paused perk steps, and kill tasks bound to a game mode.",
+    "Catacombs queue and run level (2026-11-12, tests only): the `0c16` queue with the retail entry, the match with no pop or the fill pop, the director's one-team runs, and a generated layout per run with its frame and its tile entities. The rooms' gameplay, the run's end and rewards are not made yet.",
+    "Catacombs progress: the room states on every gameplay tile, the run entity with the map of the level, the run start and the participant flags, from the ten retail catacomb ledgers and the client tile script, tests only (2026-11-12)."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-12",
-  "lastCommit": "1a0f58a2"
+  "updated": "2026-11-13",
+  "lastCommit": "75dd0b47"
 }
