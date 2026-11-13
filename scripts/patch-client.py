@@ -3,8 +3,8 @@
 """Make the patched copy of the New World client that the emulator needs.
 
 This tool writes a patched copy, ``BlightedNewWorld.exe``, next to the official
-``NewWorld.exe`` (which it never modifies). The copy has four changes, and a
-fifth one with ``--aws-proxy``:
+``NewWorld.exe`` (which it never modifies). The copy has five changes, and a
+sixth one with ``--aws-proxy``:
 
 1. Certificate bypass. The real client refuses the emulator's self-signed
    game-server certificate. The tool finds OpenSSL ``SSL_CTX_set_verify`` by a
@@ -35,7 +35,15 @@ fifth one with ``--aws-proxy``:
    with ``MOV R8B,1`` as its default; the tool makes the immediate 0. The site
    is found by the variable's name and the shape of its creation.
 
-5. AWS proxy (``--aws-proxy``, for Windows only: Wine's WinHTTP cannot use the
+5. Amazon account link. At character select the client opens the Amazon Games
+   iD link pop-up while the remote config variable
+   ``javelin.enable-agid-account-linking`` is on. The emulator uses no Amazon
+   account, and the variable keeps its default, on, even when the server's
+   remote config names it off. The account link set-up creates the variable
+   with ``MOV R8B,1`` as its default; the tool makes the immediate 0. The site
+   is found by the variable's name and the shape of its creation.
+
+6. AWS proxy (``--aws-proxy``, for Windows only: Wine's WinHTTP cannot use the
    proxy, so a Linux client reaches these names through the launcher's private
    hosts file instead; docs/client-patch.md). The remote-config (S3), analytics
    (Kinesis), analytics-credentials (STS) and news (CMS) clients call fixed
@@ -189,8 +197,34 @@ VARIABLE_CREATION = re.compile(
     + b"(?P=variable)",
     re.DOTALL,
 )
-LEA_RDX_RIP_LEN = 7
+# The length of a RIP-relative LEA (opcode, ModRM, rel32): the first instruction of a creation.
+LEA_RIP_LEN = 7
 DEFAULT_OFF = b"\x00"
+
+# Amazon account link patch. The account link set-up (build 25810808: FUN_145a7fce0) creates its
+# remote config variable as LEA RAX,[name] / MOV [RSP+n],RAX / LEA RAX,[""] / MOV [RSP+n+8],RAX /
+# MOVAPS XMM0,[RSP+n] / MOVDQA [RSP+n],XMM0 / MOV R8B,<default> / LEA RDX,[RSP+n] / CALL.
+AGID_LINK_VARIABLE = b"javelin.enable-agid-account-linking"
+LEA_RAX_RIP = bytes.fromhex("488d05")
+CONFIG_VARIABLE_CREATION = re.compile(
+    re.escape(LEA_RAX_RIP)
+    + b"(?P<name>.{4})"
+    + re.escape(bytes.fromhex("48894424"))
+    + b"(?P<slot>.)"
+    + re.escape(LEA_RAX_RIP)
+    + b".{4}"
+    + re.escape(bytes.fromhex("48894424"))
+    + b"."
+    + re.escape(bytes.fromhex("0f284424"))
+    + b"(?P=slot)"
+    + re.escape(bytes.fromhex("660f7f4424"))
+    + b"(?P=slot)"
+    + re.escape(bytes.fromhex("41b0"))
+    + b"(?P<default>\x01)"
+    + re.escape(bytes.fromhex("488d5424"))
+    + b"(?P=slot)",
+    re.DOTALL,
+)
 
 # AWS proxy patch (docs/re/2026-09-20-windows-launcher-network.md). The launcher's loopback proxy
 # listens here; bins/launcher/src/aws_proxy.rs holds the same port.
@@ -422,21 +456,33 @@ def plan_offline_ticket(data: bytes) -> "list[tuple[str, int, bytes]]":
     return [("offline Steam ticket", site, code + bytes([INT3]) * (length - len(code)))]
 
 
-def plan_typed_chat(data: bytes) -> "list[tuple[str, int, bytes]]":
-    """The edit that turns the typed chat privacy check off: the default of
-    ``javelin.social.enable-vpc-restrictions`` becomes 0."""
-    name = virtual_address(
-        data, find_unique(data, NUL + CHAT_RESTRICTION_VARIABLE + NUL, "chat restriction name") + len(NUL)
-    )
+def default_site(data: bytes, variable: bytes, creation: "re.Pattern[bytes]", what: str) -> int:
+    """File offset of the default immediate of the one `creation` of the variable named `variable`:
+    the match whose first instruction, a RIP-relative LEA, loads the name; or exit with an error."""
+    name = virtual_address(data, find_unique(data, NUL + variable + NUL, f"{what} name") + len(NUL))
     sites = [
         match.start("default")
-        for match in VARIABLE_CREATION.finditer(data)
-        if virtual_address(data, match.start()) + LEA_RDX_RIP_LEN
+        for match in creation.finditer(data)
+        if virtual_address(data, match.start()) + LEA_RIP_LEN
         + struct.unpack("<i", match.group("name"))[0] == name
     ]
     if len(sites) != 1:
-        fail(f"chat restriction site found {len(sites)} times; the client build may have changed")
-    return [("typed chat", sites[0], DEFAULT_OFF)]
+        fail(f"{what} site found {len(sites)} times; the client build may have changed")
+    return sites[0]
+
+
+def plan_typed_chat(data: bytes) -> "list[tuple[str, int, bytes]]":
+    """The edit that turns the typed chat privacy check off: the default of
+    ``javelin.social.enable-vpc-restrictions`` becomes 0."""
+    site = default_site(data, CHAT_RESTRICTION_VARIABLE, VARIABLE_CREATION, "chat restriction")
+    return [("typed chat", site, DEFAULT_OFF)]
+
+
+def plan_agid_link(data: bytes) -> "list[tuple[str, int, bytes]]":
+    """The edit that turns the Amazon account link pop-up off: the default of
+    ``javelin.enable-agid-account-linking`` becomes 0."""
+    site = default_site(data, AGID_LINK_VARIABLE, CONFIG_VARIABLE_CREATION, "account link")
+    return [("account link", site, DEFAULT_OFF)]
 
 
 def plan_patches(data: bytes, aws_proxy: bool) -> "list[tuple[str, int, bytes]]":
@@ -451,6 +497,7 @@ def plan_patches(data: bytes, aws_proxy: bool) -> "list[tuple[str, int, bytes]]"
         ("exit to desktop", slot, struct.pack("<Q", sonic)),
         *plan_offline_ticket(data),
         *plan_typed_chat(data),
+        *plan_agid_link(data),
     ]
     return edits + plan_aws_proxy(data) if aws_proxy else edits
 

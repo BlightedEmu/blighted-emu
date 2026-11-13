@@ -35,6 +35,13 @@ readonly CHAT_NAME="javelin.social.enable-vpc-restrictions"
 readonly CHAT_NAME_OFFSET=$((0xa40))
 readonly CHAT_SITE_OFFSET=$((0x440))
 readonly CHAT_FLAG_OFFSET=$((CHAT_SITE_OFFSET + 0x15))
+# The account link site: the name of the account link variable in .rdata, and its creation in
+# .text (LEA RAX,[name] / MOV [RSP+0x20],RAX / LEA RAX,[""] / MOV [RSP+0x28],RAX /
+# MOVAPS XMM0,[RSP+0x20] / MOVDQA [RSP+0x20],XMM0 / MOV R8B,1 / LEA RDX,[RSP+0x20]).
+readonly AGID_NAME="javelin.enable-agid-account-linking"
+readonly AGID_NAME_OFFSET=$((0xa80))
+readonly AGID_SITE_OFFSET=$((0x410))
+readonly AGID_FLAG_OFFSET=$((AGID_SITE_OFFSET + 0x25))
 # Fake PE layout: image base, .text at RVA 0x1000 / file 0x200 (0x800 bytes), .rdata at RVA 0x2000
 # / file 0xA00.
 readonly SIG_OFFSET=$((0x200))
@@ -104,11 +111,13 @@ make_bin64() {
     "$with_ticket" "$GET_TICKET_HEX" "$HANDLER_HEX" "$SIGNATURE_HEX" "$SONIC_HEX" "$STEAM_HEX" "$STEAM_VA_HEX" "$CTOR_HEX" "$S3_LEAD_HEX" \
     "$S3_TAIL_HEX" "$KINESIS_LEAD_HEX" "$KINESIS_TAIL_HEX" "$STS_LEAD_HEX" "$STS_TAIL_HEX" \
     "$NEWS_LEAD_HEX" "$NEWS_TAIL_HEX" "$PING_LEAD_HEX" "$PING_TAIL_HEX" \
-    "$S3_VERIFY_HEX" "$CHAT_NAME" "$CHAT_NAME_OFFSET" "$CHAT_SITE_OFFSET" <<'PY'
+    "$S3_VERIFY_HEX" "$CHAT_NAME" "$CHAT_NAME_OFFSET" "$CHAT_SITE_OFFSET" \
+    "$AGID_NAME" "$AGID_NAME_OFFSET" "$AGID_SITE_OFFSET" <<'PY'
 import struct, sys
 (path, with_sig, with_steam, with_proxy, with_ticket, get_ticket, handler, sig, sonic, steam, steam_va, ctor,
  s3_lead, s3_tail, kinesis_lead, kinesis_tail, sts_lead, sts_tail, news_lead, news_tail, ping_lead,
- ping_tail, s3_verify, chat_name, chat_name_offset, chat_site) = sys.argv[1:]
+ ping_tail, s3_verify, chat_name, chat_name_offset, chat_site, agid_name, agid_name_offset,
+ agid_site) = sys.argv[1:]
 image = bytearray(0xB00)
 image[0:2] = b"MZ"
 struct.pack_into("<I", image, 0x3C, 0x40)
@@ -156,6 +165,11 @@ image[chat_name_offset : chat_name_offset + len(chat_name) + 1] = chat_name.enco
 rdata_va = 0x140002000 + chat_name_offset - 0xA00
 name_rel = struct.pack("<i", rdata_va - (va(chat_site) + 7))
 put(chat_site, "488d15" + name_rel.hex() + "488d8dd8950000" "e811111111" "41b001" "488d95d8950000")
+agid_name_offset, agid_site = int(agid_name_offset), int(agid_site)
+image[agid_name_offset : agid_name_offset + len(agid_name) + 1] = agid_name.encode() + b"\0"
+agid_rel = struct.pack("<i", 0x140002000 + agid_name_offset - 0xA00 - (va(agid_site) + 7))
+put(agid_site, "488d05" + agid_rel.hex() + "4889442420" "488d0511111111" "4889442428"
+    "0f28442420" "660f7f442420" "41b001" "488d542420")
 open(path, "wb").write(image)
 PY
 }
@@ -217,6 +231,7 @@ check_bytes "patched GetTicket fills the rest of the request with INT3" \
 check_bytes "patched GetTicket keeps the flag write and the log call" "$GET_TICKET_OFFSET" "${GET_TICKET_HEX:0:70}"
 check_bytes "the ticket handler is unchanged" "$HANDLER_OFFSET" "$HANDLER_HEX"
 check_bytes "the chat restriction variable starts off" "$((CHAT_FLAG_OFFSET - 2))" "41b000488d95d8950000"
+check_bytes "the account link variable starts off" "$((AGID_FLAG_OFFSET - 2))" "41b000488d542420"
 
 # 2) --verify passes on the patched copy, and fails after tampering.
 if python3 "$PATCH_SCRIPT" "$bin64" --verify >/dev/null; then

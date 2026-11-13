@@ -22,7 +22,7 @@ We never change the official `NewWorld.exe`. We make a separate patched copy,
 - Our launcher runs `BlightedNewWorld.exe` directly. `NewWorldLauncher.exe` starts Easy
   Anti-Cheat, so Easy Anti-Cheat never runs.
 
-The copy has four changes. A fifth change is added with `--aws-proxy`. No change alters the
+The copy has five changes. A sixth change is added with `--aws-proxy`. No change alters the
 file length.
 
 ## First change: certificate bypass
@@ -152,7 +152,31 @@ client (Inferred: the same check).
 
 The account-age chat restriction stays on. The server answers it with `accountInProbation`.
 
-## Fifth change: AWS proxy (`--aws-proxy`)
+## Fifth change: Amazon account link
+
+At character select the client opens the "Link Account" pop-up (link the platform account to an
+Amazon Games iD, with a QR code). The emulator uses no Amazon account, so the pop-up must not
+open.
+
+The landing screen script opens it in one place only (`lyshineui/main menu/landingscreenv2.luac`,
+`TryShowAGIDLink`). That function returns at once when
+`ConfigProviderEventBus.GetBool("javelin.enable-agid-account-linking")` is false. Then it also
+needs the character select screen, no news pop-up, an authorized login and a shadow account
+(`GameRequestsBus.GetIsShadowAccount`).
+
+The account link set-up (build 25810808: `FUN_145a7fce0`) creates that variable with the default
+on: `LEA RAX,[name]` / `MOV [RSP+0x20],RAX` / `LEA RAX,[""]` / `MOV [RSP+0x28],RAX` /
+`MOVAPS` / `MOVDQA` / `MOV R8B,1` / `LEA RDX,[RSP+0x20]` / `CALL`. The server's remote config
+names the variable off in the public `ProductId` layer, and the client does not take that
+value. Live 2026-11-12: the client fetched that layer (237 bytes, with the key off) at
+15:00:56 and still opened the pop-up at character select. Unknown: why the remote value does
+not reach this variable.
+
+The tool finds the one creation whose first `LEA` points at the name of the variable and whose
+default is 1. It changes the default to 0 (build 25810808: file offset `0x5A7F620`, VA
+`0x145A80020`).
+
+## Sixth change: AWS proxy (`--aws-proxy`)
 
 This change is for Windows only. Windows has no `bwrap` sandbox to give the game process a
 private hosts file and trust file.
@@ -321,6 +345,11 @@ For the typed chat patch, find the settings function that creates
 `javelin.social.enable-vpc-restrictions` (build 25810808: `FUN_14616d7b0`). If the shape of a
 variable creation changed, update `VARIABLE_CREATION` in `scripts/patch-client.py`.
 
+For the account link patch, find the function that creates
+`javelin.enable-agid-account-linking` (build 25810808: `FUN_145a7fce0`, the only code that names
+it). If the shape of its creation changed, update `CONFIG_VARIABLE_CREATION` in
+`scripts/patch-client.py`.
+
 For the AWS proxy patch, find the `ClientConfiguration` constructor again (`FUN_147467a40`: it
 writes the two 5,000 ms timeouts and `verifySSL = 1` into a fresh object). Also find the three
 builders that call it with the S3, Kinesis and STS regions, the news fetch that logs
@@ -399,7 +428,7 @@ When `public_https_port` is not 443:
 When `public_ping_port` is not 80, the launcher's proxy sends the region ping to it.
 
 The launcher runs the loopback proxy on Windows and on Linux, but only a Windows client can use
-it (fifth change). A Linux client uses the private hosts file, which leads to ports 443 and 80
+it (sixth change). A Linux client uses the private hosts file, which leads to ports 443 and 80
 only, so point 3 above is needed for Linux players.
 
 Unknown: the game client reads a link with a port (`game.example.org:8443/s/<session>`). The
