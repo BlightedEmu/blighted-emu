@@ -3251,6 +3251,7 @@
     "**Turret use ownership and capture point shots (2026-11-13): live check (tests only).**\n\n- Live, war: use a fort turret: the other players see the user as its owner; shoot at a capture point: the shot stops there.\n- Live, Outpost Rush: use a turret: its ownership shows the user's company; let the outpost change hands: the company stays."
   ],
   "done": [
+    "The far move of the `nw-testclient pair` check is 400 m, past the 104 m move budget of the sim, as in the gateway end-to-end test; at 50 m the sim accepted it and the check could not pass (2026-11-13, config tests only).",
     "The systems of 2026-11-13 built and tested (8,217 tests pass), with world migrations 0044 to 0048, and deployed to the PC and the game VM (2026-11-13, tests only).",
     "Expedition start area, the tasks of 34 trigger areas, the score of a mutated run's kills, and offline players kept in the run's lists (2026-11-13, tests only).",
     "Expedition game mode entity with the retail first state, participants and time limit, and the mutation curse meter with its rise, ability fall and Weary zone (2026-11-13, tests only).",
@@ -3472,5 +3473,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-13",
-  "lastCommit": "298277fb"
+  "lastCommit": "32852a05"
 }
