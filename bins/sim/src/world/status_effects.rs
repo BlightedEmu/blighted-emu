@@ -834,6 +834,33 @@ impl StatusEffects {
         })
     }
 
+    /// The bag weight shares of the held effects (`ItemClassWeightMods`: lowercase item class,
+    /// share times the effect's potency; the bag perks' `Status_Perk_Bags_*Weight` -0.05).
+    pub(super) fn item_weight_mods(&self, rules: &StatusEffectRules) -> Vec<(String, f64)> {
+        self.held
+            .iter()
+            .filter_map(|held| Some((held, rules.get(held.crc)?)))
+            .flat_map(|(held, rule)| {
+                let potency = self.potency(rules, held, rule);
+                rule.item_weight_mods
+                    .iter()
+                    .map(move |(class, share)| (class.clone(), share * potency))
+            })
+            .collect()
+    }
+
+    /// What the held effects add to the holder's encumbrance limit (`Encumbrance`: the
+    /// encumbrance potions, `MajorPotionEncumbrance` 500), each times its potency.
+    pub(super) fn encumbrance(&self, rules: &StatusEffectRules) -> f64 {
+        self.sum_of(rules, |rule| rule.encumbrance)
+    }
+
+    /// The chance the held effects give a gather of gathering tradeskill `tradeskill` to be
+    /// done in a single swing (`INS*`, [`nw_content::status_effects::RewardMods::instant_gather`]).
+    pub(super) fn instant_gather_chance(&self, rules: &StatusEffectRules, tradeskill: &str) -> f64 {
+        self.sum_of(rules, |rule| rule.rewards.instant_gather_chance(tradeskill))
+    }
+
     /// The gear score the held effects add to the least and the most gear score of crafts of
     /// tradeskill `tradeskill` (`MGS_*`, `MaxGS_*`: the `FoodArmorer*` meals 5 to 15).
     pub(super) fn craft_gear_score(
@@ -1950,6 +1977,58 @@ mod tests {
         add(&mut counts, "AI_Dahut_DoD_Count");
         let held = counts.held.first().expect("held");
         assert_eq!(held.stacks, 5, "InitialStackSize");
+    }
+
+    #[test]
+    fn held_effects_lighten_bag_classes_raise_encumbrance_and_give_single_swings() {
+        // Retail rows `Status_Perk_Bags_MiningOre` (`Ore=-0.05+Ingot=-0.05+PickAxe=-0.05`),
+        // `MajorPotionEncumbrance` (`Encumbrance` 500) and `ATB_Str_Bonus_300_2_Effect`
+        // (`INSMining` 0.25).
+        const BAG: &str = "Status_Perk_Bags_MiningOre";
+        const POTION: &str = "MajorPotionEncumbrance";
+        const SWING: &str = "ATB_Str_Bonus_300_2_Effect";
+        let rules = StatusEffectRules::build(StatusEffectSource {
+            effects: vec![
+                EffectSourceRow {
+                    item_weight_mods: Some("Ore=-0.05+Ingot=-0.05+PickAxe=-0.05".to_owned()),
+                    ..row(BAG)
+                },
+                EffectSourceRow {
+                    base_duration_s: Some(1800.0),
+                    encumbrance: Some(500),
+                    ..row(POTION)
+                },
+                EffectSourceRow {
+                    rewards: nw_content::status_effects::RewardMods {
+                        instant_gather: vec![("mining".to_owned(), 0.25)],
+                        ..nw_content::status_effects::RewardMods::default()
+                    },
+                    ..row(SWING)
+                },
+            ],
+            ..StatusEffectSource::default()
+        });
+        let mut effects = StatusEffects::default();
+        assert!(effects.item_weight_mods(&rules).is_empty());
+        assert_eq!(effects.encumbrance(&rules), 0.0);
+        assert_eq!(effects.instant_gather_chance(&rules, "Mining"), 0.0);
+        for effect in [BAG, POTION, SWING] {
+            effects.add(
+                &rules,
+                crc(&rules, effect),
+                Application::plain(PLAYER),
+                START_MS,
+            );
+        }
+        let mods = effects.item_weight_mods(&rules);
+        assert_eq!(mods.len(), 3);
+        assert!(
+            mods.iter()
+                .any(|(class, share)| class == "ore" && (share + 0.05).abs() < 1e-9)
+        );
+        assert!((effects.encumbrance(&rules) - 500.0).abs() < 1e-9);
+        assert!((effects.instant_gather_chance(&rules, "mining") - 0.25).abs() < 1e-9);
+        assert_eq!(effects.instant_gather_chance(&rules, "Logging"), 0.0);
     }
 
     #[test]

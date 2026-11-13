@@ -84,7 +84,7 @@ pub(super) struct ReplicaSource {
     /// The number of its ALC states from its client's input ([`StateNumber`]).
     pub(super) number: Option<StateNumber>,
     /// Its slayer state: the action it plays, from its client or the server's follow-up, or its
-    /// movement ([`super::slayer`]).
+    /// movement, in the form the viewers get ([`super::slayer::SlayerTrack::remote_action`]).
     pub(super) action: Option<SlayerState>,
     /// Its slayer slots past the first and its marker, while its own states echo a change of
     /// them ([`super::slayer::SlayerTrack::remote_upper`]): its block, aim, aimed shot, reload
@@ -609,6 +609,16 @@ impl Replica {
             };
             return Ok(Some(group));
         }
+        let slayer = source.action.filter(|_| self.sends_action);
+        if slayer.is_some() || self.upper_due {
+            tracing::debug!(
+                player = entity,
+                interest,
+                ?slayer,
+                upper = ?source.upper.filter(|_| self.upper_due),
+                "remote slayer state to a viewer"
+            );
+        }
         let mut members = vec![BundleMember {
             component: PLAYER_ALC_COMPONENT,
             state: MemberState::Alc(AlcState::remote_step(&RemoteStep {
@@ -617,7 +627,7 @@ impl Replica {
                 position: self.place,
                 facing: source.view.map(|view| view.yaw),
                 look: source.view,
-                slayer: source.action.filter(|_| self.sends_action),
+                slayer,
                 sequence_time: source.sequence.map(|seconds| sight.sequence.time(seconds)),
                 upper: source.upper,
             })?),

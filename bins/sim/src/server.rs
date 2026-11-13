@@ -13,6 +13,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world::day_night::ClockDone;
 use crate::world::land_claims::TerritoryDone;
 use crate::world::store_purchase::{GrantAnswer, StoreGrant};
 use crate::world::transmog::SkinJob;
@@ -32,6 +33,9 @@ use nw_common::time::{unix_ms, unix_seconds};
 use nw_content::leaderboards::RotationCalendar;
 use nw_db::{AccountSkins, collect_account_skins};
 use nw_db::{
+    CompanyListing, clear_new_account_titles, company_listings, earn_account_titles, stored_players,
+};
+use nw_db::{
     PgPool, SaveOutcome, SavedCamp, SavedHome, SavedHomeRecord, SavedHousingItem, SavedInventory,
     SavedItem, SavedItemRolls, SavedLoadout, SavedLootLimit, SavedMount, SavedMounts, SavedPlace,
     SavedPosition, SavedProgression, SavedQuests, SavedStoredItem, SavedTravel, StatUpdate,
@@ -39,7 +43,6 @@ use nw_db::{
     save_character_quests, save_published_look, submit_stats,
 };
 use nw_db::{SavedGatherNode, level_gather_nodes, save_gather_node, world_clock_start};
-use nw_db::{clear_new_account_titles, company_listings, earn_account_titles, stored_players};
 use nw_messages::ArenaClientMsg;
 use nw_messages::EconomyCall;
 use nw_messages::TransmogClientMsg;
@@ -60,6 +63,7 @@ use nw_messages::{
 use nw_messages::{FishingClientMsg, MusicClientMsg};
 use nw_messages::{
     GameModeClientMsg, PayUpkeepCostMsg, TitlesUnlockMsg, WarClientMsg, WarSignupClientMsg,
+    turrets::{BuildDefensiveStructureMsg, TurretClientMsg},
 };
 use nw_reflect::Envelope;
 use nw_sim_core::{Ground, GroundCheck, Position, TickClock};
@@ -318,6 +322,8 @@ struct Inbox {
     queue: nw_bus::Subscription<QueueNews>,
     /// The director's news of the territory wars' instances (every sim).
     war_instances: nw_bus::Subscription<nw_bus::WarInstanceNews>,
+    /// The runs that start and end at the dungeon entrances (every sim).
+    entrance_runs: nw_bus::Subscription<nw_bus::EntranceRunNews>,
 }
 
 impl Inbox {
@@ -338,6 +344,7 @@ impl Inbox {
             instance: bus.subscribe(subject::sim_instance(world_id, sim)).await?,
             queue: bus.subscribe(subject::sim_queue(world_id, sim)).await?,
             war_instances: bus.subscribe(subject::sims_war(world_id)).await?,
+            entrance_runs: bus.subscribe(subject::sims_entrance_runs(world_id)).await?,
         };
         bus.flush().await?;
         Ok(inbox)
@@ -369,6 +376,8 @@ struct Loop {
     social: Publisher<SocialBatch>,
     /// The players' matchmaking queue calls to the director.
     queue_calls: Publisher<QueueCall>,
+    /// The runs this sim's players start at the dungeon entrances, to every sim.
+    entrance_runs: Publisher<nw_bus::EntranceRunNews>,
     /// The social inputs of this tick, in order.
     pending_social: Vec<SocialInput>,
     db: PgPool,
@@ -395,6 +404,10 @@ struct Loop {
     store_grants: JoinSet<(StoreGrant, GrantAnswer)>,
     /// The territory owner reads and changes that run (land claims module).
     territory_jobs: JoinSet<TerritoryDone>,
+    /// The world clock anchor reads and sets that run (day and night module).
+    clock_jobs: JoinSet<ClockDone>,
+    /// The company reads of the capture the flag participants that run.
+    company_reads: JoinSet<Result<Vec<CompanyListing>, nw_db::DbError>>,
     /// The expedition requests that wait for the director.
     instance_link: InstanceLink,
     handoff_results: mpsc::Sender<HandoffResult>,
@@ -464,6 +477,7 @@ pub async fn serve(
         script_logs: Publisher::start(bus.clone(), SIM_QUEUE),
         social: Publisher::start(bus.clone(), SIM_QUEUE),
         queue_calls: Publisher::start(bus.clone(), SIM_QUEUE),
+        entrance_runs: Publisher::start(bus.clone(), SIM_QUEUE),
         pending_social: Vec::new(),
         settings,
         bus,
@@ -481,6 +495,8 @@ pub async fn serve(
         skin_jobs: JoinSet::new(),
         store_grants: JoinSet::new(),
         territory_jobs: JoinSet::new(),
+        clock_jobs: JoinSet::new(),
+        company_reads: JoinSet::new(),
         instance_link: InstanceLink::default(),
         handoff_results,
         started: Instant::now(),
@@ -549,6 +565,18 @@ pub async fn serve(
             Some(done) = state.economy_jobs.join_next() => state.economy_done(done),
             Some(done) = state.skin_jobs.join_next() => state.skins_done(done),
             Some(done) = state.store_grants.join_next() => state.store_granted(done),
+            Some(done) = state.clock_jobs.join_next() => match done {
+                Ok(done) => state.world.clock_done(done),
+                Err(error) => {
+                    tracing::error!(%error, "world clock job task failed");
+                    state.world.clock_job_lost();
+                }
+            },
+            Some(done) = state.company_reads.join_next() => match done {
+                Ok(Ok(listings)) => state.world.companies_read(&listings),
+                Ok(Err(error)) => tracing::warn!(%error, "company read failed"),
+                Err(error) => tracing::error!(%error, "company read task failed"),
+            },
             Some(done) = state.territory_jobs.join_next() => match done {
                 Ok(done) => state.world.territories_done(done),
                 Err(error) => {
@@ -574,6 +602,10 @@ pub async fn serve(
             Some(news) = inbox.war_instances.next() => match news {
                 Ok(news) => state.world.war_instance_news(news.message),
                 Err(error) => tracing::warn!(%error, "bad war instance news"),
+            },
+            Some(news) = inbox.entrance_runs.next() => match news {
+                Ok(news) => state.world.entrance_news(news.message),
+                Err(error) => tracing::warn!(%error, "bad entrance run news"),
             },
             _ = poll.tick() => state.tick(&mut clock),
             _ = save_timer.tick() => state.save_all(),
@@ -949,6 +981,29 @@ impl Loop {
                     Err(error) => bad_call(index, &error, &envelope.body),
                 }
             }
+            Some(index) if let Some(call) = TurretClientMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => {
+                        let now_ms = self.now_ms();
+                        for result in self.world.turret_call(connection, call, now_ms) {
+                            self.attack_result(result);
+                        }
+                    }
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index)
+                if let Some(call) = BuildDefensiveStructureMsg::decode(index, &envelope.body) =>
+            {
+                match call {
+                    Ok(call) => {
+                        let now_ms = self.now_ms();
+                        self.world
+                            .build_defensive_structure(connection, &call, now_ms);
+                    }
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
             Some(index) if let Some(call) = WarSignupClientMsg::decode(index, &envelope.body) => {
                 match call {
                     Ok(call) => self.world.war_signup_call(connection, call),
@@ -1176,10 +1231,30 @@ impl Loop {
         }
     }
 
-    /// Kicks each player the AFK rule removes (AFK module).
+    /// Reads the companies the capture the flag match asks for, in one task.
+    fn run_company_reads(&mut self) {
+        let ids = self.world.take_company_reads();
+        if ids.is_empty() {
+            return;
+        }
+        let db = self.db.clone();
+        self.company_reads
+            .spawn(async move { company_listings(&db, &ids).await });
+    }
+
+    /// Runs the world clock job of the world, when one is due (day and night module).
+    fn run_clock_jobs(&mut self, now_ms: u64) {
+        if let Some(job) = self.world.take_clock_jobs(now_ms) {
+            let db = self.db.clone();
+            self.clock_jobs.spawn(async move { job.run(&db).await });
+        }
+    }
+
+    /// Removes each player the AFK rule removes (AFK module), with the AFK rejection
+    /// ([`Removal::Afk`]).
     fn run_afk_removals(&mut self) {
         for entity in self.world.take_afk_removals() {
-            let reply = self.kick(entity);
+            let reply = self.remove_player(entity, Removal::Afk);
             tracing::info!(player = entity, ?reply, "AFK removal");
         }
     }
@@ -1406,6 +1481,10 @@ impl Loop {
                     stamina: block_stamina,
                     ranged: hit.ranged,
                     blockable: !hit.unblockable,
+                    power_level: hit.power_level,
+                    hit_stun: hit.hit_stun,
+                    stagger: hit.stagger(),
+                    breakout: hit.breakout(),
                 },
                 now_ms,
             ),
@@ -1487,13 +1566,16 @@ impl Loop {
     /// Saves and removes the player with entity number `entity`, tells its client that its
     /// session ends (271, the retail kick) and its gateway to close its connection (a GM kick).
     fn kick(&mut self, entity: u64) -> AdminReply {
+        self.remove_player(entity, Removal::Kick)
+    }
+
+    /// Takes player `entity` out of the world: its client gets the message of `removal`, the
+    /// player is saved and its connection closes.
+    fn remove_player(&mut self, entity: u64, removal: Removal) -> AdminReply {
         let Some(connection) = self.world.connection_of(entity) else {
             return AdminReply::NotMine;
         };
-        let kick = ServerMessage::KickClient(KickClientMsg {
-            reason: RETAIL_KICK_REASON,
-        });
-        self.send_messages(&connection, &[kick]);
+        self.send_messages(&connection, &[removal.message()]);
         if let Some(departure) = self.world.leave(&connection) {
             self.save(&departure);
         }
@@ -1573,6 +1655,14 @@ impl Loop {
                 request,
             );
         }
+        for news in self.world.take_entrance_news() {
+            if !self
+                .entrance_runs
+                .send(subject::sims_entrance_runs(self.settings.world_id), news)
+            {
+                metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
+            }
+        }
         for call in self.world.take_queue_calls() {
             if !self
                 .queue_calls
@@ -1601,6 +1691,8 @@ impl Loop {
         self.run_economy_jobs();
         self.run_skin_jobs();
         self.run_territory_jobs(now_ms);
+        self.run_clock_jobs(now_ms);
+        self.run_company_reads();
         self.run_store_grants();
         self.run_afk_removals();
         if !output.script_log.is_empty() {
@@ -1829,6 +1921,8 @@ impl Loop {
         }
         let vitals = self.world.social_vitals();
         self.pending_social.extend(vitals);
+        let raids = self.world.take_raid_inputs();
+        self.pending_social.extend(raids);
         if !self.pending_social.is_empty() {
             let batch = SocialBatch {
                 sim: self.settings.sim_id.clone(),
@@ -2010,6 +2104,7 @@ impl Loop {
         }
         if let Some(progression) = &departure.progression {
             let save = ProgressionSave {
+                account: departure.account,
                 progression: progression.clone(),
                 taken_at_ms: unix_ms(),
             };
@@ -2092,16 +2187,26 @@ impl Loop {
         });
     }
 
+    /// Saves the progression of `character` (world database) and its account's season (global
+    /// database, global migration 0010) in one task: a failure of either retries both.
     fn spawn_progression_save(&mut self, character: Uuid, save: ProgressionSave) {
-        let db = self.db.clone();
+        let (db, global) = (self.db.clone(), self.global_db.clone());
         self.spawn_store(SaveKind::Progression, character, async move {
-            save_character_progression(
+            let outcome = save_character_progression(
                 &db,
                 character,
                 &saved_progression(&save.progression, save.taken_at_ms),
                 save.taken_at_ms,
             )
-            .await
+            .await?;
+            nw_db::save_account_season(
+                &global,
+                save.account,
+                &saved_account_season(&save.progression),
+                save.taken_at_ms,
+            )
+            .await?;
+            Ok(outcome)
         });
     }
 
@@ -2210,7 +2315,13 @@ fn saved_progression(progression: &PlayerProgression, taken_at_ms: u64) -> Saved
                 ends_ns: limit.ends_ns,
             })
             .collect(),
-        masteries: progression.masteries.clone(),
+        // The season experience is the account's ([`saved_account_season`]).
+        masteries: progression
+            .masteries
+            .iter()
+            .filter(|(category, _)| category.as_str() != nw_db::SEASON_PASS_PROGRESSION)
+            .map(|(category, experience)| (category.clone(), *experience))
+            .collect(),
         attributes: progression.attributes.clone(),
         weapon_points: progression.weapon_points.clone(),
         territory_points: progression.territory_points.clone(),
@@ -2284,14 +2395,15 @@ fn saved_progression(progression: &PlayerProgression, taken_at_ms: u64) -> Saved
             cyclic_turns: progression.cyclic_turns.clone(),
             fishing_bait: progression.fishing_bait.clone(),
         },
-        season: saved_season(&progression.season),
     }
 }
 
-/// The season pass state as the database stores it (its list versions are not saved).
-fn saved_season(season: &nw_bus::PlayerSeason) -> nw_db::SavedSeason {
+/// The account's season of `progression` as the database stores it: the season experience and
+/// the season pass state (its list versions are not saved).
+fn saved_account_season(progression: &PlayerProgression) -> nw_db::SavedAccountSeason {
+    let season = &progression.season;
     let card = &season.card;
-    nw_db::SavedSeason {
+    let state = nw_db::SavedSeason {
         season: season.season,
         redeemed: season.redeemed.clone(),
         stats: season.stats.clone(),
@@ -2307,6 +2419,14 @@ fn saved_season(season: &nw_bus::PlayerSeason) -> nw_db::SavedSeason {
             stats: card.stats.clone(),
         },
         first_connect_ns: season.first_connect_ns,
+    };
+    nw_db::SavedAccountSeason {
+        experience: progression
+            .masteries
+            .get(nw_db::SEASON_PASS_PROGRESSION)
+            .copied()
+            .unwrap_or_default(),
+        season: state,
     }
 }
 
@@ -2519,6 +2639,30 @@ fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Why the server takes a player out of the world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    /// A game master's kick or a ban: the retail kick 271 with its reason 5.
+    Kick,
+    /// The AFK rule: the rejection 1630 with reason 13, whose client error
+    /// `Errors::aoi_afk_kicked` shows the popup `@mm_rejected_Client_Kicked_AFK`
+    /// (`FUN_146455c70`, `lyshineui/popup/uierrors.luac`). A kick 271 cannot give that error
+    /// (`FUN_146447430`).
+    Afk,
+}
+
+impl Removal {
+    /// The message the client gets.
+    fn message(self) -> ServerMessage {
+        match self {
+            Self::Kick => ServerMessage::KickClient(KickClientMsg {
+                reason: RETAIL_KICK_REASON,
+            }),
+            Self::Afk => ServerMessage::PlayerManagerRejected(PlayerManagerRejectedMsg::afk()),
+        }
+    }
+}
+
 /// A client message of `type_index` shows that its client is in the game: a time sync
 /// request (see [`SimWorld::heard_from`]). The teardown calls of a level change do not,
 /// and movement input does not either: the client sends it on a fresh connection before
@@ -2537,6 +2681,30 @@ fn ghost_ids(ghosts: &[Ghost]) -> Vec<(u64, [u8; nw_messages::RAW_ID_LEN])> {
         .iter()
         .map(|ghost| (ghost.entity, nw_messages::raw_id_of_entity(ghost.entity)))
         .collect()
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use nw_messages::kick::AFK_REJECTION;
+
+    use super::*;
+
+    #[test]
+    fn an_afk_removal_is_the_afk_rejection_and_a_kick_the_retail_kick() {
+        assert_eq!(
+            Removal::Afk.message(),
+            ServerMessage::PlayerManagerRejected(PlayerManagerRejectedMsg {
+                reason: AFK_REJECTION,
+                text: nw_messages::kick::AFK_REJECTION_TEXT.as_bytes().to_vec(),
+            })
+        );
+        assert_eq!(
+            Removal::Kick.message(),
+            ServerMessage::KickClient(KickClientMsg {
+                reason: RETAIL_KICK_REASON
+            })
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2754,6 +2922,7 @@ mod tests {
             let (stop, stopped) = oneshot::channel::<()>();
             let server = tokio::spawn(serve(
                 settings.clone(),
+                Arc::new(NoGround),
                 Arc::new(NoGround),
                 bus.clone(),
                 Databases {

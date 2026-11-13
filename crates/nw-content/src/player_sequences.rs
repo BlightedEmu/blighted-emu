@@ -388,6 +388,24 @@ struct TableFile {
     follow_ups: Vec<FollowUp>,
     #[serde(default)]
     abilities: Vec<AbilityPlay>,
+    #[serde(default)]
+    reactions: Vec<ReactionPlay>,
+}
+
+/// The sequence of one hit reaction entry: the server starts it in the reaction state
+/// (`13=04`) of the own state after the hit. The client numbers the sequence by the entry it
+/// plays, not by the stance (Observed: `2960` in the great sword, the spear and no weapon), so
+/// the table keys it by the entry's animations
+/// ([`crate::player_attacks::ReactionEntry::animations`]). Mined from the own reaction starts
+/// of the capture ledgers against the side of the hit and the power level of the creature's
+/// attack row (`blighted-emu-tools` `scratch-work/combat/hitreact`, `reactlabel` and
+/// `reacttable.py`, 2026-11-12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactionPlay {
+    /// The entry's animations, joined by `+`.
+    pub animations: String,
+    /// `slayerSequenceId` (child 15).
+    pub sequence: u64,
 }
 
 /// The table.
@@ -397,6 +415,8 @@ pub struct PlayerSequences {
     follow_ups: HashMap<u64, FollowUp>,
     /// The ability animations, by CRC-32 of the lowercase ability id.
     abilities: HashMap<u32, AbilityPlay>,
+    /// The reaction sequences, by the entry's animations ([`ReactionPlay`]).
+    reactions: HashMap<String, u64>,
 }
 
 impl PlayerSequences {
@@ -419,7 +439,24 @@ impl PlayerSequences {
     /// Returns [`PlayerSequencesError::Json`] when the text is not the table.
     pub fn parse(text: &str) -> Result<Self, PlayerSequencesError> {
         let file: TableFile = serde_json::from_str(text)?;
-        Ok(Self::of_parts(file.stances, file.follow_ups).with_abilities(file.abilities))
+        Ok(Self::of_parts(file.stances, file.follow_ups)
+            .with_abilities(file.abilities)
+            .with_reactions(file.reactions))
+    }
+
+    /// The same table with the reaction sequences `reactions`.
+    #[must_use]
+    pub fn with_reactions(mut self, reactions: Vec<ReactionPlay>) -> Self {
+        self.reactions = reactions
+            .into_iter()
+            .map(|play| (play.animations, play.sequence))
+            .collect();
+        self
+    }
+
+    /// The sequence of the reaction entry that plays `animations`.
+    pub fn reaction(&self, animations: &str) -> Option<u64> {
+        self.reactions.get(animations).copied()
     }
 
     /// The same table with the ability animations `abilities`.
@@ -449,6 +486,7 @@ impl PlayerSequences {
                 .map(|follow_up| (follow_up.client, follow_up))
                 .collect(),
             abilities: HashMap::new(),
+            reactions: HashMap::new(),
         }
     }
 
@@ -628,5 +666,15 @@ mod tests {
     fn a_missing_file_is_an_io_error() {
         let missing = PlayerSequences::load(Path::new("/nonexistent"), "0");
         assert!(matches!(missing, Err(PlayerSequencesError::Io { .. })));
+    }
+
+    #[test]
+    fn a_reaction_entry_has_its_retail_sequence() {
+        // The great sword's front stagger: `2960`.
+        let text = r#"{"stances": [], "follow_ups": [], "reactions": [
+            {"animations": "unarmed_r2_f+grtswrd_r2_f", "sequence": 2960}]}"#;
+        let table = PlayerSequences::parse(text).expect("table");
+        assert_eq!(table.reaction("unarmed_r2_f+grtswrd_r2_f"), Some(2960));
+        assert_eq!(table.reaction("unarmed_r2_f"), None);
     }
 }

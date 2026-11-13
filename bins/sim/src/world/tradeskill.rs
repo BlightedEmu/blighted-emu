@@ -56,7 +56,7 @@ pub(super) struct EventScale {
 /// The units of a firing that counts once.
 const ONE_UNIT: f64 = 1.0;
 /// The `CategoricalProgressionId` of azoth (`AzothMod` raises its gains).
-const AZOTH_CURRENCY: &str = "Azoth_Currency";
+pub(super) const AZOTH_CURRENCY: &str = "Azoth_Currency";
 
 /// The kind of a gain of categorical progression `id` that is no standing and no faction's.
 fn kind_of(id: &str) -> GainKind {
@@ -255,7 +255,13 @@ impl SimWorld {
     /// `grant` (game event `event`): its reputation progression and its token currency
     /// ([`nw_content::factions::faction_name`], [`nw_content::rewards::EventGrants::faction_currency`]). A player of
     /// no faction gains none (Inferred: the reputation is a faction's).
-    fn gain_faction(&mut self, number: u64, event: &str, grant: &EventGrant, times: u32) {
+    pub(super) fn gain_faction(
+        &mut self,
+        number: u64,
+        event: &str,
+        grant: &EventGrant,
+        times: u32,
+    ) {
         if grant.faction_reputation <= 0.0 && grant.faction_tokens <= 0.0 {
             return;
         }

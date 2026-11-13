@@ -59,8 +59,9 @@ use super::status_effects::GainKind;
 use super::tradeskill::ONE_FIRING;
 use super::{Player, SimWorld, Vitals};
 
-/// The categorical progression of the season experience (`CategoricalProgressionData`).
-pub(super) const SEASON_PASS: &str = "SeasonPass";
+/// The categorical progression of the season experience (`CategoricalProgressionData`): the
+/// account's season experience ([`nw_db::SEASON_PASS_PROGRESSION`]).
+pub(super) const SEASON_PASS: &str = nw_db::SEASON_PASS_PROGRESSION;
 /// The most wild stamps a card holds (Observed: no retail body holds more).
 const MAX_WILD_STAMPS: u16 = 3;
 /// The most rerolls of one card (Inferred: the highest retail `rerollCount`).
@@ -162,6 +163,11 @@ pub(super) enum SeasonEvent<'a> {
         /// The ranks gained.
         ranks: u32,
     },
+    /// It got game event `id` (today the capture the flag end events).
+    GameEvent {
+        /// The `EventID`.
+        id: &'a str,
+    },
     /// It finished an activity card.
     CardDone,
     /// It redeemed a journey task's reward; `challenge` for a task of the challenge chapter.
@@ -258,6 +264,7 @@ fn counted(kind: &StatKind, event: &SeasonEvent<'_>) -> u32 {
                 points
             }
         }
+        (StatKind::GameEvent { events }, SeasonEvent::GameEvent { id }) => once(takes(events, id)),
         (StatKind::CompleteActivityCard, SeasonEvent::CardDone) => 1,
         (
             StatKind::CompleteJourneyTask { challenge },
@@ -1330,5 +1337,22 @@ mod tests {
             counted(&missions, &SeasonEvent::QuestDone { mission: true }),
             1
         );
+    }
+
+    #[test]
+    fn a_game_event_stat_counts_its_events_once_each() {
+        // Content bundle 25810808: `WinCTF` counts `CaptureTheFlag_T4` only.
+        let win = StatKind::GameEvent {
+            events: vec!["CaptureTheFlag_T4".to_owned()],
+        };
+        let won = SeasonEvent::GameEvent {
+            id: "capturetheflag_t4",
+        };
+        let lost = SeasonEvent::GameEvent {
+            id: "CaptureTheFlag_T2",
+        };
+        assert_eq!(counted(&win, &won), 1);
+        assert_eq!(counted(&win, &lost), 0);
+        assert_eq!(counted(&win, &SeasonEvent::CardDone), 0);
     }
 }

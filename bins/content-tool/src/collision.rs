@@ -100,7 +100,7 @@ const MARK_SOURCE_INLINE: u64 = 6;
 /// Placements of slices in a capitals file.
 const CAPITALS_EXTENSION: &str = ".capitals.json";
 /// The chunk lists of capitals.
-const CHUNKS_EXTENSION: &str = ".chunks";
+pub(crate) const CHUNKS_EXTENSION: &str = ".chunks";
 /// The union of a region's capital chunk lists (open world only).
 const REGION_CHUNKS_FILE: &str = "region.chunks";
 const REGIONS_DIR: &str = "regions/";
@@ -1305,8 +1305,26 @@ pub(crate) fn capital_asset(text: &str) -> Option<AssetKey> {
     (guid != [0; GUID_LEN]).then_some((guid, u32::from_str_radix(sub, 16).ok()?))
 }
 
+/// The chunk lists of a level among the paths `files`: each region's `region.chunks` (the union
+/// of its capitals' lists), else the capitals' own `.chunks`.
+pub(crate) fn chunk_lists<'a>(files: &[&'a str]) -> Vec<&'a str> {
+    let region_lists: Vec<&str> = files
+        .iter()
+        .filter_map(|path| path.strip_suffix(REGION_CHUNKS_FILE))
+        .collect();
+    files
+        .iter()
+        .copied()
+        .filter(|path| path.ends_with(CHUNKS_EXTENSION))
+        .filter(|path| {
+            path.ends_with(REGION_CHUNKS_FILE)
+                || !region_lists.iter().any(|region| path.starts_with(region))
+        })
+        .collect()
+}
+
 /// The chunk slices of a chunk list root: each slice's asset id and world position.
-fn chunk_placements(root: &Element) -> Vec<(AssetKey, [f32; AXES])> {
+pub(crate) fn chunk_placements(root: &Element) -> Vec<(AssetKey, [f32; AXES])> {
     let chunks = lowercase_crc32("chunks");
     let asset = lowercase_crc32("assetId");
     let guid = lowercase_crc32("guid");
@@ -1851,20 +1869,8 @@ fn level_placements(index: &PakIndex, level: &str) -> Result<Placements, Collisi
     if files.is_empty() {
         return Err(CollisionError::NoLevel(level.to_owned()));
     }
-    let region_lists: HashSet<String> = files
-        .iter()
-        .filter(|path| path.ends_with(REGION_CHUNKS_FILE))
-        .filter_map(|path| path.strip_suffix(REGION_CHUNKS_FILE).map(str::to_owned))
-        .collect();
-    let chunk_files: Vec<String> = files
-        .iter()
-        .filter(|path| path.ends_with(CHUNKS_EXTENSION))
-        .filter(|path| {
-            path.ends_with(REGION_CHUNKS_FILE)
-                || !region_lists.iter().any(|region| path.starts_with(region))
-        })
-        .cloned()
-        .collect();
+    let names: Vec<&str> = files.iter().map(String::as_str).collect();
+    let chunk_files: Vec<String> = chunk_lists(&names).into_iter().map(str::to_owned).collect();
     let capital_files: Vec<String> = files
         .iter()
         .filter(|path| path.ends_with(CAPITALS_EXTENSION))

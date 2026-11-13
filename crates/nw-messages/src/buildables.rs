@@ -20,6 +20,7 @@
 use crate::combat::{read_string, write_string};
 use crate::item_descriptor::ItemDescriptor;
 use crate::items::FullList;
+use crate::keyed_list::{KeyedList, MapKey};
 use crate::slots::{
     SLOT_0, children_mask, read_children, read_slot_0, read_slot_byte, write_children,
     write_known_children,
@@ -67,37 +68,37 @@ const COLOR_COMPONENTS: usize = 4;
 /// Bytes of a guild id (`FUN_1433f63b0`).
 pub const GUILD_ID_LEN: usize = RAW_ID_LEN;
 
-/// One resource committed to a buildable: its item id and an item descriptor
-/// ([`ItemDescriptor`]; the same fields the death recap carries after its item id).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommittedResource {
-    /// The map key: the item id text.
-    pub item: Vec<u8>,
-    /// The item's descriptor.
-    pub descriptor: ItemDescriptor,
-}
+/// The key of a resource committed to a buildable: its item id text (`WoodT1`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResourceItem(pub Vec<u8>);
 
-impl CommittedResource {
-    /// `quantity` of item `item` (its id text) and `item_crc` (the CRC-32 of its lowercase id),
-    /// every other field as the constructor and retail have it.
-    pub fn of(item: &str, item_crc: u32, quantity: u32) -> Self {
-        Self {
-            item: item.as_bytes().to_vec(),
-            descriptor: ItemDescriptor::of(item_crc, quantity),
-        }
-    }
-
+impl MapKey for ResourceItem {
     fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
-        Ok(Self {
-            item: read_string(reader)?,
-            descriptor: ItemDescriptor::read(reader)?,
-        })
+        read_string(reader).map(Self)
     }
 
     fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
-        write_string(writer, &self.item)?;
-        self.descriptor.write(writer)
+        write_string(writer, &self.0)
     }
+}
+
+/// The resources committed to a buildable: item id text to an item descriptor
+/// ([`ItemDescriptor`]; the same fields the death recap carries after its item id). A spawn
+/// group holds the full form; a build adds or raises one resource in the delta form (Observed:
+/// retail `12a_msq_12_camptutorial` 290.886 s added `FlintT1` 1 at version 14).
+pub type CommittedResources = KeyedList<ResourceItem, ItemDescriptor>;
+
+/// `quantity` of item `item` (its id text) and `item_crc` (the CRC-32 of its lowercase id) as a
+/// committed resource, every other descriptor field as the constructor and retail have it.
+pub fn committed_resource(
+    item: &str,
+    item_crc: u32,
+    quantity: u32,
+) -> (ResourceItem, ItemDescriptor) {
+    (
+        ResourceItem(item.as_bytes().to_vec()),
+        ItemDescriptor::of(item_crc, quantity),
+    )
 }
 
 /// `MB::BuildableControllerReplicatedState`.
@@ -108,7 +109,7 @@ pub struct BuildableControllerState {
     /// `checkFoundationEvents`.
     pub check_foundation_events: Option<bool>,
     /// `commitedResources`.
-    pub committed_resources: Option<FullList<CommittedResource>>,
+    pub committed_resources: Option<CommittedResources>,
     /// `ruinDamageType` (a byte).
     pub ruin_damage_type: Option<u8>,
     /// `territoryOwnerGuildId` (16 bytes).
@@ -128,8 +129,8 @@ impl BuildableControllerState {
     ///
     /// # Errors
     ///
-    /// Returns [`MessageError`] when the body ends early, has a slot or child the table has not,
-    /// or the resource list is a delta.
+    /// Returns [`MessageError`] when the body ends early or has a slot or child the table has
+    /// not.
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         let mut state = Self::default();
         read_slot_0(
@@ -142,7 +143,7 @@ impl BuildableControllerState {
                     1 => state.check_foundation_events = Some(reader.boolean()?),
                     2 => {
                         state.committed_resources =
-                            Some(FullList::read(reader, CommittedResource::read)?);
+                            Some(KeyedList::read(reader, ItemDescriptor::read)?);
                     }
                     3 => state.ruin_damage_type = Some(reader.u8()?),
                     4 => state.territory_owner_guild_id = Some(reader.array()?),
@@ -189,7 +190,7 @@ impl BuildableControllerState {
                     }
                     2 => {
                         if let Some(list) = &self.committed_resources {
-                            list.write(writer, |writer, resource| resource.write(writer))?;
+                            list.write(writer, |writer, descriptor| descriptor.write(writer))?;
                         }
                     }
                     3 => {
@@ -684,6 +685,7 @@ fn write_known_slot_0(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keyed_list::MapChange;
     use crate::payload::MemberState;
 
     /// The member bodies of the retail WW campfire group (`newchar-retail-2026-09-18`, 448630
@@ -711,6 +713,30 @@ mod tests {
         state
     }
 
+    /// Retail `12a_msq_12_camptutorial` 290.886 s: the camp build adds its last resource,
+    /// `FlintT1` 1, at list version 14 (the delta form of the committed resources).
+    const FLINT_ADDED: &str =
+        "0104010107466c696e745431010e0c9280c800000000000100ffffffff00000033000000000000";
+    const FLINT_ADDED_VERSION: u64 = 14;
+
+    #[test]
+    fn the_retail_resource_delta_of_a_camp_build_reads_and_round_trips() {
+        let MemberState::BuildableController(controller) =
+            round_trip(BUILDABLE_CONTROLLER_TYPE_INDEX, FLINT_ADDED)
+        else {
+            panic!("controller");
+        };
+        let (item, descriptor) = committed_resource("FlintT1", 0x0c92_80c8, 1);
+        assert_eq!(
+            controller.committed_resources,
+            Some(KeyedList::Changes(vec![MapChange {
+                key: item,
+                version: Some(FLINT_ADDED_VERSION),
+                value: Some(descriptor),
+            }]))
+        );
+    }
+
     #[test]
     fn the_retail_campfire_states_read_and_round_trip() {
         let MemberState::BuildableController(controller) =
@@ -719,14 +745,15 @@ mod tests {
             panic!("controller");
         };
         assert_eq!(controller.current_state, Some(5));
-        let resources = controller.committed_resources.expect("resources");
-        assert_eq!(resources.version, Some(WW_LIST_VERSION));
         assert_eq!(
-            resources.elements,
-            [
-                CommittedResource::of("WoodT1", 0x8a91_4427, 5),
-                CommittedResource::of("FlintT1", 0x0c92_80c8, 1),
-            ]
+            controller.committed_resources,
+            Some(KeyedList::full(
+                WW_LIST_VERSION,
+                vec![
+                    committed_resource("WoodT1", 0x8a91_4427, 5),
+                    committed_resource("FlintT1", 0x0c92_80c8, 1),
+                ]
+            ))
         );
         let MemberState::Ownership(ownership) = round_trip(OWNERSHIP_TYPE_INDEX, OWNERSHIP) else {
             panic!("ownership");

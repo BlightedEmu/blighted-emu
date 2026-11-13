@@ -16,13 +16,16 @@
 //! - `Target_Angle`: signed degrees from the facing to the target, positive on the mob's left
 //!   (the trace rule; Inferred from the Turn sub-tree's `< -30 Or > 30`).
 //! - `Target_Visible`: the target is within the combat vision distance (Inferred: the retail
-//!   boar turned to a player at 77 to 107 degrees, so its 180 degree combat cone does not hide
-//!   the target in a fight; trace finding a).
+//!   boar turned to a player at 77 to 107 degrees, so its combat cone of 180 degrees to each
+//!   side does not hide the target in a fight; trace finding a). It does not end the chase
+//!   (see [`MindState::perceive`]).
 //! - `Target_Reachable`, `Target_Directly_Reachable`: the straight line to the target stands on
 //!   floor within the slice's `m_maxSlope` (Inferred: the server has no navigation mesh, see
 //!   [`floor_line`]).
-//! - `Time_Since_Target_Reachable`: seconds since the target was last reachable (Inferred from
-//!   the name and `TargetUnreachableResetTime` 5 s).
+//! - `Time_Since_Target_Reachable`: seconds since the target was last reachable, or since the
+//!   mob took it (Inferred from the name and `TargetUnreachableResetTime` 5 s: a mob gets that
+//!   long to reach a new target before `UnreachableTargetLeash` sends it home).
+//! - `Target_Score`: [`HELD_TARGET_SCORE`] while it has a target.
 //! - `Target_Vitals_State`, `Vitals_State`: 4 while alive (Inferred: the trees name the test
 //!   `$Target_Vitals_State Equal 4` "HasAliveTarget", 154 times; a dead player is no target).
 //! - `Health_Percent`: 0 to 100 (Observed: the trees compare it with 5 to 100, and 33.33 and
@@ -72,8 +75,9 @@ use crate::mobs::MobReach;
 pub const MAX_STEP_DOWN_M: f32 = 3.0;
 /// A mob that sees notices a player this near at any bearing: the perception profile's
 /// `m_radiusOfImmediateVicinity` (Inferred value, mobs note 2026-10-31: three beach sailors
-/// alerted 0.3 to 0.65 s after the player stood 3.2 to 3.8 m away beside or behind them, out of
-/// their 90 deg cone; the client default is 2.5 m and the server profile is Unknown).
+/// alerted 0.3 to 0.65 s after the player stood 3.2 to 3.8 m away beside or behind them, two of
+/// them at -113 and -115 deg, out of their cone of 90 deg to each side; the client default is
+/// 2.5 m and the server profile is Unknown).
 pub(crate) const IMMEDIATE_VICINITY_M: f32 = 3.8;
 /// Longest time one AI step may move a mob, so a stalled tick never makes it jump (our
 /// engineering limit).
@@ -189,6 +193,22 @@ const PROJECTILE_SPEED_PARAM: &str = "ProjectileSpeed";
 /// The navigation config of a run (Observed: the boar's `Run` nodes name `RunToTarget`; retail
 /// boar runs reached 6.96 m/s, its maximum 7.0).
 const RUN_CONFIG: &str = "RunToTarget";
+/// The navigation config of a flight (Observed: the prey trees' `FleeFromTarget`,
+/// `FleeAnyTowardHome`, `FleeAnyDirection` and `FleeFromDamage` name `Flee`; no slice has a
+/// navigation config of that kind). A flight without a picked point runs from its target
+/// ([`MotionKind::Away`]).
+const FLEE_CONFIG: &str = "Flee";
+/// How far ahead of a fleeing mob it steers, straight away from what it flees (our engineering
+/// limit: the first leg of a way around a solid).
+const FLEE_AHEAD_M: f32 = DETOUR_LEG_M;
+/// `Target_Score` of the target a mob holds. The targeting profile's curves are Unknown (study
+/// section 3.2), so the score itself is Unknown; Inferred: a mob holds only a target it picked,
+/// whose score is above 0, and 1 is the top of a utility. Only the prey and goat trees read
+/// the key (Observed: `Target_Score > 0` and `>= 0.05`, four times each). Without it no prey
+/// fled and no goat fought: the live goat `sheep_churro_8` (archetype 748) held a player 35 s
+/// with no move (sim log 2026-11-12 14:32:52 to 14:33:27): its `HighTargetScore` (node 18123)
+/// failed, so the tree fell to its ambient wander.
+const HELD_TARGET_SCORE: f32 = 1.0;
 /// The status effects of a leash reset (Observed: `ResetToHome` and `DistanceLeash` apply
 /// `ResetAI` or `ResetAINoHeal` while the mob walks home).
 const RESET_EFFECT: &str = "ResetAI";
@@ -302,6 +322,7 @@ struct Names {
     aim_at_target: Option<NameId>,
     projectile_speed: Option<NameId>,
     run_config: Option<NameId>,
+    flee_config: Option<NameId>,
     reset: Option<NameId>,
     reset_no_heal: Option<NameId>,
     attack_cooldown: Option<NameId>,
@@ -327,6 +348,10 @@ pub struct MobAi {
     rates: AiRates,
     looks: LookAssets,
     slice_vitals: SliceVitals,
+    /// For each archetype, whether the data gives its chase distance: its slice's
+    /// `CombatLeashDistance`, or a literal of its trees' conditions on that key
+    /// ([`chase_from_data`]).
+    chase_data: Vec<bool>,
 }
 
 impl MobAi {
@@ -357,6 +382,7 @@ impl MobAi {
             aim_at_target: name(AIM_AT_TARGET_PARAM),
             projectile_speed: name(PROJECTILE_SPEED_PARAM),
             run_config: name(RUN_CONFIG),
+            flee_config: name(FLEE_CONFIG),
             reset: name(RESET_EFFECT),
             reset_no_heal: name(RESET_NO_HEAL_EFFECT),
             attack_cooldown: name(ATTACK_COOLDOWN),
@@ -366,13 +392,32 @@ impl MobAi {
             ambient_leash: key(AMBIENT_LEASH_KEY),
             combat_leash: key(COMBAT_LEASH_KEY),
         };
+        let chase_data = runtime
+            .data()
+            .archetypes
+            .iter()
+            .map(|arch| chase_from_data(runtime.data(), arch, names.combat_leash))
+            .collect();
         Self {
             runtime,
             names,
             rates,
             looks,
             slice_vitals: SliceVitals::new(),
+            chase_data,
         }
+    }
+
+    /// How far a mob of archetype `archetype` and vitals `CreatureType` `creature_type` chases
+    /// from its spawn when the data gives no value ([`chase_fallback_m`]); `None` when its slice
+    /// or its trees give one.
+    pub fn chase_fallback(&self, archetype: u32, creature_type: Option<&str>) -> Option<f32> {
+        (!self
+            .chase_data
+            .get(archetype as usize)
+            .copied()
+            .unwrap_or(false))
+        .then(|| chase_fallback_m(creature_type))
     }
 
     /// The AI whose trees' `ExecuteSpawn` nodes spawn the creatures of `slice_vitals`.
@@ -959,6 +1004,21 @@ fn turned(facing: f32, degrees: f64) -> f32 {
     facing + radians
 }
 
+/// The clips of `windows`, each written once: a clip written again in the same entry, with the
+/// same times and parameters, is the same hit or shot (Observed: the damned bowman's
+/// `Fire_Bow_SpreadShot` holds three equal `CAGE-RangedAttack` clips at 1.47 s and hit the
+/// retail player once, MSQ13-lv56 ledger 770,029 ms; the damned bear's `Attack_Lunge_L_Quad`
+/// holds two equal `CAGE-Damage` clips and hit once, 1,342,703 ms). The undead pistoleer's
+/// `Shoot_Pistol_BreakGuard` holds five equal shots at 0.93 s, which hit a live player five times
+/// in one millisecond (sim log 2026-11-12 14:32:02.032).
+fn once_each(windows: &[ProcWindow]) -> impl Iterator<Item = &ProcWindow> {
+    windows
+        .iter()
+        .enumerate()
+        .filter(|(index, window)| !windows[..*index].contains(window))
+        .map(|(_, window)| window)
+}
+
 /// The point `distance` from `from` along yaw `yaw`.
 fn ahead(from: Position, yaw: f32, distance: f32) -> Position {
     Position {
@@ -993,6 +1053,13 @@ enum MotionKind {
         left: bool,
         until_ms: u64,
     },
+    /// Away from its target, else from where it was last hit, until that point lies beyond the
+    /// distance of its ambient vision: a `Flee` navigation without a picked point (Observed:
+    /// MSQ13-lv56 ledger, 1,388,400 to 1,694,300 ms: nine retail turkeys ran `Move_Combat` from
+    /// a player 3.4 to 15.3 m away, for 8.5 to 53.5 m at 1.7 to 4.2 m/s, six of them within 70
+    /// degrees of straight away, and eight ended with the player beyond the turkey's 15 m
+    /// ambient vision; Inferred: the end rule, as the engine's rule is Unknown).
+    Away,
 }
 
 /// The CAGE action a mob plays, as its replicated animation shows it.
@@ -1065,6 +1132,7 @@ struct RangedWindow {
     slice: Option<NameId>,
     lead: bool,
     lead_max_rad: f32,
+    speed_mps: Option<f32>,
 }
 
 /// The projectile of a `CAGE-RangedAttack` clip, which the mob fires at its target.
@@ -1079,6 +1147,8 @@ pub struct RangedClip {
     pub lead: bool,
     /// `AILeadTargetMaxAngle`: how far from the target the lead may turn the aim (radians).
     pub lead_max_rad: f32,
+    /// `ProjectileSpeed` (m/s): the speed its aim leads with; `None` when the clip names none.
+    pub speed_mps: Option<f32>,
 }
 
 /// The hit of a damage window: its damage table row and how far it reaches.
@@ -1289,6 +1359,25 @@ struct MindState {
     guard: Option<GuardState>,
     /// Its block is up (after its last step).
     blocking: bool,
+    /// The node and CAGE task of the action or move it started last ([`TreeMind::log_decision`]).
+    decision: Option<(NodeId, NameId)>,
+    /// Why its target changed in its last step ([`TargetReason`]).
+    target_reason: Option<TargetReason>,
+    /// Its chase distance where the data gives none ([`MobAi::chase_fallback`]): the engine key
+    /// `CombatLeashDistance`.
+    chase_fallback_m: Option<f32>,
+}
+
+/// Why a mob's target changed, for the log of its decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetReason {
+    /// The target left the players the mob may see (the wake radius), or the mob walks home in
+    /// a leash reset.
+    OutOfSight,
+    /// It took the player that put the most threat on it.
+    Threat,
+    /// It saw a player in its ambient vision.
+    Sight,
 }
 
 /// An action the engine runs by its activation condition (`Block`, `BlockBroken`,
@@ -1529,8 +1618,23 @@ impl MindState {
         match self.motion?.kind {
             MotionKind::To(goal) => Some(goal),
             MotionKind::Follow { goal, .. } => goal.map(|(point, _)| point),
-            MotionKind::Strafe { .. } => None,
+            MotionKind::Strafe { .. } | MotionKind::Away => None,
         }
+    }
+
+    /// Where a mob at `at` that flees its target `target`, else where it was last hit, steers
+    /// to ([`MotionKind::Away`]): [`FLEE_AHEAD_M`] on, straight away from it. `None` when it has
+    /// fled past the distance of its ambient vision (none: at once), or has nothing to flee.
+    fn flight_goal(
+        &self,
+        ai: &MobAi,
+        at: Position,
+        target: Option<TargetView>,
+    ) -> Option<Position> {
+        let from = target.map(|target| target.position).or(self.last_damage)?;
+        let far_m = self.vision(ai, false).map_or(0.0, |(_, distance)| distance);
+        (at.horizontal_distance(from) < far_m)
+            .then(|| ahead(at, yaw_toward(from, at), FLEE_AHEAD_M))
     }
 
     /// Whether the mob is in a leash reset (it walks home and sees no player).
@@ -1542,10 +1646,27 @@ impl MindState {
 
     /// Picks the target (the targeting profile's curve formula is Unknown, study section 3.2;
     /// this rule is Inferred): a mob in a leash reset has none (it walks home); a target is kept
-    /// while it is within the combat vision distance, and while locked
-    /// (`LockTargetSelection`); else the top threat that is near; else, for a mob that is not
-    /// `passive`, the nearest player in its ambient vision cone (the slice profile: the cone's
-    /// full angle and its distance).
+    /// while the mob may see it (the sim's wake radius), and while locked
+    /// (`LockTargetSelection`); else the top threat that it may see; else, for a mob that is not
+    /// `passive`, the nearest player in its ambient vision cone (the slice profile: the angle
+    /// from its facing to each side, and its distance).
+    ///
+    /// The combat vision distance does not end a chase (Observed, `aggro/chase.py` over the 19
+    /// MSQ ledgers, 2026-11-12: of 147 retail mobs that walked home alive, half still ran at the
+    /// player when it was 28.6 m or more away, a quarter at 40.1 m or more, for example a
+    /// skeleton at 70.5 m in MSQ13-lv56 before its walk home at 1,211,901 ms and a boar at 56 m
+    /// in MSQ5-lv25 before 1,343,598 ms; both slices have a 30 m combat vision). The walk home
+    /// came 60 to 80 m from the mob's first place in 76 of the 147 (median 66.7 m): the tree's
+    /// `DistanceLeash` on `CombatLeashDistance` (70 m on most slices) ends the chase, so the
+    /// held target is kept to it.
+    ///
+    /// The cone's angle is the slice's `m_visionAngle` from the facing to each side, not the
+    /// cone's full width (Observed, `aggro/hazard.py`, 2026-11-12: the mobs of a 75 deg / 12 m
+    /// profile alerted 3.8 to 12 m away at 37.5 to 75 deg from their facing 7 times in 193 s of
+    /// exposure there, at 75 to 120 deg once in 269 s and at 120 to 180 deg never in 318 s (with
+    /// the full-width reading, a cone of 37.5 deg to each side, the 7 could not be); the
+    /// 50 deg / 18 m mobs alerted
+    /// at 37.5 to 60 deg 3 times and never at 60 to 180 deg within 18 m).
     fn perceive(
         &mut self,
         ai: &MobAi,
@@ -1555,22 +1676,18 @@ impl MindState {
     ) -> Perceived {
         let combat = self.vision(ai, true);
         let seen: &[Seen] = if self.resetting(ai) { &[] } else { around.seen };
-        let in_combat_range = |player: &Seen| {
-            combat.is_none_or(|(_, distance)| player.position.horizontal_distance(at) <= distance)
-        };
-        let near = |entity: u64| {
-            seen.iter()
-                .find(|player| player.entity == entity)
-                .filter(|player| in_combat_range(player))
-                .copied()
-        };
+        let near = |entity: u64| seen.iter().find(|player| player.entity == entity).copied();
         let had = self.target;
         if self.target.is_some_and(|target| near(target).is_none()) {
             self.target = None;
+            self.target_reason = Some(TargetReason::OutOfSight);
         }
         if !(self.locked && self.target.is_some()) {
             while let Some(top) = self.threat.top() {
                 if near(top).is_some() {
+                    if self.target != Some(top) {
+                        self.target_reason = Some(TargetReason::Threat);
+                    }
                     self.target = Some(top);
                     break;
                 }
@@ -1587,7 +1704,7 @@ impl MindState {
                     let distance = player.position.horizontal_distance(at);
                     let bearing = yaw_gap(self.yaw, yaw_toward(at, player.position)).abs();
                     distance <= IMMEDIATE_VICINITY_M
-                        || (distance <= distance_m && bearing.to_degrees() <= angle_deg * HALF)
+                        || (distance <= distance_m && bearing.to_degrees() <= angle_deg)
                 })
                 .min_by(|a, b| {
                     let da = a.position.horizontal_distance(at);
@@ -1595,10 +1712,21 @@ impl MindState {
                     da.total_cmp(&db).then(a.entity.cmp(&b.entity))
                 })
                 .map(|player| player.entity);
+            if self.target.is_some() {
+                self.target_reason = Some(TargetReason::Sight);
+            }
         }
         if self.target.is_some() && had.is_none() {
             // The fight takes over from the damage reaction (Inferred).
             self.last_damage = None;
+        }
+        if self.target != had {
+            // The time since the target was reachable counts from its pick (module notes).
+            // Counted from the sim's start, a target out of reach at its first sight sent the
+            // mob home at once: `UnreachableTargetLeash` (node 239, `Time_Since_Target_Reachable
+            // > 6`) took the risen of archetype 530 home 4.47 m from its spawn by `LeashOrDie`
+            // (node 219) again and again, `since_reachable_ms=None` (live 2026-11-12 13:23:58).
+            self.reachable_ms = self.target.map(|_| around.now_ms);
         }
         let max_slope = ai.arch(self.archetype).and_then(|arch| arch.max_slope_deg);
         let target = self.target.and_then(near).map(|player| {
@@ -1643,7 +1771,13 @@ impl MindState {
             .iter()
             .map(|player| player.position.horizontal_distance(at))
             .fold(f32::INFINITY, f32::min);
-        let candidates = seen.iter().filter(|player| in_combat_range(player)).count();
+        let candidates = seen
+            .iter()
+            .filter(|player| {
+                combat
+                    .is_none_or(|(_, distance)| player.position.horizontal_distance(at) <= distance)
+            })
+            .count();
         Perceived {
             target,
             nearest_m,
@@ -1758,7 +1892,8 @@ impl MindState {
         Some(tags)
     }
 
-    fn fire_windows(&mut self, ai: &MobAi, now_ms: u64, thought: &mut Thought) {
+    /// Fires the damage, ranged and spell windows of mob `entity` that are due at `now_ms`.
+    fn fire_windows(&mut self, ai: &MobAi, entity: u64, now_ms: u64, thought: &mut Thought) {
         let (due, later): (Vec<Window>, Vec<Window>) = self
             .windows
             .iter()
@@ -1780,6 +1915,16 @@ impl MindState {
                 }),
                 WindowAct::Strike { row, reach, ranged } => {
                     let (Some((target, target_at)), Some(table)) = (target, &table) else {
+                        tracing::debug!(
+                            mob = entity,
+                            attack = ai.name(row),
+                            reason = if target.is_none() {
+                                "no target"
+                            } else {
+                                "no damage table"
+                            },
+                            "mob attack not started"
+                        );
                         continue;
                     };
                     thought.hits.push(WindowHit {
@@ -1795,6 +1940,7 @@ impl MindState {
                                 slice: ranged.slice.map(|slice| ai.name(slice).to_lowercase()),
                                 lead: ranged.lead,
                                 lead_max_rad: ranged.lead_max_rad,
+                                speed_mps: ranged.speed_mps,
                             }),
                         },
                     });
@@ -1914,7 +2060,7 @@ impl MindState {
             .map(|clip| HomingRun::new(*clip, now_ms, ends_ms))
             .collect();
         let homing = clips.first();
-        for window in windows.iter().filter(is_damage) {
+        for window in once_each(windows).filter(is_damage) {
             let Some(row) = param_of(window, ai.names.damage_row) else {
                 continue;
             };
@@ -1934,7 +2080,7 @@ impl MindState {
                 at_ms,
                 act: WindowAct::Strike {
                     row,
-                    reach: window_reach(ai, window, homing),
+                    reach: window_reach(ai, shaped(ai, window, weapon), homing),
                     ranged: None,
                 },
             });
@@ -1946,7 +2092,7 @@ impl MindState {
         } else {
             weapon
         };
-        for window in ranged_windows.iter().filter(is_ranged) {
+        for window in once_each(ranged_windows).filter(is_ranged) {
             let (Some(row), Some(attack)) = (
                 param_of(window, ai.names.damage_row),
                 param_of(window, ai.names.ranged_attack),
@@ -1975,6 +2121,9 @@ impl MindState {
                             .and_then(|degrees| degrees.parse::<f32>().ok())
                             .unwrap_or(0.0)
                             .to_radians(),
+                        speed_mps: text(ai.names.projectile_speed)
+                            .and_then(|speed| speed.parse::<f32>().ok())
+                            .filter(|speed| *speed > 0.0),
                     }),
                 },
             });
@@ -2054,6 +2203,7 @@ impl MindState {
             speed_mps: self.speed_mps,
         };
         let max_slope = ai.arch(self.archetype).and_then(|arch| arch.max_slope_deg);
+        let flight = self.flight_goal(ai, *at, target);
         let outcome = match &mut motion.kind {
             MotionKind::To(goal) => {
                 steer_along(&mut self.path, &mut mover, *goal, &motion.steering, dt_s)
@@ -2095,11 +2245,22 @@ impl MindState {
                     None
                 }
             },
+            MotionKind::Away => match (target, self.last_damage) {
+                (None, None) => Some(MotionOutcome::Failed),
+                _ => match flight {
+                    None => Some(MotionOutcome::Arrived),
+                    Some(point) => {
+                        steer_along(&mut self.path, &mut mover, point, &motion.steering, dt_s);
+                        None
+                    }
+                },
+            },
         };
         let goal = match motion.kind {
             MotionKind::To(goal) => Some(goal),
             MotionKind::Follow { goal, .. } => goal.map(|(point, _)| point),
             MotionKind::Strafe { .. } => None,
+            MotionKind::Away => flight,
         };
         let outcome = match floor_move(ground, *at, mover.position, max_slope) {
             Some(on_floor) => {
@@ -2265,8 +2426,16 @@ impl TreeMind {
                 reaction_action: None,
                 guard: None,
                 blocking: false,
+                decision: None,
+                target_reason: None,
+                chase_fallback_m: None,
             },
         })
+    }
+
+    /// It chases `chase_m` from its spawn: the chase distance of a mob whose data gives none.
+    pub const fn set_chase_fallback(&mut self, chase_m: f32) {
+        self.state.chase_fallback_m = Some(chase_m);
     }
 
     /// It can block with guard `guard` (its mob type's): its stamina starts at the guard's
@@ -2770,7 +2939,8 @@ impl TreeMind {
         if had.is_none() {
             thought.acquired = self.state.target;
         }
-        self.state.fire_windows(ai, now_ms, &mut thought);
+        self.state
+            .fire_windows(ai, around.entity, now_ms, &mut thought);
         if now_ms < self.state.next_tick_ms {
             return thought;
         }
@@ -2792,7 +2962,8 @@ impl TreeMind {
                 .home_in(ai, at, target_at, around.ground, now_ms, false);
             // A run that got to its target strikes now: the tree's next action starts in this
             // step and takes the windows of the run away.
-            self.state.fire_windows(ai, now_ms, &mut thought);
+            self.state
+                .fire_windows(ai, around.entity, now_ms, &mut thought);
         } else {
             self.state.speed_mps = 0.0;
             self.state
@@ -2830,13 +3001,37 @@ impl TreeMind {
         thought
     }
 
-    /// Logs a change of the target from `from` (the live check of aggro and leash).
+    /// Logs the start of an action or move by node `node` playing `task`, when it differs from
+    /// the one the mob at `at` started last (the live check of a mob's decisions: one line per
+    /// change, not per tick).
+    fn log_decision(&mut self, ai: &MobAi, entity: u64, at: Position, node: NodeId, task: NameId) {
+        if self.state.decision == Some((node, task)) {
+            return;
+        }
+        self.state.decision = Some((node, task));
+        let data = ai.data();
+        tracing::debug!(
+            mob = entity,
+            archetype = self.state.archetype,
+            node,
+            node_name = ai.name(data.node(node).name),
+            task = ai.name(task),
+            target = ?self.state.target,
+            target_m = ?self.state.target_at.map(|target| target.horizontal_distance(at)),
+            reachable = ?self.state.reach.map(|check| check.reachable),
+            "mob decision"
+        );
+    }
+
+    /// Logs a change of the target from `from` and its reason (the live check of aggro and
+    /// leash).
     fn log_target_change(&self, ai: &MobAi, from: Option<u64>, at: Position) {
         if self.state.target != from {
             tracing::debug!(
                 archetype = self.state.archetype,
                 from = ?from,
                 to = ?self.state.target,
+                reason = ?self.state.target_reason,
                 resetting = self.state.resetting(ai),
                 x = at.x,
                 y = at.y,
@@ -2908,11 +3103,12 @@ impl TreeMind {
             match command {
                 Command::PlayTask {
                     slot,
+                    node,
                     task,
                     action,
                     done_at_ms,
-                    ..
                 } => {
+                    self.log_decision(ai, others.entity, at, node, task);
                     let tags = self.brain.tags();
                     self.state
                         .play(ai, tags, slot, task, action, done_at_ms, now_ms);
@@ -2947,20 +3143,28 @@ impl TreeMind {
                         let view = self.state.view(ai, at, now_ms, passive);
                         self.steering(ai, node, config, &view)
                     };
-                    let kind = match destination {
-                        Destination::Point(point) => {
-                            let goal = position_of(point);
-                            tracing::debug!(
-                                archetype = self.state.archetype,
-                                node,
-                                from_x = at.x,
-                                from_y = at.y,
-                                to_x = goal.x,
-                                to_y = goal.y,
-                                "mob move to a point"
-                            );
-                            MotionKind::To(goal)
+                    // A move to where the mob stands is done at once and shows no move: retail
+                    // ends a navigation at its arrival (Inferred), and the live pistoleer of
+                    // archetype 678 played `Move_CAGE_Task` 1,190 times on its own waypoint at
+                    // (7773.8, 3565.8), its Patrol sub-tree's `PatrolMove` (node 1173) before
+                    // each waypoint task: it walked in place (sim log 2026-11-12 14:28 to 14:35).
+                    if let Destination::Point(point) = destination
+                        && at.horizontal_distance(position_of(point)) <= steering.arrival_m
+                    {
+                        self.state.stop_moving();
+                        self.brain.report_motion(slot, MotionOutcome::Arrived);
+                        continue;
+                    }
+                    let flees = match &ai.data().node(node).kind {
+                        NodeKind::Navigation(nav) => {
+                            nav.motion.nav_config.is_some()
+                                && nav.motion.nav_config == ai.names.flee_config
                         }
+                        _ => false,
+                    };
+                    let kind = match destination {
+                        Destination::Point(point) => MotionKind::To(position_of(point)),
+                        Destination::Target if flees => MotionKind::Away,
                         Destination::Target => MotionKind::Follow {
                             goal: None,
                             config: config_index,
@@ -2971,6 +3175,7 @@ impl TreeMind {
                         kind,
                         steering,
                     });
+                    self.log_decision(ai, others.entity, at, node, task);
                     self.state.show(ai, slot, task, now_ms);
                     let moved = self
                         .state
@@ -2990,23 +3195,27 @@ impl TreeMind {
                     let NodeKind::Strafe(strafe) = &ai.data().node(node).kind else {
                         continue;
                     };
+                    self.log_decision(ai, others.entity, at, node, task);
                     let config = config
                         .and_then(|index| ai.arch(self.state.archetype)?.nav_configs.get(index));
                     let (steering, ideal, lateral) = {
                         let view = self.state.view(ai, at, now_ms, passive);
-                        let number = |param: &Param| {
+                        // A field the node leaves unset comes from the slice's strafe config
+                        // ([`strafe_config_number`]).
+                        let number = |param: &Param, field: &str| {
                             self.brain
                                 .resolve(&ai.runtime, &view, param)
                                 .and_then(Value::as_number)
+                                .or_else(|| strafe_config_number(config, field))
                         };
                         (
                             self.steering(ai, node, config, &view),
                             (
-                                number(&strafe.ideal_distance_min).unwrap_or(0.0),
-                                number(&strafe.ideal_distance_max).unwrap_or(0.0),
+                                number(&strafe.ideal_distance_min, IDEAL_MIN_FIELD).unwrap_or(0.0),
+                                number(&strafe.ideal_distance_max, IDEAL_MAX_FIELD).unwrap_or(0.0),
                             ),
-                            number(&strafe.lateral_frequency_min)
-                                .zip(number(&strafe.lateral_frequency_max)),
+                            number(&strafe.lateral_frequency_min, LATERAL_MIN_FIELD)
+                                .zip(number(&strafe.lateral_frequency_max, LATERAL_MAX_FIELD)),
                         )
                     };
                     // Inferred: one sideways move lasts a random time of its lateral move
@@ -3286,6 +3495,130 @@ fn window_reach(ai: &MobAi, window: &ProcWindow, homing: Option<&HomingClip>) ->
     }
 }
 
+/// The `m_strafeActionParams` fields of a slice's navigation config that a strafe node leaves
+/// unset (Observed: the undead pistoleer's `Strafe_Close` sets `IdealDistanceMin` 2.5 and
+/// `IdealDistanceMax` 5.5 and no `LateralMovementFrequency`; its slice's `Strafe` config holds
+/// `m_lateralMovementFrequencyMin` 1 and `Max` 3). Without them its strafe ended in one tick and
+/// it stood in `Combat_Idle` between its shots beside a player (sim test 2026-11-12); retail it
+/// shot a player 1 m away every 1 to 2 s (MSQ5-lv25 ledger, 423,090 to 426,024 ms).
+const IDEAL_MIN_FIELD: &str = "m_idealDistanceMin";
+const IDEAL_MAX_FIELD: &str = "m_idealDistanceMax";
+const LATERAL_MIN_FIELD: &str = "m_lateralMovementFrequencyMin";
+const LATERAL_MAX_FIELD: &str = "m_lateralMovementFrequencyMax";
+
+/// The number of strafe field `field` in the slice navigation config `config` (its
+/// `action_params`, by the lower-case CRC32 of the field name).
+fn strafe_config_number(config: Option<&NavConfig>, field: &str) -> Option<f64> {
+    let crc = nw_formats::objectstream::lowercase_crc32(field);
+    config?
+        .action_params
+        .iter()
+        .find(|(known, _)| *known == crc)
+        .and_then(|(_, value)| value.as_number())
+}
+
+/// How far a normal mob chases from its spawn where the game data and the captures give no
+/// value: 50 yards. Player's design choice 2026-11-12, used only where the game data and the
+/// captures give no value (898 of the 922 archetypes take their slice's `CombatLeashDistance` or
+/// their trees' literal; the other 24 are spell slices, hazards, catacomb bosses and gorillas).
+const NORMAL_CHASE_M: f32 = 45.72;
+/// How far a named mob chases: 75 yards. Player's design choice 2026-11-12, used only where the
+/// game data and the captures give no value.
+const NAMED_CHASE_M: f32 = 68.58;
+/// How far an elite or boss mob chases: 100 yards. Player's design choice 2026-11-12, used only
+/// where the game data and the captures give no value.
+const ELITE_CHASE_M: f32 = 91.44;
+/// The starts of the `CreatureType`s of the vitals rows of named mobs (Observed values:
+/// `Named_Solo`, `Named_Solo+`).
+const NAMED_TYPE: &str = "Named";
+/// The `CreatureType`s of the vitals rows of elite and boss mobs (Observed values: `Elite`,
+/// `Elite+`, `EliteBoss`, `Dungeon`, `DungeonBoss`, `Raid10`, `Catacombs`, `SoloBoss`, ...): the
+/// group content and every boss.
+const ELITE_TYPES: [&str; 4] = ["Elite", "Dungeon", "Raid", "Catacombs"];
+const BOSS_TYPE: &str = "Boss";
+
+/// The chase distance of a mob of vitals `CreatureType` `creature_type` where the data gives
+/// none: elite and boss mobs [`ELITE_CHASE_M`], named mobs [`NAMED_CHASE_M`], every other
+/// [`NORMAL_CHASE_M`] (player's design choice 2026-11-12).
+pub fn chase_fallback_m(creature_type: Option<&str>) -> f32 {
+    let kind = creature_type.unwrap_or_default();
+    if kind.contains(BOSS_TYPE) || ELITE_TYPES.iter().any(|elite| kind.starts_with(elite)) {
+        ELITE_CHASE_M
+    } else if kind.starts_with(NAMED_TYPE) {
+        NAMED_CHASE_M
+    } else {
+        NORMAL_CHASE_M
+    }
+}
+
+/// Whether the data gives archetype `arch` its chase distance (`combat_leash`, the key
+/// `CombatLeashDistance`): its slice's config holds the key, or a condition of its trees reads
+/// the key with a literal beside it (`$CombatLeashDistance|70`, the base trees' leashes).
+fn chase_from_data(data: &AiData, arch: &Archetype, combat_leash: Option<KeyId>) -> bool {
+    let Some(key) = combat_leash else {
+        return false;
+    };
+    if arch.config_value(key).is_some() {
+        return true;
+    }
+    let mut open: Vec<NodeId> = arch
+        .trees
+        .iter()
+        .filter_map(|tree| data.trees.get(tree.tree? as usize)?.root)
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = open.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let kind = &data.node(id).kind;
+        let gates = match kind {
+            NodeKind::BlackboardCondition { gates, .. }
+            | NodeKind::DistanceCondition { gates, .. } => Some(&**gates),
+            NodeKind::EntityQuery { params, .. } => Some(&params.gates),
+            _ => None,
+        };
+        let literal = gates.is_some_and(|gates| {
+            [&gates.entry, &gates.continuation, &gates.interrupt]
+                .into_iter()
+                .flat_map(|group| &group.conditions)
+                .flat_map(|condition| [&condition.left, &condition.right])
+                .any(|param| param.key == Some(key) && param.value.is_some())
+        });
+        if literal {
+            return true;
+        }
+        open.extend(kind.child());
+        open.extend(data.children(id).iter().copied());
+    }
+    false
+}
+
+/// The clip whose shape the hit of damage clip `window` swings: its own, or, when it names no
+/// shape, the clip of the weapon's database `weapon` with the same `DamageTableRow` (Inferred:
+/// the hit written in both databases, as [`MindState::open_windows`] takes it; the weapon's
+/// clip holds the shape of its hit volume). Observed: the undead berserker's
+/// `Berserk_Sword_Swing_Right` holds `Undead_1H_Sword_Slash` at 0.41 s without a shape in its
+/// body's entry, and at 0.40 s with radius 0.25 and half height 0.35 in its weapon's. Without
+/// the shape the Quartermaster of "A Most Mysterious Tablet" (archetype 662) missed a live
+/// player 0.96 to 2.06 m away "out of reach" (VM sim log 2026-11-12 16:53:26 to 16:53:48);
+/// retail, its hits landed 0.99 to 1.31 m away (`12a_msq_08_destroyrune` ledger, 108,777 to
+/// 130,076 ms).
+fn shaped<'a>(ai: &MobAi, window: &'a ProcWindow, weapon: &'a [ProcWindow]) -> &'a ProcWindow {
+    if param_of(window, ai.names.shape_radius).is_some() {
+        return window;
+    }
+    let row = param_of(window, ai.names.damage_row);
+    weapon
+        .iter()
+        .find(|clip| {
+            clip.kind == window.kind
+                && param_of(clip, ai.names.damage_row) == row
+                && param_of(clip, ai.names.shape_radius).is_some()
+        })
+        .unwrap_or(window)
+}
+
 /// A capsule's length is twice its half height.
 const CAPSULE_ENDS: f32 = 2.0;
 
@@ -3358,6 +3691,10 @@ impl World for View<'_> {
         let target = self.target;
         Some(match key {
             EngineKey::HasTarget => Value::Bool(target.is_some()),
+            EngineKey::TargetScore => {
+                target?;
+                Value::Float(HELD_TARGET_SCORE)
+            }
             EngineKey::TargetDist => Value::Float(target?.distance_m),
             EngineKey::TargetAngle => Value::Float(target?.angle_deg),
             EngineKey::TargetPos | EngineKey::TargetLastKnownPos => vec3(target?.position),
@@ -3412,6 +3749,9 @@ impl World for View<'_> {
                 Value::Int(tier.round() as i64)
             }
             EngineKey::AiOrder => Value::Int(i64::from(state.order?)),
+            // The engine's leash: the fallback of a mob whose data gives none; else the slice
+            // config and the trees' literals hold it.
+            EngineKey::CombatLeashDistance => Value::Float(state.chase_fallback_m?),
             _ => return None,
         })
     }
@@ -3652,6 +3992,21 @@ impl World for View<'_> {
             let Some(ground) = self.ground else {
                 return Some([point.x, point.y, point.z]);
             };
+            // A pick that checks no path takes any floor point (Observed: `CheckPathToOrigin`
+            // and `CheckPathToAnchor`); the move then walks a way to it. Requiring a straight
+            // floor line from the mob made the beach sword sailor's `ResetToWaypoint` (node
+            // 152, origin its waypoint, no path check) fail 25 m out: it played
+            // `Combat_Idle` and `Combat_Fidget` again and again and never walked home (retail
+            // test `the_beach_sword_sailor_walks_home_from_every_side`, bearing 180 degrees).
+            // The point stands as a body moved there stands ([`height_after_move`]): on the
+            // floor near its height, else at its own height where the level has no height data,
+            // as the floor line keeps it. Requiring a floor there made every pick fail where the
+            // level has no height data: a leash reset's walk home to the spawn failed at once and
+            // the mob stood past its leash (sim test `a_returning_mob_is_refused`, 2026-11-12).
+            if !(params.check_path_to_origin || params.check_path_to_anchor) {
+                let z = height_after_move(ground, point);
+                return Some([point.x, point.y, z]);
+            }
             if let Some(reached) = floor_line(ground, self.at, point, self.max_slope())
                 .filter(|reached| reached.horizontal_distance(point) < FLOOR_STEP_M)
             {
@@ -4947,16 +5302,22 @@ mod tests {
     /// A mob with a guard holds its block up, loses stamina to blocked hits, and the hit that
     /// takes the last breaks the guard: `BlockBroken` takes the block down for 8 s, holds the
     /// regen, then fills the stamina, and the block rises again (retail `damned_block`).
+    /// The guard of nearly every blocking mob type (`StaminaBaseMax` 50, `StaminaBaseTickRate`
+    /// 2 per `StaminaTickDelay` 1, `BlockStaminaCost` 0.8: 130 of the 180 vitals rows of the
+    /// mobs that blocked in the retail ledgers, the damned pistoleer's too), with its regen of
+    /// [`MobGuard::of`].
+    const GUARD: MobGuard = MobGuard {
+        stamina_max: 50.0,
+        stamina_initial: 50.0,
+        tick_rate: 2.0,
+        regen_per_s: 3.0,
+        mitigation: 1.0,
+        stamina_cost: 0.8,
+    };
+
     #[test]
     fn a_guard_breaks_at_no_stamina_and_rises_again_after_block_broken() {
         use super::test_support::{TEST_BLOCK_BROKEN_S, TEST_BROKEN_GUARD_S};
-        const GUARD: MobGuard = MobGuard {
-            stamina_max: 50.0,
-            stamina_initial: 50.0,
-            regen_per_s: 5.0,
-            mitigation: 1.0,
-            stamina_cost: 0.8,
-        };
         const STEP_MS: u64 = 100;
         let ai = test_ai(&[]);
         let ground = FlatGround(GROUND_Z);
@@ -4999,6 +5360,129 @@ mod tests {
             Some(GuardHit::Held),
             "the stamina is full again"
         );
+    }
+
+    /// One retail guard sequence: the attacker's weapon, its blocked hits (seconds after the
+    /// first, raw stamina loss) and the hit that broke the guard.
+    type GuardSequence = (&'static str, &'static [(f32, f32)], Option<usize>);
+
+    /// Retail blocked hits on a fresh guard, each as (seconds after the first, the attacker's
+    /// weapon `BlockStaminaDamage` x the attack row's `BlockStaminaDmgMod`), and the hit whose
+    /// fall of the block was a guard break (the block fell with it and stayed down 7 s or more,
+    /// or the mob died first), `None` when the block stayed up 0.3 s or more after the last hit.
+    /// Observed (blocksweep and attackseq over the 45 ledgers with breaks; the hit's attack is
+    /// the attacker's last slayer start within 1.5 s before it: a release start is a light, a
+    /// hold start a charged attack).
+    const RETAIL_GUARD_SEQUENCES: [GuardSequence; 6] = [
+        // Playthrough_Part_07 interest 110, a rapier (28): six lights (0.4), then the charged
+        // attack (2.4) at 1753.22 s.
+        (
+            "rapier",
+            &[
+                (0.0, 28.0 * 0.4),
+                (0.22, 28.0 * 0.4),
+                (0.75, 28.0 * 0.4),
+                (2.42, 28.0 * 0.4),
+                (2.97, 28.0 * 0.4),
+                (3.19, 28.0 * 0.4),
+                (4.18, 28.0 * 2.4),
+            ],
+            Some(6),
+        ),
+        // Playthrough_Part_04 interest 62, a sword (36): four lights (0.33), then the charged
+        // attack (2.4) at 104.76 s.
+        (
+            "sword",
+            &[
+                (0.0, 36.0 * 0.33),
+                (3.86, 36.0 * 0.33),
+                (4.29, 36.0 * 0.33),
+                (4.76, 36.0 * 0.33),
+                (7.15, 36.0 * 2.4),
+            ],
+            Some(4),
+        ),
+        // Playthrough_Part_16 interest 57, a flail (39): four lights (0.4), then the charged
+        // attack (2.0) at 153.37 s.
+        (
+            "flail",
+            &[
+                (0.0, 39.0 * 0.4),
+                (0.6, 39.0 * 0.4),
+                (4.79, 39.0 * 0.4),
+                (5.43, 39.0 * 0.4),
+                (8.16, 39.0 * 2.0),
+            ],
+            Some(4),
+        ),
+        // Playthrough_Part_06 interest 118, a great sword (60): its charged attack (1.85) at
+        // 3749.52 s.
+        ("great sword", &[(0.0, 60.0 * 1.85)], Some(0)),
+        // Playthrough_Part_01 interest 58, a hatchet (30): seven lights (0.4) from 4040.47 s; the
+        // regen between them holds the guard until the seventh.
+        (
+            "hatchet run",
+            &[
+                (0.0, 30.0 * 0.4),
+                (0.46, 30.0 * 0.4),
+                (0.89, 30.0 * 0.4),
+                (1.43, 30.0 * 0.4),
+                (2.79, 30.0 * 0.4),
+                (3.36, 30.0 * 0.4),
+                (5.03, 30.0 * 0.4),
+            ],
+            Some(6),
+        ),
+        // Playthrough_Part_01 interest 76, a hatchet (30): three lights (0.4) from 2390.95 s;
+        // the block stayed up.
+        (
+            "hatchet",
+            &[(0.0, 30.0 * 0.4), (0.47, 30.0 * 0.4), (0.91, 30.0 * 0.4)],
+            None,
+        ),
+    ];
+
+    /// A blocked hit takes the attacker's weapon `BlockStaminaDamage` x the row's
+    /// `BlockStaminaDmgMod` x the guard's `BlockStaminaCost`, and the guard regains its stamina
+    /// at its regen between them: the retail sequences break where retail broke (Observed: this
+    /// rule put 71 of the 81 fresh-guard sequences of the 45 ledgers with breaks right, light,
+    /// charged and ability hits; the weapon's `BlockStaminaDamage` x any factor without the row
+    /// put at most 38 right).
+    #[test]
+    fn the_retail_blocked_hits_break_the_guard_where_retail_broke() {
+        const STEP_MS: u64 = 50;
+        const MS_PER_S: f32 = 1_000.0;
+        let ai = test_ai(&[]);
+        let ground = FlatGround(GROUND_Z);
+        let around = |now_ms| Surroundings {
+            now_ms,
+            seen: &[],
+            ground: &ground,
+            health_share: 1.0,
+            entity: 1,
+            tagged: &[],
+            held: None,
+        };
+        for (weapon, hits, broken_at) in RETAIL_GUARD_SEQUENCES {
+            let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+            mind.set_guard(GUARD);
+            let mut at = START;
+            let mut now_ms = 0;
+            mind.step(&ai, &mut at, &around(now_ms));
+            let mut broken = None;
+            for (index, (after_s, loss)) in hits.iter().enumerate() {
+                let hit_ms = (after_s * MS_PER_S).round() as u64;
+                while now_ms + STEP_MS <= hit_ms {
+                    now_ms += STEP_MS;
+                    mind.step(&ai, &mut at, &around(now_ms));
+                }
+                if mind.guard_hit(&ai, at, hit_ms, *loss) == Some(GuardHit::Broken) {
+                    broken = Some(index);
+                    break;
+                }
+            }
+            assert_eq!(broken, broken_at, "the {weapon}'s sequence");
+        }
     }
 
     /// A stunned mob neither perceives, moves nor thinks; a root holds it in place while it
@@ -5122,5 +5606,356 @@ mod tests {
             assert!(bearing.abs() <= 50.0 + 1e-3, "{bearing}");
             assert_eq!(point.z, GROUND_Z);
         }
+    }
+
+    /// The surroundings of one step: player 7 at `player` on `ground`.
+    fn alone_with<'a>(
+        now_ms: u64,
+        seen: &'a [Seen],
+        ground: &'a (dyn Ground + Sync),
+    ) -> Surroundings<'a> {
+        Surroundings {
+            now_ms,
+            seen,
+            ground,
+            health_share: 1.0,
+            entity: 1,
+            tagged: &[],
+            held: None,
+        }
+    }
+
+    /// A held target has a `Target_Score` above the prey trees' bars (`> 0`, `>= 0.05`); a mob
+    /// without a target has none.
+    #[test]
+    fn a_held_target_has_a_score_and_no_target_none() {
+        const PREY_BAR: f32 = 0.05;
+        let ai = test_ai(&[]);
+        let mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let mut view = mind.state.view(&ai, START, 0, false);
+        assert_eq!(view.engine_value(EngineKey::TargetScore), None);
+        view.target = Some(TargetView {
+            position: east(5.0),
+            distance_m: 5.0,
+            angle_deg: 0.0,
+            visible: true,
+            reachable: true,
+        });
+        let score = view
+            .engine_value(EngineKey::TargetScore)
+            .and_then(Value::as_number)
+            .expect("a score");
+        assert!(score >= f64::from(PREY_BAR), "{score}");
+    }
+
+    /// A target out of reach at its first sight is unreachable since its pick, not since the
+    /// sim's start (live 2026-11-12: the risen of archetype 530 went home at once).
+    #[test]
+    fn the_unreachable_time_of_a_new_target_counts_from_its_pick() {
+        const LATE_MS: u64 = 3_600_000;
+        let ai = test_ai(&[]);
+        let seen = [Seen {
+            entity: 7,
+            position: east(5.0),
+        }];
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let mut at = START;
+        mind.step(&ai, &mut at, &alone_with(LATE_MS, &seen, &Wall));
+        assert_eq!(
+            mind.target(),
+            Some(7),
+            "it takes the player behind the wall"
+        );
+        assert_eq!(mind.state.reachable_ms, Some(LATE_MS));
+    }
+
+    /// A damage clip written twice in one entry is one hit (retail damned bear
+    /// `Attack_Lunge_L_Quad`: two equal clips, one hit).
+    #[test]
+    fn a_clip_written_twice_is_one_hit() {
+        use super::test_support::TEST_ATTACK_TASK;
+        let mut data = test_ai_data();
+        let task = data.name_id(TEST_ATTACK_TASK).expect("the attack task");
+        let action = data.grids[0].action(task).expect("its action") as usize;
+        let windows = &mut data.cage_actions[action].variants[0].windows;
+        let damage = windows
+            .iter()
+            .find(|window| data.names[window.kind as usize] == DAMAGE_CLIP)
+            .cloned()
+            .expect("a damage clip");
+        windows.push(damage);
+        let ai = MobAi::new(data, AiRates::default(), LookAssets::new());
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let cage = ai.cage_action(action as u32).expect("the attack");
+        mind.state.open_windows(&ai, &[], cage, 0, None, false);
+        let strikes = mind
+            .state
+            .windows
+            .iter()
+            .filter(|window| matches!(window.act, WindowAct::Strike { .. }))
+            .count();
+        assert_eq!(strikes, 1);
+    }
+
+    /// A move to where the mob stands is done at once and shows no move (live 2026-11-12: a
+    /// pistoleer walked in place on its waypoint).
+    #[test]
+    fn a_move_to_where_the_mob_stands_shows_no_move() {
+        const WALK_TASK: &str = "Walk_Task";
+        const WAIT_TASK: &str = "Wait_Task";
+        let mut build = nw_ai::build::Build::default();
+        let walk = build.navigation_to(WALK_TASK, None, PositionType::SpawnPosition);
+        let wait = build.idle(WAIT_TASK);
+        let root = build.sequence(&[walk, wait]);
+        let data = build.finish(root);
+        let action_of = |task: &str| {
+            data.grids[0]
+                .action(data.name_id(task).expect("task"))
+                .expect("action")
+        };
+        let (walk_action, wait_action) = (action_of(WALK_TASK), action_of(WAIT_TASK));
+        let ai = MobAi::new(data, AiRates::default(), LookAssets::new());
+        let ground = FlatGround(GROUND_Z);
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let mut at = START;
+        mind.step(&ai, &mut at, &alone_with(0, &[], &ground));
+        assert!(mind.state.motion.is_none(), "no move");
+        assert_ne!(
+            mind.state.shown.map(|shown| shown.action),
+            Some(walk_action)
+        );
+        // The tree learns of the arrival at its next tick.
+        mind.step(
+            &ai,
+            &mut at,
+            &alone_with(RETAIL_AI_RATES.idle_interval_ms, &[], &ground),
+        );
+        assert_eq!(
+            mind.state.shown.map(|shown| shown.action),
+            Some(wait_action)
+        );
+        assert_eq!(at, START);
+    }
+
+    /// A `Flee` navigation to the target runs straight away from it until the target lies
+    /// beyond the mob's ambient vision (the prey trees' `FleeFromTarget`: the node's own speeds
+    /// 5 and 2 m/s, no slice config of that kind; retail turkeys, MSQ13-lv56 ledger).
+    #[test]
+    fn a_fleeing_mob_runs_from_its_target_past_its_sight() {
+        use super::test_support::TEST_SIGHT_M;
+        const FLEE_TASK: &str = "Move_Combat_CAGE_Task";
+        const STEP_MS: u64 = 33;
+        const UNTIL_MS: u64 = 20_000;
+        const NODE_MAX_SPEED: f32 = 5.0;
+        const NODE_MIN_SPEED: f32 = 2.0;
+        const NODE_ACCELERATION: f32 = 2.0;
+        const NODE_ARRIVAL_M: f32 = 0.2;
+        const NODE_TURN_RATE_DEG: f32 = 720.0;
+        const PLAYER_M: f32 = 5.0;
+        let mut build = nw_ai::build::Build::default();
+        let flee = build.navigation(FLEE_TASK, Some(FLEE_CONFIG));
+        let fight = build.gate("Has_Target", nw_ai::value::CompareOp::Equal, 1.0, flee);
+        let stand = build.idle("Idle_Task");
+        let root = build.selector(&[fight, stand]);
+        let mut data = build.finish(root);
+        if let NodeKind::Navigation(nav) = &mut data.nodes[flee as usize].kind {
+            let literal = |value: f32| Param::literal(Value::Float(value));
+            nav.motion.max_speed = literal(NODE_MAX_SPEED);
+            nav.motion.min_speed = literal(NODE_MIN_SPEED);
+            nav.motion.linear_acceleration = literal(NODE_ACCELERATION);
+            nav.motion.linear_deceleration = literal(NODE_ACCELERATION);
+            nav.motion.arrival_threshold = literal(NODE_ARRIVAL_M);
+            nav.turn_rate = literal(NODE_TURN_RATE_DEG);
+        }
+        data.archetypes[0].ambient_vision = Some(nw_ai::data::Vision {
+            angle_deg: 360.0,
+            distance_m: TEST_SIGHT_M,
+        });
+        let ai = MobAi::new(data, AiRates::default(), LookAssets::new());
+        let ground = FlatGround(GROUND_Z);
+        let player = east(PLAYER_M);
+        let seen = [Seen {
+            entity: 7,
+            position: player,
+        }];
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let mut at = START;
+        let mut fled = false;
+        for now_ms in (0..UNTIL_MS).step_by(STEP_MS as usize) {
+            let before = at;
+            mind.step(&ai, &mut at, &alone_with(now_ms, &seen, &ground));
+            // It keeps its target (the chase rule of `perceive`), so its tree runs the flight
+            // again: the flight has ended when a step no longer moves it.
+            if now_ms > 0 && at == before {
+                fled = true;
+                break;
+            }
+        }
+        assert!(fled, "the flight ends");
+        assert!(at.horizontal_distance(player) >= TEST_SIGHT_M, "{at:?}");
+        assert!(
+            at.x < START.x && (at.y - START.y).abs() < 1.0,
+            "straight away: {at:?}"
+        );
+    }
+
+    /// The test data without a chase distance: no `CombatLeashDistance` in the slice config and
+    /// none beside the key in the leash condition of its tree.
+    fn data_without_a_chase_distance() -> AiData {
+        let mut data = test_ai_data();
+        let leash = data.key(COMBAT_LEASH_KEY).expect("the leash key");
+        data.archetypes[0].config.retain(|(key, _)| *key != leash);
+        for node in &mut data.nodes {
+            if let NodeKind::DistanceCondition { gates, .. } = &mut node.kind {
+                for condition in &mut gates.entry.conditions {
+                    if condition.right.key == Some(leash) {
+                        condition.right.value = None;
+                    }
+                }
+            }
+        }
+        data
+    }
+
+    /// Where the data gives no chase distance, a normal mob chases 50 yards and a named one 75
+    /// yards (player's design choice 2026-11-12); the data's own value goes first.
+    #[test]
+    fn a_mob_without_a_chase_distance_in_its_data_takes_the_fallback_of_its_kind() {
+        const NAMED_TYPE_ROW: &str = "Named_Solo+";
+        const BOSS_TYPE_ROW: &str = "DungeonBoss";
+        let with_data = MobAi::new(test_ai_data(), AiRates::default(), LookAssets::new());
+        assert_eq!(with_data.chase_fallback(0, None), None, "its slice's leash");
+        let ai = MobAi::new(
+            data_without_a_chase_distance(),
+            AiRates::default(),
+            LookAssets::new(),
+        );
+        assert_eq!(ai.chase_fallback(0, Some("Solo")), Some(NORMAL_CHASE_M));
+        assert_eq!(
+            ai.chase_fallback(0, Some(NAMED_TYPE_ROW)),
+            Some(NAMED_CHASE_M)
+        );
+        assert_eq!(
+            ai.chase_fallback(0, Some(BOSS_TYPE_ROW)),
+            Some(ELITE_CHASE_M)
+        );
+        assert_eq!(ai.chase_fallback(0, None), Some(NORMAL_CHASE_M));
+    }
+
+    /// A normal mob keeps chasing a player 40 m from its spawn and a named one at 60 m, when no
+    /// data value exists; past the fallback they walk home.
+    #[test]
+    fn a_mob_chases_its_fallback_distance_from_its_spawn() {
+        const STEP_MS: u64 = 33;
+        const STEPS: u64 = 10;
+        const PLAYER_AHEAD_M: f32 = 2.0;
+        let ai = MobAi::new(
+            data_without_a_chase_distance(),
+            AiRates::default(),
+            LookAssets::new(),
+        );
+        let ground = FlatGround(GROUND_Z);
+        let goes_home = |chase_m: f32, out_m: f32| {
+            let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+            mind.set_chase_fallback(chase_m);
+            let mut at = east(out_m);
+            let seen = [Seen {
+                entity: 7,
+                position: east(out_m + PLAYER_AHEAD_M),
+            }];
+            (0..STEPS).any(|step| {
+                mind.step(&ai, &mut at, &alone_with(step * STEP_MS, &seen, &ground));
+                mind.returning(&ai)
+            })
+        };
+        assert!(!goes_home(NORMAL_CHASE_M, 40.0), "a normal mob at 40 m");
+        assert!(
+            goes_home(NORMAL_CHASE_M, 50.0),
+            "a normal mob past 50 yards"
+        );
+        assert!(!goes_home(NAMED_CHASE_M, 60.0), "a named mob at 60 m");
+        assert!(goes_home(NAMED_CHASE_M, 70.0), "a named mob past 75 yards");
+    }
+
+    /// A strafe field the node leaves unset comes from the slice's strafe config by its CRC (the
+    /// undead pistoleer's `m_lateralMovementFrequencyMin` 1 and `Max` 3).
+    #[test]
+    fn a_strafe_takes_its_lateral_frequency_from_the_slice_config() {
+        const LATERAL_MIN_S: f64 = 1.0;
+        let kind = name_in(&mut test_ai_data(), "Strafe");
+        let config = NavConfig {
+            action_params: vec![(
+                nw_formats::objectstream::lowercase_crc32(LATERAL_MIN_FIELD),
+                Value::Float(LATERAL_MIN_S as f32),
+            )],
+            ..nw_ai::build::run_config(kind)
+        };
+        assert_eq!(
+            strafe_config_number(Some(&config), LATERAL_MIN_FIELD),
+            Some(LATERAL_MIN_S)
+        );
+        assert_eq!(strafe_config_number(Some(&config), LATERAL_MAX_FIELD), None);
+        assert_eq!(strafe_config_number(None, LATERAL_MIN_FIELD), None);
+    }
+
+    /// A pick that checks no path takes a floor point behind a wall; one that checks the path
+    /// to its anchor (the mob) does not (`CheckPathToAnchor`; the beach sword sailor's
+    /// `ResetToWaypoint` checks none).
+    #[test]
+    fn a_pick_checks_the_path_only_when_its_node_asks() {
+        const BEHIND_WALL_M: f32 = 5.0;
+        let ai = test_ai(&[]);
+        let mind = TreeMind::new(&ai, 0, east(BEHIND_WALL_M), 0.0, 1, None).expect("a tree");
+        let params = SelectPositionParams {
+            origin: PositionType::SpawnPosition,
+            anchor: PositionType::Own,
+            ..test_support::exact_pick()
+        };
+        let mut view = mind.state.view(&ai, START, 0, false);
+        view.ground = Some(&Wall);
+        assert_eq!(
+            view.select_position(&params, &NoBoard).map(position_of),
+            Some(east(BEHIND_WALL_M)),
+            "no path check"
+        );
+        let checked = SelectPositionParams {
+            check_path_to_anchor: true,
+            ..params
+        };
+        assert_eq!(
+            view.select_position(&checked, &NoBoard),
+            None,
+            "through the wall"
+        );
+    }
+
+    /// Ground without height data anywhere.
+    struct NoHeights;
+
+    impl Ground for NoHeights {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            None
+        }
+    }
+
+    /// A pick that checks no path takes its point at the point's own height where the level has
+    /// no height data, as the floor line keeps a body's height there (sim test 2026-11-12: the
+    /// walk home to the spawn failed at once and the mob stood past its leash).
+    #[test]
+    fn a_pick_without_a_path_check_keeps_its_height_where_the_level_has_none() {
+        const OUT_M: f32 = 55.0;
+        let ai = test_ai(&[]);
+        let mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let params = SelectPositionParams {
+            origin: PositionType::SpawnPosition,
+            anchor: PositionType::Own,
+            ..test_support::exact_pick()
+        };
+        let mut view = mind.state.view(&ai, east(OUT_M), 0, false);
+        view.ground = Some(&NoHeights);
+        assert_eq!(
+            view.select_position(&params, &NoBoard).map(position_of),
+            Some(START)
+        );
     }
 }

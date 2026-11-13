@@ -46,13 +46,70 @@ pub const MOVE_RAID_MEMBER_TYPE_INDEX: u64 = 3501;
 pub const SWAP_RAID_MEMBERS_TYPE_INDEX: u64 = 541;
 /// `GroupsComponentServerFacet_RequestChooseRole`.
 pub const CHOOSE_ROLE_TYPE_INDEX: u64 = 5390;
+/// `GroupsComponentServerFacet_RequestSetRaidMemberPermission`.
+pub const SET_RAID_PERMISSION_TYPE_INDEX: u64 = 2422;
+/// `GroupsComponentServerFacet_RequestInitiateConvertToRaid`.
+pub const INITIATE_CONVERT_TO_RAID_TYPE_INDEX: u64 = 5317;
+/// `GroupsComponentServerFacet_RequestConvertToRaidVote`.
+pub const CONVERT_TO_RAID_VOTE_TYPE_INDEX: u64 = 5318;
+/// `GroupsComponentClientFacet_OnInitiateConvertToRaidFailed`.
+pub const INITIATE_CONVERT_TO_RAID_FAILED_TYPE_INDEX: u64 = 5308;
+/// `GroupsComponentClientFacet_OnConvertToRaidVoteEnded`.
+pub const CONVERT_TO_RAID_VOTE_ENDED_TYPE_INDEX: u64 = 5309;
+/// `GroupsComponentClientFacet_OnSubmitConvertToRaidVoteFailed`.
+pub const SUBMIT_CONVERT_TO_RAID_VOTE_FAILED_TYPE_INDEX: u64 = 5310;
+/// `GroupsComponentClientFacet_OnConvertToRaidVoteInitiated`.
+pub const CONVERT_TO_RAID_VOTE_INITIATED_TYPE_INDEX: u64 = 5311;
+
+/// The client's `eConvertToRaidError` values: the byte of 5308, 5309 and 5310. Observed: the
+/// client registers the six names in this order in `FUN_144f418b0` (one value helper per number,
+/// shared by every enum there; the same order gives `eRaidType` 1 to 4 and `ePreRaidStatus_WarEnded`
+/// 4, both seen in the ledgers). Lua `socialscreen.luac` shows `VoteInProgress` and `TooFrequent`
+/// for a failed start (5308), `AlreadyVoted` for a failed vote (5310) and `NotConverted` for an
+/// ended vote (5309).
+pub const CONVERT_TO_RAID_CONVERTED: u8 = 0;
+/// See [`CONVERT_TO_RAID_CONVERTED`]: the group was not converted.
+pub const CONVERT_TO_RAID_NOT_CONVERTED: u8 = 1;
+/// See [`CONVERT_TO_RAID_CONVERTED`]: a vote of the group is open.
+pub const CONVERT_TO_RAID_VOTE_IN_PROGRESS: u8 = 2;
+/// See [`CONVERT_TO_RAID_CONVERTED`]: the group has no open vote.
+pub const CONVERT_TO_RAID_VOTE_NOT_IN_PROGRESS: u8 = 3;
+/// See [`CONVERT_TO_RAID_CONVERTED`]: the last start of the group was too recent.
+pub const CONVERT_TO_RAID_TOO_FREQUENT: u8 = 4;
+/// See [`CONVERT_TO_RAID_CONVERTED`]: the player voted already.
+pub const CONVERT_TO_RAID_ALREADY_VOTED: u8 = 5;
+
+/// The client's `eRaidPermission` values (Observed: names in this order in `FUN_144f418b0`;
+/// `playerflyouthandler.luac` compares them as numbers, `Normal` < `Assistant` < `Leader`, and a
+/// promote adds 1). The byte of 2422: the retail call (`Hive gorgon raid third boss` 230.534 s)
+/// sent [`RAID_PERMISSION_LEADER`].
+pub const RAID_PERMISSION_NORMAL: u8 = 0;
+/// See [`RAID_PERMISSION_NORMAL`].
+pub const RAID_PERMISSION_ASSISTANT: u8 = 1;
+/// See [`RAID_PERMISSION_NORMAL`].
+pub const RAID_PERMISSION_LEADER: u8 = 2;
+
+/// The client's `ePreRaidStatus` values: the status of 715 (Observed: names in this order in
+/// `FUN_144f418b0`; `army-management` 24.033 s to 68.215 s sent 0, 2, 3, 1, 0, 1 as the war
+/// roster changed, every war and invasion ledger 4 at the war's end, 7 ms before the 245).
+/// `notifications.luac` shows the war selected text for 0, unselected for 1 and the permission
+/// change for 2 and 3.
+pub const PRE_RAID_SELECTED: u32 = 0;
+/// See [`PRE_RAID_SELECTED`]: the player left the war roster.
+pub const PRE_RAID_UNSELECTED: u32 = 1;
+/// See [`PRE_RAID_SELECTED`]: the player's roster permission rose.
+pub const PRE_RAID_PERMISSION_PROMOTED: u32 = 2;
+/// See [`PRE_RAID_SELECTED`]: the player's roster permission fell.
+pub const PRE_RAID_PERMISSION_DEMOTED: u32 = 3;
+/// See [`PRE_RAID_SELECTED`]: the war ended.
+pub const PRE_RAID_WAR_ENDED: u32 = 4;
 
 /// Bytes after the header of every retail 2407 (all zero in the war, raid and healer
 /// ledgers; meaning Unknown).
 pub const PING_DATA_LEN: usize = 14;
 
 /// The group calls of the client.
-pub(crate) const CALL_TYPES: [u64; 9] = [
+pub(crate) const CALL_TYPES: [u64; 12] = [
     GROUP_INVITE_TYPE_INDEX,
     REPLY_TO_INVITE_TYPE_INDEX,
     LEAVE_GROUP_TYPE_INDEX,
@@ -62,6 +119,9 @@ pub(crate) const CALL_TYPES: [u64; 9] = [
     MOVE_RAID_MEMBER_TYPE_INDEX,
     SWAP_RAID_MEMBERS_TYPE_INDEX,
     CHOOSE_ROLE_TYPE_INDEX,
+    SET_RAID_PERMISSION_TYPE_INDEX,
+    INITIATE_CONVERT_TO_RAID_TYPE_INDEX,
+    CONVERT_TO_RAID_VOTE_TYPE_INDEX,
 ];
 
 /// The answer of an accepted invite (27 of 27 retail answers; the client sends no other in the
@@ -86,7 +146,11 @@ pub enum GroupCall {
     Invite {
         /// The invitee's character id as UUID text.
         character: String,
-        /// A 16-byte id after it (zero in every retail invite; meaning Unknown).
+        /// The raid group the invitee fills first: zero in every retail invite (all plain
+        /// group invites). Inferred: a raid member's invite carries the group id here, as the
+        /// client's `RequestRaidGroupInvite(player, raidInviteGroupId)` of `socialmenu.luac`
+        /// passes it and no other call names a raid group ("Invited Players will fill Group
+        /// {groupIndex} first").
         extra: [u8; INVITE_EXTRA_LEN],
         /// The last byte (0 in every retail invite; meaning Unknown).
         flag: u8,
@@ -144,6 +208,25 @@ pub enum GroupCall {
         /// The role (the client's `GroupFinderRole`).
         role: u8,
     },
+    /// 2422: set a raid member's permission (Observed: `Hive gorgon raid third boss` 230.534 s,
+    /// the member as UUID text, then the permission byte).
+    SetRaidPermission {
+        /// The member's character id as UUID text.
+        character: String,
+        /// The permission ([`RAID_PERMISSION_NORMAL`] to [`RAID_PERMISSION_LEADER`]).
+        permission: u8,
+    },
+    /// 5317: start the vote to turn the player's group into a raid (Observed: the client's
+    /// `RequestInitiateConvertToRaid` `FUN_1434239e0` takes no argument and its reader
+    /// `FUN_14259f180` reads the header alone).
+    InitiateConvertToRaid,
+    /// 5318: the player's vote (Observed: the reader `FUN_1425a30b0` reads one byte as a
+    /// boolean; `socialscreen.luac` sends the result of the vote notification, whose choices are
+    /// accept and deny).
+    ConvertToRaidVote {
+        /// Inferred: `true` accepts.
+        accept: bool,
+    },
 }
 
 impl GroupCall {
@@ -184,6 +267,16 @@ impl GroupCall {
                 })
             })(),
             CHOOSE_ROLE_TYPE_INDEX => reader.u8().map(|role| Self::ChooseRole { role }),
+            SET_RAID_PERMISSION_TYPE_INDEX => (|| -> Result<Self, MessageError> {
+                Ok(Self::SetRaidPermission {
+                    character: read_text(reader)?,
+                    permission: reader.u8()?,
+                })
+            })(),
+            INITIATE_CONVERT_TO_RAID_TYPE_INDEX => Ok(Self::InitiateConvertToRaid),
+            CONVERT_TO_RAID_VOTE_TYPE_INDEX => reader
+                .boolean()
+                .map(|accept| Self::ConvertToRaidVote { accept }),
             _ => return None,
         };
         Some(call)
@@ -201,6 +294,9 @@ impl GroupCall {
             Self::MoveRaidMember { .. } => MOVE_RAID_MEMBER_TYPE_INDEX,
             Self::SwapRaidMembers { .. } => SWAP_RAID_MEMBERS_TYPE_INDEX,
             Self::ChooseRole { .. } => CHOOSE_ROLE_TYPE_INDEX,
+            Self::SetRaidPermission { .. } => SET_RAID_PERMISSION_TYPE_INDEX,
+            Self::InitiateConvertToRaid => INITIATE_CONVERT_TO_RAID_TYPE_INDEX,
+            Self::ConvertToRaidVote { .. } => CONVERT_TO_RAID_VOTE_TYPE_INDEX,
         }
     }
 
@@ -245,6 +341,17 @@ impl GroupCall {
             Self::ChooseRole { role } => {
                 writer.u8(*role);
             }
+            Self::SetRaidPermission {
+                character,
+                permission,
+            } => {
+                write_text(&mut writer, character)?;
+                writer.u8(*permission);
+            }
+            Self::InitiateConvertToRaid => {}
+            Self::ConvertToRaidVote { accept } => {
+                writer.boolean(*accept);
+            }
         }
         Ok(writer.finish())
     }
@@ -288,11 +395,13 @@ pub enum GroupPush {
         /// The ping bytes.
         data: [u8; PING_DATA_LEN],
     },
-    /// 715: the pre-raid status (retail war ledger: a `u32` of 4, then the raid id).
+    /// 715: the pre-raid status (Observed in 13 ledgers: a `u32` status, then the war id, the
+    /// same 16 bytes as the 3454 of the war and the activity of its raid invite; reader
+    /// `FUN_14340fa40`).
     PreRaidStatus {
-        /// A status value (4 in retail; meaning Unknown).
+        /// The status ([`PRE_RAID_SELECTED`] to [`PRE_RAID_WAR_ENDED`]).
         status: u32,
-        /// The raid id (the same 16 bytes as the 3454 of the war).
+        /// The war id.
         raid: [u8; RAW_ID_LEN],
     },
     /// 3454: the raid's war started.
@@ -315,6 +424,32 @@ pub enum GroupPush {
         /// The value.
         value: u32,
     },
+    /// 5308: the start of a convert-to-raid vote failed (Observed: reader `FUN_143098a90`, one
+    /// byte after the header).
+    InitiateConvertToRaidFailed {
+        /// [`CONVERT_TO_RAID_VOTE_IN_PROGRESS`] or [`CONVERT_TO_RAID_TOO_FREQUENT`].
+        error: u8,
+    },
+    /// 5309: the convert-to-raid vote ended (Observed: one byte after the header, as 5308).
+    ConvertToRaidVoteEnded {
+        /// [`CONVERT_TO_RAID_CONVERTED`] or [`CONVERT_TO_RAID_NOT_CONVERTED`].
+        result: u8,
+    },
+    /// 5310: the player's vote failed (Observed: one byte after the header, as 5308).
+    SubmitConvertToRaidVoteFailed {
+        /// [`CONVERT_TO_RAID_VOTE_NOT_IN_PROGRESS`] or [`CONVERT_TO_RAID_ALREADY_VOTED`].
+        error: u8,
+    },
+    /// 5311: a convert-to-raid vote started (Observed: reader `FUN_143403650`: a character
+    /// reference (`FUN_14087ac50`), then a big-endian `u64` (`FUN_14087af30`);
+    /// `socialscreen.luac` compares the reference with the player's own character id and shows
+    /// the vote until the time).
+    ConvertToRaidVoteInitiated {
+        /// The player that started it.
+        initiator: CharacterRef,
+        /// When the vote ends. Inferred: Unix nanoseconds, the unit of the group invite times.
+        ends_ns: u64,
+    },
 }
 
 impl GroupPush {
@@ -329,6 +464,12 @@ impl GroupPush {
             Self::SiegeWarfareStarted { .. } => SIEGE_WARFARE_STARTED_TYPE_INDEX,
             Self::SiegeWarfareEnded { .. } => SIEGE_WARFARE_ENDED_TYPE_INDEX,
             Self::SiegeWarfareCompleted { .. } => SIEGE_WARFARE_COMPLETED_TYPE_INDEX,
+            Self::InitiateConvertToRaidFailed { .. } => INITIATE_CONVERT_TO_RAID_FAILED_TYPE_INDEX,
+            Self::ConvertToRaidVoteEnded { .. } => CONVERT_TO_RAID_VOTE_ENDED_TYPE_INDEX,
+            Self::SubmitConvertToRaidVoteFailed { .. } => {
+                SUBMIT_CONVERT_TO_RAID_VOTE_FAILED_TYPE_INDEX
+            }
+            Self::ConvertToRaidVoteInitiated { .. } => CONVERT_TO_RAID_VOTE_INITIATED_TYPE_INDEX,
         }
     }
 
@@ -370,6 +511,15 @@ impl GroupPush {
             }
             Self::SiegeWarfareCompleted { value } => {
                 writer.u32(*value);
+            }
+            Self::InitiateConvertToRaidFailed { error: code }
+            | Self::ConvertToRaidVoteEnded { result: code }
+            | Self::SubmitConvertToRaidVoteFailed { error: code } => {
+                writer.u8(*code);
+            }
+            Self::ConvertToRaidVoteInitiated { initiator, ends_ns } => {
+                initiator.write(writer);
+                writer.u64(*ends_ns);
             }
         }
         Ok(())
@@ -421,6 +571,21 @@ impl GroupPush {
             SIEGE_WARFARE_COMPLETED_TYPE_INDEX => reader
                 .u32()
                 .map(|value| Self::SiegeWarfareCompleted { value }),
+            INITIATE_CONVERT_TO_RAID_FAILED_TYPE_INDEX => reader
+                .u8()
+                .map(|error| Self::InitiateConvertToRaidFailed { error }),
+            CONVERT_TO_RAID_VOTE_ENDED_TYPE_INDEX => reader
+                .u8()
+                .map(|result| Self::ConvertToRaidVoteEnded { result }),
+            SUBMIT_CONVERT_TO_RAID_VOTE_FAILED_TYPE_INDEX => reader
+                .u8()
+                .map(|error| Self::SubmitConvertToRaidVoteFailed { error }),
+            CONVERT_TO_RAID_VOTE_INITIATED_TYPE_INDEX => (|| -> Result<Self, MessageError> {
+                Ok(Self::ConvertToRaidVoteInitiated {
+                    initiator: CharacterRef::read(reader)?,
+                    ends_ns: reader.u64()?,
+                })
+            })(),
             _ => return None,
         };
         Some(push)
@@ -573,6 +738,77 @@ mod tests {
         }
     }
 
+    /// The raid permission call of `Hive gorgon raid third boss` 230.534 s (the id replaced) and
+    /// the convert-to-raid forms of the client's readers (`FUN_14259f180`, `FUN_1425a30b0`,
+    /// `FUN_143098a90`, `FUN_143403650`).
+    #[test]
+    fn the_raid_permission_and_convert_to_raid_forms_read() {
+        let member = text_bytes(CHARACTER);
+        assert_eq!(
+            call(
+                SET_RAID_PERMISSION_TYPE_INDEX,
+                &[member, vec![RAID_PERMISSION_LEADER]].concat()
+            ),
+            GroupCall::SetRaidPermission {
+                character: CHARACTER.to_owned(),
+                permission: RAID_PERMISSION_LEADER,
+            }
+        );
+        assert_eq!(
+            call(INITIATE_CONVERT_TO_RAID_TYPE_INDEX, &[]),
+            GroupCall::InitiateConvertToRaid,
+            "the header alone"
+        );
+        assert_eq!(
+            call(CONVERT_TO_RAID_VOTE_TYPE_INDEX, &[1]),
+            GroupCall::ConvertToRaidVote { accept: true }
+        );
+        let initiator = [0x33; RAW_ID_LEN];
+        let ends_ns: u64 = 0x18c0_66e7_6a1b_6afc;
+        for (push, expected) in [
+            (
+                GroupPush::InitiateConvertToRaidFailed {
+                    error: CONVERT_TO_RAID_TOO_FREQUENT,
+                },
+                "04".to_owned(),
+            ),
+            (
+                GroupPush::ConvertToRaidVoteEnded {
+                    result: CONVERT_TO_RAID_NOT_CONVERTED,
+                },
+                "01".to_owned(),
+            ),
+            (
+                GroupPush::SubmitConvertToRaidVoteFailed {
+                    error: CONVERT_TO_RAID_ALREADY_VOTED,
+                },
+                "05".to_owned(),
+            ),
+            (
+                GroupPush::ConvertToRaidVoteInitiated {
+                    initiator: CharacterRef(Some(initiator)),
+                    ends_ns,
+                },
+                format!("05{}18c066e76a1b6afc", "33".repeat(RAW_ID_LEN)),
+            ),
+            (
+                GroupPush::PreRaidStatus {
+                    status: PRE_RAID_PERMISSION_DEMOTED,
+                    raid: initiator,
+                },
+                format!("00000003{}", "33".repeat(RAW_ID_LEN)),
+            ),
+        ] {
+            let push = SocialPush::Group(push);
+            let args = push.encode_args().expect("encode");
+            assert_eq!(args, hex(&expected), "{push:?}");
+            assert_eq!(
+                SocialPush::decode_args(push.type_index(), &args),
+                Some(Ok(push))
+            );
+        }
+    }
+
     /// The retail bodies (Hive 3v3 group, 3v3_arena_group), the ids replaced.
     #[test]
     fn the_retail_pushes_have_the_retail_bytes() {
@@ -664,6 +900,12 @@ mod tests {
                 second: "00000000-0000-4000-8000-000000000009".to_owned(),
             },
             GroupCall::ChooseRole { role: 4 },
+            GroupCall::SetRaidPermission {
+                character: CHARACTER.to_owned(),
+                permission: RAID_PERMISSION_ASSISTANT,
+            },
+            GroupCall::InitiateConvertToRaid,
+            GroupCall::ConvertToRaidVote { accept: false },
         ]
         .map(SocialCall::Group);
         crate::social::assert_calls_round_trip(ROUND_TRIP_HEADER, &calls);

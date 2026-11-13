@@ -45,6 +45,12 @@ const ITEM_NAME_FIELD: &str = "m_itemname";
 const ITEM_SLOT_FIELD_CRC: u32 = 0x5cdb_aa46;
 /// The main hand's paperdoll slot (`MAIN_HAND_OPTION_1`).
 const MAIN_HAND_SLOT: u32 = 24;
+/// The off hand's paperdoll slot (Observed: the dryad soldier slices hold `Npc_Dryad_Kite_Shield`
+/// in slot 27 beside `Weapon_AI_Dryad_Soldier` in slot 24). Its weapon row's `MannequinTag` is a
+/// tag of the creature as the main hand's (Inferred: the mob block action lists raise the block
+/// on `Shield_OH` with `Alerted`, and no other source gives `Shield_OH`; retail
+/// `Dryad_Soldier_32` raised its block 90 times, all-capture sweep 2026-11-09).
+const OFF_HAND_SLOT: u32 = 27;
 /// The separator of a `MannequinTag` cell (retail `1H_Melee,Club`).
 const MANNEQUIN_TAG_SEPARATOR: char = ',';
 /// A creature's body collider component's fields: the filter and the radius by name (their CRCs
@@ -115,6 +121,8 @@ pub struct SliceMannequin {
     pub default_tags: Vec<String>,
     /// The item in its main hand, when it has one.
     pub main_hand: Option<String>,
+    /// The item in its off hand, when it has one.
+    pub off_hand: Option<String>,
     /// The radius of its body's capsule, mm ([`collider_radius_mm`]).
     pub collider_radius_mm: Option<u32>,
     /// Its corpse can be skinned ([`skinnable`]).
@@ -175,7 +183,8 @@ pub fn slice_mannequin(bytes: &[u8]) -> Option<SliceMannequin> {
         grid,
         animation_database,
         default_tags,
-        main_hand: main_hand_in(&all),
+        main_hand: hand_item_in(&all, MAIN_HAND_SLOT),
+        off_hand: hand_item_in(&all, OFF_HAND_SLOT),
         collider_radius_mm: collider_radius_mm(&all),
         skinnable: skinnable(&all),
     })
@@ -310,11 +319,11 @@ impl ParsedDatabase {
 pub fn main_hand_item(root: &Element) -> Option<String> {
     let mut all = Vec::new();
     descendants(root, &mut all);
-    main_hand_in(&all)
+    hand_item_in(&all, MAIN_HAND_SLOT)
 }
 
-/// The main-hand item among the elements `all` of a slice.
-fn main_hand_in(all: &[&Element]) -> Option<String> {
+/// The item of paperdoll slot `hand` among the elements `all` of a slice.
+fn hand_item_in(all: &[&Element], hand: u32) -> Option<String> {
     let item_crc = lowercase_crc32(ITEM_NAME_FIELD);
     all.iter().find_map(|element| {
         let slot = element
@@ -323,7 +332,7 @@ fn main_hand_in(all: &[&Element]) -> Option<String> {
             .find(|child| child.name_crc == Some(ITEM_SLOT_FIELD_CRC))?
             .as_u32()
             .ok()?;
-        (slot == MAIN_HAND_SLOT)
+        (slot == hand)
             .then(|| {
                 element
                     .children
@@ -625,8 +634,12 @@ pub fn build_rows(
             .main_hand
             .as_ref()
             .and_then(|item| weapons.get(&item.to_lowercase()));
-        if let Some(weapon) = weapon {
-            default_tags.extend(weapon.tags.iter().cloned());
+        let off_hand = mannequin
+            .off_hand
+            .as_ref()
+            .and_then(|item| weapons.get(&item.to_lowercase()));
+        for hand in [weapon, off_hand].into_iter().flatten() {
+            default_tags.extend(hand.tags.iter().cloned());
         }
         let fragment_ticks = mannequin
             .animation_database
@@ -771,6 +784,37 @@ mod tests {
         assert!(!skinnable(vec![gatherable_remains()]), "a sailor");
         assert!(!skinnable(vec![states()]), "the rat without gatherable");
         assert!(slice_mannequin(&boar_slice()).expect("mannequin").skinnable);
+    }
+
+    /// The dryad soldier's paperdoll: its sword in slot 24 and its kite shield in slot 27.
+    #[test]
+    fn a_slice_names_its_off_hand_item() {
+        let hand = |slot: u32, item: &str| {
+            Element::with_children(
+                0,
+                vec![
+                    Element::with_value(ITEM_SLOT_FIELD_CRC, slot.to_be_bytes().to_vec()),
+                    text(ITEM_NAME_FIELD, item),
+                ],
+            )
+        };
+        let root = Element::with_children(
+            0,
+            vec![
+                hand(MAIN_HAND_SLOT, "Weapon_AI_Dryad_Soldier"),
+                hand(OFF_HAND_SLOT, "Npc_Dryad_Kite_Shield"),
+            ],
+        );
+        let mut all = Vec::new();
+        descendants(&root, &mut all);
+        assert_eq!(
+            hand_item_in(&all, MAIN_HAND_SLOT).as_deref(),
+            Some("Weapon_AI_Dryad_Soldier")
+        );
+        assert_eq!(
+            hand_item_in(&all, OFF_HAND_SLOT).as_deref(),
+            Some("Npc_Dryad_Kite_Shield")
+        );
     }
 
     #[test]

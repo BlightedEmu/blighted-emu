@@ -13,9 +13,10 @@
 //! `OnKickVoteEnded`) have no captured layout.
 //!
 //! A role choice (5390) sets the role child of the player's member block in its group entity
-//! (Observed, `raid_group_influence_race` 71.624 s and 75.675 s). Raids stay out: no capture
-//! holds the convert-to-raid vote (5317, 5318 and their answers 5311, 5309), so no group here
-//! grows past one group; the raid move (3501) and swap (541) reorder the members of the group.
+//! (Observed, `raid_group_influence_race` 71.624 s and 75.675 s). A group grows into a players'
+//! raid by the convert-to-raid vote (5317, 5318); the raid calls (moves 3501, swaps 541,
+//! permissions 2422), a raid member's invites and leave are [`crate::player_raids`]; a plain
+//! group refuses the raid calls. The raids of wars and matches are [`crate::raids`].
 
 use nw_bus::GroupAnswer;
 use nw_db::SocialGroup;
@@ -35,7 +36,7 @@ use crate::world::{GroupInvite, METRIC_CALLS, REFUSED, RESULT_LABEL, SocialWorld
 /// group entity.
 pub(crate) const GROUP_MEMBER_LIMIT: usize = 5;
 /// The last byte of every retail 1677.
-const INVITE_REMOVED_FLAG: u8 = 0;
+pub(crate) const INVITE_REMOVED_FLAG: u8 = 0;
 /// The 3453 error of an invite that the rules refuse (the invitee blocks the inviter, is in a
 /// group, or the group is full) and of an accepted invite whose group filled up. Inferred: the
 /// only retail 3453 error of the captures is [`ERROR_INVITEE_OFFLINE`], and the client's other
@@ -67,10 +68,18 @@ impl SocialWorld {
     pub(crate) fn group_call(&mut self, character: Uuid, call: GroupCall, now_ms: u64) {
         match call {
             GroupCall::Invite {
-                character: invitee, ..
-            } => self.invite_to_group(character, &invitee, now_ms),
+                character: invitee,
+                extra,
+                ..
+            } => self.invite_to_group(character, &invitee, extra, now_ms),
             GroupCall::Reply { invite, answer } => self.reply_to_group(character, invite, answer),
-            GroupCall::Leave { .. } => self.leave_group(character),
+            GroupCall::Leave { .. } => {
+                if self.player_raid_of(character).is_some() {
+                    self.leave_player_raid(character);
+                } else {
+                    self.leave_group(character);
+                }
+            }
             GroupCall::SetLeader { character: leader } => self.set_leader(character, &leader),
             GroupCall::KickVote { .. } => {
                 // The vote messages are not in the captures, so there is no vote.
@@ -87,6 +96,14 @@ impl SocialWorld {
                 self.swap_raid_members(character, &first, &second);
             }
             GroupCall::ChooseRole { role } => self.choose_role(character, role),
+            GroupCall::SetRaidPermission {
+                character: member,
+                permission,
+            } => self.set_raid_permission(character, &member, permission),
+            GroupCall::InitiateConvertToRaid => self.initiate_convert_to_raid(character, now_ms),
+            GroupCall::ConvertToRaidVote { accept } => {
+                self.vote_convert_to_raid(character, accept, now_ms);
+            }
         }
     }
 
@@ -135,73 +152,9 @@ impl SocialWorld {
         )
     }
 
-    /// Moves a raid member to the first place of raid group `group` (the members in join
-    /// order, [`GROUP_MEMBER_LIMIT`] per group, the first group 0) and saves the group; every
-    /// member's group state goes out again. A group this raid does not have is refused.
-    fn move_raid_member(&mut self, character: Uuid, member: &str, group: u8) {
-        let Some(member) = Uuid::parse_str(member).ok() else {
-            metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
-            return;
-        };
-        let Some(group_id) = self.people.get(&character).and_then(|person| person.group) else {
-            metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
-            return;
-        };
-        let Some(raid) = self.groups.get_mut(&group_id) else {
-            return;
-        };
-        let Some(from) = raid.members.iter().position(|known| *known == member) else {
-            metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
-            return;
-        };
-        // Raid groups are indexes from 0 (Observed: 0 to 3 in `raid_group_influence_race`).
-        let first = usize::from(group) * GROUP_MEMBER_LIMIT;
-        if first >= raid.members.len() {
-            metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
-            return;
-        }
-        raid.members.remove(from);
-        let to = first.min(raid.members.len());
-        raid.members.insert(to, member);
-        let saved = raid.clone();
-        let members = saved.members.clone();
-        self.store(StoreOp::SaveGroup(saved));
-        for member in &members {
-            self.touch(*member);
-        }
-    }
-
-    /// Swaps the places of two raid members and saves the group; every member's group state
-    /// goes out again.
-    fn swap_raid_members(&mut self, character: Uuid, first: &str, second: &str) {
-        let (Ok(first), Ok(second)) = (Uuid::parse_str(first), Uuid::parse_str(second)) else {
-            metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
-            return;
-        };
-        let Some(group_id) = self.people.get(&character).and_then(|person| person.group) else {
-            metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
-            return;
-        };
-        let Some(raid) = self.groups.get_mut(&group_id) else {
-            return;
-        };
-        let (Some(one), Some(two)) = (
-            raid.members.iter().position(|known| *known == first),
-            raid.members.iter().position(|known| *known == second),
-        ) else {
-            metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
-            return;
-        };
-        raid.members.swap(one, two);
-        let saved = raid.clone();
-        let members = saved.members.clone();
-        self.store(StoreOp::SaveGroup(saved));
-        for member in &members {
-            self.touch(*member);
-        }
-    }
-
-    fn invite_to_group(&mut self, inviter: Uuid, invitee: &str, now_ms: u64) {
+    /// The invite of `inviter` to the player of id text `invitee`; `raid_group` is the raid group
+    /// id a players' raid member's invite names ([`GroupCall::Invite`]).
+    fn invite_to_group(&mut self, inviter: Uuid, invitee: &str, raid_group: [u8; 16], now_ms: u64) {
         let Some(target) = self.known(invitee).filter(|target| *target != inviter) else {
             metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
             return;
@@ -212,6 +165,10 @@ impl SocialWorld {
                 character: reference(target),
             };
             self.push(&[inviter], SocialPush::Group(push));
+            return;
+        }
+        if self.player_raid_of(inviter).is_some() {
+            self.invite_to_player_raid(inviter, target, raid_group, now_ms);
             return;
         }
         let blocked = self
@@ -230,7 +187,9 @@ impl SocialWorld {
             .is_some_and(|group| {
                 group.leader != inviter || group.members.len() >= GROUP_MEMBER_LIMIT
             });
-        if blocked || target_grouped || full {
+        // A raid member takes no group invite and sends none ([`crate::raids`]).
+        let in_raid = self.raid_seat(inviter).is_some() || self.raid_seat(target).is_some();
+        if blocked || target_grouped || full || in_raid {
             metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
             self.refuse_group(inviter, target);
             return;
@@ -243,6 +202,7 @@ impl SocialWorld {
                 inviter,
                 invitee: target,
                 created_ms: now_ms,
+                raid_group: None,
             },
         );
         // Both see it in their groups state: the invitee's popup, the inviter's sent invites.
@@ -251,6 +211,9 @@ impl SocialWorld {
     }
 
     fn reply_to_group(&mut self, invitee: Uuid, invite: [u8; 16], answer: u32) {
+        if self.reply_to_raid(invitee, invite, answer) {
+            return;
+        }
         let Some(open) = self
             .group_invites
             .get(&invite)
@@ -262,7 +225,10 @@ impl SocialWorld {
         };
         self.end_group_invite(invite, open);
         if answer == REPLY_ACCEPT {
-            self.join_group(open.inviter, invitee);
+            match open.raid_group {
+                Some(group) => self.join_player_raid(open.inviter, invitee, group),
+                None => self.join_group(open.inviter, invitee),
+            }
         }
     }
 
@@ -301,7 +267,7 @@ impl SocialWorld {
     }
 
     /// Tells `told` that its group step with `other` was refused (3453).
-    fn refuse_group(&mut self, told: Uuid, other: Uuid) {
+    pub(crate) fn refuse_group(&mut self, told: Uuid, other: Uuid) {
         let push = GroupPush::Error {
             error: ERROR_INVITE_REFUSED,
             character: reference(other),
@@ -320,7 +286,8 @@ impl SocialWorld {
             .and_then(|person| person.group)
             .and_then(|group| self.groups.get(&group))
             .is_some_and(|group| group.members.len() >= GROUP_MEMBER_LIMIT);
-        if invitee_grouped || inviter_group_full {
+        let in_raid = self.raid_seat(inviter).is_some() || self.raid_seat(invitee).is_some();
+        if invitee_grouped || inviter_group_full || in_raid {
             metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
             self.refuse_group(invitee, inviter);
             return;
@@ -420,7 +387,7 @@ impl SocialWorld {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use nw_messages::social::ChatChannel;
     use nw_messages::social::chat::{
         RECEIVE_BATCHED_CHAT_MESSAGES_TYPE_INDEX, SEND_CHAT_MESSAGE_TYPE_INDEX,
@@ -434,7 +401,7 @@ mod tests {
     use crate::Effect;
     use crate::world::tests::{NOW_MS, call, character, join, pushes, text, world};
 
-    fn invite_args(number: u128) -> Vec<u8> {
+    pub(crate) fn invite_args(number: u128) -> Vec<u8> {
         let mut args = text(&character(number).hyphenated().to_string());
         args.extend([0; 17]);
         args
@@ -635,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ping_reaches_the_other_members_and_raid_moves_change_the_order() {
+    fn a_ping_reaches_the_other_members_and_a_plain_group_refuses_raid_moves() {
         use nw_messages::social::groups::{
             GROUP_PING_TYPE_INDEX, MOVE_RAID_MEMBER_TYPE_INDEX, PING_DATA_LEN,
             SWAP_RAID_MEMBERS_TYPE_INDEX,
@@ -701,11 +668,7 @@ mod tests {
             &swap,
             NOW_MS,
         );
-        assert_eq!(
-            world.groups[&group].members,
-            [character(1), character(3), character(2)]
-        );
-        let mut move_args = text(&character(2).hyphenated().to_string());
+        let mut move_args = text(&character(3).hyphenated().to_string());
         move_args.push(0);
         call(
             &mut world,
@@ -717,23 +680,8 @@ mod tests {
         );
         assert_eq!(
             world.groups[&group].members,
-            [character(2), character(1), character(3)],
-            "group 0 starts at the first member"
-        );
-        let mut past_the_members = text(&character(2).hyphenated().to_string());
-        past_the_members.push(1);
-        call(
-            &mut world,
-            1,
-            "sim-a",
-            MOVE_RAID_MEMBER_TYPE_INDEX,
-            &past_the_members,
-            NOW_MS,
-        );
-        assert_eq!(
-            world.groups[&group].members,
-            [character(2), character(1), character(3)],
-            "a group past the members is refused"
+            [character(1), character(2), character(3)],
+            "a plain group refuses the raid calls"
         );
     }
 

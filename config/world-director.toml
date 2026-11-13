@@ -66,6 +66,13 @@ accept_timeout_ms = 45000
 match_size = 40
 accept_timeout_ms = 90000
 
+# The matchmaking queue of capture the flag: the players of a match (two teams of half; retail
+# 20, two teams of 10) and how long the players have to accept the match once its instance is
+# open. A small even size (2 or 4) lets a few test players start a match.
+[instances.capture_the_flag]
+match_size = 20
+accept_timeout_ms = 90000
+
 # The director starts instance sims itself with this command (on this host, no cloud service)
 # and stops the ones it started when they stay free. Leave it out to start them by hand.
 # [instances.launch]

@@ -28,6 +28,15 @@ pub const WAR_RESULT_SHOWN_MS: u64 = 180_000;
 /// the index).
 pub const WAR_LENGTH_MS: u64 = 1_800_000;
 
+/// How long an invasion runs (Observed: the running invasion's time is its start + 1,500 s in
+/// the war data of `invasion`, `Reekwater_Invasion` and `Playthrough_Part_21`, and the won
+/// invasion of `invasion` ended at that time, 1590.110 s).
+pub const INVASION_LENGTH_MS: u64 = 1_500_000;
+
+/// The attacker of an invasion: no company, faction 0 (Observed: every retail invasion entry of
+/// the war data carries a zero attacker company and faction).
+pub const NO_ATTACKER: (Uuid, u8) = (Uuid::nil(), 0);
+
 /// A war of a territory, as the war data shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerritoryWar {
@@ -35,7 +44,7 @@ pub struct TerritoryWar {
     pub war: Uuid,
     /// The territory id.
     pub territory: u16,
-    /// The attacking company and its faction.
+    /// The attacking company and its faction; [`NO_ATTACKER`] for an invasion.
     pub attacker: (Uuid, u8),
     /// The defending company and its faction.
     pub defender: (Uuid, u8),
@@ -43,16 +52,29 @@ pub struct TerritoryWar {
     pub number: u64,
     /// When it starts, Unix ms.
     pub starts_ms: u64,
-    /// Its result: the company that won and when, Unix ms.
+    /// Its result: the company that won and when, Unix ms; a lost invasion's winner is the nil
+    /// id (Observed: zero in the retail war data).
     pub result: Option<(Uuid, u64)>,
     /// Its sign-ups, kicked players too.
     pub signups: Vec<WarSignup>,
 }
 
 impl TerritoryWar {
-    /// When its time ends, Unix ms.
+    /// Whether it is an invasion: a war of no attacking company.
+    #[must_use]
+    pub const fn is_invasion(&self) -> bool {
+        self.attacker.0.is_nil()
+    }
+
+    /// When its time ends, Unix ms: [`WAR_LENGTH_MS`] or [`INVASION_LENGTH_MS`] after its start.
+    #[must_use]
     pub const fn ends_ms(&self) -> u64 {
-        self.starts_ms.saturating_add(WAR_LENGTH_MS)
+        let length = if self.is_invasion() {
+            INVASION_LENGTH_MS
+        } else {
+            WAR_LENGTH_MS
+        };
+        self.starts_ms.saturating_add(length)
     }
 
     /// The players on its roster with their sides: the war's fighters (Observed: the roster
@@ -111,8 +133,8 @@ pub enum Declared {
 type WarRow = (
     Uuid,
     i16,
-    Uuid,
-    i16,
+    Option<Uuid>,
+    Option<i16>,
     Uuid,
     i16,
     i64,
@@ -149,15 +171,18 @@ fn war_of(row: WarRow) -> Result<TerritoryWar, DbError> {
     ) = row;
     let result = match (winner, resolved) {
         (Some(winner), Some(at)) => Some((winner, from_column(at, TIME_FIELD)?)),
+        (None, Some(at)) => Some((Uuid::nil(), from_column(at, TIME_FIELD)?)),
         _ => None,
     };
     Ok(TerritoryWar {
         war,
         territory: narrow(i64::from(territory), TERRITORY_FIELD)?,
-        attacker: (
-            attacker,
-            narrow(i64::from(attacker_faction), FACTION_FIELD)?,
-        ),
+        attacker: match (attacker, attacker_faction) {
+            (Some(attacker), Some(faction)) => {
+                (attacker, narrow(i64::from(faction), FACTION_FIELD)?)
+            }
+            _ => NO_ATTACKER,
+        },
         defender: (
             defender,
             narrow(i64::from(defender_faction), FACTION_FIELD)?,
@@ -212,7 +237,7 @@ pub async fn territory_wars(world: &PgPool, now_ms: u64) -> Result<Vec<Territory
         "SELECT w.war_id, w.territory_id, w.attacker_company, a.faction, w.defender_company, \
          d.faction, w.number, w.starts_ms, w.winner_company, w.resolved_ms \
          FROM territory_war w \
-         JOIN company a ON a.company_id = w.attacker_company \
+         LEFT JOIN company a ON a.company_id = w.attacker_company \
          JOIN company d ON d.company_id = w.defender_company \
          WHERE w.resolved_ms IS NULL OR w.resolved_ms >= $1 ORDER BY w.territory_id, w.number",
     )
@@ -298,7 +323,9 @@ pub async fn declare_war(
 
 /// Gives the war `war` its result: `winner` won at Unix ms `at_ms`. When the attacker won, it
 /// takes the territory's claim from now on, with its first upkeep due one interval later (as
-/// [`crate::set_territory_owner`] gives a new owner). False when the war had a result already.
+/// [`crate::set_territory_owner`] gives a new owner). For an invasion the nil id as `winner` is
+/// its loss (no winner is stored) and the defender its win; the claim stays with its owner.
+/// False when the war had a result already.
 ///
 /// # Errors
 ///
@@ -310,21 +337,23 @@ pub async fn resolve_war(
     at_ms: u64,
 ) -> Result<bool, DbError> {
     let mut transaction = world.begin().await?;
-    let resolved: Option<(i16, Uuid)> = sqlx::query_as(
-        "UPDATE territory_war SET winner_company = $2, resolved_ms = $3 \
+    let resolved: Option<(i16, Option<Uuid>)> = sqlx::query_as(
+        "UPDATE territory_war SET winner_company = NULLIF($2, $4), resolved_ms = $3 \
          WHERE war_id = $1 AND resolved_ms IS NULL \
-         AND $2 IN (attacker_company, defender_company) \
+         AND ($2 IN (attacker_company, defender_company) \
+              OR ($2 = $4 AND attacker_company IS NULL)) \
          RETURNING territory_id, attacker_company",
     )
     .bind(war)
     .bind(winner)
     .bind(to_column(at_ms, TIME_FIELD)?)
+    .bind(Uuid::nil())
     .fetch_optional(&mut *transaction)
     .await?;
     let Some((territory, attacker)) = resolved else {
         return Ok(false);
     };
-    if attacker == winner {
+    if attacker == Some(winner) {
         sqlx::query(
             "UPDATE territory_owner SET company_id = $2, since = now(), \
              upkeep_due_ms = (extract(epoch FROM now()) * 1000)::bigint + $3 \

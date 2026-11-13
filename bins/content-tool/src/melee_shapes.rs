@@ -185,8 +185,12 @@ impl Bodies {
     }
 
     /// The fragment's length: its longest animation layer, the last clip of each played to its
-    /// animation's end (a loop to its next clip only); `None` when a clip's file is missing.
+    /// animation's end (a loop to its next clip only); `None` when a clip's file is missing or a
+    /// chained clip has no start ([`Fragment::awaits_clip_lengths`]).
     pub fn fragment_length_s(&self, fragment: &Fragment) -> Option<f64> {
+        if fragment.awaits_clip_lengths {
+            return None;
+        }
         let mut length: f64 = 0.0;
         for clip in fragment.anim_layers.iter().flatten() {
             let end = match clip.end_s {
@@ -500,6 +504,8 @@ pub fn melee_shape(
         shape,
         step_ms,
         poses,
+        damage_row: None,
+        condition: None,
     }))
 }
 
@@ -617,6 +623,7 @@ mod tests {
             looped: false,
             weight: 1.0,
             end_s: None,
+            after_previous: false,
         }
     }
 
@@ -735,6 +742,15 @@ mod tests {
         // (1 s - 0.25 s) / 1.25.
         let length = bodies.fragment_length_s(&fragment).expect("length");
         assert!((length - 0.6).abs() < 1e-6);
+        let untimed = Fragment {
+            awaits_clip_lengths: true,
+            ..fragment
+        };
+        assert_eq!(
+            bodies.fragment_length_s(&untimed),
+            None,
+            "a chained clip without a start gives no length"
+        );
         assert_eq!(
             bodies.clip("Missing").err().as_deref(),
             Some("animation Missing: no clip file")

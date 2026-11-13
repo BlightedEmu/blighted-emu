@@ -16,7 +16,7 @@ pub const WORLD_MAGIC: [u8; 4] = *b"NWWF";
 pub const WORLD_FORMAT_VERSION: u16 = 1;
 /// Version of the record types. Raise it when any type in `records` changes; the golden test
 /// in this module fails until it is raised.
-pub const WORLD_SCHEMA_VERSION: u32 = 7;
+pub const WORLD_SCHEMA_VERSION: u32 = 8;
 /// Header fields of the world file.
 pub const WORLD_CONTAINER: ContainerSpec = ContainerSpec {
     magic: WORLD_MAGIC,
@@ -62,6 +62,7 @@ mod tests {
     use crate::records::*;
     use crate::slice_data::SpawnedSlice;
     use crate::stations::{CraftingStation, StationGridSide, StationSlice};
+    use crate::time_of_day::{TimeOfDay, TimeOfDayPoints, TimedPoint, TimedSlicePath};
     use crate::travel_slices::{HousingPlot, Teleporter};
 
     const BUILD: &str = "22469132";
@@ -88,7 +89,8 @@ mod tests {
         65, 0, 0, 52, 66, 0, 1, 1, 1, 112, 1, 1, 114, 1, 135, 131, 134, 140, 152, 176, 224, 192,
         129, 1, 1, 120, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 104, 1, 1, 99, 0, 0, 128, 63,
         0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 192, 63, 200, 1, 2, 0, 1, 103, 1, 1, 116, 1, 135, 131,
-        134, 140, 152, 176, 224, 192, 129, 1, 1, 1, 117,
+        134, 140, 152, 176, 224, 192, 129, 1, 1, 1, 117, 1, 134, 128, 128, 128, 8, 1, 0, 1, 0, 1,
+        1, 135, 128, 128, 128, 8, 1, 0, 1, 0, 1, 1, 1, 113, 1, 0, 1, 0, 1,
     ];
 
     /// One record of every kind. Every integer is 128 or more and every optional field is set,
@@ -96,6 +98,13 @@ mod tests {
     fn sample() -> WorldFile {
         let position = [1.0, 2.0, 3.0];
         let territory_ids = vec![300];
+        let window = TimeOfDay {
+            night: true,
+            dawn: false,
+            day: true,
+            dusk: false,
+            despawn_on_end: true,
+        };
         WorldFile {
             level: LevelInfo {
                 name: "lv".to_owned(),
@@ -237,6 +246,20 @@ mod tests {
                     tags: vec!["u".to_owned()],
                 },
             ],
+            time_of_day: TimeOfDayPoints {
+                vitals: vec![TimedPoint {
+                    index: 0x8000_0006,
+                    window,
+                }],
+                gatherables: vec![TimedPoint {
+                    index: 0x8000_0007,
+                    window,
+                }],
+                slices: vec![TimedSlicePath {
+                    slice: "q".to_owned(),
+                    window,
+                }],
+            },
         }
     }
 

@@ -17,11 +17,32 @@
 //!
 //! The table file is mined from the captures (no tracked file holds capture data): a fort that no
 //! capture shows has no entry, and it gets no war instance. The invasion forts (territories 2, 5
-//! and 16) showed a frame but no capture point in the instance: they have no entry either.
+//! and 16) showed a frame but no capture point in the instance: their entries have no point
+//! ([`WarFort::is_invasion_fort`]), and only an invasion runs there.
+//!
+//! **Turrets** (turret study 2026-11-12): each fort lists the turrets its war capture showed in
+//! the frame ([`FortStructure`]: territory 4 13, 8 18, 10 13, 11 12 repeaters, 15 three cannons, 17
+//! none seen), each with the members of its first state as retail sent them; the table's turret
+//! kinds ([`TurretKind`]) hold the values of each turret slice (`slices/structures/siege/`: the
+//! `TurretComponent` and `ProjectileSpawnerComponent` fields, the ranged attack database's range
+//! and radius of the spawner's attack, the ammo of its `AddAmmo` and the health of its `AddHealth`
+//! interaction option) and the facet rule of its turret and spawner components ([`FacetRule`],
+//! Observed on the four turrets whose calls the captures hold).
+//!
+//! **Siege structures** (siege structure study 2026-11-12): the fort's list holds every siege
+//! structure retail showed in the frame ([`FortStructure`]: the turrets, the fire barrel droppers,
+//! the horns of resilience and the supply generators), and the table's structure kinds
+//! ([`StructureKind`]) every defensive structure and generator slice of the asset catalog with
+//! the first group retail sent of it in any ledger (its template for a new build; Observed: the
+//! T3 ballista and explosive launcher only in `fort-equipements-territory`, the T1 repeater and the
+//! T1 and T2 explosive launchers in no ledger). The build costs and the supply generator recipes
+//! come from the data tables ([`SiegeBlueprints`]).
 
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+use crate::Tables;
 
 const FILE_PREFIX: &str = "war-forts-";
 const FILE_SUFFIX: &str = ".json";
@@ -83,6 +104,131 @@ pub enum WarFortsError {
 #[derive(Deserialize)]
 struct TableFile {
     forts: Vec<FortRow>,
+    #[serde(default)]
+    turret_kinds: Vec<KindRow>,
+    #[serde(default)]
+    structure_kinds: Vec<StructureKindRow>,
+}
+
+#[derive(Deserialize)]
+struct StructureRow {
+    asset: String,
+    gde_ref: String,
+    #[serde(default)]
+    place: [f32; 3],
+    #[serde(default)]
+    yaw: f32,
+    #[serde(default)]
+    side: Option<u8>,
+    card_component: u64,
+    #[serde(default)]
+    turret_component: Option<u64>,
+    interact_component: Option<u64>,
+    spawner_component: Option<u64>,
+    ownership_component: Option<u64>,
+    #[serde(default)]
+    generator_component: Option<u64>,
+    #[serde(default)]
+    container_component: Option<u64>,
+    members: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct StructureKindRow {
+    asset: String,
+    slice: String,
+    template: Option<StructureRow>,
+    #[serde(default)]
+    template_inferred: bool,
+    #[serde(default)]
+    trigger: Option<FacetRow>,
+    #[serde(default)]
+    use_timers: Option<Vec<TimerRow>>,
+    #[serde(default)]
+    drop: Option<DropRow>,
+    #[serde(default)]
+    area: Option<AreaRow>,
+}
+
+#[derive(Deserialize)]
+struct TimerRow {
+    component: u64,
+    delay_s: f32,
+}
+
+#[derive(Deserialize)]
+struct DamageRow {
+    table: String,
+    row: String,
+    base_damage: u32,
+    rate_s: f32,
+}
+
+#[derive(Deserialize)]
+struct AreaRow {
+    asset: String,
+    ownership_component: Option<u64>,
+    position_component: Option<u64>,
+    timers: Vec<TimerRow>,
+    radius_m: Option<f32>,
+    once: bool,
+    damage: Option<DamageRow>,
+    effects: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct DropRow {
+    projectile: ProjectileRow,
+    ownership_component: Option<u64>,
+    gravity_mps2: f32,
+    spawner_facet: FacetRow,
+    pour: TimerRow,
+}
+
+#[derive(Deserialize)]
+struct FacetRow {
+    xor: String,
+    component: String,
+}
+
+#[derive(Deserialize)]
+struct ProjectileRow {
+    asset: String,
+    component: u64,
+    ranged_attack: u64,
+    damage_table_crc: u32,
+    row_index: u16,
+}
+
+#[derive(Deserialize)]
+struct KindRow {
+    asset: String,
+    slice: String,
+    hold_to_fire: bool,
+    repeat_fire_delay_s: f32,
+    fire_speed_mps: f32,
+    yaw_max_deg: f32,
+    pitch_min_deg: f32,
+    pitch_max_deg: f32,
+    heat_capacity: f32,
+    heat_gain_per_s: f32,
+    heat_loss_per_s: f32,
+    heat_loss_delay_s: f32,
+    fire_cooldown_s: f32,
+    gravity_mps2: f32,
+    uses_ammo: bool,
+    max_ammo: u16,
+    ammo_refill: u16,
+    repair_health: f32,
+    damage_table: String,
+    damage_row: String,
+    range_m: f32,
+    radius_m: f32,
+    turret_facet: FacetRow,
+    spawner_facet: FacetRow,
+    projectile: Option<ProjectileRow>,
+    #[serde(default)]
+    area: Option<AreaRow>,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +238,8 @@ struct FortRow {
     arrivals: Vec<ArrivalRow>,
     siege: SiegeRow,
     points: Vec<PointRow>,
+    #[serde(default)]
+    structures: Vec<StructureRow>,
 }
 
 #[derive(Deserialize)]
@@ -201,9 +349,267 @@ pub struct WarFort {
     pub siege: SiegeEntity,
     /// Its capture points, by number.
     pub points: Vec<FortPoint>,
+    /// Its siege structures: turrets, droppers, horns and supply generators.
+    pub structures: Vec<FortStructure>,
+}
+
+/// One siege structure of a fort, as its war capture showed it first (or, as the template of a
+/// [`StructureKind`], as retail first sent its slice anywhere: then its place, facing and side
+/// are not used).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FortStructure {
+    /// Its slice asset (a [`StructureKind`]; a turret's is also a [`TurretKind`]).
+    pub asset: [u8; ID_LEN],
+    /// Its `GdeRef`.
+    pub gde_ref: [u8; ID_LEN],
+    /// Its place, metres.
+    pub place: [f32; 3],
+    /// Its facing about the up axis, radians (its place state's rotation; yaw 0 faces +y and
+    /// grows toward -x).
+    pub yaw: f32,
+    /// The war side whose company owns it ([`SIDE_ATTACKER`] or [`SIDE_DEFENDER`]; Observed:
+    /// its ownership's company is the war entry's attacker or defender company: the 56
+    /// repeaters of the fort walls the defender's, the three cannons of `RS_offensive_war` the
+    /// attacker's). Inferred: a structure of no side's company (a template) is the defender's.
+    pub side: u8,
+    /// The component of its card.
+    pub card_component: u64,
+    /// The component of its turret state (4276), for a turret.
+    pub turret_component: Option<u64>,
+    /// The component of its interact state (2930).
+    pub interact_component: Option<u64>,
+    /// The component of its projectile spawner state (57).
+    pub spawner_component: Option<u64>,
+    /// The component of its ownership state (3217).
+    pub ownership_component: Option<u64>,
+    /// The component of its item generation state (3002), for a supply generator.
+    pub generator_component: Option<u64>,
+    /// The component of its container state (1755).
+    pub container_component: Option<u64>,
+    /// Every other member of its first state (place, vitals, damage receiver, buildable
+    /// controller, status effects, container, placement obstruction, delayed events, its turret,
+    /// interact and projectile spawner states), each as one bundle member's bytes, as retail sent
+    /// it.
+    pub members: Vec<Vec<u8>>,
+}
+
+impl FortStructure {
+    /// Its facet entity: the first eight bytes of its `GdeRef` read as a little-endian `u64`
+    /// (Observed: the 2720 and 327 headers of the four turrets the captures used).
+    pub fn facet_entity(&self) -> u64 {
+        let mut key = [0; KEY_LEN];
+        key.copy_from_slice(&self.gde_ref[..KEY_LEN]);
+        u64::from_le_bytes(key)
+    }
+}
+
+/// How the facet target of a component of a slice follows from the entity: the entity XOR the
+/// slice's main entity id XOR the component's entity id, plus the component's id (Observed: the
+/// 4273, 4145, 2720 and 327 targets of the four turrets the captures used).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FacetRule {
+    /// The main entity id XOR the component's entity id.
+    pub xor: u64,
+    /// The component's id.
+    pub component: u64,
+}
+
+impl FacetRule {
+    /// The facet target of the component on the entity whose facet entity is `entity`.
+    pub const fn target(&self, entity: u64) -> u64 {
+        (entity ^ self.xor).wrapping_add(self.component)
+    }
+}
+
+/// The projectile entity of a turret shot (Observed: the 327 projectiles of `RS_offensive_war`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurretProjectile {
+    /// Its slice asset.
+    pub asset: [u8; ID_LEN],
+    /// The component of its projectile state (class 16).
+    pub component: u64,
+    /// `rangedAttackIndex`.
+    pub ranged_attack: u64,
+    /// `damageTableId`.
+    pub damage_table_crc: u32,
+    /// `damageTableRowIndex`.
+    pub row_index: u16,
+}
+
+/// A timer of a siege slice: a `DelayedEvent` component (class 3139) and the delay it counts
+/// once it starts (the slice's value; Observed equal to the `total_delay_s` retail sent when
+/// the dropper's pour and the horn's blow started, `joining_defending_war_2` 124.741 s and
+/// `invasion` 95.691 s).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SiegeTimer {
+    /// Its component.
+    pub component: u64,
+    /// Its delay, seconds.
+    pub delay_s: f32,
+}
+
+impl SiegeTimer {
+    /// Its delay in whole milliseconds.
+    pub fn delay_ms(&self) -> u64 {
+        seconds_ms(self.delay_s)
+    }
+}
+
+/// Whole milliseconds of `seconds` (0 for a negative or not finite value).
+fn seconds_ms(seconds: f32) -> u64 {
+    let ms = f64::from(seconds) * MS_PER_SECOND_F64;
+    if ms.is_finite() && ms > 0.0 {
+        // A siege delay of at most minutes.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a delay of minutes"
+        )]
+        let whole = ms.round() as u64;
+        whole
+    } else {
+        0
+    }
+}
+
+/// The damage of a siege area: its slice's `m_damageData`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AreaDamage {
+    /// The damage table of a hit.
+    pub table: String,
+    /// The damage row of a hit.
+    pub row: String,
+    /// `m_baseDamage`.
+    pub base_damage: u32,
+    /// `m_damageRate`, seconds between two hits of a lasting area.
+    pub rate_s: f32,
+}
+
+impl AreaDamage {
+    /// `m_damageRate` in whole milliseconds, at least one.
+    pub fn rate_ms(&self) -> u64 {
+        seconds_ms(self.rate_s).max(1)
+    }
+}
+
+/// An area slice of a siege structure (`<slice>_aoe`): the entity that opens where a fire barrel
+/// or an explosive shell lands or where a horn blows, and what it does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SiegeArea {
+    /// The slice asset.
+    pub asset: [u8; ID_LEN],
+    /// The component of its ownership state (3217).
+    pub ownership_component: Option<u64>,
+    /// The component of its position state (13).
+    pub position_component: Option<u64>,
+    /// Its timers; they start when it opens, and it goes when the longest ends (Observed: the
+    /// barrel's area left 15.0 s after it opened, `joining_defending_war_2` 181.773 ->
+    /// 196.771 s, its timers 15, 4 and 4 s).
+    pub timers: Vec<SiegeTimer>,
+    /// The radius its hits or effects reach, metres.
+    pub radius_m: f32,
+    /// It hits once when it opens (an explosion); else every `rate_s` while it lasts (a damage
+    /// volume).
+    pub once: bool,
+    /// Its hit; `None` for an area that only gives effects.
+    pub damage: Option<AreaDamage>,
+    /// The status effects it gives (`m_effectId`; the horn's `HornOfResilience_T<n>`).
+    pub effects: Vec<String>,
+}
+
+impl SiegeArea {
+    /// How long it lasts: its longest timer, ms.
+    pub fn life_ms(&self) -> u64 {
+        self.timers
+            .iter()
+            .map(SiegeTimer::delay_ms)
+            .max()
+            .unwrap_or_default()
+    }
+}
+
+/// The drop of a fire barrel dropper: the barrel its spawner lets fall after its pour timer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SiegeDrop {
+    /// The barrel's projectile entity.
+    pub projectile: TurretProjectile,
+    /// The component of the barrel's ownership state.
+    pub ownership_component: Option<u64>,
+    /// The spawner's `m_projectileGravity`, m/s².
+    pub gravity_mps2: f32,
+    /// The facet rule of the spawner (the 2900 that names the drop).
+    pub spawner_facet: FacetRule,
+    /// The pour (`ProjectileSpawnDelay`): the barrel falls when it ends.
+    pub pour: SiegeTimer,
+}
+
+/// The values of one turret slice.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurretKind {
+    /// The slice asset.
+    pub asset: [u8; ID_LEN],
+    /// The slice's pak path.
+    pub slice: String,
+    /// `m_holdToFireRepeatedly`: a repeater (hit scans while the trigger is held).
+    pub hold_to_fire: bool,
+    /// `m_repeatFireDelay`, seconds between two shots of a repeater.
+    pub repeat_fire_delay_s: f32,
+    /// `m_fireSpeed`, m/s of a projectile.
+    pub fire_speed_mps: f32,
+    /// `m_yawAngleMax`, degrees either side of the facing.
+    pub yaw_max_deg: f32,
+    /// `m_pitchAngleMin`, degrees.
+    pub pitch_min_deg: f32,
+    /// `m_pitchAngleMax`, degrees.
+    pub pitch_max_deg: f32,
+    /// `m_heatMeterCapacity`; 0: no heat.
+    pub heat_capacity: f32,
+    /// `m_heatMeterGainRate`, per second of fire.
+    pub heat_gain_per_s: f32,
+    /// `m_heatMeterLossRate`, per second.
+    pub heat_loss_per_s: f32,
+    /// `m_heatLossDelay`, seconds after the fire stops.
+    pub heat_loss_delay_s: f32,
+    /// The spawner's `m_fireCooldown`, seconds a projectile turret is blocked after a shot.
+    pub fire_cooldown_s: f32,
+    /// The spawner's `m_projectileGravity`, m/s².
+    pub gravity_mps2: f32,
+    /// The spawner's `m_usesAmmo`.
+    pub uses_ammo: bool,
+    /// The spawner's `m_maxAmmo`.
+    pub max_ammo: u16,
+    /// The `m_ammoAmount` of the slice's `InteractWithItemCostType_AddProjectileSpawnerAmmo`
+    /// (its `AddAmmo` option): the ammo one refill adds.
+    pub ammo_refill: u16,
+    /// The `m_amount` of the slice's `InteractWithItemCostType_AddHealth` (its `AddHealth`
+    /// option): the health one repair adds.
+    pub repair_health: f32,
+    /// The damage table of a hit.
+    pub damage_table: String,
+    /// The damage row of a hit.
+    pub damage_row: String,
+    /// The range of the spawner's ranged attack, metres.
+    pub range_m: f32,
+    /// The radius of the spawner's ranged attack, metres.
+    pub radius_m: f32,
+    /// The facet rule of its `TurretComponent`.
+    pub turret_facet: FacetRule,
+    /// The facet rule of its `ProjectileSpawnerComponent`.
+    pub spawner_facet: FacetRule,
+    /// Its projectile entity, for a turret that fires projectiles.
+    pub projectile: Option<TurretProjectile>,
+    /// The area its projectile opens where it lands (the explosive launcher's
+    /// `turret_t<n>_explosivelauncher_aoe`); `None` for a turret whose shot opens none.
+    pub area: Option<SiegeArea>,
 }
 
 impl WarFort {
+    /// Whether it is the fort of an invasion capture only: it has no capture point, so no war
+    /// runs there (a war needs its claim point).
+    pub fn is_invasion_fort(&self) -> bool {
+        self.points.is_empty()
+    }
+
     /// Where a player of `side` arrives: the first Observed arrival of its side, else the first
     /// Observed arrival of the fort (Inferred: the spawn camps of the sides are Unknown).
     pub fn arrival(&self, side: u8) -> Option<[f32; 3]> {
@@ -221,10 +627,227 @@ impl WarFort {
     }
 }
 
+/// What a siege structure slice is (from its slice name: `turret_t<n>_ballista`,
+/// `turret_t<n>_repeater`, `turret_t<n>_explosivelauncher`, `dropper_t<n>_firebarrel`,
+/// `support_t<n>_hornofresilience`, `siege_supplygenerator_t<n>`, `platform_t<n>_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StructureRole {
+    /// A ballista turret (build choice 0).
+    Ballista,
+    /// A repeater turret (build choice 1).
+    Repeater,
+    /// An explosive launcher turret (build choice 2).
+    ExplosiveLauncher,
+    /// A fire barrel dropper (build choice 3).
+    FireBarrelDropper,
+    /// A horn of resilience (build choice 4).
+    HornOfResilience,
+    /// A siege supply generator.
+    SupplyGenerator,
+    /// A war camp platform weapon (cannon, fire launcher or repeater platform).
+    Platform,
+}
+
+/// The defensive structures of a 2646 build by its choice (Observed, `fort-equipements-territory`:
+/// choices 0 to 4 on a T3 fort socket built `turret_t3_ballista`, `turret_t3_repeater`,
+/// `turret_t3_explosivelauncher`, `dropper_t3_firebarrel` and `support_t3_hornofresilience`).
+pub const DEFENSE_CHOICES: [StructureRole; 5] = [
+    StructureRole::Ballista,
+    StructureRole::Repeater,
+    StructureRole::ExplosiveLauncher,
+    StructureRole::FireBarrelDropper,
+    StructureRole::HornOfResilience,
+];
+
+/// The tier part of a slice name, and the parts that name each role.
+const TIER_PREFIX: &str = "_t";
+const ROLE_PARTS: [(&str, StructureRole); 7] = [
+    ("_ballista", StructureRole::Ballista),
+    ("_repeater", StructureRole::Repeater),
+    ("_explosivelauncher", StructureRole::ExplosiveLauncher),
+    ("dropper_", StructureRole::FireBarrelDropper),
+    ("_hornofresilience", StructureRole::HornOfResilience),
+    ("supplygenerator_", StructureRole::SupplyGenerator),
+    ("platform_", StructureRole::Platform),
+];
+
+impl StructureRole {
+    /// The role and the tier of the slice at `path`; `None` for a slice of none.
+    pub fn of_slice(path: &str) -> Option<(Self, u8)> {
+        let name = path.rsplit('/').next()?.to_ascii_lowercase();
+        // A platform's own name also holds the weapon (`platform_t3_repeater`): the platform
+        // part goes first.
+        let role = if name.starts_with("platform_") {
+            Self::Platform
+        } else {
+            ROLE_PARTS
+                .iter()
+                .find(|(part, _)| name.contains(part))
+                .map(|(_, role)| *role)?
+        };
+        let tier = name.match_indices(TIER_PREFIX).find_map(|(at, _)| {
+            let digit = name[at + TIER_PREFIX.len()..].chars().next()?;
+            u8::try_from(digit.to_digit(10)?).ok()
+        })?;
+        Some((role, tier))
+    }
+
+    /// The `BlueprintID` of the role's structure of `tier` (`BlueprintItemDefinitions`); `None`
+    /// for a platform (its blueprints name the weapon, not the role).
+    pub fn blueprint(self, tier: u8) -> Option<String> {
+        let name = match self {
+            Self::Ballista => "TurretBallista",
+            Self::Repeater => "TurretRepeater",
+            Self::ExplosiveLauncher => "TurretExplosive",
+            Self::FireBarrelDropper => "DropperFireBarrel",
+            Self::HornOfResilience => "SupportHornOfResilience",
+            Self::SupplyGenerator => return Some(format!("Siege_SupplyGenerator_T{tier}")),
+            Self::Platform => return None,
+        };
+        Some(format!("{name}T{tier}"))
+    }
+}
+
+/// One siege structure slice of the catalog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructureKind {
+    /// The slice asset.
+    pub asset: [u8; ID_LEN],
+    /// The slice's pak path.
+    pub slice: String,
+    /// What it is.
+    pub role: StructureRole,
+    /// Its tier, 1 to 3.
+    pub tier: u8,
+    /// The first group retail sent of it (its card's component, its members); `None` when no
+    /// ledger holds one.
+    pub template: Option<FortStructure>,
+    /// The template is not retail's: no capture holds the kind, and the table built it from
+    /// the template of its role at another tier with the vitals and buildable members of its
+    /// own tier (Inferred; the T1 and T2 explosive launchers).
+    pub template_inferred: bool,
+    /// The facet rule of its trigger component (the 3135 of a use), for a structure a player
+    /// uses with a trigger (a dropper, a horn).
+    pub trigger: Option<FacetRule>,
+    /// The timers a use starts (the horn's `BlowDelay` timers).
+    pub use_timers: Vec<SiegeTimer>,
+    /// The barrel a dropper's use drops.
+    pub drop: Option<SiegeDrop>,
+    /// The area a use opens (the horn's), or that its drop opens where it lands (the
+    /// dropper's).
+    pub area: Option<SiegeArea>,
+}
+
+/// The item a siege structure costs and a supply generator makes (`StructureCost_Ingredient1` of
+/// every siege blueprint, `OutputItem` of the siege generator recipes).
+pub const SIEGE_SUPPLY: &str = "SiegeSupply";
+/// The id prefix of the supply generator recipes (`GeneratorRecipes` `SiegeSupplyGeneratorT1`
+/// to `T3`).
+const GENERATOR_RECIPE_PREFIX: &str = "SiegeSupplyGeneratorT";
+const MS_PER_SECOND: u64 = 1_000;
+const MS_PER_SECOND_F64: f64 = 1_000.0;
+
+/// The recipe of a supply generator tier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratorRecipe {
+    /// `Tickrate`: how often it makes its output, ms.
+    pub tick_ms: u64,
+    /// `OutputItem`.
+    pub item: String,
+    /// `OutputQty`.
+    pub quantity: u32,
+    /// The most its container holds: the `EncumbranceBaseMax` of the `EncumbranceLimits` row
+    /// named as the recipe (`SiegeSupplyGeneratorT<n>`: 300, 400, 500; Observed: the full
+    /// generators of `joining_defending_war_2` 0.714 s, `CK_offensive_war` and
+    /// `20261008-105106-362` held one stack of 300, 400 and 500 and made none).
+    pub capacity: u32,
+}
+
+/// The build costs of the siege structures and the supply generator recipes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SiegeBlueprints {
+    /// The `SiegeSupply` cost by `BlueprintID` (lowercase).
+    costs: std::collections::HashMap<String, u32>,
+    /// The generator recipes by tier.
+    generators: std::collections::HashMap<u8, GeneratorRecipe>,
+}
+
+impl SiegeBlueprints {
+    /// The siege blueprints and generator recipes of `tables`.
+    pub fn from_tables(tables: &Tables) -> Self {
+        let costs = tables
+            .blueprint_item_definitions
+            .iter()
+            .flat_map(|table| &table.rows)
+            .filter(|row| row.structure_cost_ingredient1.as_deref() == Some(SIEGE_SUPPLY))
+            .filter_map(|row| {
+                let cost = u32::try_from(row.structure_cost_qty1?).ok()?;
+                Some((row.blueprint_id.to_ascii_lowercase(), cost))
+            });
+        let capacity = |id: &str| {
+            tables
+                .encumbrance_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .find(|row| row.container_type_id.eq_ignore_ascii_case(id))
+                .and_then(|row| u32::try_from(row.encumbrance_base_max).ok())
+        };
+        let generators = tables
+            .generator_recipes
+            .iter()
+            .flat_map(|table| &table.rows)
+            .filter_map(|row| {
+                let tier = row
+                    .structure_id
+                    .strip_prefix(GENERATOR_RECIPE_PREFIX)?
+                    .parse()
+                    .ok()?;
+                let recipe = GeneratorRecipe {
+                    tick_ms: u64::try_from(row.tickrate)
+                        .ok()?
+                        .saturating_mul(MS_PER_SECOND),
+                    item: row.output_item.clone()?,
+                    quantity: u32::try_from(row.output_qty?).ok()?,
+                    capacity: capacity(&row.structure_id)?,
+                };
+                Some((tier, recipe))
+            });
+        Self::build(costs, generators)
+    }
+
+    /// The blueprints of `costs` (`BlueprintID`, `SiegeSupply` cost) and the generator recipes
+    /// `generators` by tier.
+    pub fn build(
+        costs: impl IntoIterator<Item = (String, u32)>,
+        generators: impl IntoIterator<Item = (u8, GeneratorRecipe)>,
+    ) -> Self {
+        Self {
+            costs: costs
+                .into_iter()
+                .map(|(id, cost)| (id.to_ascii_lowercase(), cost))
+                .collect(),
+            generators: generators.into_iter().collect(),
+        }
+    }
+
+    /// The `SiegeSupply` a structure of `kind` costs; `None` when no blueprint names it.
+    pub fn cost(&self, kind: &StructureKind) -> Option<u32> {
+        let id = kind.role.blueprint(kind.tier)?;
+        self.costs.get(&id.to_ascii_lowercase()).copied()
+    }
+
+    /// The recipe of a supply generator of `tier`.
+    pub fn generator(&self, tier: u8) -> Option<&GeneratorRecipe> {
+        self.generators.get(&tier)
+    }
+}
+
 /// The forts of the wars, by territory.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WarForts {
     forts: Vec<WarFort>,
+    kinds: Vec<TurretKind>,
+    structure_kinds: Vec<StructureKind>,
 }
 
 impl WarForts {
@@ -253,7 +876,65 @@ impl WarForts {
             .into_iter()
             .map(fort_of)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { forts })
+        let kinds = file
+            .turret_kinds
+            .into_iter()
+            .map(kind_of)
+            .collect::<Result<Vec<_>, _>>()?;
+        let structure_kinds = file
+            .structure_kinds
+            .into_iter()
+            .filter_map(|row| structure_kind_of(row).transpose())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            forts,
+            kinds,
+            structure_kinds,
+        })
+    }
+
+    /// Whether a build can make a structure of `kind`: it has a template, and a turret's kind
+    /// fires (a repeater's hit scan, or a projectile the table holds).
+    pub fn buildable(&self, kind: &StructureKind) -> bool {
+        let Some(template) = &kind.template else {
+            return false;
+        };
+        template.turret_component.is_none()
+            || self
+                .kind(&kind.asset)
+                .is_some_and(|turret| turret.hold_to_fire || turret.projectile.is_some())
+    }
+
+    /// Every structure kind of the catalog.
+    pub fn structure_kinds(&self) -> impl Iterator<Item = &StructureKind> {
+        self.structure_kinds.iter()
+    }
+
+    /// The structure kind of slice asset `asset`.
+    pub fn structure_kind(&self, asset: &[u8; ID_LEN]) -> Option<&StructureKind> {
+        self.structure_kinds
+            .iter()
+            .find(|kind| &kind.asset == asset)
+    }
+
+    /// The structure a 2646 build of `choice` on a structure of slice `asset` makes: the
+    /// [`DEFENSE_CHOICES`] role of the choice at the tier of `asset`'s kind (Observed for T3;
+    /// Inferred: a T1 or T2 socket builds the same roles of its own tier). `None` for a choice
+    /// out of the list, a structure of no defensive kind, or a kind no slice has.
+    pub fn replacement(&self, asset: &[u8; ID_LEN], choice: u32) -> Option<&StructureKind> {
+        let old = self.structure_kind(asset)?;
+        if !DEFENSE_CHOICES.contains(&old.role) {
+            return None;
+        }
+        let role = *DEFENSE_CHOICES.get(usize::try_from(choice).ok()?)?;
+        self.structure_kinds
+            .iter()
+            .find(|kind| kind.role == role && kind.tier == old.tier)
+    }
+
+    /// The turret kind of slice asset `asset`.
+    pub fn kind(&self, asset: &[u8; ID_LEN]) -> Option<&TurretKind> {
+        self.kinds.iter().find(|kind| &kind.asset == asset)
     }
 
     /// The fort of `territory`, when a capture shows it.
@@ -277,25 +958,120 @@ impl WarForts {
     }
 }
 
+/// The bytes of hex `text` of the fort or kind `territory` names (0 for a kind).
+fn bytes_of(territory: u16, text: &str) -> Result<Vec<u8>, WarFortsError> {
+    hex::decode(text).map_err(|source| WarFortsError::Hex { territory, source })
+}
+
+/// The 16-byte id in hex `text`.
+fn id_of(territory: u16, text: &str) -> Result<[u8; ID_LEN], WarFortsError> {
+    let bytes = bytes_of(territory, text)?;
+    let len = bytes.len();
+    bytes
+        .try_into()
+        .map_err(|_| WarFortsError::Len { territory, len })
+}
+
+/// The big-endian `u64` in hex `text`.
+fn facet_of(territory: u16, text: &str) -> Result<u64, WarFortsError> {
+    let bytes = bytes_of(territory, text)?;
+    let len = bytes.len();
+    let bytes: [u8; KEY_LEN] = bytes
+        .try_into()
+        .map_err(|_| WarFortsError::Len { territory, len })?;
+    Ok(u64::from_be_bytes(bytes))
+}
+
+/// The territory a turret kind's errors name: kinds belong to no fort.
+const NO_TERRITORY: u16 = 0;
+
+fn rule_of(facet: &FacetRow) -> Result<FacetRule, WarFortsError> {
+    Ok(FacetRule {
+        xor: facet_of(NO_TERRITORY, &facet.xor)?,
+        component: facet_of(NO_TERRITORY, &facet.component)?,
+    })
+}
+
+fn projectile_of(projectile: &ProjectileRow) -> Result<TurretProjectile, WarFortsError> {
+    Ok(TurretProjectile {
+        asset: id_of(NO_TERRITORY, &projectile.asset)?,
+        component: projectile.component,
+        ranged_attack: projectile.ranged_attack,
+        damage_table_crc: projectile.damage_table_crc,
+        row_index: projectile.row_index,
+    })
+}
+
+const fn timer_of(row: &TimerRow) -> SiegeTimer {
+    SiegeTimer {
+        component: row.component,
+        delay_s: row.delay_s,
+    }
+}
+
+/// The area of `row`; `None` for an area slice with no radius (it reaches nothing).
+fn area_of(row: AreaRow) -> Result<Option<SiegeArea>, WarFortsError> {
+    let Some(radius_m) = row.radius_m else {
+        return Ok(None);
+    };
+    Ok(Some(SiegeArea {
+        asset: id_of(NO_TERRITORY, &row.asset)?,
+        ownership_component: row.ownership_component,
+        position_component: row.position_component,
+        timers: row.timers.iter().map(timer_of).collect(),
+        radius_m,
+        once: row.once,
+        damage: row.damage.map(|damage| AreaDamage {
+            table: damage.table,
+            row: damage.row,
+            base_damage: damage.base_damage,
+            rate_s: damage.rate_s,
+        }),
+        effects: row.effects,
+    }))
+}
+
+fn kind_of(row: KindRow) -> Result<TurretKind, WarFortsError> {
+    Ok(TurretKind {
+        asset: id_of(NO_TERRITORY, &row.asset)?,
+        turret_facet: rule_of(&row.turret_facet)?,
+        spawner_facet: rule_of(&row.spawner_facet)?,
+        projectile: row.projectile.as_ref().map(projectile_of).transpose()?,
+        area: row.area.map(area_of).transpose()?.flatten(),
+        slice: row.slice,
+        hold_to_fire: row.hold_to_fire,
+        repeat_fire_delay_s: row.repeat_fire_delay_s,
+        fire_speed_mps: row.fire_speed_mps,
+        yaw_max_deg: row.yaw_max_deg,
+        pitch_min_deg: row.pitch_min_deg,
+        pitch_max_deg: row.pitch_max_deg,
+        heat_capacity: row.heat_capacity,
+        heat_gain_per_s: row.heat_gain_per_s,
+        heat_loss_per_s: row.heat_loss_per_s,
+        heat_loss_delay_s: row.heat_loss_delay_s,
+        fire_cooldown_s: row.fire_cooldown_s,
+        gravity_mps2: row.gravity_mps2,
+        uses_ammo: row.uses_ammo,
+        max_ammo: row.max_ammo,
+        ammo_refill: row.ammo_refill,
+        repair_health: row.repair_health,
+        damage_table: row.damage_table,
+        damage_row: row.damage_row,
+        range_m: row.range_m,
+        radius_m: row.radius_m,
+    })
+}
+
 fn fort_of(row: FortRow) -> Result<WarFort, WarFortsError> {
     let territory = row.territory;
-    let bytes =
-        |text: &str| hex::decode(text).map_err(|source| WarFortsError::Hex { territory, source });
-    let id = |text: &str| -> Result<[u8; ID_LEN], WarFortsError> {
-        let bytes = bytes(text)?;
-        let len = bytes.len();
-        bytes
-            .try_into()
-            .map_err(|_| WarFortsError::Len { territory, len })
-    };
-    let facet = |text: &str| -> Result<u64, WarFortsError> {
-        let bytes = bytes(text)?;
-        let len = bytes.len();
-        let bytes: [u8; KEY_LEN] = bytes
-            .try_into()
-            .map_err(|_| WarFortsError::Len { territory, len })?;
-        Ok(u64::from_be_bytes(bytes))
-    };
+    let bytes = |text: &str| bytes_of(territory, text);
+    let id = |text: &str| id_of(territory, text);
+    let facet = |text: &str| facet_of(territory, text);
+    let structures = row
+        .structures
+        .into_iter()
+        .map(|structure| structure_of(territory, structure))
+        .collect::<Result<Vec<_>, WarFortsError>>()?;
     let mut points = row
         .points
         .into_iter()
@@ -316,7 +1092,10 @@ fn fort_of(row: FortRow) -> Result<WarFort, WarFortsError> {
         })
         .collect::<Result<Vec<_>, WarFortsError>>()?;
     points.sort_by_key(|point| point.number);
-    if !points.iter().any(FortPoint::is_claim) || row.arrivals.is_empty() {
+    // An invasion fort has no capture point (Observed: the instances of `invasion`,
+    // `Reekwater_Invasion` and `Playthrough_Part_21` hold none); a war fort has its claim point.
+    let war_fort_without_claim = !points.is_empty() && !points.iter().any(FortPoint::is_claim);
+    if war_fort_without_claim || row.arrivals.is_empty() {
         return Err(WarFortsError::NoClaimPoint { territory });
     }
     Ok(WarFort {
@@ -337,7 +1116,68 @@ fn fort_of(row: FortRow) -> Result<WarFort, WarFortsError> {
             state_component: row.siege.state_component,
         },
         points,
+        structures,
     })
+}
+
+/// The structure of `row` of the fort of `territory` ([`NO_TERRITORY`] for a template).
+fn structure_of(territory: u16, row: StructureRow) -> Result<FortStructure, WarFortsError> {
+    Ok(FortStructure {
+        asset: id_of(territory, &row.asset)?,
+        gde_ref: id_of(territory, &row.gde_ref)?,
+        place: row.place,
+        yaw: row.yaw,
+        side: row.side.unwrap_or(SIDE_DEFENDER),
+        card_component: row.card_component,
+        turret_component: row.turret_component,
+        interact_component: row.interact_component,
+        spawner_component: row.spawner_component,
+        ownership_component: row.ownership_component,
+        generator_component: row.generator_component,
+        container_component: row.container_component,
+        members: row
+            .members
+            .iter()
+            .map(|member| bytes_of(territory, member))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn structure_kind_of(row: StructureKindRow) -> Result<Option<StructureKind>, WarFortsError> {
+    let Some((role, tier)) = StructureRole::of_slice(&row.slice) else {
+        return Ok(None);
+    };
+    Ok(Some(StructureKind {
+        asset: id_of(NO_TERRITORY, &row.asset)?,
+        slice: row.slice,
+        role,
+        tier,
+        template: row
+            .template
+            .map(|template| structure_of(NO_TERRITORY, template))
+            .transpose()?,
+        template_inferred: row.template_inferred,
+        trigger: row.trigger.as_ref().map(rule_of).transpose()?,
+        use_timers: row
+            .use_timers
+            .unwrap_or_default()
+            .iter()
+            .map(timer_of)
+            .collect(),
+        drop: row
+            .drop
+            .map(|drop| {
+                Ok::<_, WarFortsError>(SiegeDrop {
+                    projectile: projectile_of(&drop.projectile)?,
+                    ownership_component: drop.ownership_component,
+                    gravity_mps2: drop.gravity_mps2,
+                    spawner_facet: rule_of(&drop.spawner_facet)?,
+                    pour: timer_of(&drop.pour),
+                })
+            })
+            .transpose()?,
+        area: row.area.map(area_of).transpose()?.flatten(),
+    }))
 }
 
 #[cfg(test)]
@@ -385,6 +1225,254 @@ pub(crate) mod tests {
             "no defender arrival: the fort's first"
         );
         assert!(forts.fort(12).is_none(), "no capture shows that fort");
+    }
+
+    /// A made-up fort with one made-up turret and the turret kind of a made-up slice whose facet
+    /// rule is the retail cannon's of `RS_offensive_war` (its 4273 and 327 targets).
+    pub(crate) const TURRET_TABLE: &str = r#"{"forts": [{
+        "territory": 15, "frame": [13824.0, 4608.0, 512.0, 512.0],
+        "arrivals": [{"side": 1, "position": [14000.0, 4900.0, 58.0]}],
+        "siege": {"asset": "11111111111111111111111111111111", "gde_ref": "22222222222222222222222222222222",
+                  "card_component": 0, "state_component": 2},
+        "points": [{"number": 4, "asset": "33333333333333333333333333333333",
+           "gde_ref": "08070605040302011111111111111111", "facet": "0a0b0c0d0e0f0001",
+           "place": [14046.73, 4820.7, 57.7], "kind": 6, "position": "020d0103",
+           "card_component": 0, "position_component": 2, "ownership_component": 1, "point_component": 4}],
+        "structures": [{"asset": "44444444444444444444444444444444", "gde_ref": "c8e5b15b50b29d585555555555555555",
+           "place": [14038.0, 4943.0, 58.2], "yaw": -0.5, "side": 1, "card_component": 0, "turret_component": 16,
+           "interact_component": 13, "spawner_component": 15, "ownership_component": 5,
+           "members": ["020d0103465b53e14599307e132943ff42"]}]}],
+      "turret_kinds": [{"asset": "44444444444444444444444444444444", "slice": "made-up.dynamicslice",
+        "hold_to_fire": false, "repeat_fire_delay_s": 0.0, "fire_speed_mps": 50.0, "yaw_max_deg": 75.0,
+        "pitch_min_deg": -20.0, "pitch_max_deg": 25.0, "heat_capacity": 0.0, "heat_gain_per_s": 0.0,
+        "heat_loss_per_s": 0.0, "heat_loss_delay_s": 0.0, "fire_cooldown_s": 3.0, "gravity_mps2": 13.0,
+        "uses_ammo": true, "max_ammo": 15, "ammo_refill": 15, "repair_health": 5000.0,
+        "damage_table": "DamageTable_Structures",
+        "damage_row": "Cannon_Projectile", "range_m": 115.0, "radius_m": 0.3,
+        "turret_facet": {"xor": "9aaa09e499dfb635", "component": "26eb5da726214d6d"},
+        "spawner_facet": {"xor": "9aaa09ee99dfb635", "component": "603842316ab22336"},
+        "projectile": {"asset": "66666666666666666666666666666666", "component": 1, "ranged_attack": 261,
+                       "damage_table_crc": 81017683, "row_index": 6}}]}"#;
+
+    #[test]
+    fn a_turret_reads_with_its_kind_and_the_retail_facet_rule() {
+        let forts = WarForts::parse(TURRET_TABLE).expect("table");
+        let turret = &forts.fort(15).expect("fort").structures[0];
+        assert_eq!(turret.facet_entity(), 0x589d_b250_5bb1_e5c8);
+        assert_eq!(turret.members.len(), 1);
+        assert_eq!(turret.spawner_component, Some(15));
+        let kind = forts.kind(&turret.asset).expect("kind");
+        assert_eq!(
+            kind.turret_facet.target(turret.facet_entity()),
+            0xe923_195b_e88f_a16a,
+            "the retail 4273 target"
+        );
+        assert_eq!(
+            kind.spawner_facet.target(turret.facet_entity()),
+            0x226f_fdf0_2d20_7733,
+            "the retail 327 target"
+        );
+        assert_eq!((kind.ammo_refill, kind.repair_health), (15, 5000.0));
+        let projectile = kind.projectile.expect("a projectile turret");
+        assert_eq!((projectile.row_index, projectile.ranged_attack), (6, 261));
+        assert!(forts.kind(&[0; ID_LEN]).is_none());
+        assert!(
+            WarForts::parse(TABLE)
+                .expect("table")
+                .fort(8)
+                .expect("fort")
+                .structures
+                .is_empty()
+        );
+        assert_eq!(turret.turret_component, Some(16));
+        assert_eq!(turret.generator_component, None);
+    }
+
+    /// Made-up assets of the five T3 defensive slices and one T2 repeater (the retail slice
+    /// paths), the T3 horn with a template.
+    const KINDS_TABLE: &str = r#"{"forts": [], "structure_kinds": [
+        {"asset": "a0000000000000000000000000000000", "slice": "slices/structures/siege/turret/turret_t3_ballista.dynamicslice", "template": null},
+        {"asset": "a1000000000000000000000000000000", "slice": "slices/structures/siege/turret/turret_t3_repeater.dynamicslice", "template": null},
+        {"asset": "a2000000000000000000000000000000", "slice": "slices/structures/siege/turret/turret_t3_explosivelauncher.dynamicslice", "template": null},
+        {"asset": "a3000000000000000000000000000000", "slice": "slices/structures/siege/dropper/dropper_t3_firebarrel.dynamicslice", "template": null},
+        {"asset": "a4000000000000000000000000000000", "slice": "slices/structures/siege/support/support_t3_hornofresilience.dynamicslice",
+         "template": {"asset": "a4000000000000000000000000000000", "gde_ref": "0e0e148b31bfb9ea896394551f6d5c1c", "card_component": 0,
+                      "interact_component": 13, "spawner_component": null, "ownership_component": 4, "members": ["0a8b22010100"]}},
+        {"asset": "b1000000000000000000000000000000", "slice": "slices/structures/siege/turret/turret_t2_repeater.dynamicslice", "template": null},
+        {"asset": "c1000000000000000000000000000000", "slice": "slices/structures/siege/siege_supplygenerator_t2.dynamicslice", "template": null},
+        {"asset": "d1000000000000000000000000000000", "slice": "slices/structures/siege/platform/platform_t3_repeater.dynamicslice", "template": null}]}"#;
+
+    fn asset(first: u8) -> [u8; ID_LEN] {
+        let mut asset = [0; ID_LEN];
+        asset[0] = first;
+        asset
+    }
+
+    #[test]
+    fn the_slice_names_give_the_role_and_the_tier() {
+        let forts = WarForts::parse(KINDS_TABLE).expect("table");
+        let horn = forts.structure_kind(&asset(0xa4)).expect("horn");
+        assert_eq!((horn.role, horn.tier), (StructureRole::HornOfResilience, 3));
+        let template = horn.template.as_ref().expect("template");
+        assert_eq!(
+            (template.interact_component, template.side),
+            (Some(13), SIDE_DEFENDER)
+        );
+        let generator = forts.structure_kind(&asset(0xc1)).expect("generator");
+        assert_eq!(
+            (generator.role, generator.tier),
+            (StructureRole::SupplyGenerator, 2)
+        );
+        let platform = forts.structure_kind(&asset(0xd1)).expect("platform");
+        assert_eq!(
+            platform.role,
+            StructureRole::Platform,
+            "not a repeater turret"
+        );
+        assert_eq!(
+            StructureRole::of_slice("slices/structures/siege/siege_claim.dynamicslice"),
+            None
+        );
+    }
+
+    /// Retail `fort-equipements-territory` 26.024 to 47.325 s: choices 0 to 4 on the T3 socket.
+    #[test]
+    fn a_build_choice_names_the_role_of_the_old_structures_tier() {
+        let forts = WarForts::parse(KINDS_TABLE).expect("table");
+        for (choice, first) in [(0, 0xa0), (1, 0xa1), (2, 0xa2), (3, 0xa3), (4, 0xa4)] {
+            let new = forts.replacement(&asset(0xa4), choice).expect("a T3 kind");
+            assert_eq!(new.asset, asset(first), "choice {choice}");
+        }
+        assert!(
+            forts.replacement(&asset(0xa4), 5).is_none(),
+            "out of the list"
+        );
+        assert!(
+            forts.replacement(&asset(0xb1), 0).is_none(),
+            "no T2 ballista slice in the table"
+        );
+        assert_eq!(
+            forts.replacement(&asset(0xb1), 1).map(|kind| kind.asset),
+            Some(asset(0xb1))
+        );
+        assert!(
+            forts.replacement(&asset(0xc1), 1).is_none(),
+            "a generator is not a socket"
+        );
+        assert!(
+            forts.replacement(&asset(0xd1), 1).is_none(),
+            "a platform is not a socket"
+        );
+    }
+
+    /// The use, drop and area rows of the T1 dropper and the T2 horn as the table holds them
+    /// (the slice values: `ProjectileSpawnDelay` 0.3 s, `BlowDelay` 7, 7, 10 and 90 s, the barrel
+    /// area's 1,200 `FireBarrelDropper_DoT` every 0.5 s in 5 m for 15 s, the horn area's
+    /// `HornOfResilience_T2` in 40 m), and the T3 explosive launcher's area (5,265
+    /// `BombTurret_Explosion` once in 5 m).
+    const USE_TABLE_KINDS: &str = r#", "structure_kinds": [
+        {"asset": "4906e0ed66b052588dfadb3b8bb8988e", "slice": "slices/structures/siege/dropper/dropper_t1_firebarrel.dynamicslice",
+         "template": null, "template_inferred": false,
+         "trigger": {"xor": "0000000000000001", "component": "0000000000000002"}, "use_timers": [],
+         "drop": {"projectile": {"asset": "05932228880d5bdf8fb1cc50513e7c62", "component": 2, "ranged_attack": 531,
+                  "damage_table_crc": 81017683, "row_index": 17}, "ownership_component": 1, "gravity_mps2": 13.0,
+                  "spawner_facet": {"xor": "0000000000000003", "component": "0000000000000004"},
+                  "pour": {"component": 19, "delay_s": 0.3}},
+         "area": {"asset": "b488e3f31cb65871baaf312aa2a52dc4", "ownership_component": 3, "position_component": 1,
+                  "timers": [{"component": 4, "delay_s": 4.0}, {"component": 5, "delay_s": 15.0}, {"component": 6, "delay_s": 4.0}],
+                  "radius_m": 5.0, "once": false,
+                  "damage": {"table": "DamageTable_Structures", "row": "FireBarrelDropper_DoT", "base_damage": 1200, "rate_s": 0.5},
+                  "effects": []}},
+        {"asset": "09ea044a0f525bcbaaddc0b5f9e51067", "slice": "slices/structures/siege/support/support_t2_hornofresilience.dynamicslice",
+         "template": null, "trigger": {"xor": "0000000000000005", "component": "0000000000000006"},
+         "use_timers": [{"component": 17, "delay_s": 7.0}, {"component": 18, "delay_s": 7.0},
+                        {"component": 19, "delay_s": 10.0}, {"component": 20, "delay_s": 90.0}],
+         "drop": null,
+         "area": {"asset": "2b622d29df025e9c91825ed757b1245e", "ownership_component": 1, "position_component": 2,
+                  "timers": [{"component": 3, "delay_s": 1.0}], "radius_m": 40.0, "once": true, "damage": null,
+                  "effects": ["HornOfResilience_T2"]}}]}"#;
+
+    #[test]
+    fn a_dropper_and_a_horn_read_with_their_use_drop_and_area() {
+        let table = format!("{}{USE_TABLE_KINDS}", &TABLE[..TABLE.len() - 1]);
+        let forts = WarForts::parse(&table).expect("table");
+        let dropper = forts
+            .structure_kind(&id_of(0, "4906e0ed66b052588dfadb3b8bb8988e").expect("id"))
+            .expect("dropper");
+        assert_eq!(dropper.role, StructureRole::FireBarrelDropper);
+        let drop = dropper.drop.as_ref().expect("drop");
+        assert_eq!(drop.pour.delay_ms(), 300);
+        assert_eq!(drop.projectile.row_index, 17);
+        assert_eq!(drop.spawner_facet.target(0x10), 0x17);
+        let area = dropper.area.as_ref().expect("barrel area");
+        assert_eq!(area.life_ms(), 15_000, "the longest timer");
+        assert!(!area.once);
+        assert_eq!(
+            area.damage.as_ref().map(|damage| damage.base_damage),
+            Some(1_200)
+        );
+        let horn = forts
+            .structure_kind(&id_of(0, "09ea044a0f525bcbaaddc0b5f9e51067").expect("id"))
+            .expect("horn");
+        assert!(horn.drop.is_none());
+        assert_eq!(
+            horn.use_timers
+                .iter()
+                .map(SiegeTimer::delay_ms)
+                .collect::<Vec<_>>(),
+            [7_000, 7_000, 10_000, 90_000]
+        );
+        let area = horn.area.as_ref().expect("horn area");
+        assert_eq!(area.effects, ["HornOfResilience_T2"]);
+        assert!(area.damage.is_none());
+        assert_eq!(area.life_ms(), 1_000);
+        assert_eq!(horn.trigger.map(|rule| rule.target(0x10)), Some(0x1b));
+    }
+
+    /// The retail blueprint rows (`BlueprintItemDefinitions`: `TurretBallistaT3` 120
+    /// `SiegeSupply`) and recipe (`GeneratorRecipes` `SiegeSupplyGeneratorT2`: 10 s, 10).
+    #[test]
+    fn the_blueprints_give_each_kinds_cost_and_the_generator_recipe() {
+        let forts = WarForts::parse(KINDS_TABLE).expect("table");
+        let blueprints = SiegeBlueprints::build(
+            [
+                ("TurretBallistaT3".to_owned(), 120),
+                ("SupportHornOfResilienceT3".to_owned(), 120),
+                ("Siege_SupplyGenerator_T2".to_owned(), 125),
+            ],
+            [(
+                2,
+                GeneratorRecipe {
+                    tick_ms: 10_000,
+                    item: SIEGE_SUPPLY.to_owned(),
+                    quantity: 10,
+                    capacity: 400,
+                },
+            )],
+        );
+        let cost = |first| blueprints.cost(forts.structure_kind(&asset(first)).expect("kind"));
+        assert_eq!(cost(0xa0), Some(120));
+        assert_eq!(cost(0xa4), Some(120));
+        assert_eq!(cost(0xc1), Some(125));
+        assert_eq!(cost(0xa1), None, "no row");
+        assert_eq!(cost(0xd1), None, "a platform names no role blueprint");
+        assert_eq!(
+            blueprints.generator(2).map(|recipe| recipe.quantity),
+            Some(10)
+        );
+        assert!(blueprints.generator(1).is_none());
+    }
+
+    #[test]
+    fn an_invasion_fort_has_no_capture_point_and_reads() {
+        let start = TABLE.find("\"points\": [").expect("points");
+        let end = TABLE[start..].find("        ]}]}").expect("end") + start;
+        let table = format!("{}\"points\": [\n{}", &TABLE[..start], &TABLE[end..]);
+        let forts = WarForts::parse(&table).expect("table");
+        let fort = forts.fort(8).expect("fort");
+        assert!(fort.is_invasion_fort());
+        let war_forts = WarForts::parse(TABLE).expect("table");
+        assert!(!war_forts.fort(8).expect("fort").is_invasion_fort());
     }
 
     #[test]

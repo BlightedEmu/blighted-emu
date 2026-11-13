@@ -609,6 +609,20 @@ impl Gear {
         true
     }
 
+    /// The weapon key ([`Gear::draw`]) of the option a press of the swap weapon key draws: the
+    /// other of the first two main-hand options than the selected one, when it holds an item.
+    /// Inferred from the key's name (`swap_weapon`): the client swaps between its two weapon
+    /// slots, and the hand change after a retail swap press was not measured.
+    pub(super) fn swap_key(&self) -> Option<u32> {
+        let other = if self.active == slot::MAIN_HAND_OPTION_1 {
+            slot::MAIN_HAND_OPTION_2
+        } else {
+            slot::MAIN_HAND_OPTION_1
+        };
+        self.worn_item(other)?;
+        other.checked_sub(slot::MAIN_HAND_OPTION_1)
+    }
+
     /// The player attacks with every weapon sheathed: the weapon of the selected option is drawn
     /// straight into the hand, the other option is stamped at `time_ns` ([`Gear::stamp`]), and
     /// the client is told. Retail, 721 ledgers: 344 attack presses drew from all sheathed, each
@@ -2020,6 +2034,20 @@ pub(crate) mod tests {
                 time_ns: KEY_NS + RELOAD_MS * NS_PER_MS
             })
         );
+    }
+
+    /// The swap weapon key draws the other of the two weapon options, and nothing while that
+    /// option is empty.
+    #[test]
+    fn the_swap_key_draws_the_other_weapon_option() {
+        let kits = kits();
+        let alone = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
+        assert_eq!(alone.swap_key(), None, "no second weapon");
+        let mut gear = gear_with_staff();
+        assert_eq!(gear.swap_key(), Some(1), "the sword is selected");
+        assert!(gear.draw(1, 0, 0));
+        assert_eq!(gear.main_weapon().map(|(item, _)| item), Some(STAFF));
+        assert_eq!(gear.swap_key(), Some(0), "back to the sword");
     }
 
     #[test]

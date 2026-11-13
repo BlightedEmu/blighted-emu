@@ -1264,6 +1264,22 @@ pub struct Hit {
     /// A mob's hit that no block stops (its row is `Unblockable` or not `CanBeBlocked`).
     #[serde(default)]
     pub unblockable: bool,
+    /// A mob's hit on a player: its row's power level after the level disparity (the player's
+    /// sim plays the hit reaction); 0 for a player's hit.
+    #[serde(default)]
+    pub power_level: u32,
+    /// A mob's hit on a player: its stun in frames of 1/30 s, after the level disparity; 0 for
+    /// a player's hit.
+    #[serde(default)]
+    pub hit_stun: u32,
+    /// A mob's hit on a player: the grit it takes while the player's grit is on, in thousandths
+    /// ([`Hit::block_stamina_milli`]'s unit); 0 for a player's hit.
+    #[serde(default)]
+    pub stagger_milli: u32,
+    /// A mob's or a player's hit on a player: what it adds to the player's reaction count, in
+    /// thousandths ([`Hit::block_stamina_milli`]'s unit); 0 for a hit on a mob.
+    #[serde(default)]
+    pub breakout_milli: u32,
 }
 
 /// Thousandths per unit of [`Hit::block_stamina_milli`].
@@ -1285,6 +1301,22 @@ impl Hit {
     pub fn block_stamina(&self) -> Option<f32> {
         self.block_stamina_milli
             .map(|milli| milli as f32 / MILLI_PER_UNIT)
+    }
+
+    /// The grit this mob hit takes while the player's grit is on ([`Hit::stagger_milli`]).
+    #[must_use]
+    // Thousandths of a stagger of a few hundred.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn stagger(&self) -> f32 {
+        self.stagger_milli as f32 / MILLI_PER_UNIT
+    }
+
+    /// What this hit adds to the player's reaction count ([`Hit::breakout_milli`]).
+    #[must_use]
+    // Thousandths of a count of a few hits.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn breakout(&self) -> f32 {
+        self.breakout_milli as f32 / MILLI_PER_UNIT
     }
 }
 
@@ -2065,6 +2097,10 @@ mod tests {
             block_stamina_milli: None,
             ranged: false,
             unblockable: false,
+            power_level: 0,
+            hit_stun: 0,
+            stagger_milli: 0,
+            breakout_milli: 0,
         });
         round_trip(Hit {
             target: CONNECTION,
@@ -2075,6 +2111,10 @@ mod tests {
             block_stamina_milli: Some(16_500),
             ranged: true,
             unblockable: true,
+            power_level: 2,
+            hit_stun: 18,
+            stagger_milli: 50_000,
+            breakout_milli: 0,
         });
     }
 

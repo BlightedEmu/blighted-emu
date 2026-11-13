@@ -18,20 +18,25 @@
 //! title list (Inferred: a title check, as some titles come from entitlements); no title of this
 //! server comes from an entitlement, and the client asks for its titles itself (4143).
 //!
-//! Unknown: retail's refusal (no capture holds a barber call without a token, or with a look
-//! outside the lists). This server logs such a call and sends nothing more.
+//! A refusal gets 6436 `OnPurchaseError` on the call's own header
+//! ([`AppearancePurchaseErrorMsg`]; Observed: the client's one other answer to the barber call,
+//! header only). A look outside the lists is refused before any token use, so it gets 6436 alone.
+//! A token use that fails (no token, or the account store failed) first closes its debit request
+//! with 3113 ([`super::store_purchase`]), then 6436. No capture holds a refused barber call, so
+//! this order is Inferred.
 
 use bevy_ecs::prelude::Entity;
 use nw_db::{AccountConsumable, DbError};
 use nw_login::look::look_in_lists;
 use nw_messages::ServerMessage;
 use nw_messages::appearance::{
-    AppearanceChangeRequest, AppearancePurchasedMsg, PlayerAppearanceState, next_change_flag,
+    AppearanceChangeRequest, AppearancePurchaseErrorMsg, AppearancePurchasedMsg,
+    PlayerAppearanceState, next_change_flag,
 };
 use uuid::Uuid;
 
 use super::economy::count_call;
-use super::store_purchase::{GrantKind, NO_PRICE, StoreGrant};
+use super::store_purchase::{GrantKind, NO_PRICE, REASON_NO_TOKEN, REASON_NOT_SAVED, StoreGrant};
 use super::{Player, SimWorld, send_now};
 
 /// The consumable the barber spends (Observed: the debit of every retail barber call).
@@ -39,7 +44,7 @@ const BARBERSHOP_TOKEN: &str = "Ent_Barbershop_Token";
 
 impl SimWorld {
     /// Player `entity` buys the look of `request` (6420): a look of the character-creation lists
-    /// gets 5936 now and a token use for the loop; another look is refused (logged).
+    /// gets 5936 now and a token use for the loop; another look is refused with 6436.
     pub(super) fn barber_change(&mut self, entity: Entity, request: &AppearanceChangeRequest) {
         let Some(player) = self.world.get::<Player>(entity) else {
             return;
@@ -47,6 +52,12 @@ impl SimWorld {
         if !look_in_lists(&request.look) {
             count_call("barber", false);
             tracing::info!(player = player.number, look = ?request.look.choices(), "barber change refused: a choice is not in its list");
+            let connection = player.connection.clone();
+            send_now(
+                &mut self.combat_messages,
+                &connection,
+                &[refused(request.header)],
+            );
             return;
         }
         let kind = GrantKind::Barber {
@@ -69,7 +80,8 @@ impl SimWorld {
     /// The loop spent a token for the barber change `grant` (`answer`). With the token spent,
     /// the player, if it is still on this sim, takes the look: 6855 and 1285 go now, the change
     /// with its next own bundle and to the players who see it. Returns whether the look changed.
-    /// An account without a token, or a failed use, counts as refused and logs.
+    /// An account without a token, or a failed use, counts as refused, logs and gets 3113 and
+    /// 6436.
     pub(super) fn barber_paid(
         &mut self,
         grant: &StoreGrant,
@@ -83,11 +95,13 @@ impl SimWorld {
             Ok(None) => {
                 count_call("barber", false);
                 tracing::info!(account = %grant.account, "barber change refused: the account holds no barbershop token");
+                self.store_request_failed(grant, REASON_NO_TOKEN, Some(refused(call)));
                 return false;
             }
             Err(error) => {
                 count_call("barber", false);
                 tracing::error!(%error, account = %grant.account, "barber token not spent");
+                self.store_request_failed(grant, REASON_NOT_SAVED, Some(refused(call)));
                 return false;
             }
         };
@@ -112,6 +126,11 @@ impl SimWorld {
         send_now(&mut self.combat_messages, &connection, &[purchased, done]);
         true
     }
+}
+
+/// 6436: the barber call on `header` is refused.
+const fn refused(header: nw_messages::FacetHeader) -> ServerMessage {
+    ServerMessage::AppearancePurchaseError(AppearancePurchaseErrorMsg { header })
 }
 
 #[cfg(test)]
@@ -212,21 +231,38 @@ mod tests {
     }
 
     #[test]
-    fn no_token_or_a_look_outside_the_lists_changes_nothing() {
+    fn no_token_or_a_look_outside_the_lists_is_refused_and_changes_nothing() {
         let mut world = barber_world();
         let mut outside = CHANGED_LOOK;
         outside[3] = u8::MAX;
         assert!(ask(&mut world, outside).is_empty(), "no token is spent");
-        assert!(sent(&mut world).is_empty());
+        let refused = sent(&mut world);
+        let [ServerMessage::AppearancePurchaseError(error)] = &refused[..] else {
+            panic!("6436 alone: {refused:?}");
+        };
+        assert_eq!(error.header, CALL);
         let [grant] = &ask(&mut world, CHANGED_LOOK)[..] else {
             panic!("one token use");
         };
-        sent(&mut world);
+        let started = sent(&mut world);
+        let [ServerMessage::RequestInitialized(RequestInitializedMsg(debit))] = &started[..] else {
+            panic!("5936 first: {started:?}");
+        };
         assert!(!world.store_answered(grant, GrantAnswer::Barber(Ok(None))));
-        assert!(
-            sent(&mut world).is_empty(),
-            "no answer: retail's refusal is Unknown"
+        let answers = sent(&mut world);
+        let [
+            ServerMessage::RequestFail(failed),
+            ServerMessage::AppearancePurchaseError(error),
+        ] = &answers[..]
+        else {
+            panic!("3113 then 6436: {answers:?}");
+        };
+        assert_eq!(
+            &failed.request, debit,
+            "the 3113 closes the debit of the 5936"
         );
+        assert_eq!(failed.reason, REASON_NO_TOKEN.as_bytes());
+        assert_eq!(error.header, CALL);
         let entity = world.player_by_number(PLAYER).expect("player");
         let player = world.world.get::<Player>(entity).expect("player");
         assert_eq!(player.look, Some(PlayerLook::of_choices(FIRST_LOOK)));

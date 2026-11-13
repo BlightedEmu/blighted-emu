@@ -32,6 +32,7 @@ use crate::containers::{
     CONTAINER_TYPE_INDEX, ContainerState, ITEM_MANAGEMENT_TYPE_INDEX, ItemManagementState,
 };
 use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
+use crate::door::{DOOR_TYPE_INDEX, DoorComponentState};
 use crate::fishing::{FISHING_TYPE_INDEX, FishingComponentState};
 use crate::game_events::{GAME_EVENT_TYPE_INDEX, GameEventState};
 use crate::game_mode_participant::{GAME_MODE_PARTICIPANT_TYPE_INDEX, GameModeParticipantState};
@@ -155,6 +156,8 @@ pub enum MemberState {
     BuildableController(BuildableControllerState),
     /// `MB::PlacementObstructionComponentReplicatedState`.
     PlacementObstruction(PlacementObstructionState),
+    /// `MB::DoorComponentReplicatedState`.
+    Door(DoorComponentState),
     /// `MB::TerritoryInterfaceComponentReplicatedState`.
     TerritoryInterface(TerritoryInterfaceState),
     /// `MB::BuildableGridComponentReplicatedState`.
@@ -292,6 +295,7 @@ impl MemberState {
             Self::GlobalStorage(_) => GLOBAL_STORAGE_TYPE_INDEX,
             Self::BuildableController(_) => BUILDABLE_CONTROLLER_TYPE_INDEX,
             Self::PlacementObstruction(_) => PLACEMENT_OBSTRUCTION_TYPE_INDEX,
+            Self::Door(_) => DOOR_TYPE_INDEX,
             Self::TerritoryInterface(_) => TERRITORY_INTERFACE_TYPE_INDEX,
             Self::BuildableGrid(_) => BUILDABLE_GRID_TYPE_INDEX,
             Self::Ownership(_) => OWNERSHIP_TYPE_INDEX,
@@ -437,6 +441,7 @@ impl MemberState {
             TypeId::FileSlot(PLACEMENT_OBSTRUCTION_TYPE_INDEX) => {
                 PlacementObstructionState::read(reader).map(Self::PlacementObstruction)
             }
+            TypeId::FileSlot(DOOR_TYPE_INDEX) => DoorComponentState::read(reader).map(Self::Door),
             TypeId::FileSlot(TERRITORY_INTERFACE_TYPE_INDEX) => {
                 TerritoryInterfaceState::read(reader).map(Self::TerritoryInterface)
             }
@@ -628,6 +633,10 @@ impl MemberState {
             Self::GlobalStorage(state) => state.write(writer),
             Self::BuildableController(state) => state.write(writer),
             Self::PlacementObstruction(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::Door(state) => {
                 state.write(writer);
                 Ok(())
             }

@@ -315,6 +315,7 @@ fn member_position(state: &MemberState) -> Option<[f32; 3]> {
         | MemberState::GlobalStorage(_)
         | MemberState::BuildableController(_)
         | MemberState::PlacementObstruction(_)
+        | MemberState::Door(_)
         | MemberState::TerritoryInterface(_)
         | MemberState::BuildableGrid(_)
         | MemberState::Ownership(_)

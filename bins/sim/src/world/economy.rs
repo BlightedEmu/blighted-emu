@@ -1559,14 +1559,10 @@ impl SimWorld {
             StoreCall::Purchase { header, purchase } => {
                 self.store_purchase(entity, *header, purchase);
             }
-            StoreCall::ClaimEntitlement { entitlement, .. } => {
-                // No entitlement is granted on this server, so none can be claimed.
-                count_call("claim_entitlement", false);
-                tracing::info!(
-                    entitlement,
-                    "entitlement claim refused: none is granted here"
-                );
-            }
+            StoreCall::ClaimEntitlement {
+                header,
+                entitlement,
+            } => self.claim_entitlement(entity, *header, *entitlement),
             StoreCall::PurchaseReward { item, cost, .. } => {
                 // The reward track state of every player is empty: no reward is offered.
                 count_call("reward_track_purchase", false);

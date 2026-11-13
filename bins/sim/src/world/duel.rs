@@ -198,6 +198,7 @@ impl SimWorld {
             )),
             no_affliction: true,
             linked_mode: Some(0),
+            ..GameModeState::default()
         };
         let middle = nw_sim_core::Position {
             x: (first.2.x + second.2.x) / 2.0,

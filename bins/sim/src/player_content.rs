@@ -14,6 +14,7 @@ use nw_content::deaths_door::DeathsDoorRules;
 use nw_content::drop_rolls::DropRolls;
 use nw_content::equip_load::EquipLoads;
 use nw_content::fishing::FishingRules;
+use nw_content::game_mode_rewards::ModeRewards;
 use nw_content::gameplay_config::GameplayConfig;
 use nw_content::gathering::{
     CrateLoot, CrateVariant, CyclicGatherables, DetectionSpheres, GatherRules, Gatherables,
@@ -53,6 +54,7 @@ use nw_login::config::ShopConfig;
 use nw_protocol::store_api::StoreTable;
 use nw_sim_core::{EquipLoad, EquipLoadLimits, Position};
 use nw_world::camps::CampSlices;
+use nw_world::claim_plots::PlacedClaimPlot;
 use nw_world::collision::QuestVolume;
 use nw_world::dungeon_scripts::DungeonScripts;
 use nw_world::interact_tags::TagOwner;
@@ -73,12 +75,13 @@ use crate::asset_solids::AssetSolids;
 use crate::charting::ChartRules;
 use crate::invite_rules::InviteRules;
 use crate::objectives::{
-    KillTypes, ObjectiveTree, TaskBook, TaskRow, counted_game_events, task_rows,
+    KillTypes, ObjectiveTree, TaskBook, TaskRow, counted_game_events, quest_drop_sources, task_rows,
 };
 use crate::placed_points::PlacedPoints;
 use crate::shop::ShopCatalog;
 use crate::trading_post::{Settlements, TradingCatalog, TradingPostConfig};
 use crate::travel_rules::TravelRules;
+use crate::world::day_night::TimedPlaces;
 use nw_world::capitals::capital_id;
 
 /// The tutorial quest's objective id (`Objectives`).
@@ -751,6 +754,8 @@ pub struct PlayerContent {
     pub gather_points: PlacedPoints,
     /// The lore points of the sim's level, by lore id: a lore read needs one in reach.
     pub lore_points: PlacedPoints,
+    /// The time of day of the sim level's spawns, gatherable points and encounter slices.
+    pub time_of_day: TimedPlaces,
     /// The lore id (CRC-32 of the lowercase `LoreID`) of each `LoreData` title, by the title
     /// in lowercase without its localized mark (`00_aeternum_title_31_01`).
     pub lore_by_title: HashMap<String, u32>,
@@ -781,6 +786,12 @@ pub struct PlayerContent {
     /// The camp slices, for a placed camp's spawn group; empty until the sim loads the camp
     /// slice file.
     pub camp_slices: CampSlices,
+    /// The catacombs tiles, for the tile entities of a run; empty until the sim loads the
+    /// catacombs tile file.
+    pub catacomb_tiles: nw_world::catacomb_tiles::CatacombTiles,
+    /// The level's claim plots, for the land claim entities; empty until the sim loads the
+    /// claim plot file.
+    pub claim_plots: Vec<PlacedClaimPlot>,
     /// The quick course rules.
     pub quick_courses: QuickCourseRules,
     /// The store: the mounts it sells and the entitlements every account holds; empty until the
@@ -800,11 +811,22 @@ pub struct PlayerContent {
     /// The start objects of the open world's encounters, in the town props table form; empty
     /// until the sim loads their file.
     pub encounter_objects: nw_content::town_props::TownProps,
+    /// The dungeon entrances of the level that are network entities ([`entrance_entities`]);
+    /// empty until the sim loads the entrance table.
+    pub entrance_entities: Vec<EntranceEntity>,
     /// The forts of the territory wars ([`nw_content::war_forts`]); empty until the sim loads
     /// their file.
     pub war_forts: nw_content::war_forts::WarForts,
+    /// The invasions of the forts ([`nw_content::invasion_forts`]); empty until the sim loads
+    /// their file.
+    pub invasion_forts: nw_content::invasion_forts::InvasionForts,
+    /// The siege structure build costs and the supply generator recipes.
+    pub siege_blueprints: nw_content::war_forts::SiegeBlueprints,
     /// The slice each spell spawns; empty until the sim loads the spell slice file.
     pub spell_slices: nw_content::spell_slices::SpellSlices,
+    /// The ability instance type of each spell slice and the player's instance limits
+    /// ([`nw_content::ability_instances`]); empty until the sim loads their file.
+    pub ability_instances: nw_content::ability_instances::AbilityInstanceTable,
     /// The projectile entity of each shot ([`nw_content::shot_entities`]).
     pub shot_entities: nw_content::shot_entities::ShotEntities,
     /// The gates of each instance level ([`nw_content::dungeon_gates`]).
@@ -819,6 +841,8 @@ pub struct PlayerContent {
     pub upkeep_costs: nw_content::territory_upkeep::UpkeepCosts,
     /// The level's quest objects that the player breaks with its weapons.
     pub quest_objects: QuestObjects,
+    /// The doors of the level's locked interact plots ([`crate::world::locked_doors`]).
+    pub locked_doors: crate::world::locked_doors::LockedDoors,
     /// The leaderboards each stat feeds.
     pub leaderboards: LeaderboardStats,
     /// The gameplay values of the remote config layers (`crate::gameplay`).
@@ -888,6 +912,8 @@ pub struct PlayerContent {
     /// The categorical progression and coins of each game event, for the tradeskill experience
     /// of gathers and crafts and the coins of salvages.
     pub event_grants: EventGrants,
+    /// What the end event of a game mode match gives (capture the flag).
+    pub mode_rewards: ModeRewards,
     /// The gather level modifiers and craft roll bonuses of each tradeskill's rank table.
     pub tradeskill_curves: TradeskillCurves,
     /// The `BonusItemChance` of each crafting recipe.
@@ -935,6 +961,9 @@ pub struct PlayerContent {
     pub invites: InviteRules,
     /// The expeditions, raids and trials.
     pub instances: InstanceCatalog,
+    /// The procedural generation rules of the catacombs level (`LevelGeneratorFeatureId`
+    /// `Catacombs`); `None` when the tables hold none.
+    pub catacombs: Option<nw_content::catacombs::CatacombRules>,
     /// The weekly expedition mutations and what each difficulty does.
     pub mutations: MutationCatalog,
     /// The expedition entrances of the level: the slice name of each entrance capital, by its
@@ -965,6 +994,20 @@ pub fn entrance_rest(name: &str) -> Option<&str> {
         .find_map(|word| name.strip_prefix(word))
 }
 
+/// The catacombs generation rules of `tables`; `None` (with a warning) when they do not read.
+fn catacomb_rules(tables: &Tables) -> Option<nw_content::catacombs::CatacombRules> {
+    match nw_content::catacombs::CatacombRules::for_game_mode(
+        tables,
+        nw_content::instances::CATACOMBS_GAME_MODE,
+    ) {
+        Ok(rules) => Some(rules),
+        Err(error) => {
+            tracing::warn!(%error, "no catacombs generation rules: no catacombs run");
+            None
+        }
+    }
+}
+
 /// The expedition entrances among the capitals of `level`: each one's slice name by its entity
 /// id (`capital_id`).
 pub fn dungeon_entrances(level: &WorldFile) -> HashMap<u64, String> {
@@ -979,6 +1022,46 @@ pub fn dungeon_entrances(level: &WorldFile) -> HashMap<u64, String> {
                 .is_some_and(|name| entrance_rest(&name.to_lowercase()).is_some())
         })
         .filter_map(|capital| Some((capital_id(&capital.id)?, capital.slice_name.clone())))
+        .collect()
+}
+
+/// A dungeon entrance capital of the level as a network entity (dungeon entrance note,
+/// 2026-11-12; [`nw_content::dungeon_entrances`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntranceEntity {
+    /// The capital's entity id (the `GdeRef` of its card and the facet entity of its
+    /// interactions).
+    pub capital: u64,
+    /// Where it stands.
+    pub position: Position,
+    /// The component of its `DungeonEntranceReplicatedState`.
+    pub entrance_component: u64,
+    /// Its other spawn states, each as the bytes of one bundle member.
+    pub members: Vec<Vec<u8>>,
+}
+
+/// The expedition entrances among the capitals of `level` whose slice has a row in `table`,
+/// as network entities. An entrance whose slice no retail capture shows has no row and stays a
+/// level object only.
+pub fn entrance_entities(
+    level: &WorldFile,
+    table: &nw_content::dungeon_entrances::DungeonEntrances,
+) -> Vec<EntranceEntity> {
+    let entrances = dungeon_entrances(level);
+    level
+        .capitals
+        .iter()
+        .filter_map(|capital| {
+            let id = capital_id(&capital.id)?;
+            let slice = table.of_slice(entrances.get(&id)?)?;
+            let [x, y, z] = capital.position;
+            Some(EntranceEntity {
+                capital: id,
+                position: Position { x, y, z },
+                entrance_component: slice.entrance_component,
+                members: slice.members.clone(),
+            })
+        })
         .collect()
 }
 
@@ -1013,12 +1096,21 @@ fn detection_cell(at: Position, cell_m: f32) -> (i32, i32) {
 }
 
 /// A quest object of the level: a gatherable point whose gather is a game event that a quest's
-/// `TaskGameEvent` counts (Grace's corruption nodules, `MSQ_CorruptedNodule_1_interact`). Retail
-/// 2026-09-18 broke them with weapon hits, with no interaction from the client.
+/// `TaskGameEvent` counts (Grace's corruption nodules, `MSQ_CorruptedNodule_1_interact`), or a
+/// damageable quest capital whose gatherable a quest's item task drops from (the tablet of
+/// `12A_MSQ_08_DestroyRune`: `ItemDropVC` `MB_MSQ2_DestroyRune_Tablet` on the capital
+/// `Master_Quest_Damageable_Instanced`). Retail broke both with weapon hits, with no interaction
+/// from the client (newchar 2026-09-18; `12a_msq_08_destroyrune` 133.92 s, a 2071 on the tablet
+/// and its 2724, then `12A_MSQ_08_RuneShards` in the bag and the task done at 133.96 s).
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuestObject {
+    /// Its gatherable's `GatherableID`.
+    pub gatherable: String,
     /// The game event of its gatherable.
     pub event: String,
+    /// Its gatherable is a quest drop's source and its capital is damageable: a break gives the
+    /// drops of the waiting item tasks ([`crate::objectives::ObjectiveRun::gather_drops`]).
+    pub drops: bool,
     /// Where it stands (the level's gatherable point).
     pub position: Position,
     /// How long it stays broken: its gatherable's `MinRespawnRate`.
@@ -1027,10 +1119,11 @@ pub struct QuestObject {
     /// the object by it (Observed: retail newchar 2026-09-18 carded Grace's four nodules, the
     /// capitals `IO_Custom_MSQ_CorruptedNodule_A` to `_D` on their points, by these ids).
     pub id: Option<u64>,
-    /// The lowercase CRC-32 of its gatherable's `FinalLootTable`: the interact tag of its broken
+    /// The lowercase CRC-32 of `IO_` and its gatherable's id: the interact tag of its broken
     /// entry in the player's loot tracker (Observed: `io_msq_grace_corruptednodule_1`,
-    /// `0x8d40_a880`, on the retail nodules' entries).
-    pub loot_tag: Option<u32>,
+    /// `0x8d40_a880`, on the retail nodules' entries, and `io_mb_msq2_destroyrune_tablet`,
+    /// `0xb0be_7cc2`, on the tablet's at 133.96 s; the tablet's `FinalLootTable` is `Empty`).
+    pub loot_tag: u32,
     /// The radius of its gatherable's detection sphere ([`DetectionSpheres`]), in metres: a
     /// player inside it sets off its game event.
     pub detection_m: Option<f32>,
@@ -1099,6 +1192,12 @@ fn level_interact_tags(tables: &Tables, level: &WorldFile) -> InteractTags {
 /// The largest difference on each axis between a quest object's point and the capital on it, m
 /// (Observed: 0 on the four nodules; a float's rounding).
 const CAPITAL_ON_POINT_M: f32 = 0.01;
+/// The part of a capital's slice name that marks an object broken by weapon hits (lower case:
+/// the 162 `Master_Quest_Damageable_Instanced` capitals of the open world and the other
+/// `*_Damageable_*` quest slices).
+const DAMAGEABLE_SLICE_MARK: &str = "damageable";
+/// What a quest object's loot tracker tag starts with before its gatherable's id.
+const LOOT_TAG_PREFIX: &str = "IO_";
 /// The folder of the generated spawn masters (`CoatGen\\<hash>\\WorldEvent_SpawnGroup_…_Master_…`,
 /// `Master_Plants_…`). Such a capital spawns the object on its point as an entity of its own; it
 /// is a spawner, not the object (Observed: the tutorial's spawn group at (484.5, 218.9); carding
@@ -1118,9 +1217,8 @@ pub struct QuestObjects {
 }
 
 impl QuestObjects {
-    /// The quest objects among the level's gatherable `points`: those of a gatherable in
-    /// `gatherables` whose game event is one of `counted` (lowercase ids), each with the GDE id
-    /// of the capital of `capitals` on its point and its sphere of `spheres`.
+    /// The quest objects among the level's gatherable `points` whose game event is one of
+    /// `counted` ([`Self::with_drops`] with no drop sources).
     pub fn build(
         points: &[GatherablePoint],
         gatherables: &Gatherables,
@@ -1128,31 +1226,65 @@ impl QuestObjects {
         counted: &HashSet<String>,
         capitals: &[Capital],
     ) -> Self {
+        Self::with_drops(
+            points,
+            gatherables,
+            spheres,
+            counted,
+            &HashSet::new(),
+            capitals,
+        )
+    }
+
+    /// The quest objects among the level's gatherable `points`: those of a gatherable in
+    /// `gatherables` whose game event is one of `counted` (lowercase ids), and those of a
+    /// gatherable of `drop_sources` (lowercase ids) on a damageable capital, each with the GDE id
+    /// of the capital of `capitals` on its point and its sphere of `spheres`.
+    pub fn with_drops(
+        points: &[GatherablePoint],
+        gatherables: &Gatherables,
+        spheres: &DetectionSpheres,
+        counted: &HashSet<String>,
+        drop_sources: &HashSet<String>,
+        capitals: &[Capital],
+    ) -> Self {
         let objects: Vec<QuestObject> = points
             .iter()
             .filter_map(|point| {
                 let gatherable = gatherables.get(point.gatherable_id)?;
                 let event = gatherable.game_event.clone()?;
-                counted.contains(&event.to_lowercase()).then(|| {
+                let on_point: Vec<&Capital> = capitals
+                    .iter()
+                    .filter(|capital| {
+                        !capital.slice_name.starts_with(SPAWN_MASTER_FOLDER)
+                            && capital
+                                .position
+                                .iter()
+                                .zip(point.position)
+                                .all(|(a, b)| (a - b).abs() <= CAPITAL_ON_POINT_M)
+                    })
+                    .collect();
+                // The damageable capital is the object when one stands on the point (the
+                // tablet's point holds another capital too).
+                let damageable = on_point.iter().copied().find(|capital| {
+                    capital
+                        .slice_name
+                        .to_lowercase()
+                        .contains(DAMAGEABLE_SLICE_MARK)
+                });
+                let capital = damageable.or_else(|| on_point.first().copied());
+                let drops =
+                    damageable.is_some() && drop_sources.contains(&gatherable.id.to_lowercase());
+                (drops || counted.contains(&event.to_lowercase())).then(|| {
                     let [x, y, z] = point.position;
-                    let position = Position { x, y, z };
-                    let id = capitals
-                        .iter()
-                        .find(|capital| {
-                            !capital.slice_name.starts_with(SPAWN_MASTER_FOLDER)
-                                && capital
-                                    .position
-                                    .iter()
-                                    .zip(point.position)
-                                    .all(|(a, b)| (a - b).abs() <= CAPITAL_ON_POINT_M)
-                        })
-                        .and_then(|capital| capital_id(&capital.id));
                     QuestObject {
+                        gatherable: gatherable.id.clone(),
                         event,
-                        position,
+                        drops,
+                        position: Position { x, y, z },
                         respawn_ms: gatherable.respawn_ms.0,
-                        id,
-                        loot_tag: gatherable.loot_table.as_deref().map(lowercase_crc32),
+                        id: capital.and_then(|capital| capital_id(&capital.id)),
+                        loot_tag: lowercase_crc32(&format!("{LOOT_TAG_PREFIX}{}", gatherable.id)),
                         detection_m: spheres.radius_of(point.gatherable_id),
                     }
                 })
@@ -1262,11 +1394,12 @@ impl PlayerContent {
         let level_gatherables = &level.gatherables;
         let rows = task_rows(tables);
         let gatherables = Gatherables::from_tables(tables);
-        let quest_objects = QuestObjects::build(
+        let quest_objects = QuestObjects::with_drops(
             level_gatherables,
             &gatherables,
             &DetectionSpheres::from_tables(tables),
             &counted_game_events(&rows),
+            &quest_drop_sources(&rows),
             &level.capitals,
         );
         let kits = StarterKits::from_tables(tables);
@@ -1296,6 +1429,7 @@ impl PlayerContent {
                     .iter()
                     .map(|point| (point.gatherable_id, point_position(point.position))),
             ),
+            time_of_day: TimedPlaces::of(level),
             lore_points: PlacedPoints::of(
                 level
                     .lore
@@ -1329,6 +1463,8 @@ impl PlayerContent {
             structure_costs: StructureCosts::from_tables(tables),
             camps: CampRules::from_tables(tables),
             camp_slices: CampSlices::default(),
+            catacomb_tiles: nw_world::catacomb_tiles::CatacombTiles::default(),
+            claim_plots: Vec::new(),
             quick_courses: QuickCourseRules::from_tables(tables),
             store: StoreTable::default(),
             shop: ShopConfig::default(),
@@ -1337,8 +1473,12 @@ impl PlayerContent {
             town_props: nw_content::town_props::TownProps::default(),
             encounter_roots: nw_content::town_props::TownProps::default(),
             encounter_objects: nw_content::town_props::TownProps::default(),
+            entrance_entities: Vec::new(),
             war_forts: nw_content::war_forts::WarForts::default(),
+            invasion_forts: nw_content::invasion_forts::InvasionForts::default(),
+            siege_blueprints: nw_content::war_forts::SiegeBlueprints::from_tables(tables),
             spell_slices: nw_content::spell_slices::SpellSlices::default(),
+            ability_instances: nw_content::ability_instances::AbilityInstanceTable::default(),
             shot_entities: nw_content::shot_entities::ShotEntities::default(),
             dungeon_gates: nw_content::dungeon_gates::DungeonGates::default(),
             dungeon_gate_rules: nw_content::dungeon_gates::GateRules::default(),
@@ -1346,6 +1486,10 @@ impl PlayerContent {
             poi_tags: PoiTags::from_tables(tables),
             upkeep_costs: nw_content::territory_upkeep::UpkeepCosts::from_tables(tables),
             quest_objects,
+            locked_doors: crate::world::locked_doors::LockedDoors::build(
+                &level.capitals,
+                &crate::world::locked_doors::locked_rows(tables),
+            ),
             leaderboards: LeaderboardStats::from_tables(tables),
             kill_experience: KillExperience::from_tables(tables),
             kill_rewards: KillRewards::from_tables(tables),
@@ -1410,6 +1554,7 @@ impl PlayerContent {
             charting,
             phasing_areas: phasing_areas(tables),
             event_grants: EventGrants::from_tables(tables),
+            mode_rewards: ModeRewards::from_tables(tables),
             tradeskill_curves: TradeskillCurves::from_tables(tables),
             bonus_chances: BonusChances::from_tables(tables),
             starting_ranks: StartingRanks::from_tables(tables),
@@ -1429,6 +1574,7 @@ impl PlayerContent {
             // The chart file comes apart from the tables: the run loads it.
             music_charts: MusicCharts::default(),
             instances: InstanceCatalog::from_tables(tables),
+            catacombs: catacomb_rules(tables),
             mutations: MutationCatalog::from_tables(tables),
             entrances: dungeon_entrances(level),
             dungeon_scripts: DungeonScripts::default(),
@@ -1514,6 +1660,52 @@ mod tests {
                 9_009, 9_011, 9_196, 10_330, 20_333, 30_082, 30_112, 30_155, 40_102, 40_186
             ]
         );
+    }
+
+    #[test]
+    #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
+    fn the_war_declaration_cost_and_the_pvp_mission_influence_are_the_bundle_values() {
+        const BUILD: &str = "25810808";
+        /// The PvP faction mission influence grants (`FactionInfluenceAmount`).
+        const GRANTS: [u64; 3] = [50, 100, 200];
+        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
+        let path = nw_content::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
+        let bundle = nw_content::ContentBundle::load(&path, BUILD).expect("bundle");
+        let tables = &bundle.tables;
+        let modifiers: std::collections::HashMap<i64, f64> = tables
+            .territory_definition
+            .iter()
+            .flat_map(|table| &table.rows)
+            .filter_map(|row| Some((row.territory_id, row.upkeep_modifier?)))
+            .collect();
+        for row in tables
+            .territory_upkeep_definition
+            .iter()
+            .flat_map(|table| &table.rows)
+        {
+            for key in nw_messages::CLAIM_KEYS {
+                let modifier = modifiers[&i64::from(key)];
+                let cost = (row.wardec_cost as f64 * modifier).round() as u64;
+                assert_eq!(
+                    cost,
+                    nw_db::WAR_DECLARATION_COST,
+                    "level {} claim {key}",
+                    row.level
+                );
+            }
+        }
+        let grants = nw_content::rewards::EventGrants::from_tables(tables);
+        for (event, points) in [
+            ("PVPFaction-V2_15", GRANTS[0]),
+            ("PVPFactionV2_15", GRANTS[1]),
+            ("PVPFaction+V2_15", GRANTS[2]),
+        ] {
+            assert_eq!(
+                grants.get(event).expect(event).faction_influence,
+                points,
+                "{event}"
+            );
+        }
     }
 
     #[test]

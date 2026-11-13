@@ -25,7 +25,7 @@ use nw_content::player_abilities::{
     AbilityList, FragmentRow, FragmentTransition, ListAction, SpellProjectile, SpellRow,
     TransitionTo,
 };
-use nw_content::player_attacks::stance_tags;
+use nw_content::player_attacks::{AttackHit, BasicAttack, stance_tags};
 use nw_content::status_effects::StatusEffectRules;
 use nw_formats::mannequin::{CageWorld, CastKind, Condition, ManaCompare, TagCase, TagChange};
 use nw_formats::objectstream::lowercase_crc32;
@@ -34,6 +34,7 @@ use nw_messages::player_components::{CHARGE_COMPONENT, CHARGE_TYPE_INDEX};
 use nw_messages::{AbilityCooldown, BundleMember, InputRecord, LookDir, MemberState};
 use nw_sim_core::{Position, weapon_damage_scale};
 
+use super::ability_instances::AbilityInstances;
 use super::gear::Gear;
 use super::hit_shape::PLAYER_CAPSULE;
 use super::points::Attributes;
@@ -130,6 +131,11 @@ pub(super) trait Holder {
     }
     /// Its passive ability or upgrade `ability` is on.
     fn ability_active(&self, ability: &str) -> bool;
+    /// An item it holds in a hand (the weapon in the hand or its off-hand shield) has one of the
+    /// item classes `classes` (`ActionConditionHasRequiredEquipment`). By default none does.
+    fn required_equipment(&self, _classes: &[String]) -> bool {
+        false
+    }
     /// What its abilities that are on add to its mana and cooldowns.
     fn stats(&self) -> AbilityStats;
 }
@@ -236,6 +242,12 @@ pub(super) enum AbilityEvent {
         /// CRC-32 of the lowercase ability id.
         ability: u32,
     },
+    /// The action that plays the newest pressed ability started a fragment with a hit (its
+    /// `CAGE-Damage` clips, or the shot of an action that casts no spell): the hit sweeps or
+    /// fires as a basic attack's (`SimWorld::start_ability_strike`). Observed in the data: the
+    /// abilities' damage rows (`1h_Flail_Ability_Trip`, `1H_Sword_Attack_Spin`, ...) are named
+    /// only by these clips, and no spell of the action deals them.
+    Strike(Box<BasicAttack>),
     /// The action that played ability `ability` stopped, and no transition handed it on.
     Ended {
         /// CRC-32 of the lowercase ability id.
@@ -477,6 +489,8 @@ pub(super) struct AbilityRun {
     pub mana: Mana,
     /// The heart rune charge.
     pub charge: RuneCharge,
+    /// The placed ability instances that are in the world ([`AbilityInstances`]).
+    pub instances: AbilityInstances,
 }
 
 /// The tests of a list, for the run of one player and the action `current` that tests. The lists
@@ -533,6 +547,54 @@ impl RunWorld<'_> {
                 .map(|(running, list, _)| (length(running, list), elapsed(running)))
                 .collect(),
         }
+    }
+}
+
+/// The tests of a clip of a basic attack, for one player: what its [`Holder`] knows (tags,
+/// status effects, slots, abilities on, equipment); no running action, marker or input.
+struct HolderWorld<'a> {
+    holder: &'a dyn Holder,
+    tags: Vec<&'a str>,
+}
+
+impl CageWorld for HolderWorld<'_> {
+    fn tag(&self, tag: &str) -> bool {
+        self.tags.iter().any(|own| own.eq_ignore_ascii_case(tag))
+    }
+
+    fn marker(&self, _marker: &str) -> bool {
+        false
+    }
+
+    fn input(&self, _input: &str) -> bool {
+        false
+    }
+
+    fn status_effect(&self, effect: &str) -> bool {
+        self.holder.has_effect(effect)
+    }
+
+    fn ability_active(&self, ability: &str) -> bool {
+        self.holder.ability_active(ability)
+    }
+
+    fn item_in_slot(&self, slot: &str) -> bool {
+        self.holder.item_in_slot(slot)
+    }
+
+    fn tag_in_slot(&self, tag: &str, slot: &str) -> bool {
+        self.holder
+            .tags_in_slot(slot)
+            .iter()
+            .any(|own| own.eq_ignore_ascii_case(tag))
+    }
+
+    fn config_var(&self, variable: &str) -> bool {
+        CLIENT_SETTINGS_ON.contains(&variable)
+    }
+
+    fn required_equipment(&self, classes: &[String]) -> bool {
+        self.holder.required_equipment(classes)
     }
 }
 
@@ -630,6 +692,10 @@ impl CageWorld for RunWorld<'_> {
         CLIENT_SETTINGS_ON.contains(&variable)
     }
 
+    fn required_equipment(&self, classes: &[String]) -> bool {
+        self.holder.required_equipment(classes)
+    }
+
     fn other(&self, test: &str) -> bool {
         if test == SPELL_PLACED_TEST {
             // The raycast of the aim found the spell's place: a cast of this chain.
@@ -724,6 +790,44 @@ impl AbilityRun {
             ability: press.ability,
             frame: press.frame,
         });
+    }
+
+    /// The hit of fragment `fragment` of list `list`, which action `index` starts to play, goes in
+    /// `events` ([`AbilityEvent::Strike`]) when the action plays the newest pressed ability
+    /// ([`AbilityOwner`]): a passive action or a basic attack of the list strikes nothing here (the
+    /// bow's `Bow_Shoot` fires through the attack key). A shot of an action that casts a spell is
+    /// the spell's ([`AbilityEvent::Cast`]), so it fires only once (Inferred: the fragment's
+    /// `CAGE-CastSpell` clip and the action's cast name the same spell). A shape whose clip has a
+    /// run-time condition strikes only when its condition holds for `holder` at `now_ms`
+    /// (Observed: the flail slam's standard sphere needs `Ability_Flail_Slam` on and no kite
+    /// shield with its second upgrade, its stagger sphere the kite shield).
+    fn strike(
+        &self,
+        (lists, list): (&[&AbilityList], &AbilityList),
+        index: usize,
+        fragment: &str,
+        (holder, now_ms): (&dyn Holder, u64),
+        events: &mut Vec<AbilityEvent>,
+    ) {
+        let owned = self
+            .owner
+            .is_some_and(|owner| owner.list == list_key(list) && owner.action == index);
+        let Some(hit) = list
+            .fragment(fragment)
+            .and_then(|row| row.hit.as_ref())
+            .filter(|_| owned)
+        else {
+            return;
+        };
+        let shot = !matches!(hit.hit, AttackHit::Melee { .. });
+        if shot && !list.actions[index].casts.is_empty() {
+            return;
+        }
+        let tags = holder.tags();
+        let world = self.world(lists, list, holder, &tags, Some(index), now_ms);
+        let mut hit = hit.clone();
+        hit.keep_held(|condition| condition.holds_in(&world));
+        events.push(AbilityEvent::Strike(Box::new(hit)));
     }
 
     /// One tick of list `list` of `lists` at `now_ms` (`server_ms` on the server clock): a
@@ -872,8 +976,18 @@ impl AbilityRun {
                     if starts_chain {
                         self.own_press(target, to, events);
                     }
+                    self.strike(
+                        (lists, target),
+                        to,
+                        &target.actions[to].fragment,
+                        (holder, now_ms),
+                        events,
+                    );
                 }
-                Step::Fragment(fragment) => self.switch_fragment(key, from, fragment, now_ms),
+                Step::Fragment(fragment) => {
+                    self.switch_fragment(key, from, fragment, now_ms);
+                    self.strike((lists, list), from, fragment, (holder, now_ms), events);
+                }
             }
         }
         let stops: Vec<usize> = self
@@ -944,6 +1058,13 @@ impl AbilityRun {
                 press.used = true;
                 self.own_press(list, index, events);
             }
+            self.strike(
+                (lists, list),
+                index,
+                &action.fragment,
+                (holder, now_ms),
+                events,
+            );
         }
         self.update_tags(lists, list, holder, &tags, now_ms);
         let mut casts = Vec::new();
@@ -1018,8 +1139,11 @@ impl AbilityRun {
     }
 
     /// Logs that `action`, the start of the ability of the newest press, did not start at
-    /// `now_ms` for `reason`: in the tick that reads the press, and in each tick with an input on
-    /// (the click of an aimed ability). An action of another ability logs nothing.
+    /// `now_ms` for `reason`: in each tick while the press still counts for the action's
+    /// activation ([`press_window_ms`]). An action of another ability logs nothing, and a press
+    /// past its window logs nothing: it can start nothing more (live 2026-11-12: a refused Trip
+    /// press logged every tick for 13 minutes, because the client holds the inputs
+    /// `Stop_Crafting` and `Test_AlwaysTrue` on in every frame).
     fn report_refusal(&self, action: &ListAction, now_ms: u64, reason: &str) {
         let Some(press) = self.press.filter(|press| !press.used) else {
             return;
@@ -1029,7 +1153,15 @@ impl AbilityRun {
             .as_ref()
             .and_then(|ability| ability.move_name.as_deref())
             .is_some_and(|name| lowercase_crc32(name) == press.ability);
-        if !of_press || (press.read_ms != Some(now_ms) && self.inputs_on.is_empty()) {
+        let age_ms = press
+            .read_ms
+            .map_or(0, |read_ms| now_ms.saturating_sub(read_ms));
+        let counts = action
+            .activation
+            .as_ref()
+            .and_then(|activation| press_window_ms(activation, press.ability))
+            .is_some_and(|window_ms| age_ms <= window_ms);
+        if !of_press || !counts {
             return;
         }
         let on_cooldown = self
@@ -1396,6 +1528,25 @@ fn list_key(list: &AbilityList) -> usize {
     std::ptr::from_ref(list).addr()
 }
 
+/// How long after the tick that reads it a press of the ability `ability` (CRC-32 of the
+/// lowercase id) still counts for `condition`: the longest `BackTicks` of its `AbilityMove`
+/// tests of that ability, in client frames ([`RunWorld::ability_move`]); `None` when no test
+/// names the ability.
+fn press_window_ms(condition: &Condition, ability: u32) -> Option<u64> {
+    match condition {
+        Condition::All(parts) | Condition::Any(parts) => parts
+            .iter()
+            .filter_map(|part| press_window_ms(part, ability))
+            .max(),
+        Condition::Not(part) => press_window_ms(part, ability),
+        Condition::AbilityMove {
+            ability: name,
+            back_ticks,
+        } => (lowercase_crc32(name) == ability).then(|| u64::from(*back_ticks) * CLIENT_FRAME_MS),
+        _ => None,
+    }
+}
+
 /// The ability that a key whose mapped abilities are `mapped` (CRC-32 of lowercase ids) starts
 /// in the lists `lists`: the first that one of their actions tests (`IfActiveAbilityMoveName`).
 fn ability_of_key(lists: &[&AbilityList], mut mapped: impl Iterator<Item = u32>) -> Option<u32> {
@@ -1420,7 +1571,57 @@ struct PlayerHolder<'a> {
     /// The slot aliases that hold an item ([`filled_slots`]).
     filled_slots: Vec<&'static str>,
     abilities_on: Vec<&'a str>,
+    /// The item classes of the weapon in the hand and of the off-hand item.
+    hand_classes: Vec<&'a str>,
     stats: AbilityStats,
+}
+
+impl<'a> PlayerHolder<'a> {
+    /// The player with `masteries`, `gear`, `attributes` and `effects` whose hand holds weapon
+    /// item `item`, as its ability lists and its clips read it.
+    pub(super) fn of(
+        (data, content): (&'a CombatData, &'a PlayerContent),
+        (masteries, gear, attributes, effects): (
+            &'a Masteries,
+            Option<&'a Gear>,
+            &Attributes,
+            &'a StatusEffects,
+        ),
+        item: &str,
+    ) -> Self {
+        let tags_of = |item: &str| weapon_tags(data, item);
+        let option_tags = gear.map_or_else(Vec::new, |gear| {
+            MAIN_HAND_OPTIONS
+                .iter()
+                .filter_map(|(alias, slot_id)| Some((*alias, tags_of(gear.worn_item(*slot_id)?)?)))
+                .collect()
+        });
+        let mut abilities_on = held_abilities((masteries, gear, attributes, effects), content);
+        // A worn heart rune grants its ability (`Ability_Rune_Detonate`): the rune list's
+        // actions test it.
+        abilities_on.extend(
+            gear.and_then(|gear| gear.worn_item(slot::HEART_GEM))
+                .and_then(|rune| data.equip_ability_of_item(rune)),
+        );
+        let hand_classes = std::iter::once(item)
+            .chain(gear.and_then(Gear::off_hand_weapon))
+            .flat_map(|item| data.weapon_item_classes(item))
+            .map(String::as_str)
+            .collect();
+        let stats = content
+            .attribute_bonuses
+            .stats_of(abilities_on.iter().copied());
+        Self {
+            tags: tags_of(item).unwrap_or_default(),
+            option_tags,
+            effects,
+            rules: &content.status_effects,
+            filled_slots: gear.map_or_else(Vec::new, filled_slots),
+            abilities_on,
+            hand_classes,
+            stats,
+        }
+    }
 }
 
 impl Holder for PlayerHolder<'_> {
@@ -1453,6 +1654,14 @@ impl Holder for PlayerHolder<'_> {
         self.abilities_on
             .iter()
             .any(|own| own.eq_ignore_ascii_case(ability))
+    }
+
+    fn required_equipment(&self, classes: &[String]) -> bool {
+        classes.iter().any(|class| {
+            self.hand_classes
+                .iter()
+                .any(|own| own.eq_ignore_ascii_case(class))
+        })
     }
 
     fn stats(&self) -> AbilityStats {
@@ -1602,6 +1811,45 @@ impl SimWorld {
         );
     }
 
+    /// Keeps the melee shapes of the basic attack `attack` of player `entity` that strike now: a
+    /// shape whose clip has a run-time condition strikes while it holds for the player's
+    /// abilities, effects and hands ([`MeleeShape::condition`]; Observed: the great axe's heavy
+    /// attack has a plain sphere and a `ReaperPass1PullHeavy` pull sphere,
+    /// `playermaleanims_2h_meleeattach.adb`). Its grit windows are kept the same way
+    /// ([`GritWindow::condition`]: `GRIT_On_Basic_Attacks` is `IfAbilityActive`). The test reads
+    /// no ability run: a basic attack is not an action of the ability lists. A player with no
+    /// weapon item has no abilities of one: only the shapes and windows without a condition stay.
+    ///
+    /// [`MeleeShape::condition`]: nw_content::player_attacks::MeleeShape::condition
+    /// [`GritWindow::condition`]: nw_content::player_attacks::GritWindow::condition
+    pub(super) fn keep_held_shapes(&self, entity: Entity, attack: &mut BasicAttack) {
+        if !attack.has_run_time_conditions() {
+            return;
+        }
+        let Some((item, player)) = self.world.get::<Player>(entity).and_then(|player| {
+            let (item, _) = player.gear.as_ref().and_then(Gear::main_weapon)?;
+            Some((item, player))
+        }) else {
+            attack.keep_held(|_| false);
+            return;
+        };
+        let holder = PlayerHolder::of(
+            (&self.combat.data, &self.content),
+            (
+                &player.masteries,
+                player.gear.as_ref(),
+                &player.attributes,
+                &player.status_effects,
+            ),
+            item,
+        );
+        let world = HolderWorld {
+            tags: holder.tags(),
+            holder: &holder,
+        };
+        attack.keep_held(|condition| condition.holds_in(&world));
+    }
+
     /// Runs the ability lists of the weapon in each player's hand at `now_ms`: the status effects
     /// an ability applies go on its player; its casts go to [`SimWorld::cast_ability_spell`].
     /// Gives the hits of the spells; lands the status effects of friendly projectiles due and
@@ -1615,6 +1863,7 @@ impl SimWorld {
         let rules = &content.status_effects;
         let server_ms = self.server_ms;
         let mut casts: Vec<(Entity, String, Box<SpellRow>, CastKind)> = Vec::new();
+        let mut strikes: Vec<(Entity, Box<BasicAttack>)> = Vec::new();
         let mut query = self.world.query::<(Entity, &mut Player)>();
         for (entity, mut player) in query.iter_mut(&mut self.world) {
             let player = &mut *player;
@@ -1626,46 +1875,16 @@ impl SimWorld {
             if lists.is_empty() {
                 continue;
             }
-            let tags_of = |item: &str| weapon_tags(&data, item);
-            let tags = tags_of(item).unwrap_or_default();
-            let option_tags = player.gear.as_ref().map_or_else(Vec::new, |gear| {
-                MAIN_HAND_OPTIONS
-                    .iter()
-                    .filter_map(|(alias, slot_id)| {
-                        Some((*alias, tags_of(gear.worn_item(*slot_id)?)?))
-                    })
-                    .collect()
-            });
-            let mut abilities_on = held_abilities(
+            let holder = PlayerHolder::of(
+                (&data, &content),
                 (
                     &player.masteries,
                     player.gear.as_ref(),
                     &player.attributes,
                     &player.status_effects,
                 ),
-                &content,
+                item,
             );
-            // A worn heart rune grants its ability (`Ability_Rune_Detonate`): the rune list's
-            // actions test it.
-            abilities_on.extend(
-                player
-                    .gear
-                    .as_ref()
-                    .and_then(|gear| gear.worn_item(slot::HEART_GEM))
-                    .and_then(|rune| data.equip_ability_of_item(rune)),
-            );
-            let stats = content
-                .attribute_bonuses
-                .stats_of(abilities_on.iter().copied());
-            let holder = PlayerHolder {
-                tags,
-                option_tags,
-                effects: &player.status_effects,
-                rules,
-                filled_slots: player.gear.as_ref().map_or_else(Vec::new, filled_slots),
-                abilities_on,
-                stats,
-            };
             let events = player.abilities.tick(&lists, &holder, now_ms, server_ms);
             let number = player.number;
             for event in events {
@@ -1701,8 +1920,12 @@ impl SimWorld {
                         }
                     }
                     AbilityEvent::Ended { ability } => player.slayer.ability_ended(ability),
+                    AbilityEvent::Strike(attack) => strikes.push((entity, attack)),
                 }
             }
+        }
+        for (entity, attack) in strikes {
+            self.start_ability_strike(entity, *attack, now_ms);
         }
         let mut results = Vec::new();
         for (entity, action, spell, kind) in casts {
@@ -1905,17 +2128,20 @@ impl SimWorld {
     }
 
     /// Opens the area `spell` of `caster` at `now_ms` where the caster aims ([`aimed_point`])
-    /// ([`super::spell_areas`]).
+    /// ([`super::spell_areas`]), and its secondary spell's area at the same place. Observed in
+    /// the data: the Slam upgrade `Spell_Flail_Slam_AOE_Upgrade` holds no status effect, and its
+    /// damage over time is its secondary `Spell_Flail_Slam_AOE_DoT`'s `Status_Flail_HexDoT`
+    /// (live 2026-11-12: without it the upgraded Slam left no damage over time). Inferred: an
+    /// area that flies nowhere opens its secondary where it opens itself, as a projectile's
+    /// opens where the projectile ends.
     fn ability_spell_area(&mut self, caster: &Caster, spell: &SpellRow, now_ms: u64) {
         let reach_m = spell.cast_distance_m.unwrap_or_default().max(0.0);
-        let area = SpellArea::new(
-            caster,
-            spell,
-            aimed_point(caster, reach_m, now_ms),
-            now_ms,
-            self.spell_heal_base(caster.entity),
-        );
-        self.open_spell_area(area);
+        let at = aimed_point(caster, reach_m, now_ms);
+        let heal_base = self.spell_heal_base(caster.entity);
+        self.open_spell_area(SpellArea::new(caster, spell, at, now_ms, heal_base));
+        if let Some(secondary) = &spell.secondary {
+            self.open_spell_area(SpellArea::new(caster, secondary, at, now_ms, heal_base));
+        }
     }
 
     /// The base of the `HealthModifierDamageBased` heals of the spell effects of player
@@ -2359,6 +2585,225 @@ mod tests {
             }]
         );
         assert!(ended(run.tick(&[&list], &Staff, FRAGMENT_MS + 100, SERVER_MS)).is_empty());
+    }
+
+    /// The test sword's light attack, as the hit of an ability fragment.
+    fn fragment_hit() -> BasicAttack {
+        crate::combat::test_support::test_player_attacks()
+            .stance(nw_content::player_attacks::stance_key(
+                crate::combat::test_support::TEST_SWORD_STANCE,
+            ))
+            .and_then(|stance| stance.light.clone())
+            .expect("light attack")
+    }
+
+    /// The damage rows of the hits that `events` strike.
+    pub(super) fn strikes(events: &[AbilityEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AbilityEvent::Strike(attack) => Some(attack.damage_row.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The pressed ability's action strikes the hit of its fragment once, as it starts; an
+    /// action that plays no pressed ability (the follow-up) strikes nothing, though its fragment
+    /// holds a hit too.
+    #[test]
+    fn the_pressed_ability_strikes_its_fragment_hit_once() {
+        const FOLLOW_UP_FRAGMENT: &str = "Smite_FollowUp";
+        let mut list = list();
+        list.fragments[0].hit = Some(fragment_hit());
+        list.actions[1].fragment = FOLLOW_UP_FRAGMENT.to_owned();
+        list.fragments.push(FragmentRow {
+            name: FOLLOW_UP_FRAGMENT.to_owned(),
+            ..list.fragments[0].clone()
+        });
+        let mut run = AbilityRun::default();
+        run.press(&[key_1(10)], mapped, no_inputs);
+        let first = run.tick(&[&list], &Staff, 0, SERVER_MS);
+        assert_eq!(strikes(&first), [fragment_hit().damage_row]);
+        let later: Vec<String> = (1..=FRAGMENT_MS / TICK_MS)
+            .flat_map(|tick| strikes(&run.tick(&[&list], &Staff, tick * TICK_MS, SERVER_MS)))
+            .collect();
+        assert!(later.is_empty(), "once, and not the follow-up's: {later:?}");
+    }
+
+    /// The flail's Arcane Smite (`Ability_Flail_Slam`, `playermaleanims_1h_meleeattach.adb`): a
+    /// 2.75 m sphere of `1H_Flail_Ability_Slam` while `Slam_Upgrade_Standard_Damage` holds, a
+    /// 2.75 m sphere of `1H_Flail_Ability_Slam_Stagger` while `Slam_Upgrade_KiteShield_Stagger`
+    /// holds (the slam on, its second upgrade on and a kite shield in the hand). The strike keeps
+    /// the shape whose condition holds for the holder.
+    #[test]
+    fn the_slam_strikes_its_standard_sphere_and_with_a_kite_shield_its_stagger_sphere() {
+        use nw_content::player_attacks::{MeleeShape, ShapeKind};
+        const SLAM: &str = "Ability_Flail_Slam";
+        const UPGRADE_2: &str = "Upgrade_Flail_Slam_Upgrade2";
+        const KITE_SHIELD: &str = "KiteShield";
+        const STANDARD_ROW: &str = "1H_Flail_Ability_Slam";
+        const STAGGER_ROW: &str = "1H_Flail_Ability_Slam_Stagger";
+        const SLAM_RADIUS_M: f32 = 2.75;
+        struct Flail {
+            kite_shield: bool,
+        }
+        impl Holder for Flail {
+            fn tags(&self) -> Vec<&str> {
+                // "Heal": the tag that the activation of the test list's action needs.
+                vec!["1H_Melee", "Flail", "Heal"]
+            }
+            fn has_effect(&self, _: &str) -> bool {
+                false
+            }
+            fn item_in_slot(&self, _: &str) -> bool {
+                true
+            }
+            fn ability_active(&self, ability: &str) -> bool {
+                [SLAM, UPGRADE_2, UPGRADE].contains(&ability)
+            }
+            fn required_equipment(&self, classes: &[String]) -> bool {
+                self.kite_shield && classes.iter().any(|class| class == KITE_SHIELD)
+            }
+            fn stats(&self) -> AbilityStats {
+                AbilityStats::default()
+            }
+        }
+        let kite = || Condition::RequiredEquipment(vec![KITE_SHIELD.to_owned()]);
+        let active = |ability: &str| Condition::AbilityActive(ability.to_owned());
+        let standard = Condition::All(vec![
+            active(SLAM),
+            Condition::Any(vec![
+                Condition::Not(Box::new(Condition::All(vec![active(UPGRADE_2)]))),
+                Condition::Not(Box::new(Condition::All(vec![kite()]))),
+            ]),
+        ]);
+        let stagger = Condition::All(vec![active(SLAM), active(UPGRADE_2), kite()]);
+        let sphere = |row: Option<&str>, condition: Condition| MeleeShape {
+            window_ms: [0, FRAGMENT_MS],
+            shape: ShapeKind::Sphere {
+                radius_m: SLAM_RADIUS_M,
+            },
+            step_ms: 0.0,
+            poses: vec![nw_formats::rigid::Rigid::translation([0.0; 3])],
+            damage_row: row.map(str::to_owned),
+            condition: Some(condition),
+        };
+        let mut list = list();
+        list.fragments[0].hit = Some(BasicAttack {
+            damage_row: STANDARD_ROW.to_owned(),
+            hit: AttackHit::Melee {
+                window_ms: [0, FRAGMENT_MS],
+                homing: None,
+                shapes: vec![sphere(None, standard), sphere(Some(STAGGER_ROW), stagger)],
+            },
+            ..fragment_hit()
+        });
+        let struck = |holder: &Flail| {
+            let mut run = AbilityRun::default();
+            run.press(&[key_1(10)], mapped, no_inputs);
+            run.tick(&[&list], holder, 0, SERVER_MS)
+                .into_iter()
+                .find_map(|event| match event {
+                    AbilityEvent::Strike(attack) => Some(*attack),
+                    _ => None,
+                })
+                .expect("a strike")
+        };
+        let rows = |attack: &BasicAttack| match &attack.hit {
+            AttackHit::Melee { shapes, .. } => shapes
+                .iter()
+                .map(|shape| {
+                    assert_eq!(
+                        shape.shape,
+                        ShapeKind::Sphere {
+                            radius_m: SLAM_RADIUS_M
+                        }
+                    );
+                    shape
+                        .damage_row
+                        .clone()
+                        .unwrap_or_else(|| attack.damage_row.clone())
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("a melee hit: {other:?}"),
+        };
+        assert_eq!(
+            rows(&struck(&Flail { kite_shield: false })),
+            [STANDARD_ROW],
+            "without a kite shield: the standard sphere"
+        );
+        assert_eq!(
+            rows(&struck(&Flail { kite_shield: true })),
+            [STAGGER_ROW],
+            "with a kite shield and the second upgrade: the stagger sphere"
+        );
+    }
+
+    /// A shot in the fragment of an action that casts a spell is the spell's: the action strikes
+    /// nothing more.
+    #[test]
+    fn a_shot_of_an_action_that_casts_is_left_to_its_spell() {
+        let mut list = list();
+        list.fragments[0].hit = Some(BasicAttack {
+            hit: AttackHit::HitScan {
+                fire_ms: MARKER_START_MS,
+                range_m: BOLT_RANGE_M,
+            },
+            ..fragment_hit()
+        });
+        list.actions[0].casts = list.actions[1].casts.clone();
+        let mut run = AbilityRun::default();
+        run.press(&[key_1(10)], mapped, no_inputs);
+        assert!(strikes(&run.tick(&[&list], &Staff, 0, SERVER_MS)).is_empty());
+    }
+
+    /// The window of a press is the longest `BackTicks` of its ability's tests, in client frames;
+    /// a test of another ability gives none.
+    #[test]
+    fn a_press_counts_for_the_longest_back_ticks_of_its_ability() {
+        const SHORT_TICKS: u32 = 15;
+        const LONG_TICKS: u32 = 20;
+        let test = |ticks: u32| Condition::AbilityMove {
+            ability: SMITE.to_owned(),
+            back_ticks: ticks,
+        };
+        let activation = Condition::All(vec![
+            test(SHORT_TICKS),
+            Condition::Not(Box::new(Condition::Any(vec![test(LONG_TICKS)]))),
+        ]);
+        assert_eq!(
+            press_window_ms(&activation, lowercase_crc32(SMITE)),
+            Some(u64::from(LONG_TICKS) * CLIENT_FRAME_MS)
+        );
+        assert_eq!(
+            press_window_ms(&activation, lowercase_crc32(FOLLOW_UP)),
+            None
+        );
+    }
+
+    /// An area spell with a secondary spell opens both where it aims: the upgraded Slam's damage
+    /// over time is its secondary's effect.
+    #[test]
+    fn an_area_spell_opens_its_secondary_spell_with_it() {
+        let (mut world, caster) = spell_fight(&[MOB_X]);
+        with_ground_effect(&mut world);
+        let hex = SpellRow {
+            radius_m: Some(SPLASH_M),
+            damage_row: None,
+            status_effects: vec![GROUND.to_owned()],
+            ..spell()
+        };
+        let slam = SpellRow {
+            radius_m: Some(SPLASH_M),
+            cast_distance_m: Some(CASTER_X - MOB_X),
+            secondary: Some(Box::new(hex)),
+            ..spell()
+        };
+        world.cast_ability_spell(caster, "Test", &slam, CastKind::Plain, NOW);
+        world.tick_spell_areas(NOW);
+        let held = world.mob_effects.get(&mob_entity(0)).expect("effects");
+        assert!(holds_effect(held, &world.content.status_effects, GROUND));
     }
 
     /// The fire staff's Incinerate: the intro's fragment moves on to the loop by a transition
@@ -3205,6 +3650,90 @@ mod tests {
         assert!(world.spell_entities.is_empty());
     }
 
+    /// A Sacred Ground entity (slice `spell_aoe_heal_foe`, `AbilityInstanceType` 3, limit 1 in
+    /// the player slice) fills child 15 of the caster's state 2267 with its raw id while it is
+    /// in the world (retail `20260927-223955-324` 234.425 to 246.422 s); a second one puts the
+    /// first out.
+    #[test]
+    fn a_typed_spell_entity_is_tracked_as_an_ability_instance_of_its_caster() {
+        use nw_messages::ability_instances::{AbilityInstance, AbilityInstanceTrackingState};
+        const SLICES: &str = r#"{"spells": [{
+            "spell": 2055668591,
+            "asset": "094588f7778354589543449b79e2a386",
+            "spell_component": 1,
+            "ownership_component": 2,
+            "position_component": null,
+            "members": ["0483310103420000"],
+            "unfilled": [],
+            "cards": 1
+        }]}"#;
+        const INSTANCES: &str = r#"{"limits": {"3": 1}, "slices": {
+            "094588f7778354589543449b79e2a386": {
+                "path": "slices/items/weapons/spell_aoe_heal_foe.dynamicslice",
+                "instance_type": 3
+            }}}"#;
+        const SACRED_GROUND_CHILD: u8 = 15;
+        let (mut world, caster) = spell_fight(&[]);
+        let ground = SpellRow {
+            cast_distance_m: Some(0.0),
+            duration_ms: Some(GROUND_MS),
+            target_types: Some("Friend".to_owned()),
+            ..spell()
+        };
+        let content = Arc::make_mut(&mut world.content);
+        content.spell_slices =
+            nw_content::spell_slices::SpellSlices::parse(SLICES).expect("slices");
+        content.ability_instances = serde_json::from_str(INSTANCES).expect("instances");
+        let sent = |world: &mut SimWorld| {
+            let member = world
+                .world
+                .get_mut::<Player>(caster)
+                .expect("caster")
+                .abilities
+                .instances
+                .take_member(false)?;
+            let MemberState::Recorded { body, .. } = member.state else {
+                panic!("a recorded body");
+            };
+            let mut reader = nw_messages::wire::Reader::new(&body);
+            AbilityInstanceTrackingState::read(&mut reader).ok()
+        };
+        // The raw id on the card of the spell entity of slot key `number`, while it is placed.
+        let card_ref = |world: &SimWorld, number: u64| {
+            world.stations.members(number)?.iter().find_map(|member| {
+                match (&member.state, member.component) {
+                    (MemberState::GdeMetadata(card), super::super::crafting::CARD_COMPONENT) => {
+                        card.gde_ref
+                    }
+                    _ => None,
+                }
+            })
+        };
+        world.cast_ability_spell(caster, "Test", &ground, CastKind::Raycast, NOW);
+        world.tick_spell_areas(NOW);
+        let first = world.spell_entities[0].0;
+        let made = sent(&mut world).expect("made");
+        let [(child, slot)] = made.slots[..] else {
+            panic!("one slot: {made:?}");
+        };
+        assert_eq!(child, SACRED_GROUND_CHILD);
+        assert_eq!(card_ref(&world, first), Some(slot.raw_id));
+        assert_eq!(
+            slot,
+            AbilityInstance::of_entity(slot.created_ns, slot.raw_id)
+        );
+        world.cast_ability_spell(caster, "Test", &ground, CastKind::Raycast, NOW + TICK_MS);
+        world.tick_spell_areas(NOW + TICK_MS);
+        let second = sent(&mut world).expect("the second");
+        assert_eq!(second.slots[0].0, SACRED_GROUND_CHILD);
+        assert_ne!(second.slots[0].1.raw_id, slot.raw_id, "the second entity");
+        assert_eq!(card_ref(&world, first), None, "the first went");
+        assert_eq!(world.spell_entities.len(), 1);
+        world.tick_spell_areas(NOW + TICK_MS + GROUND_MS as u64);
+        let gone = sent(&mut world).expect("emptied");
+        assert_eq!(gone.slots, [(SACRED_GROUND_CHILD, AbilityInstance::EMPTY)]);
+    }
+
     /// The upgraded Flail Slam's slice numbers its components its own way (retail, 59 of 59
     /// groups of the survey: position 2, spell state 4, delayed events 5 to 10). The spell
     /// state on component 1 crashed the client (live 2026-11-10 and 2026-11-11).
@@ -3370,7 +3899,7 @@ mod retail_tests {
     use nw_content::client_build::load_client_build;
     use nw_content::player_abilities::PlayerAbilities;
 
-    use super::tests::{key_1, no_inputs};
+    use super::tests::{key_1, no_inputs, strikes};
     use super::*;
 
     const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
@@ -3591,6 +4120,42 @@ mod retail_tests {
             refused.is_empty(),
             "{started} started; refused: {refused:#?}"
         );
+    }
+
+    /// The flail's abilities strike their fragments' hits (`player_flail.adb`: the `CAGE-Damage`
+    /// clips of `Ability_Flail_Trip`, `Ability_Flail_Blast`, `Ability_Flail_Burst` and its
+    /// follow-up, and `Ability_Flail_DefensiveStrike`); Slam's fragment holds none (its damage is
+    /// its spells').
+    #[test]
+    fn the_flail_abilities_strike_their_damage_rows() {
+        const FLAIL_TAGS: &[&str] = &["1H_Melee", "Flail"];
+        let table = table();
+        let lists = table.lists_for(&["Flail"]);
+        let struck = |ability: &str| {
+            let crc = lowercase_crc32(ability);
+            let mapped = |key: usize| (key == 0).then_some(crc);
+            let mut run = AbilityRun::default();
+            let holder = Armed {
+                tags: FLAIL_TAGS,
+                effects: Vec::new(),
+            };
+            run.press(&[key_1(10)], mapped, no_inputs);
+            (0..=RUN_MS / TICK_MS)
+                .flat_map(|tick| strikes(&run.tick(&lists, &holder, tick * TICK_MS, SERVER_MS)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(struck("Ability_Flail_Trip"), ["1h_Flail_Ability_Trip"]);
+        assert_eq!(struck("Ability_Flail_Blast"), ["1H_Flail_Ability_Blast"]);
+        // Burst goes on to its follow-up by a transition clip that needs no second press.
+        assert_eq!(
+            struck("Ability_Flail_Burst"),
+            ["1h_Flail_Ability_Burst", "1H_Flail_Ability_Burst_FollowUp"]
+        );
+        assert_eq!(
+            struck("Ability_Flail_DefensiveStrike"),
+            ["1H_Flail_Ability_DefensiveStrike"]
+        );
+        assert!(struck("Ability_Flail_Slam").is_empty());
     }
 
     /// `playeractions_ability_musket.actionlist`: Shooter's Stance readies, aims, and a click in

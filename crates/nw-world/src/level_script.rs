@@ -22,8 +22,8 @@
 //! - `DetectionVolumeComponent`: the radius of an encounter's player volume;
 //! - `GatherableControllerComponent`: a loot container's loot table;
 //! - the replicated components of a level object (a gate, a door, a switch) and of an encounter
-//!   slice's own entities: each one's replica index (field `81e598c5` of its base class, name
-//!   Unknown), which is its component number on the wire (Observed, dungeon gates note
+//!   slice's own entities: each one's replica index (field `m_replicationIndex`, CRC `81e598c5`, of its
+//!   base class), which is its component number on the wire (Observed, dungeon gates note
 //!   2026-11-11: every member of the Amrine, Starstone and Dynasty gates and of the Dynasty cave
 //!   monolith fits it), and for a timeline its asset, for a delayed event its delay.
 //!
@@ -96,12 +96,14 @@ pub const DELAYED_EVENT_TYPE: [u8; UUID_SIZE] = [
 pub const PLACEMENT_OBSTRUCTION_TYPE: [u8; UUID_SIZE] = [
     0xfe, 0xcc, 0x87, 0x85, 0x5d, 0x77, 0x71, 0x38, 0x0b, 0xdf, 0x57, 0x3d, 0xe2, 0x20, 0xd9, 0x0e,
 ];
-/// The name CRC of a component's replica index (a big-endian `u32` in its base class; the text
-/// is Unknown).
+/// The name CRC of a component's replica index, `m_replicationIndex` (a big-endian `u32` in its
+/// base class; Observed: the lower-case CRC-32 of that client string in `NewWorld.exe`).
 pub const REPLICA_INDEX_NAME: u32 = 0x81e5_98c5;
-/// The name CRC of a timeline's asset reference (the `.timeline` file; the text is Unknown).
+/// The name CRC of a timeline's asset reference, `TimelineAsset` (the `.timeline` file;
+/// Observed: the lower-case CRC-32 of that client string in `NewWorld.exe`).
 pub const TIMELINE_ASSET_NAME: u32 = 0x5e82_df32;
-/// The name CRC of a delayed event's delay, seconds (a big-endian `f32`; the text is Unknown;
+/// The name CRC of a delayed event's delay, `m_timeDelaySeconds`, seconds (a big-endian `f32`;
+/// the name is the lower-case CRC-32 of that client string in `NewWorld.exe`;
 /// Observed: 3.5 and 0.1 on the Dynasty `DeathEvent`, the `totalDelayDuration` retail sent).
 pub const DELAY_NAME: u32 = 0x63bf_7cb0;
 /// Objective classes (`m_objectives` entries).
@@ -569,21 +571,27 @@ impl SliceScript {
 }
 
 /// The names of the fields read, as their name CRCs.
-/// The name CRC of a `DetectionVolumeComponent`'s shape offset (its text is Unknown; a vector,
-/// 0 in the volumes seen).
+/// The name CRC of a `DetectionVolumeComponent`'s shape offset, `m_center` (a vector, 0 in the
+/// volumes seen; the name is the lower-case CRC-32 of that client string in `NewWorld.exe`).
 pub const DETECTION_OFFSET_NAME: u32 = 0x0a63_b9da;
 /// The name CRC of the list of difficulty rewards of a corrupted breach's root (Observed in
 /// `enc_darkness_minor_monolith_00`: a container of type `{B555F388-8F89-5380-AF27-467E63D18147}`
-/// whose entries hold a radius and a list of game events; the field and class names are
-/// Unknown).
+/// whose entries hold a number and a list of game events). The field is `m_successRewards` (the
+/// lower-case CRC-32 of that client string in `NewWorld.exe`); the class name is Unknown.
 pub const DIFFICULTY_REWARDS_NAME: u32 = 0x09ff_d3f2;
-/// The name CRC of an entry's radius, metres (Observed: 500.0; name Unknown).
+/// The name CRC of an entry's number, `m_requiredContribution` (Observed: 500.0; the name is
+/// the lower-case CRC-32 of that client string in `NewWorld.exe`). By its name it is the
+/// contribution a player needs for the reward, not a distance; the sim reads it as a radius in
+/// metres ([`DifficultyRewards::radius_m`]) until the contribution state (1982) is built
+/// (Inferred).
 pub const REWARD_RADIUS_NAME: u32 = 0x103c_5ae1;
 /// The name CRC of an entry's game events, one per difficulty from the first (Observed:
-/// `Darkness_Minor_DT1_T1` to `Darkness_Minor_DT6_T1`; name Unknown).
+/// `Darkness_Minor_DT1_T1` to `Darkness_Minor_DT6_T1`): `m_rewardEventIdStrs`, the lower-case
+/// CRC-32 of that client string in `NewWorld.exe`.
 pub const REWARD_EVENTS_NAME: u32 = 0xc645_56e4;
 /// The name CRC of the game event of any success, beside the rewards (Observed:
-/// `Darkness_Any_GlobalSuccess`; name Unknown).
+/// `Darkness_Any_GlobalSuccess`): `m_universalSuccessGameEventId`, the lower-case CRC-32 of
+/// that client string in `NewWorld.exe`.
 pub const GLOBAL_SUCCESS_EVENT_NAME: u32 = 0x83e0_84dc;
 
 /// The rewards of an encounter by its difficulty (a corrupted breach's root): the game event
@@ -591,7 +599,8 @@ pub const GLOBAL_SUCCESS_EVENT_NAME: u32 = 0x83e0_84dc;
 /// event every success fires.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DifficultyRewards {
-    /// The radius around the encounter, metres.
+    /// The radius around the encounter, metres: the entry's `m_requiredContribution` (Inferred
+    /// as a radius; see [`REWARD_RADIUS_NAME`]).
     pub radius_m: f32,
     /// The game event of each difficulty, from difficulty 1.
     pub events: Vec<String>,
@@ -1217,6 +1226,23 @@ mod tests {
     const OFFSET: [f32; 3] = [106.1, 232.0, 7.0];
     const VITALS: &str = "Undead_Brute_DG_Windsward_00";
     const LOOT: &str = "ChestLootElite";
+
+    /// Each field CRC read here is the lower-case CRC-32 of its client string in `NewWorld.exe`.
+    #[test]
+    fn the_field_crcs_are_the_client_field_names() {
+        for (crc, name) in [
+            (REPLICA_INDEX_NAME, "m_replicationIndex"),
+            (TIMELINE_ASSET_NAME, "TimelineAsset"),
+            (DELAY_NAME, "m_timeDelaySeconds"),
+            (DETECTION_OFFSET_NAME, "m_center"),
+            (DIFFICULTY_REWARDS_NAME, "m_successRewards"),
+            (REWARD_RADIUS_NAME, "m_requiredContribution"),
+            (REWARD_EVENTS_NAME, "m_rewardEventIdStrs"),
+            (GLOBAL_SUCCESS_EVENT_NAME, "m_universalSuccessGameEventId"),
+        ] {
+            assert_eq!(crc, lowercase_crc32(name), "{name}");
+        }
+    }
 
     fn named(name: &str, children: Vec<Element>) -> Element {
         Element::with_children(lowercase_crc32(name), children)

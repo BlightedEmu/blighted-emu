@@ -2,13 +2,16 @@
 //! The AFK rule ([`nw_content::afk_modes`]): a player that stands still for the warn time of
 //! its rule gets a warning (2139) with the seconds left, a player that moves the rule's
 //! distance after a warning gets the message that takes it back, and a player that stands
-//! still for the disconnect time is removed (the server loop kicks it, as a game master's kick
-//! does). The rule is the one of the sim's game mode (an instance), or the default one (the
-//! open world).
+//! still for the disconnect time is removed (the server loop sends it the AFK rejection 1630
+//! and closes its connection). The rule is the one of the sim's game mode (an instance), or the
+//! default one (the open world).
 //!
-//! Observed (retail 2139): the warning and its end. Inferred: only a move ends the still time
-//! (the rule's column is `ResetMinMove`; no capture shows a player who acts without moving),
-//! and the removal is the retail kick 271 (no capture holds an AFK removal).
+//! Observed (retail 2139): the warning and its end. Observed (client `FUN_146455c70` and
+//! `lyshineui/popup/uierrors.luac`): the rejection 1630 with reason 13 is the client error
+//! `Errors::aoi_afk_kicked`, whose popup is `@mm_rejected_Client_Kicked_AFK`; no kick 271 reason
+//! gives it (`FUN_146447430`). Inferred: only a move ends the still time (the rule's column is
+//! `ResetMinMove`; no capture shows a player who acts without moving); no capture holds an AFK
+//! removal.
 
 use nw_content::afk_modes::AfkMode;
 use nw_messages::{AfkWarningMsg, ServerMessage};

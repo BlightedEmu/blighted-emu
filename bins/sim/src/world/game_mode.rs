@@ -3,9 +3,12 @@
 //! (3206, 5953, 6845) of a player, with the server answers the retail captures show (1234,
 //! 4970).
 //!
-//! The queued activities are the PvP game modes and the catacombs (6254 activity values
-//! 0x3116 Outpost Rush, 0x3316 3v3 arena, 0x4316 capture the flag, 0x3016 and 0x0c16
-//! catacombs, in 29 retail queue joins). Retail matched the queued players and moved them into
+//! The queued activities are the PvP game modes and the catacombs (6254 activity values in the
+//! 17 retail queue ledgers: 0x3116 Outpost Rush, 0x3316 3v3 arena, 0x3016 capture the flag (its
+//! queue entry names `930fce8f` `CaptureTheFlag`: `20261010-125035-658` 169.450 s, `CTF01`,
+//! `CTF_QueueAndJoin_PickUpSpeedHealthAndFlagThenDied` 29.573 s), 0x0c16 catacombs (entry
+//! `2736ba35`: `CATACOMBS2` 7.006 s, `CATACOMBS6` and three Hive catacombs ledgers), and 0x4316
+//! once in an Amrine group run). Retail matched the queued players and moved them into
 //! an instance of the game mode: in `opr_que_and_lost` the accept (5741 at 1781894841233) is
 //! followed by the loading screen (3951) and the Outpost Rush level (1635
 //! `NW_OPR_005_Vertical` at 1781894842131).
@@ -14,9 +17,10 @@
 //! 6297, 5741, 5450, 1066, 2385) and their match on an instance sim ([`super::arena_match`],
 //! [`super::outpost_rush`]: 6824, 1980, 3309). The 6211 group eligibility subscription is
 //! answered with the player's 3312 slot 1 and 2 (arena flow study: every call of the arena
-//! ledgers). The other modes do not run: their rows are not instances of the game data catalog
-//! (`nw_content::instances`), and their rules (flag carrying) are not made. So their queue
-//! join is refused at once: the queue group goes away (1234), and no role selection follows.
+//! ledgers). The capture the flag queue runs as Outpost Rush's ([`super::queue`]); its match on
+//! the instance sim is not built yet. The other modes do not run: their rows are not instances
+//! of the game data catalog (`nw_content::instances`). So their queue join is refused at once:
+//! the queue group goes away (1234), and no role selection follows.
 //! Inferred: retail's own answer to a mode that cannot run is `OnQueueForGameModeFailedMsg`
 //! (3310), which no capture holds (its layout is Unknown); 1234 is the captured message that
 //! ends a queue.
@@ -191,8 +195,9 @@ mod tests {
     };
     /// The Outpost Rush activity of the retail queue calls.
     const ACTIVITY: u16 = 0x3116;
-    /// The capture the flag activity of the retail queue calls: its game mode does not run here.
-    const CAPTURE_THE_FLAG_ACTIVITY: u16 = 0x4316;
+    /// The capture the flag activity of the retail queue calls (Observed: `CTF01` and
+    /// `20261010-125035-658` 165.466 s): the test sim's catalog holds no such game mode.
+    const CAPTURE_THE_FLAG_ACTIVITY: u16 = 0x3016;
 
     fn world() -> SimWorld {
         let mut world = world_with_spawns(Vec::new());
@@ -276,9 +281,9 @@ mod tests {
         );
     }
 
-    /// The game mode of a capture the flag queue does not run here: a join is refused with the
-    /// 1234 to the player's participant component at once, and the later queue calls name no
-    /// match.
+    /// A queue join of a game mode the sim's catalog does not hold (the test sim holds no
+    /// capture the flag) is refused with the 1234 to the player's participant component at once,
+    /// and the later queue calls name no match.
     #[test]
     fn a_queue_join_is_refused_and_no_match_follows() {
         let mut world = world();

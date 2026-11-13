@@ -98,6 +98,8 @@ engine_keys! {
     SpawnerGdeRef => "Spawner_GDERef",
     SpawnPos => "Spawn_Pos",
     SpawnRequestServerTime => "Spawn_Request_Server_Time",
+    // No tree reads it (Observed: the decoded Server.pak trees and the AI data name it 0 times;
+    // only the client's key table holds it), so the sim gives it no value.
     SpawnRequestTimeOfDay => "Spawn_Request_TimeOfDay",
     TargetAngle => "Target_Angle",
     TargetDist => "Target_Dist",

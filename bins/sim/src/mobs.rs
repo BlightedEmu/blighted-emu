@@ -819,6 +819,12 @@ impl Mobs {
                 if let Some(guard) = kind.guard {
                     mind.set_guard(guard);
                 }
+                if let Some(chase_m) = self
+                    .ai
+                    .chase_fallback(mind.archetype(), kind.creature_type.as_deref())
+                {
+                    mind.set_chase_fallback(chase_m);
+                }
                 Mind::Tree(Box::new(mind))
             });
         Some(Mob {
@@ -857,11 +863,7 @@ impl Mobs {
     ) -> Option<u64> {
         let index = self.next_personal;
         let mut mob = self.make(index, &spawn, asset)?;
-        let archetype = self.archetype(&spawn, asset);
-        let leash_m = archetype
-            .and_then(|archetype| self.ai.config_number(archetype, COMBAT_LEASH_KEY))
-            // A leash of tens of metres.
-            .map_or(f32::MAX, |leash| leash as f32);
+        let leash_m = self.leash_of(&spawn, asset);
         if let Some(pace) = pace {
             mob.attack.factor = pace.attack_factor;
             let mut brain = ChaseBrain::new(position_of(&spawn), pace.sight_m);
@@ -1103,7 +1105,7 @@ impl Mobs {
             Some(personal) => (position_of(&personal.spawn), personal.leash_m),
             None => {
                 let spawn = self.spawn_of(index)?;
-                let leash = self.leash_of(spawn);
+                let leash = self.leash_of(spawn, None);
                 (position_of(spawn), leash)
             }
         };
@@ -1189,12 +1191,20 @@ impl Mobs {
         Some(landed)
     }
 
-    /// The combat leash of the slice of `spawn`; no limit without one.
-    fn leash_of(&self, spawn: &VitalsSpawn) -> f32 {
-        self.archetype(spawn, None)
+    /// The combat leash of the slice of `spawn` (shown with `asset`), else the chase distance of
+    /// its kind where the data gives none ([`crate::mob_ai::chase_fallback_m`]).
+    fn leash_of(&self, spawn: &VitalsSpawn, asset: Option<[u8; ASSET_ID_LEN]>) -> f32 {
+        let creature_type = self
+            .data
+            .mob_type(spawn.vitals_id)
+            .and_then(|kind| kind.creature_type.as_deref());
+        self.archetype(spawn, asset)
             .and_then(|archetype| self.ai.config_number(archetype, COMBAT_LEASH_KEY))
             // A leash of tens of metres.
-            .map_or(f32::MAX, |leash| leash as f32)
+            .map_or_else(
+                || crate::mob_ai::chase_fallback_m(creature_type),
+                |leash| leash as f32,
+            )
     }
 
     /// How far from paced mob `entity` its swing lands on a player: where its gait starts a
@@ -1350,8 +1360,7 @@ impl Mobs {
             .live
             .keys()
             .filter_map(|index| self.spawn_of(*index))
-            .map(|spawn| self.leash_of(spawn))
-            .filter(|leash| leash.is_finite())
+            .map(|spawn| self.leash_of(spawn, None))
             .fold(0.0_f32, f32::max);
         self.spawn_grid = SpatialGrid::new(self.wake_radius_m + leash_m).map(|mut grid| {
             for index in self.live.keys() {
@@ -1362,6 +1371,39 @@ impl Mobs {
             grid
         });
         changes
+    }
+
+    /// Takes each owned spawn's mob out while `holds` (the spawn, whether its mob is in the
+    /// world) says no, and brings it back as a new spawn when it says yes: the spawns that exist
+    /// only at some times of day ([`crate::world::day_night::TimedPlaces`]). Observed (ledger
+    /// `Playthrough_Part_18`, night at 2,040,836 ms): the mobs of day-only spawners sent their
+    /// last groups 15 to 284 ms before the night's `SyncDayPhase`, and the mobs of night-only
+    /// spawners came 18 and 35 ms after it.
+    pub fn hold_time_of_day(&mut self, holds: impl Fn(&VitalsSpawn, bool) -> bool) {
+        let spawns = Arc::clone(&self.spawns);
+        for index in self.owned.iter().copied().collect::<Vec<u32>>() {
+            let Some(spawn) = spawns.get(index as usize) else {
+                continue;
+            };
+            let live = self.live.contains_key(&index);
+            if live && !holds(spawn, true) {
+                self.live.remove(&index);
+                self.awake.remove(&index);
+                self.left.push(mob_entity(index));
+            } else if !live
+                && holds(spawn, false)
+                && let Some(mob) = self.make(index, spawn, None)
+            {
+                let at = position_of(spawn);
+                if let Some(grid) = &mut self.spawn_grid
+                    && !grid.near(at).any(|(near, _)| near == index)
+                {
+                    grid.insert(index, at);
+                }
+                self.live.insert(index, mob);
+                self.respawned.push(mob_entity(index));
+            }
+        }
     }
 
     /// Whether the spawn `index` has a design patrol route: a path drawn in a design file, which
@@ -2853,16 +2895,29 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_mob_notices_a_player_close_beside_it_out_of_its_sight_cone() {
-        // The beach sailor's ambient vision: 90 deg (`archnav.txt`); the test mob faces +y and
-        // the player stands east of it, 90 deg aside.
-        const SAILOR_CONE_DEG: f32 = 90.0;
+    /// The common slice vision (`undead_berserker`, `risen_right_arm`, wolves: 556 of the 922
+    /// archetypes of `ai-data-25810808.bin`): ambient 75 deg to each side and 12 m, combat 180
+    /// deg and 30 m.
+    const COMMON_AMBIENT: nw_ai::data::Vision = nw_ai::data::Vision {
+        angle_deg: 75.0,
+        distance_m: 12.0,
+    };
+    const COMMON_COMBAT: nw_ai::data::Vision = nw_ai::data::Vision {
+        angle_deg: 180.0,
+        distance_m: 30.0,
+    };
+    /// The test mob's spawn place; the spawn faces +y (the world file keeps no spawn rotation).
+    const SPAWN_PLACE: Position = Position {
+        x: SPAWN_X,
+        y: ROW_Y,
+        z: HEIGHT,
+    };
+
+    /// One test mob at [`SPAWN_X`] whose slice has the visions `ambient` and `combat`.
+    fn mob_with_vision(ambient: nw_ai::data::Vision, combat: Option<nw_ai::data::Vision>) -> Mobs {
         let mut data = crate::mob_ai::test_support::test_ai_data();
-        data.archetypes[0].ambient_vision = Some(nw_ai::data::Vision {
-            angle_deg: SAILOR_CONE_DEG,
-            distance_m: TEST_SIGHT_M,
-        });
+        data.archetypes[0].ambient_vision = Some(ambient);
+        data.archetypes[0].combat_vision = combat;
         let ai = crate::mob_ai::MobAi::new(
             data,
             crate::mob_ai::AiRates::default(),
@@ -2877,26 +2932,104 @@ mod tests {
             ai: Arc::new(ai),
             ..test_combat()
         };
-        let aside = |distance_m: f32| {
-            let mut mobs = Mobs::new(
-                vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)].into(),
-                &combat,
-            );
-            mobs.set_cells(every);
+        let mut mobs = Mobs::new(
+            vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)].into(),
+            &combat,
+        );
+        mobs.set_cells(every);
+        mobs
+    }
+
+    /// The player `distance_m` from the spawn at `bearing_deg` from the spawn's facing (+y),
+    /// to the east.
+    fn player_seen_at(bearing_deg: f32, distance_m: f32) -> Seen {
+        let (east, north) = bearing_deg.to_radians().sin_cos();
+        Seen {
+            entity: PLAYER,
+            position: Position {
+                x: SPAWN_PLACE.x + east * distance_m,
+                y: SPAWN_PLACE.y + north * distance_m,
+                ..SPAWN_PLACE
+            },
+        }
+    }
+
+    #[test]
+    fn a_mob_takes_a_player_at_the_retail_sight_distance_and_angle() {
+        // Retail (`aggro/aggro4.py`, 19 MSQ ledgers, 2026-11-12): the 169 solo first alerts of
+        // the 75 deg / 12 m mobs came at a median 8.5 m (p90 14.0 m), and 47 of the 115 at 3.8
+        // to 13 m came 37.5 to 75 deg from the facing.
+        const RETAIL_MEDIAN_M: f32 = 8.5;
+        const BESIDE_DEG: f32 = 60.0;
+        const BEHIND_DEG: f32 = 150.0;
+        const PAST_SIGHT_M: f32 = 14.0;
+        let taken = |bearing_deg: f32, distance_m: f32| {
+            let mut mobs = mob_with_vision(COMMON_AMBIENT, Some(COMMON_COMBAT));
             run(
                 &mut mobs,
-                &[player_at(SPAWN_X + distance_m)],
+                &[player_seen_at(bearing_deg, distance_m)],
+                0,
+                3 * TICK_MS,
+            );
+            mobs.target(mob_entity(0))
+        };
+        assert_eq!(taken(0.0, RETAIL_MEDIAN_M), Some(PLAYER), "in front");
+        assert_eq!(
+            taken(BESIDE_DEG, RETAIL_MEDIAN_M),
+            Some(PLAYER),
+            "60 deg aside: inside the 75 deg to each side"
+        );
+        assert_eq!(taken(BEHIND_DEG, RETAIL_MEDIAN_M), None, "behind it");
+        assert_eq!(taken(0.0, PAST_SIGHT_M), None, "past its 12 m");
+    }
+
+    #[test]
+    fn a_mob_keeps_a_player_it_fights_past_its_combat_vision_inside_its_leash() {
+        // Retail (`aggro/chase.py`, 2026-11-12): of 147 mobs that walked home alive, a quarter
+        // still ran at the player 40.1 m or more away; the walk home came near the 70 m
+        // `CombatLeashDistance` from their first place. The test leash is 50 m.
+        const CLOSE_M: f32 = 5.0;
+        const PAST_COMBAT_VISION_M: f32 = 40.0;
+        const KEEP_MS: u64 = 1_000;
+        let mut mobs = mob_with_vision(COMMON_AMBIENT, Some(COMMON_COMBAT));
+        run(&mut mobs, &[player_seen_at(0.0, CLOSE_M)], 0, 3 * TICK_MS);
+        assert_eq!(mobs.target(mob_entity(0)), Some(PLAYER), "taken");
+        let far = player_seen_at(0.0, PAST_COMBAT_VISION_M);
+        run(&mut mobs, &[far], 4 * TICK_MS, KEEP_MS);
+        assert!(
+            at(&mobs, 0).horizontal_distance(far.position) > COMMON_COMBAT.distance_m,
+            "the player is past the combat vision"
+        );
+        assert_eq!(mobs.target(mob_entity(0)), Some(PLAYER), "kept");
+    }
+
+    #[test]
+    fn a_mob_notices_a_player_close_behind_it_out_of_its_sight_cone() {
+        // The beach sailor's ambient vision: 90 deg to each side (`archnav.txt`); the player
+        // stands behind the mob, as the retail alerts at -113 and -115 deg (mobs note
+        // 2026-10-31).
+        const SAILOR_CONE_DEG: f32 = 90.0;
+        const BEHIND_DEG: f32 = 150.0;
+        let sailor = nw_ai::data::Vision {
+            angle_deg: SAILOR_CONE_DEG,
+            distance_m: TEST_SIGHT_M,
+        };
+        let behind = |distance_m: f32| {
+            let mut mobs = mob_with_vision(sailor, None);
+            run(
+                &mut mobs,
+                &[player_seen_at(BEHIND_DEG, distance_m)],
                 0,
                 3 * TICK_MS,
             );
             mobs.target(mob_entity(0))
         };
         assert_eq!(
-            aside(crate::mob_ai::IMMEDIATE_VICINITY_M - 0.5),
+            behind(crate::mob_ai::IMMEDIATE_VICINITY_M - 0.5),
             Some(PLAYER),
             "near: noticed"
         );
-        assert_eq!(aside(TEST_SIGHT_M / 2.0), None, "out of the cone");
+        assert_eq!(behind(TEST_SIGHT_M / 2.0), None, "out of the cone");
     }
 
     #[test]
@@ -3593,7 +3726,7 @@ mod retail_tests {
             )
             .expect("risen");
         // In front of them: a spawn faces north (the world file keeps no spawn rotation), and
-        // their ambient vision cones are 65 and 75 degrees wide (slices).
+        // their ambient vision cones reach 65 and 75 degrees to each side (slices).
         let player = Seen {
             entity: PLAYER,
             position: Position {
@@ -4147,11 +4280,18 @@ mod retail_tests {
             &build,
         )
         .expect("collision file");
+        // The mobs' ground of the live sim (`run::load_level`): the AI bodies of the level and
+        // its navigation marks.
+        let mob_bodies = collision.bodies_for(nw_world::collision::QueryFilter::Ai);
+        let nav_marks = collision.nav_marks.clone();
         let index = Arc::new(CollisionIndex::new(LevelCollision {
             deferred: Vec::new(),
             ..collision
         }));
-        LevelGround::new(Arc::new(world), index)
+        let marks = Arc::new(nw_world::collision_index::NavMarkIndex::of(
+            &index, &nav_marks,
+        ));
+        LevelGround::new(Arc::new(world), Arc::new(index.with_bodies(mob_bodies))).with_marks(marks)
     }
 
     /// The mob of vitals id `vitals_id`, shown with slice asset `slice`, at `position` of the
@@ -4318,8 +4458,11 @@ mod retail_tests {
     fn the_beach_sword_sailor_walks_home_from_every_side() {
         // Hunt test 2026-10-31 (1 run of 4): the named sword sailor of spawn `575fea06` (the
         // crc of its vitals id) stood 18.7 m from its spawn and reset every 2.8 s for minutes
-        // without a step home. It is drawn out on each bearing, then the player leaves, or
-        // stays beside it and hits it every second as a hunt bot does.
+        // without a step home. It is drawn out on each bearing, then the player leaves: it walks
+        // home. Or the player stays beside it and hits it every second as a hunt bot does: it
+        // keeps fighting, since its slice's `CombatLeashDistance` is 50 m (the leash of its
+        // tree's `DistanceLeash`) and a mob never drops a target that stands beside it inside
+        // its leash (player rule 2026-11-12).
         const SAILOR_ID: &str = "Corrupted_Sailor_1H_Sword_Named_00";
         const SAILOR: &str = "9cdc9dfea35f575fadc0fca2f7f0d29b";
         const SPAWN_XY: [f32; 2] = [7170.98, 3146.57];
@@ -4331,6 +4474,8 @@ mod retail_tests {
         const BEARINGS: u16 = 8;
         const HOME_M: f32 = 3.0;
         const HIT_EVERY_MS: u64 = 1_000;
+        /// The slice's `CombatLeashDistance` (`corrupted_sailor_1h_sword`).
+        const COMBAT_LEASH_M: f32 = 50.0;
         let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
         let content = repo().join("local-data/content");
         let mut world = nw_world::WorldFile::load(
@@ -4427,7 +4572,17 @@ mod retail_tests {
                 played(&mobs, mob_entity(0), &mut trace.0, &mut trace.1);
                 nearest = nearest.min(at(&mobs, 0).horizontal_distance(home));
             }
-            if nearest > HOME_M {
+            let fights_on = mobs.target(mob_entity(0)) == Some(PLAYER)
+                && at(&mobs, 0).horizontal_distance(home) <= COMBAT_LEASH_M;
+            if stay && !fights_on {
+                stuck.push(format!(
+                    "bearing {bearing}: dropped the player beside it, target {:?}, {} m from home; {:?}",
+                    mobs.target(mob_entity(0)),
+                    at(&mobs, 0).horizontal_distance(home),
+                    trace.1.iter().rev().take(20).collect::<Vec<_>>()
+                ));
+            }
+            if !stay && nearest > HOME_M {
                 stuck.push(format!(
                     "bearing {bearing}, player stays {stay}: out at ({}, {}, {}) {} m, nearest home {nearest} m, now ({}, {}, {}); {:?}",
                     out.x,
@@ -4442,6 +4597,145 @@ mod retail_tests {
             }
         }
         assert!(stuck.is_empty(), "{stuck:#?}");
+    }
+
+    /// The Quartermaster of "A Most Mysterious Tablet" at its spawn in the cannon room, on the
+    /// live mobs' ground, with the design overrides of its spawn.
+    fn quartermaster() -> (Mobs, RealGround, Position) {
+        const ID: &str = "Undead_Berserker_Named_12MB10";
+        const ASSET: &str = "465680915d0c5efc985422702159aa2b";
+        const SPAWN_XY: [f32; 2] = [7828.0, 3578.0];
+        mob_at_spawn(ID, ASSET, SPAWN_XY)
+    }
+
+    /// The open world's mob of vitals id `id` whose spawn is at `spawn_xy`, shown with slice
+    /// asset `asset`, on the live mobs' ground, with the design overrides of its spawn; and
+    /// where it stands.
+    fn mob_at_spawn(id: &str, asset: &str, spawn_xy: [f32; 2]) -> (Mobs, RealGround, Position) {
+        const SPAWN_MATCH_M: f32 = 1.0;
+        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
+        let content = repo().join("local-data/content");
+        let mut world = nw_world::WorldFile::load(
+            &nw_world::world_file::world_file_path(&content, &build, OPEN_WORLD_LEVEL),
+            &build,
+        )
+        .expect("world file");
+        let spawn = world
+            .vitals
+            .iter()
+            .position(|vitals| {
+                vitals.vitals_id == lowercase_crc32(id)
+                    && (vitals.position[0] - spawn_xy[0]).hypot(vitals.position[1] - spawn_xy[1])
+                        < SPAWN_MATCH_M
+            })
+            .expect("its spawn");
+        let position = world.vitals[spawn].position;
+        world.vitals_ai = vec![world.vitals_ai[spawn].clone()];
+        let (mut mobs, ground) = mob_on_real_ground(id, asset, position);
+        let ai = MobAi::new(retail_data(), AiRates::default(), LookAssets::default());
+        mobs.set_ai(crate::mob_ai::resolve_ai(&world, &ai));
+        let home = at(&mobs, 0);
+        (mobs, ground, home)
+    }
+
+    /// The Quartermaster fights a player beside it on every side, in its room, as retail (VM
+    /// 2026-11-12: it turned or stabbed once and then stood; retail it hit a player 0.99 to 1.31 m
+    /// away eight times in 21 s, `12a_msq_08_destroyrune` ledger 108,777 to 130,076 ms).
+    #[test]
+    fn the_quartermaster_fights_a_player_beside_it_on_every_side() {
+        const RUN_MS: u64 = 20_000;
+        /// Half the retail rate of eight hits in 21 s.
+        const MIN_STRIKES: usize = 4;
+        const DISTANCES_M: [f32; 3] = [1.0, 2.0, 3.0];
+        const BEARINGS: u16 = 4;
+        let mut idle = Vec::new();
+        for distance in DISTANCES_M {
+            for step in 0..BEARINGS {
+                let bearing = std::f32::consts::TAU * f32::from(step) / f32::from(BEARINGS);
+                let (mut mobs, ground, home) = quartermaster();
+                let (x, y) = (
+                    home.x + distance * bearing.cos(),
+                    home.y + distance * bearing.sin(),
+                );
+                let player = Seen {
+                    entity: PLAYER,
+                    position: Position {
+                        x,
+                        y,
+                        z: ground.height_at(x, y).unwrap_or(home.z),
+                    },
+                };
+                mobs.provoke(mob_entity(0), PLAYER, 0);
+                let mut trace = (None, Vec::new());
+                let mut strikes = 0;
+                for now in (0..RUN_MS).step_by(TICK_MS as usize) {
+                    strikes += mobs.tick(&[player], now, &ground, 1).len();
+                    played(&mobs, mob_entity(0), &mut trace.0, &mut trace.1);
+                }
+                if strikes < MIN_STRIKES || mobs.target(mob_entity(0)) != Some(PLAYER) {
+                    idle.push(format!(
+                        "{distance} m, bearing {step}: {strikes} strikes, target {:?}, {:?}",
+                        mobs.target(mob_entity(0)),
+                        trace.1
+                    ));
+                }
+            }
+        }
+        assert!(idle.is_empty(), "{idle:#?}");
+    }
+
+    /// The undead pistoleer of "A Most Mysterious Tablet" fights a player beside it with its
+    /// shots and its bash, and shoots a player farther away (retail: MSQ5-lv25 ledger, a
+    /// pistoleer shot a player 1 m away every 1 to 2 s from 417,492 to 426,024 ms; retail shots
+    /// came from 1.0 to 42.9 m over ten fights of the MSQ ledgers).
+    #[test]
+    fn the_tablet_pistoleer_shoots_near_and_far() {
+        const ID: &str = "Undead_Pistoleer_12MB10";
+        const ASSET: &str = "1adf682a75025ad5bded41a6d3137727";
+        const SPAWN_XY: [f32; 2] = [7810.0, 3628.0];
+        const RUN_MS: u64 = 20_000;
+        /// Beside the player: at least one attack in five seconds, a fraction of retail's.
+        const MIN_STRIKES: usize = 4;
+        /// Farther away: retail shot three times in 14.5 s from 4 to 18 m (MSQ5-lv25 ledger,
+        /// 627,518 to 641,984 ms).
+        const MIN_FAR_SHOTS: usize = 2;
+        const DISTANCES_M: [f32; 4] = [0.5, 2.0, 7.5, 12.0];
+        const SHOOTS_FROM_M: f32 = 7.0;
+        let mut idle = Vec::new();
+        for distance in DISTANCES_M {
+            let (mut mobs, ground, home) = mob_at_spawn(ID, ASSET, SPAWN_XY);
+            let (x, y) = (home.x, home.y + distance);
+            let player = Seen {
+                entity: PLAYER,
+                position: Position {
+                    x,
+                    y,
+                    z: ground.height_at(x, y).unwrap_or(home.z),
+                },
+            };
+            mobs.provoke(mob_entity(0), PLAYER, 0);
+            let mut trace = (None, Vec::new());
+            let (mut strikes, mut shots) = (0, 0);
+            for now in (0..RUN_MS).step_by(TICK_MS as usize) {
+                for hit in mobs.tick(&[player], now, &ground, 1) {
+                    strikes += 1;
+                    shots += usize::from(hit.strike.is_some_and(|strike| strike.ranged.is_some()));
+                }
+                played(&mobs, mob_entity(0), &mut trace.0, &mut trace.1);
+            }
+            let short = if distance > SHOOTS_FROM_M {
+                shots < MIN_FAR_SHOTS
+            } else {
+                strikes < MIN_STRIKES
+            };
+            if short {
+                idle.push(format!(
+                    "{distance} m: {strikes} strikes, {shots} shots, {:?}",
+                    trace.1
+                ));
+            }
+        }
+        assert!(idle.is_empty(), "{idle:#?}");
     }
 
     /// A player on the real ground `distance_m` in front of Janszoon (yaw 0 faces +y).
@@ -4482,7 +4776,7 @@ mod retail_tests {
         strikes
     }
 
-    /// The ambient vision of his slice: a 120 degree cone of 5 m.
+    /// The ambient vision of his slice: 120 degrees to each side and 5 m.
     const JANSZOON_IN_FACE_M: f32 = 1.5;
     /// How long he may take to aggro on a player in his face (his tree evaluates each second).
     const JANSZOON_AGGRO_MS: u64 = 3_000;

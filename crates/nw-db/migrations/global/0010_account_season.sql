@@ -1,0 +1,40 @@
+-- SPDX-License-Identifier: AGPL-3.0-or-later
+-- The season of each account (seasons finding 2026-11-12): retail keeps it per account (a new
+-- character got the account's season rank 39), so it moves here from the world's
+-- character_season (world migration 0041). experience is the total of the SeasonPass categorical
+-- progression; the other columns are those of character_season: what the season rewards state
+-- (type 5485) and the tracked stats state (type 5606) hold. season_id is the CRC-32 of the
+-- lowercase SeasonId the row is for (a u32 in BIGINT); a u64 is stored in BIGINT as the same 64
+-- bits, a u32 or u16 as its value. saved_at is when the sim took the state: a save of an older
+-- state never overwrites a newer one; a state moved from a character has the epoch. Only sim
+-- writes this table, and the world director when it moves a character's season.
+
+CREATE TABLE account_season (
+    account_id UUID PRIMARY KEY REFERENCES account (account_id) ON DELETE CASCADE,
+    saved_at TIMESTAMPTZ NOT NULL,
+    experience BIGINT NOT NULL CHECK (experience >= 0 AND experience <= 4294967295),
+    season_id BIGINT NOT NULL CHECK (season_id >= 0 AND season_id <= 4294967295),
+    -- RedeemBitmask: bit n of word n / 64 is RewardIndex n.
+    redeemed BIGINT[] NOT NULL CHECK (array_position(redeemed, NULL) IS NULL),
+    -- The season's tracked stats: the CRC-32 of each lowercase TrackedStatId and its count.
+    stat_ids BIGINT[] NOT NULL CHECK (array_position(stat_ids, NULL) IS NULL),
+    stat_values BIGINT[] NOT NULL CHECK (array_position(stat_values, NULL) IS NULL),
+    -- The activity card: cardTemplate, the CRC-32 of each lowercase ActivitiesTaskID, the bit of
+    -- each task that stamped a square, the stamped and the wild-stamped squares (bit row * 4 +
+    -- column), wildStampCount, rerollCount and cardCount.
+    card_template SMALLINT NOT NULL CHECK (card_template >= 0),
+    card_tasks BIGINT[] NOT NULL CHECK (array_position(card_tasks, NULL) IS NULL),
+    card_claimed BIGINT NOT NULL CHECK (card_claimed >= 0 AND card_claimed <= 4294967295),
+    card_stamped INTEGER NOT NULL CHECK (card_stamped >= 0 AND card_stamped <= 65535),
+    card_wild_stamped INTEGER NOT NULL CHECK (card_wild_stamped >= 0 AND card_wild_stamped <= 65535),
+    wild_stamps SMALLINT NOT NULL CHECK (wild_stamps >= 0),
+    rerolls SMALLINT NOT NULL CHECK (rerolls >= 0),
+    cards_done INTEGER NOT NULL CHECK (cards_done >= 0 AND cards_done <= 65535),
+    -- The card tasks' tracked stats, as stat_ids and stat_values: counted from the card's start.
+    card_stat_ids BIGINT[] NOT NULL CHECK (array_position(card_stat_ids, NULL) IS NULL),
+    card_stat_values BIGINT[] NOT NULL CHECK (array_position(card_stat_values, NULL) IS NULL),
+    -- firstCharacterConnectTime: Unix nanoseconds.
+    first_connect_ns BIGINT NOT NULL,
+    CHECK (cardinality(stat_ids) = cardinality(stat_values)),
+    CHECK (cardinality(card_stat_ids) = cardinality(card_stat_values))
+);

@@ -145,6 +145,13 @@ pub enum StatKind {
         /// The level.
         level: u32,
     },
+    /// `GameEvent`: a game event of one of `events` (`GameEventIDs`, any case; Observed,
+    /// content bundle 25810808: `WinCTF` counts `CaptureTheFlag_T4`, `PlayCTF` the events
+    /// `CaptureTheFlag_T2`, `_T3` and `_T4`). An empty list takes any.
+    GameEvent {
+        /// Game event ids (any one).
+        events: Vec<String>,
+    },
     /// `CompleteActivityCard`: a finished activity card (a new card after it).
     CompleteActivityCard,
     /// `CompleteJourneyTask`: a redeemed journey task of a chapter of kind `challenge`
@@ -273,6 +280,7 @@ fn unread_filters(row: &SeasonsRewardsStats) -> bool {
     let kill = row.stat_type == "Kill";
     let gather = row.stat_type == "Gather";
     let craft = row.stat_type == "Craft";
+    let game_event = row.stat_type == "GameEvent";
     let level_read = kill || row.stat_type == "ObtainLevel";
     let loot_tags_read = kill
         && row.vitals_categories.is_none()
@@ -296,7 +304,7 @@ fn unread_filters(row: &SeasonsRewardsStats) -> bool {
         row.crafting_type.is_some(),
         row.creature_types.is_some(),
         row.exclude_item_class.is_some(),
-        row.game_event_i_ds.is_some(),
+        row.game_event_i_ds.is_some() && !game_event,
         row.game_event_types.is_some(),
         row.game_mode.is_some(),
         row.game_mode_result.is_some(),
@@ -387,6 +395,9 @@ fn stat_kind(row: &SeasonsRewardsStats) -> StatKind {
             ranks: row.tracking_type.as_deref() == Some(RANKED_TRACKING),
         },
         "ObtainLevel" => StatKind::ObtainLevel { level },
+        "GameEvent" => StatKind::GameEvent {
+            events: list(&row.game_event_i_ds),
+        },
         "CompleteActivityCard" => StatKind::CompleteActivityCard,
         "CompleteJourneyTask" => StatKind::CompleteJourneyTask {
             challenge: row.chapter_type.as_deref() == Some(CHALLENGE_CHAPTER),
@@ -730,5 +741,33 @@ mod tests {
         level.is_permanent = Some(true);
         assert_eq!(stat_kind(&level), StatKind::ObtainLevel { level: 70 });
         assert_eq!(stat_kind(&stat_row("CompleteSong")), StatKind::Unread);
+    }
+
+    #[test]
+    fn a_game_event_stat_names_its_events() {
+        // Content bundle 25810808: `PlayCTF` and `WinCTF`.
+        let mut play = stat_row("GameEvent");
+        play.game_event_i_ds =
+            Some("CaptureTheFlag_T2,CaptureTheFlag_T3,CaptureTheFlag_T4".to_owned());
+        assert_eq!(
+            stat_kind(&play),
+            StatKind::GameEvent {
+                events: vec![
+                    "CaptureTheFlag_T2".to_owned(),
+                    "CaptureTheFlag_T3".to_owned(),
+                    "CaptureTheFlag_T4".to_owned(),
+                ],
+            }
+        );
+        let mut typed = stat_row("GameEvent");
+        typed.game_event_types = Some("Breach".to_owned());
+        assert_eq!(
+            stat_kind(&typed),
+            StatKind::Unread,
+            "event types are not read"
+        );
+        let mut kill = stat_row("Kill");
+        kill.game_event_i_ds = Some("CaptureTheFlag_T4".to_owned());
+        assert_eq!(stat_kind(&kill), StatKind::Unread);
     }
 }

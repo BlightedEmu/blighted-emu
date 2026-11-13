@@ -48,7 +48,6 @@ use nw_messages::game_mode_state::{GameModeState, Keyed};
 use nw_messages::list_delta::{ListChange, ReplicatedList};
 use nw_messages::position::{PositionInTheWorldReplicatedState, WorldPosition};
 use nw_messages::social::{GroupPush, SocialFacet, SocialPush, push_envelope};
-use nw_messages::temporary_affiliation::Affiliation;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     AssetId, BundleMember, DYNAMIC_SLICE_SUB_ID, DeathRecapForAllMsg, GdeMetadataReplicatedState,
@@ -57,10 +56,11 @@ use nw_messages::{
 use nw_sim_core::Position;
 
 use super::attack::Vitals;
+use super::capture_the_flag::CaptureTheFlagMatch;
 use super::crafting::{CARD_COMPONENT, Station, dynamic_ref};
 use super::game_mode_entity::{
-    FIRST_LIST_VERSION, MatchEntry, MatchParticipant as Participant, OTHER_TEAM_KIND,
-    PLAYING_STATUS, full, participant_lists,
+    FIRST_LIST_VERSION, MatchEntry, MatchParticipant as Participant, PLAYING_STATUS, full,
+    participant_lists, team_affiliations,
 };
 use super::outpost_rush::OutpostRushMatch;
 use super::queue::team_spot;
@@ -80,7 +80,7 @@ const INTER_ROUND_TIMER: u32 = 0xb9e3_ba2d;
 const ROUND_TIMER: u32 = 0x9242_bfa1;
 const HEALING_DEBUFF_TIMER: u32 = 0xd1a3_6145;
 const POST_ROUND_TIMER: u32 = 0x7eb0_604b;
-const OVERTIME_TIMER: u32 = 0x42fe_b1a0;
+pub(super) const OVERTIME_TIMER: u32 = 0x42fe_b1a0;
 pub(super) const CLEANUP_TIMER: u32 = 0xca48_34d9;
 /// The timer lengths (Observed).
 pub(super) const GAME_MODE_TIMEOUT_MS: u64 = 10_800_000;
@@ -111,8 +111,6 @@ const DEAD_STATUS: u8 = 0x07;
 const MATCH_FLAGS: [u8; PARTICIPANT_FLAGS_LEN] = [0x03, 0xc0, 0xe7, 0x08, 0x00, 0x00];
 const FIGHT_FLAGS: [u8; PARTICIPANT_FLAGS_LEN] = [0x03, 0xe0, 0xe7, 0x08, 0x00, 0x00];
 const ROUND_OVER_FLAGS: [u8; PARTICIPANT_FLAGS_LEN] = [0x03, 0xe0, 0xe7, 0x09, 0x00, 0x00];
-/// The kind of the own team's affiliation in an arena (Observed: 0).
-const OWN_TEAM_KIND: u32 = 0;
 /// The teams of a match.
 const TEAMS: usize = 2;
 /// The CRC-32 of `leave`: the 1980 event of the end screen's leave button (exe strings).
@@ -254,12 +252,34 @@ pub(super) struct ArenaMatch {
 }
 
 /// The matches of this instance sim: the running arena match, how many ran, and the running
-/// Outpost Rush match ([`super::outpost_rush`]).
+/// Outpost Rush match ([`super::outpost_rush`]) and the running capture the flag match
+/// ([`super::capture_the_flag`]).
 #[derive(Debug, Default)]
 pub(super) struct ArenaMatches {
     running: Option<ArenaMatch>,
     pub(super) started: u64,
     pub(super) outpost_rush: Option<OutpostRushMatch>,
+    pub(super) capture_the_flag: Option<CaptureTheFlagMatch>,
+}
+
+impl ArenaMatches {
+    /// The team raid id and the team place of player `number` in the arena, Outpost Rush or
+    /// capture the flag match this sim runs ([`super::raids`]); `None` for a player in none.
+    pub(super) fn raid_seat_of(&self, number: u64) -> Option<(u64, u8)> {
+        self.running
+            .as_ref()
+            .and_then(|running| running.raid_seat_of(number))
+            .or_else(|| {
+                self.outpost_rush
+                    .as_ref()
+                    .and_then(|running| running.raid_seat_of(number))
+            })
+            .or_else(|| {
+                self.capture_the_flag
+                    .as_ref()
+                    .and_then(|running| running.raid_seat_of(number))
+            })
+    }
 }
 
 impl ArenaMatch {
@@ -267,6 +287,13 @@ impl ArenaMatch {
         self.participants
             .iter()
             .find(|participant| participant.number == number)
+    }
+
+    /// The team raid id and the team place of player `number`.
+    fn raid_seat_of(&self, number: u64) -> Option<(u64, u8)> {
+        let participant = self.of(number)?;
+        let raid = *self.raids.get(usize::from(participant.team))?;
+        Some((raid, participant.place))
     }
 
     fn next_version(&mut self) -> u64 {
@@ -367,10 +394,19 @@ impl SimWorld {
 
     /// Player `entity` arrived on this instance sim with its seat `seat`: it joins the match
     /// (the first one opens it) with its participant state and affiliations; on an Outpost Rush
-    /// instance it joins that match ([`super::outpost_rush`]).
+    /// instance it joins that match ([`super::outpost_rush`]), in a catacombs run that run
+    /// ([`super::catacombs`]).
     pub(super) fn join_arena_match(&mut self, entity: Entity, seat: ArenaSeat) {
+        if self.runs_capture_the_flag() {
+            self.join_capture_the_flag(entity, seat);
+            return;
+        }
         if self.runs_outpost_rush() {
             self.join_outpost_rush(entity, seat);
+            return;
+        }
+        if self.catacomb_run().is_some() {
+            self.join_catacombs(entity);
             return;
         }
         let Some((number, character, eligible)) = self.world.get::<Player>(entity).map(|player| {
@@ -426,21 +462,7 @@ impl SimWorld {
             },
             server_ms,
         );
-        let other = 1 - seat.team.min(1);
-        self.put_affiliations(
-            entity,
-            list_version,
-            vec![
-                Affiliation {
-                    id: u32::from(seat.team),
-                    kind: OWN_TEAM_KIND,
-                },
-                Affiliation {
-                    id: u32::from(other),
-                    kind: OTHER_TEAM_KIND,
-                },
-            ],
-        );
+        self.put_affiliations(entity, list_version, team_affiliations(seat.team));
         tracing::info!(
             player = number,
             team = seat.team,
@@ -511,6 +533,7 @@ impl SimWorld {
             )),
             no_affliction: true,
             linked_mode: Some(0),
+            ..GameModeState::default()
         };
         let middle = middle_of(&running.map);
         let (entity, gde_ref) = self.place_game_mode_entity(MATCH_NAMESPACE, None, middle, state);
@@ -524,6 +547,10 @@ impl SimWorld {
     /// 6824: player `number` readied up (or not) in the pregame or between rounds (or in an
     /// Outpost Rush pregame).
     pub(super) fn arena_ready(&mut self, number: u64, ready: bool) {
+        if self.arena_matches.capture_the_flag.is_some() {
+            self.capture_the_flag_ready(number, ready);
+            return;
+        }
         if self.arena_matches.outpost_rush.is_some() {
             self.outpost_rush_ready(number, ready);
             return;
@@ -566,6 +593,10 @@ impl SimWorld {
     /// gets the 4977, and a team with no living player loses the round (in an Outpost Rush
     /// match: its rule, [`super::outpost_rush`]).
     pub(super) fn arena_death(&mut self, target: u64, attacker: u64) {
+        if self.arena_matches.capture_the_flag.is_some() {
+            self.capture_the_flag_death(target, attacker);
+            return;
+        }
         if self.arena_matches.outpost_rush.is_some() {
             self.outpost_rush_death(target, attacker);
             return;
@@ -664,6 +695,10 @@ impl SimWorld {
     /// Runs the match: the timers that ended move the script on; a team with no participant
     /// left loses (or runs the Outpost Rush match).
     pub(super) fn tick_arena(&mut self) {
+        if self.arena_matches.capture_the_flag.is_some() {
+            self.tick_capture_the_flag();
+            return;
+        }
         if self.arena_matches.outpost_rush.is_some() {
             self.tick_outpost_rush();
             return;
@@ -989,6 +1024,10 @@ impl SimWorld {
     /// 5283, its participant state names no mode, the others' lists lose it, a leave of a running
     /// match bars its queue, and it goes back to where it came from.
     pub(super) fn leave_arena(&mut self, entity: Entity) {
+        if self.arena_matches.capture_the_flag.is_some() {
+            self.leave_capture_the_flag(entity);
+            return;
+        }
         if self.arena_matches.outpost_rush.is_some() {
             self.leave_outpost_rush(entity);
             return;
@@ -1028,6 +1067,10 @@ impl SimWorld {
     /// its queue (Observed: the kicked player of `3v3_arena_group_2` got the 30 minutes), and its
     /// entry goes from the lists.
     pub(super) fn arena_left_sim(&mut self, entity: Entity) {
+        if self.arena_matches.capture_the_flag.is_some() {
+            self.capture_the_flag_left_sim(entity);
+            return;
+        }
         if self.arena_matches.outpost_rush.is_some() {
             self.outpost_rush_left_sim(entity);
             return;

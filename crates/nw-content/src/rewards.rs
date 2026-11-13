@@ -154,6 +154,11 @@ pub struct EventGrant {
     /// `FactionTokens`: the tokens one firing gives the player's faction's currency
     /// (`98_M_0001_RankUp_success`, the first Marauder rank quest, 100).
     pub faction_tokens: f64,
+    /// `FactionInfluenceAmount`: the influence one firing gives the player's faction in the
+    /// territory of its mission (Observed, content bundle 25810808: the PvP faction mission
+    /// success events, 50 for `PVPFaction-V2_*`, 100 for `PVPFactionV2_*`, 200 for
+    /// `PVPFaction+V2_*`, each of `FactionInfluenceSrc` `Missions`). 0 for an event without one.
+    pub faction_influence: u64,
 }
 
 impl EventGrant {
@@ -229,6 +234,10 @@ impl EventGrants {
                             // Reputation and tokens of a few hundred.
                             faction_reputation: row.faction_reputation.unwrap_or_default() as f64,
                             faction_tokens: row.faction_tokens.unwrap_or_default() as f64,
+                            faction_influence: row
+                                .faction_influence_amount
+                                .and_then(|amount| u64::try_from(amount).ok())
+                                .unwrap_or_default(),
                         },
                     )
                 }),

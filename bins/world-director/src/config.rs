@@ -78,6 +78,40 @@ pub struct InstancesConfig {
     /// The matchmaking queue of Outpost Rush.
     #[serde(default = "MatchConfig::outpost_rush")]
     pub outpost_rush: MatchConfig,
+    /// The matchmaking queue of capture the flag.
+    #[serde(default = "MatchConfig::capture_the_flag")]
+    pub capture_the_flag: MatchConfig,
+    /// The matchmaking queue of the catacombs.
+    #[serde(default)]
+    pub catacombs: CatacombsQueueConfig,
+}
+
+/// How long the players have to accept a catacombs run by default (Inferred: the `Catacombs`
+/// row's `RaidInviteDurationSec` 90, as the arena's window is its row's 45).
+pub const DEFAULT_CATACOMBS_ACCEPT_TIMEOUT_MS: u64 = 90_000;
+/// How long a catacombs join with the fill byte waits for other players by default (Inferred
+/// from the retail pops of a short team 62.2, 63.3 and 65.6 s after the queue entry; no row
+/// value holds it).
+pub const DEFAULT_CATACOMBS_FILL_WAIT_MS: u64 = 60_000;
+
+/// The `[instances.catacombs]` section: the accept window and the fill wait of a catacombs run
+/// (one team of the row's `TeamCapacity` 3).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatacombsQueueConfig {
+    /// How long the players have to accept a found run.
+    pub accept_timeout_ms: u64,
+    /// How long a join with the fill byte waits for other players before its team forms.
+    pub fill_wait_ms: u64,
+}
+
+impl Default for CatacombsQueueConfig {
+    fn default() -> Self {
+        Self {
+            accept_timeout_ms: DEFAULT_CATACOMBS_ACCEPT_TIMEOUT_MS,
+            fill_wait_ms: DEFAULT_CATACOMBS_FILL_WAIT_MS,
+        }
+    }
 }
 
 /// The players of an arena match by default: a full 3v3.
@@ -90,12 +124,19 @@ pub const DEFAULT_OUTPOST_RUSH_MATCH_SIZE: u32 = nw_content::instances::OUTPOST_
 /// How long the players have to accept an Outpost Rush match by default (Inferred: the
 /// `OutpostRush` row's `RaidInviteDurationSec` 90, as the arena's window is its row's 45).
 pub const DEFAULT_OUTPOST_RUSH_ACCEPT_TIMEOUT_MS: u64 = 90_000;
+/// The players of a capture the flag match by default: two teams of the row's `TeamCapacity` 10.
+pub const DEFAULT_CAPTURE_THE_FLAG_MATCH_SIZE: u32 =
+    nw_content::instances::CAPTURE_THE_FLAG_MATCH_PLAYERS;
+/// How long the players have to accept a capture the flag match by default (Inferred: the
+/// `CaptureTheFlag` row's `RaidInviteDurationSec` 90, as the arena's window is its row's 45).
+pub const DEFAULT_CAPTURE_THE_FLAG_ACCEPT_TIMEOUT_MS: u64 = 90_000;
 /// The teams of a match: the match size is a multiple of it.
 const MATCH_TEAMS: u32 = 2;
 
-/// The `[instances.arena]` and `[instances.outpost_rush]` sections: the size of a match (6 for
-/// a 3v3 arena, 2 makes the 1v1 matches retail made when few players queued; 40 for Outpost
-/// Rush, a small even size for tests) and the accept window.
+/// The `[instances.arena]`, `[instances.outpost_rush]` and `[instances.capture_the_flag]`
+/// sections: the size of a match (6 for a 3v3 arena, 2 makes the 1v1 matches retail made when
+/// few players queued; 40 for Outpost Rush and 20 for capture the flag, a small even size for
+/// tests) and the accept window.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MatchConfig {
@@ -119,6 +160,14 @@ impl MatchConfig {
         Self {
             match_size: DEFAULT_OUTPOST_RUSH_MATCH_SIZE,
             accept_timeout_ms: DEFAULT_OUTPOST_RUSH_ACCEPT_TIMEOUT_MS,
+        }
+    }
+
+    /// Capture the flag's retail values.
+    pub const fn capture_the_flag() -> Self {
+        Self {
+            match_size: DEFAULT_CAPTURE_THE_FLAG_MATCH_SIZE,
+            accept_timeout_ms: DEFAULT_CAPTURE_THE_FLAG_ACCEPT_TIMEOUT_MS,
         }
     }
 
@@ -236,6 +285,7 @@ impl DirectorConfig {
             for (section, queue) in [
                 ("instances.arena", &instances.arena),
                 ("instances.outpost_rush", &instances.outpost_rush),
+                ("instances.capture_the_flag", &instances.capture_the_flag),
             ] {
                 if !queue.is_valid() {
                     return invalid(
@@ -243,6 +293,12 @@ impl DirectorConfig {
                         "match_size must be an even number above 0 and accept_timeout_ms above 0",
                     );
                 }
+            }
+            if instances.catacombs.accept_timeout_ms == 0 || instances.catacombs.fill_wait_ms == 0 {
+                return invalid(
+                    "instances.catacombs",
+                    "accept_timeout_ms and fill_wait_ms must be above 0",
+                );
             }
             if let Some(launch) = &instances.launch
                 && (launch.program.is_empty()
@@ -390,6 +446,27 @@ mod tests {
         assert!(one_vs_one.validate().is_ok(), "a 1v1 as retail made");
         assert_eq!(MatchConfig::arena().match_size, 6);
         assert_eq!(MatchConfig::outpost_rush().match_size, 40);
+        assert_eq!(MatchConfig::capture_the_flag().match_size, 20);
+        assert_eq!(
+            CatacombsQueueConfig::default(),
+            CatacombsQueueConfig {
+                accept_timeout_ms: DEFAULT_CATACOMBS_ACCEPT_TIMEOUT_MS,
+                fill_wait_ms: DEFAULT_CATACOMBS_FILL_WAIT_MS,
+            }
+        );
+        let mut no_fill_wait = one_vs_one.clone();
+        if let Some(instances) = no_fill_wait.instances.as_mut() {
+            instances.catacombs.fill_wait_ms = 0;
+        }
+        assert!(no_fill_wait.validate().is_err(), "a catacombs fill wait");
+        let mut odd_flag = one_vs_one.clone();
+        if let Some(instances) = odd_flag.instances.as_mut() {
+            instances.capture_the_flag.match_size = 7;
+        }
+        assert!(
+            odd_flag.validate().is_err(),
+            "two capture the flag teams of the same size"
+        );
         let mut odd_rush = one_vs_one.clone();
         if let Some(instances) = odd_rush.instances.as_mut() {
             instances.outpost_rush.match_size = 5;

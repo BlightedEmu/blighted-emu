@@ -26,6 +26,9 @@
 //!   `Playthrough_Part_02` five calls from 1792686628775, `Fireworks` one). Retail answers with a
 //!   debit request on the player's `EntitlementComponent`: 5936 about 0.2 s later and 1285 with
 //!   the token's new count, status [`DEBIT_REQUEST_STATUS`], done set.
+//! - 3113 `EntitlementComponentClientFacet_OnRequestFail` ([`RequestFailMsg`]) and 5108
+//!   `OnClaimEntitlementFail` ([`ClaimEntitlementFailMsg`]): the refusals. No capture holds
+//!   either; their layouts come from the client's readers and handlers (build 25810808).
 
 use crate::BodyCodec;
 use crate::appearance::{AppearanceChangeRequest, PURCHASE_APPEARANCE_CHANGE_TYPE_INDEX};
@@ -49,6 +52,10 @@ pub const RESET_REWARD_TRACK_TYPE_INDEX: u64 = 4910;
 pub const REQUEST_INITIALIZED_TYPE_INDEX: u64 = 5936;
 /// `EntitlementComponentClientFacet_OnRequestSuccess`.
 pub const REQUEST_SUCCESS_TYPE_INDEX: u64 = 1285;
+/// `EntitlementComponentClientFacet_OnRequestFail`.
+pub const REQUEST_FAIL_TYPE_INDEX: u64 = 3113;
+/// `EntitlementComponentClientFacet_OnClaimEntitlementFail`.
+pub const CLAIM_ENTITLEMENT_FAIL_TYPE_INDEX: u64 = 5108;
 /// The request status of both answers to a store purchase (every retail answer: 2; its meaning
 /// is Unknown).
 pub const RETAIL_REQUEST_STATUS: u32 = 2;
@@ -278,6 +285,73 @@ entitlement_answer!(
     RequestSuccessMsg,
     REQUEST_SUCCESS_TYPE_INDEX
 );
+
+/// 3113: the request failed. Observed (client reader `FUN_14301a5d0`, build 25810808): the same
+/// request body as 5936 and 1285 (the reader calls the request reader `FUN_1417b0690` of the 1285
+/// reader `FUN_143010c40`), then a text. The handler `FUN_14301a3e0` passes both to the facet's
+/// `FUN_143042e20`, which raises the store event `OnEntitlementError` (`FUN_1405715ec`, event 4
+/// of `FUN_1450b84f0`). No capture holds a 3113, so which status and text retail sends is
+/// Unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestFailMsg {
+    /// The failed request.
+    pub request: EntitlementRequest,
+    /// Why it failed.
+    pub reason: Vec<u8>,
+}
+
+impl BodyCodec for RequestFailMsg {
+    const TYPE_INDEX: u64 = REQUEST_FAIL_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.request.write(&mut writer)?;
+        write_string(&mut writer, &self.reason)?;
+        Ok(writer.finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let request = EntitlementRequest::read(&mut reader)?;
+        let reason = read_string(&mut reader)?;
+        reader.finish()?;
+        Ok(Self { request, reason })
+    }
+}
+
+/// 5108: the claim of an entitlement (5107) failed. Observed (client reader `FUN_1426d6530` of the
+/// message `FUN_143013930`, build 25810808): the header, then one big-endian `u32`. The handler
+/// `FUN_143016f40` passes the `u32` to the facet's `FUN_143041db0`, which raises the store event
+/// `OnClaimEntitlementFail` (`FUN_14057163c`, event 11 of `FUN_1450b84f0`) with it as an integer
+/// (the event binder `FUN_140a71d70` is the one of `SetWorldCount`). Its 5109 twin
+/// `OnClaimEntitlementSuccess` is the header alone (Observed: `ExternalRewards` 1786896182018, the
+/// claim call's own header). What the `u32` means is Unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimEntitlementFailMsg {
+    /// The header: the claim call's own.
+    pub header: FacetHeader,
+    /// The failure code.
+    pub code: u32,
+}
+
+impl BodyCodec for ClaimEntitlementFailMsg {
+    const TYPE_INDEX: u64 = CLAIM_ENTITLEMENT_FAIL_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        writer.u32(self.code);
+        Ok(writer.finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let header = FacetHeader::read(&mut reader)?;
+        let code = reader.u32()?;
+        reader.finish()?;
+        Ok(Self { header, code })
+    }
+}
 
 /// One store call of the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -622,6 +696,37 @@ mod tests {
             b"Ent_StatusEffect_Token_Gather_1"
         );
         assert!(started.0.entitlements.is_empty() && started.0.done);
+    }
+
+    #[test]
+    fn a_failed_request_is_the_request_then_its_reason() {
+        let started = RequestInitializedMsg::decode(&hex_bytes(DEBIT_STARTED)).expect("5936");
+        let failed = RequestFailMsg {
+            request: started.0,
+            reason: b"NoToken".to_vec(),
+        };
+        let bytes = failed.encode().expect("encode");
+        let mut expected = hex_bytes(DEBIT_STARTED);
+        expected.extend_from_slice(&hex_bytes("074e6f546f6b656e"));
+        assert_eq!(bytes, expected);
+        assert_eq!(RequestFailMsg::decode(&bytes).expect("decode"), failed);
+    }
+
+    /// The header of the retail claim and its 5109 (`ExternalRewards` 1786896181850 and
+    /// 1786896182018), then the code 1 as a big-endian `u32`.
+    const CLAIM_FAILED: &str = "a3f72a79438587bbe131d651bfc7f13200000001";
+
+    #[test]
+    fn a_failed_claim_is_the_header_then_a_code() {
+        let failed = ClaimEntitlementFailMsg::decode(&hex_bytes(CLAIM_FAILED)).expect("5108");
+        assert_eq!(failed.code, 1);
+        let Some(Ok(StoreCall::ClaimEntitlement { header, .. })) =
+            StoreCall::decode(CALLS[2].0, &hex_bytes(CALLS[2].1))
+        else {
+            panic!("claim");
+        };
+        assert_eq!(failed.header, header);
+        assert_eq!(failed.encode().expect("encode"), hex_bytes(CLAIM_FAILED));
     }
 
     #[test]

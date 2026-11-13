@@ -20,11 +20,18 @@
 //! from the payer's company treasury and the database moves the due time
 //! ([`nw_bus::SocialInput::PayUpkeep`]). When the service says it is paid, this sim reads the
 //! owners at once, and the open desks of the claim get the new governance data alone in a group
-//! (Observed: the retail 1746 after the payment, 1783335287246, the times 7 days later). A refused
-//! payment gets no answer (retail sent none to the one payment; a refusal form is Unknown).
+//! (Observed: the retail 1746 after the payment, 1783335287246, the times 7 days later).
+//!
+//! A refused payment (by this sim or by the service, [`nw_bus::UpkeepAnswer::paid`] false) shows
+//! the payer's open desk its governance data again, alone in a group, with the due time that did
+//! not move. Observed: retail has no upkeep result message (the client facet
+//! `TerritoryInteractorComponentClientFacet` has 7 client messages, none for the upkeep; the facet
+//! function `FUN_144817ba0` that takes 2738 only logs a refused request), and the governance data
+//! is retail's one answer to a payment. Inferred: the same answer, unchanged, ends the payer's
+//! wait for a refused one.
 
 use bevy_ecs::entity::Entity;
-use nw_bus::{ConnectionRef, SocialInput, UpkeepPaid, UpkeepPayment};
+use nw_bus::{ConnectionRef, SocialInput, UpkeepAnswer, UpkeepPayment};
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     ACCESS_OF_A_MEMBER, ACCESS_OF_NO_MEMBER, BundleGroup, BundleMember, CLAIM_KEYS,
@@ -112,6 +119,13 @@ impl PlayerDesk {
             target,
             sent: None,
         });
+    }
+
+    /// Shows the open desk its governance data again with the next bundle.
+    fn show_again(&mut self) {
+        if let Some(view) = self.view.as_mut() {
+            view.sent = None;
+        }
     }
 
     /// The territory of the open desk.
@@ -222,7 +236,8 @@ impl SimWorld {
     }
 
     /// The upkeep payment `call` of the player of `connection` at Unix ms `now_ms`: the social
-    /// service's input that pays it, or `None` when this sim refuses it (module doc).
+    /// service's input that pays it, or `None` when this sim refuses it: the payer's desk then
+    /// shows its governance data again (module doc).
     pub fn pay_upkeep_call(
         &mut self,
         connection: &ConnectionRef,
@@ -255,19 +270,32 @@ impl SimWorld {
                     ?refusal,
                     "upkeep payment refused"
                 );
+                self.world.get_mut::<Player>(entity)?.desk.show_again();
                 None
             }
         }
     }
 
-    /// The social service took the upkeep payments `paid`: the owners are read at once, and the
-    /// open desks get the new due time when the read changed it.
-    pub(super) fn upkeep_paid(&mut self, paid: &[UpkeepPaid]) {
-        for payment in paid {
-            tracing::info!(character = %payment.character, territory = payment.territory,
-                "upkeep paid");
+    /// The social service answered the upkeep payments `answers`. After a paid one the owners
+    /// are read at once, and the open desks get the new due time when the read changed it; a
+    /// refused one shows the payer's desk, when the payer is here, its governance data again.
+    pub(super) fn upkeep_answered(&mut self, answers: &[UpkeepAnswer]) {
+        for answer in answers {
+            if answer.paid {
+                tracing::info!(character = %answer.character, territory = answer.territory,
+                    "upkeep paid");
+                self.territories.read_soon();
+                continue;
+            }
+            tracing::info!(character = %answer.character, territory = answer.territory,
+                "upkeep not paid");
+            let Some(entity) = self.player_of_character(answer.character) else {
+                continue;
+            };
+            if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                player.desk.show_again();
+            }
         }
-        self.territories.read_soon();
     }
 }
 
@@ -376,6 +404,18 @@ mod tests {
             territories.governance(TERRITORY, NOW_MS),
             "the owner's governance data"
         );
+        assert!(desk.group(number, KNOWN, &territories, NOW_MS).is_none());
+        desk.show_again();
+        let again = desk
+            .group(number, KNOWN, &territories, NOW_MS)
+            .expect("a refused payment shows the data again");
+        let [member] = again.members.as_slice() else {
+            panic!("the 1746 alone: {again:?}");
+        };
+        let MemberState::TerritoryInterface(state) = &member.state else {
+            panic!("territory interface");
+        };
+        assert_eq!(state.governance, territories.governance(TERRITORY, NOW_MS));
         assert!(desk.group(number, KNOWN, &territories, NOW_MS).is_none());
         // The read after the payment moves the due time on the same claims.
         territories.read_again_for_test(vec![owner(NOW_MS + nw_db::UPKEEP_INTERVAL_MS)]);

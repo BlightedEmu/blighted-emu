@@ -943,6 +943,11 @@ impl Character {
         self.equip_load = load;
     }
 
+    /// Its equip load category.
+    pub const fn equip_load(&self) -> EquipLoad {
+        self.equip_load
+    }
+
     /// A held status effect keeps it from sprinting (`NoSprint`), or no longer does.
     pub const fn set_no_sprint(&mut self, no_sprint: bool) {
         self.no_sprint = no_sprint;

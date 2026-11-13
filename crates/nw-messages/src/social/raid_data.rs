@@ -21,8 +21,16 @@
 //!   `Hud.LocalPlayer.Raid.MaxGroups` of `FUN_14344f6c0`); type 4 has [`PLAYER_RAID_LIFETIME`]
 //!   and [`PLAYER_RAID_GROUPS`] groups, with at most 20 members (`WURM`, `Playthrough_Part_18`).
 //!
+//! - The raid entity's card (component [`RAID_CARD_COMPONENT`]) has asset [`RAID_ENTITY_ASSET`]
+//!   and the raid entity's id as its `gde_ref`; a whole body comes first, the card after it, in
+//!   one group (`arvaysa_ES_attacker_war_45vs45` 27.039 s: raid 9428, entity `243c1c92...`). A
+//!   war's data names the same entity id in its side's `raid` and the id's facet entity in the
+//!   side's `key` (`arvaysa_ES_attacker_war_45vs45` 1.410 s: key `f665a76e921c3c24`).
+//!
 //! Unknown: what `lifetime` means beyond the two values.
 
+use crate::gde::{AssetId, GdeMetadataReplicatedState};
+use crate::payload::{BundleMember, MemberState};
 use crate::slots::{children_mask, read_slot_0, write_known};
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
 
@@ -46,6 +54,19 @@ pub const PLAYER_RAID_GROUPS: usize = 4;
 pub const EVENT_RAID_LIFETIME: u32 = 1;
 /// `lifetime` of a players' raid.
 pub const PLAYER_RAID_LIFETIME: u32 = 0;
+
+/// The component of the raid entity's spawn card.
+pub const RAID_CARD_COMPONENT: u64 = 0;
+/// The raid entity's asset (`slices/groups/raidgde`): the same in the raid cards of a raid
+/// trial, an arena and a war (`arvaysa_gorgon_raid` 0.657 s, `20261010-125035-658` 300.038 s,
+/// `everfall_war` 51.027 s).
+pub const RAID_ENTITY_ASSET: AssetId = AssetId {
+    id: [
+        0x51, 0x78, 0xda, 0x08, 0xd2, 0xb6, 0x59, 0xee, 0xb2, 0x24, 0x27, 0x95, 0xe3, 0x97, 0x17,
+        0x00,
+    ],
+    sub_id: 2,
+};
 
 /// Children of slot 0.
 const SLOT_0_CHILDREN: u8 = 5;
@@ -71,7 +92,58 @@ pub struct RaidDataState {
     pub group_ids: Option<Vec<[u8; RAW_ID_LEN]>>,
 }
 
+/// The `lifetime` of a raid of type `kind` (module doc).
+pub const fn lifetime_of(kind: u8) -> u32 {
+    if kind == RAID_TYPE_PLAYER {
+        PLAYER_RAID_LIFETIME
+    } else {
+        EVENT_RAID_LIFETIME
+    }
+}
+
+/// The group count of a raid of type `kind` (module doc).
+pub const fn groups_of(kind: u8) -> usize {
+    if kind == RAID_TYPE_PLAYER {
+        PLAYER_RAID_GROUPS
+    } else {
+        EVENT_RAID_GROUPS
+    }
+}
+
 impl RaidDataState {
+    /// The whole state of raid `raid_id` of type `kind` with `members` players and the groups
+    /// `group_ids` in index order: every child set, as the first body of a raid entity.
+    pub fn whole(raid_id: u64, kind: u8, members: u8, group_ids: Vec<[u8; RAW_ID_LEN]>) -> Self {
+        Self {
+            raid_id: Some(raid_id),
+            raid_type: Some(kind),
+            members: Some(members),
+            lifetime: Some(lifetime_of(kind)),
+            group_ids: Some(group_ids),
+        }
+    }
+
+    /// The change from `sent` (what the client has) to `self`: the member count alone when only
+    /// it changed (Observed: every body but the whole one is `01 04 nn`), else the whole state;
+    /// `None` when nothing changed.
+    pub fn change_from(&self, sent: &Self) -> Option<Self> {
+        if self == sent {
+            return None;
+        }
+        let same_but_members = Self {
+            members: sent.members,
+            ..self.clone()
+        } == *sent;
+        Some(if same_but_members {
+            Self {
+                members: self.members,
+                ..Self::default()
+            }
+        } else {
+            self.clone()
+        })
+    }
+
     /// Reads the state.
     ///
     /// # Errors
@@ -144,6 +216,29 @@ impl RaidDataState {
         );
         Ok(())
     }
+}
+
+/// The members of raid entity `entity` with state `state`: the raid data, then, with `carded`,
+/// the spawn card whose entity reference is `entity` (retail order, module doc).
+pub fn raid_entity_members(
+    entity: [u8; RAW_ID_LEN],
+    state: RaidDataState,
+    carded: bool,
+) -> Vec<BundleMember> {
+    let mut members = vec![BundleMember {
+        component: RAID_DATA_COMPONENT,
+        state: MemberState::RaidData(state),
+    }];
+    if carded {
+        members.push(BundleMember {
+            component: RAID_CARD_COMPONENT,
+            state: MemberState::GdeMetadata(GdeMetadataReplicatedState {
+                asset: Some(RAID_ENTITY_ASSET),
+                gde_ref: Some(entity),
+            }),
+        });
+    }
+    members
 }
 
 /// The bytes of `ids` as [`read_group_ids`] reads them.
@@ -243,6 +338,61 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// Retail `arvaysa_ES_attacker_war_45vs45` 27.039 s: the war raid's whole body (group ids
+    /// made up) is what [`RaidDataState::whole`] writes for a war raid of two.
+    #[test]
+    fn a_whole_war_raid_writes_the_retail_form() {
+        let ids: Vec<[u8; RAW_ID_LEN]> = (1..=10).map(|byte| [byte; RAW_ID_LEN]).collect();
+        let groups: String = (1..=10).map(group).collect();
+        let mut writer = Writer::new();
+        RaidDataState::whole(0x24d4, RAID_TYPE_WAR, 2, ids)
+            .write(&mut writer)
+            .expect("writes");
+        assert_eq!(
+            hex::encode(writer.finish()),
+            format!("011f00000000000024d40102000000010a{groups}")
+        );
+        assert_eq!(lifetime_of(RAID_TYPE_PLAYER), PLAYER_RAID_LIFETIME);
+        assert_eq!(groups_of(RAID_TYPE_PLAYER), PLAYER_RAID_GROUPS);
+        assert_eq!(groups_of(RAID_TYPE_GAME_MODE), EVENT_RAID_GROUPS);
+    }
+
+    #[test]
+    fn a_member_count_change_goes_alone_and_any_other_change_whole() {
+        let sent = RaidDataState::whole(7, RAID_TYPE_GAME_MODE, 1, vec![[1; RAW_ID_LEN]]);
+        assert_eq!(sent.change_from(&sent), None);
+        let more = RaidDataState {
+            members: Some(2),
+            ..sent.clone()
+        };
+        assert_eq!(
+            more.change_from(&sent),
+            Some(RaidDataState {
+                members: Some(2),
+                ..RaidDataState::default()
+            })
+        );
+        let other = RaidDataState::whole(8, RAID_TYPE_GAME_MODE, 2, vec![[1; RAW_ID_LEN]]);
+        assert_eq!(other.change_from(&sent), Some(other.clone()));
+    }
+
+    #[test]
+    fn the_raid_entity_is_the_data_then_the_card() {
+        let state = RaidDataState::whole(7, RAID_TYPE_WAR, 1, Vec::new());
+        let members = raid_entity_members([9; RAW_ID_LEN], state.clone(), true);
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].component, RAID_DATA_COMPONENT);
+        assert_eq!(members[0].state, MemberState::RaidData(state.clone()));
+        assert_eq!(
+            members[1].state,
+            MemberState::GdeMetadata(GdeMetadataReplicatedState {
+                asset: Some(RAID_ENTITY_ASSET),
+                gde_ref: Some([9; RAW_ID_LEN]),
+            })
+        );
+        assert_eq!(raid_entity_members([9; RAW_ID_LEN], state, false).len(), 1);
     }
 
     #[test]

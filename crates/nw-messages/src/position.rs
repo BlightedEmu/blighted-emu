@@ -28,6 +28,9 @@ const ROTATION_UNKNOWN: u8 = 0x80;
 const SCALE_ONE: u8 = 0;
 /// Scale tag: one binary16 for every axis.
 const SCALE_UNIFORM: u8 = 1;
+/// Scale tag: three binary16 values (Observed: tag 2 with three equal values on both baroness
+/// barriers of Outpost Rush, `OPR---ISLAND-2` 651.006 s and 655.342 s).
+const SCALE_PER_AXIS: u8 = 2;
 
 /// The `position` child: big-endian `f32` x and y, and a big-endian `u16` height.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -134,6 +137,16 @@ pub enum Scale {
         /// x, y and z as binary16.
         values: [u16; 3],
     },
+}
+
+impl Scale {
+    /// The three-value form (tag 2) of the scale `factors` (x, y, z), each the nearest binary16.
+    pub fn per_axis(factors: [f32; 3]) -> Self {
+        Self::PerAxis {
+            tag: SCALE_PER_AXIS,
+            values: factors.map(crate::alc::half_bits),
+        }
+    }
 }
 
 /// The replicated position, rotation and scale of one entity.
@@ -499,5 +512,19 @@ mod tests {
             bytes.extend(tail);
             let _ = decode(&bytes);
         }
+    }
+
+    /// The retail scale of a baroness barrier (`OPR---ISLAND-2` 651.006 s: tag 2 and `3ea1`
+    /// three times) from its slice scale 1.657341.
+    #[test]
+    fn a_per_axis_scale_is_three_binary16_values_under_tag_two() {
+        const BARONESS_SCALE: f32 = 1.657_341;
+        assert_eq!(
+            Scale::per_axis([BARONESS_SCALE; 3]),
+            Scale::PerAxis {
+                tag: 2,
+                values: [0x3ea1; 3],
+            }
+        );
     }
 }

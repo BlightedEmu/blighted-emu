@@ -19,7 +19,7 @@
 //! delayed event or placement obstruction are listed with their component numbers: the targets
 //! of the stages' entity events.
 //!
-//! A timeline's length is the latest clip end (field `547e44c2`, name Unknown) of its
+//! A timeline's length is the latest clip end (field `endTime`, CRC `547e44c2`) of its
 //! `.timeline` asset (Inferred: it gives the retail end bodies' play heads of the Amrine,
 //! Starstone and Dynasty gates).
 
@@ -38,7 +38,8 @@ use crate::dungeon_scripts::{
     DungeonScriptsBuildError, PakSlices, SliceSource, placed_scripts, position_of, read_script,
 };
 
-/// The name CRC of a timeline clip's end, seconds (a big-endian `f32`; the text is Unknown).
+/// The name CRC of a timeline clip's end, `endTime`, seconds (a big-endian `f32`; Observed: the
+/// lower-case CRC-32 of the client string `endTime` in `NewWorld.exe`).
 const CLIP_END_NAME: u32 = 0x547e_44c2;
 /// The bytes of a clip end.
 const CLIP_END_LEN: usize = size_of::<f32>();
@@ -318,6 +319,15 @@ mod tests {
 
     fn clip_end(seconds: f32) -> Element {
         Element::with_value(CLIP_END_NAME, seconds.to_be_bytes().to_vec())
+    }
+
+    /// The clip end field is the lower-case CRC-32 of the client string `endTime`.
+    #[test]
+    fn the_clip_end_crc_is_the_client_field_name() {
+        assert_eq!(
+            CLIP_END_NAME,
+            nw_formats::objectstream::lowercase_crc32("endTime")
+        );
     }
 
     #[test]

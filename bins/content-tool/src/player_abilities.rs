@@ -569,6 +569,7 @@ mod tests {
             grid: Vec::new(),
             controller: nw_formats::mannequin::ControllerDef::default(),
             sheathe: None,
+            reactions: Vec::new(),
             ranged: HashMap::from([
                 (
                     (PROFILE.to_owned(), SIEGE.to_owned()),

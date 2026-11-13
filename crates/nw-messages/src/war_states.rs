@@ -36,6 +36,9 @@ pub const CAPTURE_POINT_TYPE_INDEX: u64 = 333;
 pub const TURRET_TYPE_INDEX: u64 = 4276;
 /// Type index of `MB::BuilderComponentReplicatedState`.
 pub const BUILDER_TYPE_INDEX: u64 = 2270;
+/// The player component of the builder state (Observed: component 23 of the own player in every
+/// retail camp ledger, `12a_msq_12_camptutorial`, `Hive_camping`, `Playthrough_Part_05`).
+pub const BUILDER_STATE_COMPONENT: u64 = 23;
 /// Type index of `MB::LandClaimComponentReplicatedState`.
 pub const LAND_CLAIM_TYPE_INDEX: u64 = 62;
 
@@ -813,11 +816,21 @@ impl TurretState {
 /// The player's builder state (2270, a player component); a `None` slot is not sent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BuilderState {
-    /// Slot 0, `playerBuilderState` (Observed: 0 to 2; Inferred: 0 idle, 1 placing, 2 placed).
+    /// Slot 0, `playerBuilderState` (Observed: 0 to 2). Observed in every retail camp build:
+    /// [`BUILDER_BUILDING`] from the accepted build interaction (`12a_msq_12_camptutorial`
+    /// 286.303 s) to its end (290.904 s) or its cancel (`Playthrough_Part_05` 3209.646 s),
+    /// [`BUILDER_IDLE`] after.
     pub builder: Option<u8>,
-    /// Slot 1, `numberOfPlacedDeployables` (Observed: 0 to 2).
+    /// Slot 1, `numberOfPlacedDeployables` (Observed: 0 to 2): 1 from a camp's placement
+    /// (`12a_msq_12_camptutorial` 284.402 s), 0 when the camp goes with no new one
+    /// (`99g_msq_sm_excavateartifacts` 222.871 s).
     pub placed: Option<u8>,
 }
+
+/// `playerBuilderState` of a player who builds nothing.
+pub const BUILDER_IDLE: u8 = 0;
+/// `playerBuilderState` of a player who commits resources to a structure.
+pub const BUILDER_BUILDING: u8 = 1;
 
 impl BuilderState {
     /// Reads the state.

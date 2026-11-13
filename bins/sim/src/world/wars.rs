@@ -33,6 +33,11 @@
 //! no such war carries result 0 and reason 0 (retail's reason codes other than 12 and 14 are
 //! Unknown).
 //!
+//! **Raids** (Observed, `arvaysa_ES_attacker_war_45vs45` 1.410 s): each side of a war entry
+//! names its raid from the war's first state on: the side's number is the raid id, then the
+//! raid's ten group ids, the raid entity's id and that id's facet entity ([`war_side`]). A
+//! roster player joins its side's raid at its move into the war ([`super::raids`]).
+//!
 //! **Roster** (Observed, `army-management`, `joining_defending_war_2`): 10 groups of 5; the
 //! roster calls (2779, 2781, 2782, 1871, 1676, 1892) are each answered with a 2733 (done
 //! `01 00000000`, refused `00 0000000e`). Inferred: the war leader is the side company's
@@ -42,7 +47,7 @@
 
 use std::collections::BTreeSet;
 
-use nw_bus::ConnectionRef;
+use nw_bus::{ConnectionRef, RaidSpec};
 use nw_db::{
     DbError, Declared, PgPool, RosterSeat, SeatChange, TerritoryWar, WAR_RESULT_SHOWN_MS,
     WarSignup, cancel_war, change_roster, declare_war, leave_war, resolve_war, sign_up_for_war,
@@ -50,19 +55,22 @@ use nw_db::{
 use nw_messages::facet::FacetHeader;
 use nw_messages::items::{FIRST_VERSION, FullList};
 use nw_messages::keyed_list::{IndexedList, KeyedList};
-use nw_messages::war_states::{NO_SIDE_KEY, WAR_READY};
+use nw_messages::social::raid_data::{RAID_TYPE_INVASION, RAID_TYPE_WAR};
+use nw_messages::war_states::WAR_READY;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     BundleMember, CallResult, GROUP_SLOTS, MemberState, PERMISSION_LEADER, PERMISSION_MEMBER,
     PERMISSION_OFFICER, REASON_BANNED, REASON_NONE, REASON_ROSTER_REFUSED, ROSTER_GROUPS,
     RosterGroup, RosterPlace, RosterPlayer, SIDE_ATTACKER, SIDE_DEFENDER, ServerMessage,
     SignupData, SignupEntry, TerritoryFacetReadyMsg, TerritoryInteractorState, WAR_DATA_COMPONENT,
-    WAR_KIND_WAR, WAR_PHASE_RESOLVED, WAR_PHASE_RUNNING, WAR_PHASE_SCHEDULED, WAR_PLAYER_KIND,
-    WarDataState, WarEntry, WarPlayer, WarSide, WarSignupClientMsg, WarSignupServerMsg, WarStatus,
+    WAR_KIND_INVASION, WAR_KIND_WAR, WAR_PHASE_RESOLVED, WAR_PHASE_RUNNING, WAR_PHASE_SCHEDULED,
+    WAR_PLAYER_KIND, WarDataState, WarEntry, WarPlayer, WarSide, WarSignupClientMsg,
+    WarSignupServerMsg, WarStatus, facet_of_raw_id,
 };
 use uuid::Uuid;
 
 use super::gm_chat::DONE;
+use super::raids::raid_spec;
 use super::{Player, SimWorld, send_now};
 
 /// The own player component of the territory interactor state (Observed: component 7 in the
@@ -124,14 +132,60 @@ fn side_company(war: &TerritoryWar, side: u32) -> Option<(Uuid, u8)> {
     }
 }
 
-/// An empty war side (Observed: the attacker side of every invasion). Inferred for both sides
-/// here: no raid entity of a war roster is made on this server.
-fn empty_side(number: u64) -> WarSide {
+/// The war data number of `side` of `war`: the attacker's is twice the war's number, the
+/// defender's one more (Observed: 9428 and 9429 in `arvaysa_ES_attacker_war_45vs45`). It is the
+/// side's raid id ([`super::raids`]).
+fn side_number(war: &TerritoryWar, side: u32) -> u64 {
+    if war.is_invasion() && side == SIDE_ATTACKER {
+        return u64::from(NO_SIDE);
+    }
+    let attacker = war.number.saturating_mul(2);
+    if side == SIDE_DEFENDER {
+        attacker.saturating_add(1)
+    } else {
+        attacker
+    }
+}
+
+/// The other side of `side`.
+const fn other_side(side: u32) -> u32 {
+    if side == SIDE_DEFENDER {
+        SIDE_ATTACKER
+    } else {
+        SIDE_DEFENDER
+    }
+}
+
+/// The raid of `side` of `war`: its side number as raid id, the other side's as opposing raid,
+/// raid type war ([`super::raids`]).
+fn war_raid(war: &TerritoryWar, side: u32) -> RaidSpec {
+    let kind = if war.is_invasion() {
+        RAID_TYPE_INVASION
+    } else {
+        RAID_TYPE_WAR
+    };
+    raid_spec(
+        war.war,
+        side_number(war, side),
+        kind,
+        side_number(war, other_side(side)),
+    )
+}
+
+/// The war data side of `side` of `war`: its raid id, the raid's group ids, its raid entity and
+/// that entity's facet entity as the key (Observed: `arvaysa_ES_attacker_war_45vs45` 1.410 s,
+/// the side's `raid` is the raid entity's card id and its key the id's first 8 bytes as a
+/// little-endian number, from the war's first state on).
+fn war_side(war: &TerritoryWar, side: u32) -> WarSide {
+    if war.is_invasion() && side == SIDE_ATTACKER {
+        return super::invasions::empty_side();
+    }
+    let raid = war_raid(war, side);
     WarSide {
-        number,
-        groups: Vec::new(),
-        raid: NO_ID,
-        key: NO_SIDE_KEY,
+        number: raid.raid,
+        groups: raid.groups.iter().map(|group| *group.as_bytes()).collect(),
+        raid: raid.entity,
+        key: facet_of_raw_id(&raid.entity),
     }
 }
 
@@ -144,16 +198,19 @@ fn war_entry(war: &TerritoryWar, now_ms: u64, world: u32) -> WarEntry {
     } else {
         world
     };
-    let attacker_number = war.number.saturating_mul(2);
     WarEntry {
         attacker_company: *war.attacker.0.as_bytes(),
         defender_company: *war.defender.0.as_bytes(),
-        attacker: empty_side(attacker_number),
-        defender: empty_side(attacker_number.saturating_add(1)),
+        attacker: war_side(war, SIDE_ATTACKER),
+        defender: war_side(war, SIDE_DEFENDER),
         attacker_faction: war.attacker.1,
         defender_faction: war.defender.1,
         territory: war.territory,
-        kind: WAR_KIND_WAR,
+        kind: if war.is_invasion() {
+            WAR_KIND_INVASION
+        } else {
+            WAR_KIND_WAR
+        },
         war: *war.war.as_bytes(),
         extra: NO_EXTRA,
         status: WarStatus {
@@ -315,6 +372,8 @@ pub(crate) enum WarJob {
         header: FacetHeader,
         answer_to: ConnectionRef,
     },
+    /// An invasion change ([`super::invasions`]).
+    Invasion(super::invasions::InvasionJob),
 }
 
 /// The answer a war job's result gives.
@@ -450,6 +509,7 @@ impl WarJob {
                 };
                 WarAnswer::Player(answer_to, vec![roster_answer(header, result)])
             }
+            Self::Invasion(job) => job.run(world).await,
         }
     }
 }
@@ -470,6 +530,8 @@ pub(super) struct Wars {
     wars: Vec<TerritoryWar>,
     /// Rises with each change of the wars read.
     version: u64,
+    /// A read came: later changes are roster changes for the pre-raid status ([`super::raids`]).
+    primed: bool,
     /// The jobs that wait for the loop.
     jobs: Vec<WarJob>,
     /// The wars whose end-of-time result was asked for.
@@ -493,16 +555,29 @@ impl Wars {
         }
     }
 
-    /// Takes the wars a read found (a failed read keeps the last ones).
-    pub(super) fn read(&mut self, read: Result<Vec<TerritoryWar>, DbError>) {
+    /// Takes the wars a read found (a failed read keeps the last ones); the wars they replaced,
+    /// none for the sim's first read ([`super::raids`]: the pre-raid statuses of a change).
+    pub(super) fn read(&mut self, read: Result<Vec<TerritoryWar>, DbError>) -> Vec<TerritoryWar> {
         match read {
-            Ok(wars) if wars != self.wars => {
-                self.wars = wars;
+            Ok(wars) => {
+                let primed = std::mem::replace(&mut self.primed, true);
+                if wars == self.wars {
+                    return Vec::new();
+                }
                 self.version += 1;
+                let replaced = std::mem::replace(&mut self.wars, wars);
+                if primed { replaced } else { Vec::new() }
             }
-            Ok(_) => {}
-            Err(error) => tracing::warn!(%error, "territory wars not read"),
+            Err(error) => {
+                tracing::warn!(%error, "territory wars not read");
+                Vec::new()
+            }
         }
+    }
+
+    /// The wars as this sim last read them.
+    pub(super) fn all(&self) -> &[TerritoryWar] {
+        &self.wars
     }
 
     /// The jobs to run at Unix ms `now_ms`: the asked changes and the result of each war whose
@@ -540,11 +615,42 @@ impl Wars {
         }
     }
 
+    /// The invasion `war` was lost at Unix ms `at_ms`; its territory loses a tier of each upgrade
+    /// of `lowered` ([`super::invasions`]). Once per war, as [`Self::win`].
+    pub(super) fn lose_invasion(&mut self, war: Uuid, at_ms: u64, lowered: Vec<u8>) {
+        if self.ending.insert(war) {
+            self.jobs
+                .push(WarJob::Invasion(super::invasions::InvasionJob::Lose {
+                    war,
+                    at_ms,
+                    lowered,
+                }));
+        }
+    }
+
+    /// Queues the invasion change `job` of a game master ([`super::invasions`]).
+    pub(super) fn push_invasion_job(&mut self, job: super::invasions::InvasionJob) {
+        self.jobs.push(WarJob::Invasion(job));
+    }
+
     /// The war without a result of `territory`.
-    fn open_war(&self, territory: u16) -> Option<&TerritoryWar> {
+    pub(super) fn open_war(&self, territory: u16) -> Option<&TerritoryWar> {
         self.wars
             .iter()
             .find(|war| war.territory == territory && war.result.is_none())
+    }
+
+    /// The raid of the war side `character` is on the roster of, and its raid group (its roster
+    /// group, [`super::raids`]); `None` for a player on no roster of a war without a result.
+    pub(super) fn raid_seat(&self, character: Uuid) -> Option<(RaidSpec, u8)> {
+        let (war, side) = self.own_war(character)?;
+        let (group, _) = war
+            .signups
+            .iter()
+            .find(|signup| signup.character == character && !signup.kicked)?
+            .roster
+            .place?;
+        Some((war_raid(war, u32::from(side)), group))
     }
 
     /// The war without a result `character` signed up for, and its side.
@@ -937,7 +1043,8 @@ impl SimWorld {
         answers: Vec<WarAnswer>,
         read: Result<Vec<TerritoryWar>, DbError>,
     ) {
-        self.wars.read(read);
+        let replaced = self.wars.read(read);
+        self.send_pre_raid_statuses(&replaced);
         for answer in answers {
             match answer {
                 WarAnswer::Quiet => {}
@@ -968,9 +1075,10 @@ impl SimWorld {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use nw_db::WAR_LENGTH_MS;
+    use nw_messages::social::raid_data::EVENT_RAID_GROUPS;
     use nw_messages::war_roster::{group_child, player_child};
 
     /// Made-up companies, characters and a war of territory 8.
@@ -984,7 +1092,11 @@ mod tests {
     const ATTACKER_FACTION: u8 = 2;
     const DEFENDER_FACTION: u8 = 1;
 
-    fn signup(character: Uuid, rank: Option<u8>, place: Option<(u8, u8)>) -> WarSignup {
+    pub(in crate::world) fn signup(
+        character: Uuid,
+        rank: Option<u8>,
+        place: Option<(u8, u8)>,
+    ) -> WarSignup {
         WarSignup {
             character,
             name: "Testa".to_owned(),
@@ -999,7 +1111,7 @@ mod tests {
         }
     }
 
-    fn war(signups: Vec<WarSignup>) -> TerritoryWar {
+    pub(in crate::world) fn war(signups: Vec<WarSignup>) -> TerritoryWar {
         TerritoryWar {
             war: Uuid::from_u128(0x77),
             territory: TERRITORY,
@@ -1046,6 +1158,14 @@ mod tests {
         let shown = war_entry(&entry, STARTS_MS + 2000, WORLD);
         assert_eq!(shown.status.winner, *ATTACKER.as_bytes());
         assert_eq!(shown.defender.number, shown.attacker.number + 1);
+        // Each side names its raid: ten groups, the raid entity and its facet key.
+        let attacker = war_raid(&entry, SIDE_ATTACKER);
+        assert_eq!(shown.attacker.number, attacker.raid);
+        assert_eq!(attacker.opposing, shown.defender.number);
+        assert_eq!(shown.attacker.groups.len(), EVENT_RAID_GROUPS);
+        assert_eq!(shown.attacker.raid, attacker.entity);
+        assert_eq!(shown.attacker.key, facet_of_raw_id(&attacker.entity));
+        assert_ne!(shown.attacker.raid, shown.defender.raid);
         assert_eq!(shown.attacker_faction, ATTACKER_FACTION);
     }
 
@@ -1080,6 +1200,25 @@ mod tests {
             panic!("full list");
         };
         assert_eq!(list.elements[0].status.game_mode, WORLD);
+    }
+
+    /// A roster player's raid is its side's, in its roster group; a sign-up off the roster has
+    /// none.
+    #[test]
+    fn a_roster_player_joins_its_side_raid_in_its_roster_group() {
+        let on_roster = Uuid::from_u128(0x501);
+        let off_roster = Uuid::from_u128(0x502);
+        let mut wars = Wars::of_world(WORLD);
+        wars.read(Ok(vec![war(vec![
+            signup(on_roster, None, Some((3, 1))),
+            signup(off_roster, None, None),
+        ])]));
+        let (raid, group) = wars.raid_seat(on_roster).expect("a raid");
+        assert_eq!(group, 3);
+        assert_eq!(raid.raid, side_number(&war(Vec::new()), SIDE_ATTACKER));
+        assert_eq!(raid.kind, RAID_TYPE_WAR);
+        assert_eq!(raid, war_raid(&war(Vec::new()), SIDE_ATTACKER));
+        assert!(wars.raid_seat(off_roster).is_none());
     }
 
     /// A war won in its instance asks for the winner's result once, and its end of time then

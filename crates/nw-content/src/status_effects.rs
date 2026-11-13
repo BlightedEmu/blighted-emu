@@ -98,6 +98,8 @@ const LUCK_COLUMNS: [&str; 12] = [
     "Weaving",
     "Woodworking",
 ];
+/// The gathering tradeskill of each `INS*` column, in column order.
+const INSTANT_GATHER_COLUMNS: [&str; 4] = ["Harvesting", "Logging", "Mining", "Skinning"];
 /// Separates the entries of an `EXPCategoricalProgression` cell (`2:1,4:1`).
 const PROGRESSION_SEPARATOR: char = ',';
 /// Separates a progression from its share in an `EXPCategoricalProgression` entry.
@@ -129,6 +131,12 @@ pub struct RewardMods {
     pub tradeskill_luck: Vec<(String, f64)>,
     /// `GlobalRollMod`: the bonus added to the other loot rolls.
     pub global_luck: f64,
+    /// The `INS*` columns: (lowercase gathering tradeskill, chance that a gather of it is done
+    /// in a single swing). Observed (texts of build 25810808): `ATB_Str_Bonus_300_2_Effect`
+    /// `INSMining` 0.25 is the Strength 300 bonus "25% chance to mine an ore with a single swing"
+    /// (`Str_Bonus_300_active`), `ATB_Con_Bonus_300_2_Effect` `INSLogging` 0.25 the Constitution
+    /// 300 bonus "25% chance to chop down a tree in a single swing" (`Con_Bonus_300_active`).
+    pub instant_gather: Vec<(String, f64)>,
     /// `TerritoryStandingMod`: the share added to territory standing gains.
     pub territory_standing: f64,
     /// `FactionReputationMod`: the share added to faction reputation gains.
@@ -157,10 +165,10 @@ impl RewardMods {
         };
         // Luck bonuses of a few thousand.
         let luck = |value: Option<i64>| value.map(|value| value as f64);
-        let woodworking = row
-            .exp_woodworking
-            .as_deref()
-            .and_then(|cell| cell.trim().parse().ok());
+        // `EXP_Woodworking`, `INSHarvesting` and `INSSkinning` are text columns: a number in
+        // them counts, another text does not.
+        let number = |cell: Option<&str>| cell.and_then(|cell| cell.trim().parse().ok());
+        let woodworking = number(row.exp_woodworking.as_deref());
         let mut progression = by_skill(
             &EXPERIENCE_COLUMNS,
             &[
@@ -209,6 +217,15 @@ impl RewardMods {
                 ],
             ),
             global_luck: row.global_roll_mod.unwrap_or(0.0),
+            instant_gather: by_skill(
+                &INSTANT_GATHER_COLUMNS,
+                &[
+                    number(row.ins_harvesting.as_deref()),
+                    row.ins_logging,
+                    row.ins_mining,
+                    number(row.ins_skinning.as_deref()),
+                ],
+            ),
             territory_standing: row.territory_standing_mod.unwrap_or(0.0),
             faction_reputation: row.faction_reputation_mod.unwrap_or(0.0),
             faction_tokens: row.faction_tokens_mod.unwrap_or(0.0),
@@ -238,6 +255,12 @@ impl RewardMods {
     /// The bonus it adds to the loot rolls of tradeskill `tradeskill` (any case).
     pub fn luck_of(&self, tradeskill: &str) -> f64 {
         share_of(&self.tradeskill_luck, tradeskill)
+    }
+
+    /// The chance it gives a gather of gathering tradeskill `tradeskill` (any case) to be done
+    /// in a single swing.
+    pub fn instant_gather_chance(&self, tradeskill: &str) -> f64 {
+        share_of(&self.instant_gather, tradeskill)
     }
 }
 
@@ -336,6 +359,14 @@ pub struct StatusEffectRule {
     pub damage_mods: Vec<(u8, f64)>,
     /// The `EFF_*` columns: (gathering tradeskill, gathering efficiency added).
     pub gather_efficiency: Vec<(String, f64)>,
+    /// `ItemClassWeightMods`: (lowercase item class, share added to the weight its items have
+    /// in the holder's bag; `ATB_Str_Bonus_150_2_Effect` `Ore=-0.1+Stone=-0.1+Gem=-0.1`, the
+    /// Strength 150 bonus "-10% weight of mined items").
+    pub item_weight_mods: Vec<(String, f64)>,
+    /// `Encumbrance`: what it adds to the holder's encumbrance limit (`ATB_Str_Bonus_50_2_Effect`
+    /// 250, the Strength 50 bonus "+25 encumbrance": the limit's units are a tenth of the shown
+    /// weight, as `EncumbranceBaseMax` 2000 of the player).
+    pub encumbrance: f64,
     /// The `MGS_*` and `MaxGS_*` columns: (crafting tradeskill, gear score added to the least
     /// and to the most gear score of its crafts).
     pub craft_gear_score: Vec<(String, i64, i64)>,
@@ -524,6 +555,10 @@ pub struct EffectSourceRow {
     pub damage_mods: Vec<(String, f64)>,
     /// The `EFF_*` columns: (gathering tradeskill, value).
     pub gather_efficiency: Vec<(String, f64)>,
+    /// `ItemClassWeightMods`.
+    pub item_weight_mods: Option<String>,
+    /// `Encumbrance`.
+    pub encumbrance: Option<i64>,
     /// The `MGS_*` and `MaxGS_*` columns: (crafting tradeskill, least, most).
     pub craft_gear_score: Vec<(String, i64, i64)>,
     /// The `WKN*` columns: (damage type `TypeID`, value).
@@ -657,6 +692,8 @@ impl EffectSourceRow {
             duration_mods: row.effect_duration_mods.clone(),
             absorption: by_type(absorption),
             damage_mods: by_type(damage),
+            item_weight_mods: row.item_class_weight_mods.clone(),
+            encumbrance: row.encumbrance,
             gather_efficiency: GATHER_EFFICIENCY_COLUMNS
                 .iter()
                 .zip([
@@ -943,6 +980,9 @@ fn rule(
         absorption: typed(&row.absorption),
         damage_mods: typed(&row.damage_mods),
         gather_efficiency: row.gather_efficiency.clone(),
+        item_weight_mods: mods(row.item_weight_mods.as_deref()),
+        // Encumbrance bonuses of a few thousand.
+        encumbrance: row.encumbrance.map_or(0.0, |bonus| bonus as f64),
         craft_gear_score: row.craft_gear_score.clone(),
         weakness: typed(&row.weakness),
         stamina_rate: row.stamina_rate.unwrap_or(0.0),
@@ -1195,6 +1235,8 @@ mod tests {
             "exp_woodworking": "1.4999999999999999E-2",
             "mult_mining": 0.1,
             "rol_mining": 3000,
+            "ins_mining": 0.25,
+            "ins_skinning": "0.5",
             "global_roll_mod": 1000.0,
             "faction_reputation_mod": 0.03,
             "faction_tokens_mod": 0.03,
@@ -1216,6 +1258,13 @@ mod tests {
         assert_eq!(mods.luck_of("Mining"), 3_000.0);
         assert_eq!(mods.luck_of("Logging"), 0.0);
         assert_eq!(mods.global_luck, 1_000.0);
+        assert_eq!(mods.instant_gather_chance("Mining"), 0.25);
+        assert_eq!(
+            mods.instant_gather_chance("skinning"),
+            0.5,
+            "a number in a text column"
+        );
+        assert_eq!(mods.instant_gather_chance("Logging"), 0.0);
         assert_eq!(
             (
                 mods.faction_reputation,

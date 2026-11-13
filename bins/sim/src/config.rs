@@ -12,7 +12,7 @@ use nw_db::DatabaseConfig;
 use std::sync::Arc;
 
 use nw_content::combat::{CombatData, CombatRows};
-use nw_content::instances::InstanceCatalog;
+use nw_content::instances::{InstanceCatalog, InstanceKind};
 use nw_content::leaderboards::{RotationCalendar, RotationSettings};
 use nw_content::loot_limits::{HOURS_PER_DAY, ResetClock};
 use nw_messages::LevelSpec;
@@ -258,6 +258,62 @@ pub struct SimConfig {
     /// character no tool). Empty in every world players use.
     #[serde(default)]
     pub start_tools: Vec<StartTool>,
+    /// The queued game modes this sim keeps closed: a join of one gets the answer of a mode that
+    /// does not run here (1234). An operator closes a mode whose run is not complete on this
+    /// build. Empty by default: every queued mode of the catalog is open.
+    #[serde(default)]
+    pub closed_queues: Vec<QueuedMode>,
+}
+
+/// A game mode that players enter by the matchmaking queue (`closed_queues`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedMode {
+    /// The 3v3 arena.
+    Arena,
+    /// Outpost Rush.
+    OutpostRush,
+    /// Capture the flag.
+    CaptureTheFlag,
+    /// The catacombs.
+    Catacombs,
+}
+
+impl QueuedMode {
+    /// Its bit in [`ClosedQueues`].
+    const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+
+    /// The mode of a queued instance kind; `None` for a kind entered by an entrance.
+    const fn of(kind: InstanceKind) -> Option<Self> {
+        match kind {
+            InstanceKind::Arena => Some(Self::Arena),
+            InstanceKind::OutpostRush => Some(Self::OutpostRush),
+            InstanceKind::CaptureTheFlag => Some(Self::CaptureTheFlag),
+            InstanceKind::Catacombs => Some(Self::Catacombs),
+            InstanceKind::Expedition | InstanceKind::RaidTrial | InstanceKind::SoloTrial => None,
+        }
+    }
+}
+
+/// The set of closed queued modes ([`SimConfig::closed_queues`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClosedQueues(u8);
+
+impl ClosedQueues {
+    /// The set of `modes`.
+    pub fn of(modes: &[QueuedMode]) -> Self {
+        Self(modes.iter().fold(0, |bits, mode| bits | mode.bit()))
+    }
+
+    /// Whether the queue of instance kind `kind` is closed.
+    pub const fn holds(self, kind: InstanceKind) -> bool {
+        match QueuedMode::of(kind) {
+            Some(mode) => self.0 & mode.bit() != 0,
+            None => false,
+        }
+    }
 }
 
 /// A tool a new character of a test world wears ([`SimConfig::start_tools`]).
@@ -500,6 +556,7 @@ impl SimConfig {
                 && self.level == nw_world::dungeon_scripts::OPEN_WORLD_LEVEL,
             instance_request_timeout_ms: self.instance_request_timeout_ms,
             max_gm_spawn: self.admin.max_gm_spawn,
+            closed_queues: ClosedQueues::of(&self.closed_queues),
             world_id: self.world_id,
         })
     }
@@ -635,6 +692,22 @@ pub(crate) mod tests {
 
     /// The fixed dice seed of the tests.
     const TEST_SEED: u64 = 1;
+
+    /// The committed config closes the catacombs queue (its run has no end yet) and keeps every
+    /// other queued mode open; an entrance kind is never a closed queue.
+    #[test]
+    fn the_committed_config_closes_only_the_catacombs_queue() {
+        let closed = ClosedQueues::of(&committed().closed_queues);
+        assert!(closed.holds(InstanceKind::Catacombs));
+        for open in [
+            InstanceKind::Arena,
+            InstanceKind::OutpostRush,
+            InstanceKind::CaptureTheFlag,
+            InstanceKind::Expedition,
+        ] {
+            assert!(!closed.holds(open), "{open:?}");
+        }
+    }
 
     #[test]
     fn start_tools_are_off_and_only_go_in_tool_slots() {

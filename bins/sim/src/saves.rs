@@ -35,6 +35,8 @@ pub struct QuestSave {
 /// The progression of a character to save, with the Unix time it was taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgressionSave {
+    /// Its account: the season saves there (global migration 0010).
+    pub account: Uuid,
     /// Its experience, coins, achievements and loot limit counts.
     pub progression: PlayerProgression,
     /// Unix milliseconds when the state was taken: a save of an older state never overwrites

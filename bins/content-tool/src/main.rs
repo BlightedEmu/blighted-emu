@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use content_tool::ability_instances::build_ability_instances;
 use content_tool::ai_data::{AiDataReport, DEFAULT_SERVER_PAK, build_ai_data};
 use content_tool::ai_trace::{
     AiTrace, DEFAULT_TRACE_PATH, read_creatures, trace_ledger, write_trace,
@@ -21,10 +22,12 @@ use content_tool::build::{
 };
 use content_tool::camp_slices::build_camp_slices;
 use content_tool::capture::CaptureReport;
+use content_tool::catacomb_tiles::build_catacomb_tiles;
 use content_tool::catacombs::{
     CatacombCheck, DEFAULT_GAME_MODE as DEFAULT_CATACOMB_MODE,
     DEFAULT_RUNS as DEFAULT_CATACOMB_RUNS, check as catacomb_check, map_rows as catacomb_map_rows,
 };
+use content_tool::claim_plots::build_claim_plots;
 use content_tool::codegen::run_codegen;
 use content_tool::collision::{CollisionError, CollisionReport, PakIndex, build_level_collision};
 use content_tool::combat::{CombatCheck, DEFAULT_LEVEL, DEFAULT_NWDB_DIR, check, read_nwdb};
@@ -341,6 +344,31 @@ enum Command {
     /// every camp slice, from the game paks.
     CampSlices {
         /// Output folder for `camp-slices-<build>.json`.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        out_dir: PathBuf,
+    },
+    /// Writes the catacombs tile file: the gameplay and art slice, the slots and the encounters
+    /// of every tile variation of the catacombs generation rules, and the power-up slices, from
+    /// the game paks (reads the mob prefab file in the output folder).
+    CatacombTiles {
+        /// Output folder for `catacomb-tiles-<build>.json`.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        out_dir: PathBuf,
+        /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+    },
+    /// Writes the claim plot file: the spawn group components of every territory's land claim
+    /// slice, from the game paks.
+    ClaimPlots {
+        /// Output folder for `claim-plots-<build>.json`.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        out_dir: PathBuf,
+    },
+    /// Writes the ability instance file: the instance type of every slice with an ability
+    /// instance component and the player's instance limits, from the game paks.
+    AbilityInstances {
+        /// Output folder for `ability-instances-<build>.json`.
         #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
         out_dir: PathBuf,
     },
@@ -754,6 +782,22 @@ fn run(cli: Cli) -> Result<(), ToolError> {
                 report.notes
             );
         }
+        Command::CatacombTiles { out_dir, bundle } => {
+            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
+            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
+            let index =
+                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
+            let report = build_catacomb_tiles(&index, &tables, &client_build, &out_dir)?;
+            println!(
+                "{}: {} tile variations, {} art tiles, {} plain slots, {} encounters, {} power-ups",
+                report.path.display(),
+                report.variations,
+                report.art_tiles,
+                report.props,
+                report.encounters,
+                report.power_ups
+            );
+        }
         Command::CampSlices { out_dir } => {
             let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
             let report = build_camp_slices(&source, &client_build, &out_dir)?;
@@ -763,6 +807,27 @@ fn run(cli: Cli) -> Result<(), ToolError> {
                 report.camps,
                 report.pvp_camps,
                 report.slices
+            );
+        }
+        Command::ClaimPlots { out_dir } => {
+            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
+            let report = build_claim_plots(&source, &client_build, &out_dir)?;
+            println!(
+                "{}: {} claim plots of {} claim plot folder slices",
+                report.path.display(),
+                report.plots,
+                report.slices
+            );
+        }
+        Command::AbilityInstances { out_dir } => {
+            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
+            let report = build_ability_instances(&source, &client_build, &out_dir)?;
+            println!(
+                "{}: {} typed slices of {} slices, {} limits",
+                report.path.display(),
+                report.typed,
+                report.slices,
+                report.limits
             );
         }
         Command::QuickCourses { out_dir } => {

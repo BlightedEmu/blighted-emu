@@ -17,6 +17,11 @@
 //!   when there is none, as retail sends it) and one result byte.
 //! - 5269: a big-endian `u16` (0x0800 in retail) and a variable part kept whole (its inner
 //!   layout is not fully traced; 10 bytes in retail).
+//! - 327 (a turret's projectile, `RS_offensive_war`: 25 bodies, one 46 to 97 ms after each
+//!   4274 and only to its shooter): the header names the turret's projectile spawner and the
+//!   turret; one byte (1 in every body; meaning Unknown), then the `GdeRef` of the projectile
+//!   entity the server spawned (its raw id and its facet entity, big-endian), whose card comes
+//!   in the same tick.
 
 use crate::facet::FacetHeader;
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
@@ -43,6 +48,12 @@ pub const AUTO_SPELL_LIFETIME_EXPIRE_TYPE_INDEX: u64 = 2863;
 pub const TURRET_HITSCAN_RESULT_TYPE_INDEX: u64 = 2720;
 /// Type index of `VitalsComponentClientFacet_NotifyDamageNumberBusOnTrueDamageReceived`.
 pub const TRUE_DAMAGE_RECEIVED_TYPE_INDEX: u64 = 5269;
+/// Type index of `ProjectileSpawnerComponentClientFacet_OnServerSpawnAuthoritativeProjectile`.
+pub const AUTHORITATIVE_PROJECTILE_TYPE_INDEX: u64 = 327;
+/// The byte before the projectile of every retail 327 (Observed: 1).
+pub const AUTHORITATIVE_PROJECTILE_FLAG: u8 = 1;
+/// The `GdeRef` length of a 327: the raw id and the facet entity.
+const PROJECTILE_REF_LEN: usize = RAW_ID_LEN + size_of::<u64>();
 
 /// Bytes after the header of every retail 2832.
 const HITSCAN_PAYLOAD_LEN: usize = 77;
@@ -205,6 +216,15 @@ pub enum CombatEffectMsg {
         /// The result byte (meaning Unknown).
         result: u8,
     },
+    /// 327: the projectile a turret shot of the player spawned.
+    AuthoritativeProjectile {
+        /// The header: the turret's projectile spawner and the turret.
+        header: FacetHeader,
+        /// The byte before the projectile ([`AUTHORITATIVE_PROJECTILE_FLAG`]).
+        flag: u8,
+        /// The projectile entity's `GdeRef`.
+        projectile: [u8; PROJECTILE_REF_LEN],
+    },
     /// 5269: true damage the player took. The part after the `u16` is kept whole.
     TrueDamageReceived {
         /// The header.
@@ -231,6 +251,7 @@ impl CombatEffectMsg {
                 | MOMENTARY_DAMAGE_DEALT_TYPE_INDEX
                 | AUTO_SPELL_LIFETIME_EXPIRE_TYPE_INDEX
                 | TURRET_HITSCAN_RESULT_TYPE_INDEX
+                | AUTHORITATIVE_PROJECTILE_TYPE_INDEX
                 | TRUE_DAMAGE_RECEIVED_TYPE_INDEX
         )
     }
@@ -248,6 +269,7 @@ impl CombatEffectMsg {
             Self::MomentaryDamageDealt { .. } => MOMENTARY_DAMAGE_DEALT_TYPE_INDEX,
             Self::AutoSpellLifetimeExpire { .. } => AUTO_SPELL_LIFETIME_EXPIRE_TYPE_INDEX,
             Self::TurretHitscanResult { .. } => TURRET_HITSCAN_RESULT_TYPE_INDEX,
+            Self::AuthoritativeProjectile { .. } => AUTHORITATIVE_PROJECTILE_TYPE_INDEX,
             Self::TrueDamageReceived { .. } => TRUE_DAMAGE_RECEIVED_TYPE_INDEX,
         }
     }
@@ -265,6 +287,7 @@ impl CombatEffectMsg {
             | Self::MomentaryDamageDealt { header }
             | Self::AutoSpellLifetimeExpire { header }
             | Self::TurretHitscanResult { header, .. }
+            | Self::AuthoritativeProjectile { header, .. }
             | Self::TrueDamageReceived { header, .. } => *header,
         }
     }
@@ -311,6 +334,11 @@ impl CombatEffectMsg {
                 position: [reader.f32()?, reader.f32()?, reader.f32()?],
                 target: reader.u64()?,
                 result: reader.u8()?,
+            },
+            AUTHORITATIVE_PROJECTILE_TYPE_INDEX => Self::AuthoritativeProjectile {
+                header,
+                flag: reader.u8()?,
+                projectile: reader.array()?,
             },
             TRUE_DAMAGE_RECEIVED_TYPE_INDEX => Self::TrueDamageReceived {
                 header,
@@ -378,6 +406,11 @@ impl CombatEffectMsg {
                 }
                 writer.u64(*target).u8(*result);
             }
+            Self::AuthoritativeProjectile {
+                flag, projectile, ..
+            } => {
+                writer.u8(*flag).bytes(projectile);
+            }
             Self::TrueDamageReceived { flags, payload, .. } => {
                 writer.u16(*flags).bytes(payload);
             }
@@ -411,6 +444,9 @@ mod tests {
         "b7e7192ce31a9c7d4cd31e6478d6829e45baa6d145a71f6a4262d8c000000000ffffffffff";
     const TURRET_HIT: &str =
         "b7e7192ce31a9c7d4cd31e6478d6829e45ba79a145a736b642679668a944a4750a5b26ec04";
+    /// Retail `RS_offensive_war` 860.017 s: the projectile of a cannon shot.
+    const PROJECTILE: &str =
+        "226ffdf02d207733589db2505bb1e5c8017aee8d51865a2a2171e59f8c7d48bfd2212a5a86518dee7a";
     /// Retail `Hive_gorgon_raid_second_boss`: true damage.
     const TRUE_DAMAGE: &str = "ced4d31dedf93e30e34e14f344a974cc0800010443acf7983f800000";
 
@@ -427,6 +463,7 @@ mod tests {
             (AUTO_SPELL_CAST_TYPE_INDEX, AUTO_CAST),
             (TURRET_HITSCAN_RESULT_TYPE_INDEX, TURRET_NONE),
             (TURRET_HITSCAN_RESULT_TYPE_INDEX, TURRET_HIT),
+            (AUTHORITATIVE_PROJECTILE_TYPE_INDEX, PROJECTILE),
             (TRUE_DAMAGE_RECEIVED_TYPE_INDEX, TRUE_DAMAGE),
         ] {
             let push = CombatEffectMsg::decode(type_index, &hex(body)).expect("reads");

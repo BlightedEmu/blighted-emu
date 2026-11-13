@@ -29,7 +29,10 @@
 //! destroyed objective counts (`Wave_01 - Objective: Interact IO`): retail sends each one a card
 //! of its slice with a variation, position, gatherable controller, delayed event and placement
 //! obstruction state (the encounter objects file, mined as the roots are). A player gathers it
-//! as any gatherable ([`super::gathering`]); the gather ends it, and its stage counts it.
+//! as any gatherable ([`super::gathering`]); the gather ends it, and its stage counts it. The
+//! table also holds objects a stage spawns that no player gathers (the holdout's solid door and
+//! door animation; their checks are in `world_event_doors.rs`): they stand until a stage or the
+//! encounter's end takes them away.
 
 use std::collections::HashMap;
 
@@ -60,9 +63,9 @@ const ROOT_NAMESPACE: u64 = 0x656e_636f_756e_7472;
 /// `MB::PositionInTheWorldReplicatedState`.
 const POSITION_CLASS: u64 = 13;
 /// `MB::EncounterManagerComponentReplicatedState`.
-const MANAGER_CLASS: u64 = 6786;
+pub(super) const MANAGER_CLASS: u64 = 6786;
 /// `MB::EncounterComponentReplicatedState`.
-const STAGE_CLASS: u64 = 2133;
+pub(super) const STAGE_CLASS: u64 = 2133;
 /// The slot byte and child mask of a manager or stage state.
 const STATE_HEAD: [u8; 2] = [0x01, 0x01];
 /// `eEncounterStatus_Uninitialized`.
@@ -90,7 +93,7 @@ const DELAY_DONE: DelayedEventState = DelayedEventState {
 
 /// The status history of one stage.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct History {
+pub(super) struct History {
     /// Its entries, oldest first: (sequence, status).
     entries: Vec<(u32, u32)>,
     /// The sequence of the next entry.
@@ -108,14 +111,14 @@ impl Default for History {
 
 impl History {
     /// Its newest status.
-    fn status(&self) -> u32 {
+    pub(super) fn status(&self) -> u32 {
         self.entries
             .last()
             .map_or(STATUS_UNINITIALIZED, |entry| entry.1)
     }
 
     /// Adds `status` when it is not the newest; `true` when it changed.
-    fn set(&mut self, status: u32) -> bool {
+    pub(super) fn set(&mut self, status: u32) -> bool {
         if self.status() == status {
             return false;
         }
@@ -127,7 +130,7 @@ impl History {
         true
     }
 
-    fn body(&self) -> Vec<u8> {
+    pub(super) fn body(&self) -> Vec<u8> {
         let mut body = STATE_HEAD.to_vec();
         body.push(u8::try_from(self.entries.len()).unwrap_or(u8::MAX));
         for (sequence, status) in &self.entries {
@@ -207,9 +210,11 @@ impl Root {
     }
 
     fn manager_member(&self) -> BundleMember {
-        let mut body = STATE_HEAD.to_vec();
-        body.extend_from_slice(&self.manager.to_be_bytes());
-        recorded(self.manager_component, MANAGER_CLASS, body)
+        recorded(
+            self.manager_component,
+            MANAGER_CLASS,
+            manager_body(self.manager),
+        )
     }
 
     fn state_members(&self) -> impl Iterator<Item = BundleMember> + '_ {
@@ -264,7 +269,14 @@ fn row_members(members: &[Vec<u8>]) -> Option<Vec<BundleMember>> {
         .ok()
 }
 
-fn recorded(component: u64, class: u64, body: Vec<u8>) -> BundleMember {
+/// The encounter manager state body of `status` (`01 01 status:u32`).
+pub(super) fn manager_body(status: u32) -> Vec<u8> {
+    let mut body = STATE_HEAD.to_vec();
+    body.extend_from_slice(&status.to_be_bytes());
+    body
+}
+
+pub(super) fn recorded(component: u64, class: u64, body: Vec<u8>) -> BundleMember {
     BundleMember {
         component,
         state: MemberState::Recorded { class, body },
@@ -563,9 +575,9 @@ impl EncounterObjects {
         }
     }
 
-    /// Spawns a start object of slice `slice` at `at`; its entity number, or `None` for a
-    /// slice that is no start object of the table.
-    pub(super) fn spawn(&mut self, slice: &str, at: [f32; 3]) -> Option<u64> {
+    /// Spawns a start object of slice `slice` at `at`, turned `yaw_deg` about the up axis; its
+    /// entity number, or `None` for a slice that is no start object of the table.
+    pub(super) fn spawn(&mut self, slice: &str, at: [f32; 3], yaw_deg: f32) -> Option<u64> {
         let kind = self.kinds.get(slice)?;
         let index = usize::try_from(self.spawned).ok()?;
         let number = ENCOUNTER_OBJECT_ENTITY_BASE + self.spawned;
@@ -574,7 +586,7 @@ impl EncounterObjects {
         let members = std::iter::once(card(kind.asset, gde_ref))
             .chain(kind.members.iter().map(|member| {
                 if member.state.type_index() == POSITION_CLASS {
-                    place_member(member.component, at, 0.0)
+                    place_member(member.component, at, yaw_deg.to_radians() / 2.0)
                 } else {
                     member.clone()
                 }
@@ -821,8 +833,8 @@ mod tests {
     #[test]
     fn a_start_object_spawns_at_its_place_shows_once_and_goes_when_removed() {
         let mut objects = EncounterObjects::build(&object_table());
-        assert_eq!(objects.spawn("slices/other.dynamicslice", AT), None);
-        let number = objects.spawn(OBJECT_SLICE, AT).expect("spawned");
+        assert_eq!(objects.spawn("slices/other.dynamicslice", AT, 0.0), None);
+        let number = objects.spawn(OBJECT_SLICE, AT, 0.0).expect("spawned");
         assert!(EncounterObjects::is_object(number) && objects.stands(number));
         let near = Position {
             x: AT[0],

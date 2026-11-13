@@ -73,7 +73,7 @@ const ALL_SIDES: u8 = NORTH | EAST | SOUTH | WEST;
 /// Bits a quarter turn moves the sides by.
 const SIDE_BITS: u8 = 4;
 /// The sides with the cell step to the neighbour on that side (north is +y).
-const SIDES: [(u8, [i32; 2]); 4] = [
+pub const SIDES: [(u8, [i32; 2]); 4] = [
     (NORTH, [0, 1]),
     (EAST, [1, 0]),
     (SOUTH, [0, -1]),

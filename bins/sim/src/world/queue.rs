@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The matchmaking queue of the 3v3 arena and of Outpost Rush on the player's sim (arena flow
-//! study 2026-11-11, `local-data/findings/2026-11-11-arena-3v3-flow.md` sections 1 and 2;
-//! Outpost Rush study 2026-11-12, `local-data/findings/2026-11-12-outpost-rush.md`): the
+//! The matchmaking queue of the 3v3 arena, of Outpost Rush and of capture the flag on the
+//! player's sim (arena flow study 2026-11-11, `local-data/findings/2026-11-11-arena-3v3-flow.md`
+//! sections 1 and 2; Outpost Rush study 2026-11-12, `local-data/findings/2026-11-12-outpost-rush.md`;
+//! capture the flag study 2026-11-12, `local-data/notes/2026-11-12-big-systems-plan.md`): the
 //! client's queue calls, the player's participant state (3312) at each step, the queue calls to
 //! the director ([`nw_bus::matchmaking`]) and what the director sends back.
 //!
@@ -32,10 +33,28 @@
 //! s, or at once in a running match); the 5741 accept is answered with 5449 for that player
 //! alone 0.3 to 0.4 s later (3 of 3), then 5450, status 5 and the move.
 //!
+//! Observed for capture the flag (retail `CTF_QueueAndJoin_PickUpSpeedHealthAndFlagThenDied`,
+//! `CTF01`): the join is 6254 `01 3016 0001 00` solo (27.657 s), the same 6295 and two 6272; the
+//! queue entry names `930fce8f` with `matchmakingServiceActivity` 4 (29.573 s; `CTF01` 32.752
+//! s); a pop sets the entry's fourth value to 10, status 10, the match id and 20 desired players
+//! (37.023 s; `CTF01` 312.929 s); the invite sets status 1 (39.588 s; `CTF01` 314.145 s); the
+//! 5741 accept is answered with 5449 for that player alone 0.43 s later (43.389 to 43.821 s),
+//! then 5450, status 5 and the move to `NW_CTF_003_Long` (44.731 s).
+//!
+//! Observed for the catacombs (retail `CATACOMBS2`, `CATACOMBS`, `CATACOMBS5`, `CATACOMBS6`,
+//! `Hive catacomes test 2`, `Hive catacombs test 4`): a 5039 of `2736ba35` is answered with 5038
+//! allowed (`CATACOMBS2` 3.671 s); the join is 6254 `01 0c16 0001 00` (`CATACOMBS2` 4.546 s) or
+//! `01 0c16 0001 01` (`CATACOMBS6` 6.734 s), the same 6295 and two 6272; the queue entry names
+//! `2736ba35` with `matchmakingServiceActivity` 6 (7.006 s). A join without the last byte gets
+//! status 1 and the match id with no pop (11.805 s); a join with it gets a pop with the entry's
+//! match size the players found, status 10, the match id and 3 desired players (`CATACOMBS6`
+//! 79.283 s: 2 players), then status 1 (81.267 s). The 5741 accept is answered with 5449 0.5 to
+//! 0.9 s later, then 5450, status 5 and the move to `NW_Catacomb_00` (`CATACOMBS2` 14.983 to
+//! 15.671 s), into the run's start room ([`super::catacombs`]).
+//!
 //! Inferred: a queue join during the bar is refused with 1234 (no capture holds one); a player
-//! who leaves the sim (a logout, a move to another sim) leaves the queue; the activity values of
-//! the other modes (capture the flag `4316`, catacombs `3016`) are refused as before (their game
-//! modes do not run here).
+//! who leaves the sim (a logout, a move to another sim) leaves the queue; an activity of a game
+//! mode this sim's catalog does not hold is refused with 1234.
 
 use bevy_ecs::entity::Entity;
 use nw_bus::{ArenaSeat, MatchPlace, QueueCall, QueueJoin, QueueNews, QueueNewsKind};
@@ -48,6 +67,7 @@ use nw_messages::{FacetHeader, GameModeServerMsg, LeftGameModeQueueMsg, ServerMe
 use nw_sim_core::Position;
 use uuid::Uuid;
 
+use super::catacombs::run_start_spot;
 use super::game_mode_entity::full;
 use super::{Player, SimWorld, send_now, unix_ns};
 
@@ -56,14 +76,24 @@ pub(super) const ARENA_ACTIVITY: u16 = 0x3316;
 /// The 6254 activity of Outpost Rush (Observed: `opr_que_and_lost` 522.066 s, `OPR_TEST3`
 /// 12.510 s).
 pub(super) const OUTPOST_RUSH_ACTIVITY: u16 = 0x3116;
+/// The 6254 activity of capture the flag (Observed:
+/// `CTF_QueueAndJoin_PickUpSpeedHealthAndFlagThenDied` 27.657 s, `CTF01`).
+pub(super) const CAPTURE_THE_FLAG_ACTIVITY: u16 = 0x3016;
+/// The 6254 activity of the catacombs (Observed: `CATACOMBS2` 4.546 s, `CATACOMBS6` 6.734 s and
+/// three Hive catacombs ledgers).
+pub(super) const CATACOMBS_ACTIVITY: u16 = 0x0c16;
 /// The first byte of every retail 6295.
 const ROLE_SELECTION_FLAG: u8 = 1;
 /// The 6272 calls of one join; the last one queues (Observed: two per join).
 const ROLE_PICKS: u8 = 2;
-/// `matchmakingServiceActivity` while queued for the arena, for Outpost Rush, and with no queue
-/// (Observed).
+/// `matchmakingServiceActivity` while queued for the arena, for Outpost Rush, for capture the
+/// flag, and with no queue (Observed).
 const ARENA_QUEUED_ACTIVITY: u8 = 2;
 const OUTPOST_RUSH_QUEUED_ACTIVITY: u8 = 0;
+const CAPTURE_THE_FLAG_QUEUED_ACTIVITY: u8 = 4;
+/// `matchmakingServiceActivity` while queued for the catacombs (Observed: `CATACOMBS2` 7.006 s,
+/// `CATACOMBS6` 13.649 s, `Hive catacombs test 4` 106.205 s).
+const CATACOMBS_QUEUED_ACTIVITY: u8 = 6;
 const IDLE_ACTIVITY: u8 = 0x16;
 /// `matchmakingServiceStatus` values (Observed): none, a pop, the wait after it, the move.
 const STATUS_NONE: u32 = 0;
@@ -78,6 +108,10 @@ const ENTRY_UNKNOWN: u32 = 0;
 const ENTRY_FLAG: u8 = 1;
 /// The match size of an entry before a pop.
 const NOT_MATCHED: u32 = 0;
+/// The fourth value of a capture the flag entry after a pop (Observed: 10 with 20 desired
+/// players in both retail pops, 37.023 s and `CTF01` 312.929 s; its meaning is Unknown: the
+/// arena's entry holds the match size there).
+const CAPTURE_THE_FLAG_POPPED_ENTRY: u32 = 10;
 /// The `groupActivityEligibility` the sim sends with a subscribe: the bits of retail `3v3`
 /// 661.769 s (their meaning is Unknown; every character had other bits).
 const GROUP_ELIGIBILITY: [u8; ELIGIBILITY_LEN] = [
@@ -156,6 +190,16 @@ fn queue_list(version: u64, queued: Option<&Queued>) -> nw_messages::items::Full
     )
 }
 
+/// `matchmakingServiceActivity` while queued for a game mode of kind `kind` (Observed).
+const fn queued_activity(kind: InstanceKind) -> u8 {
+    match kind {
+        InstanceKind::OutpostRush => OUTPOST_RUSH_QUEUED_ACTIVITY,
+        InstanceKind::CaptureTheFlag => CAPTURE_THE_FLAG_QUEUED_ACTIVITY,
+        InstanceKind::Catacombs => CATACOMBS_QUEUED_ACTIVITY,
+        _ => ARENA_QUEUED_ACTIVITY,
+    }
+}
+
 /// The matchmaking service of no match: status 0, no match id, no players.
 fn no_match() -> MatchmakingService {
     MatchmakingService {
@@ -184,14 +228,16 @@ impl SimWorld {
     }
 
     /// The game mode of the queue activity `activity`, when it runs here: the instance
-    /// catalog's arena or Outpost Rush (each is entered by its queue only).
+    /// catalog's arena, Outpost Rush or capture the flag (each is entered by its queue only).
     fn queued_mode(&self, activity: u16) -> Option<(u32, String)> {
         let kind = match activity {
             ARENA_ACTIVITY => InstanceKind::Arena,
             OUTPOST_RUSH_ACTIVITY => InstanceKind::OutpostRush,
+            CAPTURE_THE_FLAG_ACTIVITY => InstanceKind::CaptureTheFlag,
+            CATACOMBS_ACTIVITY => InstanceKind::Catacombs,
             _ => return None,
         };
-        if self.instance_sim {
+        if self.instance_sim || self.settings.closed_queues.holds(kind) {
             return None;
         }
         self.content
@@ -269,11 +315,7 @@ impl SimWorld {
             match_size: NOT_MATCHED,
         };
         player.list_version += 1;
-        let activity = if mode.kind == InstanceKind::OutpostRush {
-            OUTPOST_RUSH_QUEUED_ACTIVITY
-        } else {
-            ARENA_QUEUED_ACTIVITY
-        };
+        let activity = queued_activity(mode.kind);
         let state = GameModeParticipantState {
             queuing: Some(queue_list(player.list_version, Some(&queued))),
             service: MatchmakingService {
@@ -290,6 +332,7 @@ impl SimWorld {
             role: pick.role,
             game_mode: mode.id.clone(),
             level: mode.rotation_map(unix_s).folder.clone(),
+            fill: pick.group,
         });
         tracing::info!(player = player.number, game_mode = %mode.id, "player queued");
         self.queue_calls.push(call);
@@ -377,10 +420,14 @@ impl SimWorld {
         let Some(mode) = content.instances.by_crc(crc) else {
             return;
         };
-        let Some(spot) = mode
-            .map_of(&place.level)
-            .and_then(|map| team_spot(map, place.team, place.place))
-        else {
+        // A generated level has no fixed spot: its players appear in the run's start room.
+        let spot = if mode.generated {
+            run_start_spot(&content, place.instance)
+        } else {
+            mode.map_of(&place.level)
+                .and_then(|map| team_spot(map, place.team, place.place))
+        };
+        let Some(spot) = spot else {
             tracing::warn!(player = player.number, level = %place.level, "arena map has no spot for the team");
             return;
         };
@@ -415,13 +462,26 @@ impl SimWorld {
         };
         let server_ms = self.server_ms;
         let server_ns = server_ms.saturating_mul(nw_messages::NS_PER_MS);
-        // An Outpost Rush pop waits for the director's invite; an arena pop turns to the wait
-        // after [`POPPED_STATUS_MS`].
-        let invited_later = self
+        // An Outpost Rush or capture the flag pop waits for the director's invite; an arena pop
+        // turns to the wait after [`POPPED_STATUS_MS`].
+        let kind = self
             .content
             .instances
             .by_id(&news.game_mode)
-            .is_some_and(|mode| mode.kind == InstanceKind::OutpostRush);
+            .map(|mode| mode.kind);
+        let invited_later = matches!(
+            kind,
+            Some(
+                InstanceKind::OutpostRush | InstanceKind::CaptureTheFlag | InstanceKind::Catacombs
+            )
+        );
+        // A catacombs pop names the players found and the team's 3 desired players (module text).
+        let team_capacity = self
+            .content
+            .instances
+            .by_id(&news.game_mode)
+            .filter(|mode| mode.kind == InstanceKind::Catacombs)
+            .map(|mode| mode.capacity);
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
@@ -433,7 +493,11 @@ impl SimWorld {
                 let Some(queued) = player.queue.queued.as_mut() else {
                     return;
                 };
-                queued.match_size = size;
+                queued.match_size = if kind == Some(InstanceKind::CaptureTheFlag) {
+                    CAPTURE_THE_FLAG_POPPED_ENTRY
+                } else {
+                    size
+                };
                 let queued = queued.clone();
                 player.queue.proposal = Some(Proposal {
                     match_id,
@@ -445,7 +509,7 @@ impl SimWorld {
                     service: MatchmakingService {
                         status: Some(STATUS_POPPED),
                         match_id: Some(match_id.hyphenated().to_string()),
-                        desired: u8::try_from(size).ok(),
+                        desired: u8::try_from(team_capacity.unwrap_or(size)).ok(),
                         ..MatchmakingService::default()
                     },
                     ..GameModeParticipantState::default()
@@ -458,6 +522,23 @@ impl SimWorld {
                 },
                 ..GameModeParticipantState::default()
             },
+            QueueNewsKind::Matched { match_id } => {
+                if player.queue.queued.is_none() {
+                    return;
+                }
+                player.queue.proposal = Some(Proposal {
+                    match_id,
+                    popped_ms: None,
+                });
+                GameModeParticipantState {
+                    service: MatchmakingService {
+                        status: Some(STATUS_WAITING),
+                        match_id: Some(match_id.hyphenated().to_string()),
+                        ..MatchmakingService::default()
+                    },
+                    ..GameModeParticipantState::default()
+                }
+            }
             QueueNewsKind::Accepted { count } => GameModeParticipantState {
                 service: MatchmakingService {
                     accepted: Some(u8::try_from(count).unwrap_or(u8::MAX)),
@@ -620,7 +701,7 @@ pub(super) fn team_spot(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use nw_content::instances::{InstanceMap, Teleport};
 
     use super::*;
@@ -921,6 +1002,143 @@ mod tests {
             .proposal;
         assert_eq!(
             proposal.map(|proposal| proposal.popped_ms),
+            Some(None),
+            "the invite comes from the director, not a timer"
+        );
+    }
+
+    /// The retail `CaptureTheFlag` mode on `NW_CTF_003_Long` (made from its rows).
+    pub(in crate::world) fn capture_the_flag() -> nw_content::instances::InstanceMode {
+        use nw_content::instances::{InstanceMap, Teleport};
+        use nw_formats::objectstream::lowercase_crc32;
+        let map = |folder: &str,
+                   name: &str,
+                   frame: [f32; 4],
+                   teleports: [([f32; 3], f32); 2],
+                   id: &str| {
+            InstanceMap {
+                folder: folder.to_owned(),
+                map_name: name.to_owned(),
+                coatlicue_path: format!("coatlicue/{name}"),
+                frame,
+                teleports: teleports
+                    .into_iter()
+                    .map(|(position, yaw_deg)| Teleport { position, yaw_deg })
+                    .collect(),
+                formation: Vec::new(),
+                map_crc: lowercase_crc32(id),
+            }
+        };
+        let long = map(
+            "nw_ctf_003_long",
+            "NW_CTF_003_Long",
+            [864.0, 864.0, 320.0, 288.0],
+            [
+                ([1087.669, 1097.134, 190.888], 150.0),
+                ([1005.846, 955.411, 189.979], 330.0),
+            ],
+            "CTF_003_Long",
+        );
+        let wide = map(
+            "nw_ctf_002_wide",
+            "NW_CTF_002_Wide",
+            [632.0, 1024.0, 384.0, 288.0],
+            [([854.1, 1263.8, 84.4], 180.0), ([854.4, 1113.2, 84.2], 0.0)],
+            "CTF_002_Wide",
+        );
+        nw_content::instances::InstanceMode {
+            id: nw_content::instances::CAPTURE_THE_FLAG_GAME_MODE.to_owned(),
+            crc: lowercase_crc32(nw_content::instances::CAPTURE_THE_FLAG_GAME_MODE),
+            kind: InstanceKind::CaptureTheFlag,
+            map: long.clone(),
+            capacity: nw_content::instances::CAPTURE_THE_FLAG_MATCH_PLAYERS,
+            min_group: 0,
+            required_level: Some(60),
+            remote_entry: false,
+            respawns: false,
+            mutable: false,
+            timeout_seconds: None,
+            victory_delay_seconds: None,
+            items_removed_on_exit: vec!["OutpostRushOnly".to_owned()],
+            required_item_classes: Vec::new(),
+            entry_achievement: None,
+            loot_tags: vec!["OutpostRush".to_owned()],
+            container_level: None,
+            counter: nw_content::instances::EntryCounter::Uncounted,
+            game_mode_index: nw_content::instances::NO_INDEX,
+            generated: false,
+            rotation: vec![long, wide],
+            rotation_span_seconds: Some(3600),
+        }
+    }
+
+    #[test]
+    fn a_capture_the_flag_join_queues_with_activity_four_and_its_pop_waits_for_the_invite() {
+        assert_eq!(queued_activity(InstanceKind::CaptureTheFlag), 4);
+        assert_eq!(queued_activity(InstanceKind::OutpostRush), 0);
+        assert_eq!(queued_activity(InstanceKind::Arena), 2);
+        let mut world = crate::world::tests::world_with_spawns(Vec::new());
+        world.content = std::sync::Arc::new(crate::player_content::PlayerContent {
+            instances: nw_content::instances::InstanceCatalog::build([capture_the_flag()]),
+            ..crate::player_content::PlayerContent::default()
+        });
+        crate::world::tests::join(&mut world, PLAYER, 100.0);
+        let header = participant_header(PLAYER);
+        // Retail `CTF_QueueAndJoin_PickUpSpeedHealthAndFlagThenDied` 27.657 s: 6254
+        // `01 3016 0001 00`, answered with 6295 `01 3016 0001`.
+        let answers = call(
+            &mut world,
+            nw_messages::GameModeClientMsg::JoinQueueForActivities {
+                header,
+                activities: vec![nw_messages::QueueActivity {
+                    activity: CAPTURE_THE_FLAG_ACTIVITY,
+                    extra: 1,
+                    flag: 0,
+                }],
+            },
+        );
+        assert_eq!(
+            answers,
+            [ServerMessage::GameMode(
+                GameModeServerMsg::StartMatchmakingRoleSelection {
+                    header,
+                    flag: ROLE_SELECTION_FLAG,
+                    activity: CAPTURE_THE_FLAG_ACTIVITY,
+                    extra: 1,
+                }
+            )]
+        );
+        for role in [1, 3] {
+            call(
+                &mut world,
+                nw_messages::GameModeClientMsg::SetMatchmakingRole { header, role },
+            );
+        }
+        let calls = world.take_queue_calls();
+        let [QueueCall::Join(join)] = calls.as_slice() else {
+            panic!("one join: {calls:?}");
+        };
+        assert_eq!(
+            join.game_mode,
+            nw_content::instances::CAPTURE_THE_FLAG_GAME_MODE
+        );
+        let entity = world.player_by_number(PLAYER).expect("player");
+        world.queue_news(QueueNews {
+            character: join.character,
+            game_mode: nw_content::instances::CAPTURE_THE_FLAG_GAME_MODE.to_owned(),
+            kind: QueueNewsKind::Popped {
+                match_id: Uuid::from_u128(6),
+                size: nw_content::instances::CAPTURE_THE_FLAG_MATCH_PLAYERS,
+            },
+        });
+        let queue = &world.world.get::<Player>(entity).expect("player").queue;
+        assert_eq!(
+            queue.queued.as_ref().map(|queued| queued.match_size),
+            Some(CAPTURE_THE_FLAG_POPPED_ENTRY),
+            "the retail entry holds 10 after the pop"
+        );
+        assert_eq!(
+            queue.proposal.map(|proposal| proposal.popped_ms),
             Some(None),
             "the invite comes from the director, not a timer"
         );

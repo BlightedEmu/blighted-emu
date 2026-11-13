@@ -10,16 +10,18 @@
 //!
 //! It also opens the instance of each territory war ([`crate::war_instances`] decides): it reads
 //! the wars every [`WAR_READ_INTERVAL`], opens a due war's instance on a free instance sim of the
-//! open world level, and tells every sim ([`WarInstanceNews`]) so they move the roster in.
+//! open world level, and tells every sim ([`WarInstanceNews`]) so they move the roster in. After
+//! each read it steps the territories' darkness and fills the invasions' rosters
+//! ([`crate::invasions`]).
 
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nw_bus::{
-    Bus, BusId, GroupAnswer, GroupQuery, Incoming, InstanceCommand, InstanceOpened,
-    InstanceRefusal, InstanceReply, InstanceRequest, QueueCall, QueueNews, QueueNewsKind, SimSlot,
-    WAR_GAME_MODE, WarInstance, WarInstanceNews, subject,
+    Bus, BusId, EntranceRunNews, GroupAnswer, GroupQuery, Incoming, InstanceCommand,
+    InstanceOpened, InstanceRefusal, InstanceReply, InstanceRequest, QueueCall, QueueNews,
+    QueueNewsKind, SimSlot, WAR_GAME_MODE, WarInstance, WarInstanceNews, subject,
 };
 use nw_content::war_forts::WarForts;
 use nw_db::{DbError, PgPool, TerritoryWar, territory_wars};
@@ -142,6 +144,8 @@ struct WarLink {
     db: PgPool,
     /// The forts a capture shows: a war of another fort gets no instance.
     forts: WarForts,
+    /// The territories whose fort has an invasion.
+    invadable: std::collections::BTreeSet<u16>,
     /// The wars that have an instance or wait for one.
     instances: WarInstances,
     /// When the next read is due.
@@ -176,16 +180,18 @@ impl InstanceLoop {
     /// its settings (none in a world without instances).
     #[must_use]
     pub fn with_wars(mut self, db: PgPool) -> Self {
-        let Some(forts) = self
-            .settings
-            .as_ref()
-            .map(|settings| settings.war_forts.clone())
-        else {
+        let Some((forts, invadable)) = self.settings.as_ref().map(|settings| {
+            (
+                settings.war_forts.clone(),
+                settings.invasion_territories.clone(),
+            )
+        }) else {
             return self;
         };
         self.wars = Some(WarLink {
             db,
             forts,
+            invadable,
             instances: WarInstances::default(),
             next_read: Instant::now(),
             reading: false,
@@ -313,8 +319,17 @@ impl InstanceLoop {
         link.reading = true;
         link.next_read = now + WAR_READ_INTERVAL;
         let (db, events) = (link.db.clone(), self.events.clone());
+        let invadable = link.invadable.clone();
         tokio::spawn(async move {
-            let read = territory_wars(&db, unix_ms()).await;
+            let now_ms = unix_ms();
+            let mut read = territory_wars(&db, now_ms).await;
+            if let Ok(wars) = &read {
+                match crate::invasions::step(&db, wars, &invadable, now_ms).await {
+                    Ok(true) => read = territory_wars(&db, now_ms).await,
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(%error, "darkness not stepped"),
+                }
+            }
             // The loop may have stopped; then the wars no longer matter.
             let _ = events.send(InstanceEvent::WarsRead(read)).await;
         });
@@ -606,8 +621,9 @@ impl InstanceLoop {
     }
 
     /// Each heartbeat interval: ends the instances that ran out of time or stayed empty, adopts
-    /// the ones a restarted director does not know, starts and stops instance sims, and runs the
-    /// matchmaking queue (the accept windows that ended, the matches it can form).
+    /// the ones a restarted director does not know, tells the sims' dungeon entrances which
+    /// instances ended, starts and stops instance sims, and runs the matchmaking queue (the
+    /// accept windows that ended, the matches it can form).
     pub fn timer(&mut self, sims: &SimRegistry) {
         let Some(settings) = self.settings.clone() else {
             return;
@@ -625,10 +641,27 @@ impl InstanceLoop {
             self.close(closing.sim, closing.instance);
             self.instances.closed(closing.instance);
         }
+        for instance in self.instances.take_ended() {
+            self.publish_run_end(instance);
+        }
         metrics::gauge!(METRIC_INSTANCES).set(self.instances.len() as f64);
         if let Some(launch) = &settings.launch {
             self.launch(launch, sims);
         }
+    }
+
+    /// Tells every sim that the run of `instance` ended: its entrance drops it.
+    fn publish_run_end(&self, instance: Uuid) {
+        let (bus, world_id) = (self.bus.clone(), self.world_id);
+        tokio::spawn(async move {
+            let news = EntranceRunNews::Ended { instance };
+            if let Err(error) = bus
+                .publish(subject::sims_entrance_runs(world_id), &news)
+                .await
+            {
+                tracing::warn!(%error, %instance, "entrance run end not sent");
+            }
+        });
     }
 
     fn close(&self, sim: SimSlot, instance: Uuid) {

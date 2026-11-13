@@ -35,14 +35,16 @@ use nw_content::tradeskill_xp::{ROLL_BONUS_SCALE, bonus_crafts};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::crafting_state::{CraftingCooldown, CraftingState};
 use nw_messages::facet::component;
+use nw_messages::item_descriptor::ItemDescriptor;
 use nw_messages::items::{FIRST_VERSION, SYNC_CRAFT_USED, SYNC_CRAFTED};
+use nw_messages::keyed_list::KeyedList;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    BuildableControllerState, BuildableGridState, BundleGroup, BundleMember, CommittedResource,
-    CraftIngredient, CraftProgressMsg, DelayedEventState, FacetHeader, FullList,
-    GdeMetadataReplicatedState, GridSide, GuildCrest, InteractionRequest, MemberState,
-    OwnerIdentification, OwnershipState, PlacementObstructionState, ServerMessage,
-    TerritoryInterfaceState,
+    BuildableControllerState, BuildableGridState, BundleGroup, BundleMember, CraftIngredient,
+    CraftProgressMsg, DelayedEventState, FacetHeader, FullList, GdeMetadataReplicatedState,
+    GridSide, GuildCrest, InteractionRequest, MemberState, OwnerIdentification, OwnershipState,
+    PlacementObstructionState, ResourceItem, ServerMessage, TerritoryInterfaceState,
+    committed_resource,
 };
 use nw_sim_core::Position;
 use nw_world::stations::CraftingStation;
@@ -163,7 +165,7 @@ fn station_members(
             MemberState::BuildableController(BuildableControllerState {
                 current_state: Some(state),
                 check_foundation_events: Some(CHECK_FOUNDATION_EVENTS),
-                committed_resources: Some(list_at(version, resources)),
+                committed_resources: Some(KeyedList::full(version, resources)),
                 ..BuildableControllerState::default()
             }),
         ));
@@ -246,10 +248,10 @@ fn answer_header(request: Option<FacetHeader>, number: u64) -> FacetHeader {
 }
 
 /// The committed resources of a structure that costs `costs` (item id, quantity).
-pub(super) fn committed(costs: &[(String, u32)]) -> Vec<CommittedResource> {
+pub(super) fn committed(costs: &[(String, u32)]) -> Vec<(ResourceItem, ItemDescriptor)> {
     costs
         .iter()
-        .map(|(item, quantity)| CommittedResource::of(item, lowercase_crc32(item), *quantity))
+        .map(|(item, quantity)| committed_resource(item, lowercase_crc32(item), *quantity))
         .collect()
 }
 
@@ -296,6 +298,24 @@ impl Stations {
             camps: BTreeMap::new(),
             camps_placed: 0,
             changes: BTreeMap::new(),
+        }
+    }
+
+    /// Adds `station` to the level's stations (a level entity that the level data does not
+    /// list as a station, such as a land claim entity, [`super::claim_entities`]); returns its
+    /// slot key.
+    pub(super) fn add_level_entity(&mut self, station: Station) -> u64 {
+        let index = self.stations.len();
+        self.by_ref.insert(station.gde_ref, index);
+        self.stations.push(station);
+        STATION_ENTITY_BASE + index as u64
+    }
+
+    /// Adds the level entities `extra` after the level's stations ([`super::dungeon_entrances`]):
+    /// each gets the next level slot key and is found by its `GdeRef`.
+    pub(super) fn add_level(&mut self, extra: Vec<Station>) {
+        for station in extra {
+            self.add_level_entity(station);
         }
     }
 
@@ -1197,11 +1217,11 @@ mod tests {
         let MemberState::BuildableController(controller) = &served[1].state else {
             panic!("controller");
         };
+        let Some(KeyedList::Full(resources)) = &controller.committed_resources else {
+            panic!("a full resource list");
+        };
         assert_eq!(
-            controller
-                .committed_resources
-                .as_ref()
-                .and_then(|list| list.version),
+            resources.version,
             Some(FIRST_VERSION),
             "this server's lists start at the version of its other first states"
         );

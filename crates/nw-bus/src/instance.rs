@@ -173,6 +173,33 @@ pub struct WarInstanceNews {
     pub phase: u64,
 }
 
+/// News of the runs of the open world's dungeon entrances, to every sim
+/// ([`crate::subject::sims_entrance_runs`]): each open-world sim keeps the running runs of the
+/// entrances of its level and shows them in the entrances' `DungeonEntranceReplicatedState`
+/// (dungeon entrance note, 2026-11-12). The sim of the player whose activation opened an
+/// instance sends [`Self::Started`]; the director sends [`Self::Ended`] when it ends the
+/// instance or finds it gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EntranceRunNews {
+    /// A run started at an entrance.
+    Started {
+        /// The entrance: the entity id of its capital.
+        entrance: u64,
+        /// The run's instance.
+        instance: Uuid,
+        /// The starter's group; `None` when it is in no group or in a raid.
+        group: Option<Uuid>,
+        /// The starter's raid id; 0 when it is in no raid.
+        #[serde(default)]
+        raid: u64,
+    },
+    /// A run ended.
+    Ended {
+        /// The run's instance.
+        instance: Uuid,
+    },
+}
+
 /// The answer to [`InstanceCommand::Open`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InstanceOpened {

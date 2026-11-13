@@ -50,6 +50,11 @@ const LOCALIZED_MARK: char = '@';
 /// Swing hits that break a quest object (Observed: each of Grace's nodules broke on the
 /// greatsword's second 2071, 0.8 s after the first).
 const HITS_TO_BREAK: u32 = 2;
+/// Hits that break a damageable quest object (`DamageableGatherable` slices such as
+/// `Master_Quest_Damageable_Instanced`). Observed: `12a_msq_08_destroyrune`, the tablet broke on
+/// its only 2071 (133.92 s, flags `0x68`, a crit). Inferred: every damageable drop object breaks
+/// on one hit, as this one did.
+const DAMAGEABLE_HITS_TO_BREAK: u32 = 1;
 /// The game events one way into a detection sphere sets off.
 const ONE_DETECTION: u32 = 1;
 /// How far from the player a swing breaks a quest object (Inferred: about a greatsword's reach
@@ -343,9 +348,11 @@ impl SimWorld {
     }
 
     /// Player `entity` attacks at `now_ms` (`strike`, reaching `reach_m`): the nearest quest
-    /// object in reach whose game event its quest counts takes the hits, and a broken one is
-    /// that game event for the quest. The client is not told: the server does not know the
-    /// object's entity id (Unknown; retail sent 2071 and 2724 to it).
+    /// object in reach whose game event its quest counts, or whose gatherable a waiting item task
+    /// drops from, takes the hits. A broken one is that game event for the quest and gives the
+    /// drops of its gatherable (retail `12a_msq_08_destroyrune` 133.92 s: the tablet's 2071 and
+    /// 2724, then `12A_MSQ_08_RuneShards` in the bag). The client is told when the object's
+    /// capital is known (2071 and 2724 to it).
     fn strike_quest_objects(&mut self, entity: Entity, strike: Strike, reach_m: f32, now_ms: u64) {
         let Some(at) = self
             .world
@@ -373,15 +380,18 @@ impl SimWorld {
                     .and_then(|(_, until)| *until)
                     .is_some_and(|until| now_ms < until);
                 !broken
-                    && quests
-                        .iter()
-                        .any(|quest| quest.run.counts_game_event(&object.event))
+                    && quests.iter().any(|quest| {
+                        quest.run.counts_game_event(&object.event)
+                            || (object.drops
+                                && !quest.run.gather_drops(&object.gatherable).is_empty())
+                    })
             })
             .map(|(index, object)| {
-                let known = object.id.zip(object.loot_tag);
-                (index, object.event.clone(), object.respawn_ms, known)
+                let known = object.id.map(|id| (id, object.loot_tag));
+                let drops = object.drops.then(|| lowercase_crc32(&object.gatherable));
+                (index, object.event.clone(), object.respawn_ms, known, drops)
             });
-        let Some((index, event, respawn_ms, known)) = target else {
+        let Some((index, event, respawn_ms, known, drops)) = target else {
             return;
         };
         let server_ms = self.server_ms;
@@ -411,7 +421,12 @@ impl SimWorld {
         let (hits, until) = player.strikes.objects.entry(index).or_default();
         *hits = if until.is_some() { 0 } else { *hits } + strike.hits();
         *until = None;
-        if *hits < HITS_TO_BREAK {
+        let needed = if drops.is_some() {
+            DAMAGEABLE_HITS_TO_BREAK
+        } else {
+            HITS_TO_BREAK
+        };
+        if *hits < needed {
             return;
         }
         *hits = 0;
@@ -435,6 +450,13 @@ impl SimWorld {
             player.gathers = player.gathers.saturating_add(1);
         }
         tracing::info!(player = number, object = index, %event, "quest object broken");
+        if let Some(gatherable) = drops
+            .and_then(|crc| self.content.gatherables.get(crc))
+            .cloned()
+        {
+            let loot = self.quest_drops(number, None, &gatherable);
+            self.give_loot(number, loot, now_ms);
+        }
         self.quest_event(number, Event::GameEvent(&event), now_ms);
     }
 
@@ -512,6 +534,120 @@ mod tests {
     const READ_EXPERIENCE: u32 = 2;
     const ACHIEVEMENT_BIT: u32 = 774;
     const LORE: u32 = 0x1234;
+
+    #[test]
+    fn one_hit_breaks_a_damageable_tablet_for_its_quest_drop() {
+        use nw_content::gathering::{DetectionSpheres, Gatherable, Gatherables};
+        use nw_world::records::{Capital, GatherablePoint};
+
+        use crate::objectives::{TaskBook, TaskRow, counted_game_events, quest_drop_sources};
+        use crate::player_content::{ObjectiveRow, QuestBook};
+        use crate::world::gear;
+        // Build 25810808 `12A_MSQ_08_DestroyRune_DestroyRune`, cut to its tablet step.
+        const QUEST: &str = "12A_MSQ_08_DestroyRune";
+        const ROOT: &str = "BossContainer";
+        const STEP: &str = "DestroyRune";
+        const TABLET: &str = "MB_MSQ2_DestroyRune_Tablet";
+        const TABLET_EVENT: &str = "MB_MSQ2_DestroyRune_Tablet_interact";
+        const SHARDS: &str = "12A_MSQ_08_RuneShards";
+        const TABLET_GUID: &str = "c38829ed-596e-cc79-0473-a96ac4ccb5a5";
+        const RESPAWN_MS: u64 = 200_000;
+        let rows = vec![
+            TaskRow {
+                task_id: ROOT.to_owned(),
+                kind: "SimpleTaskContainer".to_owned(),
+                sub_tasks: vec![STEP.to_owned()],
+                ..TaskRow::default()
+            },
+            TaskRow {
+                task_id: STEP.to_owned(),
+                kind: "TaskHaveAndReturnItems".to_owned(),
+                item_name: Some(SHARDS.to_owned()),
+                item_drop_vc: Some(TABLET.to_owned()),
+                item_drop_probability: Some(100),
+                target_qty: Some(1),
+                ..TaskRow::default()
+            },
+        ];
+        let gatherables = Gatherables::build([Gatherable {
+            id: TABLET.to_owned(),
+            gather_ms: 3_000,
+            respawn_ms: (RESPAWN_MS, RESPAWN_MS),
+            loot_table: None,
+            loot_container: true,
+            tradeskill: Some("None".to_owned()),
+            tool_required: false,
+            by_hand: true,
+            game_event: Some(TABLET_EVENT.to_owned()),
+        }]);
+        let mut world = world_with_spawns(Vec::new());
+        // The kit and the quest come before the admit: the bag is made from the kit.
+        world.content = Arc::new(PlayerContent {
+            kits: gear::tests::kits_with(&[(SHARDS, "Resource+Quest")]),
+            quests: QuestBook::build(
+                [ObjectiveRow {
+                    id: QUEST.to_owned(),
+                    root: ROOT.to_owned(),
+                    ..ObjectiveRow::default()
+                }],
+                TaskBook::new(rows.clone()),
+            ),
+            gatherables: gatherables.clone(),
+            ..(*world.content).clone()
+        });
+        let mut admit = admit_at(PLAYER, 0.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let entity = world.player_by_number(PLAYER).expect("player");
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position())
+            .expect("body");
+        let point = GatherablePoint {
+            gatherable_id: lowercase_crc32(TABLET),
+            position: [at.x, at.y, at.z],
+            ..GatherablePoint::default()
+        };
+        let capital = Capital {
+            id: TABLET_GUID.to_owned(),
+            slice_name: "Master_Quest_Damageable_Instanced".to_owned(),
+            position: [at.x, at.y, at.z],
+            ..Capital::default()
+        };
+        let quest_objects = QuestObjects::with_drops(
+            &[point],
+            &gatherables,
+            &DetectionSpheres::default(),
+            &counted_game_events(&rows),
+            &quest_drop_sources(&rows),
+            &[capital],
+        );
+        world.content = Arc::new(PlayerContent {
+            quest_objects,
+            ..(*world.content).clone()
+        });
+        world.start_quest(PLAYER, QUEST, NOW).expect("accepted");
+        world.strike_quest_objects(entity, Strike::Swing, SWING_REACH_M, NOW);
+        let shards: u32 = world
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref())
+            .map(gear::Gear::carried)
+            .unwrap_or_default()
+            .iter()
+            .filter(|stack| stack.item_id == SHARDS)
+            .map(|stack| stack.quantity)
+            .sum();
+        assert_eq!(shards, 1, "one swing breaks it and gives its drop");
+        assert!(
+            world
+                .quests_of_player(PLAYER)
+                .first()
+                .is_some_and(|quest| quest.run.is_done(STEP)),
+            "the step is done"
+        );
+    }
 
     #[test]
     fn a_first_lore_read_keeps_the_note_and_fires_its_game_event_once() {

@@ -28,6 +28,9 @@ role = "openmap"
 # Longest wait for the director's answer to an expedition request; above the director's group
 # and opening waits.
 instance_request_timeout_ms = 3000
+# The queued modes (arena, outpost_rush, capture_the_flag, catacombs) whose queue stays closed on
+# this build (a join gets "not run here"). The catacombs run has no end and no rewards yet.
+closed_queues = ["catacombs"]
 # Most players in this sim; the director adds the free ones to the login queue.
 max_players = 2000
 # Our own choice; the retail range is Unknown.

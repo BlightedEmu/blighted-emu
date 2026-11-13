@@ -49,8 +49,8 @@
 //!   second placement) needs the `Camping` rank (its tier), a territory with `CanPlaceCamp`, the
 //!   blueprint the 2236 names (or the default camp of its tier; a PvP-flagged player's is the
 //!   blueprint's `PvPCampVariantID`), an enabled skin whose achievement the player has, and its
-//!   `StructureCost` items in the bag, which it takes. It stands in the world as an entity
-//!   ([`super::camps`]); the camping state (1292) names it and its bind cooldown end (placement
+//!   `StructureCost` items in the bag, which leave it as the owner builds the camp. It stands in
+//!   the world as an entity ([`super::camps`], with its build stage); the camping state (1292) names it and its bind cooldown end (placement
 //!   plus [`CAMP_BIND_COOLDOWN_MS`]), the home points (3652) list its respawn point.
 
 use std::collections::VecDeque;
@@ -76,8 +76,9 @@ use nw_messages::travel_states::{
     home_point_kind,
 };
 use nw_messages::{
-    BundleMember, FacetHeader, InputRecord, InteractionRequest, MemberState, NS_PER_MS, RAW_ID_LEN,
-    ServerMessage, TeleportWithLoadingScreenMsg, TravelClientMsg, TravelServerMsg,
+    BUILDER_STATE_COMPONENT, BuilderState, BundleMember, FacetHeader, InputRecord,
+    InteractionRequest, MemberState, NS_PER_MS, RAW_ID_LEN, ServerMessage,
+    TeleportWithLoadingScreenMsg, TravelClientMsg, TravelServerMsg,
 };
 use nw_sim_core::Position;
 
@@ -85,7 +86,9 @@ use crate::charting::CHART_EVENT;
 use crate::objectives::Event;
 use crate::travel_rules::{HousingRules, ShrinePoint, TravelRules};
 
-use super::camps::{CampEntity, CampPlacement};
+use super::camps::{
+    APPLY_ALL_RESOURCES_KIND, CampBuild, CampEntity, CampPlacement, placed_deployables,
+};
 use super::housing_states::{HouseViews, decoration_points, house_decoration};
 use super::quest_objects::gain_experience;
 use super::statics::interaction_enabled;
@@ -230,6 +233,8 @@ struct StatesDue {
     housing: bool,
     homes: bool,
     camping: bool,
+    /// The builder state's changed slots ([`super::camps`]).
+    builder: Option<BuilderState>,
 }
 
 impl StatesDue {
@@ -238,6 +243,7 @@ impl StatesDue {
         housing: true,
         homes: true,
         camping: true,
+        builder: None,
     };
 }
 
@@ -263,6 +269,10 @@ pub(super) struct TravelState {
     due: StatesDue,
     /// Its placed camp's entity in this sim.
     pub(super) camp: Option<CampEntity>,
+    /// The build of that camp while it is not built ([`super::camps`]).
+    pub(super) camp_build: Option<CampBuild>,
+    /// The 5361 of that camp waits for its group to reach the client ([`super::camps`]).
+    pub(super) camp_blocked_due: bool,
     /// The versions of the owned house and home point lists its client has.
     houses_version: u64,
     homes_version: u64,
@@ -290,9 +300,21 @@ impl TravelState {
         }
     }
 
-    /// What a save or a handoff carries.
+    /// What a save or a handoff carries: a camp that is not built yet stays out
+    /// ([`CampBuild`]).
     pub(super) fn carried(&self) -> PlayerTravel {
-        self.saved.clone()
+        let mut carried = self.saved.clone();
+        if self.camp_build.is_some() {
+            carried.placed_camp = None;
+        }
+        carried
+    }
+
+    /// The builder state changes by `change`: its set slots go out with the next travel states.
+    pub(super) fn builder_changed(&mut self, change: BuilderState) {
+        let due = self.due.builder.get_or_insert_default();
+        due.builder = change.builder.or(due.builder);
+        due.placed = change.placed.or(due.placed);
     }
 
     /// How many houses the player owns.
@@ -431,7 +453,7 @@ impl SimWorld {
     }
 
     /// Sends `messages` to the client of `entity` now.
-    fn send_travel(&mut self, entity: Entity, messages: &[ServerMessage]) {
+    pub(super) fn send_travel(&mut self, entity: Entity, messages: &[ServerMessage]) {
         let Some(connection) = self
             .world
             .get::<Player>(entity)
@@ -754,29 +776,52 @@ impl SimWorld {
         }
     }
 
-    /// The weight of the bag of `entity`, in the units of the item tables.
+    /// The weight of the bag of `entity`, in the units of the item tables: each item lightened
+    /// by the `ItemClassWeightMods` of the player's held effects and of the effects of its
+    /// attribute thresholds ([`nw_content::equip_load::EquipLoads::bag_weight`]; Strength 150
+    /// "-10% weight of mined items", Focus 150 "-10% in carry weight of fish").
     fn bag_load(&self, entity: Entity) -> f64 {
-        let Some(gear) = self
-            .world
-            .get::<Player>(entity)
-            .and_then(|player| player.gear.as_ref())
-        else {
+        let Some(player) = self.world.get::<Player>(entity) else {
             return 0.0;
         };
+        let Some(gear) = player.gear.as_ref() else {
+            return 0.0;
+        };
+        let rules = &self.content.status_effects;
+        let mut weight_mods = player.status_effects.item_weight_mods(rules);
+        weight_mods.extend(
+            self.attribute_effects(entity)
+                .into_iter()
+                .filter_map(|effect| rules.by_id(effect))
+                .flat_map(|rule| rule.item_weight_mods.iter().cloned()),
+        );
         let weights = &self.content.equip_loads;
         gear.carried()
             .iter()
             .filter(|item| matches!(item.place, nw_bus::ItemPlace::Bag(_)))
-            .map(|item| weights.weight(&item.item_id) * f64::from(item.quantity))
+            .map(|item| weights.bag_weight(&item.item_id, &weight_mods) * f64::from(item.quantity))
             .sum()
+    }
+
+    /// The encumbrance limit of player `entity`: the player container's `EncumbranceBaseMax`
+    /// plus the `Encumbrance` of its held effects and of the effects of its attribute thresholds
+    /// (the Strength 50 bonus "+25 encumbrance": `ATB_Str_Bonus_50_2_Effect` 250; Inferred: added
+    /// to the base limit, the units of both are a tenth of the shown weight). `None` without the
+    /// player row of `EncumbranceData`.
+    fn encumbrance_limit(&self, entity: Entity) -> Option<f64> {
+        let base = self.content.travel.encumbrance_max?;
+        let rules = &self.content.status_effects;
+        let effects = self
+            .world
+            .get::<Player>(entity)
+            .map_or(0.0, |player| player.status_effects.encumbrance(rules));
+        Some(base + effects + self.attribute_effect_sum(entity, |rule| rule.encumbrance))
     }
 
     /// Whether the bag of `entity` weighs more than the player's encumbrance limit
     /// (`eCanFastTravelToSettlementResults_IsEncumbered`).
     fn encumbered(&self, entity: Entity) -> bool {
-        self.content
-            .travel
-            .encumbrance_max
+        self.encumbrance_limit(entity)
             .is_some_and(|limit| self.bag_load(entity) > limit)
     }
 
@@ -914,6 +959,7 @@ impl SimWorld {
     /// breadcrumbs of the players who stand somewhere new.
     pub(super) fn tick_travel(&mut self, now_ms: u64) {
         self.tick_housing_states();
+        self.tick_camps(now_ms);
         self.send_travel_states();
         if self.is_tutorial() {
             return;
@@ -1035,6 +1081,12 @@ impl SimWorld {
                 }
                 .body();
                 members.push((CAMPING_COMPONENT, CAMPING_TYPE_INDEX, Ok(body)));
+            }
+            if let Some(builder) = due.builder {
+                player.extra_members.push(BundleMember {
+                    component: BUILDER_STATE_COMPONENT,
+                    state: MemberState::Builder(builder),
+                });
             }
             for (component, class, body) in members {
                 match body {
@@ -1281,12 +1333,18 @@ impl SimWorld {
                 self.send_travel(entity, &[accepted]);
             }
             kind::BIND_TO_CAMP => {
+                let had_camp = self.world.get::<Player>(entity).is_some_and(|player| {
+                    player.travel.camp.is_some() || player.travel.saved.placed_camp.is_some()
+                });
                 self.despawn_camp(entity);
                 if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                     player.travel.saved.camp = Some(request.target_entity);
                     player.travel.saved.placed_camp = None;
                     player.travel.due.camping = true;
                     player.travel.due.homes = true;
+                    if had_camp {
+                        player.travel.builder_changed(placed_deployables(false));
+                    }
                 }
                 let demolish = ServerMessage::Travel(TravelServerMsg::DemolishCamp {
                     header: header(component::CAMPING, number),
@@ -1294,6 +1352,7 @@ impl SimWorld {
                 self.send_travel(entity, &[demolish, accepted]);
             }
             kind::OPEN_INN => self.send_travel(entity, &[accepted]),
+            APPLY_ALL_RESOURCES_KIND => self.ask_camp_build(entity, number, request, now_ms),
             kind::SET_SPAWN_POINT => {
                 if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                     player.travel.saved.inn = Some(request.target_entity);
@@ -1885,9 +1944,11 @@ impl SimWorld {
                 .any(|territory| rules.can_place_camp(territory))
     }
 
-    /// Player `number` places its camp (2236, [`SimWorld::camp_placement`]): the costs leave its
-    /// bag, a former camp goes (6760), the camp stands in the world and the `BindCamp` game event
-    /// fires. Answered by 441; a refusal changes nothing.
+    /// Player `number` places its camp (2236, [`SimWorld::camp_placement`]): a former camp goes
+    /// (6760), the camp stands in the world unbuilt and its build starts ([`super::camps`]: its
+    /// costs leave the bag as the owner builds it, and its `BindCamp` game event fires once it
+    /// is built). Answered by 441, and by 5361 once the camp's group reached the client; a
+    /// refusal changes nothing.
     fn place_camp(
         &mut self,
         entity: Entity,
@@ -1898,27 +1959,19 @@ impl SimWorld {
         let unix_ms = self.unix_ms();
         let placed = self.camp_placement(entity, placement);
         tracing::info!(player = number, ?placed, "camp placement");
-        let had_camp = self
-            .world
-            .get::<Player>(entity)
-            .is_some_and(|player| player.travel.saved.placed_camp.is_some());
+        let had_camp = self.world.get::<Player>(entity).is_some_and(|player| {
+            player.travel.camp.is_some() || player.travel.saved.placed_camp.is_some()
+        });
         let mut answers = Vec::new();
         if let Ok(camp) = &placed {
             let costs = self.content.structure_costs.of(&camp.blueprint).to_vec();
-            if let Some(mut player) = self.world.get_mut::<Player>(entity)
-                && let Some(gear) = player.gear.as_mut()
-            {
-                for (item, quantity) in &costs {
-                    gear.take(item, *quantity);
-                }
-            }
             self.despawn_camp(entity);
             if had_camp {
                 answers.push(ServerMessage::Travel(TravelServerMsg::DemolishCamp {
                     header: header(component::CAMPING, number),
                 }));
             }
-            let spawned = self.spawn_camp(entity, camp);
+            let spawned = self.spawn_camp(entity, camp, false);
             if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                 player.travel.camp = spawned;
                 player.travel.saved.placed_camp = Some(PlacedCamp {
@@ -1931,9 +1984,9 @@ impl SimWorld {
                 player.travel.due.camping = true;
                 player.travel.due.homes = true;
             }
-            // Inferred: a placed camp is the player's bind point, the `BindCamp` game event that
-            // the camp tutorial's task counts (`12A_MSQ_12_CampTutorial`, `TaskGameEvent`).
-            self.fire_game_event(number, BIND_CAMP_EVENT, now_ms);
+            if spawned.is_some() {
+                self.start_camp_build(entity, &costs, now_ms);
+            }
         }
         answers.push(ServerMessage::Travel(TravelServerMsg::PlacementResults {
             header: header(BUILDER_COMPONENT, number),
@@ -3013,7 +3066,7 @@ mod tests {
             .get::<Player>(entity)
             .expect("player")
             .slayer
-            .current()
+            .remote_action()
             .expect("a slayer state");
         assert_eq!(
             stand.state,
@@ -3796,6 +3849,93 @@ mod tests {
         );
     }
 
+    /// The Strength 150 and 50 threshold effects (build 25810808) lighten mined items in the
+    /// bag and raise the encumbrance limit, so a bag over the base limit may still fast travel.
+    #[test]
+    fn the_strength_thresholds_lighten_ore_and_raise_the_encumbrance_limit() {
+        use nw_content::attribute_bonuses::AttributeBonuses;
+        use nw_content::character_points::STRENGTH;
+        use nw_content::equip_load::EquipLoads;
+        use nw_content::generated::{StatusEffectData, Tables};
+        use nw_content::status_effects::StatusEffectRules;
+        use nw_content::table::Table;
+
+        use crate::world::gear;
+        use crate::world::tests::{SERVER_TIME, admit_at};
+
+        const ORE: &str = "OreT1";
+        /// `OreT1`'s master `Weight` and `ItemClass` (build 25810808).
+        const ORE_WEIGHT: f64 = 2.0;
+        const ORE_CLASS: &str = "Resource+Ore";
+        const ORE_STACK: u32 = 1_000;
+        const ORES: u32 = 10;
+        const BASE_LIMIT: f64 = 15.0;
+        /// `ATB_Str_Bonus_150_2_Effect` and `ATB_Str_Bonus_50_2_Effect` (build 25810808).
+        const LIGHTER: &str = "ATB_Str_Bonus_150_2_Effect";
+        const STRONGER: &str = "ATB_Str_Bonus_50_2_Effect";
+        const ENCUMBRANCE: i64 = 250;
+        /// A threshold every Strength value reaches, so the joined player holds both.
+        const ANY_VALUE: u32 = 0;
+        let mut world = world_with_spawns(Vec::new());
+        let effect = |row: serde_json::Value| -> StatusEffectData {
+            serde_json::from_value(row).expect("effect row")
+        };
+        let mut content = (*world.content).clone();
+        content.kits = gear::tests::kits_with_stacks(&[(ORE, ORE_CLASS, Some(ORE_STACK))]);
+        content.equip_loads = EquipLoads::new([(ORE, Some(ORE_WEIGHT), None)], [], None)
+            .with_classes([(ORE, Some(ORE_CLASS))]);
+        content.travel.encumbrance_max = Some(BASE_LIMIT);
+        content.status_effects = StatusEffectRules::from_tables(&Tables {
+            status_effect_data: vec![Table {
+                source_path: String::new(),
+                unique_id: String::new(),
+                rows: vec![
+                    effect(serde_json::json!({
+                        "status_id": LIGHTER,
+                        "item_class_weight_mods": "Ore=-0.1+Stone=-0.1+Gem=-0.1",
+                    })),
+                    effect(serde_json::json!({"status_id": STRONGER, "encumbrance": ENCUMBRANCE})),
+                ],
+            }],
+            ..Tables::default()
+        });
+        let ore = content.kits.item(ORE).cloned().expect("ore");
+        world.content = Arc::new(content);
+        let mut admit = admit_at(PLAYER, 0.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let entity = entity(&mut world);
+        {
+            let mut player = world.world.get_mut::<Player>(entity).expect("player");
+            assert!(player.gear.as_mut().expect("gear").add(&ore, ORES));
+        }
+        let full_weight = ORE_WEIGHT * f64::from(ORES);
+        assert!((world.bag_load(entity) - full_weight).abs() < 1e-9);
+        assert_eq!(world.encumbrance_limit(entity), Some(BASE_LIMIT));
+        assert!(world.encumbered(entity), "20 over the base limit 15");
+        let mut content = (*world.content).clone();
+        content.attribute_bonuses = AttributeBonuses::build(
+            [(
+                STRENGTH,
+                ANY_VALUE,
+                "Str_Bonus_150_2,Str_Bonus_50_2".to_owned(),
+            )],
+            [],
+        )
+        .with_equip_effects([
+            ("Str_Bonus_150_2".to_owned(), LIGHTER.to_owned()),
+            ("Str_Bonus_50_2".to_owned(), STRONGER.to_owned()),
+        ]);
+        world.content = Arc::new(content);
+        assert!((world.bag_load(entity) - full_weight * 0.9).abs() < 1e-9);
+        assert_eq!(
+            world.encumbrance_limit(entity),
+            Some(BASE_LIMIT + 250.0),
+            "+25 encumbrance"
+        );
+        assert!(!world.encumbered(entity));
+    }
+
     #[test]
     fn breadcrumbs_keep_their_spacing_and_their_count() {
         let mut state = TravelState::default();
@@ -3817,11 +3957,20 @@ mod tests {
         use nw_world::stations::StationSlice;
 
         use super::*;
+        use nw_messages::keyed_list::KeyedList;
+        use nw_messages::{
+            BUILDER_BUILDING, BUILDER_IDLE, BuildableControllerState, InteractState,
+        };
+
         use crate::world::camps::tests::{
             RETAIL_AT, RETAIL_SPAWN_POINT, SPAWN_POINT_TOLERANCE_M, costs, pvp_slice,
             retail_rotation,
         };
+        use crate::world::camps::{
+            BUILD_ACCEPT_DELAY_MS, COMMIT_INTERVAL_MS, COMMITTABLE_DELAY_MS, COMPLETION_DELAY_MS,
+        };
         use crate::world::crafting::CraftChoice;
+        use crate::world::crafting::committed;
         use crate::world::gear;
         use crate::world::slots::Slot;
         use crate::world::tests::{SERVER_TIME, admit_at};
@@ -4053,22 +4202,23 @@ mod tests {
         }
 
         #[test]
-        fn a_placed_camp_takes_its_costs_and_stands_in_the_world() {
+        fn a_placed_camp_stands_in_the_world_unbuilt() {
             let (mut world, entity) = camp_world(true, 0);
             assert_eq!(place(&mut world, NOW), [placed(PLACEMENT_PLACED)]);
             assert!(
-                world
+                !world
                     .take_stat_events()
                     .iter()
                     .any(|event| event.game_mode == BIND_CAMP_EVENT),
-                "a placed camp fires BindCamp"
+                "BindCamp waits for the build"
             );
             assert_eq!(
                 (
                     bag(&world, entity, WOOD),
                     bag(&world, entity, gear::tests::FLINT)
                 ),
-                (0, 0)
+                (5, 1),
+                "the costs leave the bag as the camp is built"
             );
             let camp = camp_of(&world, entity).expect("camp entity");
             assert!(shown(&world, &camp));
@@ -4120,6 +4270,11 @@ mod tests {
             let player = world.world.get::<Player>(entity).expect("player");
             assert_eq!(player.travel.camp, None);
             assert!(player.travel.saved.placed_camp.is_none());
+            assert_eq!(
+                take_builder_due(&mut world, entity).and_then(|state| state.placed),
+                Some(0),
+                "no camp is placed"
+            );
         }
 
         fn item_of(world: &SimWorld, id: &str) -> nw_content::starter::KitItem {
@@ -4277,9 +4432,381 @@ mod tests {
         }
 
         #[test]
+        fn a_camp_left_unbuilt_is_not_saved() {
+            let (mut world, entity) = camp_world(true, 0);
+            place(&mut world, NOW);
+            let departure = world.leave(&connection(CAMPER)).expect("departure");
+            let travel = departure.progression.expect("saved").travel;
+            assert!(travel.placed_camp.is_none());
+            assert!(world.world.get::<Player>(entity).is_none());
+        }
+
+        /// The members of the camp `camp`'s group as a new viewer gets them.
+        fn group_of(world: &SimWorld, camp: &CampEntity) -> Vec<BundleMember> {
+            let slot = Slot {
+                interest: 1,
+                new: true,
+            };
+            world
+                .stations
+                .group(camp.number, slot)
+                .expect("group")
+                .members
+        }
+
+        fn buildable(members: &[BundleMember]) -> BuildableControllerState {
+            members
+                .iter()
+                .find_map(|member| match &member.state {
+                    MemberState::BuildableController(state) => Some(state.clone()),
+                    _ => None,
+                })
+                .expect("buildable")
+        }
+
+        fn interact(members: &[BundleMember]) -> Option<InteractState> {
+            members.iter().find_map(|member| match &member.state {
+                MemberState::Interact(state) => Some(*state),
+                _ => None,
+            })
+        }
+
+        fn obstruction(members: &[BundleMember]) -> Option<u8> {
+            members.iter().find_map(|member| match &member.state {
+                MemberState::PlacementObstruction(state) => state.has_completion_obstruction,
+                _ => None,
+            })
+        }
+
+        /// The builder states that went to the own bundle since the last call, or wait for
+        /// the next travel states.
+        fn take_builder_due(world: &mut SimWorld, entity: Entity) -> Option<BuilderState> {
+            let mut player = world.world.get_mut::<Player>(entity).expect("player");
+            let sent = player
+                .extra_members
+                .iter()
+                .rev()
+                .find_map(|member| match &member.state {
+                    MemberState::Builder(state) => Some(*state),
+                    _ => None,
+                });
+            player
+                .extra_members
+                .retain(|member| !matches!(member.state, MemberState::Builder(_)));
+            player.travel.due.builder.take().or(sent)
+        }
+
+        /// The build request of the camp `camp` (kind 16, interaction `interaction`).
+        fn build_request(camp: &CampEntity, interaction: u64) -> InteractionRequest {
+            InteractionRequest {
+                target: camp.gde_ref,
+                target_entity: camp.facet(),
+                interaction,
+                kind: APPLY_ALL_RESOURCES_KIND,
+                gatherable: None,
+            }
+        }
+
+        /// The 3743 statuses and 3746 count of `messages`.
+        fn build_answers(messages: &[ServerMessage]) -> (Vec<u8>, usize) {
+            let statuses = messages
+                .iter()
+                .filter_map(|message| match message {
+                    ServerMessage::InteractionValidated(answer) => Some(answer.status),
+                    _ => None,
+                })
+                .collect();
+            let ended = messages
+                .iter()
+                .filter(|message| matches!(message, ServerMessage::InteractionEnded(_)))
+                .count();
+            (statuses, ended)
+        }
+
+        /// Asks to build the camp at `at_ms` and ticks to its accept; the time of the accept.
+        fn start_build(world: &mut SimWorld, entity: Entity, camp: &CampEntity, at_ms: u64) -> u64 {
+            assert!(world.travel_interaction(entity, CAMPER, build_request(camp, 1), b"", at_ms));
+            let accept_ms = at_ms + BUILD_ACCEPT_DELAY_MS;
+            let early = messages_to(
+                &tick_keeping_due(world, entity, accept_ms - 1).messages,
+                CAMPER,
+            );
+            assert_eq!(
+                build_answers(&early),
+                (Vec::new(), 0),
+                "no answer before the delay"
+            );
+            let answered =
+                messages_to(&tick_keeping_due(world, entity, accept_ms).messages, CAMPER);
+            assert_eq!(build_answers(&answered), (vec![1], 0), "accepted");
+            accept_ms
+        }
+
+        /// The travel states wait for the own card: the builder states stay due to be read.
+        fn hold_travel_states(world: &mut SimWorld, entity: Entity) {
+            world
+                .world
+                .get_mut::<Player>(entity)
+                .expect("player")
+                .own_card_sent = false;
+        }
+
+        /// A tick at `now_ms` whose travel states wait ([`hold_travel_states`]).
+        fn tick_keeping_due(
+            world: &mut SimWorld,
+            entity: Entity,
+            now_ms: u64,
+        ) -> crate::world::TickOutput {
+            hold_travel_states(world, entity);
+            tick(world, now_ms)
+        }
+
+        #[test]
+        fn a_camp_is_built_unit_by_unit_as_retail() {
+            let (mut world, entity) = camp_world(true, 0);
+            hold_travel_states(&mut world, entity);
+            place(&mut world, NOW);
+            let camp = camp_of(&world, entity).expect("camp");
+            let members = group_of(&world, &camp);
+            let placed_state = buildable(&members);
+            assert_eq!(
+                placed_state.current_state,
+                Some(3),
+                "the slice's initial state"
+            );
+            assert_eq!(placed_state.check_foundation_events, None);
+            assert_eq!(
+                placed_state.committed_resources,
+                Some(KeyedList::full(FIRST_VERSION, Vec::new()))
+            );
+            assert_eq!(interact(&members), None, "no interact member yet");
+            assert_eq!(obstruction(&members), Some(1));
+            assert_eq!(
+                take_builder_due(&mut world, entity),
+                Some(BuilderState {
+                    builder: None,
+                    placed: Some(1),
+                })
+            );
+            tick_keeping_due(&mut world, entity, NOW + COMMITTABLE_DELAY_MS);
+            assert_eq!(buildable(&group_of(&world, &camp)).current_state, Some(4));
+            let accept_ms = start_build(&mut world, entity, &camp, NOW + COMMITTABLE_DELAY_MS + 1);
+            assert_eq!(
+                interact(&group_of(&world, &camp)).and_then(|state| state.has_interactors),
+                Some(1)
+            );
+            assert_eq!(
+                take_builder_due(&mut world, entity),
+                Some(BuilderState {
+                    builder: Some(BUILDER_BUILDING),
+                    placed: None,
+                })
+            );
+            // Six units: `WoodT1` 5, then `FlintT1` 1, one per commit interval.
+            let units = [(4, 1), (3, 1), (2, 1), (1, 1), (0, 1), (0, 0)];
+            let mut at = accept_ms;
+            for (step, (wood, flint)) in units.into_iter().enumerate() {
+                at += COMMIT_INTERVAL_MS;
+                tick_keeping_due(&mut world, entity, at - 1);
+                assert_eq!(
+                    bag(&world, entity, WOOD) + bag(&world, entity, gear::tests::FLINT),
+                    wood + flint + 1,
+                    "step {step} waits"
+                );
+                let messages =
+                    messages_to(&tick_keeping_due(&mut world, entity, at).messages, CAMPER);
+                assert_eq!(
+                    (
+                        bag(&world, entity, WOOD),
+                        bag(&world, entity, gear::tests::FLINT)
+                    ),
+                    (wood, flint),
+                    "step {step}"
+                );
+                let last = step + 1 == units.len();
+                assert_eq!(build_answers(&messages), (Vec::new(), usize::from(last)));
+            }
+            let state = buildable(&group_of(&world, &camp));
+            assert_eq!(state.check_foundation_events, Some(true));
+            assert_eq!(
+                state.committed_resources,
+                Some(KeyedList::full(FIRST_VERSION + 6, committed(&costs())))
+            );
+            assert_eq!(
+                interact(&group_of(&world, &camp)).and_then(|state| state.has_interactors),
+                Some(0)
+            );
+            assert_eq!(
+                take_builder_due(&mut world, entity).and_then(|state| state.builder),
+                Some(BUILDER_IDLE)
+            );
+            assert!(
+                !world
+                    .take_stat_events()
+                    .iter()
+                    .any(|event| event.game_mode == BIND_CAMP_EVENT)
+            );
+            tick_keeping_due(&mut world, entity, at + COMPLETION_DELAY_MS);
+            let members = group_of(&world, &camp);
+            assert_eq!(buildable(&members).current_state, Some(5));
+            assert_eq!(obstruction(&members), Some(0));
+            assert_eq!(
+                interact(&members).and_then(|state| state.enabled),
+                Some(false)
+            );
+            assert!(
+                world
+                    .take_stat_events()
+                    .iter()
+                    .any(|event| event.game_mode == BIND_CAMP_EVENT),
+                "a built camp fires BindCamp"
+            );
+            let player = world.world.get::<Player>(entity).expect("player");
+            assert!(player.travel.camp_build.is_none());
+            assert!(
+                player.travel.carried().placed_camp.is_some(),
+                "a built camp is saved"
+            );
+        }
+
+        #[test]
+        fn a_cancelled_build_keeps_its_resources_and_goes_on_later() {
+            let (mut world, entity) = camp_world(true, 0);
+            place(&mut world, NOW);
+            let camp = camp_of(&world, entity).expect("camp");
+            tick(&mut world, NOW + COMMITTABLE_DELAY_MS);
+            let accept_ms = start_build(&mut world, entity, &camp, NOW + COMMITTABLE_DELAY_MS + 1);
+            tick(&mut world, accept_ms + COMMIT_INTERVAL_MS);
+            tick(&mut world, accept_ms + 2 * COMMIT_INTERVAL_MS);
+            assert_eq!(bag(&world, entity, WOOD), 3);
+            take_builder_due(&mut world, entity);
+            world.cancel_camp_build(entity, 1);
+            assert_eq!(
+                take_builder_due(&mut world, entity),
+                Some(BuilderState {
+                    builder: Some(BUILDER_IDLE),
+                    placed: None,
+                })
+            );
+            let after = messages_to(
+                &tick(&mut world, accept_ms + 3 * COMMIT_INTERVAL_MS).messages,
+                CAMPER,
+            );
+            assert_eq!(
+                build_answers(&after),
+                (Vec::new(), 0),
+                "a cancel sends no 3746"
+            );
+            assert_eq!(bag(&world, entity, WOOD), 3, "no commit after the cancel");
+            assert_eq!(
+                interact(&group_of(&world, &camp)).and_then(|state| state.has_interactors),
+                Some(0)
+            );
+            let again = start_build(
+                &mut world,
+                entity,
+                &camp,
+                accept_ms + 4 * COMMIT_INTERVAL_MS,
+            );
+            tick(&mut world, again + COMMIT_INTERVAL_MS);
+            assert_eq!(bag(&world, entity, WOOD), 2, "the build goes on");
+        }
+
+        #[test]
+        fn a_build_of_a_camp_not_ones_own_is_refused() {
+            let (mut world, entity) = camp_world(true, 0);
+            place(&mut world, NOW);
+            let mut camp = camp_of(&world, entity).expect("camp");
+            camp.gde_ref[0] ^= 2;
+            assert!(world.travel_interaction(
+                entity,
+                CAMPER,
+                build_request(&camp, 2),
+                b"",
+                NOW + 2
+            ));
+            let messages = messages_to(&tick(&mut world, NOW + 3).messages, CAMPER);
+            assert_eq!(build_answers(&messages), (vec![2], 0));
+        }
+
+        #[test]
+        fn the_completion_blocked_call_waits_for_the_camp_group() {
+            let (mut world, entity) = camp_world(true, 0);
+            place(&mut world, NOW);
+            let camp = camp_of(&world, entity).expect("camp");
+            let blocked = |messages: &[ServerMessage]| {
+                messages
+                    .iter()
+                    .filter(|message| {
+                        matches!(
+                            message,
+                            ServerMessage::Travel(TravelServerMsg::CompletionBlocked {
+                                blocked: true,
+                                ..
+                            })
+                        )
+                    })
+                    .count()
+            };
+            world
+                .world
+                .get_mut::<Player>(entity)
+                .expect("player")
+                .slots
+                .keep_only(&[]);
+            assert_eq!(
+                blocked(&messages_to(&tick(&mut world, NOW + 2).messages, CAMPER)),
+                0
+            );
+            world
+                .world
+                .get_mut::<Player>(entity)
+                .expect("player")
+                .slots
+                .slot(camp.number);
+            let messages = messages_to(&tick(&mut world, NOW + 3).messages, CAMPER);
+            assert_eq!(blocked(&messages), 1, "once the group is out");
+            let Some(ServerMessage::Travel(TravelServerMsg::CompletionBlocked { header, .. })) =
+                messages.iter().find(|message| {
+                    matches!(
+                        message,
+                        ServerMessage::Travel(TravelServerMsg::CompletionBlocked { .. })
+                    )
+                })
+            else {
+                panic!("5361");
+            };
+            assert_eq!(header.entity, camp.facet());
+            assert_eq!(
+                header.target,
+                camp.facet()
+                    .wrapping_add(nw_messages::travel::BUILDABLE_CONTROLLER_COMPONENT)
+            );
+            assert_eq!(
+                blocked(&messages_to(&tick(&mut world, NOW + 4).messages, CAMPER)),
+                0
+            );
+        }
+
+        /// Builds the camp of the camper placed at `NOW`; the time it is built.
+        fn build_whole_camp(world: &mut SimWorld, entity: Entity) -> u64 {
+            let camp = camp_of(world, entity).expect("camp");
+            tick(world, NOW + COMMITTABLE_DELAY_MS);
+            let mut at = start_build(world, entity, &camp, NOW + COMMITTABLE_DELAY_MS + 1);
+            for _ in 0..6 {
+                at += COMMIT_INTERVAL_MS;
+                tick(world, at);
+            }
+            at += COMPLETION_DELAY_MS;
+            tick(world, at);
+            at
+        }
+
+        #[test]
         fn a_saved_camp_stands_again_when_its_owner_comes_back() {
             let (mut world, entity) = camp_world(true, 0);
             place(&mut world, NOW);
+            let built_ms = build_whole_camp(&mut world, entity);
             let first = camp_of(&world, entity).expect("camp");
             let departure = world.leave(&connection(CAMPER)).expect("departure");
             assert!(!shown(&world, &first), "the camp leaves with its owner");
@@ -4297,13 +4824,32 @@ mod tests {
                 camp_skin: Some(lowercase_crc32(CAMP_SKIN_ID)),
                 ..travel
             };
-            world.admit(&admit, NOW + 30, SERVER_TIME).expect("admit");
+            world
+                .admit(&admit, built_ms + 30, SERVER_TIME)
+                .expect("admit");
             let entity = world.player_by_number(CAMPER).expect("camper");
             let again = camp_of(&world, entity).expect("the camp again");
             assert!(shown(&world, &again));
             assert_eq!(
                 again.spawn_point, first.spawn_point,
                 "turned as placed: its respawn point is where it was"
+            );
+            let members = group_of(&world, &again);
+            assert_eq!(
+                buildable(&members).current_state,
+                Some(5),
+                "it comes back built"
+            );
+            assert_eq!(buildable(&members).check_foundation_events, Some(true));
+            let player = world.world.get::<Player>(entity).expect("player");
+            assert!(player.travel.camp_build.is_none());
+            assert!(player.travel.camp_blocked_due, "5361 once its group is out");
+            assert_eq!(
+                take_builder_due(&mut world, entity),
+                Some(BuilderState {
+                    builder: None,
+                    placed: Some(1),
+                })
             );
         }
     }

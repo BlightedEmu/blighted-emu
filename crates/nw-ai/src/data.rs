@@ -55,7 +55,9 @@ pub struct TreeRef {
 /// A vision profile: cone angle and range.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Vision {
-    /// `m_visionAngle` (degrees; -1: none).
+    /// `m_visionAngle` (degrees; -1: none): the angle from the facing to each side of the cone,
+    /// half its full width (Observed from the retail alert bearings: the sim's
+    /// `MindState::perceive` notes).
     pub angle_deg: f32,
     /// `m_visionDistance` (metres; -1: none).
     pub distance_m: f32,
@@ -420,17 +422,29 @@ pub struct CageAction {
 }
 
 /// The entry of `variants` Mannequin plays for a mob with the tags `has_tag` says it has: of the
-/// entries without fragment tags whose every tag the mob has, the one with the most tags, the
-/// first on a tie (as `nw_formats::mannequin::AnimDatabase::best`).
+/// entries without fragment tags whose every tag the mob has, the one with the most tags (as
+/// `nw_formats::mannequin::AnimDatabase::best`); on a tie the first whose length is known, else
+/// the first. Entries with the same tags are options of one fragment (Inferred: which option
+/// Mannequin plays is Unknown). Observed: the `1H_Melee` `Alert_Turn` of the undead
+/// berserker's database holds an option of Unknown length before one of 1 s, so the
+/// Quartermaster of "A Most Mysterious Tablet" (archetype 662) turned to a player behind it and
+/// never finished the turn: it did not attack (sim test, 2026-11-12).
 fn best_variant<'a>(
     variants: &'a [FragmentVariant],
     has_tag: &impl Fn(NameId) -> bool,
 ) -> Option<&'a FragmentVariant> {
+    let known = |variant: &FragmentVariant| !matches!(variant.length, FragmentLength::Unknown);
     variants
         .iter()
         .filter(|variant| variant.frag_tags.is_empty() && variant.tags.iter().all(|t| has_tag(*t)))
         .fold(None, |best: Option<&FragmentVariant>, variant| match best {
-            Some(best) if best.tags.len() >= variant.tags.len() => Some(best),
+            Some(best)
+                if best.tags.len() > variant.tags.len()
+                    || (best.tags.len() == variant.tags.len()
+                        && (known(best) || !known(variant))) =>
+            {
+                Some(best)
+            }
             _ => Some(variant),
         })
 }
@@ -458,18 +472,24 @@ impl CageAction {
     /// Seconds from the start until the tree is told the action is done: the fragment length
     /// minus the completion offset of the first conditional entry that holds, else the default
     /// (Inferred: retail boar `Attack_Gore` entries lasted 1,465 and 1,498 ms; 46 frames at 30
-    /// fps / 0.85 speed - 0.4 s offset = 1,404 ms, plus one or two 33 ms server ticks). `None`
-    /// when the action has no completion, the fragment loops or its length is Unknown.
+    /// fps / 0.85 speed - 0.4 s offset = 1,404 ms, plus one or two 33 ms server ticks). An
+    /// action without a completion is done at its fragment's end (Inferred: the action ends with
+    /// its fragment; the undead berserker's `Berserker_Sword_Swing_Straight_Close` has none, and
+    /// without an end the Quartermaster of "A Most Mysterious Tablet" stabbed once and then stood
+    /// in its stab, sim test 2026-11-12, while the retail one hit a player beside it eight times
+    /// in 21 s, `12a_msq_08_destroyrune` ledger 108,777 to 130,076 ms). `None` when the fragment
+    /// loops or its length is Unknown.
     pub fn done_after_s(&self, has_tag: &impl Fn(NameId) -> bool) -> Option<f32> {
-        let completion = self.completion.as_ref()?;
         let FragmentLength::Seconds(length) = self.variant(has_tag)?.length else {
             return None;
         };
-        let offset = completion
-            .conditional
-            .iter()
-            .find(|(condition, _)| condition.holds(has_tag))
-            .map_or(completion.default_offset_s, |(_, offset)| *offset);
+        let offset = self.completion.as_ref().map_or(0.0, |completion| {
+            completion
+                .conditional
+                .iter()
+                .find(|(condition, _)| condition.holds(has_tag))
+                .map_or(completion.default_offset_s, |(_, offset)| *offset)
+        });
         Some((length - offset).max(0.0))
     }
 }
@@ -834,6 +854,47 @@ mod tests {
             None,
             "loops"
         );
+    }
+
+    /// An action without a completion is done at its fragment's end (the undead berserker's
+    /// `Berserker_Sword_Swing_Straight_Close`).
+    #[test]
+    fn an_action_without_a_completion_is_done_at_its_fragment_end() {
+        let stab = CageAction {
+            completion: None,
+            ..gore()
+        };
+        let done = stab.done_after_s(&|_| false).expect("done");
+        assert!((done - GORE_FRAMES_S / GORE_SPEED).abs() < 1e-6, "{done}");
+    }
+
+    /// Of two options with the same tags, the one of known length plays (the undead berserker's
+    /// `1H_Melee` `Alert_Turn`: Unknown, then 1 s).
+    #[test]
+    fn an_option_of_known_length_goes_before_one_of_unknown_length() {
+        const TURN_S: f32 = 1.0;
+        let option = |length| FragmentVariant {
+            tags: Vec::new(),
+            frag_tags: Vec::new(),
+            length,
+            windows: Vec::new(),
+        };
+        let turn = CageAction {
+            variants: vec![
+                option(FragmentLength::Unknown),
+                option(FragmentLength::Seconds(TURN_S)),
+            ],
+            ..gore()
+        };
+        assert_eq!(
+            turn.variant(&|_| false).map(|variant| variant.length),
+            Some(FragmentLength::Seconds(TURN_S))
+        );
+        let unknown = CageAction {
+            variants: vec![option(FragmentLength::Unknown)],
+            ..gore()
+        };
+        assert_eq!(unknown.done_after_s(&|_| false), None, "no length, no end");
     }
 
     #[test]

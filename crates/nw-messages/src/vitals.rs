@@ -12,6 +12,7 @@
 //! `ManaTickRate` (`u16`); it ends every captured slot-1 body.
 
 use crate::afflictions::{AfflictionList, ColdLong, HotLong};
+use crate::alc::half_bits;
 use crate::slots::{
     children_mask, read_children, read_slot_byte, write_children, write_known_children,
 };
@@ -146,6 +147,25 @@ impl VitalsData {
         }
     }
 
+    /// This block with the dead head: a structure that broke keeps the time of its block
+    /// (Observed: `everfall_war_2` 102.646 s, a war repeater at 0 health sent head 1 with the
+    /// time of its first block, `0b97457a6220b0ed`).
+    pub const fn broken(self) -> Self {
+        Self {
+            head: DEAD_HEAD,
+            ..self
+        }
+    }
+
+    /// This block with the alive head (Observed: the same repeater whole again at the war's
+    /// result, `everfall_war_2` 258.524 s, with the same time).
+    pub const fn whole(self) -> Self {
+        Self {
+            head: ALIVE_HEAD,
+            ..self
+        }
+    }
+
     /// The block of a dead creature: its head plays the death on the client.
     const DEAD: Self = Self {
         head: DEAD_HEAD,
@@ -262,6 +282,23 @@ impl VitalsState {
         let slot = self.slot_0.get_or_insert_with(VitalsSlot0::default);
         slot.health_max = Some(health_max as f32);
         slot.max_health = Some(u16::try_from(health_max).unwrap_or(u16::MAX));
+        self
+    }
+
+    /// This state with a creature's guard stamina in slot 0: `StaminaAmount` `amount`,
+    /// `StaminaMax` `max` and `StaminaTickRate`, the binary16 of its vitals row's
+    /// `StaminaBaseTickRate` `tick_rate`. Observed: the retail card of the damned pistoleer
+    /// (vitals id `0501e946`, MSQ13-lv56 ledger 654,127 ms) holds 50, 50 and `0x4000` (2.0, its
+    /// row's 2), and the player's tick rate `0x5100` is its row's 40. Retail sends the stamina in
+    /// the first state only: no later vitals state of that mob held a stamina child while its
+    /// raised block took eight hits (768,464 to 775,578 ms) and broke (775,604 ms), nor in the
+    /// other 25 dungeon and expedition ledgers swept.
+    #[must_use]
+    pub fn with_stamina(mut self, amount: f32, max: f32, tick_rate: f32) -> Self {
+        let slot = self.slot_0.get_or_insert_with(VitalsSlot0::default);
+        slot.stamina_amount = Some(amount);
+        slot.stamina_max = Some(max);
+        slot.stamina_tick_rate = Some(half_bits(tick_rate));
         self
     }
 
@@ -541,6 +578,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_broken_structure_keeps_the_time_of_its_block() {
+        // Retail `everfall_war_2` 102.646 s and 258.524 s, a war repeater.
+        const BLOCK_NS: u64 = 0x0b97_457a_6220_b0ed;
+        let first = VitalsData {
+            head: ALIVE_HEAD,
+            a: BLOCK_NS,
+            b: 0,
+            tail: CREATURE_DATA_TAIL,
+        };
+        let broken = first.broken();
+        assert_eq!(
+            (broken.head, broken.a, broken.tail),
+            (DEAD_HEAD, BLOCK_NS, CREATURE_DATA_TAIL)
+        );
+        assert_eq!(broken.whole(), first);
+    }
+
+    #[test]
     fn a_player_death_has_the_retail_bytes() {
         // Retail own vitals after a death: `01 0d 00000000 01 <spawn ns> 0..0 ff 03`.
         const SPAWNED_MS: u64 = 845_730_262_408;
@@ -708,6 +763,29 @@ mod tests {
         assert_eq!(slot.vitals_id, Some(PLAYER_VITALS_ID));
         assert_eq!(slot.max_health, Some(HEALTH_MAX as u16));
         assert_eq!(slot.children(), 0x21f3);
+    }
+
+    /// Our stamina children make the retail card of a damned pistoleer byte for byte
+    /// (MSQ13-lv56 ledger 654,127 ms, vitals id `0501e946`: stamina 50 of 50, tick rate 2).
+    #[test]
+    fn a_guard_stamina_writes_the_retail_card_children() {
+        const RETAIL_CARD: &str = "01ff4583b80042480000000bb2d73f1f27ec710000000000000000ff004583b8000000424800004f40000501e946be4409fd0000002b1077";
+        const GUARD_STAMINA: f32 = 50.0;
+        const GUARD_TICK_RATE: f32 = 2.0;
+        let bytes = hex::decode(RETAIL_CARD).expect("hex");
+        let retail = read_all(&bytes);
+        let mut without = retail.clone();
+        let slot = without.slot_0.as_mut().expect("slot 0");
+        (
+            slot.stamina_amount,
+            slot.stamina_max,
+            slot.stamina_tick_rate,
+        ) = (None, None, None);
+        let ours = without.with_stamina(GUARD_STAMINA, GUARD_STAMINA, GUARD_TICK_RATE);
+        assert_eq!(ours, retail);
+        let mut writer = Writer::new();
+        ours.write(&mut writer).expect("write");
+        assert_eq!(writer.finish(), bytes);
     }
 
     #[test]

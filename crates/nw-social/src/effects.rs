@@ -3,11 +3,12 @@
 //! two steps of a treasury transfer.
 
 use nw_bus::{
-    BusId, CoinTransfer, GroupEntityDelivery, OwnStateDelivery, SocialDelivery, UpkeepPaid,
+    BusId, CoinTransfer, GroupEntityDelivery, OwnStateDelivery, RaidEntityDelivery,
+    RaidInviteAnswer, SocialDelivery, UpkeepAnswer,
 };
 use nw_db::{
     CoinReturn, Company, CompanyInvite, CompanyMember, LinkKind, PlayerReport, SocialGroup,
-    SocialSettings, TreasuryReason,
+    SocialSettings, TreasuryReason, WarRequest,
 };
 use uuid::Uuid;
 
@@ -34,6 +35,13 @@ pub enum Effect {
         sim: BusId,
         /// The group entity.
         delivery: GroupEntityDelivery,
+    },
+    /// Send a player's raid entity and its raid's other group entities to its sim.
+    RaidEntity {
+        /// The sim of the player.
+        sim: BusId,
+        /// The raid entity.
+        delivery: RaidEntityDelivery,
     },
     /// Store a change.
     Store(StoreOp),
@@ -67,12 +75,29 @@ pub enum Effect {
         /// Why.
         reason: TreasuryReason,
     },
-    /// Tell the payer's sim that its territory upkeep payment was taken.
-    UpkeepPaid {
+    /// Put a war declaration into its territory's lottery in one database transaction (the
+    /// treasury pays in it when it pays); the answer comes back with
+    /// `SocialWorld::war_declared` and the same ticket.
+    DeclareWar {
+        /// The declaration's ticket.
+        ticket: u64,
+        /// The declaration.
+        request: WarRequest,
+    },
+    /// Tell the payer's sim whether its territory upkeep payment was taken.
+    UpkeepAnswered {
         /// The sim that has the payer.
         sim: BusId,
-        /// The payment.
-        paid: UpkeepPaid,
+        /// The answer.
+        answer: UpkeepAnswer,
+    },
+    /// Tell the sim that asked for a raid invite its player's answer (the sim moves it into the
+    /// war when it accepted).
+    RaidInviteAnswered {
+        /// The sim that asked for the invite.
+        sim: BusId,
+        /// The answer.
+        answer: RaidInviteAnswer,
     },
 }
 

@@ -16,7 +16,9 @@ use crate::Tables;
 use crate::character_points::{ATTRIBUTE_COUNT, DEXTERITY, FOCUS, INTELLIGENCE, STRENGTH};
 use crate::gameplay_config::ITEM_CLASS_SEPARATOR;
 use crate::player_abilities::{AbilityList, PlayerAbilities, SpellRow};
-use crate::player_attacks::{PlayerAttacks, Stance, stance_key};
+use crate::player_attacks::{
+    HitReaction, PlayerAttacks, ReactionFragment, ReactionKind, Stance, stance_key,
+};
 use crate::player_sequences::PlayerSequences;
 use crate::status_effects::RowKey;
 
@@ -42,6 +44,8 @@ const PERCENT: f64 = 100.0;
 /// The `BalanceCategory` of the open-world PvP balance rows that adjust a weapon class
 /// (`javelindata_pvpbalance_openworld`).
 const PVP_BALANCE_ITEM_CLASS: &str = "ItemClass";
+/// A `TRUE` cell of a text column (`LevelDisparityData` `AdjustPowerLevel`).
+const TRUE_CELL: &str = "TRUE";
 
 /// The config rows a `sim` needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,23 +115,29 @@ pub struct MobGuard {
     pub stamina_max: f32,
     /// `StaminaInitial`.
     pub stamina_initial: f32,
-    /// Stamina back per second: `StaminaBaseTickRate` per `StaminaTickDelay`, at the player's
-    /// rate per unit (**Inferred**: the player row's 40 per 3 gives the 33.33 per second retail
-    /// showed, so 2 per 1 gives 5 per second).
+    /// `StaminaBaseTickRate`: the first vitals state of the mob carries it as `StaminaTickRate`
+    /// (Observed: a binary16 of it; retail `0x4000` (2) on the damned pistoleer's card, vitals id
+    /// `0501e946`, beside `StaminaAmount` and `StaminaMax` 50; the player's 40 is `0x5100`).
+    pub tick_rate: f32,
+    /// Stamina back per second: `StaminaBaseTickRate` per `StaminaTickDelay` seconds, times
+    /// [`MOB_REGEN_SCALE`] (**Inferred**, fitted: 3.0 to 3.3 per second for the common guard's
+    /// 2 per 1 put 71 of 81 retail fresh-guard sequences right, 5 per second 69, 2 per second
+    /// 69; no retail state carries a mob's stamina after its card).
     pub regen_per_s: f32,
     /// `BlockDamageMitigation`: the share of a blocked hit it stops (1: all; retail sent 3,315
     /// of 4,586 direct hits on a raised mob block as `Resisted` with 0 damage).
     pub mitigation: f32,
-    /// `BlockStaminaCost`: multiplies the stamina a blocked hit takes (**Inferred** from the
-    /// name).
+    /// `BlockStaminaCost`: multiplies the stamina a blocked hit takes (Observed: the weapon's
+    /// `BlockStaminaDamage` x the row's `BlockStaminaDmgMod` x this 0.8 put 71 of 81 retail
+    /// fresh-guard sequences of 45 ledgers right; the weapon's value with any factor and no row,
+    /// at most 38).
     pub stamina_cost: f32,
 }
 
-/// The player row's `StaminaBaseTickRate` and `StaminaTickDelay`, and the regen per second
-/// retail showed with them (stamina note: 1.111 per 33 ms tick).
-const PLAYER_TICK_RATE: f32 = 40.0;
-const PLAYER_TICK_DELAY: f32 = 3.0;
-const PLAYER_REGEN_PER_S: f32 = 100.0 / 3.0;
+/// A mob guard's regen per second for each `StaminaBaseTickRate` per `StaminaTickDelay`
+/// second ([`MobGuard::regen_per_s`]; **Inferred**: the fitted 3.0 to 3.3 per second for 2 per
+/// 1 is 1.5 to 1.65 times the row's value; this is the low end of that range).
+const MOB_REGEN_SCALE: f32 = 1.5;
 /// A guard needs more stamina than this to block at all (the boar's `StaminaBaseMax` 1).
 const MIN_GUARD_STAMINA: f32 = 1.0;
 
@@ -144,8 +154,8 @@ impl MobGuard {
         (stamina_max > MIN_GUARD_STAMINA && mitigation > 0).then(|| Self {
             stamina_max,
             stamina_initial: (initial as f32).clamp(0.0, stamina_max),
-            regen_per_s: tick_rate as f32 / delay
-                * (PLAYER_REGEN_PER_S / (PLAYER_TICK_RATE / PLAYER_TICK_DELAY)),
+            tick_rate: tick_rate as f32,
+            regen_per_s: tick_rate as f32 / delay * MOB_REGEN_SCALE,
             // `BlockDamageMitigation` is 0 or 1 in every row.
             mitigation: (mitigation as f32).clamp(0.0, 1.0),
             stamina_cost: cost as f32,
@@ -224,6 +234,9 @@ pub struct WeaponRow {
     /// How it blocks a projectile; `None` without `CanBlockRanged`: a projectile passes its
     /// block.
     pub ranged_block: Option<RangedBlock>,
+    /// `BaseStaggerDamage`: the grit its hits take from a target whose grit is on, before the
+    /// attack's `StaggerDmgModifier` ([`AttackRow::stagger`]); 0 for an empty cell.
+    pub stagger_damage: f64,
 }
 
 /// How a weapon with `CanBlockRanged` blocks a projectile (build 25810808: shields 0 and 1,
@@ -340,6 +353,51 @@ pub struct AttackRow {
     /// `AttackBlockedRuneCharge` when blocked) and to the target (`HitRuneCharge`,
     /// `HitBlockedRuneCharge`); 0 without a number.
     pub rune_charge: RuneChargeRow,
+    /// `PowerLevel`: how hard its hit shakes a player (the reaction table's levels); 0 for an
+    /// empty cell. Observed (client `FUN_14692b9a0`): the client reads each power column as a
+    /// pair, the base column and its `_AI` twin, and a creature's hit on a player takes the base
+    /// column (the tutorial: `Damned_1H_Melee_*` rows of level 0 gave no reaction, the club and
+    /// axe rows of levels 1 to 3 did).
+    pub power_level: u32,
+    /// `HitStun`: how long its hit stuns a player it shakes, in frames of 1/30 s
+    /// ([`crate::player_attacks::ReactionEntry::stun_ms`]); 0 for an empty cell. A creature's
+    /// hit takes the base column, as the power level.
+    pub hit_stun: u32,
+    /// `StaggerDmgModifier`: multiplies the attacker weapon's `BaseStaggerDamage` when it hits a
+    /// target whose grit is on; 0 without a number (Observed cells: `0` to `40`, one bad
+    /// `0.0.5`).
+    pub stagger_mod: f64,
+    /// `StunBreakoutIncrement`: what its hit adds to the reaction count of a player it shakes
+    /// (Inferred from the name and `IfCanBreakReaction StunToBreakout`; Observed cells 0, 0.1,
+    /// 0.25, 0.5 and 1); 0 for an empty cell. A creature's hit takes the base column, as the
+    /// power level.
+    pub stun_breakout: f64,
+}
+
+/// A `LevelDisparityData` row that changes the power level of a hit: an attacker this many
+/// levels above its target turns a hit of `required` into one of `adjusted` that stuns for
+/// `adjusted_hit_stun` (`AdjustPowerLevel`; Observed rows of build 25810808: 10 to 20 levels
+/// above turn level 0 into level 1 with a stun of 20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowerLevelShift {
+    /// `LevelDisparity`: the attacker's level minus the target's.
+    pub disparity: i64,
+    /// `RequiredPowerLevel`.
+    pub required: u32,
+    /// `AdjustedPowerLevel`.
+    pub adjusted: u32,
+    /// `AdjustedHitStun`.
+    pub adjusted_hit_stun: u32,
+}
+
+/// How a hit shakes its target: its power level and its stun in frames
+/// ([`CombatData::incoming_hit`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IncomingHit {
+    /// The power level.
+    pub power_level: u32,
+    /// The stun, frames of 1/30 s.
+    pub hit_stun: u32,
 }
 
 /// The heart rune charge points of a `DamageData` row.
@@ -361,6 +419,13 @@ impl AttackRow {
     /// warhammer of stability 27, `100 x 0.2 x 0.73` and `125 x 0.28 x 0.73`).
     pub fn block_stamina(&self, weapon: &WeaponRow, block_stability: f64) -> f64 {
         weapon.block_stamina_damage * self.block_stamina_mod * (1.0 - block_stability / PERCENT)
+    }
+
+    /// The grit its hit takes from a target whose grit is on, by an attacker with `weapon`
+    /// (Inferred from the column names: `BaseStaggerDamage` times `StaggerDmgModifier`; the
+    /// client's `totalStaggerDamage` debug field, `FUN_146701570`, sums such hits).
+    pub fn stagger(&self, weapon: &WeaponRow) -> f64 {
+        weapon.stagger_damage * self.stagger_mod
     }
 }
 
@@ -416,6 +481,8 @@ pub struct CombatSource {
     /// The open-world PvP balance: (item class, `WeaponBaseDamageAdjustment`) of each weapon
     /// class row.
     pub pvp_weapon_adjustments: Vec<(String, f64)>,
+    /// The `LevelDisparityData` rows that change a hit's power level.
+    pub power_level_shifts: Vec<PowerLevelShift>,
 }
 
 impl CombatSource {
@@ -538,6 +605,9 @@ impl CombatSource {
                             block_stability: row
                                 .block_stability
                                 .map_or(0.0, |stability| stability as f64),
+                            stagger_damage: row
+                                .base_stagger_damage
+                                .map_or(0.0, |damage| damage as f64),
                             ranged_block: row.can_block_ranged.unwrap_or_default().then(|| {
                                 RangedBlock {
                                     health_scale: row
@@ -665,6 +735,20 @@ impl CombatSource {
                         hit: row.hit_rune_charge.unwrap_or_default(),
                         hit_blocked: row.hit_blocked_rune_charge.unwrap_or_default(),
                     },
+                    power_level: row
+                        .power_level
+                        .and_then(|level| u32::try_from(level).ok())
+                        .unwrap_or(0),
+                    hit_stun: row
+                        .hit_stun
+                        .and_then(|frames| u32::try_from(frames).ok())
+                        .unwrap_or(0),
+                    stun_breakout: row.stun_breakout_increment.unwrap_or(0.0),
+                    stagger_mod: row
+                        .stagger_dmg_modifier
+                        .as_deref()
+                        .and_then(|cell| cell.trim().parse().ok())
+                        .unwrap_or(0.0),
                 })
                 .collect(),
             vision_offsets: tables
@@ -717,6 +801,20 @@ impl CombatSource {
                         row.balance_target.clone(),
                         row.weapon_base_damage_adjustment?,
                     ))
+                })
+                .collect(),
+            power_level_shifts: tables
+                .level_disparity_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter(|row| row.adjust_power_level.eq_ignore_ascii_case(TRUE_CELL))
+                .filter_map(|row| {
+                    Some(PowerLevelShift {
+                        disparity: row.level_disparity,
+                        required: u32::try_from(row.required_power_level).ok()?,
+                        adjusted: u32::try_from(row.adjusted_power_level).ok()?,
+                        adjusted_hit_stun: u32::try_from(row.adjusted_hit_stun).ok()?,
+                    })
                 })
                 .collect(),
         }
@@ -783,6 +881,17 @@ pub struct CombatData {
     player_sequences: PlayerSequences,
     vision_offsets: HashMap<String, f32>,
     player_base_health: u32,
+    /// [`CombatSource::power_level_shifts`].
+    power_level_shifts: Vec<PowerLevelShift>,
+}
+
+/// The slayer sequence a reaction plays ([`CombatData::reaction_sequence`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReactionSequence {
+    /// `slayerSequenceId` (child 15).
+    pub sequence: u64,
+    /// Whether it is the sequence of the nearest mined entry, not the entry's own (Inferred).
+    pub inferred: bool,
 }
 
 impl CombatData {
@@ -1006,7 +1115,34 @@ impl CombatData {
             player_sequences: PlayerSequences::default(),
             vision_offsets: source.vision_offsets.into_iter().collect(),
             player_base_health,
+            power_level_shifts: source.power_level_shifts,
         })
+    }
+
+    /// How a hit of `row` shakes a target `disparity` levels below its attacker
+    /// ([`PowerLevelShift`]): the shifted level and stun of the row of that disparity (the
+    /// table's last row past its end, Inferred) when it shifts the row's level, else the row's.
+    pub fn incoming_hit(&self, row: &AttackRow, disparity: i64) -> IncomingHit {
+        let own = IncomingHit {
+            power_level: row.power_level,
+            hit_stun: row.hit_stun,
+        };
+        let Some(high) = self
+            .power_level_shifts
+            .iter()
+            .map(|shift| shift.disparity)
+            .max()
+        else {
+            return own;
+        };
+        let disparity = disparity.min(high);
+        self.power_level_shifts
+            .iter()
+            .find(|shift| shift.disparity == disparity && shift.required == row.power_level)
+            .map_or(own, |shift| IncomingHit {
+                power_level: shift.adjusted,
+                hit_stun: shift.adjusted_hit_stun,
+            })
     }
 
     /// The mob type of a vitals id crc32.
@@ -1115,6 +1251,14 @@ impl CombatData {
             .unwrap_or_default()
     }
 
+    /// The item classes (`ItemClass`, split) of weapon item `item_id` (any case): a shield's
+    /// too (`KiteShield`); empty for an item that is no weapon.
+    pub fn weapon_item_classes(&self, item_id: &str) -> &[String] {
+        self.item_weapon_classes
+            .get(&item_id.to_lowercase())
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// The ability item `item_id` (any case) grants while worn (a heart rune's).
     pub fn equip_ability_of_item(&self, item_id: &str) -> Option<&str> {
         self.item_equip_abilities
@@ -1151,6 +1295,59 @@ impl CombatData {
     /// The stance of key `key` ([`WeaponRow::stance`]).
     pub fn stance(&self, key: u32) -> Option<&Stance> {
         self.player_attacks.stance(key)
+    }
+
+    /// The slayer sequence of the reaction row `row` of stance `stance` (key `stance_key`): the
+    /// mined sequence of its entry's animations (Observed), else the nearest entry with a mined
+    /// sequence (Inferred, no retail play of the entry was mined). An upper-body row takes only
+    /// an upper-body entry's sequence, a full-body row only a full-body one's. Nearest: of the
+    /// same reaction kind (guard break, stagger, knockdown, upper body) first, then of the same
+    /// stance, then of the nearest `R` level, then of the nearest side (quarter turns), then of
+    /// the same variant, then the lowest sequence (so the pick does not depend on the table's
+    /// order). `None` for a row without an entry or of no reaction fragment, or a table with no
+    /// mined sequence of its body part.
+    pub fn reaction_sequence(
+        &self,
+        stance_key: u32,
+        stance: &Stance,
+        row: &HitReaction,
+    ) -> Option<ReactionSequence> {
+        let entry = row.entry.as_ref()?;
+        let wanted = ReactionFragment::parse(&row.fragment)?;
+        let upper_body = |kind: ReactionKind| kind == ReactionKind::UpperBody;
+        if let Some(sequence) = self.player_sequences.reaction(&entry.animations) {
+            return Some(ReactionSequence {
+                sequence,
+                inferred: false,
+            });
+        }
+        let distance = |key: u32, known: &HitReaction, sequence: u64| {
+            let fragment = ReactionFragment::parse(&known.fragment)?;
+            (upper_body(fragment.kind) == upper_body(wanted.kind)).then(|| {
+                (
+                    fragment.kind != wanted.kind,
+                    key != stance_key,
+                    fragment.level.abs_diff(wanted.level),
+                    fragment.side_turns(&wanted),
+                    fragment.variant != wanted.variant,
+                    sequence,
+                )
+            })
+        };
+        std::iter::once((stance_key, stance))
+            .chain(self.player_attacks.stances())
+            .flat_map(|(key, stance)| stance.reactions.iter().map(move |known| (key, known)))
+            .filter_map(|(key, known)| {
+                let sequence = self
+                    .player_sequences
+                    .reaction(&known.entry.as_ref()?.animations)?;
+                distance(key, known, sequence)
+            })
+            .min()
+            .map(|(.., sequence)| ReactionSequence {
+                sequence,
+                inferred: true,
+            })
     }
 
     /// The stance of a character with no weapon.
@@ -1291,6 +1488,56 @@ mod tests {
     }
 
     #[test]
+    fn an_attacker_far_above_its_target_turns_a_level_0_hit_into_level_1() {
+        // `LevelDisparityData` (build 25810808): 10 to 20 levels above, level 0 becomes 1; the
+        // test table holds the row of 10.
+        let data = data();
+        let row = |power_level, hit_stun| AttackRow {
+            power_level,
+            hit_stun,
+            ..source().attacks[0].clone()
+        };
+        let shifted = IncomingHit {
+            power_level: 1,
+            hit_stun: 20,
+        };
+        assert_eq!(data.incoming_hit(&row(0, 10), 10), shifted);
+        assert_eq!(
+            data.incoming_hit(&row(0, 10), 25),
+            shifted,
+            "past the last row"
+        );
+        let own = IncomingHit {
+            power_level: 0,
+            hit_stun: 10,
+        };
+        assert_eq!(data.incoming_hit(&row(0, 10), 9), own, "no row of 9");
+        assert_eq!(data.incoming_hit(&row(0, 10), -30), own);
+        assert_eq!(
+            data.incoming_hit(&row(2, 18), 10),
+            IncomingHit {
+                power_level: 2,
+                hit_stun: 18,
+            },
+            "the row shifts level 0 only"
+        );
+    }
+
+    #[test]
+    fn a_hit_takes_its_weapons_stagger_damage_times_its_rows_modifier() {
+        let row = AttackRow {
+            stagger_mod: 0.5,
+            stun_breakout: 0.0,
+            ..source().attacks[0].clone()
+        };
+        let weapon = WeaponRow {
+            stagger_damage: 100.0,
+            ..sword_row()
+        };
+        assert!((row.stagger(&weapon) - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn a_blocked_hit_takes_the_retail_stamina() {
         // Retail tutorial, warhammer of `BlockStability` 27: the legionnaire's
         // `Legionnaire_LightStab` (0.2) with `Legion_1HSpear` (100) took 14.6, Thorpe's
@@ -1363,11 +1610,15 @@ mod tests {
         // Retail rows (build 25810808): `Damned_1H_Swordsman_M-F_42` and `Boar`.
         let guard = MobGuard::of((50, 50, 2, 1), (1, 0.8)).expect("a guard");
         assert!(
-            (guard.regen_per_s - 5.0).abs() < 1e-4,
+            (guard.regen_per_s - 3.0).abs() < 1e-4,
             "{}",
             guard.regen_per_s
         );
         assert!((guard.mitigation - 1.0).abs() < f32::EPSILON);
+        assert!(
+            (guard.tick_rate - 2.0).abs() < f32::EPSILON,
+            "its card's tick rate"
+        );
         assert_eq!(MobGuard::of((1, 0, 0, 0), (0, 0.0)), None);
     }
 
@@ -1392,6 +1643,7 @@ mod tests {
             block_stamina_damage: 0.0,
             block_stability: 0.0,
             ranged_block: None,
+            stagger_damage: 0.0,
         }
     }
 
@@ -1485,6 +1737,12 @@ mod tests {
                 ("Sword".to_owned(), SWORD_PVP_ADJUSTMENT),
                 ("Bow".to_owned(), BOW_PVP_ADJUSTMENT),
             ],
+            power_level_shifts: vec![PowerLevelShift {
+                disparity: 10,
+                required: 0,
+                adjusted: 1,
+                adjusted_hit_stun: 20,
+            }],
             equip_abilities: vec![(RUNE_STATS.to_owned(), RUNE_ABILITY.to_owned())],
             mob_spells: vec![mob_bomb()],
             item_stats: vec![
@@ -1510,6 +1768,10 @@ mod tests {
                     backstab: true,
                     headshot: true,
                     rune_charge: RuneChargeRow::default(),
+                    power_level: 0,
+                    hit_stun: 0,
+                    stagger_mod: 0.0,
+                    stun_breakout: 0.0,
                 })
                 .to_vec(),
             vision_offsets: vec![("Beast".to_owned(), VISION_OFFSET)],
@@ -1592,6 +1854,126 @@ mod tests {
         ));
     }
 
+    /// A stance of tags `tags` with reaction rows of `fragments` (fragment, animations).
+    fn reacting(tags: &str, fragments: &[(&str, &str)]) -> Stance {
+        use crate::player_attacks::{HitReaction, ReactionEntry};
+        use nw_formats::mannequin::Condition;
+        Stance {
+            tags: tags.to_owned(),
+            light: None,
+            light_from_ms: 0,
+            heavy_from_ms: None,
+            heavy: None,
+            charged_at_ms: None,
+            charged: None,
+            dodge_invulnerable_ms: None,
+            sheathe_ms: None,
+            uses: Vec::new(),
+            combo: Vec::new(),
+            variants: Vec::new(),
+            aimed: None,
+            aimed_charged: None,
+            reactions: fragments
+                .iter()
+                .map(|(fragment, animations)| HitReaction {
+                    power_level: None,
+                    fragment: (*fragment).to_owned(),
+                    condition: Condition::True,
+                    entry: Some(ReactionEntry {
+                        animations: (*animations).to_owned(),
+                        length_ms: 0,
+                        can_transition_ms: None,
+                        motion: None,
+                    }),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_reaction_without_a_mined_sequence_takes_the_nearest_mined_one() {
+        use crate::player_sequences::ReactionPlay;
+        const SWORD: &str = "1H_Melee,Sword";
+        let sword = reacting(
+            SWORD,
+            &[
+                ("r_R1_F", "sword_r1_f"),
+                ("r_R1_L", "sword_r1_l"),
+                ("r_R1_B", "sword_r1_b"),
+                ("r_R3_F", "sword_r3_f"),
+                ("r_R4_F", "sword_r4_f"),
+                ("r_B0_Break", "sword_break"),
+                ("r_R0_F", "sword_r0_f"),
+            ],
+        );
+        let great_sword = reacting(
+            "2H_Melee,GreatSword",
+            &[
+                ("r_R1_F", "great_r1_f"),
+                ("r_B0_Break", "great_break"),
+                ("r_R4_F", "great_r4_f"),
+                ("r_R0_F", "great_r0_f"),
+            ],
+        );
+        let mined = [
+            ("sword_r1_f", 100),
+            ("sword_r3_f", 300),
+            ("great_r1_f", 900),
+            ("great_break", 2125),
+            ("great_r4_f", 3486),
+            ("great_r0_f", 50),
+        ];
+        let data = data()
+            .with_player_attacks(PlayerAttacks::of_stances(vec![sword.clone(), great_sword]))
+            .with_player_sequences(
+                PlayerSequences::default().with_reactions(
+                    mined
+                        .iter()
+                        .map(|(animations, sequence)| ReactionPlay {
+                            animations: (*animations).to_owned(),
+                            sequence: *sequence,
+                        })
+                        .collect(),
+                ),
+            );
+        let key = stance_key(SWORD);
+        let sequence = |fragment: &str| {
+            let row = sword
+                .reactions
+                .iter()
+                .find(|row| row.fragment == fragment)
+                .expect("row");
+            data.reaction_sequence(key, &sword, row)
+                .map(|found| (found.sequence, found.inferred))
+        };
+        assert_eq!(sequence("r_R1_F"), Some((100, false)), "its own mined one");
+        assert_eq!(
+            sequence("r_R1_L"),
+            Some((100, true)),
+            "the same stance and level a quarter turn away"
+        );
+        assert_eq!(
+            sequence("r_R1_B"),
+            Some((100, true)),
+            "the same level before a nearer side of another level"
+        );
+        assert_eq!(
+            sequence("r_B0_Break"),
+            Some((2125, true)),
+            "a guard break of another stance before a stagger of its own"
+        );
+        assert_eq!(
+            sequence("r_R4_F"),
+            Some((3486, true)),
+            "a knockdown of another stance"
+        );
+        assert_eq!(
+            sequence("r_R0_F"),
+            Some((50, true)),
+            "an upper-body row takes an upper-body sequence only"
+        );
+    }
+
     #[test]
     fn a_weapon_finds_its_stance() {
         let stance = Stance {
@@ -1609,6 +1991,7 @@ mod tests {
             variants: Vec::new(),
             aimed: None,
             aimed_charged: None,
+            reactions: Vec::new(),
         };
         let unarmed = Stance {
             tags: String::new(),

@@ -16,6 +16,7 @@
 
 use nw_messages::buildables::{BuildableControllerState, PlacementObstructionState};
 use nw_messages::items::FIRST_VERSION;
+use nw_messages::keyed_list::KeyedList;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     AssetId, BundleMember, GdeMetadataReplicatedState, InteractState, MemberState,
@@ -23,9 +24,7 @@ use nw_messages::{
 };
 use nw_sim_core::Position;
 
-use super::crafting::{
-    CARD_COMPONENT, CHECK_FOUNDATION_EVENTS, Station, dynamic_ref, list_at, unowned,
-};
+use super::crafting::{CARD_COMPONENT, CHECK_FOUNDATION_EVENTS, Station, dynamic_ref, unowned};
 
 /// The trading post slice of the asset catalog, as every retail card names it.
 const TRADING_POST_ASSET: AssetId = AssetId {
@@ -353,7 +352,7 @@ fn members(gde_ref: [u8; RAW_ID_LEN], at: WorldPosition, post: &Place) -> Vec<Bu
             MemberState::BuildableController(BuildableControllerState {
                 current_state: Some(BUILT_STATE),
                 check_foundation_events: Some(CHECK_FOUNDATION_EVENTS),
-                committed_resources: Some(list_at(FIRST_VERSION, Vec::new())),
+                committed_resources: Some(KeyedList::full(FIRST_VERSION, Vec::new())),
                 ..BuildableControllerState::default()
             }),
         ),

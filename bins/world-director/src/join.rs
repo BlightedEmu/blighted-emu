@@ -12,11 +12,11 @@ use nw_bus::{
     PlayerTravel, Point, QuestRun, SavedLoadout, SimSlot, StoredItem, StoredPoint, subject,
 };
 use nw_db::{
-    AdminRank, PgPool, SavedArena, SavedInventory, SavedItem, SavedItemRolls, SavedMounts,
-    SavedPlace, SavedPosition, SavedProgression, SavedQuests, SavedStatusEffect, SavedTravel,
-    account_by_id, account_entitlements, admin_rank, character_by_id, character_inventory,
-    character_items, character_position, character_progression, character_quests,
-    next_entity_number,
+    AdminRank, PgPool, SEASON_PASS_PROGRESSION, SavedAccountSeason, SavedArena, SavedInventory,
+    SavedItem, SavedItemRolls, SavedMounts, SavedPlace, SavedPosition, SavedProgression,
+    SavedQuests, SavedStatusEffect, SavedTravel, account_by_id, account_entitlements,
+    account_season, admin_rank, character_by_id, character_inventory, character_items,
+    character_position, character_progression, character_quests, next_entity_number,
 };
 use nw_login::look::{saved_backstory, saved_look};
 use nw_sim_core::{Position, TUTORIAL_FOLDER, TUTORIAL_START};
@@ -259,6 +259,17 @@ pub async fn route_join(
                 .map(|saved| player_progression(saved, unix_now_ns()))
                 .unwrap_or_default(),
         ),
+    };
+    // The season is the account's (global migration 0010); a world with no global database
+    // has none, as it has no store entitlements.
+    let progression = match (tutorial, context.ranks.as_ref()) {
+        (None, Some(global)) => with_account_season(
+            progression,
+            account_season(global, &context.db, join.account, join.character)
+                .await
+                .map_err(database)?,
+        ),
+        _ => progression,
     };
     let standing = account_standing(context.ranks.as_ref(), join.account).await?;
     let game_master = standing.game_master;
@@ -553,8 +564,26 @@ fn player_progression(saved: SavedProgression, now_ns: u64) -> PlayerProgression
         pvp_wanted: saved.log_out_state.pvp_wanted,
         cyclic_turns: saved.log_out_state.cyclic_turns,
         fishing_bait: saved.log_out_state.fishing_bait,
-        season: player_season(saved.season),
+        // The account's, put in by [`with_account_season`].
+        season: nw_bus::PlayerSeason::default(),
     }
+}
+
+/// `progression` with the account's season `saved`: its season pass state, and its season
+/// experience as the `SeasonPass` mastery (an account without season experience holds none).
+fn with_account_season(
+    mut progression: PlayerProgression,
+    saved: SavedAccountSeason,
+) -> PlayerProgression {
+    progression.season = player_season(saved.season);
+    if saved.experience == 0 {
+        progression.masteries.remove(SEASON_PASS_PROGRESSION);
+    } else {
+        progression
+            .masteries
+            .insert(SEASON_PASS_PROGRESSION.to_owned(), saved.experience);
+    }
+    progression
 }
 
 /// The saved season pass state as a sim keeps it.
@@ -961,18 +990,6 @@ mod tests {
                 cyclic_turns: std::collections::BTreeMap::from([("puzzlestone_a".to_owned(), 3)]),
                 fishing_bait: Some("FishingBaitT2".to_owned()),
             },
-            season: nw_db::SavedSeason {
-                season: 0x2221_5ad9,
-                redeemed: vec![0b11],
-                stats: vec![(0x1234_5678, 6)],
-                card: nw_db::SavedCard {
-                    template: 1,
-                    tasks: vec![0x199d_1dce],
-                    wild_stamps: 3,
-                    ..nw_db::SavedCard::default()
-                },
-                first_connect_ns: SAVED_NS,
-            },
         };
         assert_eq!(
             player_progression(saved, SAVED_NS + AWAY_NS),
@@ -1079,21 +1096,67 @@ mod tests {
                 pvp_wanted: true,
                 cyclic_turns: std::collections::BTreeMap::from([("puzzlestone_a".to_owned(), 3)]),
                 fishing_bait: Some("FishingBaitT2".to_owned()),
-                season: nw_bus::PlayerSeason {
-                    season: 0x2221_5ad9,
-                    redeemed: vec![0b11],
-                    stats: vec![(0x1234_5678, 6)],
-                    card: nw_bus::PlayerActivityCard {
-                        template: 1,
-                        tasks: vec![0x199d_1dce],
-                        wild_stamps: 3,
-                        ..nw_bus::PlayerActivityCard::default()
-                    },
-                    first_connect_ns: SAVED_NS,
-                    versions: (0, 0),
-                },
+                season: nw_bus::PlayerSeason::default(),
             }
         );
+    }
+
+    #[test]
+    fn the_account_s_season_replaces_the_character_s() {
+        /// The newchar ledger's season experience (seasons finding 2026-11-12: rank 39).
+        const ACCOUNT_EXPERIENCE: u32 = 107_683;
+        const STALE_EXPERIENCE: u32 = 500;
+        let character = PlayerProgression {
+            masteries: std::collections::BTreeMap::from([
+                (SEASON_PASS_PROGRESSION.to_owned(), STALE_EXPERIENCE),
+                ("BowAbilityTable".to_owned(), 30),
+            ]),
+            ..PlayerProgression::default()
+        };
+        let account = SavedAccountSeason {
+            experience: ACCOUNT_EXPERIENCE,
+            season: nw_db::SavedSeason {
+                season: 0x2221_5ad9,
+                redeemed: vec![0b11],
+                stats: vec![(0x1234_5678, 6)],
+                card: nw_db::SavedCard {
+                    template: 1,
+                    tasks: vec![0x199d_1dce],
+                    wild_stamps: 3,
+                    ..nw_db::SavedCard::default()
+                },
+                first_connect_ns: SAVED_NS,
+            },
+        };
+        let joined = with_account_season(character.clone(), account);
+        assert_eq!(
+            joined.masteries.get(SEASON_PASS_PROGRESSION),
+            Some(&ACCOUNT_EXPERIENCE)
+        );
+        assert_eq!(joined.masteries.get("BowAbilityTable"), Some(&30));
+        assert_eq!(
+            joined.season,
+            nw_bus::PlayerSeason {
+                season: 0x2221_5ad9,
+                redeemed: vec![0b11],
+                stats: vec![(0x1234_5678, 6)],
+                card: nw_bus::PlayerActivityCard {
+                    template: 1,
+                    tasks: vec![0x199d_1dce],
+                    wild_stamps: 3,
+                    ..nw_bus::PlayerActivityCard::default()
+                },
+                first_connect_ns: SAVED_NS,
+                versions: (0, 0),
+            }
+        );
+        let none = with_account_season(character, SavedAccountSeason::default());
+        assert_eq!(
+            none.masteries.get(SEASON_PASS_PROGRESSION),
+            None,
+            "no season yet"
+        );
+        assert_eq!(none.season, nw_bus::PlayerSeason::default());
     }
 
     /// When the food of [`saved_food`] was saved: unix ns.

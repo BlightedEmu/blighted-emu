@@ -71,6 +71,10 @@ const ACTION_LIST_NAME_ATTRIBUTE: &str = "Name";
 const FRAGMENT_NAME_ATTRIBUTE: &str = "FragmentName";
 const CONDITIONS_ELEMENT: &str = "Conditions";
 const AND_ELEMENT: &str = "And";
+/// A `<Group>` of tests: every one of them holds (Observed: the reaction table's `r_R0` rows wrap
+/// their `Stagger_Resisted` test in one, `playerreactiontableharness.actionlist`; Inferred: a
+/// group holds as an `And` does).
+const TEST_GROUP_ELEMENT: &str = "Group";
 const OR_ELEMENT: &str = "Or";
 const NOT_ELEMENT: &str = "Not";
 const TRUE_ELEMENT: &str = "True";
@@ -108,6 +112,12 @@ const ITEM_IN_SLOT_TEST_ELEMENT: &str = "IfItemInSlot";
 const SLOT_ALIAS_ATTRIBUTE: &str = "SlotToCheckAlias";
 const TAG_IN_SLOT_TEST_ELEMENT: &str = "IfMannequinTagInItemSlot";
 const CONFIG_VAR_TEST_ELEMENT: &str = "IfStackConfigVar";
+/// The equipment test and its children: `<ActionConditionHasRequiredEquipment>` holds
+/// `<RequiredItemClasses>` with one `<RequiredClass RequiredClass>` per item class (Observed:
+/// `playeractions_ability_flail.actionlist`, `Slam_Upgrade_KiteShield_Stagger`).
+const REQUIRED_EQUIPMENT_TEST_ELEMENT: &str = "ActionConditionHasRequiredEquipment";
+const REQUIRED_CLASS_ELEMENT: &str = "RequiredClass";
+const REQUIRED_CLASS_ATTRIBUTE: &str = "RequiredClass";
 const STACK_VAR_ATTRIBUTE: &str = "StackVar";
 const CONDITION_NAME_ATTRIBUTE: &str = "ConditionName";
 const ABILITY_MOVE_TEST_ELEMENT: &str = "IfActiveAbilityMoveName";
@@ -135,6 +145,13 @@ const EFFECT_ID_ELEMENT: &str = "EffectId";
 const EFFECT_ID_ATTRIBUTE: &str = "EffectId";
 /// Milliseconds per second.
 const MS_PER_SECOND: f64 = 1_000.0;
+/// A row of a reaction table (`*.actionlist` `<Reactions>`), its power level and the fragment it
+/// plays.
+const REACTION_ROW_ELEMENT: &str = "ReactionTableData";
+const POWER_LEVEL_ATTRIBUTE: &str = "PowerLevel";
+const REACTION_ATTRIBUTE: &str = "Reaction";
+/// The power level of a row for every hit.
+const ANY_POWER_LEVEL: &str = "*";
 /// How deep named conditions may name others (a named condition that names itself stops there).
 const MAX_EXTERNAL_DEPTH: usize = 8;
 const DEFAULT_ELEMENT: &str = "Default";
@@ -721,6 +738,15 @@ pub struct AnimClip {
     pub weight: f64,
     /// When the next clip of its layer starts; `None` for the last.
     pub end_s: Option<f64>,
+    /// Whether it starts when the clip before it in its layer ends: its blend's `ExitTime` is
+    /// negative (Observed: `-1` in 3,052 chained clips of the 88 game databases read, for
+    /// example the knockdown `r_R4_F`, `unarmed_r4_f` then `unarmed_prn_idle_to_idle`). Its
+    /// `start_s` is that end only once [`Fragment::time_chained_clips`] had the length of the
+    /// clip before; until then it is the start of the clip before. A first clip with a negative
+    /// exit time is not chained: it starts with the fragment (Inferred: the exit time then waits
+    /// for the fragment before, which is not part of this fragment's own time line); nor is one
+    /// after an empty clip, which ends at once.
+    pub after_previous: bool,
 }
 
 impl ProcClip {
@@ -746,6 +772,11 @@ pub struct Fragment {
     pub clips: Vec<ProcClip>,
     /// The clips of every animation layer, one list per layer, in file order.
     pub anim_layers: Vec<Vec<AnimClip>>,
+    /// Whether a clip that starts after the one before it ([`AnimClip::after_previous`]) has no
+    /// start yet: the database was not timed ([`AnimDatabase::time_chained_clips`]), or the
+    /// length of the clip before is not known, or the clip before loops. The
+    /// clip times of such an entry are not the game's.
+    pub awaits_clip_lengths: bool,
 }
 
 impl Fragment {
@@ -757,6 +788,44 @@ impl Fragment {
         clips()
             .find(|clip| clip.weight > 0.0)
             .or_else(|| clips().next())
+    }
+
+    /// Times the clips that start after the one before them ([`AnimClip::after_previous`]):
+    /// each starts where the clip before it ends, `(length - StartTime) / speed` after that
+    /// clip's start, and the later clips of its layer move with it (their exit times count
+    /// from it). `length_s` gives an animation's length in seconds; `None` when it is not known.
+    /// Without a length, or after a looping clip, the entry keeps
+    /// [`Fragment::awaits_clip_lengths`] set. Timing twice changes nothing.
+    pub fn time_chained_clips(&mut self, length_s: &dyn Fn(&str) -> Option<f64>) {
+        let mut timed = true;
+        for layer in &mut self.anim_layers {
+            for index in 1..layer.len() {
+                if !layer[index].after_previous {
+                    continue;
+                }
+                let (before, after) = layer.split_at_mut(index);
+                let previous = &mut before[index - 1];
+                let chained = &after[0];
+                let previous_end_s = (!previous.looped)
+                    .then(|| length_s(&previous.name))
+                    .flatten()
+                    .map(|length| {
+                        previous.start_s
+                            + (length - previous.anim_start_s).max(0.0) / previous.speed
+                    });
+                let Some(previous_end_s) = previous_end_s else {
+                    timed = false;
+                    continue;
+                };
+                let shift_s = previous_end_s - chained.start_s;
+                previous.end_s = Some(previous_end_s);
+                for clip in after.iter_mut() {
+                    clip.start_s += shift_s;
+                    clip.end_s = clip.end_s.map(|end| end + shift_s);
+                }
+            }
+        }
+        self.awaits_clip_lengths = !timed;
     }
 
     /// The clips of type `kind`, in layer order.
@@ -792,15 +861,23 @@ fn number_or(node: &Node, key: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-/// The clips of one `<AnimLayer>`: start times are the running sum of the blend exit times.
+/// The clips of one `<AnimLayer>`: start times are the running sum of the blend exit times; a
+/// negative exit time after a clip chains the next clip to that clip's end
+/// ([`AnimClip::after_previous`]), which adds nothing to the sum until the clips are timed; after
+/// an empty clip (which lasts no time) or as the first exit time it adds nothing.
 fn anim_clips(layer: &Node) -> Result<Vec<AnimClip>, MannequinError> {
     let mut time_s = 0.0;
     let mut blend: Option<&Node> = None;
+    let mut after_previous = false;
+    // Whether the last `<Animation>` named a clip (`None` before the first).
+    let mut previous_named: Option<bool> = None;
     let mut clips: Vec<AnimClip> = Vec::new();
     for node in &layer.children {
         match node.name.as_str() {
             BLEND_ELEMENT => {
-                time_s += exit_time(node)?;
+                let exit_s = exit_time(node)?;
+                after_previous = exit_s < 0.0 && previous_named == Some(true);
+                time_s += exit_s.max(0.0);
                 blend = Some(node);
             }
             ANIMATION_ELEMENT => {
@@ -808,6 +885,7 @@ fn anim_clips(layer: &Node) -> Result<Vec<AnimClip>, MannequinError> {
                     last.end_s = Some(time_s);
                 }
                 let name = node.attribute(NAME_ATTRIBUTE).unwrap_or_default();
+                previous_named = Some(!name.is_empty());
                 if name.is_empty() {
                     continue;
                 }
@@ -823,6 +901,7 @@ fn anim_clips(layer: &Node) -> Result<Vec<AnimClip>, MannequinError> {
                         .is_some_and(|flags| flags.split('+').any(|flag| flag.trim() == LOOP_FLAG)),
                     weight: number_or(node, WEIGHT_ATTRIBUTE, DEFAULT_WEIGHT),
                     end_s: None,
+                    after_previous,
                 });
             }
             _ => {}
@@ -918,18 +997,21 @@ impl AnimDatabase {
                 {
                     clips.extend(layer_clips(layer, index)?);
                 }
-                let anim_layers = entry
+                let anim_layers: Vec<Vec<AnimClip>> = entry
                     .children
                     .iter()
                     .filter(|layer| layer.name == ANIM_LAYER)
                     .map(anim_clips)
                     .collect::<Result<_, _>>()?;
+                let awaits_clip_lengths =
+                    anim_layers.iter().flatten().any(|clip| clip.after_previous);
                 fragments.push(Fragment {
                     name: named.name.clone(),
                     tags: split_tags(entry.attribute(FRAGMENT_TAGS_ATTRIBUTE)),
                     frag_tags: split_tags(entry.attribute(FRAGMENT_FRAG_TAGS_ATTRIBUTE)),
                     clips,
                     anim_layers,
+                    awaits_clip_lengths,
                 });
             }
         }
@@ -957,6 +1039,14 @@ impl AnimDatabase {
                 })
             })
             .collect())
+    }
+
+    /// Times the chained clips of every entry ([`Fragment::time_chained_clips`]) with the
+    /// animation lengths `length_s` gives.
+    pub fn time_chained_clips(&mut self, length_s: &dyn Fn(&str) -> Option<f64>) {
+        for fragment in &mut self.fragments {
+            fragment.time_chained_clips(length_s);
+        }
     }
 
     /// Takes the fragments of the sub database `sub` that `tags` pick: each one also needs
@@ -1090,6 +1180,9 @@ pub enum Condition {
     },
     /// `<IfStackConfigVar StackVar>`: the client setting is on.
     ConfigVar(String),
+    /// `<ActionConditionHasRequiredEquipment>`: an equipped item has one of these item classes
+    /// (its `RequiredItemClasses`; Inferred: any one of them, as the lists name one class).
+    RequiredEquipment(Vec<String>),
     /// Any other test, by element name.
     Other(String),
 }
@@ -1180,8 +1273,18 @@ pub trait CageWorld {
     fn config_var(&self, _variable: &str) -> bool {
         false
     }
+    /// An equipped item has one of the item classes `classes`.
+    fn required_equipment(&self, _classes: &[String]) -> bool {
+        false
+    }
     /// Another test, by element name.
     fn other(&self, _test: &str) -> bool {
+        false
+    }
+    /// The external condition `name` that no named condition of the list resolves holds: a
+    /// state the engine sets, such as the hit facts of a reaction table (`blocked`,
+    /// `damaged_front`, `GRIT_Broken`).
+    fn external(&self, _name: &str) -> bool {
         false
     }
 }
@@ -1212,7 +1315,34 @@ impl CageWorld for CageState<'_> {
     }
 }
 
+/// The item classes an equipment test names: the `RequiredClass` of each `RequiredClass` element
+/// under it, at any depth.
+fn required_classes(node: &Node) -> Vec<String> {
+    let mut classes = Vec::new();
+    let mut open: Vec<&Node> = node.children.iter().collect();
+    while let Some(child) = open.pop() {
+        if child.name == REQUIRED_CLASS_ELEMENT
+            && let Some(class) = child.attribute(REQUIRED_CLASS_ATTRIBUTE)
+        {
+            classes.push(class.to_owned());
+        }
+        open.extend(child.children.iter());
+    }
+    classes.sort();
+    classes
+}
+
 impl Condition {
+    /// Whether it reads more of the character than its tags and markers (an input, an ability,
+    /// an effect, a slot, an equipment or another test): it holds or not only at run time.
+    pub fn reads_state(&self) -> bool {
+        match self {
+            Self::All(parts) | Self::Any(parts) => parts.iter().any(Self::reads_state),
+            Self::Not(part) => part.reads_state(),
+            other => other.test_element().is_some(),
+        }
+    }
+
     fn of(node: &Node) -> Self {
         let parts = || node.children.iter().map(Self::of).collect();
         let attribute = |key| node.attribute(key).unwrap_or_default().to_owned();
@@ -1225,7 +1355,7 @@ impl Condition {
                 .map(str::to_owned)
         };
         match node.name.as_str() {
-            AND_ELEMENT => Self::All(parts()),
+            AND_ELEMENT | TEST_GROUP_ELEMENT => Self::All(parts()),
             OR_ELEMENT => Self::Any(parts()),
             NOT_ELEMENT => Self::Not(Box::new(Self::All(parts()))),
             TRUE_ELEMENT => Self::True,
@@ -1285,6 +1415,7 @@ impl Condition {
                 slot: attribute(SLOT_ALIAS_ATTRIBUTE),
             },
             CONFIG_VAR_TEST_ELEMENT => Self::ConfigVar(attribute(STACK_VAR_ATTRIBUTE)),
+            REQUIRED_EQUIPMENT_TEST_ELEMENT => Self::RequiredEquipment(required_classes(node)),
             other => Self::Other(other.to_owned()),
         }
     }
@@ -1311,7 +1442,7 @@ impl Condition {
             Self::Tag(tag) => world.tag(tag),
             Self::Marker(marker) => world.marker(marker),
             Self::Input(input) => world.input(input),
-            Self::External(_) => false,
+            Self::External(name) => world.external(name),
             Self::ActionStatus { action, installed } => world.action_status(action, *installed),
             Self::FragmentPlaying(fragment) => world.fragment_playing(fragment.as_deref()),
             Self::FragmentDone {
@@ -1330,6 +1461,7 @@ impl Condition {
             Self::ItemInSlot(slot) => world.item_in_slot(slot),
             Self::TagInSlot { tag, slot } => world.tag_in_slot(tag, slot),
             Self::ConfigVar(variable) => world.config_var(variable),
+            Self::RequiredEquipment(classes) => world.required_equipment(classes),
             Self::Other(test) => world.other(test),
         }
     }
@@ -1384,6 +1516,7 @@ impl Condition {
             Self::ItemInSlot(_) => ITEM_IN_SLOT_TEST_ELEMENT,
             Self::TagInSlot { .. } => TAG_IN_SLOT_TEST_ELEMENT,
             Self::ConfigVar(_) => CONFIG_VAR_TEST_ELEMENT,
+            Self::RequiredEquipment(_) => REQUIRED_EQUIPMENT_TEST_ELEMENT,
             Self::Other(test) => test,
         })
     }
@@ -2216,6 +2349,50 @@ impl ActionList {
     }
 }
 
+/// One row of a reaction table (`playerreactiontableharness.actionlist`): the engine plays the
+/// fragment of the first row whose power level and tests hold for the hit (Inferred order: the
+/// harness lists the guard break before the plain block, and power level 6's break before it).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReactionRow {
+    /// `PowerLevel`: the hit's power level the row is for; `None` for `*`, every level.
+    pub power_level: Option<u32>,
+    /// `Reaction`: the fragment it plays (`r_R2_F`).
+    pub fragment: String,
+    /// Its tests, all of which must hold (`True` when it has none).
+    pub condition: Condition,
+}
+
+/// Reads the rows of a reaction table, in file order; a row without a fragment, or with a
+/// power level that is neither `*` nor a number, is left out.
+///
+/// # Errors
+///
+/// Returns [`MannequinError`] when the XML is not well formed.
+pub fn reaction_table(text: &str) -> Result<Vec<ReactionRow>, MannequinError> {
+    let root = parse_tree(text)?;
+    let mut rows = Vec::new();
+    root.descendants(REACTION_ROW_ELEMENT, &mut rows);
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let power_level = match row.attribute(POWER_LEVEL_ATTRIBUTE)? {
+                ANY_POWER_LEVEL => None,
+                level => Some(level.parse().ok()?),
+            };
+            let condition = if row.children.is_empty() {
+                Condition::True
+            } else {
+                Condition::All(row.children.iter().map(Condition::of).collect())
+            };
+            Some(ReactionRow {
+                power_level,
+                fragment: row.attribute(REACTION_ATTRIBUTE)?.to_owned(),
+                condition,
+            })
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2480,6 +2657,88 @@ mod tests {
         assert_eq!((ms(homing.start_s), homing.end_s.map(ms)), (267, Some(467)));
         assert_eq!(homing.param("Radius"), Some("4.5"));
         assert_eq!(homing.param("Height"), None);
+    }
+
+    /// The retail knockdown `r_R4_F` of `player.adb` (its two animation clips, the second
+    /// chained with `ExitTime="-1"`), a first clip with a negative exit time, a chain after an
+    /// empty clip and a chain after a loop.
+    const CHAINED_ADB: &str = r#"<AnimDB><FragmentList><r_R4_F>
+ <Fragment BlendOutDuration="0.2" Tags=""><AnimLayer>
+  <Blend ExitTime="0" StartTime="0" Duration="0.033333335" CurveType="0"/><Animation name="unarmed_r4_f"/>
+  <Blend ExitTime="-1" StartTime="0" Duration="0.2" CurveType="0"/><Animation name="unarmed_prn_idle_to_idle"/>
+  <Blend ExitTime="0.25" StartTime="0" Duration="0.2" CurveType="0"/><Animation name="settle" speed="2"/>
+ </AnimLayer></Fragment>
+</r_R4_F><Land_Strafe>
+ <Fragment Tags=""><AnimLayer>
+  <Blend ExitTime="-1" StartTime="0.5" Duration="0.1"/><Animation name="land"/>
+  <Blend ExitTime="0.3" StartTime="0" Duration="0.1"/><Animation name=""/>
+  <Blend ExitTime="-1" StartTime="0" Duration="0.1"/><Animation name="after_empty"/>
+ </AnimLayer></Fragment>
+</Land_Strafe><Emote>
+ <Fragment Tags=""><AnimLayer>
+  <Blend ExitTime="0" StartTime="0"/><Animation name="dance_loop" flags="Loop"/>
+  <Blend ExitTime="-1" StartTime="0"/><Animation name="dance_end"/>
+ </AnimLayer></Fragment>
+</Emote></FragmentList></AnimDB>"#;
+
+    /// Made-up animation lengths for [`CHAINED_ADB`], seconds.
+    fn chained_length_s(name: &str) -> Option<f64> {
+        match name {
+            "unarmed_r4_f" => Some(1.2),
+            "unarmed_prn_idle_to_idle" => Some(0.8),
+            "dance_loop" => Some(2.0),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_negative_exit_time_chains_a_clip_to_the_end_of_the_clip_before() {
+        let mut adb = AnimDatabase::parse(CHAINED_ADB).expect("adb");
+        let knockdown = &adb.fragments[0];
+        assert!(knockdown.awaits_clip_lengths, "not timed yet");
+        let chained = &knockdown.anim_layers[0][1];
+        assert!(chained.after_previous);
+        assert!(
+            chained.start_s >= 0.0,
+            "the exit time -1 is no time back: {}",
+            chained.start_s
+        );
+        adb.time_chained_clips(&chained_length_s);
+        let starts = |fragment: &Fragment| -> Vec<(u64, Option<u64>)> {
+            fragment.anim_layers[0]
+                .iter()
+                .map(|clip| (ms(clip.start_s), clip.end_s.map(ms)))
+                .collect()
+        };
+        let knockdown = &adb.fragments[0];
+        assert!(!knockdown.awaits_clip_lengths);
+        assert_eq!(
+            starts(knockdown),
+            vec![(0, Some(1200)), (1200, Some(1450)), (1450, None)],
+            "the second clip at the first one's end, the third 0.25 s after the second"
+        );
+        let land = &adb.fragments[1];
+        assert!(!land.awaits_clip_lengths, "nothing to time");
+        assert_eq!(
+            starts(land),
+            vec![(0, Some(300)), (300, None)],
+            "a first exit time -1 starts with the fragment; after an empty clip it adds nothing"
+        );
+        assert!(!land.anim_layers[0][0].after_previous && !land.anim_layers[0][1].after_previous);
+        let emote = &adb.fragments[2];
+        assert!(emote.awaits_clip_lengths, "a loop has no end to chain to");
+        adb.time_chained_clips(&chained_length_s);
+        assert_eq!(
+            starts(&adb.fragments[0])[1],
+            (1200, Some(1450)),
+            "timing twice changes nothing"
+        );
+        let mut unknown = AnimDatabase::parse(CHAINED_ADB).expect("adb");
+        unknown.time_chained_clips(&|_| None);
+        assert!(
+            unknown.fragments[0].awaits_clip_lengths,
+            "no length, no start"
+        );
     }
 
     #[test]
@@ -2798,6 +3057,55 @@ mod tests {
         assert!(
             list.action("Ability_Life_Staff_Smite")
                 .is_some_and(|action| action.ability.is_some())
+        );
+    }
+
+    /// `Slam_Upgrade_KiteShield_Stagger` of `playeractions_ability_flail.actionlist` (build
+    /// 25810808): its equipment test names the kite shield, and the condition holds only at run
+    /// time.
+    #[test]
+    fn an_equipment_test_reads_its_item_classes_and_needs_the_run_time() {
+        struct Shielded;
+        impl CageWorld for Shielded {
+            fn tag(&self, _tag: &str) -> bool {
+                false
+            }
+            fn marker(&self, _marker: &str) -> bool {
+                false
+            }
+            fn input(&self, _input: &str) -> bool {
+                false
+            }
+            fn ability_active(&self, ability: &str) -> bool {
+                ability == "Ability_Flail_Slam"
+            }
+            fn required_equipment(&self, classes: &[String]) -> bool {
+                classes.iter().any(|class| class == "KiteShield")
+            }
+        }
+        let text = r#"<ActionList><Actions/>
+<Conditions>
+ <And Name="Slam_Upgrade_KiteShield_Stagger">
+  <IfAbilityActive AbilityName="Ability_Flail_Slam"/>
+  <ActionConditionHasRequiredEquipment><RequiredItemClasses>
+   <RequiredClass RequiredClass="KiteShield"/>
+  </RequiredItemClasses></ActionConditionHasRequiredEquipment>
+ </And>
+</Conditions></ActionList>"#;
+        let list = ActionList::parse(text).expect("list");
+        let condition = list
+            .resolved_condition("Slam_Upgrade_KiteShield_Stagger")
+            .expect("named");
+        assert!(condition.reads_state());
+        assert!(!condition.holds(&[], &[]), "never with tags alone");
+        assert!(condition.holds_in(&Shielded));
+        let mut parts = match &condition {
+            Condition::All(parts) => parts.clone(),
+            other => panic!("an And: {other:?}"),
+        };
+        assert_eq!(
+            parts.pop(),
+            Some(Condition::RequiredEquipment(vec!["KiteShield".to_owned()]))
         );
     }
 
@@ -3173,5 +3481,66 @@ mod tests {
         );
         assert_eq!(cast("Other"), None, "the melee check never holds");
         assert_eq!(action.casts[1].condition.markers(), ["CastFireProjectile"]);
+    }
+
+    /// The hit facts a reaction table reads, as the engine sets them.
+    struct HitFacts<'a>(&'a [&'a str]);
+
+    impl CageWorld for HitFacts<'_> {
+        fn tag(&self, _tag: &str) -> bool {
+            false
+        }
+
+        fn marker(&self, _marker: &str) -> bool {
+            false
+        }
+
+        fn input(&self, _input: &str) -> bool {
+            false
+        }
+
+        fn external(&self, name: &str) -> bool {
+            self.0.contains(&name)
+        }
+    }
+
+    #[test]
+    fn a_reaction_table_gives_its_rows_in_order_with_their_tests() {
+        // `playerreactiontableharness.actionlist` (build 25810808), its first, fourth and an
+        // untested row.
+        let text = r#"<ActionList><Reactions>
+ <ReactionTableData PowerLevel="*" Reaction="r_B0_Break"><And>
+  <IfExternalCondition ConditionName="blocked"/>
+  <IfExternalCondition ConditionName="last_hit_depleted_stamina"/></And></ReactionTableData>
+ <ReactionTableData PowerLevel="2" Reaction="r_R2_F"><IfExternalCondition ConditionName="damaged_front"/></ReactionTableData>
+ <ReactionTableData PowerLevel="5" Reaction="r_R4_F_Overhead"></ReactionTableData>
+ <ReactionTableData PowerLevel="n/a" Reaction="r_Bad"/>
+ <ReactionTableData PowerLevel="*" Reaction="r_R0_F"><And>
+  <IfExternalCondition ConditionName="damaged_front"/>
+  <Group><IfExternalCondition ConditionName="Stagger_Resisted"/></Group></And></ReactionTableData>
+</Reactions></ActionList>"#;
+        let rows = reaction_table(text).expect("table");
+        let levels: Vec<Option<u32>> = rows.iter().map(|row| row.power_level).collect();
+        assert_eq!(
+            levels,
+            [None, Some(2), Some(5), None],
+            "the bad level is left out"
+        );
+        assert_eq!(rows[0].fragment, "r_B0_Break");
+        assert!(
+            rows[0]
+                .condition
+                .holds_in(&HitFacts(&["blocked", "last_hit_depleted_stamina"]))
+        );
+        assert!(!rows[0].condition.holds_in(&HitFacts(&["blocked"])));
+        assert!(rows[1].condition.holds_in(&HitFacts(&["damaged_front"])));
+        assert_eq!(rows[2].condition, Condition::True);
+        assert!(
+            rows[3]
+                .condition
+                .holds_in(&HitFacts(&["damaged_front", "Stagger_Resisted"])),
+            "a group's test holds"
+        );
+        assert!(!rows[3].condition.holds_in(&HitFacts(&["damaged_front"])));
     }
 }

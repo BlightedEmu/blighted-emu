@@ -232,7 +232,9 @@ impl SimWorld {
             ItemCallMsg::TakeItem {
                 instance, quantity, ..
             } => {
-                self.take_item(entity, number, instance, quantity, now_ms);
+                if !self.take_generator_supply(entity, Some(quantity), now_ms) {
+                    self.take_item(entity, number, instance, quantity, now_ms);
+                }
             }
             ItemCallMsg::TradeEquipItem {
                 slot,

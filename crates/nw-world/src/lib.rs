@@ -4,6 +4,8 @@
 
 pub mod camps;
 pub mod capitals;
+pub mod catacomb_tiles;
+pub mod claim_plots;
 pub mod collision;
 pub mod collision_index;
 pub mod dungeon_scripts;
@@ -19,6 +21,7 @@ pub mod script;
 pub mod slice_data;
 pub mod spawner_slices;
 pub mod stations;
+pub mod time_of_day;
 pub mod travel_slices;
 pub mod water;
 pub mod world_file;

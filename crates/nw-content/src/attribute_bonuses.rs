@@ -6,6 +6,14 @@
 //! `ManaRate` (Focus 100: 0.2) and `CooldownTimer` (Focus 25: -0.03), each a share added to 1.
 //! **Observed** (retail `general-other-01`, Focus 250): a mana max of 110, the 100 of
 //! `ManaBaseMax` and the 0.1 of `Foc_Bonus_100_1`.
+//!
+//! A threshold ability's `OnEquipStatusEffect` is the status effect its holder has while it
+//! holds the ability ([`AttributeBonuses::equip_effects`]); Observed (build 25810808): the second
+//! ability of each row names one (`Foc_Bonus_50_2`: `ATB_Foc_Bonus_50_2_Effect`), and some first
+//! abilities too (`Foc_Bonus_50_1`: `ATB_Foc_Bonus_50_1_Effect`, `HealMod` 0.05). Those of the
+//! second abilities hold lasting (`BaseDuration` -1) fishing and gathering stats: gathering efficiency (`EFF_*`, the 25 and 200
+//! rows), yield (`MULT_*`, 250), luck (`ROL_*`, Constitution 50 and the 350 rows), the fish size
+//! roll (Focus 25, 200, 250) and cast distance (Focus 50, [`crate::fishing`]).
 
 use std::collections::HashMap;
 
@@ -43,6 +51,9 @@ pub struct AttributeBonuses {
     thresholds: Vec<(u32, u32, Vec<String>)>,
     /// The stats of the abilities, by lowercase `AbilityID`.
     stats: HashMap<String, AbilityStats>,
+    /// The `OnEquipStatusEffect` of the threshold abilities that have one, by lowercase
+    /// `AbilityID`.
+    equip_effects: HashMap<String, String>,
 }
 
 impl AttributeBonuses {
@@ -77,7 +88,35 @@ impl AttributeBonuses {
                 )
             })
             .filter(|(_, stats)| *stats != AbilityStats::default());
-        Self::build(thresholds, stats)
+        let equip_effects = tables
+            .ability_data
+            .iter()
+            .flat_map(|table| &table.rows)
+            .filter_map(|row| {
+                let effect = row.on_equip_status_effect.as_deref()?.trim();
+                (!effect.is_empty()).then(|| (row.ability_id.clone(), effect.to_owned()))
+            });
+        Self::build(thresholds, stats).with_equip_effects(equip_effects)
+    }
+
+    /// These bonuses with the `OnEquipStatusEffect` of their threshold abilities among
+    /// `effects` (ability id, status id); an ability of no threshold is left out.
+    #[must_use]
+    pub fn with_equip_effects(
+        mut self,
+        effects: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        let threshold: std::collections::HashSet<String> = self
+            .thresholds
+            .iter()
+            .flat_map(|(_, _, abilities)| abilities.iter().map(|ability| ability.to_lowercase()))
+            .collect();
+        self.equip_effects = effects
+            .into_iter()
+            .map(|(ability, effect)| (ability.to_lowercase(), effect))
+            .filter(|(ability, _)| threshold.contains(ability))
+            .collect();
+        self
     }
 
     /// The bonuses of the `thresholds` (attribute id, level, `EquipAbilities` cell) and the
@@ -103,6 +142,7 @@ impl AttributeBonuses {
                 .into_iter()
                 .map(|(id, stats)| (id.to_lowercase(), stats))
                 .collect(),
+            equip_effects: HashMap::new(),
         }
     }
 
@@ -113,6 +153,17 @@ impl AttributeBonuses {
             .filter(|(attribute, level, _)| value_of(*attribute) >= *level)
             .flat_map(|(_, _, abilities)| abilities.iter().map(String::as_str))
             .collect()
+    }
+
+    /// The status effects that the threshold abilities among `abilities` (any case) hold.
+    pub fn equip_effects<'a>(
+        &'a self,
+        abilities: impl IntoIterator<Item = &'a str>,
+    ) -> impl Iterator<Item = &'a str> {
+        abilities
+            .into_iter()
+            .filter_map(|ability| self.equip_effects.get(&ability.to_lowercase()))
+            .map(String::as_str)
     }
 
     /// The summed stats of `abilities` (any case; one without stats adds nothing).
@@ -181,5 +232,47 @@ mod tests {
             bonuses.stats_of(["foc_bonus_25_2"]),
             AbilityStats::default()
         );
+    }
+
+    #[test]
+    fn a_held_threshold_ability_holds_its_equip_effect() {
+        let bonuses = bonuses().with_equip_effects([
+            (
+                "Foc_Bonus_25_2".to_owned(),
+                "ATB_Foc_Bonus_25_2_Effect".to_owned(),
+            ),
+            ("Not_A_Threshold".to_owned(), "Some_Effect".to_owned()),
+        ]);
+        let effects: Vec<&str> = bonuses
+            .equip_effects(["foc_bonus_25_2", "Foc_Bonus_100_1", "Not_A_Threshold"])
+            .collect();
+        assert_eq!(effects, ["ATB_Foc_Bonus_25_2_Effect"]);
+    }
+
+    /// Focus 50 holds `Foc_Bonus_50_2`, whose effect makes the cast 3 % farther (build 25810808).
+    #[test]
+    #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
+    fn the_real_focus_50_bonus_holds_the_cast_distance_effect() {
+        const BUILD: &str = "25810808";
+        const FOCUS_50: u32 = 50;
+        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
+        let path = crate::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
+        let bundle = crate::ContentBundle::load(&path, BUILD).expect("bundle");
+        let bonuses = AttributeBonuses::from_tables(&bundle.tables);
+        let abilities =
+            bonuses.abilities(|attribute| if attribute == FOCUS { FOCUS_50 } else { 0 });
+        let effects: Vec<&str> = bonuses.equip_effects(abilities).collect();
+        assert_eq!(
+            effects,
+            [
+                "ATB_Foc_Bonus_25_2_Effect",
+                "ATB_Foc_Bonus_50_1_Effect",
+                "ATB_Foc_Bonus_50_2_Effect"
+            ]
+        );
+        let fishing = crate::fishing::FishingRules::from_tables(&bundle.tables);
+        let stats = fishing.effect_stats(effects);
+        assert!((stats.cast_distance - 0.03).abs() < 1e-9);
+        assert!((stats.modifiers.size - 0.5).abs() < 1e-9);
     }
 }

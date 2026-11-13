@@ -28,10 +28,12 @@ use std::sync::Arc;
 
 use nw_content::character_points::ATTRIBUTE_COUNT;
 use nw_content::combat::{
-    AffixDamage, AttackRow, DamageCategory, LevelRow, MobGuard, RangedBlock, WeaponRow,
+    AffixDamage, AttackRow, DamageCategory, IncomingHit, LevelRow, MobGuard, RangedBlock, WeaponRow,
 };
 use nw_content::passive_abilities::Trigger;
-use nw_content::player_attacks::{AttackHit, AttackKind, BasicAttack, Homing, MeleeShape, Stance};
+use nw_content::player_attacks::{
+    AttackHit, AttackKind, BasicAttack, GritWindow, Homing, MeleeShape, Stance,
+};
 use nw_content::respawn_points::{nearest_respawn_point, respawn_point};
 use nw_content::status_effects::{Control, RowKey};
 use nw_formats::objectstream::lowercase_crc32;
@@ -43,13 +45,14 @@ use nw_messages::{
 };
 use nw_sim_core::character::swim_floor;
 use nw_sim_core::{
-    Damage, Health, PlayerAttack, TUTORIAL_START, armor_rating, armor_share, mob_hit, player_hit,
-    weapon_damage_scale,
+    CharacterBody, Damage, Health, PlayerAttack, TUTORIAL_START, armor_rating, armor_share,
+    mob_hit, player_hit, weapon_damage_scale,
 };
 
 use super::abilities::fresh_aim;
 use super::encounter::Tutorial;
 use super::gear::{Gear, unix_ns};
+use super::hit_reaction::{Grit, PlayerReaction, ReactionCount};
 use super::hit_shape::{
     MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, SweptShape, Wedge, body_frame, homing_score, turn,
 };
@@ -111,6 +114,10 @@ const BROKEN_GUARD_DAMAGE_DIVISOR: u32 = 2;
 /// The `BlockStability` of a mob's guard in the blocked hit's stamina (`AttackRow::block_stamina`):
 /// a mob has no blocking weapon row, so none (Inferred; its `BlockStaminaCost` scales the loss).
 const NO_BLOCK_STABILITY: f64 = 0.0;
+/// How far from a player's body the mobs whose capsules stop it are looked for, m (Inferred: an
+/// input message moves the body by at most eight records, under 2 m at a sprint, and the widest
+/// mob capsules are a few metres; our choice with room to spare).
+const CHARACTER_SEARCH_M: f32 = 10.0;
 
 /// A basic attack a player's client plays: when it started and its dodge cancel windows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +128,8 @@ pub(super) struct PlayingAttack {
     dodge_cancel_ms: Option<Vec<[u64; 2]>>,
     /// [`BasicAttack::block_disabled_ms`].
     block_disabled_ms: Vec<[u64; 2]>,
+    /// [`BasicAttack::grit`].
+    grit: Vec<GritWindow>,
 }
 
 impl PlayingAttack {
@@ -131,7 +140,15 @@ impl PlayingAttack {
             length_ms: attack.length_ms,
             dodge_cancel_ms: attack.dodge_cancel_ms.clone(),
             block_disabled_ms: attack.block_disabled_ms.clone(),
+            grit: attack.grit.clone(),
         }
+    }
+
+    /// Whether its grit is on at `now_ms` ([`BasicAttack::grit`], its conditions read at its
+    /// start).
+    pub(super) fn grit_on(&self, now_ms: u64) -> bool {
+        let elapsed = now_ms.saturating_sub(self.started_ms);
+        self.grit.iter().any(|grit| grit.on(elapsed))
     }
 
     /// Whether the attack holds the block down at `now_ms` (`BlockDisabled`).
@@ -180,7 +197,7 @@ pub(super) struct Vitals {
     /// The player holds the block key (the newest input record, [`ClientInputMsg::blocking`]).
     ///
     /// [`ClientInputMsg::blocking`]: nw_messages::ClientInputMsg::blocking
-    block_key: bool,
+    pub(super) block_key: bool,
     /// A blocked hit took the last stamina: the block stays down until the key is let go.
     guard_broken: bool,
     /// The player held the dodge key in the newest input record.
@@ -197,6 +214,13 @@ pub(super) struct Vitals {
     pub(super) deaths_door_since_ms: Option<u64>,
     /// How long its last death's door lasted, for its dead block.
     pub(super) deaths_door_ms: Option<u64>,
+    /// The hit reaction that holds it ([`super::hit_reaction`]).
+    pub(super) reaction: Option<PlayerReaction>,
+    /// Its grit ([`super::hit_reaction::Grit`]).
+    pub(super) grit: Grit,
+    /// Its reaction count: the `StunBreakoutIncrement` of the hits that shook it since its last
+    /// dodge ([`super::hit_reaction::ReactionCount`]).
+    pub(super) reaction_count: ReactionCount,
 }
 
 impl Vitals {
@@ -236,7 +260,17 @@ impl Vitals {
             invulnerable_ms: None,
             deaths_door_since_ms: None,
             deaths_door_ms: None,
+            reaction: None,
+            grit: Grit::FULL,
+            reaction_count: ReactionCount::NONE,
         }
+    }
+
+    /// A hit reaction cleared its inputs (`ClearInput`): the attack key's charge, its combo and
+    /// its buffered step are dropped, a waiting dodge too.
+    pub(super) const fn drop_attack_keys(&mut self) {
+        self.keys = AttackKeys::NONE;
+        self.dodge_waiting = false;
     }
 
     /// It is down at death's door.
@@ -294,6 +328,10 @@ pub struct KeyAttack {
 pub struct AttackKeys {
     charge: Option<Charge>,
     combo: Option<ComboState>,
+    /// A buffered step whose press was let go before its start, and whether it continues the
+    /// combo: it starts at its start, or at the key's next release when a new press holds the
+    /// key down then ([`AttackKeys::queued_due`]).
+    queued: Option<(KeyAttack, bool)>,
 }
 
 impl AttackKeys {
@@ -301,13 +339,50 @@ impl AttackKeys {
     pub const NONE: Self = Self {
         charge: None,
         combo: None,
+        queued: None,
     };
+
+    /// The buffered step that starts in `record` at `record_ms`: at its start when the key is
+    /// up, else at the release of the press that holds it down (Observed, retail newchar
+    /// 2026-09-18, the tutorial sword: the second step buffered by the press of record 2156 was
+    /// due in record 2163, where a new press (2162) held the key; the client named its charge
+    /// start `5051` in 2163 and the server started its light `484` at the release in 2165; the
+    /// third step's link counted from that light). `None` while it waits.
+    fn queued_due(&mut self, record: &InputRecord, record_ms: u64) -> Option<KeyAttack> {
+        let (attack, continues_combo) = self.queued?;
+        if record_ms < attack.started_ms {
+            return None;
+        }
+        let held = record.attack_held() || record.attack_pressed();
+        if held && !record.attack_released() {
+            return None;
+        }
+        self.queued = None;
+        let attack = KeyAttack {
+            started_ms: if record.attack_released() {
+                record_ms.max(attack.started_ms)
+            } else {
+                attack.started_ms
+            },
+            ..attack
+        };
+        if continues_combo {
+            self.combo = Some(ComboState {
+                step: attack.step,
+                kind: attack.kind,
+                started_ms: attack.started_ms,
+            });
+        }
+        Some(attack)
+    }
 
     /// Reads `record` at `record_ms` with `stance`, the stance of the weapon the attack key uses
     /// (`None`: no attack): a press starts its step's charge ([`next_charge`]), a release picks
     /// the light or heavy attack by the hold, a hold to the charge starts the charged attack
-    /// ([`Stance::released`]). Gives the attack it starts; that attack continues the combo when
-    /// `continues_combo` (the first attack of an input message: the others of it cannot hit).
+    /// ([`Stance::released`]); a buffered light whose press was let go waits for the record of its
+    /// start ([`AttackKeys::queued_due`]). Gives the attack it starts; that attack continues the
+    /// combo when `continues_combo` (the first attack of an input message: the others of it
+    /// cannot hit).
     pub fn record(
         &mut self,
         stance: Option<&Stance>,
@@ -320,8 +395,13 @@ impl AttackKeys {
             if record.attack_released() {
                 self.charge = None;
             }
+            self.queued = None;
             return None;
         };
+        if self.queued.is_some() {
+            // A press while a buffered step waits for its start joins that step.
+            return self.queued_due(record, record_ms);
+        }
         if record.attack_pressed() {
             self.charge = next_charge(stance, self.combo, counter, record_ms);
         }
@@ -364,6 +444,16 @@ impl AttackKeys {
             return None;
         };
         let started_ms = step_ms.saturating_add(after_ms);
+        let attack = KeyAttack {
+            step: charge.step,
+            kind,
+            started_ms,
+            pressed_ms,
+        };
+        if kind == AttackKind::Light && started_ms > record_ms {
+            self.queued = Some((attack, continues_combo));
+            return self.queued_due(record, record_ms);
+        }
         if continues_combo {
             self.combo = Some(ComboState {
                 step: charge.step,
@@ -371,14 +461,17 @@ impl AttackKeys {
                 started_ms,
             });
         }
-        Some(KeyAttack {
-            step: charge.step,
-            kind,
-            started_ms,
-            pressed_ms,
-        })
+        Some(attack)
     }
 }
+
+/// A buffered combo step starts this long after its link's instant clip: in the input record
+/// after the one that reaches it (Observed, retail newchar 2026-09-18, the own slayer starts by
+/// record counter: the tutorial sword's second step 17 records after the first's light, its
+/// link at 533 ms = 16 records; its third 14 after the second, link 433 ms = 13; the next chain
+/// 28 after the ender, link 900 ms = 27; the great sword's second step 22 records after the
+/// first's light, link 700 ms = 21; its next chain 24 after the ender, link 767 ms = 23).
+const BUFFERED_STEP_DELAY_MS: u16 = INPUT_RECORD_MS;
 
 /// The charge a press of the attack key in the record `pressed_at`, at `pressed_ms`, starts in
 /// `stance` after the attack `combo`: while that attack plays, a press in one of its links starts
@@ -419,9 +512,9 @@ fn next_charge(
         .map(|link| Charge {
             step: link.step,
             pressed_at,
-            from_ms: link
-                .starts_at_ms
-                .map_or(0, |at| at.saturating_sub(since_ms)),
+            from_ms: link.starts_at_ms.map_or(0, |at| {
+                (at + u64::from(BUFFERED_STEP_DELAY_MS)).saturating_sub(since_ms)
+            }),
             charged: false,
         })
 }
@@ -480,9 +573,20 @@ pub(super) struct MobHitStyle {
     blockable: bool,
     /// Its row's damage category: which armor takes it off.
     category: DamageCategory,
+    /// Its row's power level after the level disparity
+    /// ([`nw_content::combat::CombatData::incoming_hit`]): which hit reaction it starts
+    /// ([`super::hit_reaction`]).
+    power_level: u32,
+    /// Its row's `HitStun` after the level disparity, frames: how long its reaction stuns.
+    hit_stun: u32,
+    /// The grit it takes from a player whose grit is on ([`AttackRow::stagger`]).
+    stagger: f32,
+    /// What it adds to the reaction count of a player it shakes ([`AttackRow::stun_breakout`]).
+    breakout: f32,
 }
 
-/// What a block does with a mob's hit on a player ([`SimWorld::defend`]).
+/// What a block does with a mob's hit on a player ([`SimWorld::defend`]), and how it shakes the
+/// player ([`super::hit_reaction`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Blow {
     /// The stamina its block takes.
@@ -491,6 +595,14 @@ pub struct Blow {
     pub ranged: bool,
     /// A block stops it at all.
     pub blockable: bool,
+    /// Its power level ([`MobHitStyle::power_level`]).
+    pub power_level: u32,
+    /// Its stun ([`MobHitStyle::hit_stun`]).
+    pub hit_stun: u32,
+    /// The grit it takes ([`MobHitStyle::stagger`]).
+    pub stagger: f32,
+    /// What it adds to the reaction count ([`MobHitStyle::breakout`]).
+    pub breakout: f32,
 }
 
 impl MobHitStyle {
@@ -500,6 +612,10 @@ impl MobHitStyle {
             stamina: self.block_stamina,
             ranged: self.ranged,
             blockable: self.blockable,
+            power_level: self.power_level,
+            hit_stun: self.hit_stun,
+            stagger: self.stagger,
+            breakout: self.breakout,
         }
     }
 
@@ -537,12 +653,14 @@ pub struct Aim {
     pub point: Option<Position>,
 }
 
-/// A player's basic attack that has not landed yet.
+/// A player's basic attack, or the hit of an ability's fragment, that has not landed yet.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct PlayerSwing {
     attacker: ConnectionRef,
     aim: Aim,
-    kind: AttackKind,
+    /// The attack key's attack; `None` for an ability's hit
+    /// ([`SimWorld::start_ability_strike`]).
+    kind: Option<AttackKind>,
     attack: BasicAttack,
     /// When the attack started.
     started_ms: u64,
@@ -582,6 +700,16 @@ impl PlayerSwing {
                 .max(self.not_before_ms),
             AttackHit::Projectile { .. } | AttackHit::HitScan { .. } => self.due_ms(),
         }
+    }
+
+    /// Whether it is the swing of the player of `connection`.
+    pub(super) fn is_of(&self, connection: &ConnectionRef) -> bool {
+        self.attacker == *connection
+    }
+
+    /// Whether it began to land by `now_ms`: a hit reaction then stops it no more.
+    pub(super) fn opened(&self, now_ms: u64) -> bool {
+        now_ms >= self.due_ms()
     }
 }
 
@@ -784,10 +912,12 @@ impl SimWorld {
     }
 
     /// Everything an attack of player `entity` can meet: the mobs ([`SimWorld::target_places`])
-    /// and its PvP foes ([`SimWorld::foe_places`]).
+    /// and its PvP foes ([`SimWorld::foe_places`]), and in a war the siege structures of the
+    /// other side ([`SimWorld::structure_places`]).
     pub(super) fn attack_places(&mut self, entity: Entity) -> Vec<(u64, Position, Capsule)> {
         let mut places = self.target_places();
         places.extend(self.foe_places(entity));
+        places.extend(self.structure_places(entity));
         places
     }
 
@@ -809,8 +939,10 @@ impl SimWorld {
     /// balance of the weapon's class ([`nw_content::combat::CombatData::pvp_damage_factor`]) and
     /// the attacker's status effects; the target's worn armor takes its share against the
     /// attacker's weapon ([`SimWorld::worn_armor_share`]), its status effects their share.
-    /// It lands as any hit on a player does ([`SimWorld::apply_hit_with`]: 3601 to the target,
-    /// its death and recap), and the attacker gets its 2071.
+    /// The target's block and dodge meet it as they meet a creature's hit ([`SimWorld::defend`]:
+    /// a dodged or wholly blocked hit is a miss), then it lands as any hit on a player does
+    /// ([`SimWorld::apply_hit_with`]: 3601 to the target, its death and recap), shakes the
+    /// target ([`super::hit_reaction`]), and the attacker gets its 2071.
     fn pvp_hit(&mut self, pvp: PvpStrike<'_>, now_ms: u64) -> Result<AttackOutcome, AttackRefusal> {
         let PvpStrike {
             entity,
@@ -918,19 +1050,53 @@ impl SimWorld {
         {
             hit.amount = (f64::from(hit.amount) * scale).round() as u32;
         }
+        let stability = self
+            .held_weapon(target_entity)
+            .map_or(self.combat.data.weapon().block_stability, |(held, _)| {
+                held.block_stability
+            });
+        // A player's hit on a player shakes it by the row's base `PowerLevel` and `HitStun`
+        // (Inferred: the client reads the base column for a target that is no creature, as it
+        // does for a creature's hit on a player; no PvP reaction was captured), and its block
+        // takes the attacker weapon's block stamina as a creature's hit does.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a block stamina of a few dozen points and a stagger of a few hundred"
+        )]
         let style = MobHitStyle {
             tag,
             affix: row.affix,
             damage_scale: PLAIN_DAMAGE_FACTOR,
-            block_stamina: 0.0,
+            block_stamina: row.block_stamina(&weapon, stability) as f32,
             row: Some(row_key),
             ranged: false,
             blockable: row.blockable,
             category: row.category,
+            power_level: row.power_level,
+            hit_stun: row.hit_stun,
+            stagger: row.stagger(&weapon) as f32,
+            breakout: row.stun_breakout as f32,
         };
+        let Some((amount, guard)) = self.defend(
+            target_entity,
+            (target, number),
+            (hit.amount, Some(row_key)),
+            style.blow(),
+            now_ms,
+        ) else {
+            return Ok(AttackOutcome::Missed);
+        };
+        hit.amount = amount;
         let outcome = self
             .apply_hit_with(target, number, hit.amount, 0, now_ms, Some(&style))
             .ok_or(AttackRefusal::TargetDead)?;
+        self.shake(
+            target_entity,
+            number,
+            (style.blow(), guard),
+            Some(&outcome),
+            now_ms,
+        );
         let killed = matches!(outcome, AttackOutcome::Killed { .. });
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             player.combat.hit(now_ms, killed);
@@ -1003,6 +1169,9 @@ impl SimWorld {
             .ok_or(AttackRefusal::NotInWorld)?;
         if vitals.health.is_dead() {
             return Err(AttackRefusal::Dead);
+        }
+        if let Some(outcome) = self.structure_hit(entity, number, target, damage_id) {
+            return outcome;
         }
         if spawn_index(target).is_none() {
             let row = self
@@ -1661,12 +1830,26 @@ impl SimWorld {
         let swimming = self.world.get::<Body>(entity).is_some_and(|body| {
             body.motion.position().z <= self.settings.ocean_level_m + SWIM_HEIGHT_M
         });
+        self.end_free_reaction(entity, now_ms);
         if let Some(newest) = records.first() {
             self.stamina_input(entity, number, newest, swimming, now_ms);
         }
         self.ability_presses(entity, records);
         if !self.player_control(entity).may_fight() {
             tracing::debug!(player = number, "attack keys while stunned");
+            if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity)
+                && vitals.reaction.is_some()
+            {
+                // A hit reaction's records start nothing, and they are not read again once it
+                // lets the keys go (Observed, newchar 2026-09-18: the presses of records 7688
+                // and 7693 in the great sword's `2960` started nothing; the press in its end
+                // record 7699 started the press start).
+                vitals.input_counter = records
+                    .first()
+                    .map(|newest| newest.u16_after_mask)
+                    .or(vitals.input_counter);
+                vitals.drop_attack_keys();
+            }
             return Vec::new();
         }
         // The weapon the attack key uses: the one in the hand, else, while the hand holds a
@@ -1717,6 +1900,8 @@ impl SimWorld {
         let mut attack_pressed = false;
         // A new press of the sheathe key ([`Gear::draw_selected`]).
         let mut sheathe_pressed = false;
+        // A press of the swap weapon key ([`Gear::swap_key`]).
+        let mut swap_pressed = false;
         let newest_counter = records.first().map(|record| record.u16_after_mask);
         for record in records.iter().rev() {
             let counter = record.u16_after_mask;
@@ -1730,14 +1915,28 @@ impl SimWorld {
             weapon_key = record.weapon_key_pressed().or(weapon_key);
             attack_pressed |= record.attack_pressed();
             sheathe_pressed |= record.sheathe_pressed();
+            swap_pressed |= record.weapon_swap_pressed();
             let behind = newest_counter.map_or(0, |newest| newest.wrapping_sub(counter));
             let record_ms =
                 now_ms.saturating_sub(u64::from(behind.saturating_mul(INPUT_RECORD_MS)));
-            if let Some(attack) = vitals
+            match vitals
                 .keys
                 .record(stance, record, record_ms, attacks.is_empty())
             {
-                attacks.push(attack);
+                Some(attack) => attacks.push(attack),
+                // A press or release that starts nothing: a press before the links of the attack
+                // that plays, or a release with no charge (live 2026-11-12: light attacks of some
+                // players started no swing, and the log could not show why).
+                None if record.attack_pressed() || record.attack_released() => tracing::debug!(
+                    player = number,
+                    counter,
+                    pressed = record.attack_pressed(),
+                    released = record.attack_released(),
+                    stance = stance.is_some(),
+                    keys = ?vitals.keys,
+                    "attack key starts no attack"
+                ),
+                None => {}
             }
         }
         let lock_target = records.first().and_then(InputRecord::lock_target);
@@ -1749,7 +1948,8 @@ impl SimWorld {
         if let Some(mut player) = self.world.get_mut::<Player>(entity)
             && let Some(gear) = player.gear.as_mut()
         {
-            match weapon_key {
+            let key = weapon_key.or_else(|| swap_pressed.then(|| gear.swap_key()).flatten());
+            match key {
                 Some(key) => {
                     if gear.draw(key, now_ms, time_ns) {
                         tracing::debug!(player = number, key, "weapon drawn");
@@ -1845,6 +2045,8 @@ impl SimWorld {
                 (player.view, fresh_aim(player.aim, now_ms))
             });
         let newest_view = records.first().and_then(|newest| newest.bit_6);
+        let mut attack = attack;
+        self.keep_held_shapes(entity, &mut attack);
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             player.attack_playing = Some(PlayingAttack::of(&attack, started_ms));
         }
@@ -1860,7 +2062,7 @@ impl SimWorld {
                 lock_target,
                 point,
             },
-            kind,
+            kind: Some(kind),
             attack,
             started_ms,
             pressed_ms,
@@ -1918,6 +2120,50 @@ impl SimWorld {
         self.tick_shot_entities(now_ms);
         results.extend(self.projectile_flights_due(now_ms));
         results
+    }
+
+    /// The hit `attack` of the fragment of an ability action that player `entity` starts at
+    /// `now_ms` ([`super::abilities::AbilityEvent::Strike`]) lands as a basic attack's does
+    /// ([`SimWorld::player_swings_due`]): its shapes sweep through its damage window on the
+    /// player's body, turned by its homing toward a target in reach, else along the player's
+    /// view; a shot fires along the view at its fire time.
+    pub(super) fn start_ability_strike(
+        &mut self,
+        entity: Entity,
+        attack: BasicAttack,
+        now_ms: u64,
+    ) {
+        let lock_target = self
+            .world
+            .get::<Vitals>(entity)
+            .and_then(Vitals::lock_target);
+        let Some(player) = self.world.get::<Player>(entity) else {
+            return;
+        };
+        let swing = PlayerSwing {
+            attacker: player.connection.clone(),
+            aim: Aim {
+                facing: player.view.map(|view| view.yaw),
+                pitch: player.view.map(|view| view.pitch),
+                lock_target,
+                point: fresh_aim(player.aim, now_ms),
+            },
+            kind: None,
+            attack,
+            started_ms: now_ms,
+            pressed_ms: now_ms,
+            hand: None,
+            not_before_ms: now_ms,
+            hits: Vec::new(),
+            swept_ms: None,
+        };
+        tracing::debug!(
+            player = player.number,
+            action = swing.attack.action,
+            damage_row = swing.attack.damage_row,
+            "ability strike"
+        );
+        self.player_swings.push(swing);
     }
 
     /// Whether `swing`, made while the server held a spread-shot weapon, was a swing of the melee
@@ -2032,6 +2278,7 @@ impl SimWorld {
         });
         // A stun keeps the block down and the dodge back; a root or tether only the dodge.
         let control = self.player_control(entity);
+        let effect_control = self.effect_control(entity);
         let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) else {
             return;
         };
@@ -2047,13 +2294,26 @@ impl SimWorld {
         let dodge = newest.dodging();
         vitals.dodge_waiting = dodge && (vitals.dodge_waiting || !vitals.dodge_held);
         vitals.dodge_held = dodge;
-        let dodge_pressed = vitals.dodge_waiting && dodge_free && control.may_dodge();
+        // `Dodge_Stunlock`: a hit reaction lets the dodge go once the reaction count reached its
+        // breakout, unless an effect keeps the dodge back.
+        let breaks_out = vitals.reaction.is_some()
+            && vitals.reaction_count.dodge_breaks_out()
+            && effect_control.may_dodge();
+        let dodge_pressed =
+            vitals.dodge_waiting && dodge_free && (control.may_dodge() || breaks_out);
         if dodge_pressed {
             vitals.dodge_waiting = false;
+            // The dodge's `ResetReactionCount`.
+            vitals.reaction_count = ReactionCount::NONE;
+            if breaks_out {
+                vitals.reaction = None;
+            }
         } else if vitals.dodge_waiting {
             tracing::debug!(player = number, "dodge waits for a cancel window");
         }
+        // A hit reaction clears the quick slot inputs (`ClearInput` `Use_Quickslot_1` to 4).
         if quick_key != vitals.quick_slot_held
+            && vitals.reaction.is_none()
             && let Some((quick_slot, use_ms)) = quick_use
         {
             self.drinks
@@ -2063,6 +2323,11 @@ impl SimWorld {
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
+        if breaks_out && dodge_pressed {
+            player.slayer.break_reaction();
+            player.tracked.break_reaction();
+            tracing::debug!(player = number, "dodge broke the hit reaction out");
+        }
         player.stamina.hold_block(block_key);
         if block_released {
             player.stamina.block_released();
@@ -2185,6 +2450,26 @@ impl SimWorld {
             .collect()
     }
 
+    /// The capsules of the living mobs (here or ghosts) within [`CHARACTER_SEARCH_M`] of `at`
+    /// on the ground plane: the player's body does not walk, lunge or follow its camera through
+    /// one ([`nw_sim_core::AmongCharacters`]). Observed: the client's capsule stops at a mob's
+    /// (`AICharacterCollider_*` filters block the player's, `default.collisionfilters`), and in
+    /// the live run of 2026-11-12 (16:52:28 to 16:52:35) the server's body went through the
+    /// standing pistoleer to 0.14 m of its centre and stayed 0.5 m beyond it, so the light
+    /// swings along the client's view swept the air behind the mob.
+    pub(super) fn character_bodies_near(&self, at: Position) -> Vec<CharacterBody> {
+        self.mob_states()
+            .filter(|(_, place, state)| {
+                state.health > 0 && place.horizontal_distance(at) < CHARACTER_SEARCH_M
+            })
+            .map(|(mob, place, _)| CharacterBody {
+                x: place.x,
+                y: place.y,
+                radius_m: self.mobs.capsule(mob).radius_m,
+            })
+            .collect()
+    }
+
     /// The target of the homing `homing` of a player at `from` with the aim `aim` among `places`:
     /// the locked target when it is in reach, else the best one in reach at the aim's yaw
     /// ([`homing_score`]); `None` when none is.
@@ -2300,10 +2585,18 @@ impl SimWorld {
             .map_or(0, |swept| swept.saturating_sub(swing.started_ms));
         swing.swept_ms = Some(now_ms);
         let Some(facing) = Self::melee_facing(homing, position, swing.aim, places) else {
+            tracing::debug!(
+                attacker = ?swing.attacker,
+                action = swing.attack.action,
+                lock = ?swing.aim.lock_target,
+                "player swing without a facing: no homing target and no view yaw"
+            );
             return Vec::new();
         };
         let frame = body_frame(position, facing);
-        let mut touched: Vec<u64> = Vec::new();
+        // Each mob touched, with the damage row of the first shape that touched it: a clip's own
+        // row, else the attack's.
+        let mut touched: Vec<(u64, &str)> = Vec::new();
         for shape in shapes {
             let [open_ms, close_ms] = shape.window_ms;
             if to_ms < open_ms || from_ms > close_ms {
@@ -2320,10 +2613,16 @@ impl SimWorld {
                 from: frame.then_local(&from),
                 to: frame.then_local(&to),
             };
+            let row = shape
+                .damage_row
+                .as_deref()
+                .unwrap_or(&swing.attack.damage_row);
             for (mob, at, body) in places {
-                if !swing.hits.contains(mob) && !touched.contains(mob) && swept.touches(*at, *body)
+                if !swing.hits.contains(mob)
+                    && !touched.iter().any(|(hit, _)| hit == mob)
+                    && swept.touches(*at, *body)
                 {
-                    touched.push(*mob);
+                    touched.push((*mob, row));
                 }
             }
         }
@@ -2342,11 +2641,16 @@ impl SimWorld {
                 .collect::<Vec<_>>(),
             "player swing"
         );
-        let damage_id = swing.attack.damage_row.clone();
+        let touched: Vec<(u64, String)> = touched
+            .into_iter()
+            .map(|(mob, row)| (mob, row.to_owned()))
+            .collect();
         touched
             .into_iter()
-            .map(|target| {
-                let paced = swing.hits.is_empty();
+            .map(|(target, damage_id)| {
+                // The first hit of an attack key's attack keeps the attack interval; an
+                // ability's hit passed the ability engine's tests when its action started.
+                let paced = swing.hits.is_empty() && swing.kind.is_some();
                 swing.hits.push(target);
                 self.hit_paced(
                     &swing.attacker,
@@ -2431,6 +2735,10 @@ impl SimWorld {
                 block_stamina_milli: mob_blow.map(|blow| Hit::milli_of(blow.stamina)),
                 ranged: mob_blow.is_some_and(|blow| blow.ranged),
                 unblockable: mob_blow.is_some_and(|blow| !blow.blockable),
+                power_level: mob_blow.map_or(0, |blow| blow.power_level),
+                hit_stun: mob_blow.map_or(0, |blow| blow.hit_stun),
+                stagger_milli: mob_blow.map_or(0, |blow| Hit::milli_of(blow.stagger)),
+                breakout_milli: mob_blow.map_or(0, |blow| Hit::milli_of(blow.breakout)),
             },
         }
     }
@@ -2667,7 +2975,7 @@ impl SimWorld {
 
     /// Where `attacker` stands: a mob or a player, here or as a ghost; the origin when it is
     /// none of them (retail always names the creature's position in a hit on a player).
-    fn attacker_position(&mut self, attacker: u64) -> [f32; 3] {
+    pub(super) fn attacker_position(&mut self, attacker: u64) -> [f32; 3] {
         let at = match self.mobs.get(attacker) {
             Some(mob) => Some(mob.position),
             None => self
@@ -2795,8 +3103,23 @@ impl SimWorld {
     }
 
     /// What the held effects of player `entity` keep it from doing (`Stunned`, `NoDodge`,
-    /// `Silenced`).
+    /// `Silenced`), and its hit reaction: until the reaction's free point it can neither
+    /// attack, block, dodge nor use an ability (`player.grid`, `From="Reaction"`: the attacks,
+    /// the dodge, the block and the uses start at `CanTransition`).
     pub(super) fn player_control(&self, entity: Entity) -> Control {
+        let effects = self.effect_control(entity);
+        let reacting = self
+            .world
+            .get::<Vitals>(entity)
+            .is_some_and(|vitals| vitals.reaction.is_some());
+        effects.with(Control {
+            stunned: reacting,
+            ..Control::default()
+        })
+    }
+
+    /// What the held effects of player `entity` alone keep it from doing.
+    fn effect_control(&self, entity: Entity) -> Control {
         self.world
             .get::<Player>(entity)
             .map_or_else(Control::default, |player| {
@@ -2988,6 +3311,10 @@ impl SimWorld {
             ranged: false,
             blockable: true,
             category: DamageCategory::Physical,
+            power_level: 0,
+            hit_stun: 0,
+            stagger: 0.0,
+            breakout: 0.0,
         };
         // The mob's empower buffs raise what a block takes (`StaminaDamageModifier`).
         // A multiple near 1.
@@ -3004,10 +3331,12 @@ impl SimWorld {
                 tracing::warn!(mob = intent.mob, ?strike, "mob damage row missing");
                 return plain;
             };
-            let block_stamina = strike
+            let weapon = strike
                 .weapon
                 .as_deref()
-                .and_then(|weapon| data.weapon_of_item(weapon))
+                .and_then(|weapon| data.weapon_of_item(weapon));
+            let incoming = self.incoming_hit(intent.mob, defender, row);
+            let block_stamina = weapon
                 // A few dozen stamina points.
                 .map_or(DEFAULT_BLOCK_STAMINA, |weapon| {
                     row.block_stamina(weapon, stability) as f32
@@ -3021,6 +3350,12 @@ impl SimWorld {
                 ranged: false,
                 blockable: row.blockable,
                 category: row.category,
+                power_level: incoming.power_level,
+                hit_stun: incoming.hit_stun,
+                // A stagger of a few hundred.
+                stagger: weapon.map_or(0.0, |weapon| row.stagger(weapon) as f32),
+                // A count of a few hits.
+                breakout: row.stun_breakout as f32,
             };
         }
         let mob = intent.mob;
@@ -3041,6 +3376,7 @@ impl SimWorld {
             .mobs
             .phase_two(mob)
             .map_or(1.0, |phase| phase.damage_mult);
+        let incoming = self.incoming_hit(mob, defender, row);
         MobHitStyle {
             tag: row.damage_type.unwrap_or(DEFAULT_HIT_TAG),
             affix: row.affix,
@@ -3051,11 +3387,32 @@ impl SimWorld {
             ranged: false,
             blockable: row.blockable,
             category: row.category,
+            power_level: incoming.power_level,
+            hit_stun: incoming.hit_stun,
+            // A stagger of a few hundred.
+            stagger: row.stagger(weapon) as f32,
+            // A count of a few hits.
+            breakout: row.stun_breakout as f32,
         }
     }
 
-    /// How the player `entity` (number `target`) takes a mob's hit of `amount` whose block takes
-    /// `block_stamina`: the health it takes, or `None` when it takes none.
+    /// How mob `mob`'s hit of `row` shakes player `defender` (`None`: a player ghost, whose
+    /// level this sim does not have: the row's own): the row's `PowerLevel` and `HitStun`,
+    /// shifted by the levels the mob stands above the player
+    /// ([`nw_content::combat::CombatData::incoming_hit`]).
+    fn incoming_hit(&self, mob: u64, defender: Option<Entity>, row: &AttackRow) -> IncomingHit {
+        let progression = &self.content.progression;
+        let disparity = defender
+            .and_then(|defender| self.world.get::<Player>(defender))
+            .map(|player| progression.level_of(player.experience))
+            .zip(self.mobs.level(mob))
+            .map_or(0, |(own, mob)| i64::from(mob) - i64::from(own));
+        self.combat.data.incoming_hit(row, disparity)
+    }
+
+    /// How the player `entity` (number `target`) takes the hit of `amount` of `attacker` (a mob,
+    /// or a player's PvP hit) whose block takes the stamina of `blow`: the health it takes and
+    /// how its block met the hit, or `None` when it takes none.
     ///
     /// - A player whose client has not spawned into the world yet takes no hit (spawn
     ///   protection: it would die at the loading screen otherwise).
@@ -3076,14 +3433,17 @@ impl SimWorld {
     /// - A block fires the player's `OnBlockedHitTaken` passives, a guard break its
     ///   `OnBlockBreak` ones ([`super::passives`]); the hit's row `row` is known for a mob of
     ///   this sim.
+    /// - A held block that takes the whole hit plays its hit reaction here
+    ///   ([`super::hit_reaction`]: the upper-body shake); a hit that passes plays it where it
+    ///   lands ([`SimWorld::shake`]).
     fn defend(
         &mut self,
         entity: Entity,
-        (target, mob): (u64, u64),
+        (target, attacker): (u64, u64),
         (amount, row): (u32, Option<RowKey>),
         blow: Blow,
         now_ms: u64,
-    ) -> Option<u32> {
+    ) -> Option<(u32, Option<Guard>)> {
         let vitals = *self.world.get::<Vitals>(entity)?;
         if !vitals.spawned {
             return None;
@@ -3092,7 +3452,7 @@ impl SimWorld {
             .invulnerable_ms
             .is_some_and(|(from, until)| from <= now_ms && now_ms < until)
         {
-            tracing::debug!(mob, target, "mob swing missed: dodge");
+            tracing::debug!(attacker, target, "hit on a player missed: dodge");
             return None;
         }
         let tutorial = self.is_tutorial();
@@ -3117,14 +3477,14 @@ impl SimWorld {
         let stamina = player.stamina.current();
         let connection = player.connection.clone();
         tracing::debug!(
-            mob,
+            attacker,
             target,
             block_key = vitals.block_key,
             guard_broken = vitals.guard_broken,
             ?guard,
             stamina,
             amount,
-            "mob hit on a player"
+            "hit on a player"
         );
         if tutorial {
             self.send_reliable(
@@ -3150,7 +3510,7 @@ impl SimWorld {
         };
         if let Some(trigger) = trigger {
             self.run_passives(
-                (entity, mob),
+                (entity, attacker),
                 &[trigger],
                 (row, passed.unwrap_or(0)),
                 now_ms,
@@ -3171,7 +3531,28 @@ impl SimWorld {
                 player.abilities.charge.gain(points as f32);
             }
         }
-        passed
+        if passed.is_none() {
+            // A block that took the whole hit lands nothing, and still shakes the upper body
+            // (Observed, newchar 2026-09-18: `22=20` after the blocked 2218 at 414.090 s).
+            self.react_to_hit(entity, attacker, blow, guard, now_ms);
+        }
+        passed.map(|amount| (amount, guard))
+    }
+
+    /// The hit reaction of the hit of `attacker` (a mob or a player) that `outcome` landed on
+    /// player `entity` with `blow` and `guard` ([`super::hit_reaction`]): a hit that left the
+    /// player alive shakes it.
+    fn shake(
+        &mut self,
+        entity: Entity,
+        attacker: u64,
+        (blow, guard): (Blow, Option<Guard>),
+        outcome: Option<&AttackOutcome>,
+        now_ms: u64,
+    ) {
+        if matches!(outcome, Some(AttackOutcome::Hit { .. })) {
+            self.react_to_hit(entity, attacker, blow, guard, now_ms);
+        }
     }
 
     /// A mob hit from another sim on player `target` of this one, with `blow` (its block stamina
@@ -3187,8 +3568,10 @@ impl SimWorld {
         now_ms: u64,
     ) -> Option<AttackOutcome> {
         let entity = self.player_by_number(target)?;
-        let amount = self.defend(entity, (target, attacker), (amount, None), blow, now_ms)?;
+        let (amount, guard) =
+            self.defend(entity, (target, attacker), (amount, None), blow, now_ms)?;
         let outcome = self.apply_hit(target, attacker, amount, 0, now_ms);
+        self.shake(entity, attacker, (blow, guard), outcome.as_ref(), now_ms);
         if outcome.is_some() {
             self.run_passives(
                 (entity, attacker),
@@ -3235,9 +3618,11 @@ impl SimWorld {
                     if !self.mob_swing_reaches(&intent, at, body) {
                         tracing::debug!(
                             mob = intent.mob,
+                            attack = intent.strike.as_ref().map(|strike| strike.row.as_str()),
+                            reason = "out of reach",
                             distance = at.horizontal_distance(body),
                             dz = body.z - at.z,
-                            "mob swing missed: out of reach"
+                            "mob attack not started"
                         );
                         return None;
                     }
@@ -3293,7 +3678,7 @@ impl SimWorld {
                 .taken_scale();
             // A hit of a few hundred points.
             let amount = (f64::from(amount) * taken).round() as u32;
-            let amount = self.defend(
+            let (amount, guard) = self.defend(
                 entity,
                 (target, mob),
                 (amount, style.row),
@@ -3301,6 +3686,7 @@ impl SimWorld {
                 now_ms,
             )?;
             let outcome = self.apply_hit_with(target, mob, amount, 0, now_ms, Some(&style));
+            self.shake(entity, mob, (style.blow(), guard), outcome.as_ref(), now_ms);
             if outcome.is_some() {
                 self.mob_hit_effects(entity, mob, style.row, amount);
                 self.run_passives(
@@ -3521,7 +3907,7 @@ mod tests {
         world.player_swings.push(PlayerSwing {
             attacker: connection(number),
             aim,
-            kind,
+            kind: Some(kind),
             attack,
             started_ms: now,
             pressed_ms: now,
@@ -3578,6 +3964,31 @@ mod tests {
         );
     }
 
+    /// An ability's hit (a flail's Trip, `1h_Flail_Ability_Trip`) sweeps as a swing of its own,
+    /// right after a light attack hit: the attack interval of the attack key does not hold it
+    /// back (live 2026-11-12: the abilities' hits were never swept, so they did no damage).
+    #[test]
+    fn an_ability_strike_lands_as_a_swing_without_the_attack_interval() {
+        let mut world = close_fight();
+        let light = swing(&mut world, 1, facing(FACING_WEST), AttackKind::Light, NOW);
+        assert_eq!(light.len(), 1, "the light attack hits");
+        let entity = world.player_by_number(1).expect("player");
+        world.world.get_mut::<Player>(entity).expect("player").view = Some(nw_messages::LookDir {
+            yaw: FACING_WEST,
+            pitch: 0.0,
+        });
+        let attack = sword().attack(AttackKind::Light).cloned().expect("attack");
+        let [open, close] = window(AttackKind::Light);
+        let started = NOW + close;
+        world.start_ability_strike(entity, attack, started);
+        assert_eq!(world.player_swings[0].kind, None, "an ability's hit");
+        let landed = through(&mut world, started + open, started + close);
+        assert!(
+            matches!(landed.as_slice(), [Ok(AttackOutcome::Hit { target, .. })] if *target == mob()),
+            "the strike hits: {landed:?}"
+        );
+    }
+
     #[test]
     fn a_hold_to_the_charge_starts_the_charged_attack_while_the_key_is_held() {
         // Retail newchar capture: the greatsword's charged hit (2071) came 998 ms after the
@@ -3591,7 +4002,7 @@ mod tests {
             usize::try_from(hold_records).expect("records"),
         ));
         world.attack_input(&connection(1), &message(1, &keys), NOW);
-        assert_eq!(world.player_swings[0].kind, AttackKind::Charged);
+        assert_eq!(world.player_swings[0].kind, Some(AttackKind::Charged));
         // It starts at the charge, after the press of the oldest record.
         let held = hold_records * u64::from(INPUT_RECORD_MS);
         let due = NOW - held + charged_at + window(AttackKind::Charged)[0];
@@ -3626,8 +4037,8 @@ mod tests {
             world.attack_input(&connection(1), &message(1, &keys), NOW);
             world.player_swings[0].kind
         };
-        assert_eq!(kind_of(records(heavy_from) - 1), AttackKind::Light);
-        assert_eq!(kind_of(records(heavy_from)), AttackKind::Heavy);
+        assert_eq!(kind_of(records(heavy_from) - 1), Some(AttackKind::Light));
+        assert_eq!(kind_of(records(heavy_from)), Some(AttackKind::Heavy));
     }
 
     #[test]
@@ -3639,6 +4050,286 @@ mod tests {
         let released = message(3, &[Key::Release]);
         world.attack_input(&connection(1), &released, NOW + INTERVAL_MS);
         assert_eq!(light_through(&mut world, NOW + INTERVAL_MS).len(), 1);
+    }
+
+    /// The retail tutorial's attack key messages of the sword and of the great sword
+    /// ([`retail_swings`]).
+    const RETAIL_TUTORIAL_SWORD_KEYS: &str =
+        include_str!("testdata/tutorial-sword-keys-2026-09-18.txt");
+    const RETAIL_TUTORIAL_GREATSWORD_KEYS: &str =
+        include_str!("testdata/tutorial-greatsword-keys-2026-09-18.txt");
+    /// The great sword's retail `MannequinTag`.
+    const GREATSWORD_STANCE: &str = "2H_Melee,GreatSword";
+
+    /// The kind and start (ms after [`NOW`]) of every swing that the retail messages `keys`
+    /// start with the weapon of stance `stance` in the hand, each message read at its own time
+    /// after [`NOW`], with the attack and sequence tables that `tables` puts on the test data.
+    fn retail_swings(
+        keys: &str,
+        stance: &str,
+        hits: &[RetailHit],
+        tables: impl FnOnce(CombatData) -> CombatData,
+    ) -> Vec<(AttackKind, u64)> {
+        const KEY_VALUE: usize = 2;
+        const PRESS_BIT: u32 = 40;
+        const RELEASE_BIT: u32 = 31;
+        const HELD_BIT: u32 = 63;
+        const ACTION_VALUES: usize = 10;
+        let mut source = crate::combat::test_support::test_source();
+        for (_, weapon) in &mut source.weapons {
+            weapon.stance = nw_content::player_attacks::stance_key(stance);
+        }
+        let mut world = awake_fight();
+        world.combat.data = Arc::new(tables(test_data_of(source)));
+        let entity = world.player_by_number(1).expect("player");
+        let mut hits = hits.iter().peekable();
+        let mut swings = Vec::new();
+        for line in keys.lines().filter(|line| !line.starts_with('#')) {
+            let mut fields = line.split(' ');
+            let after_ms: u64 = fields.next().and_then(|ms| ms.parse().ok()).expect("time");
+            while let Some(hit) = hits.next_if(|hit| hit.at_ms <= after_ms) {
+                world.react_to_hit(
+                    entity,
+                    mob(),
+                    shaking(hit.power_level, hit.hit_stun),
+                    hit.guard,
+                    NOW + hit.at_ms,
+                );
+            }
+            let records: Vec<InputRecord> = fields
+                .map(|record| {
+                    let (counter, flags) = record.split_once(':').expect("counter:flags");
+                    let mut values = vec![0; ACTION_VALUES];
+                    for (flag, bit) in [('P', PRESS_BIT), ('R', RELEASE_BIT), ('H', HELD_BIT)] {
+                        if flags.contains(flag) {
+                            values[KEY_VALUE] |= 1 << bit;
+                        }
+                    }
+                    InputRecord {
+                        u16_after_mask: counter.parse().expect("counter"),
+                        slots: nw_messages::InputSlots {
+                            count: 19,
+                            values,
+                            bytes: [128; 4],
+                        },
+                        bit_6: Some([FACING_WEST, 0.0]),
+                        ..InputRecord::default()
+                    }
+                })
+                .collect();
+            let now = NOW + after_ms;
+            world.attack_input(&connection(1), &records, now);
+            swings.extend(
+                world
+                    .player_swings
+                    .drain(..)
+                    .filter_map(|swing| Some((swing.kind?, swing.started_ms - NOW))),
+            );
+        }
+        swings
+    }
+
+    /// The retail attacks of [`RETAIL_TUTORIAL_SWORD_KEYS`]: the own slayer starts of the sword's
+    /// lights (`463`, `484`, `2030`), its charged attack (`2922`, 19 records into the hold) and
+    /// its heavy attack (`549`, at the release 18 records after the press), in ms after the
+    /// first message (Observed, newchar 2026-09-18 from 1792695769613 ms).
+    const RETAIL_TUTORIAL_SWORD_ATTACKS: [(AttackKind, u64); 22] = [
+        (AttackKind::Light, 132),
+        (AttackKind::Light, 700),
+        (AttackKind::Light, 1_215),
+        (AttackKind::Light, 2_116),
+        (AttackKind::Charged, 5_366),
+        (AttackKind::Light, 6_233),
+        (AttackKind::Light, 6_798),
+        (AttackKind::Light, 7_266),
+        (AttackKind::Heavy, 13_432),
+        (AttackKind::Light, 14_167),
+        (AttackKind::Light, 14_799),
+        (AttackKind::Light, 15_265),
+        (AttackKind::Light, 16_300),
+        (AttackKind::Light, 17_015),
+        (AttackKind::Light, 17_530),
+        (AttackKind::Light, 18_532),
+        (AttackKind::Charged, 24_648),
+        (AttackKind::Light, 25_348),
+        (AttackKind::Light, 25_949),
+        (AttackKind::Light, 26_432),
+        (AttackKind::Light, 27_367),
+        (AttackKind::Light, 28_248),
+    ];
+    /// The same of [`RETAIL_TUTORIAL_GREATSWORD_KEYS`]: the lights `4510`, `486` and `494` and
+    /// the charged attack `57` (Observed, from 1792695887395 ms), with the hit reactions of
+    /// [`RETAIL_TUTORIAL_GREATSWORD_HITS`] between them.
+    const RETAIL_TUTORIAL_GREATSWORD_ATTACKS: [(AttackKind, u64); 23] = [
+        (AttackKind::Charged, 614),
+        (AttackKind::Light, 1_365),
+        (AttackKind::Light, 2_213),
+        (AttackKind::Light, 3_095),
+        (AttackKind::Light, 3_830),
+        (AttackKind::Light, 4_613),
+        (AttackKind::Light, 5_497),
+        (AttackKind::Light, 6_214),
+        (AttackKind::Light, 82_727),
+        (AttackKind::Light, 83_545),
+        (AttackKind::Light, 84_295),
+        (AttackKind::Light, 85_212),
+        (AttackKind::Light, 85_927),
+        (AttackKind::Light, 86_661),
+        (AttackKind::Light, 88_045),
+        (AttackKind::Light, 88_776),
+        (AttackKind::Light, 224_620),
+        (AttackKind::Light, 225_555),
+        (AttackKind::Light, 226_287),
+        (AttackKind::Light, 227_140),
+        (AttackKind::Light, 227_855),
+        (AttackKind::Charged, 231_410),
+        (AttackKind::Light, 233_004),
+    ];
+    /// A mob's hit of the retail tutorial that shook the player.
+    struct RetailHit {
+        /// Its 2218, ms after the first message.
+        at_ms: u64,
+        power_level: u32,
+        /// Frames.
+        hit_stun: u32,
+        guard: Option<Guard>,
+    }
+
+    /// The hits of [`RETAIL_TUTORIAL_GREATSWORD_KEYS`] that shook the player (Observed, newchar
+    /// 2026-09-18, the 2218 times; front hits, the levels and stuns of the reactions the
+    /// player played: `2960` (`r_R2_F`, level 2) ended 17 and 15 records after its start
+    /// (`HitStun` 18 of `Attack_Stretch_Smash`, 16 of `Attack_SwipeR_01`), `3446` (`r_R1_F`) 12
+    /// twice, `3528` (`r_R3_F`) 24; the guard break `2125` (`r_B0_Break`) after a blocked
+    /// 2218 that took the last stamina).
+    const RETAIL_TUTORIAL_GREATSWORD_HITS: [RetailHit; 6] = [
+        RetailHit {
+            at_ms: 87_406,
+            power_level: 2,
+            hit_stun: 18,
+            guard: None,
+        },
+        RetailHit {
+            at_ms: 223_969,
+            power_level: 0,
+            hit_stun: 0,
+            guard: Some(Guard::Broken),
+        },
+        RetailHit {
+            at_ms: 228_869,
+            power_level: 2,
+            hit_stun: 16,
+            guard: None,
+        },
+        RetailHit {
+            at_ms: 231_969,
+            power_level: 1,
+            hit_stun: 13,
+            guard: None,
+        },
+        RetailHit {
+            at_ms: 232_436,
+            power_level: 1,
+            hit_stun: 13,
+            guard: None,
+        },
+        RetailHit {
+            at_ms: 233_104,
+            power_level: 3,
+            hit_stun: 25,
+            guard: None,
+        },
+    ];
+
+    /// How far one of our swings may start from the retail attack it stands for: six input
+    /// records (Observed: at most 191 ms in these captures; the retail times are the times of
+    /// the server's answers in the capture, ours the swing starts).
+    const RETAIL_ATTACK_MATCH_MS: u64 = 200;
+
+    /// `ours` are the attacks of `retail`, one for one and in order: of the same kind, each
+    /// within [`RETAIL_ATTACK_MATCH_MS`].
+    fn assert_retail_attacks(ours: &[(AttackKind, u64)], retail: &[(AttackKind, u64)]) {
+        assert_eq!(ours.len(), retail.len(), "retail's attack count: {ours:?}");
+        for ((our, ms), (kind, at_ms)) in ours.iter().zip(retail) {
+            assert!(
+                our == kind && ms.abs_diff(*at_ms) <= RETAIL_ATTACK_MATCH_MS,
+                "the retail {kind:?} at {at_ms} ms: our {our:?} at {ms} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn the_retail_tutorial_taps_start_light_attacks() {
+        // Live 2026-11-12 (tutorial): light presses that started no light swing. The retail
+        // tutorial's own presses, message by message, through the attack key code.
+        let with_reactions = crate::world::hit_reaction::test_support::with_reactions;
+        assert_retail_attacks(
+            &retail_swings(
+                RETAIL_TUTORIAL_SWORD_KEYS,
+                crate::combat::test_support::TEST_SWORD_STANCE,
+                &[],
+                with_reactions,
+            ),
+            &RETAIL_TUTORIAL_SWORD_ATTACKS,
+        );
+        assert_retail_attacks(
+            &retail_swings(
+                RETAIL_TUTORIAL_GREATSWORD_KEYS,
+                GREATSWORD_STANCE,
+                &RETAIL_TUTORIAL_GREATSWORD_HITS,
+                with_reactions,
+            ),
+            &RETAIL_TUTORIAL_GREATSWORD_ATTACKS,
+        );
+    }
+
+    /// The pinned client build of the content in `NW_CONTENT_DIR`.
+    const CONTENT_BUILD: &str = "25810808";
+
+    /// `data` with the attack and sequence tables of the content in `NW_CONTENT_DIR`.
+    fn with_built_tables(data: CombatData) -> CombatData {
+        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
+        let dir = std::path::Path::new(&dir);
+        data.with_player_attacks(
+            nw_content::player_attacks::PlayerAttacks::load(dir, CONTENT_BUILD)
+                .expect("player attack table"),
+        )
+        .with_player_sequences(
+            nw_content::player_sequences::PlayerSequences::load(dir, CONTENT_BUILD)
+                .expect("player sequence table"),
+        )
+    }
+
+    #[test]
+    #[ignore = "needs the build 25810808 content in NW_CONTENT_DIR"]
+    fn the_built_tables_start_the_retail_tutorial_sword_attacks() {
+        // The table `content-tool player-attacks` builds from the paks: the retail tutorial's
+        // sword attacks.
+        assert_retail_attacks(
+            &retail_swings(
+                RETAIL_TUTORIAL_SWORD_KEYS,
+                crate::combat::test_support::TEST_SWORD_STANCE,
+                &[],
+                with_built_tables,
+            ),
+            &RETAIL_TUTORIAL_SWORD_ATTACKS,
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the build 25810808 content in NW_CONTENT_DIR"]
+    fn the_built_tables_start_the_retail_tutorial_great_sword_attacks_with_its_reactions() {
+        // The tables `content-tool player-attacks` builds from the paks (with the chained clips
+        // timed, 2026-11-12) and the mined sequences: the great sword's attacks with the six
+        // retail hits played by the built reaction rows.
+        assert_retail_attacks(
+            &retail_swings(
+                RETAIL_TUTORIAL_GREATSWORD_KEYS,
+                GREATSWORD_STANCE,
+                &RETAIL_TUTORIAL_GREATSWORD_HITS,
+                with_built_tables,
+            ),
+            &RETAIL_TUTORIAL_GREATSWORD_ATTACKS,
+        );
     }
 
     #[test]
@@ -3746,25 +4437,27 @@ mod tests {
             &message(1, &[Key::Press, Key::Release]),
             NOW,
         );
-        // A press 2 records into the buffered window, released at once: the second step starts
-        // at the window's instant clip and attacks at once (the key is no longer held).
+        // A press 2 records into the buffered window, released at once: the second step waits
+        // for the record after the window's instant clip and attacks there (the key is no longer
+        // held).
         let pressed_ms = NOW + buffered.from_ms + 2 * u64::from(INPUT_RECORD_MS);
         world.attack_input(
             &connection(1),
             &message(3, &[Key::Press, Key::Release]),
             pressed_ms + u64::from(INPUT_RECORD_MS),
         );
+        assert_eq!(world.player_swings.len(), 1, "the step waits for its start");
+        let due_ms =
+            NOW + buffered.starts_at_ms.expect("buffered") + u64::from(BUFFERED_STEP_DELAY_MS);
+        world.attack_input(&connection(1), &message(5, &[Key::Hold]), due_ms);
         let swing = world.player_swings.last().expect("second swing");
         assert_eq!(swing.attack.action, second.action);
-        assert_eq!(
-            swing.started_ms,
-            NOW + buffered.starts_at_ms.expect("buffered")
-        );
+        assert_eq!(swing.started_ms, due_ms);
         // A press before the second attack's links starts nothing...
         let second_start = swing.started_ms;
         world.attack_input(
             &connection(1),
-            &message(5, &[Key::Press, Key::Release]),
+            &message(6, &[Key::Press, Key::Release]),
             second_start + u64::from(INPUT_RECORD_MS),
         );
         assert_eq!(world.player_swings.len(), 2);
@@ -3772,7 +4465,7 @@ mod tests {
         let after = second_start + second.length_ms + u64::from(INPUT_RECORD_MS);
         world.attack_input(
             &connection(1),
-            &message(7, &[Key::Press, Key::Release]),
+            &message(8, &[Key::Press, Key::Release]),
             after,
         );
         let third = world.player_swings.last().expect("third swing");
@@ -3944,6 +4637,58 @@ mod tests {
         );
     }
 
+    /// A shape whose clip names its own `DamageTableRow` hits with that row, not the attack's
+    /// (Observed: the flail slam's `1H_Flail_Ability_Slam_Stagger` clip,
+    /// `playermaleanims_1h_meleeattach.adb`).
+    #[test]
+    fn a_shape_with_its_own_damage_row_hits_with_that_row() {
+        /// The shape's own row in the test player table.
+        const CLIP_ROW: &str = "1H_Sword_Attack1_Clip";
+        /// The coefficient of [`CLIP_ROW`]: twice the attack's row.
+        const CLIP_FACTOR: f64 = 2.0;
+        /// 64 x 2.0 x (1 - 0.35), rounded.
+        const CLIP_HIT: u32 = 83;
+        let mut world = close_fight();
+        let mut source = crate::combat::test_support::test_source();
+        let mut clip_row = source
+            .attacks
+            .iter()
+            .find(|row| row.damage_id == LIGHT)
+            .cloned()
+            .expect("the light row");
+        clip_row.damage_id = CLIP_ROW.to_owned();
+        clip_row.coefficient = CLIP_FACTOR;
+        source.attacks.push(clip_row);
+        world.combat.data = Arc::new(test_data_of(source));
+        let mut attack = sword().attack(AttackKind::Light).cloned().expect("attack");
+        let AttackHit::Melee { shapes, .. } = &mut attack.hit else {
+            panic!("a melee attack");
+        };
+        for shape in shapes.iter_mut() {
+            shape.damage_row = Some(CLIP_ROW.to_owned());
+        }
+        assert_eq!(attack.damage_row, LIGHT, "the attack keeps its own row");
+        world.player_swings.push(PlayerSwing {
+            attacker: connection(1),
+            aim: facing(FACING_WEST),
+            kind: Some(AttackKind::Light),
+            attack,
+            started_ms: NOW,
+            pressed_ms: NOW,
+            hand: None,
+            not_before_ms: NOW,
+            hits: Vec::new(),
+            swept_ms: None,
+        });
+        assert_eq!(
+            light_through(&mut world, NOW),
+            vec![Ok(AttackOutcome::Hit {
+                target: mob(),
+                amount: CLIP_HIT
+            })]
+        );
+    }
+
     #[test]
     fn the_client_names_a_target_only_by_its_lock_and_the_server_checks_it() {
         // Retail 2026-09-18: around 84 melee hits the client sent nothing but inputs and time
@@ -4050,6 +4795,7 @@ mod tests {
         const GUARD: MobGuard = MobGuard {
             stamina_max: 50.0,
             stamina_initial: 50.0,
+            tick_rate: 2.0,
             regen_per_s: 5.0,
             mitigation: 1.0,
             stamina_cost: 0.8,
@@ -4080,6 +4826,69 @@ mod tests {
             .collect();
         assert_eq!(dealt.len(), 1);
         assert!(dealt[0].is_resisted(), "{:?}", dealt[0]);
+    }
+
+    #[test]
+    fn light_sword_hits_in_a_row_break_a_raised_mob_guard_and_the_next_hit_lands() {
+        // The live "infinite block" (2026-11-12 16:52:21 to 16:52:34): six blocked hits 1.1 s
+        // apart, because only every second swing landed. With the damned pistoleer's guard
+        // (`StaminaBaseMax` 50, `StaminaBaseTickRate` 2, `StaminaTickDelay` 1,
+        // `BlockStaminaCost` 0.8) and the sword's rows (`SwordT*` `BlockStaminaDamage` 36,
+        // `1H_Sword_Attack1` `BlockStaminaDmgMod` 0.4), every swing of a combo landing breaks it.
+        const SWORD_BLOCK_DAMAGE: f64 = 36.0;
+        const LIGHT_BLOCK_MOD: f64 = 0.4;
+        const PISTOLEER_GUARD: MobGuard = MobGuard {
+            stamina_max: 50.0,
+            stamina_initial: 50.0,
+            tick_rate: 2.0,
+            regen_per_s: 5.0,
+            mitigation: 1.0,
+            stamina_cost: 0.8,
+        };
+        /// Light swings of a sword combo land about this far apart (live: 0.55 s).
+        const SWING_GAP_MS: u64 = 550;
+        /// Hits of 11.52 stamina against a regen of 2.75 per gap: the sixth empties 50.
+        const HITS_TO_BREAK: usize = 6;
+        let mut source = crate::combat::test_support::test_source();
+        source.weapons[0].1.block_stamina_damage = SWORD_BLOCK_DAMAGE;
+        for row in &mut source.attacks {
+            if row.damage_id == LIGHT {
+                row.block_stamina_mod = LIGHT_BLOCK_MOD;
+            }
+        }
+        let mut world = fight();
+        world.combat = committed().combat_settings(
+            Arc::new(test_data_of(source)),
+            Arc::from([]),
+            crate::combat::tests::test_mob_ai(),
+        );
+        world.mobs.set_guard(mob(), PISTOLEER_GUARD);
+        tick(&mut world, NOW);
+        assert!(world.mobs.blocking(mob()), "the guard is up");
+        let full = mob_health(&mut world).current();
+        let mut at = NOW;
+        for hit in 1..=HITS_TO_BREAK {
+            at += SWING_GAP_MS;
+            tick(&mut world, at);
+            world
+                .attack(&connection(1), mob(), LIGHT, at)
+                .expect("a hit");
+            assert_eq!(
+                mob_health(&mut world).current(),
+                full,
+                "blocked hit {hit} takes no health"
+            );
+        }
+        at += SWING_GAP_MS;
+        tick(&mut world, at);
+        assert!(!world.mobs.blocking(mob()), "the guard broke");
+        world
+            .attack(&connection(1), mob(), LIGHT, at)
+            .expect("a hit");
+        assert!(
+            mob_health(&mut world).current() < full,
+            "the hit after the break lands"
+        );
     }
 
     #[test]
@@ -4989,7 +5798,7 @@ mod tests {
         let stamina = player_stamina(&mut world, 1);
         assert_eq!(
             blocked(&mut world, true),
-            Some(AMOUNT),
+            Some((AMOUNT, None)),
             "the test sword cannot block a projectile"
         );
         assert!((player_stamina(&mut world, 1) - stamina).abs() < f32::EPSILON);
@@ -5014,7 +5823,11 @@ mod tests {
             Arc::from([]),
             crate::combat::tests::test_mob_ai(),
         );
-        assert_eq!(blocked(&mut world, true), Some(AMOUNT / 2), "half passes");
+        assert_eq!(
+            blocked(&mut world, true),
+            Some((AMOUNT / 2, Some(Guard::Held))),
+            "half passes"
+        );
         let taken = stamina - player_stamina(&mut world, 1);
         assert!((taken - BLOCK_STAMINA * SWORD_SCALE as f32).abs() < 0.01);
     }
@@ -5036,6 +5849,10 @@ mod tests {
             stamina,
             ranged,
             blockable: true,
+            power_level: 0,
+            hit_stun: 0,
+            stagger: 0.0,
+            breakout: 0.0,
         }
     }
 
@@ -5052,7 +5869,7 @@ mod tests {
         };
         assert_eq!(
             world.defend(entity, (1, mob()), (AMOUNT, None), unblockable, NOW),
-            Some(AMOUNT),
+            Some((AMOUNT, None)),
             "a boss wipe goes through the block"
         );
         assert!((player_stamina(&mut world, 1) - 100.0).abs() < f32::EPSILON);
@@ -5071,6 +5888,210 @@ mod tests {
                 NOW
             ),
             None
+        );
+    }
+
+    /// [`awake_fight`] with the great sword's reaction rows in every stance
+    /// ([`crate::world::hit_reaction::test_support`]).
+    fn reacting_fight() -> SimWorld {
+        let mut world = awake_fight();
+        world.combat.data = Arc::new(crate::world::hit_reaction::test_support::with_reactions(
+            test_data_of(crate::combat::test_support::test_source()),
+        ));
+        world
+    }
+
+    /// A front hit of `power_level` that stuns for `hit_stun` frames.
+    const fn shaking(power_level: u32, hit_stun: u32) -> Blow {
+        Blow {
+            power_level,
+            hit_stun,
+            ..blow(0.0, false)
+        }
+    }
+
+    fn reaction_of(world: &mut SimWorld) -> Option<crate::world::hit_reaction::PlayerReaction> {
+        reaction_of_player(world, 1)
+    }
+
+    #[test]
+    fn a_stagger_refuses_the_attack_key_until_its_end_record() {
+        // Retail newchar 2026-09-18, the great sword's `2960` of a `HitStun` 18 hit at 87,406
+        // ms: the presses of records 7688 and 7693 started nothing, the press of the end record
+        // 7699 (536 ms after the hit) started the press start.
+        const STUN: u32 = 18;
+        const REFUSED_MS: u64 = 290;
+        const END_RECORD_MS: u64 = 536;
+        let mut world = reacting_fight();
+        let entity = world.player_by_number(1).expect("player");
+        world.react_to_hit(entity, mob(), shaking(2, STUN), None, NOW);
+        assert!(reaction_of(&mut world).is_some(), "a level 2 hit staggers");
+        world.attack_input(
+            &connection(1),
+            &message(100, &[Key::Press, Key::Release]),
+            NOW + REFUSED_MS,
+        );
+        assert!(world.player_swings.is_empty(), "a tap in the stagger");
+        world.attack_input(
+            &connection(1),
+            &message(110, &[Key::Press]),
+            NOW + END_RECORD_MS,
+        );
+        assert_eq!(reaction_of(&mut world), None, "free at its end record");
+        world.attack_input(
+            &connection(1),
+            &message(111, &[Key::Release]),
+            NOW + END_RECORD_MS + u64::from(INPUT_RECORD_MS),
+        );
+        assert_eq!(
+            world.player_swings.len(),
+            1,
+            "the press of the end record attacks"
+        );
+    }
+
+    #[test]
+    fn a_held_block_and_a_level_0_hit_shake_nothing_and_a_guard_break_and_level_4_do() {
+        let mut world = reacting_fight();
+        let entity = world.player_by_number(1).expect("player");
+        world.react_to_hit(entity, mob(), shaking(2, 18), Some(Guard::Held), NOW);
+        assert_eq!(reaction_of(&mut world), None, "a held block");
+        world.react_to_hit(entity, mob(), shaking(0, 18), None, NOW);
+        assert_eq!(
+            reaction_of(&mut world),
+            None,
+            "level 0: the upper body only"
+        );
+        world.react_to_hit(entity, mob(), shaking(0, 18), Some(Guard::Broken), NOW);
+        assert_eq!(
+            reaction_of(&mut world).map(|reaction| reaction.free_ms - NOW),
+            // `r_B0_Break`'s marker at 500 ms, less its end record.
+            Some(500 - 2 * u64::from(INPUT_RECORD_MS)),
+            "a guard break"
+        );
+        let mut world = reacting_fight();
+        let entity = world.player_by_number(1).expect("player");
+        world.react_to_hit(entity, mob(), shaking(4, 18), None, NOW);
+        assert_eq!(
+            reaction_of(&mut world).map(|reaction| reaction.free_ms - NOW),
+            Some(1_667 - 2 * u64::from(INPUT_RECORD_MS)),
+            "a knockdown holds to its marker"
+        );
+    }
+
+    #[test]
+    fn a_mob_hit_that_lands_staggers_and_its_reaction_goes_on_the_wire() {
+        const AMOUNT: u32 = 40;
+        let mut world = reacting_fight();
+        assert!(
+            world
+                .remote_mob_hit(1, mob(), AMOUNT, shaking(2, 18), NOW)
+                .is_some()
+        );
+        assert!(reaction_of(&mut world).is_some(), "the landed hit staggers");
+        let entity = world.player_by_number(1).expect("player");
+        let mut player = world.world.get_mut::<Player>(entity).expect("player");
+        player.slayer.advance(1, NOW + u64::from(INPUT_RECORD_MS));
+        let state = player.slayer.take_due().state.expect("the reaction state");
+        assert_eq!((state.state, state.sequence), (Some(4), 2960));
+    }
+
+    /// The fourth slot (state, start, sequence) that player 1's next own state numbered
+    /// `number` at `at_ms` carries.
+    fn fourth_slot(world: &mut SimWorld, number: u16, at_ms: u64) -> nw_messages::SlotChange {
+        let entity = world.player_by_number(1).expect("player");
+        let mut player = world.world.get_mut::<Player>(entity).expect("player");
+        player.slayer.advance(number, at_ms);
+        player
+            .slayer
+            .take_due()
+            .slots
+            .map(|slots| slots.fourth)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_level_0_hit_shakes_the_upper_body_in_the_fourth_slot_and_holds_nothing() {
+        // Retail newchar 2026-09-18 at 94.211 s: `22=20 23=0851 24=b533` (3317) in the next own
+        // state, `22=00 23=0861 24=00` 16 records later (`unarmed_r0_f`, 567 ms).
+        const AMOUNT: u32 = 40;
+        const SHAKE: u64 = 3317;
+        const END_RECORDS: u16 = 16;
+        let mut world = reacting_fight();
+        assert!(
+            world
+                .remote_mob_hit(1, mob(), AMOUNT, shaking(0, 0), NOW)
+                .is_some()
+        );
+        assert!(reaction_of(&mut world).is_none(), "no full-body reaction");
+        let record = u64::from(INPUT_RECORD_MS);
+        let start = fourth_slot(&mut world, 1, NOW + record);
+        assert_eq!(
+            (start.state, start.started, start.sequence),
+            (Some(0x20), Some(1), Some(SHAKE))
+        );
+        let before_end = NOW + u64::from(END_RECORDS - 1) * record;
+        assert_ne!(
+            fourth_slot(&mut world, END_RECORDS - 1, before_end).sequence,
+            Some(0),
+            "it plays on"
+        );
+        let end = fourth_slot(&mut world, END_RECORDS, NOW + 567);
+        assert_eq!(
+            (end.state, end.started, end.sequence),
+            (Some(0), Some(END_RECORDS), Some(0))
+        );
+    }
+
+    #[test]
+    fn a_held_block_shakes_the_upper_body_with_the_blocks_entry() {
+        // Retail newchar 2026-09-18 at 414.090 s: the great sword's blocked hit, `24=aa1d` (1898).
+        const BLOCK_STAMINA: f32 = 16.5;
+        const AMOUNT: u32 = 40;
+        const BLOCK_SHAKE: u64 = 1898;
+        let mut world = reacting_fight();
+        world.attack_input(&connection(1), &[block_held()], NOW);
+        assert!(
+            world
+                .remote_mob_hit(1, mob(), AMOUNT, blow(BLOCK_STAMINA, false), NOW)
+                .is_none(),
+            "the block takes the whole hit"
+        );
+        assert!(reaction_of(&mut world).is_none());
+        let start = fourth_slot(&mut world, 1, NOW + u64::from(INPUT_RECORD_MS));
+        assert_eq!(start.sequence, Some(BLOCK_SHAKE));
+    }
+
+    #[test]
+    fn a_dodge_breaks_a_reaction_out_once_the_count_reached_two_and_resets_it() {
+        const AMOUNT: u32 = 10;
+        let breaking = Blow {
+            breakout: 1.0,
+            ..shaking(2, 18)
+        };
+        let mut world = reacting_fight();
+        world.remote_mob_hit(1, mob(), AMOUNT, breaking, NOW);
+        world.attack_input(&connection(1), &[dodge_record(true)], NOW + TICK_MS);
+        assert!(
+            reaction_of(&mut world).is_some(),
+            "a count of 1 holds the dodge"
+        );
+        world.attack_input(&connection(1), &[dodge_record(false)], NOW + 2 * TICK_MS);
+        world.remote_mob_hit(1, mob(), AMOUNT, breaking, NOW + 3 * TICK_MS);
+        world.attack_input(&connection(1), &[dodge_record(true)], NOW + 4 * TICK_MS);
+        assert!(
+            reaction_of(&mut world).is_none(),
+            "a count of 2 lets the dodge break out"
+        );
+        let entity = world.player_by_number(1).expect("player");
+        assert_eq!(
+            world
+                .world
+                .get::<Vitals>(entity)
+                .expect("vitals")
+                .reaction_count,
+            crate::world::hit_reaction::ReactionCount::NONE,
+            "the dodge resets the count"
         );
     }
 
@@ -5421,6 +6442,7 @@ mod tests {
             length_ms: 1_420,
             dodge_cancel_ms: Some(vec![[0, 200], [500, 1_420]]),
             block_disabled_ms: vec![[200, 533]],
+            grit: Vec::new(),
         }
     }
 
@@ -5676,6 +6698,10 @@ mod tests {
                 backstab: true,
                 headshot: true,
                 rune_charge: nw_content::combat::RuneChargeRow::default(),
+                power_level: 0,
+                hit_stun: 0,
+                stagger_mod: 0.0,
+                stun_breakout: 0.0,
             });
         }
         let mut world = fight();
@@ -6307,6 +7333,81 @@ mod tests {
             Err(AttackRefusal::TooFast),
             "the attack interval applies"
         );
+    }
+
+    /// Two flagged players 3 m apart whose light row shakes by power level `power_level`
+    /// for a `HitStun` of `hit_stun` frames, with the great sword's reaction rows in every
+    /// stance ([`crate::world::hit_reaction::test_support::with_reactions`]).
+    fn pvp_fight(power_level: u32, hit_stun: u32) -> SimWorld {
+        let mut source = crate::combat::test_support::test_source();
+        for row in source
+            .attacks
+            .iter_mut()
+            .filter(|row| row.damage_id == LIGHT)
+        {
+            row.power_level = power_level;
+            row.hit_stun = hit_stun;
+        }
+        let mut world = fight();
+        world.combat.data = Arc::new(crate::world::hit_reaction::test_support::with_reactions(
+            test_data_of(source),
+        ));
+        join(&mut world, PVP_TARGET, MOB_X + 3.0);
+        flag(&mut world, 1);
+        flag(&mut world, PVP_TARGET);
+        world
+    }
+
+    /// The target of [`pvp_fight`].
+    const PVP_TARGET: u64 = 2;
+
+    /// The hit reaction that holds player `number`.
+    fn reaction_of_player(
+        world: &mut SimWorld,
+        number: u64,
+    ) -> Option<crate::world::hit_reaction::PlayerReaction> {
+        let entity = world.player_by_number(number).expect("player");
+        world.world.get::<Vitals>(entity).expect("vitals").reaction
+    }
+
+    #[test]
+    fn a_players_hit_shakes_a_player_by_its_rows_power_level_and_a_held_block_stops_it() {
+        const STAGGER_LEVEL: u32 = 2;
+        const STUN_FRAMES: u32 = 18;
+        let mut world = pvp_fight(STAGGER_LEVEL, STUN_FRAMES);
+        assert!(matches!(
+            world.attack(&connection(1), PVP_TARGET, LIGHT, NOW),
+            Ok(AttackOutcome::Hit { .. })
+        ));
+        assert!(
+            reaction_of_player(&mut world, PVP_TARGET).is_some(),
+            "a level 2 hit staggers the target"
+        );
+        assert!(
+            reaction_of_player(&mut world, 1).is_none(),
+            "not the attacker"
+        );
+        let mut calm = pvp_fight(0, 0);
+        assert!(matches!(
+            calm.attack(&connection(1), PVP_TARGET, LIGHT, NOW),
+            Ok(AttackOutcome::Hit { .. })
+        ));
+        assert!(
+            reaction_of_player(&mut calm, PVP_TARGET).is_none(),
+            "a level 0 hit does not"
+        );
+        let mut blocked = pvp_fight(STAGGER_LEVEL, STUN_FRAMES);
+        blocked.attack_input(&connection(PVP_TARGET), &[block_held()], NOW);
+        assert_eq!(
+            blocked.attack(&connection(1), PVP_TARGET, LIGHT, NOW),
+            Ok(AttackOutcome::Missed),
+            "the held block takes the whole hit"
+        );
+        assert_eq!(
+            health_of(&mut blocked, PVP_TARGET).current(),
+            TEST_PLAYER_HEALTH
+        );
+        assert!(reaction_of_player(&mut blocked, PVP_TARGET).is_none());
     }
 
     #[test]

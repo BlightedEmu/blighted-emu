@@ -9,9 +9,11 @@
 //!
 //! **The move in** (Observed, same ledger, 1783536301515 to 1783536302144): the roster player
 //! accepted a raid invite (3495), got 1677, then the loading screen (3951) and the instance's
-//! 1635 with the frame. Where the raid invite comes from is Unknown (no invite message is in the
-//! ledger), so this server sends no invite: the roster's players on an open-world sim get the
-//! loading screen and the move when the director's news comes ([`SimWorld::war_instance_news`]).
+//! 1635 with the frame. The invite came in the own groups state 1.6 s before (25.108 s: no
+//! inviter, the war id as its activity, the war raid probe of 2026-11-12). So when the
+//! director's news comes ([`SimWorld::war_instance_news`]), the roster's players on an
+//! open-world sim get the raid invite, and the accept brings the loading screen and the move
+//! ([`super::raids`]).
 //! A player arrives at its side's Observed arrival place, else at the fort's first Observed one
 //! (the spawn camps of the sides are Unknown).
 //!
@@ -68,6 +70,9 @@ use uuid::Uuid;
 
 use super::attack::Vitals;
 use super::crafting::Station;
+use super::siege_areas::{AreaRun, BarrelDrop, OpeningArea};
+use super::siege_structures::{PendingBuild, StructureRun};
+use super::turrets::TurretRun;
 use super::{Body, Player, SimWorld, send_now};
 use crate::combat::RespawnRefusal;
 
@@ -94,11 +99,12 @@ pub(super) const CAPTURE_RADIUS_M: f32 = 10.0;
 pub(super) const RESPAWN_WAVE_MS: u64 = 155_000;
 /// The 3455 value of a player that leaves the war (Observed: 0).
 const COMPLETED_VALUE: u32 = 0;
-/// The first byte of the 245 (Observed: 1).
-const ENDED_FLAG: u8 = 1;
-/// The value of the 245 (Unknown: retail sent 0x18c066e76a1b6afc, neither the instance's phase
-/// nor a time; Inferred 0 here).
-const ENDED_VALUE: u64 = 0;
+/// The first byte of the 245 for a player whose side won, and for one whose side lost
+/// ([`SimWorld::end_war`]).
+const WON_FLAG: u8 = 1;
+const LOST_FLAG: u8 = 0;
+/// Nanoseconds per millisecond (the 245 time).
+const NS_PER_MS: u64 = 1_000_000;
 /// The permission rule of a capture point's ownership (Observed: 4 on every ES point).
 const POINT_PERMISSION_RULE: u8 = 4;
 /// The faction and the option byte of a capture point's ownership (Observed: 0).
@@ -137,9 +143,26 @@ pub(crate) struct WarFight {
     ended_ms: Option<u64>,
     /// Unix ms of the next capture tick.
     next_capture_ms: u64,
+    /// The fort's turrets, once they spawned ([`super::turrets`]).
+    pub(super) turrets: Vec<TurretRun>,
+    /// The fort's other siege structures, once they spawned ([`super::siege_structures`]).
+    pub(super) structures: Vec<StructureRun>,
+    /// The builds that wait for their time, and how many structures were built.
+    pub(super) builds: Vec<PendingBuild>,
+    pub(super) built: usize,
+    /// The barrels falling, the areas open and those that open at the next tick
+    /// ([`super::siege_areas`]).
+    pub(super) drops: Vec<BarrelDrop>,
+    pub(super) areas: Vec<AreaRun>,
+    pub(super) opening: Vec<OpeningArea>,
 }
 
 impl WarFight {
+    /// The slot key of its siege data entity, once it spawned.
+    pub(super) const fn siege_entity(&self) -> Option<u64> {
+        self.siege
+    }
+
     /// The fight of `war` at `fort` in the framed `level`.
     pub(super) fn new(war: WarInstance, fort: WarFort, level: LevelSpec) -> Self {
         let points = fort
@@ -161,7 +184,19 @@ impl WarFight {
             claim_opened: false,
             ended_ms: None,
             next_capture_ms: 0,
+            turrets: Vec::new(),
+            structures: Vec::new(),
+            builds: Vec::new(),
+            built: 0,
+            drops: Vec::new(),
+            areas: Vec::new(),
+            opening: Vec::new(),
         }
+    }
+
+    /// Whether the war runs: started, with no result yet (its structures may be hurt).
+    pub(super) const fn running(&self) -> bool {
+        self.started && self.ended_ms.is_none()
     }
 
     /// The framed level of the instance.
@@ -172,6 +207,11 @@ impl WarFight {
     /// The war.
     pub(super) const fn war(&self) -> WarInstance {
         self.war
+    }
+
+    /// The fort.
+    pub(super) const fn fort(&self) -> &WarFort {
+        &self.fort
     }
 
     /// Whether `[x, y]` is inside the instance's frame.
@@ -303,6 +343,19 @@ pub(super) const fn next_wave_ms(starts_ms: u64, now_ms: u64) -> u64 {
     starts_ms + waves * RESPAWN_WAVE_MS
 }
 
+/// The side of `war` whose company is `winner`; `None` for the nil id (a lost invasion).
+fn winning_side(war: &TerritoryWar, winner: Uuid) -> Option<u8> {
+    if winner.is_nil() {
+        None
+    } else if winner == war.attacker.0 {
+        Some(SIDE_ATTACKER)
+    } else if winner == war.defender.0 {
+        Some(SIDE_DEFENDER)
+    } else {
+        None
+    }
+}
+
 /// The side of `character` in `war`: its roster side.
 fn side_of(war: &TerritoryWar, character: Uuid) -> Option<u8> {
     war.roster()
@@ -314,7 +367,7 @@ fn side_of(war: &TerritoryWar, character: Uuid) -> Option<u8> {
 /// territory (Observed, ES outer points at the start: the defending company's id, name and
 /// crest, no owner player, rule 4, the defender side's number as the raid id; Inferred for the
 /// claim point, which retail showed with no company in ES and with it in the five others).
-fn point_ownership(owner: &ClaimOwner, defender_number: u64) -> OwnershipState {
+pub(super) fn point_ownership(owner: &ClaimOwner, defender_number: u64) -> OwnershipState {
     OwnershipState {
         guild_id: Some(owner.guild_id),
         guild_owner: Some(owner.guild_name.clone()),
@@ -369,15 +422,21 @@ impl SimWorld {
     }
 
     /// The roster side of `entity`'s player in the war this sim runs.
-    fn war_side(&self, entity: Entity) -> Option<u8> {
-        let fight = self.war_fight()?;
+    pub(super) fn war_side(&self, entity: Entity) -> Option<u8> {
+        self.side_in(self.war_fight()?, entity)
+    }
+
+    /// The roster side of `entity`'s player in the war of `fight` (for a fight taken out of
+    /// the instance, as [`SimWorld::with_turrets`] does).
+    pub(super) fn side_in(&self, fight: &WarFight, entity: Entity) -> Option<u8> {
         let war = self.wars.war(fight.war.war)?;
         let character = self.world.get::<Player>(entity)?.character;
         side_of(war, character)
     }
 
-    /// The director opened the instance of a war (`news`): this open-world sim moves its players
-    /// of the war's roster in (module doc).
+    /// The director opened the instance of a war (`news`): this open-world sim invites its
+    /// players of the war's roster into their side's raid, and their accept moves them in
+    /// (module doc).
     pub fn war_instance_news(&mut self, news: WarInstanceNews) {
         if self.instance_sim {
             return;
@@ -402,8 +461,9 @@ impl SimWorld {
             let Some([x, y, z]) = fort.arrival(side) else {
                 continue;
             };
-            self.enter_war_instance(
+            self.invite_to_war_raid(
                 entity,
+                news.war.war,
                 (news.instance, news.sim.clone(), news.phase),
                 Position { x, y, z },
             );
@@ -527,8 +587,8 @@ impl SimWorld {
         else {
             return;
         };
-        // Inferred: the raid id of the 3454 is the war's id (no raid entity of a war roster is
-        // made here; retail's raid id is Unknown).
+        // Observed: the raid id of the 3454 is the raid invite's activity, the war's id
+        // (`invasion` 62.077 s, the war raid probe of 2026-11-12).
         self.send_group_push(
             entity,
             number,
@@ -562,6 +622,7 @@ impl SimWorld {
         let (attacker_number, defender_number) = side_numbers(war);
         if fight.siege.is_none() {
             self.spawn_siege(fight, NO_SIDE_NUMBER);
+            self.spawn_structures(fight);
         }
         if !fight.started && now_ms >= war.starts_ms && war.result.is_none() {
             self.start_war(fight, war, (attacker_number, defender_number));
@@ -570,13 +631,13 @@ impl SimWorld {
         if !fight.started || fight.ended_ms.is_some() {
             return;
         }
-        if let Some((_, at_ms)) = war.result {
-            self.end_war(fight, at_ms);
+        if let Some((winner, at_ms)) = war.result {
+            self.end_war(fight, at_ms, winner);
             return;
         }
         if now_ms >= war.ends_ms() {
             // The defender's result comes from the wars' own end rule ([`super::wars`]).
-            self.end_war(fight, war.ends_ms());
+            self.end_war(fight, war.ends_ms(), war.defender.0);
             return;
         }
         if now_ms < fight.next_capture_ms {
@@ -585,7 +646,7 @@ impl SimWorld {
         fight.next_capture_ms = now_ms.saturating_add(CAPTURE_TICK_MS);
         if self.capture_tick(fight, war, attacker_number) {
             self.wars.win(war.war, war.attacker.0, now_ms);
-            self.end_war(fight, now_ms);
+            self.end_war(fight, now_ms, war.attacker.0);
         }
     }
 
@@ -593,10 +654,16 @@ impl SimWorld {
     /// (Inferred: the retail group has no place state).
     fn spawn_siege(&mut self, fight: &mut WarFight, value: u64) {
         let fort = &fight.fort;
-        let Some(claim) = fort.points.iter().find(|point| point.is_claim()) else {
+        // An invasion fort has no claim point: its entity stands at its invasion's place.
+        let place = fort
+            .points
+            .iter()
+            .find(|point| point.is_claim())
+            .map(|claim| claim.place)
+            .or_else(|| self.invasion_place(fort.territory));
+        let Some([x, y, z]) = place else {
             return;
         };
-        let [x, y, z] = claim.place;
         let members = vec![
             card(
                 fort.siege.card_component,
@@ -627,6 +694,7 @@ impl SimWorld {
         (attacker, defender): (u64, u64),
     ) {
         fight.started = true;
+        self.turrets_at_start(fight);
         let owner = self
             .territories
             .owner(war.territory)
@@ -770,10 +838,16 @@ impl SimWorld {
         claim_taken
     }
 
-    /// The war ended here at Unix ms `at_ms`: every player gets the four 4063 and the 245, and
-    /// the instance ends at the end of the result time (module doc).
-    fn end_war(&mut self, fight: &mut WarFight, at_ms: u64) {
+    /// The war ended here at Unix ms `at_ms` for `winner` (the nil id: a lost invasion): every
+    /// player gets the four 4063 and the 245, and the instance ends at the end of the result
+    /// time (module doc). The 245 carries 1 for a player whose side won, else 0, and the result
+    /// time in Unix ns (Observed: 1 and 0x18c066e76a1b6afc, the result time, for the winning
+    /// attacker of `arvaysa_ES_attacker_war_45vs45`; 1 at the won invasion of `invasion`, 0 at
+    /// the lost ones of `Reekwater_Invasion` and `Playthrough_Part_21`, each with its result
+    /// time).
+    fn end_war(&mut self, fight: &mut WarFight, at_ms: u64, winner: Uuid) {
         fight.ended_ms = Some(at_ms);
+        self.turrets_at_result(fight);
         if let Some(run) = self.instance_run.as_mut() {
             run.end_at(at_ms.saturating_add(nw_db::WAR_RESULT_SHOWN_MS));
         }
@@ -788,12 +862,18 @@ impl SimWorld {
                 continue;
             };
             send_now(&mut self.combat_messages, &connection, &messages);
+            let winning_side = self
+                .wars
+                .war(fight.war.war)
+                .and_then(|war| winning_side(war, winner));
+            let won = winning_side.is_some() && self.war_side(entity) == winning_side;
+            self.send_war_ended_status(entity, number, fight.war.war);
             self.send_group_push(
                 entity,
                 number,
                 GroupPush::SiegeWarfareEnded {
-                    flag: ENDED_FLAG,
-                    value: ENDED_VALUE,
+                    flag: if won { WON_FLAG } else { LOST_FLAG },
+                    value: at_ms.saturating_mul(NS_PER_MS),
                 },
             );
         }
@@ -802,7 +882,7 @@ impl SimWorld {
 }
 
 /// Puts `member` in place of the member of its component in `members`.
-fn replace_member(members: &mut [BundleMember], member: &BundleMember) {
+pub(super) fn replace_member(members: &mut [BundleMember], member: &BundleMember) {
     if let Some(slot) = members
         .iter_mut()
         .find(|existing| existing.component == member.component)

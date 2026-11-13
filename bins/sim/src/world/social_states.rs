@@ -2,17 +2,20 @@
 //! The replicated social states the world's social service sends for this sim's players (run 15
 //! social2 study): the player's groups, social, company and chat states go into its next own
 //! bundle, and its group entity (`GroupDataComponentReplicatedState` with the group's spawn
-//! card) is one more entity in its bundles, in an entity slot of its own. This sim also tells
+//! card) is one more entity in its bundles, in an entity slot of its own; so are a raid member's
+//! raid entity (`RaidDataComponentReplicatedState` with its card) and its raid's other group
+//! entities (Observed: `arvaysa_ES_attacker_war_45vs45` 27.039 s). This sim also tells
 //! the service each change of a player's health and life, which its group shows.
 
 use nw_bus::{
-    GroupEntityDelivery, OwnStateDelivery, PlayerVitals, SocialDeliveries, SocialInput,
-    SocialStateKind,
+    GroupEntityDelivery, GroupEntityView, OwnStateDelivery, PlayerVitals, RaidEntityDelivery,
+    SocialDeliveries, SocialInput, SocialStateKind,
 };
 use nw_messages::payload::{BundleGroup, BundleMember, MemberState};
 use nw_messages::social::group_data::{
     FULL_PERCENT, GROUP_DATA_TYPE_INDEX, GroupDataState, group_entity_members,
 };
+use nw_messages::social::raid_data::{RAID_DATA_TYPE_INDEX, RaidDataState, raid_entity_members};
 use nw_messages::social::states::{
     CHAT_STATE_COMPONENT, CHAT_STATE_TYPE_INDEX, GROUPS_STATE_COMPONENT, GROUPS_STATE_TYPE_INDEX,
     GUILDS_STATE_COMPONENT, GUILDS_STATE_TYPE_INDEX,
@@ -43,7 +46,7 @@ const fn member_of(kind: SocialStateKind) -> (u64, u64) {
     }
 }
 
-/// A player's group entity on this sim.
+/// A group entity of a player on this sim: its own group's or a raid group's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GroupEntity {
     /// Its entity number for the player's slots.
@@ -54,12 +57,59 @@ struct GroupEntity {
     changed: bool,
 }
 
+impl GroupEntity {
+    /// The bundle group of this entity in `slot`: the group data and, in a new slot, the spawn
+    /// card; a known slot gets the data after a change only.
+    fn bundle_group(&mut self, slot: Slot) -> Option<BundleGroup> {
+        if !slot.new && !self.changed {
+            return None;
+        }
+        self.changed = false;
+        Some(BundleGroup {
+            interest: u64::from(slot.interest),
+            members: group_entity_members(*self.group.as_bytes(), self.state.clone(), slot.new),
+        })
+    }
+
+    /// Takes `state` as the entity's state.
+    fn update(&mut self, state: GroupDataState) {
+        self.changed |= self.state != state;
+        self.state = state;
+    }
+}
+
+/// The group data state of `view`; `None` when its body does not read.
+fn group_state_of(character: Uuid, view: &GroupEntityView) -> Option<GroupDataState> {
+    match MemberState::decode(GROUP_DATA_TYPE_INDEX, &view.body) {
+        Ok(MemberState::GroupData(state)) => Some(*state),
+        Ok(_) | Err(_) => {
+            tracing::warn!(%character, "group entity does not read");
+            None
+        }
+    }
+}
+
+/// A player's raid entity and its raid's other group entities on this sim
+/// (`nw_social` raids).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RaidEntities {
+    /// The raid entity's number for the player's slots.
+    number: u64,
+    /// The raid entity's id.
+    entity: [u8; RAW_ID_LEN],
+    state: RaidDataState,
+    /// What the client has of the raid data; `None` before its first body.
+    sent: Option<RaidDataState>,
+    groups: Vec<GroupEntity>,
+}
+
 /// A player's social side on this sim.
 #[derive(Debug, Default)]
 pub(super) struct PlayerSocial {
     group_entity: Option<GroupEntity>,
-    /// Group entities this player had on this sim: the next one gets a new number, so its client
-    /// gets a new slot and card.
+    raid: Option<RaidEntities>,
+    /// Group and raid entities this player had on this sim: the next one gets a new number, so
+    /// its client gets a new slot and card.
     groups_seen: u64,
     /// The vitals last told to the social service.
     vitals_sent: Option<(u8, u8, bool)>,
@@ -73,9 +123,29 @@ impl PlayerSocial {
         self.group_entity.as_ref().map(|entity| entity.number)
     }
 
+    /// The entity numbers of the player's group entity, raid entity and raid group entities.
+    pub(super) fn entity_numbers(&self) -> Vec<u64> {
+        let mut numbers: Vec<u64> = self.group_entity_number().into_iter().collect();
+        if let Some(raid) = &self.raid {
+            numbers.push(raid.number);
+            numbers.extend(raid.groups.iter().map(|group| group.number));
+        }
+        numbers
+    }
+
     /// The group the player is in; `None` when it is in none.
     pub(super) fn group(&self) -> Option<Uuid> {
         self.group_entity.as_ref().map(|entity| entity.group)
+    }
+
+    /// The raid entity id of the raid the player is in; `None` when it is in none.
+    pub(super) fn raid(&self) -> Option<[u8; RAW_ID_LEN]> {
+        self.raid.as_ref().map(|raid| raid.entity)
+    }
+
+    /// The raid id of the raid the player is in; `None` when it is in none.
+    pub(super) fn raid_id(&self) -> Option<u64> {
+        self.raid.as_ref().and_then(|raid| raid.state.raid_id)
     }
 
     /// The company the player is in; `None` when it is in none.
@@ -83,20 +153,40 @@ impl PlayerSocial {
         self.company
     }
 
-    /// The bundle group of the group entity `number` in `slot`: the group data and, in a new
-    /// slot, the spawn card; a known slot gets the data after a change only.
-    pub(super) fn group_entity_group(&mut self, number: u64, slot: Slot) -> Option<BundleGroup> {
-        let entity = self
+    fn next_number(&mut self) -> u64 {
+        self.groups_seen = self.groups_seen.wrapping_add(1);
+        GROUP_ENTITY_BASE + self.groups_seen
+    }
+
+    /// The bundle group of the social entity `number` in `slot`: the group entity, the raid
+    /// entity or a raid group entity; `None` when nothing goes out for it.
+    pub(super) fn entity_group(&mut self, number: u64, slot: Slot) -> Option<BundleGroup> {
+        if let Some(entity) = self
             .group_entity
             .as_mut()
-            .filter(|entity| entity.number == number)?;
-        if !slot.new && !entity.changed {
-            return None;
+            .filter(|entity| entity.number == number)
+        {
+            return entity.bundle_group(slot);
         }
-        entity.changed = false;
+        let raid = self.raid.as_mut()?;
+        if raid.number != number {
+            return raid
+                .groups
+                .iter_mut()
+                .find(|group| group.number == number)?
+                .bundle_group(slot);
+        }
+        if slot.new {
+            raid.sent = None;
+        }
+        let state = match &raid.sent {
+            None => raid.state.clone(),
+            Some(sent) => raid.state.change_from(sent)?,
+        };
+        raid.sent = Some(raid.state.clone());
         Some(BundleGroup {
             interest: u64::from(slot.interest),
-            members: group_entity_members(*entity.group.as_bytes(), entity.state.clone(), slot.new),
+            members: raid_entity_members(raid.entity, state, slot.new),
         })
     }
 
@@ -105,28 +195,78 @@ impl PlayerSocial {
             self.group_entity = None;
             return;
         };
-        let state = match MemberState::decode(GROUP_DATA_TYPE_INDEX, &view.body) {
-            Ok(MemberState::GroupData(state)) => *state,
-            Ok(_) | Err(_) => {
-                tracing::warn!(character = %delivery.character, "group entity does not read");
-                return;
-            }
+        let Some(state) = group_state_of(delivery.character, view) else {
+            return;
         };
         match &mut self.group_entity {
-            Some(entity) if entity.group == view.group => {
-                entity.changed = entity.state != state;
-                entity.state = state;
-            }
+            Some(entity) if entity.group == view.group => entity.update(state),
             _ => {
-                self.groups_seen = self.groups_seen.wrapping_add(1);
+                let number = self.next_number();
                 self.group_entity = Some(GroupEntity {
-                    number: GROUP_ENTITY_BASE + self.groups_seen,
+                    number,
                     group: view.group,
                     state,
                     changed: true,
                 });
             }
         }
+    }
+
+    /// Takes the raid entity of `delivery`: a new raid gets new entities, the raid it is in
+    /// keeps their numbers.
+    fn set_raid_entity(&mut self, delivery: &RaidEntityDelivery) {
+        let Some(view) = &delivery.view else {
+            self.raid = None;
+            return;
+        };
+        let state = match MemberState::decode(RAID_DATA_TYPE_INDEX, &view.body) {
+            Ok(MemberState::RaidData(state)) => state,
+            Ok(_) | Err(_) => {
+                tracing::warn!(character = %delivery.character, "raid entity does not read");
+                return;
+            }
+        };
+        let (kept, sent, mut known) =
+            match self.raid.take().filter(|raid| raid.entity == view.entity) {
+                Some(raid) => (Some(raid.number), raid.sent, raid.groups),
+                None => (None, None, Vec::new()),
+            };
+        let mut groups = Vec::with_capacity(view.groups.len());
+        for group_view in &view.groups {
+            let Some(group_state) = group_state_of(delivery.character, group_view) else {
+                continue;
+            };
+            match known
+                .iter()
+                .position(|group| group.group == group_view.group)
+            {
+                Some(index) => {
+                    let mut group = known.swap_remove(index);
+                    group.update(group_state);
+                    groups.push(group);
+                }
+                None => {
+                    let number = self.next_number();
+                    groups.push(GroupEntity {
+                        number,
+                        group: group_view.group,
+                        state: group_state,
+                        changed: true,
+                    });
+                }
+            }
+        }
+        let number = match kept {
+            Some(number) => number,
+            None => self.next_number(),
+        };
+        self.raid = Some(RaidEntities {
+            number,
+            entity: view.entity,
+            state,
+            sent,
+            groups,
+        });
     }
 }
 
@@ -142,10 +282,15 @@ fn percent(current: u32, max: u32) -> u8 {
 impl SimWorld {
     /// Puts the social service's states of `deliveries` into their players: the own states into
     /// the next own bundle, the group entities into the players' entities, and the paid territory
-    /// upkeeps into the claims ([`SimWorld::upkeep_paid`]). A player that is not here is skipped.
+    /// upkeep answers into the claims and the desks ([`SimWorld::upkeep_answered`]), and the raid
+    /// invite answers into the war moves ([`SimWorld::raid_invites_answered`]). A player that is
+    /// not here is skipped.
     pub fn apply_social_states(&mut self, deliveries: &SocialDeliveries) {
-        if !deliveries.upkeep_paid.is_empty() {
-            self.upkeep_paid(&deliveries.upkeep_paid);
+        if !deliveries.upkeep_answers.is_empty() {
+            self.upkeep_answered(&deliveries.upkeep_answers);
+        }
+        if !deliveries.raid_invite_answers.is_empty() {
+            self.raid_invites_answered(&deliveries.raid_invite_answers);
         }
         for delivery in &deliveries.own_states {
             self.apply_own_state(delivery);
@@ -156,6 +301,14 @@ impl SimWorld {
             };
             if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                 player.social.set_group_entity(delivery);
+            }
+        }
+        for delivery in &deliveries.raid_entities {
+            let Some(entity) = self.player_of_character(delivery.character) else {
+                continue;
+            };
+            if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                player.social.set_raid_entity(delivery);
             }
         }
     }
@@ -182,7 +335,8 @@ impl SimWorld {
         }
     }
 
-    fn player_of_character(&self, character: Uuid) -> Option<bevy_ecs::entity::Entity> {
+    /// The entity of the player of `character`, when it is on this sim.
+    pub(super) fn player_of_character(&self, character: Uuid) -> Option<bevy_ecs::entity::Entity> {
         self.by_connection.values().copied().find(|entity| {
             self.world
                 .get::<Player>(*entity)
@@ -226,7 +380,7 @@ impl SimWorld {
 
 #[cfg(test)]
 mod tests {
-    use nw_bus::GroupEntityView;
+    use nw_bus::RaidEntityView;
     use nw_messages::appearance::PlayerIconData;
     use nw_messages::social::group_data::{GROUP_CARD_COMPONENT, GroupMemberView};
     use nw_messages::social::states::{GroupsState, GuildsState};
@@ -257,6 +411,8 @@ mod tests {
             connected: true,
             dead: false,
             leader: true,
+            raid_leader: false,
+            raid_assistant: false,
             faction: 0,
             level: 1,
         };
@@ -356,14 +512,14 @@ mod tests {
             new: false,
         };
         let card = side(&mut world)
-            .group_entity_group(number, new)
+            .entity_group(number, new)
             .expect("the card");
         assert_eq!(card.members.len(), 2);
         assert_eq!(card.members[1].component, GROUP_CARD_COMPONENT);
-        assert!(side(&mut world).group_entity_group(number, known).is_none());
+        assert!(side(&mut world).entity_group(number, known).is_none());
         deliver(&mut world, 50);
         let change = side(&mut world)
-            .group_entity_group(number, known)
+            .entity_group(number, known)
             .expect("the change");
         assert_eq!(change.members.len(), 1, "no card again");
         world.apply_social_states(&SocialDeliveries {
@@ -374,6 +530,74 @@ mod tests {
             ..SocialDeliveries::default()
         });
         assert_eq!(side(&mut world).group_entity_number(), None);
+    }
+
+    /// A raid entity view of a raid of `members` with one other group of `character`.
+    fn raid_view(character: Uuid, members: u8) -> RaidEntityView {
+        let state = RaidDataState::whole(
+            9428,
+            nw_messages::social::raid_data::RAID_TYPE_WAR,
+            members,
+            vec![[1; RAW_ID_LEN], [2; RAW_ID_LEN]],
+        );
+        let mut writer = Writer::new();
+        state.write(&mut writer).expect("writes");
+        RaidEntityView {
+            entity: [0x24; RAW_ID_LEN],
+            body: writer.finish(),
+            groups: vec![entity_view(character, FULL_PERCENT)],
+        }
+    }
+
+    #[test]
+    fn the_raid_entity_gets_its_card_once_then_its_member_count_alone() {
+        let (mut world, character) = admitted();
+        let deliver = |world: &mut SimWorld, view: Option<RaidEntityView>| {
+            world.apply_social_states(&SocialDeliveries {
+                raid_entities: vec![RaidEntityDelivery { character, view }],
+                ..SocialDeliveries::default()
+            });
+        };
+        deliver(&mut world, Some(raid_view(character, 1)));
+        assert_eq!(side(&mut world).raid(), Some([0x24; RAW_ID_LEN]));
+        let numbers = side(&mut world).entity_numbers();
+        assert_eq!(numbers.len(), 2, "the raid entity and its other group");
+        let new = Slot {
+            interest: INTEREST,
+            new: true,
+        };
+        let known = Slot {
+            interest: INTEREST,
+            new: false,
+        };
+        let card = side(&mut world)
+            .entity_group(numbers[0], new)
+            .expect("the raid card");
+        assert_eq!(card.members.len(), 2);
+        assert_eq!(
+            card.members[1].component,
+            nw_messages::social::raid_data::RAID_CARD_COMPONENT
+        );
+        let group = side(&mut world)
+            .entity_group(numbers[1], new)
+            .expect("the group card");
+        assert_eq!(group.members[1].component, GROUP_CARD_COMPONENT);
+        assert!(side(&mut world).entity_group(numbers[0], known).is_none());
+        deliver(&mut world, Some(raid_view(character, 2)));
+        assert_eq!(side(&mut world).entity_numbers(), numbers, "same entities");
+        let change = side(&mut world)
+            .entity_group(numbers[0], known)
+            .expect("the change");
+        assert_eq!(
+            change.members[0].state,
+            MemberState::RaidData(RaidDataState {
+                members: Some(2),
+                ..RaidDataState::default()
+            })
+        );
+        deliver(&mut world, None);
+        assert_eq!(side(&mut world).raid(), None);
+        assert!(side(&mut world).entity_numbers().is_empty());
     }
 
     #[test]

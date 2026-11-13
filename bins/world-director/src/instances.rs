@@ -38,6 +38,9 @@ pub struct InstanceSettings {
     /// The forts of the territory wars ([`crate::war_instances`]): a war of a fort without an
     /// entry gets no instance.
     pub war_forts: nw_content::war_forts::WarForts,
+    /// The territories whose fort has an invasion ([`nw_content::invasion_forts`]): only they
+    /// get darkness and invasions ([`crate::invasions`]).
+    pub invasion_territories: std::collections::BTreeSet<u16>,
 }
 
 /// How the director starts instance sim processes.
@@ -122,6 +125,8 @@ pub struct Instances {
     open: BTreeMap<Uuid, OpenInstance>,
     /// The instance of each owner (group or solo player).
     by_owner: HashMap<Uuid, Uuid>,
+    /// The instances that ended since the last [`Instances::take_ended`].
+    ended: Vec<Uuid>,
 }
 
 impl Instances {
@@ -405,6 +410,7 @@ impl Instances {
     fn remove(&mut self, id: Uuid) {
         if let Some(open) = self.open.remove(&id) {
             self.by_owner.retain(|_, instance| *instance != id);
+            self.ended.push(id);
             tracing::info!(
                 instance = %id,
                 game_mode = %open.game_mode,
@@ -417,6 +423,12 @@ impl Instances {
     /// The instance `id` ends now (its close went out).
     pub fn closed(&mut self, id: Uuid) {
         self.remove(id);
+    }
+
+    /// The instances that ended since the last call, for the sims' entrances
+    /// ([`nw_bus::EntranceRunNews::Ended`]).
+    pub fn take_ended(&mut self) -> Vec<Uuid> {
+        std::mem::take(&mut self.ended)
     }
 }
 
@@ -620,8 +632,17 @@ mod tests {
                     40,
                     Duration::from_secs(90),
                 ),
+                capture_the_flag: crate::matchmaking::MatchSettings::capture_the_flag(
+                    20,
+                    Duration::from_secs(90),
+                ),
+                catacombs: crate::matchmaking::MatchSettings::catacombs(
+                    Duration::from_secs(90),
+                    Duration::from_secs(60),
+                ),
             },
             war_forts: nw_content::war_forts::WarForts::default(),
+            invasion_territories: std::collections::BTreeSet::new(),
         }
     }
 
@@ -866,9 +887,55 @@ mod tests {
             instances.review(&report(None), &settings(), end_ms),
             vec![close]
         );
+        assert!(
+            instances.take_ended().is_empty(),
+            "a close to send ends nothing yet"
+        );
         // The sim went silent: forgotten.
         assert!(instances.review(&[], &settings(), NOW_MS).is_empty());
         assert!(instances.is_empty());
+        assert_eq!(
+            instances.take_ended(),
+            vec![open.id],
+            "the end goes to the entrances once"
+        );
+        assert!(instances.take_ended().is_empty());
+    }
+
+    #[test]
+    fn a_closed_instance_and_a_failed_opening_end_for_the_entrances() {
+        let solo = |requester| InstanceRequest {
+            min_group: 0,
+            ..request(requester)
+        };
+        let mut instances = Instances::default();
+        let free = [slot("inst-1"), slot("inst-2")];
+        let Decision::Open(first) = instances.decide(
+            &solo(1),
+            &GroupAnswer::Alone,
+            &free,
+            (Uuid::from_u128(7), PHASE),
+            NOW_MS,
+        ) else {
+            panic!("opens");
+        };
+        let Decision::Open(second) = instances.decide(
+            &solo(2),
+            &GroupAnswer::Alone,
+            &free,
+            (Uuid::from_u128(8), PHASE),
+            NOW_MS,
+        ) else {
+            panic!("opens");
+        };
+        instances.closed(first.id);
+        assert_eq!(instances.opened(second.id, false), None);
+        assert_eq!(instances.take_ended(), vec![first.id, second.id]);
+        instances.closed(first.id);
+        assert!(
+            instances.take_ended().is_empty(),
+            "an unknown instance ends once only"
+        );
     }
 
     fn adopted_report(capacity: u32) -> Vec<(SimSlot, Option<RunningInstance>)> {

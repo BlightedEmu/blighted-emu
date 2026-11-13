@@ -84,7 +84,7 @@ use nw_content::player_attacks::AttackMotion;
 
 use crate::camera_check::{CameraCheck, CameraView, MOUNTED_CAMERA_LAG_S};
 use crate::character::{
-    Character, CharacterInput, MountPaces, SPRINT_SPEED_MPS, key_direction, swim_floor_at,
+    Character, CharacterInput, MountPaces, Posture, SPRINT_SPEED_MPS, key_direction, swim_floor_at,
     wall_between, yaw_axes,
 };
 use crate::equip_load::EquipLoad;
@@ -113,6 +113,13 @@ pub const ACTION_RECORDS: u8 = 52;
 /// move the server did not see) was never found again: live 2026-09-26, Thorpe's first grab pull
 /// left the body 7 m from the client and it drifted to 21 m for the rest of the fight, where
 /// Thorpe fought it. Cutscene and video cameras never come here (the sim drops their views).
+///
+/// Only a record in which the client can move its body counts: one with a movement key, a jump
+/// or a dodge, or one in the time of an action it started ([`ACTION_RECORDS`]). A camera that
+/// leaves a body at rest shows something else, an NPC's talk or a town board, and the body stays
+/// (Observed, retail: the talk camera of `06a_msq_06_rescuefarmers` from 101.4 s, no key held,
+/// took the body 1.75 m away onto a crate, 1.18 m above retail's place, for 17 s; the board
+/// camera of `Hivetownboardmissions` from 457.6 s took it 4.8 m away, 1.69 m into the air).
 pub const RECOVER_AFTER_RECORDS: u16 = 30;
 /// How far above the highest known floor the camera's body may stand and still stand on it, m
 /// (Observed: on the retail tutorial deck the camera's body stood 0.48 m below to 0.73 m above the
@@ -170,6 +177,9 @@ struct AttackPlay {
     keys_from_ms: f32,
     /// The velocity it keeps, along its right and its forward, m/s.
     kept_mps: [f32; 2],
+    /// A hit reaction: it moves the body along its facing, and neither a key nor a dodge or a
+    /// block ends it before `keys_from_ms`.
+    held: bool,
 }
 
 /// One record the body took: where it stood before it, the record's input and its velocity then.
@@ -262,6 +272,7 @@ impl TrackedBody {
             at_ms: since_ms - rewound_ms,
             keys_from_ms,
             kept_mps: [0.0; 2],
+            held: false,
         });
         let Some(first) = again.first() else {
             return;
@@ -279,6 +290,30 @@ impl TrackedBody {
                     self.character.step(record.input, ground, sea_level_m);
                 }
             }
+        }
+    }
+
+    /// A hit reaction of motion `motion` starts now (`playeractions_reaction.actionlist`: the
+    /// `Reaction` actions' `CharacterRelativeMovement` speed 0 and their `ReactionMotion`): its
+    /// animation moves the body along its facing, and its keys, its dodge and its block move it
+    /// no more until `keys_from_ms` after the start, when a movement key ends it.
+    pub fn start_reaction(&mut self, motion: Arc<AttackMotion>, keys_from_ms: f32) {
+        self.attack = Some(AttackPlay {
+            motion,
+            forward: None,
+            at_ms: 0.0,
+            keys_from_ms,
+            kept_mps: [0.0; 2],
+            held: true,
+        });
+    }
+
+    /// A dodge breaks the hit reaction out (`playeractions_dodge.actionlist`,
+    /// `Dodge_Stunlock`): the reaction's motion stops at once and the keys and the dodge move the
+    /// body again. An attack's motion goes on.
+    pub fn break_reaction(&mut self) {
+        if self.attack.as_ref().is_some_and(|play| play.held) {
+            self.attack = None;
         }
     }
 
@@ -302,9 +337,9 @@ impl TrackedBody {
         let play = self.attack.as_mut()?;
         let CharacterInput { intent, yaw, dt_s } = input;
         let dt_ms = dt_s * MS_PER_SECOND;
-        let over = play.at_ms >= play.motion.length_ms()
-            || (play.at_ms >= play.keys_from_ms && intent.moves());
-        if intent.dodge || intent.block || over {
+        let free = play.at_ms >= play.keys_from_ms;
+        let over = play.at_ms >= play.motion.length_ms() || (free && intent.moves());
+        if ((intent.dodge || intent.block) && (free || !play.held)) || over {
             self.attack = None;
             return None;
         }
@@ -313,8 +348,14 @@ impl TrackedBody {
             play.at_ms = to_ms;
             return None;
         }
+        let held = play.held;
         let forward = *play.forward.get_or_insert_with(|| {
-            let forward = key_direction(intent, yaw).unwrap_or_else(|| yaw_axes(yaw).0);
+            let facing = yaw_axes(yaw).0;
+            let forward = if held {
+                facing
+            } else {
+                key_direction(intent, yaw).unwrap_or(facing)
+            };
             let right = [forward[1], -forward[0]];
             let along = |axis: [f32; 2]| velocity[0] * axis[0] + velocity[1] * axis[1];
             let kept = [along(right), along(forward)];
@@ -352,6 +393,11 @@ impl TrackedBody {
     /// Its equip load category changes to `load` ([`Character::set_equip_load`]).
     pub const fn set_equip_load(&mut self, load: EquipLoad) {
         self.character.set_equip_load(load);
+    }
+
+    /// Its equip load category.
+    pub const fn equip_load(&self) -> EquipLoad {
+        self.character.equip_load()
     }
 
     /// A held `NoSprint` effect keeps it from sprinting ([`Character::set_no_sprint`]).
@@ -404,6 +450,11 @@ impl TrackedBody {
     /// Whether it swims.
     pub const fn is_swimming(&self) -> bool {
         self.character.is_swimming()
+    }
+
+    /// How it holds itself: standing, crouching or prone.
+    pub const fn posture(&self) -> Posture {
+        self.character.posture()
     }
 
     /// Whether it falls and is not in a jump or a swim.
@@ -485,7 +536,9 @@ impl TrackedBody {
         });
         // A camera that has not looked at the body for [`RECOVER_AFTER_RECORDS`] shows where
         // the client is: the body goes there.
-        let recovering = seen.is_none() && input.view.is_some() && {
+        let intent = input.character.intent;
+        let moves_itself = acting || intent.moves() || intent.jump || intent.dodge;
+        let recovering = seen.is_none() && input.view.is_some() && moves_itself && {
             self.unfit_records = self.unfit_records.saturating_add(1);
             self.unfit_records >= RECOVER_AFTER_RECORDS
         };
@@ -724,36 +777,53 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_body_its_camera_lost_goes_back_to_the_camera_after_a_second() {
-        // The client's body: 7 m to the side of the server's (live 2026-09-26 after Thorpe's
-        // first grab pull), standing still.
-        const GAP_M: f32 = 7.0;
+    /// A body at [`start`] whose camera learnt its boom there, and the view of a client that
+    /// stands `gap_m` to its side.
+    fn lost_by(gap_m: f32) -> (TrackedBody, Position, CameraView) {
         let client = Position {
-            x: start().x + GAP_M,
+            x: start().x + gap_m,
             ..start()
         };
         let mut body = TrackedBody::new(start());
-        // The camera learns its boom while it looks at the body.
         for _ in 0..10 {
             body.record(input(0, view_of(start(), BOOM, [0.0; 2])), &Flat, SEA);
         }
         body.stand_at(start());
-        let away = view_of(client, BOOM, [0.0; 2]);
-        for record in 1..RECOVER_AFTER_RECORDS {
-            let tracked = body.record(input(0, away), &Flat, SEA);
-            assert!(
-                tracked.position.horizontal_distance(start()) < 0.1,
-                "record {record}: a camera that does not look at the body moves nothing yet"
-            );
+        (body, client, view_of(client, BOOM, [0.0; 2]))
+    }
+
+    #[test]
+    fn a_body_its_camera_lost_goes_back_to_the_camera_when_its_client_acts() {
+        // The client's body: 7 m to the side of the server's (live 2026-09-26 after Thorpe's
+        // first grab pull). It attacks on the spot: its action can move it.
+        const GAP_M: f32 = 7.0;
+        let (mut body, client, away) = lost_by(GAP_M);
+        let attack = TrackInput {
+            action_started: true,
+            ..input(0, away)
+        };
+        let mut tracked = body.record(attack, &Flat, SEA);
+        for _ in 0..RECOVER_AFTER_RECORDS {
+            tracked = body.record(input(0, away), &Flat, SEA);
         }
-        let tracked = body.record(input(0, away), &Flat, SEA);
-        assert!(tracked.resynced);
         assert!(
             tracked.position.horizontal_distance(client) < 0.1,
             "{:?}: the body goes to its client",
             tracked.position
         );
+    }
+
+    #[test]
+    fn a_camera_that_leaves_a_body_at_rest_does_not_move_it() {
+        // An NPC's talk or a town board: the camera shows something 4.8 m away, no key is held
+        // (retail `Hivetownboardmissions` from 457.6 s).
+        const GAP_M: f32 = 4.8;
+        let (mut body, _, away) = lost_by(GAP_M);
+        for record in 0..RECOVER_AFTER_RECORDS * 4 {
+            let tracked = body.record(input(0, away), &Flat, SEA);
+            assert!(!tracked.resynced, "record {record}");
+            assert_eq!(tracked.position, start(), "record {record}");
+        }
     }
 
     /// An attack whose animation moves its player 1 m forward over 300 ms.
@@ -810,6 +880,59 @@ mod tests {
         body.stand_at(start());
         body.record(keys(0, yaw), &Flat, SEA);
         assert_eq!(body.position(), start(), "a server move ends the attack");
+    }
+
+    #[test]
+    fn a_hit_reaction_holds_the_keys_and_the_dodge_until_its_free_point() {
+        // A stagger that pushes the body 1 m along its facing (+y) over 300 ms, free from 200 ms.
+        let mut body = TrackedBody::new(start());
+        body.start_reaction(lunge(), 200.0);
+        let dodge = TrackInput {
+            character: CharacterInput {
+                intent: Intent {
+                    forward: -1,
+                    dodge: true,
+                    ..Intent::default()
+                },
+                yaw: 0.0,
+                dt_s: DT,
+            },
+            ..keys(0, 0.0)
+        };
+        for _ in 0..FIRST_STEP_RECORDS {
+            body.record(dodge, &Flat, SEA);
+        }
+        assert!(
+            (body.position().y - (start().y + 0.2)).abs() < CLOSE,
+            "the reaction's motion, not the back key or the dodge: {:?}",
+            body.position()
+        );
+        for _ in FIRST_STEP_RECORDS..LUNGE_RECORDS {
+            body.record(keys(1, 0.0), &Flat, SEA);
+        }
+        assert!(
+            body.position().y > start().y + 0.6 + CLOSE,
+            "a key from the free point moves the body by itself: {:?}",
+            body.position()
+        );
+    }
+
+    #[test]
+    fn a_breakout_ends_the_reaction_s_motion_and_not_an_attack_s() {
+        let mut reacting = TrackedBody::new(start());
+        reacting.start_reaction(lunge(), 200.0);
+        reacting.break_reaction();
+        reacting.record(keys(0, 0.0), &Flat, SEA);
+        assert_eq!(
+            reacting.position(),
+            start(),
+            "no reaction motion after the breakout"
+        );
+        let mut attacking = TrackedBody::new(start());
+        attacking.start_attack(lunge(), NO_KEYS_MS, 0.0, &Flat, SEA);
+        attacking.break_reaction();
+        attacking.record(keys(0, 0.0), &Flat, SEA);
+        assert_ne!(attacking.position(), start(), "the attack's motion goes on");
     }
 
     #[test]

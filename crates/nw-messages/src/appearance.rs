@@ -24,6 +24,8 @@ pub const PLAYER_APPEARANCE_COMPONENT: u64 = 12;
 pub const PURCHASE_APPEARANCE_CHANGE_TYPE_INDEX: u64 = 6420;
 /// `PlayerAppearanceComponentClientFacet_OnPurchaseSuccess`.
 pub const APPEARANCE_PURCHASED_TYPE_INDEX: u64 = 6855;
+/// `PlayerAppearanceComponentClientFacet_OnPurchaseError`.
+pub const APPEARANCE_PURCHASE_ERROR_TYPE_INDEX: u64 = 6436;
 /// Children registered on slot 0.
 const APPEARANCE_CHILDREN: u8 = 14;
 /// The look children: 0 to 11, one byte each.
@@ -365,30 +367,50 @@ impl AppearanceChangeRequest {
     }
 }
 
-/// 6855 `OnPurchaseSuccess`: the barber change is done. The header only: the barber call's own
-/// (Observed: all 11 retail answers).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AppearancePurchasedMsg {
-    /// The header of the barber call.
-    pub header: FacetHeader,
+/// Defines an answer to the barber call that holds the call's header and no other field.
+macro_rules! barber_answer {
+    ($(#[$doc:meta])* $name:ident, $type_index:expr) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct $name {
+            /// The header of the barber call.
+            pub header: FacetHeader,
+        }
+
+        impl BodyCodec for $name {
+            const TYPE_INDEX: u64 = $type_index;
+
+            fn encode(&self) -> Result<Vec<u8>, MessageError> {
+                let mut writer = Writer::new();
+                self.header.write(&mut writer);
+                Ok(writer.finish())
+            }
+
+            fn decode(body: &[u8]) -> Result<Self, MessageError> {
+                let mut reader = Reader::new(body);
+                let header = FacetHeader::read(&mut reader)?;
+                reader.finish()?;
+                Ok(Self { header })
+            }
+        }
+    };
 }
 
-impl BodyCodec for AppearancePurchasedMsg {
-    const TYPE_INDEX: u64 = APPEARANCE_PURCHASED_TYPE_INDEX;
-
-    fn encode(&self) -> Result<Vec<u8>, MessageError> {
-        let mut writer = Writer::new();
-        self.header.write(&mut writer);
-        Ok(writer.finish())
-    }
-
-    fn decode(body: &[u8]) -> Result<Self, MessageError> {
-        let mut reader = Reader::new(body);
-        let header = FacetHeader::read(&mut reader)?;
-        reader.finish()?;
-        Ok(Self { header })
-    }
-}
+barber_answer!(
+    /// 6855 `OnPurchaseSuccess`: the barber change is done. The header only: the barber call's
+    /// own (Observed: all 11 retail answers).
+    AppearancePurchasedMsg,
+    APPEARANCE_PURCHASED_TYPE_INDEX
+);
+barber_answer!(
+    /// 6436 `OnPurchaseError`: the barber change is refused. The header only (Observed: the
+    /// client facet `PlayerAppearanceComponentClientFacet` has two handlers, `FUN_14659b770` and
+    /// `FUN_1465a3e30`, for its two client messages 6436 and 6855, and neither reads a field
+    /// after the header; no capture holds a 6436). The barber call's own header (Inferred: as
+    /// 6855).
+    AppearancePurchaseErrorMsg,
+    APPEARANCE_PURCHASE_ERROR_TYPE_INDEX
+);
 
 #[cfg(test)]
 mod tests {
@@ -551,6 +573,12 @@ mod tests {
         assert_eq!(
             AppearancePurchasedMsg::decode(&bytes).expect("decode"),
             answer
+        );
+        let refused = AppearancePurchaseErrorMsg { header };
+        assert_eq!(refused.encode().expect("encode"), bytes, "the header only");
+        assert_eq!(
+            AppearancePurchaseErrorMsg::decode(&bytes).expect("decode"),
+            refused
         );
     }
 }

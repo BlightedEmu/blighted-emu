@@ -3,6 +3,7 @@
 //! capture check, the mob prefab table, the creature animation table, the tutorial static
 //! entity table and the level collision files.
 
+pub mod ability_instances;
 pub mod ai_data;
 #[cfg(all(test, feature = "ai-replay"))]
 mod ai_replay;
@@ -11,7 +12,9 @@ pub mod breach_tiers;
 pub mod build;
 pub mod camp_slices;
 pub mod capture;
+pub mod catacomb_tiles;
 pub mod catacombs;
+pub mod claim_plots;
 pub mod codegen;
 pub mod collision;
 pub mod combat;

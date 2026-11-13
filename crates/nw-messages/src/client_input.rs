@@ -685,9 +685,20 @@ const BAIT_WINDOW_KEY: (usize, u32) = (4, 9);
 /// bit 24) turned it on or off with no movement key held, and the own place moved forward at the
 /// sprint speed while it was on. (The replication note read it as a run toggle.)
 const FORWARD_NAV_KEY: (usize, u32) = (0, 14);
-/// The slot values and bits of the presses of the first and second weapon keys (input note: the
-/// weapon in the hand changed 331 to 418 ms after each).
-const WEAPON_KEYS: [(usize, u32); 2] = [(0, 9), (3, 13)];
+/// The slot values and bits of the presses of the first and second weapon keys: the inputs
+/// `Use_MainHandSlot_1` (9) and `Use_MainHandSlot_2` (355) of the client's input profile (input
+/// `n` is value `n / 64` bit `n % 64`; input note: the weapon in the hand changed 331 to 418 ms
+/// after each). Observed, 400 retail ledgers: with the default keys a press of the second key set
+/// input 355 together with input 205 (`dialogueOption2`, the same key) in 1,136 records; input
+/// 355 came alone in 19 (a weapon key bound elsewhere) and input 205 alone in 8 (a dialogue
+/// choice). Reading input 205 switched weapons at a dialogue choice and missed the swaps of a
+/// player with other keys (live 2026-11-12: the server took the life staff while the client held
+/// the void gauntlet).
+const WEAPON_KEYS: [(usize, u32); 2] = [(0, 9), (5, 35)];
+/// The slot value and bit of a press of the swap weapon key: input 563 (`swap_weapon`). Observed,
+/// 1,195 retail ledgers: 537 presses, each in one record, each with input 218
+/// (`quickslot-weaponSwap`, the same key) in the same record.
+const SWAP_WEAPON_KEY: (usize, u32) = (8, 51);
 /// The slot value and bit of the sheathe key (the Azoth catalog input 428, `sheathe`: input `n` is
 /// value `n / 64` bit `n % 64`). Retail, 721 ledgers: with every weapon sheathed the server
 /// drew the selected option 42 ms (median) after it, 106 of 109 presses.
@@ -820,6 +831,11 @@ impl InputRecord {
             second_state: ((states >> SECOND_STATE_SHIFT) & STATE_MASK) as u16,
             second_sequence,
         })
+    }
+
+    /// Whether the player pressed the swap weapon key in this record.
+    pub fn weapon_swap_pressed(&self) -> bool {
+        self.slot_bit(SWAP_WEAPON_KEY.0, SWAP_WEAPON_KEY.1)
     }
 
     /// The weapon key the player pressed in this record: 0 for the first, 1 for the second.
@@ -1576,6 +1592,30 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    /// A weapon key is its `Use_MainHandSlot_N` input; the dialogue choice that shares the
+    /// second key's default binding (`dialogueOption2`, input 205) switches no weapon.
+    #[test]
+    fn a_weapon_key_is_its_main_hand_slot_input() {
+        const DIALOGUE_OPTION_2: u32 = 205;
+        let record = |number: u32| InputRecord {
+            slots: one_action(
+                (number / INPUT_BITS_PER_VALUE) as usize,
+                number % INPUT_BITS_PER_VALUE,
+            ),
+            ..InputRecord::default()
+        };
+        let [first, second] = WEAPON_KEYS
+            .map(|(value, bit)| u32::try_from(value).expect("value") * INPUT_BITS_PER_VALUE + bit);
+        assert_eq!(record(first).weapon_key_pressed(), Some(0));
+        assert_eq!(record(second).weapon_key_pressed(), Some(1));
+        assert_eq!(record(DIALOGUE_OPTION_2).weapon_key_pressed(), None);
+        let (value, bit) = SWAP_WEAPON_KEY;
+        let swap = record(u32::try_from(value).expect("value") * INPUT_BITS_PER_VALUE + bit);
+        assert!(swap.weapon_swap_pressed());
+        assert_eq!(swap.weapon_key_pressed(), None);
+        assert!(!record(first).weapon_swap_pressed());
+    }
 
     #[test]
     fn row_1_is_the_slayer_action_the_client_starts() {

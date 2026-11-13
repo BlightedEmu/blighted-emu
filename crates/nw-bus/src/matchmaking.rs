@@ -9,7 +9,7 @@
 //! - The director sends what happened to a queued player to that player's sim ([`QueueNews`] on
 //!   [`crate::subject::sim_queue`], publish): the pop, the accept count, the cancel of a match
 //!   not every player accepted, the drop of a player who did not accept, the invite to an open
-//!   Outpost Rush match, and the opened match.
+//!   Outpost Rush match, the match of a catacombs player with no pop, and the opened match.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -32,6 +32,12 @@ pub struct QueueJoin {
     pub game_mode: String,
     /// The level folder of the map the game mode plays now (its map rotation).
     pub level: String,
+    /// The last byte of the 6254: the player waits for other queued players to fill its team.
+    /// Observed: 1 in the 6 arena group joins and in the 4 catacombs joins that popped with 1
+    /// to 3 players (3 at once, fewer about 60 s later); 0 in the 10 arena solo joins and in the
+    /// catacombs solo join of `CATACOMBS2` (4.546 s), matched alone with no pop. Inferred: the
+    /// meaning (a fill request); a mode with a fill wait reads it.
+    pub fill: bool,
 }
 
 /// A sim to the director: one queue call of a player.
@@ -94,6 +100,13 @@ pub enum QueueNewsKind {
     /// The instance of a match whose players move one by one (Outpost Rush) is open: the
     /// player may accept now.
     Invited,
+    /// The player was matched with no pop and its match is open: it may accept now (Observed:
+    /// the catacombs solo joins, status 1 and the match id at once 4.8 and 5.6 s after the
+    /// queue entry, `CATACOMBS2` 11.805 s, `CATACOMBS` 8.055 s).
+    Matched {
+        /// The match.
+        match_id: Uuid,
+    },
     /// The player may move to its match: every player accepted the arena match, or the player
     /// accepted the open Outpost Rush match.
     Ready(MatchPlace),
@@ -125,6 +138,7 @@ mod tests {
             role: 3,
             game_mode: "Arena3v3".to_owned(),
             level: "nw_arena01".to_owned(),
+            fill: true,
         });
         let bytes = encode(&join).expect("encode");
         assert_eq!(decode::<QueueCall>(&bytes).expect("decode"), join);
@@ -146,5 +160,14 @@ mod tests {
         };
         let bytes = encode(&news).expect("encode");
         assert_eq!(decode::<QueueNews>(&bytes).expect("decode"), news);
+        let matched = QueueNews {
+            character: Uuid::from_u128(1),
+            game_mode: "Catacombs".to_owned(),
+            kind: QueueNewsKind::Matched {
+                match_id: Uuid::from_u128(5),
+            },
+        };
+        let bytes = encode(&matched).expect("encode");
+        assert_eq!(decode::<QueueNews>(&bytes).expect("decode"), matched);
     }
 }

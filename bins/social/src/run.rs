@@ -41,6 +41,9 @@ const STORE_QUEUE: usize = 4096;
 /// for a database restart, long enough not to load a database that is down).
 const STORE_RETRY_FIRST: Duration = Duration::from_millis(100);
 const STORE_RETRY_LONGEST: Duration = Duration::from_secs(30);
+/// Time between the checks for convert-to-raid votes whose time ran out (`nw_social` players'
+/// raids): the end of a vote waits at most this long.
+const RAID_VOTE_CHECK: Duration = Duration::from_secs(1);
 /// Time between flushes of the waiting deliveries: one sim tick.
 const FLUSH: Duration = Duration::from_millis(33);
 /// Tries of one coin move before it counts as unanswered (Inferred: with the configured coin
@@ -58,6 +61,9 @@ const METRIC_STORE_RETRIES: &str = "social_store_retries_total";
 /// How often the territory claim counts of the companies are read (Inferred: the sims read the
 /// claim owners this often, `sim` `OWNER_READ_MS`; a game master changes owners through a sim).
 const CLAIM_COUNT_READ: Duration = Duration::from_secs(30);
+/// How often the territory races, conflicts and war lotteries move on (Inferred: a conflict
+/// starts on the minute and a lottery ends to the second, so a few seconds late is close).
+const CONFLICT_STEP: Duration = Duration::from_secs(5);
 
 /// Failure while starting or running `social`.
 #[derive(Debug, thiserror::Error)]
@@ -103,6 +109,10 @@ enum Outcome {
     Account(Uuid, Uuid),
     /// The territory claims each company owns.
     Claims(Vec<(Uuid, u32)>),
+    /// What the database did with a war declaration; `None` when it failed.
+    Declared(u64, Option<nw_db::Declaration>),
+    /// The war lotteries the database drew.
+    Draws(Vec<nw_db::LotteryDraw>),
 }
 
 /// One job of the store task.
@@ -110,6 +120,11 @@ enum StoreJob {
     Op(StoreOp),
     /// Read the account of a character.
     FindAccount(Uuid),
+    /// Put a war declaration into its lottery.
+    Declare {
+        ticket: u64,
+        request: nw_db::WarRequest,
+    },
     Treasury {
         ticket: u64,
         company: Uuid,
@@ -234,6 +249,27 @@ async fn claim_count_task(db: PgPool, outcomes: mpsc::UnboundedSender<Outcome>) 
     }
 }
 
+/// Moves the territory races, conflicts and war lotteries on every [`CONFLICT_STEP`]
+/// ([`nw_db::advance_conflicts`]) and sends the drawn lotteries to the loop; a failed step is
+/// done again at the next.
+async fn conflict_task(db: PgPool, outcomes: mpsc::UnboundedSender<Outcome>) {
+    let mut tick = tokio::time::interval(CONFLICT_STEP);
+    loop {
+        tick.tick().await;
+        // Each entry has the same chance: the random bits of a new UUID, below the count.
+        let pick = |count: usize| (Uuid::new_v4().as_u128() % count.max(1) as u128) as usize;
+        match nw_db::advance_conflicts(&db, unix_ms(), pick).await {
+            Ok(draws) if draws.is_empty() => {}
+            Ok(draws) => {
+                if outcomes.send(Outcome::Draws(draws)).is_err() {
+                    return;
+                }
+            }
+            Err(error) => tracing::warn!(%error, "territory conflicts not moved on; next try soon"),
+        }
+    }
+}
+
 /// Reads the privacy settings that changed since the last read, every `interval`, and sends them
 /// to the loop. The first read gets every stored setting.
 async fn privacy_task(
@@ -298,6 +334,7 @@ async fn serve_loop(
     // the transfers the state keeps.
     let (outcomes, mut results) = mpsc::unbounded_channel();
     let claim_reader = tokio::spawn(claim_count_task(db.clone(), outcomes.clone()));
+    let conflict_stepper = tokio::spawn(conflict_task(db.clone(), outcomes.clone()));
     let store_task = tokio::spawn(store_task(db, store_jobs, outcomes.clone()));
     let privacy_reader = privacy.map(|global| {
         let interval = Duration::from_millis(config.privacy_poll_ms);
@@ -318,6 +355,7 @@ async fn serve_loop(
     };
     let mut flush = tokio::time::interval(FLUSH);
     let mut check = tokio::time::interval(interval);
+    let mut raid_votes = tokio::time::interval(RAID_VOTE_CHECK);
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
@@ -382,11 +420,19 @@ async fn serve_loop(
                         state.world.set_claim_counts(counts);
                         Vec::new()
                     }
+                    Outcome::Declared(ticket, declaration) => {
+                        state.world.war_declared(ticket, declaration, unix_ms())
+                    }
+                    Outcome::Draws(draws) => state.world.lotteries_drawn(draws, unix_ms()),
                 };
                 state.apply(effects).await;
             }
             _ = flush.tick() => state.flush(),
             _ = check.tick() => state.check_sims(silence).await,
+            _ = raid_votes.tick() => {
+                let effects = state.world.end_due_raid_votes(unix_ms());
+                state.apply(effects).await;
+            }
         }
     }
     state.flush();
@@ -394,6 +440,7 @@ async fn serve_loop(
         reader.abort();
     }
     claim_reader.abort();
+    conflict_stepper.abort();
     // The store task ends when the last sender is gone, after it wrote every waiting change.
     let Loop {
         stores, outcomes, ..
@@ -436,12 +483,34 @@ impl Loop {
                         .group_entities
                         .push(delivery);
                 }
-                Effect::UpkeepPaid { sim, paid } => {
-                    self.pending.entry(sim).or_default().upkeep_paid.push(paid);
+                Effect::RaidEntity { sim, delivery } => {
+                    self.pending
+                        .entry(sim)
+                        .or_default()
+                        .raid_entities
+                        .push(delivery);
+                }
+                Effect::UpkeepAnswered { sim, answer } => {
+                    self.pending
+                        .entry(sim)
+                        .or_default()
+                        .upkeep_answers
+                        .push(answer);
+                }
+                Effect::RaidInviteAnswered { sim, answer } => {
+                    self.pending
+                        .entry(sim)
+                        .or_default()
+                        .raid_invite_answers
+                        .push(answer);
                 }
                 Effect::Store(op) => self.queue_store(StoreJob::Op(op)).await,
                 Effect::FindAccount { character } => {
                     self.queue_store(StoreJob::FindAccount(character)).await;
+                }
+                Effect::DeclareWar { ticket, request } => {
+                    self.queue_store(StoreJob::Declare { ticket, request })
+                        .await;
                 }
                 Effect::Treasury {
                     ticket,
@@ -594,6 +663,19 @@ async fn store_task(
                         None
                     }
                 }
+            }
+            StoreJob::Declare { ticket, request } => {
+                let declared = until_stored("war declaration", || {
+                    nw_db::declare_in_lottery(&db, &request, unix_ms())
+                })
+                .await;
+                let declaration = declared
+                    .inspect_err(|error| {
+                        metrics::counter!(METRIC_FAILED_STORES).increment(1);
+                        tracing::error!(%error, company = %request.company, "war declaration failed");
+                    })
+                    .ok();
+                Some(Outcome::Declared(ticket, declaration))
             }
             StoreJob::Treasury {
                 ticket,

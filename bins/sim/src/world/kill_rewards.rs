@@ -29,9 +29,11 @@ use crate::player_content::PlayerContent;
 const ONCE: u32 = 1;
 
 impl SimWorld {
-    /// Mob `mob` died by a hit of player `killer` (entity number): the killer gains the kill's
-    /// character and weapon mastery experience, and its meta achievements count the kill.
+    /// Mob `mob` died by a hit of player `killer` (entity number): an Outpost Rush match hears
+    /// it ([`super::outpost_rush_boss`]), the killer gains the kill's character and weapon
+    /// mastery experience, and its meta achievements count the kill.
     pub(super) fn reward_kill(&mut self, mob: u64, killer: u64) {
+        self.outpost_rush_mob_killed(mob, killer);
         let Some(entity) = self.player_by_number(killer) else {
             return;
         };

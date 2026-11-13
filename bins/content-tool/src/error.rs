@@ -35,6 +35,12 @@ pub enum ToolError {
     /// The catacomb check cannot run.
     #[error(transparent)]
     Catacombs(#[from] CatacombCheckError),
+    /// The catacombs generation rules do not read.
+    #[error("catacombs: {0}")]
+    CatacombRules(#[from] nw_content::catacombs::CatacombError),
+    /// A catacombs tile does not read, or the tile file cannot be written.
+    #[error(transparent)]
+    CatacombTiles(#[from] nw_world::catacomb_tiles::CatacombTilesError),
     /// Reading the install failed.
     #[error(transparent)]
     Source(#[from] SourceError),
@@ -80,9 +86,15 @@ pub enum ToolError {
     /// The camp slice file cannot be written.
     #[error(transparent)]
     CampSlices(#[from] nw_world::camps::CampSlicesError),
+    /// The claim plot file cannot be written.
+    #[error(transparent)]
+    ClaimPlots(#[from] nw_world::claim_plots::ClaimPlotsError),
     /// The quick course path file cannot be written.
     #[error(transparent)]
     QuickCourses(#[from] nw_world::quick_courses::QuickCoursesError),
+    /// The ability instance file cannot be written.
+    #[error(transparent)]
+    AbilityInstances(#[from] nw_content::ability_instances::AbilityInstancesError),
     /// The reloaded bundle does not hold what was written.
     #[error("bundle check failed: {what} is {found} after reload, expected {expected}")]
     CountMismatch {

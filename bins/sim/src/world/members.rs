@@ -14,6 +14,7 @@
 //! position members, as before M6-B.
 
 use nw_bus::MobGhost;
+use nw_content::combat::MobGuard;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::{
     AlcStamp, AlcState, AssetId, BOSS_PHASE_TYPE_INDEX, BundleGroup, BundleMember, BundlePayload,
@@ -101,6 +102,9 @@ pub(super) struct MobCard {
     pub(super) blocking: bool,
     /// Its block rose or fell since the last bundle step.
     pub(super) blocking_changed: bool,
+    /// Its guard, for a mob of this sim that can block ([`crate::mobs::Mobs::guard`]): its
+    /// first vitals state carries the guard's stamina ([`VitalsState::with_stamina`]).
+    pub(super) guard: Option<MobGuard>,
 }
 
 impl MobCard {
@@ -133,6 +137,7 @@ pub(super) const fn card_of(
         skinned_changed: false,
         blocking: false,
         blocking_changed: false,
+        guard: None,
         asset: None,
         server_ms: 0,
         look_target: None,
@@ -408,7 +413,18 @@ pub(super) fn mob_group(
         if let Some(slot) = vitals.slot_0.as_mut() {
             slot.vitals_data = Some(VitalsData::creature_first(mob.health, card.server_ms));
         }
-        Some(vitals)
+        // A recorded retail state holds its own stamina; a mob without one shows its guard's
+        // (retail sends no later stamina change: [`VitalsState::with_stamina`]).
+        let unrecorded = vitals
+            .slot_0
+            .as_ref()
+            .is_none_or(|slot| slot.stamina_max.is_none());
+        match card.guard.filter(|_| unrecorded) {
+            Some(guard) => {
+                Some(vitals.with_stamina(guard.stamina_initial, guard.stamina_max, guard.tick_rate))
+            }
+            None => Some(vitals),
+        }
     } else {
         // Retail sends the health once after each change (a vitals delta after each hit), with
         // its change flags at the first damage.
@@ -1766,6 +1782,46 @@ mod tests {
             vitals.slot_0.and_then(|slot| slot.vitals_data),
             Some(VitalsData::creature_first(HEALTH, CARD_SERVER_MS)),
             "a live mob's first vitals carry the card time, as on retail"
+        );
+        assert_eq!(
+            vitals.slot_0.and_then(|slot| slot.stamina_max),
+            None,
+            "a mob without a guard shows no stamina"
+        );
+        // A shield mob's card carries its guard's stamina (retail damned pistoleer: 50 of 50,
+        // tick rate `0x4000`), and its later health changes carry none.
+        const GUARD_TICK_RATE_BITS: u16 = 0x4000;
+        let guard = MobGuard::of((50, 50, 2, 1), (1, 0.8));
+        let guarded = MobCard {
+            guard,
+            ..card.clone()
+        };
+        let shield = mob_group(FIRST_REMOTE_INTEREST, &guarded, Some(&look), true)
+            .expect("encode")
+            .expect("group");
+        let MemberState::Vitals(vitals) = &shield.members[2].state else {
+            panic!("the vitals third: {shield:?}");
+        };
+        let slot = vitals.slot_0.expect("slot 0");
+        assert_eq!(
+            (
+                slot.stamina_amount,
+                slot.stamina_max,
+                slot.stamina_tick_rate
+            ),
+            (Some(50.0), Some(50.0), Some(GUARD_TICK_RATE_BITS))
+        );
+        let hurt_shield = MobCard {
+            guard,
+            ..card_of(ENTITY, at(), state(HEALTH / 2), None)
+        };
+        let hurt_shield = mob_group(FIRST_REMOTE_INTEREST, &hurt_shield, Some(&look), false)
+            .expect("encode")
+            .expect("group");
+        assert_eq!(
+            hurt_shield.members[0].state,
+            MemberState::Vitals(VitalsState::creature_health(HEALTH / 2)),
+            "no stamina after the card"
         );
         assert_eq!(
             first.members.last().map(|member| member.component),

@@ -16,10 +16,12 @@
 
 use bevy_ecs::entity::Entity;
 use nw_content::shot_entities::ShotEntity;
+use nw_content::town_props::ASSET_ID_LEN;
 use nw_messages::facet::facet_entity;
 use nw_messages::projectile_state::{
     COLLIDED_FLAGS, DEFAULT_WEAPON_EFFECT, PLAYER_DAMAGE_TABLE, ProjectileState,
 };
+use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     AssetId, BundleMember, DYNAMIC_SLICE_SUB_ID, GdeMetadataReplicatedState, MemberState,
     PositionInTheWorldReplicatedState, WorldPosition,
@@ -48,6 +50,25 @@ const MS_PER_SECOND: f32 = 1_000.0;
 const US_PER_MS: u64 = 1_000;
 /// Half of a height.
 const HALF: f32 = 0.5;
+
+/// A projectile entity to spawn ([`SimWorld::spawn_projectile`]): a player's shot or a turret's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct ProjectileSpawn {
+    /// Its slice asset.
+    pub(super) asset: [u8; ASSET_ID_LEN],
+    /// The component of its projectile state.
+    pub(super) component: u64,
+    /// The component of its place state, when its spawn group holds one.
+    pub(super) position_component: Option<u64>,
+    /// Its state without the spawn point (set from `muzzle`).
+    pub(super) state: ProjectileState,
+    /// Where it leaves.
+    pub(super) muzzle: Position,
+    /// How long it flies when it meets nothing, ms.
+    pub(super) flying_ms: u64,
+    /// How long it stays after a hit, ms.
+    pub(super) stuck_ms: u64,
+}
 
 /// A shot entity in the world.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -78,7 +99,7 @@ fn lifetime_ms(seconds: f32) -> u64 {
 
 /// The velocity of a shot of `speed_mps` along `aim`: yaw 0 faces +y and grows toward -x, a
 /// positive pitch looks down.
-fn velocity(aim: AimLine, speed_mps: f32) -> [f32; 3] {
+pub(super) fn velocity(aim: AimLine, speed_mps: f32) -> [f32; 3] {
     let level = aim.pitch.cos() * speed_mps;
     [
         -aim.yaw.sin() * level,
@@ -134,9 +155,7 @@ impl SimWorld {
             z: from.z + PLAYER_CAPSULE.height_m * HALF,
             ..from
         };
-        let start = WorldPosition::from_metres(muzzle.x, muzzle.y, muzzle.z)?;
         let state = ProjectileState {
-            position: Some(start),
             velocity: Some(velocity(aim, shot.base_speed_mps)),
             owner: Some(owner),
             ranged_attack: Some(shot.ranged_attack),
@@ -145,21 +164,50 @@ impl SimWorld {
             damage_row: Some(shot.row_index),
             ..ProjectileState::default()
         };
+        let spawn = ProjectileSpawn {
+            asset: shot.asset,
+            component: shot.component,
+            position_component: shot.position_component,
+            state,
+            muzzle,
+            flying_ms: lifetime_ms(shot.flying_lifetime_s),
+            stuck_ms: lifetime_ms(shot.stuck_lifetime_s),
+        };
+        self.spawn_projectile(spawn, now_ms)
+            .map(|(number, _)| number)
+    }
+
+    /// Spawns the projectile entity `spawn` at `now_ms` (a card of its slice and its state, the
+    /// spawn point set); gives its slot key and its `GdeRef`. `None` when the muzzle is not a
+    /// place.
+    pub(super) fn spawn_projectile(
+        &mut self,
+        spawn: ProjectileSpawn,
+        now_ms: u64,
+    ) -> Option<(u64, [u8; RAW_ID_LEN])> {
+        let muzzle = spawn.muzzle;
+        let start = WorldPosition::from_metres(muzzle.x, muzzle.y, muzzle.z)?;
+        let state = ProjectileState {
+            position: Some(start),
+            ..spawn.state
+        };
         let namespace = SHOT_ENTITY_NAMESPACE ^ self.me.generation;
+        let mut made = [0; RAW_ID_LEN];
         let number = self.stations.place_camp(|number| {
             // A slot key is far below `usize::MAX` on the 64-bit targets the server runs on.
             let gde_ref = dynamic_ref(namespace, number as usize);
+            made = gde_ref;
             let mut members = vec![BundleMember {
                 component: CARD_COMPONENT,
                 state: MemberState::GdeMetadata(GdeMetadataReplicatedState {
                     asset: Some(AssetId {
-                        id: shot.asset,
+                        id: spawn.asset,
                         sub_id: DYNAMIC_SLICE_SUB_ID,
                     }),
                     gde_ref: Some(gde_ref),
                 }),
             }];
-            if let Some(component) = shot.position_component {
+            if let Some(component) = spawn.position_component {
                 members.push(BundleMember {
                     component,
                     state: MemberState::Position(PositionInTheWorldReplicatedState {
@@ -169,7 +217,7 @@ impl SimWorld {
                     }),
                 });
             }
-            members.push(state_member(shot.component, state));
+            members.push(state_member(spawn.component, state));
             Station {
                 gde_ref,
                 position: muzzle,
@@ -180,22 +228,36 @@ impl SimWorld {
         });
         self.live_shots.push(LiveShot {
             number,
-            component: shot.component,
+            component: spawn.component,
             anchor: Some((
                 now_ms.saturating_add(TIME_ANCHOR_MS),
                 self.server_ms.saturating_mul(US_PER_MS),
             )),
-            stuck_ms: lifetime_ms(shot.stuck_lifetime_s),
+            stuck_ms: spawn.stuck_ms,
             until_ms: now_ms
-                .saturating_add(lifetime_ms(shot.flying_lifetime_s))
+                .saturating_add(spawn.flying_ms)
                 .saturating_add(AFTER_END_MS),
         });
-        Some(number)
+        Some((number, made))
     }
 
     /// The shot entity of slot key `number` hit the entity `target` (a mob's or a player's
     /// number) at `at` at `now_ms`: its state names the hit, and it stays its stuck lifetime.
     pub(super) fn shot_entity_hit(&mut self, number: u64, target: u64, at: Position, now_ms: u64) {
+        self.shot_entity_impact(number, Some(target), at, now_ms);
+    }
+
+    /// The shot entity of slot key `number` ended its flight at `at` at `now_ms`: on the entity
+    /// `target` (a mob's or a player's number), or on the world with none (Inferred: the impact
+    /// point and the collided flag without a target, as no capture shows a miss of a shot the
+    /// server flew); it stays its stuck lifetime.
+    pub(super) fn shot_entity_impact(
+        &mut self,
+        number: u64,
+        target: Option<u64>,
+        at: Position,
+        now_ms: u64,
+    ) {
         let Some(live) = self
             .live_shots
             .iter_mut()
@@ -212,8 +274,8 @@ impl SimWorld {
         };
         let hit = ProjectileState {
             position: Some(impact),
-            collided_with: Some(facet_entity(target)),
-            hit_volume: Some(BODY_HIT_VOLUME),
+            collided_with: target.map(facet_entity),
+            hit_volume: target.map(|_| BODY_HIT_VOLUME),
             flags: Some(COLLIDED_FLAGS),
             ..ProjectileState::default()
         };

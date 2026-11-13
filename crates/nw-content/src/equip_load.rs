@@ -6,10 +6,21 @@
 //! weights (555, over the 500 maximum) would make it overburdened, unable to dodge, and whose
 //! armor overrides give 470.9: Inferred, the overrides count. The limits are the
 //! `EncumbranceData` row of the player container.
+//!
+//! In the bag an item weighs its weight times one plus the `ItemClassWeightMods` shares of the
+//! holder's effects for the item's classes (`ItemClass` of its master row): the Strength 150
+//! effect's `Ore=-0.1` makes `OreT1` (`Resource+Ore`) weigh 0.9 of its weight ("-10% weight of
+//! mined items"). Inferred: the shares of all matched classes add up (no item of build 25810808
+//! has two classes with a share of one effect), and a weight is never below 0.
 
 use std::collections::HashMap;
 
 use crate::Tables;
+
+/// Separates the classes of an `ItemClass` cell (`Resource+Ore`).
+const CLASS_SEPARATOR: char = '+';
+/// The weight multiple of an item without a weight share.
+const FULL_WEIGHT: f64 = 1.0;
 
 /// The `ContainerTypeID` of the player's row of `EncumbranceData`.
 pub const PLAYER_CONTAINER: &str = "Player";
@@ -50,6 +61,8 @@ pub struct EquipLoadDamage {
 pub struct EquipLoads {
     /// The weight of each item, by its lowercase id.
     weights: HashMap<String, f64>,
+    /// The lowercase `ItemClass` entries of each item, by its lowercase id.
+    classes: HashMap<String, Vec<String>>,
     /// The player's limits, when the tables hold its row.
     pub limits: Option<EquipLoadRatios>,
 }
@@ -75,7 +88,32 @@ impl EquipLoads {
                 Some((id.to_lowercase(), weight))
             })
             .collect();
-        Self { weights, limits }
+        Self {
+            weights,
+            classes: HashMap::new(),
+            limits,
+        }
+    }
+
+    /// These weights with the `ItemClass` cells of `items` (item id, cell).
+    #[must_use]
+    pub fn with_classes<'a>(
+        mut self,
+        items: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    ) -> Self {
+        self.classes = items
+            .into_iter()
+            .filter_map(|(id, cell)| {
+                let classes: Vec<String> = cell?
+                    .split(CLASS_SEPARATOR)
+                    .map(str::trim)
+                    .filter(|class| !class.is_empty())
+                    .map(str::to_lowercase)
+                    .collect();
+                Some((id.to_lowercase(), classes))
+            })
+            .collect();
+        self
     }
 
     /// The weights and limits of `tables`.
@@ -126,7 +164,12 @@ impl EquipLoads {
                         .map_or(0.0, |share| share as f64),
                 },
             });
-        Self::new(items, armor.chain(weapons), limits)
+        let classes = tables
+            .master_item_definitions
+            .iter()
+            .flat_map(|table| &table.rows)
+            .map(|row| (row.item_id.as_str(), row.item_class.as_deref()));
+        Self::new(items, armor.chain(weapons), limits).with_classes(classes)
     }
 
     /// The weight of item `item_id` (any case); 0 for an item the tables do not weigh.
@@ -135,6 +178,20 @@ impl EquipLoads {
             .get(&item_id.to_lowercase())
             .copied()
             .unwrap_or_default()
+    }
+
+    /// The weight of one item `item_id` (any case) in a bag whose holder's effects give the
+    /// weight shares `weight_mods` (lowercase item class, share; see the module text).
+    pub fn bag_weight(&self, item_id: &str, weight_mods: &[(String, f64)]) -> f64 {
+        let id = item_id.to_lowercase();
+        let share: f64 = self.classes.get(&id).map_or(0.0, |classes| {
+            weight_mods
+                .iter()
+                .filter(|(class, _)| classes.contains(class))
+                .map(|(_, share)| share)
+                .sum()
+        });
+        self.weight(&id) * (FULL_WEIGHT + share).max(0.0)
     }
 
     /// The equip load of the equipped `items`: the sum of their weights.
@@ -185,5 +242,36 @@ mod tests {
         assert!(loads.weight("Unknown").abs() < CLOSE);
         let load = loads.load(["SwordsmanArchetypeChest", "1hSwordT2_FTUE"]);
         assert!((load - 146.555_807_775).abs() < CLOSE);
+    }
+
+    /// The Strength 150 shares (`ATB_Str_Bonus_150_2_Effect`) lighten the classes they name in
+    /// the bag, a share of another effect adds to them, and a weight never goes below 0.
+    #[test]
+    fn a_bag_item_weighs_less_by_the_shares_of_its_classes() {
+        let loads = EquipLoads::new(
+            [
+                ("OreT1", Some(2.0), None),
+                ("WoodT1", Some(2.0), None),
+                ("NoClass", Some(2.0), None),
+            ],
+            [],
+            None,
+        )
+        .with_classes([
+            ("OreT1", Some("Resource+Ore")),
+            ("WoodT1", Some("Resource+Wood")),
+            ("NoClass", None),
+        ]);
+        let strength = [
+            ("ore".to_owned(), -0.1),
+            ("stone".to_owned(), -0.1),
+            ("gem".to_owned(), -0.1),
+        ];
+        assert!((loads.bag_weight("oret1", &strength) - 1.8).abs() < CLOSE);
+        assert!((loads.bag_weight("WoodT1", &strength) - 2.0).abs() < CLOSE);
+        assert!((loads.bag_weight("NoClass", &strength) - 2.0).abs() < CLOSE);
+        let with_prospector = [("ore".to_owned(), -0.1), ("ore".to_owned(), -0.05)];
+        assert!((loads.bag_weight("OreT1", &with_prospector) - 1.7).abs() < CLOSE);
+        assert!(loads.bag_weight("OreT1", &[("ore".to_owned(), -2.0)]).abs() < CLOSE);
     }
 }

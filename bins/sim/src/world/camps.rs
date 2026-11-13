@@ -12,9 +12,32 @@
 //! slice's ([`nw_world::camps`]). The player's camping state (1292) names the camp from then on,
 //! and its home points (3652) list the camp's respawn point.
 //!
-//! Retail `Hive_camping` (a camp without PvP) spawned the group in state 3 (the slice's
-//! `m_initialState`), sent state 4 with the committed resources 69 ms later and state 5 4.2 s
-//! later: that build stage is not run here; the camp spawns built, as the `Hivecamp` group did.
+//! **Build stage** (camp build study 2026-11-12: 11 retail camps of 8 ledgers, from
+//! `12a_msq_12_camptutorial` to `Playthrough_Part_18`). A placed camp is not built yet:
+//! - Its group comes in its slice's `m_initialState` (3) with an empty committed resource
+//!   list, a completion obstruction (1) and no interact member (`12a_msq_12_camptutorial`
+//!   284.221 s); the owner's builder state (2270) counts the camp (284.402 s) and 5361 goes to
+//!   the owner (284.418 s).
+//! - State 4 follows: the camp takes resources (284.402 s, 181 ms after the group; 69 ms in
+//!   `Hive_camping`).
+//! - The owner's build interaction (kind 16, `ApplyAllResources`) is accepted 527 to 560 ms after
+//!   its first request (3743; 285.750 to 286.277 s, `99b_msq_10_cleansefort`,
+//!   `Hive_camping`): the camp's interact shows one interactor and the builder state is
+//!   building (286.303 s).
+//! - Every [`COMMIT_INTERVAL_MS`] one unit of the next resource leaves the bag and joins the
+//!   committed list (287.054 s to 290.886 s: `WoodT1` 1 to 5, then `FlintT1` 1); the first commit
+//!   sets `checkFoundationEvents`.
+//! - After the last unit the builder state is idle, the interaction ends (3746, 290.960 s) and
+//!   the interactors are 0; the camp is built later (state 5, no obstruction, interact
+//!   disabled; 292.888 s) and its `BindCamp` game event moves the camp tutorial (3233, 3236 at
+//!   292.868 s).
+//! - A cancel of the interaction (2473) stops the commits: the builder state is idle and the
+//!   interactors 0, no 3746 (`Playthrough_Part_05` 3209.61 s); the committed resources stay and
+//!   a later build goes on (3241.744 s).
+//!
+//! Retail `Hive_camping` (a capture of 2026-06-30, the oldest of them) committed every resource
+//! at the placement and built the camp 3.2 to 4.2 s later with no interaction: that older form
+//! is not run here.
 //!
 //! The camp is an entity of its owner's sim while the owner is in it (Inferred: no capture shows
 //! a camp after its owner left). A save keeps its place and tier, not its rotation or blueprint:
@@ -22,33 +45,77 @@
 //! camp of its tier (Inferred).
 
 use bevy_ecs::entity::Entity;
+use nw_bus::ConnectionRef;
 use nw_content::camps::{camp_station_type, default_camp};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_formats::rigid::{IDENTITY_QUAT, quat_normalize, rotate};
 use nw_messages::buildables::NO_OWNER_KIND;
+use nw_messages::facet::{InteractionEndedMsg, component};
 use nw_messages::gde::AssetId;
+use nw_messages::keyed_list::{KeyedList, MapChange};
 use nw_messages::position::{PositionInTheWorldReplicatedState, Rotation, WorldPosition};
+use nw_messages::travel::BUILDABLE_CONTROLLER_COMPONENT;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    BuildableControllerState, BundleMember, DamageReceiverState, DelayedEventState,
-    GdeMetadataReplicatedState, GuildCrest, InteractState, MemberState, OwnerIdentification,
-    OwnershipState, PlacementObstructionState, TerritoryInterfaceState, VitalsData, VitalsSlot0,
-    VitalsState,
+    BUILDER_BUILDING, BUILDER_IDLE, BuildableControllerState, BuilderState, BundleMember,
+    CommittedResources, DamageReceiverState, DelayedEventState, FacetHeader,
+    GdeMetadataReplicatedState, GuildCrest, InteractState, InteractionRequest, MemberState,
+    OwnerIdentification, OwnershipState, PlacementObstructionState, ServerMessage,
+    TerritoryInterfaceState, TravelServerMsg, VitalsData, VitalsSlot0, VitalsState,
+    committed_resource,
 };
 use nw_sim_core::Position;
 use nw_world::camps::CampSlice;
 use uuid::Uuid;
 
 use super::crafting::{
-    CARD_COMPONENT, CHECK_FOUNDATION_EVENTS, NO_FACTION, NO_GUILD_ID, NO_RAID, RUIN_COMPLETED,
-    RUIN_DELAY, Station, TERRITORY_REFS_SET, committed, list_at,
+    CARD_COMPONENT, NO_FACTION, NO_GUILD_ID, NO_RAID, RUIN_COMPLETED, RUIN_DELAY, Station,
+    TERRITORY_REFS_SET, committed,
 };
-use super::{Player, SimWorld};
+use super::travel::BIND_CAMP_EVENT;
+use super::{Player, SimWorld, gather_answer, send_now};
 
 /// Names the camp ids this server makes.
 const CAMP_ID_NAMESPACE: u64 = 0x6361_6d70_7369_7465;
-/// `currentState` of a built camp (both retail camps once built).
+/// `currentState` of a built camp (every retail camp once built).
 const BUILT: u8 = 5;
+/// `currentState` of a camp that takes resources (every retail build, 69 to 181 ms after its
+/// group came in the slice's `m_initialState`).
+const COMMITTABLE: u8 = 4;
+/// How long after its placement a camp takes resources (Inferred: within the retail 69 to
+/// 181 ms).
+pub(super) const COMMITTABLE_DELAY_MS: u64 = 100;
+/// `hasCompletionObstruction` of a camp that is not built (every retail placement) and of one
+/// that is (every retail completion).
+const COMPLETION_OBSTRUCTED: u8 = 1;
+const COMPLETION_FREE: u8 = 0;
+/// `checkFoundationEvents` of a camp built by its owner's commits (Observed: the first commit,
+/// `12a_msq_12_camptutorial` 287.054 s, and the built camp that came back into view,
+/// `12a_msq_16_fasttravel` 67.55 s).
+const COMMITTED_CHECK_FOUNDATION_EVENTS: bool = true;
+/// The interaction kind of a camp build (`InteractionUIActions` `ApplyAllResources`).
+pub(super) const APPLY_ALL_RESOURCES_KIND: u8 = 16;
+/// How long after the first build request the build starts (Inferred: within the retail 527
+/// to 560 ms of three ledgers).
+pub(super) const BUILD_ACCEPT_DELAY_MS: u64 = 530;
+/// How long one unit of a resource takes to commit (Observed: 765 to 777 ms from the accept to
+/// the first commit and 767 ms between commits, `12a_msq_12_camptutorial`,
+/// `99b_msq_10_cleansefort`, `20261004-175416-488`).
+pub(super) const COMMIT_INTERVAL_MS: u64 = 767;
+/// How long after the last commit the camp is built (Inferred: the median of the retail 1,065
+/// to 2,315 ms of six builds; what sets it is Unknown).
+pub(super) const COMPLETION_DELAY_MS: u64 = 1_640;
+/// One unit of a resource.
+const ONE_UNIT: u32 = 1;
+/// Interactors of a camp while its owner builds it, and after.
+const ONE_INTERACTOR: u32 = 1;
+const NO_INTERACTORS: u32 = 0;
+/// The 3743 status of an accepted build, and of a build of a camp that is not the player's
+/// (Inferred: the refusal status of a busy gather).
+const BUILD_ACCEPTED: u8 = 1;
+const BUILD_REFUSED: u8 = 2;
+/// The completion is blocked (5361, every retail body).
+const COMPLETION_BLOCKED: bool = true;
 /// `Enabled` of a built camp's first interact (both retail camps).
 const INTERACT_ENABLED: bool = false;
 /// `permissionOptions` of a player's camp (both retail camps).
@@ -109,6 +176,8 @@ pub(super) struct CampSpawn<'a> {
     pub(super) owner_pvp: bool,
     /// The server time of the placement (ms since 2000-01-01).
     pub(super) server_ms: u64,
+    /// Whether it stands built (a camp that comes back with its owner) or was just placed.
+    pub(super) built: bool,
 }
 
 impl CampSpawn<'_> {
@@ -146,13 +215,22 @@ pub(super) fn camp_members(
         }),
     }];
     let pvp = slice.vitals.is_some();
-    if let Some((component, _)) = station.buildable {
+    if let Some((component, initial_state)) = station.buildable {
+        let (current_state, check_foundation_events, resources) = if spawn.built {
+            (
+                BUILT,
+                Some(COMMITTED_CHECK_FOUNDATION_EVENTS),
+                committed(spawn.costs),
+            )
+        } else {
+            (initial_state, None, Vec::new())
+        };
         members.push(member(
             component,
             MemberState::BuildableController(BuildableControllerState {
-                current_state: Some(BUILT),
-                check_foundation_events: Some(CHECK_FOUNDATION_EVENTS),
-                committed_resources: Some(list_at(version, committed(spawn.costs))),
+                current_state: Some(current_state),
+                check_foundation_events,
+                committed_resources: Some(KeyedList::full(version, resources)),
                 crafting_station_type_crc: Some(lowercase_crc32(&camp_station_type(spawn.tier))),
                 camp_tier_buildable_id: Some(lowercase_crc32(&default_camp(spawn.tier))),
                 is_pvp_camp: pvp.then_some(true),
@@ -192,14 +270,19 @@ pub(super) fn camp_members(
         ));
     }
     if let Some((component, completion)) = station.obstruction {
+        let obstruction = if spawn.built {
+            u8::from(completion)
+        } else {
+            COMPLETION_OBSTRUCTED
+        };
         members.push(member(
             component,
             MemberState::PlacementObstruction(PlacementObstructionState {
-                has_completion_obstruction: Some(u8::from(completion)),
+                has_completion_obstruction: Some(obstruction),
             }),
         ));
     }
-    if let Some(component) = slice.interact {
+    if let Some(component) = slice.interact.filter(|_| spawn.built) {
         members.push(member(
             component,
             MemberState::Interact(InteractState {
@@ -289,13 +372,14 @@ pub(super) struct CampPlacement {
 }
 
 impl SimWorld {
-    /// Spawns the camp `placement` of player `entity` in the world: its group goes to every
-    /// viewer near it and it is a crafting station of its tier. `None` when the content has no
-    /// slice of the blueprint or the player is not here.
+    /// Spawns the camp `placement` of player `entity` in the world, `built` or just placed: its
+    /// group goes to every viewer near it and it is a crafting station of its tier. `None` when
+    /// the content has no slice of the blueprint or the player is not here.
     pub(super) fn spawn_camp(
         &mut self,
         entity: Entity,
         placement: &CampPlacement,
+        built: bool,
     ) -> Option<CampEntity> {
         let slice = self.content.camp_slices.get(&placement.blueprint)?;
         let player = self.world.get::<Player>(entity)?;
@@ -314,6 +398,7 @@ impl SimWorld {
                 name: &player.name,
                 owner_pvp: player.pvp_flagged,
                 server_ms,
+                built,
             };
             camp = Some(CampEntity {
                 number,
@@ -337,12 +422,16 @@ impl SimWorld {
         camp
     }
 
-    /// Takes the camp entity of player `entity` out of the world, when it has one.
+    /// Takes the camp entity of player `entity` out of the world, when it has one, with its
+    /// build: a build that ran leaves the builder state idle.
     pub(super) fn despawn_camp(&mut self, entity: Entity) {
-        let camp = self
-            .world
-            .get_mut::<Player>(entity)
-            .and_then(|mut player| player.travel.camp.take());
+        let camp = self.world.get_mut::<Player>(entity).and_then(|mut player| {
+            let build = player.travel.camp_build.take();
+            if build.is_some_and(|build| matches!(build.stage, BuildStage::Committing { .. })) {
+                player.travel.builder_changed(building(false));
+            }
+            player.travel.camp.take()
+        });
         if let Some(camp) = camp {
             self.stations.remove_camp(camp.number);
         }
@@ -382,9 +471,564 @@ impl SimWorld {
             rotation,
             tier,
         };
-        let camp = self.spawn_camp(entity, &placement);
+        let camp = self.spawn_camp(entity, &placement, true);
+        let Some(camp) = camp else {
+            return;
+        };
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            player.travel.camp = camp;
+            player.travel.camp = Some(camp);
+            player.travel.camp_blocked_due = true;
+            player.travel.builder_changed(placed_deployables(true));
+        }
+    }
+}
+
+/// Where the build of a placed camp stands.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BuildStage {
+    /// Just placed: it takes resources from `committable_ms` (sim ms) on.
+    Placed { committable_ms: u64 },
+    /// It takes resources; nobody builds it.
+    Committable,
+    /// Its owner asked to build it with `request`: the build starts at `accept_ms`.
+    Asked {
+        request: InteractionRequest,
+        accept_ms: u64,
+    },
+    /// Its owner builds it with interaction `interaction`: the next unit goes at `commit_ms`.
+    Committing { interaction: u64, commit_ms: u64 },
+    /// Every resource is in: it is built at `complete_ms`.
+    Completing { complete_ms: u64 },
+}
+
+/// The build of a placed camp ([module doc](self)): what it costs, what is in, its list version
+/// and stage. A build is not saved: a camp that is not built yet does not come back with its
+/// owner (Inferred: no capture shows an owner leave during a build).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct CampBuild {
+    /// What its blueprint costs (item id, quantity), in commit order.
+    costs: Vec<(String, u32)>,
+    /// What is committed (item id, quantity), in commit order.
+    committed: Vec<(String, u32)>,
+    /// The version of its committed resource list.
+    list_version: u64,
+    stage: BuildStage,
+}
+
+impl CampBuild {
+    /// The build of a camp of `costs` placed at `now_ms`, whose group holds its list at
+    /// `list_version`.
+    fn placed(costs: &[(String, u32)], list_version: u64, now_ms: u64) -> Self {
+        Self {
+            costs: costs.to_vec(),
+            committed: Vec::new(),
+            list_version,
+            stage: BuildStage::Placed {
+                committable_ms: now_ms.saturating_add(COMMITTABLE_DELAY_MS),
+            },
+        }
+    }
+
+    /// The item of the next unit to commit: the first cost not all in.
+    fn next_item(&self) -> Option<&str> {
+        self.costs
+            .iter()
+            .find(|(item, quantity)| self.quantity_of(item) < *quantity)
+            .map(|(item, _)| item.as_str())
+    }
+
+    /// How much of `item` is committed.
+    fn quantity_of(&self, item: &str) -> u32 {
+        self.committed
+            .iter()
+            .find(|(committed, _)| committed == item)
+            .map_or(0, |(_, quantity)| *quantity)
+    }
+
+    /// One more unit of `item` is in; the list's version goes up.
+    fn commit(&mut self, item: &str) {
+        match self
+            .committed
+            .iter_mut()
+            .find(|(committed, _)| committed == item)
+        {
+            Some((_, quantity)) => *quantity = quantity.saturating_add(ONE_UNIT),
+            None => self.committed.push((item.to_owned(), ONE_UNIT)),
+        }
+        self.list_version = self.list_version.saturating_add(1);
+    }
+
+    /// The committed list in its full form.
+    fn full_list(&self) -> CommittedResources {
+        KeyedList::full(self.list_version, committed(&self.committed))
+    }
+
+    /// The change of the committed list after a commit of `item`: the full list, or the delta
+    /// of `item` alone when it is shorter. Observed: retail sent the full list while it held
+    /// one resource (`12a_msq_12_camptutorial` 287.054 to 290.120 s, versions 9 to 13: the
+    /// delta is as long) and the delta of `FlintT1` when it added a second (290.886 s).
+    fn list_change(&self, item: &str) -> CommittedResources {
+        let full = self.full_list();
+        let (key, value) = committed_resource(item, lowercase_crc32(item), self.quantity_of(item));
+        let delta = KeyedList::Changes(vec![MapChange {
+            key,
+            version: Some(self.list_version),
+            value: Some(value),
+        }]);
+        if encoded_len(&delta) < encoded_len(&full) {
+            delta
+        } else {
+            full
+        }
+    }
+}
+
+/// The bytes of committed resource list `list` on the wire.
+fn encoded_len(list: &CommittedResources) -> usize {
+    let mut writer = nw_messages::Writer::new();
+    // A list of blueprint item ids fits its prefixes.
+    let _ = list.write(&mut writer, |writer, descriptor| descriptor.write(writer));
+    writer.finish().len()
+}
+
+/// The 5361 of camp `camp` to its owner ([`TravelServerMsg::CompletionBlocked`]).
+pub(super) fn completion_blocked(camp: &CampEntity) -> ServerMessage {
+    ServerMessage::Travel(TravelServerMsg::CompletionBlocked {
+        header: FacetHeader {
+            target: camp.facet().wrapping_add(BUILDABLE_CONTROLLER_COMPONENT),
+            entity: camp.facet(),
+        },
+        blocked: COMPLETION_BLOCKED,
+    })
+}
+
+/// The builder state (2270) that counts `placed` camps of a player.
+pub(super) const fn placed_deployables(placed: bool) -> BuilderState {
+    BuilderState {
+        builder: None,
+        placed: Some(if placed { 1 } else { 0 }),
+    }
+}
+
+/// The builder state (2270) of a player who builds (`building`) or not.
+const fn building(building: bool) -> BuilderState {
+    BuilderState {
+        builder: Some(if building {
+            BUILDER_BUILDING
+        } else {
+            BUILDER_IDLE
+        }),
+        placed: None,
+    }
+}
+
+impl SimWorld {
+    /// The camp `camp` of player `entity`, placed at `now_ms` and costing `costs`, starts its
+    /// build.
+    pub(super) fn start_camp_build(
+        &mut self,
+        entity: Entity,
+        costs: &[(String, u32)],
+        now_ms: u64,
+    ) {
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            player.travel.camp_build = Some(CampBuild::placed(
+                costs,
+                nw_messages::items::FIRST_VERSION,
+                now_ms,
+            ));
+            player.travel.camp_blocked_due = true;
+            player.travel.builder_changed(placed_deployables(true));
+        }
+    }
+
+    /// Player `number` asks to build the camp of `request` (kind
+    /// [`APPLY_ALL_RESOURCES_KIND`]) at `now_ms`: its own camp that is not built starts its
+    /// build after [`BUILD_ACCEPT_DELAY_MS`] (or when it takes resources, if later); a camp
+    /// whose resources are all in is accepted and ended at once (Observed: `Hive_camping` 59.49
+    /// and 59.50 s); any other camp is refused.
+    pub(super) fn ask_camp_build(
+        &mut self,
+        entity: Entity,
+        number: u64,
+        request: InteractionRequest,
+        now_ms: u64,
+    ) {
+        let own = self.world.get::<Player>(entity).is_some_and(|player| {
+            player
+                .travel
+                .camp
+                .is_some_and(|camp| camp.gde_ref == request.target)
+                && player.travel.camp_build.is_some()
+        });
+        if !own {
+            self.send_travel(
+                entity,
+                &[gather_answer(number, request, BUILD_REFUSED, &[])],
+            );
+            return;
+        }
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        let Some(build) = player.travel.camp_build.as_mut() else {
+            return;
+        };
+        let accept_ms = now_ms.saturating_add(BUILD_ACCEPT_DELAY_MS);
+        match build.stage {
+            BuildStage::Placed { committable_ms } => {
+                build.stage = BuildStage::Asked {
+                    request,
+                    accept_ms: accept_ms.max(committable_ms),
+                };
+            }
+            BuildStage::Committable => {
+                build.stage = BuildStage::Asked { request, accept_ms };
+            }
+            BuildStage::Completing { .. } => {
+                let ended = ServerMessage::InteractionEnded(InteractionEndedMsg {
+                    header: FacetHeader::of(component::INTERACTOR, number),
+                });
+                self.send_travel(
+                    entity,
+                    &[gather_answer(number, request, BUILD_ACCEPTED, &[]), ended],
+                );
+            }
+            BuildStage::Asked { .. } | BuildStage::Committing { .. } => {}
+        }
+    }
+
+    /// The client of player `entity` cancelled interaction `interaction` (2473): a build that
+    /// runs with it stops, its committed resources stay.
+    pub(super) fn cancel_camp_build(&mut self, entity: Entity, interaction: u64) {
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        let Some(build) = player.travel.camp_build.as_mut() else {
+            return;
+        };
+        let stopped = match build.stage {
+            BuildStage::Committing {
+                interaction: running,
+                ..
+            } => running == interaction,
+            BuildStage::Asked { request, .. } => request.interaction == interaction,
+            _ => false,
+        };
+        if !stopped {
+            return;
+        }
+        let was_committing = matches!(build.stage, BuildStage::Committing { .. });
+        build.stage = BuildStage::Committable;
+        if was_committing {
+            player.travel.builder_changed(building(false));
+            if let Some(camp) = player.travel.camp {
+                self.change_interactors(&camp, NO_INTERACTORS);
+            }
+        }
+    }
+
+    /// The camps at `now_ms`: each owner whose client got its camp's group since the last tick
+    /// gets the 5361 ([`completion_blocked`]; retail 17 to 197 ms after the group), and every
+    /// build whose time came runs its next stage (the [module doc](self) stages).
+    pub(super) fn tick_camps(&mut self, now_ms: u64) {
+        let blocked: Vec<(ConnectionRef, CampEntity)> = self
+            .world
+            .query::<&mut Player>()
+            .iter_mut(&mut self.world)
+            .filter_map(|mut player| {
+                let camp = player.travel.camp?;
+                let shown = player.slots.assigned().contains_key(&camp.number);
+                (player.travel.camp_blocked_due && shown).then(|| {
+                    player.travel.camp_blocked_due = false;
+                    (player.connection.clone(), camp)
+                })
+            })
+            .collect();
+        for (connection, camp) in blocked {
+            send_now(
+                &mut self.combat_messages,
+                &connection,
+                &[completion_blocked(&camp)],
+            );
+        }
+        let due: Vec<(Entity, u64, CampEntity, BuildStage)> = self
+            .world
+            .query::<(Entity, &Player)>()
+            .iter(&self.world)
+            .filter_map(|(entity, player)| {
+                let build = player.travel.camp_build.as_ref()?;
+                let ready = match build.stage {
+                    BuildStage::Placed { committable_ms } => committable_ms,
+                    BuildStage::Asked { accept_ms, .. } => accept_ms,
+                    BuildStage::Committing { commit_ms, .. } => commit_ms,
+                    BuildStage::Completing { complete_ms } => complete_ms,
+                    BuildStage::Committable => return None,
+                };
+                let camp = player.travel.camp?;
+                (now_ms >= ready).then_some((entity, player.number, camp, build.stage))
+            })
+            .collect();
+        for (entity, number, camp, stage) in due {
+            match stage {
+                BuildStage::Placed { .. } => self.camp_committable(entity, &camp),
+                BuildStage::Asked { request, .. } => {
+                    self.accept_camp_build(entity, number, &camp, request, now_ms);
+                }
+                BuildStage::Committing { interaction, .. } => {
+                    self.commit_camp_unit(entity, number, &camp, interaction, now_ms);
+                }
+                BuildStage::Completing { .. } => self.complete_camp(entity, number, &camp, now_ms),
+                BuildStage::Committable => {}
+            }
+        }
+    }
+
+    /// The camp `camp` of player `entity` takes resources (state 4).
+    fn camp_committable(&mut self, entity: Entity, camp: &CampEntity) {
+        if let Some(mut player) = self.world.get_mut::<Player>(entity)
+            && let Some(build) = player.travel.camp_build.as_mut()
+            && let BuildStage::Placed { .. } = build.stage
+        {
+            build.stage = BuildStage::Committable;
+        }
+        self.change_buildable(camp, |state| state.current_state = Some(COMMITTABLE), None);
+    }
+
+    /// The build `request` of player `number` starts: accepted (3743), one interactor, the
+    /// builder state building, the first unit [`COMMIT_INTERVAL_MS`] on.
+    fn accept_camp_build(
+        &mut self,
+        entity: Entity,
+        number: u64,
+        camp: &CampEntity,
+        request: InteractionRequest,
+        now_ms: u64,
+    ) {
+        if let Some(mut player) = self.world.get_mut::<Player>(entity)
+            && let Some(build) = player.travel.camp_build.as_mut()
+        {
+            build.stage = BuildStage::Committing {
+                interaction: request.interaction,
+                commit_ms: now_ms.saturating_add(COMMIT_INTERVAL_MS),
+            };
+            player.travel.builder_changed(building(true));
+        }
+        self.send_travel(
+            entity,
+            &[gather_answer(number, request, BUILD_ACCEPTED, &[])],
+        );
+        self.change_interactors(camp, ONE_INTERACTOR);
+    }
+
+    /// One unit of the next resource of the camp `camp` leaves the bag of player `number` and
+    /// joins the committed list. The build ends after the last unit, or when the bag does not
+    /// hold the next one (Inferred: no capture shows a bag run out during a build).
+    fn commit_camp_unit(
+        &mut self,
+        entity: Entity,
+        number: u64,
+        camp: &CampEntity,
+        interaction: u64,
+        now_ms: u64,
+    ) {
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        let player = &mut *player;
+        let Some(build) = player.travel.camp_build.as_mut() else {
+            return;
+        };
+        let Some(item) = build.next_item().map(str::to_owned) else {
+            return;
+        };
+        let taken = player
+            .gear
+            .as_mut()
+            .is_some_and(|gear| gear.take_as(&item, ONE_UNIT, nw_messages::items::SYNC_CRAFT_USED));
+        let first = build.committed.is_empty();
+        let change = taken.then(|| {
+            build.commit(&item);
+            (build.list_change(&item), build.full_list())
+        });
+        let done = build.next_item().is_none();
+        build.stage = match (taken, done) {
+            (true, true) => BuildStage::Completing {
+                complete_ms: now_ms.saturating_add(COMPLETION_DELAY_MS),
+            },
+            (true, false) => BuildStage::Committing {
+                interaction,
+                commit_ms: now_ms.saturating_add(COMMIT_INTERVAL_MS),
+            },
+            (false, _) => BuildStage::Committable,
+        };
+        if !taken || done {
+            player.travel.builder_changed(building(false));
+        }
+        if let Some((list_change, full)) = change {
+            let check = first.then_some(COMMITTED_CHECK_FOUNDATION_EVENTS);
+            self.change_buildable(
+                camp,
+                |state| {
+                    state.committed_resources = Some(full);
+                    state.check_foundation_events = check.or(state.check_foundation_events);
+                },
+                Some(BuildableControllerState {
+                    check_foundation_events: check,
+                    committed_resources: Some(list_change),
+                    ..BuildableControllerState::default()
+                }),
+            );
+        }
+        if !taken || done {
+            let ended = ServerMessage::InteractionEnded(InteractionEndedMsg {
+                header: FacetHeader::of(component::INTERACTOR, number),
+            });
+            self.send_travel(entity, &[ended]);
+            self.change_interactors(camp, NO_INTERACTORS);
+        }
+    }
+
+    /// The camp `camp` of player `number` is built: state 5, no obstruction, its interact off,
+    /// and its `BindCamp` game event fires (the camp tutorial's `TaskGameEvent`).
+    fn complete_camp(&mut self, entity: Entity, number: u64, camp: &CampEntity, now_ms: u64) {
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            player.travel.camp_build = None;
+        }
+        self.change_buildable(camp, |state| state.current_state = Some(BUILT), None);
+        let Some(slice) = self.camp_slice_of(camp) else {
+            return;
+        };
+        let mut changes = Vec::new();
+        if let Some((component, _)) = slice.station.obstruction {
+            changes.push(BundleMember {
+                component: u64::from(component),
+                state: MemberState::PlacementObstruction(PlacementObstructionState {
+                    has_completion_obstruction: Some(COMPLETION_FREE),
+                }),
+            });
+        }
+        if let Some(component) = slice.interact {
+            changes.push(BundleMember {
+                component: u64::from(component),
+                state: MemberState::Interact(InteractState {
+                    enabled: Some(INTERACT_ENABLED),
+                    has_interactors: None,
+                }),
+            });
+        }
+        self.change_camp_members(camp, changes);
+        tracing::info!(player = number, "camp built");
+        self.fire_game_event(number, BIND_CAMP_EVENT, now_ms);
+    }
+
+    /// The slice of the camp `camp`: the blueprint its card names.
+    fn camp_slice_of(&self, camp: &CampEntity) -> Option<CampSlice> {
+        let members = self.stations.members(camp.number)?;
+        let asset = members.iter().find_map(|member| match &member.state {
+            MemberState::GdeMetadata(card) => card.asset,
+            _ => None,
+        })?;
+        self.content
+            .camp_slices
+            .by_blueprint
+            .values()
+            .find(|slice| slice.asset == asset.id && slice.asset_sub_id == asset.sub_id)
+            .cloned()
+    }
+
+    /// The buildable controller of the camp `camp` changes: `merge` puts it into the group's
+    /// state, `change` goes to the viewers (the merged state when `None`).
+    fn change_buildable(
+        &mut self,
+        camp: &CampEntity,
+        merge: impl FnOnce(&mut BuildableControllerState),
+        change: Option<BuildableControllerState>,
+    ) {
+        let Some(members) = self.stations.members(camp.number) else {
+            return;
+        };
+        let Some((component, mut state)) = members.iter().find_map(|member| match &member.state {
+            MemberState::BuildableController(state) => Some((member.component, state.clone())),
+            _ => None,
+        }) else {
+            return;
+        };
+        let before = state.clone();
+        merge(&mut state);
+        let sent = change.unwrap_or_else(|| BuildableControllerState {
+            current_state: state
+                .current_state
+                .filter(|_| state.current_state != before.current_state),
+            ..BuildableControllerState::default()
+        });
+        let merged = BundleMember {
+            component,
+            state: MemberState::BuildableController(state),
+        };
+        self.stations.change_camp(
+            camp.number,
+            |members| put_member(members, merged),
+            vec![BundleMember {
+                component,
+                state: MemberState::BuildableController(sent),
+            }],
+        );
+    }
+
+    /// The interact of the camp `camp` shows `interactors` interactors.
+    fn change_interactors(&mut self, camp: &CampEntity, interactors: u32) {
+        let Some(component) = self.camp_slice_of(camp).and_then(|slice| slice.interact) else {
+            return;
+        };
+        self.change_camp_members(
+            camp,
+            vec![BundleMember {
+                component: u64::from(component),
+                state: MemberState::Interact(InteractState {
+                    enabled: None,
+                    has_interactors: Some(interactors),
+                }),
+            }],
+        );
+    }
+
+    /// The members `changes` of the camp `camp` change: each goes to the viewers and into the
+    /// group's state (over the member of its component, or added).
+    fn change_camp_members(&mut self, camp: &CampEntity, changes: Vec<BundleMember>) {
+        if changes.is_empty() {
+            return;
+        }
+        let merged = changes.clone();
+        self.stations.change_camp(
+            camp.number,
+            |members| {
+                for change in merged {
+                    put_member(members, change);
+                }
+            },
+            changes,
+        );
+    }
+}
+
+/// Puts `member` into `members`: over the member of its component (its set fields over the
+/// old ones for an interact), else added in component order.
+fn put_member(members: &mut Vec<BundleMember>, member: BundleMember) {
+    match members
+        .iter_mut()
+        .find(|existing| existing.component == member.component)
+    {
+        Some(existing) => match (&mut existing.state, member.state) {
+            (MemberState::Interact(old), MemberState::Interact(new)) => {
+                old.enabled = new.enabled.or(old.enabled);
+                old.has_interactors = new.has_interactors.or(old.has_interactors);
+            }
+            (state, new) => *state = new,
+        },
+        None => {
+            members.push(member);
+            members.sort_by_key(|member| member.component);
         }
     }
 }
@@ -504,6 +1148,7 @@ pub(super) mod tests {
             name: RETAIL_NAME,
             owner_pvp: true,
             server_ms: RETAIL_SERVER_MS,
+            built: true,
         };
         let members = camp_members(&pvp_slice(), &spawn, RETAIL_LIST_VERSION);
         let retail = retail_members();
@@ -560,6 +1205,25 @@ pub(super) mod tests {
                     };
                     assert_eq!(time(ours), time(theirs));
                 }
+                (
+                    MemberState::BuildableController(ours),
+                    MemberState::BuildableController(theirs),
+                ) => {
+                    // `Hivecamp` (2026-06) built its camps on its own and sent no foundation
+                    // check; a camp built by its owner's commits sends it
+                    // (`12a_msq_16_fasttravel` 67.55 s).
+                    assert_eq!(
+                        ours.check_foundation_events,
+                        Some(COMMITTED_CHECK_FOUNDATION_EVENTS)
+                    );
+                    assert_eq!(
+                        BuildableControllerState {
+                            check_foundation_events: theirs.check_foundation_events,
+                            ..ours.clone()
+                        },
+                        *theirs
+                    );
+                }
                 (ours, theirs) => assert_eq!(ours, theirs),
             }
         }
@@ -578,6 +1242,7 @@ pub(super) mod tests {
             name: "",
             owner_pvp: false,
             server_ms: 0,
+            built: true,
         };
         let at = spawn.world_point(pvp_slice().spawn_point);
         let retail = RETAIL_SPAWN_POINT.map(f32::from_bits);
@@ -593,6 +1258,45 @@ pub(super) mod tests {
             spawn_point: at,
         };
         assert_eq!(camp.facet(), 12_663_701_595_423_529_582);
+    }
+
+    /// Retail `12a_msq_12_camptutorial`: the buildable controller bodies (after the class
+    /// bytes) of the first commit (287.054 s, list version 9, with the foundation check), the
+    /// second (287.818 s, version 10) and the last, which adds `FlintT1` (290.886 s, version
+    /// 14).
+    const RETAIL_FIRST_COMMIT: &str =
+        "0106010001090106576f6f6454318a91442700000000000100ffffffff00000033000000000000";
+    const RETAIL_SECOND_COMMIT: &str =
+        "010400010a0106576f6f6454318a91442700000000000200ffffffff00000033000000000000";
+    const RETAIL_FLINT_COMMIT: &str =
+        "0104010107466c696e745431010e0c9280c800000000000100ffffffff00000033000000000000";
+    /// The list version of the retail camp before its first commit.
+    const RETAIL_VERSION_BEFORE: u64 = 8;
+
+    fn controller_body(state: BuildableControllerState) -> String {
+        let mut writer = nw_messages::Writer::new();
+        state.write(&mut writer).expect("write");
+        hex::encode(writer.finish())
+    }
+
+    #[test]
+    fn the_commits_send_the_retail_list_forms() {
+        let mut build = CampBuild::placed(&costs(), RETAIL_VERSION_BEFORE, 0);
+        let mut bodies = Vec::new();
+        for _ in 0..6 {
+            let item = build.next_item().expect("an item").to_owned();
+            let first = build.committed.is_empty();
+            build.commit(&item);
+            bodies.push(controller_body(BuildableControllerState {
+                check_foundation_events: first.then_some(COMMITTED_CHECK_FOUNDATION_EVENTS),
+                committed_resources: Some(build.list_change(&item)),
+                ..BuildableControllerState::default()
+            }));
+        }
+        assert_eq!(build.next_item(), None, "every unit is in");
+        assert_eq!(bodies[0], RETAIL_FIRST_COMMIT);
+        assert_eq!(bodies[1], RETAIL_SECOND_COMMIT);
+        assert_eq!(bodies[5], RETAIL_FLINT_COMMIT);
     }
 
     #[test]
@@ -676,6 +1380,7 @@ mod retail_tests {
             name: "",
             owner_pvp: true,
             server_ms: 0,
+            built: true,
         };
         let at = spawn.world_point(slice.spawn_point);
         for (ours, theirs) in [at.x, at.y, at.z]

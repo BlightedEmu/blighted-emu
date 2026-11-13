@@ -972,6 +972,24 @@ pub fn counted_game_events(rows: &[TaskRow]) -> HashSet<String> {
         .collect()
 }
 
+/// The sources (lowercase ids) that the item tasks of `rows` drop from (`ItemDropVC`): the
+/// gatherables of their quest objects among them ([`ObjectiveRun::gather_drops`]).
+pub fn quest_drop_sources(rows: &[TaskRow]) -> HashSet<String> {
+    rows.iter()
+        .filter_map(|row| match kind_of(row) {
+            TaskKind::GatherItems {
+                drop: Some(drop), ..
+            }
+            | TaskKind::HaveItems {
+                drop: Some(drop), ..
+            } => Some(drop.sources),
+            _ => None,
+        })
+        .flatten()
+        .map(|source| source.to_lowercase())
+        .collect()
+}
+
 /// A location cell "x y z"; `None` when it is not three numbers.
 fn location_of(cell: &str) -> Option<Position> {
     let mut numbers = cell
@@ -1711,6 +1729,22 @@ pub struct ObjectiveRun {
     /// The game mode of the instance the player is in ([`Event::GameModeEntered`]); `None` in
     /// the open world. A run that goes to another sim starts without one.
     game_mode: Option<String>,
+    /// The player and quest of an open-world quest's run, for its progress log lines; `None`
+    /// for a run that logs nothing (the tutorial's logs its own).
+    owner: Option<RunOwner>,
+}
+
+/// The changes of a task its log line names.
+const TASK_ACTIVE: &str = "active";
+const TASK_DONE: &str = "done";
+
+/// Whose open-world quest a run is: what its progress log lines name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunOwner {
+    /// The player's number.
+    pub player: u64,
+    /// The quest's `ObjectiveID`.
+    pub quest: String,
 }
 
 /// Whether `enemy` names a mob of `vitals_id`, `categories` and spawn categories
@@ -1830,6 +1864,24 @@ impl KillTypes {
 impl ObjectiveRun {
     /// A run of `tree`, started at `now_ms`; the effects of its first tasks.
     pub fn start(tree: Arc<ObjectiveTree>, now_ms: u64) -> (Self, Vec<Effect>) {
+        Self::begin(tree, now_ms, None)
+    }
+
+    /// [`ObjectiveRun::start`] for the open-world quest of `owner`: each task that starts or
+    /// ends, and each event that a waiting task does not count, is one debug line.
+    pub fn start_owned(
+        tree: Arc<ObjectiveTree>,
+        now_ms: u64,
+        owner: RunOwner,
+    ) -> (Self, Vec<Effect>) {
+        Self::begin(tree, now_ms, Some(owner))
+    }
+
+    fn begin(
+        tree: Arc<ObjectiveTree>,
+        now_ms: u64,
+        owner: Option<RunOwner>,
+    ) -> (Self, Vec<Effect>) {
         let states = vec![TaskState::Idle; tree.tasks.len()];
         let mut run = Self {
             tree,
@@ -1838,6 +1890,7 @@ impl ObjectiveRun {
             places: None,
             course_sections: Vec::new(),
             game_mode: None,
+            owner,
         };
         let mut effects = Vec::new();
         if !run.states.is_empty() {
@@ -1910,7 +1963,18 @@ impl ObjectiveRun {
             places: None,
             course_sections: Vec::new(),
             game_mode: None,
+            owner: None,
         })
+    }
+
+    /// The run of the open-world quest of `owner`: its progress log lines name it
+    /// ([`ObjectiveRun::start_owned`]).
+    #[must_use]
+    pub fn owned_by(self, owner: RunOwner) -> Self {
+        Self {
+            owner: Some(owner),
+            ..self
+        }
     }
 
     /// Whether the whole tree is done.
@@ -2157,6 +2221,8 @@ impl ObjectiveRun {
                 self.complete(index, now_ms, &mut effects);
             }
         }
+        let held: Vec<&str> = facts.held.iter().map(|(item, _, _)| *item).collect();
+        self.complete_weapon_groups(&held, now_ms, &mut effects);
         effects
     }
 
@@ -2500,8 +2566,20 @@ impl ObjectiveRun {
                 | (TaskKind::CraftRecipe(wanted), Event::Crafted(item)) => {
                     (wanted.eq_ignore_ascii_case(item), 1, 1)
                 }
+                // An item gained counts for a have-items task as for a gather task: since the
+                // take tasks became have-items tasks (c37ce1ac), only a sync of the held items
+                // counted them, and the tutorial's chest step `Tutorial_TakeChestLoot` waited
+                // past the second legionnaire's kill, which then closed its partial container
+                // through `Combat_Corrupted_02_Failsafe` without `Tutorial_TargetLock2` (retail
+                // newchar 2026-09-18 set it after that kill). A later sync corrects the count
+                // by the items held.
                 (
                     TaskKind::GatherItems {
+                        item: wanted,
+                        count,
+                        ..
+                    }
+                    | TaskKind::HaveItems {
                         item: wanted,
                         count,
                         ..
@@ -2604,9 +2682,14 @@ impl ObjectiveRun {
                     1,
                     1,
                 ),
-                _ => (false, 1, 1),
+                // An event of another kind is no news for the task.
+                _ => continue,
             };
             if !matches {
+                // A move reaches the area tasks at every tick: only other events are logged.
+                if !matches!(event, Event::Moved(_)) {
+                    self.log_uncounted(index, &event);
+                }
                 continue;
             }
             let progress = progress.saturating_add(step);
@@ -2618,23 +2701,22 @@ impl ObjectiveRun {
             }
         }
         if let Event::ContainerLooted { items } = event {
-            self.complete_looted_weapon_group(items, now_ms, &mut effects);
+            self.complete_weapon_groups(items, now_ms, &mut effects);
         }
         effects
     }
 
-    /// Completes a simple container of weapon takes when the loot includes one weapon of that
-    /// container. Retail (newchar-retail-2026-09-18, objectives 3857 at 173.857 s): the swordsman
-    /// bag holds `SwordsmanArchetype_2hGreatsword`, and `Weapon2_container` plus its three takes
-    /// (`TakeFireStaff`, `TakeVoidGauntlet`, `TakeGreatSword`) all complete together. The other
-    /// group stays open. The fire-staff and void-gauntlet takes are not items in that bag; the
-    /// group completes as one when any of its drops matches a looted weapon.
-    fn complete_looted_weapon_group(
-        &mut self,
-        items: &[&str],
-        now_ms: u64,
-        effects: &mut Vec<Effect>,
-    ) {
+    /// Completes each active simple container of weapon takes when `items` (a loot, or the items
+    /// the player holds) include one weapon of that container. Retail (newchar-retail-2026-09-18,
+    /// objectives 3857 at 173.857 s): the swordsman bag holds `SwordsmanArchetype_2hGreatsword`,
+    /// and `Weapon2_container` plus its three takes (`TakeFireStaff`, `TakeVoidGauntlet`,
+    /// `TakeGreatSword`) all complete together. The other group stays open. The fire-staff and
+    /// void-gauntlet takes are not items in that bag; the group completes as one when any of its
+    /// drops matches a looted weapon. The held items count as a loot ([`ObjectiveRun::sync`]): a
+    /// bag taken before the group started still completes it (live 2026-11-12: the beach bag
+    /// taken before its trigger area left the tutorial at its weapon pick; retail crossed the
+    /// trigger first).
+    fn complete_weapon_groups(&mut self, items: &[&str], now_ms: u64, effects: &mut Vec<Effect>) {
         let families: Vec<String> = items
             .iter()
             .filter_map(|item| weapon_family(item))
@@ -2682,7 +2764,38 @@ impl ObjectiveRun {
         effects
     }
 
+    /// The debug line of an owned run's task `index` that `change` ("active", "done").
+    fn log_task(&self, index: usize, change: &str) {
+        if let Some(owner) = &self.owner {
+            let task = &self.tree.tasks[index];
+            tracing::debug!(
+                player = owner.player,
+                quest = %owner.quest,
+                task = %task.id,
+                kind = ?task.kind,
+                change,
+                "quest task"
+            );
+        }
+    }
+
+    /// The debug line of an owned run's waiting task `index` that `event`, of the kind it waits
+    /// for, does not count: its id, item, place or game mode is another.
+    fn log_uncounted(&self, index: usize, event: &Event<'_>) {
+        if let Some(owner) = &self.owner {
+            tracing::debug!(
+                player = owner.player,
+                quest = %owner.quest,
+                task = %self.tree.tasks[index].id,
+                ?event,
+                reason = "its id, item, place or game mode is another",
+                "quest event not counted"
+            );
+        }
+    }
+
     fn activate(&mut self, index: usize, now_ms: u64, effects: &mut Vec<Effect>) {
+        self.log_task(index, TASK_ACTIVE);
         let task = &self.tree.tasks[index];
         let due_ms = match task.kind {
             TaskKind::Timer { duration_ms } => Some(now_ms.saturating_add(duration_ms)),
@@ -2742,6 +2855,7 @@ impl ObjectiveRun {
     }
 
     fn complete(&mut self, index: usize, now_ms: u64, effects: &mut Vec<Effect>) {
+        self.log_task(index, TASK_DONE);
         self.states[index] = TaskState::Done;
         self.list(index);
         let tree = Arc::clone(&self.tree);
@@ -4193,6 +4307,49 @@ pub(crate) mod tests {
         );
     }
 
+    /// The beach bag taken while the weapon pick waits behind an earlier step: its weapons held
+    /// complete the pick's group once the pick starts.
+    #[test]
+    fn a_weapon_held_before_its_take_group_starts_completes_the_group() {
+        let rows = vec![
+            container(
+                "Root",
+                "ConsecutiveTaskContainer",
+                &["Wait", "EquipWeapon_partial"],
+            ),
+            TaskRow {
+                duration: Some(TIMER_S),
+                ..row("Wait", "TaskTimer")
+            },
+            container(
+                "EquipWeapon_partial",
+                "PartialTaskContainer",
+                &["Weapon1_container"],
+            ),
+            container(
+                "Weapon1_container",
+                "SimpleTaskContainer",
+                &["TakeGreatAxe"],
+            ),
+            with_condition("TakeGreatAxe", "TaskHaveAndReturnItems", "2hGreatAxeDropT2"),
+        ];
+        let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        const BAG: &[&str] = &["DestroyerArchetype_2hGreataxe"];
+        run.event(Event::ContainerLooted { items: BAG }, NOW);
+        run.tick(NOW + TIMER_MS);
+        assert!(
+            run.is_active("Weapon1_container"),
+            "looted before it started"
+        );
+        run.sync_held(
+            &[("DestroyerArchetype_2hGreataxe", 1, false)],
+            NOW + TIMER_MS,
+        );
+        assert!(run.is_done("Weapon1_container"));
+        assert!(run.finished());
+    }
+
     #[test]
     fn items_held_before_their_task_starts_count() {
         let rows = vec![
@@ -4870,6 +5027,185 @@ pub(crate) mod tests {
         set.dedup();
         assert_eq!(set, RETAIL_ACHIEVEMENTS);
         assert!(effects.contains(&Effect::RemoveItem("1hSwordT2_FTUE".to_owned(), 1)));
+    }
+
+    /// The messages and fields of the debug lines written while a test runs.
+    #[derive(Default)]
+    struct Lines(std::sync::Mutex<Vec<String>>);
+
+    impl tracing::Subscriber for Lines {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Text(String);
+            impl tracing::field::Visit for Text {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.push_str(&format!(" {}={value:?}", field.name()));
+                }
+            }
+            let mut text = Text(String::new());
+            event.record(&mut text);
+            if let Ok(mut lines) = self.0.lock() {
+                lines.push(text.0);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn an_owned_run_logs_each_task_change_once_and_an_uncounted_event() {
+        const PLAYER: u64 = 9;
+        const QUEST: &str = "Q";
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["Boar", "Wolf"]),
+            TaskRow {
+                kill_enemy_type: Some("Boar".to_owned()),
+                ..row("Boar", "TaskKillContribution")
+            },
+            TaskRow {
+                kill_enemy_type: Some("Wolf".to_owned()),
+                ..row("Wolf", "TaskKillContribution")
+            },
+        ];
+        let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let lines = Arc::new(Lines::default());
+        let kill = |vitals_id| Event::Killed {
+            vitals_id,
+            categories: &[],
+            spawn_categories: &[],
+        };
+        tracing::subscriber::with_default(Arc::clone(&lines), || {
+            let owner = RunOwner {
+                player: PLAYER,
+                quest: QUEST.to_owned(),
+            };
+            let (mut run, _) = ObjectiveRun::start_owned(tree, NOW, owner);
+            run.event(kill("Wolf"), NOW);
+            for _ in 0..3 {
+                run.event(Event::Moved(AREA), NOW);
+            }
+            run.event(kill("Boar"), NOW);
+            run.event(kill("Wolf"), NOW);
+            assert!(run.finished());
+        });
+        let lines = lines.0.lock().expect("lines").clone();
+        let of = |task: &str, change: &str| {
+            lines
+                .iter()
+                .filter(|line| {
+                    line.contains(&format!("task={task}"))
+                        && line.contains(&format!("change=\"{change}\""))
+                })
+                .count()
+        };
+        for task in ["Root", "Boar", "Wolf"] {
+            assert_eq!(
+                (of(task, TASK_ACTIVE), of(task, TASK_DONE)),
+                (1, 1),
+                "{task}: {lines:?}"
+            );
+        }
+        let uncounted: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("quest event not counted"))
+            .collect();
+        assert_eq!(uncounted.len(), 1, "the early wolf, no move: {lines:?}");
+        assert!(uncounted[0].contains("task=Boar") && uncounted[0].contains("player=9"));
+    }
+
+    #[test]
+    #[ignore = "needs the build 25810808 content bundle and world file in NW_CONTENT_DIR"]
+    fn the_real_mysterious_tablet_quest_runs_to_its_end_on_the_retail_events() {
+        // `12A_MSQ_08_DestroyRune` ("A Most Mysterious Tablet"), retail `12a_msq_08_destroyrune`:
+        // the cannon's game event at 93.83 s, the named berserker's kill at 130.36 s, the
+        // tablet broken by a weapon hit at 133.92 s and its rune shards in the bag, the task
+        // tree done at 133.96 s.
+        use crate::player_content::QuestObjects;
+        const BUILD: &str = "25810808";
+        const LEVEL: &str = "newworld_vitaeeterna";
+        const ROOT: &str = "12A_MSQ_08_DestroyRune_Container";
+        const CANNON_EVENT: &str = "IO_Gimmick_BreakingWallsCannon_interact";
+        const BOSS: &str = "Undead_Berserker_Named_12MB10";
+        const TABLET: &str = "MB_MSQ2_DestroyRune_Tablet";
+        const SHARDS: &str = "12A_MSQ_08_RuneShards";
+        const STEP_MS: u64 = 30_000;
+        const SURE_PERCENT: u32 = 100;
+        /// The tablet's tracker entry and its capital (retail 133.96 s).
+        const TABLET_AT: Position = Position {
+            x: 7827.997,
+            y: 3577.553,
+            z: 188.108,
+        };
+        const TABLET_REACH_M: f32 = 5.0;
+        const TABLET_ID: u64 = 0x79cc_6e59_ed29_88c3;
+        const TABLET_TAG: u32 = 0xb0be_7cc2;
+        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
+        let dir = std::path::Path::new(&dir);
+        let bundle =
+            nw_content::ContentBundle::load(&nw_content::bundle::bundle_path(dir, BUILD), BUILD)
+                .expect("bundle");
+        let rows = task_rows(&bundle.tables);
+        let world = nw_world::WorldFile::load(
+            &nw_world::world_file::world_file_path(dir, BUILD, LEVEL),
+            BUILD,
+        )
+        .expect("world file");
+        let objects = QuestObjects::with_drops(
+            &world.gatherables,
+            &nw_content::gathering::Gatherables::from_tables(&bundle.tables),
+            &nw_content::gathering::DetectionSpheres::from_tables(&bundle.tables),
+            &counted_game_events(&rows),
+            &quest_drop_sources(&rows),
+            &world.capitals,
+        );
+        let (_, tablet) = objects
+            .nearest(TABLET_AT, TABLET_REACH_M, |_, object| {
+                object.gatherable == TABLET
+            })
+            .expect("the tablet is a quest object");
+        assert!(tablet.drops, "a weapon hit breaks it for its drops");
+        assert_eq!((tablet.id, tablet.loot_tag), (Some(TABLET_ID), TABLET_TAG));
+        let book = TaskBook::new(rows);
+        let tree = Arc::new(book.tree(ROOT).expect("the tablet quest"));
+        let kill_types = KillTypes::from_tables(&bundle.tables);
+        let (mut run, mut effects) = ObjectiveRun::start(tree, NOW);
+        effects.extend(run.event(Event::GameEvent(CANNON_EVENT), NOW));
+        let (vitals_id, categories) = kill_types.of(lowercase_crc32(BOSS)).expect("kill type");
+        effects.extend(run.event(
+            Event::Killed {
+                vitals_id,
+                categories,
+                spawn_categories: &[],
+            },
+            NOW + STEP_MS,
+        ));
+        assert_eq!(
+            run.gather_drops(TABLET),
+            [(SHARDS.to_owned(), SURE_PERCENT)],
+            "the broken tablet drops the shards"
+        );
+        effects.extend(run.event(
+            Event::ItemGained {
+                item: SHARDS,
+                quantity: 1,
+            },
+            NOW + 2 * STEP_MS,
+        ));
+        assert!(run.finished(), "{:?}", run.waiting_steps());
+        assert!(effects.contains(&Effect::Done(
+            "12A_MSQ_08_DestroyRune_DestroyRune".to_owned()
+        )));
     }
 
     #[test]

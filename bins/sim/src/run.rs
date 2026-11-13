@@ -29,6 +29,8 @@ use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 use nw_sim_core::{LevelGround, level_bounds};
 use nw_world::WorldFile;
 use nw_world::camps::{CampSlices, camp_slices_path};
+use nw_world::catacomb_tiles::{CatacombTiles, catacomb_tiles_path};
+use nw_world::claim_plots::{ClaimPlots, claim_plots_path};
 use nw_world::collision::{LevelCollision, QueryFilter, collision_file_path};
 use nw_world::collision_index::{CollisionIndex, NavMarkIndex};
 use nw_world::dungeon_scripts::{DungeonScripts, dungeon_scripts_path};
@@ -384,6 +386,17 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
         }
     }
     content.dungeon_scripts = dungeon_scripts;
+    content.catacomb_tiles =
+        match CatacombTiles::load(&catacomb_tiles_path(&config.content_dir, &build)) {
+            Ok(tiles) => {
+                tracing::info!(variations = tiles.by_variation.len(), "catacombs tiles");
+                tiles
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no catacombs tiles: a catacombs run has no tile entities");
+                CatacombTiles::default()
+            }
+        };
     content.camp_slices = match CampSlices::load(&camp_slices_path(&config.content_dir, &build)) {
         Ok(slices) => {
             tracing::info!(
@@ -396,6 +409,17 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
         Err(error) => {
             tracing::warn!(%error, "no camp slices: no camp can be placed");
             CampSlices::default()
+        }
+    };
+    content.claim_plots = match ClaimPlots::load(&claim_plots_path(&config.content_dir, &build)) {
+        Ok(plots) => {
+            let placed = plots.placed(&world_file.capitals);
+            tracing::info!(slices = plots.len(), placed = placed.len(), "claim plots");
+            placed
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no claim plots: no land claim entity is shown");
+            Vec::new()
         }
     };
     content.music_charts = match MusicCharts::load(&config.content_dir, &build) {
@@ -463,6 +487,22 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             nw_content::town_props::TownProps::default()
         }
     };
+    content.entrance_entities =
+        match nw_content::dungeon_entrances::DungeonEntrances::load(&config.content_dir, &build) {
+            Ok(table) => {
+                let entities = crate::player_content::entrance_entities(&world_file, &table);
+                tracing::info!(
+                    slices = table.len(),
+                    entities = entities.len(),
+                    "dungeon entrances"
+                );
+                entities
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no dungeon entrances: no entrance shows its runs");
+                Vec::new()
+            }
+        };
     content.war_forts = match nw_content::war_forts::WarForts::load(&config.content_dir, &build) {
         Ok(forts) => {
             tracing::info!(forts = forts.len(), "war forts");
@@ -473,6 +513,17 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             nw_content::war_forts::WarForts::default()
         }
     };
+    content.invasion_forts =
+        match nw_content::invasion_forts::InvasionForts::load(&config.content_dir, &build) {
+            Ok(forts) => {
+                tracing::info!(forts = forts.len(), "invasion forts");
+                forts
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no invasion forts table: no invasion runs on this sim");
+                nw_content::invasion_forts::InvasionForts::default()
+            }
+        };
     content.spell_slices =
         match nw_content::spell_slices::SpellSlices::load(&config.content_dir, &build) {
             Ok(slices) => {
@@ -482,6 +533,19 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             Err(error) => {
                 tracing::warn!(%error, "no spell slices: a cast spell shows nothing");
                 nw_content::spell_slices::SpellSlices::default()
+            }
+        };
+    let instances_path =
+        nw_content::ability_instances::ability_instances_path(&config.content_dir, &build);
+    content.ability_instances =
+        match nw_content::ability_instances::AbilityInstanceTable::load(&instances_path) {
+            Ok(table) => {
+                tracing::info!(slices = table.len(), "ability instance types");
+                table
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no ability instance types: no placed ability is tracked");
+                nw_content::ability_instances::AbilityInstanceTable::default()
             }
         };
     content.shot_entities =

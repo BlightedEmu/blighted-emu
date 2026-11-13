@@ -80,6 +80,9 @@ pub(super) struct Stamina {
     regen_starting: bool,
     /// The block key is held: no regen.
     block_held: bool,
+    /// A hit reaction that started while the player blocked holds the regen until then
+    /// (`DisableStaminaRegen` of the `Reaction` action, [`Stamina::hold_regen_until`]).
+    regen_held_until_ms: Option<u64>,
     /// The children that changed since the last [`Stamina::take_change`].
     change: StaminaState,
 }
@@ -93,6 +96,7 @@ impl Default for Stamina {
             last_tick_ms: None,
             regen_starting: false,
             block_held: false,
+            regen_held_until_ms: None,
             change: StaminaState::default(),
         }
     }
@@ -159,6 +163,13 @@ impl Stamina {
         }
     }
 
+    /// No regen until `until_ms` (`playeractions_reaction.actionlist`: the `Reaction` action of
+    /// a player with the `Blocking` tag, `BlockingReaction`, disables the stamina regen on its
+    /// start and enables it on its end); a later hold replaces it.
+    pub(super) fn hold_regen_until(&mut self, until_ms: u64) {
+        self.regen_held_until_ms = Some(until_ms);
+    }
+
     /// The player let go of the block key: the regen delay starts again.
     pub(super) fn block_released(&mut self) {
         self.delay_ms = REGEN_DELAY_MS;
@@ -192,6 +203,13 @@ impl Stamina {
             self.change.regen = Some(seconds(self.delay_ms));
             return;
         }
+        if self
+            .regen_held_until_ms
+            .is_some_and(|until_ms| now_ms < until_ms)
+        {
+            return;
+        }
+        self.regen_held_until_ms = None;
         if self.cur < MAX_STAMINA && !self.block_held {
             #[allow(clippy::cast_precision_loss, reason = "a tick is a few ms")]
             let step = REGEN_PER_SECOND * regen_scale * elapsed_ms as f32 / MS_PER_SECOND;
@@ -242,6 +260,24 @@ mod tests {
             now += TICK;
         }
         now
+    }
+
+    #[test]
+    fn a_held_regen_waits_until_its_end_then_grows() {
+        const HOLD_MS: u64 = 500;
+        let mut stamina = Stamina::default();
+        stamina.blocked_hit(40.0);
+        let after_delay = run(&mut stamina, NOW, NOW + REGEN_DELAY_MS + TICK);
+        stamina.hold_regen_until(after_delay + HOLD_MS);
+        let before = stamina.current();
+        let held_until = run(&mut stamina, after_delay, after_delay + HOLD_MS);
+        let held = stamina.current();
+        assert!(
+            (held - before).abs() < CLOSE,
+            "no regen while held: {before} to {held}"
+        );
+        run(&mut stamina, held_until, held_until + 10 * TICK);
+        assert!(stamina.current() > held, "it grows again after the hold");
     }
 
     #[test]

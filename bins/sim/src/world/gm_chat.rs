@@ -37,6 +37,11 @@ const CANCEL: &str = "cancel";
 const WIN: &str = "win";
 const ATTACKER: &str = "attacker";
 const DEFENDER: &str = "defender";
+/// The separator of `!time`'s hour and minute.
+const TIME_SEPARATOR: char = ':';
+/// The hours of a day and the minutes of an hour (`!time`).
+const HOURS_PER_DAY: u64 = 24;
+const MINUTES_PER_HOUR: u64 = 60;
 /// Milliseconds per minute (`!war`'s start).
 const MS_PER_MINUTE: u64 = 60_000;
 /// The answer to a command the sim carried out.
@@ -68,7 +73,7 @@ struct Verb {
 }
 
 /// Every command, in the order of `!help`.
-const VERBS: [Verb; 26] = [
+const VERBS: [Verb; 28] = [
     Verb {
         name: "help",
         usage: "!help",
@@ -370,6 +375,31 @@ const VERBS: [Verb; 26] = [
             Some(Command::War { territory, change })
         },
     },
+    Verb {
+        name: "invasion",
+        usage: super::invasions::INVASION_USAGE,
+        read: |words| {
+            let (territory, rest) = words.split_first()?;
+            let territory = number::<u16>(territory)?;
+            let change = super::invasions::InvasionCommand::read(rest)?;
+            Some(Command::Invasion { territory, change })
+        },
+    },
+    Verb {
+        name: "time",
+        usage: "!time [<hour>:<minute>]",
+        read: |words| match words {
+            [] => Some(Command::Time { set: None }),
+            [clock] => {
+                let (hour, minute) = clock.split_once(TIME_SEPARATOR)?;
+                let (hour, minute) = (number::<u64>(hour)?, number::<u64>(minute)?);
+                (hour < HOURS_PER_DAY && minute < MINUTES_PER_HOUR).then_some(Command::Time {
+                    set: Some((hour, minute)),
+                })
+            }
+            _ => None,
+        },
+    },
 ];
 
 /// What `!war` asks for ([`super::wars`]).
@@ -446,6 +476,16 @@ enum Command {
     War {
         territory: u16,
         change: WarCommand,
+    },
+    /// An invasion change ([`super::invasions`]).
+    Invasion {
+        territory: u16,
+        change: super::invasions::InvasionCommand,
+    },
+    /// The world's time of day ([`super::day_night`]); a set `(hour, minute)` is answered once
+    /// the world database took it, and every sim follows it.
+    Time {
+        set: Option<(u64, u64)>,
     },
 }
 
@@ -868,6 +908,20 @@ impl SimWorld {
                     Err(refusal) => vec![refusal.to_owned()],
                 }
             }
+            Command::Time { set: None } => vec![self.time_line()],
+            Command::Time {
+                set: Some((hour, minute)),
+            } => {
+                let Some(connection) = self
+                    .world
+                    .get::<Player>(sender)
+                    .map(|player| player.connection.clone())
+                else {
+                    return Outcome::Lines(vec![NOT_HERE.to_owned()]);
+                };
+                self.ask_time(hour, minute, connection);
+                Vec::new()
+            }
             Command::War { territory, change } => {
                 let Some(connection) = self
                     .world
@@ -899,6 +953,19 @@ impl SimWorld {
                         Vec::new()
                     }
                 }
+            }
+            Command::Invasion { territory, change } => {
+                let Some(connection) = self
+                    .world
+                    .get::<Player>(sender)
+                    .map(|player| player.connection.clone())
+                else {
+                    return Outcome::Lines(vec![NOT_HERE.to_owned()]);
+                };
+                if !CLAIM_KEYS.contains(&territory) {
+                    return Outcome::Lines(vec![NO_SUCH_CLAIM.to_owned()]);
+                }
+                self.invasion_command(territory, change, connection)
             }
         };
         Outcome::Lines(lines)
@@ -1292,6 +1359,32 @@ mod tests {
         ));
         assert_eq!(read("!owner 6"), usage);
         assert_eq!(read("!owner six Made Up Company"), usage);
+    }
+
+    #[test]
+    fn time_reads_the_time_or_a_clock_time_and_waits_for_the_database_to_set_it() {
+        assert_eq!(read("!time"), Some(Ok(Command::Time { set: None })));
+        assert_eq!(
+            read("!time 21:30"),
+            Some(Ok(Command::Time {
+                set: Some((21, 30))
+            }))
+        );
+        let usage = Some(Err("Usage: !time [<hour>:<minute>]".to_owned()));
+        assert_eq!(read("!time 24:00"), usage);
+        assert_eq!(read("!time 9"), usage);
+        let mut world = world();
+        chat(&mut world, GM, "!time");
+        assert_eq!(answers(&mut world, GM).len(), 1, "the time and the phase");
+        chat(&mut world, GM, "!time 21:30");
+        assert!(
+            answers(&mut world, GM).is_empty(),
+            "the answer waits for the database"
+        );
+        assert!(matches!(
+            world.take_clock_jobs(NOW),
+            Some(crate::world::day_night::ClockJob::Set { .. })
+        ));
     }
 
     #[test]

@@ -19,7 +19,7 @@
 use nw_messages::time_synch::NS_PER_MS;
 use nw_messages::{
     Block1415acc30, CalendarConnectedMsg, ClientAddEntryMsg, ConnectedBody, FacetHeader,
-    LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec, MessageError, OBSERVED_DAY_PHASE,
+    LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec, MessageError,
     OBSERVED_TIME_CHANGE_F32S_AT_16, OBSERVED_TIME_CHANGE_F32S_AT_60,
     OBSERVED_TIME_CHANGE_U32S_AT_28, PlayerManagerSelfIdentificationMsg, RAW_ID_LEN,
     ReceivePlayerSpawnPointMsg, ServerMessage, SyncDayPhaseMsg, SyncTimeChangeMsg, TUTORIAL_LEVEL,
@@ -154,9 +154,10 @@ pub fn login_messages(
 }
 
 /// The answer to the client's time request (4248) with header `time`: the time change, then the
-/// day phase. Sent with the login, they reached the client before its player existed and it
-/// dropped them, so its clock stayed unset (live 2026-09-16: the potion cooldown showed the date).
-pub fn time_answers(world: &WorldIds, time: FacetHeader) -> [ServerMessage; 2] {
+/// day phase `phase` ([`crate::world`]'s day and night). Sent with the login, they reached the
+/// client before its player existed and it dropped them, so its clock stayed unset (live
+/// 2026-09-16: the potion cooldown showed the date).
+pub fn time_answers(world: &WorldIds, time: FacetHeader, phase: u32) -> [ServerMessage; 2] {
     [
         ServerMessage::TimeChange(SyncTimeChangeMsg {
             ids: [time.target, time.entity],
@@ -168,7 +169,7 @@ pub fn time_answers(world: &WorldIds, time: FacetHeader) -> [ServerMessage; 2] {
         ServerMessage::DayPhase(SyncDayPhaseMsg {
             component: time.target,
             u64_at_8: time.entity,
-            u32_at_16: OBSERVED_DAY_PHASE,
+            u32_at_16: phase,
         }),
     ]
 }
@@ -265,7 +266,7 @@ mod tests {
         let [
             ServerMessage::TimeChange(change),
             ServerMessage::DayPhase(phase),
-        ] = time_answers(&world, time)
+        ] = time_answers(&world, time, nw_messages::NIGHT_PHASE)
         else {
             panic!("the time change, then the day phase");
         };
@@ -273,8 +274,8 @@ mod tests {
         assert_eq!(change.time, world.time_change_time);
         assert_eq!(change.time, START_TIME * NS_PER_MS, "ns of the start");
         assert_eq!(
-            (phase.component, phase.u64_at_8),
-            (time.target, time.entity)
+            (phase.component, phase.u64_at_8, phase.u32_at_16),
+            (time.target, time.entity, nw_messages::NIGHT_PHASE)
         );
     }
 

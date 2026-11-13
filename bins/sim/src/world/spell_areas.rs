@@ -25,6 +25,7 @@
 use bevy_ecs::entity::Entity;
 use nw_bus::ConnectionRef;
 use nw_content::player_abilities::SpellRow;
+use nw_content::town_props::ASSET_ID_LEN;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::buildables::{NO_OWNER_KIND, OwnerIdentification};
 use nw_messages::spell_state::{NO_ATTACHMENT, SPELL_REF_LEN, SpellState};
@@ -66,6 +67,14 @@ const NO_ARMOR_SHARE: f64 = 0.0;
 /// Milliseconds per second of a flight.
 const MS_PER_S: f32 = 1_000.0;
 
+/// A spawned spell entity.
+struct SpawnedEntity {
+    /// Its slot key.
+    number: u64,
+    /// The spell entity of the ability instance that its own instance put out of its slot.
+    evicted: Option<u64>,
+}
+
 /// Who cast a spell area.
 #[derive(Debug, Clone, PartialEq)]
 enum AreaCaster {
@@ -104,6 +113,8 @@ pub(super) struct SpellArea {
     yaw: f32,
     /// Its spell entity is in the world.
     shown: bool,
+    /// The slot key of its spell entity, once spawned.
+    entity: Option<u64>,
 }
 
 impl SpellArea {
@@ -171,6 +182,7 @@ impl SpellArea {
             foes_in: Vec::new(),
             yaw,
             shown: false,
+            entity: None,
         }
     }
 }
@@ -221,7 +233,7 @@ fn mob_spell_place(
 
 /// The caster id of a spell state: the raw id of entity `number`, then its entity id, the raw
 /// id's first half, big-endian (Observed: retail `c86f8015f81f3a19 ... 193a1ff815806fc8`).
-fn caster_ref(number: u64) -> [u8; SPELL_REF_LEN] {
+pub(super) fn caster_ref(number: u64) -> [u8; SPELL_REF_LEN] {
     let raw = raw_id_of_entity(number);
     let mut caster = [0; SPELL_REF_LEN];
     caster[..RAW_ID_LEN].copy_from_slice(&raw);
@@ -282,6 +294,7 @@ impl SimWorld {
     ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
         let mut results = Vec::new();
         let mut open = Vec::new();
+        let mut evicted = Vec::new();
         for mut area in std::mem::take(&mut self.spell_areas) {
             if now_ms < area.starts_ms {
                 open.push(area);
@@ -289,7 +302,10 @@ impl SimWorld {
             }
             if !area.shown {
                 area.shown = true;
-                self.spawn_spell_entity(&area);
+                if let Some(spawned) = self.spawn_spell_entity(&area) {
+                    area.entity = Some(spawned.number);
+                    evicted.extend(spawned.evicted);
+                }
             }
             results.extend(self.area_pass(&mut area, now_ms));
             if now_ms < area.ends_ms {
@@ -300,49 +316,86 @@ impl SimWorld {
             }
         }
         self.spell_areas = open;
+        self.end_evicted_instances(&evicted, now_ms);
         let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.spell_entities)
             .into_iter()
             .partition(|(_, until_ms)| now_ms >= *until_ms);
         self.spell_entities = kept;
         for (number, _) in gone {
             self.stations.remove_camp(number);
+            let mut players = self.world.query::<&mut Player>();
+            for mut player in players.iter_mut(&mut self.world) {
+                player.abilities.instances.gone(number);
+            }
         }
         results
     }
 
-    /// Spawns the spell entity of `area`, when its spell has a slice that the server can fill
-    /// and its caster is here.
-    fn spawn_spell_entity(&mut self, area: &SpellArea) {
-        let spell = lowercase_crc32(&area.spell.id);
-        let Some(slice) = self.content.spell_slices.of(spell).cloned() else {
-            return;
+    /// Ends now the areas and the spell entities of the ability instances in `evicted`: the
+    /// oldest instances of full rows
+    /// ([`super::ability_instances::AbilityInstances`]).
+    fn end_evicted_instances(&mut self, evicted: &[u64], now_ms: u64) {
+        for area in &mut self.spell_areas {
+            if area.entity.is_some_and(|entity| evicted.contains(&entity)) {
+                area.ends_ms = area.ends_ms.min(now_ms);
+            }
+        }
+        for (number, until_ms) in &mut self.spell_entities {
+            if evicted.contains(number) {
+                *until_ms = now_ms;
+            }
+        }
+    }
+
+    /// Tracks the spell entity `number` (raw id `raw_id`) of slice `asset` as an ability
+    /// instance of the player that cast `caster`, when the slice has an instance type
+    /// ([`nw_content::ability_instances`]); the spell entity it put out of its slot, if any.
+    fn track_ability_instance(
+        &mut self,
+        caster: &AreaCaster,
+        asset: &[u8; ASSET_ID_LEN],
+        (number, raw_id): (u64, [u8; RAW_ID_LEN]),
+    ) -> Option<u64> {
+        let AreaCaster::Player { entity, .. } = caster else {
+            return None;
         };
+        let instance_type = self.content.ability_instances.type_of(asset)?;
+        let slots = self.content.ability_instances.slots_for(instance_type);
+        let server_ms = self.server_ms;
+        let mut player = self.world.get_mut::<Player>(*entity)?;
+        player
+            .abilities
+            .instances
+            .track(instance_type, slots, (number, raw_id), server_ms)?
+            .evicted
+    }
+
+    /// Spawns the spell entity of `area`, when its spell has a slice that the server can fill
+    /// and its caster is here; a player's entity of a typed slice is tracked as an ability
+    /// instance ([`SimWorld::track_ability_instance`]).
+    fn spawn_spell_entity(&mut self, area: &SpellArea) -> Option<SpawnedEntity> {
+        let spell = lowercase_crc32(&area.spell.id);
+        let slice = self.content.spell_slices.of(spell).cloned()?;
         if !slice.unfilled.is_empty() {
             tracing::debug!(
                 spell = %area.spell.id,
                 unfilled = ?slice.unfilled,
                 "spell entity not spawned: states without bytes"
             );
-            return;
+            return None;
         }
-        let Some(start) = WorldPosition::from_metres(area.centre.x, area.centre.y, area.centre.z)
-        else {
-            return;
-        };
+        let start = WorldPosition::from_metres(area.centre.x, area.centre.y, area.centre.z)?;
         // A mob's spell has no owner (Inferred: the ownership names a player's character).
         let owner = match &area.caster {
             AreaCaster::Player { entity, .. } => {
-                let Some(owner) =
+                let owner =
                     self.world
                         .get::<Player>(*entity)
                         .map(|player| OwnerIdentification {
                             first: player.character.to_string().into_bytes(),
                             second: player.name.clone().into_bytes(),
                             kind: NO_OWNER_KIND,
-                        })
-                else {
-                    return;
-                };
+                        })?;
                 Some(owner)
             }
             AreaCaster::Mob { .. } => None,
@@ -353,7 +406,7 @@ impl SimWorld {
             .map(|bytes| BundleMember::read_from(bytes).map(|(member, _)| member))
             .collect::<Result<Vec<_>, _>>()
         else {
-            return;
+            return None;
         };
         let half = area.yaw / 2.0;
         let rotation = Rotation::of_quaternion([0.0, 0.0, half.sin(), half.cos()]);
@@ -368,9 +421,11 @@ impl SimWorld {
         };
         let namespace = SPELL_ENTITY_NAMESPACE ^ self.me.generation;
         let position = area.centre;
+        let mut raw_id = [0; RAW_ID_LEN];
         let number = self.stations.place_camp(|number| {
             // A slot key is far below `usize::MAX` on the 64-bit targets the server runs on.
             let gde_ref = dynamic_ref(namespace, number as usize);
+            raw_id = gde_ref;
             let member = |component, state| BundleMember { component, state };
             let mut members = vec![
                 member(
@@ -415,6 +470,8 @@ impl SimWorld {
             .ends_ms
             .max(area.starts_ms.saturating_add(SPELL_ENTITY_MIN_MS));
         self.spell_entities.push((number, until_ms));
+        let evicted = self.track_ability_instance(&area.caster, &slice.asset, (number, raw_id));
+        Some(SpawnedEntity { number, evicted })
     }
 
     /// One pass of `area` at `now_ms`: the enemies first in it take its damage row; the targets

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Typed New World game rule tables and the content bundle file.
 
+pub mod ability_instances;
 pub mod achievements;
 pub mod afk_modes;
 pub mod artifacts;
@@ -21,6 +22,7 @@ pub mod creature_animations;
 pub mod datatable_overrides;
 pub mod deaths_door;
 pub mod drop_rolls;
+pub mod dungeon_entrances;
 pub mod dungeon_gates;
 pub mod equip_load;
 pub mod factions;
@@ -31,11 +33,13 @@ pub mod fill;
 pub mod generated;
 pub mod fishing;
 pub mod ftue_entities;
+pub mod game_mode_rewards;
 pub mod gameplay_config;
 pub mod gathering;
 pub mod ids;
 pub mod instances;
 pub mod interact_tags;
+pub mod invasion_forts;
 pub mod item_repair;
 pub mod item_rolls;
 pub mod item_rules;

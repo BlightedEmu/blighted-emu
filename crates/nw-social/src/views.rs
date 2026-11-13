@@ -14,7 +14,10 @@
 
 use std::collections::BTreeSet;
 
-use nw_bus::{GroupEntityDelivery, GroupEntityView, OwnStateDelivery, SocialStateKind};
+use nw_bus::{
+    GroupEntityDelivery, GroupEntityView, OwnStateDelivery, RaidEntityDelivery, RaidEntityView,
+    SocialStateKind,
+};
 use nw_messages::FullList;
 use nw_messages::items::FIRST_VERSION;
 use nw_messages::social::group_data::{GroupDataState, GroupMemberView};
@@ -27,6 +30,7 @@ use nw_messages::wire::{MessageError, Writer};
 use uuid::Uuid;
 
 use crate::effects::{Effect, StoreOp};
+use crate::raids::{RaidFields, RaidView};
 use crate::world::SocialWorld;
 
 /// Nanoseconds per millisecond: the states carry Unix nanoseconds.
@@ -39,6 +43,11 @@ const OFFLINE: u8 = 0;
 const ONLINE_LAST_SEEN: u64 = 0;
 /// The id of no group or company.
 const NO_ID: [u8; 16] = [0; 16];
+/// The raid id of a plain group invite (Observed: 0 in every retail one).
+const NO_RAID: u64 = 0;
+/// The create source of the groups state after a players' raid (Observed: 0 with the zero raid
+/// fields, `Playthrough_Part_18` 6612.115 s, `WURM` 1379.165 s).
+const LEFT_RAID_CREATE_SOURCE: u8 = 0;
 /// The platform id text of an inviter: this server has no platform ids.
 const NO_PLATFORM_ID: &str = "";
 
@@ -65,6 +74,8 @@ impl Default for GroupVitals {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GroupsView {
     group: [u8; 16],
+    /// The raid fields of a raid member ([`crate::raids`]).
+    raid: Option<RaidFields>,
     inbound: Vec<GroupInviteData>,
     outbound: Vec<GroupInviteData>,
 }
@@ -87,6 +98,7 @@ pub(crate) struct SentViews {
     guilds: Option<GuildsState>,
     chat: Option<Vec<String>>,
     group_entity: Option<Option<(Uuid, GroupDataState)>>,
+    raid: Option<Option<RaidView>>,
 }
 
 impl SentViews {
@@ -155,14 +167,18 @@ impl SocialWorld {
                 | StoreOp::DeleteCompany(_)
                 | StoreOp::DeleteGroup(_) => Vec::new(),
             },
-            // The treasury changes when its change is stored (`treasury_changed` touches).
+            // The treasury changes when its change is stored (`treasury_changed` touches, and
+            // `war_declared` for a declaration).
             Effect::Treasury { .. }
+            | Effect::DeclareWar { .. }
             | Effect::FindAccount { .. }
             | Effect::Deliver { .. }
             | Effect::MoveCoins { .. }
             | Effect::OwnState { .. }
             | Effect::GroupEntity { .. }
-            | Effect::UpkeepPaid { .. } => Vec::new(),
+            | Effect::RaidEntity { .. }
+            | Effect::UpkeepAnswered { .. }
+            | Effect::RaidInviteAnswered { .. } => Vec::new(),
         }
     }
 
@@ -192,6 +208,9 @@ impl SocialWorld {
             if let Some(group) = person.group.and_then(|group| self.groups.get(&group)) {
                 circle.extend(group.members.iter().copied());
             }
+            if let Some(raid) = person.raid.and_then(|raid| self.raids.get(&raid)) {
+                circle.extend(raid.seats.iter().map(|(member, _)| *member));
+            }
             if let Some((company, _)) = person.company {
                 circle.extend(self.members_of_company(company));
             }
@@ -215,12 +234,28 @@ impl SocialWorld {
         let guilds = self.guilds_view(character, now_ms);
         let chat = self.chat_view(character);
         let entity = self.group_entity_view(character);
+        let raid = self.raid_view(character);
         let mut sent = self.sent.remove(&character).unwrap_or_default();
         let mut out = Vec::new();
         if sent.groups.as_ref() != Some(&groups) {
             let version = sent.next_version();
+            // A raid member's fields, and zeros once it left (Observed, `crate::raids` and
+            // `crate::player_raids`).
+            let left = sent.groups.as_ref().and_then(|sent| sent.raid);
+            let fields = groups.raid.or_else(|| {
+                left.map(|left| RaidFields {
+                    raid: 0,
+                    opposing: 0,
+                    kind: 0,
+                    create_source: left.create_source.map(|_| LEFT_RAID_CREATE_SOURCE),
+                })
+            });
             let state = GroupsState {
                 group_id: Some(groups.group),
+                raid_id: fields.map(|fields| fields.raid),
+                opposing_raid_id: fields.map(|fields| fields.opposing),
+                raid_type: fields.map(|fields| fields.kind),
+                create_source: fields.and_then(|fields| fields.create_source),
                 inbound_invites: Some(FullList {
                     version: Some(version),
                     elements: groups.inbound.clone(),
@@ -279,6 +314,16 @@ impl SocialWorld {
             sent.group_entity = Some(entity);
             view.map(|view| GroupEntityDelivery { character, view })
         };
+        let raid_out = if sent.raid.as_ref() == Some(&raid) {
+            None
+        } else {
+            let view = match &raid {
+                Some(raid) => raid_entity_view(raid).map(Some),
+                None => Some(None),
+            };
+            sent.raid = Some(raid);
+            view.map(|view| RaidEntityDelivery { character, view })
+        };
         self.sent.insert(character, sent);
         for delivery in out {
             self.out.push(Effect::OwnState {
@@ -287,30 +332,49 @@ impl SocialWorld {
             });
         }
         if let Some(delivery) = entity_out {
-            self.out.push(Effect::GroupEntity { sim, delivery });
+            self.out.push(Effect::GroupEntity {
+                sim: sim.clone(),
+                delivery,
+            });
+        }
+        if let Some(delivery) = raid_out {
+            self.out.push(Effect::RaidEntity { sim, delivery });
         }
     }
 
+    /// The entry of group invite `id`: a players' raid invite names the raid group the invitee
+    /// fills first and the raid id ([`crate::player_raids`]), a plain one the inviter's group.
     fn invite_data(&self, id: [u8; 16], invite: crate::world::GroupInvite) -> GroupInviteData {
-        let group = self
-            .people
-            .get(&invite.inviter)
-            .and_then(|person| person.group)
+        let raid_group = invite.raid_group.and_then(|index| {
+            let (raid, _) = self.raid_seat(invite.inviter)?;
+            Some((*raid.spec.groups.get(usize::from(index))?, raid.spec.raid))
+        });
+        let group = raid_group
+            .map(|(group, _)| group)
+            .or_else(|| {
+                self.people
+                    .get(&invite.inviter)
+                    .and_then(|person| person.group)
+            })
             .map_or(NO_ID, |group| *group.as_bytes());
-        GroupInviteData::plain(
-            id,
-            group,
-            CharacterRef(Some(*invite.inviter.as_bytes())),
-            CharacterRef(Some(*invite.invitee.as_bytes())),
-            invite.created_ms.saturating_mul(NANOS_PER_MS),
-        )
+        GroupInviteData {
+            raid: raid_group.map_or(NO_RAID, |(_, raid)| raid),
+            ..GroupInviteData::plain(
+                id,
+                group,
+                CharacterRef(Some(*invite.inviter.as_bytes())),
+                CharacterRef(Some(*invite.invitee.as_bytes())),
+                invite.created_ms.saturating_mul(NANOS_PER_MS),
+            )
+        }
     }
 
     fn groups_view(&self, character: Uuid) -> GroupsView {
-        let group = self
-            .people
-            .get(&character)
-            .and_then(|person| person.group)
+        let raid_group = self
+            .own_raid_group_entity(character)
+            .map(|(group, _)| group);
+        let group = raid_group
+            .or_else(|| self.people.get(&character).and_then(|person| person.group))
             .map_or(NO_ID, |group| *group.as_bytes());
         let mut invites: Vec<(&[u8; 16], &crate::world::GroupInvite)> =
             self.group_invites.iter().collect();
@@ -328,9 +392,23 @@ impl SocialWorld {
                 .map(|(id, invite)| self.invite_data(**id, **invite))
                 .collect()
         };
+        // A raid invite is an inbound invite too ([`crate::raids`]).
+        let mut raid_invites: Vec<(&[u8; 16], &crate::raids::RaidInvite)> = self
+            .raid_invites
+            .iter()
+            .filter(|(_, invite)| invite.invitee == character)
+            .collect();
+        raid_invites.sort_by_key(|(id, invite)| (invite.created_ms, **id));
+        let mut inbound = pick(true);
+        inbound.extend(
+            raid_invites
+                .into_iter()
+                .map(|(id, invite)| invite.data(*id)),
+        );
         GroupsView {
             group,
-            inbound: pick(true),
+            raid: self.raid_fields(character),
+            inbound,
             outbound: pick(false),
         }
     }
@@ -493,7 +571,36 @@ impl SocialWorld {
         }
     }
 
+    /// What the group entity shows of `member`; `leader` sets its leader flag.
+    pub(crate) fn member_view(&self, member: Uuid, leader: bool) -> Option<GroupMemberView> {
+        let person = self.people.get(&member)?;
+        Some(GroupMemberView {
+            character: *member.as_bytes(),
+            name: person.name.clone(),
+            icon: person
+                .settings
+                .icon
+                .map(|icon| icon_of_bytes(&icon))
+                .unwrap_or_default(),
+            role: person.group_role,
+            health: person.vitals.health_percent,
+            mana: person.vitals.mana_percent,
+            connected: person.online.is_some(),
+            dead: person.vitals.dead,
+            leader,
+            raid_leader: false,
+            raid_assistant: false,
+            faction: person.settings.faction,
+            level: u8::try_from(person.settings.level).unwrap_or(u8::MAX),
+        })
+    }
+
+    /// The group entity of `character`: its raid group's in a raid ([`crate::raids`]), else its
+    /// group's.
     fn group_entity_view(&self, character: Uuid) -> Option<(Uuid, GroupDataState)> {
+        if let Some(raid_group) = self.own_raid_group_entity(character) {
+            return Some(raid_group);
+        }
         let group = self
             .people
             .get(&character)
@@ -502,32 +609,33 @@ impl SocialWorld {
         let members: Vec<GroupMemberView> = group
             .members
             .iter()
-            .filter_map(|member| {
-                let person = self.people.get(member)?;
-                Some(GroupMemberView {
-                    character: *member.as_bytes(),
-                    name: person.name.clone(),
-                    icon: person
-                        .settings
-                        .icon
-                        .map(|icon| icon_of_bytes(&icon))
-                        .unwrap_or_default(),
-                    role: person.group_role,
-                    health: person.vitals.health_percent,
-                    mana: person.vitals.mana_percent,
-                    connected: person.online.is_some(),
-                    dead: person.vitals.dead,
-                    leader: *member == group.leader,
-                    faction: person.settings.faction,
-                    level: u8::try_from(person.settings.level).unwrap_or(u8::MAX),
-                })
-            })
+            .filter_map(|member| self.member_view(*member, *member == group.leader))
             .collect();
         Some((
             group.id,
             GroupDataState::whole(*group.id.as_bytes(), &members),
         ))
     }
+}
+
+/// The encoded form of a raid member's raid entity and its raid's other groups.
+fn raid_entity_view(raid: &RaidView) -> Option<RaidEntityView> {
+    let body = encode(|writer| raid.state.write(writer))?;
+    let groups = raid
+        .groups
+        .iter()
+        .map(|(group, state)| {
+            encode(|writer| state.write(writer)).map(|body| GroupEntityView {
+                group: *group,
+                body,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(RaidEntityView {
+        entity: raid.entity,
+        body,
+        groups,
+    })
 }
 
 /// The company state with `version` on each of its lists.

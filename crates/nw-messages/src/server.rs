@@ -2,7 +2,7 @@
 //! Every server message of M4 with a known layout (M4 spec section 5.2), by type index.
 
 use crate::abilities::MasteryTreeRespecResponseMsg;
-use crate::appearance::AppearancePurchasedMsg;
+use crate::appearance::{AppearancePurchaseErrorMsg, AppearancePurchasedMsg};
 use crate::arena::ArenaServerMsg;
 use crate::bundle::ReplicatedStateBundle;
 use crate::client_add_entry::ClientAddEntryMsg;
@@ -40,7 +40,9 @@ use crate::spawn_point::ReceivePlayerSpawnPointMsg;
 use crate::spreadshot::SpreadshotProcessedMsg;
 use crate::storage_search::StorageSearchReadyMsg;
 use crate::storage_search::StorageSearchResultsMsg;
-use crate::store::{RequestInitializedMsg, RequestSuccessMsg};
+use crate::store::{
+    ClaimEntitlementFailMsg, RequestFailMsg, RequestInitializedMsg, RequestSuccessMsg,
+};
 use crate::territory_upkeep::TerritoryFacetReadyMsg;
 use crate::time_change::SyncTimeChangeMsg;
 use crate::time_synch::TimeSynchMsg;
@@ -113,6 +115,12 @@ pub enum ServerMessage {
     RequestSuccess(RequestSuccessMsg),
     /// 6855.
     AppearancePurchased(AppearancePurchasedMsg),
+    /// 3113.
+    RequestFail(RequestFailMsg),
+    /// 5108.
+    ClaimEntitlementFail(ClaimEntitlementFailMsg),
+    /// 6436.
+    AppearancePurchaseError(AppearancePurchaseErrorMsg),
     /// 4299.
     DeathRecap(DeathRecapMsg),
     /// 4977: a death in the game mode, for every participant.
@@ -280,6 +288,13 @@ impl ServerMessage {
             }
             AppearancePurchasedMsg::TYPE_INDEX => {
                 AppearancePurchasedMsg::decode(body).map(Self::AppearancePurchased)
+            }
+            RequestFailMsg::TYPE_INDEX => RequestFailMsg::decode(body).map(Self::RequestFail),
+            ClaimEntitlementFailMsg::TYPE_INDEX => {
+                ClaimEntitlementFailMsg::decode(body).map(Self::ClaimEntitlementFail)
+            }
+            AppearancePurchaseErrorMsg::TYPE_INDEX => {
+                AppearancePurchaseErrorMsg::decode(body).map(Self::AppearancePurchaseError)
             }
             DeathRecapMsg::TYPE_INDEX => DeathRecapMsg::decode(body).map(Self::DeathRecap),
             DeathRecapForAllMsg::TYPE_INDEX => {
@@ -451,6 +466,9 @@ impl ServerMessage {
             Self::RequestInitialized(_) => RequestInitializedMsg::TYPE_INDEX,
             Self::RequestSuccess(_) => RequestSuccessMsg::TYPE_INDEX,
             Self::AppearancePurchased(_) => AppearancePurchasedMsg::TYPE_INDEX,
+            Self::RequestFail(_) => RequestFailMsg::TYPE_INDEX,
+            Self::ClaimEntitlementFail(_) => ClaimEntitlementFailMsg::TYPE_INDEX,
+            Self::AppearancePurchaseError(_) => AppearancePurchaseErrorMsg::TYPE_INDEX,
             Self::DeathRecap(_) => DeathRecapMsg::TYPE_INDEX,
             Self::DeathRecapForAll(_) => DeathRecapForAllMsg::TYPE_INDEX,
             Self::OnHealed(_) => OnHealedMsg::TYPE_INDEX,
@@ -551,6 +569,9 @@ impl ServerMessage {
             Self::RequestInitialized(message) => message.encode(),
             Self::RequestSuccess(message) => message.encode(),
             Self::AppearancePurchased(message) => message.encode(),
+            Self::RequestFail(message) => message.encode(),
+            Self::ClaimEntitlementFail(message) => message.encode(),
+            Self::AppearancePurchaseError(message) => message.encode(),
             Self::DeathRecap(message) => message.encode(),
             Self::DeathRecapForAll(message) => message.encode(),
             Self::OnHealed(message) => message.encode(),

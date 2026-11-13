@@ -48,6 +48,11 @@ impl PlacedPoints {
         index
     }
 
+    /// The kind of the point of index `index`; `None` for no such point.
+    pub fn kind_of(&self, index: usize) -> Option<u32> {
+        self.points.get(index).map(|(kind, _)| *kind)
+    }
+
     /// The first point of kind `kind`, anywhere on the level.
     pub fn first(&self, kind: u32) -> Option<Position> {
         self.points

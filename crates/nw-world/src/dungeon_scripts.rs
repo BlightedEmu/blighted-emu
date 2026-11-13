@@ -95,6 +95,11 @@ pub struct Spawn {
     pub count: u32,
     /// Where (world metres), in order; none spawns at the encounter's place.
     pub locations: Vec<[f32; 3]>,
+    /// The turn of each location from the encounter's yaw ([`Encounter::yaw_deg`]), degrees
+    /// counter-clockwise, in the order of [`Self::locations`]. A file written before it has
+    /// none: a spawn then faces the encounter's way.
+    #[serde(default)]
+    pub turns_deg: Vec<f32>,
 }
 
 /// What an objective waits for.

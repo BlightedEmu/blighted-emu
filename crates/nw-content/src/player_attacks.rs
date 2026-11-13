@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use nw_formats::mannequin::Condition;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_formats::rigid::Rigid;
 use serde::{Deserialize, Serialize};
@@ -229,6 +230,32 @@ pub struct BasicAttack {
     /// How it moves the player; `None`: its action leaves the motion to the movement keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motion: Option<AttackMotion>,
+    /// The windows of its fragment's `ActivateGrit` clips: grit is on in them, so a hit of power
+    /// level 1 to 3 shakes only the upper body (`playeractions_reaction.actionlist`, `Reaction`
+    /// needs no active grit with a value above 0). Observed: the great sword's `Attack_Primary`
+    /// holds one to 433 ms on `GRIT_On_Basic_Attacks` (`player_greatsword.adb`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grit: Vec<GritWindow>,
+}
+
+/// One `ActivateGrit` clip of an attack's fragment (`OptionOnEnter` `Activate`, `OptionOnExit`
+/// `Deactivate`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GritWindow {
+    /// The clip's start and end, ms after the attack starts.
+    pub window_ms: [u64; 2],
+    /// The clip's named `Condition`, resolved, when it holds only at run time (an active
+    /// ability or upgrade: `GRIT_On_Basic_Attacks` is `IfAbilityActive Con_Bonus_300_1`); the
+    /// grit is on only while it holds. `None`: always.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Condition>,
+}
+
+impl GritWindow {
+    /// Whether its window holds `since_start_ms` after the attack starts.
+    pub fn on(&self, since_start_ms: u64) -> bool {
+        (self.window_ms[0]..self.window_ms[1]).contains(&since_start_ms)
+    }
 }
 
 /// How an attack moves its player (its action's `AnimationDrivenMotion`): the root motion of its
@@ -292,6 +319,30 @@ impl BasicAttack {
     pub fn next_attack_from_ms(&self) -> u64 {
         self.can_transition_ms.unwrap_or(self.length_ms)
     }
+
+    /// Keeps only the melee shapes that strike now and the grit windows that are on now: those
+    /// without a run-time condition and those whose condition `holds`
+    /// ([`MeleeShape::condition`], [`GritWindow::condition`]).
+    pub fn keep_held(&mut self, holds: impl Fn(&Condition) -> bool) {
+        if let AttackHit::Melee { shapes, .. } = &mut self.hit {
+            shapes.retain(|shape| shape.condition.as_ref().is_none_or(&holds));
+        }
+        self.grit
+            .retain(|grit| grit.condition.as_ref().is_none_or(&holds));
+    }
+
+    /// Whether a melee shape or a grit window of it has a run-time condition.
+    pub fn has_run_time_conditions(&self) -> bool {
+        self.grit.iter().any(|grit| grit.condition.is_some())
+            || matches!(&self.hit, AttackHit::Melee { shapes, .. }
+            if shapes.iter().any(|shape| shape.condition.is_some()))
+    }
+
+    /// Whether one of its grit windows is on `since_start_ms` after it starts (its conditions
+    /// read already, [`BasicAttack::keep_held`]).
+    pub fn grit_on(&self, since_start_ms: u64) -> bool {
+        self.grit.iter().any(|grit| grit.on(since_start_ms))
+    }
 }
 
 /// A melee hit shape (`MeleeAttackShapeCastType`, numbered as the client's enum in
@@ -338,6 +389,15 @@ pub struct MeleeShape {
     /// The shape's pose in the character's root space from the window's start, one per step,
     /// the last at or after the window's end.
     pub poses: Vec<Rigid>,
+    /// The clip's own `DamageTableRow` when it is not the attack's (Observed: the flail's
+    /// `Ability_Flail_Slam` holds a `1H_Flail_Ability_Slam` and a `1H_Flail_Ability_Slam_Stagger`
+    /// clip, `playermaleanims_1h_meleeattach.adb`).
+    #[serde(default)]
+    pub damage_row: Option<String>,
+    /// The clip's named `Condition`, resolved, when it holds only at run time (an active
+    /// ability or upgrade, the equipment); the shape hits only while it holds. `None`: always.
+    #[serde(default)]
+    pub condition: Option<Condition>,
 }
 
 impl MeleeShape {
@@ -518,6 +578,176 @@ pub struct Stance {
     /// (`Bow_Charge_UpperBody` to `Bow_Shoot_Charged`, row `BowAttack2`).
     #[serde(default)]
     pub aimed_charged: Option<BasicAttack>,
+    /// The player reaction table's rows (`playerreactiontableharness.actionlist`), in order,
+    /// each with this stance's entry of its fragment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<HitReaction>,
+}
+
+/// One row of the player reaction table with a stance's entry of its fragment: the engine's
+/// `SetReactionFragment` plays the fragment of the first row whose power level and tests hold for
+/// the hit ([`Stance::reaction`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HitReaction {
+    /// The hit's power level the row is for; `None`: every level (`*`).
+    pub power_level: Option<u32>,
+    /// The fragment it plays (`r_R2_F`).
+    pub fragment: String,
+    /// Its tests of the hit's facts (`IfExternalCondition` `blocked`, `damaged_front`, ...).
+    pub condition: Condition,
+    /// The stance's entry of the fragment; `None`: no player database has one for the stance,
+    /// so the row plays nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<ReactionEntry>,
+}
+
+/// A stance's entry of a reaction fragment: how long it holds the player and how it moves it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReactionEntry {
+    /// The entry's animation names, in layer order, joined by `+`: the client numbers its
+    /// slayer sequences by the entry it plays, so stances whose entries play the same animations
+    /// get the same sequence (Observed: `2960` in the great sword, the spear and no weapon).
+    pub animations: String,
+    /// Its longest animation layer, ms, a clip that a negative blend `ExitTime` chains after the
+    /// clip before counted from that clip's end (the knockdowns' `unarmed_prn_idle_to_idle`:
+    /// 2,467 ms, its `CanTransition` at 1,667 ms).
+    pub length_ms: u64,
+    /// The start of its `CAGE-Named` `CanTransition` clip, ms: from there the grid lets the
+    /// movement, the attacks, the dodge and the block start (`player.grid`, `From="Reaction"`).
+    /// `None`: only its end does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_transition_ms: Option<u64>,
+    /// How it moves the player: the root motion of its main animation (the action's
+    /// `ReactionMotion`) up to its `CanTransition` marker, else over the fragment; `None` when
+    /// the animation moves its root by less than a millimetre.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion: Option<AttackMotion>,
+}
+
+/// What kind of reaction a fragment of the player reaction table plays (Observed names of
+/// `playerreactiontableharness.actionlist`: `r_B0_Break`, `r_B0`, `r_R0_<side>`, `r_R<1-3>_<side>`
+/// and their `_Disarm` variants, `r_R4_<side>`, `r_R4_F_Overhead`, `r_R4_F_Crumple`,
+/// `r_R4_F_Stumble`, `r_R4_Upyr_Consumed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReactionKind {
+    /// `r_B0_Break`: the guard break of the full-body `Reaction`.
+    GuardBreak,
+    /// `r_R1` to `r_R3`: the full-body `Reaction`.
+    Stagger,
+    /// `r_R4`: `Reaction_Knockdown`.
+    Knockdown,
+    /// `r_B0` and `r_R0`: the additive `UpperBodyReaction`.
+    UpperBody,
+}
+
+/// The side a reaction fragment plays for, in the order around the body (front, right, back,
+/// left), so that two sides' distance is the quarter turns between them.
+const REACTION_SIDES: [char; 4] = ['F', 'R', 'B', 'L'];
+/// The quarter turns of a full turn.
+const QUARTER_TURNS: usize = REACTION_SIDES.len();
+/// The level a knockdown fragment starts at (`r_R4`).
+const KNOCKDOWN_FRAGMENT_LEVEL: u32 = 4;
+/// The prefix of every reaction fragment name.
+const REACTION_PREFIX: &str = "r_";
+/// The prefix of the block fragments (`r_B0`, `r_B0_Break`).
+const BLOCK_PREFIX: &str = "B0";
+/// The suffix of the guard break's block fragment.
+const GUARD_BREAK_SUFFIX: &str = "Break";
+/// The separator of a fragment name's parts.
+const FRAGMENT_PART_SEPARATOR: char = '_';
+
+/// A reaction fragment's name read as its kind, level, side and variant
+/// ([`ReactionFragment::parse`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReactionFragment<'a> {
+    /// What it plays.
+    pub kind: ReactionKind,
+    /// Its `R` level (0 for the block fragments).
+    pub level: u32,
+    /// Its side's index in [`REACTION_SIDES`]; a fragment without a side letter
+    /// (`r_R4_Upyr_Consumed`, `r_B0_Break`) plays for the front (Inferred: its animation plays
+    /// forward).
+    side: usize,
+    /// What follows the side (`Disarm`, `Overhead`, ...); empty for the plain fragment.
+    pub variant: &'a str,
+}
+
+impl<'a> ReactionFragment<'a> {
+    /// Reads fragment name `name`; `None` for a name of no reaction fragment.
+    pub fn parse(name: &'a str) -> Option<Self> {
+        let rest = name.strip_prefix(REACTION_PREFIX)?;
+        let (head, tail) = rest
+            .split_once(FRAGMENT_PART_SEPARATOR)
+            .unwrap_or((rest, ""));
+        if head == BLOCK_PREFIX {
+            let kind = if tail == GUARD_BREAK_SUFFIX {
+                ReactionKind::GuardBreak
+            } else {
+                ReactionKind::UpperBody
+            };
+            return Some(Self {
+                kind,
+                level: 0,
+                side: 0,
+                variant: "",
+            });
+        }
+        let level: u32 = head.strip_prefix('R')?.parse().ok()?;
+        let (side_part, variant) = tail
+            .split_once(FRAGMENT_PART_SEPARATOR)
+            .unwrap_or((tail, ""));
+        let mut letters = side_part.chars();
+        let side = match (letters.next(), letters.next()) {
+            (Some(letter), None) => REACTION_SIDES.iter().position(|side| *side == letter),
+            _ => None,
+        };
+        let (side, variant) = match side {
+            Some(side) => (side, variant),
+            None => (0, tail),
+        };
+        let kind = match level {
+            0 => ReactionKind::UpperBody,
+            KNOCKDOWN_FRAGMENT_LEVEL.. => ReactionKind::Knockdown,
+            _ => ReactionKind::Stagger,
+        };
+        Some(Self {
+            kind,
+            level,
+            side,
+            variant,
+        })
+    }
+
+    /// The quarter turns between its side and `other`'s (0 to 2).
+    pub fn side_turns(&self, other: &Self) -> usize {
+        let apart = self.side.abs_diff(other.side);
+        apart.min(QUARTER_TURNS - apart)
+    }
+}
+
+/// One frame of a damage row's `HitStun`, ms (30 frames a second).
+const HIT_STUN_FRAME_MS: f64 = 1_000.0 / 30.0;
+
+impl ReactionEntry {
+    /// How long it stuns the player for a hit of `HitStun` `hit_stun` frames, ms: to its
+    /// `CanTransition` marker, else the hit's stun, else (a stun of 0) its length. Observed
+    /// (mined reactions, the time from the reaction state to the end `16=2d` in 1/30 s against
+    /// the creature's row): the great sword's `2960` (`r_R2_F`) ended after 10-11 frames for
+    /// `HitStun` 10, 13-14 for 15, 16-17 for 18, 18-20 for 20 and 30-31 for 30; `3446`
+    /// (`r_R1_F`) after 14 for 15; `3528` (`r_R3_F`, 1 s) after 29 for 30 and for 0; the
+    /// knockdown `3486` after 50 (its marker at 1,667 ms) for every stun from 10 to 44.
+    pub fn stun_ms(&self, hit_stun: u32) -> u64 {
+        self.can_transition_ms.unwrap_or_else(|| {
+            if hit_stun == 0 {
+                self.length_ms
+            } else {
+                // A stun of a few dozen frames.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let stun_ms = (f64::from(hit_stun) * HIT_STUN_FRAME_MS).round() as u64;
+                stun_ms
+            }
+        })
+    }
 }
 
 /// Which basic attack a press and a hold of the attack key make.
@@ -581,6 +811,18 @@ impl Stance {
             .map_or(self, |variant| &variant.stance)
     }
 
+    /// The reaction of a hit of power level `power_level` whose facts `holds` tells: the first
+    /// row of the table for that level (or every level) whose tests hold.
+    pub fn reaction(
+        &self,
+        power_level: u32,
+        holds: impl Fn(&Condition) -> bool,
+    ) -> Option<&HitReaction> {
+        self.reactions.iter().find(|row| {
+            row.power_level.is_none_or(|level| level == power_level) && holds(&row.condition)
+        })
+    }
+
     /// When an item use of consumable tag `tag` takes effect after it starts.
     pub fn use_effect_ms(&self, tag: &str) -> Option<u64> {
         self.uses
@@ -632,6 +874,11 @@ impl PlayerAttacks {
     /// The stance of key `key`.
     pub fn stance(&self, key: u32) -> Option<&Stance> {
         self.by_key.get(&key)
+    }
+
+    /// Every stance with its key, in no set order.
+    pub fn stances(&self) -> impl Iterator<Item = (u32, &Stance)> {
+        self.by_key.iter().map(|(key, stance)| (*key, stance))
     }
 
     /// Stances in the table.
@@ -692,6 +939,7 @@ mod tests {
             dodge_cancel_ms: None,
             block_disabled_ms: Vec::new(),
             motion: None,
+            grit: Vec::new(),
         }
     }
 
@@ -747,6 +995,7 @@ mod tests {
             variants: Vec::new(),
             aimed: None,
             aimed_charged: None,
+            reactions: Vec::new(),
         }
     }
 
@@ -911,6 +1160,8 @@ mod tests {
                 Rigid::translation([1.0, 0.0, 0.0]),
                 Rigid::translation([3.0, 0.0, 0.0]),
             ],
+            damage_row: None,
+            condition: None,
         };
         let at = |ms| shape.pose_at(ms).expect("pose").translation[0];
         assert!((at(425) - 0.5).abs() < 1e-5);
@@ -996,5 +1247,205 @@ mod tests {
             ..ARROW
         };
         assert_eq!(gone.time_to(100.0), None, "gone before 100 m");
+    }
+
+    /// A reaction table row of `fragment` for `power_level` that holds when `facts` hold.
+    fn reaction_row(power_level: Option<u32>, fragment: &str, facts: &[&str]) -> HitReaction {
+        HitReaction {
+            power_level,
+            fragment: fragment.to_owned(),
+            condition: Condition::All(
+                facts
+                    .iter()
+                    .map(|fact| Condition::External((*fact).to_owned()))
+                    .collect(),
+            ),
+            entry: None,
+        }
+    }
+
+    #[test]
+    fn the_first_row_of_the_hits_level_whose_facts_hold_is_the_reaction() {
+        // The order of `playerreactiontableharness.actionlist`: the break before the block,
+        // the block before the side rows.
+        let stance = Stance {
+            reactions: vec![
+                reaction_row(
+                    None,
+                    "r_B0_Break",
+                    &["blocked", "last_hit_depleted_stamina"],
+                ),
+                reaction_row(None, "r_B0", &["blocked"]),
+                reaction_row(Some(2), "r_R2_F", &["damaged_front"]),
+                reaction_row(Some(2), "r_R2_B", &["damaged_back"]),
+            ],
+            ..greatsword()
+        };
+        let reaction = |level, facts: &[&str]| {
+            stance
+                .reaction(level, |condition| {
+                    match condition {
+                    Condition::All(parts) => parts.iter().all(|part| {
+                        matches!(part, Condition::External(name) if facts.contains(&name.as_str()))
+                    }),
+                    _ => false,
+                }
+                })
+                .map(|row| row.fragment.as_str())
+        };
+        assert_eq!(reaction(2, &["damaged_back"]), Some("r_R2_B"));
+        assert_eq!(reaction(2, &["blocked", "damaged_front"]), Some("r_B0"));
+        assert_eq!(
+            reaction(1, &["blocked", "last_hit_depleted_stamina"]),
+            Some("r_B0_Break")
+        );
+        assert_eq!(reaction(3, &["damaged_front"]), None, "no row of level 3");
+    }
+
+    #[test]
+    fn a_reaction_stuns_to_its_marker_else_for_the_hits_stun_else_its_length() {
+        let stagger = ReactionEntry {
+            animations: "unarmed_r2_f+grtswrd_r2_f".to_owned(),
+            length_ms: 800,
+            can_transition_ms: None,
+            motion: None,
+        };
+        assert_eq!(stagger.stun_ms(18), 600, "18 frames");
+        assert_eq!(stagger.stun_ms(0), 800, "no stun: the fragment");
+        let knockdown = ReactionEntry {
+            can_transition_ms: Some(1_667),
+            ..stagger
+        };
+        assert_eq!(knockdown.stun_ms(18), 1_667);
+    }
+
+    #[test]
+    fn grit_is_on_in_its_window_while_its_condition_holds() {
+        let upgrade = Condition::AbilityActive("Con_Bonus_300_1".to_owned());
+        let mut attack = BasicAttack {
+            grit: vec![
+                GritWindow {
+                    window_ms: [0, 433],
+                    condition: Some(upgrade.clone()),
+                },
+                GritWindow {
+                    window_ms: [500, 600],
+                    condition: None,
+                },
+            ],
+            ..melee("Attack_Primary")
+        };
+        assert!(attack.has_run_time_conditions());
+        let mut held = attack.clone();
+        held.keep_held(|condition| *condition == upgrade);
+        assert!(held.grit_on(432));
+        assert!(!held.grit_on(433), "the window ends at 433 ms");
+        attack.keep_held(|_| false);
+        assert!(!attack.grit_on(100), "without the upgrade");
+        assert!(attack.grit_on(550), "the window without a condition stays");
+        assert!(!attack.has_run_time_conditions());
+    }
+
+    /// The pinned client build of the content in `NW_CONTENT_DIR`.
+    const CONTENT_BUILD: &str = "25810808";
+    /// Retail input records (frames) per second.
+    const RECORDS_PER_SECOND: u64 = 30;
+    const MS_PER_SECOND_U64: u64 = 1_000;
+
+    /// `ms` in whole records, rounded.
+    fn records(ms: u64) -> u64 {
+        (ms * RECORDS_PER_SECOND + MS_PER_SECOND_U64 / 2) / MS_PER_SECOND_U64
+    }
+
+    #[test]
+    #[ignore = "needs the build 25810808 content in NW_CONTENT_DIR"]
+    fn the_built_reactions_end_at_their_retail_times_and_no_marker_lies_past_its_fragment() {
+        // Retail (mined reactions, 2026-11-12): the knockdown `3486` (`r_R4_F`) ends 50 records
+        // after its start for every stun, `3463` (`r_R4_F_Overhead`) at a median of 1.5 s, and
+        // the great sword's `3528` (`r_R3_F`, no marker) after 29 for a stun of 0. Before the
+        // chained clips were timed (`ExitTime -1` summed as -1 s) the knockdowns were 67 ms long,
+        // 1.6 s short of their own `CanTransition` marker.
+        const KNOCKDOWN_RECORDS: u64 = 50;
+        const OVERHEAD_MS: u64 = 1_500;
+        const GREATSWORD_R3_RECORDS: u64 = 29;
+        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
+        let text = std::fs::read_to_string(player_attacks_path(Path::new(&dir), CONTENT_BUILD))
+            .expect("player attack table");
+        let stances: Vec<Stance> = serde_json::from_str(&text).expect("stances");
+        let entry = |tags: &str, fragment: &str| -> ReactionEntry {
+            stances
+                .iter()
+                .find(|stance| stance.tags == tags)
+                .and_then(|stance| stance.reactions.iter().find(|row| row.fragment == fragment))
+                .and_then(|row| row.entry.clone())
+                .expect("entry")
+        };
+        let knockdown = entry("", "r_R4_F");
+        assert_eq!(
+            records(knockdown.stun_ms(0)),
+            KNOCKDOWN_RECORDS,
+            "{knockdown:?}"
+        );
+        assert!(knockdown.length_ms > knockdown.stun_ms(0), "{knockdown:?}");
+        assert_eq!(entry("", "r_R4_F_Overhead").stun_ms(0), OVERHEAD_MS);
+        let greatsword = entry("2H_Melee,GreatSword", "r_R3_F");
+        assert_eq!(greatsword.can_transition_ms, None);
+        assert_eq!(
+            records(greatsword.stun_ms(0)) - 1,
+            GREATSWORD_R3_RECORDS,
+            "it ends a record before its stun is over"
+        );
+        for stance in &stances {
+            for row in &stance.reactions {
+                if let Some(entry) = &row.entry {
+                    assert!(
+                        entry
+                            .can_transition_ms
+                            .is_none_or(|at| at <= entry.length_ms),
+                        "{} {}: {entry:?}",
+                        stance.tags,
+                        row.fragment
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_reaction_fragment_name_reads_as_its_kind_level_side_and_variant() {
+        fn read(name: &str) -> Option<(ReactionKind, u32, usize, &str)> {
+            ReactionFragment::parse(name).map(|fragment| {
+                (
+                    fragment.kind,
+                    fragment.level,
+                    fragment.side,
+                    fragment.variant,
+                )
+            })
+        }
+        assert_eq!(read("r_R2_L"), Some((ReactionKind::Stagger, 2, 3, "")));
+        assert_eq!(
+            read("r_R2_B_Disarm"),
+            Some((ReactionKind::Stagger, 2, 2, "Disarm"))
+        );
+        assert_eq!(
+            read("r_R4_F_Overhead"),
+            Some((ReactionKind::Knockdown, 4, 0, "Overhead"))
+        );
+        assert_eq!(
+            read("r_R4_Upyr_Consumed"),
+            Some((ReactionKind::Knockdown, 4, 0, "Upyr_Consumed"))
+        );
+        assert_eq!(
+            read("r_B0_Break"),
+            Some((ReactionKind::GuardBreak, 0, 0, ""))
+        );
+        assert_eq!(read("r_B0"), Some((ReactionKind::UpperBody, 0, 0, "")));
+        assert_eq!(read("r_R0_R"), Some((ReactionKind::UpperBody, 0, 1, "")));
+        assert_eq!(read("Attack_Primary"), None);
+        let side = |name| ReactionFragment::parse(name).expect("fragment");
+        assert_eq!(side("r_R1_F").side_turns(&side("r_R1_B")), 2);
+        assert_eq!(side("r_R1_L").side_turns(&side("r_R1_F")), 1);
+        assert_eq!(side("r_R1_L").side_turns(&side("r_R1_R")), 2);
     }
 }

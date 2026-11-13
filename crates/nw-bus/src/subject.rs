@@ -66,6 +66,12 @@ pub fn sims_war(world: Uuid) -> String {
     format!("nw.{world}.sims.war")
 }
 
+/// A sim or the director to every sim: a run started or ended at a dungeon entrance
+/// ([`crate::instance::EntranceRunNews`]).
+pub fn sims_entrance_runs(world: Uuid) -> String {
+    format!("nw.{world}.sims.entrance_runs")
+}
+
 /// Sim to director: the matchmaking queue calls of its players ([`crate::matchmaking`]).
 pub fn director_queue(world: Uuid) -> String {
     format!("nw.{world}.director.queue")

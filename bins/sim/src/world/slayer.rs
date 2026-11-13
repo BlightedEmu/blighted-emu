@@ -26,7 +26,7 @@ use nw_messages::{
     RemoteUpper, SecondSlayerState, SequenceClock, SequenceTime, SlayerInput, SlayerState,
     SlotChange, UpperSlots,
 };
-use nw_sim_core::Intent;
+use nw_sim_core::{Intent, Posture};
 
 /// The value of a slot's state, sequence or marker that clears it (retail `19=00 21=00 48=00`).
 const CLEARED_SLOT: u64 = 0;
@@ -42,7 +42,8 @@ const ATTACK_RUN_RECORDS: u16 = 34;
 /// Input records from the last start of a first-slot chain to its end (Observed: retail's
 /// `48=0` came 932 ms, 28 records, after the last attack start at the median).
 const CHAIN_END_RECORDS: u16 = 28;
-/// The second slot's state at the end of a cast (Observed: `16=45 18=0 48=0`).
+/// The second slot's state at the end of a cast (Observed: `16=45 18=0 48=0`) and of a hit
+/// reaction ([`reaction`]).
 const CAST_END_STATE: u64 = 45;
 
 /// The slayer states the server starts for the player's own movement with the weapon sheathed,
@@ -74,6 +75,111 @@ mod movement {
     pub(super) const STOP_RECORDS: u16 = 39;
 }
 
+/// The slayer states of a crouching or prone player (retail, the four `walk_running_crouch_prone`
+/// and `equip_and_prone` captures, weapon sheathed, 15 presses of the crouch and prone toggles;
+/// Inferred for a drawn weapon, which no capture has in these postures).
+///
+/// A change of posture is a new sequence of the state that goes on (child 15 alone), 33 to 54 ms
+/// after the toggle. The sequence of the new posture's stand or move follows it, alone too, unless
+/// a move started or stopped in between. Other players got no state for these postures before:
+/// they saw a crouching or prone player stand (live 2026-11-09).
+mod posture {
+    use super::{MoveSet, Posture, movement};
+
+    /// Crouching: a start `13=1a 15=b61c` (forward 2 of 2, back 1 of 1), a stop `13=1b 15=ac30`
+    /// (3 of 3), a key during the stop `15=8511` (1 of 1), still `13=1f 15=9e3e` 10 records
+    /// after the stop (2 of 2).
+    const CROUCH: MoveSet = MoveSet {
+        start: (movement::START_STATE, 1846),
+        back_start: (movement::START_STATE, 1846),
+        stop: (movement::MOVE_STATE, 3116),
+        restart: (movement::MOVE_STATE, 1093),
+        idle: (movement::IDLE_STATE, 3998),
+        moving: 1846,
+        stop_records: STOP_RECORDS,
+    };
+    /// Prone: a start `13=1a 15=971c` (5 of 5, every direction; after a stop too, 1 of 1), a stop
+    /// `13=1b 15=8c15` (6 of 6), still `13=1f 15=bc3b` 10 records after the stop (4 of 5).
+    const PRONE: MoveSet = MoveSet {
+        start: (movement::START_STATE, 1815),
+        back_start: (movement::START_STATE, 1815),
+        stop: (movement::MOVE_STATE, 1356),
+        restart: (movement::START_STATE, 1815),
+        idle: (movement::IDLE_STATE, 3836),
+        moving: 1815,
+        stop_records: STOP_RECORDS,
+    };
+    /// Input records from a crouching or prone stop to its idle state.
+    const STOP_RECORDS: u16 = 10;
+    /// Standing still to a crouch: `8913` (2 of 2).
+    const STAND_TO_CROUCH: u64 = 1225;
+    /// Moving to a crouch: `a51b` (1 of 1).
+    const MOVING_TO_CROUCH: u64 = 1765;
+    /// A crouch to standing: `a13c` (2 of 2).
+    const CROUCH_TO_STAND: u64 = 3873;
+    /// Standing still to prone: `bf36` (1 of 1).
+    const STAND_TO_PRONE: u64 = 3519;
+    /// Moving to prone: `931c` (1 of 1).
+    const MOVING_TO_PRONE: u64 = 1811;
+    /// A crouch to prone: `912f` (2 of 2).
+    const CROUCH_TO_PRONE: u64 = 3025;
+    /// Prone to standing: `a03c` (3 of 3).
+    const PRONE_TO_STAND: u64 = 3872;
+    /// Prone to a crouch: `b93c` (1 of 1).
+    const PRONE_TO_CROUCH: u64 = 3897;
+    /// Input records from most toggles to the new posture's stand or move sequence (517 to
+    /// 554 ms in 8 of the changes).
+    const SETTLE_RECORDS: u16 = 16;
+    /// The same from a toggle to prone while moving (769 ms, 1 of 1).
+    const MOVING_TO_PRONE_SETTLE_RECORDS: u16 = 23;
+    /// The same from prone to a crouch (867 ms, 1 of 1).
+    const PRONE_TO_CROUCH_SETTLE_RECORDS: u16 = 26;
+    /// Input records from a toggle to prone while a start waits: a movement key in that time
+    /// starts the prone move at their end (2 of 2: `13=1a 15=971c` 20 records after the toggle,
+    /// with the key down from the first or the seventh record after it). A key during a change
+    /// to a crouch starts its move at once (1 of 1, 6 records after the toggle).
+    pub(super) const PRONE_HOLD_RECORDS: u16 = 20;
+    /// Input records from a toggle to the record whose slayer state knows the new posture: the
+    /// body takes the toggle after the slayer state read the record.
+    pub(super) const SEEN_AFTER_RECORDS: u16 = 1;
+
+    /// The movement of a crouching or prone player; `None` for a standing one.
+    pub(super) const fn moves(posture: Posture) -> Option<MoveSet> {
+        match posture {
+            Posture::Stand => None,
+            Posture::Crouch => Some(CROUCH),
+            Posture::Prone => Some(PRONE),
+        }
+    }
+
+    /// The sequence that starts at a change from posture `from` to `to` of a player that is
+    /// `moving` or not, and the input records from the toggle to the sequence of the new
+    /// posture's stand or move. No sequence: retail sent none when a moving player stood up
+    /// from a crouch (1 of 1), and the others must still see it stand, so the stand's move
+    /// goes at once (Inferred). Without a sample of its own, a moving change takes the still
+    /// one's sequence (Inferred), and a crouch to prone settles when its hold ends (Inferred).
+    pub(super) const fn change(from: Posture, to: Posture, moving: bool) -> (Option<u64>, u16) {
+        match (from, to, moving) {
+            (Posture::Stand, Posture::Crouch, false) => (Some(STAND_TO_CROUCH), SETTLE_RECORDS),
+            (Posture::Stand, Posture::Crouch, true) => (Some(MOVING_TO_CROUCH), SETTLE_RECORDS),
+            (Posture::Crouch, Posture::Stand, false) => (Some(CROUCH_TO_STAND), SETTLE_RECORDS),
+            (Posture::Stand, Posture::Prone, false) => (Some(STAND_TO_PRONE), SETTLE_RECORDS),
+            (Posture::Stand, Posture::Prone, true) => {
+                (Some(MOVING_TO_PRONE), MOVING_TO_PRONE_SETTLE_RECORDS)
+            }
+            (Posture::Crouch, Posture::Prone, _) => (Some(CROUCH_TO_PRONE), PRONE_HOLD_RECORDS),
+            (Posture::Prone, Posture::Stand, _) => (Some(PRONE_TO_STAND), SETTLE_RECORDS),
+            (Posture::Prone, Posture::Crouch, _) => {
+                (Some(PRONE_TO_CROUCH), PRONE_TO_CROUCH_SETTLE_RECORDS)
+            }
+            (Posture::Crouch, Posture::Stand, true)
+            | (Posture::Stand, Posture::Stand, _)
+            | (Posture::Crouch, Posture::Crouch, _)
+            | (Posture::Prone, Posture::Prone, _) => (None, 0),
+        }
+    }
+}
+
 /// The second slot of a weapon put away (retail, the first own slayer change after the sheathe
 /// key in 60 open world ledgers and the own captures: `16=2c 18=9b2c` in all 8 changes that
 /// carried a second slot, with the sheathed stand or move in the first slot).
@@ -96,6 +202,38 @@ mod pull {
     pub(super) const SEQUENCE: u64 = 3530;
     /// From the pull's state to the state that stands the player still again.
     pub(super) const LENGTH_MS: u64 = 1_133;
+}
+
+/// The hit reaction of a player (Observed, all 3,237 own reaction starts of 310 capture ledgers,
+/// `local-data/scratch-work/hitreact/mined.tsv`; newchar 2026-09-18, the great sword's `2960`
+/// from 1792695974821): the server starts the reaction state in the own state after the hit,
+/// `13=04 14=<n> 15=<sequence> 16=00 17=<n>`, with `18=00` when the second slot played, `19=00
+/// 20=<n> 21=00` when the third did, `22=00 23=<n> 24=00` when the fourth did (the block) and
+/// `48=00` when the slayer marker was set (1,543 of the starts carried only 48 more, 848 none).
+/// The client names the state in row 1 of its next record (`[2960, 0xffff0004, 0]`) and sends
+/// no row 1 while it reacts: the server does not echo it. Its keys start nothing until the
+/// reaction lets them (`hit_reaction::reaction_times`); the end
+/// is the second slot's end state alone, `16=2d 17=<n>` (newchar: 17 records after the start,
+/// `17=1e13`), and the state after it stands the player still or moves it again (1,689 of the
+/// starts after an end came 31 to 36 ms after it). The grab pull ([`pull`]) is one of these
+/// reactions.
+mod reaction {
+    /// Records from the end that stand the player still unless a key moves it: one.
+    pub(super) const STOP_RECORDS: u16 = 1;
+}
+
+/// The upper-body hit reaction (`UpperBodyReaction`, an additive shake that holds nothing) plays
+/// in the fourth slot. Observed (newchar 2026-09-18, the own state after each 2218 that started
+/// no full-body reaction, probe `blighted-emu-tools/scratch-work/combat/hitreact` `flinch`): the
+/// start `22=20 23=<n> 24=<sequence>` (`b533`, 3317, after the level 0 hits on the sword at
+/// 94.211, 97.912, 202.556, 203.489 and 235.961 s; `aa1d`, 1898, after the blocked great sword
+/// hits at 414.090 and 421.256 s), a hit while it plays starts it again (`23=<n>` alone, the
+/// other children unchanged, 414.622 s), and the end `22=00 23=<n> 24=00` a record before its
+/// fragment is over (`unarmed_r0_f`, 567 ms: 16 records after the start, 94.235 to 94.803 and
+/// 97.952 to 98.484 s).
+mod upper_reaction {
+    /// The fourth slot's state while it plays (`22=20`).
+    pub(super) const STATE: u64 = 0x20;
 }
 
 /// The kneel of a fast travel's channel and of an accepted unstuck's wait: the unstuck's state and
@@ -175,7 +313,8 @@ mod loadout {
 }
 
 /// The movement states and sequences of one moment: the sheathed ones, the stance's drawn ones,
-/// or its block and aim walk while the right-click is held.
+/// its block and aim walk while the right-click is held, or the posture's while the player
+/// crouches or lies prone ([`posture`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MoveSet {
     start: (u64, u64),
@@ -183,6 +322,10 @@ struct MoveSet {
     stop: (u64, u64),
     restart: (u64, u64),
     idle: (u64, u64),
+    /// The sequence of a move that goes on.
+    moving: u64,
+    /// Input records from a stop to the idle state.
+    stop_records: u16,
 }
 
 impl MoveSet {
@@ -193,12 +336,18 @@ impl MoveSet {
         stop: (movement::MOVE_STATE, movement::STOP_SEQUENCE),
         restart: (movement::MOVE_STATE, movement::RESTART_SEQUENCE),
         idle: (movement::IDLE_STATE, movement::IDLE_SEQUENCE),
+        moving: movement::RESTART_SEQUENCE,
+        stop_records: movement::STOP_RECORDS,
     };
 
-    /// The movement of `stance` (the weapon `drawn` or not) with the right-click held or not.
+    /// The movement of a player in `posture`: the posture's when it crouches or lies prone,
+    /// else that of `stance` (the weapon `drawn` or not) with the right-click held or not.
     /// A value the table does not have keeps the sheathed one (best guess: the table's drawn
     /// moves are the most common non-sheathed sequence of each transition per stance).
-    fn of(stance: Option<&StanceSequences>, drawn: bool, alt: bool) -> Self {
+    fn of(stance: Option<&StanceSequences>, drawn: bool, alt: bool, posture: Posture) -> Self {
+        if let Some(set) = posture::moves(posture) {
+            return set;
+        }
         let mut set = Self::SHEATHED;
         let Some(stance) = stance.filter(|_| drawn) else {
             return set;
@@ -220,6 +369,7 @@ impl MoveSet {
             }
             set.idle = walk.idle.map_or(set.idle, pair);
         }
+        set.moving = set.restart.1;
         set
     }
 }
@@ -250,7 +400,7 @@ impl Locomotion {
                 };
                 (Self::Moving, Some(start))
             }
-            (Self::Moving, false) => (Self::Stopping(movement::STOP_RECORDS), Some(set.stop)),
+            (Self::Moving, false) => (Self::Stopping(set.stop_records), Some(set.stop)),
             (Self::Stopping(_), true) => (Self::Moving, Some(set.restart)),
             (Self::Stopping(left), false) => match left.saturating_sub(1) {
                 0 => (Self::Idle, Some(set.idle)),
@@ -264,7 +414,7 @@ impl Locomotion {
     const fn current(self, set: MoveSet) -> (u64, u64) {
         match self {
             Self::Idle => set.idle,
-            Self::Moving => set.restart,
+            Self::Moving => (set.restart.0, set.moving),
             Self::Stopping(_) => set.stop,
         }
     }
@@ -371,8 +521,38 @@ enum Pending {
     Attack(u64),
     /// A state the server started: its state and sequence (movement, dodge, jump).
     State(u64, u64),
+    /// The first-slot chain the server opened at a press: its state and sequence, with the
+    /// second slot started with it (Observed: all 64 own and 157 remote state-10 starts of
+    /// `11-Savage-Divide-ab1760f2e3180cab/EXP-Savage-Divide` carried child 17, for example the
+    /// remote flail press start `13=10 14=711 15=1319 17=711 48=1` at 1793443086841).
+    Press(u64, u64),
     /// A full-body weapon ability the server started ([`SlayerTrack::ability_started`]).
     Ability(FirstPlay),
+}
+
+/// Which upper slots play ([`SlayerTrack::slots_on`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct SlotsOn {
+    second: bool,
+    third: bool,
+    fourth: bool,
+}
+
+impl SlotsOn {
+    /// The slots after `change` went out: a slot whose change sets its sequence plays when the
+    /// sequence is not 0, one whose change sets only its state when the state is not 0.
+    fn after(self, change: UpperSlots) -> Self {
+        let on = |was: bool, slot: SlotChange| {
+            slot.sequence
+                .or(slot.state)
+                .map_or(was, |value| value != CLEARED_SLOT)
+        };
+        Self {
+            second: on(self.second, change.second),
+            third: on(self.third, change.third),
+            fourth: on(self.fourth, change.fourth),
+        }
+    }
 }
 
 /// The weapon ability whose animation the slayer state plays.
@@ -437,6 +617,8 @@ pub(super) struct SlayerRecord {
     pub(super) swimming: bool,
     /// The body falls and is not in a jump ([`nw_sim_core::TrackedBody::is_falling`]).
     pub(super) falling: bool,
+    /// How the body holds itself ([`nw_sim_core::TrackedBody::posture`]).
+    pub(super) posture: Posture,
 }
 
 /// What one own state carries of the slayer state.
@@ -495,6 +677,14 @@ pub(super) struct SlayerTrack {
     set: Option<MoveSet>,
     /// The player's own movement.
     locomotion: Locomotion,
+    /// The posture of the newest record.
+    posture: Posture,
+    /// Input records left while a change to prone holds a start
+    /// ([`posture::PRONE_HOLD_RECORDS`]).
+    posture_hold: u16,
+    /// Input records left until the new posture's stand or move sequence goes out
+    /// ([`posture::change`]).
+    posture_settle: Option<u16>,
     /// The last record was a fall the server already started.
     in_air: bool,
     /// The player's swim.
@@ -505,6 +695,20 @@ pub(super) struct SlayerTrack {
     pull_due: bool,
     /// When the pull ends and the player stands still again, while it is pulled.
     pull_ends_ms: Option<u64>,
+    /// A hit reaction's sequence: the reaction state starts in the next own state ([`reaction`]).
+    reaction_due: Option<u64>,
+    /// While a hit reaction holds the player: when its keys may start states again.
+    reaction_free_ms: Option<u64>,
+    /// While a hit reaction plays: when it ends (the second slot's end state).
+    reaction_ends_ms: Option<u64>,
+    /// An upper-body hit reaction's sequence: the fourth slot starts it in the next own state
+    /// ([`upper_reaction`]).
+    upper_reaction_due: Option<u64>,
+    /// While an upper-body hit reaction plays: when its fourth slot ends.
+    upper_reaction_ends_ms: Option<u64>,
+    /// The upper slots that play: each one's last change set a state or sequence other than 0
+    /// (the hit reaction clears them).
+    slots_on: SlotsOn,
     /// A fast travel's channel or an unstuck's wait started: the kneel starts in the next own
     /// state ([`kneel`]).
     kneel_due: bool,
@@ -514,6 +718,15 @@ pub(super) struct SlayerTrack {
     /// The newest slayer state, and how many more own states carry it.
     current: Option<SlayerState>,
     repeats: u8,
+    /// The slayer state the attack that runs plays in: the state of the press start the server
+    /// opened its chain with, or of the action the client named (row 1). Its release, hold and
+    /// follow-up starts go on in it.
+    chain_state: Option<u64>,
+    /// The slayer state the newest start plays in, as the players who see this one have it.
+    played_state: Option<u64>,
+    /// The newest slayer state as the players who see this one get it
+    /// ([`SlayerTrack::remote_action`]).
+    remote_action: Option<SlayerState>,
     /// The weapon ability the slayer state plays, from its start to its end.
     ability: Option<AbilityOn>,
     /// The counter of the newest record.
@@ -535,6 +748,7 @@ impl SlayerTrack {
         *self = Self {
             sequence_s: SequenceClock::spawn_seconds(),
             clock: Some(SequenceClock::after_spawn()),
+            played_state: Some(movement::IDLE_STATE),
             ..Self::default()
         };
     }
@@ -547,11 +761,33 @@ impl SlayerTrack {
         self.newest_frame_s = record.frame_s;
         self.newest_counter = record.counter;
         self.sequence_s += record.frame_s;
+        if self.reaction_due.is_some() || self.reaction_free_ms.is_some() {
+            // A hit reaction holds the player: its records start nothing, and the client's row
+            // 1 names the reaction itself, which is not echoed ([`reaction`]).
+            self.press = None;
+            self.attack_down = false;
+            return;
+        }
+        // A row 1 that names the reaction state is the client's copy of the server's own start.
+        let record = SlayerRecord {
+            action: record
+                .action
+                .filter(|input| u64::from(input.state) != pull::STATE),
+            ..record
+        };
         let stance = record.weapon.and_then(|weapon| table.stance(weapon.stance));
         let drawn = record.weapon.is_some_and(|weapon| weapon.drawn);
         let upper = self.upper_slots(&record, stance, drawn);
         let alt = drawn && record.intent.is_some_and(|intent| intent.block);
-        let set = MoveSet::of(stance, drawn, alt);
+        let posture_change =
+            (record.posture != self.posture).then_some((self.posture, record.posture));
+        self.posture = record.posture;
+        if posture_change.is_some_and(|(_, to)| to == Posture::Prone) {
+            self.posture_hold = posture::PRONE_HOLD_RECORDS - posture::SEEN_AFTER_RECORDS;
+        }
+        let held_start = self.posture_hold > 0 && self.locomotion == Locomotion::Idle;
+        self.posture_hold = self.posture_hold.saturating_sub(1);
+        let set = MoveSet::of(stance, drawn, alt, record.posture);
         self.set = Some(set);
         let entered_air = record.falling && !record.swimming && !self.in_air;
         let entered_water = record.swimming && self.swim == Swim::Out;
@@ -575,7 +811,7 @@ impl SlayerTrack {
         } else if record.swimming {
             None
         } else {
-            record.intent.and_then(|intent| {
+            record.intent.filter(|_| !held_start).and_then(|intent| {
                 let (next, started) = self.locomotion.step(intent, set);
                 self.locomotion = next;
                 started
@@ -605,9 +841,13 @@ impl SlayerTrack {
             .or(server)
             .or_else(|| movement.map(|(state, sequence)| Pending::State(state, sequence)))
             .or_else(|| stroke.map(Pending::Sequence));
+        let posture_sequence =
+            self.posture_sequence(posture_change, set, movement.is_some(), started.is_some());
+        let started = started.or_else(|| posture_sequence.map(Pending::Sequence));
         if let Some(input) = record.action {
             // The attack the client named runs now: a release or a hold follows it.
             self.running = Some((first_slot(input.sequence), record.counter));
+            self.chain_state = Some(u64::from(input.state));
             match table.follow_up(input.sequence) {
                 Some(follow_up) if follow_up.at_release && !record.attack.released => {
                     self.release_follow_up = Some(follow_up.server);
@@ -626,6 +866,35 @@ impl SlayerTrack {
                 self.follow_up = None;
             }
         }
+    }
+
+    /// The sequence the posture starts in this record: the change's own at a change of posture
+    /// `change` ([`posture::change`]), then the sequence of the stand or the move in `set` when
+    /// the change settles. A movement state that starts (`moved`) shows the posture by itself
+    /// and ends the wait; while another state starts (`started`) the sequence waits a record.
+    fn posture_sequence(
+        &mut self,
+        change: Option<(Posture, Posture)>,
+        set: MoveSet,
+        moved: bool,
+        started: bool,
+    ) -> Option<u64> {
+        if moved {
+            self.posture_settle = None;
+            return None;
+        }
+        let settled = self.locomotion.current(set).1;
+        if let Some((from, to)) = change {
+            let moving = self.locomotion == Locomotion::Moving;
+            let (sequence, records) = posture::change(from, to, moving);
+            let wait = records.saturating_sub(posture::SEEN_AFTER_RECORDS).max(1);
+            self.posture_settle = (sequence.is_some() || started).then_some(wait);
+            return sequence.or(Some(settled)).filter(|_| !started);
+        }
+        let left = self.posture_settle?.saturating_sub(1);
+        let due = left == 0 && !started;
+        self.posture_settle = (!due).then_some(left.max(1));
+        due.then_some(settled)
     }
 
     /// Queues `sequence` to start one own state after the client's action (the retail
@@ -804,7 +1073,10 @@ impl SlayerTrack {
             self.upper = Some(merge(self.upper.unwrap_or_default(), slots));
         }
         match (attack.slot, press) {
-            (AttackSlot::First, Some(press)) => Some(Pending::State(press.state, attack.sequence)),
+            (AttackSlot::First, Some(press)) => {
+                self.chain_state = Some(press.state);
+                Some(Pending::Press(press.state, attack.sequence))
+            }
             (AttackSlot::First, None) => Some(Pending::Attack(attack.sequence)),
             (AttackSlot::Second, _) => None,
         }
@@ -990,6 +1262,68 @@ impl SlayerTrack {
         self.pull_ends_ms = Some(now_ms.saturating_add(pull::LENGTH_MS));
     }
 
+    /// A hit reaction of sequence `sequence` started at `now_ms` ([`reaction`]): the next own
+    /// state starts the reaction state; the player's records start nothing for `free_after_ms`
+    /// (then a key moves it again, else it stands still), and the reaction ends `length_ms`
+    /// after its start.
+    pub(super) fn reacted(
+        &mut self,
+        sequence: u64,
+        now_ms: u64,
+        free_after_ms: u64,
+        length_ms: u64,
+    ) {
+        self.reaction_due = Some(sequence);
+        self.reaction_free_ms = Some(now_ms.saturating_add(free_after_ms));
+        self.reaction_ends_ms = Some(now_ms.saturating_add(length_ms));
+        // The full-body reaction's start clears the fourth slot when it plays.
+        self.upper_reaction_due = None;
+        self.upper_reaction_ends_ms = None;
+    }
+
+    /// A dodge broke the hit reaction out (`Dodge_Stunlock`): the player's records start states
+    /// again at once, and the dodge's own state takes the reaction's place, so no reaction end
+    /// goes out (Inferred: no retail breakout was mined).
+    pub(super) fn break_reaction(&mut self) {
+        self.reaction_due = None;
+        self.reaction_free_ms = None;
+        self.reaction_ends_ms = None;
+    }
+
+    /// An upper-body hit reaction of sequence `sequence` started at `now_ms`
+    /// ([`upper_reaction`]): the next own state starts the fourth slot, which ends `end_after_ms`
+    /// later; it holds no key.
+    pub(super) fn shook(&mut self, sequence: u64, now_ms: u64, end_after_ms: u64) {
+        self.upper_reaction_due = Some(sequence);
+        self.upper_reaction_ends_ms = Some(now_ms.saturating_add(end_after_ms));
+    }
+
+    /// The upper slots that a hit reaction's start clears in the own state numbered `number`:
+    /// each slot that plays, and the slayer marker when the server's chain set it ([`reaction`]).
+    fn reaction_clears(&self, number: u16) -> UpperSlots {
+        let cleared = |on: bool| {
+            if on {
+                SlotChange {
+                    state: Some(CLEARED_SLOT),
+                    started: Some(number),
+                    sequence: Some(CLEARED_SLOT),
+                }
+            } else {
+                SlotChange::default()
+            }
+        };
+        UpperSlots {
+            // The second slot's state and start go with the reaction state (`16=00 17=<n>`).
+            second: SlotChange {
+                sequence: self.slots_on.second.then_some(CLEARED_SLOT),
+                ..SlotChange::default()
+            },
+            third: cleared(self.slots_on.third),
+            fourth: cleared(self.slots_on.fourth),
+            marker: self.chain_marked.then_some(CLEARED_SLOT),
+        }
+    }
+
     /// A fast travel's channel or an unstuck's wait started: the next own state starts the
     /// kneel, and the player stands still under it ([`kneel`]).
     pub(super) fn kneel(&mut self) {
@@ -1093,6 +1427,56 @@ impl SlayerTrack {
     /// this one get the newest state at once ([`SlayerTrack::current`]).
     pub(super) fn advance(&mut self, number: u16, state_ms: u64) {
         self.step_loadout(state_ms);
+        if self
+            .reaction_free_ms
+            .is_some_and(|free_ms| state_ms >= free_ms)
+        {
+            // From here a key moves the player again, else it stands still.
+            self.reaction_free_ms = None;
+            self.locomotion = Locomotion::Stopping(reaction::STOP_RECORDS);
+        }
+        if self
+            .reaction_ends_ms
+            .is_some_and(|ends_ms| state_ms >= ends_ms)
+        {
+            self.reaction_ends_ms = None;
+            let end = UpperSlots {
+                second: SlotChange {
+                    state: Some(CAST_END_STATE),
+                    started: Some(number),
+                    sequence: None,
+                },
+                ..UpperSlots::default()
+            };
+            self.upper = Some(merge(self.upper.unwrap_or_default(), end));
+        }
+        if self
+            .upper_reaction_ends_ms
+            .is_some_and(|ends_ms| state_ms >= ends_ms)
+            && self.upper_reaction_due.is_none()
+        {
+            self.upper_reaction_ends_ms = None;
+            let end = UpperSlots {
+                fourth: SlotChange {
+                    state: Some(CLEARED_SLOT),
+                    started: Some(number),
+                    sequence: Some(CLEARED_SLOT),
+                },
+                ..UpperSlots::default()
+            };
+            self.upper = Some(merge(self.upper.unwrap_or_default(), end));
+        }
+        if let Some(sequence) = self.upper_reaction_due.take() {
+            let start = UpperSlots {
+                fourth: SlotChange {
+                    state: Some(upper_reaction::STATE),
+                    started: Some(number),
+                    sequence: Some(sequence),
+                },
+                ..UpperSlots::default()
+            };
+            self.upper = Some(merge(self.upper.unwrap_or_default(), start));
+        }
         if self.pull_ends_ms.is_some_and(|ends_ms| state_ms >= ends_ms) {
             self.pull_ends_ms = None;
             self.locomotion = Locomotion::Idle;
@@ -1114,6 +1498,9 @@ impl SlayerTrack {
             (None, None) => None,
         };
         self.consume_loadout_echo();
+        if let Some(slots) = slots {
+            self.slots_on = self.slots_on.after(slots);
+        }
         self.remote = slots.map(|slots| RemoteUpper {
             slots,
             after_state: self.upper_after_state,
@@ -1155,18 +1542,52 @@ impl SlayerTrack {
     /// started it when it starts there.
     fn next(&mut self, number: u16) -> (Option<SlayerState>, Option<f32>) {
         let stand = std::mem::take(&mut self.stand_due);
+        if let Some(sequence) = self.reaction_due.take() {
+            // The reaction drops what the records started and the attack that ran.
+            self.pending = None;
+            self.follow_up = None;
+            self.release_follow_up = None;
+            self.press = None;
+            self.running = None;
+            self.chain_state = None;
+            let clears = self.reaction_clears(number);
+            self.chain_marked = false;
+            self.upper = Some(merge(self.upper.unwrap_or_default(), clears));
+            self.sequence_s = self.newest_frame_s;
+            return (
+                self.start(pulled_state(number, sequence), None),
+                Some(self.newest_frame_s),
+            );
+        }
         if std::mem::take(&mut self.pull_due) {
             self.sequence_s = self.newest_frame_s;
-            return (self.start(pulled_state(number)), Some(self.newest_frame_s));
+            return (
+                self.start(pulled_state(number, pull::SEQUENCE), None),
+                Some(self.newest_frame_s),
+            );
         }
         if std::mem::take(&mut self.kneel_due) {
             self.sequence_s = self.newest_frame_s;
-            return (self.start(kneel_state(number)), Some(self.newest_frame_s));
+            return (
+                self.start(kneel_state(number), None),
+                Some(self.newest_frame_s),
+            );
         }
         if let Some((pending, counter, frame_s)) = self.pending.take() {
+            let mut plays = None;
             let state = match pending {
-                Pending::Client(input) => SlayerState::of_input(input, counter),
-                Pending::Attack(sequence) => attack_start(counter, sequence),
+                Pending::Client(input) => {
+                    plays = Some(u64::from(input.state));
+                    SlayerState::of_input(input, counter)
+                }
+                Pending::Attack(sequence) => {
+                    plays = self.chain_state;
+                    attack_start(counter, sequence)
+                }
+                Pending::Press(state, sequence) => SlayerState {
+                    state: Some(state),
+                    ..attack_start(counter, sequence)
+                },
                 Pending::State(state, sequence) => SlayerState {
                     state: Some(state),
                     started: Some(counter),
@@ -1190,19 +1611,23 @@ impl SlayerTrack {
                         sequence,
                         second: None,
                     };
-                    return (self.start(state), None);
+                    return (self.start(state, None), None);
                 }
             };
-            return (self.start(state), Some(frame_s));
+            return (self.start(state, plays), Some(frame_s));
         }
         if stand {
             self.sequence_s = self.newest_frame_s;
-            return (self.start(stand_state(number)), Some(self.newest_frame_s));
+            return (
+                self.start(stand_state(number), None),
+                Some(self.newest_frame_s),
+            );
         }
         if let Some(sequence) = self.follow_up.take() {
             self.sequence_s = self.newest_frame_s;
+            let plays = self.chain_state;
             return (
-                self.start(attack_start(number, sequence)),
+                self.start(attack_start(number, sequence), plays),
                 Some(self.newest_frame_s),
             );
         }
@@ -1213,9 +1638,20 @@ impl SlayerTrack {
         (self.current, None)
     }
 
-    /// The newest slayer state, in its own form.
-    pub(super) const fn current(&self) -> Option<SlayerState> {
-        self.current
+    /// The newest slayer state as the players who see this one get it: the own form, with the
+    /// state (child 13) added when the start plays in another state than the start before it.
+    /// Observed (`11-Savage-Divide-ab1760f2e3180cab/EXP-Savage-Divide`, the starts of the other
+    /// players with child 14): 3,042 of the 3,921 starts named a new state in child 13 and 233
+    /// the same one again; of the 646 without it, 529 went on in state 10 and 94 in state 8.
+    /// `02-The_Starstone_Barrows-c29df4e9ee294c08/EXP-Starstone-Barrows`: 1,183 new and 97
+    /// same of 1,430; of the 150 without it, 54 went on in state 10 and 76 in state 8. The client names its attacks in
+    /// row 1 and its own state needs no 13 ([`SlayerState::of_input`]), but a viewer's copy of
+    /// the player is still in its movement state: without 13 it never played the light and
+    /// heavy attacks (live 2026-11-12: others saw the abilities, whose starts carry 13, and no
+    /// attack). Example: the remote flail light `13=10 14=959 15=461 17=959` at 1793443095058
+    /// after an ability in state 8.
+    pub(super) const fn remote_action(&self) -> Option<SlayerState> {
+        self.remote_action
     }
 
     /// The state and sequence of its movement now, for the first card of a player who comes
@@ -1240,7 +1676,16 @@ impl SlayerTrack {
         self.clock.map(|_| self.sequence_s)
     }
 
-    fn start(&mut self, state: SlayerState) -> Option<SlayerState> {
+    /// Starts `state`, which plays in slayer state `plays` when its own form leaves child 13
+    /// out ([`SlayerTrack::remote_action`]).
+    fn start(&mut self, state: SlayerState, plays: Option<u64>) -> Option<SlayerState> {
+        let shown = state.state.or(plays);
+        let changed = shown.filter(|shown| Some(*shown) != self.played_state);
+        self.remote_action = Some(SlayerState {
+            state: state.state.or(changed),
+            ..state
+        });
+        self.played_state = shown.or(self.played_state);
         self.upper_after_state = false;
         self.current = Some(state);
         self.repeats = ECHO_STATES - 1;
@@ -1271,12 +1716,13 @@ const fn attack_start(started: u16, sequence: u64) -> SlayerState {
     }
 }
 
-/// The pull state in the own state numbered `started`: the second slot's action stops with it.
-const fn pulled_state(started: u16) -> SlayerState {
+/// The reaction state of sequence `sequence` (a pull's, [`pull`], or a hit's, [`reaction`]) in
+/// the own state numbered `started`: the second slot's action stops with it.
+const fn pulled_state(started: u16, sequence: u64) -> SlayerState {
     SlayerState {
         state: Some(pull::STATE),
         started: Some(started),
-        sequence: pull::SEQUENCE,
+        sequence,
         second: Some(SecondSlayerState {
             started,
             playing: None,
@@ -1546,6 +1992,7 @@ pub(crate) mod tests {
             weapon: None,
             swimming: false,
             falling: false,
+            posture: Posture::Stand,
         }
     }
 
@@ -1608,7 +2055,11 @@ pub(crate) mod tests {
             "once more"
         );
         assert_eq!(own_state(&mut track, NEWEST).state, None);
-        assert_eq!(track.current(), Some(follow_up), "the others still see it");
+        assert_eq!(
+            track.remote_action(),
+            Some(follow_up),
+            "the others still see it: it goes on in the action's state"
+        );
     }
 
     #[test]
@@ -1624,6 +2075,11 @@ pub(crate) mod tests {
         assert_eq!(
             (press.state, press.started, press.sequence),
             (Some(PRESS_STATE), Some(0x6ba), PRESS_START)
+        );
+        assert_eq!(
+            press.second.map(|second| (second.started, second.playing)),
+            Some((0x6ba, None)),
+            "the second slot starts with it (retail `17=<press>`)"
         );
         assert_eq!(
             due.slots.and_then(|slots| slots.marker),
@@ -1642,6 +2098,53 @@ pub(crate) mod tests {
         assert_eq!(
             light.second.map(|second| (second.started, second.playing)),
             Some((0x6bd, None))
+        );
+    }
+
+    #[test]
+    fn the_others_get_the_state_of_an_attack_that_starts_in_a_new_state() {
+        // Retail remote flail (Savage Divide 1793443095058): `13=10 14=959 15=461 17=959` after
+        // the player's ability in state 8; the own client named the start in row 1 and its own
+        // state left 13 out.
+        let table = table();
+        let mut track = spawned();
+        let walk = Intent {
+            forward: 1,
+            ..Intent::default()
+        };
+        track.record(quiet_record(200, walk), &table);
+        let moving = own_state(&mut track, 200).state.expect("the move");
+        assert_eq!(
+            track.remote_action(),
+            Some(moving),
+            "the move has its state"
+        );
+        track.record(
+            SlayerRecord {
+                intent: Some(walk),
+                ..attack_record(201)
+            },
+            &table,
+        );
+        let own = own_state(&mut track, 201)
+            .state
+            .expect("the client's attack");
+        assert_eq!(own.state, None, "the own form leaves the state out");
+        let seen = track.remote_action().expect("the others' form");
+        assert_eq!(
+            (seen.state, seen.started, seen.sequence),
+            (
+                Some(u64::from(attack_record(201).action.expect("row 1").state)),
+                Some(201),
+                5055
+            ),
+            "the others get the state the attack plays in"
+        );
+        let follow_up = own_state(&mut track, 201).state.expect("the follow-up");
+        assert_eq!(
+            track.remote_action(),
+            Some(follow_up),
+            "the follow-up goes on in that state: no state again"
         );
     }
 
@@ -2194,12 +2697,6 @@ pub(crate) mod tests {
 
     #[test]
     fn the_movement_sequences_are_the_retail_bytes() {
-        let bytes = |sequence: u64| {
-            nw_messages::wire::Writer::new()
-                .prefixed(sequence)
-                .expect("prefix")
-                .finish()
-        };
         for (sequence, retail) in [
             (movement::START_SEQUENCE, [0xaa, 0x2b]),
             (movement::BACK_START_SEQUENCE, [0x98, 0x14]),
@@ -2215,7 +2712,207 @@ pub(crate) mod tests {
             (loadout::LOOP_SEQUENCE, [0x89, 0x0a]),
             (loadout::CLOSE_SEQUENCE, [0x8b, 0x2e]),
         ] {
-            assert_eq!(bytes(sequence), retail, "{sequence}");
+            assert_eq!(sequence_bytes(sequence), retail, "{sequence}");
+        }
+    }
+
+    /// A sequence as the wire carries it (child 15).
+    fn sequence_bytes(sequence: u64) -> Vec<u8> {
+        nw_messages::wire::Writer::new()
+            .prefixed(sequence)
+            .expect("prefix")
+            .finish()
+    }
+
+    /// Reads the next record of a player in `posture` with keys `intent`: the record's counter
+    /// and the slayer state of its own state.
+    fn posture_step(
+        track: &mut SlayerTrack,
+        counter: &mut u16,
+        intent: Intent,
+        posture: Posture,
+    ) -> (u16, Option<SlayerState>) {
+        *counter += 1;
+        track.record(
+            SlayerRecord {
+                posture,
+                ..quiet_record(*counter, intent)
+            },
+            &table(),
+        );
+        (*counter, own_state(track, *counter).state)
+    }
+
+    /// The first state within `records` records of `intent` in `posture` that `wanted` takes,
+    /// with its record's counter.
+    fn posture_state(
+        track: &mut SlayerTrack,
+        counter: &mut u16,
+        (intent, posture): (Intent, Posture),
+        records: u16,
+        wanted: impl Fn(&SlayerState) -> bool,
+    ) -> Option<(u16, SlayerState)> {
+        (0..records).find_map(|_| {
+            let (at, state) = posture_step(track, counter, intent, posture);
+            state.filter(&wanted).map(|state| (at, state))
+        })
+    }
+
+    #[test]
+    fn a_crouch_and_its_moves_play_the_retail_sequences() {
+        // Retail `arvaysa_walk_running_crouch_prone_2`: the toggle at 72411 ms, `15=8913` 34 ms
+        // later, `15=9e3e` 548 ms after that; the moves from 37448 ms.
+        const TOGGLE: u16 = 0x7ac;
+        let still = Intent::default();
+        let forward = Intent::of_keys(true, false, false, false);
+        let mut track = spawned();
+        let mut counter = TOGGLE;
+        // The record after the toggle knows the crouch.
+        let (_, change) = posture_step(&mut track, &mut counter, still, Posture::Crouch);
+        let change = change.expect("the change to a crouch");
+        assert_eq!(
+            (change.state, change.started),
+            (None, None),
+            "child 15 alone"
+        );
+        assert_eq!(sequence_bytes(change.sequence), [0x89, 0x13]);
+        assert_eq!(track.remote_action(), Some(change), "the others see it");
+        let (at, settled) = posture_state(
+            &mut track,
+            &mut counter,
+            (still, Posture::Crouch),
+            20,
+            |state| state.sequence != change.sequence,
+        )
+        .expect("the crouch's stand");
+        assert_eq!((settled.state, settled.started), (None, None));
+        assert_eq!(sequence_bytes(settled.sequence), [0x9e, 0x3e]);
+        assert_eq!(at - TOGGLE, 16, "records from the toggle");
+        let (_, start) = posture_step(&mut track, &mut counter, forward, Posture::Crouch);
+        let start = start.expect("a crouching start");
+        assert_eq!(start.state, Some(movement::START_STATE));
+        assert_eq!(sequence_bytes(start.sequence), [0xb6, 0x1c]);
+        posture_step(&mut track, &mut counter, forward, Posture::Crouch);
+        let (_, stop) = posture_step(&mut track, &mut counter, still, Posture::Crouch);
+        let stop = stop.expect("a crouching stop");
+        assert_eq!(stop.state, Some(movement::MOVE_STATE));
+        assert_eq!(sequence_bytes(stop.sequence), [0xac, 0x30]);
+        let (_, idle) = posture_state(
+            &mut track,
+            &mut counter,
+            (still, Posture::Crouch),
+            12,
+            |state| state.state == Some(movement::IDLE_STATE),
+        )
+        .expect("crouching still");
+        assert_eq!(sequence_bytes(idle.sequence), [0x9e, 0x3e]);
+        assert_eq!(
+            idle.started
+                .zip(stop.started)
+                .map(|(idle, stop)| idle.wrapping_sub(stop)),
+            Some(10),
+            "retail: the stop at 04ac, still at 04b6"
+        );
+        // Standing up: `15=a13c`, then the stand's `15=b910`.
+        let (_, up) = posture_step(&mut track, &mut counter, still, Posture::Stand);
+        assert_eq!(
+            up.map(|state| sequence_bytes(state.sequence)),
+            Some(vec![0xa1, 0x3c])
+        );
+        let (_, stand) = posture_state(
+            &mut track,
+            &mut counter,
+            (still, Posture::Stand),
+            20,
+            |state| state.sequence == movement::IDLE_SEQUENCE,
+        )
+        .expect("standing still");
+        assert_eq!(stand.state, None);
+    }
+
+    #[test]
+    fn a_change_to_prone_holds_the_start_of_a_move() {
+        // Retail `arvaysa_walk_running_crouch_prone_2`: the toggle at 0530, the forward key from
+        // 0531, `15=912f`, then `13=1a 14=0544 15=971c`.
+        const TOGGLE: u16 = 0x530;
+        let still = Intent::default();
+        let forward = Intent::of_keys(true, false, false, false);
+        let mut track = spawned();
+        let mut counter = TOGGLE - 40;
+        for _ in 0..40 {
+            posture_step(&mut track, &mut counter, still, Posture::Crouch);
+        }
+        assert_eq!(counter, TOGGLE);
+        let (_, change) = posture_step(&mut track, &mut counter, forward, Posture::Prone);
+        assert_eq!(
+            change.map(|state| (state.state, sequence_bytes(state.sequence))),
+            Some((None, vec![0x91, 0x2f]))
+        );
+        let (_, start) = posture_state(
+            &mut track,
+            &mut counter,
+            (forward, Posture::Prone),
+            25,
+            |state| state.state == Some(movement::START_STATE),
+        )
+        .expect("the prone start");
+        assert_eq!(sequence_bytes(start.sequence), [0x97, 0x1c]);
+        assert_eq!(start.started, Some(TOGGLE + 20));
+        // The start shows the posture: no sequence of its own follows.
+        posture_step(&mut track, &mut counter, forward, Posture::Prone);
+        for _ in 0..30 {
+            let (at, state) = posture_step(&mut track, &mut counter, forward, Posture::Prone);
+            assert_eq!(state, None, "record {at:#x}");
+        }
+        // Prone to standing while it moves: `15=a03c`, then the stand's move.
+        let (_, up) = posture_step(&mut track, &mut counter, forward, Posture::Stand);
+        assert_eq!(
+            up.map(|state| sequence_bytes(state.sequence)),
+            Some(vec![0xa0, 0x3c])
+        );
+    }
+
+    #[test]
+    fn a_moving_player_crouches_and_stands_up_without_a_stop() {
+        // Retail `arvaysa_walk_running_crouch_prone`: the forward key held, the toggle at
+        // 38240 ms, `15=a51b` 52 ms later, `15=b61c` 535 ms after that.
+        const TOGGLE: u16 = 0x39f;
+        let forward = Intent::of_keys(true, false, false, false);
+        let mut track = spawned();
+        let mut counter = TOGGLE - 1;
+        let (_, start) = posture_step(&mut track, &mut counter, forward, Posture::Stand);
+        assert_eq!(
+            start.map(|state| state.sequence),
+            Some(movement::START_SEQUENCE)
+        );
+        let (_, change) = posture_step(&mut track, &mut counter, forward, Posture::Crouch);
+        let change = change.expect("the change to a crouch");
+        assert_eq!(
+            (change.state, sequence_bytes(change.sequence)),
+            (None, vec![0xa5, 0x1b])
+        );
+        let (at, settled) = posture_state(
+            &mut track,
+            &mut counter,
+            (forward, Posture::Crouch),
+            20,
+            |state| state.sequence != change.sequence,
+        )
+        .expect("the crouching move");
+        assert_eq!(
+            (settled.state, sequence_bytes(settled.sequence)),
+            (None, vec![0xb6, 0x1c])
+        );
+        assert_eq!(at - TOGGLE, 16, "records from the toggle");
+        // Standing up while moving: the stand's move at once.
+        let (_, up) = posture_step(&mut track, &mut counter, forward, Posture::Stand);
+        assert_eq!(
+            up.map(|state| (state.state, state.sequence)),
+            Some((None, movement::RESTART_SEQUENCE))
+        );
+        for _ in 0..30 {
+            let (_, state) = posture_step(&mut track, &mut counter, forward, Posture::Stand);
+            assert!(state.is_none_or(|state| state.sequence == movement::RESTART_SEQUENCE));
         }
     }
 
@@ -2296,6 +2993,118 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_hit_reaction_starts_clears_the_slots_holds_the_keys_and_ends_like_retail() {
+        // Retail newchar 2026-09-18, the great sword's `2960`: `13=04 14=1e02 15=902e 16=00
+        // 17=1e02 48=00`, 17 records, then `16=2d 17=1e13`; the hit came 20 ms before the start.
+        const STARTED: u16 = 0x1e02;
+        const SEQUENCE: u64 = 2960;
+        const LENGTH_RECORDS: u16 = 17;
+        const HIT_BEFORE_MS: u64 = 20;
+        let mut track = spawned();
+        track.chain_marked = true;
+        track.slots_on.second = true;
+        let length_ms = u64::from(LENGTH_RECORDS) * TICK_MS;
+        let hit_ms = u64::from(STARTED) * TICK_MS - HIT_BEFORE_MS;
+        track.reacted(SEQUENCE, hit_ms, length_ms, length_ms);
+        let start = own_state(&mut track, STARTED);
+        let reaction = pulled_state(STARTED, SEQUENCE);
+        assert_eq!(start.state, Some(reaction));
+        let clears = start.slots.expect("the slots it clears");
+        assert_eq!(clears.marker, Some(CLEARED_SLOT), "48=00");
+        assert_eq!(clears.second.sequence, Some(CLEARED_SLOT), "18=00");
+        assert_eq!(
+            clears.third,
+            SlotChange::default(),
+            "the third slot did not play"
+        );
+        // The client's row 1 of the reaction, a held move key and attack presses start nothing.
+        let walk = Intent {
+            forward: 1,
+            ..Intent::default()
+        };
+        let row = SlayerInput {
+            sequence: SEQUENCE,
+            state: u16::try_from(pull::STATE).expect("state"),
+            second_state: u16::MAX,
+            second_sequence: 0,
+        };
+        for counter in STARTED..STARTED + LENGTH_RECORDS {
+            track.record(
+                SlayerRecord {
+                    action: (counter == STARTED).then_some(row),
+                    attack: PRESS,
+                    ..quiet_record(counter, walk)
+                },
+                &table(),
+            );
+            let due = own_state(&mut track, counter + 1);
+            if counter + 1 < STARTED + LENGTH_RECORDS {
+                assert!(
+                    due.state.is_none_or(|state| state == reaction),
+                    "record {counter}: {due:?}"
+                );
+            } else {
+                let end = due.slots.expect("the end");
+                assert_eq!(
+                    end.second,
+                    SlotChange {
+                        state: Some(CAST_END_STATE),
+                        started: Some(STARTED + LENGTH_RECORDS),
+                        sequence: None,
+                    },
+                    "16=2d 17=1e13"
+                );
+            }
+        }
+        // Without keys the player stands still in the state after the end.
+        track.record(
+            quiet_record(STARTED + LENGTH_RECORDS, Intent::default()),
+            &table(),
+        );
+        let after = own_state(&mut track, STARTED + LENGTH_RECORDS + 1).state;
+        assert_eq!(
+            after.map(|state| (state.state, state.sequence)),
+            Some((Some(movement::IDLE_STATE), movement::IDLE_SEQUENCE))
+        );
+    }
+
+    #[test]
+    fn a_hit_reaction_lets_a_held_key_move_the_player_again_at_its_free_point() {
+        const STARTED: u16 = 100;
+        const FREE_RECORDS: u16 = 10;
+        let mut track = spawned();
+        let walk = Intent {
+            forward: 1,
+            ..Intent::default()
+        };
+        track.record(quiet_record(STARTED - 2, walk), &table());
+        own_state(&mut track, STARTED - 1);
+        let free_ms = u64::from(FREE_RECORDS) * TICK_MS;
+        track.reacted(
+            pull::SEQUENCE,
+            u64::from(STARTED) * TICK_MS - 1,
+            free_ms,
+            2 * free_ms,
+        );
+        own_state(&mut track, STARTED);
+        let mut moved = None;
+        for counter in STARTED..STARTED + 2 * FREE_RECORDS {
+            track.record(quiet_record(counter, walk), &table());
+            let due = own_state(&mut track, counter + 1);
+            if moved.is_none()
+                && let Some(state) = due.state.filter(|state| state.state != Some(pull::STATE))
+            {
+                moved = Some((counter, state.state));
+            }
+        }
+        assert_eq!(
+            moved,
+            Some((STARTED + FREE_RECORDS, Some(movement::MOVE_STATE))),
+            "the held key moves it again from the free point, in the move state (13=1b)"
+        );
+    }
+
+    #[test]
     fn a_pull_plays_the_pulled_state_then_stands_the_player_still() {
         /// The retail pull's own state number (`14=3163`), as this test's tick number.
         const PULLED_IN: u16 = 0x3163;
@@ -2303,7 +3112,7 @@ pub(crate) mod tests {
         let pulled_at_ms = u64::from(PULLED_IN - 1) * TICK_MS;
         track.pulled(pulled_at_ms);
         let state = own_state(&mut track, PULLED_IN).state;
-        assert_eq!(state, Some(pulled_state(PULLED_IN)));
+        assert_eq!(state, Some(pulled_state(PULLED_IN, pull::SEQUENCE)));
         assert_eq!(
             own_state(&mut track, PULLED_IN + 1).state,
             state,

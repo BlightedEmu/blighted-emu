@@ -34,14 +34,13 @@ use crate::position::SaveOutcome;
 use crate::recipe_cooldowns::{
     SavedRecipeCooldown, character_recipe_cooldowns, save_character_recipe_cooldowns,
 };
-use crate::seasons::{SavedSeason, character_season, save_character_season};
 use crate::status_effects::{
     SavedStatusEffect, character_status_effects, save_character_status_effects,
 };
 use crate::travel::{SavedTravel, character_travel, save_character_travel};
 
 /// Milliseconds per second, for the stored time.
-const MILLIS_PER_SECOND: f64 = 1000.0;
+pub(crate) const MILLIS_PER_SECOND: f64 = 1000.0;
 /// The column of the achievement bits.
 const ACHIEVEMENTS: &str = "achievements";
 
@@ -113,8 +112,6 @@ pub struct SavedProgression {
     /// The vitals, ability cooldowns, PvP flag wish, stone turns and fishing bait (world
     /// migration 0034).
     pub log_out_state: SavedLogOutState,
-    /// The season pass state (world migration 0041).
-    pub season: SavedSeason,
 }
 
 type ProgressionRow = (bool, i64, i64, Vec<i32>);
@@ -205,7 +202,6 @@ pub async fn character_progression(
     let status_effects = character_status_effects(world, character_id).await?;
     let consumable_cooldowns = character_consumable_cooldowns(world, character_id).await?;
     let log_out_state = character_log_out_state(world, character_id).await?;
-    let season = character_season(world, character_id).await?;
     Ok(Some(SavedProgression {
         experience: from_column(experience, "experience")?,
         coins: from_column(coins, "coins")?,
@@ -266,7 +262,6 @@ pub async fn character_progression(
         status_effects,
         consumable_cooldowns,
         log_out_state,
-        season,
     }))
 }
 
@@ -447,7 +442,6 @@ pub async fn save_character_progression(
     .await?;
     save_character_log_out_state(&mut transaction, character_id, &progression.log_out_state)
         .await?;
-    save_character_season(&mut transaction, character_id, &progression.season).await?;
     transaction.commit().await?;
     Ok(SaveOutcome::Saved)
 }
@@ -586,21 +580,6 @@ mod infra_tests {
                 pvp_wanted: true,
                 cyclic_turns: BTreeMap::from([("puzzlestone_a".to_owned(), 3)]),
                 fishing_bait: Some("FishingBaitT2".to_owned()),
-            },
-            // A made-up season state: two redeemed rewards and a card with one stamp.
-            season: crate::SavedSeason {
-                season: 0x2221_5ad9,
-                redeemed: vec![0b11],
-                stats: vec![(0x1234_5678, 6)],
-                card: crate::SavedCard {
-                    template: 1,
-                    tasks: vec![0x199d_1dce],
-                    claimed: 1,
-                    stamped: 2,
-                    wild_stamps: 3,
-                    ..crate::SavedCard::default()
-                },
-                first_connect_ns: 1_790_860_000_000_000_000,
             },
         }
     }

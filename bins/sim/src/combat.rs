@@ -254,6 +254,7 @@ pub mod test_support {
                     block_stamina_damage: 0.0,
                     block_stability: 0.0,
                     ranged_block: None,
+                    stagger_damage: 0.0,
                 },
             )],
             attacks: test_attack_rows(&rows.damage_table)
@@ -287,6 +288,10 @@ pub mod test_support {
             backstab: true,
             headshot: true,
             rune_charge: nw_content::combat::RuneChargeRow::default(),
+            power_level: 0,
+            hit_stun: 0,
+            stagger_mod: 0.0,
+            stun_breakout: 0.0,
         }
     }
 
@@ -321,6 +326,10 @@ pub mod test_support {
                 backstab: true,
                 headshot: true,
                 rune_charge: nw_content::combat::RuneChargeRow::default(),
+                power_level: 0,
+                hit_stun: 0,
+                stagger_mod: 0.0,
+                stun_breakout: 0.0,
             })
             .collect()
     }

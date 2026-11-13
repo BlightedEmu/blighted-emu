@@ -109,9 +109,9 @@ pub(super) trait ScriptHost {
         at: [f32; 3],
         waypoints: Option<&PatrolPath>,
     ) -> Option<u64>;
-    /// Spawns a start object of slice `slice` at `at` (a target slice without a mob); its
-    /// entity, or `None` when the slice is no start object.
-    fn spawn_object(&mut self, slice: &str, at: [f32; 3]) -> Option<u64>;
+    /// Spawns a start object of slice `slice` at `at`, turned `yaw_deg` (a target slice
+    /// without a mob); its entity, or `None` when the slice is no start object.
+    fn spawn_object(&mut self, slice: &str, at: [f32; 3], yaw_deg: f32) -> Option<u64>;
     /// Removes encounter mob or start object `entity`.
     fn remove(&mut self, entity: u64);
     /// The health of mob `entity` (a standing start object has [`OBJECT_HEALTH`]); `None` when
@@ -124,7 +124,7 @@ pub(super) trait ScriptHost {
 }
 
 /// The health a standing start object reports: it is not dead until it is gathered.
-const OBJECT_HEALTH: u32 = 1;
+pub(super) const OBJECT_HEALTH: u32 = 1;
 
 /// What the players of the instance are doing in one tick.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -412,13 +412,6 @@ impl DungeonRun {
         Some((manager, stages))
     }
 
-    pub(super) fn places(&self) -> impl Iterator<Item = [f32; 3]> + '_ {
-        self.script
-            .encounters
-            .iter()
-            .map(|encounter| encounter.position)
-    }
-
     /// The live mobs of every encounter.
     pub(super) fn mobs(&self) -> impl Iterator<Item = u64> + '_ {
         self.encounters
@@ -577,12 +570,16 @@ fn starts_when_enabled(encounter: &Encounter) -> bool {
 
 /// How long after its end at `done_ms` an open world encounter starts again: a time in its
 /// spawner's respawn range (picked by the end time, so that a run holds one time), else the
-/// rules' mob respawn time.
+/// rules' mob respawn time. A range whose end is below its start is its start: the holdout's
+/// spawner (`WorldEvent_Holdout`, range 10 to 0 s) took its one-way door away 10.05 s after the
+/// end its stage times give (`99a_msq_01b_learnsoulwardens` 378.650 s; Inferred: the end
+/// itself is out of the player's view).
 fn respawn_ms(encounter: &Encounter, rules: OpenWorldRules, done_ms: u64) -> u64 {
     let Some([low_s, high_s]) = encounter
         .spawner
         .map(|spawner| spawner.respawn_s)
-        .filter(|[low, high]| *high > 0.0 && high >= low)
+        .filter(|[low, high]| *high > 0.0 || *low > 0.0)
+        .map(|[low, high]| [low, high.max(low)])
     else {
         return rules.respawn_ms;
     };
@@ -604,7 +601,7 @@ fn respawn_ms(encounter: &Encounter, rules: OpenWorldRules, done_ms: u64) -> u64
 }
 
 /// The SplitMix64 mix (Steele, Lea and Flood) of `seed`.
-const fn mixed(seed: u64) -> u64 {
+pub(super) const fn mixed(seed: u64) -> u64 {
     let mut mixed = seed.wrapping_add(SPLITMIX_GAMMA);
     mixed = (mixed ^ (mixed >> 30)).wrapping_mul(SPLITMIX_MUL_A);
     mixed = (mixed ^ (mixed >> 27)).wrapping_mul(SPLITMIX_MUL_B);
@@ -891,12 +888,24 @@ fn spawn_one(
     let Some(target) = encounter.targets.get(spawn.target) else {
         return;
     };
-    let at_of = |number: u32| {
+    let location_of = |number: u32| {
         usize::try_from(number)
             .ok()
-            .and_then(|number| spawn.locations.get(number % spawn.locations.len().max(1)))
+            .map(|number| number % spawn.locations.len().max(1))
+    };
+    let at_of = |number: u32| {
+        location_of(number)
+            .and_then(|location| spawn.locations.get(location))
             .copied()
             .unwrap_or(encounter.position)
+    };
+    // The encounter's yaw and its location's turn ([`Spawn::turns_deg`]).
+    let yaw_of = |number: u32| {
+        encounter.yaw_deg
+            + location_of(number)
+                .and_then(|location| spawn.turns_deg.get(location))
+                .copied()
+                .unwrap_or_default()
     };
     let difficulty = encounter.difficulty;
     let mobs: Vec<(usize, &TargetMob, u32)> = target
@@ -919,7 +928,7 @@ fn spawn_one(
                 .enumerate()
                 .filter(|(_, slice)| of_difficulty(target, slice, difficulty))
             {
-                match host.spawn_object(&target_slice.path, at_of(number)) {
+                match host.spawn_object(&target_slice.path, at_of(number), yaw_of(number)) {
                     Some(entity) => run.mobs.push(EncounterMob {
                         entity,
                         target: spawn.target,
@@ -1221,8 +1230,8 @@ impl ScriptHost for SimHost<'_> {
         }
     }
 
-    fn spawn_object(&mut self, slice: &str, at: [f32; 3]) -> Option<u64> {
-        self.world.encounter_objects.spawn(slice, at)
+    fn spawn_object(&mut self, slice: &str, at: [f32; 3], yaw_deg: f32) -> Option<u64> {
+        self.world.encounter_objects.spawn(slice, at, yaw_deg)
     }
 
     fn remove(&mut self, entity: u64) {
@@ -1295,7 +1304,11 @@ impl SimWorld {
                 .map_or(0, |(instance, _)| instance.as_u64_pair().0);
             self.start_gates(running.as_ref().map(|(_, mode)| mode.as_str()), salt);
             self.dungeon_run = running.and_then(|(instance, game_mode)| {
-                let script = self.content.dungeon_scripts.game_mode(&game_mode)?.clone();
+                // A catacombs run's script is made from its layout ([`super::catacombs`]).
+                let script = match self.catacomb_run() {
+                    Some(catacomb) => catacomb.script().clone(),
+                    None => self.content.dungeon_scripts.game_mode(&game_mode)?.clone(),
+                };
                 tracing::info!(
                     %instance,
                     game_mode = %game_mode,
@@ -1334,6 +1347,7 @@ impl SimWorld {
         for outcome in outcomes {
             match outcome {
                 ScriptOutcome::EncounterDone(index) => {
+                    self.catacomb_encounter_done(index);
                     let chests: Vec<(String, [f32; 3])> = run
                         .chests_of(index)
                         .map(|(table, at)| (table.to_owned(), at))
@@ -1412,10 +1426,7 @@ impl SimWorld {
             ..ScriptView::default()
         };
         self.see_players(&mut view);
-        let owned: Vec<bool> = run
-            .places()
-            .map(|[x, y, z]| self.owns(Point { x, y, z }))
-            .collect();
+        let owned = self.runs_here(&run);
         let host = &mut SimHost {
             world: self,
             mutated: false,
@@ -1434,6 +1445,27 @@ impl SimWorld {
         }
         self.show_encounters(&mut run, &owned, now_ms);
         self.world_events = Some(run);
+    }
+
+    /// Which open world encounters of `run` this sim runs now, by index: those of its own cells
+    /// in their time of day ([`super::day_night::TimedPlaces`]). An encounter out of its time
+    /// resets as one of another sim's cell does.
+    fn runs_here(&self, run: &DungeonRun) -> Vec<bool> {
+        let phase = self.day_phase();
+        run.script
+            .encounters
+            .iter()
+            .zip(&run.encounters)
+            .map(|(encounter, state)| {
+                let [x, y, z] = encounter.position;
+                self.owns(Point { x, y, z })
+                    && self.content.time_of_day.slice_holds(
+                        &encounter.slice,
+                        phase,
+                        state.status != EncounterStatus::Idle,
+                    )
+            })
+            .collect()
     }
 
     /// The encounter roots after a step of `run` at `now_ms`: each root shows its encounter's
@@ -1563,6 +1595,8 @@ mod tests {
         health: HashMap<u64, u32>,
         phase: HashMap<u64, u32>,
         spawned: Vec<(String, [f32; 3])>,
+        /// The yaw of each start object spawned, in order.
+        object_yaws: Vec<f32>,
         removed: Vec<u64>,
     }
 
@@ -1578,11 +1612,12 @@ mod tests {
             self.spawned.push((mob.vitals_id.clone(), at));
             Some(self.next)
         }
-        fn spawn_object(&mut self, slice: &str, at: [f32; 3]) -> Option<u64> {
+        fn spawn_object(&mut self, slice: &str, at: [f32; 3], yaw_deg: f32) -> Option<u64> {
             slice.contains(START_OBJECT).then(|| {
                 self.next += 1;
                 self.health.insert(self.next, OBJECT_HEALTH);
                 self.spawned.push((slice.to_owned(), at));
+                self.object_yaws.push(yaw_deg);
                 self.next
             })
         }
@@ -1772,6 +1807,9 @@ mod tests {
 
     #[test]
     fn a_start_object_stands_until_it_is_gathered_and_then_its_stage_ends() {
+        // The encounter's yaw and its location's turn: the object faces their sum.
+        const ENCOUNTER_YAW_DEG: f32 = 90.0;
+        const TURN_DEG: f32 = -52.0;
         let object = Target {
             name: "StartObject".to_owned(),
             slices: vec![TargetSlice {
@@ -1784,6 +1822,8 @@ mod tests {
             spawns: vec![Spawn {
                 target: 0,
                 count: 1,
+                locations: vec![PLACE],
+                turns_deg: vec![TURN_DEG],
                 ..Spawn::default()
             }],
             objectives: vec![objective(
@@ -1802,6 +1842,7 @@ mod tests {
             top_stages: vec![0],
             stages: vec![interact],
             targets: vec![object],
+            yaw_deg: ENCOUNTER_YAW_DEG,
             ..Encounter::default()
         };
         let mut run = DungeonRun::new(Uuid::nil(), script(vec![encounter]));
@@ -1810,6 +1851,7 @@ mod tests {
         run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
         assert_eq!(host.spawned.len(), 1, "the start object stands");
         assert!(host.spawned[0].0.contains(START_OBJECT));
+        assert_eq!(host.object_yaws, [ENCOUNTER_YAW_DEG + TURN_DEG]);
         assert_eq!(stage_status(&run, 0), StageStatus::Running);
         assert_eq!(
             run.client_status(0),
@@ -1886,6 +1928,21 @@ mod tests {
             assert!((900_000..=1_200_000).contains(&ms), "{ms}");
             assert_eq!(ms, respawn_ms(&grouped, rules, done), "one time per end");
         }
+        // The holdout's spawner range (Observed, `WorldEvent_Holdout`).
+        const HOLDOUT_RANGE_S: [f32; 2] = [10.0, 0.0];
+        const HOLDOUT_RESPAWN_MS: u64 = 10_000;
+        let holdout = Encounter {
+            spawner: Some(SpawnerRules {
+                respawn_s: HOLDOUT_RANGE_S,
+                ..area
+            }),
+            ..boss_encounter()
+        };
+        assert_eq!(
+            respawn_ms(&holdout, rules, T0),
+            HOLDOUT_RESPAWN_MS,
+            "an end below the start"
+        );
         assert!(starts_when_enabled(&grouped));
         let triggered = Encounter {
             spawner: Some(SpawnerRules {
@@ -2018,6 +2075,7 @@ mod tests {
                 count: 2,
                 delay_s: 1,
                 locations: vec![[1.0, 2.0, 3.0]],
+                ..Spawn::default()
             }],
             objectives: vec![objective(
                 ObjectiveSpec::SliceDestroyed {
@@ -2226,6 +2284,50 @@ mod tests {
             near_m: 100.0,
             respawn_ms: 60_000,
         }
+    }
+
+    #[test]
+    fn an_encounter_runs_only_in_its_time_of_day() {
+        use nw_world::time_of_day::{TimeOfDayPoints, TimedSlicePath};
+
+        use crate::world::day_night::TimedPlaces;
+        use crate::world::day_night::tests::{DAY_MS, NIGHT_MS, NIGHT_ONLY};
+        use crate::world::tests::{table, world_with_spawns};
+        const HAUNT: &str =
+            "slices/worldevents/brightwood/enc_worldevent_brightwood_walshamhaunt_00.dynamicslice";
+        let haunt = Encounter {
+            slice: HAUNT.to_owned(),
+            ..boss_encounter()
+        };
+        let run =
+            DungeonRun::of_open_world(script(vec![boss_encounter(), haunt]), open_rules(), &|_| {
+                false
+            });
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a"])).expect("table");
+        world.ids.time_change_time = 0;
+        let level = nw_world::WorldFile {
+            time_of_day: TimeOfDayPoints {
+                slices: vec![TimedSlicePath {
+                    slice: HAUNT.to_owned(),
+                    window: NIGHT_ONLY,
+                }],
+                ..TimeOfDayPoints::default()
+            },
+            ..nw_world::WorldFile::default()
+        };
+        world.content = std::sync::Arc::new(crate::player_content::PlayerContent {
+            time_of_day: TimedPlaces::of(&level),
+            ..(*world.content).clone()
+        });
+        world.server_ms = DAY_MS;
+        assert_eq!(
+            world.runs_here(&run),
+            [true, false],
+            "the haunt waits for the night"
+        );
+        world.server_ms = NIGHT_MS;
+        assert_eq!(world.runs_here(&run), [true, true]);
     }
 
     #[test]

@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use nw_content::Tables;
 use nw_content::instances::InstanceCatalog;
 use nw_content::mob_prefabs::{ASSET_ID_LEN, MobPrefabs};
+use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, AssetCatalogError, slice_assets_in};
 use nw_formats::azcs::AzcsError;
 use nw_formats::objectstream::{Element, ObjectStreamError, parse_object_stream};
 use nw_formats::pak::PakError;
@@ -40,8 +41,12 @@ use crate::breach_tiers::{BreachTier, load_breach_tiers};
 use crate::collision::{PakIndex, detector_volume};
 use crate::roads::without_azcs;
 
+/// The pak folder of the catacombs gameplay tiles.
+const CATACOMB_TILE_FOLDER: &str = "slices/catacombs/gameplay/tiles/";
 /// The folder of the levels' data in the paks.
 const COATLICUE_DIR: &str = "sharedassets/coatlicue";
+/// The catalog folder that holds every slice (the empty prefix).
+const ANY_FOLDER: &str = "";
 /// The suffix of a capitals file.
 const CAPITALS_SUFFIX: &str = ".capitals.json";
 /// The folder of a slice path of the game mode table.
@@ -101,6 +106,9 @@ pub enum DungeonScriptsBuildError {
         /// Why.
         source: LevelScriptError,
     },
+    /// The asset catalog cannot be read.
+    #[error(transparent)]
+    Catalog(#[from] AssetCatalogError),
     /// A metadata file cannot be read.
     #[error("{path}: {source}")]
     Metadata {
@@ -140,12 +148,49 @@ pub trait SliceSource {
     ///
     /// Returns [`DungeonScriptsBuildError`] when the entry cannot be read or decoded.
     fn root(&mut self, path: &str) -> Result<Option<Element>, DungeonScriptsBuildError>;
+
+    /// The catalog path of each dynamic slice GUID, when the source has an asset catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DungeonScriptsBuildError`] when the catalog cannot be read.
+    fn slice_catalog(
+        &mut self,
+    ) -> Result<Option<&HashMap<[u8; ASSET_ID_LEN], String>>, DungeonScriptsBuildError> {
+        Ok(None)
+    }
+
+    /// The pak path of the slice `asset` names: its stored path when that is an entry (or
+    /// empty), else the catalog's path of its GUID, else the stored path.
+    ///
+    /// Observed: a spawner's stored path can be out of date while its GUID is right
+    /// (`WorldEvent_SpawnGroup_Single_Master_448598026` names
+    /// `slices/pois/ancient/design/enc_worldevent_holdout_setup.dynamicslice`, whose entry is in
+    /// the `holdout` folder below it; retail spawned the GUID's asset `a8cf2442...` in
+    /// `99a_msq_01b_learnsoulwardens` 180.442 s).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DungeonScriptsBuildError`] when the entry or the catalog cannot be read.
+    fn asset_path(&mut self, asset: &AssetRef) -> Result<String, DungeonScriptsBuildError> {
+        if asset.path.is_empty() || self.root(&asset.path)?.is_some() {
+            return Ok(asset.path.clone());
+        }
+        Ok(self
+            .slice_catalog()?
+            .and_then(|catalog| catalog.get(&asset.guid))
+            .cloned()
+            .unwrap_or_else(|| asset.path.clone()))
+    }
 }
 
 /// The pak entries, read once each.
 pub struct PakSlices<'a> {
     index: &'a PakIndex,
     read: HashMap<String, Option<Element>>,
+    /// The catalog path of each dynamic slice GUID, read at the first stored path that is no
+    /// entry.
+    catalog: Option<HashMap<[u8; ASSET_ID_LEN], String>>,
 }
 
 impl<'a> PakSlices<'a> {
@@ -154,7 +199,27 @@ impl<'a> PakSlices<'a> {
         Self {
             index,
             read: HashMap::new(),
+            catalog: None,
         }
+    }
+
+    /// The catalog path of each dynamic slice GUID (sub id 2) of the paks' asset catalog.
+    fn catalog(
+        &mut self,
+    ) -> Result<&HashMap<[u8; ASSET_ID_LEN], String>, DungeonScriptsBuildError> {
+        if self.catalog.is_none() {
+            let mut by_guid = HashMap::new();
+            for (_, bytes) in self
+                .index
+                .read_each(&[ASSET_CATALOG_ENTRY.to_owned()], |_, bytes| bytes)
+            {
+                for (path, (guid, _)) in slice_assets_in(&bytes?, ANY_FOLDER)? {
+                    by_guid.insert(guid, path);
+                }
+            }
+            self.catalog = Some(by_guid);
+        }
+        Ok(self.catalog.get_or_insert_default())
     }
 }
 
@@ -178,6 +243,12 @@ impl SliceSource for PakSlices<'_> {
         }
         self.read.insert(path.to_owned(), root.clone());
         Ok(root)
+    }
+
+    fn slice_catalog(
+        &mut self,
+    ) -> Result<Option<&HashMap<[u8; ASSET_ID_LEN], String>>, DungeonScriptsBuildError> {
+        self.catalog().map(Some)
     }
 }
 
@@ -271,6 +342,14 @@ fn is_breach_group(path: &str) -> bool {
     file_name(path).starts_with(BREACH_GROUP_PREFIX)
 }
 
+/// Whether `path` is a catacombs gameplay tile: its alias slots (`EncounterNamedEnemy`,
+/// `EncounterBoss`, `EncounterHazard`, `Hallway`) spawn one of their entries per run (Observed:
+/// `CATACOMBS2` shows `dg_enc_catacombs_namedenemy_werebeast` and `_warden`, two entries of
+/// `catacombs_gameplay_tile_namedenemy.aliasasset`, in two named rooms).
+fn is_catacomb_tile(path: &str) -> bool {
+    path.starts_with(CATACOMB_TILE_FOLDER)
+}
+
 /// The file name of the pak path `path`.
 fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
@@ -324,6 +403,71 @@ fn script_placements(
         }
     }
     Ok(found)
+}
+
+/// An open world encounter slice that no spawn group, alias asset or capital of the client data
+/// places, at the place of its retail root.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RetailPlacement {
+    /// The name the encounter takes (its slice's root entity).
+    name: &'static str,
+    /// The slice's pak path.
+    slice: &'static str,
+    /// The retail root's place (world metres).
+    position: [f32; 3],
+    /// The retail root's yaw (degrees counter-clockwise).
+    yaw_deg: f32,
+}
+
+/// The retail-placed encounters (Observed): the stronghold siren's root group came at 4558.190 s
+/// of `Playthrough_Part_18` with a dynamic `GdeRef` at x 11490.633, y 2738.5813 and the raw height
+/// 4606 (47.594 m), with no rotation (yaw 0). No dynamic slice spawner names the slice by its path
+/// or its GUID `501044708f825265...`, no alias asset lists it and no capital of any level names it
+/// (door study 2026-11-12, every pak of build 25810808); the server places it from data the
+/// client does not have.
+const RETAIL_PLACED_ENCOUNTERS: [RetailPlacement; 1] = [RetailPlacement {
+    name: "Enc_WorldEvent_Stronghold_Siren",
+    slice: "slices/worldevents/elite_stronghold_siege/siren/enc_worldevent_stronghold_siren.dynamicslice",
+    position: [11_490.633, 2_738.581_3, 47.594],
+    yaw_deg: 0.0,
+}];
+
+/// The encounter of `placement`; `None` when its slice is not in the paks or holds no
+/// encounter manager.
+fn retail_placed_encounter(
+    source: &mut impl SliceSource,
+    placement: &RetailPlacement,
+    mobs: MobSources<'_>,
+    points: &[EncounterPoint],
+    report: &mut DungeonScriptsReport,
+) -> Result<Option<Encounter>, DungeonScriptsBuildError> {
+    let Some(script) = read_script(source, placement.slice, &mut report.missing_slices)? else {
+        return Ok(None);
+    };
+    if script.manager().is_none() {
+        return Ok(None);
+    }
+    let half_yaw = placement.yaw_deg.to_radians() / 2.0;
+    let placed = Transform::placed(
+        placement.position,
+        [0.0, 0.0, half_yaw.sin(), half_yaw.cos()],
+        UNIT_SCALE,
+    );
+    let entity = ScriptEntity {
+        name: placement.name.to_owned(),
+        ..ScriptEntity::default()
+    };
+    build_encounter(
+        source,
+        MobSources {
+            prefabs: None,
+            ..mobs
+        },
+        report,
+        (&entity, placement.slice, &script, placed),
+        points,
+    )
+    .map(Some)
 }
 
 /// The level of each vitals row (`VitalsLevelVariantData`), by lower-case id.
@@ -530,11 +674,8 @@ pub fn build_dungeon_scripts(
     client_build: &str,
     out_dir: &Path,
 ) -> Result<DungeonScriptsReport, DungeonScriptsBuildError> {
-    let levels = vitals_levels(tables);
+    let (levels, prefabs) = mob_tables(tables, out_dir, client_build);
     let names = vitals_names(tables);
-    let prefabs = MobPrefabs::load(out_dir, client_build)
-        .map(|prefabs| prefab_mobs(&prefabs, &names))
-        .unwrap_or_default();
     let mobs = MobSources {
         levels: &levels,
         prefabs: Some(&prefabs),
@@ -580,6 +721,20 @@ pub fn build_dungeon_scripts(
         open_world.encounters.extend(group.encounters);
         open_world.chests.extend(group.chests);
     }
+    for placement in &RETAIL_PLACED_ENCOUNTERS {
+        let placed = open_world
+            .encounters
+            .iter()
+            .any(|encounter| encounter.slice == placement.slice);
+        if placed {
+            continue;
+        }
+        if let Some(encounter) =
+            retail_placed_encounter(&mut slices, placement, mobs, &points, &mut report)?
+        {
+            open_world.encounters.push(encounter);
+        }
+    }
     let tiers = load_breach_tiers(out_dir, client_build)?;
     finish_grouped_encounters(&mut open_world.encounters, &tiers, &levels, &mut report);
     report.open_world_encounters = open_world.encounters.len();
@@ -593,6 +748,21 @@ pub fn build_dungeon_scripts(
     }
     report.path = path;
     Ok(report)
+}
+
+/// The level of each vitals row ([`vitals_levels`]) and the vitals row of each creature slice
+/// asset of the mob prefab file in `out_dir` ([`prefab_mobs`]; empty without the file): the
+/// tables a [`MobSources`] borrows.
+pub fn mob_tables(
+    tables: &Tables,
+    out_dir: &Path,
+    client_build: &str,
+) -> (HashMap<String, u32>, HashMap<[u8; ASSET_ID_LEN], String>) {
+    let names = vitals_names(tables);
+    let prefabs = MobPrefabs::load(out_dir, client_build)
+        .map(|prefabs| prefab_mobs(&prefabs, &names))
+        .unwrap_or_default();
+    (vitals_levels(tables), prefabs)
 }
 
 /// The script of the level script slice `script` placed at `placement`; `None` when the slice
@@ -622,8 +792,9 @@ pub fn build_level(
         };
         let own_place = placement.then(&level_script.placement_of(entity.id));
         if let Some(spawned) = &spawner.slice {
+            let spawned_path = source.asset_path(spawned)?;
             let Some(spawned_script) =
-                read_script(source, &spawned.path, &mut report.missing_slices)?
+                read_script(source, &spawned_path, &mut report.missing_slices)?
             else {
                 continue;
             };
@@ -635,7 +806,7 @@ pub fn build_level(
                         ..mobs
                     },
                     report,
-                    (entity, &spawned.path, &spawned_script, own_place),
+                    (entity, &spawned_path, &spawned_script, own_place),
                     points,
                 )?;
                 level.encounters.push(encounter);
@@ -643,16 +814,15 @@ pub fn build_level(
                 report.chests += 1;
                 level.chests.push(Chest {
                     name: entity.name.clone(),
-                    slice: spawned.path.clone(),
+                    slice: spawned_path,
                     position: position_of(&own_place),
                     loot_table: table.to_owned(),
                 });
             }
-        } else if let Some(alias) = spawner
-            .alias
-            .as_ref()
-            .filter(|alias| is_breach_group(script) && alias.path.ends_with(ALIAS_SUFFIX))
-        {
+        } else if let Some(alias) = spawner.alias.as_ref().filter(|alias| {
+            (is_breach_group(script) || is_catacomb_tile(script))
+                && alias.path.ends_with(ALIAS_SUFFIX)
+        }) {
             let places = spawn_points(&level_script, entity.id)
                 .map(|point| placement.then(&level_script.placement_of(point)))
                 .collect::<Vec<_>>();
@@ -663,7 +833,7 @@ pub fn build_level(
             };
             let group = format!("{script}#{}", entity.id);
             for choice in read_alias(source, &alias.path, &mut report.missing_slices)? {
-                let path = choice.slice.path;
+                let path = source.asset_path(&choice.slice)?;
                 let Some(spawned_script) = read_script(source, &path, &mut report.missing_slices)?
                 else {
                     continue;
@@ -779,6 +949,14 @@ pub(crate) fn read_script(
         })
 }
 
+/// The turn of `place` from `from`'s yaw, degrees counter-clockwise (Observed: the holdout's
+/// one-way door faced its `sp03 - Entrance` location's way, `99a_msq_01b_learnsoulwardens`
+/// 245.635 s).
+#[allow(clippy::cast_possible_truncation, reason = "degrees")]
+fn turn_deg(place: &Transform, from: &Transform) -> f32 {
+    (place.yaw_degrees() - from.yaw_degrees()) as f32
+}
+
 /// World metres of a transform's translation.
 #[allow(clippy::cast_possible_truncation, reason = "world metres")]
 pub(crate) fn position_of(transform: &Transform) -> [f32; 3] {
@@ -856,14 +1034,19 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
                 else {
                     continue;
                 };
+                let places: Vec<Transform> = definition
+                    .locations
+                    .iter()
+                    .map(|location| placed.then(&script.placement_of(*location)))
+                    .collect();
                 spawns.push(Spawn {
                     target,
                     delay_s: definition.delay_s,
                     count: definition.count,
-                    locations: definition
-                        .locations
+                    locations: places.iter().map(position_of).collect(),
+                    turns_deg: places
                         .iter()
-                        .map(|location| position_of(&placed.then(&script.placement_of(*location))))
+                        .map(|place| turn_deg(place, &placed))
                         .collect(),
                 });
             }
@@ -989,6 +1172,17 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
         if slice.is_none() && alias.is_none() {
             return Ok(None);
         }
+        // A spawn and an action may name one slice by an old and a new path (the holdout's
+        // `Wave_01 - Interact` spawns `.../design/worldevent_object_holdout_door_solid` and
+        // destroys `.../design/holdout/worldevent_object_holdout_door_solid`): one target.
+        let slice = match slice {
+            Some(asset) => Some(AssetRef {
+                path: self.source.asset_path(asset)?,
+                guid: asset.guid,
+            }),
+            None => None,
+        };
+        let slice = slice.as_ref();
         let key = (
             slice.map(|asset| asset.path.clone()).unwrap_or_default(),
             alias.map(|asset| asset.path.clone()).unwrap_or_default(),
@@ -1029,6 +1223,10 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
         slice: &AssetRef,
         percent: u32,
     ) -> Result<TargetSlice, DungeonScriptsBuildError> {
+        let slice = &AssetRef {
+            path: self.source.asset_path(slice)?,
+            guid: slice.guid,
+        };
         let found = self.mob_of(slice, NESTED_DEPTH)?;
         let mobs_per_spawn = found.count;
         let level_of = |vitals_id: &str| {
@@ -1107,11 +1305,8 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
         slice: &AssetRef,
         depth: u32,
     ) -> Result<SliceMobs, DungeonScriptsBuildError> {
-        let Some(script) = read_script(
-            &mut *self.source,
-            &slice.path,
-            &mut self.report.missing_slices,
-        )?
+        let path = self.source.asset_path(slice)?;
+        let Some(script) = read_script(&mut *self.source, &path, &mut self.report.missing_slices)?
         else {
             return Ok(SliceMobs::default());
         };
@@ -1141,7 +1336,7 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
                     level: 0,
                 }),
                 count: ONE_MOB,
-                by_difficulty: slice_difficulty(&slice.path)
+                by_difficulty: slice_difficulty(&path)
                     .map(|difficulty| BTreeMap::from([(difficulty, vitals_id.clone())]))
                     .unwrap_or_default(),
             });
@@ -1787,6 +1982,171 @@ mod tests {
         .expect("build");
         assert!(built.is_none());
         assert_eq!(report.missing_slices, [SCRIPT]);
+    }
+
+    /// A test level whose spawners name slices by an out of date path, with the asset catalog
+    /// that holds their GUIDs' paths.
+    struct MovedSlices {
+        slices: Slices,
+        catalog: HashMap<[u8; ASSET_ID_LEN], String>,
+    }
+
+    impl SliceSource for MovedSlices {
+        fn root(&mut self, path: &str) -> Result<Option<Element>, DungeonScriptsBuildError> {
+            self.slices.root(path)
+        }
+
+        fn slice_catalog(
+            &mut self,
+        ) -> Result<Option<&HashMap<[u8; ASSET_ID_LEN], String>>, DungeonScriptsBuildError>
+        {
+            Ok(Some(&self.catalog))
+        }
+    }
+
+    #[test]
+    fn a_spawner_s_out_of_date_path_reads_its_guid_s_catalog_path() {
+        const STALE: &str = "slices/dungeon_eventmanager/dg_enc_test_boss.dynamicslice";
+        let Slices(mut slices) = level();
+        slices.insert(
+            SCRIPT.to_owned(),
+            slice(vec![
+                entity(1, "Encounters", vec![transform(NO_PARENT, [0.0; 3])]),
+                entity(
+                    2,
+                    "EncounterBoss",
+                    vec![transform(1, ENCOUNTER_OFFSET), spawner(STALE)],
+                ),
+            ]),
+        );
+        let mut source = MovedSlices {
+            slices: Slices(slices),
+            catalog: HashMap::from([([1; ASSET_ID_LEN], ENCOUNTER.to_owned())]),
+        };
+        let levels = HashMap::new();
+        let mut report = DungeonScriptsReport::default();
+        let level = build_level(
+            &mut source,
+            SCRIPT,
+            Transform::default(),
+            MobSources {
+                levels: &levels,
+                prefabs: None,
+            },
+            &[],
+            &mut report,
+        )
+        .expect("build")
+        .expect("level");
+        assert_eq!(level.encounters.len(), 1);
+        assert_eq!(level.encounters[0].slice, ENCOUNTER);
+        assert!(
+            report.missing_slices.is_empty(),
+            "{:?}",
+            report.missing_slices
+        );
+        let Slices(mut without) = source.slices;
+        without.remove(ENCOUNTER);
+        let mut unknown = Slices(without);
+        let mut report = DungeonScriptsReport::default();
+        let level = build_level(
+            &mut unknown,
+            SCRIPT,
+            Transform::default(),
+            MobSources {
+                levels: &levels,
+                prefabs: None,
+            },
+            &[],
+            &mut report,
+        )
+        .expect("build")
+        .expect("level");
+        assert!(level.encounters.is_empty());
+        assert_eq!(report.missing_slices, [STALE]);
+    }
+
+    #[test]
+    fn an_old_and_a_new_path_of_one_slice_are_one_target() {
+        const STALE: &str = "slices/characters/old_folder_test_add.dynamicslice";
+        let mut source = MovedSlices {
+            slices: level(),
+            catalog: HashMap::from([([4; ASSET_ID_LEN], CREATURE.to_owned())]),
+        };
+        let levels = HashMap::new();
+        let mut report = DungeonScriptsReport::default();
+        let mut builder = EncounterBuilder::new(
+            &mut source,
+            MobSources {
+                levels: &levels,
+                prefabs: None,
+            },
+            &mut report,
+        );
+        let fresh = AssetRef {
+            guid: [4; ASSET_ID_LEN],
+            path: CREATURE.to_owned(),
+        };
+        let stale = AssetRef {
+            path: STALE.to_owned(),
+            ..fresh.clone()
+        };
+        let first = builder.target(Some(&stale), None).expect("target");
+        let second = builder.target(Some(&fresh), None).expect("target");
+        assert_eq!(first, Some(0));
+        assert_eq!(second, first);
+        assert_eq!(builder.targets[0].slices[0].path, CREATURE);
+    }
+
+    #[test]
+    fn a_retail_placed_encounter_stands_at_its_retail_root() {
+        const YAW_DEG: f32 = 30.0;
+        let placement = RetailPlacement {
+            name: "EncounterBoss",
+            slice: ENCOUNTER,
+            position: PLACE,
+            yaw_deg: YAW_DEG,
+        };
+        let mut source = level();
+        let levels = HashMap::from([(VITALS.to_lowercase(), LEVEL)]);
+        let mobs = MobSources {
+            levels: &levels,
+            prefabs: None,
+        };
+        let mut report = DungeonScriptsReport::default();
+        let encounter = retail_placed_encounter(&mut source, &placement, mobs, &[], &mut report)
+            .expect("build")
+            .expect("encounter");
+        assert_eq!(encounter.name, placement.name);
+        assert_eq!(encounter.slice, ENCOUNTER);
+        for (cell, retail) in encounter.position.iter().zip(PLACE) {
+            assert!((cell - retail).abs() < 1e-3, "{:?}", encounter.position);
+        }
+        assert!(
+            (encounter.yaw_deg - YAW_DEG).abs() < 1e-3,
+            "{}",
+            encounter.yaw_deg
+        );
+        assert_eq!(encounter.stages[0].name, "Wave_01");
+        let missing = RetailPlacement {
+            slice: "slices/worldevents/none.dynamicslice",
+            ..placement
+        };
+        assert!(
+            retail_placed_encounter(&mut source, &missing, mobs, &[], &mut report)
+                .expect("build")
+                .is_none()
+        );
+        let chest = RetailPlacement {
+            slice: CHEST,
+            ..placement
+        };
+        assert!(
+            retail_placed_encounter(&mut source, &chest, mobs, &[], &mut report)
+                .expect("build")
+                .is_none(),
+            "a slice with no encounter manager"
+        );
     }
 
     #[test]

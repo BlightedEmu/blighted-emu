@@ -95,10 +95,11 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         admit_timeout: Duration::from_millis(config.admit_timeout_ms),
         heartbeat_interval: Duration::from_millis(config.heartbeat_interval_ms),
         heartbeat_misses: config.heartbeat_misses,
-        instances: config
-            .instances
-            .as_ref()
-            .map(|instances| instance_settings(instances, war_forts(&config, &build))),
+        instances: config.instances.as_ref().map(|instances| {
+            let mut settings = instance_settings(instances, war_forts(&config, &build));
+            settings.invasion_territories = invasion_territories(&config, &build);
+            settings
+        }),
     };
     // The heights are needed only for the start position.
     drop(world_file);
@@ -120,6 +121,21 @@ fn war_forts(config: &DirectorConfig, build: &str) -> WarForts {
         Err(error) => {
             tracing::warn!(%error, "no war forts table: no territory war gets an instance");
             WarForts::default()
+        }
+    }
+}
+
+/// The territories whose fort has an invasion in the content of `config` for client build
+/// `build`; none (and so no darkness and no invasion) when the table is missing.
+fn invasion_territories(config: &DirectorConfig, build: &str) -> std::collections::BTreeSet<u16> {
+    match nw_content::invasion_forts::InvasionForts::load(&config.content_dir, build) {
+        Ok(forts) => {
+            tracing::info!(forts = forts.len(), "invasion forts");
+            forts.territories().collect()
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no invasion forts table: no territory gets an invasion");
+            std::collections::BTreeSet::new()
         }
     }
 }
@@ -147,8 +163,17 @@ fn instance_settings(config: &InstancesConfig, war_forts: WarForts) -> InstanceS
                 config.outpost_rush.match_size,
                 Duration::from_millis(config.outpost_rush.accept_timeout_ms),
             ),
+            capture_the_flag: MatchSettings::capture_the_flag(
+                config.capture_the_flag.match_size,
+                Duration::from_millis(config.capture_the_flag.accept_timeout_ms),
+            ),
+            catacombs: MatchSettings::catacombs(
+                Duration::from_millis(config.catacombs.accept_timeout_ms),
+                Duration::from_millis(config.catacombs.fill_wait_ms),
+            ),
         },
         war_forts,
+        invasion_territories: std::collections::BTreeSet::new(),
     }
 }
 

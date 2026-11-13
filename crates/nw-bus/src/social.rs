@@ -15,8 +15,15 @@
 //! - The treasury moves a player's coins through the sim that has the player ([`CoinTransfer`]
 //!   on [`crate::subject::sim_coins`], request/reply).
 //! - A sim asks the service to pay a territory's upkeep from the payer's company treasury
-//!   ([`SocialInput::PayUpkeep`]); the service tells the payer's sim when it is paid
-//!   ([`SocialDeliveries::upkeep_paid`]).
+//!   ([`SocialInput::PayUpkeep`]); the service tells the payer's sim whether it paid
+//!   ([`SocialDeliveries::upkeep_answers`]).
+//! - The sim that runs a war, an arena match or an Outpost Rush match puts its players into the
+//!   raid of their side or team ([`SocialInput::RaidJoin`], [`SocialInput::RaidLeave`]); the
+//!   service owns the raid as it owns the groups and sends each member its raid entity and the
+//!   raid's group entities ([`RaidEntityDelivery`]).
+//! - Before a war's move, the sim of a roster player asks the service to invite it into its
+//!   side's raid ([`SocialInput::RaidInvite`]); the service tells that sim the player's answer
+//!   ([`SocialDeliveries::raid_invite_answers`]), and the sim moves it in when it accepted.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -107,6 +114,51 @@ pub enum SocialInput {
     /// A player asks to pay the upkeep of a territory claim from its company's treasury; the
     /// sim checked the claim and the cost.
     PayUpkeep(UpkeepPayment),
+    /// The sim that runs a raid's war or match puts a player into group `group` (from 0) of raid
+    /// `raid`; the service makes the raid at its first member.
+    RaidJoin {
+        /// The character.
+        character: Uuid,
+        /// The raid.
+        raid: RaidSpec,
+        /// The raid group, from 0.
+        group: u8,
+    },
+    /// A player left the war or match of raid `raid` (its instance's exit).
+    RaidLeave {
+        /// The character.
+        character: Uuid,
+        /// The raid entity's id ([`RaidSpec::entity`]): raid ids are numbers of the sims and
+        /// can repeat across them, the entity id names one raid in the world.
+        raid: [u8; 16],
+    },
+    /// The sim of a war's roster player asks the service to invite it into group `group` (from
+    /// 0) of raid `raid` for activity `activity` (the war id): an invite without an inviter.
+    RaidInvite {
+        /// The character.
+        character: Uuid,
+        /// The raid.
+        raid: RaidSpec,
+        /// The raid group, from 0.
+        group: u8,
+        /// The activity the invite is for (the war id).
+        activity: Uuid,
+    },
+}
+
+/// A raid as the sim that runs its war or match names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaidSpec {
+    /// The raid id (`raidId`).
+    pub raid: u64,
+    /// The raid type (`raidType`, 1 war to 4 players' raid).
+    pub kind: u8,
+    /// The raid of the other side (`opposingRaidId`); 0 for none.
+    pub opposing: u64,
+    /// The raid entity's id (its card's `gde_ref`).
+    pub entity: [u8; 16],
+    /// The raid's groups in index order.
+    pub groups: Vec<Uuid>,
 }
 
 /// An upkeep payment a player asked for.
@@ -122,13 +174,26 @@ pub struct UpkeepPayment {
     pub at_ms: u64,
 }
 
-/// An upkeep payment the service took from the treasury.
+/// The service's answer to an upkeep payment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UpkeepPaid {
+pub struct UpkeepAnswer {
     /// The payer.
     pub character: Uuid,
     /// The territory id of the claim.
     pub territory: u16,
+    /// Whether the service took the payment from the treasury; `false` for a refused one.
+    pub paid: bool,
+}
+
+/// A player's answer to the raid invite of activity `activity` ([`SocialInput::RaidInvite`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaidInviteAnswer {
+    /// The player.
+    pub character: Uuid,
+    /// The activity of the invite (the war id).
+    pub activity: Uuid,
+    /// Whether it accepted.
+    pub accepted: bool,
 }
 
 /// What a player's group shows of its health.
@@ -222,6 +287,27 @@ pub struct GroupEntityDelivery {
     pub view: Option<GroupEntityView>,
 }
 
+/// A raid member's raid entity and the raid's group entities but its own (its own group comes
+/// as its [`GroupEntityView`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaidEntityView {
+    /// The raid entity's id.
+    pub entity: [u8; 16],
+    /// The encoded raid data body (`RaidDataComponentReplicatedState`, whole).
+    pub body: Vec<u8>,
+    /// The raid's other groups.
+    pub groups: Vec<GroupEntityView>,
+}
+
+/// A player's raid entity: its state now, or none when the player left its raid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaidEntityDelivery {
+    /// The player.
+    pub character: Uuid,
+    /// The raid entity; `None` removes it.
+    pub view: Option<RaidEntityView>,
+}
+
 /// The service's messages and states for the players of one sim, in order.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SocialDeliveries {
@@ -231,9 +317,15 @@ pub struct SocialDeliveries {
     pub own_states: Vec<OwnStateDelivery>,
     /// The group entity changes.
     pub group_entities: Vec<GroupEntityDelivery>,
-    /// The upkeep payments of this sim's players that the service took.
+    /// The service's answers to the upkeep payments of this sim's players.
     #[serde(default)]
-    pub upkeep_paid: Vec<UpkeepPaid>,
+    pub upkeep_answers: Vec<UpkeepAnswer>,
+    /// The raid entity changes.
+    #[serde(default)]
+    pub raid_entities: Vec<RaidEntityDelivery>,
+    /// The answers of this sim's players to the raid invites it asked for.
+    #[serde(default)]
+    pub raid_invite_answers: Vec<RaidInviteAnswer>,
 }
 
 /// Service to sim, request/reply: add `change` coins to a player (a negative change takes them).
@@ -309,6 +401,33 @@ mod tests {
                     cost: 100_000,
                     at_ms: 1_000,
                 }),
+                SocialInput::RaidJoin {
+                    character,
+                    raid: RaidSpec {
+                        raid: 9428,
+                        kind: 1,
+                        opposing: 9429,
+                        entity: [7; 16],
+                        groups: vec![Uuid::from_u128(3)],
+                    },
+                    group: 0,
+                },
+                SocialInput::RaidLeave {
+                    character,
+                    raid: [7; 16],
+                },
+                SocialInput::RaidInvite {
+                    character,
+                    raid: RaidSpec {
+                        raid: 9428,
+                        kind: 1,
+                        opposing: 9429,
+                        entity: [7; 16],
+                        groups: vec![Uuid::from_u128(3)],
+                    },
+                    group: 0,
+                    activity: Uuid::from_u128(4),
+                },
             ],
         };
         assert_eq!(
@@ -340,9 +459,26 @@ mod tests {
                     view: None,
                 },
             ],
-            upkeep_paid: vec![UpkeepPaid {
+            upkeep_answers: vec![UpkeepAnswer {
                 character,
                 territory: 6,
+                paid: true,
+            }],
+            raid_entities: vec![RaidEntityDelivery {
+                character,
+                view: Some(RaidEntityView {
+                    entity: [7; 16],
+                    body: vec![1],
+                    groups: vec![GroupEntityView {
+                        group: Uuid::from_u128(3),
+                        body: vec![2],
+                    }],
+                }),
+            }],
+            raid_invite_answers: vec![RaidInviteAnswer {
+                character,
+                activity: Uuid::from_u128(4),
+                accepted: true,
             }],
         };
         assert_eq!(

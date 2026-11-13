@@ -23,9 +23,9 @@ pub use client::{Bus, BusError, Incoming, Subscription};
 pub use ghost_parts::{GhostAssembly, ghost_parts};
 pub use id::{BusId, BusIdError, MAX_BUS_ID_LEN};
 pub use instance::{
-    ArenaSeat, GroupAnswer, GroupQuery, InstanceBeat, InstanceCommand, InstanceOpened,
-    InstanceRefusal, InstanceReply, InstanceRequest, InstanceStay, PlayerArena, RunningInstance,
-    WAR_GAME_MODE, WarInstance, WarInstanceNews,
+    ArenaSeat, EntranceRunNews, GroupAnswer, GroupQuery, InstanceBeat, InstanceCommand,
+    InstanceOpened, InstanceRefusal, InstanceReply, InstanceRequest, InstanceStay, PlayerArena,
+    RunningInstance, WAR_GAME_MODE, WarInstance, WarInstanceNews,
 };
 pub use matchmaking::{MatchPlace, QueueCall, QueueJoin, QueueNews, QueueNewsKind};
 pub use message::{
@@ -49,6 +49,7 @@ pub use snapshot::{
 pub use social::ICON_LEN as SOCIAL_ICON_LEN;
 pub use social::{
     CoinReply, CoinTransfer, GroupEntityDelivery, GroupEntityView, LeaveReason, OwnStateDelivery,
-    PlayerVitals, SocialBatch, SocialDeliveries, SocialDelivery, SocialFacetKind, SocialHeader,
-    SocialInput, SocialPlayer, SocialStateKind, UpkeepPaid, UpkeepPayment,
+    PlayerVitals, RaidEntityDelivery, RaidEntityView, RaidInviteAnswer, RaidSpec, SocialBatch,
+    SocialDeliveries, SocialDelivery, SocialFacetKind, SocialHeader, SocialInput, SocialPlayer,
+    SocialStateKind, UpkeepAnswer, UpkeepPayment,
 };

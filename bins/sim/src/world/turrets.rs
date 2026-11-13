@@ -1,0 +1,2597 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! The turrets of a war fort (turret study 2026-11-12; the forts' turrets and the turret kinds
+//! from [`nw_content::war_forts`]; the calls from [`nw_messages::turrets`]).
+//!
+//! **Spawn** (Observed: every turret group of the six war captures is in the instance from the
+//! entry, `joining_defending_war_2` 0.5 s): each turret of the fort spawns with the war's
+//! instance, its members as retail sent them first, its turret state idle (yaw, pitch and heat 0,
+//! no interactor, not overheated, not blocked), its interact with no interactor, its projectile
+//! spawner full and free, and the ownership of its side's company (Observed on the repeaters of
+//! `joining_defending_war_2`: the company's id, name and crest, no owner, permission rule 3,
+//! raid 0, faction 0).
+//!
+//! **Use** (Observed, `RS_offensive_war` 857.974 s and `joining_defending_war_2` 194.538 s): the
+//! client's interaction of kind [`USE_TURRET_KIND`] on the turret is accepted (3743) about 45 ms
+//! later; the turret's interact shows one interactor and its turret state names the player
+//! (raw id and facet entity). The client then sends its aim about every 33 to 50 ms (4273 for a
+//! cannon, 4145 for a repeater) and sends no call to leave: the retail server let the turret go
+//! 132 and 147 ms after the last call (`joining_defending_war_2` 199.373 -> 199.505 s,
+//! `RS_offensive_war` 877.477 -> 877.624 s): the last yaw and pitch, no interactor, no
+//! interactors, and for a repeater with heat the interaction blocked until the heat is gone
+//! (201.737 s: heat 0 and the block off). Inferred: a use ends [`USE_TIMEOUT_MS`] after the
+//! last call, at the client's cancel (2473), or when the player leaves the instance; only a
+//! player of the turret's side uses it, one at a time (a refused use answers 3743 with
+//! [`USE_REFUSED`], the status of a refused build).
+//!
+//! **A repeater** (`m_holdToFireRepeatedly`; Observed, `joining_defending_war_2` 195.438 to
+//! 199.256 s): each 4145 whose flags say the client fired gets one 2720 from the turret: the
+//! point where the shot met the ground (55 to 92 m away; heading the turret's facing plus the
+//! call's yaw, rising by its pitch, from [`REPEATER_MUZZLE`] over the turret's place, fitted on 16
+//! shots), no target and result `ff` when it met no body; the turret's ammo falls by one a shot
+//! (200 -> 0 over the ledger); the heat (half float) rises about 20 a second while the trigger
+//! is held (sent about every 0.53 s, [`HEAT_RISE_SEND_MS`]) and falls 40 a second from 0.5 s
+//! after the fire stopped (sent each tick), the slice's `m_heatMeterGainRate`,
+//! `m_heatMeterLossRate` and `m_heatLossDelay`. Inferred: a shot meets the first foe or mob on
+//! its line within the slice's ranged attack range (125 m) before the ground; the shots of one
+//! use are spaced by at least `m_repeatFireDelay` on the client's clock; a turret at its heat
+//! capacity is overheated and fires no more until it cooled to 0; a hit's result byte is 0
+//! (the hits on mobs of the invasion captures were 0, 2 or 4; their meaning is Unknown).
+//!
+//! **A cannon** (a turret with a projectile; Observed, `RS_offensive_war` 859.971 to 876.921 s,
+//! six shots): each 4274 gets a projectile entity (card and class 16 state: spawn point
+//! [`CANNON_MUZZLE`] off the turret's place, velocity the slice's `m_fireSpeed` along the aim,
+//! the shooter, the ranged attack, the damage table and row) and a 327 to the shooter naming it,
+//! 46 to 97 ms later; the ammo falls by one and firing is blocked, free again the slice's
+//! `m_fireCooldown` (3.0 s) later. The server flies the ball with the slice's
+//! `m_projectileGravity` (13 m/s², Observed on six shots) and sends its impact 1.5 to 2.1 s
+//! later. Inferred: the ball meets the first foe or mob within the attack's radius of its path,
+//! else the ground; it hurts the body it met.
+//!
+//! **A ballista and an explosive launcher** fire as a cannon (Inferred: no capture holds a shot
+//! of either; both are turrets without `m_holdToFireRepeatedly` whose spawner fires a
+//! projectile, as the cannon's does). Their projectile comes from their slices
+//! ([`nw_content::war_forts::TurretKind::projectile`]: the spawner's `m_ammoId` slice, the
+//! replication index of its projectile component, the ranged attack and the damage row; the
+//! same rule gives the captured cannon ball). They leave from [`CANNON_MUZZLE`] (Inferred: the
+//! slices place the shot at the `projectile_spawn` joint of their model, which the server does
+//! not read).
+//!
+//! **Damage of a shot** (Inferred: no capture shows a turret hit on a player whose health the
+//! capture holds): a hit takes the slice's damage row's coefficient (`DamageTable_Structures`
+//! `RepeaterTurret_Projectile` 2.2, `Cannon_Projectile` 1.0) times the base damage of the
+//! shooter's level.
+//!
+//! **Damage a turret takes** (Observed in the vitals (15) and buildable controller (1594) states
+//! of the war turrets: `arvaysa_ES_attacker_war_45vs45` 925.121 to 2141.723 s, `everfall_war_2`
+//! 52.315 to 258.524 s, `CK_won_offensive_war` 1148.978 s, `Reekwater_Invasion` 273.585 s,
+//! `joining_defending_war_2` 83.7 and 1883.7 s): a turret is invulnerable until the war starts
+//! (its vitals' `invulnerability` goes to 0 at the start, ES 925.121 s) and again from the
+//! result (1 at ES 2141.723 s, with its full health; `joining_defending_war_2` 1883.7 s also
+//! filled its ammo). A hit sends its health and `healthChangeFlags` 3. Its committed
+//! `SiegeSupply` (its build cost in its first buildable state) is that cost times its health
+//! share, rounded up (a T3 repeater of cost 120: 117 at 105,266.1 of 108,000 health, 1 at 640.3),
+//! sent as a full list with a new version when it changes. At 0 health it breaks
+//! (`everfall_war_2` 102.646 s): its vitals block gets the dead head, its buildable state goes
+//! to 6 with no committed resource and ruin damage type 10, and its interact is disabled; it
+//! stays broken until the result. Inferred: the shots of a turret meet the turrets of the other
+//! side ([`TURRET_BODY`]) with the damage of a shot; a user of a turret that breaks is let go.
+//!
+//! **Player weapon hits** on a structure ([`SimWorld::structure_hit`]): a player's swing or shot
+//! meets the whole structures of the other side while the war runs
+//! ([`SimWorld::structure_places`], [`TURRET_BODY`]); a hit takes the base damage of the
+//! player's level times its attack row's coefficient (Inferred: the structure damage rows of
+//! player weapons are not in the captures; the vitals of a hit are the Observed ones above).
+//! The remote status effect 791 that a retail turret carried while it lost health
+//! (`everfall_war_2` 52.315 s, stacks 1 then 2 at 54.451 s) is key 791 of the status effect
+//! tables: `Status_Perk_Artifact_Set1_Bow_StaticCharge` (`Debuff+Tracking+Boltcaster`, 3 s, up
+//! to 3 stacks, no `Health` or damage column): the mark of a player's artifact bow perk, not a
+//! burn. The turret's health loss came from the bow's hits, so no damage over time is built for
+//! it.
+//!
+//! **Refill and repair** (Observed, `joining_defending_war_2` 1148.839 and 1421.699 s): the
+//! client's interaction of kind [`ITEM_COST_KIND`] on a repeater is accepted (3743) about 40 ms
+//! later; one bag item goes with sync reason 2 (a stack of two went to one, then to none; retail
+//! item index 10591, five below this table's `AmmoKit`, which `RepairKit`, `BattleToken` and
+//! `SiegeSupply` follow here as there); the turret's ammo goes from 130 to 200, and only the ammo
+//! is sent. The slices give the amounts: their `AddAmmo` option adds `m_ammoAmount` ammo (200 a
+//! repeater, 15 a cannon), their `AddHealth` option adds `m_amount` health (5,000), both up to
+//! the most. Inferred: a refill costs one [`AMMO_KIT`] ("Reloads turrets."), a repair one
+//! [`REPAIR_KIT`] ("A kit ... used to repair siege emplacements."); one request refills when
+//! the turret lacks ammo and the player holds an ammo kit, else repairs when it lacks health and
+//! the player holds a repair kit, else it is refused; only a player of the turret's side refills
+//! or repairs, and a broken turret takes neither. The call 2175
+//! `PlayerTurretComponentServerFacet_RequestAmmoRefill` is in no ledger of the capture index,
+//! and no function of the client decompile names it (the Aeternum catalog's handler addresses
+//! are of another build): it has no codec, and its body is Unknown.
+
+use bevy_ecs::entity::Entity;
+use nw_bus::ConnectionRef;
+use nw_content::war_forts::{FortStructure, SiegeArea, TurretKind};
+use nw_messages::buildables::OwnerIdentification;
+use nw_messages::client_input::TRIGGER_KIND;
+use nw_messages::combat_effects::{AUTHORITATIVE_PROJECTILE_FLAG, CombatEffectMsg};
+use nw_messages::entity_ids::{facet_of_raw_id, raw_id_of_entity};
+use nw_messages::facet::facet_entity;
+use nw_messages::items::SYNC_CRAFT_USED;
+use nw_messages::projectile_state::ProjectileState;
+use nw_messages::turrets::{
+    PROJECTILE_SPAWNER_TYPE_INDEX, ProjectileSpawnerState, TURRET_GDE_REF_LEN, TurretAim,
+    TurretClientMsg, gde_ref_of, turret_half,
+};
+use nw_messages::war_states::GDE_REF_LEN;
+use nw_messages::{
+    BundleMember, ClaimOwner, FacetHeader, InteractionRequest, MemberState, OwnershipState,
+    ServerMessage, TurretState,
+};
+use nw_sim_core::{Ground, Position};
+
+use super::attack::Vitals;
+use super::crafting::Station;
+use super::projectile::AimLine;
+use super::shot_entity::{ProjectileSpawn, velocity};
+use super::siege_areas::{AreaSource, rotation_of};
+use super::siege_structures::{
+    Hurt, NO_INTERACTORS, OPEN_SELECTION_KIND, StructureBody, spawn_members,
+};
+use super::supply_generators::CONTAINER_KIND;
+use super::war_fight::{WarFight, replace_member};
+use super::{Body, Player, SimWorld, gather_answer, send_now};
+use crate::combat::{AttackOutcome, AttackRefusal};
+use crate::mobs::Capsule;
+
+/// The interaction kind of a turret's use (`InteractionUIActions` `UseTurret`, 0x34, registered
+/// by `FUN_1435eaa20`; Observed on every turret use of the captures).
+pub(super) const USE_TURRET_KIND: u8 = 52;
+/// The 3743 status of an accepted use (Observed) and of a refused one (Inferred).
+pub(super) const USE_ACCEPTED: u8 = 1;
+pub(super) const USE_REFUSED: u8 = 2;
+/// How long after the user's last call a use ends (Inferred from the retail 132 and 147 ms).
+pub(super) const USE_TIMEOUT_MS: u64 = 150;
+/// The interactor of a turret nobody uses (Observed: 20 zero bytes, then `ffffffff`).
+const NO_INTERACTOR: [u8; GDE_REF_LEN] = {
+    let mut none = [0; GDE_REF_LEN];
+    let mut at = GDE_REF_LEN - NO_INTERACTOR_TAIL;
+    while at < GDE_REF_LEN {
+        none[at] = u8::MAX;
+        at += 1;
+    }
+    none
+};
+const NO_INTERACTOR_TAIL: usize = 4;
+/// The interactors of a turret in use and of a free one (Observed).
+const ONE_INTERACTOR: u32 = 1;
+/// The 2720 target of a shot that met no body, and its result (Observed).
+const NO_TARGET: u64 = 0x0000_0000_ffff_ffff;
+const NO_TARGET_RESULT: u8 = 0xff;
+/// The 2720 result of a shot that met a body (Inferred, module doc).
+const HIT_RESULT: u8 = 0;
+/// Where a repeater's shot leaves: metres forward of and above the turret's place (Observed:
+/// 3.14 to 3.48 m above on 16 shots of `joining_defending_war_2`, no forward offset fitted).
+const REPEATER_MUZZLE: (f32, f32) = (0.0, 3.3);
+/// Where a cannon's ball leaves (Observed: the first ball of `RS_offensive_war` spawned 2.5 m
+/// forward of and 3.24 m above its turret's place).
+const CANNON_MUZZLE: (f32, f32) = (2.5, 3.24);
+/// How often a rising heat is sent (Observed: about 0.53 s in `joining_defending_war_2`).
+pub(super) const HEAT_RISE_SEND_MS: u64 = 530;
+/// The ownership of a turret (Observed, module doc).
+const TURRET_PERMISSION_RULE: u8 = 3;
+const TURRET_RAID: u64 = 0;
+const TURRET_FACTION: u8 = 0;
+const TURRET_PERMISSION_OPTIONS: u8 = 0;
+/// The step of the walk along a shot's line to the ground, metres.
+const GROUND_STEP_M: f32 = 0.5;
+/// The step of a cannon ball's flight, seconds.
+const FLIGHT_STEP_S: f32 = 0.02;
+/// Milliseconds and nanoseconds per second.
+const MS_PER_SECOND: f32 = 1_000.0;
+const NS_PER_SECOND: f32 = 1_000_000_000.0;
+/// Half of a height.
+const HALF: f32 = 0.5;
+/// The base level of a level index ([`nw_content::progression::Progression::level_of`] counts
+/// from 0).
+const FIRST_LEVEL: u32 = 1;
+/// The interaction kind of a refill or a repair for an item (`InteractionUIActions`
+/// `InteractWithItemCost`, 0x35, registered by `FUN_1435eaa20`; Observed on both retail
+/// refills).
+pub(super) const ITEM_COST_KIND: u8 = 53;
+/// The item a refill costs and the item a repair costs, and how many (Inferred, module doc).
+pub(super) const AMMO_KIT: &str = "AmmoKit";
+pub(super) const REPAIR_KIT: &str = "RepairKit";
+const KIT_COST: u32 = 1;
+/// The body a shot meets on a turret (Inferred: the turret's collision shape is not read; about
+/// its base, 3 m wide and 3 m high).
+const TURRET_BODY: Capsule = Capsule {
+    radius_m: 1.5,
+    height_m: 3.0,
+};
+
+/// The player who uses a turret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TurretUser {
+    entity: Entity,
+    number: u64,
+    interaction: u64,
+    last_call_ms: u64,
+}
+
+/// The heat of a repeater (module doc).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct Heat {
+    value: f32,
+    overheated: bool,
+    held: bool,
+    /// Sim ms of the last change and of the last shot.
+    at_ms: u64,
+    fired_ms: u64,
+    /// The value last sent, and when.
+    sent: f32,
+    sent_ms: u64,
+}
+
+impl Heat {
+    /// The heat at `now_ms` of a turret of `kind`: it rises while the trigger is held and the
+    /// turret is not overheated, up to the capacity (then it is overheated); it falls from the
+    /// loss delay after the last shot down to 0 (then it is no longer overheated).
+    pub(super) fn advance(&mut self, kind: &TurretKind, now_ms: u64) {
+        let seconds = now_ms.saturating_sub(self.at_ms) as f32 / MS_PER_SECOND;
+        self.at_ms = now_ms;
+        if kind.heat_capacity <= 0.0 {
+            return;
+        }
+        if self.held && !self.overheated {
+            self.value = (self.value + kind.heat_gain_per_s * seconds).min(kind.heat_capacity);
+            self.overheated = self.value >= kind.heat_capacity;
+            return;
+        }
+        let delay_ms = (kind.heat_loss_delay_s * MS_PER_SECOND) as u64;
+        if now_ms.saturating_sub(self.fired_ms) >= delay_ms {
+            self.value = (self.value - kind.heat_loss_per_s * seconds).max(0.0);
+            if self.value <= 0.0 {
+                self.overheated = false;
+            }
+        }
+    }
+
+    /// Whether the heat is due to go out at `now_ms`: a rise every [`HEAT_RISE_SEND_MS`], a fall
+    /// and the last 0 at once.
+    pub(super) fn due(&self, now_ms: u64) -> bool {
+        if self.value == self.sent {
+            return false;
+        }
+        self.value < self.sent || now_ms.saturating_sub(self.sent_ms) >= HEAT_RISE_SEND_MS
+    }
+
+    fn mark_sent(&mut self, now_ms: u64) {
+        self.sent = self.value;
+        self.sent_ms = now_ms;
+    }
+}
+
+/// An area a landed ball opens: the area, where, and who fired it.
+type ShellArea = (SiegeArea, Position, AreaSource);
+
+/// What one repeater shot did: the outcomes of the bodies it hit, and the place in the fight's
+/// turret list of the turret it hit with the health it takes.
+type RepeaterShot = (
+    Vec<Result<AttackOutcome, AttackRefusal>>,
+    Option<(usize, u32)>,
+);
+
+/// What a turret shot meets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ShotTarget {
+    /// A player or a mob, by its number.
+    Body(u64),
+    /// A turret of the fight: its place in the fight's list and its facet entity.
+    Turret { index: usize, facet: u64 },
+}
+
+impl ShotTarget {
+    /// The 2720 target of a hit on it (Observed for a body: its facet entity).
+    fn facet(self) -> u64 {
+        match self {
+            Self::Body(number) => facet_entity(number),
+            Self::Turret { facet, .. } => facet,
+        }
+    }
+}
+
+/// A cannon ball on its way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct BallFlight {
+    /// The slot key of its projectile entity.
+    entity: u64,
+    /// The shooter's number.
+    shooter: u64,
+    /// Sim ms of its impact, where, and what it met.
+    pub(super) land_ms: u64,
+    at: Position,
+    target: Option<ShotTarget>,
+    /// The hit's health.
+    amount: u32,
+}
+
+/// One turret of the fight.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TurretRun {
+    /// Its vitals, buildable and interact parts ([`StructureBody`]).
+    pub(super) body: StructureBody,
+    kind: TurretKind,
+    /// The component of its turret state.
+    turret_component: u64,
+    /// The packed turn of its retail first turret state (`initialOrientation`).
+    orientation: Option<nw_messages::war_states::PackedTurn>,
+    user: Option<TurretUser>,
+    /// The last aim, radians.
+    yaw: f32,
+    pitch: f32,
+    ammo: u16,
+    heat: Heat,
+    /// Sim ms a cannon's firing is free again.
+    blocked_until_ms: Option<u64>,
+    /// A cannon's firing is blocked.
+    firing_blocked: bool,
+    /// No one may use it until its heat is gone.
+    interaction_blocked: bool,
+    /// The client time of the last shot of the use, ns.
+    last_shot_ns: Option<u64>,
+    /// Its balls on their way.
+    pub(super) balls: Vec<BallFlight>,
+}
+
+impl TurretRun {
+    /// `turret` of `kind` as it spawns (module doc): idle, full of ammo, whole, invulnerable,
+    /// with the turn, the interact, the vitals and the buildable state of its retail first
+    /// members; `None` for a structure with no turret state.
+    fn new(turret: FortStructure, kind: TurretKind) -> Option<Self> {
+        let turret_component = turret.turret_component?;
+        let orientation = turret.members.iter().find_map(|bytes| {
+            match BundleMember::read_from(bytes).ok()?.0.state {
+                MemberState::Turret(state) => state.orientation,
+                _ => None,
+            }
+        });
+        Some(Self {
+            ammo: kind.max_ammo,
+            body: StructureBody::new(turret),
+            kind,
+            turret_component,
+            orientation,
+            user: None,
+            yaw: 0.0,
+            pitch: 0.0,
+            heat: Heat::default(),
+            blocked_until_ms: None,
+            firing_blocked: false,
+            interaction_blocked: false,
+            last_shot_ns: None,
+            balls: Vec::new(),
+        })
+    }
+
+    /// Whether a player uses it.
+    pub(super) const fn in_use(&self) -> bool {
+        self.user.is_some()
+    }
+
+    /// Its own state in the place of the retail `member`: its turret, interact and projectile
+    /// spawner states; `None` for a member of the body or a member it keeps as retail sent it.
+    fn own_member(&self, member: &BundleMember) -> Option<BundleMember> {
+        if member.component == self.turret_component {
+            return Some(self.turret_member(self.state()));
+        }
+        if Some(member.component) == self.body.structure.interact_component {
+            return self.interact_member();
+        }
+        if Some(member.component) == self.body.structure.spawner_component {
+            return self.spawner_member(self.full_spawner());
+        }
+        None
+    }
+
+    /// The turret's facet header for its 2720.
+    fn turret_header(&self) -> FacetHeader {
+        let entity = self.body.structure.facet_entity();
+        FacetHeader {
+            target: self.kind.turret_facet.target(entity),
+            entity,
+        }
+    }
+
+    /// The turret's facet header for its 327.
+    fn spawner_header(&self) -> FacetHeader {
+        let entity = self.body.structure.facet_entity();
+        FacetHeader {
+            target: self.kind.spawner_facet.target(entity),
+            entity,
+        }
+    }
+
+    /// Its full turret state now.
+    fn state(&self) -> TurretState {
+        TurretState {
+            yaw: Some(turret_half(self.yaw)),
+            pitch: Some(turret_half(self.pitch)),
+            heat: Some(turret_half(self.heat.value)),
+            orientation: self.orientation,
+            interactor: Some(
+                self.user
+                    .map_or(NO_INTERACTOR, |user| interactor_of(user.number)),
+            ),
+            overheated: Some(self.heat.overheated),
+            blocked: Some(self.interaction_blocked),
+        }
+    }
+
+    fn turret_member(&self, state: TurretState) -> BundleMember {
+        BundleMember {
+            component: self.turret_component,
+            state: MemberState::Turret(state),
+        }
+    }
+
+    fn interact_member(&self) -> Option<BundleMember> {
+        self.body.interact_member(if self.user.is_some() {
+            ONE_INTERACTOR
+        } else {
+            NO_INTERACTORS
+        })
+    }
+
+    fn spawner_member(&self, state: ProjectileSpawnerState) -> Option<BundleMember> {
+        Some(BundleMember {
+            component: self.body.structure.spawner_component?,
+            state: MemberState::Recorded {
+                class: PROJECTILE_SPAWNER_TYPE_INDEX,
+                body: state.encode(),
+            },
+        })
+    }
+
+    fn full_spawner(&self) -> ProjectileSpawnerState {
+        ProjectileSpawnerState {
+            ammo: Some(self.ammo),
+            firing_blocked: Some(self.firing_blocked),
+        }
+    }
+
+    /// Where its shots leave and along which line ([`AimLine`]: the facing plus the aim's yaw;
+    /// the player convention's pitch looks down).
+    fn muzzle(&self) -> (Position, AimLine) {
+        let (forward, up) = if self.kind.hold_to_fire {
+            REPEATER_MUZZLE
+        } else {
+            CANNON_MUZZLE
+        };
+        let line = AimLine {
+            yaw: self.body.structure.yaw + self.yaw,
+            pitch: -self.pitch,
+        };
+        let [x, y, z] = self.body.structure.place;
+        let muzzle = Position {
+            x: x - line.yaw.sin() * forward,
+            y: y + line.yaw.cos() * forward,
+            z: z + up,
+        };
+        (muzzle, line)
+    }
+
+    /// The aim of a call, kept within the slice's limits.
+    fn aim(&mut self, aim: &TurretAim) {
+        let yaw_max = self.kind.yaw_max_deg.to_radians();
+        self.yaw = aim.yaw.clamp(-yaw_max, yaw_max);
+        self.pitch = aim.pitch.clamp(
+            self.kind.pitch_min_deg.to_radians(),
+            self.kind.pitch_max_deg.to_radians(),
+        );
+    }
+
+    /// Whether a repeater may fire a shot at the client's time `time_ns`: not overheated, with
+    /// ammo, and `m_repeatFireDelay` after the last shot of the use.
+    fn repeater_may_fire(&self, time_ns: u64) -> bool {
+        let delay_ns = (self.kind.repeat_fire_delay_s * NS_PER_SECOND) as u64;
+        !self.heat.overheated
+            && (!self.kind.uses_ammo || self.ammo > 0)
+            && self
+                .last_shot_ns
+                .is_none_or(|last| time_ns.saturating_sub(last) >= delay_ns)
+    }
+
+    /// Whether a cannon may fire: with ammo and not blocked.
+    const fn cannon_may_fire(&self) -> bool {
+        (!self.kind.uses_ammo || self.ammo > 0) && !self.firing_blocked
+    }
+}
+
+/// The 24-byte reference of player `number` in a turret's interactor (Observed: its raw id and
+/// its facet entity).
+fn interactor_of(number: u64) -> [u8; GDE_REF_LEN] {
+    gde_ref_of(raw_id_of_entity(number), facet_entity(number))
+}
+
+/// The ownership of a turret of the company `owner` (module doc).
+pub(super) fn turret_ownership(owner: &ClaimOwner) -> OwnershipState {
+    OwnershipState {
+        guild_id: Some(owner.guild_id),
+        guild_owner: Some(owner.guild_name.clone()),
+        guild_crest: Some(owner.crest),
+        owner: Some(OwnerIdentification::none()),
+        permission_rule: Some(TURRET_PERMISSION_RULE),
+        structure_name: Some(Vec::new()),
+        raid_id: Some(TURRET_RAID),
+        faction_type: Some(TURRET_FACTION),
+        owner_pvp: Some(false),
+        owner_ffa: Some(false),
+        permission_options: Some(TURRET_PERMISSION_OPTIONS),
+    }
+}
+
+/// The direction of `line` (east, north, up) as a unit vector.
+fn direction(line: AimLine) -> [f32; 3] {
+    let level = line.pitch.cos();
+    [
+        -line.yaw.sin() * level,
+        line.yaw.cos() * level,
+        -line.pitch.sin(),
+    ]
+}
+
+/// The point `along_m` metres from `from` on `line`.
+fn point_on(from: Position, line: AimLine, along_m: f32) -> Position {
+    let [east, north, up] = direction(line);
+    Position {
+        x: from.x + east * along_m,
+        y: from.y + north * along_m,
+        z: from.z + up * along_m,
+    }
+}
+
+/// How far along `line` from `from` the ground is met within `range_m` (`ground` gives the
+/// ground height at a place); `None` when the line stays above it.
+pub(super) fn ground_along(
+    from: Position,
+    line: AimLine,
+    range_m: f32,
+    ground: impl Fn(f32, f32) -> Option<f32>,
+) -> Option<f32> {
+    let steps = (range_m / GROUND_STEP_M).ceil() as u32;
+    (1..=steps)
+        .map(|step| (step as f32 * GROUND_STEP_M).min(range_m))
+        .find(|along| {
+            let at = point_on(from, line, *along);
+            ground(at.x, at.y).is_some_and(|height| at.z <= height)
+        })
+}
+
+/// The first body of `bodies` that a hit scan from `from` along `line` meets within `range_m`
+/// and `radius_m`, with how far along it is.
+pub(super) fn body_on_line<T: Copy>(
+    from: Position,
+    line: AimLine,
+    (range_m, radius_m): (f32, f32),
+    bodies: &[(T, Position, Capsule)],
+) -> Option<(T, f32)> {
+    let [east, north, up] = direction(line);
+    bodies
+        .iter()
+        .filter_map(|(number, at, body)| {
+            let middle = Position {
+                z: at.z + body.height_m * HALF,
+                ..*at
+            };
+            let (dx, dy, dz) = (middle.x - from.x, middle.y - from.y, middle.z - from.z);
+            let along = dx * east + dy * north + dz * up;
+            if along < 0.0 || along > range_m {
+                return None;
+            }
+            let point = point_on(from, line, along);
+            let aside = point.horizontal_distance(middle);
+            let height = (point.z - middle.z).abs();
+            (aside <= body.radius_m + radius_m && height <= body.height_m * HALF + radius_m)
+                .then_some((*number, along))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+/// Where a ball fired from `from` with `velocity` under `gravity` ends within `range_m`: when
+/// (s), where, and the body of `bodies` it met within `radius_m` (else the ground, else the end
+/// of its range).
+pub(super) fn ball_flight<T: Copy>(
+    from: Position,
+    velocity: [f32; 3],
+    (gravity, range_m, radius_m): (f32, f32, f32),
+    bodies: &[(T, Position, Capsule)],
+    ground: impl Fn(f32, f32) -> Option<f32>,
+) -> (f32, Position, Option<T>) {
+    let speed = velocity[0].hypot(velocity[1]).max(f32::EPSILON);
+    let end_s = range_m / speed;
+    let mut time_s = 0.0;
+    let mut at = from;
+    while time_s < end_s {
+        time_s = (time_s + FLIGHT_STEP_S).min(end_s);
+        at = Position {
+            x: from.x + velocity[0] * time_s,
+            y: from.y + velocity[1] * time_s,
+            z: from.z + velocity[2] * time_s - HALF * gravity * time_s * time_s,
+        };
+        let met = bodies.iter().find(|(_, body_at, body)| {
+            at.horizontal_distance(*body_at) <= body.radius_m + radius_m
+                && at.z >= body_at.z - radius_m
+                && at.z <= body_at.z + body.height_m + radius_m
+        });
+        if let Some((number, _, _)) = met {
+            return (time_s, at, Some(*number));
+        }
+        if ground(at.x, at.y).is_some_and(|height| at.z <= height) {
+            return (time_s, at, None);
+        }
+    }
+    (time_s, at, None)
+}
+
+impl SimWorld {
+    /// Spawns the siege structures of the fort of `fight` (module doc, and
+    /// [`super::siege_structures`]): each turret of a known kind as a turret, the others as
+    /// structures.
+    pub(super) fn spawn_structures(&mut self, fight: &mut WarFight) {
+        let structures = fight.fort().structures.clone();
+        let content = std::sync::Arc::clone(&self.content);
+        for structure in structures {
+            match (
+                structure.turret_component,
+                content.war_forts.kind(&structure.asset),
+            ) {
+                (Some(_), Some(kind)) => self.spawn_turret(fight, structure, kind.clone()),
+                (Some(_), None) => {
+                    tracing::warn!(turret = ?structure.gde_ref, "turret of no known kind");
+                }
+                (None, _) => self.spawn_structure(fight, structure),
+            }
+        }
+    }
+
+    /// Spawns `turret` of `kind` in `fight`, open to damage while the war runs.
+    pub(super) fn spawn_turret(
+        &mut self,
+        fight: &mut WarFight,
+        turret: FortStructure,
+        kind: TurretKind,
+    ) {
+        let Some(mut run) = TurretRun::new(turret, kind) else {
+            return;
+        };
+        run.body.invulnerable = !fight.running();
+        let ownership = self.structure_ownership(fight, run.body.structure.side);
+        let members = spawn_members(&run.body, |member| run.own_member(member), ownership);
+        let gde_ref = run.body.structure.gde_ref;
+        let position = run.body.place();
+        run.body.number = self.stations.place_camp(|_| Station {
+            gde_ref,
+            position,
+            station_type: String::new(),
+            name: Vec::new(),
+            members,
+        });
+        fight.turrets.push(run);
+    }
+
+    /// Runs `body` on the war fight of this sim and puts it back; `None` when it runs none.
+    pub(super) fn with_turrets<T>(
+        &mut self,
+        body: impl FnOnce(&mut Self, &mut WarFight) -> T,
+    ) -> Option<T> {
+        let mut fight = self.instance_run.as_mut()?.take_war_fight()?;
+        let result = body(self, &mut fight);
+        if let Some(run) = self.instance_run.as_mut() {
+            run.put_war_fight(fight);
+        }
+        Some(result)
+    }
+
+    /// Sends the turret of `run`'s full state to its spawn members and `partial` to its viewers.
+    fn sync_turret(&mut self, run: &TurretRun, partial: Vec<BundleMember>) {
+        let full: Vec<BundleMember> = std::iter::once(run.turret_member(run.state()))
+            .chain(run.interact_member())
+            .chain(run.spawner_member(run.full_spawner()))
+            .chain(run.body.vitals_member())
+            .chain(run.body.buildable_member())
+            .collect();
+        self.stations.change_camp(
+            run.body.number,
+            |members| {
+                for member in &full {
+                    replace_member(members, member);
+                }
+            },
+            partial,
+        );
+    }
+
+    /// The interaction `request` of player `entity` (`number`) at `now_ms`: a use, a refill or
+    /// a repair of a turret of this sim's war (module doc); `false` when it names no turret.
+    pub(super) fn turret_interaction(
+        &mut self,
+        entity: Entity,
+        number: u64,
+        request: InteractionRequest,
+        name: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        match request.kind {
+            USE_TURRET_KIND => {}
+            ITEM_COST_KIND => return self.turret_item_cost(entity, number, request, name),
+            OPEN_SELECTION_KIND => {
+                return self.open_structure_selection(entity, number, request, name);
+            }
+            TRIGGER_KIND => return self.structure_trigger(entity, number, request, name, now_ms),
+            CONTAINER_KIND => return self.open_generator(entity, number, request, name),
+            _ => return false,
+        }
+        let side = self.war_side(entity);
+        let Some(connection) = self
+            .world
+            .get::<Player>(entity)
+            .map(|player| player.connection.clone())
+        else {
+            return false;
+        };
+        self.with_turrets(|world, fight| {
+            let Some(index) = fight
+                .turrets
+                .iter()
+                .position(|run| run.body.structure.gde_ref == request.target)
+            else {
+                return false;
+            };
+            let run = &mut fight.turrets[index];
+            let free = run.user.is_none() && !run.interaction_blocked && !run.body.broken;
+            if !free || side != Some(run.body.structure.side) {
+                let refused = gather_answer(number, request, USE_REFUSED, name);
+                send_now(&mut world.combat_messages, &connection, &[refused]);
+                return true;
+            }
+            run.user = Some(TurretUser {
+                entity,
+                number,
+                interaction: request.interaction,
+                last_call_ms: now_ms,
+            });
+            run.last_shot_ns = None;
+            let accepted = gather_answer(number, request, USE_ACCEPTED, name);
+            send_now(&mut world.combat_messages, &connection, &[accepted]);
+            let run = fight.turrets[index].clone();
+            let partial = vec![
+                run.interact_member(),
+                Some(run.turret_member(TurretState {
+                    interactor: Some(interactor_of(number)),
+                    ..TurretState::default()
+                })),
+            ];
+            world.sync_turret(&run, partial.into_iter().flatten().collect());
+            true
+        })
+        .unwrap_or(false)
+    }
+
+    /// The refill or repair `request` of player `entity` (`number`) on a turret of this sim's
+    /// war (module doc): the 3743 answer; `false` when it names no turret.
+    fn turret_item_cost(
+        &mut self,
+        entity: Entity,
+        number: u64,
+        request: InteractionRequest,
+        name: &[u8],
+    ) -> bool {
+        let side = self.war_side(entity);
+        let Some(connection) = self
+            .world
+            .get::<Player>(entity)
+            .map(|player| player.connection.clone())
+        else {
+            return false;
+        };
+        self.with_turrets(|world, fight| {
+            let Some(index) = fight
+                .turrets
+                .iter()
+                .position(|run| run.body.structure.gde_ref == request.target)
+            else {
+                return false;
+            };
+            let mut run = fight.turrets[index].clone();
+            let done = side == Some(run.body.structure.side)
+                && !run.body.broken
+                && world.spend_kit_on(entity, &mut run);
+            let status = if done { USE_ACCEPTED } else { USE_REFUSED };
+            let answer = gather_answer(number, request, status, name);
+            send_now(&mut world.combat_messages, &connection, &[answer]);
+            fight.turrets[index] = run;
+            true
+        })
+        .unwrap_or(false)
+    }
+
+    /// Player `entity` spends one kit on `run` (module doc): an ammo kit on a turret that lacks
+    /// ammo, else a repair kit on one that lacks health; whether it spent one.
+    fn spend_kit_on(&mut self, entity: Entity, run: &mut TurretRun) -> bool {
+        let lacks_ammo = run.kind.uses_ammo && run.ammo < run.kind.max_ammo;
+        let lacks_health = run.body.health < run.body.max_health;
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return false;
+        };
+        let Some(gear) = player.gear.as_mut() else {
+            return false;
+        };
+        if lacks_ammo && gear.take_as(AMMO_KIT, KIT_COST, SYNC_CRAFT_USED) {
+            run.ammo = run
+                .ammo
+                .saturating_add(run.kind.ammo_refill)
+                .min(run.kind.max_ammo);
+            let partial = run
+                .spawner_member(ProjectileSpawnerState {
+                    ammo: Some(run.ammo),
+                    firing_blocked: None,
+                })
+                .into_iter()
+                .collect();
+            self.sync_turret(run, partial);
+            return true;
+        }
+        if lacks_health && gear.take_as(REPAIR_KIT, KIT_COST, SYNC_CRAFT_USED) {
+            let partial = run.body.repair(run.kind.repair_health);
+            self.sync_turret(run, partial);
+            return true;
+        }
+        false
+    }
+
+    /// Turret `run` takes `amount` health (module doc): a hit, or its break at 0 (a user of a
+    /// turret that breaks is let go first).
+    pub(super) fn hurt_turret(&mut self, run: &mut TurretRun, amount: u32) {
+        if run.body.breaks_at(amount) && run.user.is_some() {
+            self.release_turret(run);
+        }
+        match run.body.take(amount) {
+            Some(Hurt::Hit(partial) | Hurt::Broke(partial)) => self.sync_turret(run, partial),
+            None => {}
+        }
+    }
+
+    /// The war of `fight` started (module doc): its structures may be hurt.
+    pub(super) fn turrets_at_start(&mut self, fight: &mut WarFight) {
+        for run in &mut fight.turrets {
+            let partial = run.body.open_to_damage();
+            self.sync_turret(run, partial);
+        }
+        for run in &mut fight.structures {
+            let partial = run.body.open_to_damage();
+            self.sync_structure(run, partial);
+        }
+    }
+
+    /// The war of `fight` has its result (module doc): its structures are whole and
+    /// invulnerable again, its turrets full of ammo.
+    pub(super) fn turrets_at_result(&mut self, fight: &mut WarFight) {
+        for run in &mut fight.turrets {
+            if run.user.is_some() {
+                self.release_turret(run);
+            }
+            run.ammo = run.kind.max_ammo;
+            let mut partial = run.body.restore();
+            partial.extend(run.spawner_member(ProjectileSpawnerState {
+                ammo: Some(run.ammo),
+                firing_blocked: None,
+            }));
+            self.sync_turret(run, partial);
+        }
+        for run in &mut fight.structures {
+            let partial = run.body.restore();
+            self.sync_structure(run, partial);
+        }
+    }
+
+    /// The bodies and the turrets a shot from a turret of `side` that player `shooter` fires
+    /// meets: the mobs, the shooter's foes and the whole turrets of the other side.
+    pub(super) fn shot_targets(
+        &mut self,
+        shooter: u64,
+        turrets: &[TurretRun],
+        side: u8,
+    ) -> Vec<(ShotTarget, Position, Capsule)> {
+        let mut bodies = self.target_places();
+        if let Some(entity) = self.player_by_number(shooter) {
+            bodies.extend(self.foe_places(entity));
+        }
+        let structures = turrets
+            .iter()
+            .enumerate()
+            .filter(|(_, run)| run.body.structure.side != side && !run.body.broken)
+            .map(|(index, run)| {
+                let [x, y, z] = run.body.structure.place;
+                (
+                    ShotTarget::Turret {
+                        index,
+                        facet: run.body.structure.facet_entity(),
+                    },
+                    Position { x, y, z },
+                    TURRET_BODY,
+                )
+            });
+        bodies
+            .into_iter()
+            .map(|(number, at, body)| (ShotTarget::Body(number), at, body))
+            .chain(structures)
+            .collect()
+    }
+
+    /// The client of `connection` sent turret call `call` at `now_ms` (module doc); the hits
+    /// of a repeater's shot.
+    pub fn turret_call(
+        &mut self,
+        connection: &ConnectionRef,
+        call: TurretClientMsg,
+        now_ms: u64,
+    ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
+        let Some(&entity) = self.by_connection.get(connection) else {
+            return Vec::new();
+        };
+        let aim = call.aim();
+        self.with_turrets(|world, fight| {
+            let Some(index) = fight.turrets.iter().position(|run| {
+                run.body.structure.gde_ref == aim.turret_id()
+                    && run.user.is_some_and(|user| user.entity == entity)
+            }) else {
+                tracing::debug!(turret = ?aim.turret_id(), "turret call of a player who does not use it");
+                return Vec::new();
+            };
+            let mut run = fight.turrets[index].clone();
+            if let Some(user) = run.user.as_mut() {
+                user.last_call_ms = now_ms;
+            }
+            run.aim(&aim);
+            let shooter = run.user.map_or(0, |user| user.number);
+            let (outcomes, structure_hit) = match call {
+                TurretClientMsg::RepeaterInput { flags, .. } if run.kind.hold_to_fire => {
+                    run.heat.advance(&run.kind, now_ms);
+                    run.heat.held = flags.held();
+                    if flags.fired() && run.repeater_may_fire(aim.time_ns) {
+                        run.last_shot_ns = Some(aim.time_ns);
+                        let targets = world.shot_targets(shooter, &fight.turrets, run.body.structure.side);
+                        world.fire_repeater(&mut run, &targets, now_ms)
+                    } else {
+                        (Vec::new(), None)
+                    }
+                }
+                TurretClientMsg::FireProjectile { .. }
+                    if !run.kind.hold_to_fire && run.cannon_may_fire() =>
+                {
+                    let targets = world.shot_targets(shooter, &fight.turrets, run.body.structure.side);
+                    world.fire_cannon(&mut run, &targets, now_ms);
+                    (Vec::new(), None)
+                }
+                _ => (Vec::new(), None),
+            };
+            fight.turrets[index] = run;
+            if let Some((target, amount)) = structure_hit {
+                world.hurt_turret(&mut fight.turrets[target], amount);
+            }
+            outcomes
+        })
+        .unwrap_or_default()
+    }
+
+    /// The health of a hit of a turret of `kind` that player `shooter` fires (module doc).
+    fn turret_hit_amount(&mut self, kind: &TurretKind, shooter: u64) -> u32 {
+        let coefficient = self
+            .combat
+            .data
+            .table_attack(&kind.damage_table, &kind.damage_row)
+            .map_or(0.0, |row| row.coefficient);
+        self.level_hit_amount(shooter, coefficient)
+    }
+
+    /// The health of a hit of player `shooter` with a row of `coefficient`: the base damage of
+    /// its level times the coefficient (module doc).
+    fn level_hit_amount(&mut self, shooter: u64, coefficient: f64) -> u32 {
+        let level = self
+            .player_by_number(shooter)
+            .and_then(|entity| self.world.get::<Player>(entity))
+            .map_or(FIRST_LEVEL, |player| {
+                self.content.progression.level_of(player.experience) + FIRST_LEVEL
+            });
+        let base = self
+            .combat
+            .data
+            .level(level)
+            .map_or(0.0, |row| row.base_damage);
+        // A hit of a few thousand points at most.
+        (base * coefficient).round() as u32
+    }
+
+    /// The siege structures of the war this sim runs that an attack of player `entity` can meet
+    /// (module doc): while the war runs, the whole structures of the other side, by their slot
+    /// keys, with [`TURRET_BODY`].
+    pub(super) fn structure_places(&self, entity: Entity) -> Vec<(u64, Position, Capsule)> {
+        let (Some(fight), Some(side)) = (self.war_fight(), self.war_side(entity)) else {
+            return Vec::new();
+        };
+        fight
+            .turrets
+            .iter()
+            .map(|run| &run.body)
+            .chain(fight.structures.iter().map(|run| &run.body))
+            .filter(|body| body.structure.side != side && !body.broken && !body.invulnerable)
+            .map(|body| (body.number, body.place(), TURRET_BODY))
+            .collect()
+    }
+
+    /// A hit of player `entity` (`shooter`) with its attack `damage_id` on `target` (module
+    /// doc): `None` when `target` is no siege structure of this sim's war. A structure of the
+    /// player's own side, or one before the start or from the result, is no target.
+    pub(super) fn structure_hit(
+        &mut self,
+        entity: Entity,
+        shooter: u64,
+        target: u64,
+        damage_id: &str,
+    ) -> Option<Result<AttackOutcome, AttackRefusal>> {
+        let side = self.war_side(entity);
+        let coefficient = self
+            .combat
+            .data
+            .attack(damage_id)
+            .map(|row| row.coefficient);
+        self.with_turrets(|world, fight| {
+            let turret = fight
+                .turrets
+                .iter()
+                .position(|run| run.body.number == target);
+            let other = fight
+                .structures
+                .iter()
+                .position(|run| run.body.number == target);
+            if turret.is_none() && other.is_none() {
+                return None;
+            }
+            let Some(coefficient) = coefficient else {
+                return Some(Err(AttackRefusal::NotWeaponAttack));
+            };
+            let body = match (turret, other) {
+                (Some(index), _) => &fight.turrets[index].body,
+                (None, Some(index)) => &fight.structures[index].body,
+                (None, None) => return None,
+            };
+            if side.is_none_or(|side| side == body.structure.side) || body.invulnerable {
+                return Some(Err(AttackRefusal::UnknownTarget));
+            }
+            if body.broken {
+                return Some(Err(AttackRefusal::TargetDead));
+            }
+            let amount = world.level_hit_amount(shooter, coefficient);
+            if let Some(index) = turret {
+                let mut run = fight.turrets[index].clone();
+                world.hurt_turret(&mut run, amount);
+                fight.turrets[index] = run;
+            } else if let Some(index) = other {
+                let mut run = fight.structures[index].clone();
+                if let Some(Hurt::Hit(partial) | Hurt::Broke(partial)) = run.body.take(amount) {
+                    world.sync_structure(&run, partial);
+                }
+                fight.structures[index] = run;
+            }
+            Some(Ok(AttackOutcome::Hit { target, amount }))
+        })
+        .flatten()
+    }
+
+    /// A repeater's shot along the aim of `run` at `targets` (module doc): the 2720 to every
+    /// player of the sim, the ammo and the hit: a body's outcome, or a turret's place in the
+    /// fight's list with the health it takes.
+    fn fire_repeater(
+        &mut self,
+        run: &mut TurretRun,
+        bodies: &[(ShotTarget, Position, Capsule)],
+        now_ms: u64,
+    ) -> RepeaterShot {
+        let Some(shooter) = run.user.map(|user| user.number) else {
+            return (Vec::new(), None);
+        };
+        let (muzzle, line) = run.muzzle();
+        let ground = std::sync::Arc::clone(&self.ground);
+        let ground_m = ground_along(muzzle, line, run.kind.range_m, |x, y| {
+            ground.height_at(x, y)
+        });
+        let body = body_on_line(muzzle, line, (run.kind.range_m, run.kind.radius_m), bodies)
+            .filter(|(_, along)| ground_m.is_none_or(|ground_m| *along <= ground_m));
+        let along = body.map_or(ground_m.unwrap_or(run.kind.range_m), |(_, along)| along);
+        let at = point_on(muzzle, line, along);
+        let result = CombatEffectMsg::TurretHitscanResult {
+            header: run.turret_header(),
+            position: [at.x, at.y, at.z],
+            target: body.map_or(NO_TARGET, |(target, _)| target.facet()),
+            result: body.map_or(NO_TARGET_RESULT, |_| HIT_RESULT),
+        };
+        self.send_to_all(&[ServerMessage::CombatEffect(result)]);
+        if run.kind.uses_ammo {
+            run.ammo = run.ammo.saturating_sub(1);
+        }
+        run.heat.fired_ms = now_ms;
+        let mut partial: Vec<BundleMember> = run
+            .spawner_member(ProjectileSpawnerState {
+                ammo: Some(run.ammo),
+                firing_blocked: None,
+            })
+            .into_iter()
+            .collect();
+        if run.heat.due(now_ms) {
+            run.heat.mark_sent(now_ms);
+            partial.push(run.turret_member(TurretState {
+                heat: Some(turret_half(run.heat.value)),
+                overheated: Some(run.heat.overheated),
+                ..TurretState::default()
+            }));
+        }
+        self.sync_turret(run, partial);
+        let Some((target, _)) = body else {
+            return (Vec::new(), None);
+        };
+        let amount = self.turret_hit_amount(&run.kind, shooter);
+        match target {
+            ShotTarget::Body(number) => (
+                self.apply_hit(number, shooter, amount, 0, now_ms)
+                    .map(Ok)
+                    .into_iter()
+                    .collect(),
+                None,
+            ),
+            ShotTarget::Turret { index, .. } => (Vec::new(), Some((index, amount))),
+        }
+    }
+
+    /// A cannon's shot along the aim of `run` at `bodies` (module doc): the ball, its 327 to the
+    /// shooter, the ammo and the block.
+    fn fire_cannon(
+        &mut self,
+        run: &mut TurretRun,
+        bodies: &[(ShotTarget, Position, Capsule)],
+        now_ms: u64,
+    ) {
+        let (Some(user), Some(projectile)) = (run.user, run.kind.projectile) else {
+            return;
+        };
+        let (muzzle, line) = run.muzzle();
+        let speed = velocity(line, run.kind.fire_speed_mps);
+        let ground = std::sync::Arc::clone(&self.ground);
+        let (flight_s, at, target) = ball_flight(
+            muzzle,
+            speed,
+            (run.kind.gravity_mps2, run.kind.range_m, run.kind.radius_m),
+            bodies,
+            |x, y| ground.height_at(x, y),
+        );
+        let flight_ms = (flight_s * MS_PER_SECOND) as u64;
+        let spawn = ProjectileSpawn {
+            asset: projectile.asset,
+            component: projectile.component,
+            position_component: None,
+            state: ProjectileState {
+                velocity: Some(speed),
+                owner: Some(facet_entity(user.number)),
+                ranged_attack: Some(projectile.ranged_attack),
+                damage_table: Some(projectile.damage_table_crc),
+                damage_row: Some(projectile.row_index),
+                ..ProjectileState::default()
+            },
+            muzzle,
+            flying_ms: flight_ms,
+            stuck_ms: 0,
+        };
+        let Some((entity, gde_ref)) = self.spawn_projectile(spawn, now_ms) else {
+            return;
+        };
+        let spawned = CombatEffectMsg::AuthoritativeProjectile {
+            header: run.spawner_header(),
+            flag: AUTHORITATIVE_PROJECTILE_FLAG,
+            projectile: projectile_ref(gde_ref),
+        };
+        if let Some(connection) = self
+            .world
+            .get::<Player>(user.entity)
+            .map(|player| player.connection.clone())
+        {
+            send_now(
+                &mut self.combat_messages,
+                &connection,
+                &[ServerMessage::CombatEffect(spawned)],
+            );
+        }
+        let amount = self.turret_hit_amount(&run.kind, user.number);
+        run.balls.push(BallFlight {
+            entity,
+            shooter: user.number,
+            land_ms: now_ms.saturating_add(flight_ms),
+            at,
+            target,
+            amount,
+        });
+        if run.kind.uses_ammo {
+            run.ammo = run.ammo.saturating_sub(1);
+        }
+        run.blocked_until_ms =
+            Some(now_ms.saturating_add((run.kind.fire_cooldown_s * MS_PER_SECOND) as u64));
+        run.firing_blocked = true;
+        let partial = run
+            .spawner_member(ProjectileSpawnerState {
+                ammo: Some(run.ammo),
+                firing_blocked: Some(true),
+            })
+            .into_iter()
+            .collect();
+        self.sync_turret(run, partial);
+    }
+
+    /// Sends `messages` to every player of this sim.
+    pub(super) fn send_to_all(&mut self, messages: &[ServerMessage]) {
+        let connections: Vec<ConnectionRef> = self.by_connection.keys().cloned().collect();
+        for connection in connections {
+            send_now(&mut self.combat_messages, &connection, messages);
+        }
+    }
+
+    /// The client of player `entity` cancelled interaction `interaction` (2473): a use of a
+    /// turret with it ends, and a supply generator it opened with it closes for it.
+    pub(super) fn turret_interaction_ended(&mut self, entity: Entity, interaction: u64) {
+        self.generator_interaction_ended(entity, interaction);
+        self.with_turrets(|world, fight| {
+            for index in 0..fight.turrets.len() {
+                if fight.turrets[index]
+                    .user
+                    .is_some_and(|user| user.entity == entity && user.interaction == interaction)
+                {
+                    let mut run = fight.turrets[index].clone();
+                    world.release_turret(&mut run);
+                    fight.turrets[index] = run;
+                }
+            }
+        });
+    }
+
+    /// The use of `run` ends (module doc): the last aim, no interactor, the block while hot.
+    pub(super) fn release_turret(&mut self, run: &mut TurretRun) {
+        run.user = None;
+        run.heat.held = false;
+        run.interaction_blocked = run.heat.value > 0.0;
+        let partial: Vec<BundleMember> = run
+            .interact_member()
+            .into_iter()
+            .chain(std::iter::once(run.turret_member(TurretState {
+                yaw: Some(turret_half(run.yaw)),
+                pitch: Some(turret_half(run.pitch)),
+                interactor: Some(NO_INTERACTOR),
+                blocked: run.interaction_blocked.then_some(true),
+                ..TurretState::default()
+            })))
+            .collect();
+        self.sync_turret(run, partial);
+    }
+
+    /// One tick of the turrets of this sim's war at sim ms `now_ms` (module doc): uses that
+    /// timed out or whose player is gone end, the heat moves, a cannon's block ends, and the
+    /// balls that landed hit.
+    pub(super) fn tick_turrets(
+        &mut self,
+        now_ms: u64,
+    ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
+        self.with_turrets(|world, fight| {
+            world.tick_siege_builds(fight, now_ms);
+            let mut outcomes = Vec::new();
+            let mut structure_hits = Vec::new();
+            let mut shell_areas = Vec::new();
+            for index in 0..fight.turrets.len() {
+                let mut run = fight.turrets[index].clone();
+                world.tick_turret(
+                    &mut run,
+                    now_ms,
+                    &mut outcomes,
+                    (&mut structure_hits, &mut shell_areas),
+                );
+                fight.turrets[index] = run;
+            }
+            for (area, at, source) in shell_areas {
+                world.open_siege_area(fight, &area, at, source, now_ms, &mut outcomes);
+            }
+            world.tick_siege_uses(fight, now_ms, &mut outcomes);
+            world.tick_generators(fight, now_ms);
+            for (target, amount) in structure_hits {
+                if let Some(run) = fight.turrets.get_mut(target) {
+                    world.hurt_turret(run, amount);
+                }
+            }
+            outcomes
+        })
+        .unwrap_or_default()
+    }
+
+    /// One tick of `run` at `now_ms`: its use, heat and block; the balls that landed hit (the
+    /// hits go into `outcomes`, a turret's place and its health into the first list), and a
+    /// ball of a kind with an area opens it where it landed (the second list).
+    fn tick_turret(
+        &mut self,
+        run: &mut TurretRun,
+        now_ms: u64,
+        outcomes: &mut Vec<Result<AttackOutcome, AttackRefusal>>,
+        (structure_hits, shell_areas): (&mut Vec<(usize, u32)>, &mut Vec<ShellArea>),
+    ) {
+        if let Some(user) = run.user {
+            let alive = self
+                .world
+                .get::<Vitals>(user.entity)
+                .is_some_and(|vitals| !vitals.health.is_dead())
+                && self.world.get::<Body>(user.entity).is_some();
+            if !alive || now_ms.saturating_sub(user.last_call_ms) >= USE_TIMEOUT_MS {
+                self.release_turret(run);
+            }
+        }
+        let mut partial = Vec::new();
+        let overheated = run.heat.overheated;
+        run.heat.advance(&run.kind, now_ms);
+        if run.heat.due(now_ms) || overheated != run.heat.overheated {
+            run.heat.mark_sent(now_ms);
+            let cooled = run.interaction_blocked && run.heat.value <= 0.0;
+            if cooled {
+                run.interaction_blocked = false;
+            }
+            partial.push(run.turret_member(TurretState {
+                heat: Some(turret_half(run.heat.value)),
+                overheated: (overheated != run.heat.overheated).then_some(run.heat.overheated),
+                blocked: cooled.then_some(false),
+                ..TurretState::default()
+            }));
+        }
+        if run.blocked_until_ms.is_some_and(|until| now_ms >= until) {
+            run.blocked_until_ms = None;
+            run.firing_blocked = false;
+            partial.extend(run.spawner_member(ProjectileSpawnerState {
+                ammo: None,
+                firing_blocked: Some(false),
+            }));
+        }
+        if !partial.is_empty() {
+            self.sync_turret(run, partial);
+        }
+        let (landed, flying): (Vec<_>, Vec<_>) = std::mem::take(&mut run.balls)
+            .into_iter()
+            .partition(|ball| now_ms >= ball.land_ms);
+        run.balls = flying;
+        for ball in landed {
+            // Inferred: a ball that met a turret ends at its impact point (the hit volume of a
+            // structure is Unknown).
+            let body = match ball.target {
+                Some(ShotTarget::Body(number)) => Some(number),
+                _ => None,
+            };
+            self.shot_entity_impact(ball.entity, body, ball.at, now_ms);
+            if let Some(area) = &run.kind.area {
+                let source = self.area_source(
+                    run.body.structure.side,
+                    ball.shooter,
+                    rotation_of(&run.body.structure),
+                );
+                shell_areas.push((area.clone(), ball.at, source));
+            }
+            match ball.target {
+                Some(ShotTarget::Body(number)) => outcomes.extend(
+                    self.apply_hit(number, ball.shooter, ball.amount, 0, now_ms)
+                        .map(Ok),
+                ),
+                Some(ShotTarget::Turret { index, .. }) => structure_hits.push((index, ball.amount)),
+                None => {}
+            }
+        }
+    }
+}
+
+/// The 327 form of a projectile's `GdeRef`: its raw id and its facet entity.
+fn projectile_ref(gde_ref: [u8; nw_messages::wire::RAW_ID_LEN]) -> [u8; TURRET_GDE_REF_LEN] {
+    gde_ref_of(gde_ref, facet_of_raw_id(&gde_ref))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::sync::Arc;
+
+    use nw_bus::WarInstance;
+    use nw_content::war_forts::WarForts;
+    use nw_db::{RosterSeat, TerritoryWar, WarSignup};
+    use nw_messages::keyed_list::KeyedList;
+    use nw_messages::{BuildableControllerState, InteractState, VitalsSlot0};
+
+    use crate::world::siege_structures::{
+        BROKEN_RUIN_TYPE, BROKEN_STATE, BUILT_STATE, INVULNERABLE, VULNERABLE,
+    };
+    use nw_messages::turrets::{RepeaterFlags, TURRET_REPEATER_INPUT_TYPE_INDEX};
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::player_content::PlayerContent;
+    use crate::world::tests::{NOW, SERVER_TIME, admit_at, messages_to, world_with_spawns};
+    use crate::world::war_fight::war_levels;
+
+    /// The retail repeater `fe2d8806...` of territory 11 (`joining_defending_war_2`: its first
+    /// members and its slice values) and a made-up cannon of the attackers with the retail cannon
+    /// kind of `RS_offensive_war`.
+    pub(crate) const TABLE: &str = r#"{"forts": [{
+        "territory": 11, "frame": [13312.0, 6144.0, 512.0, 512.0],
+        "arrivals": [{"side": 2, "position": [13664.976, 6312.062, 50.63449]}],
+        "siege": {"asset": "11111111111111111111111111111111", "gde_ref": "22222222222222222222222222222222",
+                  "card_component": 0, "state_component": 2},
+        "points": [{"number": 4, "asset": "33333333333333333333333333333333",
+           "gde_ref": "08070605040302011111111111111111", "facet": "0a0b0c0d0e0f0001",
+           "place": [13694.4, 6314.97, 57.7], "kind": 6, "position": "020d0103",
+           "card_component": 0, "position_component": 2, "ownership_component": 1, "point_component": 4}],
+        "structures": [
+          {"asset": "d1000d79ba715eae9e2382d252d9e6d5", "card_component": 0, "gde_ref": "fe2d8806c5c5b3da3218b9ad4b3dcb4f",
+           "interact_component": 13, "members": ["010d010346561b6a45c6e19412f2037a6a",
+           "020f01ff47afc80000000000000b9790c0aee250f80000000000000000ff0047afc80000003f8000005300001eaefb73015f90",
+           "03b81701030000000020", "079b1b01140000000000", "0a8b22010100", "0c39010300c800", "0db22d010200000001",
+           "0e921b010201", "0fb442017f00000000000066770000000000000000000000000000000000000000ffffffff0000",
+           "05ba1801070500000103010b5369656765537570706c79573a918000000000003c00ffffffff00000033000000000000"],
+           "ownership_component": 4, "place": [13702.854, 6364.1973, 55.413147], "side": 2, "spawner_component": 12,
+           "turret_component": 15, "yaw": -0.08727877},
+          {"asset": "4e41fea1158d570397ce292035800042", "card_component": 0, "gde_ref": "c8e5b15b50b29d5867767e3572dd4a63",
+           "interact_component": 13, "members": ["0f390103000f00",
+           "10b442017f000000000000466c0000000000000000000000000000000000000000ffffffff0000"],
+           "ownership_component": 5, "place": [13650.0, 6300.0, 55.0], "side": 1, "spawner_component": 15,
+           "turret_component": 16, "yaw": 0.0}]}],
+      "turret_kinds": [
+       {"asset": "d1000d79ba715eae9e2382d252d9e6d5", "damage_row": "RepeaterTurret_Projectile",
+        "damage_table": "DamageTable_Structures", "fire_cooldown_s": 0.0, "fire_speed_mps": 1000.0, "gravity_mps2": 0.0,
+        "heat_capacity": 100.0, "heat_gain_per_s": 20.0, "heat_loss_delay_s": 0.5, "heat_loss_per_s": 40.0,
+        "hold_to_fire": true, "max_ammo": 200, "ammo_refill": 200, "repair_health": 5000.0, "pitch_max_deg": 45.0, "pitch_min_deg": -50.0, "projectile": null,
+        "radius_m": 0.2, "range_m": 125.0, "repeat_fire_delay_s": 0.2, "slice": "turret_t2_repeater",
+        "spawner_facet": {"component": "372fc35a6778d259", "xor": "06f03eba159de653"},
+        "turret_facet": {"component": "36b800a37ce6d7c1", "xor": "06f03ea2159de653"}, "uses_ammo": true, "yaw_max_deg": 85.0},
+       {"asset": "4e41fea1158d570397ce292035800042", "damage_row": "Cannon_Projectile",
+        "damage_table": "DamageTable_Structures", "fire_cooldown_s": 3.0, "fire_speed_mps": 50.0, "gravity_mps2": 13.0,
+        "heat_capacity": 0.0, "heat_gain_per_s": 0.0, "heat_loss_delay_s": 0.0, "heat_loss_per_s": 0.0,
+        "hold_to_fire": false, "max_ammo": 15, "ammo_refill": 15, "repair_health": 5000.0, "pitch_max_deg": 25.0, "pitch_min_deg": -20.0,
+        "projectile": {"asset": "30a2e9cadf6b5622a0571e468690f128", "component": 1, "ranged_attack": 261,
+                       "damage_table_crc": 81017683, "row_index": 6},
+        "radius_m": 0.3, "range_m": 115.0, "repeat_fire_delay_s": 0.0, "slice": "platform_t3_cannon_autobuild",
+        "spawner_facet": {"component": "603842316ab22336", "xor": "9aaa09ee99dfb635"},
+        "turret_facet": {"component": "26eb5da726214d6d", "xor": "9aaa09e499dfb635"}, "uses_ammo": true, "yaw_max_deg": 75.0}]}"#;
+
+    pub(crate) const REPEATER_REF: [u8; 16] =
+        *b"\xfe\x2d\x88\x06\xc5\xc5\xb3\xda\x32\x18\xb9\xad\x4b\x3d\xcb\x4f";
+    pub(crate) const CANNON_REF: [u8; 16] =
+        *b"\xc8\xe5\xb1\x5b\x50\xb2\x9d\x58\x67\x76\x7e\x35\x72\xdd\x4a\x63";
+    pub(crate) const DEFENDER: u64 = 7;
+    const INTERACTION: u64 = 0xbfde_0000_0000_0001;
+    /// The client clock of the first shot (ns) and the retail spacing of two shots.
+    const SHOT_NS: u64 = 0x0b97_927a_bd0a_dcad;
+    const SHOT_SPACING_NS: u64 = 250_000_000;
+    const TOO_SOON_NS: u64 = 100_000_000;
+
+    fn forts() -> WarForts {
+        WarForts::parse(TABLE).expect("table")
+    }
+
+    /// A war instance sim of territory 11 with its fight open and one defender of its roster.
+    fn war_world() -> (SimWorld, Entity) {
+        war_world_of(nw_content::war_forts::SIDE_DEFENDER)
+    }
+
+    /// [`war_world`] with its player on `side`.
+    pub(crate) fn war_world_of(side: u8) -> (SimWorld, Entity) {
+        war_world_with(forts(), side, |content| content)
+    }
+
+    /// [`war_world_of`] with the forts and kinds of `forts`, its content changed by `content`
+    /// before the fight spawns.
+    pub(crate) fn war_world_with(
+        forts: WarForts,
+        side: u8,
+        content: impl FnOnce(PlayerContent) -> PlayerContent,
+    ) -> (SimWorld, Entity) {
+        let mut world = world_with_spawns(Vec::new());
+        world.instance_sim = true;
+        world.war_levels = war_levels(&forts);
+        world.content = Arc::new(content(PlayerContent {
+            war_forts: forts,
+            kits: crate::world::gear::tests::kits_with(&[
+                (AMMO_KIT, KIT_CLASS),
+                (REPAIR_KIT, KIT_CLASS),
+            ]),
+            ..PlayerContent::default()
+        }));
+        let admit = admit_at(DEFENDER, 0.0, true);
+        let character = admit.character;
+        let war = TerritoryWar {
+            war: Uuid::from_u128(0x77),
+            territory: 11,
+            attacker: (Uuid::from_u128(0xa1), 2),
+            defender: (Uuid::from_u128(0xd1), 1),
+            number: 4714,
+            starts_ms: u64::MAX / 2,
+            result: None,
+            signups: vec![WarSignup {
+                character,
+                name: "Defender".to_owned(),
+                company: Some((Uuid::from_u128(0xd1), 0)),
+                side,
+                gear_score: 600,
+                roster: RosterSeat {
+                    place: Some((0, 0)),
+                    permission: 0,
+                },
+                kicked: false,
+            }],
+        };
+        world.wars.read(Ok(vec![war]));
+        let opened = world.open_war_instance(
+            Uuid::from_u128(0x1),
+            1,
+            (vec![character], None),
+            WarInstance {
+                war: Uuid::from_u128(0x77),
+                territory: 11,
+            },
+            NOW,
+        );
+        assert!(matches!(opened, nw_bus::InstanceOpened::Opened));
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let entity = world.player_by_number(DEFENDER).expect("defender");
+        let gear = crate::world::gear::Gear::starter(
+            &world.content.kits,
+            character,
+            Some(crate::world::gear::tests::BACKSTORY),
+        )
+        .expect("starter gear");
+        world.world.get_mut::<Player>(entity).expect("player").gear = Some(gear);
+        world.tick_war_fight();
+        world.take_messages();
+        (world, entity)
+    }
+
+    pub(crate) fn use_request(target: [u8; 16]) -> InteractionRequest {
+        InteractionRequest {
+            target,
+            target_entity: u64::from_le_bytes(target[..8].try_into().expect("8 bytes")),
+            interaction: INTERACTION,
+            kind: USE_TURRET_KIND,
+            gatherable: None,
+        }
+    }
+
+    fn repeater_call(time_ns: u64, flags: u8) -> TurretClientMsg {
+        let kind = forts().kind(&REPEATER_REF_ASSET).cloned().expect("kind");
+        let entity = u64::from_le_bytes(REPEATER_REF[..8].try_into().expect("8 bytes"));
+        TurretClientMsg::RepeaterInput {
+            header: FacetHeader::of(0, DEFENDER),
+            aim: TurretAim {
+                turret: gde_ref_of(REPEATER_REF, entity),
+                turret_facet: kind.turret_facet.target(entity),
+                time_ns,
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+            flags: RepeaterFlags(flags),
+            frame_s: 1.0 / 30.0,
+        }
+    }
+
+    const REPEATER_REF_ASSET: [u8; 16] =
+        *b"\xd1\x00\x0d\x79\xba\x71\x5e\xae\x9e\x23\x82\xd2\x52\xd9\xe6\xd5";
+
+    fn turret_state(world: &SimWorld, gde_ref: &[u8; 16]) -> (TurretState, Option<u32>, Vec<u8>) {
+        let number = turret_number(world, gde_ref).expect("spawned");
+        let members = world.stations.members(number).expect("members");
+        let state = members
+            .iter()
+            .find_map(|member| match &member.state {
+                MemberState::Turret(state) => Some(*state),
+                _ => None,
+            })
+            .expect("turret state");
+        let interactors = members.iter().find_map(|member| match &member.state {
+            MemberState::Interact(state) => state.has_interactors,
+            _ => None,
+        });
+        let spawner = members
+            .iter()
+            .find_map(|member| match &member.state {
+                MemberState::Recorded { class, body }
+                    if *class == PROJECTILE_SPAWNER_TYPE_INDEX =>
+                {
+                    Some(body.clone())
+                }
+                _ => None,
+            })
+            .expect("spawner");
+        (state, interactors, spawner)
+    }
+
+    fn turret_number(world: &SimWorld, gde_ref: &[u8; 16]) -> Option<u64> {
+        world
+            .war_fight()?
+            .turrets
+            .iter()
+            .find(|run| &run.body.structure.gde_ref == gde_ref)
+            .map(|run| run.body.number)
+    }
+
+    #[test]
+    fn the_turrets_spawn_idle_with_their_retail_members_and_their_side_ownership() {
+        let (world, _) = war_world();
+        let (state, interactors, spawner) = turret_state(&world, &REPEATER_REF);
+        assert_eq!(state.interactor, Some(NO_INTERACTOR));
+        assert_eq!(state.heat, Some(0));
+        assert_eq!(
+            state.orientation.map(|turn| turn.flag),
+            Some(0x66),
+            "retail orientation"
+        );
+        assert_eq!(
+            interactors,
+            Some(NO_INTERACTORS),
+            "retail first interact had one"
+        );
+        assert_eq!(
+            spawner,
+            ProjectileSpawnerState {
+                ammo: Some(200),
+                firing_blocked: Some(false)
+            }
+            .encode()
+        );
+        let number = turret_number(&world, &REPEATER_REF).expect("spawned");
+        let members = world.stations.members(number).expect("members");
+        assert!(members.iter().any(|member| matches!(&member.state,
+            MemberState::Ownership(owner) if owner.guild_id == Some(*Uuid::from_u128(0xd1).as_bytes())
+                && owner.permission_rule == Some(TURRET_PERMISSION_RULE))));
+        assert!(
+            members
+                .iter()
+                .any(|member| matches!(member.state, MemberState::Position(_)))
+        );
+        assert!(turret_number(&world, &CANNON_REF).is_some());
+    }
+
+    #[test]
+    fn a_defender_uses_its_turret_and_the_attackers_cannon_is_refused() {
+        let (mut world, entity) = war_world();
+        assert!(world.turret_interaction(entity, DEFENDER, use_request(CANNON_REF), &[], NOW));
+        let refused = messages_to(&world.take_messages(), DEFENDER);
+        assert!(
+            matches!(&refused[..], [ServerMessage::InteractionValidated(answer)] if answer.status == USE_REFUSED)
+        );
+        assert!(world.turret_interaction(entity, DEFENDER, use_request(REPEATER_REF), &[], NOW));
+        let accepted = messages_to(&world.take_messages(), DEFENDER);
+        assert!(
+            matches!(&accepted[..], [ServerMessage::InteractionValidated(answer)] if answer.status == USE_ACCEPTED)
+        );
+        let (state, interactors, _) = turret_state(&world, &REPEATER_REF);
+        assert_eq!(state.interactor, Some(interactor_of(DEFENDER)));
+        assert_eq!(interactors, Some(ONE_INTERACTOR));
+        assert!(!world.turret_interaction(
+            entity,
+            DEFENDER,
+            InteractionRequest {
+                kind: 51,
+                ..use_request(REPEATER_REF)
+            },
+            &[],
+            NOW
+        ));
+    }
+
+    #[test]
+    fn a_repeater_shot_answers_2720_spends_ammo_and_keeps_its_rate() {
+        let (mut world, entity) = war_world();
+        world.turret_interaction(entity, DEFENDER, use_request(REPEATER_REF), &[], NOW);
+        world.take_messages();
+        let connection = world
+            .world
+            .get::<Player>(entity)
+            .expect("player")
+            .connection
+            .clone();
+        let fired = RepeaterFlags::PRESSED | RepeaterFlags::HELD | RepeaterFlags::FIRED;
+        world.turret_call(&connection, repeater_call(SHOT_NS, fired), NOW + 1);
+        let sent = messages_to(&world.take_messages(), DEFENDER);
+        let [
+            ServerMessage::CombatEffect(CombatEffectMsg::TurretHitscanResult {
+                header,
+                position,
+                target,
+                result,
+            }),
+        ] = &sent[..]
+        else {
+            panic!("one 2720: {sent:?}");
+        };
+        assert_eq!(
+            *header,
+            FacetHeader {
+                target: 0x12fb_fc0a_8ffc_a36e,
+                entity: 0xdab3_c5c5_0688_2dfe
+            },
+            "the retail 2720 header"
+        );
+        assert_eq!((*target, *result), (NO_TARGET, NO_TARGET_RESULT));
+        let from = Position {
+            x: 13_702.854,
+            y: 6_364.197,
+            z: 55.413 + REPEATER_MUZZLE.1,
+        };
+        let at = Position {
+            x: position[0],
+            y: position[1],
+            z: position[2],
+        };
+        assert!(
+            (from.horizontal_distance(at) - 125.0).abs() < 0.5,
+            "no ground: the range end"
+        );
+        let (_, _, spawner) = turret_state(&world, &REPEATER_REF);
+        assert_eq!(
+            spawner,
+            ProjectileSpawnerState {
+                ammo: Some(199),
+                firing_blocked: Some(false)
+            }
+            .encode()
+        );
+        world.turret_call(
+            &connection,
+            repeater_call(SHOT_NS + TOO_SOON_NS, fired),
+            NOW + 2,
+        );
+        assert!(
+            messages_to(&world.take_messages(), DEFENDER).is_empty(),
+            "too soon"
+        );
+        world.turret_call(
+            &connection,
+            repeater_call(SHOT_NS + SHOT_SPACING_NS, fired),
+            NOW + 3,
+        );
+        assert_eq!(messages_to(&world.take_messages(), DEFENDER).len(), 1);
+        let _ = TURRET_REPEATER_INPUT_TYPE_INDEX;
+    }
+
+    #[test]
+    fn a_use_ends_after_the_calls_stop_and_a_hot_turret_stays_blocked_until_cool() {
+        let (mut world, entity) = war_world();
+        world.turret_interaction(entity, DEFENDER, use_request(REPEATER_REF), &[], NOW);
+        let connection = world
+            .world
+            .get::<Player>(entity)
+            .expect("player")
+            .connection
+            .clone();
+        let held = RepeaterFlags::HELD | RepeaterFlags::FIRED;
+        world.turret_call(&connection, repeater_call(SHOT_NS, held), NOW);
+        world.turret_call(
+            &connection,
+            repeater_call(SHOT_NS + SHOT_SPACING_NS, held),
+            NOW + 1_000,
+        );
+        world.tick_turrets(NOW + 1_000 + USE_TIMEOUT_MS - 1);
+        assert_eq!(
+            turret_state(&world, &REPEATER_REF).0.interactor,
+            Some(interactor_of(DEFENDER))
+        );
+        world.tick_turrets(NOW + 1_000 + USE_TIMEOUT_MS);
+        let (state, interactors, _) = turret_state(&world, &REPEATER_REF);
+        assert_eq!(state.interactor, Some(NO_INTERACTOR));
+        assert_eq!(interactors, Some(NO_INTERACTORS));
+        assert_eq!(state.blocked, Some(true), "hot");
+        assert!(world.turret_interaction(
+            entity,
+            DEFENDER,
+            use_request(REPEATER_REF),
+            &[],
+            NOW + 1_200
+        ));
+        let refused = messages_to(&world.take_messages(), DEFENDER);
+        assert!(refused.iter().any(|message| matches!(message, ServerMessage::InteractionValidated(answer) if answer.status == USE_REFUSED)));
+        world.tick_turrets(NOW + 10_000);
+        let (state, _, _) = turret_state(&world, &REPEATER_REF);
+        assert_eq!(
+            (state.heat, state.blocked),
+            (Some(0), Some(false)),
+            "cooled"
+        );
+    }
+
+    pub(crate) const CANNON_ASSET: [u8; 16] =
+        *b"\x4e\x41\xfe\xa1\x15\x8d\x57\x03\x97\xce\x29\x20\x35\x80\x00\x42";
+
+    pub(crate) fn cannon_call() -> TurretClientMsg {
+        let kind = kind(&CANNON_ASSET);
+        let entity = u64::from_le_bytes(CANNON_REF[..8].try_into().expect("8 bytes"));
+        TurretClientMsg::FireProjectile {
+            header: FacetHeader::of(0, DEFENDER),
+            aim: TurretAim {
+                turret: gde_ref_of(CANNON_REF, entity),
+                turret_facet: kind.turret_facet.target(entity),
+                time_ns: SHOT_NS,
+                yaw: 0.0,
+                pitch: 0.2,
+            },
+            tail: nw_messages::turrets::FIRE_TAIL,
+        }
+    }
+
+    #[test]
+    fn a_cannon_shot_spawns_its_ball_tells_the_shooter_and_blocks_for_its_cooldown() {
+        let (mut world, entity) = war_world_of(nw_content::war_forts::SIDE_ATTACKER);
+        assert!(world.turret_interaction(entity, DEFENDER, use_request(CANNON_REF), &[], NOW));
+        world.take_messages();
+        let connection = world
+            .world
+            .get::<Player>(entity)
+            .expect("player")
+            .connection
+            .clone();
+        world.turret_call(&connection, cannon_call(), NOW + 10);
+        let sent = messages_to(&world.take_messages(), DEFENDER);
+        let [
+            ServerMessage::CombatEffect(CombatEffectMsg::AuthoritativeProjectile {
+                header,
+                flag,
+                projectile,
+            }),
+        ] = &sent[..]
+        else {
+            panic!("one 327: {sent:?}");
+        };
+        assert_eq!(
+            header.target, 0x226f_fdf0_2d20_7733,
+            "the retail 327 target"
+        );
+        assert_eq!(*flag, AUTHORITATIVE_PROJECTILE_FLAG);
+        let ball: [u8; 16] = projectile[..16].try_into().expect("16 bytes");
+        assert_eq!(projectile[16..], facet_of_raw_id(&ball).to_be_bytes());
+        let (_, _, spawner) = turret_state(&world, &CANNON_REF);
+        assert_eq!(
+            spawner,
+            ProjectileSpawnerState {
+                ammo: Some(14),
+                firing_blocked: Some(true)
+            }
+            .encode()
+        );
+        world.turret_call(&connection, cannon_call(), NOW + 20);
+        assert!(
+            messages_to(&world.take_messages(), DEFENDER).is_empty(),
+            "blocked"
+        );
+        let flying = |world: &SimWorld| {
+            world
+                .war_fight()
+                .expect("fight")
+                .turrets
+                .iter()
+                .map(|run| run.balls.len())
+                .sum::<usize>()
+        };
+        assert_eq!(flying(&world), 1);
+        world.tick_turrets(NOW + 10 + 3_000);
+        let (_, _, spawner) = turret_state(&world, &CANNON_REF);
+        assert_eq!(
+            spawner,
+            ProjectileSpawnerState {
+                ammo: Some(14),
+                firing_blocked: Some(false)
+            }
+            .encode()
+        );
+        assert_eq!(flying(&world), 0, "landed at the end of its range");
+    }
+
+    fn kind(asset: &[u8; 16]) -> TurretKind {
+        forts().kind(asset).cloned().expect("kind")
+    }
+
+    /// The client build of the content table the slice tests read (`NW_CONTENT_DIR`).
+    pub(crate) const CONTENT_BUILD: &str = "25810808";
+
+    /// The test table with the cannon's kind replaced by the kind of the content table whose
+    /// slice ends with `slice` (on the cannon's asset, so that the cannon of the test fort is of
+    /// that kind).
+    pub(crate) fn forts_with_cannon_of(slice: &str) -> WarForts {
+        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
+        let path = nw_content::war_forts::war_forts_path(std::path::Path::new(&dir), CONTENT_BUILD);
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("content table"))
+                .expect("json");
+        let mut kind = content["turret_kinds"]
+            .as_array()
+            .expect("kinds")
+            .iter()
+            .find(|kind| {
+                kind["slice"]
+                    .as_str()
+                    .is_some_and(|name| name.ends_with(slice))
+            })
+            .cloned()
+            .expect("kind of the slice");
+        let mut table: serde_json::Value = serde_json::from_str(TABLE).expect("test table");
+        let kinds = table["turret_kinds"].as_array_mut().expect("kinds");
+        let cannon = kinds
+            .iter_mut()
+            .find(|row| row["asset"] == hex::encode(CANNON_ASSET))
+            .expect("cannon kind");
+        kind["asset"] = cannon["asset"].clone();
+        *cannon = kind;
+        WarForts::parse(&table.to_string()).expect("table")
+    }
+
+    /// The slices of the T3 ballista and explosive launcher with the projectile slice each
+    /// fires (`m_ammoId`: `turret_t1_ballista_projectile`, `turret_t3_explosivelauncher_projectile`).
+    const SHOT_SLICES: [(&str, &str); 2] = [
+        (
+            "turret_t3_ballista.dynamicslice",
+            "047a2b6174ae57e49a703b1f72516490",
+        ),
+        (
+            "turret_t3_explosivelauncher.dynamicslice",
+            "14546b51be8c508f9a7b3768a3761944",
+        ),
+    ];
+
+    #[test]
+    fn a_ballista_and_an_explosive_launcher_fire_the_projectile_of_their_slices_as_a_cannon() {
+        for (slice, shot_asset) in SHOT_SLICES {
+            let forts = forts_with_cannon_of(slice);
+            let kind = forts.kind(&CANNON_ASSET).cloned().expect("kind");
+            let projectile = kind.projectile.expect("a projectile from the slices");
+            assert_eq!(hex::encode(projectile.asset), shot_asset, "{slice}");
+            let (mut world, entity) =
+                war_world_with(forts, nw_content::war_forts::SIDE_ATTACKER, |content| {
+                    content
+                });
+            assert!(world.turret_interaction(entity, DEFENDER, use_request(CANNON_REF), &[], NOW));
+            world.take_messages();
+            let connection = world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .connection
+                .clone();
+            world.turret_call(&connection, cannon_call(), NOW + 10);
+            let sent = messages_to(&world.take_messages(), DEFENDER);
+            assert!(
+                matches!(
+                    &sent[..],
+                    [ServerMessage::CombatEffect(
+                        CombatEffectMsg::AuthoritativeProjectile { .. }
+                    )]
+                ),
+                "{slice}: one 327: {sent:?}"
+            );
+            let fight = world.war_fight().expect("fight");
+            let ball = fight
+                .turrets
+                .iter()
+                .find_map(|run| run.balls.first())
+                .expect("a ball in flight");
+            let members = world
+                .stations
+                .members(ball.entity)
+                .expect("projectile entity");
+            let card = members.iter().find_map(|member| match &member.state {
+                MemberState::GdeMetadata(card) => card.asset,
+                _ => None,
+            });
+            assert_eq!(
+                card.map(|asset| hex::encode(asset.id)).as_deref(),
+                Some(shot_asset)
+            );
+            let state = members
+                .iter()
+                .find(|member| member.component == projectile.component)
+                .and_then(|member| match &member.state {
+                    MemberState::Projectile(state) => Some(*state),
+                    _ => None,
+                })
+                .expect("projectile state on the slice's component");
+            assert_eq!(
+                state.ranged_attack,
+                Some(projectile.ranged_attack),
+                "{slice}"
+            );
+            assert_eq!(state.damage_row, Some(projectile.row_index), "{slice}");
+            let (_, _, spawner) = turret_state(&world, &CANNON_REF);
+            assert_eq!(
+                spawner,
+                ProjectileSpawnerState {
+                    ammo: Some(kind.max_ammo - 1),
+                    firing_blocked: Some(true)
+                }
+                .encode(),
+                "{slice}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_heat_rises_while_held_overheats_and_falls_after_its_delay() {
+        let kind = kind(&REPEATER_REF_ASSET);
+        let mut heat = Heat {
+            held: true,
+            ..Heat::default()
+        };
+        heat.advance(&kind, 1_000);
+        assert!((heat.value - 20.0).abs() < 1e-3, "20 a second");
+        assert!(
+            !heat.due(1_000 + HEAT_RISE_SEND_MS - 1 - 1_000 + heat.sent_ms) || heat.sent_ms == 0
+        );
+        heat.advance(&kind, 6_000);
+        assert!(heat.overheated && (heat.value - 100.0).abs() < 1e-3);
+        heat.held = false;
+        heat.fired_ms = 6_000;
+        heat.advance(&kind, 6_400);
+        assert!((heat.value - 100.0).abs() < 1e-3, "within the loss delay");
+        heat.advance(&kind, 7_400);
+        assert!((heat.value - 60.0).abs() < 1e-3, "40 a second");
+        heat.advance(&kind, 9_000);
+        assert!(heat.value == 0.0 && !heat.overheated);
+    }
+
+    #[test]
+    fn a_rising_heat_goes_out_every_half_second_and_a_falling_one_at_once() {
+        let mut heat = Heat {
+            value: 5.0,
+            ..Heat::default()
+        };
+        assert!(!heat.due(HEAT_RISE_SEND_MS - 1));
+        assert!(heat.due(HEAT_RISE_SEND_MS));
+        heat.mark_sent(HEAT_RISE_SEND_MS);
+        heat.value = 4.0;
+        assert!(heat.due(HEAT_RISE_SEND_MS + 1));
+    }
+
+    /// Retail `joining_defending_war_2` 197.937 s: aim yaw 78.1 and pitch -11.1 degrees from the
+    /// repeater facing -5 degrees met the ground 80.4 m away, at 43.0 m.
+    #[test]
+    fn a_shot_meets_the_ground_where_the_retail_one_did() {
+        let from = Position {
+            x: 0.0,
+            y: 0.0,
+            z: 55.413 + REPEATER_MUZZLE.1,
+        };
+        let line = AimLine {
+            yaw: (78.1_f32 - 5.0).to_radians(),
+            pitch: 11.1_f32.to_radians(),
+        };
+        let along = ground_along(from, line, 125.0, |_, _| Some(43.0)).expect("the ground");
+        let at = point_on(from, line, along);
+        assert!(
+            (from.horizontal_distance(at) - 80.4).abs() < 1.5,
+            "{}",
+            from.horizontal_distance(at)
+        );
+        let heading = (-at.x).atan2(at.y).to_degrees();
+        assert!((heading - 73.1).abs() < 0.1);
+        assert!(
+            ground_along(
+                from,
+                AimLine {
+                    pitch: -0.2,
+                    ..line
+                },
+                125.0,
+                |_, _| Some(43.0)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_shot_meets_the_nearest_body_on_its_line_only() {
+        let from = Position {
+            x: 0.0,
+            y: 0.0,
+            z: 2.0,
+        };
+        let line = AimLine {
+            yaw: 0.0,
+            pitch: 0.0,
+        };
+        let capsule = Capsule {
+            radius_m: 0.4,
+            height_m: 1.8,
+        };
+        let bodies = [
+            (
+                1,
+                Position {
+                    x: 0.0,
+                    y: 40.0,
+                    z: 1.2,
+                },
+                capsule,
+            ),
+            (
+                2,
+                Position {
+                    x: 0.0,
+                    y: 20.0,
+                    z: 1.2,
+                },
+                capsule,
+            ),
+            (
+                3,
+                Position {
+                    x: 3.0,
+                    y: 10.0,
+                    z: 1.2,
+                },
+                capsule,
+            ),
+            (
+                4,
+                Position {
+                    x: 0.0,
+                    y: -10.0,
+                    z: 1.2,
+                },
+                capsule,
+            ),
+        ];
+        let (number, along) = body_on_line(from, line, (125.0, 0.2), &bodies).expect("a body");
+        assert_eq!(number, 2);
+        assert!((along - 20.0).abs() < 0.1);
+        assert!(
+            body_on_line(from, line, (15.0, 0.2), &bodies).is_none(),
+            "out of range"
+        );
+    }
+
+    /// Retail `RS_offensive_war` 860.037 s: the first ball (horizontal velocity 20.4, -42.1 m/s
+    /// from 58.2 m) landed 1.7 m higher after 1.546 s of flight with the slice's gravity 13 m/s²,
+    /// so it rose at 11.15 m/s.
+    #[test]
+    fn a_ball_flies_with_the_slice_gravity_to_the_retail_impact() {
+        let from = Position {
+            x: 0.0,
+            y: 0.0,
+            z: 58.2,
+        };
+        // The ground under the turret is low; the ball came down on ground 1.7 m above its spawn.
+        let ground = |x: f32, y: f32| Some(if x.hypot(y) < 50.0 { 50.0 } else { 59.9 });
+        let (time_s, at, target) =
+            ball_flight::<u64>(from, [20.4, -42.1, 11.15], (13.0, 115.0, 0.3), &[], ground);
+        assert!(target.is_none());
+        assert!((time_s - 1.546).abs() < 0.03, "{time_s}");
+        assert!((at.z - 59.9).abs() < 0.5);
+        let capsule = Capsule {
+            radius_m: 0.4,
+            height_m: 1.8,
+        };
+        let body = [(
+            9,
+            Position {
+                x: 20.4 * 0.5,
+                y: -42.1 * 0.5,
+                z: 58.2 + 11.15 * 0.5 - 6.5 * 0.25 - 0.9,
+            },
+            capsule,
+        )];
+        let (_, _, met) = ball_flight(
+            from,
+            [20.4, -42.1, 11.15],
+            (13.0, 115.0, 0.3),
+            &body,
+            |_, _| None,
+        );
+        assert_eq!(met, Some(9));
+    }
+
+    #[test]
+    fn the_aim_stays_in_the_slice_limits_and_the_headers_follow_the_facet_rules() {
+        let forts = forts();
+        let turret = forts.fort(11).expect("fort").structures[1].clone();
+        let kind = kind(&turret.asset);
+        let mut run = TurretRun::new(turret, kind).expect("a turret");
+        assert_eq!(
+            run.turret_header(),
+            FacetHeader {
+                target: 0xe923_195b_e88f_a16a,
+                entity: 0x589d_b250_5bb1_e5c8
+            }
+        );
+        assert_eq!(
+            run.spawner_header(),
+            FacetHeader {
+                target: 0x226f_fdf0_2d20_7733,
+                entity: 0x589d_b250_5bb1_e5c8
+            }
+        );
+        let aim = TurretAim {
+            turret: [0; TURRET_GDE_REF_LEN],
+            turret_facet: 0,
+            time_ns: 0,
+            yaw: 3.0,
+            pitch: -1.0,
+        };
+        run.aim(&aim);
+        assert!((run.yaw - 75_f32.to_radians()).abs() < 1e-6);
+        assert!((run.pitch - (-20_f32).to_radians()).abs() < 1e-6);
+        let (muzzle, line) = run.muzzle();
+        assert!((muzzle.z - (55.0 + CANNON_MUZZLE.1)).abs() < 1e-3);
+        assert!(
+            (line.pitch - 20_f32.to_radians()).abs() < 1e-6,
+            "the player convention looks down"
+        );
+        assert!(run.cannon_may_fire());
+        run.firing_blocked = true;
+        assert!(!run.cannon_may_fire());
+        run.firing_blocked = false;
+        run.ammo = 0;
+        assert!(!run.cannon_may_fire());
+    }
+
+    #[test]
+    fn the_no_interactor_and_the_interactor_are_the_retail_forms() {
+        let mut none = vec![0; 20];
+        none.extend([0xff; 4]);
+        assert_eq!(NO_INTERACTOR.to_vec(), none);
+        let interactor = interactor_of(DEFENDER);
+        assert_eq!(interactor[16..], facet_entity(DEFENDER).to_be_bytes());
+        assert_eq!(
+            projectile_ref(REPEATER_REF)[16..],
+            0xdab3_c5c5_0688_2dfe_u64.to_be_bytes()
+        );
+    }
+    /// The item class of the kits (their `MasterItemDefinitions_Faction` rows).
+    pub(crate) const KIT_CLASS: &str = "Resource+SiegeWarOnly";
+    /// The retail repeater's health (its first vitals state) and its committed `SiegeSupply`
+    /// (its first buildable state, `joining_defending_war_2`).
+    const REPEATER_HEALTH: f32 = 90_000.0;
+    const REPEATER_SUPPLY: u32 = 60;
+    /// The ammo of the retail repeater before its second refill (`joining_defending_war_2`
+    /// 1416 s).
+    const LOW_AMMO: u16 = 130;
+    const HIT: u32 = 10_000;
+
+    pub(crate) fn give(world: &mut SimWorld, entity: Entity, item_id: &str, quantity: u32) {
+        let item = world.content.kits.item(item_id).cloned().expect("kit item");
+        let mut player = world.world.get_mut::<Player>(entity).expect("player");
+        assert!(player.gear.as_mut().expect("gear").add(&item, quantity));
+    }
+
+    pub(crate) fn bag_count(world: &SimWorld, entity: Entity, item_id: &str) -> u32 {
+        world
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref())
+            .map_or(0, |gear| gear.bag_count(item_id))
+    }
+
+    fn item_cost_request(target: [u8; 16]) -> InteractionRequest {
+        InteractionRequest {
+            kind: ITEM_COST_KIND,
+            ..use_request(target)
+        }
+    }
+
+    pub(crate) fn answer_status(world: &mut SimWorld) -> Option<u8> {
+        messages_to(&world.take_messages(), DEFENDER)
+            .iter()
+            .find_map(|message| match message {
+                ServerMessage::InteractionValidated(answer) => Some(answer.status),
+                _ => None,
+            })
+    }
+
+    fn repeater(world: &SimWorld) -> &TurretRun {
+        world
+            .war_fight()
+            .expect("fight")
+            .turrets
+            .iter()
+            .find(|run| run.body.structure.gde_ref == REPEATER_REF)
+            .expect("repeater")
+    }
+
+    fn with_repeater(world: &mut SimWorld, change: impl FnOnce(&mut SimWorld, &mut TurretRun)) {
+        world.with_turrets(|world, fight| {
+            let run = fight
+                .turrets
+                .iter_mut()
+                .find(|run| run.body.structure.gde_ref == REPEATER_REF)
+                .expect("repeater");
+            change(world, run);
+        });
+    }
+
+    fn vitals_of(world: &SimWorld) -> VitalsSlot0 {
+        let number = turret_number(world, &REPEATER_REF).expect("spawned");
+        world
+            .stations
+            .members(number)
+            .expect("members")
+            .iter()
+            .find_map(|member| match &member.state {
+                MemberState::Vitals(state) => state.slot_0,
+                _ => None,
+            })
+            .expect("vitals")
+    }
+
+    fn buildable_of(world: &SimWorld) -> BuildableControllerState {
+        let number = turret_number(world, &REPEATER_REF).expect("spawned");
+        world
+            .stations
+            .members(number)
+            .expect("members")
+            .iter()
+            .find_map(|member| match &member.state {
+                MemberState::BuildableController(state) => Some(state.clone()),
+                _ => None,
+            })
+            .expect("buildable")
+    }
+
+    fn supply_shown(state: &BuildableControllerState) -> Vec<u32> {
+        match &state.committed_resources {
+            Some(KeyedList::Full(list)) => list
+                .elements
+                .iter()
+                .map(|(_, descriptor)| descriptor.quantity)
+                .collect(),
+            other => panic!("a full list: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_refill_spends_one_ammo_kit_and_adds_the_slice_ammo_up_to_the_most() {
+        let (mut world, entity) = war_world();
+        give(&mut world, entity, AMMO_KIT, 2);
+        with_repeater(&mut world, |_, run| run.ammo = LOW_AMMO);
+        assert!(world.turret_interaction(
+            entity,
+            DEFENDER,
+            item_cost_request(REPEATER_REF),
+            &[],
+            NOW
+        ));
+        assert_eq!(answer_status(&mut world), Some(USE_ACCEPTED));
+        assert_eq!(repeater(&world).ammo, 200, "130 + 200, at most 200");
+        assert_eq!(bag_count(&world, entity, AMMO_KIT), 1);
+        let (_, _, spawner) = turret_state(&world, &REPEATER_REF);
+        assert_eq!(
+            spawner,
+            ProjectileSpawnerState {
+                ammo: Some(200),
+                firing_blocked: Some(false)
+            }
+            .encode()
+        );
+        assert!(world.turret_interaction(
+            entity,
+            DEFENDER,
+            item_cost_request(REPEATER_REF),
+            &[],
+            NOW
+        ));
+        assert_eq!(
+            answer_status(&mut world),
+            Some(USE_REFUSED),
+            "full and whole: nothing to do"
+        );
+        assert_eq!(bag_count(&world, entity, AMMO_KIT), 1);
+    }
+
+    #[test]
+    fn a_refill_or_repair_of_the_other_side_or_without_a_kit_is_refused() {
+        let (mut world, entity) = war_world();
+        with_repeater(&mut world, |_, run| run.ammo = LOW_AMMO);
+        world.turret_interaction(entity, DEFENDER, item_cost_request(REPEATER_REF), &[], NOW);
+        assert_eq!(answer_status(&mut world), Some(USE_REFUSED), "no kit");
+        give(&mut world, entity, AMMO_KIT, 1);
+        world.turret_interaction(entity, DEFENDER, item_cost_request(CANNON_REF), &[], NOW);
+        assert_eq!(
+            answer_status(&mut world),
+            Some(USE_REFUSED),
+            "the attackers' cannon"
+        );
+        assert_eq!(bag_count(&world, entity, AMMO_KIT), 1);
+        assert!(!world.turret_interaction(
+            entity,
+            DEFENDER,
+            item_cost_request([0x42; 16]),
+            &[],
+            NOW
+        ));
+    }
+
+    #[test]
+    fn a_repair_spends_one_repair_kit_and_adds_the_slice_health() {
+        let (mut world, entity) = war_world();
+        give(&mut world, entity, REPAIR_KIT, 1);
+        with_repeater(&mut world, |world, run| {
+            run.body.invulnerable = false;
+            world.hurt_turret(run, HIT);
+        });
+        world.turret_interaction(entity, DEFENDER, item_cost_request(REPEATER_REF), &[], NOW);
+        assert_eq!(answer_status(&mut world), Some(USE_ACCEPTED));
+        let health = REPEATER_HEALTH - HIT as f32 + 5_000.0;
+        assert!((repeater(&world).body.health - health).abs() < 1e-3);
+        assert_eq!(vitals_of(&world).health_amount, Some(health));
+        assert_eq!(bag_count(&world, entity, REPAIR_KIT), 0);
+        let share = (REPEATER_SUPPLY as f32 * health / REPEATER_HEALTH).ceil() as u32;
+        assert_eq!(supply_shown(&buildable_of(&world)), vec![share]);
+    }
+
+    #[test]
+    fn a_turret_is_hurt_only_in_the_war_and_its_supply_follows_its_health() {
+        let (mut world, _) = war_world();
+        let first = buildable_of(&world);
+        assert_eq!(
+            supply_shown(&first),
+            vec![REPEATER_SUPPLY],
+            "the retail first state"
+        );
+        assert_eq!(vitals_of(&world).invulnerability, Some(INVULNERABLE));
+        with_repeater(&mut world, |world, run| world.hurt_turret(run, HIT));
+        assert!(
+            (repeater(&world).body.health - REPEATER_HEALTH).abs() < 1e-3,
+            "before the start"
+        );
+        let mut fight = world
+            .instance_run
+            .as_mut()
+            .and_then(|run| run.take_war_fight())
+            .expect("fight");
+        world.turrets_at_start(&mut fight);
+        if let Some(run) = world.instance_run.as_mut() {
+            run.put_war_fight(fight);
+        }
+        assert_eq!(vitals_of(&world).invulnerability, Some(VULNERABLE));
+        world.take_messages();
+        with_repeater(&mut world, |world, run| world.hurt_turret(run, HIT));
+        let vitals = vitals_of(&world);
+        assert_eq!(vitals.health_amount, Some(REPEATER_HEALTH - HIT as f32));
+        assert_eq!(
+            supply_shown(&buildable_of(&world)),
+            vec![54],
+            "60 x 80,000 / 90,000 rounded up"
+        );
+        let version = |state: &BuildableControllerState| match &state.committed_resources {
+            Some(KeyedList::Full(list)) => list.version,
+            _ => None,
+        };
+        assert_eq!(
+            version(&buildable_of(&world)),
+            version(&first).map(|v| v + 1)
+        );
+    }
+
+    #[test]
+    fn a_turret_breaks_at_no_health_and_is_whole_again_at_the_result() {
+        let (mut world, entity) = war_world();
+        world.turret_interaction(entity, DEFENDER, use_request(REPEATER_REF), &[], NOW);
+        with_repeater(&mut world, |world, run| {
+            run.body.invulnerable = false;
+            world.hurt_turret(run, u32::MAX);
+        });
+        let run = repeater(&world);
+        assert!(
+            run.body.broken && run.user.is_none(),
+            "broken, its user let go"
+        );
+        let vitals = vitals_of(&world);
+        assert_eq!(vitals.health_amount, Some(0.0));
+        assert_eq!(
+            vitals.vitals_data.map(|data| data.head),
+            Some(1),
+            "the dead head"
+        );
+        let state = buildable_of(&world);
+        assert_eq!(
+            (state.current_state, state.ruin_damage_type),
+            (Some(BROKEN_STATE), Some(BROKEN_RUIN_TYPE))
+        );
+        assert!(supply_shown(&state).is_empty());
+        let number = turret_number(&world, &REPEATER_REF).expect("spawned");
+        assert!(
+            world
+                .stations
+                .members(number)
+                .expect("members")
+                .iter()
+                .any(|member| {
+                    matches!(
+                        member.state,
+                        MemberState::Interact(InteractState {
+                            enabled: Some(false),
+                            ..
+                        })
+                    )
+                })
+        );
+        world.take_messages();
+        world.turret_interaction(entity, DEFENDER, use_request(REPEATER_REF), &[], NOW + 1);
+        assert_eq!(
+            answer_status(&mut world),
+            Some(USE_REFUSED),
+            "a broken turret"
+        );
+        let mut fight = world
+            .instance_run
+            .as_mut()
+            .and_then(|run| run.take_war_fight())
+            .expect("fight");
+        world.turrets_at_result(&mut fight);
+        if let Some(run) = world.instance_run.as_mut() {
+            run.put_war_fight(fight);
+        }
+        let run = repeater(&world);
+        assert!(!run.body.broken && run.body.invulnerable);
+        let vitals = vitals_of(&world);
+        assert_eq!(vitals.health_amount, Some(REPEATER_HEALTH));
+        assert_eq!(vitals.vitals_data.map(|data| data.head), Some(0));
+        assert_eq!(vitals.invulnerability, Some(INVULNERABLE));
+        let state = buildable_of(&world);
+        assert_eq!(state.current_state, Some(BUILT_STATE));
+        assert_eq!(supply_shown(&state), vec![REPEATER_SUPPLY]);
+    }
+
+    #[test]
+    fn a_shot_meets_the_whole_turrets_of_the_other_side_only() {
+        let (mut world, _) = war_world();
+        let turrets = world.war_fight().expect("fight").turrets.clone();
+        let targets = world.shot_targets(DEFENDER, &turrets, nw_content::war_forts::SIDE_DEFENDER);
+        let cannon_facet = u64::from_le_bytes(CANNON_REF[..8].try_into().expect("8 bytes"));
+        assert!(targets.iter().any(|(target, _, _)| *target
+            == ShotTarget::Turret {
+                index: 1,
+                facet: cannon_facet
+            }));
+        assert!(
+            !targets
+                .iter()
+                .any(|(target, _, _)| matches!(target, ShotTarget::Turret { index: 0, .. })),
+            "not its own side"
+        );
+        let mut broken = turrets;
+        broken[1].body.broken = true;
+        assert!(
+            world
+                .shot_targets(DEFENDER, &broken, nw_content::war_forts::SIDE_DEFENDER)
+                .iter()
+                .all(|(target, _, _)| matches!(target, ShotTarget::Body(_))),
+            "not a broken one"
+        );
+        let from = Position {
+            x: 13_650.0,
+            y: 6_280.0,
+            z: 55.0 + TURRET_BODY.height_m * HALF,
+        };
+        let line = AimLine {
+            yaw: 0.0,
+            pitch: 0.0,
+        };
+        let structure = [(
+            ShotTarget::Turret {
+                index: 1,
+                facet: cannon_facet,
+            },
+            Position {
+                x: 13_650.0,
+                y: 6_300.0,
+                z: 55.0,
+            },
+            TURRET_BODY,
+        )];
+        let (met, along) = body_on_line(from, line, (125.0, 0.2), &structure).expect("met");
+        assert_eq!(met.facet(), cannon_facet, "the 2720 target of a turret hit");
+        assert!((along - 20.0).abs() < 0.1);
+    }
+}

@@ -5,25 +5,40 @@
 //!
 //! A game mode is an instance when its row has `IsDungeon` (expeditions, raids, soul and season
 //! trials), `ActivityType` `Catacombs`, `ActivityType` `Arena3v3` (the 3v3 arena, entered by
-//! the matchmaking queue only: arena flow study 2026-11-11) or `ActivityType` `OutpostRush`
-//! (Outpost Rush, entered by the queue only: Outpost Rush study 2026-11-12); the other PvP modes
-//! (Outpost Rush without perks, battle royale, capture the flag) and the matchmaking groups
-//! `Dungeon` and `Mutation` (no map) are not.
+//! the matchmaking queue only: arena flow study 2026-11-11), `ActivityType` `OutpostRush`
+//! (Outpost Rush, entered by the queue only: Outpost Rush study 2026-11-12) or `ActivityType`
+//! `CaptureTheFlag` (capture the flag, entered by the queue only: capture the flag study
+//! 2026-11-12); the other PvP modes (Outpost Rush without perks, battle royale) and the
+//! matchmaking groups `Dungeon` and `Mutation` (no map) are not.
 //!
-//! Outpost Rush keeps the maps with a level of their own (Observed: retail matches on
-//! `NW_OPR_004_Trench`, `OPR-coral-divide2` 101.9 s, and `NW_OPR_005_Vertical`,
-//! `opr_que_and_lost` 577.3 s). Its first map row plays on a frame of the open world level
-//! (`coatlicue\NewWorld_VitaeEterna`, `OPR_TEST3` 215.4 s): that map is left out, because a
-//! match on a framed open world instance is not built.
+//! Capture the flag keeps both of its maps, each with a level of its own (Observed: retail
+//! matches on `NW_CTF_002_Wide`, `CTF01` 317.353 s, and `NW_CTF_003_Long`,
+//! `CTF_QueueAndJoin_PickUpSpeedHealthAndFlagThenDied` 44.731 s and `CTF04` 1.591 s).
 //!
-//! An arena has several maps (`GameModeMapData` rows of one `GameModeId`, in datasheet order):
-//! every map is kept ([`InstanceMode::rotation`]) with its `TeamTeleportFormationData` (the
-//! offsets of a team's players from its teleport spot). Observed: the retail arena matches
-//! loaded `NW_Arena01` (`3v3`, `20261010-125035-658`) and `NW_Arena_3v3_04`
-//! (`3v3_arena_group_2`, `arena-4165c8761c29c499`); each team appeared at its
-//! `TeamTeleportData` entry with about 1.5 m of formation offset. Inferred: the map turns every
-//! `MapRotationTimeSpanInSeconds` from `MapRotationStartIndex` ([`InstanceMode::rotation_map`];
-//! no capture shows the turn).
+//! Outpost Rush keeps its three maps: the island, a frame of the open world level
+//! (`coatlicue\NewWorld_VitaeEterna` with `WorldBounds` 937, 10562, 704 x 1056; Observed: the
+//! 1635 of `OPR_TEST3` 215.385 s, `OPR---ISLAND` 518.412 s and `OPR_Original_map` 0.525 s names
+//! the open world's map and terrain, that frame and a type-3 phasing entry with the instance
+//! phase, as a war instance does), `NW_OPR_004_Trench` (`OPR-coral-divide2` 101.9 s) and
+//! `NW_OPR_005_Vertical` (`opr_que_and_lost` 577.3 s). The island's instance sim runs the open
+//! world level ([`InstanceMap::frames`] tells what lies in its frame).
+//!
+//! A matched mode has several maps (`GameModeMapData` rows of one `GameModeId`, in datasheet
+//! order): every map is kept ([`InstanceMode::rotation`]) with its `TeamTeleportFormationData`
+//! (the offsets of a team's players from its teleport spot). Observed: each team of a retail
+//! arena match appeared at its `TeamTeleportData` entry with about 1.5 m of formation offset.
+//! The map turns every `MapRotationTimeSpanInSeconds` from `MapRotationStartIndex` on a clock one
+//! hour behind Unix time ([`InstanceMode::rotation_map`]). Observed in 13 of 13 retail matches
+//! (span 3600 s, start index 0 in all three rows): Outpost Rush on the island (`OPR_TEST3`
+//! Unix s 1789307606, `OPR---ISLAND` 1789920731, `OPR---ISLAND-2` 1789923226,
+//! `OPR_Original_map` 1783032426), on Trench (`OPR-coral-divide2` 1789839811, `opr_match_2`
+//! 1782150892) and on Vertical (`opr_match_4` 1782163020, `opr_que_and_lost` 1781894842); the
+//! arena on `NW_Arena01` (`20261010-125035-658` 1791629752) and `NW_Arena_3v3_04`
+//! (`3v3_arena_group_2` 1781893887); capture the flag on `NW_CTF_002_Wide` (`CTF01` 1792126948)
+//! and `NW_CTF_003_Long` (`CTF04` 1792132235, `CTF_QueueAndJoin...` 1786514505). A Unix clock
+//! with no shift fits none of the three Outpost Rush maps. Unknown: whether the shift is one
+//! hour or seven (Pacific daylight time, the season of every capture): both give the same map
+//! for every rotation of two or three maps.
 //!
 //! Rules from the retail captures (29 ledgers):
 //!
@@ -44,16 +59,27 @@ use crate::Tables;
 use crate::gameplay_config::ITEM_CLASS_SEPARATOR;
 use crate::generated::{GameModeData, GameModeMapData};
 
-/// The `ActivityType` of a catacombs run.
-const CATACOMBS_ACTIVITY: &str = "Catacombs";
+/// The `GameModeID` and `ActivityType` of a catacombs run.
+pub const CATACOMBS_GAME_MODE: &str = "Catacombs";
+/// The players of a catacombs run: `NumTeams` 1 times `TeamCapacity` 3 of the retail row
+/// (Observed: `matchmakingServiceDesiredPlayers` 3 at every catacombs pop, `CATACOMBS5` 63.667
+/// s, `CATACOMBS6` 79.283 s, `Hive catacomes test 2` 101.321 s, `Hive catacombs test 4` 107.657
+/// s).
+pub const CATACOMBS_TEAM_PLAYERS: u32 = 3;
 /// The `ActivityType` of an expedition: its entries count as base dungeon entries.
 const DUNGEON_ACTIVITY: &str = "Dungeon";
 /// The `ActivityType` of the 3v3 arena.
 const ARENA_ACTIVITY: &str = "Arena3v3";
 /// The `GameModeID` and `ActivityType` of Outpost Rush.
 pub const OUTPOST_RUSH_GAME_MODE: &str = "OutpostRush";
-/// The map name of the open world level: an Outpost Rush map on it is left out (module text).
-const OPEN_WORLD_MAP: &str = "NewWorld_VitaeEterna";
+/// The `GameModeID` and `ActivityType` of capture the flag.
+pub const CAPTURE_THE_FLAG_GAME_MODE: &str = "CaptureTheFlag";
+/// The players of a capture the flag match: `NumTeams` 2 times `TeamCapacity` 10 of the retail
+/// row (Observed: `matchmakingServiceDesiredPlayers` 20 at the pop,
+/// `CTF_QueueAndJoin_PickUpSpeedHealthAndFlagThenDied` 37.023 s and `CTF01` 312.929 s).
+pub const CAPTURE_THE_FLAG_MATCH_PLAYERS: u32 = 20;
+/// How far the map rotation's clock runs behind Unix time, in seconds (module text).
+const ROTATION_CLOCK_SHIFT_SECONDS: u64 = 3_600;
 /// The players of an Outpost Rush match: `NumTeams` 2 times `TeamCapacity` 20 of the retail row
 /// (Observed: `matchmakingServiceDesiredPlayers` 40 at the pop, `opr_que_and_lost` 530.716 s).
 pub const OUTPOST_RUSH_MATCH_PLAYERS: u32 = 40;
@@ -115,12 +141,22 @@ pub enum InstanceKind {
     Arena,
     /// An Outpost Rush match (`ActivityType` `OutpostRush`), entered by the matchmaking queue.
     OutpostRush,
+    /// A capture the flag match (`ActivityType` `CaptureTheFlag`), entered by the matchmaking
+    /// queue.
+    CaptureTheFlag,
 }
 
 impl InstanceKind {
     /// Whether the kind is entered by the matchmaking queue only (never by an entrance).
     pub const fn is_matched(self) -> bool {
-        matches!(self, Self::Arena | Self::OutpostRush)
+        matches!(self, Self::Arena | Self::OutpostRush | Self::CaptureTheFlag)
+    }
+
+    /// Whether the kind is entered by the matchmaking queue (6254) and never by an activation
+    /// (5037, interaction 72): the matched kinds and the catacombs (Observed: every retail
+    /// catacombs run came from a 6254 of activity `0c16`, 10 ledgers).
+    pub const fn is_queued(self) -> bool {
+        self.is_matched() || matches!(self, Self::Catacombs)
     }
 }
 
@@ -163,6 +199,19 @@ pub struct InstanceMap {
     /// `TeamTeleportFormationData`: the offset (east, north, metres) of each player of a team
     /// from its teleport spot, in order; empty when the row has none.
     pub formation: Vec<[f32; FORMATION_NUMBERS]>,
+}
+
+impl InstanceMap {
+    /// Whether `[x, y]` lies in the map's frame (`WorldBounds`).
+    pub fn frames(&self, x: f32, y: f32) -> bool {
+        frame_holds(self.frame, x, y)
+    }
+}
+
+/// Whether `[x, y]` lies in `frame` (x, y, width, height; the far edges are outside).
+pub fn frame_holds(frame: [f32; FRAME_NUMBERS], x: f32, y: f32) -> bool {
+    let [left, bottom, width, height] = frame;
+    (left..left + width).contains(&x) && (bottom..bottom + height).contains(&y)
 }
 
 /// One instance game mode.
@@ -231,7 +280,8 @@ impl InstanceMode {
     }
 
     /// The map an arena plays at Unix second `unix_s`: the rotation turns every
-    /// `MapRotationTimeSpanInSeconds` (Inferred, see the module text); `map` for the other kinds
+    /// `MapRotationTimeSpanInSeconds` on a clock one hour behind Unix time (Observed, see the
+    /// module text); `map` for the other kinds
     /// and for an arena with no span.
     pub fn rotation_map(&self, unix_s: u64) -> &InstanceMap {
         let (Some(span), Some(count)) = (
@@ -248,7 +298,8 @@ impl InstanceMode {
             .position(|map| *map == self.map)
             .and_then(|start| u64::try_from(start).ok())
             .unwrap_or_default();
-        let index = (start + unix_s / span) % count;
+        let turns = unix_s.saturating_sub(ROTATION_CLOCK_SHIFT_SECONDS) / span;
+        let index = (start + turns) % count;
         usize::try_from(index)
             .ok()
             .and_then(|index| self.rotation.get(index))
@@ -434,16 +485,24 @@ fn instance_mode(
     maps: &[&GameModeMapData],
     game_mode_index: u8,
 ) -> Option<InstanceMode> {
-    let catacombs = row.activity_type.as_deref() == Some(CATACOMBS_ACTIVITY);
+    let catacombs = row.activity_type.as_deref() == Some(CATACOMBS_GAME_MODE);
     let arena = row.activity_type.as_deref() == Some(ARENA_ACTIVITY);
     let outpost_rush = row.activity_type.as_deref() == Some(OUTPOST_RUSH_GAME_MODE);
-    if !row.is_dungeon.unwrap_or_default() && !catacombs && !arena && !outpost_rush {
+    let capture_the_flag = row.activity_type.as_deref() == Some(CAPTURE_THE_FLAG_GAME_MODE);
+    if !row.is_dungeon.unwrap_or_default()
+        && !catacombs
+        && !arena
+        && !outpost_rush
+        && !capture_the_flag
+    {
         return None;
     }
     let kind = if arena {
         InstanceKind::Arena
     } else if outpost_rush {
         InstanceKind::OutpostRush
+    } else if capture_the_flag {
+        InstanceKind::CaptureTheFlag
     } else if catacombs {
         InstanceKind::Catacombs
     } else if row.is_solo_trial.unwrap_or_default() {
@@ -460,12 +519,7 @@ fn instance_mode(
         InstanceKind::RaidTrial => EntryCounter::GroupTrial,
         _ => EntryCounter::Uncounted,
     };
-    let rotation = if outpost_rush {
-        maps.iter()
-            .filter_map(|map| instance_map(map))
-            .filter(|map| map.map_name != OPEN_WORLD_MAP)
-            .collect()
-    } else if arena {
+    let rotation = if arena || capture_the_flag || outpost_rush {
         maps.iter()
             .map(|map| instance_map(map))
             .collect::<Option<Vec<_>>>()?
@@ -483,7 +537,7 @@ fn instance_mode(
     };
     let capacity = match (row.team_capacity, kind) {
         (_, InstanceKind::Arena) => ARENA_MATCH_PLAYERS,
-        (Some(capacity), InstanceKind::OutpostRush) => {
+        (Some(capacity), InstanceKind::OutpostRush | InstanceKind::CaptureTheFlag) => {
             u32::try_from(capacity * row.num_teams.unwrap_or(DEFAULT_TEAMS)).ok()?
         }
         (Some(capacity), _) => u32::try_from(capacity).ok()?,
@@ -703,12 +757,12 @@ mod tests {
 
     #[test]
     fn pvp_modes_rows_without_a_map_and_bad_frames_are_left_out() {
-        let mut flag = mode_row("CaptureTheFlag");
-        flag.activity_type = Some("CaptureTheFlag".to_owned());
-        flag.team_capacity = Some(5);
-        let flag_map = map_row(
-            "CaptureTheFlag",
-            "coatlicue\\NW_CTF_002_Wide",
+        let mut royale = mode_row("BattleRoyale");
+        royale.is_pvp = Some(true);
+        royale.team_capacity = Some(5);
+        let royale_map = map_row(
+            "BattleRoyale",
+            "coatlicue\\NW_BR_001",
             "864,832,992,960",
             "939,935,226.5,180",
         );
@@ -718,16 +772,69 @@ mod tests {
         let (amrine, mut amrine_map) = amrine();
         amrine_map.world_bounds = Some("610.0,560.0".to_owned());
         let catalog = InstanceCatalog::from_tables(&tables(
-            vec![flag, lost, amrine],
-            vec![flag_map, amrine_map],
+            vec![royale, lost, amrine],
+            vec![royale_map, amrine_map],
         ));
         assert!(catalog.is_empty());
     }
 
-    /// The retail `OutpostRush` rows (build 25810808): two teams of 20, the open world map and
-    /// the two maps with their own level.
+    /// The retail `CaptureTheFlag` rows (build 25810808): two teams of 10 and both maps with
+    /// their own level, `CTF_002_Wide` first.
     #[test]
-    fn outpost_rush_keeps_its_own_levels_and_two_teams_of_twenty() {
+    fn capture_the_flag_keeps_both_maps_and_two_teams_of_ten() {
+        let mut flag = mode_row(CAPTURE_THE_FLAG_GAME_MODE);
+        flag.activity_type = Some(CAPTURE_THE_FLAG_GAME_MODE.to_owned());
+        flag.team_capacity = Some(10);
+        flag.num_teams = Some(2);
+        flag.map_rotation_start_index = Some(0);
+        flag.map_rotation_time_span_in_seconds = Some(3600);
+        let map = |id: &str, coatlicue: &str, bounds: &str, teleports: &str| {
+            let mut row = map_row(CAPTURE_THE_FLAG_GAME_MODE, coatlicue, bounds, teleports);
+            row.game_mode_map_id = id.to_owned();
+            row
+        };
+        let catalog = InstanceCatalog::from_tables(&tables(
+            vec![flag],
+            vec![
+                map(
+                    "CTF_002_Wide",
+                    "coatlicue\\NW_CTF_002_Wide",
+                    "632.0,1024.0,384.0,288.0",
+                    "854.1,1263.8,84.4,180+854.4,1113.2,84.2,0",
+                ),
+                map(
+                    "CTF_003_Long",
+                    "coatlicue\\NW_CTF_003_Long",
+                    "864.0,864.0,320.0,288.0",
+                    "1087.669,1097.134,190.888,150+1005.846,955.411,189.979,330",
+                ),
+            ],
+        ));
+        let mode = catalog
+            .by_id(CAPTURE_THE_FLAG_GAME_MODE)
+            .expect("capture the flag");
+        assert_eq!(mode.kind, InstanceKind::CaptureTheFlag);
+        assert!(mode.kind.is_matched());
+        assert_eq!(mode.capacity, CAPTURE_THE_FLAG_MATCH_PLAYERS);
+        assert_eq!(mode.crc, 0x930f_ce8f, "the mode of the retail queue entry");
+        let folders: Vec<&str> = mode.maps().map(|map| map.folder.as_str()).collect();
+        assert_eq!(folders, ["nw_ctf_002_wide", "nw_ctf_003_long"]);
+        assert_eq!(
+            mode.map_of("nw_ctf_002_wide").map(|map| map.map_crc),
+            Some(0x4808_f81b),
+            "the map id of the retail game mode state, CTF01 320.384 s"
+        );
+        assert_eq!(
+            mode.map_of("nw_ctf_003_long").map(|map| map.map_crc),
+            Some(0x1420_0e34),
+            "CTF_QueueAndJoin_PickUpSpeedHealthAndFlagThenDied 46.961 s"
+        );
+    }
+
+    /// The retail `OutpostRush` rows (build 25810808): two teams of 20, the island on a frame of
+    /// the open world and the two maps with their own level.
+    #[test]
+    fn outpost_rush_keeps_its_three_maps_and_two_teams_of_twenty() {
         let mut rush = mode_row(OUTPOST_RUSH_GAME_MODE);
         rush.activity_type = Some(OUTPOST_RUSH_GAME_MODE.to_owned());
         rush.team_capacity = Some(20);
@@ -766,11 +873,30 @@ mod tests {
         assert_eq!(mode.kind, InstanceKind::OutpostRush);
         assert!(mode.kind.is_matched() && InstanceKind::Arena.is_matched());
         assert!(!InstanceKind::Expedition.is_matched());
+        assert!(InstanceKind::Catacombs.is_queued() && mode.kind.is_queued());
+        assert!(!InstanceKind::Catacombs.is_matched() && !InstanceKind::Expedition.is_queued());
         assert_eq!(mode.capacity, OUTPOST_RUSH_MATCH_PLAYERS);
         assert_eq!(mode.crc, 0x91b9_9a18);
         let folders: Vec<&str> = mode.maps().map(|map| map.folder.as_str()).collect();
-        assert_eq!(folders, ["nw_opr_004_trench", "nw_opr_005_vertical"]);
-        assert_eq!(mode.map.folder, "nw_opr_004_trench");
+        assert_eq!(
+            folders,
+            [
+                "newworld_vitaeeterna",
+                "nw_opr_004_trench",
+                "nw_opr_005_vertical"
+            ]
+        );
+        assert_eq!(mode.map.folder, "newworld_vitaeeterna");
+        let island = mode.map_of("newworld_vitaeeterna").expect("the island");
+        assert_eq!(island.map_name, "NewWorld_VitaeEterna");
+        assert_eq!(island.coatlicue_path, "coatlicue/NewWorld_VitaeEterna");
+        assert_eq!(island.frame, [937.0, 10562.0, 704.0, 1056.0]);
+        assert_eq!(
+            island.map_crc, 0x91b9_9a18,
+            "the retail island map id is the mode's"
+        );
+        assert!(island.frames(1451.48, 11077.73), "the boss spot");
+        assert!(!island.frames(1641.0, 11000.0) && !island.frames(936.9, 11000.0));
         assert_eq!(
             mode.map_of("nw_opr_005_vertical").map(|map| map.map_crc),
             Some(0x91eb_09eb),
@@ -780,6 +906,19 @@ mod tests {
             mode.map_of("nw_opr_004_trench").map(|map| map.map_crc),
             Some(0x87e1_2d57)
         );
+        // The map of each retail match at the Unix second of its first 1635 (module text).
+        for (unix_s, folder) in [
+            (1_789_307_606, "newworld_vitaeeterna"),
+            (1_789_920_731, "newworld_vitaeeterna"),
+            (1_789_923_226, "newworld_vitaeeterna"),
+            (1_783_032_426, "newworld_vitaeeterna"),
+            (1_789_839_811, "nw_opr_004_trench"),
+            (1_782_150_892, "nw_opr_004_trench"),
+            (1_782_163_020, "nw_opr_005_vertical"),
+            (1_781_894_842, "nw_opr_005_vertical"),
+        ] {
+            assert_eq!(mode.rotation_map(unix_s).folder, folder, "Unix s {unix_s}");
+        }
     }
 
     /// The retail `Arena3v3` rows (build 25810808): three maps, two team spots each and the
@@ -836,10 +975,19 @@ mod tests {
         let folders: Vec<&str> = mode.maps().map(|map| map.folder.as_str()).collect();
         assert_eq!(folders, ["nw_arena01", "nw_arena02", "nw_arena_3v3_04"]);
         assert_eq!(catalog.of_level("nw_arena_3v3_04").count(), 1);
-        assert_eq!(mode.rotation_map(0).folder, "nw_arena01");
         let span = u64::try_from(SPAN_SECONDS).expect("a span");
-        assert_eq!(mode.rotation_map(span).folder, "nw_arena02");
-        assert_eq!(mode.rotation_map(3 * span + 1).folder, "nw_arena01");
+        let shift = ROTATION_CLOCK_SHIFT_SECONDS;
+        assert_eq!(
+            mode.rotation_map(0).folder,
+            "nw_arena01",
+            "before the first turn"
+        );
+        assert_eq!(mode.rotation_map(shift + span - 1).folder, "nw_arena01");
+        assert_eq!(mode.rotation_map(shift + span).folder, "nw_arena02");
+        assert_eq!(mode.rotation_map(shift + 3 * span + 1).folder, "nw_arena01");
+        // The retail matches (module text).
+        assert_eq!(mode.rotation_map(1_791_629_752).folder, "nw_arena01");
+        assert_eq!(mode.rotation_map(1_781_893_887).folder, "nw_arena_3v3_04");
     }
 
     #[test]

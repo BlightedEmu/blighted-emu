@@ -12,6 +12,7 @@ mod admin;
 mod analytics;
 mod arena;
 mod character;
+mod conflicts;
 mod connect;
 mod consumable_cooldowns;
 mod entitlements;
@@ -19,6 +20,7 @@ mod entity;
 mod error;
 mod faction;
 mod gather_nodes;
+mod invasions;
 mod items;
 mod log_out_state;
 mod meta_achievements;
@@ -62,6 +64,11 @@ pub use character::{
     delete_character, insert_character, release_character_name, reserve_character_name,
     save_changed_look, save_published_look,
 };
+pub use conflicts::{
+    Declaration, LotteryDraw, LotteryEntry, TerritoryConflict, WAR_DECLARATION_COST, WarRefusal,
+    WarRequest, add_influence, advance_conflicts, declare_in_lottery, territory_conflicts,
+    war_cost,
+};
 pub use connect::{DatabaseConfig, GlobalDatabase, connect, connect_lazy, connect_options};
 pub use consumable_cooldowns::SavedConsumableCooldown;
 pub use entitlements::{
@@ -72,6 +79,12 @@ pub use entity::{MAX_ENTITY_NUMBER, next_entity_number};
 pub use error::DbError;
 pub use faction::SavedFaction;
 pub use gather_nodes::{NODE_ID_LEN, SavedGatherNode, level_gather_nodes, save_gather_node};
+pub use invasions::{
+    DARKNESS_INVASION_LEVEL, DarknessRow, DarknessStep, InvasionScheduled, TerritoryDarkness,
+    TerritoryUpgrade, UPGRADE_TIER_MAX, apply_darkness, darkness_rows, fill_invasion_roster,
+    lose_invasion, schedule_invasion, set_darkness, set_territory_upgrade, territory_darkness,
+    territory_upgrades,
+};
 pub use items::{
     AccountSkins, SavedInventory, SavedItem, SavedItemRolls, SavedLoadout, SavedPlace,
     SavedStoredItem, character_inventory, character_items, collect_account_skins,
@@ -95,7 +108,10 @@ pub use progression::{
 };
 pub use quests::{SavedQuests, character_quests, save_character_quests};
 pub use recipe_cooldowns::SavedRecipeCooldown;
-pub use seasons::{SavedCard, SavedSeason};
+pub use seasons::{
+    SEASON_PASS_PROGRESSION, SavedAccountSeason, SavedCard, SavedSeason, account_season,
+    save_account_season,
+};
 pub use session::{create_launcher_session, delete_launcher_session, launcher_session_account};
 pub use social::{
     AccountTitle, StoredPlayer, clear_new_account_titles, earn_account_titles, stored_players,
@@ -131,11 +147,11 @@ pub use travel::{
 };
 pub use uuid::Uuid;
 pub use wars::{
-    Declared, RosterSeat, SeatChange, TerritoryWar, WAR_LENGTH_MS, WAR_RESULT_SHOWN_MS, WarSignup,
-    cancel_war, change_roster, declare_war, leave_war, resolve_war, sign_up_for_war,
-    territory_wars,
+    Declared, INVASION_LENGTH_MS, NO_ATTACKER, RosterSeat, SeatChange, TerritoryWar, WAR_LENGTH_MS,
+    WAR_RESULT_SHOWN_MS, WarSignup, cancel_war, change_roster, declare_war, leave_war, resolve_war,
+    sign_up_for_war, territory_wars,
 };
-pub use world_clock::world_clock_start;
+pub use world_clock::{set_world_clock, world_clock_start};
 
 /// What Discord says about a user at one login.
 #[derive(Debug, Clone, PartialEq, Eq)]

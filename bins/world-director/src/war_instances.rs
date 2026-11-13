@@ -23,6 +23,19 @@ use uuid::Uuid;
 /// before the start: 15 minutes).
 pub const WAR_INSTANCE_LEAD_MS: u64 = 900_000;
 
+/// How long before its start an invasion's instance opens (Observed: the invite of
+/// `Playthrough_Part_21`, its 715, came 449.9 s before the 3454).
+pub const INVASION_INSTANCE_LEAD_MS: u64 = 450_000;
+
+/// How long before its start the instance of `war` opens.
+pub const fn instance_lead_ms(war: &TerritoryWar) -> u64 {
+    if war.is_invasion() {
+        INVASION_INSTANCE_LEAD_MS
+    } else {
+        WAR_INSTANCE_LEAD_MS
+    }
+}
+
 /// A war instance to open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WarOpening {
@@ -57,12 +70,14 @@ impl WarInstances {
     pub fn due(&mut self, wars: &[TerritoryWar], forts: &WarForts, now_ms: u64) -> Vec<WarOpening> {
         let mut openings = Vec::new();
         for war in wars {
-            let soon = now_ms >= war.starts_ms.saturating_sub(WAR_INSTANCE_LEAD_MS);
+            let soon = now_ms >= war.starts_ms.saturating_sub(instance_lead_ms(war));
             let open = war.result.is_none() && soon && now_ms < war.ends_ms();
             if !open || self.opened.contains_key(&war.war) || self.opening.contains(&war.war) {
                 continue;
             }
-            if forts.fort(war.territory).is_none() {
+            // A fort of an invasion capture only has no capture point: no war runs there.
+            let fort = forts.fort(war.territory);
+            if fort.is_none_or(|fort| fort.is_invasion_fort() && !war.is_invasion()) {
                 continue;
             }
             let members: Vec<Uuid> = war.roster().map(|(character, _)| character).collect();
@@ -189,6 +204,33 @@ mod tests {
         assert!(
             wars.due(&[war(8)], &forts, STARTS_MS + WAR_LENGTH_MS)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_invasion_fort_takes_only_an_invasion_from_its_own_lead() {
+        let start = FORTS.find("\"points\": [").expect("points");
+        let invasion_fort = format!("{}\"points\": []}}]}}", &FORTS[..start]);
+        let forts = WarForts::parse(&invasion_fort).expect("forts");
+        let mut wars = WarInstances::default();
+        assert!(
+            wars.due(&[war(8)], &forts, STARTS_MS).is_empty(),
+            "no war at an invasion fort"
+        );
+        let invasion = TerritoryWar {
+            attacker: nw_db::NO_ATTACKER,
+            ..war(8)
+        };
+        let early = STARTS_MS - INVASION_INSTANCE_LEAD_MS - 1;
+        assert!(
+            wars.due(std::slice::from_ref(&invasion), &forts, early)
+                .is_empty()
+        );
+        let due = wars.due(&[invasion], &forts, early + 1);
+        assert_eq!(due.len(), 1);
+        assert_eq!(
+            due[0].ends_at_ms,
+            STARTS_MS + nw_db::INVASION_LENGTH_MS + WAR_RESULT_SHOWN_MS
         );
     }
 }

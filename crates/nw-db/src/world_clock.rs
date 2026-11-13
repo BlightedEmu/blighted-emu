@@ -32,6 +32,25 @@ pub async fn world_clock_start(world: &PgPool, candidate_ns: u64) -> Result<u64,
     from_column(start, "world clock start")
 }
 
+/// Sets the world's clock anchor to `anchor_ns` (ns since 2000-01-01): a game master's time.
+/// Every sim reads it again ([`world_clock_start`]) and follows it.
+///
+/// # Errors
+///
+/// Returns [`DbError::OutOfRange`] for a time its column cannot hold, and [`DbError::Database`]
+/// when the query fails.
+pub async fn set_world_clock(world: &PgPool, anchor_ns: u64) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO world_clock (id, start_ns) VALUES ($1, $2) \
+         ON CONFLICT (id) DO UPDATE SET start_ns = EXCLUDED.start_ns",
+    )
+    .bind(CLOCK_ROW)
+    .bind(to_column(anchor_ns, "world clock start")?)
+    .execute(world)
+    .await?;
+    Ok(())
+}
+
 #[cfg(all(test, feature = "infra"))]
 mod infra_tests {
     use super::*;
@@ -52,5 +71,17 @@ mod infra_tests {
         })
         .await;
         assert_eq!((first, later), (FIRST_NS, FIRST_NS));
+    }
+
+    #[tokio::test]
+    async fn a_set_anchor_is_what_every_later_start_reads() {
+        let read = with_test_schema(async |pool| {
+            WORLD_MIGRATOR.run(pool).await.expect("migrate");
+            world_clock_start(pool, FIRST_NS).await.expect("first");
+            set_world_clock(pool, LATER_NS).await.expect("set");
+            world_clock_start(pool, FIRST_NS).await.expect("read")
+        })
+        .await;
+        assert_eq!(read, LATER_NS);
     }
 }

@@ -25,12 +25,15 @@ use nw_world::records::{
 use nw_world::slice_data::{SliceDataError, SliceSpawners, SpawnedSlice};
 use nw_world::spawner_slices::SpawnerSlice;
 use nw_world::stations::{CraftingStation, StationSlice};
+use nw_world::time_of_day::{
+    TimeOfDayPoints, TimedHolder, TimedSlice, TimedSlicePath, points_under,
+};
 use nw_world::travel_slices::{HousingPlot, TeleporterSlice, plot_house_type};
 use nw_world::world_file::world_file_path;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::collision::{AssetKey, capital_asset};
+use crate::collision::{AssetKey, CHUNKS_EXTENSION, capital_asset, chunk_lists, chunk_placements};
 use crate::error::ToolError;
 use crate::source::GameSource;
 
@@ -295,6 +298,7 @@ pub fn is_world_input(path: &str) -> bool {
             || path.ends_with(HEIGHTMAP_FILE)
             || path.ends_with(METADATA_EXTENSION)
             || path.ends_with(CAPITALS_EXTENSION)
+            || path.ends_with(CHUNKS_EXTENSION)
             || path.ends_with(SLICE_DATA_FILE))
 }
 
@@ -431,7 +435,8 @@ pub fn build_level(
 /// IDs against the content bundle at `bundle_path`. The crafting stations and house plots among
 /// each level's spawned slices come from the slices' `.dynamicslice` files, and the teleporters
 /// among its capitals from the capitals' slices, found by their `sliceAssetId` in the asset
-/// catalog.
+/// catalog. The time of day of its spawns and gatherable points comes from the slices that its
+/// capitals and chunk lists place ([`time_of_day_points`]).
 pub fn run_world(
     source: &GameSource,
     client_build: &str,
@@ -473,12 +478,20 @@ pub fn run_world(
             Ok::<(), ToolError>(())
         },
     )?;
+    let catalog = asset_catalog(source)?;
     let CapitalSlices {
         teleporters,
         spawners,
         interact_tags: capital_tags,
-    } = capital_slices(source, &built)?;
-    for (world, _) in &mut built {
+    } = capital_slices(source, &built, catalog.as_deref())?;
+    let timed = timed_slices(source)?;
+    let chunks = levels
+        .iter()
+        .map(|(level, files)| level_chunks(level, files))
+        .collect::<Result<Vec<_>, _>>()?;
+    let timed_assets = timed_by_asset(catalog.as_deref(), &built, &chunks, &timed)?;
+    for ((world, _), chunks) in built.iter_mut().zip(&chunks) {
+        world.time_of_day = time_of_day_points(world, chunks, &timed_assets, &timed);
         add_spawner_paths(world, &spawners);
         world.stations = stations_of(&world.spawned, &stations);
         world.plots = plots_of(&world.spawned, &plots);
@@ -554,17 +567,8 @@ fn add_spawner_paths(world: &mut WorldFile, spawners: &HashMap<AssetKey, Spawner
     }
 }
 
-/// The teleporter and spawner slices of the capitals of `built`, by the capitals' slice asset
-/// id.
-fn capital_slices(
-    source: &GameSource,
-    built: &[(WorldFile, SkipCounts)],
-) -> Result<CapitalSlices, ToolError> {
-    let wanted: HashSet<AssetKey> = built
-        .iter()
-        .flat_map(|(world, _)| &world.capitals)
-        .filter_map(|capital| capital_asset(&capital.slice_asset_id))
-        .collect();
+/// The asset catalog of `source`; `None` when the paks hold none.
+fn asset_catalog(source: &GameSource) -> Result<Option<Vec<u8>>, ToolError> {
     let mut catalog = None;
     source.for_each_entry(
         |path| path == ASSET_CATALOG_ENTRY,
@@ -573,10 +577,29 @@ fn capital_slices(
             Ok::<(), ToolError>(())
         },
     )?;
+    Ok(catalog)
+}
+
+/// The asset ids of the capitals of `built`.
+fn capital_assets(built: &[(WorldFile, SkipCounts)]) -> HashSet<AssetKey> {
+    built
+        .iter()
+        .flat_map(|(world, _)| &world.capitals)
+        .filter_map(|capital| capital_asset(&capital.slice_asset_id))
+        .collect()
+}
+
+/// The teleporter and spawner slices of the capitals of `built`, by the capitals' slice asset
+/// id, found in the asset catalog `catalog`.
+fn capital_slices(
+    source: &GameSource,
+    built: &[(WorldFile, SkipCounts)],
+    catalog: Option<&[u8]>,
+) -> Result<CapitalSlices, ToolError> {
     let Some(catalog) = catalog else {
         return Ok(CapitalSlices::default());
     };
-    let paths = paths_of(&catalog, &wanted).map_err(WorldBuildError::from)?;
+    let paths = paths_of(catalog, &capital_assets(built)).map_err(WorldBuildError::from)?;
     let keys_by_path: HashMap<String, AssetKey> = paths
         .into_iter()
         .filter(|(_, path)| path.ends_with(DYNAMIC_SLICE_EXTENSION))
@@ -601,6 +624,102 @@ fn capital_slices(
         },
     )?;
     Ok(slices)
+}
+
+/// Every dynamic slice of `source` with a time of day, by pak path.
+fn timed_slices(source: &GameSource) -> Result<HashMap<String, TimedSlice>, ToolError> {
+    let mut timed = HashMap::new();
+    source.for_each_entry(
+        |path| path.ends_with(DYNAMIC_SLICE_EXTENSION),
+        |path, bytes| {
+            let stream = unwrapped(path, &bytes)?;
+            if TimedSlice::may_hold(&stream)
+                && let Some(slice) = TimedSlice::of(&parsed(path, &stream)?)
+            {
+                timed.insert(path.to_owned(), slice);
+            }
+            Ok::<(), ToolError>(())
+        },
+    )?;
+    Ok(timed)
+}
+
+/// The slices that the chunk lists of `level` (its `files`) place: asset id and world position.
+fn level_chunks(
+    level: &str,
+    files: &LevelFiles,
+) -> Result<Vec<(AssetKey, [f32; 3])>, WorldBuildError> {
+    let names: Vec<&str> = files.keys().map(String::as_str).collect();
+    let mut placed = Vec::new();
+    for path in chunk_lists(&names) {
+        placed.extend(chunk_placements(&object_stream(level, path, &files[path])?));
+    }
+    Ok(placed)
+}
+
+/// The slices of `timed` (by pak path) that the capitals of `built` or the chunk lists `chunks`
+/// place, by asset id (the asset catalog `catalog`).
+fn timed_by_asset(
+    catalog: Option<&[u8]>,
+    built: &[(WorldFile, SkipCounts)],
+    chunks: &[Vec<(AssetKey, [f32; 3])>],
+    timed: &HashMap<String, TimedSlice>,
+) -> Result<HashMap<AssetKey, TimedSlice>, ToolError> {
+    let Some(catalog) = catalog else {
+        return Ok(HashMap::new());
+    };
+    let mut wanted = capital_assets(built);
+    wanted.extend(chunks.iter().flatten().map(|(key, _)| *key));
+    Ok(paths_of(catalog, &wanted)
+        .map_err(WorldBuildError::from)?
+        .into_iter()
+        .filter_map(|(key, path)| Some((key, timed.get(&path)?.clone())))
+        .collect())
+}
+
+/// The time of day of `world`'s vitals spawns and gatherable points: those on which an entity
+/// with a time of day stands, in a slice that one of its capitals or of its chunk lists
+/// (`chunks`) places (`timed_assets`, by asset id). Every slice of `timed` is listed by its path
+/// too: the encounter slices that spawn groups spawn have no place of their own.
+fn time_of_day_points(
+    world: &WorldFile,
+    chunks: &[(AssetKey, [f32; 3])],
+    timed_assets: &HashMap<AssetKey, TimedSlice>,
+    timed: &HashMap<String, TimedSlice>,
+) -> TimeOfDayPoints {
+    let mut holders: Vec<TimedHolder> = world
+        .capitals
+        .iter()
+        .filter_map(|capital| {
+            let slice = timed_assets.get(&capital_asset(&capital.slice_asset_id)?)?;
+            Some(slice.at_capital(capital))
+        })
+        .flatten()
+        .collect();
+    holders.extend(
+        chunks
+            .iter()
+            .filter_map(|(key, at)| Some(timed_assets.get(key)?.at_chunk(*at)))
+            .flatten(),
+    );
+    let mut slices: Vec<TimedSlicePath> = timed
+        .iter()
+        .filter_map(|(path, slice)| {
+            Some(TimedSlicePath {
+                slice: path.clone(),
+                window: slice.window()?,
+            })
+        })
+        .collect();
+    slices.sort_by(|a, b| a.slice.cmp(&b.slice));
+    TimeOfDayPoints {
+        vitals: points_under(&holders, world.vitals.iter().map(|spawn| spawn.position)),
+        gatherables: points_under(
+            &holders,
+            world.gatherables.iter().map(|point| point.position),
+        ),
+        slices,
+    }
 }
 
 /// The capitals (their slices' tags by asset id, `capital_tags`) and spawned slices (by pak path,
@@ -762,15 +881,26 @@ fn object_stream(level: &str, path: &str, bytes: &[u8]) -> Result<Element, World
 
 /// The root element of the ObjectStream `bytes` (AZCS-wrapped or not) of pak entry `path`.
 pub(crate) fn stream_of(path: &str, bytes: &[u8]) -> Result<Element, WorldBuildError> {
-    let stream = if is_azcs(bytes) {
-        Cow::Owned(decode_azcs(bytes).map_err(|source| WorldBuildError::Azcs {
-            path: path.to_owned(),
-            source,
-        })?)
+    parsed(path, &unwrapped(path, bytes)?)
+}
+
+/// The ObjectStream of pak entry `path`: `bytes` without their AZCS wrapper, when they have one.
+fn unwrapped<'a>(path: &str, bytes: &'a [u8]) -> Result<Cow<'a, [u8]>, WorldBuildError> {
+    if is_azcs(bytes) {
+        Ok(Cow::Owned(decode_azcs(bytes).map_err(|source| {
+            WorldBuildError::Azcs {
+                path: path.to_owned(),
+                source,
+            }
+        })?))
     } else {
-        Cow::Borrowed(bytes)
-    };
-    parse_object_stream(&stream).map_err(|source| WorldBuildError::ObjectStream {
+        Ok(Cow::Borrowed(bytes))
+    }
+}
+
+/// The root element of the ObjectStream `stream` of pak entry `path`.
+fn parsed(path: &str, stream: &[u8]) -> Result<Element, WorldBuildError> {
+    parse_object_stream(stream).map_err(|source| WorldBuildError::ObjectStream {
         path: path.to_owned(),
         source,
     })
@@ -1022,6 +1152,128 @@ mod tests {
             path.tasks[0].as_ref().map(|task| task.task.as_str()),
             Some("POI_Graze_LOOP")
         );
+    }
+
+    /// A slice of one entity at `at` in its frame that holds a night-only time of day, as the
+    /// retail Dunwood dye plant chunks hold it (Observed, `17dw_gatherables_32x32_static_chunk_*`).
+    fn night_only_slice(at: [f32; 3]) -> TimedSlice {
+        let named = |name: &str, value: Vec<u8>| {
+            Element::with_value(nw_formats::objectstream::lowercase_crc32(name), value)
+        };
+        let mut local = [0.0_f32; 12];
+        local[0] = 1.0;
+        local[4] = 1.0;
+        local[8] = 1.0;
+        local[9..].copy_from_slice(&at);
+        let flags = ["m_night", "m_dawn", "m_day", "m_dusk", "m_despawnOnTimeEnd"]
+            .into_iter()
+            .map(|name| {
+                named(
+                    name,
+                    vec![u8::from(
+                        name != "m_dawn" && name != "m_day" && name != "m_dusk",
+                    )],
+                )
+            })
+            .collect();
+        let holder = Element {
+            type_id: 0x7565_1658_8663_478d_9090_2432_dfca_fa44_u128.to_be_bytes(),
+            ..Element::with_children(
+                0,
+                vec![
+                    Element::with_children(
+                        nw_formats::objectstream::lowercase_crc32("Id"),
+                        vec![named("Id", 1_u64.to_be_bytes().to_vec())],
+                    ),
+                    Element::with_children(
+                        0,
+                        vec![named(
+                            "m_localTM",
+                            local.iter().flat_map(|value| value.to_be_bytes()).collect(),
+                        )],
+                    ),
+                    Element {
+                        type_id: nw_world::time_of_day::TIME_OF_DAY_CONSTRAINT,
+                        ..Element::with_children(0, flags)
+                    },
+                ],
+            )
+        };
+        TimedSlice::of(&Element::with_children(0, vec![holder])).expect("a holder")
+    }
+
+    #[test]
+    fn spawns_and_gatherables_under_a_timed_entity_take_its_time_of_day() {
+        const CAPITAL_ASSET: &str = "{3D51B368-7E53-5FF9-AF51-58FD8602F34B}:2";
+        const CHUNK_PATH: &str = "coatgen/x/17dw_gatherables_32x32_static_chunk_1_1_1.dynamicslice";
+        let capital_at = [100.0, 200.0, 30.0];
+        let chunk_at = [400.0, 500.0, 60.0];
+        let chunk_key = capital_asset("{11111111-2222-3333-4444-555555555555}:1").expect("key");
+        let world = WorldFile {
+            capitals: vec![nw_world::records::Capital {
+                position: capital_at,
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                slice_asset_id: CAPITAL_ASSET.to_owned(),
+                ..nw_world::records::Capital::default()
+            }],
+            vitals: vec![
+                nw_world::records::VitalsSpawn::default(),
+                nw_world::records::VitalsSpawn {
+                    position: capital_at,
+                    ..nw_world::records::VitalsSpawn::default()
+                },
+            ],
+            gatherables: vec![nw_world::records::GatherablePoint {
+                position: [400.0 - 13.88, 501.47, 60.0],
+                ..nw_world::records::GatherablePoint::default()
+            }],
+            ..WorldFile::default()
+        };
+        let spawner = night_only_slice([0.0; 3]);
+        let chunk = night_only_slice([-13.88, 1.47, 0.0]);
+        let window = chunk.window().expect("a window");
+        let timed_assets = HashMap::from([
+            (capital_asset(CAPITAL_ASSET).expect("key"), spawner),
+            (chunk_key, chunk.clone()),
+        ]);
+        let timed = HashMap::from([(CHUNK_PATH.to_owned(), chunk)]);
+        let points = time_of_day_points(&world, &[(chunk_key, chunk_at)], &timed_assets, &timed);
+        assert!(window.night && !window.day && window.despawn_on_end);
+        assert_eq!(
+            points.vitals,
+            [nw_world::time_of_day::TimedPoint { index: 1, window }]
+        );
+        assert_eq!(
+            points.gatherables,
+            [nw_world::time_of_day::TimedPoint { index: 0, window }]
+        );
+        assert_eq!(
+            points.slices,
+            [TimedSlicePath {
+                slice: CHUNK_PATH.to_owned(),
+                window
+            }]
+        );
+    }
+
+    #[test]
+    fn a_regions_chunk_list_stands_for_its_capitals_lists() {
+        let files = [
+            "regions/r_+00_+00/region.chunks",
+            "regions/r_+00_+00/capitals/a/a.chunks",
+            "regions/r_+01_+00/capitals/b/b.chunks",
+            "regions/r_+01_+00/capitals/b/b.capitals.json",
+        ];
+        assert_eq!(
+            chunk_lists(&files),
+            [
+                "regions/r_+00_+00/region.chunks",
+                "regions/r_+01_+00/capitals/b/b.chunks"
+            ]
+        );
+        assert!(is_world_input(
+            "sharedassets/coatlicue/lv/regions/r_+00_+00/region.chunks"
+        ));
     }
 
     #[test]

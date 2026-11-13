@@ -6,6 +6,7 @@
 pub mod config;
 pub mod instance_loop;
 pub mod instances;
+pub mod invasions;
 pub mod join;
 pub mod matchmaking;
 pub mod run;

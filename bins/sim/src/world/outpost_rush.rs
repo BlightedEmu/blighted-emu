@@ -33,8 +33,19 @@
 //!   `OPR_TEST3` 1851.453): script state 1, `WinningTeamIdx`, `Cleanup` 180 s on.
 //! - Statuses: 3 alive, `0x20` set by a ready-up (6824) in the pregame and kept (636.312), `0x04`
 //!   while dead (`07`, `27`).
-//! - The participant flags are `13ca61080000` for the whole match (3 of 3 ledgers); the player
-//!   gets no temporary affiliation in the match.
+//! - The participant flags are `13ca61080000` for the whole match (3 of 3 ledgers). At its
+//!   arrival the player gets the temporary affiliations of its team (own team kind 0, the other
+//!   kind 4: `opr_que_and_lost` 577.371 s, `OPR-coral-divide2` 101.950 s, `OPR_TEST3`
+//!   215.432 s), emptied at the match's end (2105.799 s, 660.032 s, 1851.453 s).
+//! - The island (the open world map) runs the same match: the same mode and values, its
+//!   outposts the entities `OR_Outpost_A_LUNA`, `OR_Outpost_B_SOL` and `OR_Outpost_C_STAR` of its
+//!   layout slice `POIs/OutpostRush/OutpostRush_Layout_00` (the same `radius` 21.35 and heights
+//!   18.0, 16.5 and 16.0) at their slice places plus the slice's open world capital (1272.7565,
+//!   11016.635, 68.71661; the boss and the barriers of the island stood there to the
+//!   centimetre); its map id is the mode's (`91b99a18`, `OPR_TEST3` 216.746 s); its own extras
+//!   are the Baroness's barriers.
+//! - Each map has the Baroness ([`super::outpost_rush_boss`]) and the event feed
+//!   ([`super::outpost_rush_events`]): the first state holds `armorybuilt` for each outpost.
 //! - The client's 1980 `Leave` is answered as in the arena: 3455 (`0`), 5283 (own character),
 //!   3951 and the move back (`OPR-coral-divide2` 674.171, `OPR_TEST3` 1862.570).
 //! - A dead player asks for its respawn (1938) 8 to 30 s after its death, at one respawn point
@@ -51,11 +62,11 @@
 //! `Cleanup` go back; a leave of a running match bars the queue as the arena's does.
 //!
 //! Not built (no capture shows them in full, or they need entities this sim does not make): the
-//! capture point entities (333), the gates and structures (2270, 2646), the turrets (4276),
-//! resources and the armory, the summons, the boss (`BossSpawnTimer`, `BossKilled`,
-//! `BossFreezeTimer`, `FrozenStatus`) and its score freeze, the event feed (`Event1` to `Event3`),
-//! the end statistics, the score board (839) and the rewards, and a backfill into a running
-//! match.
+//! capture point entities (333), the outpost gates and structures (2270, 2646; the fort
+//! barriers are built: [`super::outpost_rush_doors`]), the turrets (4276),
+//! resources and the armory, the summons (the summoning circles, the azoth portal and the
+//! timers `7a0740b0` and `5543c08f`), the events of those parts, the end statistics, the score
+//! board (839) and the rewards, and a backfill into a running match.
 
 use bevy_ecs::entity::Entity;
 use nw_bus::ArenaSeat;
@@ -70,9 +81,13 @@ use super::arena_match::{
     CLEANUP_TIMER, GAME_MODE_TIMEOUT, GAME_MODE_TIMEOUT_MS, LEAVER_PENALTY_NS, PREGAME_MS,
     PREGAME_TIMER, RAID_ID_BASE, READY_BIT, WINNING_TEAM, middle_of,
 };
+use super::game_mode_entity::team_affiliations;
 use super::game_mode_entity::{
     FIRST_LIST_VERSION, MatchEntry, MatchParticipant, PLAYING_STATUS, full, participant_lists,
 };
+use super::outpost_rush_boss::BaronessRun;
+use super::outpost_rush_doors::{FortBarrier, ISLAND_FOLDER};
+use super::outpost_rush_events::{ARMORY_BUILT, EventFeed};
 use super::queue::team_spot;
 use super::{Body, Player, SimWorld, unix_ns};
 
@@ -81,7 +96,7 @@ const RUNNING: u8 = 0;
 const ENDED: u8 = 1;
 const PREGAME: u8 = 2;
 /// `TimeLimit`: the match's end, from the start of state 0 (Observed: 2,700 s in 3 of 3).
-const TIME_LIMIT_TIMER: u32 = 0x8f0e_9156;
+pub(super) const TIME_LIMIT_TIMER: u32 = 0x8f0e_9156;
 const TIME_LIMIT_MS: u64 = 2_700_000;
 /// `Cleanup` after the end (Observed: 180 s, `opr_que_and_lost` 2105.783 s).
 const CLEANUP_MS: u64 = 180_000;
@@ -147,9 +162,14 @@ struct OutpostMap {
     outposts: [Outpost; 3],
 }
 
-const OUTPOST_MAPS: [OutpostMap; 2] = [
+/// The folder of the Trench map (`NW_OPR_004_Trench`).
+pub(super) const TRENCH_FOLDER: &str = "nw_opr_004_trench";
+/// The folder of the Vertical map (`NW_OPR_005_Vertical`).
+pub(super) const VERTICAL_FOLDER: &str = "nw_opr_005_vertical";
+
+const OUTPOST_MAPS: [OutpostMap; 3] = [
     OutpostMap {
-        folder: "nw_opr_004_trench",
+        folder: TRENCH_FOLDER,
         outposts: [
             Outpost {
                 key: OUTPOST_A_STATUS,
@@ -169,7 +189,7 @@ const OUTPOST_MAPS: [OutpostMap; 2] = [
         ],
     },
     OutpostMap {
-        folder: "nw_opr_005_vertical",
+        folder: VERTICAL_FOLDER,
         outposts: [
             Outpost {
                 key: OUTPOST_A_STATUS,
@@ -184,6 +204,26 @@ const OUTPOST_MAPS: [OutpostMap; 2] = [
             Outpost {
                 key: OUTPOST_C_STATUS,
                 position: [1086.71, 971.59, 107.0],
+                height_m: 16.0,
+            },
+        ],
+    },
+    OutpostMap {
+        folder: ISLAND_FOLDER,
+        outposts: [
+            Outpost {
+                key: OUTPOST_A_STATUS,
+                position: [1368.2405, 10875.8, 80.562_61],
+                height_m: 18.0,
+            },
+            Outpost {
+                key: OUTPOST_B_STATUS,
+                position: [1272.0815, 11016.969, 65.561_61],
+                height_m: 16.5,
+            },
+            Outpost {
+                key: OUTPOST_C_STATUS,
+                position: [1173.2115, 11155.818, 55.968_61],
                 height_m: 16.0,
             },
         ],
@@ -297,6 +337,12 @@ pub(super) struct OutpostRushMatch {
     version: u64,
     list_version: u64,
     both_teams_seen: bool,
+    /// The fort barriers of the map ([`super::outpost_rush_doors`]).
+    barriers: Vec<FortBarrier>,
+    /// The Baroness of the island ([`super::outpost_rush_boss`]); `None` on the other maps.
+    pub(super) baroness: Option<BaronessRun>,
+    /// The event feed ([`super::outpost_rush_events`]).
+    pub(super) feed: EventFeed,
 }
 
 impl OutpostRushMatch {
@@ -309,6 +355,23 @@ impl OutpostRushMatch {
         self.participants
             .iter()
             .find(|participant| participant.number == number)
+    }
+
+    /// The team raid id and the team place of player `number` ([`super::raids`]).
+    pub(super) fn raid_seat_of(&self, number: u64) -> Option<(u64, u8)> {
+        let participant = self.of(number)?;
+        let raid = *self.raids.get(usize::from(participant.team))?;
+        Some((raid, participant.place))
+    }
+
+    /// The team of player `number`.
+    pub(super) fn team_of(&self, number: u64) -> Option<u8> {
+        self.of(number).map(|participant| participant.team)
+    }
+
+    /// The score of team `team`.
+    pub(super) fn score_of(&self, team: u8) -> u32 {
+        self.scores[usize::from(team.min(1))]
     }
 
     fn present(&self, team: u8) -> bool {
@@ -329,6 +392,7 @@ impl OutpostRushMatch {
         if self.state != PREGAME {
             values.push((TEAM_SCORES, team_scores(self.scores)));
             values.push((DOMINATION_MULTIPLIER, u64::from(self.multiplier)));
+            values.extend(self.baroness.iter().flat_map(BaronessRun::values));
         }
         if let Some(winner) = self.winner {
             values.push((WINNING_TEAM, u64::from(winner)));
@@ -343,7 +407,22 @@ impl OutpostRushMatch {
             RUNNING => TIME_LIMIT_TIMER,
             _ => CLEANUP_TIMER,
         };
-        vec![(own, self.ends_ms), (GAME_MODE_TIMEOUT, self.timeout_ms)]
+        let mut timers = vec![(own, self.ends_ms), (GAME_MODE_TIMEOUT, self.timeout_ms)];
+        if self.state == RUNNING {
+            timers.extend(self.baroness.iter().flat_map(BaronessRun::timers));
+        }
+        timers
+    }
+
+    /// The change of the values and the timers at a new version.
+    fn values_and_timers_change(&mut self) -> GameModeState {
+        let version = self.next_version();
+        GameModeState {
+            values: Some(full(version, self.values())),
+            timers: Some(full(version, self.timers())),
+            events: self.feed.take(),
+            ..GameModeState::default()
+        }
     }
 
     /// The change of the values at a new version.
@@ -351,6 +430,7 @@ impl OutpostRushMatch {
         let version = self.next_version();
         GameModeState {
             values: Some(full(version, self.values())),
+            events: self.feed.take(),
             ..GameModeState::default()
         }
     }
@@ -364,6 +444,7 @@ impl OutpostRushMatch {
             script_state: Some(state),
             values: Some(full(version, self.values())),
             timers: Some(full(version, self.timers())),
+            events: self.feed.take(),
             ..GameModeState::default()
         }
     }
@@ -388,8 +469,16 @@ impl OutpostRushMatch {
         }
     }
 
-    /// Team `team` scores `points`; `true` when it reached the win.
+    /// Team `team` scores `points` (none while the Baroness froze it); `true` when it reached
+    /// the win.
     fn score(&mut self, team: u8, points: u32) -> bool {
+        if self
+            .baroness
+            .as_ref()
+            .is_some_and(|run| run.frozen_team() == Some(team.min(1)))
+        {
+            return false;
+        }
         let score = &mut self.scores[usize::from(team.min(1))];
         *score = score.saturating_add(points);
         *score >= SCORE_TO_WIN
@@ -454,6 +543,7 @@ impl SimWorld {
         running.both_teams_seen |= (0..TEAMS as u8).all(|team| running.present(team));
         let lists = running.participant_lists();
         running.list_version += 1;
+        let list_version = running.list_version;
         let entry = MatchEntry {
             gde_ref: running.gde_ref,
             mode: running.crc,
@@ -461,12 +551,13 @@ impl SimWorld {
             phase,
             flags: MATCH_FLAGS,
             team: seat.team,
-            list_version: running.list_version,
+            list_version,
             eligible,
         };
         let mode_entity = running.entity;
         self.change_game_mode_state(mode_entity, lists);
         self.put_match_joined(entity, entry, server_ms);
+        self.put_affiliations(entity, list_version, team_affiliations(seat.team));
         tracing::info!(
             player = number,
             team = seat.team,
@@ -520,7 +611,14 @@ impl SimWorld {
             version: FIRST_LIST_VERSION,
             list_version: FIRST_LIST_VERSION,
             both_teams_seen: false,
+            barriers: Vec::new(),
+            baroness: None,
+            feed: EventFeed::default(),
         };
+        for outpost in 0..running.outposts.len() {
+            let number = u32::try_from(outpost).unwrap_or(u32::MAX);
+            running.feed.note(ARMORY_BUILT, server_ms, number);
+        }
         let version = running.version;
         let state = GameModeState {
             script_state: Some(PREGAME),
@@ -534,12 +632,17 @@ impl SimWorld {
             raids: Some(ReplicatedList::Full(full(version, running.raids.to_vec()))),
             values: Some(full(version, running.values())),
             timers: Some(full(version, running.timers())),
+            events: running.feed.take(),
             no_affliction: true,
             linked_mode: Some(0),
+            ..GameModeState::default()
         };
         let middle = middle_of(&running.map);
         let (entity, gde_ref) = self.place_game_mode_entity(MATCH_NAMESPACE, None, middle, state);
         running.entity = entity;
+        running.barriers = self.spawn_fort_barriers(folder, started);
+        running.baroness =
+            BaronessRun::of_map(folder, self.spawn_baroness_barriers(folder, started));
         running.gde_ref = gde_ref;
         tracing::info!(level = %running.map.folder, "Outpost Rush match opened");
         self.arena_matches.outpost_rush = Some(running);
@@ -605,6 +708,9 @@ impl SimWorld {
     /// Where dead player `entity` of the match respawns: its team's spot, with its status alive
     /// again. `None` when it plays no Outpost Rush match here.
     pub(super) fn outpost_rush_respawn(&mut self, entity: Entity) -> Option<Position> {
+        if self.arena_matches.capture_the_flag.is_some() {
+            return self.capture_the_flag_respawn(entity);
+        }
         let running = self.arena_matches.outpost_rush.as_mut()?;
         let index = running
             .participants
@@ -621,6 +727,9 @@ impl SimWorld {
     /// Whether players `first` and `second` are foes in the match: participants of two teams
     /// while it runs. `None` when this sim runs no Outpost Rush match.
     pub(super) fn outpost_rush_foes(&self, first: Entity, second: Entity) -> Option<bool> {
+        if self.arena_matches.capture_the_flag.is_some() {
+            return self.capture_the_flag_foes(first, second);
+        }
         let running = self.arena_matches.outpost_rush.as_ref()?;
         let team = |entity: Entity| {
             running
@@ -655,13 +764,24 @@ impl SimWorld {
         }
         match state {
             PREGAME if now_ms >= ends_ms => self.start_outpost_rush(),
-            RUNNING => self.run_outpost_rush(now_ms),
+            RUNNING => {
+                self.run_outpost_rush(now_ms);
+                let still_running = self
+                    .arena_matches
+                    .outpost_rush
+                    .as_ref()
+                    .is_some_and(|running| running.state == RUNNING);
+                if still_running && self.tick_baroness(now_ms) {
+                    self.send_outpost_rush_values_and_timers();
+                }
+            }
             ENDED if now_ms >= ends_ms => self.cleanup_outpost_rush(),
             _ => {}
         }
     }
 
-    /// `PregameTimer` ended: state 0 with `TimeLimit`.
+    /// `PregameTimer` ended: state 0 with `TimeLimit`, and the fort barriers take their teams'
+    /// raids ([`super::outpost_rush_doors`]).
     fn start_outpost_rush(&mut self) {
         let server_ms = self.server_ms;
         let Some(running) = self.arena_matches.outpost_rush.as_mut() else {
@@ -669,9 +789,14 @@ impl SimWorld {
         };
         running.next_score_ms = server_ms.saturating_add(SCORE_TICK_MS);
         running.next_capture_ms = server_ms.saturating_add(CAPTURE_TICK_MS);
+        if let Some(run) = running.baroness.as_mut() {
+            run.start(server_ms);
+        }
         let change = running.script_change(RUNNING, server_ms.saturating_add(TIME_LIMIT_MS));
         let entity = running.entity;
+        let (barriers, raids) = (running.barriers.clone(), running.raids);
         self.change_game_mode_state(entity, change);
+        self.open_fort_barriers(&barriers, &raids);
         tracing::info!("Outpost Rush match started");
     }
 
@@ -770,8 +895,26 @@ impl SimWorld {
         }
     }
 
+    /// Sends the match's values and timers.
+    fn send_outpost_rush_values_and_timers(&mut self) {
+        let Some(running) = self.arena_matches.outpost_rush.as_mut() else {
+            return;
+        };
+        let change = running.values_and_timers_change();
+        let entity = running.entity;
+        self.change_game_mode_state(entity, change);
+    }
+
+    /// Mob `mob` died by a hit of player `killer`: the Baroness's death freezes a team
+    /// ([`super::outpost_rush_boss`]).
+    pub(super) fn outpost_rush_mob_killed(&mut self, mob: u64, killer: u64) {
+        if self.baroness_killed(mob, killer) {
+            self.send_outpost_rush_values_and_timers();
+        }
+    }
+
     /// The match ended with `winner` (`None`: a tie at the time limit): state 1 with
-    /// `WinningTeamIdx` and `Cleanup`.
+    /// `WinningTeamIdx` and `Cleanup`, and the participants' temporary affiliations go.
     fn end_outpost_rush(&mut self, winner: Option<u8>) {
         let server_ms = self.server_ms;
         let Some(running) = self.arena_matches.outpost_rush.as_mut() else {
@@ -780,7 +923,17 @@ impl SimWorld {
         running.winner = winner;
         let change = running.script_change(ENDED, server_ms.saturating_add(CLEANUP_MS));
         let entity = running.entity;
+        running.list_version += 1;
+        let list_version = running.list_version;
+        let players: Vec<Entity> = running
+            .participants
+            .iter()
+            .map(|participant| participant.entity)
+            .collect();
         self.change_game_mode_state(entity, change);
+        for player in players {
+            self.put_affiliations(player, list_version, Vec::new());
+        }
         tracing::info!(?winner, "Outpost Rush match ended");
     }
 
@@ -802,6 +955,10 @@ impl SimWorld {
         }
         if let Some(running) = self.arena_matches.outpost_rush.take() {
             self.stations.remove_camp(running.entity);
+            self.remove_fort_barriers(&running.barriers);
+            if let Some(run) = &running.baroness {
+                self.remove_baroness(run);
+            }
         }
         if let Some(instance) = self.instance_run.as_ref().map(|run| run.id()) {
             self.close_instance(instance);
@@ -856,7 +1013,7 @@ pub(super) mod tests {
         EntryCounter, InstanceCatalog, InstanceMode, NO_INDEX, OUTPOST_RUSH_GAME_MODE, Teleport,
     };
     use nw_formats::objectstream::lowercase_crc32;
-    use nw_messages::LevelSpec;
+    use nw_messages::{LevelSpec, MemberState};
     use uuid::Uuid;
 
     use super::*;
@@ -866,13 +1023,13 @@ pub(super) mod tests {
     /// Players of the test sim.
     const MANY_PLAYERS: usize = 10;
     /// The two players, one per team.
-    const FIRST: u64 = 41;
-    const SECOND: u64 = 42;
+    pub(in crate::world) const FIRST: u64 = 41;
+    pub(in crate::world) const SECOND: u64 = 42;
     /// The test instance and its phase.
     const INSTANCE: u128 = 8;
     const PHASE: u64 = 0x486f_26c0_6aa9_8117;
     /// The server time of the opening.
-    const START_MS: u64 = 1_000_000;
+    pub(in crate::world) const START_MS: u64 = 1_000_000;
 
     #[test]
     fn the_keys_are_the_crcs_of_their_names() {
@@ -1003,7 +1160,40 @@ pub(super) mod tests {
 
     /// The Outpost Rush instance sim with the match open and two players, one per team.
     fn rush_sim() -> SimWorld {
-        let mode = outpost_rush();
+        rush_sim_on(outpost_rush())
+    }
+
+    /// The retail `OutpostRush` mode on the island (made from its rows): the open world's level
+    /// in the frame of its `WorldBounds`.
+    pub(in crate::world) fn island_rush() -> InstanceMode {
+        let map = InstanceMap {
+            folder: ISLAND_FOLDER.to_owned(),
+            map_name: "NewWorld_VitaeEterna".to_owned(),
+            coatlicue_path: "coatlicue/NewWorld_VitaeEterna".to_owned(),
+            frame: [937.0, 10562.0, 704.0, 1056.0],
+            teleports: vec![
+                Teleport {
+                    position: [1241.0, 10746.0, 96.0],
+                    yaw_deg: 0.0,
+                },
+                Teleport {
+                    position: [1309.0, 11279.0, 66.0],
+                    yaw_deg: 180.0,
+                },
+            ],
+            formation: Vec::new(),
+            map_crc: lowercase_crc32(OUTPOST_RUSH_GAME_MODE),
+        };
+        InstanceMode {
+            map: map.clone(),
+            rotation: vec![map],
+            ..outpost_rush()
+        }
+    }
+
+    /// The Outpost Rush instance sim of `mode` with the match open and two players, one per
+    /// team.
+    pub(in crate::world) fn rush_sim_on(mode: InstanceMode) -> SimWorld {
         let mut settings = crate::world::tests::settings(MANY_PLAYERS, MANY_PLAYERS as u32);
         settings.instance_role = true;
         settings.level = LevelSpec::instance(
@@ -1058,12 +1248,49 @@ pub(super) mod tests {
         world
     }
 
-    fn running(world: &SimWorld) -> &OutpostRushMatch {
+    pub(in crate::world) fn running(world: &SimWorld) -> &OutpostRushMatch {
         world
             .arena_matches
             .outpost_rush
             .as_ref()
             .expect("the match")
+    }
+
+    /// The held game mode state of the test match.
+    pub(in crate::world) fn held_state(world: &SimWorld) -> GameModeState {
+        world
+            .stations
+            .members(running(world).entity)
+            .and_then(|members| {
+                members.iter().find_map(|member| match &member.state {
+                    MemberState::GameMode(state) => Some(state.clone()),
+                    _ => None,
+                })
+            })
+            .expect("the game mode state")
+    }
+
+    #[test]
+    fn the_first_state_holds_the_armory_of_each_outpost() {
+        use super::super::outpost_rush_events::ARMORY_BUILT;
+        use nw_messages::game_mode_state::GameModeEvent;
+        let world = rush_sim();
+        let events = held_state(&world).events;
+        // The server ms of the opening: the end of the pregame less its length.
+        let opened_ms = running(&world).ends_ms - PREGAME_MS;
+        let armories: Vec<(u8, GameModeEvent)> = (0..3)
+            .map(|outpost| {
+                (
+                    outpost,
+                    GameModeEvent {
+                        name: ARMORY_BUILT,
+                        at_ms: opened_ms,
+                        number: u32::from(outpost),
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(events, armories);
     }
 
     fn tick_at(world: &mut SimWorld, server_ms: u64) {
@@ -1075,6 +1302,55 @@ pub(super) mod tests {
         let [x, y, z] = OUTPOST_MAPS[0].outposts[index].position;
         let entity = world.player_by_number(number).expect("player");
         world.place_player(entity, Position { x, y, z }, None, Placement::Drop, NOW);
+    }
+
+    #[test]
+    fn the_island_match_has_its_outposts_its_barriers_and_team_affiliations() {
+        let mut world = rush_sim_on(island_rush());
+        let match_state = running(&world);
+        assert_eq!(match_state.outposts, OUTPOST_MAPS[2].outposts);
+        assert_eq!(
+            match_state.map.map_crc, 0x91b9_9a18,
+            "the retail island map id"
+        );
+        assert_eq!(match_state.barriers.len(), 6, "three fort barriers a team");
+        let entity = world.player_by_number(SECOND).expect("player");
+        let player = world.world.get::<Player>(entity).expect("player");
+        assert!(
+            player.extra_members.iter().any(|member| matches!(
+                &member.state,
+                MemberState::TemporaryAffiliation(state)
+                    if matches!(&state.affiliations, Some(ReplicatedList::Full(list))
+                        if list.elements == team_affiliations(1))
+            )),
+            "own team 1, the other team 0"
+        );
+        let start = START_MS + PREGAME_MS;
+        tick_at(&mut world, start);
+        let timers = running(&world).timers();
+        assert!(timers.contains(&(
+            super::super::outpost_rush_boss::BOSS_SPAWN_TIMER,
+            start + 600_000
+        )));
+        world.end_outpost_rush(Some(0));
+        let player = world.world.get::<Player>(entity).expect("player");
+        assert!(
+            player.extra_members.iter().any(|member| matches!(
+                &member.state,
+                MemberState::TemporaryAffiliation(state)
+                    if matches!(&state.affiliations, Some(ReplicatedList::Full(list))
+                        if list.elements.is_empty())
+            )),
+            "emptied at the end"
+        );
+    }
+
+    #[test]
+    fn an_island_instance_owns_the_spawns_of_its_frame_only() {
+        let world = rush_sim_on(island_rush());
+        assert_eq!(world.instance_frame(), Some(island_rush().map.frame));
+        let trench = rush_sim_on(outpost_rush());
+        assert_eq!(trench.instance_frame(), None, "a level of its own");
     }
 
     #[test]
@@ -1164,5 +1440,63 @@ pub(super) mod tests {
         tick_at(&mut world, start_ms + TIME_LIMIT_MS);
         let match_state = running(&world);
         assert_eq!((match_state.state, match_state.winner), (ENDED, None));
+    }
+
+    /// The raid of the ownership and the door body of the barrier of slot key `number`, as a new
+    /// viewer gets it.
+    fn barrier_view(world: &SimWorld, number: u64) -> Option<(u64, MemberState)> {
+        let group = world.stations.group(
+            number,
+            crate::world::slots::Slot {
+                interest: 9,
+                new: true,
+            },
+        )?;
+        let raid = group
+            .members
+            .iter()
+            .find_map(|member| match &member.state {
+                MemberState::Ownership(ownership) => ownership.raid_id,
+                _ => None,
+            })?;
+        let door = group
+            .members
+            .iter()
+            .find(|member| member.state.type_index() == nw_messages::DOOR_TYPE_INDEX)?
+            .state
+            .clone();
+        Some((raid, door))
+    }
+
+    #[test]
+    fn the_fort_barriers_stay_closed_take_their_team_raid_at_the_start_and_go_at_the_end() {
+        let mut world = rush_sim();
+        let barriers = running(&world).barriers.clone();
+        assert_eq!(barriers.len(), 6, "three barriers per Trench fort");
+        let closed = MemberState::Door(nw_messages::DoorComponentState::of(
+            nw_messages::DoorState::Closed,
+        ));
+        for barrier in &barriers {
+            assert_eq!(
+                barrier_view(&world, barrier.number),
+                Some((0, closed.clone())),
+                "raid 0 in the pregame"
+            );
+        }
+        let start_ms = START_MS + PREGAME_MS;
+        tick_at(&mut world, start_ms);
+        let raids = running(&world).raids;
+        for barrier in &barriers {
+            assert_eq!(
+                barrier_view(&world, barrier.number),
+                Some((raids[usize::from(barrier.team)], closed.clone())),
+                "the team's raid once the match runs, the door still closed"
+            );
+        }
+        world.end_outpost_rush(Some(0));
+        tick_at(&mut world, start_ms + CLEANUP_MS);
+        for barrier in &barriers {
+            assert!(barrier_view(&world, barrier.number).is_none(), "gone");
+        }
     }
 }

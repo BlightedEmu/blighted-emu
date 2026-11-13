@@ -12,8 +12,17 @@
 //!   version (the timers and the values of a duel), or the changed elements of a list (one
 //!   participant's status).
 //!
-//! The sim writes this state; the captures' own states read through the member table, which
-//! also holds the children the sim does not send (the events, the map tiles, the icons).
+//! - the state of a catacombs run (retail `CATACOMBS2` 17.409 s) also holds the map of its
+//!   generated level (children 23 to 28, [`GeneratedMap`]): the map origin and the tile size,
+//!   the map size in tiles, one byte per tile (its map picture and its quarter turns), one bit
+//!   per tile a player went into, and the icons of the rooms.
+//!
+//! - the state of an Outpost Rush match also holds its event feed (children 12 to 21, `Event1`
+//!   to `Event10`, [`GameModeEvent`]): a ring of ten slots that each new event fills in turn
+//!   (Observed: `opr_que_and_lost` 578.634 s to 2087.883 s, `Event10` then `Event1` again); the
+//!   first state holds every filled slot, a later state the new slot only.
+//!
+//! The sim writes this state; the captures' own states read through the member table.
 
 use crate::items::FullList;
 use crate::list_delta::{ReplicatedList, write_child};
@@ -35,7 +44,17 @@ const CHARACTERS_CHILD: u8 = 8;
 const RAIDS_CHILD: u8 = 9;
 const VALUES_CHILD: u8 = 10;
 const TIMERS_CHILD: u8 = 11;
+/// `Event1`, the first slot of the event feed.
+const FIRST_EVENT_CHILD: u8 = 12;
+/// The slots of the event feed (`Event1` to `Event10`).
+pub const EVENT_SLOTS: u8 = 10;
 const AFFLICTION_CHILD: u8 = 22;
+const MAP_ORIGIN_CHILD: u8 = 23;
+const TILE_SIZE_CHILD: u8 = 24;
+const MAP_SIZE_CHILD: u8 = 25;
+const TILES_CHILD: u8 = 26;
+const VISITED_CHILD: u8 = 27;
+const ICONS_CHILD: u8 = 28;
 const LINKED_MODE_CHILD: u8 = 29;
 /// The flag of a participant's character id in its raw form (Observed: `05`, then 16 bytes).
 const RAW_CHARACTER_ID: u8 = 0x05;
@@ -56,6 +75,48 @@ pub struct ParticipantRef {
     pub facet: u64,
     /// A second id (name Unknown; retail: constant per player over its game modes).
     pub second: u64,
+}
+
+/// One icon of a generated level's map (`icons`): the CRC-32 of its name and its place (Observed:
+/// `bossicon` at the boss room's tile centre, `CATACOMBS2` 17.409 s; the place is written as two
+/// 32-bit floats, east then north).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapIcon {
+    /// CRC-32 of the icon's lowercase name.
+    pub key: u32,
+    /// Its place east and north, whole metres (retail icons stand at tile centres).
+    pub position_m: [u16; 2],
+}
+
+/// The map of a generated level (children 23 to 28). A `None` child is not sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GeneratedMap {
+    /// Child 23, `mapOrigin`: the centre of the first tile, east then north, metres (Observed:
+    /// `0040 0040` in every retail run).
+    pub origin_m: Option<[u16; 2]>,
+    /// Child 24, `tileSizeMeters`.
+    pub tile_size_m: Option<u8>,
+    /// Child 25, `mapSizeInTiles`: east then north.
+    pub size_in_tiles: Option<[u8; 2]>,
+    /// Child 26, `tileUiFilenameIdAndRotation`: per tile, row by row from the origin, its map
+    /// picture id shifted left by two and its quarter turns in the low two bits; 0 for no tile.
+    pub tiles: Option<ReplicatedList<u8>>,
+    /// Child 27, `tileVisited`: one bit per tile in the order of `tiles`, lowest bit first.
+    pub visited: Option<ReplicatedList<u8>>,
+    /// Child 28, `icons`.
+    pub icons: Option<ReplicatedList<MapIcon>>,
+}
+
+/// One event of the feed (`Event1` to `Event10`): the CRC-32 of its lowercase name, the server ms
+/// since 2000-01-01 it happened and its number (the member table: 4, 8 and 4 bytes).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GameModeEvent {
+    /// CRC-32 of the event's lowercase name.
+    pub name: u32,
+    /// Server ms since 2000-01-01 of the event.
+    pub at_ms: u64,
+    /// The event's number (its meaning is the event's).
+    pub number: u32,
 }
 
 /// A keyed number of a game mode: the CRC-32 of its name and its value (`values`: a count;
@@ -87,8 +148,12 @@ pub struct GameModeState {
     pub values: Option<FullList<Keyed>>,
     /// Child 11, `syncedTimers`.
     pub timers: Option<FullList<Keyed>>,
+    /// Children 12 to 21, `Event1` to `Event10`: each slot sent (0 to 9) and its event.
+    pub events: Vec<(u8, GameModeEvent)>,
     /// Child 22, `globalAfflictionData`: sent empty with the first state.
     pub no_affliction: bool,
+    /// Children 23 to 28: the map of a generated level.
+    pub level_map: GeneratedMap,
     /// Child 29, `linkedMode`.
     pub linked_mode: Option<u8>,
 }
@@ -129,12 +194,25 @@ impl GameModeState {
             (VALUES_CHILD, self.values.is_some()),
             (TIMERS_CHILD, self.timers.is_some()),
             (AFFLICTION_CHILD, self.no_affliction),
+            (MAP_ORIGIN_CHILD, self.level_map.origin_m.is_some()),
+            (TILE_SIZE_CHILD, self.level_map.tile_size_m.is_some()),
+            (MAP_SIZE_CHILD, self.level_map.size_in_tiles.is_some()),
+            (TILES_CHILD, self.level_map.tiles.is_some()),
+            (VISITED_CHILD, self.level_map.visited.is_some()),
+            (ICONS_CHILD, self.level_map.icons.is_some()),
             (LINKED_MODE_CHILD, self.linked_mode.is_some()),
         ];
         let mask = present
             .iter()
             .filter(|(_, present)| *present)
-            .fold(0_u32, |mask, (child, _)| mask | 1 << child);
+            .map(|(child, _)| *child)
+            .chain(
+                self.events
+                    .iter()
+                    .filter(|(slot, _)| *slot < EVENT_SLOTS)
+                    .map(|(slot, _)| FIRST_EVENT_CHILD + slot),
+            )
+            .fold(0_u32, |mask, child| mask | 1 << child);
         if mask == 0 {
             writer.u8(0);
             return Ok(());
@@ -182,6 +260,48 @@ impl GameModeState {
                 TIMERS_CHILD => write_keyed_list(writer, self.timers.as_ref()),
                 AFFLICTION_CHILD => {
                     writer.bytes(&NO_AFFLICTION);
+                    Ok(())
+                }
+                MAP_ORIGIN_CHILD => {
+                    if let Some([east, north]) = self.level_map.origin_m {
+                        writer.u16(east).u16(north);
+                    }
+                    Ok(())
+                }
+                TILE_SIZE_CHILD => {
+                    self.level_map.tile_size_m.map(|size| writer.u8(size));
+                    Ok(())
+                }
+                MAP_SIZE_CHILD => {
+                    if let Some([east, north]) = self.level_map.size_in_tiles {
+                        writer.u8(east).u8(north);
+                    }
+                    Ok(())
+                }
+                TILES_CHILD => {
+                    write_child(writer, self.level_map.tiles.as_ref(), |writer, tile| {
+                        writer.u8(*tile);
+                    })
+                }
+                VISITED_CHILD => {
+                    write_child(writer, self.level_map.visited.as_ref(), |writer, bits| {
+                        writer.u8(*bits);
+                    })
+                }
+                ICONS_CHILD => {
+                    write_child(writer, self.level_map.icons.as_ref(), |writer, icon| {
+                        let [east, north] = icon.position_m;
+                        writer
+                            .u32(icon.key)
+                            .f32(f32::from(east))
+                            .f32(f32::from(north));
+                    })
+                }
+                child if (FIRST_EVENT_CHILD..FIRST_EVENT_CHILD + EVENT_SLOTS).contains(&child) => {
+                    let slot = child - FIRST_EVENT_CHILD;
+                    if let Some((_, event)) = self.events.iter().find(|(at, _)| *at == slot) {
+                        writer.u32(event.name).u64(event.at_ms).u32(event.number);
+                    }
                     Ok(())
                 }
                 _ => {
@@ -261,6 +381,7 @@ mod tests {
             timers: Some(full(2, vec![(COUNTDOWN_TIMER, 0x00c2_58a8_cef9)])),
             no_affliction: true,
             linked_mode: Some(0),
+            ..GameModeState::default()
         };
         let expected = [
             "01fd01000102009bb4a7629bb4a76200010202",
@@ -309,5 +430,114 @@ mod tests {
         };
         assert_eq!(hex(&back), "0140010101011303");
         assert_eq!(hex(&GameModeState::default()), "00", "no child: no slot");
+    }
+
+    /// Retail `opr_que_and_lost`: three later states of the Outpost Rush match that hold one
+    /// slot of the event feed each, `outpostattacked` (`8d700253`) with outpost 2: `Event6` at
+    /// 1021.875 s, `Event10` at 1289.679 s and `Event2` after the ring turned (1354.779 s).
+    #[test]
+    fn a_retail_outpost_rush_event_writes_the_same_bytes() {
+        const OUTPOST_ATTACKED: u32 = 0x8d70_0253;
+        let event = |slot, at_ms| GameModeState {
+            events: vec![(
+                slot,
+                GameModeEvent {
+                    name: OUTPOST_ATTACKED,
+                    at_ms,
+                    number: 2,
+                },
+            )],
+            ..GameModeState::default()
+        };
+        assert_eq!(
+            hex(&event(5, 0x00c2_766c_a55f)),
+            "018080088d700253000000c2766ca55f00000002"
+        );
+        assert_eq!(
+            hex(&event(9, 0x00c2_7670_bb76)),
+            "01808080018d700253000000c27670bb7600000002"
+        );
+        assert_eq!(
+            hex(&event(1, 0x00c2_7671_b9d3)),
+            "0180408d700253000000c27671b9d300000002"
+        );
+        assert_eq!(hex(&event(EVENT_SLOTS, 0)), "00", "no slot past the ring");
+    }
+
+    /// Retail `CATACOMBS2` 17.409 s: the map children of the run's first state (9 x 14 tiles of
+    /// 64 m from (64, 64), 30 tiles with a picture, 5 visited, 4 icons), with the affliction and
+    /// the linked mode around them; the other children left out.
+    #[test]
+    fn the_map_of_a_retail_catacombs_run_writes_the_same_bytes() {
+        const BOSS_ICON: u32 = 0xfd06_5714;
+        const EXTRACTION_ICON: u32 = 0xfab6_c9fe;
+        const KEY_ROOM_ICON: u32 = 0x3ce7_487f;
+        const REWARD_ROOM_ICON: u32 = 0xb486_91b9;
+        const TILES: &str = "000000000000b73600000000000000e4bc00000000000000e83436000000000086acebf20000afebd7ddf3d3d2003774bf3500bcec840080608586003439850000dce73a83d785000000ac3b7439d13600000000d4f1bfbf3500000086d4ae00000000008638ade400000000876874e7b500000000008035000000000000";
+        let tiles = (0..TILES.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&TILES[at..at + 2], 16).expect("hex"))
+            .collect();
+        let mut visited = vec![0; 16];
+        visited[12] = 0x70;
+        visited[13] = 0x60;
+        let icon = |key, east, north| MapIcon {
+            key,
+            position_m: [east, north],
+        };
+        let state = GameModeState {
+            no_affliction: true,
+            level_map: GeneratedMap {
+                origin_m: Some([64, 64]),
+                tile_size_m: Some(64),
+                size_in_tiles: Some([9, 14]),
+                tiles: Some(ReplicatedList::Full(full(4, tiles))),
+                visited: Some(ReplicatedList::Full(full(14, visited))),
+                icons: Some(ReplicatedList::Full(full(
+                    11,
+                    vec![
+                        icon(BOSS_ICON, 192, 704),
+                        icon(EXTRACTION_ICON, 128, 768),
+                        icon(KEY_ROOM_ICON, 256, 768),
+                        icon(REWARD_ROOM_ICON, 192, 832),
+                    ],
+                ))),
+            },
+            linked_mode: Some(0),
+            ..GameModeState::default()
+        };
+        let expected = [
+            "01808080fe",
+            "00000000000000000000000000000000000000000000000000000000ff00",
+            "00400040",
+            "40",
+            "090e",
+            "0001047e",
+            TILES,
+            "00010e10",
+            "00000000000000000000000070600000",
+            "03",
+            "00010b04fd0657144340000044300000fab6c9fe4300000044400000",
+            "3ce7487f4380000044400000b48691b94340000044500000",
+            "00",
+        ]
+        .concat();
+        assert_eq!(hex(&state), expected);
+        let visit = GameModeState {
+            level_map: GeneratedMap {
+                visited: Some(ReplicatedList::Changes(vec![ListChange {
+                    index: 11,
+                    version: 0x11,
+                    value: 0x20,
+                }])),
+                ..GeneratedMap::default()
+            },
+            ..GameModeState::default()
+        };
+        assert_eq!(
+            hex(&visit),
+            "018080804001010b011120",
+            "retail 78.839 s: one tile visited"
+        );
     }
 }

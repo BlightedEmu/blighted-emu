@@ -18,7 +18,7 @@ use nw_messages::game_mode_participant::{
     ActiveGameMode, GAME_MODE_PARTICIPANT_COMPONENT, GameModeParticipantState, NO_TEAM,
     PARTICIPANT_FLAGS_LEN,
 };
-use nw_messages::game_mode_state::{GameModeState, ParticipantRef};
+use nw_messages::game_mode_state::{GameModeState, GeneratedMap, ParticipantRef};
 use nw_messages::items::FullList;
 use nw_messages::list_delta::ReplicatedList;
 use nw_messages::social::groups::REMOVED_LEFT;
@@ -46,6 +46,9 @@ pub(super) const PLAYING_STATUS: u8 = 3;
 pub(super) const FIRST_LIST_VERSION: u64 = 2;
 /// The kind of the other team's affiliation (Observed: 4 in every retail duel and arena).
 pub(super) const OTHER_TEAM_KIND: u32 = 4;
+/// The kind of the own team's affiliation in an arena and a capture the flag match (Observed:
+/// 0).
+const OWN_TEAM_KIND: u32 = 0;
 /// The 3455 value of every retail return from a match (Observed: 0 in the arena and in Outpost
 /// Rush, `OPR-coral-divide2` 674.307 s, `OPR_TEST3` 1862.622 s).
 const MODE_COMPLETED_VALUE: u32 = 0;
@@ -122,25 +125,55 @@ pub(super) fn full<T>(version: u64, elements: Vec<T>) -> FullList<T> {
     }
 }
 
-/// The game mode state `state` with the children `change` sets: a child of the change replaces
-/// the held one; changed elements of the statuses go into the held list.
-pub(super) fn merged(state: &GameModeState, change: &GameModeState) -> GameModeState {
-    let statuses = match (&state.statuses, &change.statuses) {
+/// The list `held` with the list child `change`: a full list replaces it; changed elements go
+/// into a held full list (an element one past its end is appended), which takes the highest
+/// version of the changes (retail: the first change carries the version, the others 0).
+fn merged_list<T: Clone>(
+    held: Option<&ReplicatedList<T>>,
+    change: Option<&ReplicatedList<T>>,
+) -> Option<ReplicatedList<T>> {
+    match (held, change) {
         (Some(ReplicatedList::Full(list)), Some(ReplicatedList::Changes(changes))) => {
             let mut list = list.clone();
             for change in changes {
-                if let Some(status) = usize::try_from(change.index)
-                    .ok()
-                    .and_then(|index| list.elements.get_mut(index))
-                {
-                    *status = change.value;
+                let Ok(index) = usize::try_from(change.index) else {
+                    continue;
+                };
+                if let Some(element) = list.elements.get_mut(index) {
+                    *element = change.value.clone();
+                } else if index == list.elements.len() {
+                    list.elements.push(change.value.clone());
                 }
-                list.version = Some(change.version);
+                list.version = list.version.max(Some(change.version));
             }
             Some(ReplicatedList::Full(list))
         }
-        (held, None) => held.clone(),
-        (_, new) => new.clone(),
+        (held, None) => held.cloned(),
+        (_, new) => new.cloned(),
+    }
+}
+
+/// The game mode state `state` with the children `change` sets: a child of the change replaces
+/// the held one; changed elements of the statuses and of the map's lists go into the held list;
+/// an event of the change takes its slot of the feed.
+pub(super) fn merged(state: &GameModeState, change: &GameModeState) -> GameModeState {
+    let statuses = merged_list(state.statuses.as_ref(), change.statuses.as_ref());
+    let mut events: Vec<_> = state
+        .events
+        .iter()
+        .filter(|(slot, _)| change.events.iter().all(|(new, _)| new != slot))
+        .chain(&change.events)
+        .copied()
+        .collect();
+    events.sort_by_key(|(slot, _)| *slot);
+    let (held, new) = (&state.level_map, &change.level_map);
+    let level_map = GeneratedMap {
+        origin_m: new.origin_m.or(held.origin_m),
+        tile_size_m: new.tile_size_m.or(held.tile_size_m),
+        size_in_tiles: new.size_in_tiles.or(held.size_in_tiles),
+        tiles: merged_list(held.tiles.as_ref(), new.tiles.as_ref()),
+        visited: merged_list(held.visited.as_ref(), new.visited.as_ref()),
+        icons: merged_list(held.icons.as_ref(), new.icons.as_ref()),
     };
     GameModeState {
         script_state: change.script_state.or(state.script_state),
@@ -160,9 +193,26 @@ pub(super) fn merged(state: &GameModeState, change: &GameModeState) -> GameModeS
         raids: change.raids.clone().or_else(|| state.raids.clone()),
         values: change.values.clone().or_else(|| state.values.clone()),
         timers: change.timers.clone().or_else(|| state.timers.clone()),
+        events,
         no_affliction: state.no_affliction,
+        level_map,
         linked_mode: change.linked_mode.or(state.linked_mode),
     }
+}
+
+/// The affiliations of a player of team `team` of a two-team match: its own team, then the
+/// other (Observed: every retail arena and capture the flag join).
+pub(super) fn team_affiliations(team: u8) -> Vec<Affiliation> {
+    vec![
+        Affiliation {
+            id: u32::from(team),
+            kind: OWN_TEAM_KIND,
+        },
+        Affiliation {
+            id: u32::from(1 - team.min(1)),
+            kind: OTHER_TEAM_KIND,
+        },
+    ]
 }
 
 /// The participant reference of player `number`.
@@ -262,6 +312,20 @@ impl SimWorld {
         position: Position,
         state: GameModeState,
     ) -> (u64, [u8; RAW_ID_LEN]) {
+        self.place_game_mode_entity_on(GAME_MODE_COMPONENT, namespace, asset, position, state)
+    }
+
+    /// [`Self::place_game_mode_entity`] with the game mode state on component `component`
+    /// (Observed: 1 in capture the flag, `CTF_QueueAndJoin_PickUpSpeedHealthAndFlagThenDied`
+    /// 46.961 s).
+    pub(super) fn place_game_mode_entity_on(
+        &mut self,
+        component: u64,
+        namespace: u64,
+        asset: Option<[u8; RAW_ID_LEN]>,
+        position: Position,
+        state: GameModeState,
+    ) -> (u64, [u8; RAW_ID_LEN]) {
         let namespace = namespace ^ self.me.generation;
         let mut gde_ref = [0; RAW_ID_LEN];
         let entity = self.stations.place_camp(|number| {
@@ -284,7 +348,7 @@ impl SimWorld {
                         }),
                     },
                     BundleMember {
-                        component: GAME_MODE_COMPONENT,
+                        component,
                         state: MemberState::GameMode(state),
                     },
                 ],
@@ -296,6 +360,14 @@ impl SimWorld {
     /// Sends the change `change` of the game mode state of the game mode entity `entity`, and
     /// keeps it for the viewers that get the entity later.
     pub(super) fn change_game_mode_state(&mut self, entity: u64, change: GameModeState) {
+        let Some(component) = self.stations.members(entity).and_then(|members| {
+            members
+                .iter()
+                .find(|member| matches!(member.state, MemberState::GameMode(_)))
+                .map(|member| member.component)
+        }) else {
+            return;
+        };
         let merge = change.clone();
         self.stations.change_camp(
             entity,
@@ -307,7 +379,7 @@ impl SimWorld {
                 }
             },
             vec![BundleMember {
-                component: GAME_MODE_COMPONENT,
+                component,
                 state: MemberState::GameMode(change),
             }],
         );
@@ -382,6 +454,89 @@ mod tests {
             "a child the change does not set stays"
         );
         assert_eq!(state.timers, change.timers);
+    }
+
+    /// A later viewer gets every filled slot of the event feed: a new event takes its slot, the
+    /// other slots stay (retail `opr_que_and_lost` 2016.046 s: ten slots after the ring turned).
+    #[test]
+    fn an_event_of_a_change_takes_its_slot_of_the_held_feed() {
+        use nw_messages::game_mode_state::GameModeEvent;
+        let event = |name, at_ms| GameModeEvent {
+            name,
+            at_ms,
+            number: 0,
+        };
+        let held = GameModeState {
+            events: vec![(0, event(1, 10)), (1, event(2, 20))],
+            ..GameModeState::default()
+        };
+        let change = GameModeState {
+            events: vec![(0, event(3, 30))],
+            ..GameModeState::default()
+        };
+        let state = merged(&held, &change);
+        assert_eq!(state.events, vec![(0, event(3, 30)), (1, event(2, 20))]);
+        assert_eq!(
+            merged(&state, &GameModeState::default()).events,
+            state.events
+        );
+    }
+
+    /// A later viewer of a catacombs run gets the map as it stands: a changed visited byte goes
+    /// into the held list and an icon one past the list's end is appended (retail `CATACOMBS5`
+    /// 338.115 s: icons 1 to 3 appended to a list of one).
+    #[test]
+    fn a_change_of_the_map_lists_goes_into_the_held_map() {
+        use nw_messages::game_mode_state::MapIcon;
+        let icon = |key| MapIcon {
+            key,
+            position_m: [64, 128],
+        };
+        let held = GameModeState {
+            level_map: GeneratedMap {
+                size_in_tiles: Some([2, 1]),
+                visited: Some(ReplicatedList::Full(full(4, vec![0b01]))),
+                icons: Some(ReplicatedList::Full(full(4, vec![icon(1)]))),
+                ..GeneratedMap::default()
+            },
+            ..GameModeState::default()
+        };
+        let change = GameModeState {
+            level_map: GeneratedMap {
+                visited: Some(ReplicatedList::Changes(vec![ListChange {
+                    index: 0,
+                    version: 5,
+                    value: 0b11,
+                }])),
+                icons: Some(ReplicatedList::Changes(vec![
+                    ListChange {
+                        index: 1,
+                        version: 6,
+                        value: icon(2),
+                    },
+                    ListChange {
+                        index: 2,
+                        version: 0,
+                        value: icon(3),
+                    },
+                ])),
+                ..GeneratedMap::default()
+            },
+            ..GameModeState::default()
+        };
+        let state = merged(&held, &change);
+        assert_eq!(state.level_map.size_in_tiles, Some([2, 1]));
+        assert_eq!(
+            state.level_map.visited,
+            Some(ReplicatedList::Full(full(5, vec![0b11])))
+        );
+        assert_eq!(
+            state.level_map.icons,
+            Some(ReplicatedList::Full(full(
+                6,
+                vec![icon(1), icon(2), icon(3)]
+            )))
+        );
     }
 
     #[test]

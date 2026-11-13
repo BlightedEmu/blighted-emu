@@ -23,6 +23,7 @@ pub mod raid_data;
 pub mod states;
 mod text;
 pub mod voice;
+pub mod war_requests;
 
 use nw_reflect::{Envelope, TypeId};
 
@@ -108,6 +109,8 @@ pub enum SocialCall {
     Guild(GuildCall),
     /// A voice-chat call.
     Voice(VoiceCall),
+    /// A war declaration call.
+    War(war_requests::WarCall),
 }
 
 impl SocialCall {
@@ -128,6 +131,9 @@ impl SocialCall {
             }
             if let Some(call) = GuildCall::read(type_index, reader) {
                 return Some(call.map(Self::Guild));
+            }
+            if let Some(call) = war_requests::WarCall::read(type_index, reader) {
+                return Some(call.map(Self::War));
             }
             VoiceCall::read(type_index, reader).map(|call| call.map(Self::Voice))
         };
@@ -154,6 +160,7 @@ impl SocialCall {
             Self::Group(call) => call.type_index(),
             Self::Guild(call) => call.type_index(),
             Self::Voice(call) => call.type_index(),
+            Self::War(call) => call.type_index(),
         }
     }
 
@@ -170,6 +177,12 @@ impl SocialCall {
             Self::Group(call) => call.encode(header),
             Self::Guild(call) => call.encode(header),
             Self::Voice(call) => call.encode(header),
+            Self::War(call) => {
+                let mut writer = Writer::new();
+                header.write(&mut writer);
+                call.write(&mut writer);
+                Ok(writer.finish())
+            }
         }
     }
 
@@ -180,6 +193,7 @@ impl SocialCall {
             || groups::CALL_TYPES.contains(&type_index)
             || guilds::CALL_TYPES.contains(&type_index)
             || voice::CALL_TYPES.contains(&type_index)
+            || war_requests::CALL_TYPES.contains(&type_index)
     }
 }
 
@@ -196,6 +210,8 @@ pub enum SocialPush {
     Guild(guilds::GuildPush),
     /// A voice-chat push.
     Voice(voice::VoicePush),
+    /// A war declaration answer.
+    War(war_requests::WarPush),
 }
 
 impl SocialPush {
@@ -207,6 +223,7 @@ impl SocialPush {
             Self::Group(push) => push.type_index(),
             Self::Guild(push) => push.type_index(),
             Self::Voice(push) => push.type_index(),
+            Self::War(push) => push.type_index(),
         }
     }
 
@@ -218,6 +235,7 @@ impl SocialPush {
             Self::Group(_) => SocialFacet::Groups,
             Self::Guild(_) => SocialFacet::Guilds,
             Self::Voice(_) => SocialFacet::VoiceChat,
+            Self::War(_) => SocialFacet::Social,
         }
     }
 
@@ -234,6 +252,7 @@ impl SocialPush {
             Self::Group(push) => push.write(&mut writer)?,
             Self::Guild(push) => push.write(&mut writer)?,
             Self::Voice(push) => push.write(&mut writer)?,
+            Self::War(push) => push.write(&mut writer),
         }
         Ok(writer.finish())
     }
@@ -264,6 +283,8 @@ impl SocialPush {
             push.map(Self::Group)
         } else if let Some(push) = guilds::GuildPush::read(type_index, &mut reader) {
             push.map(Self::Guild)
+        } else if let Some(push) = war_requests::WarPush::read(type_index, &mut reader) {
+            push.map(Self::War)
         } else {
             voice::VoicePush::read(type_index, &mut reader)?.map(Self::Voice)
         };

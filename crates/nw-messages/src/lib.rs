@@ -7,6 +7,7 @@
 //! name in the notes keeps a neutral name. `decode` fails on missing bytes and on bytes left over.
 
 pub mod abilities;
+pub mod ability_instances;
 pub mod achievements;
 pub mod afflictions;
 pub mod alc;
@@ -28,6 +29,8 @@ pub mod contracts;
 pub mod cooldowns;
 pub mod crafting_state;
 pub mod day_phase;
+pub mod door;
+pub mod dungeon_entrance_state;
 pub mod economy;
 pub mod entity_ids;
 pub mod entity_slots;
@@ -89,6 +92,7 @@ pub mod title_choice;
 pub mod titles;
 pub mod travel;
 pub mod travel_states;
+pub mod turrets;
 pub mod vitals;
 pub mod war;
 pub mod war_roster;
@@ -124,9 +128,10 @@ pub use attributes::{
 };
 pub use buildables::{
     BUILDABLE_CONTROLLER_TYPE_INDEX, BUILDABLE_GRID_TYPE_INDEX, BuildableControllerState,
-    BuildableGridState, CommittedResource, GridSide, GuildCrest, OWNERSHIP_TYPE_INDEX,
+    BuildableGridState, CommittedResources, GridSide, GuildCrest, OWNERSHIP_TYPE_INDEX,
     OwnerIdentification, OwnershipState, PLACEMENT_OBSTRUCTION_TYPE_INDEX,
-    PlacementObstructionState, TERRITORY_INTERFACE_TYPE_INDEX, TerritoryInterfaceState,
+    PlacementObstructionState, ResourceItem, TERRITORY_INTERFACE_TYPE_INDEX,
+    TerritoryInterfaceState, committed_resource,
 };
 pub use bundle::{
     IndexBlock, LOCAL_PLAYER_INTEREST, MAX_BUNDLE_INDEXES, OBSERVED_BUNDLE_BYTE_4,
@@ -169,7 +174,10 @@ pub use cooldowns::{
     AbilityCooldown, COOLDOWNS_COMPONENT, COOLDOWNS_TYPE_INDEX, ConsumableCooldown, CooldownChange,
     CooldownMap, CooldownsState,
 };
-pub use day_phase::{OBSERVED_DAY_PHASE, SYNC_DAY_PHASE_MSG_TYPE_INDEX, SyncDayPhaseMsg};
+pub use day_phase::{
+    DAY_PHASE, DayCycle, NIGHT_PHASE, SYNC_DAY_PHASE_MSG_TYPE_INDEX, SyncDayPhaseMsg,
+};
+pub use door::{DOOR_TYPE_INDEX, DoorComponentState, DoorState};
 pub use economy::{EconomyCall, EconomyMessage};
 #[cfg(any(test, feature = "test-util"))]
 pub use entity_ids::number_of_facet;
@@ -304,9 +312,10 @@ pub use war_signup::{
     SIDE_DEFENDER, SignupEntry, WAR_PLAYER_KIND, WarPlayer, WarSignupClientMsg, WarSignupServerMsg,
 };
 pub use war_states::{
-    BuilderState, CapturePointState, LandClaimState, SiegeWarfareDataState, TurretState,
-    WAR_DATA_COMPONENT, WAR_DATA_TYPE_INDEX, WAR_KIND_INVASION, WAR_KIND_WAR, WAR_PHASE_RESOLVED,
-    WAR_PHASE_RUNNING, WAR_PHASE_SCHEDULED, WarDataState, WarEntry, WarSide, WarStatus,
+    BUILDER_BUILDING, BUILDER_IDLE, BUILDER_STATE_COMPONENT, BUILDER_TYPE_INDEX, BuilderState,
+    CapturePointState, LandClaimState, SiegeWarfareDataState, TurretState, WAR_DATA_COMPONENT,
+    WAR_DATA_TYPE_INDEX, WAR_KIND_INVASION, WAR_KIND_WAR, WAR_PHASE_RESOLVED, WAR_PHASE_RUNNING,
+    WAR_PHASE_SCHEDULED, WarDataState, WarEntry, WarSide, WarStatus,
 };
 pub use wire::{
     BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer, entity_of_raw_id, raw_id_of_entity,

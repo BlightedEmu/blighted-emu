@@ -10,6 +10,28 @@
 //! Deep from 1.8 m, Shallow from 0.9 m, Very Shallow from 0.2 m). The level water map's sea is
 //! `0x0a` (salt), lakes and rivers `0x07` (fresh), ponds `0x04` (not fishable).
 //!
+//! The fishing perks ([`FishingPerk`]) are the `PerkData` rows whose `Affix` row of
+//! `AffixStatData` holds a fishing stat (build 25810808: 39 perks, 30 of the pole and 9 of the
+//! armour). Their values are those of the perk texts (`javelindata_perks.loc.xml`): `FishRarity`
+//! and `FishSize` add to the catch roll's modifiers as the pole's and the bait's do
+//! (`FishLuckDay1`: "Small increase to chance of catching better fish during daytime", 0.3);
+//! `MaxCastDistance` is a share of the cast distance (`FishCastDistanceDay1`: "+5% cast distance
+//! during daytime", 0.05); `FishingLineStrength` is a share of the line's tension gain
+//! (`FishLineStrengthSalt1`: "+10% line strength in saltwater", -0.1). The client multiplies the
+//! pole's `LineTensionGainPerSecond` by the stat multiplier `FishingLineStrength` (type 0x3c of
+//! the `StatMultiplierType` list, `FUN_143ff1970`; read in `FUN_1430f5420`, from 1.0). A perk with
+//! a `DayPhases` cell holds only in that phase, one with a `FishingWaterType` cell only in that
+//! water.
+//!
+//! Status effects add fishing stats too ([`FishingRules::effect_stats`]): a `StatusEffectData`
+//! row's `FishSizeRollModifier`, and the fishing stats of the `AffixStatData` rows its
+//! `OnHitAffixes` cell names. The attribute threshold abilities hold such effects through their
+//! `OnEquipStatusEffect` ([`crate::attribute_bonuses`]); Observed (build 25810808):
+//! `ATB_Foc_Bonus_25_2_Effect`, `_200_2_` and `_250_2_` (Focus 25, 200 and 250) add 0.5, 1.5 and 2.0
+//! to the size roll, and `ATB_Foc_Bonus_50_2_Effect` (Focus 50) names `ATB_Foc_Bonus_50_2_Affix`,
+//! `MaxCastDistance` 0.03. Inferred: an effect's `OnHitAffixes` hold while the effect is held (no
+//! other row names this affix, and the effect is a `FishingBuff` with no hit condition).
+//!
 //! A hotspot is a spawned slice `fishing_hotspot_<type>_<n>`: its `FishingHotspotComponent`
 //! names the hotspot row `Hotspot_<Type>_<n>` (Observed on `fishing_hotspot_secret_64` and
 //! `fishing_hotspot_broad_4`), and its physics shape on the `FishingHotspot` layer has a radius
@@ -31,6 +53,9 @@ const CLASS_SEPARATOR: char = '+';
 const RANGE_SEPARATOR: char = '-';
 /// Separates the names of a list cell (`Lazy,Sporadic`, `Fresh,Salt`).
 const LIST_SEPARATOR: char = ',';
+/// Separates the entries of a `StatusEffectData` list cell such as `OnHitAffixes` (Inferred: the
+/// table's other list cells, `EffectCategories` `Buff+Haste`, use it).
+const EFFECT_LIST_SEPARATOR: char = '+';
 /// The water tags of a bait's `RequiredWaterTags` and of the loot tables' conditions.
 pub const FRESH_TAG: &str = "Fresh";
 /// See [`FRESH_TAG`].
@@ -297,6 +322,82 @@ impl RollModifiers {
     }
 }
 
+/// What the worn fishing perks add (see the module text).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FishingStats {
+    /// `FishRarityRollModifier` and `FishSizeRollModifier`, added to the catch roll's.
+    pub modifiers: RollModifiers,
+    /// `MaxCastDistance`: a share of the cast distance (0.05: 5 % farther).
+    pub cast_distance: f64,
+    /// `FishingLineStrength`: a share of the line's tension gain (-0.1: a tenth less).
+    pub line_strength: f64,
+}
+
+impl FishingStats {
+    /// The sum of `self` and `other` (Inferred: the shares of two perks add; no retail capture
+    /// holds a catch with two such perks).
+    #[must_use]
+    pub fn plus(self, other: Self) -> Self {
+        Self {
+            modifiers: self.modifiers.plus(other.modifiers),
+            cast_distance: self.cast_distance + other.cast_distance,
+            line_strength: self.line_strength + other.line_strength,
+        }
+    }
+
+    /// The cast distance `distance_m` with the cast distance share.
+    #[must_use]
+    pub fn cast(&self, distance_m: f64) -> f64 {
+        distance_m * (1.0 + self.cast_distance)
+    }
+
+    /// The line tension gain `gain` with the line strength share (the client's multiplier).
+    #[must_use]
+    pub fn tension_gain(&self, gain: f64) -> f64 {
+        gain * (1.0 + self.line_strength)
+    }
+}
+
+/// One fishing perk (`PerkData` and its `AffixStatData` row).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FishingPerk {
+    /// `DayPhases`: the only phase it holds in; `None` for every phase.
+    pub phase: Option<DayPhase>,
+    /// `FishingWaterType`: the only water it holds in (salt `true`, fresh `false`); `None` for
+    /// every water.
+    pub salt: Option<bool>,
+    /// What it adds.
+    pub stats: FishingStats,
+}
+
+impl FishingPerk {
+    /// Whether it holds at phase `phase` in water `water` (`None`: the water is not known yet,
+    /// so a perk of one water does not hold).
+    pub fn holds(&self, phase: DayPhase, water: Option<WaterType>) -> bool {
+        self.phase.is_none_or(|own| own == phase)
+            && self
+                .salt
+                .is_none_or(|salt| water.is_some_and(|water| water.is_salt() == salt))
+    }
+}
+
+/// The phase of a `DayPhases` cell: the names of the bait columns' phases.
+fn phase_of(cell: &str) -> Option<DayPhase> {
+    PHASE_NAMES
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(cell.trim()))
+        .map(|(_, phase)| *phase)
+}
+
+/// The phase names of the `DayPhases` cells (Observed: `Day` and `Night`; `!time` names them
+/// so too).
+const PHASE_NAMES: [(&str, DayPhase); 4] = [
+    ("Night", DayPhase::Night),
+    ("Dawn", DayPhase::Dawn),
+    ("Day", DayPhase::Day),
+    ("Dusk", DayPhase::Dusk),
+];
+
 /// One fishing pole (`FishingPolesData`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pole {
@@ -448,6 +549,10 @@ pub struct FishingRules {
     cast_bonus: Vec<f64>,
     /// The `LootTags` of each territory.
     territory_tags: HashMap<u32, Vec<String>>,
+    /// The fishing perks, by lowercase `PerkID`.
+    perks: HashMap<String, FishingPerk>,
+    /// The fishing stats of the status effects that have any, by lowercase `StatusID`.
+    effects: HashMap<String, FishingStats>,
 }
 
 /// The names of a list cell, trimmed, without empty ones.
@@ -472,6 +577,95 @@ fn pattern_bits(pattern: &str) -> u8 {
 /// A whole non-negative number of a data cell as `u32`.
 fn whole(value: i64) -> u32 {
     u32::try_from(value.max(0)).unwrap_or(u32::MAX)
+}
+
+/// The text of a cell, trimmed; `None` for a missing or empty cell.
+fn filled(cell: Option<&str>) -> Option<&str> {
+    cell.map(str::trim).filter(|cell| !cell.is_empty())
+}
+
+/// The fishing stats of the `AffixStatData` rows of `tables` that have any, by lowercase
+/// `StatusID`.
+fn affix_stats(tables: &Tables) -> HashMap<String, FishingStats> {
+    tables
+        .affix_stat_data
+        .iter()
+        .flat_map(|table| &table.rows)
+        .filter_map(|row| {
+            let stats = FishingStats {
+                modifiers: RollModifiers {
+                    rarity: row.fish_rarity_roll_modifier.unwrap_or_default(),
+                    size: row.fish_size_roll_modifier.unwrap_or_default(),
+                    summer_rarity: 0.0,
+                },
+                cast_distance: row.max_cast_distance.unwrap_or_default(),
+                line_strength: row.fishing_line_strength.unwrap_or_default(),
+            };
+            (stats != FishingStats::default()).then(|| (row.status_id.to_lowercase(), stats))
+        })
+        .collect()
+}
+
+/// The fishing stats of the `StatusEffectData` rows of `tables` that have any, by lowercase
+/// `StatusID`: the row's `FishSizeRollModifier` and the stats of its `OnHitAffixes` among
+/// `affixes` (see the module text).
+fn effect_stats(
+    tables: &Tables,
+    affixes: &HashMap<String, FishingStats>,
+) -> HashMap<String, FishingStats> {
+    tables
+        .status_effect_data
+        .iter()
+        .flat_map(|table| &table.rows)
+        .filter_map(|row| {
+            let own = FishingStats {
+                modifiers: RollModifiers {
+                    size: row.fish_size_roll_modifier.unwrap_or_default(),
+                    ..RollModifiers::default()
+                },
+                ..FishingStats::default()
+            };
+            let stats = row
+                .on_hit_affixes
+                .as_deref()
+                .unwrap_or_default()
+                .split(EFFECT_LIST_SEPARATOR)
+                .filter_map(|affix| affixes.get(&affix.trim().to_lowercase()))
+                .fold(own, |sum, stats| sum.plus(*stats));
+            (stats != FishingStats::default()).then(|| (row.status_id.to_lowercase(), stats))
+        })
+        .collect()
+}
+
+/// The fishing perks of `tables`, by lowercase `PerkID`: each perk whose `Affix` row has a
+/// fishing stat among `stats`. A perk whose `DayPhases` or `FishingWaterType` cell names no phase
+/// or water is left out.
+fn fishing_perks(
+    tables: &Tables,
+    stats: &HashMap<String, FishingStats>,
+) -> HashMap<String, FishingPerk> {
+    tables
+        .perk_data
+        .iter()
+        .flat_map(|table| &table.rows)
+        .filter_map(|row| {
+            let stats = *stats.get(&row.affix.as_deref()?.to_lowercase())?;
+            let phase = match filled(row.day_phases.as_deref()) {
+                Some(name) => Some(phase_of(name)?),
+                None => None,
+            };
+            let salt = match filled(row.fishing_water_type.as_deref()) {
+                Some(water) if water.eq_ignore_ascii_case(SALT_TAG) => Some(true),
+                Some(water) if water.eq_ignore_ascii_case(FRESH_TAG) => Some(false),
+                Some(_) => return None,
+                None => None,
+            };
+            Some((
+                row.perk_id.to_lowercase(),
+                FishingPerk { phase, salt, stats },
+            ))
+        })
+        .collect()
 }
 
 impl FishingRules {
@@ -652,6 +846,7 @@ impl FishingRules {
             })
             .filter(|(_, tags)| !tags.is_empty())
             .collect();
+        let affixes = affix_stats(tables);
         Self {
             poles,
             baits,
@@ -662,6 +857,8 @@ impl FishingRules {
             places: Vec::new(),
             cast_bonus: ranks.into_iter().map(|(_, bonus)| bonus).collect(),
             territory_tags,
+            perks: fishing_perks(tables, &affixes),
+            effects: effect_stats(tables, &affixes),
         }
     }
 
@@ -750,6 +947,28 @@ impl FishingRules {
             .or(self.cast_bonus.last())
             .copied()
             .unwrap_or_default()
+    }
+
+    /// What the worn perks `perks` (perk ids) add at phase `phase` in water `water`.
+    pub fn perk_stats<'a>(
+        &self,
+        perks: impl IntoIterator<Item = &'a str>,
+        phase: DayPhase,
+        water: Option<WaterType>,
+    ) -> FishingStats {
+        perks
+            .into_iter()
+            .filter_map(|perk| self.perks.get(&perk.to_lowercase()))
+            .filter(|perk| perk.holds(phase, water))
+            .fold(FishingStats::default(), |sum, perk| sum.plus(perk.stats))
+    }
+
+    /// What the held status effects `effects` (status ids) add.
+    pub fn effect_stats<'a>(&self, effects: impl IntoIterator<Item = &'a str>) -> FishingStats {
+        effects
+            .into_iter()
+            .filter_map(|effect| self.effects.get(&effect.to_lowercase()))
+            .fold(FishingStats::default(), |sum, stats| sum.plus(*stats))
     }
 
     /// The loot tags of the territories `territories` (their `LootTags`).
@@ -957,6 +1176,135 @@ mod tests {
         assert!(
             (rules.cast_bonus(200) - 0.05).abs() < f64::EPSILON,
             "the top rank's"
+        );
+    }
+
+    /// The retail rows of three fishing perks (build 25810808): a pole perk of the day, a pole
+    /// perk of salt water and an armour perk.
+    fn perk_tables() -> Tables {
+        let perk =
+            |id: &str, phases: Option<&str>, water: Option<&str>| -> crate::generated::PerkData {
+                serde_json::from_value(serde_json::json!({
+                    "perk_id": id,
+                    "affix": id,
+                    "perk_type": "Generated",
+                    "condition_event": "OnEquip",
+                    "channel": 0,
+                    "day_phases": phases,
+                    "fishing_water_type": water,
+                }))
+                .expect("perk row")
+            };
+        let affix = |id: &str, stat: &str, value: f64| -> crate::generated::AffixStatData {
+            serde_json::from_value(serde_json::json!({"status_id": id, stat: value}))
+                .expect("affix row")
+        };
+        Tables {
+            perk_data: table(
+                "PerkData",
+                vec![
+                    perk("FishCastDistanceDay1", Some("Day"), None),
+                    perk("FishLineStrengthSalt1", None, Some("Salt")),
+                    perk("FishArmorLuck1", None, None),
+                    perk("NotFishing", None, None),
+                ],
+            ),
+            affix_stat_data: table(
+                "AffixStatData",
+                vec![
+                    affix("FishCastDistanceDay1", "max_cast_distance", 0.05),
+                    affix("FishLineStrengthSalt1", "fishing_line_strength", -0.1),
+                    affix("FishArmorLuck1", "fish_rarity_roll_modifier", 0.1),
+                    affix("NotFishing", "max_health_mod", 0.1),
+                ],
+            ),
+            ..Tables::default()
+        }
+    }
+
+    #[test]
+    fn the_worn_fishing_perks_hold_by_their_phase_and_water() {
+        let rules = FishingRules::from_tables(&perk_tables());
+        let worn = [
+            "FishCastDistanceDay1",
+            "fishlinestrengthsalt1",
+            "FishArmorLuck1",
+            "NotFishing",
+        ];
+        let day_salt = rules.perk_stats(worn, DayPhase::Day, Some(WaterType::SaltShallow));
+        assert!(
+            (day_salt.cast(20.0) - 21.0).abs() < 1e-9,
+            "+5 % cast distance by day"
+        );
+        assert!(
+            (day_salt.tension_gain(12.5) - 11.25).abs() < 1e-9,
+            "+10 % line strength"
+        );
+        assert!(
+            (day_salt.modifiers.rarity - 0.1).abs() < 1e-9,
+            "the armour's luck"
+        );
+        let night_fresh = rules.perk_stats(worn, DayPhase::Night, Some(WaterType::FreshDeep));
+        assert!((night_fresh.cast(20.0) - 20.0).abs() < 1e-9, "not at night");
+        assert!(
+            (night_fresh.tension_gain(12.5) - 12.5).abs() < 1e-9,
+            "not in fresh water"
+        );
+        assert!((night_fresh.modifiers.rarity - 0.1).abs() < 1e-9, "always");
+        let unknown_water = rules.perk_stats(worn, DayPhase::Day, None);
+        assert!(
+            (unknown_water.line_strength).abs() < 1e-9,
+            "a water perk needs its water"
+        );
+    }
+
+    /// The retail rows of the Focus 25 and 50 fishing effects and their affix (build 25810808).
+    #[test]
+    fn a_status_effect_adds_its_size_roll_and_the_stats_of_its_affixes() {
+        let effect = |row: serde_json::Value| -> crate::generated::StatusEffectData {
+            serde_json::from_value(row).expect("effect row")
+        };
+        let tables = Tables {
+            affix_stat_data: table(
+                "AffixStatData",
+                vec![
+                    serde_json::from_value(serde_json::json!({
+                        "status_id": "ATB_Foc_Bonus_50_2_Affix",
+                        "max_cast_distance": 0.03,
+                    }))
+                    .expect("affix row"),
+                ],
+            ),
+            status_effect_data: table(
+                "StatusEffectData",
+                vec![
+                    effect(serde_json::json!({
+                        "status_id": "ATB_Foc_Bonus_25_2_Effect",
+                        "fish_size_roll_modifier": 0.5,
+                    })),
+                    effect(serde_json::json!({
+                        "status_id": "ATB_Foc_Bonus_50_2_Effect",
+                        "on_hit_affixes": "ATB_Foc_Bonus_50_2_Affix",
+                    })),
+                    effect(serde_json::json!({"status_id": "ATB_Foc_Bonus_50_1_Effect"})),
+                ],
+            ),
+            ..Tables::default()
+        };
+        let rules = FishingRules::from_tables(&tables);
+        let focus_50 = rules.effect_stats([
+            "ATB_Foc_Bonus_25_2_Effect",
+            "atb_foc_bonus_50_2_effect",
+            "ATB_Foc_Bonus_50_1_Effect",
+        ]);
+        assert!(
+            (focus_50.cast(20.0) - 20.6).abs() < 1e-9,
+            "+3 % cast distance"
+        );
+        assert!((focus_50.modifiers.size - 0.5).abs() < 1e-9);
+        assert_eq!(
+            rules.effect_stats(["ATB_Foc_Bonus_50_1_Effect"]),
+            FishingStats::default()
         );
     }
 

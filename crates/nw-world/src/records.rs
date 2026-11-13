@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::interact_tags::InteractTagged;
 use crate::slice_data::SpawnedSlice;
 use crate::stations::CraftingStation;
+use crate::time_of_day::TimeOfDayPoints;
 use crate::travel_slices::{HousingPlot, Teleporter};
 
 /// A world position in metres: x, y, z (z up).
@@ -55,6 +56,9 @@ pub struct WorldFile {
     pub teleporters: Vec<Teleporter>,
     /// The capitals and spawned slices whose slices hold interact tags.
     pub interact_tags: Vec<InteractTagged>,
+    /// The spawns and gatherable points that exist only at some times of day, and the slices
+    /// with a time of day ([`crate::time_of_day`]).
+    pub time_of_day: TimeOfDayPoints,
 }
 
 /// What an awake mob does without a target.

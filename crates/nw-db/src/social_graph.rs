@@ -85,15 +85,23 @@ pub enum TreasuryReason {
         /// When the payment is taken, Unix milliseconds.
         now_ms: u64,
     },
+    /// A member declared a war from the treasury (world migration 0042; the client's treasury
+    /// log reason `WarDeclaration`, 4).
+    WarDeclaration,
+    /// A declaration that lost its lottery got its coin back (the client's
+    /// `WarDeclarationFailed`, 5).
+    WarDeclarationFailed,
 }
 
 impl TreasuryReason {
-    const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Deposit => "deposit",
             Self::Withdraw => "withdraw",
             Self::Refund => "refund",
             Self::Upkeep { .. } => "upkeep",
+            Self::WarDeclaration => "war declaration",
+            Self::WarDeclarationFailed => "war declaration failed",
         }
     }
 }

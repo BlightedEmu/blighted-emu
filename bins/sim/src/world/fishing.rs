@@ -23,14 +23,24 @@
 //!
 //! The bait goes on the hook at the cast's end (Observed: the bag lost one at `CastEnd`, twice)
 //! and comes back after the cast unless its `FishingData` loss chance takes it.
+//!
+//! The worn fishing perks ([`nw_content::fishing::FishingPerk`]: of the pole and of the armour,
+//! by the world's day phase and the cast's water) make the cast farther, add to the catch roll's
+//! modifiers (and to the modifiers 3172 sends), and lower the line's tension gain (Inferred: no
+//! retail capture holds a cast with such a perk; the forms are the perk texts' and the client's
+//! tension reader's, see that module).
+//!
+//! The fishing luck of the player's held status effects and attribute thresholds (`ROLFishing`,
+//! [`SimWorld::loot_bonuses`]) is added to the catch roll's `FishRarity` bonus (Inferred, see
+//! [`roll_bonuses`]).
 
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
 use nw_bus::ConnectionRef;
 use nw_content::fishing::{
-    Behavior, DayPhase, FISHING_DATA, FISHING_TRADESKILL, FishStateMultipliers, Pole, Range,
-    RollModifiers, WaitRanges, WaterType,
+    Behavior, DayPhase, FISHING_DATA, FISHING_TRADESKILL, FishStateMultipliers, FishingStats, Pole,
+    Range, RollModifiers, WaitRanges, WaterType,
 };
 use nw_content::loot::RollBonus;
 use nw_content::rewards::Reward;
@@ -41,7 +51,7 @@ use nw_messages::fishing::{
     FishingServerMsg, FishingState, RollModifier, StateTransition,
 };
 use nw_messages::items::FIRST_VERSION;
-use nw_messages::{BundleMember, FacetHeader, MemberState, OBSERVED_DAY_PHASE, ServerMessage};
+use nw_messages::{BundleMember, FacetHeader, MemberState, ServerMessage};
 use nw_sim_core::character::yaw_axes;
 use nw_sim_core::{Ground, Position};
 
@@ -796,8 +806,24 @@ fn reel_distance(ground: &dyn Ground, tip: [f32; 2], bobber: [f32; 2], sea_level
         .unwrap_or(total)
 }
 
-/// The loot roll bonuses and the 3172 roll modifiers of `modifiers`.
-fn roll_bonuses(modifiers: RollModifiers) -> ([RollBonus<'static>; 4], Vec<RollModifier>) {
+/// The loot roll bonuses and the 3172 roll modifiers of `modifiers`, with the fishing luck
+/// `luck` (on the tables' `MaxRoll` scale) added to the `FishRarity` bonus of the roll only.
+///
+/// Observed (texts of build 25810808): the Focus 350 threshold's luck (`Foc_Bonus_350_active`,
+/// `ATB_Foc_Bonus_350_2_Effect` `ROLFishing` 1000) is a "chance at finding rare items while
+/// fishing", and the data's own fishing luck perks (`FishLuckDay1`, `FishArmorLuck1`) are
+/// `FishRarityRollModifier` values, "chance of catching better fish". Inferred (no retail catch
+/// was captured with and without a luck effect; the client has no `ROLFishing` reader, the column
+/// is server data): the luck is added to the rarity roll as it is, as a gather's luck is added to
+/// its roll ([`nw_content::loot::LootTables::roll_with_luck`]). The other fishing tables name a bonus (`FishingLoot` `LootTableDiverted`: a luck
+/// there would divert catches to its threshold 100001) or roll the chests of a `FishRarity`
+/// entry, so the luck goes to the `FishRarity` roll alone. 3172 keeps the modifiers without the
+/// luck (Observed: retail sent `FishRarity` 19500 for a T5 pole's 1.25 plus a bait's 0.7,
+/// `gather_node_20260912`; Inferred: the player held no fishing luck).
+fn roll_bonuses(
+    modifiers: RollModifiers,
+    luck: u32,
+) -> ([RollBonus<'static>; 4], Vec<RollModifier>) {
     let scaled = |value: f64| (value * ROLL_SCALE).round().clamp(0.0, f64::from(u32::MAX)) as u32;
     let entries = [
         (FISH_SIZE, scaled(modifiers.size)),
@@ -805,8 +831,18 @@ fn roll_bonuses(modifiers: RollModifiers) -> ([RollBonus<'static>; 4], Vec<RollM
         (SUMMER_FISH_RARITY, scaled(modifiers.summer_rarity)),
         (LOOT_TABLE_DIVERTED, 0),
     ];
+    let lucky = |name: &str, value: u32| {
+        if name == FISH_RARITY.0 {
+            value.saturating_add(luck)
+        } else {
+            value
+        }
+    };
     (
-        entries.map(|((name, _), value)| RollBonus { name, value }),
+        entries.map(|((name, _), value)| RollBonus {
+            name,
+            value: lucky(name, value),
+        }),
         entries
             .iter()
             .map(|((_, kind), value)| RollModifier {
@@ -927,6 +963,31 @@ impl SimWorld {
         }
     }
 
+    /// What the worn fishing perks of player `entity` add now in water `water` (`None`: not
+    /// known yet, before the bobber lands), with what the effects of its attribute thresholds
+    /// add ([`SimWorld::attribute_effects`]: Focus 25 a larger fish, Focus 50 a cast 3 % farther).
+    fn fishing_perks(&self, entity: Entity, water: Option<WaterType>) -> FishingStats {
+        let fishing = &self.content.fishing;
+        let attributes = fishing.effect_stats(self.attribute_effects(entity));
+        let Some(phase) = DayPhase::of(self.day_phase()) else {
+            return attributes;
+        };
+        let Some(gear) = self
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref())
+        else {
+            return attributes;
+        };
+        fishing
+            .perk_stats(
+                gear.worn_perks().into_iter().map(|(perk, _)| perk),
+                phase,
+                water,
+            )
+            .plus(attributes)
+    }
+
     /// The pole worn by player `entity`.
     fn worn_pole(&self, entity: Entity) -> Option<&Pole> {
         let item = self
@@ -1008,6 +1069,7 @@ impl SimWorld {
             .and_then(|player| player.view)
             .map_or(0.0, |view| view.yaw);
         let pole = self.worn_pole(entity).cloned();
+        let perks = self.fishing_perks(entity, None);
         let ground = Arc::clone(&self.ground);
         let landing = place.zip(pole).and_then(|(place, pole)| {
             if water_at(&*ground, place.x, place.y, place.z, sea_level_m)
@@ -1017,11 +1079,11 @@ impl SimWorld {
                 return None;
             }
             let (forward, _) = yaw_axes(yaw);
-            let distance = cast_distance(
+            let distance = perks.cast(cast_distance(
                 pole.cast_distance,
                 content.fishing.cast_bonus(rank),
                 hold_ms,
-            ) as f32;
+            )) as f32;
             let tip = [
                 place.x + forward[0] * ROD_TIP_M,
                 place.y + forward[1] * ROD_TIP_M,
@@ -1080,11 +1142,12 @@ impl SimWorld {
         }
     }
 
-    /// Puts one of player `entity`'s applied bait on the hook for water `water` at the day
-    /// phase: a bait that works there and that the player carries. Gives its item id.
+    /// Puts one of player `entity`'s applied bait on the hook for water `water` at the world's
+    /// day phase now ([`super::day_night`]): a bait that works there and that the player
+    /// carries. Gives its item id.
     fn bait_on_hook(&mut self, entity: Entity, water: Option<WaterType>) -> Option<String> {
         let content = Arc::clone(&self.content);
-        let phase = DayPhase::of(OBSERVED_DAY_PHASE)?;
+        let phase = DayPhase::of(self.day_phase())?;
         let mut player = self.world.get_mut::<Player>(entity)?;
         let player = &mut *player;
         let item = player.fishing.bait()?.to_owned();
@@ -1150,6 +1213,7 @@ impl SimWorld {
         let rules = &content.fishing;
         let water = cast.water?;
         let pole = self.worn_pole(entity)?.clone();
+        let perks = self.fishing_perks(entity, Some(water));
         let (number, territories, bait) = {
             let player = self.world.get::<Player>(entity)?;
             (
@@ -1166,6 +1230,7 @@ impl SimWorld {
             Some(pole.modifiers),
             bait.map(|bait| bait.modifiers),
             hotspot.map(|hotspot| hotspot.modifiers),
+            Some(perks.modifiers),
         ]
         .into_iter()
         .flatten()
@@ -1177,7 +1242,10 @@ impl SimWorld {
         let mut tags = rules.territory_tags(&territories);
         tags.push(water.tag().to_owned());
         tags.extend(hotspot.map(|hotspot| hotspot.loot_tag.clone()));
-        let (bonuses, wire_modifiers) = roll_bonuses(modifiers);
+        let luck = self
+            .loot_bonuses(number, &[], Some(FISHING_TRADESKILL))
+            .luck;
+        let (bonuses, wire_modifiers) = roll_bonuses(modifiers, luck);
         let zones = super::player_territories(&content, &territories);
         let quest_fish: Vec<(String, u32)> = self
             .quests
@@ -1243,7 +1311,7 @@ impl SimWorld {
                 swim_away_mps: catchable.swim_away_mps,
                 tension_multiplier: catchable.tension_multiplier,
                 reel_time_s: pole.reel_time_s,
-                tension_gain: pole.tension_gain,
+                tension_gain: perks.tension_gain(pole.tension_gain),
                 tension_recover: pole.tension_recover,
                 reel_m,
                 left_m: reel_m,
@@ -1664,12 +1732,133 @@ mod tests {
     }
 
     #[test]
-    fn the_roll_bonuses_scale_the_modifiers_as_retail_sent_them() {
-        let (bonuses, modifiers) = roll_bonuses(RollModifiers {
-            rarity: 1.25 + 0.7,
-            size: 0.0,
-            summer_rarity: 0.0,
+    fn the_worn_pole_s_day_perk_holds_by_the_world_s_day_phase() {
+        use nw_content::fishing::FishingRules;
+        use nw_content::generated::{AffixStatData, PerkData, Tables};
+        use nw_content::table::Table;
+
+        use super::super::gear;
+        use crate::world::day_night::tests::{DAY_MS, NIGHT_MS};
+        use crate::world::tests::{SERVER_TIME, admit_at, connection, world_with_spawns};
+        /// Retail `FishCastDistanceDay1` (build 25810808): +5 % cast distance by day.
+        const PERK: &str = "FishCastDistanceDay1";
+        const SHARE: f64 = 0.05;
+        const POLE: &str = "2hFishingPoleT1";
+        const NUMBER: u64 = 7;
+        let perk: PerkData = serde_json::from_value(serde_json::json!({
+            "perk_id": PERK, "affix": PERK, "perk_type": "Generated",
+            "condition_event": "OnEquip", "channel": 0, "day_phases": "Day",
+        }))
+        .expect("perk row");
+        let affix: AffixStatData = serde_json::from_value(
+            serde_json::json!({"status_id": PERK, "max_cast_distance": SHARE}),
+        )
+        .expect("affix row");
+        fn table<T>(rows: Vec<T>) -> Table<T> {
+            Table {
+                source_path: String::new(),
+                unique_id: String::new(),
+                rows,
+            }
+        }
+        let mut world = world_with_spawns(Vec::new());
+        let mut content = (*world.content).clone();
+        content.kits = gear::tests::kits_with(&[(POLE, "EquippableTool+FishingPole")]);
+        content.fishing = FishingRules::from_tables(&Tables {
+            perk_data: vec![table(vec![perk])],
+            affix_stat_data: vec![table(vec![affix])],
+            ..Tables::default()
         });
+        world.content = Arc::new(content);
+        let mut admit = admit_at(NUMBER, 0.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let entity = world.by_connection[&connection(NUMBER)];
+        let mut pole = world.content.kits.item(POLE).cloned().expect("pole");
+        pole.perk_ids = vec![PERK.to_owned()];
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .and_then(|mut player| {
+                player
+                    .gear
+                    .as_mut()
+                    .map(|gear| gear.renew(&pole, 1, FISHING_SLOT, 0))
+            })
+            .expect("gear");
+        world.ids.time_change_time = 0;
+        world.server_ms = DAY_MS;
+        let by_day = world.fishing_perks(entity, None);
+        assert!((by_day.cast(20.0) - 21.0).abs() < 1e-9, "{by_day:?}");
+        world.server_ms = NIGHT_MS;
+        assert_eq!(world.fishing_perks(entity, None), FishingStats::default());
+    }
+
+    #[test]
+    fn the_focus_50_threshold_makes_the_cast_farther_without_a_perk() {
+        use nw_content::attribute_bonuses::AttributeBonuses;
+        use nw_content::character_points::FOCUS;
+        use nw_content::fishing::FishingRules;
+        use nw_content::generated::{AffixStatData, StatusEffectData, Tables};
+        use nw_content::table::Table;
+
+        use crate::world::tests::{SERVER_TIME, admit_at, connection, world_with_spawns};
+        /// Retail `Foc_Bonus_50_2` (build 25810808), its effect and the effect's affix.
+        const ABILITY: &str = "Foc_Bonus_50_2";
+        const EFFECT: &str = "ATB_Foc_Bonus_50_2_Effect";
+        const AFFIX: &str = "ATB_Foc_Bonus_50_2_Affix";
+        const SHARE: f64 = 0.03;
+        /// A threshold every Focus value reaches, so the admitted player holds the ability.
+        const ANY_FOCUS: u32 = 0;
+        const NUMBER: u64 = 7;
+        fn table<T>(rows: Vec<T>) -> Table<T> {
+            Table {
+                source_path: String::new(),
+                unique_id: String::new(),
+                rows,
+            }
+        }
+        let affix: AffixStatData = serde_json::from_value(
+            serde_json::json!({"status_id": AFFIX, "max_cast_distance": SHARE}),
+        )
+        .expect("affix row");
+        let effect: StatusEffectData = serde_json::from_value(
+            serde_json::json!({"status_id": EFFECT, "on_hit_affixes": AFFIX}),
+        )
+        .expect("effect row");
+        let mut world = world_with_spawns(Vec::new());
+        let mut content = (*world.content).clone();
+        content.fishing = FishingRules::from_tables(&Tables {
+            affix_stat_data: vec![table(vec![affix])],
+            status_effect_data: vec![table(vec![effect])],
+            ..Tables::default()
+        });
+        content.attribute_bonuses =
+            AttributeBonuses::build([(FOCUS, ANY_FOCUS, ABILITY.to_owned())], [])
+                .with_equip_effects([(ABILITY.to_owned(), EFFECT.to_owned())]);
+        world.content = Arc::new(content);
+        world
+            .admit(&admit_at(NUMBER, 0.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let entity = world.by_connection[&connection(NUMBER)];
+        assert_eq!(world.attribute_effects(entity), [EFFECT]);
+        let stats = world.fishing_perks(entity, None);
+        assert!((stats.cast(20.0) - 20.6).abs() < 1e-9, "{stats:?}");
+    }
+
+    /// A catch roll of a player without a fishing luck.
+    const NO_LUCK: u32 = 0;
+
+    #[test]
+    fn the_roll_bonuses_scale_the_modifiers_as_retail_sent_them() {
+        let (bonuses, modifiers) = roll_bonuses(
+            RollModifiers {
+                rarity: 1.25 + 0.7,
+                size: 0.0,
+                summer_rarity: 0.0,
+            },
+            NO_LUCK,
+        );
         assert_eq!(bonuses[1].name, "FishRarity");
         assert_eq!(bonuses[1].value, 19_500, "retail gather_node");
         assert_eq!(
@@ -1679,5 +1868,78 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0, 1, 2, 3]
         );
+    }
+    /// The fishing luck joins the `FishRarity` bonus of the roll and leaves the other bonuses and
+    /// the 3172 modifiers as they are.
+    #[test]
+    fn the_fishing_luck_raises_only_the_rarity_roll() {
+        /// `ATB_Foc_Bonus_350_2_Effect` `ROLFishing` (build 25810808).
+        const LUCK: u32 = 1_000;
+        let modifiers = RollModifiers {
+            rarity: 1.25,
+            size: 0.5,
+            summer_rarity: 0.0,
+        };
+        let (plain, plain_wire) = roll_bonuses(modifiers, NO_LUCK);
+        let (lucky, lucky_wire) = roll_bonuses(modifiers, LUCK);
+        let value = |bonuses: &[RollBonus<'_>], name: &str| {
+            bonuses
+                .iter()
+                .find(|bonus| bonus.name == name)
+                .map(|bonus| bonus.value)
+        };
+        assert_eq!(value(&lucky, FISH_RARITY.0), Some(12_500 + LUCK));
+        for name in [FISH_SIZE.0, SUMMER_FISH_RARITY.0, LOOT_TABLE_DIVERTED.0] {
+            assert_eq!(value(&lucky, name), value(&plain, name), "{name}");
+        }
+        assert_eq!(
+            lucky_wire, plain_wire,
+            "3172 sends the modifiers without the luck"
+        );
+    }
+
+    /// The `ROLFishing` luck of an attribute threshold effect is the luck of the player's catch
+    /// roll (the path [`SimWorld::roll_catch`] reads).
+    #[test]
+    fn the_constitution_50_threshold_gives_fishing_luck() {
+        use nw_content::attribute_bonuses::AttributeBonuses;
+        use nw_content::character_points::CONSTITUTION;
+        use nw_content::generated::{StatusEffectData, Tables};
+        use nw_content::status_effects::StatusEffectRules;
+        use nw_content::table::Table;
+
+        use crate::world::tests::{SERVER_TIME, admit_at, connection, world_with_spawns};
+        /// Retail `Con_Bonus_50_2` (build 25810808) and its effect's `ROLFishing`.
+        const ABILITY: &str = "Con_Bonus_50_2";
+        const EFFECT: &str = "ATB_Con_Bonus_50_2_Effect";
+        const LUCK: i64 = 150;
+        /// A threshold every Constitution value reaches, so the admitted player holds it.
+        const ANY_VALUE: u32 = 0;
+        const NUMBER: u64 = 7;
+        let effect: StatusEffectData =
+            serde_json::from_value(serde_json::json!({"status_id": EFFECT, "rol_fishing": LUCK}))
+                .expect("effect row");
+        let mut world = world_with_spawns(Vec::new());
+        let mut content = (*world.content).clone();
+        content.status_effects = StatusEffectRules::from_tables(&Tables {
+            status_effect_data: vec![Table {
+                source_path: String::new(),
+                unique_id: String::new(),
+                rows: vec![effect],
+            }],
+            ..Tables::default()
+        });
+        content.attribute_bonuses =
+            AttributeBonuses::build([(CONSTITUTION, ANY_VALUE, ABILITY.to_owned())], [])
+                .with_equip_effects([(ABILITY.to_owned(), EFFECT.to_owned())]);
+        world.content = Arc::new(content);
+        world
+            .admit(&admit_at(NUMBER, 0.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        assert!(world.by_connection.contains_key(&connection(NUMBER)));
+        let luck = world
+            .loot_bonuses(NUMBER, &[], Some(FISHING_TRADESKILL))
+            .luck;
+        assert_eq!(i64::from(luck), LUCK);
     }
 }

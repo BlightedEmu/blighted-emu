@@ -21,8 +21,12 @@
 //! The flag bits: `0x10` of the first byte is set on every connected member and cleared when it
 //! disconnects; `0x08` while it is dead (set and cleared with its deaths in the raid sessions);
 //! `0x01` on the member that leads (the inviter of `HiveDynastiHealer`, `OPR_TEST3` and
-//! `opr_match_2`: Inferred). The other bits seen (`0x02`, `0x04`, `0x40` of the first byte,
-//! `0x04` and `0x08` of the second) have no meaning here and are not sent.
+//! `opr_match_2`: Inferred). In a players' raid `0x02` marks the raid leader and `0x04` its
+//! assistants (Observed: `Hive gorgon raid third boss`, the 2422 that made a member the leader at
+//! 230.534 s moved `0x02` to that member and gave the old leader `0x04` at 230.588 s;
+//! `raid_group_influence_race` one member with `0x02` all along, the player's own block gained
+//! `0x04` at 39.778 s before its raid moves from 43.292 s). The other bits seen (`0x40` of the
+//! first byte, `0x04` and `0x08` of the second) have no meaning here and are not sent.
 //!
 //! Positions, pings, waypoints and houses are not sent by this server and read as
 //! [`MessageError::Unsized`].
@@ -56,6 +60,11 @@ pub const FLAG_CONNECTED: u8 = 0x10;
 pub const FLAG_DEAD: u8 = 0x08;
 /// Flag bit (first byte): the member leads the group (Inferred, see the module text).
 pub const FLAG_LEADER: u8 = 0x01;
+/// Flag bit (first byte): the member leads its players' raid (Observed, see the module text).
+pub const FLAG_RAID_LEADER: u8 = 0x02;
+/// Flag bit (first byte): the member is an assistant of its players' raid (Observed, see the
+/// module text).
+pub const FLAG_RAID_ASSISTANT: u8 = 0x04;
 /// The matchmaking role of every member block of a retail full card, the empty ones too.
 pub const MATCHMAKING_ROLE_NONE: u8 = 1;
 /// The role of a member that chose none (the inviter's block of the retail join card; the
@@ -94,6 +103,8 @@ const DUNGEON_TIME: u8 = 39;
 const FIRST_INDEX: u8 = 40;
 /// The one-byte indexes.
 const INDEXES: usize = 8;
+/// Index of the raid group among the indexes.
+const RAID_GROUP_INDEX: usize = 0;
 /// Index of the icon among the indexes.
 const ICON_INDEX: usize = 2;
 /// Index of the colour among the indexes.
@@ -179,6 +190,10 @@ pub struct GroupMemberView {
     pub dead: bool,
     /// Leads the group.
     pub leader: bool,
+    /// Leads its players' raid.
+    pub raid_leader: bool,
+    /// Is an assistant of its players' raid.
+    pub raid_assistant: bool,
     /// The faction (0 none).
     pub faction: u8,
     /// The level as the client's player data shows it.
@@ -192,6 +207,8 @@ impl GroupMemberView {
             (self.connected, FLAG_CONNECTED),
             (self.dead, FLAG_DEAD),
             (self.leader, FLAG_LEADER),
+            (self.raid_leader, FLAG_RAID_LEADER),
+            (self.raid_assistant, FLAG_RAID_ASSISTANT),
         ] {
             if set {
                 first |= bit;
@@ -241,6 +258,18 @@ impl GroupDataState {
             };
         }
         state
+    }
+
+    /// The state of group `index` of a raid (from 0): its raid group, icon and colour indexes
+    /// are `index` (Observed: the ten group entities of the war raid of
+    /// `arvaysa_ES_attacker_war_45vs45` 27.039 s carry their place in the raid's group list in
+    /// all three; group 0 sends no icon and colour, the client's default 0).
+    #[must_use]
+    pub fn in_raid_group(mut self, index: u8) -> Self {
+        for child in [RAID_GROUP_INDEX, ICON_INDEX, COLOR_INDEX] {
+            self.indexes[child] = Some(index);
+        }
+        self
     }
 
     /// Reads the state.
@@ -578,11 +607,30 @@ mod tests {
             connected: true,
             dead: false,
             leader,
+            raid_leader: false,
+            raid_assistant: false,
             faction: 0,
             level: 5,
         };
         let group = [9; RAW_ID_LEN];
+        let raid_assistant = GroupMemberView {
+            raid_assistant: true,
+            ..member(3, false)
+        };
+        let raid_leader = GroupMemberView {
+            raid_leader: true,
+            ..member(4, false)
+        };
         let state = GroupDataState::whole(group, &[member(1, true), member(2, false)]);
+        let raid = GroupDataState::whole(group, &[raid_leader, raid_assistant]);
+        assert_eq!(
+            raid.members[0].flags,
+            Some([FLAG_CONNECTED | FLAG_RAID_LEADER, 0])
+        );
+        assert_eq!(
+            raid.members[1].flags,
+            Some([FLAG_CONNECTED | FLAG_RAID_ASSISTANT, 0])
+        );
         assert_eq!(
             state.members[0].flags,
             Some([FLAG_CONNECTED | FLAG_LEADER, 0])

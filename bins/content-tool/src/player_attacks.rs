@@ -29,16 +29,16 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use nw_content::Tables;
 use nw_content::player_attacks::{
-    AttackHit, AttackMotion, BasicAttack, ChargeStep, ComboLink, Flight, Homing, ItemUse, Stance,
-    StanceVariant, stance_tags,
+    AttackHit, AttackMotion, BasicAttack, ChargeStep, ComboLink, Flight, GritWindow, HitReaction,
+    Homing, ItemUse, MeleeShape, ReactionEntry, Stance, StanceVariant, stance_tags,
 };
 use nw_content::sheathe::SheatheAction;
 use nw_formats::azcs::{decode_azcs, is_azcs};
 use nw_formats::caf::Caf;
 use nw_formats::character::CharacterDefinition;
 use nw_formats::mannequin::{
-    Action, ActionList, AnimClip, AnimDatabase, CageGrid, ControllerDef, DrivenMotion, Fragment,
-    GridList, ProcClip,
+    Action, ActionList, AnimClip, AnimDatabase, CageGrid, Condition, ControllerDef, DrivenMotion,
+    Fragment, GridList, ProcClip, ReactionRow, reaction_table,
 };
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
 use nw_formats::skeleton::Skeleton;
@@ -111,9 +111,24 @@ const DODGE_CANCEL_MARKER: &str = "CanDodgeCancel";
 /// The marker clip of the windows the block does not rise in ([`BasicAttack::block_disabled_ms`]).
 const BLOCK_DISABLED_MARKER: &str = "BlockDisabled";
 const HOMING_CLIP: &str = "Homing";
+/// The clip that turns grit on while it plays ([`BasicAttack::grit`]), and its parameter and
+/// value that do so on its start.
+const GRIT_CLIP: &str = "ActivateGrit";
+const GRIT_ON_ENTER: &str = "OptionOnEnter";
+const GRIT_ACTIVATE: &str = "ActivateGritOptions::Activate";
+/// The player reaction table the `Reaction` actions' `SetReactionFragment` names
+/// (`ReactionTablePath`, `playeractions_reaction.actionlist`).
+const PLAYER_REACTION_TABLE: &str =
+    "sharedassets/springboardentitites/playerdata/cage/playerreactiontableharness.actionlist";
+/// The separator of a reaction entry's animation names ([`ReactionEntry::animations`]).
+const ANIMATION_SEPARATOR: &str = "+";
+/// A root path that moves less than this, m, is no motion ([`ReactionEntry::motion`]).
+const STILL_ROOT_M: f32 = 0.001;
 const INVULNERABILITY_CLIP: &str = "Invulnerability";
 const USE_CLIP: &str = "UsePaperdollItem";
 const CONDITION: &str = "Condition";
+/// The damage clip parameter of a clip that strikes allies only.
+const ALLIES_ONLY: &str = "AffectAlliesOnly";
 const NEW_ACTION: &str = "NewAction";
 const NEW_FRAGMENT: &str = "NewFragment";
 const DAMAGE_ROW: &str = "DamageTableRow";
@@ -190,6 +205,8 @@ pub struct AnimationSources {
     pub controller: ControllerDef,
     /// The sheathe action of the action lists.
     pub sheathe: Option<SheatheAction>,
+    /// The rows of the player reaction table, in file order.
+    pub reactions: Vec<ReactionRow>,
     /// The ranged attack database: (profile, attack) to (range, radius, hit scan).
     pub ranged: HashMap<(String, String), (f32, f32, bool)>,
     /// The projectile flights, by lowercase prefab path.
@@ -224,14 +241,29 @@ impl AnimationSources {
 
     /// Whether `clip` plays for a character with `tags` and no other state: it has no
     /// `Condition`, or its named condition holds ([`nw_formats::mannequin::Condition::holds`]).
+    /// The ranged and cast clips are read so; a damage clip keeps a run-time condition
+    /// ([`Self::clip_play`]).
     fn plays(&self, clip: &ProcClip, tags: &[&str]) -> bool {
-        match clip.param(CONDITION).filter(|name| !name.is_empty()) {
-            None => true,
-            Some(name) => self
-                .actions
-                .iter()
-                .find_map(|list| list.condition(name))
-                .is_some_and(|condition| condition.holds(tags, &[])),
+        match self.clip_play(clip, tags) {
+            ClipPlay::Always => true,
+            ClipPlay::Never => false,
+            ClipPlay::When(condition) => condition.holds(tags, &[]),
+        }
+    }
+
+    /// When `clip` plays for a character with `tags`: always (no `Condition`, or a named one that
+    /// reads only tags and holds), never (an unknown name, or one of tags alone that does not
+    /// hold), or while its named condition holds at run time (it reads an active ability, the
+    /// equipment or other state; [`Condition::reads_state`]).
+    fn clip_play(&self, clip: &ProcClip, tags: &[&str]) -> ClipPlay {
+        let Some(name) = clip.param(CONDITION).filter(|name| !name.is_empty()) else {
+            return ClipPlay::Always;
+        };
+        match self.actions.iter().find_map(|list| list.condition(name)) {
+            None => ClipPlay::Never,
+            Some(condition) if condition.reads_state() => ClipPlay::When(condition.clone()),
+            Some(condition) if condition.holds(tags, &[]) => ClipPlay::Always,
+            Some(_) => ClipPlay::Never,
         }
     }
 
@@ -250,6 +282,16 @@ impl AnimationSources {
             .clone();
         self.player_fragment(&name, tags)
     }
+}
+
+/// When a clip plays ([`AnimationSources::clip_play`]).
+enum ClipPlay {
+    /// Every time its fragment plays.
+    Always,
+    /// Never for this weapon.
+    Never,
+    /// While this condition holds at run time.
+    When(Condition),
 }
 
 /// The ranged attack database in `root`: (profile, attack) to (range, radius, hit scan).
@@ -630,6 +672,23 @@ pub(crate) fn fragment_attack(
     let dodge_cancel = marker_windows(DODGE_CANCEL_MARKER);
     let dodge_cancel_ms = (!dodge_cancel.is_empty()).then_some(dodge_cancel);
     let block_disabled_ms = marker_windows(BLOCK_DISABLED_MARKER);
+    // Grit clips play in the character's fragment (Observed: none in an attach database).
+    let grit: Vec<GritWindow> = player
+        .into_iter()
+        .flat_map(|fragment| fragment.clips_of(GRIT_CLIP))
+        .filter(|clip| clip.param(GRIT_ON_ENTER) == Some(GRIT_ACTIVATE))
+        .filter_map(|clip| {
+            let condition = match sources.clip_play(clip, tags) {
+                ClipPlay::Always => None,
+                ClipPlay::When(condition) => Some(condition),
+                ClipPlay::Never => return None,
+            };
+            Some(GritWindow {
+                window_ms: [ms(clip.start_s), clip.end_s.map_or(length_ms, ms)],
+                condition,
+            })
+        })
+        .collect();
     let motion = match (
         sources
             .action(action)
@@ -653,19 +712,41 @@ pub(crate) fn fragment_attack(
         dodge_cancel_ms: dodge_cancel_ms.clone(),
         block_disabled_ms: block_disabled_ms.clone(),
         motion: motion.clone(),
+        grit: grit.clone(),
     };
-    let (melee, context) = playing_in(DAMAGE_CLIP);
-    if let Some(first) = melee.first() {
+    // A damage clip whose condition reads the character's state at run time stays, with the
+    // condition (Observed: `Ability_Flail_Slam`'s `Slam_Upgrade_Standard_Damage` tests
+    // `IfAbilityActive` and the kite shield; read with tags alone it never held, and the slam
+    // struck nothing).
+    let (melee, context): (Vec<(&ProcClip, Option<Condition>)>, ClipContext) = fragments
+        .iter()
+        .map(|(fragment, context)| {
+            // A clip that strikes allies only (`AffectAlliesOnly`: the flail blast's ally heal
+            // row) never hits a foe: the spell of the action reaches the allies.
+            let clips = fragment
+                .clips_of(DAMAGE_CLIP)
+                .filter(|clip| clip.param(ALLIES_ONLY) != Some(TRUE_TEXT))
+                .filter_map(|clip| match sources.clip_play(clip, tags) {
+                    ClipPlay::Always => Some((clip, None)),
+                    ClipPlay::When(condition) => Some((clip, Some(condition))),
+                    ClipPlay::Never => None,
+                })
+                .collect::<Vec<_>>();
+            (clips, *context)
+        })
+        .find(|(clips, _)| !clips.is_empty())
+        .unwrap_or((Vec::new(), ClipContext::Character));
+    if let Some((first, _)) = melee.first() {
         let damage_row = first
             .param(DAMAGE_ROW)
             .ok_or_else(|| format!("{fragment_name}: damage clip without a row"))?;
         let start = melee
             .iter()
-            .map(|clip| clip.start_s)
+            .map(|(clip, _)| clip.start_s)
             .fold(f64::MAX, f64::min);
         let end = melee
             .iter()
-            .map(|clip| clip.end_s)
+            .map(|(clip, _)| clip.end_s)
             .try_fold(f64::MIN, |end, clip_end| {
                 clip_end.map(|clip_end| end.max(clip_end))
             })
@@ -697,10 +778,15 @@ pub(crate) fn fragment_attack(
             (ClipContext::Character, Err(_)) => None,
         };
         let mut shapes = Vec::new();
-        for clip in &melee {
+        for (clip, condition) in &melee {
             let shape = melee_shape(&sources.bodies, body, body_clip, weapon_clip, clip, context)
                 .map_err(|why| format!("{fragment_name}: {why}"))?;
-            shapes.extend(shape);
+            let own_row = clip.param(DAMAGE_ROW).filter(|row| *row != damage_row);
+            shapes.extend(shape.map(|shape| MeleeShape {
+                damage_row: own_row.map(str::to_owned),
+                condition: condition.clone(),
+                ..shape
+            }));
         }
         return Ok(attack(
             damage_row,
@@ -829,6 +915,92 @@ fn attack_motion(
         inherit_velocity: start.inherit_velocity.unwrap_or(false),
         inherit_max_mps: start.inherit_max_mps,
         decel_mps2: start.decel_mps2.unwrap_or([0.0; 2]),
+    })
+}
+
+/// The rows of the player reaction table, each with the entry of its fragment for a character
+/// with `tags` ([`HitReaction`]); an entry that cannot be built goes to `skipped` and leaves its
+/// row without one.
+fn reactions_of(
+    sources: &AnimationSources,
+    tags: &[&str],
+    label: &str,
+    skipped: &mut Vec<(String, String)>,
+) -> Vec<HitReaction> {
+    sources
+        .reactions
+        .iter()
+        .map(|row| {
+            let entry = sources
+                .player_fragment_any_case(&row.fragment, tags)
+                .map(|fragment| reaction_entry(sources, fragment))
+                .transpose()
+                .unwrap_or_else(|why| {
+                    skipped.push((label.to_owned(), format!("{}: {why}", row.fragment)));
+                    None
+                });
+            HitReaction {
+                power_level: row.power_level,
+                fragment: row.fragment.clone(),
+                condition: row.condition.clone(),
+                entry,
+            }
+        })
+        .collect()
+}
+
+/// A reaction fragment's entry ([`ReactionEntry`]): its animations, its `CanTransition` marker
+/// and the root path of its main animation up to the marker, else over the fragment (the
+/// `Reaction` action's `ReactionMotion` moves the body by it, with no multiplier).
+///
+/// # Errors
+///
+/// Returns why when an animation file is missing or has no frame time.
+fn reaction_entry(
+    sources: &AnimationSources,
+    fragment: &Fragment,
+) -> Result<ReactionEntry, String> {
+    let animations: Vec<&str> = fragment
+        .anim_layers
+        .iter()
+        .flatten()
+        .map(|clip| clip.name.as_str())
+        .filter(|name| !name.is_empty())
+        .collect();
+    let can_transition = fragment
+        .clips_of(NAMED_CLIP)
+        .find(|clip| clip.param(NAMED_CLIP_NAME) == Some(CAN_TRANSITION_MARKER))
+        .map(|clip| clip.start_s);
+    let fragment_s = sources
+        .bodies
+        .fragment_length_s(fragment)
+        .ok_or("an animation clip file is missing")?;
+    let length_s = can_transition.unwrap_or(fragment_s);
+    let motion = fragment
+        .main_animation()
+        .map(|clip| root_path(&sources.bodies, clip, length_s))
+        .transpose()?
+        .filter(|(_, path)| {
+            path.iter()
+                .any(|(_, offset)| offset[0].hypot(offset[1]) >= STILL_ROOT_M)
+        })
+        .map(|(step_s, path)| {
+            // A frame time is a few tens of milliseconds.
+            #[allow(clippy::cast_possible_truncation)]
+            let step_ms = (step_s * MS_PER_SECOND) as f32;
+            AttackMotion {
+                step_ms,
+                offsets: path.into_iter().map(|(_, offset)| offset).collect(),
+                inherit_velocity: false,
+                inherit_max_mps: None,
+                decel_mps2: [0.0; 2],
+            }
+        });
+    Ok(ReactionEntry {
+        animations: animations.join(ANIMATION_SEPARATOR),
+        length_ms: ms(fragment_s),
+        can_transition_ms: can_transition.map(ms),
+        motion,
     })
 }
 
@@ -1113,6 +1285,7 @@ fn stance_of(
         sheathe.marker_clip(entry).map(|clip| ms(clip.start_s))
     });
     let (aimed, aimed_charged) = aimed_of(sources, rows, weapon, body.as_ref(), &tags, skipped);
+    let reactions = reactions_of(sources, &tags, &label, skipped);
     let mut steps = steps.into_iter();
     let first = steps.next();
     Stance {
@@ -1130,6 +1303,7 @@ fn stance_of(
         variants: Vec::new(),
         aimed,
         aimed_charged,
+        reactions,
     }
 }
 
@@ -1236,7 +1410,8 @@ fn clip_name(path: &str) -> Option<&str> {
 
 /// Reads the animation sources of `rows` from `source`: a first walk for the databases, action
 /// lists, ranged attacks, projectile slices, character definitions and equip types, a second for
-/// the skeletons and the clips they name.
+/// the skeletons and the clips they name; then the databases' chained clips are timed with the
+/// clip lengths ([`AnimDatabase::time_chained_clips`]).
 ///
 /// # Errors
 ///
@@ -1257,6 +1432,7 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
         grid: Vec::new(),
         controller: ControllerDef::default(),
         sheathe: None,
+        reactions: Vec::new(),
         ranged: HashMap::new(),
         flights: HashMap::new(),
         input_files: HashMap::new(),
@@ -1316,6 +1492,10 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
                 if let Some(controller) = text().and_then(|text| ControllerDef::parse(text).ok()) {
                     sources.controller = controller;
                 }
+            } else if path == PLAYER_REACTION_TABLE {
+                if let Some(rows) = text().and_then(|text| reaction_table(text).ok()) {
+                    sources.reactions = rows;
+                }
             } else if path.ends_with(ACTION_LIST_SUFFIX) {
                 if let Some(list) = text().and_then(|text| ActionList::parse(text).ok()) {
                     sources.actions.push(list);
@@ -1369,6 +1549,21 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
             Ok::<(), ToolError>(())
         },
     )?;
+    let AnimationSources {
+        player,
+        attach,
+        bodies,
+        ..
+    } = &mut sources;
+    let length_s = |name: &str| {
+        bodies
+            .clip(name)
+            .ok()
+            .map(|caf| f64::from(caf.duration_s()))
+    };
+    for database in player.iter_mut().chain(attach.values_mut()) {
+        database.time_chained_clips(&length_s);
+    }
     Ok(sources)
 }
 
@@ -1406,6 +1601,11 @@ mod tests {
  </ProcLayer><ProcLayer>
   <Blend ExitTime="0.76666665"/><Procedural type="CAGE-Named"><ProceduralParams><Name value="CanTransition"/></ProceduralParams></Procedural>
  </ProcLayer><ProcLayer>
+  <Blend ExitTime="0"/><Procedural type="ActivateGrit"><ProceduralParams><OptionOnEnter value="ActivateGritOptions::Activate"/><OptionOnExit value="ActivateGritOptions::Deactivate"/><Condition value=""/></ProceduralParams></Procedural>
+  <Blend ExitTime="0.43333334"/><Procedural type=""/>
+ </ProcLayer><ProcLayer>
+  <Blend ExitTime="0"/><Procedural type="ActivateGrit"><ProceduralParams><OptionOnEnter value="ActivateGritOptions::NoEffect"/><Condition value=""/></ProceduralParams></Procedural>
+ </ProcLayer><ProcLayer>
   <Blend ExitTime="0"/><Procedural type="CAGE-Named"><ProceduralParams><Name value="Attack_Translation"/></ProceduralParams></Procedural>
   <Blend ExitTime="0.5"/><Procedural type=""/>
  </ProcLayer><ProcLayer>
@@ -1418,6 +1618,11 @@ mod tests {
   <Blend ExitTime="0.1"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Condition value="CanAttack_Heavy"/><NewAction value="Attack_Start_Charge"/></ProceduralParams></Procedural>
  </ProcLayer></Fragment></Attack_Primary_Strike2>
  <Attack_Heavy_Charged><Fragment Tags="1H_Melee+Sword"><ProcLayer/></Fragment></Attack_Heavy_Charged>
+ <r_R2_F><Fragment Tags="1H_Melee+Sword"><AnimLayer>
+  <Blend ExitTime="0" StartTime="0" Duration="0"/><Animation name="swing"/>
+ </AnimLayer><ProcLayer>
+  <Blend ExitTime="0.5"/><Procedural type="CAGE-Named"><ProceduralParams><Name value="CanTransition"/></ProceduralParams></Procedural>
+ </ProcLayer></Fragment></r_R2_F>
  <Dodge_Roll><Fragment Tags=""><ProcLayer>
   <Blend ExitTime="0"/><Procedural type="Invulnerability"><ProceduralParams/></Procedural>
   <Blend ExitTime="0.5"/><Procedural type=""/>
@@ -1453,6 +1658,13 @@ mod tests {
   <Blend ExitTime="0.2"/><Procedural type="CAGE-Damage"><ProceduralParams><DamageTableRow value="1H_Sword_Attack2"/></ProceduralParams></Procedural>
  </ProcLayer></Fragment></Attack_Heavy>
 </FragmentList></AnimDB>"#;
+
+    /// Two rows of `playerreactiontableharness.actionlist`: the block, which the test databases
+    /// have no entry of, and the front stagger of power level 2.
+    const REACTIONS: &str = r#"<ActionList><Reactions>
+ <ReactionTableData PowerLevel="*" Reaction="r_B0"><IfExternalCondition ConditionName="blocked"/></ReactionTableData>
+ <ReactionTableData PowerLevel="2" Reaction="r_R2_F"><IfExternalCondition ConditionName="damaged_front"/></ReactionTableData>
+</Reactions></ActionList>"#;
 
     const ACTIONS: &str = r#"<ActionList><Actions>
  <Action Name="Attack_Start_Charge" FragmentName="Attack_Start_Charge"/>
@@ -1500,6 +1712,7 @@ mod tests {
             grid: Vec::new(),
             controller: ControllerDef::default(),
             sheathe: SheatheAction::parse(ACTIONS, SHEATHE_ACTION).expect("actions"),
+            reactions: reaction_table(REACTIONS).expect("reactions"),
             ranged: HashMap::new(),
             flights: HashMap::new(),
             input_files: HashMap::new(),
@@ -1564,6 +1777,57 @@ mod tests {
             second.map(|attack| attack.motion.is_some()),
             Some(false),
             "an action without a driven motion"
+        );
+    }
+
+    #[test]
+    fn a_stance_has_the_reaction_rows_with_its_entries_and_its_attacks_grit() {
+        let (stances, _) = build_stances(&sources(), &rows());
+        let sword = sword(&stances);
+        let fragments: Vec<(&str, Option<u32>)> = sword
+            .reactions
+            .iter()
+            .map(|row| (row.fragment.as_str(), row.power_level))
+            .collect();
+        assert_eq!(fragments, [("r_B0", None), ("r_R2_F", Some(2))]);
+        assert_eq!(
+            sword.reactions[0].entry, None,
+            "no database has the block's entry"
+        );
+        let stagger = sword.reactions[1]
+            .entry
+            .as_ref()
+            .expect("the stagger's entry");
+        assert_eq!(stagger.animations, "swing");
+        assert_eq!(stagger.length_ms, 1_000, "the clip's 30 frames");
+        assert_eq!(stagger.can_transition_ms, Some(500));
+        assert_eq!(
+            stagger.stun_ms(18),
+            500,
+            "its marker, whatever the hit's stun"
+        );
+        let motion = stagger.motion.as_ref().expect("the swing's root moves");
+        assert!(
+            (motion.length_ms() - 500.0).abs() <= motion.step_ms,
+            "the motion runs to the marker: {}",
+            motion.length_ms()
+        );
+        let light = sword.light.as_ref().expect("light");
+        assert_eq!(
+            light.grit,
+            [GritWindow {
+                window_ms: [0, 433],
+                condition: None,
+            }],
+            "the clip that activates; not the one without an effect"
+        );
+        let unarmed = stances
+            .iter()
+            .find(|stance| stance.tags.is_empty())
+            .expect("no weapon");
+        assert!(
+            unarmed.reactions.iter().all(|row| row.entry.is_none()),
+            "the test entry needs the sword's tags"
         );
     }
 
@@ -1741,6 +2005,7 @@ mod tests {
             grid: Vec::new(),
             controller: ControllerDef::default(),
             sheathe: None,
+            reactions: Vec::new(),
             ranged: HashMap::from([
                 (
                     ("Musket".to_owned(), "Basic".to_owned()),

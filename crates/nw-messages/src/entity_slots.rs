@@ -193,6 +193,7 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::GlobalStorage(_)
         | MemberState::BuildableController(_)
         | MemberState::PlacementObstruction(_)
+        | MemberState::Door(_)
         | MemberState::TerritoryInterface(_)
         | MemberState::BuildableGrid(_)
         | MemberState::Ownership(_)

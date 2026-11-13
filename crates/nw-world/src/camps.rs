@@ -39,7 +39,7 @@ pub const CAMP_SLICE_FOLDER: &str = "slices/structures/camps/";
 const POSITION: [u8; UUID_LEN] = uuid(0x6c2f_c842_f451_4b45_9d7d_a6ee_954d_f025);
 /// The interact component (retail member 6, class 2930; the slice has three, the group sends
 /// the first).
-const INTERACT: [u8; UUID_LEN] = uuid(0xb690_45a3_a129_4334_bdfb_069c_18cc_84a2);
+pub(crate) const INTERACT: [u8; UUID_LEN] = uuid(0xb690_45a3_a129_4334_bdfb_069c_18cc_84a2);
 /// The vitals component of a PvP camp (retail member 7, class 15).
 const VITALS: [u8; UUID_LEN] = uuid(0x0c84_8755_1f41_4408_b2be_0a36_2767_4f50);
 /// The damage receiver of a PvP camp (retail member 8, class 1528).

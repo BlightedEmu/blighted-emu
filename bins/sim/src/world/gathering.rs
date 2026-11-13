@@ -4,7 +4,11 @@
 //! node is known here from its first gather. Retail cards a node only once it left its default
 //! state: after a gather it sends the node's card with its state Depleted and its interaction off,
 //! and when the node grows back (60 to 90 s later for flint) its state Healthy and its interaction
-//! on again.
+//! on again. The Fire Cannon of a breaking walls vignette ([`NodeLayout::BreakingWallsCannon`])
+//! holds its states in other slots and has a server timeline: at the gather's end its card shows
+//! it Depleted with the timeline playing, which fires the cannon and breaks the wall (seen live on
+//! 2026-11-12 with both cannons), the timeline stops at its end 30 s later, and the cannon grows
+//! back after its respawn time.
 //!
 //! A gather with a tool runs for the gatherable's `BaseGatherTime` over the gather efficiency:
 //! the tool's (`MinGatherEFF` to `MaxGatherEFF` over its gear score range) plus the gathering
@@ -13,6 +17,14 @@
 //! runs at efficiency 1. A gatherable may ask for a tradeskill rank or an item in the bag
 //! ([`nw_content::gathering::GatherRule`]); without them the request is refused. The gather's
 //! game event gives its tradeskill experience ([`SimWorld::grant_event`]).
+//!
+//! A gather with a tool may be done in a single swing: with the chance of the gatherer's held
+//! effects and attribute threshold effects for the tradeskill (`INS*`: Strength 300 "25% chance
+//! to mine an ore with a single swing", Constitution 300 "... to chop down a tree in a single
+//! swing", [`nw_content::status_effects::RewardMods::instant_gather`]) it ends at the server's
+//! next gather step ([`GATHER_TICK_MS`]) instead of after its work. Inferred: the client times
+//! the swing itself, as every mining and logging gatherable of build 25810808 has `WaitForImpact`
+//! 1; no retail capture holds a gather of a player with such an effect.
 //!
 //! The gatherer's held status effects (status effect bonuses study 2026-11-11, [`LootBonuses`]):
 //! the gather's loot roll adds their luck for the tradeskill (`ROL_*`; a gather without a
@@ -33,6 +45,7 @@ use nw_content::loot::{LootContext, LootRoll, TABLE_PREFIX, loot_level};
 use nw_content::tradeskill_xp::NEUTRAL_MODIFIER;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::items::SYNC_MOVED;
+use nw_messages::timeline_state::TimelineState;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     BundleGroup, BundleMember, GatherableControllerState, GdeMetadataReplicatedState,
@@ -41,6 +54,9 @@ use nw_messages::{
 };
 use nw_sim_core::Position;
 
+use super::abilities::held_abilities;
+use super::crafting::unowned;
+use super::gates::timeline_member;
 use super::loot_bag::LimitsSent;
 use super::slots::Slot;
 use super::statics::{
@@ -63,6 +79,62 @@ const INTERACT_COMPONENT: u64 = 4;
 /// `gatherableState` values (client enum): Healthy 4, Depleted 8.
 const HEALTHY: u8 = 4;
 const DEPLETED: u8 = 8;
+
+/// Where a node entity holds the states the server sends to the players near it. A node of no
+/// layout gets none: a state in a slot that holds another class crashed the client
+/// ([`Gatherable::plant_layout`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NodeLayout {
+    /// The gatherable controller in slot 3 and the interact in slot 4.
+    Plant,
+    /// The Fire Cannon of a breaking walls vignette ([`Gatherable::breaking_walls_cannon`]).
+    BreakingWallsCannon,
+}
+
+impl NodeLayout {
+    /// The layout of the nodes of `gatherable`; `None` for one whose slots are Unknown.
+    pub(super) fn of(gatherable: &Gatherable) -> Option<Self> {
+        if gatherable.plant_layout() {
+            Some(Self::Plant)
+        } else if gatherable.breaking_walls_cannon() {
+            Some(Self::BreakingWallsCannon)
+        } else {
+            None
+        }
+    }
+}
+
+/// The Fire Cannon's slots (gimmick scan of 2026-11-12, every one of the 19 retail cards of its
+/// 4 placements): the gatherable controller in 2, the server timeline (`VFX Timeline (Server)`,
+/// type 1647) in 3, the projectile spawner (type 57) in 5, the interact in 6 and the ownership
+/// (type 3217) in 7.
+const CANNON_CONTROLLER_COMPONENT: u64 = 2;
+const CANNON_TIMELINE_COMPONENT: u64 = 3;
+const CANNON_SPAWNER_COMPONENT: u64 = 5;
+const CANNON_INTERACT_COMPONENT: u64 = 6;
+const CANNON_OWNERSHIP_COMPONENT: u64 = 7;
+/// The type index of `MB::ProjectileSpawnerReplicatedState`.
+const PROJECTILE_SPAWNER_TYPE_INDEX: u64 = 57;
+/// The projectile spawner's body on every retail card: `curAmmo` `0xffff` and
+/// `isFiringBlocked` false.
+const CANNON_SPAWNER_BODY: [u8; 5] = [0x01, 0x03, 0xff, 0xff, 0x00];
+/// The ownership of every retail card: nobody owns it, permission rule 1, no structure name.
+const CANNON_PERMISSION_RULE: u8 = 1;
+const CANNON_STRUCTURE_NAME: &str = "";
+/// How long the cannon's timeline plays from the gather's end: it ends 30 s later stopped at
+/// its end (retail `12a_msq_08_destroyrune` 93.925 s to 123.890 s, play head 30.0; every use of
+/// the gimmick scan stopped 32.05 to 32.18 s after its request). The timeline fires the cannon
+/// and breaks the wall (its slice's timeline entities `Cannon_VFX_Fuse`, `Cannon_VFX_MuzzleFlash`,
+/// `Wall Destroyed VFX` and `Debris_Collision`; seen live on 2026-11-12). The node grows back
+/// with its `MinRespawnRate` of 31 s (retail 124.840 s; the scan 33.03 to 33.17 s after the
+/// request).
+const CANNON_TIMELINE_MS: u64 = 30_000;
+
+/// The cannon timeline's play head at its end, seconds ([`CANNON_TIMELINE_MS`]).
+#[allow(clippy::cast_precision_loss, reason = "a timeline of seconds")]
+fn cannon_timeline_end_s() -> f32 {
+    CANNON_TIMELINE_MS as f32 / MS_PER_SECOND
+}
 
 /// The status of a refused gather request (gather note: retail 2 for a node another player
 /// gathers; Inferred the same for a depleted node).
@@ -127,6 +199,25 @@ pub(super) fn with_yield(quantity: u32, scale: f64, below: &mut impl FnMut(u32) 
 
 /// The resolution of a yield fraction's roll.
 const YIELD_STEPS: u32 = 10_000;
+
+/// The levels a gather's loot roll `context` holds: a gather of no mob (a node, a crate) takes
+/// the gatherer's loot level as its content level (`MinContLevel`). Without it a supply crate
+/// gives nothing once its gatherer is above loot level 7: build 25810808
+/// `ContainerLootSmallLeveled_2` rolls on `Level` and from loot level 8 on rolls
+/// `ContainerLootSmall`, whose buckets hold items tagged `MinContLevel` (`ContainerResources`,
+/// `RecoveryItems`): no roll of it gives an item without a content level, and the alchemy
+/// crates' `ContainerLootAlchemySmall` neither. Inferred: retail alchemy crate opens gave
+/// `PotionHealthT3` (`MinContLevel:19-38`) in areas of levels 17 to 20 (`dtls` 2637 s) and 26
+/// to 30 (`99b_msq_02_meetgalahad` 496 s, `dtls` 342 s) and `PotionHealthT4`
+/// (`MinContLevel:39-48`) in that area of levels 26 to 30 too (`02a_side08_01_treasures`
+/// 102 s): a level of the gatherer, which the area's level alone does not give. No capture names
+/// the gatherer's level at the open. A skinned mob keeps its own level.
+pub(super) fn gather_levels(context: LootContext<'_>) -> LootContext<'_> {
+    LootContext {
+        content: context.content.or(context.player),
+        ..context
+    }
+}
 
 /// What a player's held status effects give its loot rolls.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -205,7 +296,14 @@ impl SimWorld {
     ) {
         for node in saved {
             let left_ms = node.respawn_at_unix_ms.saturating_sub(now_unix_ms);
-            self.nodes.restore(node, now_ms.saturating_add(left_ms));
+            let layout = self
+                .content
+                .gather_points
+                .kind_of(node.point)
+                .and_then(|crc| self.content.gatherables.get(crc))
+                .and_then(NodeLayout::of);
+            self.nodes
+                .restore(node, now_ms.saturating_add(left_ms), layout);
         }
     }
 
@@ -245,7 +343,8 @@ impl SimWorld {
             .or_else(|| self.gate_switch_at(&request.target, position, GATHER_REACH_M));
         // The node must be one of the level's gatherables of that kind (or a dead mob to skin,
         // or an encounter's start object) within reach of the player: a client cannot gather
-        // from anywhere.
+        // from anywhere, nor a node out of its time of day ([`super::day_night`]).
+        let phase = self.day_phase();
         let point = match mob {
             None if object.is_some() => Some(None),
             Some(mob) => self
@@ -256,10 +355,15 @@ impl SimWorld {
             None => request
                 .gatherable
                 .and_then(|crc| {
-                    let near = self
+                    let near: Vec<(usize, Position)> = self
                         .content
                         .gather_points
-                        .within(crc, position, GATHER_REACH_M);
+                        .within(crc, position, GATHER_REACH_M)
+                        .into_iter()
+                        .filter(|(point, _)| {
+                            self.content.time_of_day.gather_point_shows(*point, phase)
+                        })
+                        .collect();
                     self.nodes.point_for(&request.target, &near)
                 })
                 .map(Some),
@@ -295,6 +399,10 @@ impl SimWorld {
         }
         let tool_efficiency =
             (!gatherable.by_hand).then(|| self.gather_efficiency(entity, &gatherable));
+        let single_swing = tool_efficiency.is_some() && {
+            let chance = self.instant_gather_chance(entity, &gatherable);
+            self.dice.chance(chance)
+        };
         let started = match (mob, point) {
             (None, _) if let Some(object) = object => {
                 // One player gathers a start object at a time.
@@ -312,7 +420,13 @@ impl SimWorld {
             (Some(mob), _) => self.start_skinning(mob, number),
             (None, Some((point, at))) => self
                 .nodes
-                .start(request.target, point, at, number, gatherable.plant_layout())
+                .start(
+                    request.target,
+                    point,
+                    at,
+                    number,
+                    NodeLayout::of(&gatherable),
+                )
                 .map_err(|busy| tracing::debug!(player = number, ?busy, "gather refused")),
             (None, None) => Err(()),
         };
@@ -335,7 +449,14 @@ impl SimWorld {
                     reason = "a gather time of seconds over a positive efficiency"
                 )]
                 let tool_ms = (gatherable.gather_ms as f32 / efficiency) as u64;
-                (tool_ms, efficiency)
+                (
+                    if single_swing {
+                        GATHER_TICK_MS
+                    } else {
+                        tool_ms
+                    },
+                    efficiency,
+                )
             }
             None => (
                 gatherable.gather_ms.div_ceil(GATHER_TICK_MS) * GATHER_TICK_MS + GATHER_TICK_MS,
@@ -351,7 +472,7 @@ impl SimWorld {
         send_now(&mut self.combat_messages, &player.connection, &[accept]);
         let started = gather_started(request.target_entity, player.gathers, run);
         player.extra_members.extend(started);
-        tracing::debug!(player = number, gatherable = %gatherable.id, duration_ms, "gather");
+        tracing::debug!(player = number, gatherable = %gatherable.id, duration_ms, single_swing, "gather");
         self.open_gathers.push(OpenGather {
             number,
             request,
@@ -431,7 +552,8 @@ impl SimWorld {
     /// What player `number` rolls loot with: its level, and for a mob `mob` (killed or skinned)
     /// the mob's level as the enemy and content level (Inferred: the content of a kill is the
     /// creature; nwdb.info lists creature loot by `{!clvl}` ranges around the creature's level)
-    /// and its loot tags. A gather has no enemy, and its content and POI levels are Unknown.
+    /// and its loot tags. Without a mob there is no enemy, and the POI level is Unknown; a gather
+    /// adds its content level ([`gather_levels`]).
     /// `reached_limits` are the player's loot limits at their limit
     /// ([`SimWorld::reached_loot_limits`]).
     pub(super) fn loot_context<'a>(
@@ -461,10 +583,12 @@ impl SimWorld {
         }
     }
 
-    /// What the held status effects of player `number` give a loot roll with the mob's loot
-    /// tags `mob_tags`: of a gather of tradeskill `tradeskill`, their luck and yield for it; of
-    /// another roll (`None`: a kill, a chest), their `GlobalRollMod` and no yield. Their
-    /// `LootTags` join the mob's.
+    /// What the held status effects of player `number`, and the effects of its attribute
+    /// thresholds, give a loot roll with the mob's loot tags `mob_tags`: of a gather of tradeskill
+    /// `tradeskill`, their luck and yield for it (`ROL_*`: `ATB_Con_Bonus_50_2_Effect` 150 to each
+    /// gathering tradeskill; `MULT_*`: `ATB_Str_Bonus_250_2_Effect` 0.1 to mining); of another
+    /// roll (`None`: a kill, a chest), their `GlobalRollMod` and no yield. Their `LootTags` join
+    /// the mob's.
     pub(super) fn loot_bonuses(
         &mut self,
         number: u64,
@@ -476,20 +600,73 @@ impl SimWorld {
             yield_scale: NEUTRAL_MODIFIER,
             ..LootBonuses::default()
         };
-        let entity = self.player_by_number(number);
+        let Some(entity) = self.player_by_number(number) else {
+            return bonuses;
+        };
+        let attribute_luck = self.attribute_effect_sum(entity, |rule| match tradeskill {
+            Some(tradeskill) => rule.rewards.luck_of(tradeskill),
+            None => rule.rewards.global_luck,
+        });
+        let attribute_yield = tradeskill.map_or(0.0, |tradeskill| {
+            self.attribute_effect_sum(entity, |rule| rule.rewards.yield_share(tradeskill))
+        });
         let rules = &self.content.status_effects;
-        let Some(effects) = entity
-            .and_then(|entity| self.world.get::<Player>(entity))
+        let Some(effects) = self
+            .world
+            .get::<Player>(entity)
             .map(|player| &player.status_effects)
         else {
             return bonuses;
         };
-        bonuses.luck = effects.luck(rules, tradeskill);
+        // A luck of a few thousand on a 100,000 roll.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a luck of a few thousand, at least 0"
+        )]
+        let attribute_luck = attribute_luck.max(0.0).round() as u32;
+        bonuses.luck = effects
+            .luck(rules, tradeskill)
+            .saturating_add(attribute_luck);
         bonuses.tags.extend(effects.loot_tags(rules));
         if let Some(tradeskill) = tradeskill {
-            bonuses.yield_scale = effects.yield_scale(rules, tradeskill);
+            bonuses.yield_scale = effects.yield_scale(rules, tradeskill) + attribute_yield;
         }
         bonuses
+    }
+
+    /// The status effects that the attribute threshold abilities of player `entity` hold
+    /// ([`nw_content::attribute_bonuses::AttributeBonuses::equip_effects`]).
+    pub(super) fn attribute_effects(&self, entity: Entity) -> Vec<&str> {
+        let Some(player) = self.world.get::<Player>(entity) else {
+            return Vec::new();
+        };
+        let held = held_abilities(
+            (
+                &player.masteries,
+                player.gear.as_ref(),
+                &player.attributes,
+                &player.status_effects,
+            ),
+            &self.content,
+        );
+        self.content.attribute_bonuses.equip_effects(held).collect()
+    }
+
+    /// The sum of `value` over the rules of the effects of player `entity`'s attribute
+    /// thresholds ([`Self::attribute_effects`]), each at one stack's potency (Inferred: the
+    /// effect is held once, as long as its ability, and no category mod of these effects exists).
+    pub(super) fn attribute_effect_sum(
+        &self,
+        entity: Entity,
+        value: impl Fn(&nw_content::status_effects::StatusEffectRule) -> f64,
+    ) -> f64 {
+        let rules = &self.content.status_effects;
+        self.attribute_effects(entity)
+            .into_iter()
+            .filter_map(|effect| rules.by_id(effect))
+            .map(value)
+            .sum()
     }
 
     /// Whether player `entity` may gather `gatherable`: one that needs its tradeskill's tool
@@ -537,7 +714,8 @@ impl SimWorld {
 
     /// The gather efficiency of player `entity` with a tool on `gatherable`: its tradeskill's
     /// tool at its gear score (else [`HAND_EFFICIENCY`]), plus the gathering efficiency of the
-    /// tradeskill's rank and of the player's held status effects (`EFF_*`).
+    /// tradeskill's rank, of the player's held status effects and of the effects of its
+    /// attribute thresholds (`EFF_*`: `ATB_Str_Bonus_25_2_Effect` 0.1 to mining).
     fn gather_efficiency(&self, entity: Entity, gatherable: &Gatherable) -> f32 {
         let tool = self.worn_tool(entity, gatherable).and_then(|item| {
             let efficiency = self.content.tools.of(item)?;
@@ -550,10 +728,18 @@ impl SimWorld {
                     .status_effects
                     .gather_efficiency(&self.content.status_effects, tradeskill)
             });
+            let attributes = self.attribute_effect_sum(entity, |rule| {
+                rule.gather_efficiency
+                    .iter()
+                    .filter(|(skill, _)| skill.eq_ignore_ascii_case(tradeskill))
+                    .map(|(_, value)| *value)
+                    .sum()
+            });
             self.tradeskill_perks(entity, tradeskill)
                 .1
                 .gathering_efficiency
                 + effects
+                + attributes
         });
         #[allow(
             clippy::cast_possible_truncation,
@@ -561,6 +747,24 @@ impl SimWorld {
         )]
         let efficiency = (tool.unwrap_or(f64::from(HAND_EFFICIENCY)) + rank) as f32;
         efficiency.max(HAND_EFFICIENCY)
+    }
+
+    /// The chance that a gather of `gatherable` by player `entity` is done in a single swing:
+    /// the `INS*` chance of its held status effects and of the effects of its attribute
+    /// thresholds for the gatherable's tradeskill (0 without a tradeskill).
+    fn instant_gather_chance(&self, entity: Entity, gatherable: &Gatherable) -> f64 {
+        let Some(tradeskill) = gatherable.tradeskill.as_deref() else {
+            return 0.0;
+        };
+        let effects = self.world.get::<Player>(entity).map_or(0.0, |player| {
+            player
+                .status_effects
+                .instant_gather_chance(&self.content.status_effects, tradeskill)
+        });
+        effects
+            + self.attribute_effect_sum(entity, |rule| {
+                rule.rewards.instant_gather_chance(tradeskill)
+            })
     }
 
     /// The item player `entity` wears in the tool slot of `gatherable`'s tradeskill.
@@ -650,14 +854,14 @@ impl SimWorld {
             gather.gatherable.tradeskill.as_deref(),
         );
         let reached = self.reached_loot_limits(gather.number);
-        let levels = LootContext {
+        let levels = gather_levels(LootContext {
             tags: &bonuses.tags,
             ..self.loot_context(
                 gather.number,
                 gather.mob.map(|mob| (mob, mob_tags)),
                 &reached,
             )
-        };
+        });
         let dice = &mut self.dice;
         let rolled = gather
             .table
@@ -704,7 +908,8 @@ impl SimWorld {
                 let respawn_at_ms = now_ms
                     .saturating_add(shortest)
                     .saturating_add(u64::from(self.dice.below(spread.saturating_add(1))));
-                self.nodes.deplete(&gather.request.target, respawn_at_ms);
+                self.nodes
+                    .deplete(&gather.request.target, now_ms, respawn_at_ms);
             }
         }
         // A container's lockout ends at the next reset of its kind, from now.
@@ -859,7 +1064,7 @@ impl SimWorld {
     /// of `mob` it skinned, a quest object, or a container. One of each waiting task's item whose
     /// enemy the mob is, or whose gatherable the object is, or that a container in the player's
     /// place drops, at the task's chance.
-    fn quest_drops(
+    pub(super) fn quest_drops(
         &mut self,
         number: u64,
         mob: Option<u64>,
@@ -1049,8 +1254,12 @@ struct Node {
     gatherer: Option<u64>,
     /// When it grows back, while it is depleted.
     respawn_at_ms: Option<u64>,
-    /// Its state goes to the players near it ([`Gatherable::plant_layout`]).
-    sent: bool,
+    /// Where its entity holds the states sent to the players near it; `None`: none is sent.
+    layout: Option<NodeLayout>,
+    /// When the timeline of a [`NodeLayout::BreakingWallsCannon`] stops, while it plays.
+    timeline_ends_at_ms: Option<u64>,
+    /// The node version at which its timeline last started or stopped.
+    timeline_version: u32,
     /// Counts its state changes, so each player gets each one once.
     version: u32,
     /// Its depletion is not saved yet.
@@ -1076,12 +1285,18 @@ impl Node {
         self.respawn_at_ms.is_some()
     }
 
-    /// Its card, controller and interact members (`with_card`), or its last two alone.
-    fn members(&self, with_card: bool) -> Vec<BundleMember> {
+    /// Its card and states (`with_card`), or its states alone, in the slots of its layout.
+    fn members(&self, layout: NodeLayout, with_card: bool) -> Vec<BundleMember> {
         let (state, enabled) = if self.depleted() {
             (DEPLETED, false)
         } else {
             (HEALTHY, true)
+        };
+        let (controller, interact) = match layout {
+            NodeLayout::Plant => (CONTROLLER_COMPONENT, INTERACT_COMPONENT),
+            NodeLayout::BreakingWallsCannon => {
+                (CANNON_CONTROLLER_COMPONENT, CANNON_INTERACT_COMPONENT)
+            }
         };
         let card = with_card.then_some(BundleMember {
             component: CARD_COMPONENT,
@@ -1090,22 +1305,58 @@ impl Node {
                 gde_ref: Some(self.gde_ref),
             }),
         });
-        card.into_iter()
-            .chain([
+        let states = [
+            BundleMember {
+                component: controller,
+                state: MemberState::GatherableController(GatherableControllerState {
+                    gatherable_state: Some(state),
+                }),
+            },
+            BundleMember {
+                component: interact,
+                state: MemberState::Interact(InteractState {
+                    enabled: Some(enabled),
+                    has_interactors: None,
+                }),
+            },
+        ];
+        let cannon = match layout {
+            NodeLayout::Plant => Vec::new(),
+            NodeLayout::BreakingWallsCannon => self.cannon_members(with_card),
+        };
+        card.into_iter().chain(states).chain(cannon).collect()
+    }
+
+    /// The Fire Cannon's own states: its timeline, and with its card the projectile spawner and
+    /// the ownership, as every retail card sent them (gimmick scan of 2026-11-12).
+    fn cannon_members(&self, with_card: bool) -> Vec<BundleMember> {
+        let version = u64::from(self.timeline_version);
+        let timeline = if self.timeline_ends_at_ms.is_some() {
+            TimelineState::start(version)
+        } else {
+            TimelineState::end(version, cannon_timeline_end_s())
+        };
+        let card_states = with_card.then(|| {
+            [
                 BundleMember {
-                    component: CONTROLLER_COMPONENT,
-                    state: MemberState::GatherableController(GatherableControllerState {
-                        gatherable_state: Some(state),
-                    }),
+                    component: CANNON_SPAWNER_COMPONENT,
+                    state: MemberState::Recorded {
+                        class: PROJECTILE_SPAWNER_TYPE_INDEX,
+                        body: CANNON_SPAWNER_BODY.to_vec(),
+                    },
                 },
                 BundleMember {
-                    component: INTERACT_COMPONENT,
-                    state: MemberState::Interact(InteractState {
-                        enabled: Some(enabled),
-                        has_interactors: None,
-                    }),
+                    component: CANNON_OWNERSHIP_COMPONENT,
+                    state: MemberState::Ownership(unowned(
+                        CANNON_PERMISSION_RULE,
+                        CANNON_STRUCTURE_NAME,
+                    )),
                 },
-            ])
+            ]
+        });
+        timeline_member(CANNON_TIMELINE_COMPONENT, &timeline)
+            .into_iter()
+            .chain(card_states.into_iter().flatten())
             .collect()
     }
 }
@@ -1136,14 +1387,14 @@ impl Nodes {
     /// Player `player` starts to gather node `gde_ref`, the level's gatherable point `point` at
     /// `position`; refused while another player gathers it, while it is depleted, and when the
     /// point and the node id do not name the same node they named first (a new id cannot skip a
-    /// depleted node). `sent`: its state goes to the players near it.
+    /// depleted node). `layout`: where its entity holds the states sent to the players near it.
     pub(super) fn start(
         &mut self,
         gde_ref: [u8; RAW_ID_LEN],
         point: usize,
         position: Position,
         player: u64,
-        sent: bool,
+        layout: Option<NodeLayout>,
     ) -> Result<(), NodeBusy> {
         let index = match (self.by_ref.get(&gde_ref), self.by_point.get(&point)) {
             (Some(by_ref), Some(by_point)) if by_ref == by_point => *by_ref,
@@ -1154,7 +1405,9 @@ impl Nodes {
                     position,
                     gatherer: None,
                     respawn_at_ms: None,
-                    sent,
+                    layout,
+                    timeline_ends_at_ms: None,
+                    timeline_version: 0,
                     version: 0,
                     unsaved: false,
                 });
@@ -1214,8 +1467,9 @@ impl Nodes {
             .map(|index| self.nodes[*index].position)
     }
 
-    /// Node `gde_ref` was harvested: depleted until `respawn_at_ms`.
-    pub(super) fn deplete(&mut self, gde_ref: &[u8; RAW_ID_LEN], respawn_at_ms: u64) {
+    /// Node `gde_ref` was harvested at `now_ms`: depleted until `respawn_at_ms`. A Fire Cannon's
+    /// timeline plays from now for [`CANNON_TIMELINE_MS`].
+    pub(super) fn deplete(&mut self, gde_ref: &[u8; RAW_ID_LEN], now_ms: u64, respawn_at_ms: u64) {
         if let Some(node) = self
             .by_ref
             .get(gde_ref)
@@ -1225,6 +1479,10 @@ impl Nodes {
             node.respawn_at_ms = Some(respawn_at_ms);
             node.version += 1;
             node.unsaved = true;
+            if node.layout == Some(NodeLayout::BreakingWallsCannon) {
+                node.timeline_ends_at_ms = Some(now_ms.saturating_add(CANNON_TIMELINE_MS));
+                node.timeline_version = node.version;
+            }
         }
     }
 
@@ -1249,8 +1507,13 @@ impl Nodes {
 
     /// Holds again the saved depleted node `saved`, which grows back at sim ms `respawn_at_ms`;
     /// a node or point this sim already holds is left as it is. Its depleted state goes to the
-    /// players near it.
-    pub(super) fn restore(&mut self, saved: &DepletedNode, respawn_at_ms: u64) {
+    /// players near it in the slots of `layout`, its gatherable's.
+    pub(super) fn restore(
+        &mut self,
+        saved: &DepletedNode,
+        respawn_at_ms: u64,
+        layout: Option<NodeLayout>,
+    ) {
         if self.by_ref.contains_key(&saved.gde_ref) || self.by_point.contains_key(&saved.point) {
             return;
         }
@@ -1260,7 +1523,9 @@ impl Nodes {
             position: saved.position,
             gatherer: None,
             respawn_at_ms: Some(respawn_at_ms),
-            sent: true,
+            layout,
+            timeline_ends_at_ms: None,
+            timeline_version: 1,
             version: 1,
             unsaved: false,
         });
@@ -1269,9 +1534,15 @@ impl Nodes {
         self.by_point.insert(saved.point, index);
     }
 
-    /// The depleted nodes whose time came at `now_ms` grow back.
+    /// The depleted nodes whose time came at `now_ms` grow back, and the Fire Cannon timelines
+    /// whose time came stop at their end.
     pub(super) fn tick(&mut self, now_ms: u64) {
         for node in &mut self.nodes {
+            if node.timeline_ends_at_ms.is_some_and(|at| now_ms >= at) {
+                node.timeline_ends_at_ms = None;
+                node.version += 1;
+                node.timeline_version = node.version;
+            }
             if node.respawn_at_ms.is_some_and(|at| now_ms >= at) {
                 node.respawn_at_ms = None;
                 node.version += 1;
@@ -1289,7 +1560,7 @@ impl Nodes {
         (0_u64..)
             .zip(&self.nodes)
             .filter(move |(_, node)| {
-                node.sent
+                node.layout.is_some()
                     && node.version > 0
                     && node.position.horizontal_distance(position) <= radius_m
             })
@@ -1307,13 +1578,14 @@ impl Nodes {
     ) -> Option<BundleGroup> {
         let index = usize::try_from(number.checked_sub(GATHERABLE_ENTITY_BASE)?).ok()?;
         let node = self.nodes.get(index)?;
+        let layout = node.layout?;
         if !slot.new && sent.get(&number) == Some(&node.version) {
             return None;
         }
         sent.insert(number, node.version);
         Some(BundleGroup {
             interest: u64::from(slot.interest),
-            members: node.members(slot.new),
+            members: node.members(layout, slot.new),
         })
     }
 }
@@ -1334,6 +1606,90 @@ pub(crate) mod tests {
     use crate::player_content::PlayerContent;
     use crate::world::gear;
     use crate::world::tests::{NOW, SERVER_TIME, admit_at, connection, world_with_spawns};
+
+    /// The retail threshold effects of Strength 25 and 250 and Constitution 50 (build 25810808)
+    /// add mining efficiency, yield and luck to a player that holds their abilities.
+    #[test]
+    fn the_attribute_threshold_effects_add_gathering_efficiency_yield_and_luck() {
+        use nw_content::attribute_bonuses::AttributeBonuses;
+        use nw_content::character_points::{CONSTITUTION, STRENGTH};
+        use nw_content::generated::{StatusEffectData, Tables};
+        use nw_content::status_effects::StatusEffectRules;
+        use nw_content::table::Table;
+
+        const PLAYER: u64 = 7;
+        const MINING: &str = "Mining";
+        /// A threshold every attribute value reaches, so the admitted player holds them.
+        const ANY_VALUE: u32 = 0;
+        let effect = |row: serde_json::Value| -> StatusEffectData {
+            serde_json::from_value(row).expect("effect row")
+        };
+        let effects = vec![
+            effect(
+                serde_json::json!({"status_id": "ATB_Str_Bonus_25_2_Effect", "eff_mining": 0.1}),
+            ),
+            effect(
+                serde_json::json!({"status_id": "ATB_Str_Bonus_250_2_Effect", "mult_mining": 0.1}),
+            ),
+            effect(
+                serde_json::json!({"status_id": "ATB_Con_Bonus_50_2_Effect", "rol_mining": 150}),
+            ),
+        ];
+        let mut world = world_with_spawns(Vec::new());
+        let mut content = (*world.content).clone();
+        content.status_effects = StatusEffectRules::from_tables(&Tables {
+            status_effect_data: vec![Table {
+                source_path: String::new(),
+                unique_id: String::new(),
+                rows: effects,
+            }],
+            ..Tables::default()
+        });
+        let ability = |id: &str| id.to_owned();
+        content.attribute_bonuses = AttributeBonuses::build(
+            [
+                (
+                    STRENGTH,
+                    ANY_VALUE,
+                    ability("Str_Bonus_25_2,Str_Bonus_250_2"),
+                ),
+                (CONSTITUTION, ANY_VALUE, ability("Con_Bonus_50_2")),
+            ],
+            [],
+        )
+        .with_equip_effects([
+            (
+                ability("Str_Bonus_25_2"),
+                ability("ATB_Str_Bonus_25_2_Effect"),
+            ),
+            (
+                ability("Str_Bonus_250_2"),
+                ability("ATB_Str_Bonus_250_2_Effect"),
+            ),
+            (
+                ability("Con_Bonus_50_2"),
+                ability("ATB_Con_Bonus_50_2_Effect"),
+            ),
+        ]);
+        world.content = Arc::new(content);
+        world
+            .admit(&admit_at(PLAYER, 0.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let entity = world.by_connection[&connection(PLAYER)];
+        let efficiency = world.attribute_effect_sum(entity, |rule| {
+            rule.gather_efficiency
+                .iter()
+                .filter(|(skill, _)| skill.eq_ignore_ascii_case(MINING))
+                .map(|(_, value)| *value)
+                .sum()
+        });
+        assert!((efficiency - 0.1).abs() < 1e-9);
+        let bonuses = world.loot_bonuses(PLAYER, &[], Some(MINING));
+        assert_eq!(bonuses.luck, 150);
+        assert!((bonuses.yield_scale - 1.1).abs() < 1e-9);
+        let kill = world.loot_bonuses(PLAYER, &[], None);
+        assert_eq!(kill.luck, 0, "no global luck");
+    }
 
     #[test]
     fn a_yield_share_grows_each_stack_and_rolls_its_fraction() {
@@ -1364,7 +1720,9 @@ pub(crate) mod tests {
     /// The level point of the flint node.
     const FLINT_POINT: usize = 0;
     /// The node state of the test nodes goes to the players near them.
-    const SENT: bool = true;
+    const SENT: Option<NodeLayout> = Some(NodeLayout::Plant);
+    /// When the test nodes are harvested.
+    const HARVESTED_AT_MS: u64 = 1_500;
     /// The interest radius of the test views.
     const RADIUS_M: f32 = 100.0;
     const AT: Position = Position {
@@ -1387,7 +1745,7 @@ pub(crate) mod tests {
         const OTHER: [u8; RAW_ID_LEN] = [0x6c; RAW_ID_LEN];
         let mut nodes = Nodes::default();
         assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT), Ok(()));
-        nodes.deplete(&FLINT, RESPAWN_AT_MS);
+        nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
         assert_eq!(
             nodes.start(OTHER, FLINT_POINT, AT, PLAYER, SENT),
             Err(NodeBusy::OtherNode),
@@ -1407,10 +1765,10 @@ pub(crate) mod tests {
     #[test]
     fn a_node_of_another_layout_is_never_sent() {
         let mut nodes = Nodes::default();
-        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER, false), Ok(()));
-        nodes.deplete(&FLINT, RESPAWN_AT_MS);
+        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER, None), Ok(()));
+        nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
         assert_eq!(
-            nodes.start(FLINT, FLINT_POINT, AT, PLAYER, false),
+            nodes.start(FLINT, FLINT_POINT, AT, PLAYER, None),
             Err(NodeBusy::Depleted),
             "the server still keeps it depleted"
         );
@@ -1432,7 +1790,7 @@ pub(crate) mod tests {
         const UNIX_OF_ZERO_MS: u64 = 1_798_761_600_000;
         let mut nodes = Nodes::default();
         assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT), Ok(()));
-        nodes.deplete(&FLINT, RESPAWN_AT_MS);
+        nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
         let saved = nodes.take_unsaved(|at_ms| at_ms + UNIX_OF_ZERO_MS);
         assert_eq!(
             saved,
@@ -1446,7 +1804,7 @@ pub(crate) mod tests {
         assert!(nodes.take_unsaved(|at_ms| at_ms).is_empty(), "saved once");
         // A new sim holds it again: depleted, shown, and refused until its time.
         let mut restarted = Nodes::default();
-        restarted.restore(&saved[0], RESPAWN_AT_MS);
+        restarted.restore(&saved[0], RESPAWN_AT_MS, SENT);
         assert_eq!(
             restarted.start(FLINT, FLINT_POINT, AT, PLAYER, SENT),
             Err(NodeBusy::Depleted)
@@ -1476,7 +1834,7 @@ pub(crate) mod tests {
             0,
             "a node in its default state is not shown"
         );
-        nodes.deplete(&FLINT, RESPAWN_AT_MS);
+        nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
         assert_eq!(
             nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT),
             Err(NodeBusy::Depleted)
@@ -1722,6 +2080,58 @@ pub(crate) mod tests {
         );
     }
 
+    /// A gather with the Strength 300 threshold's single swing chance at certainty ends at the
+    /// next gather step; its loot and experience come as after a full gather.
+    #[test]
+    fn a_single_swing_chance_ends_the_tool_gather_at_the_next_step() {
+        use nw_content::attribute_bonuses::AttributeBonuses;
+        use nw_content::character_points::STRENGTH;
+        use nw_content::generated::{StatusEffectData, Tables};
+        use nw_content::status_effects::StatusEffectRules;
+        use nw_content::table::Table;
+
+        /// Retail `Str_Bonus_300_2` and its effect (build 25810808), here with a certain chance.
+        const ABILITY: &str = "Str_Bonus_300_2";
+        const EFFECT: &str = "ATB_Str_Bonus_300_2_Effect";
+        const CERTAIN: f64 = 1.0;
+        /// A threshold every Strength value reaches, so the admitted player holds it.
+        const ANY_VALUE: u32 = 0;
+        let (mut world, entity) = admitted();
+        let effect: StatusEffectData =
+            serde_json::from_value(serde_json::json!({"status_id": EFFECT, "ins_mining": CERTAIN}))
+                .expect("effect row");
+        let mut content = (*world.content).clone();
+        content.status_effects = StatusEffectRules::from_tables(&Tables {
+            status_effect_data: vec![Table {
+                source_path: String::new(),
+                unique_id: String::new(),
+                rows: vec![effect],
+            }],
+            ..Tables::default()
+        });
+        content.attribute_bonuses =
+            AttributeBonuses::build([(STRENGTH, ANY_VALUE, ABILITY.to_owned())], [])
+                .with_equip_effects([(ABILITY.to_owned(), EFFECT.to_owned())]);
+        world.content = Arc::new(content);
+        let vein = world
+            .content
+            .gatherables
+            .get(lowercase_crc32(VEIN))
+            .cloned();
+        assert_eq!(
+            world.instant_gather_chance(entity, &vein.expect("vein")),
+            CERTAIN
+        );
+        world.gather_open_world(entity, NUMBER, request(1, 0x11, VEIN), &[], NOW);
+        let [gather] = world.open_gathers.as_slice() else {
+            panic!("one gather runs: {:?}", world.open_gathers);
+        };
+        assert_eq!(gather.end_ms, NOW + GATHER_TICK_MS);
+        world.gathers_due(NOW + GATHER_TICK_MS);
+        assert!(world.open_gathers.is_empty());
+        assert_eq!(mining(&world, entity), 64, "the gather's experience");
+    }
+
     #[test]
     fn a_harvest_takes_the_sickle_slot_and_each_tool_its_own() {
         let of = |tradeskill: &str| {
@@ -1777,6 +2187,38 @@ pub(crate) mod tests {
             world.open_gathers.is_empty(),
             "no barrel of the level lies in reach: a client cannot gather from anywhere"
         );
+    }
+
+    #[test]
+    fn a_node_out_of_its_time_of_day_takes_no_gather() {
+        use nw_world::time_of_day::{TimeOfDayPoints, TimedPoint};
+
+        use crate::world::day_night::TimedPlaces;
+        use crate::world::day_night::tests::{DAY_MS, NIGHT_MS, NIGHT_ONLY};
+        let (mut world, entity) = admitted();
+        world.ids.time_change_time = 0;
+        let night_veins = nw_world::WorldFile {
+            time_of_day: TimeOfDayPoints {
+                gatherables: (0..NODES_PER_KIND)
+                    .map(|index| TimedPoint {
+                        index: u32::try_from(index).expect("index"),
+                        window: NIGHT_ONLY,
+                    })
+                    .collect(),
+                ..TimeOfDayPoints::default()
+            },
+            ..nw_world::WorldFile::default()
+        };
+        world.content = Arc::new(PlayerContent {
+            time_of_day: TimedPlaces::of(&night_veins),
+            ..(*world.content).clone()
+        });
+        world.server_ms = DAY_MS;
+        world.gather_open_world(entity, NUMBER, request(1, 0x12, VEIN), &[], NOW);
+        assert!(world.open_gathers.is_empty(), "a night node by day");
+        world.server_ms = NIGHT_MS;
+        world.gather_open_world(entity, NUMBER, request(2, 0x13, VEIN), &[], NOW);
+        assert_eq!(world.open_gathers.len(), 1, "the night node at night");
     }
 
     #[test]
@@ -2065,5 +2507,285 @@ pub(crate) mod tests {
         world.nodes.release(&target);
         world.gather_open_world(entity, NUMBER, request(2, 0x15, CHEST), &[], end_ms);
         assert!(world.open_gathers.is_empty(), "locked for its opener");
+    }
+
+    /// The gatherable controller and the interact of `group` are in the Fire Cannon's slots.
+    fn in_cannon_slots(group: &BundleGroup) -> bool {
+        group.members.iter().all(|member| match member.state {
+            MemberState::GatherableController(_) => member.component == CANNON_CONTROLLER_COMPONENT,
+            MemberState::Interact(_) => member.component == CANNON_INTERACT_COMPONENT,
+            _ => true,
+        })
+    }
+
+    /// The members of a node's group as retail writes them (component, class and body).
+    fn member_bytes(group: &BundleGroup) -> Vec<String> {
+        group
+            .members
+            .iter()
+            .map(|member| hex::encode(member.encode().expect("encodes")))
+            .collect()
+    }
+
+    #[test]
+    fn a_fire_cannon_plays_its_timeline_and_grows_back_in_its_own_slots() {
+        const CANNON: &str = "Gimmick_BreakingWallsCannon_Vignette";
+        const CANNON_EVENT: &str = "IO_Gimmick_BreakingWallsCannon_interact";
+        /// `BaseGatherTime` 2 and `MinRespawnRate` 31 (build 25810808).
+        const CANNON_GATHER_MS: u64 = 2_000;
+        const CANNON_RESPAWN_MS: u64 = 31_000;
+        // Retail `12a_msq_08_destroyrune` 93.857 s, the first card of the cannon after its use:
+        // controller Depleted, interact off, projectile spawner and ownership.
+        const RETAIL_CARD_STATES: [&str; 4] = [
+            "020c010108",
+            "06b22d010100",
+            "05390103ffff00",
+            "07913201ff000000000000000000000000000000000000003f8000003f8000003f8000003f8000000000\
+             3f8000003f8000003f8000003f800000000002010000000000000000000f00000000",
+        ];
+        // Retail 124.840 s: grown back, the interact on.
+        const RETAIL_GROWN: [&str; 2] = ["020c010104", "06b22d010101"];
+        let (mut world, entity) = admitted();
+        let mut content = (*world.content).clone();
+        content.gatherables = Gatherables::build([Gatherable {
+            gather_ms: CANNON_GATHER_MS,
+            respawn_ms: (CANNON_RESPAWN_MS, CANNON_RESPAWN_MS),
+            tradeskill: Some("None".to_owned()),
+            game_event: Some(CANNON_EVENT.to_owned()),
+            ..gatherable(CANNON, true)
+        }]);
+        world.content = Arc::new(content);
+        place_nodes(&mut world, NUMBER, &[CANNON]);
+        world.gather_open_world(entity, NUMBER, request(1, 0x3c, CANNON), &[], NOW);
+        let end_ms = world
+            .open_gathers
+            .first()
+            .expect("the cannon is used")
+            .end_ms;
+        world.gathers_due(end_ms);
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position())
+            .expect("body");
+        let number = world
+            .nodes
+            .numbers_near(at, RADIUS_M)
+            .next()
+            .expect("the used cannon is shown");
+        let mut sent = HashMap::new();
+        let new = Slot {
+            interest: 9,
+            new: true,
+        };
+        let card = world.nodes.group(number, new, &mut sent).expect("card");
+        let node = &world.nodes.nodes[0];
+        let playing = timeline_member(
+            CANNON_TIMELINE_COMPONENT,
+            &TimelineState::start(u64::from(node.timeline_version)),
+        )
+        .expect("timeline");
+        let mut expected: Vec<String> = RETAIL_CARD_STATES
+            .iter()
+            .map(|hex| (*hex).to_owned())
+            .collect();
+        expected.push(hex::encode(playing.encode().expect("encodes")));
+        let mut bytes = member_bytes(&card);
+        assert!(
+            matches!(card.members[0].state, MemberState::GdeMetadata(_)),
+            "the card first"
+        );
+        bytes.remove(0);
+        bytes.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            bytes, expected,
+            "retail's slots and bodies, the timeline playing"
+        );
+        let kept = Slot { new: false, ..new };
+        world.gathers_due(end_ms + CANNON_TIMELINE_MS - 1);
+        assert_eq!(
+            world.nodes.group(number, kept, &mut sent),
+            None,
+            "still firing"
+        );
+        world.gathers_due(end_ms + CANNON_TIMELINE_MS);
+        let stopped = world
+            .nodes
+            .group(number, kept, &mut sent)
+            .expect("timeline end");
+        let node = &world.nodes.nodes[0];
+        let ended = timeline_member(
+            CANNON_TIMELINE_COMPONENT,
+            &TimelineState::end(u64::from(node.timeline_version), cannon_timeline_end_s()),
+        )
+        .expect("timeline");
+        assert!(stopped.members.contains(&ended), "stopped at its end");
+        assert!(node.depleted(), "not grown back yet");
+        world.gathers_due(end_ms + CANNON_RESPAWN_MS);
+        let grown = world
+            .nodes
+            .group(number, kept, &mut sent)
+            .expect("grown back");
+        let bytes = member_bytes(&grown);
+        for retail in RETAIL_GROWN {
+            assert!(
+                bytes.iter().any(|ours| ours == retail),
+                "{retail} in {bytes:?}"
+            );
+        }
+        assert!(in_cannon_slots(&grown), "nothing in the plant slots");
+    }
+
+    #[test]
+    fn a_restored_node_keeps_the_slots_of_its_gatherable() {
+        let mut nodes = Nodes::default();
+        let saved = DepletedNode {
+            gde_ref: FLINT,
+            point: FLINT_POINT,
+            position: AT,
+            respawn_at_unix_ms: RESPAWN_AT_MS,
+        };
+        nodes.restore(&saved, RESPAWN_AT_MS, Some(NodeLayout::BreakingWallsCannon));
+        let number = nodes.numbers_near(AT, RADIUS_M).next().expect("shown");
+        let new = Slot {
+            interest: 9,
+            new: true,
+        };
+        let card = nodes.group(number, new, &mut HashMap::new()).expect("card");
+        assert!(
+            in_cannon_slots(&card),
+            "a restored cannon gets no state in the plant slots"
+        );
+        let mut unsent = Nodes::default();
+        unsent.restore(&saved, RESPAWN_AT_MS, None);
+        assert_eq!(
+            unsent.numbers_near(AT, RADIUS_M).count(),
+            0,
+            "no layout, no card"
+        );
+    }
+
+    #[test]
+    fn a_crate_rolls_its_content_level_items_at_the_gatherers_loot_level() {
+        use nw_content::loot::{BucketItem, LootRow, LootSource, LootTables, PlayerLootLevels};
+        // Build 25810808 `ContainerLootSmall` cut to its `ContainerResources` bucket: every
+        // item asks for a content level (`MinContLevel`).
+        const CRATE: &str = "LootMediumT1";
+        const TABLE: &str = "ContainerLootSmall";
+        const BUCKET: &str = "ContainerResources";
+        const TIER_TAG: &str = "MinContLevel:19-38";
+        const LOOT_LEVEL: u32 = 20;
+        const MAX_ROLL: i64 = 100_000;
+        let row = |id: &str, item: &str, and_or: Option<&str>, max_roll: Option<i64>| LootRow {
+            id: id.to_owned(),
+            and_or: and_or.map(str::to_owned),
+            max_roll,
+            cells: [(1, item.to_owned())].into(),
+            ..LootRow::default()
+        };
+        let (mut world, entity) = admitted();
+        let mut content = (*world.content).clone();
+        content.gatherables = Gatherables::build([Gatherable {
+            loot_table: Some(TABLE.to_owned()),
+            ..gatherable(CRATE, true)
+        }]);
+        content.loot = LootTables::build(LootSource {
+            rows: vec![
+                row(TABLE, &format!("[LBID]{BUCKET}"), Some("OR"), None),
+                row(&format!("{TABLE}_Qty"), "1", None, None),
+                row(&format!("{TABLE}_Probs"), "0", None, Some(MAX_ROLL)),
+            ],
+            bucket_items: vec![BucketItem {
+                bucket: BUCKET.to_owned(),
+                item: KEY.to_owned(),
+                quantity: Some("1".to_owned()),
+                tags: Some(TIER_TAG.to_owned()),
+                match_one: true,
+            }],
+        });
+        content.player_loot_levels = PlayerLootLevels::build([(0, LOOT_LEVEL)]);
+        world.content = Arc::new(content);
+        place_nodes(&mut world, NUMBER, &[CRATE]);
+        world.gather_open_world(entity, NUMBER, request(1, 0x15, CRATE), &[], NOW);
+        let end_ms = world
+            .open_gathers
+            .first()
+            .expect("the crate is opened")
+            .end_ms;
+        world.gathers_due(end_ms);
+        let keys: u32 = world
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref())
+            .map(gear::Gear::carried)
+            .unwrap_or_default()
+            .iter()
+            .filter(|item| item.item_id == KEY)
+            .map(|item| item.quantity)
+            .sum();
+        assert_eq!(keys, 1, "the crate gives the item of the gatherer's tier");
+    }
+}
+
+#[cfg(all(test, feature = "local-data"))]
+mod retail_tests {
+    use std::path::Path;
+
+    use nw_content::ContentBundle;
+    use nw_content::bundle::bundle_path;
+    use nw_content::client_build::load_client_build;
+    use nw_content::gathering::{CrateLoot, CrateVariant};
+    use nw_content::loot::{LootContext, LootTables};
+    use nw_formats::objectstream::lowercase_crc32;
+
+    use super::gather_levels;
+
+    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
+    /// The supply crate of the live play (2026-11-12, Cynefin Mine) and the name its gather
+    /// request carries.
+    const CRATE: &str = "LootMediumT1";
+    const SUPPLIES: &str = "@LootContainer_SuppliesMedium_DisplayName";
+    /// A gatherer above loot level 7, where `ContainerLootSmallLeveled_2` rolls
+    /// `ContainerLootSmall`.
+    const LOOT_LEVEL: u32 = 20;
+    /// No facet entity: the crate's table comes from its gatherable and name.
+    const NO_FACET: u64 = 0;
+
+    #[test]
+    fn the_retail_supply_crate_gives_items_only_with_a_content_level() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let build = load_client_build(&repo.join(CLIENT_BUILD_CONFIG)).expect("client build");
+        let dir = repo.join("local-data/content");
+        let bundle = ContentBundle::load(&bundle_path(&dir, &build), &build).expect("bundle");
+        let loot = LootTables::from_tables(&bundle.tables);
+        let crates = CrateLoot::build(
+            CrateVariant::from_tables(&bundle.tables),
+            std::iter::empty(),
+            std::iter::empty(),
+        );
+        let table = crates
+            .table(NO_FACET, lowercase_crc32(CRATE), SUPPLIES)
+            .expect("the supply crate's table");
+        assert_eq!(table, "ContainerLootSmallLeveled");
+        let plain = LootContext {
+            enemy: None,
+            content: None,
+            player: Some(LOOT_LEVEL),
+            poi: None,
+            tags: &[],
+            reached_limits: &[],
+        };
+        // The middle of every roll.
+        let mut middle = |below: u32| below / 2;
+        assert!(
+            loot.roll(table, plain, &mut middle).items.is_empty(),
+            "without a content level the crate gives nothing"
+        );
+        let gathered = loot.roll(table, gather_levels(plain), &mut middle).items;
+        assert!(
+            !gathered.is_empty(),
+            "the gather's content level gives the crate's items"
+        );
     }
 }

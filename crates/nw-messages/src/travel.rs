@@ -117,6 +117,13 @@ pub const PLACE_STRUCTURE_TYPE_INDEX: u64 = 2236;
 pub const CANCEL_PLACING_STRUCTURE_TYPE_INDEX: u64 = 1507;
 /// `BuilderComponentClientFacet_SyncPlacementRequestResults`.
 pub const PLACEMENT_RESULTS_TYPE_INDEX: u64 = 441;
+/// `BuildableControllerClientFacet_OnCompletionBlockedStatusChanged`.
+pub const COMPLETION_BLOCKED_TYPE_INDEX: u64 = 5361;
+/// The buildable controller component of a camp: the 5361 target less the camp's facet entity.
+/// Observed: one value in 27 of 28 retail 5361 bodies of 29 ledgers (every camp, from
+/// `12a_msq_12_camptutorial` 284.418 s to `Playthrough_Part_18`); the 28th
+/// (`RS_offensive_war` 873.64 s) is of a war structure.
+pub const BUILDABLE_CONTROLLER_COMPONENT: u64 = 0x02a7_2b56_4d4a_6481;
 /// The builder component of the player: the target of 2236, 1507 and 441 less the entity
 /// (`Hive_camping`: 5 placements, 1 cancel and 5 answers, one value; the same session's housing
 /// headers give the known [`component::PLAYER_HOUSING`]).
@@ -888,6 +895,18 @@ pub enum TravelServerMsg {
         /// A number of unknown meaning (0 in every retail body).
         value: u32,
     },
+    /// 5361: the completion of a camp is blocked or not. Observed: `blocked` 1 in all 28
+    /// retail bodies, to the owner when its camp's group comes to it (after 441 at a
+    /// placement, `12a_msq_12_camptutorial` 284.418 s; when the built camp comes back into
+    /// view, `12a_msq_16_fasttravel` 67.56 s). What the client shows for it is Unknown: the
+    /// client facet (`BuildableControllerClientFacet`, constructor `FUN_1447a0070`, vtable
+    /// `0x148379fb0`) is not in the decompile sweep's function bodies.
+    CompletionBlocked {
+        /// The header (the camp's buildable controller, [`BUILDABLE_CONTROLLER_COMPONENT`]).
+        header: FacetHeader,
+        /// Whether the completion is blocked.
+        blocked: bool,
+    },
     /// 3733: items were given back.
     ItemsRefunded {
         /// The header.
@@ -922,6 +941,7 @@ impl TravelServerMsg {
                 | ITEMS_REFUNDED_TYPE_INDEX
                 | RESIDENT_DATA_TYPE_INDEX
                 | PLACEMENT_RESULTS_TYPE_INDEX
+                | COMPLETION_BLOCKED_TYPE_INDEX
         )
     }
 
@@ -999,6 +1019,10 @@ impl TravelServerMsg {
                 result: reader.u8()?,
                 value: reader.u32()?,
             },
+            COMPLETION_BLOCKED_TYPE_INDEX => Self::CompletionBlocked {
+                header,
+                blocked: reader.boolean()?,
+            },
             ITEMS_REFUNDED_TYPE_INDEX => Self::ItemsRefunded {
                 header,
                 id: reader.raw_id()?,
@@ -1036,6 +1060,7 @@ impl TravelServerMsg {
             Self::ItemsRefunded { .. } => ITEMS_REFUNDED_TYPE_INDEX,
             Self::ResidentData { .. } => RESIDENT_DATA_TYPE_INDEX,
             Self::PlacementResults { .. } => PLACEMENT_RESULTS_TYPE_INDEX,
+            Self::CompletionBlocked { .. } => COMPLETION_BLOCKED_TYPE_INDEX,
         }
     }
 
@@ -1059,7 +1084,8 @@ impl TravelServerMsg {
             | Self::RemoveItemResult { header, .. }
             | Self::ItemsRefunded { header, .. }
             | Self::ResidentData { header, .. }
-            | Self::PlacementResults { header, .. } => header,
+            | Self::PlacementResults { header, .. }
+            | Self::CompletionBlocked { header, .. } => header,
         }
     }
 
@@ -1111,6 +1137,9 @@ impl TravelServerMsg {
             }
             Self::PlacementResults { result, value, .. } => {
                 writer.u8(*result).u32(*value);
+            }
+            Self::CompletionBlocked { blocked, .. } => {
+                writer.boolean(*blocked);
             }
             Self::FastTravelCompleted { .. }
             | Self::FastTravelFailed { .. }
@@ -1607,5 +1636,28 @@ mod tests {
             PLACEMENT_RESULTS_TYPE_INDEX,
             &[0x00, 0x00, 0x00, 0x00, 0x00],
         );
+    }
+
+    /// Retail `12a_msq_12_camptutorial` 284.418 s: the 5361 of the placed camp (facet entity
+    /// `3c489541019d4900`).
+    const RETAIL_COMPLETION_BLOCKED: &str = "3eefc0974ee7ad813c489541019d490001";
+    const RETAIL_CAMP_FACET: u64 = 0x3c48_9541_019d_4900;
+
+    #[test]
+    fn the_retail_completion_blocked_call_reads_and_writes_back() {
+        let bytes = hex::decode(RETAIL_COMPLETION_BLOCKED).expect("hex");
+        let message =
+            TravelServerMsg::decode(COMPLETION_BLOCKED_TYPE_INDEX, &bytes).expect("reads");
+        assert_eq!(
+            message,
+            TravelServerMsg::CompletionBlocked {
+                header: FacetHeader {
+                    target: RETAIL_CAMP_FACET.wrapping_add(BUILDABLE_CONTROLLER_COMPONENT),
+                    entity: RETAIL_CAMP_FACET,
+                },
+                blocked: true,
+            }
+        );
+        assert_eq!(message.encode(), bytes);
     }
 }

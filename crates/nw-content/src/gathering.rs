@@ -39,6 +39,13 @@ const PLANT_LAYOUT_OTHERS: [&str; 11] = [
     "NutSmall",
     "SingleStone",
 ];
+/// The gatherables of the Fire Cannon of the breaking walls vignettes (the
+/// `Gimmick_BreakingWallsCannon_Interact` slices: the cannon, the wall, its debris and the
+/// server timeline that fires the one and breaks the other). Every retail card of its node
+/// (gimmick scan of 2026-11-12: 19 cards of 4 placements in 8 ledgers, `12a_msq_08_destroyrune`
+/// and `99d_msq_04_destroymines` among them) had the same slots. Its other gatherable,
+/// `Gimmick_BreakingWallsCannon`, has no retail gather, so its slots are Unknown.
+const BREAKING_WALLS_CANNONS: [&str; 1] = ["Gimmick_BreakingWallsCannon_Vignette"];
 
 /// One gatherable of `javelindata_gatherables`.
 #[derive(Debug, Clone, PartialEq)]
@@ -89,6 +96,15 @@ impl Gatherable {
             || PLANT_LAYOUT_OTHERS
                 .iter()
                 .any(|id| id.eq_ignore_ascii_case(&self.id))
+    }
+
+    /// Its node entity is the Fire Cannon of a breaking walls vignette
+    /// ([`BREAKING_WALLS_CANNONS`]), whose card holds a timeline beside the gatherable controller
+    /// and the interact.
+    pub fn breaking_walls_cannon(&self) -> bool {
+        BREAKING_WALLS_CANNONS
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case(&self.id))
     }
 }
 
@@ -626,6 +642,20 @@ mod tests {
         );
         assert!(!gatherable_of("17dw_DoorLarge", None).plant_layout());
         assert!(!gatherable_of("16BS_AncientGlyphLock", Some("AzothStaff")).plant_layout());
+    }
+
+    #[test]
+    fn only_the_vignette_cannon_has_the_breaking_walls_cannon_slots() {
+        assert!(
+            gatherable_of("gimmick_breakingwallscannon_vignette", Some("None"))
+                .breaking_walls_cannon(),
+            "any case"
+        );
+        assert!(
+            !gatherable_of("Gimmick_BreakingWallsCannon", Some("None")).breaking_walls_cannon(),
+            "no retail gather measured its slots"
+        );
+        assert!(!gatherable_of("HempT1", Some("Harvesting")).breaking_walls_cannon());
     }
 
     #[test]

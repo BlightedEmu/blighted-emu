@@ -25,7 +25,9 @@ use nw_bus::{
     InstanceReply, InstanceRequest, InstanceStay, PlayerArena, Point, RunningInstance, SimSlot,
     StoredPoint, WAR_GAME_MODE, WarInstance,
 };
-use nw_content::instances::{EntryCounter, InstanceCatalog, InstanceKind, InstanceMode, NO_INDEX};
+use nw_content::instances::{
+    EntryCounter, InstanceCatalog, InstanceKind, InstanceMode, NO_INDEX, frame_holds,
+};
 use nw_content::loot_limits::ResetCycle;
 use nw_messages::{
     ActivateResponse, ArenaClientMsg, ArenaServerMsg, FacetHeader, FullList, InteractionRequest,
@@ -35,6 +37,7 @@ use nw_messages::{
 use nw_sim_core::Position;
 use uuid::Uuid;
 
+use super::catacombs::{CatacombRun, open_run};
 use super::mutations::{InstanceMutation, difficulty_of_request};
 use super::war_fight::WarFight;
 use super::{
@@ -123,6 +126,9 @@ pub(super) struct ArenaPlayer {
     touched: bool,
     /// The player leaves its instance (926 or interaction 74): it is no longer in the arena.
     exiting: bool,
+    /// The entrance capital whose menu it opened or that it entered at last
+    /// ([`super::dungeon_entrances`]).
+    entrance: Option<u64>,
 }
 
 impl ArenaPlayer {
@@ -284,6 +290,8 @@ pub(crate) struct InstanceRun {
     /// The fight of the territory war it runs ([`super::war_fight`]); `None` for every other
     /// instance.
     war: Option<WarFight>,
+    /// The catacombs run it runs ([`super::catacombs`]); `None` for every other instance.
+    catacomb: Option<CatacombRun>,
 }
 
 impl InstanceRun {
@@ -305,6 +313,16 @@ impl InstanceRun {
     /// The fight of the war it runs.
     pub(super) const fn war_fight(&self) -> Option<&WarFight> {
         self.war.as_ref()
+    }
+
+    /// The catacombs run it runs.
+    pub(super) const fn catacomb(&self) -> Option<&CatacombRun> {
+        self.catacomb.as_ref()
+    }
+
+    /// The catacombs run it runs, to change.
+    pub(super) const fn catacomb_mut(&mut self) -> Option<&mut CatacombRun> {
+        self.catacomb.as_mut()
     }
 
     /// Takes the fight of its war out, to run it ([`Self::put_war_fight`] puts it back).
@@ -337,9 +355,19 @@ impl InstanceRun {
         &self.game_mode
     }
 
+    /// The instance's id.
+    pub(super) const fn instance(&self) -> Uuid {
+        self.instance
+    }
+
     /// Its phase id.
     pub(super) const fn phase(&self) -> u64 {
         self.phase
+    }
+
+    /// Unix ms when it ends, when its game mode limits it.
+    pub(super) const fn ends_at_ms(&self) -> Option<u64> {
+        self.ends_at_ms
     }
 }
 
@@ -464,6 +492,9 @@ impl SimWorld {
         if let Some(fight) = self.war_fight() {
             return fight.level();
         }
+        if let Some(run) = self.catacomb_run() {
+            return run.level();
+        }
         self.instance_run
             .as_ref()
             .and_then(|run| self.content.instances.by_id(&run.game_mode))
@@ -559,6 +590,9 @@ impl SimWorld {
             kind::OPEN_DUNGEON_MENU => {
                 if let Some(crc) = self.entrance_at(request.target_entity) {
                     self.offer_game_mode(entity, crc, false);
+                    if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                        player.arena.entrance = Some(request.target_entity);
+                    }
                 }
                 let accepted = gather_answer(number, request, ACCEPTED, name);
                 self.send_to(entity, &[accepted]);
@@ -570,6 +604,7 @@ impl SimWorld {
                     if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                         player.arena.selected = Some(crc);
                         player.arena.difficulty = None;
+                        player.arena.entrance = Some(request.target_entity);
                     }
                     self.activate(entity, false);
                 }
@@ -600,7 +635,7 @@ impl SimWorld {
         };
         // An arena or an Outpost Rush match is entered by the matchmaking queue only
         // ([`super::queue`]).
-        if (remote && !mode.remote_entry) || mode.generated || mode.kind.is_matched() {
+        if (remote && !mode.remote_entry) || mode.kind.is_matched() {
             return false;
         }
         // `RequiredLevel` is the character level the client shows: one above the zero-based
@@ -671,7 +706,8 @@ impl SimWorld {
         };
         let (number, character, connection) =
             (player.number, player.character, player.connection.clone());
-        if !self.may_activate(entity, mode, remote) {
+        // The catacombs answer a 5039 (retail: 5038 allowed) but are entered by the queue only.
+        if mode.kind.is_queued() || !self.may_activate(entity, mode, remote) {
             self.answer_activation(entity, number, ActivateResponse::EntranceActivationFailure);
             return;
         }
@@ -737,6 +773,7 @@ impl SimWorld {
                 instance,
                 sim,
                 phase,
+                opened,
                 ..
             }) => {
                 let Some(crc) = player.arena.selected else {
@@ -753,6 +790,10 @@ impl SimWorld {
                     arena: None,
                 });
                 player.arena.touched = true;
+                let entrance = player.arena.entrance;
+                if opened {
+                    self.entrance_run_started(entity, crc, entrance, instance);
+                }
                 ActivateResponse::Success
             }
             Ok(InstanceReply::Refused { reason }) => response_of(reason),
@@ -938,6 +979,7 @@ impl SimWorld {
             seat: None,
         };
         self.move_into_instance(entity, stay, sim, arrival);
+        self.join_war_raid(entity);
     }
 
     /// 926, 3309 or interaction 74: a player in this instance sim goes back to where it entered
@@ -959,6 +1001,7 @@ impl SimWorld {
         // The game mode takes back its items (`ItemClassesToRemoveOnExit`).
         self.remove_instance_items(entity);
         self.war_exit(entity);
+        self.leave_raid(entity);
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
@@ -1092,6 +1135,9 @@ impl SimWorld {
             self.adopt_mutation(&stay, number);
             if let Some(seat) = stay.seat {
                 self.join_arena_match(entity, seat);
+                self.join_match_raid(entity);
+            } else {
+                self.join_run_raid(entity);
             }
             self.war_arrived(entity);
         }
@@ -1153,9 +1199,18 @@ impl SimWorld {
                 reason: format!("game mode {game_mode} is not on this level"),
             };
         }
-        // A fresh instance: every mob of the level spawns again.
-        self.mob_changes.add(self.mobs.set_cells(|_| false));
-        self.mob_changes.add(self.mobs.set_cells(|_| true));
+        let level = self
+            .instance_levels
+            .get(&(mode.crc, self.settings.level.folder.to_owned()))
+            .copied()
+            .unwrap_or(self.settings.level);
+        let catacomb = open_run(&self.content, mode, level, instance);
+        if mode.generated && catacomb.is_none() {
+            return InstanceOpened::Refused {
+                reason: format!("game mode {game_mode} has no layout"),
+            };
+        }
+        self.end_instance_run();
         self.instance_run = Some(InstanceRun {
             instance,
             game_mode: game_mode.to_owned(),
@@ -1168,9 +1223,54 @@ impl SimWorld {
             closing: false,
             mutation: None,
             war: None,
+            catacomb,
         });
+        self.spawn_instance_mobs(true);
+        self.place_catacomb_tiles();
         tracing::info!(%instance, game_mode, "instance opened");
         InstanceOpened::Opened
+    }
+
+    /// The frame (x, y, width, height) whose spawns the running instance owns: the fort's frame
+    /// of a war, or the `WorldBounds` of a matched map that is a part of the open world level
+    /// (the Outpost Rush island, Observed: only the island's own mobs, the `OR_` point spawns of
+    /// its layout, were in the retail island matches, `OPR---ISLAND-2` and `OPR_TEST3`); `None`
+    /// for an instance whose level is its own, and with no instance.
+    pub(super) fn instance_frame(&self) -> Option<[f32; 4]> {
+        if let Some(fight) = self.war_fight() {
+            return Some(fight.fort().frame);
+        }
+        let open_world = nw_messages::level_info::OPEN_WORLD_LEVEL.folder;
+        if self.settings.level.folder != open_world {
+            return None;
+        }
+        let run = self.instance_run.as_ref()?;
+        let mode = self.content.instances.by_id(&run.game_mode)?;
+        mode.map_of(open_world).map(|map| map.frame)
+    }
+
+    /// Spawns the mobs whose spawns the running instance owns ([`Self::instance_frame`]) and
+    /// removes the others; `fresh` first removes every mob (a new instance: its mobs spawn
+    /// again).
+    pub(super) fn spawn_instance_mobs(&mut self, fresh: bool) {
+        if fresh {
+            self.mob_changes.add(self.mobs.set_cells(|_| false));
+        }
+        let frame = self.instance_frame();
+        self.mob_changes.add(
+            self.mobs
+                .set_cells(|at| frame.is_none_or(|frame| frame_holds(frame, at.x, at.y))),
+        );
+        self.recheck_timed_spawns();
+    }
+
+    /// Frees this sim of its instance: the tile entities of a catacombs run go away.
+    fn end_instance_run(&mut self) {
+        if let Some(mut run) = self.instance_run.take()
+            && let Some(catacomb) = run.catacomb_mut()
+        {
+            self.remove_catacomb_tiles(catacomb);
+        }
     }
 
     /// Runs the instance `instance` of the territory war `war` (the director's opening): the
@@ -1214,6 +1314,7 @@ impl SimWorld {
         self.mob_changes.add(self.mobs.set_cells(|_| false));
         self.mob_changes
             .add(self.mobs.set_cells(|at| fight.frames(at.x, at.y)));
+        self.recheck_timed_spawns();
         self.instance_run = Some(InstanceRun {
             instance,
             game_mode: WAR_GAME_MODE.to_owned(),
@@ -1226,6 +1327,7 @@ impl SimWorld {
             closing: false,
             mutation: None,
             war: Some(fight),
+            catacomb: None,
         });
         tracing::info!(%instance, war = %war.war, territory = war.territory, "war instance opened");
         InstanceOpened::Opened
@@ -1257,7 +1359,7 @@ impl SimWorld {
         }
         if players.is_empty() {
             tracing::info!(%instance, "instance closed");
-            self.instance_run = None;
+            self.end_instance_run();
         } else if let Some(run) = self.instance_run.as_mut() {
             // No one may come in again; the last exit frees the sim.
             run.members.clear();
@@ -1293,7 +1395,7 @@ impl SimWorld {
         // Closed and empty: free again.
         if players == 0 && run.closing {
             tracing::info!(instance = %run.instance, "instance closed");
-            self.instance_run = None;
+            self.end_instance_run();
             return Some(InstanceBeat { running: None });
         }
         let war = run.war.as_ref().map(WarFight::war);
@@ -1384,7 +1486,7 @@ fn refresh(record: &mut PlayerArena, clock: nw_content::loot_limits::ResetClock,
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use nw_content::instances::{InstanceMap, Teleport};
     use nw_content::loot_limits::{ResetClock, Weekday};
 
@@ -1686,7 +1788,7 @@ mod tests {
     }
 
     /// The solo trial of the end-to-end test: one player, its level and teleport spot.
-    fn trial() -> InstanceMode {
+    pub(in crate::world) fn trial() -> InstanceMode {
         InstanceMode {
             capacity: 1,
             min_group: 0,

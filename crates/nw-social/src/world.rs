@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use nw_bus::{
     BusId, LeaveReason, SocialDelivery, SocialFacetKind, SocialHeader, SocialInput, SocialPlayer,
 };
-use nw_db::{CoinReturn, Company, LinkKind, SocialGroup, SocialRecords, SocialSettings};
+use nw_db::{
+    CoinReturn, Company, LinkKind, SocialGroup, SocialRecords, SocialSettings, WarRequest,
+};
 use nw_messages::FacetHeader;
 use nw_messages::social::group_data::ROLE_NONE;
 use nw_messages::social::players::{ONLINE_STATE_OFFLINE, ONLINE_STATE_ONLINE};
@@ -17,8 +19,10 @@ use uuid::Uuid;
 
 use crate::companies::CompanyRules;
 use crate::effects::{Effect, StoreOp};
+use crate::player_raids::{PLAYER_RAID_ID_BASE, RaidVote};
 use crate::privacy::PrivacyByAccount;
 use crate::profanity::ProfanityFilter;
+use crate::raids::{Raid, RaidInvite};
 use crate::throttle::ChatThrottle;
 use crate::views::{GroupVitals, SentViews, vitals_of};
 use crate::voice::VoiceService;
@@ -84,6 +88,8 @@ pub(crate) struct Person {
     pub(crate) vitals: GroupVitals,
     /// The role it chose for its groups (5390, [`crate::groups`]); kept for the service's run.
     pub(crate) group_role: u8,
+    /// The raid it is in, by raid entity id ([`crate::raids`]).
+    pub(crate) raid: Option<[u8; 16]>,
 }
 
 impl Person {
@@ -106,6 +112,7 @@ impl Person {
             throttle: ChatThrottle::default(),
             vitals: GroupVitals::default(),
             group_role: ROLE_NONE,
+            raid: None,
         }
     }
 }
@@ -126,6 +133,9 @@ pub(crate) struct GroupInvite {
     pub(crate) invitee: Uuid,
     /// Unix milliseconds when it was made.
     pub(crate) created_ms: u64,
+    /// The group of the inviter's players' raid the invitee fills first; `None` for a plain
+    /// group invite ([`crate::player_raids`]).
+    pub(crate) raid_group: Option<u8>,
 }
 
 /// The coins of one treasury transfer.
@@ -160,6 +170,9 @@ pub(crate) enum Transfer {
         /// When the player asked, Unix milliseconds.
         at_ms: u64,
     },
+    /// A war declaration paid from the player's wallet: its coins leave the player, then the
+    /// declaration goes to the database ([`crate::war_declaration`]).
+    WarFee(WarRequest),
 }
 
 /// The social state of one world.
@@ -196,6 +209,18 @@ pub struct SocialWorld {
     pub(crate) company_invite_ms: HashMap<(Uuid, Uuid), u64>,
     /// The territory claims each company owns, as the service last read them.
     pub(crate) claim_counts: HashMap<Uuid, u32>,
+    /// The raids by raid entity id ([`crate::raids`]).
+    pub(crate) raids: HashMap<[u8; 16], Raid>,
+    /// The open raid invites by invite id ([`crate::raids`]).
+    pub(crate) raid_invites: HashMap<[u8; 16], RaidInvite>,
+    /// The open convert-to-raid votes by group id ([`crate::player_raids`]).
+    pub(crate) raid_votes: HashMap<Uuid, RaidVote>,
+    /// When each group last started a convert-to-raid vote, Unix milliseconds.
+    pub(crate) raid_vote_starts: HashMap<Uuid, u64>,
+    /// The raid id of the next players' raid.
+    pub(crate) next_player_raid: u64,
+    /// The war declarations the database has now, by ticket ([`crate::war_declaration`]).
+    pub(crate) war_requests: HashMap<u64, WarRequest>,
 }
 
 impl SocialWorld {
@@ -323,6 +348,12 @@ impl SocialWorld {
             sent: HashMap::new(),
             company_invite_ms: HashMap::new(),
             claim_counts: HashMap::new(),
+            raids: HashMap::new(),
+            raid_invites: HashMap::new(),
+            raid_votes: HashMap::new(),
+            raid_vote_starts: HashMap::new(),
+            next_player_raid: PLAYER_RAID_ID_BASE,
+            war_requests: HashMap::new(),
         }
     }
 
@@ -353,6 +384,7 @@ impl SocialWorld {
                     .get(&character)
                     .and_then(|person| person.online.as_ref())
                     .is_some_and(|online| online.sim == *sim);
+                self.drop_raid_invites(character, Some(sim));
                 if here && reason == LeaveReason::Logout {
                     self.went_offline(character, now_ms);
                 }
@@ -363,6 +395,18 @@ impl SocialWorld {
                 body,
             } => self.call(character, type_index, &body, now_ms),
             SocialInput::PayUpkeep(payment) => self.pay_upkeep(payment),
+            SocialInput::RaidJoin {
+                character,
+                raid,
+                group,
+            } => self.join_raid(character, raid, group),
+            SocialInput::RaidLeave { character, raid } => self.leave_raid(character, raid),
+            SocialInput::RaidInvite {
+                character,
+                raid,
+                group,
+                activity,
+            } => self.invite_to_raid(sim, character, raid, group, activity, now_ms),
         }
         self.refresh_views(now_ms);
         std::mem::take(&mut self.out)
@@ -478,6 +522,13 @@ impl SocialWorld {
         self.touch(character);
         self.tell_watchers(character, ONLINE_STATE_OFFLINE);
         self.drop_group_invites_of(character);
+        self.drop_raid_invites(character, None);
+        // A players' raid keeps an offline member, as a group does ([`crate::player_raids`]).
+        if let Some(raid) = self.people.get(&character).and_then(|person| person.raid)
+            && self.player_raid_of(character).is_none()
+        {
+            self.leave_raid(character, raid);
+        }
         metrics::gauge!(METRIC_ONLINE).set(self.online_count() as f64);
     }
 
@@ -538,6 +589,7 @@ impl SocialWorld {
             SocialCall::Group(call) => self.group_call(character, call, now_ms),
             SocialCall::Guild(call) => self.guild_call(character, header, call, now_ms),
             SocialCall::Voice(call) => self.voice_call(character, header, call, now_ms),
+            SocialCall::War(call) => self.war_call(character, call),
         }
     }
 

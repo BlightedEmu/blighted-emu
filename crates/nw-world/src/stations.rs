@@ -16,15 +16,17 @@ use serde::{Deserialize, Serialize};
 use crate::records::Position;
 
 /// `Javelin::BuildableController`: `m_initialState`, `m_structureName`.
-const BUILDABLE_CONTROLLER: [u8; UUID_LEN] = uuid(0x359f_8468_0483_46ee_b1d4_beb7_5c10_48fd);
+pub(crate) const BUILDABLE_CONTROLLER: [u8; UUID_LEN] =
+    uuid(0x359f_8468_0483_46ee_b1d4_beb7_5c10_48fd);
 /// The ownership component: `m_initialPermissionRule`, `m_initialStructureName`.
-const OWNERSHIP: [u8; UUID_LEN] = uuid(0x2a33_3c23_a549_bc11_1a9a_ae90_5170_f2f6);
+pub(crate) const OWNERSHIP: [u8; UUID_LEN] = uuid(0x2a33_3c23_a549_bc11_1a9a_ae90_5170_f2f6);
 /// The crafting station component: `m_craftingStationReference.m_craftingStationEntry`.
 const CRAFTING_STATION: [u8; UUID_LEN] = uuid(0x5200_15fd_2674_49e1_b862_e737_1ae6_0043);
 /// The interact name component: `m_name`, the name the station's interaction answer carries.
 const INTERACT_NAME: [u8; UUID_LEN] = uuid(0x76e2_6125_7e1c_32f4_c1d0_b841_d643_12ad);
 /// `Javelin::PlacementObstructionComponent`.
-const PLACEMENT_OBSTRUCTION: [u8; UUID_LEN] = uuid(0xfecc_8785_5d77_7138_0bdf_573d_e220_d90e);
+pub(crate) const PLACEMENT_OBSTRUCTION: [u8; UUID_LEN] =
+    uuid(0xfecc_8785_5d77_7138_0bdf_573d_e220_d90e);
 /// `Javelin::TerritoryInterfaceComponent`.
 const TERRITORY_INTERFACE: [u8; UUID_LEN] = uuid(0xe1d7_8b60_b892_4d25_9e5e_5ac8_c398_fcab);
 /// `Javelin::BuildableGridComponent`: `m_gridHeightsData`.
@@ -140,13 +142,13 @@ fn descendants(root: &Element) -> Vec<&Element> {
 }
 
 /// The first element named `name` under `root`.
-fn find(root: &Element, name: u32) -> Option<&Element> {
+pub(crate) fn find(root: &Element, name: u32) -> Option<&Element> {
     descendants(root)
         .into_iter()
         .find(|element| element.name_crc == Some(name))
 }
 
-fn text(element: Option<&Element>) -> String {
+pub(crate) fn text(element: Option<&Element>) -> String {
     element
         .and_then(|element| element.as_string().ok())
         .unwrap_or_default()
@@ -159,7 +161,7 @@ pub(crate) fn replication_index(element: &Element) -> Option<u8> {
 }
 
 /// A `u32` field as a byte (indexes and enums of a slice are small).
-fn small(element: Option<&Element>) -> Option<u8> {
+pub(crate) fn small(element: Option<&Element>) -> Option<u8> {
     element
         .and_then(|element| element.as_u32().ok())
         .and_then(|value| u8::try_from(value).ok())

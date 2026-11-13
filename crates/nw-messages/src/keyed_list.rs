@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! A replicated map, or a list keyed by its index, whose delta form may remove entries: the
 //! status effect maps (type 4236), the war data (1739), the siege warfare data (4103) and the
-//! territory interactor's sign-ups (1880).
+//! territory interactor's sign-ups (1880), and the resources committed to a buildable (1594,
+//! keyed by the item id text: retail `12a_msq_12_camptutorial` 290.886 s added `FlintT1` with
+//! version 14 in this delta form).
 //!
 //! The full form is the version and every (key, value) entry ([`FullList`]). The delta form is a
 //! count above 0, then groups of up to 8 entries. Each group starts with a mask byte: bit `i` set
@@ -20,7 +22,7 @@ const MAX_CHANGES: u64 = 16_383;
 const VERSION_ABSENT: u8 = 0;
 
 /// The wire form of a map key.
-pub trait MapKey: Copy {
+pub trait MapKey: Clone {
     /// Reads a key.
     ///
     /// # Errors
@@ -28,7 +30,11 @@ pub trait MapKey: Copy {
     /// Returns [`MessageError`] when the body ends early.
     fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError>;
     /// Writes the key.
-    fn write(&self, writer: &mut Writer);
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError::CountTooLarge`] for a text key too long for its prefix.
+    fn write(&self, writer: &mut Writer) -> Result<(), MessageError>;
 }
 
 impl MapKey for u16 {
@@ -36,8 +42,9 @@ impl MapKey for u16 {
         reader.u16()
     }
 
-    fn write(&self, writer: &mut Writer) {
+    fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
         writer.u16(*self);
+        Ok(())
     }
 }
 
@@ -46,8 +53,9 @@ impl MapKey for u32 {
         reader.u32()
     }
 
-    fn write(&self, writer: &mut Writer) {
+    fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
         writer.u32(*self);
+        Ok(())
     }
 }
 
@@ -56,8 +64,9 @@ impl MapKey for u64 {
         reader.u64()
     }
 
-    fn write(&self, writer: &mut Writer) {
+    fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
         writer.u64(*self);
+        Ok(())
     }
 }
 
@@ -71,8 +80,9 @@ impl MapKey for ListIndex {
         reader.wide_prefixed().map(Self)
     }
 
-    fn write(&self, writer: &mut Writer) {
+    fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
         writer.wide_prefixed(self.0);
+        Ok(())
     }
 }
 
@@ -135,7 +145,7 @@ impl<K: MapKey, V> KeyedList<K, V> {
     ) -> Result<(), MessageError> {
         match self {
             Self::Full(list) => list.write(writer, |writer, (key, value)| {
-                key.write(writer);
+                key.write(writer)?;
                 write_value(writer, value)
             }),
             Self::Changes(changes) => write_changes(writer, changes, write_value),
@@ -239,7 +249,7 @@ fn write_changes<K: MapKey, V>(
             .fold(0_u8, |mask, (entry, _)| mask | (1 << entry));
         writer.u8(mask);
         for change in group {
-            change.key.write(writer);
+            change.key.write(writer)?;
             match change.version {
                 Some(version) => writer.u8(VERSION_PRESENT).wide_prefixed(version),
                 None => writer.u8(VERSION_ABSENT),

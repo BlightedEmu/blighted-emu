@@ -14,6 +14,7 @@
 //! 30 m/s. Inferred: the landing test on the body (the client's projectile collision is not
 //! read), and a flight time of the slice's speed along the ground (its arc is not drawn).
 
+use nw_content::player_attacks::Flight;
 use nw_sim_core::Position;
 
 use super::Body;
@@ -42,6 +43,22 @@ pub(super) struct MobShot {
     radius_m: f32,
     /// When it lands.
     land_ms: u64,
+}
+
+/// The flight of a projectile a clip names no slice for: straight at the clip's
+/// `ProjectileSpeed`, the speed its aim leads with, until it passes the attack's range. Inferred:
+/// the ranged attack database's own flight fields are not named (`AI_Risen_Vomit_Ball` `Basic`:
+/// not a hit scan, range 100 m, radius 0.3 m, and unnamed speeds of 100). Without it the risen
+/// regurgitator's `AVOMIT` and `Attack_Throw` clips (`ProjectileSpeed` 15 and 30, no
+/// `SliceOverride`) fired nothing: "mob projectile flight missing" (live 2026-11-12 13:24:26).
+fn straight_flight(speed_mps: f32, range_m: f32) -> Flight {
+    Flight {
+        base_speed_mps: speed_mps,
+        extra_speed_mps: 0.0,
+        time_for_max_speed_s: 0.0,
+        gravity_mps2: 0.0,
+        lifetime_s: range_m / speed_mps,
+    }
 }
 
 /// The point a shot from `from` aims at for a target at `target` that moves at `velocity` (m/s
@@ -99,21 +116,31 @@ impl SimWorld {
         let Some(attack) = attack else {
             tracing::warn!(
                 mob = intent.mob,
+                attack = clip.attack,
+                reason = "no ranged attack",
                 ?weapon,
                 ?clip,
-                "mob ranged attack missing"
+                "mob attack not started"
             );
             return;
         };
         let flight = if attack.hit_scan {
             None
         } else {
-            let flight = clip
-                .slice
-                .as_deref()
-                .and_then(|slice| data.projectile_flight(slice));
+            let flight = match clip.slice.as_deref() {
+                Some(slice) => data.projectile_flight(slice),
+                None => clip
+                    .speed_mps
+                    .map(|speed_mps| straight_flight(speed_mps, attack.range_m)),
+            };
             if flight.is_none() {
-                tracing::warn!(mob = intent.mob, ?clip, "mob projectile flight missing");
+                tracing::warn!(
+                    mob = intent.mob,
+                    attack = clip.attack,
+                    reason = "no flight",
+                    ?clip,
+                    "mob attack not started"
+                );
                 return;
             }
             flight
@@ -134,8 +161,10 @@ impl SimWorld {
         let Some(flight_s) = flight_s else {
             tracing::debug!(
                 mob = intent.mob,
+                attack = clip.attack,
+                reason = "out of range",
                 distance = distance_m,
-                "mob shot missed: out of range"
+                "mob attack not started"
             );
             return;
         };
@@ -261,8 +290,9 @@ mod tests {
         world
     }
 
-    /// The test mob's ranged clip at player 1, from the main-hand item `weapon`.
-    fn shot_at(weapon: Option<&str>) -> MobAttackIntent {
+    /// The test mob's ranged clip at player 1, from the main-hand item `weapon`, with the
+    /// projectile slice `slice`.
+    fn shot_from(weapon: Option<&str>, slice: Option<&str>) -> MobAttackIntent {
         MobAttackIntent {
             mob: mob_entity(0),
             target: 1,
@@ -283,12 +313,18 @@ mod tests {
                 },
                 ranged: Some(RangedClip {
                     attack: TEST_RANGED_ATTACK.to_owned(),
-                    slice: Some(TEST_SHOT_SLICE.to_owned()),
+                    slice: slice.map(str::to_owned),
                     lead: false,
                     lead_max_rad: 0.0,
+                    speed_mps: Some(TEST_SHOT_SPEED_MPS),
                 }),
             }),
         }
+    }
+
+    /// The test mob's ranged clip with its projectile slice at player 1, from `weapon`.
+    fn shot_at(weapon: Option<&str>) -> MobAttackIntent {
+        shot_from(weapon, Some(TEST_SHOT_SLICE))
     }
 
     fn health_of(world: &mut SimWorld) -> u32 {
@@ -330,6 +366,29 @@ mod tests {
         assert_eq!(world.mob_shots_due(NOW + flight_ms).len(), 1);
         assert!(health_of(&mut world) < full);
         assert!(world.mob_shots.is_empty());
+    }
+
+    /// A clip without a projectile slice flies at its own `ProjectileSpeed` (the risen
+    /// regurgitator's `AVOMIT`, live 2026-11-12: "mob projectile flight missing" and no shot).
+    #[test]
+    fn a_shot_without_a_slice_flies_at_its_clip_speed() {
+        let mut world = range();
+        let full = health_of(&mut world);
+        world.mob_hits(vec![(shot_from(Some(TEST_RANGED_ITEM), None), None)], NOW);
+        assert_eq!(world.mob_shots.len(), 1, "fired");
+        // 6 m at 20 m/s, to the millisecond of the flight's time search.
+        const FLIGHT_MS: u64 = 300;
+        let land_ms = world.mob_shots[0].land_ms;
+        assert!(land_ms.abs_diff(NOW + FLIGHT_MS) <= 1, "{land_ms}");
+        assert!(world.mob_shots_due(land_ms - 1).is_empty());
+        assert_eq!(world.mob_shots_due(land_ms).len(), 1);
+        assert!(health_of(&mut world) < full);
+        let flight = straight_flight(TEST_SHOT_SPEED_MPS, TEST_SHOT_RANGE_M);
+        assert_eq!(
+            flight.time_to(TEST_SHOT_RANGE_M + 1.0),
+            None,
+            "gone past its range"
+        );
     }
 
     #[test]
