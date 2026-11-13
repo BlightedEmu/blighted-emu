@@ -282,15 +282,18 @@ mod tests {
     const RETAIL_ROTATION_Z: u16 = 9597;
     /// The achievement of the crown chamber plot.
     const DAGGERS: &str = "12A_MB_Daggers_Complete";
+    /// The id of the crown chamber plot's capital in the open world's world file.
+    const CROWN_CAPITAL: &str = "6ba512ee-59e3-4fe7-896b-9d24c2f1932e";
     /// A view radius for the tests.
     const RADIUS_M: f32 = 100.0;
 
-    /// The level capital of the crown chamber plot (the client level's place; the turn is the
-    /// retail door's, -90 degrees about the up axis).
+    /// The level capital of the crown chamber plot as the world file holds it (Observed:
+    /// `12mb04_props.capitals.json`, id `6ba512ee-...`, rotation (0, 0, -0.70710677,
+    /// 0.70710677): -90 degrees about the up axis, the retail door's z 9597).
     fn crown_plot() -> Capital {
         let half_yaw = -std::f32::consts::FRAC_PI_4;
         Capital {
-            id: "f3b41357-e794-be99-e184-a3ddf65f8d53".into(),
+            id: CROWN_CAPITAL.into(),
             position: [7927.443, 2749.6392, 92.4478],
             rotation: [0.0, 0.0, half_yaw.sin(), half_yaw.cos()],
             scale: None,
@@ -412,5 +415,56 @@ mod tests {
             .expect("the crown chamber row");
         assert_eq!(normal_path(&row.slice), DOOR_LAYOUTS[0].slice);
         assert_eq!(row.achievement, DAGGERS);
+    }
+}
+
+#[cfg(all(test, feature = "local-data"))]
+mod retail_tests {
+    use std::path::Path;
+
+    use nw_content::ContentBundle;
+    use nw_content::bundle::bundle_path;
+    use nw_content::client_build::load_client_build;
+    use nw_messages::position::RotationComponent;
+    use nw_world::dungeon_scripts::OPEN_WORLD_LEVEL;
+    use nw_world::records::WorldFile;
+    use nw_world::world_file::world_file_path;
+
+    use super::*;
+
+    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
+    /// The retail crown chamber door's rotation z (`12a_msq_20_collectcrown` 123.437 s).
+    const RETAIL_ROTATION_Z: u16 = 9597;
+
+    #[test]
+    fn the_crown_door_takes_the_retail_turn_from_its_world_file_capital() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let build = load_client_build(&repo.join(CLIENT_BUILD_CONFIG)).expect("client build");
+        let dir = std::env::var("NW_CONTENT_DIR")
+            .map_or_else(|_| repo.join("local-data/content"), Into::into);
+        let bundle = ContentBundle::load(&bundle_path(&dir, &build), &build).expect("bundle");
+        let level = WorldFile::load(&world_file_path(&dir, &build, OPEN_WORLD_LEVEL), &build)
+            .expect("world");
+        let doors = LockedDoors::build(&level.capitals, &locked_rows(&bundle.tables));
+        let rotations: Vec<&Rotation> = doors
+            .doors
+            .iter()
+            .flat_map(|door| &door.members)
+            .filter_map(|member| match &member.state {
+                MemberState::Position(PositionInTheWorldReplicatedState {
+                    rotation: Some(rotation),
+                    ..
+                }) => Some(rotation),
+                _ => None,
+            })
+            .collect();
+        let [rotation] = rotations.as_slice() else {
+            panic!("one crown chamber door: {}", rotations.len());
+        };
+        assert_eq!(
+            rotation.components[2],
+            RotationComponent::Value(RETAIL_ROTATION_Z)
+        );
+        assert!(!rotation.w_negative);
     }
 }

@@ -112,7 +112,10 @@ pub(super) const MOUNT_FOOD_USE_MS: u64 = 690;
 /// the same attack's 34.05 unblocked).
 const BROKEN_GUARD_DAMAGE_DIVISOR: u32 = 2;
 /// The `BlockStability` of a mob's guard in the blocked hit's stamina (`AttackRow::block_stamina`):
-/// a mob has no blocking weapon row, so none (Inferred; its `BlockStaminaCost` scales the loss).
+/// none: its guard takes its own share of the hit's block stamina
+/// ([`nw_content::combat::MOB_GUARD_STAMINA_SHARE`]; Observed: the share was the same for
+/// guards whose main hands have a `BlockStability` of 15, such as `Undead_Navigator_Pistol`,
+/// `1hSwordT1Damned` and `Lost_Knight_Axe`).
 const NO_BLOCK_STABILITY: f64 = 0.0;
 /// How far from a player's body the mobs whose capsules stop it are looked for, m (Inferred: an
 /// input message moves the body by at most eight records, under 2 m at a sprint, and the widest
@@ -606,6 +609,38 @@ pub struct Blow {
 }
 
 impl MobHitStyle {
+    /// The hit of a mob without rows the tables have: [`DEFAULT_HIT_TAG`], physical, and
+    /// [`DEFAULT_BLOCK_STAMINA`] for a block.
+    const PLAIN: Self = Self {
+        tag: DEFAULT_HIT_TAG,
+        affix: None,
+        damage_scale: 1.0,
+        block_stamina: DEFAULT_BLOCK_STAMINA,
+        row: None,
+        ranged: false,
+        blockable: true,
+        category: DamageCategory::Physical,
+        power_level: 0,
+        hit_stun: 0,
+        stagger: 0.0,
+        breakout: 0.0,
+    };
+
+    /// The hit of a siege area of row `row` (a barrel's `FireBarrelDropper_DoT`): its row's
+    /// damage type, affix, category and coefficient (Observed: `invasion-71657c7d8159622a`
+    /// 862.680 s to 864.187 s, four 3601 on the own player 0.5 s apart with item tag 9, `Fire`,
+    /// the row's type).
+    pub(super) fn of_area(row: &AttackRow) -> Self {
+        Self {
+            tag: row.damage_type.unwrap_or(DEFAULT_HIT_TAG),
+            affix: row.affix,
+            damage_scale: row.coefficient,
+            blockable: row.blockable,
+            category: row.category,
+            ..Self::PLAIN
+        }
+    }
+
     /// What a block does with the hit.
     pub(super) const fn blow(self) -> Blow {
         Blow {
@@ -711,6 +746,18 @@ impl PlayerSwing {
     pub(super) fn opened(&self, now_ms: u64) -> bool {
         now_ms >= self.due_ms()
     }
+}
+
+/// What a hit for another sim carries besides its amount and threat.
+#[derive(Debug, Clone, Copy)]
+enum RemoteBlow {
+    /// A mob's hit on a player: its block stamina, reaction and grit.
+    Mob(Blow),
+    /// A player's hit on a mob: the stagger its grit takes there.
+    Player {
+        /// The hit's stagger (weapon `BaseStaggerDamage` x row `StaggerDmgModifier`).
+        stagger: f32,
+    },
 }
 
 /// What a due swing did.
@@ -1173,6 +1220,9 @@ impl SimWorld {
         if let Some(outcome) = self.structure_hit(entity, number, target, damage_id) {
             return outcome;
         }
+        if self.mobs.tree(target).is_some_and(|mind| mind.spares(number)) {
+            return Err(AttackRefusal::OwnSide);
+        }
         if spawn_index(target).is_none() {
             let row = self
                 .combat
@@ -1358,6 +1408,14 @@ impl SimWorld {
             let loss = row.block_stamina(&weapon, NO_BLOCK_STABILITY) as f32;
             self.mobs.guard_hit(target, loss, now_ms)
         });
+        // A hit the block did not take lowers the stamina of a mob whose grit is on; a mob of
+        // another sim takes it there ([`Hit::stagger_milli`]).
+        // Stagger of about a hundred points.
+        #[allow(clippy::cast_possible_truncation, reason = "stagger of about a hundred")]
+        let stagger = row.stagger(&weapon) as f32;
+        if block.is_none() && view.owner.is_none() {
+            self.grit_hit(target, number, stagger, now_ms);
+        }
         // The status effects of the player and of the mob scale the hit (`Dmg*`, `Abs*`).
         let effects_scale =
             self.player_hit_scale(entity, target, row.damage_type.unwrap_or(HIT_TAG));
@@ -1371,11 +1429,9 @@ impl SimWorld {
                 .ok_or(AttackRefusal::TargetDead)?,
             Some(owner) => AttackOutcome::Remote(self.remote_hit(
                 owner.clone(),
-                target,
-                number,
-                hit.amount,
-                threat,
-                None,
+                (target, number),
+                (hit.amount, threat),
+                RemoteBlow::Player { stagger },
             )),
         };
         let killed = matches!(outcome, AttackOutcome::Killed { .. });
@@ -1451,14 +1507,24 @@ impl SimWorld {
         })
     }
 
-    /// The guard of mob `mob` of this sim when its block is up and player `entity` stands in
-    /// front of it (Inferred: the half in front of its facing; retail let 1,243 hits through
-    /// raised mob blocks, and which side they came from is Unknown).
+    /// The guard stamina of mob `mob` of this sim in whole segments of its guard's max
+    /// ([`nw_messages::stamina_segments`]), when it has a guard: its card and its states carry
+    /// it as ALC child 44, from which the client draws the guard bar.
+    pub(super) fn guard_segments(&self, mob: u64) -> Option<u8> {
+        let guard = self.mobs.guard(mob)?;
+        let stamina = self.mobs.guard_stamina(mob)?;
+        Some(nw_messages::stamina_segments(stamina, guard.stamina_max))
+    }
+
+    /// The guard of mob `mob` of this sim when its block is up and stops some of a hit
+    /// ([`MobGuard::blocks`]), and player `entity` stands in front of it (Inferred: the half in
+    /// front of its facing; retail let 1,243 hits through raised mob blocks, and which side
+    /// they came from is Unknown).
     fn mob_blocks(&self, entity: Entity, mob: u64) -> Option<MobGuard> {
         if !self.mobs.blocking(mob) {
             return None;
         }
-        let guard = self.mobs.guard(mob)?;
+        let guard = self.mobs.guard(mob).filter(MobGuard::blocks)?;
         let from = self.world.get::<Body>(entity)?.motion.position();
         let at = self.mobs.get(mob)?.position;
         let yaw = self.mobs.facing(mob)?;
@@ -2713,17 +2779,20 @@ impl SimWorld {
         })
     }
 
-    /// A hit for `owner`, the sim of `target`; a mob's hit on a player carries the stamina its
-    /// block takes and whether it is a projectile's.
+    /// A hit of `amount` with `threat` from `attacker` for `owner`, the sim of `target`; a mob's
+    /// hit on a player carries the stamina its block takes and whether it is a projectile's, a
+    /// player's hit on a mob its stagger for the mob's grit.
     fn remote_hit(
         &self,
         owner: BusId,
-        target: u64,
-        attacker: u64,
-        amount: u32,
-        threat: u64,
-        mob_blow: Option<Blow>,
+        (target, attacker): (u64, u64),
+        (amount, threat): (u32, u64),
+        blow: RemoteBlow,
     ) -> RemoteHit {
+        let (mob_blow, player_stagger) = match blow {
+            RemoteBlow::Mob(blow) => (Some(blow), 0.0),
+            RemoteBlow::Player { stagger } => (None, stagger),
+        };
         RemoteHit {
             owner,
             hit: Hit {
@@ -2737,10 +2806,21 @@ impl SimWorld {
                 unblockable: mob_blow.is_some_and(|blow| !blow.blockable),
                 power_level: mob_blow.map_or(0, |blow| blow.power_level),
                 hit_stun: mob_blow.map_or(0, |blow| blow.hit_stun),
-                stagger_milli: mob_blow.map_or(0, |blow| Hit::milli_of(blow.stagger)),
+                stagger_milli: Hit::milli_of(mob_blow.map_or(player_stagger, |blow| blow.stagger)),
                 breakout_milli: mob_blow.map_or(0, |blow| Hit::milli_of(blow.breakout)),
             },
         }
+    }
+
+    /// A player's hit `hit` from another sim lands on `hit.target` here at `now_ms`: the grit
+    /// of a mob takes its stagger ([`Hit::stagger`]; the attacker's sim runs no block for a mob
+    /// of another sim), then the hit applies ([`SimWorld::apply_hit`]).
+    pub fn remote_player_hit(&mut self, hit: &Hit, now_ms: u64) -> Option<AttackOutcome> {
+        let stagger = hit.stagger();
+        if stagger > 0.0 && self.mobs.get(hit.target).is_some() {
+            self.grit_hit(hit.target, hit.attacker, stagger, now_ms);
+        }
+        self.apply_hit(hit.target, hit.attacker, hit.amount, hit.threat, now_ms)
     }
 
     /// Applies a hit of `amount` with `threat` from `attacker` on `target`, a mob or a player of
@@ -2755,6 +2835,36 @@ impl SimWorld {
         now_ms: u64,
     ) -> Option<AttackOutcome> {
         self.apply_hit_with(target, attacker, amount, threat, now_ms, None)
+    }
+
+    /// Applies the hit of a siege area of `style` ([`MobHitStyle::of_area`]; `None`: a row the
+    /// tables lack) and of `health` (the slice's base damage times the row's coefficient) from
+    /// `source` on `target`. A player of this sim takes it less its worn armor's share against
+    /// the hit's category, and its 3601 carries the hit's type and the share kept (Observed:
+    /// `invasion-71657c7d8159622a` 862.680 s, item `9:1125.1355:0.707632` = 1,200 x 1.325 x
+    /// 0.707632); a mob takes it whole (Inferred: no capture shows a siege area on a mob).
+    pub(super) fn area_hit(
+        &mut self,
+        target: u64,
+        source: u64,
+        health: f64,
+        style: Option<&MobHitStyle>,
+        now_ms: u64,
+    ) -> Option<AttackOutcome> {
+        let kept = if self.player_by_number(target).is_some() {
+            let category = style.map_or(DamageCategory::Physical, |style| style.category);
+            1.0 - self.worn_armor_share(target, source, category)
+        } else {
+            1.0
+        };
+        // A hit of a few thousand points.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a hit of thousands"
+        )]
+        let amount = (health * kept).round().max(0.0) as u32;
+        self.apply_hit_with(target, source, amount, 0, now_ms, style)
     }
 
     /// Mob `mob`, killed by player `killer`, counts for the kill tasks of the killer's quest
@@ -2802,6 +2912,8 @@ impl SimWorld {
                 return None;
             }
             let damage = self.mobs.get_mut(target)?.health.take(amount);
+            self.note_mob_damage(target, attacker, amount);
+            self.outpost_rush_hit(target, attacker, amount);
             tracing::debug!(
                 mob = target,
                 attacker,
@@ -2886,6 +2998,7 @@ impl SimWorld {
             damage == Damage::Killed,
             now_ms,
         );
+        self.outpost_rush_hit(target, attacker, amount);
         let total = amount_of(amount);
         let affix = style.and_then(|style| style.affix);
         // A share of a hit: f32 holds it.
@@ -2976,15 +3089,29 @@ impl SimWorld {
     /// Where `attacker` stands: a mob or a player, here or as a ghost; the origin when it is
     /// none of them (retail always names the creature's position in a hit on a player).
     pub(super) fn attacker_position(&mut self, attacker: u64) -> [f32; 3] {
-        let at = match self.mobs.get(attacker) {
+        self.attacker_at(attacker)
+            .map_or([0.0; 3], |at| [at.x, at.y, at.z])
+    }
+
+    /// Where `attacker` (a mob, a player of this sim or a ghost) is; `None` when it is not
+    /// known here.
+    fn attacker_at(&mut self, attacker: u64) -> Option<Position> {
+        match self.mobs.get(attacker) {
             Some(mob) => Some(mob.position),
             None => self
                 .player_by_number(attacker)
                 .and_then(|entity| self.world.get::<Body>(entity))
                 .map(|body| body.motion.position())
                 .or_else(|| self.ghost(attacker).map(|(_, ghost)| ghost.position)),
-        };
-        at.map_or([0.0; 3], |at| [at.x, at.y, at.z])
+        }
+    }
+
+    /// A player's unblocked hit of stagger `stagger` from `attacker` lands on mob `target` of
+    /// this sim at `now_ms`: the mob's grit takes it ([`Mobs::grit_hit`]), and its stagger
+    /// faces the side the attacker stands on.
+    pub(super) fn grit_hit(&mut self, target: u64, attacker: u64, stagger: f32, now_ms: u64) {
+        let from = self.attacker_at(attacker);
+        self.mobs.grit_hit(target, stagger, from, now_ms);
     }
 
     /// The player with entity number `number`.
@@ -3302,20 +3429,7 @@ impl SimWorld {
         defender: Option<Entity>,
     ) -> MobHitStyle {
         let data = &self.combat.data;
-        let plain = MobHitStyle {
-            tag: DEFAULT_HIT_TAG,
-            affix: None,
-            damage_scale: 1.0,
-            block_stamina: DEFAULT_BLOCK_STAMINA,
-            row: None,
-            ranged: false,
-            blockable: true,
-            category: DamageCategory::Physical,
-            power_level: 0,
-            hit_stun: 0,
-            stagger: 0.0,
-            breakout: 0.0,
-        };
+        let plain = MobHitStyle::PLAIN;
         // The mob's empower buffs raise what a block takes (`StaminaDamageModifier`).
         // A multiple near 1.
         let empower = self.mob_effects.get(&intent.mob).map_or(1.0, |effects| {
@@ -3503,6 +3617,9 @@ impl SimWorld {
             }
             None => Some(amount),
         };
+        if guard.is_some() {
+            self.outpost_rush_blocked(target, amount.saturating_sub(passed.unwrap_or(0)));
+        }
         let trigger = match guard {
             Some(Guard::Held) => Some(Trigger::BlockedHitTaken),
             Some(Guard::Broken) => Some(Trigger::BlockBreak),
@@ -3703,11 +3820,9 @@ impl SimWorld {
         ghost.mob.is_none().then(|| {
             AttackOutcome::Remote(self.remote_hit(
                 owner,
-                target,
-                mob,
-                amount,
-                0,
-                Some(style.blow()),
+                (target, mob),
+                (amount, 0),
+                RemoteBlow::Mob(style.blow()),
             ))
         })
     }
@@ -4795,10 +4910,12 @@ mod tests {
         const GUARD: MobGuard = MobGuard {
             stamina_max: 50.0,
             stamina_initial: 50.0,
+            row_stamina_max: 50.0,
+            row_stamina_initial: 50.0,
             tick_rate: 2.0,
-            regen_per_s: 5.0,
+            regen_per_s: 2.0,
             mitigation: 1.0,
-            stamina_cost: 0.8,
+            beast: false,
         };
         let mut world = fight();
         world.mobs.set_guard(mob(), GUARD);
@@ -4829,25 +4946,163 @@ mod tests {
     }
 
     #[test]
+    fn a_large_mob_guard_shows_254_segments_and_its_first_blocked_hit_lowers_them() {
+        // `Evil_Knight_Heavy_Named_DG_GreatCleave_00`: `StaminaBaseMax` 250, 2 per 0 s, x
+        // `Dungeon+` 6 = 1,500; retail child 44 is 254 on its card and 250 after its first hit
+        // (EXP-Glacial-Tarn interest 35, 535.163 s). A sword light's 36 x 0.4 x 0.75 = 10.8 of
+        // 1,500 leaves 1,489.2, 252 of 254 segments.
+        const SWORD_BLOCK_DAMAGE: f64 = 36.0;
+        const LIGHT_BLOCK_MOD: f64 = 0.4;
+        const DUNGEON_PLUS_STAMINA_MOD: f64 = 6.0;
+        const AFTER_ONE_LIGHT: u8 = 252;
+        let knight = MobGuard::of((250, 250, 2, 0), 1)
+            .expect("a guard")
+            .in_category(DUNGEON_PLUS_STAMINA_MOD);
+        let mut source = crate::combat::test_support::test_source();
+        source.weapons[0].1.block_stamina_damage = SWORD_BLOCK_DAMAGE;
+        for row in &mut source.attacks {
+            if row.damage_id == LIGHT {
+                row.block_stamina_mod = LIGHT_BLOCK_MOD;
+            }
+        }
+        let mut world = fight();
+        world.combat = committed().combat_settings(
+            Arc::new(test_data_of(source)),
+            Arc::from([]),
+            crate::combat::tests::test_mob_ai(),
+        );
+        world.mobs.set_guard(mob(), knight);
+        tick(&mut world, NOW);
+        assert!(world.mobs.blocking(mob()), "the guard is up");
+        assert_eq!(
+            world.guard_segments(mob()),
+            Some(nw_messages::MAX_STAMINA_SEGMENTS),
+            "a full guard of 1,500 shows 254"
+        );
+        world
+            .attack(&connection(1), mob(), LIGHT, NOW + TICK_MS)
+            .expect("a hit");
+        assert_eq!(world.guard_segments(mob()), Some(AFTER_ONE_LIGHT));
+    }
+
+    #[test]
+    fn an_unblocked_hit_lowers_the_stamina_bar_of_a_mob_whose_grit_is_on() {
+        // `Bear_Grizzly_Named_00`: 1,000 stamina of 200 segments, `BlockDamageMitigation` 0
+        // (its block stops nothing); a great sword heavy's stagger, 60 x 1.85.
+        const BEAR_STAMINA: f32 = 1_000.0;
+        const GREAT_SWORD_STAGGER: f64 = 60.0;
+        const HEAVY_STAGGER_MOD: f64 = 1.85;
+        const FULL_BEAR: u8 = 200;
+        /// The entity number of a player of another sim.
+        const REMOTE_PLAYER: u64 = 900;
+        let bear = MobGuard::of((1_000, 1_000, 0, 0), 0)
+            .expect("a stamina")
+            .in_vitals_categories(Some("Bear_Grizzly_Named_00,Hostile,Beast,Predator"));
+        let mut source = crate::combat::test_support::test_source();
+        source.weapons[0].1.stagger_damage = GREAT_SWORD_STAGGER;
+        for row in &mut source.attacks {
+            if row.damage_id == LIGHT {
+                row.stagger_mod = HEAVY_STAGGER_MOD;
+            }
+        }
+        let data = Arc::new(test_data_of(source));
+        let stagger = (GREAT_SWORD_STAGGER * HEAVY_STAGGER_MOD) as f32;
+        // A player of another sim: its sim sends the hit's stagger with it.
+        let remote_hit = Hit {
+            target: mob(),
+            attacker: REMOTE_PLAYER,
+            attacker_sim: slot("sim-b").id,
+            amount: 1,
+            threat: 1,
+            block_stamina_milli: None,
+            ranged: false,
+            unblockable: false,
+            power_level: 0,
+            hit_stun: 0,
+            stagger_milli: Hit::milli_of(stagger),
+            breakout_milli: 0,
+        };
+        // The world's mobs think with the AI of its combat settings.
+        let hit_bar = |ai, remote: bool| {
+            let mut combat = committed().combat_settings(Arc::clone(&data), Arc::from([]), ai);
+            combat.spawns = vec![test_spawn(MOB_X)].into();
+            let mut world = fight_in(
+                SimWorld::new(
+                    crate::world::tests::settings(
+                        crate::world::tests::MANY,
+                        crate::world::tests::MAX_PLAYERS,
+                    ),
+                    crate::login::WorldIds::random(0).expect("ids"),
+                    Arc::new(Flat),
+                    slot("sim-a"),
+                    combat,
+                    Arc::default(),
+                ),
+                MOB_X + 2.0,
+            );
+            world.mobs.set_guard(mob(), bear);
+            tick(&mut world, NOW);
+            assert_eq!(world.guard_segments(mob()), Some(FULL_BEAR));
+            if remote {
+                world
+                    .remote_player_hit(&remote_hit, NOW + TICK_MS)
+                    .expect("a hit");
+            } else {
+                world
+                    .attack(&connection(1), mob(), LIGHT, NOW + TICK_MS)
+                    .expect("a hit");
+            }
+            world.guard_segments(mob())
+        };
+        // A beast: its grit takes 0.75 of the share.
+        let lost = MobGuard::grit_loss(stagger, 0.0, nw_content::combat::GritBody::Large);
+        let after_one = Some(nw_messages::stamina_segments(
+            BEAR_STAMINA - lost,
+            BEAR_STAMINA,
+        ));
+        assert_eq!(
+            hit_bar(crate::combat::tests::test_stagger_mob_ai(), true),
+            after_one,
+            "a hit from another sim takes the stagger it carries"
+        );
+        assert_eq!(
+            hit_bar(crate::combat::tests::test_stagger_mob_ai(), false),
+            Some(nw_messages::stamina_segments(
+                BEAR_STAMINA - lost,
+                BEAR_STAMINA
+            )),
+            "its grit takes the stagger from its stamina"
+        );
+        assert_eq!(
+            hit_bar(crate::combat::tests::test_mob_ai(), false),
+            Some(FULL_BEAR),
+            "a mob without the stagger keeps it"
+        );
+    }
+
+    #[test]
     fn light_sword_hits_in_a_row_break_a_raised_mob_guard_and_the_next_hit_lands() {
         // The live "infinite block" (2026-11-12 16:52:21 to 16:52:34): six blocked hits 1.1 s
         // apart, because only every second swing landed. With the damned pistoleer's guard
-        // (`StaminaBaseMax` 50, `StaminaBaseTickRate` 2, `StaminaTickDelay` 1,
-        // `BlockStaminaCost` 0.8) and the sword's rows (`SwordT*` `BlockStaminaDamage` 36,
-        // `1H_Sword_Attack1` `BlockStaminaDmgMod` 0.4), every swing of a combo landing breaks it.
+        // (`StaminaBaseMax` 50, `StaminaBaseTickRate` 2, `StaminaTickDelay` 1) and the sword's
+        // rows (`SwordT*` `BlockStaminaDamage` 36, `1H_Sword_Attack1` `BlockStaminaDmgMod` 0.4),
+        // every swing of a combo landing breaks it.
         const SWORD_BLOCK_DAMAGE: f64 = 36.0;
         const LIGHT_BLOCK_MOD: f64 = 0.4;
         const PISTOLEER_GUARD: MobGuard = MobGuard {
             stamina_max: 50.0,
             stamina_initial: 50.0,
+            row_stamina_max: 50.0,
+            row_stamina_initial: 50.0,
             tick_rate: 2.0,
-            regen_per_s: 5.0,
+            regen_per_s: 2.0,
             mitigation: 1.0,
-            stamina_cost: 0.8,
+            beast: false,
         };
         /// Light swings of a sword combo land about this far apart (live: 0.55 s).
         const SWING_GAP_MS: u64 = 550;
-        /// Hits of 11.52 stamina against a regen of 2.75 per gap: the sixth empties 50.
+        /// Hits of 10.8 stamina (0.75 of 14.4) against a regen of 1.1 per gap: the sixth
+        /// empties 50.
         const HITS_TO_BREAK: usize = 6;
         let mut source = crate::combat::test_support::test_source();
         source.weapons[0].1.block_stamina_damage = SWORD_BLOCK_DAMAGE;
@@ -4878,7 +5133,20 @@ mod tests {
                 full,
                 "blocked hit {hit} takes no health"
             );
+            // Each blocked hit lowers the guard the mob's states show (ALC child 44).
+            if hit < HITS_TO_BREAK {
+                let stamina = world.mobs.guard_stamina(mob()).expect("a guard");
+                assert!(
+                    stamina > 0.0 && stamina < PISTOLEER_GUARD.stamina_max,
+                    "after hit {hit}: {stamina}"
+                );
+            }
         }
+        assert_eq!(
+            world.mobs.guard_stamina(mob()),
+            Some(0.0),
+            "the breaking hit empties it"
+        );
         at += SWING_GAP_MS;
         tick(&mut world, at);
         assert!(!world.mobs.blocking(mob()), "the guard broke");
@@ -6168,18 +6436,19 @@ mod tests {
         panic!("the mob never hit");
     }
 
-    /// A player's worn armor rates by its pieces (`ArmorItemDefinitions` of the kit chest,
-    /// `HeavyChest_Balanced`: 0.35 of a set, physical scale 0.875) against the mob's level gear
-    /// score (retail level 1: 50), physical and elemental apart; without the chest it takes
-    /// nothing off.
-    #[test]
-    fn worn_armor_takes_its_share_of_a_mob_hit() {
-        const CHEST: &str = "MysticArchetypeChest";
-        const CHEST_STATS: &str = "HeavyChest_Balanced";
-        const SET_SCALE: f64 = 0.874_996_5;
-        const ELEMENTAL_SCALE: f64 = 0.5;
-        const KIT_GEAR_SCORE: u32 = 75;
-        const MOB_GEAR_SCORE: u32 = 50;
+    /// The starter mystic's chest (`HeavyChest_Balanced`: 0.35 of a set).
+    const CHEST: &str = "MysticArchetypeChest";
+    const CHEST_STATS: &str = "HeavyChest_Balanced";
+    /// The chest's physical and elemental set scales.
+    const SET_SCALE: f64 = 0.874_996_5;
+    const ELEMENTAL_SCALE: f64 = 0.5;
+    /// The gear score of the starter kit's armor and of the level 1 mob.
+    const KIT_GEAR_SCORE: u32 = 75;
+    const MOB_GEAR_SCORE: u32 = 50;
+
+    /// The fight world with player 1 in the starter kit, whose chest is [`CHEST_STATS`], against
+    /// mobs of gear score [`MOB_GEAR_SCORE`]; the player's entity.
+    fn armored_fight() -> (SimWorld, Entity) {
         let mut source = crate::combat::test_support::test_source();
         source.levels[0].1.gear_score = MOB_GEAR_SCORE;
         source
@@ -6203,6 +6472,16 @@ mod tests {
             gear::tests::CHARACTER,
             Some(gear::tests::BACKSTORY),
         );
+        (world, entity)
+    }
+
+    /// A player's worn armor rates by its pieces (`ArmorItemDefinitions` of the kit chest,
+    /// `HeavyChest_Balanced`: 0.35 of a set, physical scale 0.875) against the mob's level gear
+    /// score (retail level 1: 50), physical and elemental apart; without the chest it takes
+    /// nothing off.
+    #[test]
+    fn worn_armor_takes_its_share_of_a_mob_hit() {
+        let (mut world, entity) = armored_fight();
         let against = |scale: f64| {
             let armor = 0.35 * scale * armor_rating(KIT_GEAR_SCORE);
             armor_share(armor, MOB_GEAR_SCORE)
@@ -6215,6 +6494,57 @@ mod tests {
         assert_eq!(
             world.worn_armor_share(1, mob(), DamageCategory::Physical),
             0.0
+        );
+    }
+
+    /// A siege area's hit on a player takes the worn armor's share against its row's category
+    /// off and carries its row's damage type and the share kept in the 3601 (a T1 barrel's
+    /// `FireBarrelDropper_DoT`: `Fire`, elemental, 1,200 x 1.325); a mob takes it whole.
+    #[test]
+    fn a_siege_area_hit_on_a_player_takes_its_row_type_and_the_armor_share() {
+        const FIRE_TAG: u8 = 9;
+        const BARREL_COEFFICIENT: f64 = 1.325;
+        // A tenth of the barrel's hit: the test player and the test mob hold about 1,000 health.
+        const BARREL_HEALTH: f64 = 1_200.0 * BARREL_COEFFICIENT / 10.0;
+        let (mut world, _) = armored_fight();
+        let mut row = crate::combat::test_support::test_source().attacks[0].clone();
+        row.damage_type = Some(FIRE_TAG);
+        row.category = DamageCategory::Elemental;
+        row.coefficient = BARREL_COEFFICIENT;
+        row.affix = None;
+        let style = MobHitStyle::of_area(&row);
+        let kept = 1.0 - world.worn_armor_share(1, mob(), DamageCategory::Elemental);
+        assert!(kept < 1.0, "the chest takes a share: {kept}");
+        let expected = (BARREL_HEALTH * kept).round() as u32;
+        world.take_messages();
+        assert_eq!(
+            world.area_hit(1, mob(), BARREL_HEALTH, Some(&style), NOW),
+            Some(AttackOutcome::Hit {
+                target: 1,
+                amount: expected
+            })
+        );
+        let damage: Vec<OnDamageMsg> = messages_to(&world.take_messages(), 1)
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::OnDamage(damage) => Some(damage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(damage.len(), 1, "{damage:?}");
+        let item = &damage[0].items[0];
+        assert_eq!(item.tag, FIRE_TAG, "the row's damage type");
+        assert!((item.amount - amount(expected)).abs() < f32::EPSILON);
+        assert!(
+            (f64::from(item.scale) - kept).abs() < 1e-6,
+            "the share kept"
+        );
+        let before = mob_health(&mut world).current();
+        world.area_hit(mob(), 1, BARREL_HEALTH, Some(&style), NOW);
+        assert_eq!(
+            before - mob_health(&mut world).current(),
+            BARREL_HEALTH.round() as u32,
+            "a mob takes it whole"
         );
     }
 

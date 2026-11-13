@@ -16,18 +16,23 @@
 //! player through its sim first, then goes to the database; a refused one gives them back (or
 //! owes them). A treasury declaration is paid in the database transaction (treasury log reason
 //! `war declaration`, the client's `WarDeclaration` 4); a lost lottery gives it back there
-//! (`war declaration failed`, 5), and a wallet gets its coins back through its sim.
+//! (`war declaration failed`, 5), and a wallet gets its coins back through its sim. Each
+//! declaration has an id ([`nw_db::WarRequest::id`]): a declaration the database stored whose
+//! answer was lost is found again on its retry, so its wallet coins never come back while it
+//! stands.
 //!
 //! **Answers**: every refusal gets 941 with the cost and siege window the service holds (Observed:
 //! the popup compares them with its own and shows which changed, or `unknown`); a declaration
-//! in the lottery gets 1737 with `WarRequestStatus` Pending; the drawn company's declaring player
-//! gets 193 with the war id (Inferred meanings, `nw_messages::social::war_requests`). Which
-//! message shows a lost lottery's text (`OnWarDeclarationUnsuccessful`) is Unknown: no capture
-//! holds a lottery and no client reader names it, so a losing player only gets its coin back.
+//! in the lottery gets 1737 with the defender and the territory; the drawn company's declaring
+//! player gets 193 with the war id; every other declaring player of the lottery gets its coin
+//! back and 4139 with `WarRequestStatus` `WarDecNotSelected` (12), which the client turns into
+//! `OnWarDeclarationUnsuccessful` and its "Another company's War Declaration was selected"
+//! notice (Observed in the client handler `FUN_143f04300` and `notifications.luac`; no capture
+//! holds a lottery, so the time of the message is Inferred: when the lottery is drawn).
 
 use nw_db::{Declaration, LotteryDraw, LotteryEntry, WarRequest, war_cost};
 use nw_messages::social::SocialPush;
-use nw_messages::social::war_requests::{WAR_REQUEST_PENDING, WarCall, WarPush};
+use nw_messages::social::war_requests::{WAR_DEC_NOT_SELECTED, WarCall, WarPush};
 use uuid::Uuid;
 
 use crate::companies::{Privilege, Right, may};
@@ -81,6 +86,7 @@ impl SocialWorld {
         let checked = self.check_declaration(character, company, defender, camp);
         let request = checked.and_then(|(company, faction)| {
             let request = WarRequest {
+                id: Uuid::new_v4(),
                 territory,
                 company,
                 faction,
@@ -205,7 +211,7 @@ impl SocialWorld {
     }
 
     /// Gives the wallet coins `coins` back to their player through its sim, or owes them.
-    fn give_back(&mut self, coins: CoinMove) {
+    pub(crate) fn give_back(&mut self, coins: CoinMove) {
         let change = i64::try_from(coins.amount).unwrap_or(i64::MAX);
         if !self.move_coins(Transfer::DepositReturn(coins), coins.character, change) {
             self.owe(coins);
@@ -213,7 +219,7 @@ impl SocialWorld {
     }
 
     /// Takes the treasury balance `balance` of `company` that the database stored.
-    fn treasury_stored(&mut self, company: Uuid, balance: u64) {
+    pub(crate) fn treasury_stored(&mut self, company: Uuid, balance: u64) {
         if let Some(state) = self.companies.get_mut(&company) {
             state.record.treasury = balance;
             let members = state.members.clone();
@@ -246,7 +252,7 @@ impl SocialWorld {
                 }
                 let pending = WarPush::Pending {
                     defender: *request.defender.as_bytes(),
-                    status: WAR_REQUEST_PENDING,
+                    territory: request.territory,
                 };
                 self.push(&[request.character], SocialPush::War(pending));
             }
@@ -264,7 +270,7 @@ impl SocialWorld {
     }
 
     /// Takes the lotteries `draws` the database drew: the drawn declaring player gets 193, the
-    /// others their coin.
+    /// others their coin and 4139 `WarDecNotSelected`.
     pub fn lotteries_drawn(&mut self, draws: Vec<LotteryDraw>, now_ms: u64) -> Vec<Effect> {
         for draw in draws {
             if let Some((winner, war)) = draw.winner {
@@ -276,6 +282,12 @@ impl SocialWorld {
                 self.push(&[winner.character], SocialPush::War(won));
             }
             for entry in draw.refunds {
+                let lost = WarPush::RequestError {
+                    defender: *entry.defender.as_bytes(),
+                    territory: draw.territory,
+                    status: WAR_DEC_NOT_SELECTED,
+                };
+                self.push(&[entry.character], SocialPush::War(lost));
                 match entry.treasury {
                     Some(balance) => self.treasury_stored(entry.company, balance),
                     None => self.give_back(refund_of(&entry)),
@@ -310,8 +322,8 @@ mod tests {
     use nw_bus::CoinReply;
     use nw_db::{WAR_DECLARATION_COST, WarRefusal};
     use nw_messages::social::war_requests::{
-        DECLARATION_FAILED_TYPE_INDEX, DECLARE_WAR_TYPE_INDEX, REQUEST_PENDING_TYPE_INDEX,
-        REQUEST_SUCCESSFUL_TYPE_INDEX,
+        DECLARATION_FAILED_TYPE_INDEX, DECLARE_WAR_TYPE_INDEX, REQUEST_ERROR_TYPE_INDEX,
+        REQUEST_PENDING_TYPE_INDEX, REQUEST_SUCCESSFUL_TYPE_INDEX,
     };
 
     use super::*;
@@ -447,6 +459,7 @@ mod tests {
         let winner = LotteryEntry {
             company,
             character: crate::world::tests::character(1),
+            defender,
             cost: WAR_DECLARATION_COST,
             treasury: None,
         };
@@ -466,6 +479,21 @@ mod tests {
         };
         let effects = world.lotteries_drawn(vec![draw], NOW_MS);
         assert_eq!(pushes(&effects, REQUEST_SUCCESSFUL_TYPE_INDEX).len(), 1);
+        let lost = pushes(&effects, REQUEST_ERROR_TYPE_INDEX);
+        let expected = SocialPush::War(WarPush::RequestError {
+            defender: *defender.as_bytes(),
+            territory: TERRITORY,
+            status: WAR_DEC_NOT_SELECTED,
+        });
+        let heard: Vec<_> = lost.into_iter().collect();
+        assert_eq!(
+            heard,
+            vec![
+                (vec![wallet_loser.character], expected.clone()),
+                (vec![treasury_loser.character], expected),
+            ],
+            "each losing declarer hears the lost lottery"
+        );
         assert_eq!(
             coin_move(&effects).map(|(_, change)| change),
             Some(WAR_DECLARATION_COST as i64)

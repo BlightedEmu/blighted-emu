@@ -18,6 +18,7 @@ use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::client_input::TALK_KIND;
 use nw_messages::{ClientFacetMsg, ConversationClientMsg, FacetHeader, InteractionRequest};
 use nw_sim_core::Position;
+use nw_world::dungeon_scripts::OPEN_WORLD_LEVEL;
 use nw_world::records::VitalsSpawn;
 use uuid::Uuid;
 
@@ -767,6 +768,12 @@ pub(crate) enum FlowEvent {
 pub(crate) enum StepPlan {
     /// Wait: for a timer, a patrol stay or another quest.
     Wait,
+    /// Nothing: a pin task (a game event task with no event, `neverbetrue`) never ends; its
+    /// container ends through its other steps (a `PartialTaskContainer` through any one), so
+    /// it alone says nothing of the quest (`12A_MSQ_24_DefeatGawain_Enter_PinTask` beside the
+    /// `QuestGawain` run). When nothing else moves, the round's "no step progresses" stop
+    /// names it.
+    Pin,
     /// The step cannot be played: how the walk ends, and why.
     Stop(Outcome, String),
     /// Send the client calls of this step.
@@ -785,14 +792,16 @@ pub(crate) enum StepPlan {
     },
     /// Leave these territories.
     Leave(Vec<u16>),
-    /// Kill so many mobs of the spawn (its index in the spawns the sim runs), in the territory
-    /// when one is named; `spawned`: a mob made from the spawn's vitals alone counts (else only
-    /// the placed mobs count, by their spawn category).
+    /// Kill so many mobs of the spawn, in the territory when one is named; `spawned`: a mob
+    /// made from the spawn's vitals alone counts (else only the placed mobs count, by their
+    /// spawn category). The spawn is one the sim runs, or the level's record of a mob that
+    /// the open world encounter `encounter` (its slice) spawns in a stage.
     Kill {
-        spawn: usize,
+        spawn: VitalsSpawn,
         count: u32,
         territory: Option<u16>,
         spawned: bool,
+        encounter: Option<String>,
     },
     /// Get so many of the item from the source; `gathered`: the step counts gathers; `node`:
     /// the gatherable whose nodes give it, when a gather gives it.
@@ -974,9 +983,7 @@ impl SimWorld {
                     )),
                 }
             }
-            TaskKind::Never => broken(
-                "waits on a step that nothing ends (a game event task with no event)".to_owned(),
-            ),
+            TaskKind::Never => StepPlan::Pin,
             TaskKind::EquipItem(item) => event(FlowEvent::Equipped(item.clone()), 1),
             TaskKind::ConversationTopic(topic) => {
                 let npcs = level.topic_npcs.get(topic).cloned().unwrap_or_default();
@@ -1254,8 +1261,41 @@ impl SimWorld {
             })
     }
 
+    /// The slice of the open world encounter that spawns the mob of the level's encounter
+    /// spawn `spawn` in one of its stages, when this sim runs the open world's encounters and
+    /// that encounter starts by itself when a player comes near. The sim leaves such a spawn
+    /// out of its own spawns ([`crate::mobs::in_scripted_group`]): the encounter's stage
+    /// spawns its mob (`12A_MSQ_22_DestroyShrine_Defeat_Captain`: `Wave_02 - Objective: Kill
+    /// Captain Boss` of `enc_worldevent_12mb06_captain_boss_waveevent`).
+    fn spawning_encounter(&self, spawn: &VitalsSpawn) -> Option<String> {
+        let script = self
+            .settings
+            .world_events
+            .then(|| self.content.dungeon_scripts.game_mode(OPEN_WORLD_LEVEL))
+            .flatten()?;
+        script
+            .encounters
+            .iter()
+            .filter(|encounter| {
+                super::dungeon_script::starts_when_enabled(encounter)
+                    && crate::mobs::in_scripted_group(spawn, &[encounter.position])
+            })
+            .find(|encounter| {
+                encounter
+                    .stages
+                    .iter()
+                    .flat_map(|stage| &stage.spawns)
+                    .filter_map(|stage_spawn| encounter.targets.get(stage_spawn.target))
+                    .flat_map(|target| &target.slices)
+                    .filter_map(|slice| slice.mob.as_ref())
+                    .any(|mob| lowercase_crc32(&mob.vitals_id) == spawn.vitals_id)
+            })
+            .map(|encounter| encounter.slice.clone())
+    }
+
     /// `count` kills of mobs that count as `enemy` (in POI `place` when it names one): a spawn
-    /// of such a mob that the open map runs.
+    /// of such a mob that the open map runs, else one that an open world encounter it runs
+    /// spawns ([`Self::spawning_encounter`]).
     fn walk_kill(
         &self,
         level: &QuestGuide,
@@ -1274,27 +1314,40 @@ impl SimWorld {
             })
         };
         let counts = |spawn: &VitalsSpawn| self.walk_counts(spawn, enemy) && in_place(spawn);
-        match self.combat.spawns.iter().position(counts) {
-            Some(index) => {
+        let found = self
+            .combat
+            .spawns
+            .iter()
+            .find(|spawn| counts(spawn))
+            .map(|spawn| (spawn.clone(), None))
+            .or_else(|| {
+                level
+                    .all_spawns
+                    .iter()
+                    .filter(|spawn| counts(spawn))
+                    .find_map(|spawn| {
+                        self.spawning_encounter(spawn)
+                            .map(|encounter| (spawn.clone(), Some(encounter)))
+                    })
+            });
+        match found {
+            Some((spawn, encounter)) => {
                 let territory = territories.as_ref().and_then(|territories| {
-                    self.combat.spawns[index]
+                    spawn
                         .territory_ids
                         .iter()
                         .find(|territory| territories.contains(&u32::from(**territory)))
                         .copied()
                 });
-                let spawned = self
-                    .content
-                    .kill_types
-                    .of(self.combat.spawns[index].vitals_id)
-                    .is_some_and(|(vitals_id, categories)| {
-                        kills_count(enemy, vitals_id, categories, &[])
-                    });
+                let spawned = self.content.kill_types.of(spawn.vitals_id).is_some_and(
+                    |(vitals_id, categories)| kills_count(enemy, vitals_id, categories, &[]),
+                );
                 StepPlan::Kill {
-                    spawn: index,
+                    spawn,
                     count,
                     territory,
                     spawned,
+                    encounter,
                 }
             }
             None => {
@@ -1423,6 +1476,7 @@ impl SimWorld {
     ) -> Play {
         match plan {
             StepPlan::Wait => Play::Waits,
+            StepPlan::Pin => Play::Done(None),
             StepPlan::Stop(Outcome::NeedsLook, reason) => Play::NeedsLook(reason),
             StepPlan::Stop(Outcome::NotWalked, reason) => Play::NotWalked(reason),
             StepPlan::Stop(_, reason) => Play::Broken(reason),
@@ -1464,11 +1518,10 @@ impl SimWorld {
                 spawn,
                 count,
                 territory,
+                encounter,
                 ..
             } => {
-                let spawns = std::sync::Arc::clone(&self.combat.spawns);
                 let content = std::sync::Arc::clone(&self.content);
-                let spawn = &spawns[spawn];
                 self.walk_go(number, position_of(spawn.position), now_ms);
                 if let Some(territory) = territory {
                     self.walk_territory(number, connection, territory, true, now_ms);
@@ -1490,7 +1543,14 @@ impl SimWorld {
                         now_ms,
                     );
                 }
-                Play::Done(Some(format!("killed {vitals_id} at its spawn, by event")))
+                Play::Done(Some(match encounter {
+                    Some(encounter) => {
+                        format!(
+                            "killed {vitals_id} at its spawn in encounter {encounter}, by event"
+                        )
+                    }
+                    None => format!("killed {vitals_id} at its spawn, by event"),
+                }))
             }
             StepPlan::Item {
                 item,
@@ -1636,7 +1696,7 @@ impl SimWorld {
                 .unwrap_or_default()
         };
         let what = match plan {
-            StepPlan::Wait => PLAN_WAIT.to_owned(),
+            StepPlan::Wait | StepPlan::Pin => PLAN_WAIT.to_owned(),
             StepPlan::Stop(outcome, reason) => format!("{PLAN_STOP} {outcome:?}: {reason}"),
             StepPlan::Client(step) => format!("{PLAN_CLIENT} {}", step.words()),
             StepPlan::Talk { npc, at: place } => format!(
@@ -1668,8 +1728,8 @@ impl SimWorld {
                 count,
                 territory: entered,
                 spawned,
+                ..
             } => {
-                let spawn = &self.combat.spawns[*spawn];
                 let vitals = self.content.kill_types.of(spawn.vitals_id).map_or_else(
                     || format!("{:08x}", spawn.vitals_id),
                     |(id, _)| id.to_owned(),
@@ -1775,6 +1835,9 @@ mod tests {
     const ORB: &str = "walk_orb";
     const ORB_OBJECT: &str = "Walk_Orb";
     const DEN: &str = "walk_den";
+    /// A quest whose partial container holds a pin task and a kill, and one of a pin alone.
+    const PIN_BESIDE: &str = "walk_pin_beside";
+    const PIN_ALONE: &str = "walk_pin_alone";
     const DEN_GROUP: &str = "Walk_DenBoars";
 
     fn gateway() -> BusId {
@@ -1819,6 +1882,8 @@ mod tests {
                 objective(PVP, "p_root", None),
                 objective(ORB, "o_root", None),
                 objective(DEN, "w_root", None),
+                objective(PIN_BESIDE, "q_root", None),
+                objective(PIN_ALONE, "a_root", None),
             ],
             TaskBook::new(vec![
                 task(
@@ -1869,6 +1934,17 @@ mod tests {
                     item_drop_vc: Some(ORB_OBJECT.to_owned()),
                     ..task("o_get", "TaskGatherAndReturnItems", &[])
                 },
+                // Retail `12A_MSQ_24_DefeatGawain_Enter_Partial`: a pin beside the step that
+                // ends the container.
+                task("q_root", "PartialTaskContainer", &["q_pin", "q_kill"]),
+                task("q_pin", "TaskGameEvent", &[]),
+                TaskRow {
+                    kill_enemy_type: Some("Boar".to_owned()),
+                    target_qty: Some(1),
+                    ..task("q_kill", "TaskKillContribution", &[])
+                },
+                task("a_root", "ConsecutiveTaskContainer", &["a_pin"]),
+                task("a_pin", "TaskGameEvent", &[]),
                 task("w_root", "ConsecutiveTaskContainer", &["w_kill"]),
                 TaskRow {
                     kill_enemy_type: Some(DEN_GROUP.to_owned()),
@@ -1970,6 +2046,21 @@ mod tests {
         );
         let pvp = world.walk_quest(&level, &gateway(), 7, PVP, &mut now);
         assert_eq!(pvp.outcome, Outcome::NotWalked, "{pvp:?}");
+        let beside = world.walk_quest(&level, &gateway(), 8, PIN_BESIDE, &mut now);
+        assert_eq!(
+            beside.outcome,
+            Outcome::Completed,
+            "a pin says nothing while its sibling ends the container: {beside:?}"
+        );
+        let alone = world.walk_quest(&level, &gateway(), 9, PIN_ALONE, &mut now);
+        assert_eq!(alone.outcome, Outcome::Broken);
+        assert!(
+            alone
+                .stop
+                .as_deref()
+                .is_some_and(|stop| stop.contains("no step progresses") && stop.contains("a_pin")),
+            "{alone:?}"
+        );
         let unknown = world.walk_quest(&level, &gateway(), 5, "no_such_quest", &mut now);
         assert_eq!(unknown.outcome, Outcome::NotStarted);
         assert_eq!(world.players(), 0, "each walk character left");

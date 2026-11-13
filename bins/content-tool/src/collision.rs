@@ -584,9 +584,6 @@ struct Names {
     detection_offset: u32,
     enabled_initially: u32,
     collision_filter: u32,
-    dimensions: u32,
-    engine_radius: u32,
-    engine_height: u32,
     nav_area: u32,
     mesh_source: u32,
     register_with_nav_mesh: u32,
@@ -625,9 +622,6 @@ impl Names {
             detection_offset: DETECTION_OFFSET_NAME,
             enabled_initially: lowercase_crc32("EnabledInitially"),
             collision_filter: lowercase_crc32("CollisionFilter"),
-            dimensions: lowercase_crc32("Dimensions"),
-            engine_radius: lowercase_crc32("Radius"),
-            engine_height: lowercase_crc32("Height"),
             nav_area: lowercase_crc32("m_navArea"),
             mesh_source: lowercase_crc32("m_meshSource"),
             register_with_nav_mesh: lowercase_crc32("m_registerWithNavMesh"),
@@ -800,7 +794,7 @@ fn read_component(component: &Element, names: &Names, entity: &mut SliceEntity) 
         types::MESH_COLLIDER => entity.engine.mesh_collider = true,
         types::PRIMITIVE_COLLIDER => entity.engine.primitive_collider = true,
         types::BOX_SHAPE | types::SPHERE_SHAPE | types::CYLINDER_SHAPE | types::CAPSULE_SHAPE => {
-            entity.engine.shape = engine_shape(component, names);
+            entity.engine.shape = engine_shape(component);
         }
         types::NAV_OBSTACLE => {
             let number = |name: u32| component.child(name).and_then(unsigned);
@@ -835,40 +829,11 @@ fn unsigned(element: &Element) -> Option<u64> {
     }
 }
 
-/// The shape of an engine shape component, centred on its entity: a box of its `Dimensions`
-/// (the full size), a sphere of its `Radius`, a cylinder or a capsule standing along z, its
-/// `Height` from end to end (a capsule's with its round ends). `None` without its sizes.
-fn engine_shape(component: &Element, names: &Names) -> Option<Geometry> {
-    let float = |name: u32| descendant(component, name).and_then(|value| value.as_f32().ok());
-    match component.type_id {
-        types::BOX_SHAPE => {
-            let size = descendant(component, names.dimensions)?.as_vec3().ok()?;
-            Some(Geometry::Box {
-                half_extents: size.map(|side| side * HALF),
-            })
-        }
-        types::SPHERE_SHAPE => Some(Geometry::Sphere {
-            radius: float(names.engine_radius)?,
-        }),
-        types::CYLINDER_SHAPE => {
-            let half = float(names.engine_height)? * HALF;
-            Some(Geometry::Cylinder {
-                from: [0.0, 0.0, -half],
-                to: [0.0, 0.0, half],
-                radius: float(names.engine_radius)?,
-            })
-        }
-        types::CAPSULE_SHAPE => {
-            let radius = float(names.engine_radius)?;
-            let half = (float(names.engine_height)? * HALF - radius).max(0.0);
-            Some(Geometry::Capsule {
-                from: [0.0, 0.0, -half],
-                to: [0.0, 0.0, half],
-                radius,
-            })
-        }
-        _ => None,
-    }
+/// The shape of an engine shape component, centred on its entity
+/// ([`nw_world::level_script::engine_shape`]); `None` without its sizes or with an unreadable
+/// size.
+fn engine_shape(component: &Element) -> Option<Geometry> {
+    nw_world::level_script::engine_shape(component).ok().flatten()
 }
 
 /// The first element named `name` under `element`, depth first (the `m_targetTag` of an
@@ -1529,6 +1494,72 @@ pub fn build_level_collision(
     client_build: &str,
     out_dir: &Path,
 ) -> Result<CollisionReport, CollisionError> {
+    let catalog = index.read(ASSET_CATALOG_ENTRY)?;
+    let mut placements = level_placements(index, level)?;
+    let mut report = CollisionReport {
+        level: level.to_owned(),
+        ..CollisionReport::default()
+    };
+    let rows = distribution_placements(index, level, &catalog, client_build, out_dir, &mut report)?;
+    placements.total += rows.len();
+    placements.pending.extend(rows);
+    let collision = collide(index, &catalog, level, placements, Vec::new(), &mut report)?;
+    save_collision(&collision, client_build, out_dir, report)
+}
+
+/// Builds, writes and reloads the collision file of `level` whose solids are those of the
+/// slices `slices` only, each a deferred slice at the origin of its own frame (with the slices
+/// it spawns): a generated level's pieces, which the server places itself (the catacombs' art
+/// tiles, [`crate::catacomb_tiles`]).
+///
+/// # Errors
+///
+/// Returns [`CollisionError`] when a needed file is missing or cannot be read, or the file
+/// cannot be written.
+pub fn build_slices_collision(
+    index: &PakIndex,
+    level: &str,
+    slices: &[AssetKey],
+    client_build: &str,
+    out_dir: &Path,
+) -> Result<CollisionReport, CollisionError> {
+    let catalog = index.read(ASSET_CATALOG_ENTRY)?;
+    let pending: Vec<Pending> = slices
+        .iter()
+        .enumerate()
+        .map(|(deferred, slice)| Pending {
+            slice: *slice,
+            place: IDENTITY_AFFINE,
+            depth: 0,
+            deferred: Some(deferred),
+            variant: None,
+            meta: None,
+        })
+        .collect();
+    let placements = Placements {
+        total: pending.len(),
+        pending,
+    };
+    let origins = slices.iter().map(|slice| (*slice, [0.0; AXES])).collect();
+    let mut report = CollisionReport {
+        level: level.to_owned(),
+        ..CollisionReport::default()
+    };
+    let collision = collide(index, &catalog, level, placements, origins, &mut report)?;
+    save_collision(&collision, client_build, out_dir, report)
+}
+
+/// The solids of `placements` and of the slices they spawn, with the deferred slices
+/// `deferred_slices` that some of them belong to (more are added for the slices spawners place
+/// later), and the quest volumes of the level as it loads.
+fn collide(
+    index: &PakIndex,
+    catalog: &[u8],
+    level: &str,
+    mut placements: Placements,
+    mut deferred_slices: Vec<(AssetKey, [f32; AXES])>,
+    report: &mut CollisionReport,
+) -> Result<LevelCollision, CollisionError> {
     let names = Names::new();
     let filters_root = stream_of(
         COLLISION_FILTERS_ENTRY,
@@ -1538,20 +1569,10 @@ pub fn build_level_collision(
         player: blocking_filters(&filters_root, PLAYER_FILTER)?,
         ai: blocking_filters(&filters_root, AI_FILTER)?,
     };
-    let catalog = index.read(ASSET_CATALOG_ENTRY)?;
     let variation_tables = variation_tables(index)?;
-    let mut placements = level_placements(index, level)?;
     let mut solids_by_slice: HashMap<AssetKey, SliceSolids> = HashMap::new();
     let mut placed_solids: Vec<PlacedSolid> = Vec::new();
     let mut volumes: Vec<QuestVolume> = Vec::new();
-    let mut deferred_slices: Vec<(AssetKey, [f32; AXES])> = Vec::new();
-    let mut report = CollisionReport {
-        level: level.to_owned(),
-        ..CollisionReport::default()
-    };
-    let rows = distribution_placements(index, level, &catalog, client_build, out_dir, &mut report)?;
-    placements.total += rows.len();
-    placements.pending.extend(rows);
     while !placements.pending.is_empty() {
         let wanted: HashSet<AssetKey> = placements
             .pending
@@ -1559,7 +1580,7 @@ pub fn build_level_collision(
             .map(|pending| pending.slice)
             .filter(|slice| !solids_by_slice.contains_key(slice))
             .collect();
-        let paths = paths_of(&catalog, &wanted)?;
+        let paths = paths_of(catalog, &wanted)?;
         let by_path: HashMap<&String, AssetKey> =
             paths.iter().map(|(key, path)| (path, *key)).collect();
         let mut path_list: Vec<String> = by_path.keys().map(|path| (*path).clone()).collect();
@@ -1702,18 +1723,28 @@ pub fn build_level_collision(
         .filter(|solid| solid.deferred.is_none() && solid.solid_for.any())
         .count();
     report.volumes = volumes.len();
-    let collision = LevelCollision {
+    Ok(LevelCollision {
         volumes,
         ..place_solids(
             index,
-            &catalog,
+            catalog,
             level,
             &placed_solids,
             &deferred_slices,
-            &mut report,
+            report,
         )?
-    };
-    let path = collision_file_path(out_dir, client_build, level);
+    })
+}
+
+/// Writes `collision` to its level's file, reloads it and completes `report` with what the
+/// file holds.
+fn save_collision(
+    collision: &LevelCollision,
+    client_build: &str,
+    out_dir: &Path,
+    mut report: CollisionReport,
+) -> Result<CollisionReport, CollisionError> {
+    let path = collision_file_path(out_dir, client_build, &collision.level);
     collision.save(&path, client_build)?;
     let reloaded = LevelCollision::load(&path, client_build)?;
     report.file_bytes = std::fs::metadata(&path)
@@ -1857,6 +1888,19 @@ fn varied(
 /// `objects/nature/...cgf`; the paks' paths are lowercase with forward slashes).
 fn pak_path(value: &str) -> String {
     value.replace('\\', "/").to_lowercase()
+}
+
+/// The slices that `level`'s capitals and chunk lists place, each with its world place
+/// ([`level_placements`]).
+pub(crate) fn level_slice_places(
+    index: &PakIndex,
+    level: &str,
+) -> Result<Vec<(AssetKey, Affine)>, CollisionError> {
+    Ok(level_placements(index, level)?
+        .pending
+        .into_iter()
+        .map(|placed| (placed.slice, placed.place))
+        .collect())
 }
 
 /// The slice placements of a level: its capitals and its chunks.
@@ -2476,18 +2520,14 @@ mod tests {
 
     #[test]
     fn engine_round_shapes_stand_along_z_on_their_middle() {
-        let names = Names::new();
         let shape = |type_id, height: f32, radius: f32| {
-            engine_shape(
-                &component(
-                    type_id,
-                    vec![list(
-                        "Configuration",
-                        vec![float("Height", height), float("Radius", radius)],
-                    )],
-                ),
-                &names,
-            )
+            engine_shape(&component(
+                type_id,
+                vec![list(
+                    "Configuration",
+                    vec![float("Height", height), float("Radius", radius)],
+                )],
+            ))
         };
         assert_eq!(
             shape(types::CAPSULE_SHAPE, 4.0, 0.5),

@@ -392,6 +392,16 @@ impl StatusEffects {
             .and_then(|held| held.ends_ms)
     }
 
+    /// How many times the held effect `crc` was applied (the wire's count); `None` when it is
+    /// not held.
+    #[cfg(test)]
+    pub(super) fn applications(&self, crc: u32) -> Option<u8> {
+        self.held
+            .iter()
+            .find(|held| held.crc == crc)
+            .map(|held| held.applications)
+    }
+
     /// Marks the held effect of `rule` as one that consumable `consumable_id` (or the token of
     /// that entitlement) added: a save and a handoff keep it.
     fn keep(&mut self, rule: &StatusEffectRule, consumable_id: &str) {
@@ -569,6 +579,40 @@ impl StatusEffects {
     }
 
     /// Ends effect `crc`.
+    /// Ends held effect `crc` at server time `now_ms`, before its time: its `OnEndStatusEffect`
+    /// effects follow, applied by `source` (Inferred: an action's `EffectsToRemoveOnExit`
+    /// ends its effect as its time would). Nothing for an effect it does not hold.
+    pub(super) fn end(&mut self, rules: &StatusEffectRules, crc: u32, source: u64, now_ms: u64) {
+        let Some(rule) = rules.get(crc).filter(|_| self.holds(crc)) else {
+            return;
+        };
+        self.remove(crc);
+        for follow in &rule.on_end {
+            self.add(rules, *follow, Application::plain(source), now_ms);
+        }
+    }
+
+    /// Takes `count` applications of held effect `crc` back: the effect stays while it has
+    /// applications left, and ends (as [`Self::remove`]) when it has none. An effect area that a
+    /// holder leaves takes back the applications it gave ([`super::effect_areas`]).
+    ///
+    /// **Observed** (`99a_msq_05_unblockfountain`, the own `ApplyCurseL1` of the Everfall curse
+    /// patches, local map): the wire count rose 1, 2, 3, 4 (104.353 s to 106.236 s) and fell to 1
+    /// at 108.389 s, and from 3 to 2 at 111.636 s, with the effect held all the time; the effect
+    /// went at 161.374 s and its next application, 171.007 s, was 1 again.
+    pub(super) fn withdraw(&mut self, crc: u32, count: u8) {
+        let Some(index) = self.index(crc) else {
+            return;
+        };
+        let held = &mut self.held[index];
+        if held.applications > count {
+            held.applications -= count;
+            self.changed = true;
+        } else {
+            self.remove(crc);
+        }
+    }
+
     pub(super) fn remove(&mut self, crc: u32) {
         let before = self.held.len();
         self.held.retain(|held| held.crc != crc);
@@ -791,11 +835,19 @@ impl StatusEffects {
         self.scale_of(rules, |rule| rule.health_rate)
     }
 
-    /// The held effects as a mob's tree and body read them: their ids, their categories and
-    /// what they keep it from doing.
+    /// The held effects as a mob's tree and body read them: their ids, their categories, what
+    /// they keep it from doing and the sum of their `StaminaRate` (its guard's regen).
     pub(super) fn held_view(&self, rules: &StatusEffectRules) -> HeldEffects {
+        // A rate of a few units.
+        #[allow(clippy::cast_possible_truncation, reason = "a rate of a few units")]
+        let stamina_rate = self.sum_of(rules, |rule| rule.stamina_rate) as f32;
+        // A share of 1 or less.
+        #[allow(clippy::cast_possible_truncation, reason = "a share of 1 or less")]
+        let stagger_reduction = self.sum_of(rules, |rule| rule.stagger_reduction) as f32;
         let mut held = HeldEffects {
             control: self.control(rules),
+            stamina_rate,
+            stagger_reduction,
             ..HeldEffects::default()
         };
         for rule in self.rules(rules) {
@@ -1296,14 +1348,17 @@ impl SimWorld {
         for crc in row.map_or(&[][..], |row| rules.on_hit(row)) {
             player.status_effects.add(rules, *crc, application, now_ms);
         }
+        self.affliction_hit_by(entity, row);
     }
 
-    /// Player `entity` took a hit: its effects that end at a hit count it.
+    /// Player `entity` took a hit: its effects that end at a hit count it, and its erosion
+    /// effects' hit abilities fire ([`super::afflictions`]).
     pub(super) fn player_hit_taken(&mut self, entity: Entity) {
         let rules = &self.content.status_effects;
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             player.status_effects.hit_taken(rules);
         }
+        self.erosion_hit_taken(entity);
     }
 
     /// Player `attacker` hit mob `mob` for `amount` with the attack row `row`: the mob took a
@@ -1371,9 +1426,12 @@ impl SimWorld {
         self.mobs.set_held_effects(held);
     }
 
-    /// Puts the status effects the mobs' trees put on them (fire resist, empower) with the
-    /// effects this sim holds on them, each its own mob's (so that they change its damage and
-    /// show to the clients), and ends those the trees took off.
+    /// Puts the status effects the mobs' trees and engine actions put on them (fire resist,
+    /// empower, the stagger's tracker) with the effects this sim holds on them, each its own
+    /// mob's (so that they change its damage and show to the clients), and ends those they took
+    /// off; an effect that ends so adds its `OnEndStatusEffect` (Inferred from the stagger's
+    /// `AI_Staggered_Tracker`, which `Reaction_Staggered` removes on exit and whose follow-up
+    /// `AI_Staggered_StaggerDamageResist` notes "for a period after being staggered").
     pub(super) fn add_tree_statuses(&mut self) {
         let changes = self.mobs.take_status_changes();
         if changes.is_empty() {
@@ -1395,7 +1453,7 @@ impl SimWorld {
                     now_ms,
                 );
             } else if let Some(held) = self.mob_effects.get_mut(&mob) {
-                held.remove(rule.crc);
+                held.end(rules, rule.crc, mob, now_ms);
             }
         }
     }
@@ -1538,7 +1596,9 @@ impl SimWorld {
                 return;
             }
             if tick.health > 0.0 {
-                vitals.health.heal(amount);
+                let before = vitals.health.current();
+                let healed = vitals.health.heal(amount).saturating_sub(before);
+                self.outpost_rush_healed(tick.source, number, healed);
                 return;
             }
             (amount < vitals.health.current()).then(|| {
@@ -1841,6 +1901,44 @@ mod tests {
         assert!(!held.control.any());
     }
 
+    /// A mob's stagger: its tracker holds the regen (`StaminaRate` -100); taken off by the
+    /// stagger's end, it ends into the stagger resist, whose equip ability's
+    /// `StaggerDamageReduction` (0.5) and `StaminaRate` (5) the tree reads. An effect it does
+    /// not hold ends into nothing.
+    #[test]
+    fn a_staggered_mobs_tracker_ends_into_the_stagger_resist() {
+        const TRACKER: &str = "AI_Staggered_Tracker";
+        const RESIST: &str = "AI_Staggered_StaggerDamageResist";
+        let rules = StatusEffectRules::build(StatusEffectSource {
+            effects: vec![
+                EffectSourceRow {
+                    stamina_rate: Some(-100.0),
+                    on_end: Some(RESIST.to_owned()),
+                    ..row(TRACKER)
+                },
+                EffectSourceRow {
+                    base_duration_s: Some(10.0),
+                    stamina_rate: Some(5.0),
+                    stagger_reduction: Some(0.5),
+                    ..row(RESIST)
+                },
+            ],
+            ..StatusEffectSource::default()
+        });
+        let mut mob = StatusEffects::default();
+        mob.end(&rules, crc(&rules, TRACKER), MOB, START_MS);
+        assert!(mob.held_view(&rules).effects.is_empty(), "nothing held, nothing follows");
+        mob.add(&rules, crc(&rules, TRACKER), Application::plain(MOB), START_MS);
+        let staggered = mob.held_view(&rules);
+        assert!((staggered.stamina_rate + 100.0).abs() < f32::EPSILON);
+        assert!(staggered.stagger_reduction.abs() < f32::EPSILON);
+        mob.end(&rules, crc(&rules, TRACKER), MOB, START_MS);
+        let after = mob.held_view(&rules);
+        assert_eq!(after.effects, [RESIST]);
+        assert!((after.stamina_rate - 5.0).abs() < f32::EPSILON);
+        assert!((after.stagger_reduction - 0.5).abs() < f32::EPSILON);
+    }
+
     #[test]
     fn held_effects_change_damage_taken_stamina_attributes_heals_armor_and_control() {
         // Values of the retail rows of the same names (build 25810808).
@@ -1945,6 +2043,10 @@ mod tests {
             "1 - 0.25 + 0.15"
         );
         assert!(close(effects.stamina_regen_scale(&rules), 0.85));
+        assert!(
+            (effects.held_view(&rules).stamina_rate + 0.15).abs() < 1e-6,
+            "a mob's guard regen reads the same sum"
+        );
         assert!(close(effects.block_stamina_scale(&rules), 1.15));
         assert_eq!(effects.attribute_bonus(&rules, 0), 20, "Constitution");
         assert_eq!(effects.attribute_bonus(&rules, 1), 0, "Focus");
@@ -2326,6 +2428,23 @@ mod tests {
         assert_eq!((held.stacks, held.applications), (3, 6));
         let rule = rules.get(buff).expect("rule");
         assert_eq!(effects.potency(&rules, held, rule), 3.0);
+    }
+
+    #[test]
+    fn a_withdrawal_lowers_the_applications_and_ends_the_effect_at_none() {
+        let rules = rules();
+        let mut effects = StatusEffects::default();
+        let buff = crc(&rules, BUFF);
+        for _ in 0..4 {
+            effects.add(&rules, buff, Application::plain(PLAYER), START_MS);
+        }
+        effects.withdraw(buff, 3);
+        assert_eq!(effects.applications(buff), Some(1), "three areas left, one holds it");
+        effects.withdraw(buff, 1);
+        assert!(!effects.holds(buff), "the last area left");
+        effects.add(&rules, buff, Application::plain(PLAYER), START_MS);
+        assert_eq!(effects.applications(buff), Some(1), "a new entry counts from 1");
+        effects.withdraw(crc(&rules, FOOD), 1);
     }
 
     #[test]

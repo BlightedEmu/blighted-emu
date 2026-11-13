@@ -4,11 +4,11 @@
 
 use nw_bus::{
     BusId, CoinTransfer, GroupEntityDelivery, OwnStateDelivery, RaidEntityDelivery,
-    RaidInviteAnswer, SocialDelivery, UpkeepAnswer,
+    RaidInviteAnswer, SocialDelivery, TownProjectAnswer, UpkeepAnswer,
 };
 use nw_db::{
-    CoinReturn, Company, CompanyInvite, CompanyMember, LinkKind, PlayerReport, SocialGroup,
-    SocialSettings, TreasuryReason, WarRequest,
+    CoinReturn, Company, CompanyInvite, CompanyMember, LinkKind, PlayerRaidRecord, PlayerReport,
+    ProjectStart, SocialGroup, SocialSettings, TreasuryReason, WarRequest,
 };
 use uuid::Uuid;
 
@@ -83,6 +83,36 @@ pub enum Effect {
         ticket: u64,
         /// The declaration.
         request: WarRequest,
+    },
+    /// Start the town project `start` in the database (the treasury pays in its transaction
+    /// when it pays); the answer comes back with `SocialWorld::town_project_started` and the
+    /// same ticket.
+    StartTownProject {
+        /// The start's ticket.
+        ticket: u64,
+        /// The start.
+        start: ProjectStart,
+    },
+    /// Cancel the running town project `project` of `territory` for `company` in the database;
+    /// the answer comes back with `SocialWorld::town_project_cancelled` and the same ticket.
+    CancelTownProject {
+        /// The cancel's ticket.
+        ticket: u64,
+        /// The territory id.
+        territory: u16,
+        /// The CRC-32 of the project's lowercase `ProjectId`.
+        project: u32,
+        /// The company that must own the territory.
+        company: Uuid,
+        /// When the player asked, Unix milliseconds.
+        at_ms: u64,
+    },
+    /// Tell the player's sim whether its town project start or cancel was done.
+    TownProjectAnswered {
+        /// The sim that has the player.
+        sim: BusId,
+        /// The answer.
+        answer: TownProjectAnswer,
     },
     /// Tell the payer's sim whether its territory upkeep payment was taken.
     UpkeepAnswered {
@@ -164,6 +194,10 @@ pub enum StoreOp {
     SaveGroup(SocialGroup),
     /// A group that ended.
     DeleteGroup(Uuid),
+    /// A players' raid with its members ([`crate::player_raids`]).
+    SavePlayerRaid(PlayerRaidRecord),
+    /// A players' raid that ended, by raid entity id.
+    DeletePlayerRaid(Uuid),
     /// Coin owed to a character (its sim did not take it).
     AddCoinReturn(CoinReturn),
     /// Coin owed to a character that its sim took now.

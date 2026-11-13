@@ -41,8 +41,9 @@ const STORE_QUEUE: usize = 4096;
 /// for a database restart, long enough not to load a database that is down).
 const STORE_RETRY_FIRST: Duration = Duration::from_millis(100);
 const STORE_RETRY_LONGEST: Duration = Duration::from_secs(30);
-/// Time between the checks for convert-to-raid votes whose time ran out (`nw_social` players'
-/// raids): the end of a vote waits at most this long.
+/// Time between the checks for convert-to-raid votes whose time ran out, for AFK raid leaders
+/// (`nw_social` players' raids) and for raid group leads whose bit clears (`nw_social` raids):
+/// the end of a vote, a demotion or a lead's bit waits at most this long.
 const RAID_VOTE_CHECK: Duration = Duration::from_secs(1);
 /// Time between flushes of the waiting deliveries: one sim tick.
 const FLUSH: Duration = Duration::from_millis(33);
@@ -113,6 +114,10 @@ enum Outcome {
     Declared(u64, Option<nw_db::Declaration>),
     /// The war lotteries the database drew.
     Draws(Vec<nw_db::LotteryDraw>),
+    /// What the database did with a town project start; `None` when it failed.
+    ProjectStarted(u64, Option<nw_db::ProjectStarted>),
+    /// Whether the database cancelled a town project; `None` when it failed.
+    ProjectCancelled(u64, Option<bool>),
 }
 
 /// One job of the store task.
@@ -124,6 +129,19 @@ enum StoreJob {
     Declare {
         ticket: u64,
         request: nw_db::WarRequest,
+    },
+    /// Start a town project.
+    StartProject {
+        ticket: u64,
+        start: nw_db::ProjectStart,
+    },
+    /// Cancel a town project.
+    CancelProject {
+        ticket: u64,
+        territory: u16,
+        project: u32,
+        company: Uuid,
+        at_ms: u64,
     },
     Treasury {
         ticket: u64,
@@ -424,13 +442,22 @@ async fn serve_loop(
                         state.world.war_declared(ticket, declaration, unix_ms())
                     }
                     Outcome::Draws(draws) => state.world.lotteries_drawn(draws, unix_ms()),
+                    Outcome::ProjectStarted(ticket, started) => {
+                        state.world.town_project_started(ticket, started, unix_ms())
+                    }
+                    Outcome::ProjectCancelled(ticket, cancelled) => {
+                        state.world.town_project_cancelled(ticket, cancelled, unix_ms())
+                    }
                 };
                 state.apply(effects).await;
             }
             _ = flush.tick() => state.flush(),
             _ = check.tick() => state.check_sims(silence).await,
             _ = raid_votes.tick() => {
-                let effects = state.world.end_due_raid_votes(unix_ms());
+                let now_ms = unix_ms();
+                let mut effects = state.world.end_due_raid_votes(now_ms);
+                effects.extend(state.world.demote_afk_raid_leaders(now_ms));
+                effects.extend(state.world.end_due_raid_group_leads(now_ms));
                 state.apply(effects).await;
             }
         }
@@ -511,6 +538,33 @@ impl Loop {
                 Effect::DeclareWar { ticket, request } => {
                     self.queue_store(StoreJob::Declare { ticket, request })
                         .await;
+                }
+                Effect::StartTownProject { ticket, start } => {
+                    self.queue_store(StoreJob::StartProject { ticket, start })
+                        .await;
+                }
+                Effect::CancelTownProject {
+                    ticket,
+                    territory,
+                    project,
+                    company,
+                    at_ms,
+                } => {
+                    self.queue_store(StoreJob::CancelProject {
+                        ticket,
+                        territory,
+                        project,
+                        company,
+                        at_ms,
+                    })
+                    .await;
+                }
+                Effect::TownProjectAnswered { sim, answer } => {
+                    self.pending
+                        .entry(sim)
+                        .or_default()
+                        .project_answers
+                        .push(answer);
                 }
                 Effect::Treasury {
                     ticket,
@@ -677,6 +731,38 @@ async fn store_task(
                     .ok();
                 Some(Outcome::Declared(ticket, declaration))
             }
+            StoreJob::StartProject { ticket, start } => {
+                let started = until_stored("town project start", || {
+                    nw_db::start_town_project(&db, &start)
+                })
+                .await;
+                let started = started
+                    .inspect_err(|error| {
+                        metrics::counter!(METRIC_FAILED_STORES).increment(1);
+                        tracing::error!(%error, company = %start.company, "town project start failed");
+                    })
+                    .ok();
+                Some(Outcome::ProjectStarted(ticket, started))
+            }
+            StoreJob::CancelProject {
+                ticket,
+                territory,
+                project,
+                company,
+                at_ms,
+            } => {
+                let cancelled = until_stored("town project cancel", || {
+                    nw_db::cancel_town_project(&db, territory, project, company, at_ms)
+                })
+                .await;
+                let cancelled = cancelled
+                    .inspect_err(|error| {
+                        metrics::counter!(METRIC_FAILED_STORES).increment(1);
+                        tracing::error!(%error, %company, "town project cancel failed");
+                    })
+                    .ok();
+                Some(Outcome::ProjectCancelled(ticket, cancelled))
+            }
             StoreJob::Treasury {
                 ticket,
                 company,
@@ -756,6 +842,8 @@ async fn store(db: &PgPool, op: &StoreOp) -> Result<Stored, DbError> {
         }
         StoreOp::SaveGroup(group) => done(nw_db::save_group(db, group).await),
         StoreOp::DeleteGroup(group) => done(nw_db::delete_group(db, *group).await),
+        StoreOp::SavePlayerRaid(raid) => done(nw_db::save_player_raid(db, raid).await),
+        StoreOp::DeletePlayerRaid(raid) => done(nw_db::delete_player_raid(db, *raid).await),
         StoreOp::AddCoinReturn(debt) => done(nw_db::add_coin_return(db, debt).await),
         StoreOp::RemoveCoinReturn(debt) => done(nw_db::remove_coin_return(db, *debt).await),
     }

@@ -91,6 +91,15 @@ const SCOPE_DATA_CHILD: usize = 32;
 const SCOPE_INFO_CHILD: usize = 33;
 /// Slot 0 child of the Mannequin tag state (`globalFragTags`).
 const FRAG_TAGS_CHILD: usize = 34;
+/// Slot 0 child of the stamina in whole segments (`segmentedStamina`, [`stamina_segments`];
+/// Observed: entry 44 of the slot-0 field table of the ALC constructor `FUN_142a36d50`).
+const STAMINA_SEGMENTS_CHILD: usize = 44;
+/// The stamina points of one segment of child 44 for a stamina max of at most
+/// [`MAX_STAMINA_SEGMENTS`] segments (Observed: [`stamina_segments`]).
+pub const STAMINA_SEGMENT_POINTS: f32 = 5.0;
+/// The most segments child 44 holds: a larger stamina max is cut into this many segments
+/// (Observed: [`stamina_segments`]).
+pub const MAX_STAMINA_SEGMENTS: u8 = 254;
 /// Slot 0 child of the angle from a mob's facing to the facing it wants
 /// (`aiAngleToDesiredFacing`, radians; creature-animation note, section 7).
 const FACING_GAP_CHILD: usize = 35;
@@ -534,6 +543,53 @@ pub struct MobStep {
     /// the card's `10` kept every mob out of the lock). Retail sends `c3` or `d3` about 100 ms
     /// after the card (16,319 ms card, 16,421 ms state).
     pub awake: bool,
+    /// Its guard stamina in whole segments ([`stamina_segments`]), when it changed since the
+    /// last state that carried it: the client draws the mob's guard bar from it.
+    pub stamina_segments: Option<u8>,
+}
+
+/// The stamina `stamina` of a character of stamina max `max` in whole segments, as slot-0 child
+/// 44 carries it (rounded down): segments of [`STAMINA_SEGMENT_POINTS`] for a max of at most
+/// [`MAX_STAMINA_SEGMENTS`] of them, and else `max` cut into [`MAX_STAMINA_SEGMENTS`] equal
+/// segments.
+///
+/// Observed, segments of 5: the own player's child 44 was `floor(cur / 5)` of its `Stamina`
+/// component's `cur` (max 100) in 351,000 states of 400 ledgers; a blocking mob's card carries 10
+/// for a guard of 50, 15 for 75, 40 for 200, 60 for 300 and 225 for 1,125 (the
+/// `CatacombsMiniBoss` rows of 250 x 4.5); each blocked hit lowers it (MSQ13-lv56 interest 103:
+/// 7, 5, 5, 4, 3, 1 from 768.464 s), regen raises it one segment at a time, and it was 0 in the
+/// state of 586 of the 680 guard breaks of all 1,193 ledgers (the other 94 sent it in the state
+/// before).
+///
+/// Observed, the large max (all 1,194 distinct ledgers of `local-data/capture-index.tsv`,
+/// 2026-11-13, probe `blighted-emu-tools` `scratch-work/guardshow` `big44`): no card ever held
+/// more than 254 in 1,608 cards that reached 200 or more, and every guard above 1,270 starts at
+/// 254 and falls at its first hit (`Evil_Knight_Heavy_Named_DG_GreatCleave_00`, 250 x
+/// `Dungeon+` 6 = 1,500: 254 to 250 at the first health loss, `EXP-Glacial-Tarn` interest 35,
+/// 535.163 s; `Sand_Elemental_Heavy_Sandworm`, 20,000: 254, 253, 241, 229, ... to 0 at its guard
+/// break, `WURM-41815e8e778735be` interest 43, 1014.6 to 1068.8 s; a cap at 254 would hold 254
+/// down to 1,270). The regen steps fit `max / 254` per segment: at the 2 per second regen of
+/// these rows, the hit-free runs of +1 steps last 2.477 s for segments of 5 (three `Dungeon`
+/// rows of 250 x 4 = 1,000, 12 steps), 2.922 s for `Trial_Quest_Seraphim_Boss_Mute_Seraph` (1,500; 26 runs) and
+/// `Ancient_Amalgam_Named_DG_GreatCleave_00` (1,500), 3.895 s for
+/// `Trial_Quest_Seraphim_Boss_Heartless_Seraph` (2,000) and `Dynasty_Heavy_Named_DG_Ebonscale_00`
+/// (250 x `DungeonMiniBoss` 8): ratios 1.180 and 1.572 to the segments of 5, against 1.181 and
+/// 1.575 for `max / 254` (1.177 and 1.569 for `max / 255`).
+pub fn stamina_segments(stamina: f32, max: f32) -> u8 {
+    let most = f32::from(MAX_STAMINA_SEGMENTS);
+    let segments = if max > most * STAMINA_SEGMENT_POINTS {
+        stamina * most / max
+    } else {
+        stamina / STAMINA_SEGMENT_POINTS
+    };
+    // At most `MAX_STAMINA_SEGMENTS`.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to the segment range"
+    )]
+    let whole = segments.floor().clamp(0.0, most) as u8;
+    whole
 }
 
 /// The slayer state of a character (children 13 to 18): the slayer script state it is in, the
@@ -1249,6 +1305,20 @@ impl AlcState {
         })
     }
 
+    /// The same body with its stamina at `segments` ([`stamina_segments`]): a card of a mob whose
+    /// guard is not full shows the guard it has. A body that does not send child 44 stays as it
+    /// is (Observed: every retail mob card of a blocking mob sends it).
+    #[must_use]
+    pub fn with_stamina_segments(&self, segments: u8) -> Self {
+        let Ok(walked) = walk(&mut Reader::new(&self.bytes)) else {
+            return self.clone();
+        };
+        Self {
+            bytes: self.with_children(walked, &[(STAMINA_SEGMENTS_CHILD, vec![segments])]),
+            pos10: self.pos10,
+        }
+    }
+
     /// Whether the body is the card of a fresh spawn: state number 0 and a time anchor of 0, as
     /// [`Self::mob_spawn_card`] writes (a card of a mob already alive carries its newest state).
     pub fn is_fresh_card(&self) -> bool {
@@ -1316,6 +1386,9 @@ impl AlcState {
         }
         if step.awake {
             children.extend(awake_data_bits());
+        }
+        if let Some(segments) = step.stamina_segments {
+            children.push((STAMINA_SEGMENTS_CHILD, vec![segments]));
         }
         Ok(Self::of_slot0(
             children,
@@ -1793,8 +1866,13 @@ const FRESH_CARD_VALUES: [(usize, &[u8]); 21] = [
 ];
 /// A `frag` of zeros.
 const ZERO_FRAG: [u8; FRAG_LEN] = [0; FRAG_LEN];
-/// The retail `segmentedStamina` (child 46) of every first own ALC (315 of 315 logins).
-const FULL_SEGMENTED_STAMINA: u64 = 4_021_696_251;
+/// The retail child 46 (`shapeCastFilter`: entry 46 of the slot-0 field table of the ALC
+/// constructor `FUN_142a36d50`, where entry 44 is `segmentedStamina`) of every first own ALC
+/// (315 of 315 logins).
+const PLAYER_SHAPE_CAST_FILTER: u64 = 4_021_696_251;
+/// Child 44 of every first own ALC: a full stamina of 100 in segments of
+/// [`STAMINA_SEGMENT_POINTS`].
+const PLAYER_STAMINA_SEGMENTS: u8 = 20;
 
 /// The number of the first own state (the most common retail first own ALC).
 pub const SPAWN_STATE_ID: u16 = 2;
@@ -1850,9 +1928,9 @@ const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
     (DATA_BITS_CHILD, Byte(243)),
     (DATA_BITS_HIGH_CHILD, DataBitsHigh),
     (43, Byte(0)),
-    (44, Byte(20)),
+    (STAMINA_SEGMENTS_CHILD, Byte(PLAYER_STAMINA_SEGMENTS)),
     (45, Byte(0)),
-    (46, Prefixed(FULL_SEGMENTED_STAMINA)),
+    (46, Prefixed(PLAYER_SHAPE_CAST_FILTER)),
     (47, Byte(4)),
     (48, Prefixed(0)),
     (53, Float(2.0)),
@@ -3136,6 +3214,7 @@ mod tests {
             facing: None,
             scope: Some(StepScope::Changed(alert)),
             awake: false,
+            stamina_segments: None,
         })
         .expect("step");
         assert_eq!(child(&state, SCOPE_TIME_EX_CHILD), Some(hex("023556")));
@@ -3156,6 +3235,7 @@ mod tests {
                 look_pose_seconds: Some(0.367),
             }),
             awake: false,
+            stamina_segments: None,
         })
         .expect("step");
         assert_eq!(child(&later, SCOPE_TIME_EX_CHILD), Some(hex("0235df")));
@@ -3257,6 +3337,7 @@ mod tests {
                 look_pose_seconds: None,
             }),
             awake: false,
+            stamina_segments: None,
         })
         .expect("step");
         assert_eq!(
@@ -3278,6 +3359,7 @@ mod tests {
                 facing_gap: None,
             })),
             awake: false,
+            stamina_segments: None,
         })
         .expect("step");
         let present: Vec<usize> = children_of(&changed).into_iter().map(|(c, _)| c).collect();
@@ -3290,6 +3372,7 @@ mod tests {
             facing: None,
             scope: None,
             awake: false,
+            stamina_segments: None,
         })
         .expect("step");
         let present: Vec<usize> = children_of(&idle).into_iter().map(|(c, _)| c).collect();
@@ -3307,6 +3390,7 @@ mod tests {
             facing: None,
             scope: None,
             awake: true,
+            stamina_segments: None,
         })
         .expect("step");
         assert_eq!(
@@ -3325,6 +3409,133 @@ mod tests {
             .find(|(child, _)| *child == DATA_BITS_CHILD)
             .map(|(_, bytes)| bytes[0]);
         assert_eq!(fresh_card_bits.map(|bits| bits & TARGETABLE_BIT), Some(0));
+    }
+
+    #[test]
+    fn a_stamina_counts_its_whole_segments_of_five_points() {
+        // The own player's child 44 against its `Stamina` `cur` (max 100): `floor(cur / 5)`; a
+        // blocking mob's full guard of 50 is 10, a `Dungeon` guard of 200 is 40 (the Empyrean
+        // Forge `Evil_Knight_Mace_DG_GreatCleave01_00` cards) and 38 after a hatchet light's 9,
+        // the hatchet run's guard is 8 after its first light (41, Playthrough_Part_01 interest
+        // 58 at 4040.49 s), and a broken guard 0.
+        const CASES: [(f32, f32, u8); 10] = [
+            (100.0, 100.0, 20),
+            (200.0, 200.0, 40),
+            (191.0, 200.0, 38),
+            (50.0, 50.0, 10),
+            (49.9, 50.0, 9),
+            (41.0, 50.0, 8),
+            (5.0, 50.0, 1),
+            (4.9, 50.0, 0),
+            (0.0, 50.0, 0),
+            (1_125.0, 1_125.0, 225),
+        ];
+        for (stamina, max, segments) in CASES {
+            assert_eq!(
+                stamina_segments(stamina, max),
+                segments,
+                "{stamina} of {max}"
+            );
+        }
+        assert_eq!(stamina_segments(-1.0, 50.0), 0, "never below 0");
+    }
+
+    #[test]
+    fn a_stamina_max_above_254_segments_of_five_is_cut_into_254() {
+        // `Evil_Knight_Heavy_Named_DG_GreatCleave_00`, 250 x `Dungeon+` 6: full at 254, and the
+        // first hit takes it below 254 (EXP-Glacial-Tarn interest 35, 535.163 s: 250); the
+        // Sandworm heavy's 20,000 falls one segment per 78.74 points; 1,270 is the largest max
+        // of segments of 5.
+        const KNIGHT: f32 = 1_500.0;
+        const SANDWORM: f32 = 20_000.0;
+        const CASES: [(f32, f32, u8); 9] = [
+            (KNIGHT, KNIGHT, MAX_STAMINA_SEGMENTS),
+            (1_499.0, KNIGHT, 253),
+            (1_476.0, KNIGHT, 249),
+            (750.0, KNIGHT, 127),
+            (5.0, KNIGHT, 0),
+            (SANDWORM, SANDWORM, MAX_STAMINA_SEGMENTS),
+            (19_922.0, SANDWORM, 253),
+            (1_270.0, 1_270.0, MAX_STAMINA_SEGMENTS),
+            (1_269.0, 1_270.0, 253),
+        ];
+        for (stamina, max, segments) in CASES {
+            assert_eq!(
+                stamina_segments(stamina, max),
+                segments,
+                "{stamina} of {max}"
+            );
+        }
+        assert_eq!(
+            stamina_segments(KNIGHT * 2.0, KNIGHT),
+            MAX_STAMINA_SEGMENTS,
+            "never above 254"
+        );
+    }
+
+    #[test]
+    fn a_mob_step_carries_its_guard_segments_only_when_given() {
+        // MSQ13-lv56 interest 103, 772.640 s: the state after a blocked hit sends child 44 = 5.
+        const SEGMENTS: u8 = 5;
+        let step = MobStep {
+            stamp: STAMP,
+            anchored: false,
+            position: None,
+            facing: None,
+            scope: None,
+            awake: false,
+            stamina_segments: Some(SEGMENTS),
+        };
+        let state = AlcState::mob_step(&step).expect("step");
+        assert_eq!(
+            AlcState::read(&mut Reader::new(&state.bytes)).expect("read"),
+            state
+        );
+        assert_eq!(child(&state, STAMINA_SEGMENTS_CHILD), Some(vec![SEGMENTS]));
+        let plain = AlcState::mob_step(&MobStep {
+            stamina_segments: None,
+            ..step
+        })
+        .expect("step");
+        assert_eq!(child(&plain, STAMINA_SEGMENTS_CHILD), None);
+    }
+
+    #[test]
+    fn a_card_shows_the_guard_segments_it_is_given_in_place_of_its_recorded_ones() {
+        const HALF_GUARD: u8 = 5;
+        let place = CardPlace {
+            anchor: None,
+            at: InputPosition {
+                x: POS10_X,
+                y: POS10_Y,
+                z_raw: POS10_Z_RAW,
+            },
+        };
+        let stamp = AlcStamp {
+            id: SPAWN_STATE_ID,
+            anchor_us: 0,
+            offset_ms: SPAWN_STATE_MS,
+        };
+        let recorded = AlcState::spawn(place, stamp).expect("spawn");
+        assert_eq!(
+            child(&recorded, STAMINA_SEGMENTS_CHILD),
+            Some(vec![PLAYER_STAMINA_SEGMENTS])
+        );
+        let shown = recorded.with_stamina_segments(HALF_GUARD);
+        assert_eq!(
+            child(&shown, STAMINA_SEGMENTS_CHILD),
+            Some(vec![HALF_GUARD])
+        );
+        assert_eq!(shown.pos10, recorded.pos10);
+        let others = |state: &AlcState| {
+            children_of(state)
+                .into_iter()
+                .filter(|(index, _)| *index != STAMINA_SEGMENTS_CHILD)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(others(&shown), others(&recorded), "only child 44 changes");
+        let without = AlcState::at_position(place.at);
+        assert_eq!(without.with_stamina_segments(HALF_GUARD), without);
     }
 
     #[test]

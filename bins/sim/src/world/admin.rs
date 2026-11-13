@@ -354,7 +354,7 @@ impl SimWorld {
                 position: [x, y, at.z],
                 ..VitalsSpawn::default()
             };
-            match self.mobs.spawn_gm(spawn, ai.cloned()) {
+            match self.mobs.spawn_gm(spawn, ai.cloned(), None) {
                 Some(entity) => entities.push(entity),
                 None => {
                     self.remove_gm(&entities);

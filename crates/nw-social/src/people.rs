@@ -404,17 +404,12 @@ impl SocialWorld {
                 }
             }
             VoiceCall::GroupChannel => {
-                let Some(group) = self
-                    .people
-                    .get(&character)
-                    .and_then(|person| person.group)
-                    .and_then(|group| self.groups.get(&group))
-                else {
+                let Some(channel) = self.own_voice_channel(character) else {
                     return;
                 };
                 VoicePush::GroupChannel {
-                    uri: service.group_uri(&group.voice_channel),
-                    channel: group.voice_channel.clone(),
+                    uri: service.group_uri(&channel),
+                    channel,
                 }
             }
             VoiceCall::ActivationState { .. } | VoiceCall::ReportError { .. } => return,
@@ -424,8 +419,21 @@ impl SocialWorld {
 }
 
 impl SocialWorld {
-    /// Whether `character` may get a token for the channel at address `uri`: its group's channel,
-    /// or a positional channel at or next to its place, as its voice privacy setting allows
+    /// The group voice channel of `character` (4200): its raid's while it is in a raid (one for
+    /// all the raid's groups, [`crate::raids`]), else its group's; `None` in neither.
+    pub(crate) fn own_voice_channel(&self, character: Uuid) -> Option<String> {
+        if let Some((raid, _)) = self.raid_seat(character) {
+            return Some(raid.voice_channel.clone());
+        }
+        self.people
+            .get(&character)
+            .and_then(|person| person.group)
+            .and_then(|group| self.groups.get(&group))
+            .map(|group| group.voice_channel.clone())
+    }
+
+    /// Whether `character` may get a token for the channel at address `uri`: its raid's or
+    /// group's channel ([`Self::own_voice_channel`]), or a positional channel at or next to its place, as its voice privacy setting allows
     /// ([`crate::privacy`]). Any other channel is refused with no
     /// answer (Inferred: retail's refusal of a token is Unknown; no token is the safe answer).
     fn may_hear(&self, service: &VoiceService, character: Uuid, uri: &str) -> bool {
@@ -436,10 +444,9 @@ impl SocialWorld {
         if voice == Audience::NoOne {
             return false;
         }
-        let in_group = person
-            .group
-            .and_then(|group| self.groups.get(&group))
-            .is_some_and(|group| service.group_uri(&group.voice_channel) == uri);
+        let in_group = self
+            .own_voice_channel(character)
+            .is_some_and(|channel| service.group_uri(&channel) == uri);
         let near = voice == Audience::Everyone
             && person.online.as_ref().is_some_and(|online| {
                 service

@@ -566,6 +566,13 @@ fn player_progression(saved: SavedProgression, now_ns: u64) -> PlayerProgression
         fishing_bait: saved.log_out_state.fishing_bait,
         // The account's, put in by [`with_account_season`].
         season: nw_bus::PlayerSeason::default(),
+        rested_experience: saved.rested.experience,
+        // A character that never saved its pool counts no time away.
+        away_ns: if saved.rested.saved_ns == 0 {
+            0
+        } else {
+            now_ns.saturating_sub(saved.rested.saved_ns)
+        },
     }
 }
 
@@ -990,6 +997,10 @@ mod tests {
                 cyclic_turns: std::collections::BTreeMap::from([("puzzlestone_a".to_owned(), 3)]),
                 fishing_bait: Some("FishingBaitT2".to_owned()),
             },
+            rested: nw_db::SavedRested {
+                experience: RESTED_EXPERIENCE,
+                saved_ns: SAVED_NS,
+            },
         };
         assert_eq!(
             player_progression(saved, SAVED_NS + AWAY_NS),
@@ -1097,6 +1108,8 @@ mod tests {
                 cyclic_turns: std::collections::BTreeMap::from([("puzzlestone_a".to_owned(), 3)]),
                 fishing_bait: Some("FishingBaitT2".to_owned()),
                 season: nw_bus::PlayerSeason::default(),
+                rested_experience: RESTED_EXPERIENCE,
+                away_ns: AWAY_NS,
             }
         );
     }
@@ -1159,6 +1172,22 @@ mod tests {
         assert_eq!(none.season, nw_bus::PlayerSeason::default());
     }
 
+    #[test]
+    fn a_join_counts_the_time_away_since_the_rested_save_and_none_without_one() {
+        let saved = SavedProgression {
+            rested: nw_db::SavedRested {
+                experience: RESTED_EXPERIENCE,
+                saved_ns: SAVED_NS,
+            },
+            ..SavedProgression::default()
+        };
+        let joined = player_progression(saved, SAVED_NS + AWAY_NS);
+        assert_eq!(joined.rested_experience, RESTED_EXPERIENCE);
+        assert_eq!(joined.away_ns, AWAY_NS);
+        let never = player_progression(SavedProgression::default(), SAVED_NS + AWAY_NS);
+        assert_eq!(never.away_ns, 0, "a pool never saved counts no time away");
+    }
+
     /// When the food of [`saved_food`] was saved: unix ns.
     const SAVED_NS: u64 = 1_790_860_000_000_000_000;
     /// The retail `Hivecamp` 2236 rotation (x, y, z, w bits).
@@ -1173,6 +1202,8 @@ mod tests {
     const TICK_NS: u64 = 2_000_000_000;
     /// How long the player was away.
     const AWAY_NS: u64 = 3_600_000_000_000;
+    /// Its rested experience pool at the save (retail `Playthrough_Part_04` login).
+    const RESTED_EXPERIENCE: u32 = 1_261;
 
     /// A saved `FoodRecoveryT2` that pauses unless it `runs_offline`.
     fn saved_food(runs_offline: bool) -> SavedStatusEffect {

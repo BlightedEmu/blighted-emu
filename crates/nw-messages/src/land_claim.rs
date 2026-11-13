@@ -127,15 +127,18 @@ pub struct ProgressionTier {
     pub tier: u8,
 }
 
-/// One `(id, state, value)` entry of a claim's progression (Observed: 5 per owned claim).
+/// One `(project, type, state)` entry of a claim's progression: the project of one
+/// `TerritoryProgressionType` (Observed: 5 per owned claim, one per type 1, 2, 3, 6 and 7; town
+/// project findings 2026-11-13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgressionEntry {
-    /// The id (a CRC-32 or 0).
-    pub id: u32,
-    /// The state byte.
-    pub state: u8,
-    /// The value.
-    pub value: u32,
+    /// The CRC-32 of the lowercase `ProjectId`, or 0 for none.
+    pub project: u32,
+    /// The `TerritoryProgressionType`.
+    pub kind: u8,
+    /// The `SettlementProgressionState` (Active 0, Completed 1, Expired 2, Cancelled 3,
+    /// Blocking 4).
+    pub state: u32,
 }
 
 /// One claim's progression.
@@ -157,7 +160,7 @@ impl ClaimProgression {
         }
         writer.prefixed(self.entries.len() as u64)?;
         for entry in &self.entries {
-            writer.u32(entry.id).u8(entry.state).u32(entry.value);
+            writer.u32(entry.project).u8(entry.kind).u32(entry.state);
         }
         writer.u8(self.level);
         Ok(())
@@ -175,9 +178,9 @@ impl ClaimProgression {
         let entries = (0..progression_count(reader)?)
             .map(|_| {
                 Ok(ProgressionEntry {
-                    id: reader.u32()?,
-                    state: reader.u8()?,
-                    value: reader.u32()?,
+                    project: reader.u32()?,
+                    kind: reader.u8()?,
+                    state: reader.u32()?,
                 })
             })
             .collect::<Result<_, MessageError>>()?;
@@ -602,9 +605,9 @@ mod tests {
                 ClaimProgression {
                     tiers: vec![ProgressionTier { id: 11, tier: 2 }],
                     entries: vec![ProgressionEntry {
-                        id: 9_437_075,
-                        state: 1,
-                        value: 0,
+                        project: 9_437_075,
+                        kind: 1,
+                        state: 0,
                     }],
                     level: 28,
                 };

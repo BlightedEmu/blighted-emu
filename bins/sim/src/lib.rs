@@ -7,6 +7,7 @@ pub mod camera;
 pub mod charting;
 pub mod combat;
 pub mod config;
+pub mod control_point_rules;
 pub mod forward;
 pub mod gameplay;
 pub mod gateways;

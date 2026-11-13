@@ -27,10 +27,14 @@
 //! - a `u32`: the claim's territory level (Observed: 31, 35 and 27 for the desks of territories
 //!   6, 2 and 4, their levels in the 3086 of the same ledgers).
 //!
-//! The progression data (slot 1, meanings Unknown beyond the forms): a list of (`u8`, (`u32`,
-//! Unix ns, `u32`)) entries (5 per body, first bytes 1, 2, 3, 6, 7; the `u32` is the CRC-32 of a
-//! town project id or 0), a list of (`u32`, `u64`) entries (project id CRCs with 0), one
-//! (`u32`, `u64`, `u32`) entry (zero in every body), and a list of (`u32`, Unix ns) entries.
+//! The progression data (slot 1; town project findings 2026-11-13, `Hivetownboardmissions`
+//! 1781378033421 to 1781378595613): a list of one (`u8`, (`u32`, Unix ns, `u32`)) entry per
+//! `TerritoryProgressionType` in the order 3, 7, 6, 2, 1 ([`ProjectSlot`]: the type's running
+//! project, when it ends and its points; Observed: the points rose by the missions'
+//! `CommunityGoalAmount` at their turn-ins), a list of (`u32`, `u64`) entries (the completed
+//! upgrade projects of the territory, time 0 in every body), one (`u32`, `u64`, `u32`) entry
+//! (zero in every body; meaning Unknown), and a list of (`u32`, Unix ns) entries (the CRC-32s of
+//! the running lifestyle buffs, `*LSB`, with their ends).
 
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -71,14 +75,14 @@ fn write_list<T>(
     entries.iter().try_for_each(|entry| write(entry, writer))
 }
 
-/// One (`u32`, Unix ns, `u32`) part of the progression data (meaning Unknown).
+/// One (`u32`, Unix ns, `u32`) part of the progression data: a running project.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProjectEntry {
     /// The CRC-32 of a lowercase town project id, or 0.
     pub project: u32,
-    /// A Unix ns time, or 0.
+    /// When the project ends, Unix ns, or 0.
     pub time_ns: u64,
-    /// A number (0 to 1,700 in retail; meaning Unknown).
+    /// The project's points (Observed: 0 to 1,700, rising with the turned-in missions).
     pub value: u32,
 }
 
@@ -99,7 +103,7 @@ impl ProjectEntry {
 /// One (`u8`, [`ProjectEntry`]) entry of the progression data's first list.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProjectSlot {
-    /// The first byte (1, 2, 3, 6 or 7 in retail; meaning Unknown).
+    /// The `TerritoryProgressionType` (Observed: 3, 7, 6, 2 and 1 in every body).
     pub slot: u8,
     /// The entry.
     pub entry: ProjectEntry,
@@ -108,9 +112,10 @@ pub struct ProjectSlot {
 /// One (`u32`, `u64`) entry of the progression data's lists.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProjectTime {
-    /// The CRC-32 of a lowercase town project id.
+    /// The CRC-32 of a lowercase town project id (a completed project) or of a lifestyle buff
+    /// effect id (a running buff).
     pub project: u32,
-    /// A Unix ns time, or 0.
+    /// A Unix ns time (a buff's end), or 0.
     pub time_ns: u64,
 }
 
@@ -131,13 +136,13 @@ impl ProjectTime {
 /// `territoryProgressionData` (slot 1 of type 1746).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TerritoryProgressionData {
-    /// The first list.
+    /// The running project of each progression type.
     pub slots: Vec<ProjectSlot>,
-    /// The second list.
+    /// The completed upgrade projects.
     pub projects: Vec<ProjectTime>,
-    /// The single entry.
+    /// The single entry (zero in every retail body; meaning Unknown).
     pub entry: ProjectEntry,
-    /// The last list.
+    /// The running lifestyle buffs.
     pub times: Vec<ProjectTime>,
 }
 

@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
+use crate::instanced_loot::InstancedGather;
 use crate::interact_tags::InteractTagged;
 use crate::slice_data::SpawnedSlice;
 use crate::stations::CraftingStation;
@@ -59,6 +60,10 @@ pub struct WorldFile {
     /// The spawns and gatherable points that exist only at some times of day, and the slices
     /// with a time of day ([`crate::time_of_day`]).
     pub time_of_day: TimeOfDayPoints,
+    /// The capitals and spawned slices whose gathers are instanced: their slices hold a
+    /// gatherable controller with an instanced loot entity, with the loot type and area of
+    /// interest radius of their slice ([`crate::instanced_loot::instanced_object`]).
+    pub instanced_gathers: Vec<InstancedGather>,
 }
 
 /// What an awake mob does without a target.

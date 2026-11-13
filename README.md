@@ -100,7 +100,24 @@ A sim needs only the bundle, the world file and the collision file of its level.
 | `creature-animations-<build>.json` | `cargo run --release -p content-tool -- creature-animations` (needs the mob prefab table) | Mobs move without animations |
 | `ai-data-<build>.bin` | `cargo run --release -p content-tool -- ai-data` (reads `local-data/server-pak/Server.pak`; needs the creature animation table) | Every mob stands at its spawn |
 | `ftue-entities-<build>.json` | `cargo run --release -p content-tool -- ftue-entities <ledger.bin>` (a capture of a new character's tutorial) | The tutorial's level entities are not sent |
-| `dungeon-scripts-<build>.json` | `cargo run --release -p content-tool -- dungeon-scripts` | Instances run without encounters |
+| `dungeon-scripts-<build>.json` | `cargo run --release -p content-tool -- dungeon-scripts` (reads `breach-tiers-<build>.json` from `content-tool breach-tiers`) | Instances run without encounters |
+| `dungeon-gates-<build>.json` | `cargo run --release -p content-tool -- dungeon-gates` | An instance shows no gate or door |
+| `dungeon-gate-rules-<build>.json` | No tool here. It is mined from the retail captures (`gaterules.py` of the capture tools) | Every gate is open from the start |
+| `catacomb-tiles-<build>.json` | `cargo run --release -p content-tool -- catacomb-tiles` (needs the mob prefab table) | A catacombs run has no tile entities |
+| `level-doors-<build>-<level>.json` | `cargo run --release -p content-tool -- level-doors` (default `newworld_vitaeeterna`; reads the level's world file) | No door capital of the level is shown |
+| `effect-areas-<build>.json` | `cargo run --release -p content-tool -- effect-areas` | No level area or spell gas gives an affliction |
+| `ability-instances-<build>.json` | `cargo run --release -p content-tool -- ability-instances` | No placed ability is tracked |
+| `claim-plots-<build>.json` | `cargo run --release -p content-tool -- claim-plots` | No land claim entity is shown |
+| `music-charts-<build>.json` | `cargo run --release -p content-tool -- music-charts` | Each played note counts as missed |
+| `town-props-<build>.json` | No tool here. It is mined from the retail captures (`cardsurvey` and `townprops.py` of the capture tools) | Station buildings, lights and house plots do not show |
+| `encounter-roots-<build>.json` | Mined with `town-props` | The world events show no encounter states |
+| `encounter-objects-<build>.json` | Mined with `town-props` | World events that wait for a start object do not go on |
+| `spell-slices-<build>.json` | No tool here. It is mined from the retail captures (`cardsurvey` and `spellslices.py` of the capture tools) | A cast spell shows nothing |
+| `shot-entities-<build>.json` | No tool here. It is mined from the retail captures with the capture tools | No player sees a shot fly |
+| `dungeon-entrances-<build>.json` | No tool here. It is mined from the retail captures (`entrancetable` of the capture tools) | No entrance shows its runs |
+| `invasion-forts-<build>.json` | No tool here. It is mined from the retail captures (`invasionforts` of the capture tools) | No invasion runs on this sim |
+| `war-forts-<build>.json` | No tool here. It is mined from the retail captures (`warforts` of the capture tools) | No war instance runs on this sim |
+| `outpost-structures-<build>.json` | No tool here. It is mined from the retail captures (`oprstructures/mine.py` of the capture tools) | Outpost Rush has no structures |
 | `camp-slices-<build>.json` | `cargo run --release -p content-tool -- camp-slices` | No camp can be placed |
 | `quick-courses-<build>.json` | `cargo run --release -p content-tool -- quick-courses` | No course can be ridden |
 | `store-<build>.json` | `cargo run --release -p content-tool -- store` (reads the content bundle; for `edge-http`, `[shop] store_table`) | The game's store sells nothing (the sims build the same table from the bundle themselves) |
@@ -314,6 +331,8 @@ Voice chat needs a Vivox-compatible voice service and the `[voice]` section. Its
 
 Expeditions, raids and trials run on `sim` processes with `role = "instance"` in `config/sim.toml`. The `[instances]` section of `config/world-director.toml` sets their waits. With `[instances.launch]`, the director starts and stops instance sims itself.
 
+The `[resets]` section of `config/sim.toml` names the server's region (`us-east`, `us-west`, `eu-central`, `sa-east` or `ap-southeast`). Daily loot limits, recipe cooldowns, instance refreshes and gather locks end each day at 05:00 local time in that region, with its daylight saving time, as on retail. The weekly ones end on Tuesday at the same hour. Keep the region the same as the edge world's region. A config that still has the old `[loot_limits]` section does not start.
+
 Known gaps:
 
 - The parts of the client input (type 1589) whose meaning is Unknown are kept as raw bytes.
@@ -520,6 +539,12 @@ The client has no menu or console command for its GM calls, so a game master typ
 | `!spawn <vitals id> <level> <count>` | Spawns GM mobs around the sender (at most 50) |
 | `!despawn` | Removes every GM mob of the sim |
 | `!event <start\|stop> <event id>` / `!events` | Starts an event at the sender, stops one, or lists the running ones |
+| `!owner <territory id> <company name\|clear>` | Gives the land claim of a territory to a company, or clears its owner |
+| `!war <territory id> <minutes to start> <company name>` / `!war <territory id> win <attacker\|defender>` / `!war <territory id> cancel` | Lets the named company declare a war on the territory's owner, sets the war's result, or takes the war back |
+| `!invasion <territory id> <minutes to start>` / `!invasion <territory id> lose` / `!invasion <territory id> darkness <0-3>` / `!invasion <territory id> upgrade <upgrade id> <0-3>` | Schedules an invasion, loses the running one now, sets the territory's darkness level, or sets the tier of one of its upgrades |
+| `!time [<hour>:<minute>]` | Says the world's time of day, or sets it for every sim |
+
+`!owner`, `!war`, `!invasion` and `!time` change the world, not a player, so they take no player name. `!owner`, `!war` and a set `!time` answer once the world database has the change.
 
 Chat commands skip the admin site's audit log. The sim logs each line and its answer (`GM chat command`, `GM chat answer`).
 

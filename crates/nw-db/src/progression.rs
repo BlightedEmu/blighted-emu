@@ -2,10 +2,10 @@
 //! The progression of a character besides its items and quests (world migrations 0006 to
 //! 0008, 0010 for its travel state, 0012 for its mounts, 0013 for its ability slots and meta
 //! achievements, 0024 for its recipe cooldowns, 0025 for its faction, 0026 for its consumable
-//! status effects and 0034 for its log out state): its experience, coins, achievement bits, loot
-//! limit counts, weapon masteries, spent points, travel state, mounts, mapped ability slots, meta
-//! achievements, recipe cooldown counts, faction, held consumable effects, vitals and ability
-//! cooldowns. `sim` saves it; the director
+//! status effects, 0034 for its log out state and 0048 for its rested experience): its experience,
+//! coins, achievement bits, loot limit counts, weapon masteries, spent points, travel state,
+//! mounts, mapped ability slots, meta achievements, recipe cooldown counts, faction, held
+//! consumable effects, vitals, ability cooldowns and rested experience. `sim` saves it; the director
 //! loads it at a join.
 //!
 //! Each save carries the time its state was taken; an older state never overwrites a newer one.
@@ -34,6 +34,7 @@ use crate::position::SaveOutcome;
 use crate::recipe_cooldowns::{
     SavedRecipeCooldown, character_recipe_cooldowns, save_character_recipe_cooldowns,
 };
+use crate::rested::{SavedRested, character_rested, save_character_rested};
 use crate::status_effects::{
     SavedStatusEffect, character_status_effects, save_character_status_effects,
 };
@@ -112,6 +113,8 @@ pub struct SavedProgression {
     /// The vitals, ability cooldowns, PvP flag wish, stone turns and fishing bait (world
     /// migration 0034).
     pub log_out_state: SavedLogOutState,
+    /// The rested experience pool and the time of its save (world migration 0048).
+    pub rested: SavedRested,
 }
 
 type ProgressionRow = (bool, i64, i64, Vec<i32>);
@@ -202,6 +205,7 @@ pub async fn character_progression(
     let status_effects = character_status_effects(world, character_id).await?;
     let consumable_cooldowns = character_consumable_cooldowns(world, character_id).await?;
     let log_out_state = character_log_out_state(world, character_id).await?;
+    let rested = character_rested(world, character_id).await?;
     Ok(Some(SavedProgression {
         experience: from_column(experience, "experience")?,
         coins: from_column(coins, "coins")?,
@@ -262,6 +266,7 @@ pub async fn character_progression(
         status_effects,
         consumable_cooldowns,
         log_out_state,
+        rested,
     }))
 }
 
@@ -442,6 +447,7 @@ pub async fn save_character_progression(
     .await?;
     save_character_log_out_state(&mut transaction, character_id, &progression.log_out_state)
         .await?;
+    save_character_rested(&mut transaction, character_id, &progression.rested).await?;
     transaction.commit().await?;
     Ok(SaveOutcome::Saved)
 }
@@ -481,6 +487,7 @@ mod infra_tests {
     /// 2027-01-01, with milliseconds.
     const TAKEN_AT_MS: u64 = 1_798_761_600_123;
     const LATER_MS: u64 = 1_000;
+    const NS_PER_MS: u64 = 1_000_000;
 
     /// The tutorial's experience and achievements, coins of a quest reward, and the retail
     /// newchar loot limit count.
@@ -580,6 +587,11 @@ mod infra_tests {
                 pvp_wanted: true,
                 cyclic_turns: BTreeMap::from([("puzzlestone_a".to_owned(), 3)]),
                 fishing_bait: Some("FishingBaitT2".to_owned()),
+            },
+            // The retail `Playthrough_Part_04` login pool, saved at the state's time.
+            rested: SavedRested {
+                experience: 1_261,
+                saved_ns: TAKEN_AT_MS * NS_PER_MS,
             },
         }
     }

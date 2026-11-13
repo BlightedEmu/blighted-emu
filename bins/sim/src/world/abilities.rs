@@ -519,20 +519,16 @@ impl RunWorld<'_> {
     }
 
     /// The running actions that play fragment `fragment` now (any case; `None`: the testing
-    /// action), each with its fragment's length and how long it plays it.
-    fn playing(&self, fragment: Option<&str>) -> Vec<(u64, u64)> {
+    /// action), each with its fragment's row (`None` for an action whose fragment the table
+    /// does not hold) and how long it plays it.
+    fn playing(&self, fragment: Option<&str>) -> Vec<(Option<&FragmentRow>, u64)> {
         let elapsed = |running: &Running| self.now_ms.saturating_sub(running.started_ms);
-        let length = |running: &Running, list: &AbilityList| {
-            running
-                .fragment_in(list)
-                .map_or(0, |fragment| fragment.length_ms)
-        };
         match fragment {
             None => self
                 .run
                 .running_in(self.list)
                 .filter(|running| Some(running.action) == self.current)
-                .map(|running| (length(running, self.list), elapsed(running)))
+                .map(|running| (running.fragment_in(self.list), elapsed(running)))
                 .collect(),
             Some(name) => self
                 .all_running()
@@ -544,7 +540,7 @@ impl RunWorld<'_> {
                         .eq_ignore_ascii_case(name)
                         && list.fragment(name).is_some()
                 })
-                .map(|(running, list, _)| (length(running, list), elapsed(running)))
+                .map(|(running, list, _)| (running.fragment_in(list), elapsed(running)))
                 .collect(),
         }
     }
@@ -631,10 +627,13 @@ impl CageWorld for RunWorld<'_> {
         !self.playing(fragment).is_empty()
     }
 
+    /// Whether a running action's fragment is done ([`FragmentRow::done_at`]): a fragment that
+    /// ends in a loop never is, so its action plays until its other deactivation or a
+    /// transition ends it; an action whose fragment the table does not hold is done at once.
     fn fragment_done(&self, fragment: Option<&str>, exit_offset_ms: u32) -> bool {
         self.playing(fragment)
             .into_iter()
-            .any(|(length, elapsed)| elapsed + u64::from(exit_offset_ms) >= length)
+            .any(|(row, elapsed)| row.is_none_or(|row| row.done_at(elapsed, exit_offset_ms)))
     }
 
     fn ability_move(&self, ability: &str, back_ticks: u32) -> bool {
@@ -905,9 +904,7 @@ impl AbilityRun {
                             .iter()
                             .find(|(own, _)| *own == index)
                             .map(|(_, press)| *press);
-                        (since_ms >= transition.start_ms
-                            && (since_ms < transition.end_ms
-                                || transition.start_ms >= transition.end_ms)
+                        (transition.on_at(since_ms)
                             && (kept.is_some() || holds(&world, transition)))
                         .then_some((transition, kept.flatten()))
                     })
@@ -1851,7 +1848,9 @@ impl SimWorld {
     }
 
     /// Runs the ability lists of the weapon in each player's hand at `now_ms`: the status effects
-    /// an ability applies go on its player; its casts go to [`SimWorld::cast_ability_spell`].
+    /// an ability applies go on its player; its casts go to [`SimWorld::cast_ability_spell`]; a
+    /// started ability fires the `OnPerform` abilities of its player's curse effects
+    /// ([`SimWorld::ability_performed`]).
     /// Gives the hits of the spells; lands the status effects of friendly projectiles due and
     /// runs the spell areas ([`super::spell_areas`]).
     pub(super) fn tick_abilities(
@@ -1864,6 +1863,7 @@ impl SimWorld {
         let server_ms = self.server_ms;
         let mut casts: Vec<(Entity, String, Box<SpellRow>, CastKind)> = Vec::new();
         let mut strikes: Vec<(Entity, Box<BasicAttack>)> = Vec::new();
+        let mut performed: Vec<Entity> = Vec::new();
         let mut query = self.world.query::<(Entity, &mut Player)>();
         for (entity, mut player) in query.iter_mut(&mut self.world) {
             let player = &mut *player;
@@ -1906,6 +1906,7 @@ impl SimWorld {
                         kind,
                     } => casts.push((entity, action, spell, kind)),
                     AbilityEvent::Started { ability, frame } => {
+                        performed.push(entity);
                         if let Some(play) = data.player_sequences().ability(ability) {
                             player.slayer.ability_started(
                                 ability,
@@ -1926,6 +1927,10 @@ impl SimWorld {
         }
         for (entity, attack) in strikes {
             self.start_ability_strike(entity, *attack, now_ms);
+        }
+        // The `OnPerform` abilities of the curse effects ([`super::afflictions`]).
+        for entity in performed {
+            self.ability_performed(entity);
         }
         let mut results = Vec::new();
         for (entity, action, spell, kind) in casts {
@@ -2522,10 +2527,11 @@ mod tests {
                 name: SMITE.to_owned(),
                 scopes: Vec::new(),
                 length_ms: FRAGMENT_MS,
+                loops: false,
                 markers: vec![FragmentMarker {
                     name: MARKER.to_owned(),
                     start_ms: MARKER_START_MS,
-                    end_ms: FRAGMENT_MS,
+                    end_ms: Some(FRAGMENT_MS),
                 }],
                 transitions: Vec::new(),
                 hit: None,
@@ -2585,6 +2591,85 @@ mod tests {
             }]
         );
         assert!(ended(run.tick(&[&list], &Staff, FRAGMENT_MS + 100, SERVER_MS)).is_empty());
+    }
+
+    /// A pressed ability whose fragment ends in a loop (the fire staff's
+    /// `Ability_Fire_Staff_Speed_Loop`: `elm_fire_stf_dash_loop` loops from 0 s, and its action
+    /// stops when the fragment is done) plays past any length; it goes on until its transition
+    /// holds, here on the key's release, and the ability ends when the action it moved on to
+    /// is done. Before, a loop was 0 ms long and its action stopped at its first tick.
+    #[test]
+    fn a_looping_fragment_plays_its_action_until_a_transition_moves_it_on() {
+        const RELEASE: &str = "ability1_release";
+        const STOP: &str = "Smite_Stop";
+        const HELD_MS: u64 = 20_000;
+        const RELEASE_FRAME: u16 = 600;
+        let mut list = list();
+        list.fragments[0].length_ms = 0;
+        list.fragments[0].loops = true;
+        list.fragments[0].transitions = vec![FragmentTransition {
+            to: TransitionTo::Action(STOP.to_owned()),
+            input: Some(RELEASE.to_owned()),
+            condition: None,
+            start_ms: 0,
+            end_ms: None,
+            buffer_start_ms: None,
+        }];
+        list.actions.push(ListAction {
+            charge_take: None,
+            name: STOP.to_owned(),
+            fragment: STOP.to_owned(),
+            activation: None,
+            deactivation: None,
+            tag_activities: Vec::new(),
+            ability: None,
+            casts: Vec::new(),
+        });
+        list.fragments.push(FragmentRow {
+            name: STOP.to_owned(),
+            scopes: Vec::new(),
+            length_ms: FRAGMENT_MS,
+            loops: false,
+            markers: Vec::new(),
+            transitions: Vec::new(),
+            hit: None,
+        });
+        let ended = |events: &[AbilityEvent]| {
+            events
+                .iter()
+                .any(|event| matches!(event, AbilityEvent::Ended { .. }))
+        };
+        let mut run = AbilityRun::default();
+        run.press(&[key_1(10)], mapped, no_inputs);
+        assert!(!ended(&run.tick(&[&list], &Staff, 0, SERVER_MS)));
+        for now_ms in (1..=HELD_MS / TICK_MS).map(|tick| tick * TICK_MS) {
+            assert!(
+                !ended(&run.tick(&[&list], &Staff, now_ms, SERVER_MS)),
+                "the loop still plays at {now_ms} ms"
+            );
+        }
+        assert!(
+            run.running.iter().any(|running| running.action == 0),
+            "the loop's action runs"
+        );
+        let release = InputRecord {
+            u16_after_mask: RELEASE_FRAME,
+            ..InputRecord::default()
+        };
+        run.press(&[release], mapped, |_| vec![RELEASE.to_owned()]);
+        let released_ms = HELD_MS + TICK_MS;
+        assert!(!ended(&run.tick(&[&list], &Staff, released_ms, SERVER_MS)));
+        let stop = list.actions.len() - 1;
+        assert!(
+            run.running.iter().any(|running| running.action == stop)
+                && !run.running.iter().any(|running| running.action == 0),
+            "the release moved the loop on: {:?}",
+            run.running
+        );
+        assert!(
+            ended(&run.tick(&[&list], &Staff, released_ms + FRAGMENT_MS, SERVER_MS)),
+            "the ability ends with the action it moved on to"
+        );
     }
 
     /// The test sword's light attack, as the hit of an ability fragment.
@@ -2841,7 +2926,7 @@ mod tests {
             input: None,
             condition: None,
             start_ms: TRANSITION_MS,
-            end_ms: FRAGMENT_MS,
+            end_ms: Some(FRAGMENT_MS),
             buffer_start_ms: None,
         }];
         let second = AbilityList {
@@ -2863,6 +2948,7 @@ mod tests {
                 name: LOOP.to_owned(),
                 scopes: Vec::new(),
                 length_ms: FRAGMENT_MS,
+                loops: false,
                 markers: Vec::new(),
                 transitions: Vec::new(),
                 hit: None,
@@ -2906,7 +2992,7 @@ mod tests {
                 back_ticks: 0,
             }),
             start_ms: CHAIN_WINDOW_MS,
-            end_ms: FRAGMENT_MS,
+            end_ms: Some(FRAGMENT_MS),
             buffer_start_ms,
         }];
         chained.actions.push(ListAction {
@@ -2927,6 +3013,7 @@ mod tests {
             name: CHAINED.to_owned(),
             scopes: Vec::new(),
             length_ms: FRAGMENT_MS,
+            loops: false,
             markers: Vec::new(),
             transitions: Vec::new(),
             hit: None,
@@ -4124,8 +4211,10 @@ mod retail_tests {
 
     /// The flail's abilities strike their fragments' hits (`player_flail.adb`: the `CAGE-Damage`
     /// clips of `Ability_Flail_Trip`, `Ability_Flail_Blast`, `Ability_Flail_Burst` and its
-    /// follow-up, and `Ability_Flail_DefensiveStrike`); Slam's fragment holds none (its damage is
-    /// its spells').
+    /// follow-up, `Ability_Flail_DefensiveStrike`, and `Ability_Flail_Slam`, whose fragment holds
+    /// its standard sphere while Slam is active and its stagger sphere only with
+    /// `Upgrade_Flail_Slam_Upgrade2` and a kite shield, which a plain flail holder does not
+    /// hold: Observed, the content table since the conditioned clips were kept, 2026-11-12).
     #[test]
     fn the_flail_abilities_strike_their_damage_rows() {
         const FLAIL_TAGS: &[&str] = &["1H_Melee", "Flail"];
@@ -4155,7 +4244,7 @@ mod retail_tests {
             struck("Ability_Flail_DefensiveStrike"),
             ["1H_Flail_Ability_DefensiveStrike"]
         );
-        assert!(struck("Ability_Flail_Slam").is_empty());
+        assert_eq!(struck("Ability_Flail_Slam"), ["1H_Flail_Ability_Slam"]);
     }
 
     /// `playeractions_ability_musket.actionlist`: Shooter's Stance readies, aims, and a click in
@@ -4332,11 +4421,11 @@ mod retail_tests {
                 frame += 1;
             }
             if is_key {
-                run.press(&[key_1(frame)], &mapped, no_inputs);
+                run.press(&[key_1(frame)], mapped, no_inputs);
             } else if is_click {
-                run.press(&[record(frame, false)], &mapped, click);
+                run.press(&[record(frame, false)], mapped, click);
             } else if click_ends {
-                run.press(&[record(frame, false)], &mapped, no_inputs);
+                run.press(&[record(frame, false)], mapped, no_inputs);
             }
             for event in run.tick(&lists, &LifeStaff, tick * TICK_MS, SERVER_MS) {
                 if let AbilityEvent::Cast { spell, .. } = event {

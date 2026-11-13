@@ -24,14 +24,21 @@
 //! unturned tile's centre, as `CheckpointTile` (-12, 0, -2) in `tile3_a_gameplay`; a named enemy
 //! room's `dg_enc_catacombs_namedenemy_werebeast` stands at the tile's centre, 2 m down, as
 //! `EncounterNamedEnemy` (0, 0, -2) in `tile4_a_gameplay`.
+//!
+//! Each tile also keeps its map picture id ([`tile_pictures`]): the id the run map's
+//! `tileUiFilenameIdAndRotation` sends above the tile's quarter turns.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use nw_formats::objectstream::Element;
+use nw_content::dungeon_gates::GateTimeline;
+use nw_content::instances::game_mode_indexes;
+use nw_formats::objectstream::{Element, lowercase_crc32};
 use serde::{Deserialize, Serialize};
 
-use crate::collision::Affine;
+use crate::collision::{Affine, Body, LevelCollision};
+use crate::collision_index::CollisionIndex;
 use crate::dungeon_scripts::Encounter;
 use crate::level_script::{
     LevelScriptError, ReplicatedKind, SliceScript, Transform, pak_path, slice_script,
@@ -50,6 +57,26 @@ pub const POWER_UP_FOLDER: &str = "slices/catacombs/gameplay/powerups/";
 /// The pak folder of the spawner slices whose entities are spawn points
 /// (`tile_powerup_spawner_master`, `tile4_c_powerup_spawner`).
 pub const SPAWNER_FOLDER: &str = "slices/catacombs/gameplay/spawners/";
+/// The picture id of no picture: the client's file name table starts with an empty name at
+/// index 0 (`FUN_14334d0e0`), and a map byte of 0 is a cell with no tile.
+pub const NO_PICTURE: u8 = 0;
+/// The bits of a map byte below the picture id: the tile's quarter turns
+/// (`tileUiFilenameIdAndRotation`, Observed: `tile4_a` turned twice is 0x86 in `CATACOMBS2`
+/// 17.409 s).
+const MAP_BYTE_TURN_BITS: u32 = 2;
+/// The largest picture id a map byte holds above its turn bits.
+pub const MAX_PICTURE_ID: u8 = u8::MAX >> MAP_BYTE_TURN_BITS;
+/// The client's first file id: the one after [`NO_PICTURE`].
+const FIRST_PICTURE_ID: usize = NO_PICTURE as usize + 1;
+/// Separates the paths of a `VariationAssetPaths` cell (`FUN_14334bcb0` splits it at `,` with
+/// `FUN_14178ae30`, a stream `getline`: no trimming, an empty entry between two separators kept,
+/// none after the last).
+const VARIATION_SEPARATOR: char = ',';
+/// The key of a row with an empty id: the client refuses it as an invalid entry
+/// (`FUN_1447415e0`; the CRC of no text is 0).
+const INVALID_TILE_KEY: u32 = 0;
+/// Most rows whose map order [`game_mode_indexes`] tells apart: each row's place in one byte.
+const MAX_ORDERED_ROWS: usize = u8::MAX as usize + 1;
 
 /// One entity of a tile: its slice, asset id, position component and place in the tile.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,6 +115,24 @@ pub struct TileProp {
     /// `CATACOMBS2` 17.307 to 17.341 s shows six power-up cards at them).
     #[serde(default)]
     pub points: Vec<TilePlace>,
+    /// The gatherable and the timelines of the spawned slice, when it has a gatherable (a
+    /// door that opens, a lever that is pulled: `catacombs_gate_hidden`,
+    /// `catacombs_lever_wall_torch`); `None` for another slice.
+    #[serde(default)]
+    pub gate: Option<PropGate>,
+}
+
+/// The replicated parts of a prop that opens or is pulled ([`TileProp::gate`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PropGate {
+    /// The component of its `GatherableControllerReplicatedState`.
+    pub gatherable_component: u64,
+    /// Its timelines, with their lengths.
+    pub timelines: Vec<GateTimeline>,
+    /// The component of its `InteractReplicatedState`, when it has one (the wall torch lever's
+    /// 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interact_component: Option<u64>,
 }
 
 /// One encounter a slot may spawn, with its weight: how many entries of the slot's alias name
@@ -115,6 +160,9 @@ pub struct CatacombTile {
     /// after its slot, and the entries of one alias slot share a `spawn_group`.
     #[serde(default)]
     pub encounters: Vec<TileEncounter>,
+    /// Its map picture id ([`tile_pictures`]); [`NO_PICTURE`] in a file from before this field.
+    #[serde(default)]
+    pub picture: u8,
 }
 
 /// The tiles, by lowercase variation path, and the power-ups a power-up spawner picks from.
@@ -150,11 +198,37 @@ pub enum CatacombTilesError {
         /// The slice.
         slice: String,
     },
+    /// The game mode has no map of its own: no level to write the tiles' collision for.
+    #[error("game mode {game_mode}: no map")]
+    NoLevel {
+        /// The game mode.
+        game_mode: String,
+    },
     /// The catalog holds no asset id for a slice.
     #[error("{slice}: not in the asset catalog")]
     NoAsset {
         /// The slice.
         slice: String,
+    },
+    /// The tile rows are more than [`MAX_ORDERED_ROWS`]: their map order is not told apart.
+    #[error("{rows} tile rows: at most {MAX_ORDERED_ROWS} have a known picture order")]
+    TooManyTileRows {
+        /// The rows.
+        rows: usize,
+    },
+    /// A variation's picture id does not fit a map byte ([`MAX_PICTURE_ID`]).
+    #[error("{variation}: picture id {id} is above {MAX_PICTURE_ID}")]
+    PictureIdTooLarge {
+        /// The variation (lower case).
+        variation: String,
+        /// Its id.
+        id: usize,
+    },
+    /// A tile variation of the rules has no picture: the rows do not name it.
+    #[error("{variation}: no tile row names this variation")]
+    NoPicture {
+        /// The variation (lower case).
+        variation: String,
     },
     /// The file cannot be read or written.
     #[error("{path}: {source}")]
@@ -185,6 +259,64 @@ pub fn catacomb_tiles_path(dir: &Path, client_build: &str) -> PathBuf {
 /// is `slices/catacombs/gameplay/tiles/tile4_a_gameplay.dynamicslice`, as the client builds it).
 pub fn variation_slice(variation: &str) -> String {
     pak_path(&format!("slices/{variation}.dynamicslice"))
+}
+
+/// The paths of a `VariationAssetPaths` cell, split as the client splits it
+/// ([`VARIATION_SEPARATOR`]).
+fn variation_paths(cell: &str) -> Vec<&str> {
+    let mut paths: Vec<&str> = cell.split(VARIATION_SEPARATOR).collect();
+    if paths.last().is_some_and(|last| last.is_empty()) {
+        paths.pop();
+    }
+    paths
+}
+
+/// The map picture id of every tile variation (lower case) of the `DungeonTileStaticData`
+/// `rows`, each its `DungeonTileId` and its `VariationAssetPaths` cell, in datasheet order and
+/// of every feature (the client's table also holds the `UnitTesting_Catacombs` rows).
+///
+/// Observed (client build 25810808, `local-data/findings/2026-11-13-catacomb-tile-pictures.md`):
+/// `FUN_1447415e0` puts the rows into a hash map under the lower-case CRC of their id, skipping
+/// an empty id and a repeated one (insert `FUN_1446a3aa0`, rehash `FUN_1446bd430`, one bucket at
+/// the start, maximum load 1, a power of two buckets); `FUN_144777b70` copies the map, which
+/// lists its buckets from the last to the first, each bucket's rows in datasheet order (the
+/// order of [`game_mode_indexes`]). `FUN_14334d0e0` walks that copy and gives every path of a
+/// row the next file id from [`FIRST_PICTURE_ID`]; a path that two rows name keeps the later
+/// id (`FUN_143349fd0` keeps the first entry of an asset id, and the walk then sets its file
+/// id). With the retail rows this gives all 25 picture ids of the ten retail catacomb ledgers
+/// (`tile4_d` 38 and `tile5_d` 10, which no retail run showed).
+///
+/// # Errors
+///
+/// Returns [`CatacombTilesError`] when the rows are more than [`MAX_ORDERED_ROWS`] or a
+/// picture id does not fit a map byte.
+pub fn tile_pictures<'a>(
+    rows: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<BTreeMap<String, u8>, CatacombTilesError> {
+    let mut keys = HashSet::new();
+    let mut rows: Vec<(&str, &str)> = rows
+        .into_iter()
+        .filter(|(id, _)| {
+            let key = lowercase_crc32(id);
+            key != INVALID_TILE_KEY && keys.insert(key)
+        })
+        .collect();
+    if rows.len() > MAX_ORDERED_ROWS {
+        return Err(CatacombTilesError::TooManyTileRows { rows: rows.len() });
+    }
+    let places = game_mode_indexes(rows.iter().map(|(id, _)| *id));
+    rows.sort_by_key(|(id, _)| places.get(id).copied());
+    let mut ids = BTreeMap::new();
+    let paths = rows.iter().flat_map(|(_, cell)| variation_paths(cell));
+    for (id, path) in (FIRST_PICTURE_ID..).zip(paths) {
+        ids.insert(path.to_lowercase(), id);
+    }
+    ids.into_iter()
+        .map(|(variation, id)| match u8::try_from(id) {
+            Ok(picture) if picture <= MAX_PICTURE_ID => Ok((variation, picture)),
+            _ => Err(CatacombTilesError::PictureIdTooLarge { variation, id }),
+        })
+        .collect()
 }
 
 /// The replica index of the position component of the root entity of `script`.
@@ -219,7 +351,9 @@ fn piece(
 impl CatacombTile {
     /// The tile of the gameplay slice `slice` (pak path) with ObjectStream root `root`;
     /// `root_of` gives the root of a slice the tile spawns by its pak path, `asset_of` a slice's
-    /// asset id. Its encounters are left empty: the content builder fills them.
+    /// asset id, `length_of` a timeline asset's length in seconds by its pak path. Its
+    /// encounters are left empty and its picture is [`NO_PICTURE`]: the content builder sets
+    /// them.
     ///
     /// # Errors
     ///
@@ -230,6 +364,7 @@ impl CatacombTile {
         root: &Element,
         root_of: impl Fn(&str) -> Option<Element>,
         asset_of: impl Fn(&str) -> Option<[u8; GUID_LEN]>,
+        length_of: impl Fn(&str) -> f32,
     ) -> Result<Self, CatacombTilesError> {
         let script = |slice: &str, root: &Element| {
             slice_script(root).map_err(|source| CatacombTilesError::Slice {
@@ -300,6 +435,13 @@ impl CatacombTile {
                 } else {
                     Vec::new()
                 },
+                gate: spawned_script
+                    .gatherable_component()
+                    .map(|gatherable_component| PropGate {
+                        gatherable_component,
+                        timelines: spawned_script.timelines(&length_of),
+                        interact_component: spawned_script.interact_component(),
+                    }),
             });
         }
         Ok(Self {
@@ -317,6 +459,7 @@ impl CatacombTile {
             ),
             props,
             encounters: Vec::new(),
+            picture: NO_PICTURE,
         })
     }
 }
@@ -408,6 +551,115 @@ pub fn placed_encounter(encounter: &Encounter, centre: [f32; 3], yaw_deg: f32) -
     placed
 }
 
+/// The solids of the art tiles (the floors and walls a player stands on and runs into), from the
+/// collision file of the catacombs level (`content-tool catacomb-tiles` writes it: each art tile
+/// slice a deferred slice at the origin of its tile's frame, [`crate::collision::DeferredSlice`]),
+/// with the shapes of that file's index.
+#[derive(Debug, Clone, Default)]
+pub struct CatacombSolids {
+    /// The level collision's index, whose shapes the bodies use.
+    shapes: Option<Arc<CollisionIndex>>,
+    /// The bodies of each art tile slice in its tile's frame, by asset id.
+    by_art: BTreeMap<[u8; GUID_LEN], Vec<Body>>,
+}
+
+/// Two are equal when their solids are: the level index only lends them its shapes.
+impl PartialEq for CatacombSolids {
+    fn eq(&self, other: &Self) -> bool {
+        self.by_art == other.by_art
+    }
+}
+
+/// The solids of one run's tiles, placed in the world, and their index.
+#[derive(Debug, Clone)]
+pub struct RunSolids {
+    /// The placed bodies.
+    bodies: Vec<Body>,
+    /// Their index over the level collision's shapes.
+    index: Arc<CollisionIndex>,
+}
+
+/// Two are equal when their bodies are.
+impl PartialEq for RunSolids {
+    fn eq(&self, other: &Self) -> bool {
+        self.bodies == other.bodies
+    }
+}
+
+impl RunSolids {
+    /// The index of the placed solids.
+    pub const fn index(&self) -> &Arc<CollisionIndex> {
+        &self.index
+    }
+
+    /// The placed bodies.
+    pub fn bodies(&self) -> &[Body] {
+        &self.bodies
+    }
+}
+
+impl CatacombSolids {
+    /// The solids of the art tiles of `tiles` in `collision`, whose index is `shapes`: the
+    /// deferred slice of each art tile's asset id at the origin.
+    pub fn of(
+        collision: &LevelCollision,
+        shapes: &Arc<CollisionIndex>,
+        tiles: &CatacombTiles,
+    ) -> Self {
+        let by_art = tiles
+            .by_variation
+            .values()
+            .filter_map(|tile| {
+                let art = tile.art.asset;
+                collision
+                    .deferred
+                    .iter()
+                    .find(|deferred| deferred.slice == art && deferred.origin == [0.0; 3])
+                    .map(|deferred| (art, deferred.bodies.clone()))
+            })
+            .collect();
+        Self {
+            shapes: Some(Arc::clone(shapes)),
+            by_art,
+        }
+    }
+
+    /// The art tiles that have solids.
+    pub fn art_tiles(&self) -> usize {
+        self.by_art.len()
+    }
+
+    /// The solids of the tiles `placed` (each an art tile's asset id, its centre and its yaw in
+    /// degrees counter-clockwise), turned and moved into the world; `None` when no tile has
+    /// solids or no collision file was read.
+    pub fn placed(
+        &self,
+        placed: impl IntoIterator<Item = ([u8; GUID_LEN], [f32; 3], f32)>,
+    ) -> Option<RunSolids> {
+        let shapes = self.shapes.as_ref()?;
+        let bodies: Vec<Body> = placed
+            .into_iter()
+            .filter_map(|(art, centre, yaw_deg)| {
+                self.by_art.get(&art).map(|bodies| {
+                    bodies
+                        .iter()
+                        .map(move |body| Body {
+                            geometry: body.geometry,
+                            place: turned_affine(&body.place, centre, yaw_deg),
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .flatten()
+            .collect();
+        if bodies.is_empty() {
+            return None;
+        }
+        let index = Arc::new(shapes.with_bodies(bodies.clone()));
+        Some(RunSolids { bodies, index })
+    }
+}
+
 impl CatacombTiles {
     /// Reads `path`; a missing file has no tiles (content from before this file).
     ///
@@ -456,6 +708,66 @@ impl CatacombTiles {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collision::{DeferredSlice, Geometry, IDENTITY_AFFINE};
+
+    /// An art tile's floor slab (a box 1 m thick whose top is 0.5 m above its place, 10 m east of
+    /// the tile's centre) stands in the run where its tile stands, turned with it; a tile of
+    /// no solids adds none.
+    #[test]
+    fn a_run_s_solids_are_its_art_tiles_solids_turned_and_moved_into_the_world() {
+        const CENTRE: [f32; 3] = [192.0, 768.0, 120.0];
+        let mut slab = IDENTITY_AFFINE;
+        slab[0][3] = 10.0;
+        let collision = LevelCollision {
+            level: "nw_catacomb_00".to_owned(),
+            geometries: vec![Geometry::Box {
+                half_extents: [2.0, 2.0, 0.5],
+            }],
+            deferred: vec![DeferredSlice {
+                slice: [7; GUID_LEN],
+                sub_id: 2,
+                origin: [0.0; 3],
+                bodies: vec![Body {
+                    geometry: 0,
+                    place: slab,
+                }],
+            }],
+            ..LevelCollision::default()
+        };
+        let shapes = Arc::new(CollisionIndex::new(LevelCollision {
+            deferred: Vec::new(),
+            ..collision.clone()
+        }));
+        let tile = CatacombTile {
+            gameplay: piece_at("slices/catacombs/gameplay/tiles/tile1_a_gameplay"),
+            art: piece_at("slices/catacombs/arttiles/tile1_a"),
+            props: Vec::new(),
+            encounters: Vec::new(),
+            picture: NO_PICTURE,
+        };
+        let tiles = CatacombTiles {
+            by_variation: BTreeMap::from([("tile1_a_gameplay".to_owned(), tile)]),
+            power_ups: Vec::new(),
+        };
+        let solids = CatacombSolids::of(&collision, &shapes, &tiles);
+        assert_eq!(solids.art_tiles(), 1);
+        let run = solids
+            .placed([([7; GUID_LEN], CENTRE, 90.0), ([9; GUID_LEN], CENTRE, 0.0)])
+            .expect("solids");
+        assert_eq!(run.bodies().len(), 1, "the tile of no solids adds none");
+        let place = run.bodies()[0].place;
+        assert!(
+            (place[0][3] - CENTRE[0]).abs() < 1e-3,
+            "east turns to north"
+        );
+        assert!((place[1][3] - (CENTRE[1] + 10.0)).abs() < 1e-3);
+        let floor = run
+            .index()
+            .floor_at(CENTRE[0], CENTRE[1] + 10.0, CENTRE[2] + 1.0)
+            .expect("the slab is a floor");
+        assert!((floor - (CENTRE[2] + 0.5)).abs() < 1e-3, "floor {floor}");
+        assert!(solids.placed([([9; GUID_LEN], CENTRE, 0.0)]).is_none());
+    }
 
     fn piece_at(slice: &str) -> TilePiece {
         TilePiece {
@@ -465,6 +777,169 @@ mod tests {
             offset: [0.0; 3],
             yaw_deg: 0.0,
         }
+    }
+
+    /// The tile kinds of the retail `javelindata_dungeontiles` rows, by tile number.
+    const TILE_KINDS: [&str; 5] = ["Straight", "Corner", "ThreeWay", "DeadEnd", "FourWay"];
+    /// The variations of a retail hallway row, in `VariationAssetPaths` order.
+    const HALLWAY_VARIANTS: [&str; 4] = ["b", "c", "ba", "ca"];
+    /// The id prefix of the retail `UnitTesting_Catacombs` rows.
+    const TEST_ROW_PREFIX: &str = "UT";
+
+    /// The retail `DungeonTileStaticData` rows in datasheet order (client build 25810808): the
+    /// five rooms, the five hallways and the five parkour hallways of `Catacombs`, then the same
+    /// fifteen rows with the `UT` prefix (`UnitTesting_Catacombs`, the same paths).
+    fn retail_rows() -> Vec<(String, String)> {
+        let path = |number: usize, variant: &str| {
+            format!("Catacombs/Gameplay/Tiles/tile{number}_{variant}_gameplay")
+        };
+        let mut feature = Vec::new();
+        for (index, kind) in TILE_KINDS.iter().enumerate() {
+            feature.push((format!("{kind}Room"), path(index + 1, "a")));
+        }
+        for (index, kind) in TILE_KINDS.iter().enumerate() {
+            let cell: Vec<String> = HALLWAY_VARIANTS
+                .iter()
+                .map(|variant| path(index + 1, variant))
+                .collect();
+            feature.push((format!("{kind}Hallway"), cell.join(",")));
+        }
+        for (index, kind) in TILE_KINDS.iter().enumerate() {
+            feature.push((format!("{kind}Hallway_Parkour"), path(index + 1, "d")));
+        }
+        let tests: Vec<(String, String)> = feature
+            .iter()
+            .map(|(id, cell)| (format!("{TEST_ROW_PREFIX}{id}"), cell.clone()))
+            .collect();
+        feature.into_iter().chain(tests).collect()
+    }
+
+    /// The client's id table of the retail rows gives every picture id seen in the ten retail
+    /// catacomb ledgers (25 variations; `tile4_b`, `tile4_c` and `tile4_ba` were never seen
+    /// and fit the hallway rule) and the two tiles no retail run showed: `tile4_d` 38 and
+    /// `tile5_d` 10.
+    #[test]
+    fn the_retail_rows_give_the_retail_picture_ids() {
+        const RETAIL_IDS: [(&str, u8); 30] = [
+            ("tile1_a", 47),
+            ("tile1_b", 56),
+            ("tile1_c", 57),
+            ("tile1_ba", 58),
+            ("tile1_ca", 59),
+            ("tile1_d", 31),
+            ("tile2_a", 13),
+            ("tile2_b", 43),
+            ("tile2_c", 44),
+            ("tile2_ba", 45),
+            ("tile2_ca", 46),
+            ("tile2_d", 32),
+            ("tile3_a", 14),
+            ("tile3_b", 52),
+            ("tile3_c", 53),
+            ("tile3_ba", 54),
+            ("tile3_ca", 55),
+            ("tile3_d", 60),
+            ("tile4_a", 33),
+            ("tile4_b", 34),
+            ("tile4_c", 35),
+            ("tile4_ba", 36),
+            ("tile4_ca", 37),
+            ("tile4_d", 38),
+            ("tile5_a", 29),
+            ("tile5_b", 24),
+            ("tile5_c", 25),
+            ("tile5_ba", 26),
+            ("tile5_ca", 27),
+            ("tile5_d", 10),
+        ];
+        let rows = retail_rows();
+        let pictures =
+            tile_pictures(rows.iter().map(|(id, cell)| (id.as_str(), cell.as_str())))
+                .expect("pictures");
+        assert_eq!(pictures.len(), RETAIL_IDS.len());
+        for (tile, id) in RETAIL_IDS {
+            let variation = format!("catacombs/gameplay/tiles/{tile}_gameplay");
+            assert_eq!(pictures.get(&variation), Some(&id), "{tile}");
+        }
+    }
+
+    /// A row with an empty id or an id already held (any case) adds no file; a path two rows
+    /// name keeps the later id; an empty entry between two separators takes an id, a separator
+    /// at the end does not.
+    #[test]
+    fn refused_rows_add_no_file_and_a_shared_path_keeps_its_later_id() {
+        let one_row = |cell: &'static str| {
+            tile_pictures([("Room", cell)]).expect("pictures")
+        };
+        assert_eq!(
+            one_row("A,B,"),
+            BTreeMap::from([("a".to_owned(), 1), ("b".to_owned(), 2)])
+        );
+        assert_eq!(
+            one_row("A,,B"),
+            BTreeMap::from([
+                ("a".to_owned(), 1),
+                (String::new(), 2),
+                ("b".to_owned(), 3)
+            ])
+        );
+        let with_refused = tile_pictures([("Room", "A"), ("", "B"), ("ROOM", "C")])
+            .expect("pictures");
+        assert_eq!(with_refused, BTreeMap::from([("a".to_owned(), 1)]));
+        // `room` and `hall` share bucket 0 of 2: the walk keeps their datasheet order.
+        let shared = tile_pictures([("Room", "A,B"), ("Hall", "a")]).expect("pictures");
+        assert_eq!(
+            shared,
+            BTreeMap::from([("a".to_owned(), 3), ("b".to_owned(), 2)])
+        );
+    }
+
+    /// The walk lists the map's buckets from the last to the first: `second` (bucket 1 of 2)
+    /// comes before `first` (bucket 0), against the datasheet order.
+    #[test]
+    fn the_walk_lists_the_last_bucket_first() {
+        let pictures = tile_pictures([("First", "X"), ("Second", "Y")]).expect("pictures");
+        assert_eq!(
+            pictures,
+            BTreeMap::from([("x".to_owned(), 2), ("y".to_owned(), 1)])
+        );
+    }
+
+    /// An id above [`MAX_PICTURE_ID`] does not fit a map byte: the table refuses it.
+    #[test]
+    fn a_picture_id_past_the_map_byte_is_refused() {
+        let paths: Vec<String> = (0..=MAX_PICTURE_ID).map(|path| path.to_string()).collect();
+        let cell = paths.join(",");
+        assert!(matches!(
+            tile_pictures([("Room", cell.as_str())]),
+            Err(CatacombTilesError::PictureIdTooLarge { id, .. })
+                if id == usize::from(MAX_PICTURE_ID) + 1
+        ));
+        let fits = paths[..usize::from(MAX_PICTURE_ID)].join(",");
+        assert_eq!(
+            tile_pictures([("Room", fits.as_str())])
+                .expect("pictures")
+                .values()
+                .max(),
+            Some(&MAX_PICTURE_ID)
+        );
+    }
+
+    /// A tile of a file from before the picture field reads with no picture.
+    #[test]
+    fn a_tile_without_a_picture_field_has_no_picture() {
+        let tile = CatacombTile {
+            gameplay: piece_at("slices/catacombs/gameplay/tiles/tile4_d_gameplay"),
+            art: piece_at("slices/catacombs/arttiles/tile4_d"),
+            props: Vec::new(),
+            encounters: Vec::new(),
+            picture: 38,
+        };
+        let mut json = serde_json::to_value(&tile).expect("json");
+        json.as_object_mut().expect("object").remove("picture");
+        let read: CatacombTile = serde_json::from_value(json).expect("old tile");
+        assert_eq!(read.picture, NO_PICTURE);
+        assert_eq!(read.gameplay, tile.gameplay);
     }
 
     #[test]
@@ -499,6 +974,7 @@ mod tests {
                             offset: [-6.0, 0.0, 0.0],
                             yaw_deg: 0.0,
                         }],
+                        gate: None,
                     }],
                     encounters: vec![TileEncounter {
                         weight: 1,
@@ -507,6 +983,7 @@ mod tests {
                             ..Encounter::default()
                         },
                     }],
+                    picture: 33,
                 },
             )]
             .into_iter()

@@ -285,6 +285,7 @@ impl SimWorld {
         };
         let player = &mut *player;
         let call_type = call.type_index();
+        let territory_spend = matches!(call, PointsClientMsg::SpendTerritoryStandingPoint { .. });
         let refusal = match call {
             PointsClientMsg::SpendAttributePoints {
                 attributes, points, ..
@@ -377,8 +378,12 @@ impl SimWorld {
             }
         };
         // The next save round finds the change: the save compares the whole progression.
+        let spent = refusal.is_ok();
         if let Err(reason) = refusal {
             tracing::info!(entity = player.number, call_type, %reason, "point call refused");
+        }
+        if territory_spend && spent {
+            self.refresh_territory_experience(entity);
         }
     }
 }
@@ -602,6 +607,12 @@ mod tests {
                 [(0, i64::from(RANK_ONE_XP)), (1, 50)],
                 [(SWORD, 2)],
             );
+            progression.points = progression_rules();
+            progression
+        }
+
+        /// The point rules of [`progression`].
+        fn progression_rules() -> CharacterPoints {
             let attribute_levels: Vec<(&str, i64)> = nw_content::character_points::ATTRIBUTE_NAMES
                 .iter()
                 .flat_map(|name| [(*name, BASE), (*name, MAX)])
@@ -612,7 +623,7 @@ mod tests {
                 max_level: MAX_LEVEL,
                 requires,
             };
-            progression.points = CharacterPoints::build(
+            CharacterPoints::build(
                 (0..).zip(LEVEL_POINTS).collect::<Vec<_>>(),
                 attribute_levels,
                 [SWORD_TABLE],
@@ -620,8 +631,7 @@ mod tests {
                 [(SWORD, SWORD_VERSION)],
                 [point(COMBO, None), point(UPGRADE, Some((COMBO, 1)))],
             )
-            .with_constitution_health(CONSTITUTION_ROWS);
-            progression
+            .with_constitution_health(CONSTITUTION_ROWS)
         }
 
         fn world() -> SimWorld {
@@ -719,6 +729,57 @@ mod tests {
                 }) => Some(points.unspent),
                 _ => None,
             }
+        }
+
+        #[test]
+        fn a_territory_experience_point_raises_the_share_in_its_territory() {
+            use nw_content::character_points::{
+                TERRITORY_EXPERIENCE_BONUS, territory_experience_share,
+            };
+            /// Retail territory 12 (its standing progression and bonus pool).
+            const TERRITORY: u16 = 12;
+            const TERRITORY_ID: &str = "12";
+            const POOL: &str = "TerritoryRankBonus_12";
+            /// The pool's points before any standing rank and its cap.
+            const INITIAL_POINTS: &str = "1";
+            const POINT_CAP: i64 = 14;
+            /// `TB_GainXP` `MaxLevel`.
+            const BONUS_MAX_LEVEL: i64 = 100;
+            let mut world = world();
+            let mut progression = Progression::build(
+                [(0, 0), (1, 150), (2, i64::from(LEVEL_TWO_XP))],
+                [(0, i64::from(RANK_ONE_XP)), (1, 50)],
+                [(SWORD, 2), (TERRITORY_ID, 2)],
+            );
+            progression.points = progression_rules().with_territory_pools(
+                [(POOL, POINT_CAP, Some(INITIAL_POINTS))],
+                [(TERRITORY_EXPERIENCE_BONUS, POOL, BONUS_MAX_LEVEL)],
+            );
+            world.content = Arc::new(PlayerContent {
+                progression,
+                ..PlayerContent::default()
+            });
+            let entity = world.player_by_number(PLAYER).expect("player");
+            world.territory_changed(entity, TERRITORY, true);
+            let share = |world: &SimWorld| {
+                world
+                    .world
+                    .get::<Player>(entity)
+                    .expect("player")
+                    .territory_experience_share
+            };
+            assert!(share(&world).abs() < f64::EPSILON, "no point spent yet");
+            world.points_call(
+                &connection(PLAYER),
+                PointsClientMsg::SpendTerritoryStandingPoint {
+                    header: HEADER,
+                    pool: lowercase_crc32(POOL),
+                    point: lowercase_crc32(TERRITORY_EXPERIENCE_BONUS),
+                },
+            );
+            assert!((share(&world) - territory_experience_share(1)).abs() < f64::EPSILON);
+            world.territory_changed(entity, TERRITORY, false);
+            assert!(share(&world).abs() < f64::EPSILON, "outside the territory");
         }
 
         #[test]

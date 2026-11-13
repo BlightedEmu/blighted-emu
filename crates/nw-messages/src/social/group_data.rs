@@ -18,15 +18,28 @@
 //! - Slots 1 to 5: the member's two positions (0, 1), game-mode index (2, optional byte),
 //!   faction (3), level (4), waypoint (5), ping (6), ping target (7) and houses (8).
 //!
-//! The flag bits: `0x10` of the first byte is set on every connected member and cleared when it
-//! disconnects; `0x08` while it is dead (set and cleared with its deaths in the raid sessions);
-//! `0x01` on the member that leads (the inviter of `HiveDynastiHealer`, `OPR_TEST3` and
-//! `opr_match_2`: Inferred). In a players' raid `0x02` marks the raid leader and `0x04` its
-//! assistants (Observed: `Hive gorgon raid third boss`, the 2422 that made a member the leader at
-//! 230.534 s moved `0x02` to that member and gave the old leader `0x04` at 230.588 s;
-//! `raid_group_influence_race` one member with `0x02` all along, the player's own block gained
-//! `0x04` at 39.778 s before its raid moves from 43.292 s). The other bits seen (`0x40` of the
-//! first byte, `0x04` and `0x08` of the second) have no meaning here and are not sent.
+//! The flag bits: the client reads the two bytes as one word, the first byte low (Observed,
+//! `FUN_1433e2ae0` with `FUN_1433e41d0`: each member's word goes to the group notification
+//! bus): bit 0 (`0x01` of the first byte) is the member's leader status
+//! (`OnMemberLeaderStatusChanged`, `FUN_145c69c80`), bit 1 the raid leader and else bit 2 the
+//! raid assistant (`OnMemberRaidPermissionChanged`, `FUN_145c53660`), bit 3 its death's door
+//! status (`OnMemberDeathsDoorStatusChanged`, `FUN_145c679e0`), bit 4 its online status
+//! (`OnMemberOnlineStatusChanged`, `FUN_145c6a790`), bits 7 to 9 its dungeon, mutated dungeon
+//! and group trial limits (`Hud.LocalPlayer.Group.Members.%i.IsAt...Limit`) and bit 12 (`0x10`
+//! of the second byte) its pristine status (`OnMemberPristineStatusChanged`, `FUN_145c6a820`,
+//! only with `javelin.groups-enable-sync-pristine`). Observed in the captures: `0x10` is set on
+//! every connected member and cleared when it disconnects; `0x08` with its deaths in the raid
+//! sessions (this server sets it while the member is dead); `0x01` on the member that leads (the
+//! inviter of `HiveDynastiHealer`, `OPR_TEST3` and `opr_match_2`). In a players' raid `0x02`
+//! marks the raid leader and `0x04` its assistants (`Hive gorgon raid third boss`, the 2422 that
+//! made a member the leader at 230.534 s moved `0x02` to that member and gave the old leader
+//! `0x04` at 230.588 s; `raid_group_influence_race` one member with `0x02` all along, the
+//! player's own block gained `0x04` at 39.778 s before its raid moves from 43.292 s). In a raid
+//! group the leader bit marks the group's lead: the member that took a seat in the empty group,
+//! or the next one when it leaves; a game mode team keeps it, a war's, an invasion's and a
+//! players' raid's group clears it again about 0.8 s later (Observed over the 122 ledgers with
+//! the class; `nw_social` raids module doc). The other bits seen (`0x40` of the first byte,
+//! `0x04` and `0x08` of the second) are not sent.
 //!
 //! Positions, pings, waypoints and houses are not sent by this server and read as
 //! [`MessageError::Unsized`].
@@ -54,11 +67,13 @@ pub const GROUP_ENTITY_ASSET: AssetId = AssetId {
 };
 /// Members of a group: five member blocks in slot 0 and five member slots.
 pub const GROUP_SIZE: usize = 5;
-/// Flag bit (first byte): the member is connected.
+/// Flag bit (first byte): the member is connected (the client's online status, Observed).
 pub const FLAG_CONNECTED: u8 = 0x10;
-/// Flag bit (first byte): the member is dead.
+/// Flag bit (first byte): the member is dead (the client's death's door status, Observed; set
+/// while dead: Inferred, see the module text).
 pub const FLAG_DEAD: u8 = 0x08;
-/// Flag bit (first byte): the member leads the group (Inferred, see the module text).
+/// Flag bit (first byte): the member leads the group (the client's leader status, Observed, see
+/// the module text).
 pub const FLAG_LEADER: u8 = 0x01;
 /// Flag bit (first byte): the member leads its players' raid (Observed, see the module text).
 pub const FLAG_RAID_LEADER: u8 = 0x02;

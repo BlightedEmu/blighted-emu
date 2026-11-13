@@ -451,7 +451,7 @@ fn filled(cell: Option<&str>) -> Option<&str> {
 }
 
 /// The entries of a list cell, trimmed; empty for an empty cell.
-fn list_of(cell: Option<&str>) -> Vec<String> {
+pub(crate) fn list_of(cell: Option<&str>) -> Vec<String> {
     filled(cell).map_or_else(Vec::new, |cell| {
         cell.split(LIST_SEPARATOR)
             .map(str::trim)

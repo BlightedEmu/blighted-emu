@@ -95,6 +95,7 @@ pub mod travel_states;
 pub mod turrets;
 pub mod vitals;
 pub mod war;
+pub mod warboard_stats;
 pub mod war_roster;
 pub mod war_signup;
 pub mod war_states;
@@ -107,14 +108,18 @@ pub use abilities::{
 pub use achievements::{
     ACHIEVEMENT_COMPONENT, ACHIEVEMENT_TYPE_INDEX, AchievementBits, AchievementState, ByteChange,
 };
-pub use afflictions::{Affliction, AfflictionId, AfflictionList, ColdLong, HotLong, LongForm};
+pub use afflictions::{
+    Affliction, AfflictionId, AfflictionList, ColdLong, GlobalAffliction, HotLong, LongForm,
+    MeterLine,
+};
 pub use alc::{
     ALC_TYPE_INDEX, AlcChild, AlcStamp, AlcState, CardPlace, DATA_BITS_ACTIVE, FRAG_TAGS_LEN,
-    KnownStamp, LayerEntry, LookDir, MobAnimation, MobStep, POS_REL_CHILD, POS_REL_STEP_M,
-    POS3_LEN, POS10_CHILD, RemoteSequenceClock, RemoteStep, RemoteUpper, SLOT0_CHILDREN,
-    SLOT1_CHILDREN, SPAWN_MOVEMENT, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, ScopeEntry,
-    SecondSlayerState, SequenceClock, SequenceTime, SlayerState, SlotChange, StepPlace, StepScope,
-    TeleportStep, UpperSlots, offset_from, offset_metres,
+    KnownStamp, LayerEntry, LookDir, MAX_STAMINA_SEGMENTS, MobAnimation, MobStep, POS_REL_CHILD,
+    POS_REL_STEP_M, POS3_LEN, POS10_CHILD, RemoteSequenceClock, RemoteStep, RemoteUpper,
+    SLOT0_CHILDREN, SLOT1_CHILDREN, SPAWN_MOVEMENT, SPAWN_STATE_ID, SPAWN_STATE_MS,
+    SPAWN_TELEPORT, STAMINA_SEGMENT_POINTS, ScopeEntry, SecondSlayerState, SequenceClock,
+    SequenceTime, SlayerState, SlotChange, StepPlace, StepScope, TeleportStep, UpperSlots,
+    offset_from, offset_metres, stamina_segments,
 };
 pub use appearance::{
     LOOK_CHOICES, PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState, PlayerIconData, PlayerLook,
@@ -144,7 +149,7 @@ pub use categorical::{
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use client_input::{
     Bit8, ClientInputMsg, HeadStep9, INPUT_Z_MAX, INPUT_Z_MIN, InputHead, InputPosition,
-    InputRecord, InputSlots, InteractionRequest, MoveKeys, QUICK_SLOT_KEYS,
+    InputRecord, InputSlots, InteractionAction, InteractionRequest, MoveKeys, QUICK_SLOT_KEYS,
     RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, SlayerInput,
 };
 pub use client_options::{ClientOptionMsg, FULL_CULL_LIMIT_PERCENT};
@@ -158,7 +163,8 @@ pub use components::{
     BOSS_PHASE_TYPE_INDEX, COMBAT_STATUS_TYPE_INDEX, CURRENCY_COMPONENT, CURRENCY_TYPE_INDEX,
     CombatStatusState, CurrencyState, DAMAGE_RECEIVER_TYPE_INDEX, DELAYED_EVENT_TYPE_INDEX,
     DEPLETED_GATHERABLE, DamageReceiverState, DelayedEventState, GATHERABLE_CONTROLLER_TYPE_INDEX,
-    GatherableControllerState, HEALTHY_GATHERABLE, INTERACT_TYPE_INDEX, InteractState,
+    GatherableControllerState, HEALTHY_GATHERABLE, INTERACT_TYPE_INDEX, InteractCooldown,
+    InteractCooldownState, InteractState,
     LOOK_TARGETING_TYPE_INDEX, LookTargetingState, MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX,
     StaminaState, boss_phase_change,
 };
@@ -183,7 +189,7 @@ pub use economy::{EconomyCall, EconomyMessage};
 pub use entity_ids::number_of_facet;
 pub use entity_ids::{
     Adopted, IdHolder, RawIdError, adopt_raw_id, as_dynamic_raw_id, entity_of_facet,
-    facet_of_raw_id, hold_raw_id, is_dynamic_raw_id, number_of_seen_raw_id, raw_id_count,
+    facet_of_raw_id, hold_raw_id, holds_raw_id, is_dynamic_raw_id, number_of_seen_raw_id, raw_id_count,
     release_raw_id, renew_raw_id,
 };
 pub use entity_slots::{EntitySlots, SlotRead, SlotUpdate};
@@ -238,7 +244,7 @@ pub use mount::{
 };
 pub use objectives::{
     OBJECTIVES_COMPONENT, OBJECTIVES_TYPE_INDEX, ObjectiveRecord, ObjectivesState, TaskEntry,
-    TaskWireState,
+    TaskKey, TaskWireState,
 };
 pub use paperdoll::{
     ItemVisual, LoadedAmmo, Loadout, PAPERDOLL_TYPE_INDEX, PaperdollOwner, PaperdollPublic,
@@ -397,6 +403,7 @@ pub use territory_governance::{
 };
 pub mod territory_upkeep;
 pub use territory_upkeep::{
-    ACCESS_OF_A_MEMBER, ACCESS_OF_NO_MEMBER, PAY_UPKEEP_COST_TYPE_INDEX, PayUpkeepCostMsg,
-    TERRITORY_FACET_READY_TYPE_INDEX, TERRITORY_INTERACTOR_COMPONENT, TerritoryFacetReadyMsg,
+    ACCESS_OF_A_MEMBER, ACCESS_OF_NO_MEMBER, CANCEL_PROJECT_TYPE_INDEX, PAY_UPKEEP_COST_TYPE_INDEX,
+    PayUpkeepCostMsg, START_PROJECT_TYPE_INDEX, TERRITORY_FACET_READY_TYPE_INDEX,
+    TERRITORY_INTERACTOR_COMPONENT, TerritoryFacetReadyMsg, TownProjectCallMsg,
 };

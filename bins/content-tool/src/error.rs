@@ -17,6 +17,8 @@ use crate::collision::CollisionError;
 use crate::combat::NwdbError;
 use crate::creature_animations::CreatureAnimationsError;
 use crate::dungeon_scripts::DungeonScriptsBuildError;
+use crate::effect_areas::EffectAreasBuildError;
+use crate::level_doors::LevelDoorsBuildError;
 use crate::ftue_entities::FtueEntitiesError;
 use crate::map_tiles::MapTilesError;
 use crate::mob_prefabs::MobPrefabsError;
@@ -80,6 +82,12 @@ pub enum ToolError {
     /// The dungeon script file cannot be built.
     #[error(transparent)]
     DungeonScripts(#[from] DungeonScriptsBuildError),
+    /// The effect areas file cannot be built.
+    #[error(transparent)]
+    EffectAreas(#[from] EffectAreasBuildError),
+    /// The level doors file cannot be built.
+    #[error(transparent)]
+    LevelDoors(#[from] LevelDoorsBuildError),
     /// The breach tiers file cannot be made.
     #[error(transparent)]
     BreachTiers(#[from] BreachTiersError),

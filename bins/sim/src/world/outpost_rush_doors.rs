@@ -323,7 +323,7 @@ fn barrier_place(spawner: &BarrierSpawner, placement: [f32; 3]) -> [f32; 3] {
 
 /// The half yaw whose quaternion the retail server sends for a turn of `yaw` about the up axis:
 /// `w` not negative while the trace is above 0, else `z` not negative.
-fn retail_half_yaw(yaw: f32) -> f32 {
+pub(super) fn retail_half_yaw(yaw: f32) -> f32 {
     let half = yaw * HALF;
     let flip = if yaw.cos() > TRACE_TURN_COSINE {
         half.cos() < 0.0
@@ -339,13 +339,30 @@ fn retail_half_yaw(yaw: f32) -> f32 {
 
 /// The ownership of a fort barrier whose raid is `raid`.
 fn barrier_ownership(raid: u64) -> BundleMember {
-    ownership_with(BARRIER_PERMISSION_RULE, raid)
+    team_ownership_on(OWNERSHIP_COMPONENT, raid)
 }
 
-/// The ownership of a barrier with the permission rule `rule` and the raid `raid`.
-fn ownership_with(rule: u8, raid: u64) -> BundleMember {
+/// The ownership on `component` of a game mode part of the team whose raid is `raid` (0: no
+/// team): the fort barriers' body (Observed: the outpost structures carry the same body, raid 0
+/// while no team owns their outpost and the owner team's raid after, `OPR_TEST3` 333.555 and
+/// 1087.165 s).
+pub(super) fn team_ownership_on(component: u64, raid: u64) -> BundleMember {
+    ownership_with(component, BARRIER_PERMISSION_RULE, raid)
+}
+
+/// The place of the layout slice of the Outpost Rush map in `folder` in its level (the fort
+/// barriers' placement); `None` for another level.
+pub(super) fn layout_placement(folder: &str) -> Option<[f32; 3]> {
+    BARRIER_MAPS
+        .iter()
+        .find(|map| map.folder.eq_ignore_ascii_case(folder))
+        .map(|map| map.placement)
+}
+
+/// The ownership on `component` with the permission rule `rule` and the raid `raid`.
+pub(super) fn ownership_with(component: u64, rule: u8, raid: u64) -> BundleMember {
     BundleMember {
-        component: OWNERSHIP_COMPONENT,
+        component,
         state: MemberState::Ownership(OwnershipState {
             guild_id: Some([0; GUILD_ID_LEN]),
             guild_owner: Some(Vec::new()),
@@ -433,7 +450,7 @@ fn baroness_members(
 ) -> Vec<BundleMember> {
     vec![
         card(BARONESS_ASSET, gde_ref),
-        ownership_with(BARONESS_PERMISSION_RULE, PREGAME_RAID),
+        ownership_with(OWNERSHIP_COMPONENT, BARONESS_PERMISSION_RULE, PREGAME_RAID),
         baroness_position(spawner),
         closed_door_on(BARONESS_DOOR_COMPONENT),
     ]

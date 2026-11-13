@@ -11,7 +11,8 @@
 //! body of its class.
 
 use crate::alc::{half_bits, half_value};
-use crate::slots::{children_mask, read_slot_0, write_known};
+use crate::items::FullList;
+use crate::slots::{SLOT_0, children_mask, read_slot_0, write_children, write_known};
 use crate::wire::{MessageError, Reader, Writer};
 
 /// Type index of `MB::StaminaComponentReplicatedState`.
@@ -65,12 +66,14 @@ const PLAYER_BLOCK_WEAPON_SLOT_ALIAS: u32 = 0x20;
 /// The sized child of the gatherable controller: `gatherableState` (a byte). The width of child 1
 /// (`replenishTime`) is Unknown, so a body that sets it is not read.
 const GATHERABLE_CONTROLLER_CHILDREN: u8 = 1;
-/// The sized child of the interact state: child 0, the interaction's `Enabled` flag (a byte;
-/// retail `01 01 00` on a taken bag and a depleted node, `01 01 01` on a node that grew back). The
-/// other children are Unknown, so a body that sets one is not read.
-/// Children of the interact state sized here: `Enabled` (a byte) and `HasInteractors` (a `u32`;
-/// retail loot bag `01 02 00000001` while it is opened). `CooldownUpdates` is not sized.
-const INTERACT_CHILDREN: u8 = 2;
+/// Children of the interact state (names from `FUN_1435e3ce0`): `Enabled` (a byte; retail
+/// `01 01 00` on a taken bag and a depleted node, `01 01 01` on a node that grew back),
+/// `HasInteractors` (a `u32`; retail loot bag `01 02 00000001` while it is opened) and
+/// `CooldownUpdates` (a replicated vector of [`InteractCooldown`]).
+const INTERACT_CHILDREN: u8 = 3;
+const INTERACT_ENABLED_CHILD: u8 = 0;
+const INTERACT_INTERACTORS_CHILD: u8 = 1;
+const INTERACT_COOLDOWNS_CHILD: u8 = 2;
 /// The sized child of the currency: child 0, the coins (a `u64`; beach-quests note: retail
 /// `01 01 0000000000000177`, 375 coins after two quest rewards). The other children are Unknown.
 const CURRENCY_CHILDREN: u8 = 1;
@@ -423,38 +426,121 @@ pub struct InteractState {
 }
 
 impl InteractState {
-    /// Reads the state from the bundle path.
+    /// Reads the state from the bundle path, with the `CooldownUpdates` child when the body
+    /// sets it.
     ///
     /// # Errors
     ///
-    /// Returns [`MessageError`] when the body ends early or sets an unsized child.
-    pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+    /// Returns [`MessageError`] when the body ends early or its cooldown list is a delta.
+    pub fn read(
+        reader: &mut Reader<'_>,
+    ) -> Result<(Self, Option<FullList<InteractCooldown>>), MessageError> {
         let mut state = Self::default();
+        let mut cooldown_updates = None;
         read_slot_0(reader, "interact", INTERACT_CHILDREN, |reader, child| {
-            if child == 0 {
-                state.enabled = Some(reader.u8()? != 0);
-            } else {
-                state.has_interactors = Some(reader.u32()?);
+            match child {
+                INTERACT_ENABLED_CHILD => state.enabled = Some(reader.u8()? != 0),
+                INTERACT_INTERACTORS_CHILD => state.has_interactors = Some(reader.u32()?),
+                _ => cooldown_updates = Some(FullList::read(reader, InteractCooldown::read)?),
             }
             Ok(())
         })?;
-        Ok(state)
+        Ok((state, cooldown_updates))
+    }
+
+    /// The child mask of the state, with child 2 when `cooldown_updates`.
+    fn children(&self, cooldown_updates: bool) -> u16 {
+        children_mask(&[
+            self.enabled.is_some(),
+            self.has_interactors.is_some(),
+            cooldown_updates,
+        ])
+    }
+
+    /// Writes child 0 or 1.
+    fn write_child(&self, writer: &mut Writer, child: u8) {
+        if child == INTERACT_ENABLED_CHILD {
+            self.enabled.map(|enabled| writer.u8(u8::from(enabled)));
+        } else {
+            self.has_interactors.map(|count| writer.u32(count));
+        }
     }
 
     /// Writes the state for the bundle path.
     pub fn write(&self, writer: &mut Writer) {
         write_known(
             writer,
-            children_mask(&[self.enabled.is_some(), self.has_interactors.is_some()]),
+            self.children(false),
             INTERACT_CHILDREN,
-            |writer, child| {
-                if child == 0 {
-                    self.enabled.map(|enabled| writer.u8(u8::from(enabled)));
-                } else {
-                    self.has_interactors.map(|count| writer.u32(count));
-                }
-            },
+            |writer, child| self.write_child(writer, child),
         );
+    }
+}
+
+/// One entry of the interact state's `CooldownUpdates`: a big-endian `u32` and a big-endian
+/// `u64` (the element writers `FUN_140876e70` and `FUN_140877280` of the vector's delta writer
+/// `FUN_1435e7de0`).
+///
+/// Observed (every 2930 body of the capture index that sets child 2: 526 bodies of 12 ledgers,
+/// each in the full form with one entry): the `u64` is the end of the cooldown in ns since
+/// 1970-01-01, the use time plus 20 s on a fire barrel dropper and a vat (`OPR_TEST3` 1714.326 s,
+/// `joining_defending_war_2` 124.741, 180.041, 1436.598 and 1458.199 s), plus 90 s on a horn
+/// (`invasion-71657c7d8159622a` 95.691 s) and plus 1 s on the `AddAmmo` of the Isle of Night
+/// ballista (`ION-a9280e800e2eccdc` 532.259 s). The `u32` is 0 on the dropper, the vat and the
+/// horn and 1 on the ballista. Inferred: it is the index of the cooldown's option in the interact
+/// component's `m_interactOptionEntities` (`DropFlameBarrel` is the first option of the dropper
+/// and the vat, `RaidMonarchsBluffs00AddAmmo` the second of the ballista).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InteractCooldown {
+    /// The index of the option on cooldown.
+    pub option: u32,
+    /// When the cooldown ends: ns since 1970-01-01.
+    pub ends_unix_ns: u64,
+}
+
+impl InteractCooldown {
+    fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        Ok(Self {
+            option: reader.u32()?,
+            ends_unix_ns: reader.u64()?,
+        })
+    }
+
+    fn write(&self, writer: &mut Writer) {
+        writer.u32(self.option).u64(self.ends_unix_ns);
+    }
+}
+
+/// `MB::InteractReplicatedState` with its child 2, `CooldownUpdates`: a body of an object
+/// whose option went on cooldown, and its cards after that (Observed: the entity cards of a used
+/// dropper keep its last cooldown, `joining_defending_war_2` 165.349 s, 20.55 s after its end).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractCooldownState {
+    /// Children 0 and 1.
+    pub interact: InteractState,
+    /// Child 2, in the full form (Observed: every retail body).
+    pub cooldown_updates: FullList<InteractCooldown>,
+}
+
+impl InteractCooldownState {
+    /// Writes the state for the bundle path.
+    ///
+    /// # Errors
+    ///
+    /// Never fails today; the list writer's form keeps the signature of the other lists.
+    pub fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
+        writer.u8(SLOT_0);
+        let children = self.interact.children(true);
+        write_children(writer, children, INTERACT_CHILDREN, |writer, child| {
+            if child != INTERACT_COOLDOWNS_CHILD {
+                self.interact.write_child(writer, child);
+                return Ok(());
+            }
+            self.cooldown_updates.write(writer, |writer, cooldown| {
+                cooldown.write(writer);
+                Ok(())
+            })
+        })
     }
 }
 
@@ -732,8 +818,9 @@ mod tests {
     fn the_interact_state_is_its_enabled_flag() {
         // Retail: a taken bag and a depleted node, then a node that grew back.
         for (body, enabled) in [([0x01, 0x01, 0x00], false), ([0x01, 0x01, 0x01], true)] {
-            let state = InteractState::read(&mut Reader::new(&body)).expect("read");
+            let (state, cooldowns) = InteractState::read(&mut Reader::new(&body)).expect("read");
             assert_eq!(state.enabled, Some(enabled));
+            assert_eq!(cooldowns, None);
             let mut writer = Writer::new();
             state.write(&mut writer);
             assert_eq!(writer.finish(), body);
@@ -747,7 +834,7 @@ mod tests {
             ([0x01, 0x02, 0x00, 0x00, 0x00, 0x01], 1),
             ([0x01, 0x02, 0x00, 0x00, 0x00, 0x00], 0),
         ] {
-            let state = InteractState::read(&mut Reader::new(&body)).expect("read");
+            let (state, cooldowns) = InteractState::read(&mut Reader::new(&body)).expect("read");
             assert_eq!(
                 state,
                 InteractState {
@@ -755,12 +842,62 @@ mod tests {
                     has_interactors: Some(count),
                 }
             );
+            assert_eq!(cooldowns, None);
             let mut writer = Writer::new();
             state.write(&mut writer);
             assert_eq!(writer.finish(), body);
         }
-        let cooldowns = [0x01, 0x04, 0x00];
-        assert!(InteractState::read(&mut Reader::new(&cooldowns)).is_err());
+    }
+
+    #[test]
+    fn the_interact_state_carries_the_cooldown_of_a_used_option() {
+        // Retail `OPR_TEST3` 1714.326 s, the vat of slot 123 at its use: one interactor and the
+        // cooldown of option 0 (version 62) ending at 1789309125751282200 ns.
+        const VAT_USE: [u8; 22] = [
+            0x01, 0x06, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x3e, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x18, 0xd4, 0xe7, 0x2b, 0x71, 0xc5, 0x1a, 0x18,
+        ];
+        const VAT_VERSION: u64 = 62;
+        const VAT_COOLDOWN_END_NS: u64 = 0x18d4_e72b_71c5_1a18;
+        // Retail `ION-a9280e800e2eccdc` 532.259 s, the ballista's `AddAmmo` (option 1).
+        const BALLISTA_ADD_AMMO: [u8; 22] = [
+            0x01, 0x06, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x08, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x18, 0xd7, 0xb5, 0x4d, 0x82, 0x88, 0x85, 0x7c,
+        ];
+        const BALLISTA_OPTION: u32 = 1;
+        let (interact, cooldowns) = InteractState::read(&mut Reader::new(&VAT_USE)).expect("read");
+        let state = InteractCooldownState {
+            interact,
+            cooldown_updates: cooldowns.expect("child 2"),
+        };
+        assert_eq!(
+            state,
+            InteractCooldownState {
+                interact: InteractState {
+                    enabled: None,
+                    has_interactors: Some(1),
+                },
+                cooldown_updates: FullList {
+                    version: Some(VAT_VERSION),
+                    elements: vec![InteractCooldown {
+                        option: 0,
+                        ends_unix_ns: VAT_COOLDOWN_END_NS,
+                    }],
+                },
+            }
+        );
+        let mut writer = Writer::new();
+        state.write(&mut writer).expect("writes");
+        assert_eq!(writer.finish(), VAT_USE);
+        let (_, ballista) =
+            InteractState::read(&mut Reader::new(&BALLISTA_ADD_AMMO)).expect("read");
+        assert_eq!(
+            ballista.expect("child 2").elements[0].option,
+            BALLISTA_OPTION
+        );
+        // A delta form of the list is not read.
+        let delta = [0x01, 0x04, 0x01];
+        assert!(InteractState::read(&mut Reader::new(&delta)).is_err());
     }
 
     #[test]

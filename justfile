@@ -2,6 +2,11 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 sweep_age_days := "7"
+# Longest run of `just test-infra`, seconds (the build and every test): a test that hangs on
+# the bus ends the run instead of holding the build lock for hours.
+test_infra_limit_s := "3600"
+# Wait after the limit for the tests to stop before they are killed, seconds.
+test_infra_kill_after_s := "30"
 
 # Run every required check (spec 10.5) and the game-data guard (M1 spec section 6).
 check:
@@ -55,7 +60,7 @@ infra-test:
 
 # Tests that need the Docker Compose PostgreSQL, Valkey and NATS. Run `just infra-up` first.
 test-infra:
-    cargo test -p nw-db -p nw-login -p nw-bus -p sim -p rep-gateway -p world-director -p blighted-admin --features nw-db/infra,nw-login/infra,nw-bus/infra,sim/infra,rep-gateway/infra,world-director/infra,blighted-admin/infra
+    timeout --kill-after={{test_infra_kill_after_s}} {{test_infra_limit_s}} cargo test -p nw-db -p nw-login -p nw-bus -p sim -p rep-gateway -p world-director -p blighted-admin --features nw-db/infra,nw-login/infra,nw-bus/infra,sim/infra,rep-gateway/infra,world-director/infra,blighted-admin/infra
 
 # Tests that read your own New World install. Set NW_GAME_DIR first.
 test-local:

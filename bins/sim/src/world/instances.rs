@@ -28,7 +28,7 @@ use nw_bus::{
 use nw_content::instances::{
     EntryCounter, InstanceCatalog, InstanceKind, InstanceMode, NO_INDEX, frame_holds,
 };
-use nw_content::loot_limits::ResetCycle;
+use nw_content::resets::ResetCycle;
 use nw_messages::{
     ActivateResponse, ArenaClientMsg, ArenaServerMsg, FacetHeader, FullList, InteractionRequest,
     LevelInfoChangedMsg, LevelSpec, PLAYER_ARENA_FACET, PlayerArenaState, ServerMessage,
@@ -38,6 +38,7 @@ use nw_sim_core::Position;
 use uuid::Uuid;
 
 use super::catacombs::{CatacombRun, open_run};
+use super::expedition_mode::ExpeditionMode;
 use super::mutations::{InstanceMutation, difficulty_of_request};
 use super::war_fight::WarFight;
 use super::{
@@ -292,6 +293,9 @@ pub(crate) struct InstanceRun {
     war: Option<WarFight>,
     /// The catacombs run it runs ([`super::catacombs`]); `None` for every other instance.
     catacomb: Option<CatacombRun>,
+    /// The game mode entity of the expedition it runs ([`super::expedition_mode`]); `None` for
+    /// every other instance.
+    expedition: Option<ExpeditionMode>,
 }
 
 impl InstanceRun {
@@ -323,6 +327,21 @@ impl InstanceRun {
     /// The catacombs run it runs, to change.
     pub(super) const fn catacomb_mut(&mut self) -> Option<&mut CatacombRun> {
         self.catacomb.as_mut()
+    }
+
+    /// The game mode entity of the expedition it runs.
+    pub(super) const fn expedition(&self) -> Option<&ExpeditionMode> {
+        self.expedition.as_ref()
+    }
+
+    /// The game mode entity of the expedition it runs, to change.
+    pub(super) const fn expedition_mut(&mut self) -> Option<&mut ExpeditionMode> {
+        self.expedition.as_mut()
+    }
+
+    /// Sets the game mode entity of the expedition it runs.
+    pub(super) fn set_expedition(&mut self, expedition: ExpeditionMode) {
+        self.expedition = Some(expedition);
     }
 
     /// Takes the fight of its war out, to run it ([`Self::put_war_fight`] puts it back).
@@ -483,6 +502,15 @@ impl SimWorld {
     /// The header of a call to `number`'s `PlayerArenaComponent`.
     fn arena_header(number: u64) -> FacetHeader {
         FacetHeader::of(PLAYER_ARENA_FACET, number)
+    }
+
+    /// The kind of the game mode this instance sim runs; `None` for an open world sim or a mode
+    /// the catalog does not hold.
+    pub(super) fn instance_kind(&self) -> Option<InstanceKind> {
+        self.instance_run
+            .as_ref()
+            .and_then(|run| self.content.instances.by_id(run.game_mode()))
+            .map(|mode| mode.kind)
     }
 
     /// The level a player arrives in: the framed level of the running war, or the level of the
@@ -1000,6 +1028,7 @@ impl SimWorld {
         };
         // The game mode takes back its items (`ItemClassesToRemoveOnExit`).
         self.remove_instance_items(entity);
+        self.leave_expedition_mode(entity);
         self.war_exit(entity);
         self.leave_raid(entity);
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
@@ -1138,6 +1167,7 @@ impl SimWorld {
                 self.join_match_raid(entity);
             } else {
                 self.join_run_raid(entity);
+                self.join_expedition_mode(entity);
             }
             self.war_arrived(entity);
         }
@@ -1224,9 +1254,11 @@ impl SimWorld {
             mutation: None,
             war: None,
             catacomb,
+            expedition: None,
         });
         self.spawn_instance_mobs(true);
         self.place_catacomb_tiles();
+        self.place_expedition_mode();
         tracing::info!(%instance, game_mode, "instance opened");
         InstanceOpened::Opened
     }
@@ -1264,12 +1296,17 @@ impl SimWorld {
         self.recheck_timed_spawns();
     }
 
-    /// Frees this sim of its instance: the tile entities of a catacombs run go away.
+    /// Frees this sim of its instance: the tile entities of a catacombs run and the game mode
+    /// entity of an expedition go away.
     fn end_instance_run(&mut self) {
-        if let Some(mut run) = self.instance_run.take()
-            && let Some(catacomb) = run.catacomb_mut()
-        {
+        let Some(mut run) = self.instance_run.take() else {
+            return;
+        };
+        if let Some(catacomb) = run.catacomb_mut() {
             self.remove_catacomb_tiles(catacomb);
+        }
+        if let Some(expedition) = run.expedition() {
+            self.stations.remove_camp(expedition.entity());
         }
     }
 
@@ -1328,6 +1365,7 @@ impl SimWorld {
             mutation: None,
             war: Some(fight),
             catacomb: None,
+            expedition: None,
         });
         tracing::info!(%instance, war = %war.war, territory = war.territory, "war instance opened");
         InstanceOpened::Opened
@@ -1464,7 +1502,7 @@ impl SimWorld {
 /// the base dungeon and group trial counts each day, the mutated count each week, at the
 /// server's resets (retail refresh times: daily ones on every weekday at the reset hour, the
 /// mutated one on the weekly reset day; a new character gets the three times at once).
-fn refresh(record: &mut PlayerArena, clock: nw_content::loot_limits::ResetClock, now_ns: u64) {
+fn refresh(record: &mut PlayerArena, clock: nw_content::resets::ResetClock, now_ns: u64) {
     if now_ns >= record.next_base_refresh_ns {
         if record.next_base_refresh_ns != 0 {
             record.base_entered = 0;
@@ -1488,14 +1526,14 @@ fn refresh(record: &mut PlayerArena, clock: nw_content::loot_limits::ResetClock,
 #[cfg(test)]
 pub(super) mod tests {
     use nw_content::instances::{InstanceMap, Teleport};
-    use nw_content::loot_limits::{ResetClock, Weekday};
+    use nw_content::resets::{ResetClock, ServerRegion};
 
     use super::*;
 
     /// The CRC of every test mode: the state and the entrances do not read it.
     const TEST_CRC: u32 = 7;
 
-    fn mode(id: &str, map_name: &str, kind: InstanceKind) -> InstanceMode {
+    pub(in crate::world) fn mode(id: &str, map_name: &str, kind: InstanceKind) -> InstanceMode {
         InstanceMode {
             id: id.to_owned(),
             crc: TEST_CRC,
@@ -1658,8 +1696,7 @@ pub(super) mod tests {
 
     fn clock() -> ResetClock {
         ResetClock {
-            hour_utc: 3,
-            weekly_day: Weekday::Tuesday,
+            region: ServerRegion::EuCentral,
         }
     }
 
@@ -1667,8 +1704,9 @@ pub(super) mod tests {
     const NOW_NS: u64 = 1_792_670_400_250_000_000;
     /// Friday 2026-10-23 03:00 UTC, Unix seconds.
     const NEXT_DAILY_S: u64 = 1_792_724_400;
-    /// Tuesday 2026-10-27 03:00 UTC, Unix seconds.
-    const NEXT_WEEKLY_S: u64 = 1_793_070_000;
+    /// Tuesday 2026-10-27 04:00 UTC (05:00 CET: European summer time ended on 2026-10-25),
+    /// Unix seconds.
+    const NEXT_WEEKLY_S: u64 = 1_793_073_600;
 
     #[test]
     fn a_new_record_gets_its_refresh_times_and_an_old_one_starts_again() {

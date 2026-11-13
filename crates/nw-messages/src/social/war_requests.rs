@@ -14,11 +14,25 @@
 //!   cost and the window with what it sent, shows `warcost_changed`, `siegewindow_changed`, both
 //!   or `unknown`, and keeps the new values. Inferred: the ids are the defender and the declaring
 //!   company, the u16 the territory.
-//! - 1737 `SocialComponentClientFacet_OnWarRequestPending` (reader `FUN_143eabec0`): 16 bytes
-//!   and a u32 (`ntohl`). Inferred: the defender and the client's `WarRequestStatus` (1 Pending,
-//!   `FUN_145cc2d20`).
+//! - 1737 `SocialComponentClientFacet_OnWarRequestPending` (message vtable `0x1482da2c8`: writer
+//!   `FUN_143eabe70`, reader `FUN_143eabec0`, handler `FUN_143eb6830`): 16 bytes and a u16 (the
+//!   reader's `FUN_14087a360` is `ntohs`). The handler raises the social notification
+//!   `OnWarDeclarationPending(id, u16)` (event slot `+0x80`, `FUN_143f049d0`); `notifications.luac`
+//!   proto63 shows `@ui_wardeclaration_pending_notification_title` / `_text` for 10 s. Inferred:
+//!   the defender and the territory (the u16 of 941 and 4139 in the same place).
 //! - 193 `SocialComponentClientFacet_OnWarRequestSuccessful` (`FUN_142959860`): 16 bytes.
 //!   Inferred: the war id.
+//! - 4139 `SocialComponentClientFacet_OnWarRequestErrorMessage` (message vtable `0x1482d9168`:
+//!   writer `FUN_143eb3250`, reader `FUN_143eb32c0`, handler `FUN_143eb31b0`): 16 bytes, a u16
+//!   and a u32 `WarRequestStatus` (`FUN_145cc2d20`). `FUN_143f04300` shows the error pop-ups of
+//!   statuses 2, 3, 14 and 15, and for status 12 `WarDecNotSelected` it raises
+//!   `OnWarDeclarationUnsuccessful(id, u16)` (event slot `+0x88`, index 9 of the Lua binder
+//!   `FUN_144f16450`; the slots of 941 `Failed` `+0x78` = index 7 and 193 `Successful` `+0x90` =
+//!   index 10 fix the order). `notifications.luac` proto64 shows
+//!   `@ui_wardeclaration_unsuccessful_notification_title` / `_text` ("Another company's War
+//!   Declaration was selected. Your coin has been refunded to the Company Wallet.") for 10 s,
+//!   and an open `wardeclarationpopup.luac` (proto33) shows the text and unlocks its button: the
+//!   message of a lost lottery. Inferred: the defender and the territory, as in 1737.
 
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
 
@@ -30,8 +44,11 @@ pub const DECLARATION_FAILED_TYPE_INDEX: u64 = 941;
 pub const REQUEST_PENDING_TYPE_INDEX: u64 = 1737;
 /// `SocialComponentClientFacet_OnWarRequestSuccessful`.
 pub const REQUEST_SUCCESSFUL_TYPE_INDEX: u64 = 193;
-/// The client's `WarRequestStatus` `Pending` (`FUN_145cc2d20`).
-pub const WAR_REQUEST_PENDING: u32 = 1;
+/// `SocialComponentClientFacet_OnWarRequestErrorMessage`.
+pub const REQUEST_ERROR_TYPE_INDEX: u64 = 4139;
+/// The client's `WarRequestStatus` `WarDecNotSelected` (`FUN_145cc2d20`): the lottery drew
+/// another company's declaration.
+pub const WAR_DEC_NOT_SELECTED: u32 = 12;
 
 /// The war calls of the client.
 pub(crate) const CALL_TYPES: [u64; 1] = [DECLARE_WAR_TYPE_INDEX];
@@ -118,13 +135,23 @@ pub enum WarPush {
     Pending {
         /// The defending company.
         defender: [u8; RAW_ID_LEN],
-        /// The `WarRequestStatus`.
-        status: u32,
+        /// The territory id.
+        territory: u16,
     },
     /// 193: the declaration won its lottery.
     Successful {
         /// The war id.
         war: [u8; RAW_ID_LEN],
+    },
+    /// 4139: the request ended with `status` (for [`WAR_DEC_NOT_SELECTED`] the client shows the
+    /// lost lottery notice).
+    RequestError {
+        /// The defending company.
+        defender: [u8; RAW_ID_LEN],
+        /// The territory id.
+        territory: u16,
+        /// The `WarRequestStatus`.
+        status: u32,
     },
 }
 
@@ -135,6 +162,7 @@ impl WarPush {
             Self::DeclarationFailed { .. } => DECLARATION_FAILED_TYPE_INDEX,
             Self::Pending { .. } => REQUEST_PENDING_TYPE_INDEX,
             Self::Successful { .. } => REQUEST_SUCCESSFUL_TYPE_INDEX,
+            Self::RequestError { .. } => REQUEST_ERROR_TYPE_INDEX,
         }
     }
 
@@ -154,11 +182,21 @@ impl WarPush {
                     .u64(*cost)
                     .f32(*siege_window);
             }
-            Self::Pending { defender, status } => {
-                writer.bytes(defender).u32(*status);
+            Self::Pending {
+                defender,
+                territory,
+            } => {
+                writer.bytes(defender).u16(*territory);
             }
             Self::Successful { war } => {
                 writer.bytes(war);
+            }
+            Self::RequestError {
+                defender,
+                territory,
+                status,
+            } => {
+                writer.bytes(defender).u16(*territory).u32(*status);
             }
         }
     }
@@ -180,10 +218,17 @@ impl WarPush {
             REQUEST_PENDING_TYPE_INDEX => (|| -> Result<Self, MessageError> {
                 Ok(Self::Pending {
                     defender: reader.raw_id()?,
-                    status: reader.u32()?,
+                    territory: reader.u16()?,
                 })
             })(),
             REQUEST_SUCCESSFUL_TYPE_INDEX => reader.raw_id().map(|war| Self::Successful { war }),
+            REQUEST_ERROR_TYPE_INDEX => (|| -> Result<Self, MessageError> {
+                Ok(Self::RequestError {
+                    defender: reader.raw_id()?,
+                    territory: reader.u16()?,
+                    status: reader.u32()?,
+                })
+            })(),
             _ => return None,
         };
         Some(push)
@@ -243,9 +288,14 @@ mod tests {
             },
             WarPush::Pending {
                 defender: DEFENDER,
-                status: WAR_REQUEST_PENDING,
+                territory: TERRITORY,
             },
             WarPush::Successful { war: COMPANY },
+            WarPush::RequestError {
+                defender: DEFENDER,
+                territory: TERRITORY,
+                status: WAR_DEC_NOT_SELECTED,
+            },
         ] {
             let social = SocialPush::War(push);
             assert_eq!(social.facet(), crate::social::SocialFacet::Social);
@@ -255,13 +305,27 @@ mod tests {
                 .expect("decode");
             assert_eq!(read, social);
         }
-        assert_eq!(
-            WarPush::Pending {
-                defender: DEFENDER,
-                status: WAR_REQUEST_PENDING
-            }
-            .type_index(),
-            REQUEST_PENDING_TYPE_INDEX
-        );
+    }
+
+    #[test]
+    fn pending_and_the_lost_lottery_carry_the_client_reader_widths() {
+        let pending = SocialPush::War(WarPush::Pending {
+            defender: DEFENDER,
+            territory: TERRITORY,
+        })
+        .encode_args()
+        .expect("encode");
+        assert_eq!(pending.len(), RAW_ID_LEN + 2, "1737: 16 bytes and a u16");
+        assert_eq!(&pending[RAW_ID_LEN..], &TERRITORY.to_be_bytes());
+        let lost = SocialPush::War(WarPush::RequestError {
+            defender: DEFENDER,
+            territory: TERRITORY,
+            status: WAR_DEC_NOT_SELECTED,
+        })
+        .encode_args()
+        .expect("encode");
+        assert_eq!(lost.len(), RAW_ID_LEN + 2 + 4, "4139: 16 bytes, a u16, a u32");
+        assert_eq!(&lost[RAW_ID_LEN..RAW_ID_LEN + 2], &TERRITORY.to_be_bytes());
+        assert_eq!(&lost[RAW_ID_LEN + 2..], &WAR_DEC_NOT_SELECTED.to_be_bytes());
     }
 }

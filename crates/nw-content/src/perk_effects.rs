@@ -29,21 +29,20 @@ const STEP_SEPARATOR: char = ',';
 /// Separates a step's gear score and scale.
 const GEAR_SCORE_SEPARATOR: char = ':';
 
-/// The effect one perk holds while its item is worn.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PerkEffect {
-    /// `AffixStatData.StatusEffect`: the effect's `StatusID`.
-    pub status_effect: String,
-    /// `ScalingPerGearScore`: (gear score from which it applies, scale per point), ascending.
+/// A perk's `ScalingPerGearScore`: how its strength grows with its item's gear score (module
+/// notes). The affliction shares of a worn perk's affix grow with it too
+/// ([`crate::afflictions::PerkShares`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GearScoreScale {
+    /// (gear score from which it applies, scale per point), ascending.
     steps: Vec<(u32, f64)>,
 }
 
-impl PerkEffect {
-    /// The effect `status_effect` with the steps of `ScalingPerGearScore` cell `scaling`; a cell
-    /// that does not read gives no steps.
-    pub fn new(status_effect: &str, scaling: Option<&str>) -> Self {
+impl GearScoreScale {
+    /// The scale of `ScalingPerGearScore` cell `scaling`; a missing cell, or one that does not
+    /// read, gives none (potency 1 at every gear score).
+    pub fn of_cell(scaling: Option<&str>) -> Self {
         Self {
-            status_effect: status_effect.to_owned(),
             steps: scaling.map(steps_of).unwrap_or_default(),
         }
     }
@@ -62,6 +61,30 @@ impl PerkEffect {
             }
         }
         potency
+    }
+}
+
+/// The effect one perk holds while its item is worn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerkEffect {
+    /// `AffixStatData.StatusEffect`: the effect's `StatusID`.
+    pub status_effect: String,
+    /// `ScalingPerGearScore`.
+    scale: GearScoreScale,
+}
+
+impl PerkEffect {
+    /// The effect `status_effect` with the scale of `ScalingPerGearScore` cell `scaling`.
+    pub fn new(status_effect: &str, scaling: Option<&str>) -> Self {
+        Self {
+            status_effect: status_effect.to_owned(),
+            scale: GearScoreScale::of_cell(scaling),
+        }
+    }
+
+    /// The potency on an item of gear score `gear_score` (module notes).
+    pub fn potency(&self, gear_score: u32) -> f64 {
+        self.scale.potency(gear_score)
     }
 }
 

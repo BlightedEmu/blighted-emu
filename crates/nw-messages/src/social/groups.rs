@@ -42,6 +42,8 @@ pub const SIEGE_WARFARE_ENDED_TYPE_INDEX: u64 = 245;
 pub const SIEGE_WARFARE_COMPLETED_TYPE_INDEX: u64 = 3455;
 /// `GroupsComponentServerFacet_RequestMoveRaidMember`.
 pub const MOVE_RAID_MEMBER_TYPE_INDEX: u64 = 3501;
+/// `GroupsComponentServerFacet_RequestRemoveRaidMember`.
+pub const REMOVE_RAID_MEMBER_TYPE_INDEX: u64 = 3500;
 /// `GroupsComponentServerFacet_RequestSwapRaidMembers`.
 pub const SWAP_RAID_MEMBERS_TYPE_INDEX: u64 = 541;
 /// `GroupsComponentServerFacet_RequestChooseRole`.
@@ -109,7 +111,7 @@ pub const PRE_RAID_WAR_ENDED: u32 = 4;
 pub const PING_DATA_LEN: usize = 14;
 
 /// The group calls of the client.
-pub(crate) const CALL_TYPES: [u64; 12] = [
+pub(crate) const CALL_TYPES: [u64; 13] = [
     GROUP_INVITE_TYPE_INDEX,
     REPLY_TO_INVITE_TYPE_INDEX,
     LEAVE_GROUP_TYPE_INDEX,
@@ -117,6 +119,7 @@ pub(crate) const CALL_TYPES: [u64; 12] = [
     KICK_VOTE_TYPE_INDEX,
     GROUP_PING_TYPE_INDEX,
     MOVE_RAID_MEMBER_TYPE_INDEX,
+    REMOVE_RAID_MEMBER_TYPE_INDEX,
     SWAP_RAID_MEMBERS_TYPE_INDEX,
     CHOOSE_ROLE_TYPE_INDEX,
     SET_RAID_PERMISSION_TYPE_INDEX,
@@ -129,8 +132,16 @@ pub(crate) const CALL_TYPES: [u64; 12] = [
 pub const REPLY_ACCEPT: u32 = 0;
 /// The 2252 value of every retail leave (15 of 15).
 pub const LEAVE_VALUE: u32 = 0;
-/// The 5283 reason of a member who left (every retail 5283 after a 2252).
+/// The client's `eGroupMemberRemovedReason` values: the reason of 5283. Observed: the client
+/// registers `Left`, `Kicked`, `Disconnected`, `ConvertedToRaid`, `Moved`, `RaidDestroyed` and
+/// `PlayerInFFA` in this order (`FUN_144f418b0` from 0x144f4c44e), `Left` and `Kicked` with the
+/// value helpers of `eConvertToRaidError_Converted` (0) and `_NotConverted` (1); every retail 5283
+/// after a 2252 carries `Left` 0. `raidgroup.luac` shows `@ui_kickedfromraidpmessage` to a
+/// removed player and `@ui_raidmemberkickedmessage` to the others for `Kicked`, and nothing for
+/// `Moved`.
 pub const REMOVED_LEFT: u32 = 0;
+/// See [`REMOVED_LEFT`]: the member was removed by the raid's leader or an assistant (3500).
+pub const REMOVED_KICKED: u32 = 1;
 /// The 1677 `kind` of an invite that ended by an answer (46 of 47 retail).
 pub const INVITE_ENDED_ANSWERED: u32 = 0;
 /// The 3453 error of an invite of an offline player (`3v3_arena_group`: the invitee's online
@@ -192,6 +203,15 @@ pub enum GroupCall {
         /// (Observed: 0 to 3 in `raid_group_influence_race` 43.292 to 65.476 s, each move
         /// followed by the member's groups state naming that group).
         group: u8,
+    },
+    /// 3500: remove a member from the players' raid. Observed: the client's message has the
+    /// reader and writer of 3498 and 3502 (`FUN_14328d480`, `FUN_14344a890`: header, then the
+    /// member as text of at most 40 bytes); `raidpanel.luac` sends the member's `characterId` for
+    /// a raid that is not a war's, and `playerflyouthandler.luac` offers `@ui_raid_kick` when the
+    /// caller's raid permission is at least an assistant's and above the member's.
+    RemoveRaidMember {
+        /// The member's character id as UUID text.
+        character: String,
     },
     /// 541: swap two raid members (two character ids as UUID text).
     SwapRaidMembers {
@@ -260,6 +280,9 @@ impl GroupCall {
                     group: reader.u8()?,
                 })
             })(),
+            REMOVE_RAID_MEMBER_TYPE_INDEX => {
+                read_text(reader).map(|character| Self::RemoveRaidMember { character })
+            }
             SWAP_RAID_MEMBERS_TYPE_INDEX => (|| -> Result<Self, MessageError> {
                 Ok(Self::SwapRaidMembers {
                     first: read_text(reader)?,
@@ -292,6 +315,7 @@ impl GroupCall {
             Self::KickVote { .. } => KICK_VOTE_TYPE_INDEX,
             Self::Ping { .. } => GROUP_PING_TYPE_INDEX,
             Self::MoveRaidMember { .. } => MOVE_RAID_MEMBER_TYPE_INDEX,
+            Self::RemoveRaidMember { .. } => REMOVE_RAID_MEMBER_TYPE_INDEX,
             Self::SwapRaidMembers { .. } => SWAP_RAID_MEMBERS_TYPE_INDEX,
             Self::ChooseRole { .. } => CHOOSE_ROLE_TYPE_INDEX,
             Self::SetRaidPermission { .. } => SET_RAID_PERMISSION_TYPE_INDEX,
@@ -324,7 +348,9 @@ impl GroupCall {
             Self::Leave { value } => {
                 writer.u32(*value);
             }
-            Self::SetLeader { character } | Self::KickVote { character } => {
+            Self::SetLeader { character }
+            | Self::KickVote { character }
+            | Self::RemoveRaidMember { character } => {
                 write_text(&mut writer, character)?;
             }
             Self::Ping { data } => {
@@ -364,7 +390,7 @@ pub enum GroupPush {
     MemberRemoved {
         /// The member.
         character: CharacterRef,
-        /// [`REMOVED_LEFT`].
+        /// [`REMOVED_LEFT`] or [`REMOVED_KICKED`].
         reason: u32,
     },
     /// 1677: an invite of the player ended.
@@ -738,8 +764,8 @@ mod tests {
         }
     }
 
-    /// The raid permission call of `Hive gorgon raid third boss` 230.534 s (the id replaced) and
-    /// the convert-to-raid forms of the client's readers (`FUN_14259f180`, `FUN_1425a30b0`,
+    /// The raid permission call of `Hive gorgon raid third boss` 230.534 s (the id replaced), the
+    /// raid kick form of the client's reader (`FUN_14328d480`) and the convert-to-raid forms of the client's readers (`FUN_14259f180`, `FUN_1425a30b0`,
     /// `FUN_143098a90`, `FUN_143403650`).
     #[test]
     fn the_raid_permission_and_convert_to_raid_forms_read() {
@@ -753,6 +779,13 @@ mod tests {
                 character: CHARACTER.to_owned(),
                 permission: RAID_PERMISSION_LEADER,
             }
+        );
+        assert_eq!(
+            call(REMOVE_RAID_MEMBER_TYPE_INDEX, &text_bytes(CHARACTER)),
+            GroupCall::RemoveRaidMember {
+                character: CHARACTER.to_owned(),
+            },
+            "the member as text, as 3498"
         );
         assert_eq!(
             call(INITIATE_CONVERT_TO_RAID_TYPE_INDEX, &[]),

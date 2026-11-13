@@ -8,6 +8,9 @@
 //! faction board offered it for. A player of no faction gains none (Inferred: the influence is a
 //! faction's). The gain goes to the world database with the next territory job
 //! ([`super::land_claims`]), so every sim shows it in the claims' influence at its next read.
+//! There the faction's fort, tower and underdog bonus raise it, and the towers a faction holds
+//! in the race window add their own influence every five seconds ([`nw_db::add_influence`],
+//! [`super::control_points`]).
 
 use super::SimWorld;
 use super::faction_board::mission_territory;

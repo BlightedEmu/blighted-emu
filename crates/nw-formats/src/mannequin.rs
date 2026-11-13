@@ -157,6 +157,15 @@ const MAX_EXTERNAL_DEPTH: usize = 8;
 const DEFAULT_ELEMENT: &str = "Default";
 const SPELL_NAME_ATTRIBUTE: &str = "SpellName";
 const STATUS_EFFECT_TEST_ELEMENT: &str = "IfHasStatusEffect";
+/// The test of the side a hit came from (`baseai_stagger.actionlist`: `damaged_front`,
+/// `damaged_back`).
+const DAMAGED_BY_ANGLE_TEST_ELEMENT: &str = "IfDamagedByAngle";
+const ANGLE_MIN_ATTRIBUTE: &str = "Min";
+const ANGLE_MAX_ATTRIBUTE: &str = "Max";
+/// The activity that plays another fragment in the action's place.
+const CHANGE_FRAGMENT_ELEMENT: &str = "ChangeActionFragment";
+const USE_DEFAULT_FRAGMENT_ATTRIBUTE: &str = "UseDefaultFragment";
+const FALSE_VALUE: &str = "false";
 const STATUS_EFFECT_ATTRIBUTE: &str = "StatusEffect";
 const ACTIVATION_CONDITION_ELEMENT: &str = "ActivationCondition";
 const DEACTIVATION_CONDITION_ELEMENT: &str = "DeactivationCondition";
@@ -177,6 +186,9 @@ const REGEN_OFF_VALUE: &str = "Disable";
 /// `ResetStamina`: `OnExit="Reset"` fills the stamina again.
 const RESET_STAMINA_ELEMENT: &str = "ResetStamina";
 const STAMINA_RESET_VALUE: &str = "Reset";
+/// `ActivateGrit`: `OnEnter="Activate"` turns the character's grit on until `OnExit`.
+const ACTIVATE_GRIT_ELEMENT: &str = "ActivateGrit";
+const GRIT_ON_VALUE: &str = "Activate";
 const ON_ENTER_ATTRIBUTE: &str = "OnEnter";
 const ON_EXIT_ATTRIBUTE: &str = "OnExit";
 const CASE_NAME_ATTRIBUTE: &str = "Name";
@@ -328,6 +340,70 @@ pub fn parse_tree(text: &str) -> Result<Node, MannequinError> {
         .pop()
         .and_then(|document| document.children.into_iter().next())
         .ok_or(MannequinError::Missing("root"))
+}
+
+/// The root element of a character's animation list file (`.chrparams`).
+const PARAMS_ROOT: &str = "Params";
+/// The list of a `.chrparams` file.
+const ANIMATION_LIST: &str = "AnimationList";
+/// One entry of an animation list.
+const ANIMATION_ENTRY: &str = "Animation";
+const ENTRY_NAME: &str = "name";
+const ENTRY_PATH: &str = "path";
+/// The entry name that makes the folder of the wildcard entries after it.
+const FOLDER_ENTRY: &str = "#filepath";
+/// The entry name that takes in another animation list.
+const INCLUDE_ENTRY: &str = "$Include";
+
+/// One entry of a character's animation list that says where its clips are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnimationSource {
+    /// `$Include`: the entries of another `.chrparams` file, at this place in the list.
+    Include(String),
+    /// `#filepath`: a folder whose clips the wildcard entries after it take in.
+    Folder(String),
+}
+
+/// A character's animation list (`<AnimationList>` of its `.chrparams` file): where the
+/// animation names of its databases find their clips. Observed (build 25810808): the player's
+/// `player_male.chrparams` takes in `player_shared.chrparams` first, whose first folder is
+/// `animations/Gameplay/Character/Npc/SuperNatural/Archetypes` (the clips of the heart rune's
+/// beast form, `archetype_beast_combat_taunt_01`), then the player's own weapon folders.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AnimationList {
+    /// Its `$Include` and `#filepath` entries, in file order; the other entries (wildcards,
+    /// event databases) are left out.
+    pub sources: Vec<AnimationSource>,
+}
+
+impl AnimationList {
+    /// Reads a `.chrparams` file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MannequinError`] when the XML is not well formed or is not a `<Params>` file.
+    pub fn parse(text: &str) -> Result<Self, MannequinError> {
+        let root = parse_tree(text)?;
+        if root.name != PARAMS_ROOT {
+            return Err(MannequinError::Missing(PARAMS_ROOT));
+        }
+        let sources = root
+            .children
+            .iter()
+            .filter(|list| list.name == ANIMATION_LIST)
+            .flat_map(|list| &list.children)
+            .filter(|entry| entry.name == ANIMATION_ENTRY)
+            .filter_map(|entry| {
+                let path = entry.attribute(ENTRY_PATH)?.to_owned();
+                match entry.attribute(ENTRY_NAME)? {
+                    INCLUDE_ENTRY => Some(AnimationSource::Include(path)),
+                    FOLDER_ENTRY => Some(AnimationSource::Folder(path)),
+                    _ => None,
+                }
+            })
+            .collect();
+        Ok(Self { sources })
+    }
 }
 
 /// A creature's Mannequin controller definitions.
@@ -747,6 +823,35 @@ pub struct AnimClip {
     /// for the fragment before, which is not part of this fragment's own time line); nor is one
     /// after an empty clip, which ends at once.
     pub after_previous: bool,
+    /// The empty clip after it starts when it ends (that clip's blend has a negative
+    /// `ExitTime`): it plays to its animation's end, and the later clips of its layer count
+    /// their exit times from that end (Observed: 1,728 such empty clips in the game databases,
+    /// for example the damned axe's `Attack_Primary_Close` `mc_melee2h_damned_swipel_stepf`;
+    /// three of them are followed by a named clip, in `npc_damned_anims.adb`,
+    /// `npc_damned_rse_anims.adb` and `npc_upyr_thrall_anims.adb`). Its `end_s` is that end only
+    /// once [`Fragment::time_chained_clips`] had its length; until then it is `None`.
+    pub chained_end: bool,
+}
+
+impl AnimClip {
+    /// Where it ends when it plays its animation of `length_s` seconds to the end: its start
+    /// plus the rest of the animation from its `StartTime` at its speed, in f32 as the game
+    /// times clips (Observed: the elk's `POI_Graze` of three chained clips, 0.6 + 9.366667 +
+    /// 1.1 s in f32, is 11.066668 s, the database's own `ExitTime` after it and past tick 332,
+    /// where 111 retail plays of the reindeer and 4 of the spring stag stopped (none at 331;
+    /// `11-elysian-wilds-8330a50b70ad5744/09a_m2_findoakes-...` 354.229 s the first); the f64 sum,
+    /// 11.0666668 s, rounds to f32 11.066667, a tick short).
+    pub fn natural_end_s(&self, length_s: f64) -> f64 {
+        // Lengths and times of seconds, as the game holds them.
+        #[allow(clippy::cast_possible_truncation, reason = "the game's f32 times")]
+        let (start, length, anim_start, speed) = (
+            self.start_s as f32,
+            length_s as f32,
+            self.anim_start_s as f32,
+            self.speed as f32,
+        );
+        f64::from(start + (length - anim_start).max(0.0) / speed)
+    }
 }
 
 impl ProcClip {
@@ -772,6 +877,13 @@ pub struct Fragment {
     pub clips: Vec<ProcClip>,
     /// The clips of every animation layer, one list per layer, in file order.
     pub anim_layers: Vec<Vec<AnimClip>>,
+    /// For each animation layer, in the order of [`Fragment::anim_layers`]: when its last
+    /// `<Animation>` is an empty clip (`name=""`), that clip's start, where the layer ends (on
+    /// the timed line once [`Fragment::time_chained_clips`] ran); `None` when its last
+    /// `<Animation>` names a clip or it has none (Observed: the Imhotep `Outro` of
+    /// `npc_adiana_anims.adb` ends its looping clip with an empty clip at 10.33 s and a second
+    /// at 17.17 s; `<AnimLayer/>` in `npc_damned_subadb_undead_anims.adb` `Navigator_Dash_R`).
+    pub layer_ends_s: Vec<Option<f64>>,
     /// Whether a clip that starts after the one before it ([`AnimClip::after_previous`]) has no
     /// start yet: the database was not timed ([`AnimDatabase::time_chained_clips`]), or the
     /// length of the clip before is not known, or the clip before loops. The
@@ -790,38 +902,47 @@ impl Fragment {
             .or_else(|| clips().next())
     }
 
-    /// Times the clips that start after the one before them ([`AnimClip::after_previous`]):
-    /// each starts where the clip before it ends, `(length - StartTime) / speed` after that
-    /// clip's start, and the later clips of its layer move with it (their exit times count
-    /// from it). `length_s` gives an animation's length in seconds; `None` when it is not known.
-    /// Without a length, or after a looping clip, the entry keeps
-    /// [`Fragment::awaits_clip_lengths`] set. Timing twice changes nothing.
+    /// Times the clips that start after the one before them ([`AnimClip::after_previous`]) and
+    /// the clips an empty clip ends when they end ([`AnimClip::chained_end`]): such a clip ends
+    /// `(length - StartTime) / speed` after its start, the chained clip starts there, and the
+    /// later clips of its layer move with it (their exit times count from it). `length_s` gives
+    /// an animation's length in seconds; `None` when it is not known. Without a length, or for
+    /// a looping clip, the entry keeps [`Fragment::awaits_clip_lengths`] set. Timing twice
+    /// changes nothing.
     pub fn time_chained_clips(&mut self, length_s: &dyn Fn(&str) -> Option<f64>) {
+        let natural_end_s = |clip: &AnimClip| {
+            (!clip.looped)
+                .then(|| length_s(&clip.name))
+                .flatten()
+                .map(|length| clip.natural_end_s(length))
+        };
         let mut timed = true;
-        for layer in &mut self.anim_layers {
-            for index in 1..layer.len() {
-                if !layer[index].after_previous {
-                    continue;
+        self.layer_ends_s.resize(self.anim_layers.len(), None);
+        for (layer, layer_end_s) in self.anim_layers.iter_mut().zip(&mut self.layer_ends_s) {
+            for index in 0..layer.len() {
+                if index > 0 && layer[index].after_previous {
+                    let (before, after) = layer.split_at_mut(index);
+                    let previous = &mut before[index - 1];
+                    match natural_end_s(previous) {
+                        Some(previous_end_s) => {
+                            let shift_s = previous_end_s - after[0].start_s;
+                            previous.end_s = Some(previous_end_s);
+                            shift(after, layer_end_s, shift_s);
+                        }
+                        None => timed = false,
+                    }
                 }
-                let (before, after) = layer.split_at_mut(index);
-                let previous = &mut before[index - 1];
-                let chained = &after[0];
-                let previous_end_s = (!previous.looped)
-                    .then(|| length_s(&previous.name))
-                    .flatten()
-                    .map(|length| {
-                        previous.start_s
-                            + (length - previous.anim_start_s).max(0.0) / previous.speed
-                    });
-                let Some(previous_end_s) = previous_end_s else {
-                    timed = false;
-                    continue;
-                };
-                let shift_s = previous_end_s - chained.start_s;
-                previous.end_s = Some(previous_end_s);
-                for clip in after.iter_mut() {
-                    clip.start_s += shift_s;
-                    clip.end_s = clip.end_s.map(|end| end + shift_s);
+                if layer[index].chained_end && layer[index].end_s.is_none() {
+                    let (upto, after) = layer.split_at_mut(index + 1);
+                    let clip = &mut upto[index];
+                    match natural_end_s(clip) {
+                        Some(end_s) => {
+                            let shift_s = end_s - clip.start_s;
+                            clip.end_s = Some(end_s);
+                            shift(after, layer_end_s, shift_s);
+                        }
+                        None => timed = false,
+                    }
                 }
             }
         }
@@ -832,6 +953,15 @@ impl Fragment {
     pub fn clips_of<'a>(&'a self, kind: &'a str) -> impl Iterator<Item = &'a ProcClip> {
         self.clips.iter().filter(move |clip| clip.kind == kind)
     }
+}
+
+/// Moves the clips `clips` and the end `layer_end_s` of their layer `shift_s` seconds later.
+fn shift(clips: &mut [AnimClip], layer_end_s: &mut Option<f64>, shift_s: f64) {
+    for clip in clips {
+        clip.start_s += shift_s;
+        clip.end_s = clip.end_s.map(|end| end + shift_s);
+    }
+    *layer_end_s = layer_end_s.map(|end| end + shift_s);
 }
 
 fn split_tags(text: Option<&str>) -> Vec<String> {
@@ -864,14 +994,17 @@ fn number_or(node: &Node, key: &str, default: f64) -> f64 {
 /// The clips of one `<AnimLayer>`: start times are the running sum of the blend exit times; a
 /// negative exit time after a clip chains the next clip to that clip's end
 /// ([`AnimClip::after_previous`]), which adds nothing to the sum until the clips are timed; after
-/// an empty clip (which lasts no time) or as the first exit time it adds nothing.
-fn anim_clips(layer: &Node) -> Result<Vec<AnimClip>, MannequinError> {
+/// an empty clip (which lasts no time) or as the first exit time it adds nothing. It also gives
+/// the start of the layer's last `<Animation>` when that one is empty
+/// ([`Fragment::layer_ends_s`]).
+fn anim_clips(layer: &Node) -> Result<(Vec<AnimClip>, Option<f64>), MannequinError> {
     let mut time_s = 0.0;
     let mut blend: Option<&Node> = None;
     let mut after_previous = false;
     // Whether the last `<Animation>` named a clip (`None` before the first).
     let mut previous_named: Option<bool> = None;
     let mut clips: Vec<AnimClip> = Vec::new();
+    let mut layer_end_s = None;
     for node in &layer.children {
         match node.name.as_str() {
             BLEND_ELEMENT => {
@@ -881,11 +1014,19 @@ fn anim_clips(layer: &Node) -> Result<Vec<AnimClip>, MannequinError> {
                 blend = Some(node);
             }
             ANIMATION_ELEMENT => {
-                if let Some(last) = clips.last_mut().filter(|last| last.end_s.is_none()) {
-                    last.end_s = Some(time_s);
-                }
                 let name = node.attribute(NAME_ATTRIBUTE).unwrap_or_default();
+                if let Some(last) = clips
+                    .last_mut()
+                    .filter(|last| last.end_s.is_none() && !last.chained_end)
+                {
+                    if name.is_empty() && after_previous {
+                        last.chained_end = true;
+                    } else {
+                        last.end_s = Some(time_s);
+                    }
+                }
                 previous_named = Some(!name.is_empty());
+                layer_end_s = name.is_empty().then_some(time_s);
                 if name.is_empty() {
                     continue;
                 }
@@ -902,12 +1043,13 @@ fn anim_clips(layer: &Node) -> Result<Vec<AnimClip>, MannequinError> {
                     weight: number_or(node, WEIGHT_ATTRIBUTE, DEFAULT_WEIGHT),
                     end_s: None,
                     after_previous,
+                    chained_end: false,
                 });
             }
             _ => {}
         }
     }
-    Ok(clips)
+    Ok((clips, layer_end_s))
 }
 
 /// The clips of one `<ProcLayer>`: start times are the running sum of the blend exit times.
@@ -997,20 +1139,25 @@ impl AnimDatabase {
                 {
                     clips.extend(layer_clips(layer, index)?);
                 }
-                let anim_layers: Vec<Vec<AnimClip>> = entry
+                let (anim_layers, layer_ends_s): (Vec<Vec<AnimClip>>, Vec<Option<f64>>) = entry
                     .children
                     .iter()
                     .filter(|layer| layer.name == ANIM_LAYER)
                     .map(anim_clips)
-                    .collect::<Result<_, _>>()?;
-                let awaits_clip_lengths =
-                    anim_layers.iter().flatten().any(|clip| clip.after_previous);
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .unzip();
+                let awaits_clip_lengths = anim_layers
+                    .iter()
+                    .flatten()
+                    .any(|clip| clip.after_previous || clip.chained_end);
                 fragments.push(Fragment {
                     name: named.name.clone(),
                     tags: split_tags(entry.attribute(FRAGMENT_TAGS_ATTRIBUTE)),
                     frag_tags: split_tags(entry.attribute(FRAGMENT_FRAG_TAGS_ATTRIBUTE)),
                     clips,
                     anim_layers,
+                    layer_ends_s,
                     awaits_clip_lengths,
                 });
             }
@@ -1166,6 +1313,16 @@ pub enum Condition {
     },
     /// `<IfHasStatusEffect StatusEffect>`: the character has the effect.
     StatusEffect(String),
+    /// `<IfDamagedByAngle Min Max>`: the last hit came from this side, in whole degrees from
+    /// the character's facing (Observed in the action lists: 0 to 90 and -90 to 0 are
+    /// `damaged_front`, 90 to 180 and -180 to -90 `damaged_back`, 45 to 135 `damaged_right`,
+    /// -135 to -45 `damaged_left`; every `Min` and `Max` of the retail lists is whole).
+    DamagedByAngle {
+        /// `Min`, degrees.
+        min_deg: i32,
+        /// `Max`, degrees.
+        max_deg: i32,
+    },
     /// `<IfAbilityActive AbilityName>`: the passive ability (an upgrade perk) is on.
     AbilityActive(String),
     /// `<IfItemInSlot SlotToCheckAlias>`: an item is in the slot.
@@ -1229,6 +1386,10 @@ pub trait CageWorld {
     }
     /// Fragment `fragment` plays (`None`: the testing action's own).
     fn fragment_playing(&self, _fragment: Option<&str>) -> bool {
+        false
+    }
+    /// The last hit on it came from between `min_deg` and `max_deg` degrees of its facing.
+    fn damaged_by_angle(&self, _min_deg: i32, _max_deg: i32) -> bool {
         false
     }
     /// Fragment `fragment` is done, `exit_offset_ms` before its end (`None`: the testing
@@ -1408,6 +1569,18 @@ impl Condition {
                     .unwrap_or_default(),
             },
             STATUS_EFFECT_TEST_ELEMENT => Self::StatusEffect(attribute(STATUS_EFFECT_ATTRIBUTE)),
+            DAMAGED_BY_ANGLE_TEST_ELEMENT => {
+                let degrees = |name: &str| {
+                    node.attribute(name)
+                        .and_then(|value| value.trim().parse::<f64>().ok())
+                        // Whole degrees between -180 and 180.
+                        .map_or(0, |value| value.round() as i32)
+                };
+                Self::DamagedByAngle {
+                    min_deg: degrees(ANGLE_MIN_ATTRIBUTE),
+                    max_deg: degrees(ANGLE_MAX_ATTRIBUTE),
+                }
+            }
             ABILITY_ACTIVE_TEST_ELEMENT => Self::AbilityActive(attribute(ABILITY_NAME_ATTRIBUTE)),
             ITEM_IN_SLOT_TEST_ELEMENT => Self::ItemInSlot(attribute(SLOT_ALIAS_ATTRIBUTE)),
             TAG_IN_SLOT_TEST_ELEMENT => Self::TagInSlot {
@@ -1457,6 +1630,7 @@ impl Condition {
             Self::ManaCost { cost, compare } => world.mana_cost(cost, *compare),
             Self::ChargeAmount { compare, value } => world.charge_amount(*compare, *value),
             Self::StatusEffect(effect) => world.status_effect(effect),
+            Self::DamagedByAngle { min_deg, max_deg } => world.damaged_by_angle(*min_deg, *max_deg),
             Self::AbilityActive(ability) => world.ability_active(ability),
             Self::ItemInSlot(slot) => world.item_in_slot(slot),
             Self::TagInSlot { tag, slot } => world.tag_in_slot(tag, slot),
@@ -1512,6 +1686,7 @@ impl Condition {
             Self::ManaCost { .. } => MANA_COST_TEST_ELEMENT,
             Self::ChargeAmount { .. } => CHARGE_TEST_ELEMENT,
             Self::StatusEffect(_) => STATUS_EFFECT_TEST_ELEMENT,
+            Self::DamagedByAngle { .. } => DAMAGED_BY_ANGLE_TEST_ELEMENT,
             Self::AbilityActive(_) => ABILITY_ACTIVE_TEST_ELEMENT,
             Self::ItemInSlot(_) => ITEM_IN_SLOT_TEST_ELEMENT,
             Self::TagInSlot { .. } => TAG_IN_SLOT_TEST_ELEMENT,
@@ -1655,6 +1830,22 @@ pub struct Action {
     pub stamina: StaminaActivities,
     /// The heart rune charge it takes when it starts.
     pub charge_take: Option<ChargeTake>,
+    /// The `<Conditional>` cases of its `ChangeActionFragment` activities that play another
+    /// fragment in its place (`UseDefaultFragment="false"` with a `FragmentName`), in file
+    /// order: the first whose condition holds plays (`baseai_stagger.actionlist`:
+    /// `Reaction_Staggered` plays `r_Stagger_F` for `damaged_front`, `r_Stagger_B` for
+    /// `damaged_back`, else its own `r_Stagger`).
+    pub fragment_cases: Vec<FragmentCase>,
+}
+
+/// A `<Conditional>` case of a `ChangeActionFragment` activity: while its named condition holds
+/// as the action starts, the action plays `fragment`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FragmentCase {
+    /// The named condition of the case, and those of the branches the activity is in.
+    pub condition: Condition,
+    /// `FragmentName`.
+    pub fragment: String,
 }
 
 /// A `ConsumeCharge` activity: the heart rune charge an action takes as it starts, when its
@@ -1753,6 +1944,10 @@ pub struct StaminaActivities {
     pub regen_off: Option<Condition>,
     /// `ResetStamina` with `OnExit="Reset"`: the stamina is full again when it ends.
     pub reset_on_exit: Option<Condition>,
+    /// `ActivateGrit` with `OnEnter="Activate"`: the grit is on while it runs (the
+    /// `ActivateGrit` action of `baseai_stagger.actionlist`: "This allows the character to
+    /// always take Stamina damage").
+    pub grit_on: Option<Condition>,
 }
 
 /// A `SetMannequinTag` activity: while the conditions of the branches it is in hold, it is on;
@@ -2065,6 +2260,41 @@ fn tag_activities(action: &Node) -> Vec<TagActivity> {
     found
 }
 
+/// The fragment cases of the `ChangeActionFragment` activities of `action` (named conditions
+/// not resolved yet), in file order.
+fn fragment_cases(action: &Node) -> Vec<FragmentCase> {
+    let mut found = Vec::new();
+    walk_activities(action, &mut |activity, condition| {
+        if activity.name != CHANGE_FRAGMENT_ELEMENT {
+            return false;
+        }
+        found.extend(
+            activity
+                .children
+                .iter()
+                .filter(|entry| {
+                    entry.name == CONDITIONAL_ELEMENT
+                        && entry.attribute(USE_DEFAULT_FRAGMENT_ATTRIBUTE) == Some(FALSE_VALUE)
+                })
+                .filter_map(|entry| {
+                    let name = entry.attribute(CASE_NAME_ATTRIBUTE)?;
+                    let fragment = entry
+                        .attribute(FRAGMENT_NAME_ATTRIBUTE)
+                        .filter(|fragment| !fragment.is_empty())?;
+                    Some(FragmentCase {
+                        condition: Condition::All(vec![
+                            condition.clone(),
+                            Condition::External(name.to_owned()),
+                        ]),
+                        fragment: fragment.to_owned(),
+                    })
+                }),
+        );
+        true
+    });
+    found
+}
+
 /// The `ActivateBlock` activities of `action`, each with the conditions of the branches it is in,
 /// in file order.
 fn block_activities(action: &Node) -> Vec<BlockActivity> {
@@ -2147,6 +2377,14 @@ fn stamina_activities(action: &Node) -> StaminaActivities {
                     == Some(STAMINA_RESET_VALUE)
                 {
                     found.reset_on_exit.get_or_insert(condition);
+                }
+                true
+            }
+            ACTIVATE_GRIT_ELEMENT => {
+                if default.and_then(|entry| entry.attribute(ON_ENTER_ATTRIBUTE))
+                    == Some(GRIT_ON_VALUE)
+                {
+                    found.grit_on.get_or_insert(condition);
                 }
                 true
             }
@@ -2300,6 +2538,13 @@ impl ActionList {
                                 ..activity
                             })
                             .collect(),
+                        fragment_cases: fragment_cases(action)
+                            .into_iter()
+                            .map(|case| FragmentCase {
+                                condition: case.condition.resolved(&conditions, 0),
+                                ..case
+                            })
+                            .collect(),
                         charge_take: charge_take(action).map(|take| ChargeTake {
                             condition: take.condition.resolved(&conditions, 0),
                             ..take
@@ -2312,6 +2557,9 @@ impl ActionList {
                                     .map(|condition| condition.resolved(&conditions, 0)),
                                 reset_on_exit: found
                                     .reset_on_exit
+                                    .map(|condition| condition.resolved(&conditions, 0)),
+                                grit_on: found
+                                    .grit_on
                                     .map(|condition| condition.resolved(&conditions, 0)),
                             }
                         },
@@ -2691,6 +2939,74 @@ mod tests {
         }
     }
 
+    /// An empty clip after a negative exit time ends the clip before at that clip's own end, and
+    /// a later clip counts its exit time from there (the damned axe's `Attack_Primary_Close`
+    /// shape, `npc_damned_anims.adb`).
+    #[test]
+    fn an_empty_clip_with_a_negative_exit_time_ends_the_clip_before_at_its_end() {
+        const CHAINED_EMPTY_ADB: &str = r#"<AnimDB><FragmentList><Attack>
+<Fragment Tags=""><AnimLayer>
+ <Blend ExitTime="0"/><Animation name="unarmed_r4_f"/>
+ <Blend ExitTime="-1"/><Animation name=""/>
+</AnimLayer></Fragment>
+<Fragment Tags=""><AnimLayer>
+ <Blend ExitTime="0"/><Animation name="unarmed_r4_f"/>
+ <Blend ExitTime="-1"/><Animation name=""/>
+ <Blend ExitTime="0.25"/><Animation name="unarmed_prn_idle_to_idle"/>
+</AnimLayer></Fragment>
+<Fragment Tags=""><AnimLayer>
+ <Blend ExitTime="0"/><Animation name="dance_loop" flags="Loop"/>
+ <Blend ExitTime="-1"/><Animation name=""/>
+</AnimLayer></Fragment>
+</Attack></FragmentList></AnimDB>"#;
+        let mut adb = AnimDatabase::parse(CHAINED_EMPTY_ADB).expect("adb");
+        let swing = &adb.fragments[0].anim_layers[0][0];
+        assert!(swing.chained_end && swing.end_s.is_none(), "{swing:?}");
+        assert!(adb.fragments[0].awaits_clip_lengths, "not timed yet");
+        adb.time_chained_clips(&chained_length_s);
+        adb.time_chained_clips(&chained_length_s);
+        let times = |fragment: &Fragment| -> Vec<(u64, Option<u64>)> {
+            fragment.anim_layers[0]
+                .iter()
+                .map(|clip| (ms(clip.start_s), clip.end_s.map(ms)))
+                .collect()
+        };
+        assert!(!adb.fragments[0].awaits_clip_lengths);
+        assert_eq!(
+            times(&adb.fragments[0]),
+            vec![(0, Some(1200))],
+            "its own end"
+        );
+        assert_eq!(
+            times(&adb.fragments[1]),
+            vec![(0, Some(1200)), (1450, None)],
+            "the later clip 0.25 s after that end, timed twice"
+        );
+        assert!(
+            adb.fragments[2].awaits_clip_lengths,
+            "a loop has no end for the empty clip"
+        );
+        assert_eq!(adb.fragments[1].layer_ends_s, [None], "it ends with a clip");
+        assert_eq!(
+            adb.fragments[0].layer_ends_s,
+            [Some(f64::from(1.2_f32))],
+            "the empty clip at the clip's end, in the game's f32"
+        );
+    }
+
+    /// A layer of only empty clips ends where its last empty clip starts; an `<AnimLayer/>` has
+    /// no end.
+    #[test]
+    fn a_layer_of_only_empty_clips_ends_at_its_last_empty_clip() {
+        const SILENT_ADB: &str = r#"<AnimDB><FragmentList><EmptyFragment>
+<Fragment Tags=""><AnimLayer><Blend ExitTime="0.5"/><Animation name=""/></AnimLayer><AnimLayer/></Fragment>
+</EmptyFragment></FragmentList></AnimDB>"#;
+        let adb = AnimDatabase::parse(SILENT_ADB).expect("adb");
+        let silent = &adb.fragments[0];
+        assert_eq!(silent.anim_layers, [Vec::new(), Vec::new()]);
+        assert_eq!(silent.layer_ends_s, [Some(0.5), None]);
+    }
+
     #[test]
     fn a_negative_exit_time_chains_a_clip_to_the_end_of_the_clip_before() {
         let mut adb = AnimDatabase::parse(CHAINED_ADB).expect("adb");
@@ -2738,6 +3054,35 @@ mod tests {
         assert!(
             unknown.fragments[0].awaits_clip_lengths,
             "no length, no start"
+        );
+    }
+
+    #[test]
+    fn chained_clips_add_up_in_f32_as_the_game_times_them() {
+        // The elk's `POI_Graze` (`npc_elk_anims.adb`): 18, 281 and 33 frames of the clips' f32
+        // 1/30 s, chained; the database's own `ExitTime` after them is 11.066668.
+        const SECONDS_PER_FRAME: f32 = 1.0 / 30.0;
+        const GAME_END_S: f32 = 11.066_668;
+        let text = r#"<AnimDB><FragmentList><POI_Graze><Fragment Tags=""><AnimLayer>
+ <Blend ExitTime="0"/><Animation name="elk_grazing_start"/>
+ <Blend ExitTime="-1"/><Animation name="elk_grazing_loop"/>
+ <Blend ExitTime="-1"/><Animation name="elk_grazing_stop"/>
+</AnimLayer></Fragment></POI_Graze></FragmentList></AnimDB>"#;
+        let frames = |name: &str| match name {
+            "elk_grazing_start" => Some(18.0_f32),
+            "elk_grazing_loop" => Some(281.0),
+            "elk_grazing_stop" => Some(33.0),
+            _ => None,
+        };
+        let mut adb = AnimDatabase::parse(text).expect("adb");
+        adb.time_chained_clips(&|name| frames(name).map(|n| f64::from(n * SECONDS_PER_FRAME)));
+        let layer = &adb.fragments[0].anim_layers[0];
+        let stop = layer.last().expect("the stop clip");
+        let length = f64::from(33.0 * SECONDS_PER_FRAME);
+        assert_eq!(stop.natural_end_s(length), f64::from(GAME_END_S));
+        assert!(
+            stop.natural_end_s(length) * 30.0 > 332.0,
+            "past tick 332, where retail stopped"
         );
     }
 
@@ -3254,6 +3599,10 @@ mod tests {
    <ResetStamina ResetWhenReinstalled="false"><Default OnEnter="NoEffect" OnExit="Reset"/></ResetStamina>
   </Activities>
  </Action>
+ <Action Name="ActivateGrit">
+  <ActivationCondition><And><IfHasStatusEffect StatusEffect="AI_Enable_Stagger"/></And></ActivationCondition>
+  <Activities><ActivateGrit><Default OnEnter="Activate" OnExit="Deactivate" DamageTableRow=""/></ActivateGrit></Activities>
+ </Action>
 </Actions></ActionList>"#;
         let list = ActionList::parse(text).expect("list");
         let block = list.action("Block").expect("block");
@@ -3290,9 +3639,55 @@ mod tests {
             StaminaActivities {
                 regen_off: Some(Condition::True),
                 reset_on_exit: Some(Condition::True),
+                grit_on: None,
             }
         );
         assert!(broken.block_activities.is_empty());
+        // The stagger list's grit action has no fragment; its grit is on while it runs.
+        let grit = list.action("ActivateGrit").expect("grit action");
+        assert_eq!(grit.fragment, "");
+        assert_eq!(grit.stamina.grit_on, Some(Condition::True));
+    }
+
+    #[test]
+    fn the_stagger_plays_its_front_or_back_fragment_by_the_side_of_the_hit() {
+        // `Reaction_Staggered` of `baseai_stagger.actionlist`, trimmed.
+        let text = r#"<ActionList><Actions>
+ <Action Name="Reaction_Staggered" FragmentName="r_Stagger" ServerStarted="true"><Activities>
+  <ChangeActionFragment ResetWhenReinstalled="true">
+   <Default UseDefaultFragment="true" FragmentName=""/>
+   <Conditional Name="damaged_front" UseDefaultFragment="false" FragmentName="r_Stagger_F"/>
+   <Conditional Name="damaged_back" UseDefaultFragment="false" FragmentName="r_Stagger_B"/>
+  </ChangeActionFragment>
+ </Activities></Action>
+</Actions><Conditions>
+ <Or Name="damaged_front">
+  <IfDamagedByAngle Max="90.000000" Min="0.000000" Tolerance="0.010000"/>
+  <IfDamagedByAngle Max="0.000000" Min="-90.000000" Tolerance="0.010000"/>
+ </Or>
+ <Or Name="damaged_back">
+  <IfDamagedByAngle Max="180.000000" Min="90.000000" Tolerance="0.010000"/>
+  <IfDamagedByAngle Max="-90.000000" Min="-180.000000" Tolerance="0.010000"/>
+ </Or>
+</Conditions></ActionList>"#;
+        let list = ActionList::parse(text).expect("list");
+        let stagger = list.action("Reaction_Staggered").expect("stagger");
+        let side = |min_deg, max_deg| Condition::DamagedByAngle { min_deg, max_deg };
+        let case = |sides: Vec<Condition>, fragment: &str| FragmentCase {
+            condition: Condition::All(vec![Condition::True, Condition::Any(sides)]),
+            fragment: fragment.to_owned(),
+        };
+        assert_eq!(
+            stagger.fragment_cases,
+            [
+                case(vec![side(0, 90), side(-90, 0)], "r_Stagger_F"),
+                case(vec![side(90, 180), side(-180, -90)], "r_Stagger_B"),
+            ]
+        );
+        assert_eq!(
+            side(0, 90).test_element(),
+            Some(DAMAGED_BY_ANGLE_TEST_ELEMENT)
+        );
     }
 
     #[test]
@@ -3542,5 +3937,40 @@ mod tests {
             "a group's test holds"
         );
         assert!(!rows[3].condition.holds_in(&HitFacts(&["damaged_front"])));
+    }
+
+    /// A cut of `player_male.chrparams` (build 25810808): its include and folders stay in file
+    /// order; the wildcards and the event database are left out.
+    #[test]
+    fn an_animation_list_keeps_its_includes_and_folders_in_file_order() {
+        const SHARED: &str = "objects/characters/player/player_shared.chrparams";
+        const MARKETING: &str = "animations/marketing";
+        const ADIANA: &str = "animations/Gameplay/Character/Npc/SuperNatural/Adiana";
+        let text = format!(
+            r##"<Params>
+ <AnimationList>
+  <Animation name="$Include" path="{SHARED}"/>
+  <Animation name="$AnimEventDatabase" path="animations/Gameplay/Character/Player/male/TEMP_male.animevents"/>
+  <Animation name="#filepath" path="{MARKETING}"/>
+  <Animation name="*" path="*/*.caf"/>
+  <Animation name="#filepath" path="{ADIANA}"/>
+  <Animation name="*" path="*/*.bspace"/>
+ </AnimationList>
+ <BBoxIncludeList/>
+</Params>"##
+        );
+        let list = AnimationList::parse(&text).expect("list");
+        assert_eq!(
+            list.sources,
+            [
+                AnimationSource::Include(SHARED.to_owned()),
+                AnimationSource::Folder(MARKETING.to_owned()),
+                AnimationSource::Folder(ADIANA.to_owned()),
+            ]
+        );
+        assert!(
+            AnimationList::parse("<ControllerDef/>").is_err(),
+            "not a .chrparams file"
+        );
     }
 }

@@ -55,8 +55,25 @@ const JAVELIN: &str = "javelin";
 const XP_MULTIPLIERS: &str = "xp-multipliers";
 /// Its key of the free fast travel switch, a bool (client cvar `FUN_140169720`).
 const FAST_TRAVEL_FREE: &str = "playtest-disable-fast-travel-costs";
+/// Its key of the influence a held tower gives every 5 s, an unsigned number: the client's tower
+/// text "+{TowerInfluenceValue} Influence every 5 seconds" (client cvar
+/// `javelin.faction-influence-tower-influence-amount`, a UInt; no retail layer sets it), served
+/// as [`nw_db::TOWER_INFLUENCE_POINTS`] so the text shows what the server gives.
+const TOWER_INFLUENCE_AMOUNT: &str = "faction-influence-tower-influence-amount";
+/// Its key of the influence gain bonus of each held tower, a share: the client's tower text
+/// "+{TowerPercentageValue}% Influence earned" shows it times 100 (client cvar
+/// `javelin.faction-influence-tower-influence-percent-bonus`, a float registered by
+/// `FUN_140201980`; no retail layer sets it), served as [`nw_db::TOWER_BONUS_PERCENT`].
+const TOWER_INFLUENCE_PERCENT_BONUS: &str = "faction-influence-tower-influence-percent-bonus";
+/// A whole in percent: the tower bonus share is the percent over this.
+const PERCENT_OF_WHOLE: f64 = 100.0;
 /// The keys of [`JAVELIN`] the server fills, which no file may set.
-const SERVER_KEYS: [&str; 2] = [XP_MULTIPLIERS, FAST_TRAVEL_FREE];
+const SERVER_KEYS: [&str; 4] = [
+    XP_MULTIPLIERS,
+    FAST_TRAVEL_FREE,
+    TOWER_INFLUENCE_AMOUNT,
+    TOWER_INFLUENCE_PERCENT_BONUS,
+];
 /// Its character experience multiplier, a number.
 const XP_CHARACTER: &str = "character";
 /// Its list of `<CategoricalProgressionId>:<multiplier>` entries.
@@ -181,8 +198,9 @@ pub enum RemoteConfigError {
         reason: String,
     },
     /// A file sets a key the server fills (`javelin.xp-multipliers` from `[experience]`,
-    /// `javelin.playtest-disable-fast-travel-costs` from `[fast_travel]`), or the server keys
-    /// layer's `javelin` is no object.
+    /// `javelin.playtest-disable-fast-travel-costs` from `[fast_travel]`, the two
+    /// `javelin.faction-influence-tower-influence-*` tower values), or the server keys layer's
+    /// `javelin` is no object.
     #[error("remote config {key}: {reason}")]
     ServerKey {
         /// The key.
@@ -204,8 +222,9 @@ impl RemoteConfigSets {
     /// object, and the folder may hold no other file. The [`GAME_HOST_ENDPOINTS`] of the
     /// [`ENDPOINTS_APPLICATION`] `RegionId` layer are set to `game.<domain>`, and the
     /// [`SERVER_KEYS_APPLICATION`] `ProductId` layer gets `javelin.xp-multipliers` from
-    /// `[experience]` and `javelin.playtest-disable-fast-travel-costs` from `[fast_travel]`,
-    /// which no file may set; other layers are served byte for byte.
+    /// `[experience]`, `javelin.playtest-disable-fast-travel-costs` from `[fast_travel]` and the
+    /// tower values of the influence race ([`with_server_keys`]), which no file may set; other
+    /// layers are served byte for byte.
     pub fn load(config: &EdgeConfig) -> Result<Self, RemoteConfigError> {
         let root = &config.remote_config.directory;
         let server_keys_key = object_key(
@@ -335,7 +354,8 @@ fn server_key_set(object: &Map<String, Value>) -> Option<&'static str> {
 
 /// `object` with the [`SERVER_KEYS`] from `config`, as JSON text: `javelin.xp-multipliers` from
 /// `[experience]` (the `character` number and one `<CategoricalProgressionId>:<multiplier>` entry
-/// for each progression) and `javelin.playtest-disable-fast-travel-costs` from `[fast_travel]`.
+/// for each progression), `javelin.playtest-disable-fast-travel-costs` from `[fast_travel]` and
+/// the two tower values of the influence race from the server's own rules (`nw_db`).
 fn with_server_keys(
     mut object: Map<String, Value>,
     config: &EdgeConfig,
@@ -363,6 +383,16 @@ fn with_server_keys(
     javelin.insert(
         FAST_TRAVEL_FREE.to_owned(),
         Value::Bool(config.fast_travel.free),
+    );
+    javelin.insert(
+        TOWER_INFLUENCE_AMOUNT.to_owned(),
+        Value::from(nw_db::TOWER_INFLUENCE_POINTS),
+    );
+    let tower_percent =
+        u32::try_from(nw_db::TOWER_BONUS_PERCENT).map_err(|error| fail(error.to_string()))?;
+    javelin.insert(
+        TOWER_INFLUENCE_PERCENT_BONUS.to_owned(),
+        Value::from(f64::from(tower_percent) / PERCENT_OF_WHOLE),
     );
     serde_json::to_vec_pretty(&Value::Object(object)).map_err(|error| fail(error.to_string()))
 }
@@ -417,8 +447,9 @@ pub(crate) mod tests {
     /// asks for (`analytics/enable` and seven `javelin` keys of the publicGameplay `RegionId`
     /// layer; leaderboards note section 1), plus the shop service keys `omni/fcs/*` and the
     /// privacy settings keys `omni/privacy-settings/*` that retail leaves to the client's defaults
-    /// (shop note). The experience multipliers and the free fast travel switch are served once,
-    /// in the `ProductId` layer, from `[experience]` and `[fast_travel]`.
+    /// (shop note). The experience multipliers, the free fast travel switch and the tower values
+    /// are served once, in the `ProductId` layer, from `[experience]`, `[fast_travel]` and the
+    /// server's influence rules.
     const SERVED_KEY_PATHS: [(&str, Dimension, &[&str]); 8] = [
         (
             "public",
@@ -453,6 +484,8 @@ pub(crate) mod tests {
             "publicGameplay",
             Dimension::ProductId,
             &[
+                "javelin/faction-influence-tower-influence-amount",
+                "javelin/faction-influence-tower-influence-percent-bonus",
                 "javelin/playtest-disable-fast-travel-costs",
                 "javelin/xp-multipliers/character",
                 "javelin/xp-multipliers/progression",
@@ -765,6 +798,27 @@ pub(crate) mod tests {
             .iter()
             .map(|entry| entry.as_str().expect("entry").to_owned())
             .collect()
+    }
+
+    #[test]
+    fn the_tower_texts_get_the_servers_influence_values() {
+        /// The client's tower text shows the share times this.
+        const TEXT_PERCENT: f64 = 100.0;
+        let javelin = served_javelin(&sets());
+        assert_eq!(
+            javelin[TOWER_INFLUENCE_AMOUNT].as_u64(),
+            Some(nw_db::TOWER_INFLUENCE_POINTS)
+        );
+        let share = javelin[TOWER_INFLUENCE_PERCENT_BONUS]
+            .as_f64()
+            .expect("a share");
+        assert!(
+            (share * TEXT_PERCENT
+                - f64::from(u32::try_from(nw_db::TOWER_BONUS_PERCENT).expect("percent")))
+            .abs()
+                < f64::EPSILON,
+            "{share}"
+        );
     }
 
     #[test]

@@ -37,6 +37,12 @@
 //! T3 ballista and explosive launcher only in `fort-equipements-territory`, the T1 repeater and the
 //! T1 and T2 explosive launchers in no ledger). The build costs and the supply generator recipes
 //! come from the data tables ([`SiegeBlueprints`]).
+//!
+//! **Outpost Rush vats** (game mode helper B16, 2026-11-13): the burning oil vats of the Outpost
+//! Rush layouts (`or_turretfire`, `or_turretfire_trench`) are structure kinds too, T1 fire
+//! barrel droppers with the use, drop and area rows of their slices (their barrel and area are
+//! the war T1 slices); they are outpost structures, never a war build
+//! ([`StructureKind::is_war_siege`]).
 
 use std::path::{Path, PathBuf};
 
@@ -148,6 +154,8 @@ struct StructureKindRow {
     drop: Option<DropRow>,
     #[serde(default)]
     area: Option<AreaRow>,
+    #[serde(default)]
+    use_interact: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -218,7 +226,8 @@ struct KindRow {
     gravity_mps2: f32,
     uses_ammo: bool,
     max_ammo: u16,
-    ammo_refill: u16,
+    #[serde(default)]
+    ammo_refill: Option<u16>,
     repair_health: f32,
     damage_table: String,
     damage_row: String,
@@ -579,8 +588,9 @@ pub struct TurretKind {
     /// The spawner's `m_maxAmmo`.
     pub max_ammo: u16,
     /// The `m_ammoAmount` of the slice's `InteractWithItemCostType_AddProjectileSpawnerAmmo`
-    /// (its `AddAmmo` option): the ammo one refill adds.
-    pub ammo_refill: u16,
+    /// (its `AddAmmo` option): the ammo one refill adds; `None` for a slice with no `AddAmmo`
+    /// option (Observed: `slices/outpostrush/structures/or_turretcannon` has none).
+    pub ammo_refill: Option<u16>,
     /// The `m_amount` of the slice's `InteractWithItemCostType_AddHealth` (its `AddHealth`
     /// option): the health one repair adds.
     pub repair_health: f32,
@@ -659,6 +669,15 @@ pub const DEFENSE_CHOICES: [StructureRole; 5] = [
     StructureRole::HornOfResilience,
 ];
 
+/// The pak folder of the war fort structure slices.
+pub const WAR_SIEGE_SLICES: &str = "slices/structures/siege/";
+/// The name of the Outpost Rush burning oil vats (`or_turretfire`, `or_turretfire_trench`) and
+/// their role and tier: a fire barrel dropper of tier 1. Observed: nwdb names `OR_TurretFire`
+/// "Burning Oil Vat Tier 1"; the slices' projectile spawner fires
+/// `Dropper_T1_FireBarrel_Projectile` (the war T1 barrel), and the use of one in `OPR_TEST3`
+/// (1714.326 s) dropped that barrel and opened `dropper_t1_firebarrel_aoe` where it landed.
+const OUTPOST_RUSH_VAT: &str = "or_turretfire";
+const OUTPOST_RUSH_VAT_TIER: u8 = 1;
 /// The tier part of a slice name, and the parts that name each role.
 const TIER_PREFIX: &str = "_t";
 const ROLE_PARTS: [(&str, StructureRole); 7] = [
@@ -672,9 +691,13 @@ const ROLE_PARTS: [(&str, StructureRole); 7] = [
 ];
 
 impl StructureRole {
-    /// The role and the tier of the slice at `path`; `None` for a slice of none.
+    /// The role and the tier of the slice at `path` (an Outpost Rush vat is a T1 dropper,
+    /// [`OUTPOST_RUSH_VAT`]); `None` for a slice of none.
     pub fn of_slice(path: &str) -> Option<(Self, u8)> {
         let name = path.rsplit('/').next()?.to_ascii_lowercase();
+        if name.starts_with(OUTPOST_RUSH_VAT) {
+            return Some((Self::FireBarrelDropper, OUTPOST_RUSH_VAT_TIER));
+        }
         // A platform's own name also holds the weapon (`platform_t3_repeater`): the platform
         // part goes first.
         let role = if name.starts_with("platform_") {
@@ -736,6 +759,20 @@ pub struct StructureKind {
     /// The area a use opens (the horn's), or that its drop opens where it lands (the
     /// dropper's).
     pub area: Option<SiegeArea>,
+    /// The component of the interact whose options hold a dropper's use (`DropFlameBarrel`):
+    /// the slice's interact that shows the user (Observed: component 17 of
+    /// `dropper_t1_firebarrel`, the war captures' first states; component 16 of
+    /// `or_turretfire`, `OPR_TEST3` 1714.326 s, while its build interact is component 19).
+    /// `None` for a slice with no such interact.
+    pub use_interact: Option<u64>,
+}
+
+impl StructureKind {
+    /// Whether it is a structure of the war forts (its slice is under [`WAR_SIEGE_SLICES`]);
+    /// the Outpost Rush vats are outpost structures.
+    pub fn is_war_siege(&self) -> bool {
+        self.slice.starts_with(WAR_SIEGE_SLICES)
+    }
 }
 
 /// The item a siege structure costs and a supply generator makes (`StructureCost_Ingredient1` of
@@ -920,16 +957,17 @@ impl WarForts {
     /// The structure a 2646 build of `choice` on a structure of slice `asset` makes: the
     /// [`DEFENSE_CHOICES`] role of the choice at the tier of `asset`'s kind (Observed for T3;
     /// Inferred: a T1 or T2 socket builds the same roles of its own tier). `None` for a choice
-    /// out of the list, a structure of no defensive kind, or a kind no slice has.
+    /// out of the list, a structure of no defensive kind, or a kind no slice has. Only war fort
+    /// structures build and are built ([`StructureKind::is_war_siege`]).
     pub fn replacement(&self, asset: &[u8; ID_LEN], choice: u32) -> Option<&StructureKind> {
         let old = self.structure_kind(asset)?;
-        if !DEFENSE_CHOICES.contains(&old.role) {
+        if !DEFENSE_CHOICES.contains(&old.role) || !old.is_war_siege() {
             return None;
         }
         let role = *DEFENSE_CHOICES.get(usize::try_from(choice).ok()?)?;
         self.structure_kinds
             .iter()
-            .find(|kind| kind.role == role && kind.tier == old.tier)
+            .find(|kind| kind.role == role && kind.tier == old.tier && kind.is_war_siege())
     }
 
     /// The turret kind of slice asset `asset`.
@@ -1177,6 +1215,7 @@ fn structure_kind_of(row: StructureKindRow) -> Result<Option<StructureKind>, War
             })
             .transpose()?,
         area: row.area.map(area_of).transpose()?.flatten(),
+        use_interact: row.use_interact,
     }))
 }
 
@@ -1272,7 +1311,7 @@ pub(crate) mod tests {
             0x226f_fdf0_2d20_7733,
             "the retail 327 target"
         );
-        assert_eq!((kind.ammo_refill, kind.repair_health), (15, 5000.0));
+        assert_eq!((kind.ammo_refill, kind.repair_health), (Some(15), 5000.0));
         let projectile = kind.projectile.expect("a projectile turret");
         assert_eq!((projectile.row_index, projectile.ranged_attack), (6, 261));
         assert!(forts.kind(&[0; ID_LEN]).is_none());
@@ -1429,6 +1468,60 @@ pub(crate) mod tests {
         assert_eq!(horn.trigger.map(|rule| rule.target(0x10)), Some(0x1b));
     }
 
+    /// The retail Outpost Rush vat (`or_turretfire`, asset `1326dd54..`): the facet rules of its
+    /// slice (trigger and spawner), its pour timer (component 18, 0.3 s) and its use interact
+    /// (component 16), with the war T1 barrel and area (Observed, `OPR_TEST3` 1714.326 to
+    /// 1715.608 s); the facet entity of the retail vat of slot 123.
+    const VAT_KINDS: &str = r#"{"forts": [], "structure_kinds": [
+        {"asset": "1326dd54e1345e24a15063bf88cfcff4", "slice": "slices/outpostrush/structures/or_turretfire.dynamicslice",
+         "template": null, "template_inferred": false, "use_interact": 16,
+         "trigger": {"xor": "0000022e8d2bb976", "component": "bfcf71e4ebd21074"}, "use_timers": [],
+         "drop": {"projectile": {"asset": "05932228880d5bdf8fb1cc50513e7c62", "component": 2, "ranged_attack": 275,
+                  "damage_table_crc": 81017683, "row_index": 17}, "ownership_component": 1, "gravity_mps2": 13.0,
+                  "spawner_facet": {"xor": "0000003700000000", "component": "603842316ab22336"},
+                  "pour": {"component": 18, "delay_s": 0.3}},
+         "area": {"asset": "b488e3f31cb65871baaf312aa2a52dc4", "ownership_component": 3, "position_component": 1,
+                  "timers": [{"component": 4, "delay_s": 4.0}, {"component": 5, "delay_s": 15.0}, {"component": 6, "delay_s": 4.0}],
+                  "radius_m": 5.0, "once": false,
+                  "damage": {"table": "DamageTable_Structures", "row": "FireBarrelDropper_DoT", "base_damage": 1200, "rate_s": 0.5},
+                  "effects": []}},
+        {"asset": "a3000000000000000000000000000000", "slice": "slices/structures/siege/dropper/dropper_t1_firebarrel.dynamicslice", "template": null}]}"#;
+    const VAT_FACET_ENTITY: u64 = 0xd08e_a7b0_680d_f518;
+
+    #[test]
+    fn an_outpost_rush_vat_reads_as_a_t1_dropper_with_the_retail_headers_and_is_no_war_build() {
+        let forts = WarForts::parse(VAT_KINDS).expect("table");
+        let vat = forts
+            .structure_kind(&id_of(0, "1326dd54e1345e24a15063bf88cfcff4").expect("id"))
+            .expect("vat");
+        assert_eq!((vat.role, vat.tier), (StructureRole::FireBarrelDropper, 1));
+        assert!(!vat.is_war_siege());
+        assert_eq!(vat.use_interact, Some(16));
+        assert_eq!(
+            vat.trigger.map(|rule| rule.target(VAT_FACET_ENTITY)),
+            Some(0x905e_1783_d0f8_5ce2),
+            "the retail 3135 header"
+        );
+        let drop = vat.drop.as_ref().expect("drop");
+        assert_eq!(
+            drop.spawner_facet.target(VAT_FACET_ENTITY),
+            0x30c6_e9b8_d2c0_184e,
+            "the retail 2900 header"
+        );
+        assert_eq!((drop.pour.component, drop.pour.delay_ms()), (18, 300));
+        assert_eq!(
+            StructureRole::of_slice("slices/outpostrush/structures/or_turretfire_trench.dynamicslice"),
+            Some((StructureRole::FireBarrelDropper, 1))
+        );
+        let war_dropper = id_of(0, "a3000000000000000000000000000000").expect("id");
+        assert_eq!(
+            forts.replacement(&war_dropper, 3).map(|kind| kind.asset),
+            Some(war_dropper),
+            "a war T1 socket builds the war dropper, not the vat"
+        );
+        assert!(forts.replacement(&vat.asset, 3).is_none(), "a vat is no war socket");
+    }
+
     /// The retail blueprint rows (`BlueprintItemDefinitions`: `TurretBallistaT3` 120
     /// `SiegeSupply`) and recipe (`GeneratorRecipes` `SiegeSupplyGeneratorT2`: 10 s, 10).
     #[test]
@@ -1482,5 +1575,16 @@ pub(crate) mod tests {
             WarForts::parse(&table),
             Err(WarFortsError::NoClaimPoint { territory: 8 })
         ));
+    }
+
+    #[test]
+    fn a_turret_kind_without_an_add_ammo_option_has_no_refill() {
+        let table = TURRET_TABLE.replace("\"ammo_refill\": 15, ", "");
+        assert_ne!(table, TURRET_TABLE, "the row lost its refill");
+        let forts = WarForts::parse(&table).expect("table");
+        let turret = &forts.fort(15).expect("fort").structures[0];
+        let kind = forts.kind(&turret.asset).expect("kind");
+        assert_eq!(kind.ammo_refill, None);
+        assert_eq!(kind.max_ammo, 15);
     }
 }

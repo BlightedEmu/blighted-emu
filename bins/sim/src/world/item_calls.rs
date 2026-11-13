@@ -225,14 +225,24 @@ impl SimWorld {
                 );
             }
             ItemCallMsg::GiveItem {
-                instance, quantity, ..
+                container,
+                instance,
+                quantity,
+                ..
             } => {
-                self.refused(entity, "deposit", |gear| gear.deposit(instance, quantity));
+                if !self.outpost_rush_shed_give(entity, &container.id, instance, quantity) {
+                    self.refused(entity, "deposit", |gear| gear.deposit(instance, quantity));
+                }
             }
             ItemCallMsg::TakeItem {
-                instance, quantity, ..
+                container,
+                instance,
+                quantity,
+                ..
             } => {
-                if !self.take_generator_supply(entity, Some(quantity), now_ms) {
+                if !self.take_generator_supply(entity, Some(quantity), now_ms)
+                    && !self.outpost_rush_shed_take(entity, &container.id, instance, quantity)
+                {
                     self.take_item(entity, number, instance, quantity, now_ms);
                 }
             }
@@ -530,6 +540,7 @@ impl SimWorld {
         // Every effect it adds goes in the player's status effects (4236): attributes,
         // absorption, food and potion buffs, immunities ([`super::status_effects`]).
         self.add_consumable_effects(entity, consumable, now_ms);
+        self.affliction_used(entity, &item_id);
         let mut played: Vec<u32> = consumable
             .effects
             .iter()

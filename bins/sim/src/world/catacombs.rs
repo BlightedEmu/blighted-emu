@@ -71,8 +71,11 @@
 //!   `bossicon` and `keyroomicon` on `AreaDiscover` and `hazardroomicon` on `AreaTile`
 //!   (`FUN_14080ad40`).
 
+use std::sync::Arc;
+
 use bevy_ecs::entity::Entity;
 use nw_content::catacombs::{CatacombLayout, EAST, NORTH, SIDES, SOUTH, WEST, cell_of, turned};
+use nw_content::dungeon_gates::{GateLevel, LevelRules};
 use nw_content::instances::{CATACOMBS_GAME_MODE, InstanceKind, InstanceMode};
 use nw_messages::facet::NO_GAME_MODE;
 use nw_messages::game_mode_participant::{GameModeParticipantState, PARTICIPANT_FLAGS_LEN};
@@ -81,13 +84,21 @@ use nw_messages::list_delta::{ListChange, ReplicatedList};
 use nw_messages::position::{PositionInTheWorldReplicatedState, WorldPosition};
 use nw_messages::{BundleMember, MemberState};
 use nw_messages::{GameModeServerMsg, LeftGameModeQueueMsg, LevelSpec, ServerMessage};
+use nw_sim_core::level_ground::LevelGround;
+use nw_sim_core::movement::Ground;
 use nw_sim_core::Position;
 use nw_world::catacomb_tiles::{
-    CatacombTile, CatacombTiles, TileEncounter, TilePiece, placed_encounter, turned_point,
+    CatacombSolids, CatacombTile, CatacombTiles, NO_PICTURE, RunSolids, TileEncounter, TilePiece,
+    placed_encounter, turned_point,
 };
 use nw_world::dungeon_scripts::{Encounter, LevelScript};
 use uuid::Uuid;
 
+use self::board::RunBoard;
+use self::end::RunEnd;
+use self::pool::RunPool;
+use self::secrets::{SecretProp, is_secret_gate_slot, secret_gates};
+use super::arena_match::RAID_ID_BASE;
 use super::crafting::{Station, dynamic_ref};
 use super::dungeon_script::mixed;
 use super::encounter_roots::{card, place_member};
@@ -98,6 +109,11 @@ use super::game_mode_entity::{
 use super::queue::participant_header;
 use super::{Body, Player, SimWorld};
 use crate::player_content::PlayerContent;
+
+mod board;
+mod end;
+mod pool;
+mod secrets;
 
 /// The namespace of the `GdeRef`s of the run's tile entities ("catatile").
 const TILE_NAMESPACE: u64 = 0x6361_7461_7469_6c65;
@@ -119,6 +135,45 @@ const SIDE_NAMES: [(u8, &str); 4] = [
 ];
 /// The salt of the power-up draw of a room, beside its index.
 const POWER_UP_SALT: u64 = 0x706f_7765_7275_7073;
+/// The salt of the chest draw of a room, beside its index ("chests").
+const CHEST_SALT: u64 = 0x0063_6865_7374_7300;
+/// The secret slots a tile spawns wherever it holds them: two hidden gates, the two wall torch
+/// levers beside them and the large cursed silver chest behind each. Observed in the ten retail
+/// catacomb ledgers (cards matched to the slots of their tile): every seen tile that holds them
+/// (`tile1_ba`, `tile2_ba`, `tile2_ca`, `tile3_ba`, `tile3_ca`, `tile5_ba`; 58 tiles) showed all
+/// six, or the part of them in the player's view; the gold chest slots `SecretChestGoldA` and
+/// `SecretChestGoldB` of `tile2_ba` never spawned (10 tiles).
+const SECRET_SLOTS: [&str; 6] = [
+    "SecretDoorA",
+    "SecretDoorB",
+    "SecretLeverA",
+    "SecretLeverB",
+    "SecretChestA",
+    "SecretChestB",
+];
+/// The slot of a small cursed silver chest.
+const SMALL_CHEST_SLOT: &str = "ChestSilverSmall";
+/// The slot of a large cursed silver chest.
+const LARGE_CHEST_SLOT: &str = "ChestSilverLarge";
+/// The chest of a hallway tile (a `Hallway` or `EncounterKey` room) and its weight in the draw.
+/// Observed over the 147 hallway tiles of the ten retail ledgers whose gates or checkpoint were
+/// in view: 31 a small chest, 15 a large chest, 17 the erosion chest (`ChestErosion`,
+/// [`super::afflictions`]), 84 none.
+const HALLWAY_CHESTS: [(Option<&str>, u64); 4] = [
+    (Some(SMALL_CHEST_SLOT), 31),
+    (Some(LARGE_CHEST_SLOT), 15),
+    (Some(super::afflictions::EROSION_CHEST_SLOT), 17),
+    (None, 84),
+];
+/// The chest of a parkour tile (`tile1_d` to `tile5_d`) and its weight in the draw. Observed
+/// over the 44 parkour tiles of the ten retail ledgers: 15 a small chest, 13 a large chest, 6
+/// the erosion chest, 10 none (their own part of the 44 may have been out of view).
+const PARKOUR_CHESTS: [(Option<&str>, u64); 4] = [
+    (Some(SMALL_CHEST_SLOT), 15),
+    (Some(LARGE_CHEST_SLOT), 13),
+    (Some(super::afflictions::EROSION_CHEST_SLOT), 6),
+    (None, 10),
+];
 
 /// The room states of a gameplay tile (module text "Progress"). Observed per room kind over the
 /// ten retail catacomb ledgers, by the slices each tile's slots spawned.
@@ -236,43 +291,6 @@ const RESTORE_VITALS_FLAG: (usize, u8) = (0, 0x20);
 /// back to `31 02 02`, `CATACOMBS` 156.732 s to 275.126 s, in all ten ledgers; the client's
 /// tile script sets it on `AreaStart` of a room in the boss state, `FUN_14080ad40`).
 const BOSS_FIGHT_FLAG: (usize, u8) = (1, 0x20);
-/// The map picture id of each gameplay tile (`tileUiFilenameIdAndRotation` above the two turn
-/// bits). Observed in the ten retail ledgers' maps at the tiles of each slice, except
-/// `tile4_b`, `tile4_c` and `tile4_ba`: Inferred from `tile4_ca` 37 and the other hallway
-/// kinds, whose four variations hold four ids in a row in their `VariationAssetPaths` order.
-/// `tile4_d` and `tile5_d` never stood in a retail run: their tiles go without a picture.
-const TILE_PICTURES: [(&str, u8); 28] = [
-    ("tile1_a", 47),
-    ("tile1_b", 56),
-    ("tile1_c", 57),
-    ("tile1_ba", 58),
-    ("tile1_ca", 59),
-    ("tile1_d", 31),
-    ("tile2_a", 13),
-    ("tile2_b", 43),
-    ("tile2_c", 44),
-    ("tile2_ba", 45),
-    ("tile2_ca", 46),
-    ("tile2_d", 32),
-    ("tile3_a", 14),
-    ("tile3_b", 52),
-    ("tile3_c", 53),
-    ("tile3_ba", 54),
-    ("tile3_ca", 55),
-    ("tile3_d", 60),
-    ("tile4_a", 33),
-    ("tile4_b", 34),
-    ("tile4_c", 35),
-    ("tile4_ba", 36),
-    ("tile4_ca", 37),
-    ("tile5_a", 29),
-    ("tile5_b", 24),
-    ("tile5_c", 25),
-    ("tile5_ba", 26),
-    ("tile5_ca", 27),
-];
-/// The end of a gameplay tile's variation name.
-const GAMEPLAY_SUFFIX: &str = "_gameplay";
 /// The bits of a map byte that hold the tile's quarter turns.
 const TURN_BITS: u32 = 2;
 /// Tiles per byte of `tileVisited`.
@@ -286,22 +304,15 @@ fn first_room_state(room_type: &str) -> Option<u8> {
         .map(|(_, state)| *state)
 }
 
-/// The map byte of a tile of `variation` turned `turns` quarter turns: its picture id above
-/// the turns (Observed: the four-way tiles always 0, a dead end 0 to 3); 0 (no picture) for a
-/// variation without a known id.
-fn map_byte(variation: &str, turns: u8) -> u8 {
-    let name = variation
-        .rsplit('/')
-        .next()
-        .unwrap_or(variation)
-        .to_lowercase();
-    let name = name.strip_suffix(GAMEPLAY_SUFFIX).unwrap_or(&name);
-    TILE_PICTURES
-        .iter()
-        .find(|(tile, _)| *tile == name)
-        .map_or(0, |(_, picture)| {
-            (picture << TURN_BITS) | (turns % QUARTER_TURNS)
-        })
+/// The map byte of a tile of `variation` turned `turns` quarter turns: its picture id from
+/// `tiles` above the turns (Observed: the four-way tiles always 0, a dead end 0 to 3; the ids
+/// are the client's, [`nw_world::catacomb_tiles::tile_pictures`]); 0 (no picture) for a
+/// variation without one.
+fn map_byte(tiles: &CatacombTiles, variation: &str, turns: u8) -> u8 {
+    match tiles.get(variation).map_or(NO_PICTURE, |tile| tile.picture) {
+        NO_PICTURE => NO_PICTURE,
+        picture => (picture << TURN_BITS) | (turns % QUARTER_TURNS),
+    }
 }
 
 /// The slots a room of `room_type` spawns beside its gates and its checkpoint (module text):
@@ -310,24 +321,32 @@ fn map_byte(variation: &str, turns: u8) -> u8 {
 /// - `EncounterStart`: `EncounterExtractionStartTile` or `EncounterExtraction` (Observed:
 ///   `dg_enc_catacombs_extraction_prototype` in the dead end beside the arrival, `CATACOMBS2`
 ///   17.292 s; Inferred: the start room's).
+/// - `EncounterBoss`: also `EncounterExtraction` and `EncounterExtractionPortal` (Observed:
+///   every boss tile holds both, and the extraction of `CATACOMBS5` ran in its boss room,
+///   1593.555 s to 1674.550 s; [`end`]).
 /// - `EncounterNamedEnemy`: also `LevelUp` (Observed: `catacombs_gatherable_levelup` in both
 ///   named rooms of `CATACOMBS2`).
 /// - `EncounterGate`: also the levers `KeyLever` and `LeverKey` (Observed:
 ///   `interactobject_catacombs_lever_locked` beside `dg_enc_catacombs_key`, `CATACOMBS2` at 256,
 ///   768; Inferred: a gate room's).
-/// - `Hallway`: also `ChestSilverSmall` (Observed: `catacombs_gatherable_chest_cursedsilver_s`
-///   in three hallways of `CATACOMBS2`).
+/// - `Hallway`, `EncounterKey` and `Parkour`: a chest drawn with the run's seed
+///   ([`chest_slot`]), beside the slot of the kind.
+/// - Every room: the secret slots its tile holds ([`SECRET_SLOTS`]).
 /// - `Reward`: also `PowerUps` and `PowerUpSpawner` (Observed: power-up spawners and six
 ///   power-ups in three rooms of `CATACOMBS2`; Inferred: the reward rooms').
 pub(super) fn room_slots(room_type: &str) -> &'static [&'static str] {
     match room_type {
         "EncounterStart" => &["EncounterExtractionStartTile", "EncounterExtraction"],
-        "EncounterBoss" => &["EncounterBoss"],
+        "EncounterBoss" => &[
+            "EncounterBoss",
+            "EncounterExtraction",
+            "EncounterExtractionPortal",
+        ],
         "EncounterNamedEnemy" => &["EncounterNamedEnemy", "LevelUp"],
         "EncounterGate" => &["EncounterGate", "KeyLever", "LeverKey"],
         "EncounterKey" => &["EncounterKey"],
         "EncounterHazard" => &["EncounterHazard"],
-        "Hallway" => &["Hallway", "ChestSilverSmall"],
+        "Hallway" => &["Hallway"],
         "Parkour" => &["Parkour"],
         "Reward" => &["EncounterReward", "PowerUps", "PowerUpSpawner"],
         _ => &[],
@@ -346,6 +365,7 @@ pub(super) fn slots_of(layout: &CatacombLayout, index: usize) -> Vec<String> {
         .map(|slot| (*slot).to_owned())
         .collect();
     slots.push(CHECKPOINT_SLOT.to_owned());
+    slots.extend(SECRET_SLOTS.iter().map(|slot| (*slot).to_owned()));
     let back = (QUARTER_TURNS - room.turns % QUARTER_TURNS) % QUARTER_TURNS;
     for (side, step) in SIDES {
         if room.sides & side == 0 {
@@ -371,10 +391,49 @@ fn holds(tile: &CatacombTile, slot: &str) -> bool {
         || tile.props.iter().any(|prop| prop.slot == slot)
 }
 
-/// The slots of room `index` that its tile spawns: of the start room's two extraction slots
-/// only the first the tile holds ([`room_slots`]).
-fn spawned_slots(layout: &CatacombLayout, index: usize, tile: &CatacombTile) -> Vec<String> {
+/// The chest slot room `index` of kind `room_type` spawns in the run `seed`: one entry of the
+/// chest weights of its tile kind ([`HALLWAY_CHESTS`], [`PARKOUR_CHESTS`]) drawn with the seed
+/// (Inferred: one draw per room, as the retail counts give no rule beside the kind); `None` for
+/// a room of another kind or a draw of no chest.
+fn chest_slot(room_type: &str, seed: u64, index: usize) -> Option<&'static str> {
+    let chests: &[(Option<&'static str>, u64)] = match room_type {
+        "Hallway" | "EncounterKey" => &HALLWAY_CHESTS,
+        "Parkour" => &PARKOUR_CHESTS,
+        _ if super::afflictions::ROOM_TILE_KINDS.contains(&room_type) => {
+            &super::afflictions::ROOM_EROSION_PROPS
+        }
+        _ => return None,
+    };
+    let room = u64::try_from(index).unwrap_or(u64::MAX);
+    let total: u64 = chests.iter().map(|(_, weight)| weight).sum();
+    let mut left = mixed(seed ^ CHEST_SALT ^ (room << 32)) % total.max(1);
+    chests
+        .iter()
+        .find(|(_, weight)| {
+            let hit = left < *weight;
+            left = left.saturating_sub(*weight);
+            hit
+        })
+        .and_then(|(slot, _)| *slot)
+}
+
+/// The slots of room `index` that its tile spawns in the run `seed`: those of
+/// [`slots_of`] with the room's drawn chest ([`chest_slot`]), and of the start room's two
+/// extraction slots only the first the tile holds ([`room_slots`]).
+fn spawned_slots(
+    layout: &CatacombLayout,
+    index: usize,
+    tile: &CatacombTile,
+    seed: u64,
+) -> Vec<String> {
     let mut slots = slots_of(layout, index);
+    if let Some(chest) = layout
+        .rooms
+        .get(index)
+        .and_then(|room| chest_slot(&room.room_type, seed, index))
+    {
+        slots.push(chest.to_owned());
+    }
     let extraction = room_slots("EncounterStart");
     if layout
         .rooms
@@ -446,6 +505,8 @@ fn power_up_order(power_ups: &[TilePiece], seed: u64, index: usize) -> Vec<&Tile
 /// One entity of a run's tile as it stands in the run.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct PlacedPiece {
+    /// Its slice's pak path.
+    slice: String,
     /// Its slice's asset id.
     asset: [u8; 16],
     /// The member number of its position state.
@@ -475,6 +536,57 @@ pub(super) struct CatacombRun {
     rooms: Vec<RoomProgress>,
     /// The run's own game mode entity and what it shows.
     progress: RunProgress,
+    /// The run's extractions and end ([`end`]).
+    end: RunEnd,
+    /// What fed the run's pool, and its chests ([`pool`]).
+    pool: RunPool,
+    /// The run's war board ([`board`]).
+    board: RunBoard,
+    /// The solids of the run's art tiles: the floors and walls its players and mobs stand on
+    /// and run into (the tile collision); `None` without the catacombs collision file.
+    solids: Option<RunSolids>,
+    /// The mobs' ground of the sim before the run laid its solids over it, while the run's
+    /// tiles stand.
+    base_mob_ground: Option<BaseGround>,
+    /// The run's secret doors and levers as its gates, with their rules ([`secrets`]).
+    gates: (GateLevel, LevelRules),
+    /// The run's erosion chests and shrines, start objects to take away at its end
+    /// ([`super::afflictions`]).
+    erosion_props: Vec<u64>,
+}
+
+/// A ground the run keeps to give back ([`CatacombRun::base_mob_ground`]).
+#[derive(Clone)]
+pub(super) struct BaseGround(Arc<dyn Ground + Send + Sync>);
+
+impl std::fmt::Debug for BaseGround {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("BaseGround")
+    }
+}
+
+/// Two are equal when they are the same ground.
+impl PartialEq for BaseGround {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// The solids of the tiles of `layout` ([`CatacombSolids::placed`]): each room's art tile at
+/// its place in the room's tile, turned with the room.
+fn run_solids(
+    layout: &CatacombLayout,
+    tiles: &CatacombTiles,
+    solids: &CatacombSolids,
+) -> Option<RunSolids> {
+    solids.placed(layout.rooms.iter().filter_map(|room| {
+        let art = &tiles.get(&room.variation)?.art;
+        Some((
+            art.asset,
+            turned_point(art.offset, room.position, room.yaw_deg),
+            room.yaw_deg + art.yaw_deg,
+        ))
+    }))
 }
 
 /// The progress of one room of a run.
@@ -536,11 +648,11 @@ impl RunMap {
 
     /// The map's first children: origin, tile size, size, each tile's picture byte, no visited
     /// tile and no icon.
-    fn first_state(&self, layout: &CatacombLayout) -> GeneratedMap {
-        let mut tiles = vec![0; self.tiles()];
+    fn first_state(&self, layout: &CatacombLayout, pictures: &CatacombTiles) -> GeneratedMap {
+        let mut tiles = vec![NO_PICTURE; self.tiles()];
         for room in &layout.rooms {
             if let Some(index) = self.index(room.cell) {
-                tiles[index] = map_byte(&room.variation, room.turns);
+                tiles[index] = map_byte(pictures, &room.variation, room.turns);
             }
         }
         // A tile size is 64 m (`TileSize`).
@@ -595,6 +707,12 @@ impl CatacombRun {
         self.level
     }
 
+    /// The run's secret doors and levers as the instance's gates, with their rules
+    /// ([`secrets`]).
+    pub(super) fn gates(&self) -> (GateLevel, LevelRules) {
+        self.gates.clone()
+    }
+
     /// The run's level script: the encounters of its rooms.
     pub(super) const fn script(&self) -> &LevelScript {
         &self.script
@@ -615,6 +733,7 @@ impl CatacombRun {
 /// `piece` of a tile whose centre stands at `centre` turned by `tile_yaw_deg`.
 fn placed_piece(piece: &TilePiece, centre: [f32; 3], tile_yaw_deg: f32) -> PlacedPiece {
     PlacedPiece {
+        slice: piece.slice.clone(),
         asset: piece.asset,
         position_component: u64::from(piece.position_component),
         position: turned_point(piece.offset, centre, tile_yaw_deg),
@@ -633,6 +752,8 @@ struct TileSpawns {
     gameplay: Vec<usize>,
     /// The room of each encounter, by index.
     encounter_rooms: Vec<usize>,
+    /// The secret doors and levers of the rooms' slots, which run as gates.
+    secrets: Vec<SecretProp>,
 }
 
 /// What every tile of `layout` spawns in the run `seed` (module text); `None` when `tiles`
@@ -643,6 +764,7 @@ fn tile_spawns(layout: &CatacombLayout, tiles: &CatacombTiles, seed: u64) -> Opt
         encounters: Vec::new(),
         gameplay: Vec::with_capacity(layout.rooms.len()),
         encounter_rooms: Vec::new(),
+        secrets: Vec::new(),
     };
     for (index, room) in layout.rooms.iter().enumerate() {
         let Some(tile) = tiles.get(&room.variation) else {
@@ -655,11 +777,19 @@ fn tile_spawns(layout: &CatacombLayout, tiles: &CatacombTiles, seed: u64) -> Opt
                 .pieces
                 .push(placed_piece(piece, room.position, room.yaw_deg));
         }
-        let slots = spawned_slots(layout, index, tile);
+        let slots = spawned_slots(layout, index, tile, seed);
         for prop in tile.props.iter().filter(|prop| slots.contains(&prop.slot)) {
-            spawns
-                .pieces
-                .push(placed_piece(&prop.piece, room.position, room.yaw_deg));
+            let placed = placed_piece(&prop.piece, room.position, room.yaw_deg);
+            if let Some(gate) = prop.gate.as_ref().filter(|_| is_secret_gate_slot(&prop.slot)) {
+                spawns.secrets.push(SecretProp {
+                    room: index,
+                    slot: prop.slot.clone(),
+                    piece: placed,
+                    gate: gate.clone(),
+                });
+                continue;
+            }
+            spawns.pieces.push(placed);
             let order = power_up_order(&tiles.power_ups, seed, index);
             for (point, power_up) in prop.points.iter().zip(order) {
                 let at_point = TilePiece {
@@ -775,6 +905,13 @@ pub(super) fn open_run(
         phasing_bounds: [width, height],
         ..level
     };
+    let end = RunEnd::of(
+        spawns
+            .encounters
+            .iter()
+            .map(|encounter| (encounter.name.as_str(), encounter.position)),
+        &spawns.encounter_rooms,
+    );
     let rooms = layout
         .rooms
         .iter()
@@ -782,11 +919,12 @@ pub(super) fn open_run(
         .map(|(index, room)| RoomProgress {
             tile: None,
             state: first_room_state(&room.room_type).unwrap_or(HALLWAY_STATE),
+            // A room clears when its encounters end; its extraction is the run's end ([`end`]).
             open_encounters: spawns
                 .encounter_rooms
                 .iter()
                 .enumerate()
-                .filter(|(_, of)| **of == index)
+                .filter(|(encounter, of)| **of == index && !end.is_extraction(*encounter))
                 .map(|(encounter, _)| encounter)
                 .collect(),
             icon_shown: false,
@@ -801,6 +939,7 @@ pub(super) fn open_run(
             script_slice: String::new(),
             encounters: spawns.encounters,
             chests: Vec::new(),
+            trigger_areas: Vec::new(),
         },
         placed: Vec::new(),
         gameplay: spawns.gameplay,
@@ -817,6 +956,13 @@ pub(super) fn open_run(
             visited: vec![0; map.tiles().div_ceil(TILES_PER_BYTE)],
             icons: Vec::new(),
         },
+        end,
+        pool: RunPool::default(),
+        board: RunBoard::default(),
+        solids: run_solids(&layout, &content.catacomb_tiles, &content.catacomb_solids),
+        base_mob_ground: None,
+        gates: secret_gates(&spawns.secrets),
+        erosion_props: Vec::new(),
         layout,
     })
 }
@@ -837,20 +983,28 @@ fn shared_first_state(progress: &RunProgress) -> GameModeState {
     }
 }
 
-/// The first game mode state of a gameplay tile whose room is in `state`.
+/// The first game mode state of a gameplay tile whose room is in `state`: its raid list holds
+/// the run's raid (Observed: `CATACOMBS2` 17.307 s, `00010401` and the raid id after the
+/// character list; the run's raid is made at the arrival, [`super::raids`]).
 fn tile_first_state(progress: &RunProgress, state: u8) -> GameModeState {
     GameModeState {
         script_state: Some(state),
         linked_mode: Some(TILE_LINKED_MODE),
+        raids: Some(ReplicatedList::Full(full(FIRST_LIST_VERSION, vec![RAID_ID_BASE]))),
         ..shared_first_state(progress)
     }
 }
 
-/// The first game mode state of the run's own entity: waiting, with the map of `layout`.
-fn run_first_state(progress: &RunProgress, layout: &CatacombLayout) -> GameModeState {
+/// The first game mode state of the run's own entity: waiting, with the map of `layout` and
+/// the pictures of `tiles`.
+fn run_first_state(
+    progress: &RunProgress,
+    layout: &CatacombLayout,
+    tiles: &CatacombTiles,
+) -> GameModeState {
     GameModeState {
         script_state: Some(RUN_WAITING_STATE),
-        level_map: progress.map.first_state(layout),
+        level_map: progress.map.first_state(layout, tiles),
         linked_mode: Some(RUN_LINKED_MODE),
         ..shared_first_state(progress)
     }
@@ -882,26 +1036,54 @@ impl SimWorld {
             Some((
                 run.pieces.clone(),
                 states,
-                run_first_state(&run.progress, &run.layout),
+                run_first_state(&run.progress, &run.layout, &self.content.catacomb_tiles),
                 Position { x, y, z },
             ))
         }) else {
             return;
         };
+        // The run's start objects (its extractions' cores, its chests) are slices of the start
+        // objects table; an instance sim runs no open world encounters that hold their own.
+        if self.world_events.is_none() {
+            self.encounter_objects = super::encounter_roots::EncounterObjects::build(
+                &self.content.encounter_objects,
+            );
+        }
         let namespace = TILE_NAMESPACE ^ self.me.generation;
-        let placed: Vec<u64> = pieces
+        // A cursed silver chest is a start object a player gathers ([`pool`]); the other
+        // pieces are stations.
+        let mut chests = Vec::new();
+        let mut erosion_props = Vec::new();
+        let placed: Vec<Option<u64>> = pieces
             .iter()
             .zip(states)
             .map(|(piece, state)| {
+                if super::afflictions::is_erosion_prop(&piece.slice) {
+                    match self.encounter_objects.spawn(&piece.slice, piece.position, piece.yaw_deg) {
+                        Some(object) => erosion_props.push(object),
+                        None => tracing::warn!(slice = %piece.slice, "erosion prop not in the start objects table"),
+                    }
+                    return None;
+                }
+                if let Some(base) = RunPool::chest_base(&piece.slice) {
+                    match self
+                        .encounter_objects
+                        .spawn(&piece.slice, piece.position, piece.yaw_deg)
+                    {
+                        Some(object) => chests.push((object, base)),
+                        None => tracing::warn!(slice = %piece.slice, "catacombs chest not in the start objects table"),
+                    }
+                    return None;
+                }
                 let [x, y, z] = piece.position;
-                self.stations.place_camp(|number| {
+                Some(self.stations.place_camp(|number| {
                     // A slot key is far below `usize::MAX` on the 64-bit targets the server runs
                     // on.
                     let gde_ref = dynamic_ref(namespace, number as usize);
                     let mut members = piece_members(piece, gde_ref);
                     members.extend(state.map(|state| BundleMember {
                         component: GAME_MODE_COMPONENT,
-                        state: MemberState::GameMode(state),
+                        state: MemberState::GameMode(Box::new(state)),
                     }));
                     Station {
                         gde_ref,
@@ -910,25 +1092,58 @@ impl SimWorld {
                         name: Vec::new(),
                         members,
                     }
-                })
+                }))
             })
             .collect();
         let mode_entity = self.place_game_mode_entity(RUN_NAMESPACE, None, start, mode_state);
         tracing::info!(entities = placed.len(), "catacombs tiles placed");
         if let Some(run) = self.catacomb_run_mut() {
             for (room, piece) in run.rooms.iter_mut().zip(&run.gameplay) {
-                room.tile = placed.get(*piece).copied();
+                room.tile = placed.get(*piece).copied().flatten();
             }
-            run.placed = placed;
+            for (object, base) in chests {
+                run.pool.add_chest(object, base);
+            }
+            run.erosion_props = erosion_props;
+            run.placed = placed.into_iter().flatten().collect();
             run.placed.push(mode_entity.0);
             run.progress.entity = Some(mode_entity);
         }
+        self.lay_catacomb_solids();
+    }
+
+    /// Lays the solids of this sim's run over the mobs' ground while its tiles stand (the
+    /// players get them as they arrive, [`Self::join_catacombs`]).
+    fn lay_catacomb_solids(&mut self) {
+        let base = Arc::clone(&self.mob_ground);
+        let Some(run) = self.catacomb_run_mut() else {
+            return;
+        };
+        let Some(index) = run.solids.as_ref().map(|solids| Arc::clone(solids.index())) else {
+            tracing::warn!("no catacombs tile solids: the run's floors and walls are not known");
+            return;
+        };
+        run.base_mob_ground = Some(BaseGround(Arc::clone(&base)));
+        let bodies = index.body_count();
+        self.mob_ground = Arc::new(LevelGround::new(base, index));
+        tracing::info!(bodies, "catacombs tile solids laid");
     }
 
     /// Takes the tile entities of the ended run `run` away.
     pub(super) fn remove_catacomb_tiles(&mut self, run: &mut CatacombRun) {
         for number in run.take_placed() {
             self.stations.remove_camp(number);
+        }
+        if let Some(BaseGround(base)) = run.base_mob_ground.take() {
+            self.mob_ground = base;
+        }
+        for object in run
+            .pool
+            .take_chests()
+            .into_iter()
+            .chain(std::mem::take(&mut run.erosion_props))
+        {
+            self.encounter_objects.remove(object);
         }
     }
 
@@ -953,6 +1168,14 @@ impl SimWorld {
         ];
         tracing::info!(player = number, "player arrived in the catacombs run");
         self.send_to(entity, &messages);
+        let solids = self
+            .catacomb_run()
+            .and_then(|run| run.solids.as_ref())
+            .map(|solids| Arc::clone(solids.index()));
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            player.solids = solids;
+        }
+        self.erosion_joined(entity);
         let phase = self.instance_run.as_ref().map_or(0, |run| run.phase());
         let server_ms = self.server_ms;
         let Some(run) = self.catacomb_run_mut() else {
@@ -983,9 +1206,18 @@ impl SimWorld {
         let lists = participant_lists(&run.progress.participants, version, true);
         let entities = run.state_entities();
         let (mode, map) = (run.progress.mode_crc, run.progress.map_crc);
+        // A player who joins the started run brings its respawns and joins the board ([`end`],
+        // [`board`]).
+        let respawns = run.late_join_change();
+        let board = run.board.join(number, character);
+        let mode_entity = run.progress.entity.map(|(entity, _)| entity);
         for state_entity in entities {
             self.change_game_mode_state(state_entity, lists.clone());
         }
+        if let (Some(mode_entity), Some(respawns)) = (mode_entity, respawns) {
+            self.change_game_mode_state(mode_entity, respawns);
+        }
+        self.send_catacomb_board(board);
         self.put_match_joined(
             entity,
             MatchEntry {
@@ -1025,9 +1257,27 @@ impl SimWorld {
             return;
         };
         let changes = run.progress_changes(&places, server_ms, ends_at_ms);
+        let mut board = Vec::new();
+        if run.progress.started && !run.board.started() {
+            let participants: Vec<(u64, [u8; nw_messages::RAW_ID_LEN])> = run
+                .progress
+                .participants
+                .iter()
+                .map(|participant| (participant.number, participant.character))
+                .collect();
+            board = run.board.start(&participants);
+        }
+        let flushed = run.board.flush(server_ms);
         for (entity, change) in changes.states {
             self.change_game_mode_state(entity, change);
         }
+        self.send_catacomb_board(board);
+        self.send_catacomb_board(
+            flushed
+                .into_iter()
+                .map(|(number, message)| (number, vec![message]))
+                .collect(),
+        );
         for (entity, flags) in changes.flags {
             self.put_participant_state(
                 entity,
@@ -1037,18 +1287,35 @@ impl SimWorld {
                 },
             );
         }
+        self.tick_catacomb_end();
     }
 
     /// The encounter `encounter` of this sim's catacombs run ended: when it was its room's last
-    /// one, a room that clears goes to [`CLEARED_ROOM_STATE`] (module text).
+    /// one, a room that clears goes to [`CLEARED_ROOM_STATE`] (module text), and a cleared boss
+    /// room opens its extraction ([`end`]).
     pub(super) fn catacomb_encounter_done(&mut self, encounter: usize) {
+        let server_ms = self.server_ms;
         let Some(run) = self.catacomb_run_mut() else {
             return;
         };
+        let room = run
+            .rooms
+            .iter()
+            .position(|room| room.open_encounters.contains(&encounter));
         let Some(change) = run.encounter_done(encounter) else {
             return;
         };
+        // The feed takes the difficulty the clear then raises ([`pool`]).
+        let feed = room.and_then(|room| run.room_feed(room, server_ms));
+        let cleared = room.and_then(|room| run.room_cleared(room));
+        let mode_entity = run.progress.entity.map(|(entity, _)| entity);
         self.change_game_mode_state(change.0, change.1);
+        if let (Some(mode_entity), Some(cleared)) = (mode_entity, cleared) {
+            self.change_game_mode_state(mode_entity, cleared);
+        }
+        if let Some((silvers, crowns)) = feed {
+            self.feed_catacomb_pool(silvers, crowns);
+        }
     }
 }
 
@@ -1166,18 +1433,9 @@ impl CatacombRun {
             let version = self.progress.version;
             run_change.script_state = Some(RUN_STARTED_STATE);
             let participants = self.progress.participants.len() as u64;
-            run_change.values = Some(full(
-                version,
-                vec![
-                    (DYNAMIC_DIFFICULTY_VALUE, 0),
-                    (
-                        RESPAWNS_REMAINING_VALUE,
-                        participants * RESPAWNS_PER_PARTICIPANT,
-                    ),
-                    (THIRD_RUN_VALUE, 0),
-                ],
-            ));
-            run_change.timers = Some(full(version, run_timers(server_ms, ends_at_ms)));
+            let (values, timers) = self.end.start(participants, server_ms, ends_at_ms);
+            run_change.values = Some(full(version, values));
+            run_change.timers = Some(full(version, timers));
             if let Some(room) = self.rooms.first_mut() {
                 room.state = START_OPEN_STATE;
                 if let Some(tile) = room.tile {
@@ -1484,6 +1742,7 @@ pub(in crate::world) mod tests {
                         yaw_deg: 0.0,
                     })
                     .collect(),
+                gate: None,
             }
         };
         let mut props = vec![
@@ -1555,6 +1814,7 @@ pub(in crate::world) mod tests {
                             ),
                             props: test_props(number),
                             encounters: test_encounters(),
+                            picture: number,
                         },
                     )
                 })
@@ -1571,13 +1831,38 @@ pub(in crate::world) mod tests {
         }
     }
 
-    /// Player content with the catacombs mode, rules and tiles.
+    /// The cap of each catacombs currency (`MaximumInfluence` of its rank row).
+    const CURRENCY_CAP: i64 = 1_000_000;
+    /// The retail small chest's asset and states (`CATACOMBS5` 157.079 s).
+    const CHEST_ASSET: &str = "4f02cd285a915193bb49a98e5ca0ab49";
+    const CHEST_PLACE: &str = "010d010342f14580447f28da1b0f03da81";
+    const CHEST_GATHERABLE: &str = "020c010104";
+
+    /// Player content with the catacombs mode, rules and tiles, and the four catacombs
+    /// currencies.
     pub(in crate::world) fn content() -> PlayerContent {
         let rules = rules();
+        let currency = |id: &str| nw_content::progression::ProgressionSource {
+            id: id.to_owned(),
+            max_level: 0,
+            auto_rank_up: false,
+            ranks: vec![(0, CURRENCY_CAP)],
+        };
         PlayerContent {
             instances: nw_content::instances::InstanceCatalog::build([catacombs()]),
             catacomb_tiles: tiles(&rules),
             catacombs: Some(rules),
+            progression: nw_content::progression::Progression::default().with_progressions(
+                end::CURRENCIES
+                    .iter()
+                    .flat_map(|(cursed, paid, _)| [currency(cursed), currency(paid)]),
+            ),
+            encounter_objects: nw_content::town_props::TownProps::parse(&format!(
+                r#"{{"props": [{{"asset": "{CHEST_ASSET}", "slice": "{}",
+                "members": ["{CHEST_PLACE}", "{CHEST_GATHERABLE}"]}}]}}"#,
+                pool::CHESTS[0].0
+            ))
+            .expect("start objects table"),
             ..PlayerContent::default()
         }
     }
@@ -1633,7 +1918,7 @@ pub(in crate::world) mod tests {
     }
 
     /// The test player.
-    const PLAYER: u64 = 41;
+    pub(crate) const PLAYER: u64 = 41;
     /// The test run.
     const INSTANCE: u128 = 0x51;
     /// The test run's phase.
@@ -1826,7 +2111,12 @@ pub(in crate::world) mod tests {
     /// arriving player gets 1234 and 4970 of no game mode (retail `CATACOMBS2` 15.707 s).
     /// An instance sim of the test run with `PLAYER` arrived in its start room, and the
     /// messages it was sent.
-    fn arrived_run() -> (SimWorld, Vec<ServerMessage>) {
+    pub(crate) fn arrived_run() -> (SimWorld, Vec<ServerMessage>) {
+        arrived_run_with(content())
+    }
+
+    /// [`arrived_run`] with the content `content`.
+    fn arrived_run_with(content: PlayerContent) -> (SimWorld, Vec<ServerMessage>) {
         let mode = catacombs();
         let mut settings = settings(4, 4);
         settings.instance_role = true;
@@ -1842,12 +2132,30 @@ pub(in crate::world) mod tests {
             std::sync::Arc::new(nw_sim_core::test_support::NoGround),
             slot("inst-1"),
             crate::combat::tests::test_combat(),
-            std::sync::Arc::new(content()),
+            std::sync::Arc::new(content),
         );
-        let mut admit = admit_at(PLAYER, 492.0, false);
+        assert_eq!(
+            world.open_instance(
+                Uuid::from_u128(INSTANCE),
+                &mode.id,
+                PHASE,
+                Vec::new(),
+                None,
+                NOW
+            ),
+            InstanceOpened::Opened
+        );
+        admit_run_player(&mut world, PLAYER);
+        let sent = messages_to(&world.take_messages(), PLAYER);
+        (world, sent)
+    }
+
+    /// Player `number` joins the run of [`arrived_run`] and arrives in it.
+    pub(crate) fn admit_run_player(world: &mut SimWorld, number: u64) {
+        let mut admit = admit_at(number, 492.0, false);
         admit.progression.arena.stay = Some(InstanceStay {
             instance: Uuid::from_u128(INSTANCE),
-            game_mode: mode.id.clone(),
+            game_mode: catacombs().id,
             phase: PHASE,
             return_level: "newworld_vitaeeterna".to_owned(),
             return_position: StoredPoint::default(),
@@ -1855,20 +2163,8 @@ pub(in crate::world) mod tests {
             mutation_difficulty: None,
             seat: Some(ArenaSeat { team: 0, place: 0 }),
         });
-        assert_eq!(
-            world.open_instance(
-                Uuid::from_u128(INSTANCE),
-                &mode.id,
-                PHASE,
-                vec![admit.character],
-                None,
-                NOW
-            ),
-            InstanceOpened::Opened
-        );
+        world.add_instance_member(Uuid::from_u128(INSTANCE), admit.character);
         world.admit(&admit, NOW, SERVER_TIME).expect("admit");
-        let sent = messages_to(&world.take_messages(), PLAYER);
-        (world, sent)
     }
 
     #[test]
@@ -2076,6 +2372,76 @@ pub(in crate::world) mod tests {
         }
     }
 
+    /// The run lays its art tiles' floors over the mobs' ground and gives them to an arriving
+    /// player: the start room's floor stands under the player's feet where the sim's own ground
+    /// has none; the run's end gives the mobs' ground back.
+    #[test]
+    fn a_run_s_tile_floors_hold_its_players_and_mobs_until_it_ends() {
+        use nw_world::collision::{Body, DeferredSlice, Geometry, IDENTITY_AFFINE, LevelCollision};
+        const FLOOR_HALF_THICKNESS_M: f32 = 0.5;
+        let mut content = content();
+        let mut slab = IDENTITY_AFFINE;
+        slab[2][3] = -FLOOR_HALF_THICKNESS_M;
+        let collision = LevelCollision {
+            level: "nw_catacomb_00".to_owned(),
+            geometries: vec![Geometry::Box {
+                half_extents: [TILE_SIZE_M / 2.0, TILE_SIZE_M / 2.0, FLOOR_HALF_THICKNESS_M],
+            }],
+            deferred: content
+                .catacomb_tiles
+                .by_variation
+                .values()
+                .map(|tile| DeferredSlice {
+                    slice: tile.art.asset,
+                    sub_id: 2,
+                    origin: [0.0; 3],
+                    bodies: vec![Body {
+                        geometry: 0,
+                        place: slab,
+                    }],
+                })
+                .collect(),
+            ..LevelCollision::default()
+        };
+        let shapes = Arc::new(nw_world::collision_index::CollisionIndex::new(LevelCollision {
+            deferred: Vec::new(),
+            ..collision.clone()
+        }));
+        content.catacomb_solids =
+            CatacombSolids::of(&collision, &shapes, &content.catacomb_tiles);
+        let (mut world, _) = arrived_run_with(content);
+        let spot = run_start_spot(&world.content, Uuid::from_u128(INSTANCE)).expect("spot");
+        let entity = world.player_by_number(PLAYER).expect("player");
+        let solids = world
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.solids.clone())
+            .expect("the arriving player stands on the run's solids");
+        // The slab's top stands at the start room's art tile origin.
+        let layout = run_layout(&world.content, Uuid::from_u128(INSTANCE)).expect("layout");
+        let top = layout.rooms[0].position[2] + ART_OFFSET[2];
+        let floor = solids
+            .floor_at(spot.x, spot.y, top + 1.0)
+            .expect("a floor in the start room");
+        assert!((floor - top).abs() < 1e-3, "floor {floor} against {top}");
+        assert!(
+            world
+                .mob_ground
+                .floor_at(spot.x, spot.y, top + 1.0)
+                .is_some(),
+            "the mobs stand on it too"
+        );
+        let mut run = world.catacomb_run().cloned().expect("run");
+        world.remove_catacomb_tiles(&mut run);
+        assert!(
+            world
+                .mob_ground
+                .floor_at(spot.x, spot.y, top + 1.0)
+                .is_none(),
+            "the end gives the sim's own ground back"
+        );
+    }
+
     /// Each room kind spawns the slot of its `AliasCategory1`, its checkpoint and a gate on
     /// each open side named in the tile's frame; a side toward a locked room takes a key gate.
     #[test]
@@ -2118,8 +2484,105 @@ pub(in crate::world) mod tests {
             room_slots("EncounterGate"),
             ["EncounterGate", "KeyLever", "LeverKey"]
         );
-        assert_eq!(room_slots("Hallway"), ["Hallway", "ChestSilverSmall"]);
+        assert_eq!(room_slots("Hallway"), ["Hallway"]);
+        for slot in SECRET_SLOTS {
+            assert!(reward.contains(&slot.to_owned()), "{slot} in every room");
+        }
         assert!(slots_of(&layout, 2).is_empty(), "no such room");
+    }
+
+    /// Hallway and parkour rooms draw a small, a large, an erosion or no chest with the run's
+    /// seed in about the retail shares, the same seed draws the same, the room tiles draw only
+    /// their erosion props and other rooms draw none.
+    #[test]
+    fn hallway_and_parkour_rooms_draw_their_chest_in_the_retail_shares() {
+        const DRAWS: usize = 3000;
+        let share = |room_type: &str, slot: Option<&str>| {
+            (0..DRAWS)
+                .filter(|index| chest_slot(room_type, 7, *index) == slot)
+                .count() as f64
+                / DRAWS as f64
+        };
+        let hallway_total: u64 = HALLWAY_CHESTS.iter().map(|(_, weight)| weight).sum();
+        let parkour_total: u64 = PARKOUR_CHESTS.iter().map(|(_, weight)| weight).sum();
+        for (room_type, chests, total) in [
+            ("Hallway", HALLWAY_CHESTS, hallway_total),
+            ("Parkour", PARKOUR_CHESTS, parkour_total),
+        ] {
+            for (slot, weight) in chests {
+                let expected = weight as f64 / total as f64;
+                let got = share(room_type, slot);
+                assert!(
+                    (got - expected).abs() < 0.04,
+                    "{room_type} {slot:?}: {got} against {expected}"
+                );
+            }
+        }
+        assert_eq!(chest_slot("EncounterKey", 9, 3), chest_slot("Hallway", 9, 3));
+        assert_eq!(chest_slot("Hallway", 9, 3), chest_slot("Hallway", 9, 3));
+        for room_type in crate::world::afflictions::ROOM_TILE_KINDS {
+            assert!((0..DRAWS).all(|index| {
+                chest_slot(room_type, 7, index).is_none_or(|slot| {
+                    crate::world::afflictions::ROOM_EROSION_PROPS
+                        .iter()
+                        .any(|(prop, _)| *prop == Some(slot))
+                })
+            }));
+        }
+        assert!((0..DRAWS).all(|index| chest_slot("Corridor", 7, index).is_none()));
+    }
+
+    /// A room's secret door and lever with gate parts run as the run's gates, not as plain
+    /// pieces: the lever's pull opens the door of its letter ([`secrets`]); a secret slot
+    /// without gate parts stays a plain piece.
+    #[test]
+    fn a_rooms_secret_door_and_lever_are_the_runs_gates() {
+        use nw_content::dungeon_gates::{GateTimeline, Trigger};
+        use nw_world::catacomb_tiles::{PropGate, TileProp};
+        let layout = reward_and_boss();
+        let mut tiles = tiles(&rules());
+        let gate_parts = |timeline: &str| PropGate {
+            gatherable_component: 2,
+            timelines: vec![GateTimeline {
+                name: timeline.to_owned(),
+                component: 3,
+                length_s: 3.325,
+            }],
+            interact_component: None,
+        };
+        let secret = |slot: &str, asset: u8, gate: Option<PropGate>| TileProp {
+            slot: slot.to_owned(),
+            piece: TilePiece {
+                slice: format!("slices/test/{slot}.dynamicslice"),
+                asset: [asset; 16],
+                position_component: 1,
+                offset: [-8.0, 0.0, -2.0],
+                yaw_deg: 0.0,
+            },
+            points: Vec::new(),
+            gate,
+        };
+        for tile in tiles.by_variation.values_mut() {
+            tile.props.extend([
+                secret("SecretDoorA", 0xd0, Some(gate_parts("Timeline_Open"))),
+                secret("SecretLeverA", 0xd1, Some(gate_parts("Pull"))),
+                secret("SecretChestA", 0xd2, None),
+            ]);
+        }
+        let spawns = tile_spawns(&layout, &tiles, 11).expect("spawns");
+        let rooms = layout.rooms.len();
+        assert_eq!(spawns.secrets.len(), 2 * rooms, "a door and a lever per room");
+        let plain = |asset: u8| spawns.pieces.iter().filter(|piece| piece.asset == [asset; 16]).count();
+        assert_eq!((plain(0xd0), plain(0xd1), plain(0xd2)), (0, 0, rooms));
+        let (level, rules) = secret_gates(&spawns.secrets);
+        assert_eq!(level.gates.len(), 2 * rooms);
+        let door = rules.of_gate("SecretDoorA@0").expect("door rules");
+        assert_eq!(
+            door.rules[0].when,
+            Trigger::SwitchStarted {
+                switch: "SecretLeverA@0".to_owned()
+            }
+        );
     }
 
     /// The reward room's power-up spawner places a different power-up at each of its points;
@@ -2177,12 +2640,15 @@ pub(in crate::world) mod tests {
             spawns
                 .encounters
                 .iter()
-                .all(|encounter| encounter.name == "EncounterBoss"),
-            "a reward room has no encounter slot of the test tiles"
+                .all(|encounter| ["EncounterBoss", "EncounterExtraction"]
+                    .contains(&encounter.name.as_str())),
+            "a reward room has no encounter slot of the test tiles; the boss room spawns its \
+             boss and its extraction"
         );
         let picks: std::collections::BTreeSet<u32> = (0..32)
             .filter_map(|seed| tile_spawns(&layout, &tiles, seed))
             .flat_map(|spawns| spawns.encounters)
+            .filter(|encounter| encounter.name == "EncounterBoss")
             .map(|encounter| encounter.position[0].to_bits())
             .collect();
         assert_eq!(picks.len(), 2, "both entries are drawn over many runs");
@@ -2193,6 +2659,7 @@ pub(in crate::world) mod tests {
         let only: std::collections::BTreeSet<u32> = (0..32)
             .filter_map(|seed| tile_spawns(&layout, &heavy, seed))
             .flat_map(|spawns| spawns.encounters)
+            .filter(|encounter| encounter.name == "EncounterBoss")
             .map(|encounter| encounter.position[0].to_bits())
             .collect();
         assert_eq!(only.len(), 1, "an entry of no weight is never drawn");
@@ -2200,7 +2667,7 @@ pub(in crate::world) mod tests {
     }
 
     /// The run's encounters are the instance sim's dungeon script: the start room spawns its
-    /// extraction slot, the hallway and the boss their slots.
+    /// extraction slot, the hallway its slot and the boss room its boss and its extraction.
     #[test]
     fn a_run_script_is_the_rooms_encounters() {
         let mode = catacombs();
@@ -2223,7 +2690,7 @@ pub(in crate::world) mod tests {
                 .iter()
                 .filter(|name| **name == "EncounterExtraction")
                 .count(),
-            1
+            2
         );
         assert_eq!(
             names
@@ -2253,21 +2720,21 @@ pub(in crate::world) mod tests {
     const BOSS_FIGHT_FLAGS: [u8; PARTICIPANT_FLAGS_LEN] = [0x31, 0x22, 0x02, 0x00, 0x00, 0x00];
 
     /// The game mode state the entity of slot key `entity` holds (its merged state).
-    fn held_state(world: &SimWorld, entity: u64) -> GameModeState {
+    pub(in crate::world) fn held_state(world: &SimWorld, entity: u64) -> GameModeState {
         world
             .stations
             .members(entity)
             .expect("entity")
             .iter()
             .find_map(|member| match &member.state {
-                MemberState::GameMode(state) => Some(state.clone()),
+                MemberState::GameMode(state) => Some((**state).clone()),
                 _ => None,
             })
             .expect("a game mode state")
     }
 
     /// Puts player `PLAYER` at the centre of the room `index` of the run.
-    fn stand_in_room(world: &mut SimWorld, index: usize) {
+    pub(super) fn stand_in_room(world: &mut SimWorld, index: usize) {
         let [x, y, z] = world.catacomb_run().expect("run").layout.rooms[index].position;
         let entity = world.player_by_number(PLAYER).expect("player");
         let limits = world.settings.limits;
@@ -2278,7 +2745,8 @@ pub(in crate::world) mod tests {
 
     /// The retail room states: each `RoomType` starts in its state; the map byte holds the
     /// tile's picture id over its turns (`CATACOMBS2` 17.409 s: `tile4_a` at 128, 768 turned
-    /// twice is 0x86, the four-way `tile5_a` 0x74); a tile with no known picture has none.
+    /// twice is 0x86, the four-way `tile5_a` 0x74; `tile5_d` has the client's id 10); a tile
+    /// that is not in the table has no picture.
     #[test]
     fn rooms_start_in_their_retail_states_and_tiles_show_their_pictures() {
         assert_eq!(first_room_state("EncounterNamedEnemy"), Some(0x0b));
@@ -2286,13 +2754,47 @@ pub(in crate::world) mod tests {
         assert_eq!(first_room_state("EncounterStart"), Some(0x10));
         assert_eq!(first_room_state("EncounterHazard"), Some(0x01));
         assert_eq!(first_room_state("Unknown"), None);
+        let template = tiles(&rules())
+            .by_variation
+            .into_values()
+            .next()
+            .expect("a test tile");
+        let table = CatacombTiles {
+            by_variation: [
+                ("tile4_a_gameplay", 33),
+                ("tile5_a_gameplay", 29),
+                ("tile3_a_gameplay", 14),
+                ("tile5_d_gameplay", 10),
+            ]
+            .into_iter()
+            .map(|(name, picture)| {
+                (
+                    format!("catacombs/gameplay/tiles/{name}"),
+                    CatacombTile {
+                        picture,
+                        ..template.clone()
+                    },
+                )
+            })
+            .collect(),
+            ..CatacombTiles::default()
+        };
         assert_eq!(
-            map_byte("Catacombs/Gameplay/Tiles/tile4_a_gameplay", 2),
+            map_byte(&table, "Catacombs/Gameplay/Tiles/tile4_a_gameplay", 2),
             0x86
         );
-        assert_eq!(map_byte("tile5_a_gameplay", 0), 0x74);
-        assert_eq!(map_byte("tile3_a_gameplay", 4), 0x38, "four turns are none");
-        assert_eq!(map_byte("tile5_d_gameplay", 1), 0, "no retail picture");
+        assert_eq!(map_byte(&table, "catacombs/gameplay/tiles/tile5_a_gameplay", 0), 0x74);
+        assert_eq!(
+            map_byte(&table, "catacombs/gameplay/tiles/tile3_a_gameplay", 4),
+            0x38,
+            "four turns are none"
+        );
+        assert_eq!(map_byte(&table, "catacombs/gameplay/tiles/tile5_d_gameplay", 1), 0x29);
+        assert_eq!(
+            map_byte(&table, "catacombs/gameplay/tiles/tile1_a_gameplay", 1),
+            NO_PICTURE,
+            "not in the table"
+        );
     }
 
     /// Retail `CATACOMBS2` 17.307 s and 17.409 s: every gameplay tile holds its room's state with
@@ -2308,6 +2810,11 @@ pub(in crate::world) mod tests {
             assert_eq!(state.linked_mode, Some(TILE_LINKED_MODE));
             assert_eq!(state.mode, Some(catacombs().crc));
             assert!(state.level_map.tiles.is_none(), "a tile holds no map");
+            assert_eq!(
+                state.raids,
+                Some(ReplicatedList::Full(full(FIRST_LIST_VERSION, vec![RAID_ID_BASE]))),
+                "a tile names the run's raid"
+            );
         }
         let (mode_entity, _) = run.progress.entity.expect("run entity");
         let state = held_state(&world, mode_entity);
@@ -2328,7 +2835,10 @@ pub(in crate::world) mod tests {
         );
         for room in &run.layout.rooms {
             let index = run.progress.map.index(room.cell).expect("on the map");
-            assert_eq!(tiles.elements[index], map_byte(&room.variation, room.turns));
+            assert_eq!(
+                tiles.elements[index],
+                map_byte(&world.content.catacomb_tiles, &room.variation, room.turns)
+            );
             assert_ne!(tiles.elements[index], 0, "every test tile has a picture");
         }
         assert_eq!(
@@ -2544,6 +3054,337 @@ pub(in crate::world) mod tests {
         assert!(
             participant_states(&mut world, entity).is_empty(),
             "no change, no state"
+        );
+    }
+}
+
+/// The encounter spawns of the catacomb tile file of `local-data/content` (run `content-tool
+/// catacomb-tiles` first) against the mobs of the ten retail catacomb ledgers: per room kind,
+/// which mobs the encounter spawns, how many and whether they come back (helper B6 notes in the
+/// big systems plan, item 9; the mob lists by `mobspawns`).
+#[cfg(all(test, feature = "local-data"))]
+mod retail_room_tests {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use nw_content::client_build::load_client_build;
+    use nw_world::catacomb_tiles::{CatacombTiles, catacomb_tiles_path};
+    use nw_world::dungeon_scripts::Encounter;
+
+    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
+    const CONTENT_DIR: &str = "local-data/content";
+    /// The folder of the room encounter slices.
+    const ROOMS: &str = "slices/catacombs/gameplay/roomgameplay/";
+    const EXTRACTION: &str =
+        "slices/catacombs/gameplay/extractiongameplay/dg_enc_catacombs_extraction_prototype.dynamicslice";
+
+    /// One kind of mob an encounter spawns: (vitals row in lower case, (how many, whether it
+    /// comes back)).
+    type Spawned = BTreeMap<String, (u32, bool)>;
+
+    fn tiles() -> CatacombTiles {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let build = load_client_build(&repo.join(CLIENT_BUILD_CONFIG)).expect("client build");
+        CatacombTiles::load(&catacomb_tiles_path(&repo.join(CONTENT_DIR), &build))
+            .expect("catacomb tile file")
+    }
+
+    /// The encounter of slice `slice` in any tile.
+    fn encounter(tiles: &CatacombTiles, slice: &str) -> Encounter {
+        tiles
+            .by_variation
+            .values()
+            .flat_map(|tile| &tile.encounters)
+            .map(|entry| &entry.encounter)
+            .find(|encounter| encounter.slice == slice)
+            .cloned()
+            .unwrap_or_else(|| panic!("{slice} in the tile file"))
+    }
+
+    /// The mobs every stage of `encounter` spawns: each spawn's count times its slice's mobs
+    /// per spawn, of its slice's own mob (one kind per spawned slice).
+    fn spawned(encounter: &Encounter) -> Spawned {
+        let mut kinds = Spawned::new();
+        for spawn in encounter.stages.iter().flat_map(|stage| &stage.spawns) {
+            let Some(slice) = encounter.targets[spawn.target].slices.first() else {
+                continue;
+            };
+            let Some(mob) = &slice.mob else {
+                continue;
+            };
+            let entry = kinds.entry(mob.vitals_id.to_lowercase()).or_default();
+            entry.0 += spawn.count * slice.mobs_per_spawn;
+            entry.1 |= slice.refill.is_some();
+        }
+        kinds
+    }
+
+    fn room(kind: &str, name: &str) -> String {
+        format!("{ROOMS}{kind}/{name}.dynamicslice")
+    }
+
+    fn once(rows: &[(&str, u32)]) -> Spawned {
+        rows.iter()
+            .map(|(row, count)| (row.to_lowercase(), (*count, false)))
+            .collect()
+    }
+
+    /// Each boss room spawns its boss alone, once. Observed: `CATACOMBS2` 17.3 s flamekeeper,
+    /// `CATACOMBS` 344.2 s gorilla elemental (its four elementals came during the fight, 804.6 to
+    /// 847.6 s), 537.7 s ice golem (its stalagmites lived 2 s each without a place,
+    /// `catacombshigh` 826.5 to 988.9 s), 137.5 s corrupted naga, `CATACOMBS3` 441.0 s dryad
+    /// siren, 257.6 s ancient guardian with `AncientGuardian_Heavy_Boss_Catacombs`,
+    /// `catacombshigh` 448.1 s soul harvester (its two minions at 453.2 s and five flights at
+    /// 468.9 s came from the boss) and 624.5 s fulgoris.
+    #[test]
+    fn a_boss_room_spawns_its_boss_alone() {
+        let tiles = tiles();
+        for (name, boss) in [
+            ("dg_enc_catacombs_boss_flamekeeper", "Evil_Knight_Flamekeeper_Boss_Catacombs"),
+            ("dg_enc_catacombs_boss_gorillaelemental", "Wildlife_GorillaElemental_Boss_Catacombs"),
+            ("dg_enc_catacombs_boss_icegolem", "IceGolem_Boss_Catacombs"),
+            ("dg_enc_catacombs_boss_nagacorrupted", "Corrupted_Naga_Catacombs"),
+            ("dg_enc_catacombs_boss_dryadsiren", "AngryEarth_Dryad_Siren_Boss_Catacombs"),
+            ("dg_enc_catacombs_boss_ancientheavy", "AncientGuardian_Heavy_Boss_Catacombs"),
+            ("dg_enc_catacombs_boss_soulharvester", "Lost_SoulHarvester_Boss_Catacombs"),
+            ("dg_enc_catacombs_boss_fulgoris", "Dryad_Fulgoris_Boss_Catacombs"),
+        ] {
+            let encounter = encounter(&tiles, &room("boss", name));
+            assert_eq!(spawned(&encounter), once(&[(boss, 1)]), "{name}");
+        }
+    }
+
+    /// A named room spawns its named mob and its guards once. Observed: `CATACOMBS2` 670.6 s
+    /// cyclops, signifer, sagittarii; `CATACOMBS3` 307.6 s consort, baroness and three meatbags;
+    /// 375.8 s warden, cleric, markswoman; 588.9 s dynasty heavy, spearman, warrior, summoner;
+    /// `CATACOMBS5` 260.3 s werewolf, wereraven, werebear; `CATACOMBS6` 513.9 s undead naga,
+    /// two nurses, cryptkeeper (four deaths).
+    #[test]
+    fn a_named_room_spawns_its_named_mob_and_guards_once() {
+        let tiles = tiles();
+        let rooms: [(&str, &[(&str, u32)]); 6] = [
+            (
+                "dg_enc_catacombs_namedenemy_cyclops",
+                &[
+                    ("CorruptedLegion_Cyclops_Catacombs_Named", 1),
+                    ("CorruptedLegion_Signifer_Catacombs", 1),
+                    ("CorruptedLegion_Sagittarii_Catacombs", 1),
+                ],
+            ),
+            (
+                "dg_enc_catacombs_namedenemy_upyr",
+                &[
+                    ("Upyr_Consort_Catacombs_Named", 1),
+                    ("Upyr_Baroness_Catacombs_Named", 1),
+                    ("Upyr_Thrall_Meatbag_Catacombs", 3),
+                ],
+            ),
+            (
+                "dg_enc_catacombs_namedenemy_warden",
+                &[
+                    ("Inquisitor_Warden_Catacombs_Named", 1),
+                    ("Inquisitor_Cleric_Catacombs", 1),
+                    ("Inquisitor_Markswoman_Catacombs", 1),
+                ],
+            ),
+            (
+                "dg_enc_catacombs_namedenemy_dynasty",
+                &[
+                    ("Dynasty_Heavy_Catacombs_Named", 1),
+                    ("Dynasty_Spearman_Catacombs", 1),
+                    ("Dynasty_Warrior_Catacombs", 1),
+                    ("Dynasty_Summoner_Catacombs", 1),
+                ],
+            ),
+            (
+                "dg_enc_catacombs_namedenemy_werebeast",
+                &[
+                    ("Wildlife_Werewolf_Catacombs_Named", 1),
+                    ("Wildlife_Wereraven_Catacombs", 1),
+                    ("Wildlife_Werebear_Catacombs", 1),
+                ],
+            ),
+            (
+                "dg_enc_catacombs_namedenemy_undead",
+                &[
+                    ("Lost_Undead_Naga_Catacombs_Named", 1),
+                    ("Lost_MutatedNurse_Catacombs", 2),
+                    ("Lost_Cryptkeeper_Catacombs", 1),
+                ],
+            ),
+        ];
+        for (name, mobs) in rooms {
+            let encounter = encounter(&tiles, &room("namedenemy", name));
+            assert_eq!(spawned(&encounter), once(mobs), "{name}");
+        }
+    }
+
+    /// The flame thrower hazard spawns one `Naga_Fire` (`CATACOMBS5` 1475.6 s, the Hive runs
+    /// 662.1 and 1209.8 s); the lightning hazard spawns no encounter mob: its three tornadoes
+    /// (`CATACOMBS3` 449.6, 459.6 and 469.6 s, `AngryEarth_Dryad_Siren_Tornado_Catacombs`) come
+    /// 2, 12 and 22 s after its hazard slice from the `Single_Tornado` spawner its `Delay`
+    /// entity triggers, and its `Destroy` entity ends the slice 33 s after it (the tornadoes
+    /// went at 480.6 s); no retail run showed a siren boss there.
+    #[test]
+    fn a_hazard_room_spawns_only_its_retail_hazard_mob() {
+        const TORNADO: &str = "AngryEarth_Dryad_Siren_Tornado_Catacombs";
+        const TORNADO_S: [f32; 3] = [2.0, 12.0, 22.0];
+        const LIFETIME_S: f32 = 33.0;
+        let tiles = tiles();
+        let flames = encounter(&tiles, &room("hazard", "dg_enc_catacombs_hazard_flamethrower"));
+        assert_eq!(spawned(&flames), once(&[("Naga_Fire", 1)]));
+        let lightning =
+            encounter(&tiles, &room("hazard", "dg_enc_catacombs_hazard_lightning_parent"));
+        assert_eq!(spawned(&lightning), Spawned::new());
+        let hazard = lightning
+            .targets
+            .iter()
+            .flat_map(|target| &target.slices)
+            .find(|slice| !slice.timed_mobs.is_empty())
+            .expect("the hazard slice with its timed tornadoes");
+        let times: Vec<f32> = hazard.timed_mobs.iter().map(|timed| timed.delay_s).collect();
+        assert_eq!(times, TORNADO_S);
+        assert!(hazard.timed_mobs.iter().all(|timed| timed.mob.vitals_id == TORNADO));
+        assert_eq!(hazard.lifetime_s, Some(LIFETIME_S));
+    }
+
+    /// The key room's one wave spawns three of the human alias (evil knights). The retail rooms
+    /// of four knight waves (2, 2, 2 and 3: `CATACOMBS3` 303.8 to 348.6 s, `CATACOMBS5` 81.0 to
+    /// 173.3 s) were hallway waves rooms, no key rooms: the hallway waves portal stood in them
+    /// after the last wave (342.579 s at 448.00, 448.56; 167.261 s at 960.56, 448.00), and the
+    /// waves fit its stages ([`super::super::dungeon_script`] test
+    /// `the_hallway_waves_room_spawns_its_retail_waves`).
+    #[test]
+    fn a_key_room_spawns_evil_knights() {
+        let tiles = tiles();
+        let key = encounter(&tiles, &room("key", "dg_enc_catacombs_key"));
+        let kinds = spawned(&key);
+        assert_eq!(kinds.values().map(|(count, _)| count).sum::<u32>(), 3);
+        assert!(
+            kinds
+                .iter()
+                .all(|(row, (_, back))| row.starts_with("evil_knight_") && !back),
+            "{kinds:?}"
+        );
+    }
+
+    /// The wall torch lever of a secret door is a by-hand gather of 2 s with its interact state
+    /// on component 4 (retail's, 431.572 and 433.574 s)
+    /// (`Raid_CutlassKeys00_SplitSwitch`, the CRC the retail client named, `CATACOMBS2`
+    /// 431.525 s; the pull ran 431.572 to 433.574 s), and the tile file gives the door and the
+    /// lever their gatherable and timelines (the lever's 3.325 s, 433.608 to 436.938 s).
+    #[test]
+    fn the_secret_lever_is_a_two_second_pull_of_its_retail_gatherable() {
+        use nw_content::ContentBundle;
+        use nw_content::bundle::bundle_path;
+        use nw_content::gathering::Gatherables;
+        use nw_formats::objectstream::lowercase_crc32;
+        const LEVER_GATHERABLE: &str = "Raid_CutlassKeys00_SplitSwitch";
+        const RETAIL_CRC: u32 = 639_022_248;
+        const PULL_MS: u64 = 2_000;
+        const LEVER_S: f32 = 3.325;
+        const TIMELINE_TOLERANCE_S: f32 = 0.01;
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let build = load_client_build(&repo.join(CLIENT_BUILD_CONFIG)).expect("client build");
+        let bundle = ContentBundle::load(&bundle_path(&repo.join(CONTENT_DIR), &build), &build)
+            .expect("bundle");
+        assert_eq!(lowercase_crc32(LEVER_GATHERABLE), RETAIL_CRC);
+        let gatherables = Gatherables::from_tables(&bundle.tables);
+        let lever = gatherables.get(RETAIL_CRC).expect("the lever's gatherable");
+        assert_eq!((lever.gather_ms, lever.by_hand), (PULL_MS, true));
+        let tiles = tiles();
+        let prop = |slot: &str| {
+            tiles
+                .by_variation
+                .values()
+                .flat_map(|tile| &tile.props)
+                .find(|prop| prop.slot == slot)
+                .and_then(|prop| prop.gate.clone())
+                .unwrap_or_else(|| panic!("{slot} with its gate parts"))
+        };
+        const LEVER_INTERACT: u64 = 4;
+        let lever_parts = prop("SecretLeverA");
+        assert_eq!(lever_parts.interact_component, Some(LEVER_INTERACT));
+        assert!(
+            lever_parts
+                .timelines
+                .iter()
+                .any(|timeline| (timeline.length_s - LEVER_S).abs() < TIMELINE_TOLERANCE_S),
+            "{lever_parts:?}"
+        );
+        let door = prop("SecretDoorA");
+        assert!(!door.timelines.is_empty(), "{door:?}");
+    }
+
+    /// The survive wave keeps four of its fodder and one named mob alive and brings them back
+    /// (`CATACOMBS5` 1593.9 to 1617.7 s); its falling debris (`Catacombs_Hazard_Debris`, 6.4 s
+    /// each without a place, 173 sightings) is a hazard object, no mob: three at a time, each
+    /// lives 6.5 s and stuns (`Stunned_Afflict`) in a 1.2 m sphere from 4.0 to 4.6 s, and the
+    /// encounter objects table spawns it with the retail states and no position state.
+    #[test]
+    fn the_survive_wave_keeps_its_mobs_alive_and_spawns_no_debris_mob() {
+        use nw_content::town_props::TownProps;
+        /// `MB::PositionInTheWorldReplicatedState`.
+        const POSITION_CLASS: u64 = 13;
+        const VITALS_COMPONENT: u64 = 1;
+        const DEBRIS: &str = "slices/catacombs/gameplay/roomgameplay/hazard/ambienthazard/\
+                              dg_enc_catacombs_hazard_falling_debris_random.dynamicslice";
+        const DEBRIS_LIVE: u32 = 3;
+        let tiles = tiles();
+        let extraction = encounter(&tiles, EXTRACTION);
+        assert_eq!(
+            spawned(&extraction),
+            Spawned::from([
+                ("lost_bloodbeast_catacombs_extraction".to_owned(), (4, true)),
+                ("upyr_baroness_catacombs_named".to_owned(), (1, true)),
+            ])
+        );
+        let hazard_slice = extraction
+            .targets
+            .iter()
+            .flat_map(|target| &target.slices)
+            .find(|slice| slice.hazard.is_some())
+            .expect("the debris spawner");
+        assert_eq!(hazard_slice.mobs_per_spawn, DEBRIS_LIVE);
+        assert!(hazard_slice.refill.is_some());
+        let hazard = hazard_slice.hazard.as_ref().expect("hazard");
+        assert_eq!(hazard.slice, DEBRIS);
+        assert!((hazard.life_s - 6.5).abs() < 1e-3, "{}", hazard.life_s);
+        let [area] = hazard.areas.as_slice() else {
+            panic!("one stun area: {:?}", hazard.areas);
+        };
+        assert_eq!(area.effects, ["Stunned_Afflict"]);
+        assert!((area.radius_m - 1.2).abs() < 1e-3);
+        assert!((area.on_s - 4.0).abs() < 1e-3 && (area.off_s - 4.6).abs() < 1e-3);
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let table = TownProps::load_file(
+            repo.join("local-data/content/encounter-objects-25810808.json"),
+        )
+        .expect("encounter objects");
+        let mut objects = super::super::encounter_roots::EncounterObjects::build(&table);
+        let number = objects
+            .spawn(DEBRIS, [1.0, 2.0, 3.0], 0.0)
+            .expect("the debris is an encounter object");
+        let slot = super::super::slots::Slot {
+            interest: 1,
+            new: true,
+        };
+        let group = objects
+            .group(number, slot, &mut std::collections::HashMap::new())
+            .expect("its group");
+        assert!(
+            group
+                .members
+                .iter()
+                .all(|member| member.state.type_index() != POSITION_CLASS),
+            "no position state, as retail"
+        );
+        assert!(
+            group
+                .members
+                .iter()
+                .any(|member| member.component == VITALS_COMPONENT),
+            "its vitals state"
         );
     }
 }

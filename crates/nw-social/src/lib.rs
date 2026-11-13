@@ -16,6 +16,7 @@ pub mod privacy;
 pub mod profanity;
 mod raids;
 pub mod throttle;
+mod town_projects;
 mod treasury;
 mod views;
 pub mod voice;

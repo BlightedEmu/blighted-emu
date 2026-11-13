@@ -311,11 +311,22 @@ impl Default for XpMultipliers {
     }
 }
 
+/// The share of a gain with no bonus.
+const WHOLE_SHARE: f64 = 1.0;
+/// The float error a product of whole points and decimal shares may carry below a whole
+/// number (far below one point of any gain).
+const WHOLE_ALLOWANCE: f64 = 1e-9;
+
 impl XpMultipliers {
-    /// The character experience that a gain of `points` gives. The rounding of a fractional
-    /// result is Unknown (retail values are whole); it rounds to the nearest point here.
-    pub fn character_gain(&self, points: u32) -> u32 {
-        let gained = (f64::from(points) * self.character).round();
+    /// The character experience that a gain of `points` gives where the player's territory
+    /// experience share is `share` (0 for none): `points` x the character multiplier x (1 +
+    /// `share`), rounded down once (Observed, findings `2026-11-13-kill-xp-rounding.md`: retail
+    /// `Playthrough_Part_02` 1505.5 s 15 x 2 x 1.122853 gave +33, 1595.3 s 7 x 2 x 1.122853
+    /// +15; 2,213 kills fit). A product that is a whole number in exact arithmetic stays it
+    /// (Inferred: `WHOLE_ALLOWANCE` absorbs the float error of the share).
+    pub fn character_gain(&self, points: u32, share: f64) -> u32 {
+        let gained =
+            (f64::from(points) * self.character * (WHOLE_SHARE + share) + WHOLE_ALLOWANCE).floor();
         if gained >= f64::from(u32::MAX) {
             u32::MAX
         } else if gained > 0.0 {
@@ -693,18 +704,28 @@ mod tests {
     #[test]
     fn the_character_multiplier_scales_every_gain() {
         let neutral = XpMultipliers::default();
-        assert_eq!(neutral.character_gain(10), 10);
+        const NO_SHARE: f64 = 0.0;
+        /// The share of 5 territory experience points (findings, Observed interval).
+        const FIVE_POINTS: f64 = 0.122_853;
+        /// The share of one point.
+        const ONE_POINT: f64 = 0.03;
+        assert_eq!(neutral.character_gain(10, NO_SHARE), 10);
         let retail = XpMultipliers {
             character: 2.0,
             progression: HashMap::new(),
         };
-        assert_eq!(retail.character_gain(10), 20, "the retail kill");
-        assert_eq!(retail.character_gain(u32::MAX), u32::MAX);
+        assert_eq!(retail.character_gain(10, NO_SHARE), 20, "the retail kill");
+        assert_eq!(retail.character_gain(u32::MAX, NO_SHARE), u32::MAX);
+        // Retail `Playthrough_Part_02`: 15 and 7 points with 5 territory points gave +33 and +15.
+        assert_eq!(retail.character_gain(15, FIVE_POINTS), 33);
+        assert_eq!(retail.character_gain(7, FIVE_POINTS), 15);
+        // A whole product stays whole: 50 x 2 x 1.03 = 103.
+        assert_eq!(retail.character_gain(50, ONE_POINT), 103);
         let half = XpMultipliers {
             character: 0.5,
             progression: HashMap::new(),
         };
-        assert_eq!(half.character_gain(5), 3, "rounds to the nearest point");
+        assert_eq!(half.character_gain(5, NO_SHARE), 2, "rounds down");
     }
 
     #[test]

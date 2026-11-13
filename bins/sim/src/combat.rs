@@ -42,6 +42,10 @@ pub enum AttackRefusal {
     /// The weapon has no shot loaded.
     #[error("no shot loaded")]
     NoAmmo,
+    /// The target fights on the attacker's side: an Outpost Rush summon of the attacker's team
+    /// ([`crate::mob_ai::TreeMind::spares`]).
+    #[error("the target is on the attacker's side")]
+    OwnSide,
 }
 
 impl AttackRefusal {
@@ -58,6 +62,7 @@ impl AttackRefusal {
             Self::TooFast => "too_fast",
             Self::NoAim => "no_aim",
             Self::NoAmmo => "no_ammo",
+            Self::OwnSide => "own_side",
         }
     }
 }
@@ -351,6 +356,15 @@ pub(crate) mod tests {
         Arc::new(crate::mob_ai::test_support::test_ai(&[
             super::test_support::TEST_MOB,
         ]))
+    }
+
+    /// [`test_mob_ai`] whose slice has the stagger
+    /// ([`crate::mob_ai::test_support::test_stagger_ai_data`]).
+    pub(crate) fn test_stagger_mob_ai() -> Arc<crate::mob_ai::MobAi> {
+        Arc::new(crate::mob_ai::test_support::test_ai_with(
+            crate::mob_ai::test_support::test_stagger_ai_data(),
+            &[super::test_support::TEST_MOB],
+        ))
     }
 
     use nw_content::player_attacks::{AttackHit, AttackKind, BasicAttack, Stance, stance_key};

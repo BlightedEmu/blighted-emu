@@ -62,7 +62,8 @@ use nw_messages::{
 };
 use nw_messages::{FishingClientMsg, MusicClientMsg};
 use nw_messages::{
-    GameModeClientMsg, PayUpkeepCostMsg, TitlesUnlockMsg, WarClientMsg, WarSignupClientMsg,
+    GameModeClientMsg, PayUpkeepCostMsg, TitlesUnlockMsg, TownProjectCallMsg, WarClientMsg,
+    WarSignupClientMsg,
     turrets::{BuildDefensiveStructureMsg, TurretClientMsg},
 };
 use nw_reflect::Envelope;
@@ -1019,6 +1020,15 @@ impl Loop {
                     Err(error) => bad_call(index, &error, &envelope.body),
                 }
             }
+            Some(index) if let Some(call) = TownProjectCallMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => {
+                        let input = self.world.town_project_call(connection, &call, unix_ms());
+                        self.pending_social.extend(input);
+                    }
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
             Some(index) if let Some(call) = ArenaClientMsg::decode(index, &envelope.body) => {
                 match call {
                     Ok(call) => self.world.arena_call(connection, call, self.now_ms()),
@@ -1068,6 +1078,8 @@ impl Loop {
         let now_ms = self.now_ms();
         match input.interaction() {
             Some(request) => {
+                self.world
+                    .note_summoning_choice(connection, input.interaction_action());
                 self.world
                     .interact(connection, request, &input.interaction_name(), now_ms);
             }
@@ -1231,7 +1243,7 @@ impl Loop {
         }
     }
 
-    /// Reads the companies the capture the flag match asks for, in one task.
+    /// Reads the companies the game modes ask for (`world::company_looks`), in one task.
     fn run_company_reads(&mut self) {
         let ids = self.world.take_company_reads();
         if ids.is_empty() {
@@ -1488,9 +1500,7 @@ impl Loop {
                 },
                 now_ms,
             ),
-            None => self
-                .world
-                .apply_hit(hit.target, hit.attacker, hit.amount, hit.threat, now_ms),
+            None => self.world.remote_player_hit(hit, now_ms),
         };
         if let Some(outcome) = &applied {
             count_mob_death(outcome);
@@ -2395,6 +2405,11 @@ fn saved_progression(progression: &PlayerProgression, taken_at_ms: u64) -> Saved
             cyclic_turns: progression.cyclic_turns.clone(),
             fishing_bait: progression.fishing_bait.clone(),
         },
+        // The next join counts the time away from this save.
+        rested: nw_db::SavedRested {
+            experience: progression.rested_experience,
+            saved_ns: taken_at_ms.saturating_mul(NS_PER_MS),
+        },
     }
 }
 
@@ -2708,6 +2723,30 @@ mod removal_tests {
 }
 
 #[cfg(test)]
+mod rested_save_tests {
+    use super::*;
+
+    #[test]
+    fn a_save_keeps_the_rested_pool_with_the_time_of_the_save() {
+        /// Retail `Playthrough_Part_04` login pool.
+        const POOL: u32 = 1_261;
+        /// 2027-01-01, Unix ms.
+        const TAKEN_AT_MS: u64 = 1_798_761_600_123;
+        let progression = PlayerProgression {
+            rested_experience: POOL,
+            ..PlayerProgression::default()
+        };
+        assert_eq!(
+            saved_progression(&progression, TAKEN_AT_MS).rested,
+            nw_db::SavedRested {
+                experience: POOL,
+                saved_ns: TAKEN_AT_MS * NS_PER_MS,
+            }
+        );
+    }
+}
+
+#[cfg(test)]
 mod ghost_id_tests {
     use nw_bus::Point;
 
@@ -2785,8 +2824,8 @@ mod tests {
     use nw_content::respawn_points::nearest_respawn_point;
     use nw_db::test_db::with_test_schema;
     use nw_db::{
-        NewCharacter, WORLD_MIGRATOR, character_items, character_position, character_progression,
-        character_quests, insert_character,
+        GLOBAL_MIGRATOR, NewCharacter, WORLD_MIGRATOR, character_items, character_position,
+        character_progression, character_quests, insert_character,
     };
 
     /// A finished objective a test player carries.
@@ -2813,6 +2852,9 @@ mod tests {
     use crate::world::{MESSAGE_CHANNEL, REPLICATION_CHANNEL};
 
     const WAIT: Duration = Duration::from_secs(5);
+    /// The longest a test may run: the slowest test waits a few [`WAIT`]s and the shutdown
+    /// saves ([`SHUTDOWN_SAVE_WAIT`]).
+    const TEST_LIMIT: Duration = Duration::from_secs(60);
     const LEVEL: &str = "newworld_vitaeeterna";
     const LEVEL_M: f32 = 14_336.0;
     const CELL_M: f32 = 2048.0;
@@ -2830,6 +2872,10 @@ mod tests {
     const PAUSE: Duration = Duration::from_millis(100);
     const SAVE_TOLERANCE_M: f64 = 0.01;
     const CHARACTER_NAME: &str = "Ada";
+    /// The start of a test account's login name; a random hex part follows.
+    const ACCOUNT_PREFIX: &str = "simtest";
+    /// A made-up password hash: no test logs in.
+    const PASSWORD_HASH: &str = "not-a-hash";
     /// A step the limits allow at once.
     const STEP_M: f32 = 2.0;
     const MOVE_TOLERANCE_M: f32 = 0.01;
@@ -2893,9 +2939,13 @@ mod tests {
         Point { x, y: Y, z: Z }
     }
 
-    /// A character of a new account: (account, character).
-    async fn character(db: &PgPool) -> (Uuid, Uuid) {
-        let account = Uuid::new_v4();
+    /// A character of a new account in the global database: (account, character).
+    async fn character(db: &TestDatabases) -> (Uuid, Uuid) {
+        let username = format!("{ACCOUNT_PREFIX}{}", Uuid::new_v4().simple());
+        let account = nw_db::create_password_account(&db.global, &username, PASSWORD_HASH)
+            .await
+            .expect("account")
+            .id;
         let character = insert_character(
             db,
             &NewCharacter {
@@ -2910,6 +2960,42 @@ mod tests {
         (account, character.id)
     }
 
+    /// The test sim's databases: a world schema and a global schema, each with its migrations
+    /// (the sim saves a leaving player's season to the global one, global migration 0010). It
+    /// stands for the world pool where a test reads or writes the world database.
+    struct TestDatabases {
+        world: PgPool,
+        global: PgPool,
+    }
+
+    impl std::ops::Deref for TestDatabases {
+        type Target = PgPool;
+
+        fn deref(&self) -> &PgPool {
+            &self.world
+        }
+    }
+
+    /// Runs `test` with new migrated world and global test schemas, within [`TEST_LIMIT`]: a
+    /// test that waits on the bus for something that never comes fails instead of hanging.
+    async fn with_databases(test: impl AsyncFnOnce(&TestDatabases)) {
+        with_test_schema(async |global| {
+            GLOBAL_MIGRATOR.run(global).await.expect("migrate global");
+            with_test_schema(async |world| {
+                WORLD_MIGRATOR.run(world).await.expect("migrate world");
+                let databases = TestDatabases {
+                    world: world.clone(),
+                    global: global.clone(),
+                };
+                tokio::time::timeout(TEST_LIMIT, test(&databases))
+                    .await
+                    .expect("the test ends within its time limit");
+            })
+            .await;
+        })
+        .await;
+    }
+
     /// A running sim and the sender that stops it.
     struct Running {
         settings: LoopSettings,
@@ -2918,7 +3004,7 @@ mod tests {
     }
 
     impl Running {
-        async fn start(bus: &Bus, settings: LoopSettings, db: &PgPool) -> Self {
+        async fn start(bus: &Bus, settings: LoopSettings, db: &TestDatabases) -> Self {
             let (stop, stopped) = oneshot::channel::<()>();
             let server = tokio::spawn(serve(
                 settings.clone(),
@@ -2926,8 +3012,8 @@ mod tests {
                 Arc::new(NoGround),
                 bus.clone(),
                 Databases {
-                    world: db.clone(),
-                    global: db.clone(),
+                    world: db.world.clone(),
+                    global: db.global.clone(),
                 },
                 async {
                     let _ = stopped.await;
@@ -3323,13 +3409,18 @@ mod tests {
         .into()
     }
 
-    /// The entity numbers and class type indexes of the members of every bundle in `reads`.
+    /// The entity numbers and class type indexes of the members of every bundle in `reads`. The
+    /// slot-2 world entity is left out: its card names retail's world entity, not an entity
+    /// number of this sim ([`crate::world::land_claims`]), so no slot ties it.
     fn member_classes(reads: &[SlotRead]) -> Vec<(u64, u64)> {
         reads
             .iter()
             .flat_map(|read| &read.updates)
+            .filter(|update| u64::from(update.interest) != nw_messages::LAND_CLAIM_MANAGER_INTEREST)
             .flat_map(|update| {
-                let entity = update.entity.expect("every slot is tied");
+                let entity = update
+                    .entity
+                    .unwrap_or_else(|| panic!("slot {} is not tied", update.interest));
                 update
                     .members
                     .iter()
@@ -3357,8 +3448,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_sim_with_snapshots_publishes_them() {
         const SNAPSHOT: Duration = Duration::from_millis(100);
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
             let mut snapshots = bus
@@ -3392,8 +3482,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_mob_enters_a_players_bundles_with_its_card() {
         const MOB_X: f32 = 1000.0;
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let ada = character(db).await;
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
@@ -3446,8 +3535,7 @@ mod tests {
         /// (`player-attacks-25810808.json`).
         const SWORD_REACH_M: f32 = 1.2;
         const PLAYER_X: f32 = MOB_X + SWORD_REACH_M;
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let ada = character(db).await;
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
@@ -3528,8 +3616,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn an_admit_gets_login_messages_bundles_and_a_saved_position() {
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let ada = character(db).await;
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
@@ -3580,8 +3667,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_client_input_moves_the_player() {
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let ada = character(db).await;
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
@@ -3602,8 +3688,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_last_saves_finish_before_serve_returns() {
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let ada = character(db).await;
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
@@ -3622,8 +3707,7 @@ mod tests {
     async fn a_leave_saves_the_items_quests_and_progression() {
         /// An achievement bit the player carries in.
         const ACHIEVEMENT_BIT: u32 = 15_317;
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let ada = character(db).await;
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
@@ -3690,8 +3774,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_silent_gateway_loses_its_players_and_hears_close() {
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let ada = character(db).await;
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
@@ -3723,12 +3806,12 @@ mod tests {
     }
 
     impl Pair {
-        async fn start(db: &PgPool) -> Self {
+        async fn start(db: &TestDatabases) -> Self {
             Self::start_with(db, test_combat()).await
         }
 
         /// A pair whose east sim has the combat settings `east_combat`.
-        async fn start_with(db: &PgPool, east_combat: CombatSettings) -> Self {
+        async fn start_with(db: &TestDatabases, east_combat: CombatSettings) -> Self {
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
             let gateway = TestGateway::start(&bus, world_id, true).await;
@@ -3760,8 +3843,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_player_crosses_to_the_other_sim_and_its_inputs_follow() {
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let ada = character(db).await;
             let mut pair = Pair::start(db).await;
             let (bus, world_id) = (pair.bus.clone(), pair.world_id);
@@ -3851,8 +3933,7 @@ mod tests {
         const RESPAWN: Duration = Duration::from_millis(300);
         const MOB_X: f32 = 1000.0;
         const PLAYER_X: f32 = MOB_X + 2.0;
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let ada = character(db).await;
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
@@ -3952,8 +4033,7 @@ mod tests {
             target: 1,
             entity: 2,
         };
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let ada = character(db).await;
             let stored = character(db).await;
             let bus = test_bus().await;
@@ -4024,8 +4104,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_mob_of_the_other_sim_kills_a_player_through_the_bus() {
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let mut combat = lethal_combat();
             combat.spawns = one_mob(BORDER_X + 2.0);
             let pair = Pair::start_with(db, combat).await;
@@ -4052,8 +4131,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn ghosts_cross_the_border() {
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let mut pair = Pair::start(db).await;
             let (bus, world_id) = (pair.bus.clone(), pair.world_id);
             let west_player = admit_at(
@@ -4149,7 +4227,7 @@ mod tests {
 
     /// One real west sim, a fake east sim in the table, and a player 10 m inside the east.
     async fn west_with_fake_east(
-        db: &PgPool,
+        db: &TestDatabases,
         answer: Option<HandoffReply>,
     ) -> (
         Running,
@@ -4175,8 +4253,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_refused_handoff_keeps_the_player() {
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let refusal = HandoffReply::Refused {
                 reason: "full".to_owned(),
             };
@@ -4208,8 +4285,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_late_handoff_is_cancelled() {
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let (west, mut messages, mut gateway, tables) = west_with_fake_east(db, None).await;
             let HandoffMessage::Offer(offer) = next_handoff(&mut messages).await else {
                 panic!("expected an offer first");
@@ -4233,8 +4309,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_sim_dropped_from_the_table_saves_and_removes_its_players() {
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let ada = character(db).await;
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
@@ -4272,15 +4347,21 @@ mod tests {
             .await
     }
 
-    /// Reads bundles of `sim` until the own x is `x`.
+    /// Reads bundles of `sim` until the own x is `x`, within [`WAIT`].
     async fn wait_for_x(gateway: &mut TestGateway, sim: &BusId, x: f32) {
-        while (own_x_from(gateway, sim).await - x).abs() > MOVE_TOLERANCE_M {}
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let own = own_x_from(gateway, sim).await;
+            if (own - x).abs() <= MOVE_TOLERANCE_M {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the own x stays {own}, not {x}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_forwarded_input_after_a_direct_one_is_dropped() {
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
             let mut gateway = TestGateway::start(&bus, world_id, true).await;
@@ -4289,6 +4370,18 @@ mod tests {
             let player = admit_at(connection.clone(), character(db).await, BORDER_X);
             admit(&bus, world_id, sim.id(), &player).await;
             let id = sim.id().clone();
+            // The client spawns as [`spawn_client`] does, but with a forwarded time sync: a
+            // direct one would make every later forwarded input stale. Until the spawn only the
+            // own card shows the player, so no later move would show.
+            tokio::time::sleep(OWN_CARD_WAIT).await;
+            send_inputs(
+                &bus,
+                world_id,
+                &id,
+                true,
+                vec![time_sync(connection.clone())],
+            )
+            .await;
             let step = |metres: f32| move_to(connection.clone(), BORDER_X + metres);
             send_inputs(&bus, world_id, &id, true, vec![step(1.0)]).await;
             wait_for_x(&mut gateway, &id, BORDER_X + 1.0).await;
@@ -4308,17 +4401,17 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cancel_after_a_take_removes_the_player() {
-        with_test_schema(async |db| {
-            WORLD_MIGRATOR.run(db).await.expect("migrate");
+        with_databases(async |db| {
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
             let mut gateway = TestGateway::start(&bus, world_id, true).await;
             let taker = Running::start(&bus, settings(world_id, "sim"), db).await;
             let id = taker.id().clone();
+            let (account, character) = character(db).await;
             let offer = HandoffOffer {
                 connection: gateway.connection(CONNECTION),
-                character: character(db).await.1,
-                account: Uuid::nil(),
+                character,
+                account,
                 name: CHARACTER_NAME.to_owned(),
                 entity: CONNECTION,
                 gde_ref: nw_messages::raw_id_of_entity(CONNECTION),

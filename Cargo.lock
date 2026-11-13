@@ -2746,6 +2746,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b4ff49b2887190c760b86207b55cdcaabbdecaf7a0660d68aa2ed6f652abf0a"
 dependencies = [
  "jiff-core",
+ "jiff-tzdb",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3411,6 +3412,7 @@ version = "0.1.0"
 dependencies = [
  "crc32fast",
  "hex",
+ "jiff",
  "nw-common",
  "nw-formats",
  "nw-protocol",

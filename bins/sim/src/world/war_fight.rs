@@ -70,7 +70,7 @@ use uuid::Uuid;
 
 use super::attack::Vitals;
 use super::crafting::Station;
-use super::siege_areas::{AreaRun, BarrelDrop, OpeningArea};
+use super::siege_areas::SiegeUses;
 use super::siege_structures::{PendingBuild, StructureRun};
 use super::turrets::TurretRun;
 use super::{Body, Player, SimWorld, send_now};
@@ -150,11 +150,8 @@ pub(crate) struct WarFight {
     /// The builds that wait for their time, and how many structures were built.
     pub(super) builds: Vec<PendingBuild>,
     pub(super) built: usize,
-    /// The barrels falling, the areas open and those that open at the next tick
-    /// ([`super::siege_areas`]).
-    pub(super) drops: Vec<BarrelDrop>,
-    pub(super) areas: Vec<AreaRun>,
-    pub(super) opening: Vec<OpeningArea>,
+    /// What the uses of its droppers and horns opened ([`super::siege_areas`]).
+    pub(super) uses: SiegeUses,
 }
 
 impl WarFight {
@@ -188,9 +185,7 @@ impl WarFight {
             structures: Vec::new(),
             builds: Vec::new(),
             built: 0,
-            drops: Vec::new(),
-            areas: Vec::new(),
-            opening: Vec::new(),
+            uses: SiegeUses::default(),
         }
     }
 
@@ -212,6 +207,22 @@ impl WarFight {
     /// The fort.
     pub(super) const fn fort(&self) -> &WarFort {
         &self.fort
+    }
+
+    /// The capture points that stand in the instance (spawned at the war's start): the facet
+    /// entity of each, its key ([`nw_content::war_forts::FortPoint::key`]; Observed: the 2720
+    /// target of a turret shot that met point 2 of territory 11, `joining_defending_war_2`
+    /// 1282.655 s), and its place.
+    pub(super) fn standing_points(&self) -> impl Iterator<Item = (u64, Position)> + '_ {
+        self.fort
+            .points
+            .iter()
+            .zip(&self.points)
+            .filter(|(_, run)| run.entity.is_some())
+            .map(|(point, _)| {
+                let [x, y, z] = point.place;
+                (point.key(), Position { x, y, z })
+            })
     }
 
     /// Whether `[x, y]` is inside the instance's frame.
@@ -368,15 +379,27 @@ fn side_of(war: &TerritoryWar, character: Uuid) -> Option<u8> {
 /// crest, no owner player, rule 4, the defender side's number as the raid id; Inferred for the
 /// claim point, which retail showed with no company in ES and with it in the five others).
 pub(super) fn point_ownership(owner: &ClaimOwner, defender_number: u64) -> OwnershipState {
+    claim_ownership(owner, POINT_PERMISSION_RULE, defender_number, POINT_FACTION)
+}
+
+/// The ownership of an entity of the claim of `owner` with permission rule `permission_rule`,
+/// raid id `raid_id` and faction `faction` (the war points above; the open world fort control
+/// point, [`super::control_points`]): the company's id, name and crest, no owner player.
+pub(super) fn claim_ownership(
+    owner: &ClaimOwner,
+    permission_rule: u8,
+    raid_id: u64,
+    faction: u8,
+) -> OwnershipState {
     OwnershipState {
         guild_id: Some(owner.guild_id),
         guild_owner: Some(owner.guild_name.clone()),
         guild_crest: Some(owner.crest),
         owner: Some(OwnerIdentification::none()),
-        permission_rule: Some(POINT_PERMISSION_RULE),
+        permission_rule: Some(permission_rule),
         structure_name: Some(Vec::new()),
-        raid_id: Some(defender_number),
-        faction_type: Some(POINT_FACTION),
+        raid_id: Some(raid_id),
+        faction_type: Some(faction),
         owner_pvp: Some(false),
         owner_ffa: Some(false),
         permission_options: Some(POINT_PERMISSION_OPTIONS),
@@ -410,7 +433,7 @@ fn point_member(point: &FortPoint, cold: CapturePointCold, progress: u8) -> Bund
 
 /// The war side numbers of `war` (the war data's: the attacker's is twice the war's number,
 /// the defender's one more; Observed 9428 and 9429).
-const fn side_numbers(war: &TerritoryWar) -> (u64, u64) {
+pub(super) const fn side_numbers(war: &TerritoryWar) -> (u64, u64) {
     let attacker = war.number.saturating_mul(2);
     (attacker, attacker.saturating_add(1))
 }
@@ -436,38 +459,12 @@ impl SimWorld {
 
     /// The director opened the instance of a war (`news`): this open-world sim invites its
     /// players of the war's roster into their side's raid, and their accept moves them in
-    /// (module doc).
+    /// (module doc; [`SimWorld::invite_war_roster`]).
     pub fn war_instance_news(&mut self, news: WarInstanceNews) {
         if self.instance_sim {
             return;
         }
-        let content = std::sync::Arc::clone(&self.content);
-        let Some(fort) = content.war_forts.fort(news.war.territory) else {
-            return;
-        };
-        let Some(war) = self.wars.war(news.war.war).cloned() else {
-            tracing::warn!(war = %news.war.war, "war instance of a war this sim has not read");
-            return;
-        };
-        let players: Vec<(Entity, Uuid)> = self
-            .by_connection
-            .values()
-            .filter_map(|entity| Some((*entity, self.world.get::<Player>(*entity)?.character)))
-            .collect();
-        for (entity, character) in players {
-            let Some(side) = side_of(&war, character) else {
-                continue;
-            };
-            let Some([x, y, z]) = fort.arrival(side) else {
-                continue;
-            };
-            self.invite_to_war_raid(
-                entity,
-                news.war.war,
-                (news.instance, news.sim.clone(), news.phase),
-                Position { x, y, z },
-            );
-        }
+        self.invite_war_roster(news.war.war, (news.instance, news.sim, news.phase), None);
     }
 
     /// Whether players `first` and `second` are foes in the war this sim runs: of two sides,
@@ -620,6 +617,7 @@ impl SimWorld {
 
     fn run_war_fight(&mut self, fight: &mut WarFight, war: &TerritoryWar, now_ms: u64) {
         let (attacker_number, defender_number) = side_numbers(war);
+        self.ask_company_ids([war.attacker.0, war.defender.0]);
         if fight.siege.is_none() {
             self.spawn_siege(fight, NO_SIDE_NUMBER);
             self.spawn_structures(fight);

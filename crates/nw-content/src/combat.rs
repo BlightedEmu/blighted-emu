@@ -75,6 +75,9 @@ pub struct CategoryMods {
     pub health: f64,
     /// Damage multiplier.
     pub damage: f64,
+    /// `CategoryStaminaMod`: multiplies the guard's `StaminaBaseMax` and `StaminaInitial`
+    /// ([`MobGuard::in_category`]).
+    pub stamina: f64,
 }
 
 /// A mob type.
@@ -107,59 +110,236 @@ impl MobType {
 /// The guard of a mob type that can block (`VitalsBaseData`; Observed in the rows of build
 /// 25810808: the shield and guard pose kinds that retail showed blocking, `Damned_1H_Swordsman_*`,
 /// `Lost_Knight_Tank_*`, `Dryad_Soldier_*`, `Invasion_Swordsman`, have `StaminaBaseMax` 50,
-/// `StaminaBaseTickRate` 2, `StaminaTickDelay` 1, `BlockDamageMitigation` 1 and
-/// `BlockStaminaCost` 0.8; the boar has `StaminaBaseMax` 1 and mitigation 0).
+/// `StaminaBaseTickRate` 2, `StaminaTickDelay` 1 and `BlockDamageMitigation` 1; the boar has
+/// `StaminaBaseMax` 1 and mitigation 0).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MobGuard {
-    /// `StaminaBaseMax`.
+    /// `StaminaBaseMax` times its category's `CategoryStaminaMod` (Observed: the
+    /// `Evil_Knight_Mace_DG_GreatCleave01_00` row, max 50 and creature type `Dungeon` of mod 4,
+    /// showed 40 guard segments of 5 points, 200, on its cards of the Empyrean Forge ledgers).
     pub stamina_max: f32,
-    /// `StaminaInitial`.
+    /// `StaminaInitial` times the same mod (the same cards started at 40 segments).
     pub stamina_initial: f32,
+    /// `StaminaBaseMax` without the category mod: the `StaminaMax` of the mob's first vitals
+    /// state (Observed, all 1,194 distinct ledgers, 2026-11-13: the cards of
+    /// `Evil_Knight_Heavy_Named_DG_GreatCleave_00`, 250 x `Dungeon+` 6, send 250 of 250 while
+    /// their child 44 shows a guard of 1,500; `FL_DG_FirstLight_01_Chameleon`, 500 x `Dungeon-` 2,
+    /// sends 500 with 200 segments of 5; `Trial_Quest_Seraphim_Boss_Mute_Seraph`, 1,500 x
+    /// `SoloBoss` 1, sends 1,500).
+    pub row_stamina_max: f32,
+    /// `StaminaInitial` without the category mod: the `StaminaAmount` of the same first state.
+    pub row_stamina_initial: f32,
     /// `StaminaBaseTickRate`: the first vitals state of the mob carries it as `StaminaTickRate`
     /// (Observed: a binary16 of it; retail `0x4000` (2) on the damned pistoleer's card, vitals id
     /// `0501e946`, beside `StaminaAmount` and `StaminaMax` 50; the player's 40 is `0x5100`).
     pub tick_rate: f32,
-    /// Stamina back per second: `StaminaBaseTickRate` per `StaminaTickDelay` seconds, times
-    /// [`MOB_REGEN_SCALE`] (**Inferred**, fitted: 3.0 to 3.3 per second for the common guard's
-    /// 2 per 1 put 71 of 81 retail fresh-guard sequences right, 5 per second 69, 2 per second
-    /// 69; no retail state carries a mob's stamina after its card).
+    /// Stamina back per second with no status effect: `StaminaBaseTickRate` per
+    /// `StaminaTickDelay` seconds, a delay of 0 counting as 1 (Observed: the mob's ALC child 44,
+    /// its stamina in segments of 5, rose one segment every 2.5 s with no hit between in the
+    /// steps of the rows with 2 per 1 and of the `Inquisitor_Warden_*` rows with 2 per 0;
+    /// the child 44 traces of five guards from a blocked hit to the next segment fit a smooth
+    /// 2 per second, Playthrough_Part_01 interest 58 from 4040.47 s, interest 76 from 2390.95 s,
+    /// interest 81 from 5575.78 s, Playthrough_Part_04 interest 62 from 97.61 s,
+    /// Playthrough_Part_07 interest 110 from 1749.04 s). The category mod leaves it as it is (the
+    /// `Dungeon` row above rose one segment every 2.5 s with no effect held).
     pub regen_per_s: f32,
     /// `BlockDamageMitigation`: the share of a blocked hit it stops (1: all; retail sent 3,315
     /// of 4,586 direct hits on a raised mob block as `Resisted` with 0 damage).
     pub mitigation: f32,
-    /// `BlockStaminaCost`: multiplies the stamina a blocked hit takes (Observed: the weapon's
-    /// `BlockStaminaDamage` x the row's `BlockStaminaDmgMod` x this 0.8 put 71 of 81 retail
-    /// fresh-guard sequences of 45 ledgers right; the weapon's value with any factor and no row,
-    /// at most 38).
-    pub stamina_cost: f32,
+    /// Its vitals row's `VitalsCategories` hold `Beast` ([`MobGuard::in_vitals_categories`]):
+    /// a beast's grit takes hits as a large body ([`GritBody::of`]).
+    pub beast: bool,
 }
 
-/// A mob guard's regen per second for each `StaminaBaseTickRate` per `StaminaTickDelay`
-/// second ([`MobGuard::regen_per_s`]; **Inferred**: the fitted 3.0 to 3.3 per second for 2 per
-/// 1 is 1.5 to 1.65 times the row's value; this is the low end of that range).
-const MOB_REGEN_SCALE: f32 = 1.5;
+/// The share of a blocked hit's block stamina (the attacker's weapon `BlockStaminaDamage` x the
+/// attack row's `BlockStaminaDmgMod`) that a mob guard loses ([`MobGuard::blocked_loss`]).
+/// **Inferred**, fitted: the child 44 traces of the five guards of [`MobGuard::regen_per_s`]
+/// give 0.746 to 0.749 per point (hatchet lights 30 x 0.4: 8.95 to 8.99 lost per hit; sword
+/// lights 36 x 0.4: 10.70 to 10.79; flail lights 39 x 0.4: about 11.8), 0.75 within the 0.05 s
+/// the hit and state times of the ledgers can be off. The rows' `BlockStaminaCost` (0.8) is not
+/// this share: the player row holds the same 0.8, and a player's block loses the hit's block
+/// stamina with no such factor (`AttackRow::block_stamina`). A guard row of `BlockStaminaCost` 0
+/// (the 29 `VitalsBaseData` guard rows such as `Evil_Knight_Heavy`, 250, and
+/// `OR_Corrupted_Brute`, 1,000) takes the same share: **Inferred**, as no ledger lets it be
+/// fitted (search 2026-11-13 over all 1,195 ledgers of `local-data/capture-index.tsv` with
+/// `blighted-emu-tools` `scratch-work/guardshow` `zerocost` and `cardline`: 140 cards of 13
+/// such rows in 31 ledgers). Only `Sand_Elemental_Heavy_Sandworm` (20,000, `Raid20+`) raised
+/// a block, in 10 cards of `WURM-41815e8e778735be`; its bar (ALC child 44) is full at 254 and
+/// falls to 0 at the guard break (interest 43: 0 at 1068.79 s, the block down at 1069.02 s),
+/// but the own player's hits on it (interest 45: four at 140.39 to 140.90 s) fall inside one
+/// bar step, and the other raid players' hits send this client no `DamageDealt`. The other
+/// rows' mobs never raised a block; their bar still falls under unblocked hits and fills to
+/// full about 2 s after 0 (Observed, `EXP-Empyrian-Forge-M1` interest 91,
+/// `Evil_Knight_Heavy_Named_DG_GreatCleave_01`: 0 at 279.45 s, 254 at 281.35 s), which is not
+/// this rule.
+pub const MOB_GUARD_STAMINA_SHARE: f32 = 0.75;
 /// A guard needs more stamina than this to block at all (the boar's `StaminaBaseMax` 1).
 const MIN_GUARD_STAMINA: f32 = 1.0;
+/// The share of a hit's stagger (the attacker's weapon `BaseStaggerDamage` x the attack row's
+/// `StaggerDmgModifier`, [`AttackRow::stagger`]) that a mob whose grit is on loses from its
+/// stamina ([`MobGuard::grit_loss`]). **Inferred**, fitted over the own direct unblocked hits of
+/// all 1,195 ledgers of `local-data/capture-index.tsv` on cards of slices whose grit is their
+/// stamina (`blighted-emu-tools` `scratch-work/guardshow` `hitdrop3`, 2026-11-13): great sword
+/// heavies (60 x 1.85 = 111) took 19 segments of 5 (95) from the dungeon corruption heavies of
+/// `EXP-The-Depths` (14 hits) and 16 segments of 1,500 / 254 (94.5) from the Mute Seraph (67 of
+/// 70 heavies), charged spear heavies (46 x 2.4 = 110.4) 18 to 19 segments (93) from the
+/// Ebonscale dynasty heavies, and the hatchet, sword and bow lights (30 to 38 x 0.4) 2 to 3
+/// segments; 0.85 fits each within one segment. The 14 to 15 segments (72) the same heavies
+/// took from brutes and bears are the large body share ([`LARGE_BODY_GRIT_SHARE`]); the
+/// slices' `m_defaultStaggerResistRating` (0, 10, 20) did not change the loss.
+pub const GRIT_STAMINA_SHARE: f32 = 0.85;
+/// The share of [`GRIT_STAMINA_SHARE`] that the grit of a large body takes ([`GritBody::Large`]).
+/// **Inferred**, fitted (2026-11-13, `blighted-emu-tools` `scratch-work/guardshow` `gritclip`
+/// over the 1,194 retail ledgers of `local-data/capture-index.tsv`, 41,648 own direct hits):
+/// of the own unblocked great sword heavies (60 x 1.85) and charged spear heavies (46 x 2.4)
+/// with a known drawn weapon, 508 lowered a grit stamina bar by the full share or by 0.75 of
+/// it (great sword 94 against 71 points, spear 94 against 70); 5 of them fell while the mob's
+/// `r_Stagger` played (its `AI_Staggered_Tracker` `StaminaRate` -100 drains the bar then) and
+/// are left out. Of the 503 others, 490 fit the rule of [`GritBody::of`]: 316 at 0.75 (bears,
+/// alligators, dragons, chameleons, mammoths, ogres, cyclops, tendrils, Anubian, invasion and
+/// withered brutes, the bog monster, the remnant, and the elk and werewolf lords through
+/// `Beast`) and 174 full (Seraph bosses, corruption, dynasty and sand elemental heavies,
+/// Anubian Horus). Not fitted: 2 heavies on `CK_Undead_Pirate_Brute_Named_10WS06b` (one
+/// ledger) took the full share though its slice holds the list (its `GritComponent` fields are
+/// those of `undead_brute`, which took 0.75), and 1 on `Inquisitor_Warden_Named_17DW01_20332`
+/// took 0.75 with neither; 10 hit cards of the Crassus encounter (`CorruptedLegion_Cyclops_*
+/// _Crassus_Minion`, `Legion_GeneralCrassus`) whose slice the probe did not know. No data
+/// field sets the share: no `AbilityData` row holds 0.25 or 0.75 of `StaggerDamage`, the
+/// client has no take-grit math, and the server's is not in Server.pak (Unknown).
+pub const LARGE_BODY_GRIT_SHARE: f32 = 0.75;
+/// The share of a body that takes all of [`GRIT_STAMINA_SHARE`].
+const FULL_BODY_GRIT_SHARE: f32 = 1.0;
+/// The `VitalsCategories` entry of the beasts ([`MobGuard::in_vitals_categories`]).
+const BEAST_VITALS_CATEGORY: &str = "Beast";
+/// Between the entries of a `VitalsCategories` cell.
+const VITALS_CATEGORY_SEPARATOR: char = ',';
+
+/// How a mob's grit takes a hit's stagger ([`MobGuard::grit_loss`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GritBody {
+    /// Humanoid heavies and Seraphim: all of [`GRIT_STAMINA_SHARE`].
+    Standard,
+    /// Beasts and big bodies: [`LARGE_BODY_GRIT_SHARE`] of it.
+    Large,
+}
+
+impl GritBody {
+    /// The body of a mob whose slice holds the FX list `fxscriptlist_npc_statuseffects_large`
+    /// (`large_status_effects_fx`, the `FxScriptComponent` of 248 slices) or whose vitals row
+    /// is a `Beast` (`beast`): [`GritBody::Large`]; else [`GritBody::Standard`]. **Inferred**,
+    /// the best fit of [`LARGE_BODY_GRIT_SHARE`]: the list alone misses the elk and the werewolf
+    /// lords (`fxscriptlist_npc_statuseffects`, `Beast`), `Beast` alone misses the brutes, ogres,
+    /// cyclops, tendrils and the remnant (the list, no `Beast`); the vitals cells
+    /// `CharacterScale`, `CreatureType`, `Family`, `PhysicalMitigation`, the slice
+    /// `GritComponent` fields and the initial status effects each split a group.
+    pub fn of(large_status_effects_fx: bool, beast: bool) -> Self {
+        if large_status_effects_fx || beast {
+            Self::Large
+        } else {
+            Self::Standard
+        }
+    }
+
+    /// The share of [`GRIT_STAMINA_SHARE`] its grit takes.
+    pub fn share(self) -> f32 {
+        match self {
+            Self::Standard => FULL_BODY_GRIT_SHARE,
+            Self::Large => LARGE_BODY_GRIT_SHARE,
+        }
+    }
+}
 
 impl MobGuard {
-    /// The guard of the vitals cells (max, initial, tick rate, tick delay, mitigation, cost);
-    /// `None` for a type whose stamina is too small or whose block stops nothing.
+    /// The guard of the vitals cells (max, initial, tick rate, tick delay) and
+    /// `BlockDamageMitigation`; `None` for a type whose stamina is too small. A type whose block
+    /// stops nothing (`BlockDamageMitigation` 0: the bears, brutes and heavies) still has the
+    /// stamina its grit takes hits from ([`MobGuard::blocks`]).
     pub fn of(
         (max, initial, tick_rate, tick_delay): (i64, i64, i64, i64),
-        (mitigation, cost): (i64, f64),
+        mitigation: i64,
     ) -> Option<Self> {
         // Stamina cells of a few dozen points.
         let stamina_max = max as f32;
         let delay = (tick_delay as f32).max(1.0);
-        (stamina_max > MIN_GUARD_STAMINA && mitigation > 0).then(|| Self {
+        let stamina_initial = (initial as f32).clamp(0.0, stamina_max);
+        (stamina_max > MIN_GUARD_STAMINA).then(|| Self {
             stamina_max,
-            stamina_initial: (initial as f32).clamp(0.0, stamina_max),
+            stamina_initial,
+            row_stamina_max: stamina_max,
+            row_stamina_initial: stamina_initial,
             tick_rate: tick_rate as f32,
-            regen_per_s: tick_rate as f32 / delay * MOB_REGEN_SCALE,
+            regen_per_s: tick_rate as f32 / delay,
             // `BlockDamageMitigation` is 0 or 1 in every row.
             mitigation: (mitigation as f32).clamp(0.0, 1.0),
-            stamina_cost: cost as f32,
+            beast: false,
         })
+    }
+
+    /// The guard of a mob whose vitals row has the `VitalsCategories` list `categories`
+    /// (comma separated, Observed: `Elk_Motherwell_Stag,Hostile,Beast,Elemental,Elk,AngryEarth`):
+    /// [`MobGuard::beast`] when one of them is `Beast`.
+    #[must_use]
+    pub fn in_vitals_categories(self, categories: Option<&str>) -> Self {
+        Self {
+            beast: categories.is_some_and(|categories| {
+                categories
+                    .split(VITALS_CATEGORY_SEPARATOR)
+                    .any(|category| category.trim() == BEAST_VITALS_CATEGORY)
+            }),
+            ..self
+        }
+    }
+
+    /// How its grit takes hits on a mob whose slice holds the large status effect FX list when
+    /// `large_status_effects_fx` ([`GritBody::of`]).
+    pub fn grit_body(&self, large_status_effects_fx: bool) -> GritBody {
+        GritBody::of(large_status_effects_fx, self.beast)
+    }
+
+    /// The guard of a mob whose category has `CategoryStaminaMod` `stamina_mod`: its max and
+    /// initial stamina times the mod (its row's cells stay as they are).
+    #[must_use]
+    pub fn in_category(self, stamina_mod: f64) -> Self {
+        // A mod of a few units.
+        let scale = stamina_mod as f32;
+        Self {
+            stamina_max: self.stamina_max * scale,
+            stamina_initial: self.stamina_initial * scale,
+            ..self
+        }
+    }
+
+    /// The stamina a blocked hit of block stamina `block_stamina` takes from the guard
+    /// ([`MOB_GUARD_STAMINA_SHARE`]).
+    pub fn blocked_loss(block_stamina: f32) -> f32 {
+        block_stamina * MOB_GUARD_STAMINA_SHARE
+    }
+
+    /// Its block stops some of a hit (`BlockDamageMitigation` above 0): only such a guard is
+    /// raised against hits.
+    pub fn blocks(&self) -> bool {
+        self.mitigation > 0.0
+    }
+
+    /// The stamina a hit of stagger `stagger` takes from a mob of body `body` whose grit is on,
+    /// while its status effects take `reduction` of it off (`StaggerDamageReduction`, at most
+    /// all): [`GRIT_STAMINA_SHARE`] of the rest, times the body's share ([`GritBody::share`]).
+    pub fn grit_loss(stagger: f32, reduction: f32, body: GritBody) -> f32 {
+        stagger * GRIT_STAMINA_SHARE * body.share() * (1.0 - reduction).max(0.0)
+    }
+
+    /// Its stamina back per second while its holder's status effects hold `stamina_rate` in sum
+    /// (`StaminaRate`): the plain regen times `1 + stamina_rate`, at least 0 (Observed: the
+    /// `Inquisitor_Warden_*` cards rose one segment every 0.4 s, 2 x (1 + 5) per second, in 54
+    /// steps, each while they held `AI_Staggered_StaggerDamageResist` (`StaminaRate` 5, 10 s);
+    /// the `Evil_Knight_Mace_*` cards rose so in 364 steps, 268 of them within 15 s of an
+    /// `AI_EvilKnight_Rally` (`StaminaRate` 5, `BaseDuration` 15) on their list and the others
+    /// after their own `Attack_Rally`, which leaves no add on the caster's list (Arvaysa
+    /// empyrean M1 run 4 interest 34: `Attack_Rally` at 59.86 s and 91.39 s, 0.4 s steps from
+    /// 61.19 s and from 91.99 s to 107.43 s, 2.5 s steps from 107.72 s); no step of 2.5 s fell
+    /// while one of those effects was held, over the 68 dungeon and Catacomb ledgers).
+    pub fn regen_with(&self, stamina_rate: f32) -> f32 {
+        self.regen_per_s * (1.0 + stamina_rate).max(0.0)
     }
 }
 
@@ -532,11 +712,11 @@ impl CombatSource {
                                     row.stamina_base_tick_rate.unwrap_or_default(),
                                     row.stamina_tick_delay.unwrap_or_default(),
                                 ),
-                                (
-                                    row.block_damage_mitigation.unwrap_or_default(),
-                                    row.block_stamina_cost.unwrap_or_default(),
-                                ),
-                            ),
+                                row.block_damage_mitigation.unwrap_or_default(),
+                            )
+                            .map(|guard| {
+                                guard.in_vitals_categories(row.vitals_categories.as_deref())
+                            }),
                         },
                     )
                 })
@@ -773,6 +953,7 @@ impl CombatSource {
                         CategoryMods {
                             health: row.category_health_mod,
                             damage: row.category_damage_mod,
+                            stamina: row.category_stamina_mod,
                         },
                     )
                 })
@@ -1074,6 +1255,7 @@ impl CombatData {
                 {
                     kind.category_health_mod = mods.health;
                     kind.damage_mod *= mods.damage;
+                    kind.guard = kind.guard.map(|guard| guard.in_category(mods.stamina));
                 }
                 (lowercase_crc32(&id), kind)
             })
@@ -1608,10 +1790,10 @@ mod tests {
     #[test]
     fn a_shield_mobs_vitals_give_its_guard_and_a_boars_none() {
         // Retail rows (build 25810808): `Damned_1H_Swordsman_M-F_42` and `Boar`.
-        let guard = MobGuard::of((50, 50, 2, 1), (1, 0.8)).expect("a guard");
+        let guard = MobGuard::of((50, 50, 2, 1), 1).expect("a guard");
         assert!(
-            (guard.regen_per_s - 3.0).abs() < 1e-4,
-            "{}",
+            (guard.regen_per_s - 2.0).abs() < 1e-4,
+            "2 per 1 s: {}",
             guard.regen_per_s
         );
         assert!((guard.mitigation - 1.0).abs() < f32::EPSILON);
@@ -1619,7 +1801,279 @@ mod tests {
             (guard.tick_rate - 2.0).abs() < f32::EPSILON,
             "its card's tick rate"
         );
-        assert_eq!(MobGuard::of((1, 0, 0, 0), (0, 0.0)), None);
+        assert_eq!(MobGuard::of((1, 0, 0, 0), 0), None);
+        assert!(guard.blocks());
+    }
+
+    #[test]
+    fn a_bears_stamina_is_a_guard_that_never_blocks_and_its_grit_takes_most_of_a_hits_stagger() {
+        // Retail row `Bear_Grizzly_Named_00` (build 25810808): stamina 1,000, tick rate 2 per 0,
+        // `BlockDamageMitigation` 0.
+        let bear = MobGuard::of((1_000, 1_000, 2, 0), 0).expect("a stamina");
+        assert!(!bear.blocks(), "its block stops nothing");
+        assert!((bear.stamina_max - 1_000.0).abs() < f32::EPSILON);
+        // A great sword heavy: 60 x 1.85.
+        const GREAT_SWORD_HEAVY: f32 = 111.0;
+        const AFTER_A_STAGGER: f32 = 0.5;
+        // A Seraph boss or a humanoid heavy: all of the 0.85; the bear (a large body): 0.75 of it.
+        const FULL: GritBody = GritBody::Standard;
+        assert!((MobGuard::grit_loss(GREAT_SWORD_HEAVY, 0.0, FULL) - 94.35).abs() < 1e-3);
+        assert!(
+            (MobGuard::grit_loss(GREAT_SWORD_HEAVY, AFTER_A_STAGGER, FULL) - 47.175).abs() < 1e-3
+        );
+        assert_eq!(
+            MobGuard::grit_loss(GREAT_SWORD_HEAVY, 2.0, FULL),
+            0.0,
+            "never a gain"
+        );
+        let large = bear.in_vitals_categories(Some("Bear_Grizzly_Named_00,Hostile,Beast,Predator"));
+        assert_eq!(large.grit_body(true), GritBody::Large);
+        assert!(
+            (MobGuard::grit_loss(GREAT_SWORD_HEAVY, 0.0, large.grit_body(true)) - 70.7625).abs()
+                < 1e-3,
+            "14 segments of 5 and a part: retail 70.9 to 75"
+        );
+    }
+
+    /// The large body rule ([`GritBody::of`]) for each group of the fit of
+    /// [`LARGE_BODY_GRIT_SHARE`] (retail slices and `VitalsCategories` of build 25810808).
+    #[test]
+    fn beasts_and_slices_of_the_large_status_effect_fx_take_three_quarters_of_the_grit_share() {
+        let guard = MobGuard::of((1_500, 1_500, 2, 0), 0).expect("a stamina");
+        let body = |categories: &str, large_fx: bool| {
+            guard
+                .in_vitals_categories(Some(categories))
+                .grit_body(large_fx)
+        };
+        // The bear: the list and `Beast`.
+        assert_eq!(
+            body("Bear_Black_59,Hostile,Beast,Predator", true),
+            GritBody::Large
+        );
+        // The Anubian brute, an ogre, a tendril, the remnant: the list, no `Beast`.
+        assert_eq!(
+            body("Ancient_Amalgam_Remnant,Hostile,Ancient", true),
+            GritBody::Large
+        );
+        // The Motherwell stag and the werewolf lords: `fxscriptlist_npc_statuseffects`, `Beast`.
+        assert_eq!(
+            body(
+                "Elk_Motherwell_Stag,Hostile,Beast,Elemental,Elk,AngryEarth",
+                false
+            ),
+            GritBody::Large
+        );
+        assert_eq!(
+            body(
+                "Werewolf_Asena_MSQ_Pt1,Hostile,Beast,Predator,Werewolf",
+                false
+            ),
+            GritBody::Large
+        );
+        // The Mute Seraph, the dynasty and corruption heavies, Anubian Horus: neither.
+        assert_eq!(
+            body("Dynasty_Heavy,Hostile,Corrupted", false),
+            GritBody::Standard
+        );
+        assert_eq!(
+            body(
+                "AnubianGuardian_Horus_DG_BrimstoneSands_00,Hostile,Ancient,AnubianIdol",
+                false
+            ),
+            GritBody::Standard
+        );
+        // A category that only holds the word is not `Beast`; spaces around an entry are.
+        assert_eq!(body("Hostile,BeastBoss", false), GritBody::Standard);
+        assert_eq!(body("Hostile, Beast", false), GritBody::Large);
+        assert_eq!(
+            MobGuard::of((1_500, 1_500, 2, 0), 0)
+                .expect("a stamina")
+                .in_vitals_categories(None)
+                .grit_body(false),
+            GritBody::Standard,
+            "a row without categories"
+        );
+        assert!((GritBody::Large.share() - LARGE_BODY_GRIT_SHARE).abs() < f32::EPSILON);
+        assert!((GritBody::Standard.share() - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// The regen of each kind of guard: 2 per 1 s and 2 per 0 s (`Inquisitor_Warden`) are 2 per
+    /// second; a held `StaminaRate` of 5 (`AI_EvilKnight_Rally`) makes it 12 per second, one
+    /// segment of 5 points in 0.417 s; a rate below -1 stops it.
+    #[test]
+    fn a_guards_regen_is_its_tick_rate_per_delay_times_one_plus_the_held_stamina_rate() {
+        const PLAIN_REGEN: f32 = 2.0;
+        const RALLY_RATE: f32 = 5.0;
+        const RALLY_REGEN: f32 = 12.0;
+        const EXHAUST_RATE: f32 = -1.5;
+        let close = |left: f32, right: f32| (left - right).abs() < 1e-4;
+        let common = MobGuard::of((50, 50, 2, 1), 1).expect("a guard");
+        let warden = MobGuard::of((75, 75, 2, 0), 1).expect("a guard");
+        for guard in [common, warden] {
+            assert!(close(guard.regen_with(0.0), PLAIN_REGEN), "{guard:?}");
+            assert!(
+                close(guard.regen_with(RALLY_RATE), RALLY_REGEN),
+                "{guard:?}"
+            );
+            assert!(close(guard.regen_with(EXHAUST_RATE), 0.0), "{guard:?}");
+        }
+    }
+
+    /// A guard's category multiplies its max and initial stamina, not its regen
+    /// (`Evil_Knight_Mace_DG_GreatCleave01_00`: max 50, `Dungeon` mod 4, 40 segments of 5).
+    #[test]
+    fn a_guards_category_stamina_mod_multiplies_its_max_and_initial_stamina() {
+        const DUNGEON_STAMINA_MOD: f64 = 4.0;
+        const DUNGEON_GUARD_MAX: f32 = 200.0;
+        let guard = MobGuard::of((50, 50, 2, 1), 1).expect("a guard");
+        let dungeon = guard.in_category(DUNGEON_STAMINA_MOD);
+        assert!((dungeon.stamina_max - DUNGEON_GUARD_MAX).abs() < f32::EPSILON);
+        assert!((dungeon.stamina_initial - DUNGEON_GUARD_MAX).abs() < f32::EPSILON);
+        assert!((dungeon.regen_per_s - guard.regen_per_s).abs() < f32::EPSILON);
+        assert_eq!(
+            (dungeon.row_stamina_max, dungeon.row_stamina_initial),
+            (guard.stamina_max, guard.stamina_initial),
+            "the first vitals state sends the row's cells"
+        );
+        let mut source = source();
+        source.base_types = vec![(
+            "Knight_20".to_owned(),
+            MobType {
+                creature_type: Some("Dungeon".to_owned()),
+                guard: Some(guard),
+                ..boar()
+            },
+        )];
+        source.categories = vec![(
+            "Dungeon".to_owned(),
+            CategoryMods {
+                health: 1.0,
+                damage: 1.0,
+                stamina: DUNGEON_STAMINA_MOD,
+            },
+        )];
+        let data = CombatData::build(source, &rows()).expect("data");
+        let knight = data.mob_type(lowercase_crc32("Knight_20")).expect("knight");
+        assert_eq!(knight.guard, Some(dungeon), "the content applies the mod");
+    }
+
+    /// A guard loses 0.75 of a blocked hit's block stamina: a hatchet light (30 x 0.4) takes 9.
+    #[test]
+    fn a_blocked_hit_takes_three_quarters_of_its_block_stamina_from_a_mob_guard() {
+        const HATCHET_LIGHT_BLOCK_STAMINA: f32 = 30.0 * 0.4;
+        const HATCHET_LIGHT_LOSS: f32 = 9.0;
+        assert!(
+            (MobGuard::blocked_loss(HATCHET_LIGHT_BLOCK_STAMINA) - HATCHET_LIGHT_LOSS).abs() < 1e-4
+        );
+    }
+
+    /// A `VitalsBaseData` guard row of `BlockStaminaCost` 0 (retail `Evil_Knight_Heavy`: 250,
+    /// 250, 2 per 0, mitigation 1) gives the same guard as one of 0.8 (the guards the share was
+    /// fitted to), so a blocked hit takes the same share from it ([`MOB_GUARD_STAMINA_SHARE`]).
+    #[test]
+    fn a_guard_row_of_block_stamina_cost_0_gives_the_same_guard_as_one_of_0_8() {
+        use ColumnKind::{Boolean, Number, String as Text};
+        const ZERO_COST: &str = "Evil_Knight_Heavy";
+        const FITTED_COST: &str = "Fitted_Guard";
+        let rows = sheet(
+            "VitalsBaseData",
+            &[
+                ("VitalsID", Text),
+                ("CanDropLoot", Boolean),
+                ("HealthInitial", Text),
+                ("HealthMin", Number),
+                ("StaminaBaseMax", Number),
+                ("StaminaInitial", Number),
+                ("StaminaBaseTickRate", Number),
+                ("StaminaTickDelay", Number),
+                ("BlockDamageMitigation", Number),
+                ("BlockStaminaCost", Number),
+            ],
+            &[
+                &[ZERO_COST, "1", "100", "0", "250", "250", "2", "0", "1", "0"],
+                &[FITTED_COST, "1", "100", "0", "250", "250", "2", "0", "1", "0.8"],
+            ],
+        );
+        let tables = Tables {
+            vitals_base_data: vec![Table::fill("vitals", &rows).expect("vitals")],
+            ..Tables::default()
+        };
+        let source = CombatSource::from_tables(&tables);
+        let guard = |id: &str| {
+            source
+                .base_types
+                .iter()
+                .find(|(row, _)| row == id)
+                .and_then(|(_, mob)| mob.guard)
+        };
+        let zero = guard(ZERO_COST).expect("a guard");
+        assert_eq!(Some(zero), guard(FITTED_COST));
+        assert!((zero.stamina_max - 250.0).abs() < f32::EPSILON);
+    }
+
+    /// A `VitalsBaseData` row's `VitalsCategories` make its guard a beast's (retail cells:
+    /// `Werewolf_Asena_MSQ_Pt1` and `Dynasty_Heavy`, build 25810808).
+    #[test]
+    fn a_vitals_row_whose_categories_hold_beast_gives_a_beasts_guard() {
+        use ColumnKind::{Boolean, Number, String as Text};
+        const WEREWOLF: &str = "Werewolf_Asena_MSQ_Pt1";
+        const DYNASTY_HEAVY: &str = "Dynasty_Heavy";
+        let rows = sheet(
+            "VitalsBaseData",
+            &[
+                ("VitalsID", Text),
+                ("CanDropLoot", Boolean),
+                ("HealthInitial", Text),
+                ("HealthMin", Number),
+                ("StaminaBaseMax", Number),
+                ("StaminaInitial", Number),
+                ("StaminaBaseTickRate", Number),
+                ("StaminaTickDelay", Number),
+                ("BlockDamageMitigation", Number),
+                ("VitalsCategories", Text),
+            ],
+            &[
+                &[
+                    WEREWOLF,
+                    "1",
+                    "100",
+                    "0",
+                    "1500",
+                    "1500",
+                    "2",
+                    "0",
+                    "0",
+                    "Werewolf_Asena_MSQ_Pt1,Hostile,Beast,Predator,Werewolf",
+                ],
+                &[
+                    DYNASTY_HEAVY,
+                    "1",
+                    "100",
+                    "0",
+                    "500",
+                    "500",
+                    "2",
+                    "0",
+                    "1",
+                    "Dynasty_Heavy,Hostile,Corrupted",
+                ],
+            ],
+        );
+        let tables = Tables {
+            vitals_base_data: vec![Table::fill("vitals", &rows).expect("vitals")],
+            ..Tables::default()
+        };
+        let source = CombatSource::from_tables(&tables);
+        let guard = |id: &str| {
+            source
+                .base_types
+                .iter()
+                .find(|(row, _)| row == id)
+                .and_then(|(_, mob)| mob.guard)
+                .expect("a guard")
+        };
+        assert!(guard(WEREWOLF).beast);
+        assert!(!guard(DYNASTY_HEAVY).beast);
     }
 
     /// The occultist's starter ice gauntlet, its stats row and the row's `MannequinTag` (retail
@@ -2032,6 +2486,7 @@ mod tests {
             CategoryMods {
                 health: 2.0,
                 damage: 1.5,
+                stamina: 1.0,
             },
         )];
         let data = CombatData::build(source, &rows()).expect("data");

@@ -15,10 +15,10 @@ use nw_formats::objectstream::lowercase_crc32;
 use nw_sim_core::Position;
 use nw_world::WorldFile;
 
-use crate::config::load_sim_config;
+use crate::config::{SimConfig, load_sim_config};
 use crate::login::WorldIds;
 use crate::player_content::PlayerContent;
-use crate::run::{RunError, load_level, world_parts};
+use crate::run::{LoadedLevel, RunError, load_level, world_parts};
 use crate::world::{Outcome, QuestGuide, QuestWalk, SimWorld};
 
 /// The gateway the walk characters' connections name.
@@ -44,22 +44,7 @@ pub fn walk(config_path: &Path, report_path: &Path, only: Option<&str>) -> Resul
     init_logging(WALK_LOG_FILTER)?;
     let level = load_level(&config)?;
     let gateway = BusId::try_from(WALK_GATEWAY.to_owned()).map_err(RunError::WalkId)?;
-    let (settings, combat, spawn_ai) = world_parts(&config, &level)?;
-    let me = SimSlot {
-        id: BusId::try_from(WALK_SIM.to_owned()).map_err(RunError::WalkId)?,
-        generation: START_MS,
-    };
-    let mut world = SimWorld::new(
-        settings,
-        WorldIds::random(START_MS).map_err(RunError::WorldIds)?,
-        level.ground.clone(),
-        me,
-        combat,
-        Arc::clone(&level.content),
-    );
-    world.set_mob_ai(spawn_ai);
-    world.set_mob_ground(level.mob_ground.clone());
-    world.set_design(&level.design);
+    let mut world = walk_world(&config, &level)?;
     let lower_only = only.map(str::to_lowercase);
     let quests: Vec<(String, String)> = level
         .content
@@ -97,6 +82,27 @@ pub fn walk(config_path: &Path, report_path: &Path, only: Option<&str>) -> Resul
         report_path.display()
     );
     Ok(())
+}
+
+/// The walk's world of `level` under `config`: a sim of its own, with no database and no bus.
+fn walk_world(config: &SimConfig, level: &LoadedLevel) -> Result<SimWorld, RunError> {
+    let (settings, combat, spawn_ai) = world_parts(config, level)?;
+    let me = SimSlot {
+        id: BusId::try_from(WALK_SIM.to_owned()).map_err(RunError::WalkId)?,
+        generation: START_MS,
+    };
+    let mut world = SimWorld::new(
+        settings,
+        WorldIds::random(START_MS).map_err(RunError::WorldIds)?,
+        level.ground.clone(),
+        me,
+        combat,
+        Arc::clone(&level.content),
+    );
+    world.set_mob_ai(spawn_ai);
+    world.set_mob_ground(level.mob_ground.clone());
+    world.set_design(&level.design);
+    Ok(world)
 }
 
 /// What level `world_file` holds that the quests of `content` need: the NPC and territory
@@ -167,8 +173,35 @@ pub fn quest_guide(world_file: &WorldFile, tables: &Tables, content: &PlayerCont
             Some((id.to_lowercase(), offered))
         })
         .collect();
+    // The topics a conversation state offers (`12_Moira_01`: `12A_MSQ_10_ConfrontLochnir_
+    // TalkMoira` while that task is active): an NPC with the state holds them as well as its own.
+    let state_topics: HashMap<String, Vec<&str>> = tables
+        .conversation_state_data
+        .iter()
+        .flat_map(|table| &table.rows)
+        .filter_map(|row| {
+            let id = row.conversation_state_id.as_ref()?;
+            let topics = [
+                &row.topic_id1,
+                &row.topic_id2,
+                &row.topic_id3,
+                &row.topic_id4,
+                &row.topic_id5,
+                &row.topic_id6,
+                &row.topic_id7,
+                &row.topic_id8,
+                &row.topic_id9,
+                &row.topic_id10,
+            ]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|topic| !topic.is_empty())
+            .collect();
+            Some((id.to_lowercase(), topics))
+        })
+        .collect();
     let mut givers: HashMap<String, Vec<String>> = HashMap::new();
-    let mut topic_npcs: HashMap<u32, Vec<String>> = HashMap::new();
     for row in tables.npc_data.iter().flat_map(|table| &table.rows) {
         for state in row.conversation_state_id.values() {
             for quest in states.get(&state.to_lowercase()).into_iter().flatten() {
@@ -178,29 +211,38 @@ pub fn quest_guide(world_file: &WorldFile, tables: &Tables, content: &PlayerCont
                 }
             }
         }
-        let topics = [
-            &row.topic_id1,
-            &row.topic_id2,
-            &row.topic_id3,
-            &row.topic_id4,
-            &row.topic_id5,
-            &row.topic_id6,
-            &row.topic_id7,
-            &row.topic_id8,
-            &row.topic_id9,
-            &row.topic_id10,
-        ];
-        for topic in topics
-            .into_iter()
-            .flatten()
-            .filter(|topic| !topic.is_empty())
-        {
-            topic_npcs
-                .entry(lowercase_crc32(topic))
-                .or_default()
-                .push(row.npc_id.clone());
-        }
     }
+    let topic_npcs = topic_holders(
+        tables
+            .npc_data
+            .iter()
+            .flat_map(|table| &table.rows)
+            .map(|row| {
+                let own = [
+                    &row.topic_id1,
+                    &row.topic_id2,
+                    &row.topic_id3,
+                    &row.topic_id4,
+                    &row.topic_id5,
+                    &row.topic_id6,
+                    &row.topic_id7,
+                    &row.topic_id8,
+                    &row.topic_id9,
+                    &row.topic_id10,
+                ]
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .collect();
+                let held_states = row
+                    .conversation_state_id
+                    .values()
+                    .map(String::as_str)
+                    .collect();
+                (row.npc_id.as_str(), own, held_states)
+            }),
+        &state_topics,
+    );
     let mut achievement_sources = HashMap::new();
     let mut success_events = HashSet::new();
     for (id, _) in content.quests.listing() {
@@ -238,6 +280,40 @@ pub fn quest_guide(world_file: &WorldFile, tables: &Tables, content: &PlayerCont
 }
 
 /// The title of each outcome's section.
+/// The NPCs that hold each conversation topic, by the CRC-32 of its lowercase id: the topics
+/// of each NPC's own row (`TopicId1`-`10`) and those of each conversation state it has
+/// (`state_topics`, by lowercase state id; `12_MB_Moira_01` holds
+/// `12A_MSQ_10_ConfrontLochnir_TalkMoira` through its state `12_Moira_01`). `npcs` gives each
+/// NPC id with its own topics and its states.
+fn topic_holders<'a>(
+    npcs: impl IntoIterator<Item = (&'a str, Vec<&'a str>, Vec<&'a str>)>,
+    state_topics: &HashMap<String, Vec<&str>>,
+) -> HashMap<u32, Vec<String>> {
+    let mut holders: HashMap<u32, Vec<String>> = HashMap::new();
+    for (npc, own, held_states) in npcs {
+        let from_states = held_states
+            .iter()
+            .flat_map(|state| {
+                state_topics
+                    .get(&state.to_lowercase())
+                    .into_iter()
+                    .flatten()
+            })
+            .copied();
+        for topic in own
+            .into_iter()
+            .chain(from_states)
+            .filter(|topic| !topic.is_empty())
+        {
+            let held = holders.entry(lowercase_crc32(topic)).or_default();
+            if !held.iter().any(|known| known == npc) {
+                held.push(npc.to_owned());
+            }
+        }
+    }
+    holders
+}
+
 fn outcome_title(outcome: Outcome) -> &'static str {
     match outcome {
         Outcome::Completed => "Completed",
@@ -328,6 +404,104 @@ mod tests {
             stop: stop.map(str::to_owned),
             notes: vec!["a | note".to_owned()],
         }
+    }
+
+    /// The Monarch's Bluffs main story from `Fragments of Truth` (`12A_MSQ_09`, after `A Most
+    /// Mysterious Tablet`) to its end, in the retail order of the `12a_msq_09` to `12a_msq_26`
+    /// captures: each quest is taken, played and turned in; every talk and topic step finds its
+    /// NPC in the open world. `12A_MSQ_24_DefeatGawain` needs a run of the `QuestGawain` story
+    /// instance, which the walk does not play.
+    #[cfg(feature = "local-data")]
+    #[test]
+    fn the_monarchs_bluffs_story_from_fragments_of_truth_walks_to_its_end() {
+        const CHAIN: [&str; 16] = [
+            "12A_MSQ_09_ReturnRegent",
+            "12A_MSQ_10_ConfrontLochnir",
+            "12A_MSQ_12_CampTutorial",
+            "12A_MSQ_13_StormBeach",
+            "12A_MSQ_15_DefeatNavigator",
+            "12A_MSQ_16_FastTravel",
+            "12A_MSQ_17_LochnirsNotes",
+            "12A_MSQ_18_InspectStatue",
+            "12A_MSQ_19_MeetPercilla",
+            "12A_MSQ_20_CollectCrown",
+            "12A_MSQ_21_FindGrace",
+            "12A_MSQ_22_DestroyShrine",
+            "12A_MSQ_23_ToTower",
+            "12A_MSQ_24_DefeatGawain",
+            "12A_MSQ_25_CrownRegent",
+            "12A_MSQ_26_ToYonas",
+        ];
+        const STORY_INSTANCE_QUEST: &str = "12A_MSQ_24_DefeatGawain";
+        const NPC_FAULTS: [&str; 2] = ["no NPC holds its topic", "not in the open world"];
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut config = load_sim_config(&repo.join("config/sim.toml")).expect("config");
+        config.client_build_config = repo.join(&config.client_build_config);
+        config.content_dir = repo.join(&config.content_dir);
+        // The edge config names its config set folder from the repository root, and a test runs
+        // in the crate folder: a copy names the folder in full.
+        let folder = std::env::temp_dir().join(format!("sim-quest-walk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).expect("folder");
+        config.edge_config = crate::gameplay::tests::committed_edge_config(
+            &folder,
+            &crate::gameplay::tests::AS_COMMITTED,
+        );
+        let level = load_level(&config).expect("level");
+        let mut world = walk_world(&config, &level).expect("world");
+        let gateway = BusId::try_from(WALK_GATEWAY.to_owned()).expect("id");
+        let mut now_ms = START_MS;
+        for (number, quest) in (1..).zip(CHAIN) {
+            let walked = world.walk_quest(
+                &level.content.quest_guide,
+                &gateway,
+                number,
+                quest,
+                &mut now_ms,
+            );
+            let wanted = if quest == STORY_INSTANCE_QUEST {
+                Outcome::NotWalked
+            } else {
+                Outcome::Completed
+            };
+            assert_eq!(walked.outcome, wanted, "{walked:?}");
+            assert!(
+                !walked
+                    .notes
+                    .iter()
+                    .any(|note| NPC_FAULTS.iter().any(|fault| note.contains(fault))),
+                "{walked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_npc_holds_its_own_topics_and_those_of_its_conversation_states() {
+        // Retail `12_MB_Moira_01` offers `12A_MSQ_10_ConfrontLochnir_TalkMoira` only through
+        // its state `12_Moira_01`.
+        const MOIRA: &str = "12_MB_Moira_01";
+        const TALK: &str = "12A_MSQ_10_ConfrontLochnir_TalkMoira";
+        const OWN: &str = "Own_Topic";
+        let state_topics = HashMap::from([("12_moira_01".to_owned(), vec![TALK, ""])]);
+        let holders = topic_holders(
+            [
+                (MOIRA, vec![OWN], vec!["12_Moira_01", "No_Such_State"]),
+                (MOIRA, vec![TALK], Vec::new()),
+            ],
+            &state_topics,
+        );
+        assert_eq!(
+            holders.get(&lowercase_crc32(TALK)),
+            Some(&vec![MOIRA.to_owned()])
+        );
+        assert_eq!(
+            holders.get(&lowercase_crc32(OWN)),
+            Some(&vec![MOIRA.to_owned()])
+        );
+        assert_eq!(
+            holders.len(),
+            2,
+            "an empty topic names nothing: {holders:?}"
+        );
     }
 
     #[test]

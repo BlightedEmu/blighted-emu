@@ -8,9 +8,9 @@
 //! lowercase `RecipeID` (`TimberT51`, `DoubloonWeeklyKey`), its value a u8 count and a u64 end
 //! (unix ns). The count is the crafts made: 9 after one craft of 9 `TimberT51`, 10 for
 //! `LeatherT51` (its `CooldownQuantity`). A recipe of `CooldownSeconds` 86400 ended at the next
-//! day's reset (03:00 UTC, the refining ledger's server), one of 604800 at the next Tuesday's
-//! (09:00 UTC, `DoubloonWeeklyKey`): the resets of the loot limits
-//! ([`crate::loot_limits::ResetClock`]), with the sub-second part of the first craft.
+//! day's reset (03:00 UTC, the refining ledger's EU Central server), one of 604800 at the next
+//! Tuesday's (09:00 UTC, `DoubloonWeeklyKey`, a US East server): the server's resets
+//! ([`crate::resets::ResetClock`]), with the sub-second part of the first craft.
 //!
 //! **Inferred**: a craft that would pass `CooldownQuantity` is refused whole; a count that ended
 //! starts again at the next craft. **Unknown**: the reset of `CooldownSeconds` 79200
@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 use nw_formats::objectstream::lowercase_crc32;
 
-use crate::loot_limits::{ResetClock, ResetCycle};
+use crate::resets::{ResetClock, ResetCycle};
 
 /// `CooldownSeconds` of a cooldown that resets with each day (Observed).
 const DAILY_SECONDS: i64 = 86_400;
@@ -186,12 +186,11 @@ impl RecipeCooldownCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::loot_limits::Weekday;
+    use crate::resets::ServerRegion;
 
-    /// The refining ledger's server: daily reset 03:00 UTC.
+    /// The refining ledger's server: daily reset 03:00 UTC in summer.
     const CLOCK: ResetClock = ResetClock {
-        hour_utc: 3,
-        weekly_day: Weekday::Tuesday,
+        region: ServerRegion::EuCentral,
     };
     /// `LeatherT51`'s retail end, `0x18b8d351b144f000`: 2026-06-14 03:00 UTC (a daily reset)
     /// with the first craft's sub-second part.

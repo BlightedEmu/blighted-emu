@@ -27,6 +27,9 @@
 //! - 6297 and 6296: the header alone (role selection cancel and its answer, `Hive_3v3_group`).
 //! - 6228: three zero bytes (a match that not every player accepted; `3v3`, `Hive_3v3_group`).
 //! - 6970: a text, the cutscene name (empty in the one capture).
+//! - 6969: a text, the cutscene name, and a little-endian `f32` (Observed: `ExtractionIGC` with
+//!   0.0 and `ExtractionGodEyesView` with 29.49, `CATACOMBS5` 1659.442 s and 1661.292 s; the
+//!   value's meaning is Unknown, its byte order is the only little-endian field of the facet).
 //! - 1066: the CRC of the game mode (big-endian `u32`) and one byte (1 for a group queue; 4
 //!   retail calls, both values).
 //! - 3309: two 16-byte values (meaning Unknown; 4 retail calls, each an expedition or arena
@@ -55,6 +58,8 @@ pub const MATCHMAKING_LOGIN_CONFIRMED_TYPE_INDEX: u64 = 5450;
 pub const MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX: u64 = 5449;
 /// Type index of `GameModeParticipantComponentServerFacet_RequestJoinQueueForActivities`.
 pub const JOIN_QUEUE_FOR_ACTIVITIES_TYPE_INDEX: u64 = 6254;
+/// Type index of `GameModeParticipantComponentClientFacet_OnStartCutsceneWithName`.
+pub const START_CUTSCENE_WITH_NAME_TYPE_INDEX: u64 = 6969;
 /// Type index of `GameModeParticipantComponentClientFacet_OnStopCutsceneWithName`.
 pub const STOP_CUTSCENE_WITH_NAME_TYPE_INDEX: u64 = 6970;
 /// Type index of `GameModeParticipantComponentClientFacet_OnStartMatchmakingRoleSelection`.
@@ -418,6 +423,16 @@ pub enum GameModeServerMsg {
         /// The removed player.
         player: CharacterRef,
     },
+    /// 6969: start the cutscene of this name.
+    StartCutsceneWithName {
+        /// The header.
+        header: FacetHeader,
+        /// The cutscene name.
+        name: String,
+        /// The value after the name: the bits of a little-endian `f32` (module text; meaning
+        /// Unknown; `f32::from_bits` reads it).
+        value_bits: u32,
+    },
     /// 6970: stop the cutscene of this name (empty in retail).
     StopCutsceneWithName {
         /// The header.
@@ -438,6 +453,7 @@ impl GameModeServerMsg {
                 | ROLE_SELECTION_CANCELED_TYPE_INDEX
                 | MATCHMAKING_MATCH_CANCELLED_TYPE_INDEX
                 | GAME_MODE_PLAYER_REMOVED_TYPE_INDEX
+                | START_CUTSCENE_WITH_NAME_TYPE_INDEX
                 | STOP_CUTSCENE_WITH_NAME_TYPE_INDEX
         )
     }
@@ -453,6 +469,7 @@ impl GameModeServerMsg {
             Self::RoleSelectionCanceled { .. } => ROLE_SELECTION_CANCELED_TYPE_INDEX,
             Self::MatchCancelled { .. } => MATCHMAKING_MATCH_CANCELLED_TYPE_INDEX,
             Self::GameModePlayerRemoved { .. } => GAME_MODE_PLAYER_REMOVED_TYPE_INDEX,
+            Self::StartCutsceneWithName { .. } => START_CUTSCENE_WITH_NAME_TYPE_INDEX,
             Self::StopCutsceneWithName { .. } => STOP_CUTSCENE_WITH_NAME_TYPE_INDEX,
         }
     }
@@ -466,6 +483,7 @@ impl GameModeServerMsg {
             | Self::RoleSelectionCanceled { header }
             | Self::MatchCancelled { header }
             | Self::GameModePlayerRemoved { header, .. }
+            | Self::StartCutsceneWithName { header, .. }
             | Self::StopCutsceneWithName { header, .. } => *header,
         }
     }
@@ -497,6 +515,15 @@ impl GameModeServerMsg {
                 header,
                 game_mode: reader.u32()?,
                 player: CharacterRef::read(&mut reader)?,
+            },
+            START_CUTSCENE_WITH_NAME_TYPE_INDEX => Self::StartCutsceneWithName {
+                header,
+                name: String::from_utf8_lossy(&read_string(&mut reader)?).into_owned(),
+                value_bits: {
+                    let mut bytes = [0; size_of::<u32>()];
+                    bytes.copy_from_slice(reader.bytes(size_of::<u32>())?);
+                    u32::from_le_bytes(bytes)
+                },
             },
             STOP_CUTSCENE_WITH_NAME_TYPE_INDEX => Self::StopCutsceneWithName {
                 header,
@@ -541,6 +568,12 @@ impl GameModeServerMsg {
             } => {
                 writer.u32(*game_mode);
                 player.write(&mut writer);
+            }
+            Self::StartCutsceneWithName {
+                name, value_bits, ..
+            } => {
+                write_string(&mut writer, name.as_bytes())?;
+                writer.bytes(&value_bits.to_le_bytes());
             }
             Self::StopCutsceneWithName { name, .. } => {
                 write_string(&mut writer, name.as_bytes())?;
@@ -758,6 +791,30 @@ mod tests {
             stop.encode().expect("writes"),
             hex("7134484c503933ace34e14f344a974cc00")
         );
+        // Retail `CATACOMBS5` 1659.442 s and 1661.292 s: the two extraction cutscenes.
+        for (body, cutscene, value) in [
+            (
+                "f5ce05dba58eff8a67e7d28299ff40aa0d45787472616374696f6e49474300000000",
+                "ExtractionIGC",
+                0.0,
+            ),
+            (
+                "f5ce05dba58eff8a67e7d28299ff40aa1545787472616374696f6e476f64457965735669657720f4eb41",
+                "ExtractionGodEyesView",
+                29.494_202,
+            ),
+        ] {
+            let push = server(START_CUTSCENE_WITH_NAME_TYPE_INDEX, body);
+            let GameModeServerMsg::StartCutsceneWithName {
+                name, value_bits, ..
+            } = &push
+            else {
+                panic!("a cutscene start");
+            };
+            assert_eq!(name, cutscene);
+            assert!((f32::from_bits(*value_bits) - value).abs() < f32::EPSILON * 32.0);
+            assert_eq!(push.encode().expect("writes"), hex(body));
+        }
     }
 
     /// Retail `20261010-125035-658` 411.564 s with made-up ids (arena flow study, section 5.4).

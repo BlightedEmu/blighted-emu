@@ -29,8 +29,9 @@
 //! it are dead (territory 16: wave 4 at +535.8 s, as the last mob of wave 3 died, and wave 8 at
 //! +1309.6 s); a wave's stage completes when the next one starts. Each wave's mobs come at their
 //! retail times after the wave's start, at their retail places, of their vitals and at the fort's
-//! mob level ([`nw_content::invasion_forts::WaveSpawn`]); Inferred: they walk to the fort's claim
-//! position (the retail lanes are server data no capture shows).
+//! mob level ([`nw_content::invasion_forts::WaveSpawn`]); each walks the retail lane of its
+//! place, then on to the fort's claim position ([`lane_path`]; Inferred past the lane: the
+//! captures show a lane as far as its mob lived).
 //!
 //! **Defense** (Observed, 4103 child 2 of `invasion`): six fort structures at 100 % fell to 86 %
 //! in the last waves; the fort's turrets and siege structures are the war fort's
@@ -42,6 +43,17 @@
 //! is not the walls'; retail's rule is Unknown). An invasion whose time runs out is won
 //! ([`super::wars`]: the defender wins at the end; Observed: the won invasion ended at its
 //! start + 1,500 s).
+//!
+//! **Corruption areas** (Observed in the data, findings `2026-11-13-catacomb-erosion.md`
+//! section C13): the fort slice `siege_fort_dunwood_3407430195` has nine encounter stage
+//! entities, `Setup` and `Stage_1` to `Stage_8`; `Setup` spawns the claim, the claim zone clear,
+//! two fallback objectives and four `Invasion_CorruptionArea` slices (`ApplyCurseL4`, remove on
+//! exit), the others spawn the wave mobs. Observed (remote effect maps): other players of the
+//! three captured invasions held `ApplyCurseL4` (`invasion` 97, `Reekwater_Invasion` 151,
+//! `Playthrough_Part_21` 300 applications), in `invasion` from 22.9 s after the start (112.991 s)
+//! to 1.0 s after the end (1591.050 s). **Inferred**: `Setup` is the defense stage (the one stage
+//! beside the eight waves, as the encounter entity holds), so its corruption areas within the
+//! fort's frame open at the start and close at the end ([`DEFENSE_STAGE`]).
 //!
 //! **End** (Observed): at the end the pre-raid status 715 with [`PRE_RAID_ENDED`] and the 245
 //! ([`super::war_fight`]); every player of the instance gets the fort's reward event and
@@ -60,7 +72,7 @@ use std::sync::Arc;
 use bevy_ecs::entity::Entity;
 // The pre-raid status at the invite (a place on the roster) and at the end (module doc).
 use nw_bus::ConnectionRef;
-use nw_content::invasion_forts::{FortWall, InvasionFort};
+use nw_content::invasion_forts::{FortWall, InvasionFort, WaveSpawn};
 use nw_db::{
     DbError, InvasionScheduled, PgPool, TerritoryDarkness, TerritoryUpgrade, TerritoryWar,
     UPGRADE_TIER_MAX, lose_invasion, schedule_invasion, set_darkness, set_territory_upgrade,
@@ -86,10 +98,14 @@ use super::encounter_roots::{
 use super::gates::merge_members;
 use super::gm_chat::DONE;
 use super::land_claims::CLAIM_POSITIONS;
+use super::town_projects::ProjectSlots;
 use super::war_fight::{CAPTURE_RADIUS_M, point_ownership};
 use super::wars::WarAnswer;
 use super::{Body, Player, SimWorld};
 use crate::mob_ai::script_mob_ai;
+
+/// The fort slice stage that runs from the invasion's start to its end (module text).
+const DEFENSE_STAGE: &str = "Setup";
 
 /// The `!invasion` usage line.
 pub(super) const INVASION_USAGE: &str = "!invasion <territory id> <minutes to start> | <territory id> lose | <territory id> darkness <0-3> | <territory id> upgrade <upgrade id> <0-3>";
@@ -166,26 +182,33 @@ pub(super) fn empty_side() -> WarSide {
     }
 }
 
-/// The darkness and the upgrade tiers of the territories, as read with the wars.
+/// The darkness, the upgrade tiers and the town projects of the territories, as read with the
+/// wars.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Dominion {
     darkness: BTreeMap<u16, TerritoryDarkness>,
     upgrades: BTreeMap<(u16, u8), u8>,
+    projects: ProjectSlots,
 }
 
 impl Dominion {
-    /// Reads both from the world database; `None` (logged) when a read fails.
-    pub(crate) async fn read(world: &PgPool) -> Option<Self> {
+    /// Reads them from the world database at Unix ms `now_ms` (the town projects due end
+    /// first); `None` (logged) when a read fails.
+    pub(crate) async fn read(world: &PgPool, now_ms: u64) -> Option<Self> {
         let read = async {
             Ok::<_, DbError>((
                 territory_darkness(world).await?,
                 territory_upgrades(world).await?,
+                ProjectSlots::read(world, now_ms).await?,
             ))
         };
         match read.await {
-            Ok((darkness, upgrades)) => Some(Self::of(darkness, upgrades)),
+            Ok((darkness, upgrades, projects)) => Some(Self {
+                projects,
+                ..Self::of(darkness, upgrades)
+            }),
             Err(error) => {
-                tracing::warn!(%error, "territory darkness and upgrades not read");
+                tracing::warn!(%error, "territory darkness, upgrades and projects not read");
                 None
             }
         }
@@ -201,7 +224,13 @@ impl Dominion {
                 .into_iter()
                 .map(|row| ((row.territory, row.upgrade), row.tier))
                 .collect(),
+            projects: ProjectSlots::default(),
         }
+    }
+
+    /// The town projects ([`super::town_projects`]).
+    pub(super) const fn projects(&self) -> &ProjectSlots {
+        &self.projects
     }
 
     /// The claims' darkness threshold of `territory`.
@@ -222,7 +251,7 @@ impl Dominion {
     }
 
     /// The tier of `upgrade` of `territory`.
-    fn tier(&self, territory: u16, upgrade: u8) -> u8 {
+    pub(super) fn tier(&self, territory: u16, upgrade: u8) -> u8 {
         self.upgrades
             .get(&(territory, upgrade))
             .copied()
@@ -230,7 +259,8 @@ impl Dominion {
     }
 
     /// The claims' progression of `territory`: every upgrade's tier and their sum as the level
-    /// (module doc); no town project entry (none runs here).
+    /// (module doc), and one town project entry per progression type
+    /// ([`ProjectSlots::entries`]).
     pub(super) fn progression(&self, territory: u16) -> ClaimProgression {
         let tiers: Vec<ProgressionTier> = UPGRADE_IDS
             .iter()
@@ -245,7 +275,7 @@ impl Dominion {
             .fold(0_u8, u8::saturating_add);
         ClaimProgression {
             tiers,
-            entries: Vec::new(),
+            entries: self.projects.entries(territory),
             level,
         }
     }
@@ -374,6 +404,31 @@ impl InvasionJob {
                 stored_line(set_territory_upgrade(world, &upgrade).await),
             ),
         }
+    }
+}
+
+/// The way invasion mob `spawn` walks from its place (offsets from it, [`PatrolPath`]): its lane,
+/// then the claim position `claim` unless the lane ends within [`CAPTURE_RADIUS_M`] of it
+/// (module doc).
+pub(super) fn lane_path(spawn: &WaveSpawn, claim: [f32; 3]) -> PatrolPath {
+    let [x, y, z] = spawn.place;
+    let offset = |[px, py, pz]: [f32; 3]| [px - x, py - y, pz - z];
+    let position = |[px, py, pz]: [f32; 3]| Position {
+        x: px,
+        y: py,
+        z: pz,
+    };
+    let end = spawn.path.last().copied().unwrap_or(spawn.place);
+    let at_claim = position(end).horizontal_distance(position(claim)) <= CAPTURE_RADIUS_M;
+    let mut points: Vec<[f32; 3]> = spawn.path.iter().copied().map(offset).collect();
+    if !at_claim {
+        points.push(offset(claim));
+    }
+    PatrolPath {
+        points,
+        waits_ms: Vec::new(),
+        mode: PathMode::Once,
+        tasks: Vec::new(),
     }
 }
 
@@ -824,10 +879,15 @@ impl SimWorld {
             run.next_spawn = 0;
         }
         self.change_invasion_stages(run);
+        let content = Arc::clone(&self.content);
+        if let Some(fort) = content.war_forts.fort(run.fort.territory) {
+            self.open_stage_areas(DEFENSE_STAGE, |[x, y, _]| fort.frames(x, y));
+        }
         tracing::info!(war = %run.war, territory = run.fort.territory, "invasion started");
     }
 
-    /// The running wave's mobs that are due spawn, walking to the claim position.
+    /// The running wave's mobs that are due spawn, walking to the claim position; a siege
+    /// mob shows its cow launcher slice ([`WaveSpawn::slice`]).
     fn spawn_due(&mut self, run: &mut InvasionRun, now_ms: u64) {
         let Some((index, started_ms)) = run.wave else {
             return;
@@ -842,13 +902,7 @@ impl SimWorld {
             }
             run.next_spawn += 1;
             let [x, y, z] = spawn.place;
-            let [cx, cy, cz] = run.claim;
-            let path = PatrolPath {
-                points: vec![[cx - x, cy - y, cz - z]],
-                waits_ms: Vec::new(),
-                mode: PathMode::Once,
-                tasks: Vec::new(),
-            };
+            let path = lane_path(spawn, run.claim);
             let ai = script_mob_ai(&path, Position { x, y, z }, self.mobs.ai());
             let vitals = VitalsSpawn {
                 vitals_id: spawn.vitals,
@@ -856,7 +910,7 @@ impl SimWorld {
                 position: spawn.place,
                 ..VitalsSpawn::default()
             };
-            match self.mobs.spawn_gm(vitals, Some(ai)) {
+            match self.mobs.spawn_gm(vitals, Some(ai), spawn.slice()) {
                 Some(entity) => run.mobs.push(WaveMob {
                     entity,
                     wave: index,
@@ -957,6 +1011,7 @@ impl SimWorld {
     /// The invasion ended here: the stages, the 715 and the rewards (module doc).
     fn end_invasion(&mut self, run: &mut InvasionRun, won: bool, now_ms: u64) {
         run.end_stages(won);
+        self.close_stage_areas(DEFENSE_STAGE);
         run.ended = Some(Ended {
             won,
             cleanup_ms: (!won).then(|| now_ms.saturating_add(CLEANUP_AFTER_LOSS_MS)),
@@ -1058,7 +1113,11 @@ mod tests {
         assert_eq!(progression.tiers.len(), UPGRADE_IDS.len());
         assert_eq!(progression.tiers[0].id, 11);
         assert_eq!(progression.level, 5);
-        assert!(progression.entries.is_empty());
+        assert_eq!(
+            progression.entries.len(),
+            5,
+            "one town project entry per progression type"
+        );
     }
 
     #[test]
@@ -1120,6 +1179,43 @@ mod tests {
         assert!((sieged_health(FULL_HEALTH, 2, 1.0) - 98.0).abs() < f32::EPSILON);
         assert!((sieged_health(FULL_HEALTH, 0, 1.0) - FULL_HEALTH).abs() < f32::EPSILON);
         assert!(sieged_health(1.0, 3, 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_mob_walks_its_lane_then_on_to_the_claim() {
+        let claim = [100.0, 0.0, 10.0];
+        let spawn = WaveSpawn {
+            after_ms: 0,
+            vitals: 1,
+            place: [0.0, 0.0, 10.0],
+            siege: false,
+            path: vec![[10.0, 0.0, 10.0], [20.0, 5.0, 11.0]],
+        };
+        let path = lane_path(&spawn, claim);
+        assert_eq!(
+            path.points,
+            vec![[10.0, 0.0, 0.0], [20.0, 5.0, 1.0], [100.0, 0.0, 0.0]],
+            "the lane as offsets from the place, then the claim"
+        );
+        assert_eq!(path.mode, PathMode::Once);
+        let ending = WaveSpawn {
+            path: vec![[95.0, 1.0, 10.0]],
+            ..spawn.clone()
+        };
+        assert_eq!(
+            lane_path(&ending, claim).points,
+            vec![[95.0, 1.0, 0.0]],
+            "a lane that ends at the claim"
+        );
+        let no_lane = WaveSpawn {
+            path: Vec::new(),
+            ..spawn
+        };
+        assert_eq!(
+            lane_path(&no_lane, claim).points,
+            vec![[100.0, 0.0, 0.0]],
+            "no lane: straight to the claim"
+        );
     }
 
     #[test]

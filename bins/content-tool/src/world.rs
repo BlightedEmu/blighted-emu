@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
+use nw_content::gathering::InstancedObject;
 use nw_content::ids::{gatherable_ids, lore_ids, npc_ids, vitals_ids};
 use nw_content::{ContainerError, ContentBundle};
 use nw_formats::asset_catalog::{
@@ -17,6 +18,7 @@ use nw_formats::heightmap::{HeightmapError, parse_heightmap};
 use nw_formats::objectstream::{Element, ObjectStreamError, lowercase_crc32, parse_object_stream};
 use nw_world::capitals::parse_capitals_and_cookies;
 use nw_world::height::{VERIFIED_MOUNTAIN_HEIGHTS, rescaled_sample};
+use nw_world::instanced_loot::{InstancedGather, instanced_object};
 use nw_world::interact_tags::{InteractTagged, TagOwner, interact_tags_of};
 use nw_world::metadata::{MetadataError, MetadataRecords, SkipCounts, read_metadata};
 use nw_world::records::{
@@ -461,6 +463,7 @@ pub fn run_world(
     let mut stations = HashMap::new();
     let mut plots = HashMap::new();
     let mut slice_tags = HashMap::new();
+    let mut instanced_slices = HashMap::new();
     source.for_each_entry(
         |path| slice_files.contains(path),
         |path, bytes| {
@@ -468,6 +471,9 @@ pub fn run_world(
             let tags = interact_tags_of(&root);
             if !tags.is_empty() {
                 slice_tags.insert(path.to_owned(), tags);
+            }
+            if let Some(object) = instanced_object(&root) {
+                instanced_slices.insert(path.to_owned(), object);
             }
             if let Some(station) = StationSlice::of(&root) {
                 stations.insert(path.to_owned(), station);
@@ -483,6 +489,7 @@ pub fn run_world(
         teleporters,
         spawners,
         interact_tags: capital_tags,
+        instanced: instanced_capitals,
     } = capital_slices(source, &built, catalog.as_deref())?;
     let timed = timed_slices(source)?;
     let chunks = levels
@@ -496,6 +503,7 @@ pub fn run_world(
         world.stations = stations_of(&world.spawned, &stations);
         world.plots = plots_of(&world.spawned, &plots);
         world.interact_tags = interact_tags(world, &capital_tags, &slice_tags);
+        world.instanced_gathers = instanced_gathers(world, &instanced_capitals, &instanced_slices);
         world.teleporters = world
             .capitals
             .iter()
@@ -526,6 +534,8 @@ struct CapitalSlices {
     spawners: HashMap<AssetKey, SpawnerSlice>,
     /// The interact tags of the slices that hold any.
     interact_tags: HashMap<AssetKey, Vec<String>>,
+    /// The values of each slice whose gathers are instanced ([`instanced_object`]).
+    instanced: HashMap<AssetKey, InstancedObject>,
 }
 
 /// The largest difference on each axis between a spawner capital and its level vitals spawn, m
@@ -619,6 +629,9 @@ fn capital_slices(
             let tags = interact_tags_of(&root);
             if !tags.is_empty() {
                 slices.interact_tags.insert(keys_by_path[path], tags);
+            }
+            if let Some(object) = instanced_object(&root) {
+                slices.instanced.insert(keys_by_path[path], object);
             }
             Ok::<(), ToolError>(())
         },
@@ -740,6 +753,30 @@ fn interact_tags(
         Some(InteractTagged {
             owner: TagOwner::Spawned(slice.id),
             tags: slice_tags.get(&slice_file(&slice.slice))?.clone(),
+        })
+    });
+    capitals.chain(spawned).collect()
+}
+
+/// The capitals (whose slices' asset ids are in `capital_slices`) and spawned slices (whose pak
+/// paths are in `spawned_slices`) of `world` whose gathers are instanced, each with its slice's
+/// values.
+fn instanced_gathers(
+    world: &WorldFile,
+    capital_slices: &HashMap<AssetKey, InstancedObject>,
+    spawned_slices: &HashMap<String, InstancedObject>,
+) -> Vec<InstancedGather> {
+    let capitals = world.capitals.iter().filter_map(|capital| {
+        let key = capital_asset(&capital.slice_asset_id)?;
+        Some(InstancedGather {
+            owner: TagOwner::Capital(capital.id.clone()),
+            object: *capital_slices.get(&key)?,
+        })
+    });
+    let spawned = world.spawned.iter().filter_map(|slice| {
+        Some(InstancedGather {
+            owner: TagOwner::Spawned(slice.id),
+            object: *spawned_slices.get(&slice_file(&slice.slice))?,
         })
     });
     capitals.chain(spawned).collect()
@@ -935,6 +972,7 @@ mod tests {
     };
     use nw_formats::objectstream::{Element, write_object_stream};
     use nw_world::height::HEIGHT_UNITS_PER_METRE;
+    use nw_world::instanced_loot::POI_LOOT;
     use nw_world::metadata::*;
 
     use super::*;
@@ -1253,6 +1291,57 @@ mod tests {
                 slice: CHUNK_PATH.to_owned(),
                 window
             }]
+        );
+    }
+
+    #[test]
+    fn capitals_and_spawned_slices_of_instanced_slices_have_instanced_gathers() {
+        const CHEST_ASSET: &str = "{3D51B368-7E53-5FF9-AF51-58FD8602F34B}:2";
+        const LOCK_ASSET: &str = "{11111111-2222-3333-4444-555555555555}:1";
+        const CHEST_SLICE: &str = "slices/master_lootcontainer";
+        const LOCK_SLICE: &str = "slices/master_lootcontainer_pvp";
+        const SPAWNED_CHEST: u64 = 0x1234_5678_9abc_def0;
+        /// `master_lootcontainer`: `InstancedLootType::POILoot`, `m_aoiRadius` 80 m.
+        const CHEST: InstancedObject = InstancedObject {
+            loot_type: POI_LOOT,
+            aoi_radius_m: Some(80.0),
+        };
+        /// `master_quest_instanced`: `InstancedLootType::Quest`, `m_aoiRadius` 100 m.
+        const QUEST: InstancedObject = InstancedObject {
+            loot_type: 4,
+            aoi_radius_m: Some(100.0),
+        };
+        let capital = |id: &str, asset: &str| nw_world::records::Capital {
+            id: id.to_owned(),
+            slice_asset_id: asset.to_owned(),
+            ..nw_world::records::Capital::default()
+        };
+        let spawned = |id: u64, slice: &str| SpawnedSlice {
+            id,
+            slice: slice.to_owned(),
+            variant: String::new(),
+            position: [0.0; 3],
+        };
+        let world = WorldFile {
+            capitals: vec![capital("chest", CHEST_ASSET), capital("lock", LOCK_ASSET)],
+            spawned: vec![spawned(SPAWNED_CHEST, CHEST_SLICE), spawned(1, LOCK_SLICE)],
+            ..WorldFile::default()
+        };
+        let chest_key = capital_asset(CHEST_ASSET).expect("key");
+        let capital_slices = HashMap::from([(chest_key, CHEST)]);
+        let spawned_slices = HashMap::from([(slice_file(CHEST_SLICE), QUEST)]);
+        assert_eq!(
+            instanced_gathers(&world, &capital_slices, &spawned_slices),
+            [
+                InstancedGather {
+                    owner: TagOwner::Capital("chest".to_owned()),
+                    object: CHEST,
+                },
+                InstancedGather {
+                    owner: TagOwner::Spawned(SPAWNED_CHEST),
+                    object: QUEST,
+                },
+            ]
         );
     }
 

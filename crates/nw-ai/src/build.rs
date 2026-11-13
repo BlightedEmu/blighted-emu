@@ -150,6 +150,8 @@ impl Build {
             blocks: Vec::new(),
             regen_off: None,
             stamina_reset: None,
+            grit_on: None,
+            fragment_cases: Vec::new(),
         });
         let index = (self.data.cage_actions.len() - 1) as u32;
         self.tasks.push((name, index));
@@ -406,6 +408,9 @@ impl Build {
             main_hand_item: None,
             default_tags: Vec::new(),
             triggers: Vec::new(),
+            initial_effects: Vec::new(),
+            grit_uses_stamina: false,
+            large_status_effects_fx: false,
         });
         self.data
     }

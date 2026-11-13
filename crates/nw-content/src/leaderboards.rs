@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Tables;
 use crate::generated::{LeaderboardData, LeaderboardStatData};
-use crate::loot_limits::HOURS_PER_DAY;
+use crate::resets::HOURS_PER_DAY;
 
 /// The placeholder of the world id in a board template.
 pub const WORLD_PLACEHOLDER: &str = "{world}";

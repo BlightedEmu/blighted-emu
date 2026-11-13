@@ -76,6 +76,38 @@ const CLIENT_ABILITY_TABLE_ORDER: [u32; 29] = [
 /// The start of a territory standing bonus pool id; the territory id follows
 /// (`TerritoryRankBonus_2`).
 const TERRITORY_POOL_PREFIX: &str = "TerritoryRankBonus_";
+/// The territory standing bonus that raises the character experience gained in its territory
+/// (`ProgressionPointData` `TerritoryBonusCategory` `GainXP`).
+pub const TERRITORY_EXPERIENCE_BONUS: &str = "TB_GainXP";
+/// The experience share of the first [`TERRITORY_EXPERIENCE_BONUS`] point (Observed: 129
+/// retail kills at 1 point fit only shares in [0.02941, 0.03030)).
+const FIRST_EXPERIENCE_POINT_SHARE: f64 = 0.03;
+/// What each later [`TERRITORY_EXPERIENCE_BONUS`] point is worth of the one before (Inferred,
+/// fitted: [`territory_experience_share`]).
+const NEXT_EXPERIENCE_POINT_WORTH: f64 = 0.9;
+
+/// The CRC-32 of the territory standing bonus pool of territory `territory` (`2` gives
+/// `TerritoryRankBonus_2`), as the 4040 call and the point list name it.
+pub fn territory_pool_crc(territory: &str) -> u32 {
+    lowercase_crc32(&format!("{TERRITORY_POOL_PREFIX}{territory}"))
+}
+
+/// The CRC-32 of [`TERRITORY_EXPERIENCE_BONUS`].
+pub fn territory_experience_point_crc() -> u32 {
+    lowercase_crc32(TERRITORY_EXPERIENCE_BONUS)
+}
+
+/// The share of character experience that `points` points of [`TERRITORY_EXPERIENCE_BONUS`]
+/// add in their territory: 3 % for the first point and each later point 0.9 of the one before,
+/// 0.3 x (1 - 0.9^points). Observed for 0 to 5 points (findings
+/// `2026-11-13-kill-xp-rounding.md`, the share intervals of 2,213 retail kills: 1 point
+/// [0.02941, 0.03030), 2 [0.05128, 0.06410), 3 [0.08088, 0.08209), 4 [0.10256, 0.10345), 5
+/// [0.12000, 0.12500); this curve gives 0.03, 0.057, 0.0813, 0.10317, 0.12285); the curve for 6
+/// and more points is Inferred (no ledger holds more than 5).
+pub fn territory_experience_share(points: u16) -> f64 {
+    let kept = NEXT_EXPERIENCE_POINT_WORTH.powi(i32::from(points));
+    FIRST_EXPERIENCE_POINT_SHARE * (1.0 - kept) / (1.0 - NEXT_EXPERIENCE_POINT_WORTH)
+}
 
 /// The values one attribute may take: the `Level` rows of its `AttributeDefinition` table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -487,6 +519,28 @@ fn small(value: i64) -> u16 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn territory_experience_points_give_the_retail_shares() {
+        /// The Observed share interval of 1 to 5 points (findings).
+        const INTERVALS: [(f64, f64); 5] = [
+            (0.029_41, 0.030_30),
+            (0.051_28, 0.064_10),
+            (0.080_88, 0.082_09),
+            (0.102_56, 0.103_45),
+            (0.120_00, 0.125_00),
+        ];
+        assert!(territory_experience_share(0).abs() < f64::EPSILON);
+        for (points, (low, high)) in (1..).zip(INTERVALS) {
+            let share = territory_experience_share(points);
+            assert!(share >= low && share < high, "{points} points: {share}");
+        }
+        assert_eq!(
+            territory_pool_crc("12"),
+            lowercase_crc32("TerritoryRankBonus_12")
+        );
+        assert_eq!(territory_experience_point_crc(), 238_159_249);
+    }
 
     #[test]
     fn the_ability_tables_go_in_the_clients_order() {

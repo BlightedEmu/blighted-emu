@@ -39,9 +39,18 @@
 //!   `20000`, 1068.115 s `30000`: outpost A's command post at tiers 1, 2 and 3 in
 //!   `outpoststructurestatusesa`).
 //!
-//! The sim sends `armorybuilt`, `bossspawned` and `bosskilled`. Not built: the outposts'
-//! structures, the corrupted portal and the attacks on structures, which the other events
-//! report.
+//! - The structures have no other event: these nine names are every event of the 12 ledgers;
+//!   gate builds, upgrades and ruins show only in `outpoststructurestatuses` (`OPR_TEST3` gate
+//!   1 tier 2 at 1032.951 s, ruined 1151.810 s, no event).
+//!
+//! Inferred: `commandpostupgraded` carries the outpost's index in its low byte as
+//! `commandpostbuilt` does (only outpost A, index 0, was upgraded in a capture); a command post
+//! rebuilt from its ruin keeps its tier and sends no event; `outpostattacked` comes when a foe of
+//! the owner team hits one of the outpost's structures or starts to take the owned outpost.
+//!
+//! The sim sends `armorybuilt`, `bossspawned`, `bosskilled`, `commandpostbuilt`,
+//! `commandpostupgraded` and `outpostattacked`. The corrupted portal's events wait for the
+//! portal.
 
 use nw_messages::game_mode_state::{EVENT_SLOTS, GameModeEvent};
 
@@ -51,6 +60,21 @@ pub(super) const ARMORY_BUILT: u32 = 0x9d69_f1fc;
 pub(super) const BOSS_SPAWNED: u32 = 0x3c26_75ad;
 /// `bosskilled`.
 pub(super) const BOSS_KILLED: u32 = 0xde64_0472;
+/// `commandpostbuilt`.
+pub(super) const COMMAND_POST_BUILT: u32 = 0x234b_695e;
+/// `commandpostupgraded`.
+pub(super) const COMMAND_POST_UPGRADED: u32 = 0x7782_3389;
+/// `outpostattacked`.
+pub(super) const OUTPOST_ATTACKED: u32 = 0x8d70_0253;
+/// The shortest gap between two `outpostattacked` of one outpost, ms (Observed: 20.03 s).
+const ATTACKED_GAP_MS: u64 = 20_000;
+/// The shift of the new tier in `commandpostupgraded` (Observed: tier 2 is `20000`).
+const UPGRADED_TIER_SHIFT: u32 = 16;
+/// The command post's place in an outpost's structure status: its slot (1) times the three
+/// bits of a slot (Observed, `outpoststructurestatusesa` 1052.250 to 1068.182 s).
+const COMMAND_POST_STATUS_SHIFT: u32 = 3;
+/// The tier bits of a structure's status.
+const TIER_MASK: u64 = 0b11;
 /// The number of an event that carries none (Observed: `bossspawned` and the portal's events).
 pub(super) const NO_NUMBER: u32 = 0;
 /// `OutpostRush_FrozenEventTeamIdxBits` (Observed: 1).
@@ -61,6 +85,52 @@ const MS_PER_S: u64 = 1_000;
 pub(super) fn boss_killed_number(freeze_ms: u64, killing_team: u8) -> u32 {
     let seconds = u32::try_from(freeze_ms / MS_PER_S).unwrap_or(u32::MAX >> 1);
     seconds << FROZEN_EVENT_TEAM_IDX_BITS | u32::from(killing_team.min(1))
+}
+
+/// The command post events of the change of the outposts' structure statuses from `before` to
+/// `after`: name and number, in outpost order.
+pub(super) fn command_post_events(before: &[u64], after: &[u64]) -> Vec<(u32, u32)> {
+    let tier = |status: u64| status >> COMMAND_POST_STATUS_SHIFT & TIER_MASK;
+    before
+        .iter()
+        .zip(after)
+        .zip(0u32..)
+        .filter_map(|((before, after), outpost)| {
+            let (old, new) = (tier(*before), tier(*after));
+            if new <= old {
+                return None;
+            }
+            Some(if old == 0 {
+                (COMMAND_POST_BUILT, outpost)
+            } else {
+                // A tier of two bits.
+                #[allow(clippy::cast_possible_truncation, reason = "a tier of two bits")]
+                let new = new as u32;
+                (COMMAND_POST_UPGRADED, new << UPGRADED_TIER_SHIFT | outpost)
+            })
+        })
+        .collect()
+}
+
+/// When each outpost was last reported attacked, server ms.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct AttackWatch {
+    last_ms: [Option<u64>; 3],
+}
+
+impl AttackWatch {
+    /// Outpost `outpost` was attacked at `now_ms`: `true` when that is news (no report in the
+    /// last [`ATTACKED_GAP_MS`]).
+    pub(super) fn attacked(&mut self, outpost: usize, now_ms: u64) -> bool {
+        let Some(last) = self.last_ms.get_mut(outpost) else {
+            return false;
+        };
+        if last.is_some_and(|at| now_ms.saturating_sub(at) < ATTACKED_GAP_MS) {
+            return false;
+        }
+        *last = Some(now_ms);
+        true
+    }
 }
 
 /// The ring of one match: the events noted since the last state change, and the slot of the next.
@@ -114,6 +184,9 @@ mod tests {
             ("armorybuilt", ARMORY_BUILT),
             ("bossspawned", BOSS_SPAWNED),
             ("bosskilled", BOSS_KILLED),
+            ("commandpostbuilt", COMMAND_POST_BUILT),
+            ("commandpostupgraded", COMMAND_POST_UPGRADED),
+            ("outpostattacked", OUTPOST_ATTACKED),
         ] {
             assert_eq!(lowercase_crc32(name), key, "{name}");
         }
@@ -161,5 +234,37 @@ mod tests {
                 .iter()
                 .any(|(slot, event)| *slot == 1 && event.at_ms == 10)
         );
+    }
+
+    #[test]
+    fn a_command_post_tier_rise_is_built_then_upgraded_as_retail() {
+        // `OPR_TEST3` outpost A: tiers 1, 2 and 3 (1052.205 s `0`, 1060.082 s `20000`,
+        // 1068.115 s `30000`); the armory's tier 1 stays.
+        let status = |tier: u64| 1 | tier << COMMAND_POST_STATUS_SHIFT;
+        assert_eq!(
+            command_post_events(&[status(0), 0, 0], &[status(1), 0, 0]),
+            vec![(COMMAND_POST_BUILT, 0)]
+        );
+        assert_eq!(
+            command_post_events(&[status(1), 0, 0], &[status(2), 0, 0]),
+            vec![(COMMAND_POST_UPGRADED, 0x2_0000)]
+        );
+        assert_eq!(
+            command_post_events(&[0, 0, status(2)], &[0, 0, status(3)]),
+            vec![(COMMAND_POST_UPGRADED, 0x3_0002)]
+        );
+        let ruined = status(2) | 0b100 << COMMAND_POST_STATUS_SHIFT;
+        assert!(command_post_events(&[ruined, 0, 0], &[status(2), 0, 0]).is_empty(), "a repair");
+        assert!(command_post_events(&[status(2), 0, 0], &[ruined, 0, 0]).is_empty(), "a ruin");
+    }
+
+    #[test]
+    fn an_outpost_is_reported_attacked_at_most_once_in_twenty_seconds() {
+        let mut watch = AttackWatch::default();
+        assert!(watch.attacked(0, 729_037));
+        assert!(!watch.attacked(0, 740_000));
+        assert!(watch.attacked(2, 740_000), "each outpost has its own gap");
+        assert!(watch.attacked(0, 749_070), "20.03 s later");
+        assert!(!watch.attacked(3, 0), "no fourth outpost");
     }
 }

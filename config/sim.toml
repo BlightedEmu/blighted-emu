@@ -29,8 +29,8 @@ role = "openmap"
 # and opening waits.
 instance_request_timeout_ms = 3000
 # The queued modes (arena, outpost_rush, capture_the_flag, catacombs) whose queue stays closed on
-# this build (a join gets "not run here"). The catacombs run has no end and no rewards yet.
-closed_queues = ["catacombs"]
+# this build (a join gets "not run here"), for example closed_queues = ["catacombs"]. Every
+# queued mode is open on this build.
 # Most players in this sim; the director adds the free ones to the login queue.
 max_players = 2000
 # Our own choice; the retail range is Unknown.
@@ -92,15 +92,14 @@ rotation_start_date = "2023-02-07"
 weekly_reset_hour = 2
 season = 11
 
-# The resets of the loot limits (LootLimitData): a daily limit (LimitExpireSeconds 64800 or
-# 86400) resets each day at hour_utc, a weekly one (604800) on weekly_day at that hour. Retail
-# (loot tracker entries of 707 capture ledgers): weekly ones always end on a Tuesday; the hour
-# is 09:00 UTC on the US East server of our config sets (newchar ledger 2026-09-18, 31 ledgers)
-# and 03:00 UTC on 417 ledgers of another server. Whether the hour follows daylight saving time
-# is Unknown.
-[loot_limits]
-hour_utc = 9
-weekly_day = "tuesday"
+# The server's resets: the daily loot limits, recipe cooldowns, instance refreshes and gather
+# locks end each day at 05:00 local time of the region's time zone (with its daylight saving
+# time), the weekly ones on Tuesday at that time. Retail (lastDailyResetTime of 802 social states
+# in 948 capture ledgers): US East 09:00 UTC in summer and 10:00 UTC from 2026-11-01, EU Central
+# 03:00 UTC in summer and 04:00 UTC from 2026-10-25 (nw-content `resets`). Regions: us-east,
+# us-west, eu-central, sa-east, ap-southeast; keep it the same as the edge world's region.
+[resets]
+region = "us-east"
 
 # Mobs and combat (M6-A spec section 9). Values marked Unknown are not in the game files yet;
 # the study notes of M6-B replace them with numbers from the captures.

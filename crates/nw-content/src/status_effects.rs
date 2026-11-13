@@ -379,6 +379,10 @@ pub struct StatusEffectRule {
     /// `StaminaDamageModifier`: the share added to the stamina the holder's hits take from a
     /// blocker (the `AI_*_Empower` mob buffs 0.15 to 0.3).
     pub block_stamina_mod: f64,
+    /// `StaggerDamageReduction` of its `EquipAbility` row: the share the holder's grit takes
+    /// less of a hit's stagger (`AI_Staggered_StaggerDamageResist`, the effect after a mob's
+    /// stagger, "Reduce stagger damage taken for a period after being staggered": 0.5).
+    pub stagger_reduction: f64,
     /// The `MOD*` columns: the points added to each attribute, in
     /// [`crate::character_points::ATTRIBUTE_NAMES`] order (the `Food*` meals 10 to 24).
     pub attribute_mods: [i64; ATTRIBUTE_COUNT],
@@ -567,6 +571,8 @@ pub struct EffectSourceRow {
     pub stamina_rate: Option<f64>,
     /// `StaminaDamageModifier`.
     pub block_stamina_mod: Option<f64>,
+    /// `StaggerDamageReduction` of the `AbilityData` row its `EquipAbility` names.
+    pub stagger_reduction: Option<f64>,
     /// The `MOD*` columns, in [`crate::character_points::ATTRIBUTE_NAMES`] order.
     pub attribute_mods: [Option<i64>; ATTRIBUTE_COUNT],
     /// `CritChanceModifier`.
@@ -729,6 +735,8 @@ impl EffectSourceRow {
             weakness: by_type(weakness),
             stamina_rate: row.stamina_rate,
             block_stamina_mod: row.stamina_damage_modifier,
+            // Its equip ability's: the row alone does not have it ([`StatusEffectSource`]).
+            stagger_reduction: None,
             attribute_mods: [
                 row.mod_constitution,
                 row.mod_focus,
@@ -786,12 +794,25 @@ pub struct StatusEffectSource {
 impl StatusEffectSource {
     /// The status effect content of `tables`.
     pub fn from_tables(tables: &Tables) -> Self {
+        let stagger_reductions: HashMap<String, f64> = tables
+            .ability_data
+            .iter()
+            .flat_map(|table| &table.rows)
+            .filter_map(|row| Some((row.ability_id.to_lowercase(), row.stagger_damage_reduction?)))
+            .collect();
         Self {
             effects: tables
                 .status_effect_data
                 .iter()
                 .flat_map(|table| &table.rows)
-                .map(EffectSourceRow::of)
+                .map(|row| EffectSourceRow {
+                    stagger_reduction: row
+                        .equip_ability
+                        .as_deref()
+                        .and_then(|ability| stagger_reductions.get(&ability.trim().to_lowercase()))
+                        .copied(),
+                    ..EffectSourceRow::of(row)
+                })
                 .collect(),
             damage_types: tables
                 .damage_type_data
@@ -987,6 +1008,7 @@ fn rule(
         weakness: typed(&row.weakness),
         stamina_rate: row.stamina_rate.unwrap_or(0.0),
         block_stamina_mod: row.block_stamina_mod.unwrap_or(0.0),
+        stagger_reduction: row.stagger_reduction.unwrap_or(0.0),
         attribute_mods: row.attribute_mods.map(Option::unwrap_or_default),
         crit_chance: row.crit_chance.unwrap_or(0.0),
         crit_damage: row.crit_damage.unwrap_or(0.0),
@@ -1108,13 +1130,14 @@ mod tests {
     }
 
     #[test]
-    fn a_row_gives_its_weakness_stamina_attribute_heal_armor_and_control_columns() {
+    fn a_row_gives_its_weakness_stamina_stagger_attribute_heal_armor_and_control_columns() {
         let mut source = source();
         source.effects.push(EffectSourceRow {
             status_id: "Greatsword_Stance_Offense".to_owned(),
             weakness: vec![("Slash".to_owned(), 0.15), ("Nowhere".to_owned(), 1.0)],
             stamina_rate: Some(-0.15),
             block_stamina_mod: Some(0.2),
+            stagger_reduction: Some(0.5),
             attribute_mods: [Some(18), None, Some(12), None, None],
             heal_mod: Some(-0.05),
             physical_armor: Some(-0.1),
@@ -1137,6 +1160,7 @@ mod tests {
         );
         assert_eq!(rule.stamina_rate, -0.15);
         assert_eq!(rule.block_stamina_mod, 0.2);
+        assert_eq!(rule.stagger_reduction, 0.5);
         assert_eq!(rule.attribute_mods, [18, 0, 12, 0, 0]);
         assert_eq!((rule.heal_mod, rule.physical_armor), (-0.05, -0.1));
         assert!(!rule.control.may_dodge() && !rule.control.may_cast() && !rule.control.may_fight());

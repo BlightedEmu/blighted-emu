@@ -335,8 +335,8 @@ pub async fn territory_upgrades(world: &PgPool) -> Result<Vec<TerritoryUpgrade>,
         .collect()
 }
 
-/// Sets the tier of one upgrade of a territory (a game master's change; the town projects that
-/// raise tiers in retail are in no capture).
+/// Sets the tier of one upgrade of a territory (a game master's change; a completed town project
+/// raises its tier with [`crate::add_project_points`]).
 ///
 /// # Errors
 ///

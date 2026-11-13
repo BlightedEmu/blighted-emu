@@ -17,6 +17,11 @@
 //! - while the mode runs: `flags` alone (`01 02 <flags>`);
 //! - when the player leaves it: the empty mode list, zero flags, an empty mutation context
 //!   and the team index 255 (`01 33 00 01 <version> 00 <13 + 6 zero bytes> ff`);
+//! - when the player joins an expedition: the mutation context too, empty in a normal run
+//!   (Starstone 7.141 s) and, in a mutated run, the CRC-32 of the lowercase elemental
+//!   category, promotion and curse ids and the difficulty (`EXP-Empyrian-Forge-M1` 476.658 s:
+//!   `79366364 72e544c1 08218e8e 01`, `voi`, `indomitable`, `censored`, 1;
+//!   `M2-TEMPEST-HEART` 443.560 s: `fir`, `savage`, `fiendish`, 2);
 //! - a queue join: `queuingForGameModes` with one entry and `matchmakingServiceActivity` 2
 //!   (`03 04 <list> 01 02`); a pop: the entry's match size, status 10, the match id and the
 //!   desired players; each accept: the accepted count (`02 10 <count>`);
@@ -52,8 +57,6 @@ const SLOT_1: u8 = 0x02;
 const SLOT_2: u8 = 0x04;
 /// The slot byte of a state that sets no child.
 const NO_SLOT: u8 = 0;
-/// Bytes of an empty `gameModeMutationContext`: three ids and a flag.
-const NO_MUTATION_CONTEXT: [u8; 13] = [0; 13];
 /// The child bit of `groupActivityEligibility` in slot 2.
 const ELIGIBILITY_CHILD: u16 = 0x01;
 
@@ -90,6 +93,29 @@ pub struct QueueEntry {
     pub match_size: u32,
     /// A byte of Unknown meaning (1 in every retail entry).
     pub flag: u8,
+}
+
+/// `gameModeMutationContext`: the mutation of the player's game mode (module text).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MutationContextWire {
+    /// CRC-32 of the lowercase elemental category (`fir`).
+    pub elemental: u32,
+    /// CRC-32 of the lowercase `PromotionMutationID`.
+    pub promotion: u32,
+    /// CRC-32 of the lowercase `CurseMutationID`.
+    pub curse: u32,
+    /// The mutation difficulty (1 to 3); 0 in the empty context.
+    pub difficulty: u8,
+}
+
+impl MutationContextWire {
+    /// The empty context: no mutation.
+    pub const NONE: Self = Self {
+        elemental: 0,
+        promotion: 0,
+        curse: 0,
+        difficulty: 0,
+    };
 }
 
 /// The matchmaking service children of slot 1. A `None` child is not sent.
@@ -175,8 +201,9 @@ pub struct GameModeParticipantState {
     /// Child 3, `queueEligibleTimesForGameModes`, in its full form: each mode's CRC and the
     /// Unix ns from which it may queue again (Observed: a leave of a running arena match).
     pub eligible: Option<FullList<(u32, u64)>>,
-    /// Child 4, `gameModeMutationContext`: sent empty when the player leaves its mode.
-    pub no_mutation_context: bool,
+    /// Child 4, `gameModeMutationContext`: [`MutationContextWire::NONE`] when the player leaves
+    /// its mode or joins a normal expedition, the run's mutation in a mutated one.
+    pub mutation_context: Option<MutationContextWire>,
     /// Child 5, `lastTeamIndex`.
     pub last_team: Option<u8>,
     /// Slot 1, the matchmaking service.
@@ -192,7 +219,7 @@ impl GameModeParticipantState {
             self.flags.is_some(),
             self.queuing.is_some(),
             self.eligible.is_some(),
-            self.no_mutation_context,
+            self.mutation_context.is_some(),
             self.last_team.is_some(),
         ])
     }
@@ -269,7 +296,13 @@ impl GameModeParticipantState {
                     })
                 }),
                 4 => {
-                    writer.bytes(&NO_MUTATION_CONTEXT);
+                    if let Some(context) = self.mutation_context {
+                        writer
+                            .u32(context.elemental)
+                            .u32(context.promotion)
+                            .u32(context.curse)
+                            .u8(context.difficulty);
+                    }
                     Ok(())
                 }
                 _ => {
@@ -346,7 +379,7 @@ mod tests {
                 elements: Vec::new(),
             }),
             flags: Some([0; PARTICIPANT_FLAGS_LEN]),
-            no_mutation_context: true,
+            mutation_context: Some(MutationContextWire::NONE),
             last_team: Some(NO_TEAM),
             ..GameModeParticipantState::default()
         };
@@ -478,5 +511,54 @@ mod tests {
             hex(&penalty),
             "01080001050291b99a18188aa65fbebd4c481fad9d4218ba90b76b06b2d4"
         );
+    }
+
+    /// Retail `M2-TEMPEST-HEART` 443.560 s (made-up game mode entity and times): a player's join
+    /// of a mutated expedition carries the mutation context `fir`, `savage`, `fiendish` at
+    /// difficulty 2; Starstone 7.141 s: a normal run's join carries the empty context.
+    #[test]
+    fn an_expedition_join_writes_its_mutation_context() {
+        /// CRC-32 of `dungeonshattermtn00`.
+        const TEMPEST: u32 = 0x7f1c_8a63;
+        let mutated = GameModeParticipantState {
+            active: Some(FullList {
+                version: Some(0x0df5),
+                elements: vec![ActiveGameMode {
+                    raw_id: [0xb1; RAW_ID_LEN],
+                    facet: 0xb2b2_b2b2_b2b2_b2b2,
+                    second: 0xb3b3_b3b3_b3b3_b3b3,
+                    mode: TEMPEST,
+                    map: TEMPEST,
+                    joined_ns: 0x0bb7_7972_37de_ed1b,
+                    phase: 0x8b2c_bbb8_6aa9_a152,
+                }],
+            }),
+            flags: Some([0x11, 0x00, 0x07, 0x00, 0x00, 0x00]),
+            mutation_context: Some(MutationContextWire {
+                elemental: 0xb92f_ae7e,
+                promotion: 0x8803_b6d1,
+                curse: 0xa78a_7b02,
+                difficulty: 2,
+            }),
+            last_team: Some(0),
+            ..GameModeParticipantState::default()
+        };
+        assert_eq!(
+            hex(&mutated),
+            [
+                "01330001b53701",
+                "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b2b2b2b2b2b2b2b2b3b3b3b3b3b3b3b3",
+                "7f1c8a637f1c8a630bb7797237deed1b8b2cbbb86aa9a152",
+                "110007000000",
+                "b92fae7e8803b6d1a78a7b0202",
+                "00",
+            ]
+            .concat()
+        );
+        let normal = GameModeParticipantState {
+            mutation_context: Some(MutationContextWire::NONE),
+            ..GameModeParticipantState::default()
+        };
+        assert_eq!(hex(&normal), "011000000000000000000000000000");
     }
 }

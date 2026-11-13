@@ -282,12 +282,16 @@ fn percent(current: u32, max: u32) -> u8 {
 impl SimWorld {
     /// Puts the social service's states of `deliveries` into their players: the own states into
     /// the next own bundle, the group entities into the players' entities, and the paid territory
-    /// upkeep answers into the claims and the desks ([`SimWorld::upkeep_answered`]), and the raid
+    /// upkeep answers into the claims and the desks ([`SimWorld::upkeep_answered`]), the town
+    /// project answers into the boards ([`SimWorld::project_answered`]), and the raid
     /// invite answers into the war moves ([`SimWorld::raid_invites_answered`]). A player that is
     /// not here is skipped.
     pub fn apply_social_states(&mut self, deliveries: &SocialDeliveries) {
         if !deliveries.upkeep_answers.is_empty() {
             self.upkeep_answered(&deliveries.upkeep_answers);
+        }
+        if !deliveries.project_answers.is_empty() {
+            self.project_answered(&deliveries.project_answers);
         }
         if !deliveries.raid_invite_answers.is_empty() {
             self.raid_invites_answered(&deliveries.raid_invite_answers);

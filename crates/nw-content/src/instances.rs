@@ -392,6 +392,18 @@ impl InstanceCatalog {
         }
     }
 
+    /// This catalog with item `item_id` of the `ItemClass` entries `classes` (any case), as
+    /// [`Self::from_tables`] takes them from `MasterItemDefinitions` for a catalog made of
+    /// modes alone ([`Self::build`]).
+    #[must_use]
+    pub fn with_item_classes(mut self, item_id: &str, classes: &[&str]) -> Self {
+        self.item_classes.insert(
+            item_id.to_lowercase(),
+            classes.iter().map(|class| class.to_lowercase()).collect(),
+        );
+        self
+    }
+
     /// Whether item `item_id` has one of `classes` (`ItemClass` entries, any case).
     pub fn item_has_class(&self, item_id: &str, classes: &[String]) -> bool {
         self.item_classes
@@ -1188,5 +1200,13 @@ mod tests {
         assert_eq!(key_hash(1), 0xde5f_b9d2_6304_58e9);
         // 2 * multiplier carries one bit into the high half.
         assert_eq!(key_hash(2), 0xbcbf_73a4_c608_b1d2 + 1);
+    }
+
+    #[test]
+    fn an_added_item_class_is_found_in_any_case() {
+        let catalog = InstanceCatalog::build([]).with_item_classes("OR_Wood", &["OutpostRushOnly"]);
+        assert!(catalog.item_has_class("or_wood", &["outpostrushonly".to_owned()]));
+        assert!(!catalog.item_has_class("or_wood", &["DungeonItem".to_owned()]));
+        assert!(!catalog.item_has_class("other", &["OutpostRushOnly".to_owned()]));
     }
 }

@@ -22,13 +22,14 @@ use nw_bus::LootLimitCount;
 use nw_content::loot::{LootContext, LootRoll};
 use nw_content::loot_limits::{LimitCount, LootLimitCounts, LootLimitRules};
 use nw_content::perks::{chance_hit, rarity};
+use nw_content::resets::{ResetClock, ResetCycle};
 use nw_content::starter::KitItem;
 use nw_messages::gde::AssetId;
 use nw_messages::items::{ITEM_BOUND, SYNC_MOVED, SYNC_OWNED};
 use nw_messages::loot::{
     GLOBAL_STORAGE_COMPONENT, GlobalStorageState, LOOT_CREATURE, LOOT_DROPPED, LOOT_POI,
-    LOOT_QUEST_OBJECT, LOOT_ROLLED, LOOT_TAKEN, LOOT_TRACKER_COMPONENT, LootLimitEntry,
-    LootTrackerState, StoredItems, TrackedLoot,
+    LOOT_ROLLED, LOOT_TAKEN, LOOT_TRACKER_COMPONENT, LootLimitEntry, LootTrackerState, StoredItems,
+    TrackedLoot,
 };
 use nw_messages::position::{PositionInTheWorldReplicatedState, WorldPosition};
 use nw_messages::wire::RAW_ID_LEN;
@@ -43,7 +44,7 @@ use super::gathering::{GATHER_ACCEPTED, GATHER_BUSY};
 use super::gear::{BagEntry, unix_ns};
 use super::slots::Slot;
 use super::statics::interactor_target;
-use super::{Player, SimWorld, gather_answer, send_now};
+use super::{Body, Player, SimWorld, gather_answer, send_now};
 use crate::objectives::ObjectiveRun;
 
 /// First slot key of a loot bag: its serial is added. Keys are never sent; they stay above every
@@ -105,6 +106,22 @@ const NO_PERK_RARITY: u8 = 0;
 const NO_INTERACT_TAG: u32 = 0;
 /// The counter of a stored item (retail 0).
 const STORED_COUNTER: u32 = 0;
+/// How far a re-added entry's renewed daily reset may lie from its kept one, ns: the two differ
+/// by the sub-second parts of the looted times only (Observed: 12 of 12 retail re-adds of
+/// capped entries, 0.02 to 0.61 s).
+const SAME_RESET_NS: u64 = 1_000_000_000;
+/// How the tutorial chest's tracker entry follows its opener: 80 m, the `m_aoiRadius` of
+/// `master_lootcontainer`, and no daily reset (its lock is 3,600 s). Observed (retail newchar
+/// 2026-09-18): the chest's entry (type 0, 216.86 s) left the list at 282.33 s with its reset an
+/// hour away, the player 78.8 m from it at 280.33 s and 89.7 m at 281.33 s. The chest's slice
+/// `ftue_v2_lootcontainer_ancient_t1_small` wraps the loot container
+/// `LootContainer_Ancient_T1_Large` (variant `Ancient_T1_S_FTUE_V2`) and holds an
+/// `m_aoiRadius` of 0 of its own; the chest is in no world file (it spawns with the level), so
+/// its radius is Inferred to be the loot container master's, which the removal matches.
+const TUTORIAL_CHEST_RANGE: EntryRange = EntryRange {
+    radius_m: 80.0,
+    daily_reset: false,
+};
 
 /// Where a bag is in its life.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,8 +463,56 @@ impl LootBags {
 /// with the bag at a kill whose drop counted, and with the login state).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct PlayerLoot {
+    /// The entries of the replicated list.
     tracked: Vec<TrackedLoot>,
+    /// The range of each looted instanced object of `tracked` and `away` that has one, by its
+    /// id.
+    ranges: HashMap<[u8; RAW_ID_LEN], EntryRange>,
+    /// The looted instanced objects whose looter is beyond their range: off the replicated
+    /// list, still locked ([`Self::opened`]).
+    away: Vec<TrackedLoot>,
     limits: LootLimitCounts,
+}
+
+/// How a looted instanced object's tracker entry follows its looter.
+///
+/// Observed (finding D9 "tracker entries out of range", `tracker-range.tsv`: 2,669 early
+/// removals and 560 re-adds of looted entries in 401 retail ledgers): the entry leaves the
+/// replicated list when the looter is farther from it than its slice's `m_aoiRadius` and comes
+/// back when the looter is within it again, at the same distance both ways (`master_lootcontainer`
+/// 80 m: medians 79.3 m and 78.6 m; `master_quest_instanced` 100 m: 99.5 m and 98.5 m); the lock
+/// stays while it is off the list. A re-added entry's `m_lootedTime` is the re-add (median 0.05 s
+/// before its record) and it keeps its reset (545 of 560), except an entry that ends at the daily
+/// reset: whole seconds after the re-add at that reset (finding D10, 12 of 12 such re-adds, the
+/// reset's sub-second part that of the re-add's looted time). The other 3 re-adds were new loots
+/// after the reset (`nightaven` 5303.19 s, 2,377 s later). Inferred: the distance is horizontal
+/// (the AOI grid is a ground grid; the measures above are horizontal).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct EntryRange {
+    /// The object's slice's `m_aoiRadius`, m.
+    pub(super) radius_m: f32,
+    /// Whether the entry ends at the world's daily reset (the lock was capped there, or an elite
+    /// chest's).
+    pub(super) daily_reset: bool,
+}
+
+impl EntryRange {
+    /// Whether a looter at `at` is beyond the range of `entry`.
+    fn beyond(self, entry: &TrackedLoot, at: Position) -> bool {
+        let [x, y, z] = entry.position;
+        Position { x, y, z }.horizontal_distance(at) > self.radius_m
+    }
+}
+
+/// The reset of an entry re-added at Unix ns `looted_ns` that had reset `kept_ns`: under the
+/// reset clock `daily` for an entry that ends at the daily reset, whole seconds after the re-add
+/// at that same reset ([`EntryRange`]); else, or when the daily reset passed within the kept
+/// reset's last second (Inferred: the entry keeps its end), `kept_ns`.
+fn renewed_reset(kept_ns: u64, looted_ns: u64, daily: Option<ResetClock>) -> u64 {
+    daily
+        .map(|clock| clock.end_ns(ResetCycle::Daily, looted_ns))
+        .filter(|renewed| renewed.abs_diff(kept_ns) < SAME_RESET_NS)
+        .unwrap_or(kept_ns)
 }
 
 /// The last byte of a loot limit entry (retail 0 in all 1,406 entries).
@@ -466,13 +531,13 @@ impl PlayerLoot {
     /// The loot of a player that arrives with loot limit counts `counts` (a join or a handoff).
     pub(super) fn with_limits(counts: &[LootLimitCount]) -> Self {
         Self {
-            tracked: Vec::new(),
             limits: LootLimitCounts::from_counts(counts.iter().map(|count| LimitCount {
                 id: count.limit_id.clone(),
                 count: count.count,
                 counted_ns: count.counted_ns,
                 ends_ns: count.ends_ns,
             })),
+            ..Self::default()
         }
     }
 
@@ -578,54 +643,59 @@ impl PlayerLoot {
         )
     }
 
-    /// The player opened loot container `container` at `at` at server time `server_ms`: the
-    /// tracker lists it as looted point-of-interest loot until server time `reset_ms`, and the
-    /// player may not open it again before (craft2 report: retail state 2, type 0, the reset of
-    /// [`nw_content::chest_lockouts`]; an open-world chest is `privileged`, the tutorial chest is
-    /// not). Returns the tracker member with version `version`.
+    /// The player opened the tutorial chest `container` (no interact tag) at `at` at server time
+    /// `server_ms`: the tracker lists it as looted point-of-interest loot until server time
+    /// `reset_ms`, and the player may not open it again before (craft2 report and finding D8:
+    /// retail state 2, type 0, not privileged in 842 of 842 chest entries). The entry follows the
+    /// player by [`TUTORIAL_CHEST_RANGE`]. Returns the tracker member with version `version`.
     pub(super) fn track_opened(
         &mut self,
         container: [u8; RAW_ID_LEN],
         at: Position,
         server_ms: u64,
         reset_ms: u64,
-        privileged: bool,
         version: u64,
     ) -> BundleMember {
-        self.track_looted(
-            TrackedLoot {
-                bag: container,
-                state: LOOT_TAKEN,
-                kind: LOOT_POI,
-                reset_ns: unix_ns(reset_ms),
-                looted_ns: unix_ns(server_ms),
-                privileged,
-                position: [at.x, at.y, at.z],
-                interact_tag: NO_INTERACT_TAG,
-                rarity: NO_PERK_RARITY,
-            },
+        self.track_instanced(
+            container,
+            LOOT_POI,
+            NO_INTERACT_TAG,
+            at,
+            server_ms,
+            reset_ms,
+            Some(TUTORIAL_CHEST_RANGE),
             version,
         )
     }
 
-    /// The player broke quest object `object` (interact tag `tag`) from `at` at server time
-    /// `server_ms`: the tracker lists it as looted until server time `reset_ms` (Observed: retail
-    /// nodules, state 2, type 4, not privileged, the reset 33 s after, the place the player stood
-    /// as its position). Returns the tracker member with version `version`.
-    pub(super) fn track_broken(
+    /// The player gathered instanced object `object` (loot type `kind`, interact tag `tag`) at
+    /// `at` at server time `server_ms`: the tracker lists it as looted until server time
+    /// `reset_ms`, and the player may not gather it again before ([`Self::opened`]); the entry
+    /// follows the player by `range` when given ([`Self::due`]). Observed (finding D8 "per-player
+    /// gather lock", 2,122 entries of retail gathers): state 2, the slice's loot type, never
+    /// privileged, the variant's interact tag CRC (0 for none). Returns the tracker member with
+    /// version `version`.
+    #[allow(clippy::too_many_arguments, reason = "the fields of one tracker entry")]
+    pub(super) fn track_instanced(
         &mut self,
         object: [u8; RAW_ID_LEN],
+        kind: u32,
         tag: u32,
         at: Position,
         server_ms: u64,
         reset_ms: u64,
+        range: Option<EntryRange>,
         version: u64,
     ) -> BundleMember {
+        match range {
+            Some(range) => self.ranges.insert(object, range),
+            None => self.ranges.remove(&object),
+        };
         self.track_looted(
             TrackedLoot {
                 bag: object,
                 state: LOOT_TAKEN,
-                kind: LOOT_QUEST_OBJECT,
+                kind,
                 reset_ns: unix_ns(reset_ms),
                 looted_ns: unix_ns(server_ms),
                 privileged: false,
@@ -637,10 +707,11 @@ impl PlayerLoot {
         )
     }
 
-    /// Lists `entry` in place of any entry of the same bag; the tracker member with version
-    /// `version`.
+    /// Lists `entry` in place of any entry of the same bag, listed or away; the tracker member
+    /// with version `version`.
     fn track_looted(&mut self, entry: TrackedLoot, version: u64) -> BundleMember {
         self.tracked.retain(|loot| loot.bag != entry.bag);
+        self.away.retain(|loot| loot.bag != entry.bag);
         self.tracked.push(entry);
         self.tracker(version)
     }
@@ -654,12 +725,20 @@ impl PlayerLoot {
             .map(|loot| (loot.kind, loot.interact_tag))
     }
 
-    /// Whether the tracker holds loot container `container` as opened: the player may not
-    /// open it until its entry's reset ([`Self::expire`]).
-    pub(super) fn opened(&self, container: &[u8; RAW_ID_LEN]) -> bool {
+    /// Whether the tracker holds object `object` as looted (an opened chest, an instanced
+    /// object gathered), listed or away: the player may not gather it until its entry's reset
+    /// ([`Self::due`]).
+    pub(super) fn opened(&self, object: &[u8; RAW_ID_LEN]) -> bool {
         self.tracked
             .iter()
-            .any(|loot| loot.bag == *container && loot.kind == LOOT_POI)
+            .chain(&self.away)
+            .any(|loot| loot.bag == *object && loot.state == LOOT_TAKEN)
+    }
+
+    /// The replicated list's entry of `bag`, when it names it.
+    #[cfg(test)]
+    pub(super) fn listed(&self, bag: &[u8; RAW_ID_LEN]) -> Option<TrackedLoot> {
+        self.tracked.iter().find(|loot| loot.bag == *bag).copied()
     }
 
     /// Lists bag `bag` of loot type `kind` at `at`, rolled at server time `server_ms`, with the
@@ -706,13 +785,79 @@ impl PlayerLoot {
         self.tracker(version)
     }
 
-    /// The entries whose reset time passed at server time `server_ms` leave the tracker: the
-    /// tracker member with version `version`, or `None` when none left.
-    pub(super) fn expire(&mut self, server_ms: u64, version: u64) -> Option<BundleMember> {
+    /// The tracker at server time `server_ms` for its player at `at`, under the world's reset
+    /// clock `clock`: the entries whose reset time passed leave it, listed or away, and each
+    /// looted instanced object's entry leaves the list beyond its range and comes back within
+    /// it ([`EntryRange`]). Returns the tracker member with version `version` when the list
+    /// changed.
+    pub(super) fn due(
+        &mut self,
+        at: Position,
+        server_ms: u64,
+        clock: Option<ResetClock>,
+        version: u64,
+    ) -> Option<BundleMember> {
+        let expired = self.drop_expired(server_ms);
+        let moved = self.follow(at, server_ms, clock);
+        (expired || moved).then(|| self.tracker(version))
+    }
+
+    /// Drops the entries whose reset time passed at server time `server_ms`, listed or away, and
+    /// their ranges; whether the list lost any.
+    fn drop_expired(&mut self, server_ms: u64) -> bool {
         let now_ns = unix_ns(server_ms);
-        let before = self.tracked.len();
-        self.tracked.retain(|loot| loot.reset_ns > now_ns);
-        (self.tracked.len() != before).then(|| self.tracker(version))
+        let Self {
+            tracked,
+            ranges,
+            away,
+            ..
+        } = self;
+        let before = tracked.len();
+        tracked.retain(|loot| loot.reset_ns > now_ns);
+        away.retain(|loot| loot.reset_ns > now_ns);
+        ranges.retain(|bag, _| {
+            tracked
+                .iter()
+                .chain(away.iter())
+                .any(|loot| loot.bag == *bag)
+        });
+        tracked.len() != before
+    }
+
+    /// Takes each ranged entry off the list when its looter at `at` is beyond its range, and
+    /// lists each away entry again, looted at server time `server_ms` with its renewed reset
+    /// under `clock` ([`renewed_reset`]), when the looter is within it; whether the list changed.
+    fn follow(&mut self, at: Position, server_ms: u64, clock: Option<ResetClock>) -> bool {
+        let Self {
+            tracked,
+            ranges,
+            away,
+            ..
+        } = self;
+        if ranges.is_empty() {
+            return false;
+        }
+        let beyond = |loot: &TrackedLoot| {
+            ranges
+                .get(&loot.bag)
+                .is_some_and(|range| range.beyond(loot, at))
+        };
+        let (left, stayed): (Vec<_>, Vec<_>) =
+            std::mem::take(tracked).into_iter().partition(beyond);
+        let (still_away, back): (Vec<_>, Vec<_>) =
+            std::mem::take(away).into_iter().partition(beyond);
+        let changed = !left.is_empty() || !back.is_empty();
+        *tracked = stayed;
+        *away = still_away;
+        let looted_ns = unix_ns(server_ms);
+        for mut loot in back {
+            let daily = ranges.get(&loot.bag).is_some_and(|range| range.daily_reset);
+            loot.reset_ns = renewed_reset(loot.reset_ns, looted_ns, clock.filter(|_| daily));
+            loot.looted_ns = looted_ns;
+            tracked.push(loot);
+        }
+        away.extend(left);
+        changed
     }
 
     /// The first bag of dropped items the tracker lists.
@@ -1077,12 +1222,18 @@ impl SimWorld {
     }
 
     /// The loot tracker entries whose reset time came at server time `server_ms` leave their
-    /// players' trackers.
+    /// players' trackers, and the looted instanced objects' entries follow their players'
+    /// distance ([`PlayerLoot::due`]).
     pub(super) fn loot_rights_due(&mut self, server_ms: u64) {
-        let mut query = self.world.query::<&mut Player>();
-        for mut player in query.iter_mut(&mut self.world) {
+        let clock = self.content.loot_limits.as_ref().map(|rules| rules.clock);
+        let mut query = self.world.query::<(&mut Player, &Body)>();
+        for (mut player, body) in query.iter_mut(&mut self.world) {
             let version = player.list_version + 1;
-            if let Some(tracker) = player.loot.expire(server_ms, version) {
+            if let Some(tracker) =
+                player
+                    .loot
+                    .due(body.motion.position(), server_ms, clock, version)
+            {
                 player.list_version = version;
                 player.extra_members.push(tracker);
             }
@@ -1307,8 +1458,10 @@ mod tests {
         assert!(loot.holds(&id));
         loot.taken(&id, NOW, 2);
         assert!(!loot.holds(&id));
-        assert_eq!(loot.expire(NOW + LOOTED_KEEP_MS - 1, 3), None);
-        let gone = loot.expire(NOW + LOOTED_KEEP_MS, 3).expect("expired");
+        assert_eq!(loot.due(AT, NOW + LOOTED_KEEP_MS - 1, None, 3), None);
+        let gone = loot
+            .due(AT, NOW + LOOTED_KEEP_MS, None, 3)
+            .expect("expired");
         let MemberState::LootTracker(state) = gone.state else {
             panic!("tracker");
         };
@@ -1321,11 +1474,194 @@ mod tests {
         const RESET_MS: u64 = NOW + 3_600_000;
         let mut loot = PlayerLoot::default();
         assert!(!loot.opened(&CHEST));
-        loot.track_opened(CHEST, AT, NOW, RESET_MS, true, 1);
+        let MemberState::LootTracker(state) = loot.track_opened(CHEST, AT, NOW, RESET_MS, 1).state
+        else {
+            panic!("tracker");
+        };
+        let entry = &state.loot.expect("map").elements[0];
+        assert_eq!(
+            (entry.state, entry.kind, entry.privileged),
+            (LOOT_TAKEN, LOOT_POI, false),
+            "retail: looted point-of-interest loot, not privileged"
+        );
         assert!(loot.opened(&CHEST));
         assert!(!loot.holds(&CHEST), "looted, not waiting for a take");
-        assert_eq!(loot.expire(RESET_MS - 1, 2), None);
-        assert!(loot.expire(RESET_MS, 2).is_some());
+        assert_eq!(loot.due(AT, RESET_MS - 1, None, 2), None);
+        assert!(loot.due(AT, RESET_MS, None, 2).is_some());
         assert!(!loot.opened(&CHEST), "the reset frees it");
+    }
+
+    /// Retail newchar 2026-09-18 282.33 s: the tutorial chest's entry left its opener's list
+    /// about 80 m away, its reset an hour on.
+    #[test]
+    fn the_tutorial_chest_entry_leaves_the_list_beyond_eighty_metres() {
+        const CHEST: [u8; RAW_ID_LEN] = [0x3f; RAW_ID_LEN];
+        const RESET_MS: u64 = NOW + 3_600_000;
+        const AWAY_MS: u64 = NOW + 65_000;
+        let mut loot = PlayerLoot::default();
+        loot.track_opened(CHEST, AT, NOW, RESET_MS, 1);
+        assert_eq!(
+            loot.due(east_of(AT, CHEST_RADIUS_M - 1.0), AWAY_MS, None, 2),
+            None,
+            "within 80 m: listed"
+        );
+        assert!(
+            loot.due(east_of(AT, CHEST_RADIUS_M + 1.0), AWAY_MS, None, 2)
+                .is_some(),
+            "beyond: off the list"
+        );
+        assert_eq!(loot.listed(&CHEST), None);
+        assert!(loot.opened(&CHEST), "still locked");
+    }
+
+    /// The `m_aoiRadius` of `master_lootcontainer`, m.
+    const CHEST_RADIUS_M: f32 = 80.0;
+
+    /// A tracker that lists chest `chest` looted at `AT` at [`NOW`] until `reset_ms`, its
+    /// range the `master_lootcontainer` radius and `daily_reset`.
+    fn ranged_chest(chest: [u8; RAW_ID_LEN], reset_ms: u64, daily_reset: bool) -> PlayerLoot {
+        let mut loot = PlayerLoot::default();
+        loot.track_instanced(
+            chest,
+            LOOT_POI,
+            NO_INTERACT_TAG,
+            AT,
+            NOW,
+            reset_ms,
+            Some(EntryRange {
+                radius_m: CHEST_RADIUS_M,
+                daily_reset,
+            }),
+            1,
+        );
+        loot
+    }
+
+    /// `at` moved `east_m` east.
+    fn east_of(at: Position, east_m: f32) -> Position {
+        Position {
+            x: at.x + east_m,
+            ..at
+        }
+    }
+
+    /// Finding D9 "tracker entries out of range": a chest's entry (radius 80 m) leaves the list
+    /// beyond the radius, stays locked, and comes back within it looted at the return with its
+    /// reset kept (545 of 560 retail re-adds).
+    #[test]
+    fn a_ranged_entry_leaves_the_list_beyond_its_radius_and_comes_back_within_it() {
+        const CHEST: [u8; RAW_ID_LEN] = [0x3d; RAW_ID_LEN];
+        const RESET_MS: u64 = NOW + 3_600_000;
+        const FAR_MS: u64 = NOW + 1_000;
+        const BACK_MS: u64 = NOW + 30_123;
+        let mut loot = ranged_chest(CHEST, RESET_MS, false);
+        let near = east_of(AT, CHEST_RADIUS_M - 1.0);
+        let far = east_of(AT, CHEST_RADIUS_M + 1.0);
+        assert_eq!(
+            loot.due(near, FAR_MS, None, 2),
+            None,
+            "within the radius: listed"
+        );
+        let gone = loot.due(far, FAR_MS, None, 2).expect("the list changed");
+        let MemberState::LootTracker(state) = gone.state else {
+            panic!("tracker");
+        };
+        assert!(state.loot.expect("map").elements.is_empty(), "off the list");
+        assert!(loot.opened(&CHEST), "still locked away");
+        assert_eq!(
+            loot.due(far, FAR_MS + 1, None, 3),
+            None,
+            "no change while away"
+        );
+        assert!(loot.due(AT, BACK_MS, None, 3).is_some());
+        let entry = loot.listed(&CHEST).expect("listed again");
+        assert_eq!(entry.looted_ns, unix_ns(BACK_MS), "looted at the return");
+        assert_eq!(entry.reset_ns, unix_ns(RESET_MS), "the same reset");
+    }
+
+    /// An entry whose reset passes while its looter is away leaves the tracker without a list
+    /// change, and the return does not list it again.
+    #[test]
+    fn an_away_entry_whose_reset_passes_is_gone() {
+        const CHEST: [u8; RAW_ID_LEN] = [0x3e; RAW_ID_LEN];
+        const RESET_MS: u64 = NOW + 60_000;
+        let mut loot = ranged_chest(CHEST, RESET_MS, false);
+        let far = east_of(AT, 2.0 * CHEST_RADIUS_M);
+        assert!(loot.due(far, NOW + 1, None, 2).is_some());
+        assert_eq!(
+            loot.due(far, RESET_MS, None, 3),
+            None,
+            "the list had it no more"
+        );
+        assert!(!loot.opened(&CHEST), "the reset frees it");
+        assert_eq!(
+            loot.due(AT, RESET_MS + 1, None, 3),
+            None,
+            "not listed again"
+        );
+        assert_eq!(loot.listed(&CHEST), None);
+    }
+
+    /// Finding D10 (12 of 12 retail re-adds of capped entries, `CATACOMBS3` 856.04 s and
+    /// 897.39 s: reset 52,067.0 s, then 52,025.0 s after the looted time, each at 03:00 UTC plus
+    /// the looted time's sub-second part): an entry that ends at the daily reset comes back
+    /// ending whole seconds after the return at that reset.
+    #[test]
+    fn a_capped_entry_comes_back_ending_whole_seconds_after_the_return() {
+        use nw_content::resets::ServerRegion;
+        const CHEST: [u8; RAW_ID_LEN] = [0x3f; RAW_ID_LEN];
+        /// Sunday 2026-10-25 04:00 UTC, Unix ms: the EU Central reset (05:00 CET).
+        const RESET_UNIX_MS: u64 = 1_792_900_800_000;
+        /// The sub-second part of the looter's return, ms.
+        const BACK_SUBSECOND_MS: u64 = 218;
+        /// The return, Unix ms: Saturday 2026-10-24 12:30 UTC and the sub-second part.
+        const BACK_UNIX_MS: u64 = 1_792_845_000_000 + BACK_SUBSECOND_MS;
+        const NS_PER_SECOND: u64 = 1_000_000_000;
+        let clock = ResetClock {
+            region: ServerRegion::EuCentral,
+        };
+        let epoch = crate::server::SERVER_EPOCH_UNIX_MS;
+        let mut loot = ranged_chest(CHEST, RESET_UNIX_MS - epoch, true);
+        assert!(
+            loot.due(east_of(AT, 2.0 * CHEST_RADIUS_M), NOW + 1, Some(clock), 2)
+                .is_some()
+        );
+        assert!(loot.due(AT, BACK_UNIX_MS - epoch, Some(clock), 3).is_some());
+        let entry = loot.listed(&CHEST).expect("listed again");
+        assert_eq!(
+            entry.reset_ns,
+            unix_ns(RESET_UNIX_MS + BACK_SUBSECOND_MS - epoch),
+            "the reset with the return's sub-second part"
+        );
+        assert_eq!(
+            (entry.reset_ns - entry.looted_ns) % NS_PER_SECOND,
+            0,
+            "whole seconds after the return"
+        );
+    }
+
+    /// Inferred: a capped entry that comes back after the daily reset's whole second but
+    /// before its own end keeps that end (it does not take the next day's reset).
+    #[test]
+    fn a_return_within_the_resets_last_second_keeps_the_reset() {
+        use nw_content::resets::ServerRegion;
+        /// Sunday 2026-10-25 04:00 UTC, Unix ns: the EU Central reset (05:00 CET).
+        const RESET_UNIX_NS: u64 = 1_792_900_800_000_000_000;
+        /// The kept end and the return, ns after the reset.
+        const KEPT_AFTER_NS: u64 = 900_000_000;
+        const BACK_AFTER_NS: u64 = 500_000_000;
+        let clock = ResetClock {
+            region: ServerRegion::EuCentral,
+        };
+        let kept_ns = RESET_UNIX_NS + KEPT_AFTER_NS;
+        assert_eq!(
+            renewed_reset(kept_ns, RESET_UNIX_NS + BACK_AFTER_NS, Some(clock)),
+            kept_ns
+        );
+        assert_eq!(
+            renewed_reset(kept_ns, RESET_UNIX_NS, None),
+            kept_ns,
+            "no clock"
+        );
     }
 }

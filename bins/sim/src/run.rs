@@ -29,7 +29,7 @@ use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 use nw_sim_core::{LevelGround, level_bounds};
 use nw_world::WorldFile;
 use nw_world::camps::{CampSlices, camp_slices_path};
-use nw_world::catacomb_tiles::{CatacombTiles, catacomb_tiles_path};
+use nw_world::catacomb_tiles::{CatacombSolids, CatacombTiles, catacomb_tiles_path};
 use nw_world::claim_plots::{ClaimPlots, claim_plots_path};
 use nw_world::collision::{LevelCollision, QueryFilter, collision_file_path};
 use nw_world::collision_index::{CollisionIndex, NavMarkIndex};
@@ -364,7 +364,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
         tutorial_level,
         &world_file,
         gameplay,
-        config.loot_limits,
+        config.resets,
     );
     content.asset_solids =
         AssetSolids::of(&deferred_level, &collision, &content.tutorial_level.assets);
@@ -397,6 +397,14 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
                 CatacombTiles::default()
             }
         };
+    content.catacomb_solids =
+        CatacombSolids::of(&deferred_level, &collision, &content.catacomb_tiles);
+    if !content.catacomb_tiles.by_variation.is_empty() {
+        tracing::info!(
+            art_tiles = content.catacomb_solids.art_tiles(),
+            "catacombs tile solids"
+        );
+    }
     content.camp_slices = match CampSlices::load(&camp_slices_path(&config.content_dir, &build)) {
         Ok(slices) => {
             tracing::info!(
@@ -503,6 +511,20 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
                 Vec::new()
             }
         };
+    content.level_doors = match nw_content::level_doors::LevelDoors::load(
+        &config.content_dir,
+        &build,
+        &config.level,
+    ) {
+        Ok(doors) => {
+            tracing::info!(doors = doors.len(), "level doors");
+            doors
+        }
+        Err(error) => {
+            tracing::info!(%error, "no level doors: no door capital of this level is shown");
+            nw_content::level_doors::LevelDoors::default()
+        }
+    };
     content.war_forts = match nw_content::war_forts::WarForts::load(&config.content_dir, &build) {
         Ok(forts) => {
             tracing::info!(forts = forts.len(), "war forts");
@@ -511,6 +533,19 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
         Err(error) => {
             tracing::warn!(%error, "no war forts table: no war instance runs on this sim");
             nw_content::war_forts::WarForts::default()
+        }
+    };
+    content.outpost_structures = match nw_content::outpost_structures::OutpostStructures::load(
+        &config.content_dir,
+        &build,
+    ) {
+        Ok(structures) => {
+            tracing::info!(slices = structures.len(), "outpost structures");
+            structures
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no outpost structures table: Outpost Rush has no structures");
+            nw_content::outpost_structures::OutpostStructures::default()
         }
     };
     content.invasion_forts =
@@ -533,6 +568,18 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             Err(error) => {
                 tracing::warn!(%error, "no spell slices: a cast spell shows nothing");
                 nw_content::spell_slices::SpellSlices::default()
+            }
+        };
+    content.effect_areas =
+        match nw_world::effect_areas::EffectAreas::load(&config.content_dir, &build) {
+            Ok(mut areas) => {
+                areas.levels.retain(|level, _| *level == config.level);
+                tracing::info!(areas = areas.len(), "status effect areas of the level and spells");
+                areas
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no status effect areas: no level area or spell gas afflicts");
+                nw_world::effect_areas::EffectAreas::default()
             }
         };
     let instances_path =

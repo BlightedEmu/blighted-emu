@@ -59,6 +59,12 @@
 //! finds the roster changes in its wars read ([`super::wars::Wars::read`]) and tells its own
 //! players; a permission change is the roster's stored permission (a company rank is no roster
 //! change); the sim's first read tells nothing (the roster was as it is).
+//!
+//! A player that gets a roster place while its war's instance is open gets its raid invite at
+//! once (Observed, `RS_offensive_war`: sign-up 39.067 s, the pre-raid status selected 63.838 s,
+//! the inbound raid invite 63.868 s, the accept 3495 and the loading screen 88.406 s and 88.459
+//! s, the war's start 843.803 s); an invasion's late sign-up too, once the director placed it
+//! (Inferred: no invasion ledger holds one).
 
 use std::collections::HashMap;
 
@@ -99,6 +105,9 @@ struct WarMove {
 pub(super) struct SimRaids {
     inputs: Vec<SocialInput>,
     war_moves: HashMap<Uuid, WarMove>,
+    /// The open instances of the wars without a result, by war: the instance, its sim and its
+    /// phase (the director's news), for the invites of players that get a roster place later.
+    open_war_instances: HashMap<Uuid, (Uuid, SimSlot, u64)>,
     /// The raid groups of the players of this sim's expedition or catacombs run.
     run_groups: HashMap<Uuid, u8>,
 }
@@ -168,6 +177,74 @@ impl SimWorld {
             activity: war,
         });
         self.invasion_invited(entity, war);
+    }
+
+    /// The director opened war `war`'s instance `target`: every roster player of this sim, or
+    /// only those of `placed`, gets its raid invite ([`Self::invite_to_war_raid`]) with its
+    /// side's arrival place; the instance is kept until the war has a result, so that a player
+    /// who gets a roster place later gets its invite then
+    /// ([`Self::invite_late_roster_players`]).
+    pub(super) fn invite_war_roster(
+        &mut self,
+        war: Uuid,
+        target: (Uuid, SimSlot, u64),
+        placed: Option<&[Uuid]>,
+    ) {
+        let wars = &self.wars;
+        self.raids
+            .open_war_instances
+            .retain(|open, _| wars.war(*open).is_some_and(|war| war.result.is_none()));
+        let Some(known) = self.wars.war(war).cloned() else {
+            tracing::warn!(%war, "war instance of a war this sim has not read");
+            return;
+        };
+        if known.result.is_some() {
+            return;
+        }
+        self.raids.open_war_instances.insert(war, target.clone());
+        let content = std::sync::Arc::clone(&self.content);
+        let Some(fort) = content.war_forts.fort(known.territory) else {
+            return;
+        };
+        let players: Vec<(Entity, Uuid)> = self
+            .by_connection
+            .values()
+            .filter_map(|entity| Some((*entity, self.world.get::<Player>(*entity)?.character)))
+            .filter(|(_, character)| placed.is_none_or(|placed| placed.contains(character)))
+            .collect();
+        for (entity, character) in players {
+            let Some(side) = known
+                .roster()
+                .find(|(roster, _)| *roster == character)
+                .map(|(_, side)| side)
+            else {
+                continue;
+            };
+            let Some([x, y, z]) = fort.arrival(side) else {
+                continue;
+            };
+            self.invite_to_war_raid(entity, war, target.clone(), Position { x, y, z });
+        }
+    }
+
+    /// The players that got a roster place from `before` to the wars read now, in a war whose
+    /// instance is open, get their raid invite at once (module doc).
+    pub(super) fn invite_late_roster_players(&mut self, before: &[TerritoryWar]) {
+        if before.is_empty() {
+            return;
+        }
+        let open: Vec<(Uuid, (Uuid, SimSlot, u64))> = self
+            .raids
+            .open_war_instances
+            .iter()
+            .map(|(war, target)| (*war, target.clone()))
+            .collect();
+        for (war, target) in open {
+            let placed = newly_placed(before, self.wars.all(), war);
+            if !placed.is_empty() {
+                self.invite_war_roster(war, target, Some(&placed));
+            }
+        }
     }
 
     /// The social service's answers to this sim's raid invites: an accepting player of a war
@@ -354,6 +431,25 @@ fn roster_permission(war: &TerritoryWar, character: Uuid) -> Option<u8> {
         })
 }
 
+/// The characters with a roster place in war `war` of `after` that had none in `before` (a
+/// war missing from `before` places nobody: the sim had not read it).
+fn newly_placed(before: &[TerritoryWar], after: &[TerritoryWar], war: Uuid) -> Vec<Uuid> {
+    let (Some(old), Some(now)) = (
+        before.iter().find(|known| known.war == war),
+        after.iter().find(|known| known.war == war),
+    ) else {
+        return Vec::new();
+    };
+    now.signups
+        .iter()
+        .map(|signup| signup.character)
+        .filter(|character| {
+            roster_permission(now, *character).is_some()
+                && roster_permission(old, *character).is_none()
+        })
+        .collect()
+}
+
 /// The pre-raid statuses of the roster changes from `before` to `after`, as (character, status,
 /// war): of each war without a result that is no invasion (module doc).
 pub(super) fn pre_raid_statuses(
@@ -468,6 +564,67 @@ mod tests {
             "the move joins the raid: {inputs:?}"
         );
         assert!(world.raids.war_moves.is_empty());
+    }
+
+    /// A made-up fort of the test war's territory with the attacker side's arrival place.
+    const LATE_FORT: &str = r#"{"forts": [{
+        "territory": 8, "frame": [5632.0, 5120.0, 512.0, 512.0],
+        "arrivals": [{"side": 1, "position": [6001.5, 5291.0, 56.6]}],
+        "siege": {"asset": "11111111111111111111111111111111", "gde_ref": "22222222222222222222222222222222",
+                  "card_component": 0, "state_component": 2},
+        "points": []}]}"#;
+
+    #[test]
+    fn a_player_placed_after_the_instance_opened_gets_its_invite_at_the_next_read() {
+        let mut world = world_with_spawns(Vec::new());
+        world.content = std::sync::Arc::new(crate::player_content::PlayerContent {
+            war_forts: nw_content::war_forts::WarForts::parse(LATE_FORT).expect("forts"),
+            ..crate::player_content::PlayerContent::default()
+        });
+        let admit = admit_at(PLAYER, 0.0, true);
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let signed_up = war(vec![signup(admit.character, None, None)]);
+        let war_id = signed_up.war;
+        world.wars.read(Ok(vec![signed_up.clone()]));
+        world.invite_war_roster(war_id, target(), None);
+        assert!(
+            world.take_raid_inputs().is_empty(),
+            "a sign-up without a roster place gets no invite at the opening"
+        );
+
+        let placed = war(vec![signup(admit.character, None, Some((ROSTER_GROUP, 0)))]);
+        let before = world.wars.read(Ok(vec![placed.clone()]));
+        world.invite_late_roster_players(&before);
+        let inputs = world.take_raid_inputs();
+        assert!(
+            matches!(
+                inputs.as_slice(),
+                [SocialInput::RaidInvite { character, group, activity, .. }]
+                    if *character == admit.character && *group == ROSTER_GROUP && *activity == war_id
+            ),
+            "the place brings the invite: {inputs:?}"
+        );
+        let open = world
+            .raids
+            .war_moves
+            .get(&admit.character)
+            .expect("its move");
+        assert_eq!(
+            open.arrival,
+            Position {
+                x: 6001.5,
+                y: 5291.0,
+                z: 56.6
+            },
+            "the side's arrival place"
+        );
+
+        let before = world.wars.read(Ok(vec![placed]));
+        world.invite_late_roster_players(&before);
+        assert!(
+            world.take_raid_inputs().is_empty(),
+            "an unchanged roster invites nobody again"
+        );
     }
 
     #[test]

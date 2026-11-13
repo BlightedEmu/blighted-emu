@@ -1858,9 +1858,8 @@ mod tests {
         #[test]
         fn a_mount_food_of_quick_slot_3_feeds_the_horse_up_to_the_daily_limit() {
             use nw_content::item_rules::{ConsumableRow, ItemRuleRow, ItemRuleSource, ItemRules};
-            use nw_content::loot_limits::{
-                LimitRow, LootLimitRules, LootLimits, ResetClock, Weekday,
-            };
+            use nw_content::loot_limits::{LimitRow, LootLimitRules, LootLimits};
+            use nw_content::resets::{ResetClock, ServerRegion};
             use nw_content::progression::{Progression, ProgressionSource};
             use nw_content::rewards::{EventGrant, EventGrants};
             use nw_content::status_effects::{
@@ -1948,8 +1947,7 @@ mod tests {
                     replicated: true,
                 }]),
                 clock: ResetClock {
-                    hour_utc: 3,
-                    weekly_day: Weekday::Tuesday,
+                    region: ServerRegion::EuCentral,
                 },
             });
             content.progression = Progression::default().with_progressions([ProgressionSource {

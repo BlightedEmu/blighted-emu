@@ -25,6 +25,8 @@ use crate::character_points::CharacterPoints;
 
 /// The level table (`javelindata_xpamountsbylevel`).
 pub const LEVEL_TABLE: &str = "XPLevels";
+/// What the shown level adds to the zero-based level.
+const SHOWN_LEVEL_OFFSET: u32 = 1;
 /// The rank table of the weapon masteries (`javelindata_weaponmastery`).
 pub const WEAPON_MASTERY_RANK_TABLE: &str = "WeaponMastery";
 
@@ -461,6 +463,13 @@ impl Progression {
         u32::try_from(reached.saturating_sub(1)).unwrap_or(u32::MAX)
     }
 
+    /// The level of a total of `experience` as the client shows it and as mob levels count:
+    /// one-based ([`Self::level_of`] + 1; Observed, retail kill level gaps, findings
+    /// `2026-11-13-kill-xp-rounding.md`).
+    pub fn shown_level_of(&self, experience: u32) -> u32 {
+        self.level_of(experience).saturating_add(SHOWN_LEVEL_OFFSET)
+    }
+
     /// The total experience at which `level` (zero-based) starts; `None` above the top level.
     pub fn experience_for_level(&self, level: u32) -> Option<u32> {
         self.level_starts.get(usize::try_from(level).ok()?).copied()
@@ -686,6 +695,12 @@ pub(crate) mod tests {
         // Retail: one gain from level 0 to 2.
         assert_eq!(progression.level_of(670), 2);
         assert_eq!(progression.level_of(u32::MAX), 5);
+        assert_eq!(
+            progression.shown_level_of(0),
+            1,
+            "the first level shows as 1"
+        );
+        assert_eq!(progression.shown_level_of(150), 2);
         assert_eq!(progression.max_level(), 5);
         assert_eq!(progression.experience_for_level(3), Some(1080));
         assert_eq!(progression.experience_for_level(6), None);

@@ -102,17 +102,22 @@ pub struct GameEventEntry {
     pub time_ns: u64,
     /// CRC-32 of the lowercase `EventID` (`game_event_data`).
     pub event: u32,
-    /// A big-endian `f32` (Inferred: the experience; `Chart_Location` 75 to 400,
-    /// `Read_LoreItem` 120 to 710, 1.0 on kills).
+    /// A big-endian `f32` (name Unknown; `Chart_Location` 75 to 400, `Read_LoreItem` 120 to
+    /// 710; on kills the killer's share: 1.0 alone, 0.7 in a group of 2 and 0.6 of 3 in the
+    /// catacombs ledgers; 1.0 on gathers, salvages and game mode end events).
     pub amount_a: f32,
     /// A big-endian `f32` (name Unknown; retail 1.0).
     pub amount_b: f32,
-    /// A big-endian `u32` (name Unknown; `KillEvent` 1012 to 1309, `SalvageCoinGrantT5` 300).
+    /// A big-endian `u32`: the coins (Observed: `SalvageCoinGrantT2` 25 = its `CurrencyReward`,
+    /// `CaptureTheFlag_T4` 25,000 = the wallet's gain, a kill's `KillCurrency` x its creature
+    /// type's `Currency`, `MSQ5-lv25` 1758.286 s +470 in the wallet).
     pub value_a: u32,
-    /// A flag (name Unknown; true on 1,807 of 28,418 kills).
+    /// A flag (name Unknown; true on 1,807 of 28,418 kills and on the 11 capture the flag and
+    /// Outpost Rush end events).
     pub flag: bool,
-    /// A big-endian `u32` (Inferred: the territory standing; `Chart_Location` 50 to 56, its
-    /// `TerritoryStanding` column is 50).
+    /// A big-endian `u32`: the territory standing before the territory's multiplier (Observed:
+    /// `Chart_Location` 50 to 56, its `TerritoryStanding` column is 50; kills 5 with a standing
+    /// gain of 15 under multiplier 3).
     pub standing: u32,
     /// A big-endian `u32` (name Unknown; retail 0).
     pub value_c: u32,
@@ -124,13 +129,16 @@ pub struct GameEventEntry {
     pub byte_a: u8,
     /// A byte (name Unknown; retail 0).
     pub byte_b: u8,
-    /// A big-endian `u32` (name Unknown; kills 0, 10 or 15).
+    /// A big-endian `u32`: the azoth (Observed: kills 10 or 15 = `KillAzoth`, `CaptureTheFlag_T4`
+    /// 125 = `WarAzoth` x `Azoth`).
     pub value_f: u32,
     /// A big-endian `u16` (Inferred: the territory id; 0 outside a territory).
     pub territory: u16,
-    /// A big-endian `u32` (name Unknown; kills 0 or 15).
+    /// A big-endian `u32`: the season experience (Observed: `Arena3v3_Win_3_Round` 5 = its
+    /// `SeasonsXp`, `CaptureTheFlag_T4` 15 = its `SeasonsXpModifier`).
     pub value_g: u32,
-    /// A big-endian `u32` (name Unknown; retail 0).
+    /// A big-endian `u32`: the umbral shards (Observed: the event's `UmbralCurrency`,
+    /// `CaptureTheFlag_T4` 150, `CatacombsKillEvent_Boss_01` 10).
     pub value_h: u32,
 }
 

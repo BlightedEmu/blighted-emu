@@ -14,6 +14,7 @@ mod arena;
 mod character;
 mod conflicts;
 mod connect;
+mod control_points;
 mod consumable_cooldowns;
 mod entitlements;
 mod entity;
@@ -28,11 +29,13 @@ mod migrate;
 mod mounts;
 mod music;
 mod notifications;
+mod player_raids;
 mod position;
 mod privacy;
 mod progression;
 mod quests;
 mod recipe_cooldowns;
+mod rested;
 mod seasons;
 mod session;
 mod social;
@@ -40,6 +43,7 @@ mod social_graph;
 mod stats;
 mod status_effects;
 mod territory;
+mod town_projects;
 mod trading_post;
 mod travel;
 mod wars;
@@ -65,11 +69,16 @@ pub use character::{
     save_changed_look, save_published_look,
 };
 pub use conflicts::{
-    Declaration, LotteryDraw, LotteryEntry, TerritoryConflict, WAR_DECLARATION_COST, WarRefusal,
-    WarRequest, add_influence, advance_conflicts, declare_in_lottery, territory_conflicts,
-    war_cost,
+    Declaration, LotteryDraw, LotteryEntry, TerritoryConflict, WAR_DEC_THRESHOLD_POINTS,
+    WAR_DECLARATION_COST, WarRefusal, WarRequest, add_influence, advance_conflicts,
+    declare_in_lottery, territory_conflicts, war_cost,
 };
 pub use connect::{DatabaseConfig, GlobalDatabase, connect, connect_lazy, connect_options};
+pub use control_points::{
+    ControlPoint, FIRST_TOWER_POINT, FORT_EXPERIENCE_BONUS_PERCENT, FORT_LOCK_MS, FORT_POINTS,
+    RACE_WINDOW_MS, TOWER_BONUS_PERCENT, TOWER_INFLUENCE_POINTS, TOWERS_PER_TERRITORY,
+    control_points, in_race_window, is_tower, store_control_point, with_bonus,
+};
 pub use consumable_cooldowns::SavedConsumableCooldown;
 pub use entitlements::{
     AccountConsumable, AccountEntitlement, Purchase, Wallet, account_consumables,
@@ -96,6 +105,7 @@ pub use migrate::{GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 pub use mounts::{DYE_LEN, SavedMount, SavedMounts};
 pub use music::SavedMusic;
 pub use notifications::SavedNotifications;
+pub use player_raids::{PlayerRaidRecord, delete_player_raid, load_player_raids, save_player_raid};
 pub use position::{SaveOutcome, SavedPosition, character_position, save_character_position};
 pub use privacy::{
     AccountPrivacySetting, PRIVACY_EVERYONE, PRIVACY_FRIEND_REQUESTS, PRIVACY_FRIENDS,
@@ -108,6 +118,7 @@ pub use progression::{
 };
 pub use quests::{SavedQuests, character_quests, save_character_quests};
 pub use recipe_cooldowns::SavedRecipeCooldown;
+pub use rested::SavedRested;
 pub use seasons::{
     SEASON_PASS_PROGRESSION, SavedAccountSeason, SavedCard, SavedSeason, account_season,
     save_account_season,
@@ -134,6 +145,11 @@ pub use status_effects::SavedStatusEffect;
 pub use territory::{
     TerritoryOwner, UPKEEP_INTERVAL_MS, UPKEEP_PAYABLE_BEFORE_MS, clear_territory_owner,
     set_territory_owner, territory_claim_counts, territory_owners,
+};
+pub use town_projects::{
+    PROJECT_ACTIVE, PROJECT_BLOCKING, PROJECT_CANCELLED, PROJECT_COMPLETED, PROJECT_EXPIRED,
+    ProjectProgress, ProjectRefusal, ProjectStart, ProjectStarted, TownProject, add_project_points,
+    advance_town_projects, cancel_town_project, start_town_project, town_projects,
 };
 pub use trading_post::{
     CharacterOrders, Completed, Delivery, DeliveryNotice, MAX_COUNTED_MATCHES, NewOrder, Order,

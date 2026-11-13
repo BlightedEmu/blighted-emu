@@ -783,6 +783,9 @@ impl QuestDrop {
 struct Task {
     id: String,
     kind: TaskKind,
+    /// Its row's `InteractTag`, of any task type: while the task is active, the interacts with
+    /// this tag that are only on quest are open to the player ([`ObjectiveRun::enables_interact`]).
+    interact_tag: Option<String>,
     stay_active: bool,
     parent: Option<usize>,
     children: Vec<usize>,
@@ -1436,6 +1439,7 @@ impl ObjectiveTree {
         self.tasks.push(Task {
             id: row.task_id.clone(),
             kind: kind_of(row),
+            interact_tag: row.interact_tag.clone().filter(|tag| !tag.is_empty()),
             stay_active: row.stay_active,
             parent,
             children: Vec::new(),
@@ -2034,6 +2038,25 @@ impl ObjectiveRun {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Whether an active task (a container too) names interact tag `tag` (any case): an
+    /// interact with that tag that is only on quest is open to the player then. Observed
+    /// (client, finding 2026-11-13 "gather progress and quest interacts"): each objective task
+    /// answers for its own `InteractTag` while it is active, whatever its type (646 of the 919
+    /// tags a task names are on `TaskGameEvent` rows, such as `IO_0513_LighthouseLure`).
+    pub fn enables_interact(&self, tag: &str) -> bool {
+        self.tree
+            .tasks
+            .iter()
+            .zip(&self.states)
+            .any(|(task, state)| {
+                matches!(state, TaskState::Active { .. })
+                    && task
+                        .interact_tag
+                        .as_deref()
+                        .is_some_and(|own| own.eq_ignore_ascii_case(tag))
+            })
     }
 
     /// Whether task `id` waits.
@@ -2979,6 +3002,34 @@ pub(crate) mod tests {
         assert!(!run.is_done("Enter"), "another game mode");
         run.event(Event::GameModeEntered("dungeonamrine"), 0);
         assert!(run.finished(), "entering its game mode ends it");
+    }
+
+    #[test]
+    fn an_active_task_of_any_type_opens_the_quest_interacts_of_its_tag() {
+        // Build 25810808: `0511_0101_d_01_01_GameEvent_0513_LighthouseLure_interact` waits for
+        // the lure's game event and names the lure's interact tag.
+        const LURE_TAG: &str = "IO_0513_LighthouseLure";
+        const LURE_EVENT: &str = "0513_LighthouseLure_interact";
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["Lure", "After"]),
+            TaskRow {
+                kill_enemy_type: Some(LURE_EVENT.to_owned()),
+                interact_tag: Some(LURE_TAG.to_owned()),
+                target_qty: Some(1),
+                ..row("Lure", "TaskGameEvent")
+            },
+            with_item("After", "TaskEquipItem", "SwordT1"),
+        ];
+        let tree = Arc::new(TaskBook::new(rows).tree("Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        assert!(run.enables_interact(LURE_TAG));
+        assert!(run.enables_interact("io_0513_lighthouselure"), "any case");
+        assert!(!run.enables_interact("IO_0511_PowderkegA"));
+        run.event(Event::GameEvent(LURE_EVENT), 0);
+        assert!(
+            !run.enables_interact(LURE_TAG),
+            "a done task opens its interacts no more"
+        );
     }
 
     #[test]
@@ -5175,7 +5226,12 @@ pub(crate) mod tests {
             })
             .expect("the tablet is a quest object");
         assert!(tablet.drops, "a weapon hit breaks it for its drops");
-        assert_eq!((tablet.id, tablet.loot_tag), (Some(TABLET_ID), TABLET_TAG));
+        assert_eq!(tablet.id, Some(TABLET_ID));
+        let tag = crate::player_content::level_interact_tags(&bundle.tables, &world)
+            .of_interaction(TABLET_ID, Some(lowercase_crc32(TABLET)))
+            .first()
+            .map(|tag| lowercase_crc32(tag));
+        assert_eq!(tag, Some(TABLET_TAG), "its tracker entry's tag");
         let book = TaskBook::new(rows);
         let tree = Arc::new(book.tree(ROOT).expect("the tablet quest"));
         let kill_types = KillTypes::from_tables(&bundle.tables);

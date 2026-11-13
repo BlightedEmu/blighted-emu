@@ -1045,6 +1045,7 @@ impl SimWorld {
     ) {
         let replaced = self.wars.read(read);
         self.send_pre_raid_statuses(&replaced);
+        self.invite_late_roster_players(&replaced);
         for answer in answers {
             match answer {
                 WarAnswer::Quiet => {}

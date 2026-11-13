@@ -16,7 +16,7 @@ pub const WORLD_MAGIC: [u8; 4] = *b"NWWF";
 pub const WORLD_FORMAT_VERSION: u16 = 1;
 /// Version of the record types. Raise it when any type in `records` changes; the golden test
 /// in this module fails until it is raised.
-pub const WORLD_SCHEMA_VERSION: u32 = 8;
+pub const WORLD_SCHEMA_VERSION: u32 = 9;
 /// Header fields of the world file.
 pub const WORLD_CONTAINER: ContainerSpec = ContainerSpec {
     magic: WORLD_MAGIC,
@@ -56,8 +56,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use nw_content::container::encode_container;
+    use nw_content::gathering::InstancedObject;
 
     use super::*;
+    use crate::instanced_loot::InstancedGather;
     use crate::interact_tags::{InteractTagged, TagOwner};
     use crate::records::*;
     use crate::slice_data::SpawnedSlice;
@@ -90,7 +92,8 @@ mod tests {
         129, 1, 1, 120, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 104, 1, 1, 99, 0, 0, 128, 63,
         0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 192, 63, 200, 1, 2, 0, 1, 103, 1, 1, 116, 1, 135, 131,
         134, 140, 152, 176, 224, 192, 129, 1, 1, 1, 117, 1, 134, 128, 128, 128, 8, 1, 0, 1, 0, 1,
-        1, 135, 128, 128, 128, 8, 1, 0, 1, 0, 1, 1, 1, 113, 1, 0, 1, 0, 1,
+        1, 135, 128, 128, 128, 8, 1, 0, 1, 0, 1, 1, 1, 113, 1, 0, 1, 0, 1, 2, 0, 1, 103, 128, 1, 1,
+        0, 0, 160, 66, 1, 135, 131, 134, 140, 152, 176, 224, 192, 129, 1, 129, 1, 1, 0, 0, 200, 66,
     ];
 
     /// One record of every kind. Every integer is 128 or more and every optional field is set,
@@ -260,6 +263,22 @@ mod tests {
                     window,
                 }],
             },
+            instanced_gathers: vec![
+                InstancedGather {
+                    owner: TagOwner::Capital("g".to_owned()),
+                    object: InstancedObject {
+                        loot_type: 128,
+                        aoi_radius_m: Some(80.0),
+                    },
+                },
+                InstancedGather {
+                    owner: TagOwner::Spawned(SPAWNED_ID),
+                    object: InstancedObject {
+                        loot_type: 129,
+                        aoi_radius_m: Some(100.0),
+                    },
+                },
+            ],
         }
     }
 

@@ -1115,6 +1115,9 @@ impl MobTimeline {
             facing: turn,
             scope,
             awake: first,
+            // The guard's segments come from the mob's guard, not its timeline
+            // ([`super::members::mob_group`]).
+            stamina_segments: None,
         }
     }
 }

@@ -63,6 +63,10 @@ mod abilities;
 mod ability_instances;
 mod admin;
 mod afk;
+mod afflictions;
+mod effect_areas;
+mod expedition_mode;
+mod expedition_scripts;
 mod arena_match;
 mod asset_script;
 mod attack;
@@ -73,6 +77,8 @@ mod catacombs;
 mod charms;
 mod claim_entities;
 mod combat_status;
+mod company_looks;
+mod control_points;
 mod conversation;
 mod crafting;
 pub(crate) mod day_night;
@@ -87,6 +93,7 @@ mod faction;
 mod faction_board;
 mod fall_damage;
 mod fishing;
+mod game_event_log;
 mod game_mode;
 mod game_mode_entity;
 mod gates;
@@ -106,6 +113,7 @@ mod item_calls;
 mod kill_rewards;
 pub(crate) mod land_claims;
 mod level_assets;
+mod level_doors;
 mod level_flow;
 pub mod locked_doors;
 mod loot_bag;
@@ -123,6 +131,8 @@ mod outpost_rush;
 mod outpost_rush_boss;
 mod outpost_rush_doors;
 mod outpost_rush_events;
+mod outpost_rush_structures;
+mod outpost_rush_summons;
 mod passives;
 mod points;
 mod progression;
@@ -135,6 +145,7 @@ mod quick_course;
 mod raids;
 mod repair;
 mod replica;
+mod rested;
 mod revive;
 mod rolled_loot;
 mod salvage;
@@ -156,6 +167,7 @@ mod storage_search;
 pub(crate) mod store_purchase;
 mod supply_generators;
 mod title_choice;
+mod town_projects;
 mod town_props;
 mod tradeskill;
 mod trading_post_cards;
@@ -172,7 +184,7 @@ use asset_script::Step;
 use combat_status::CombatTimer;
 use encounter::{BAG_PREFIX, Order, Shove, Tutorial};
 pub(crate) use gathering::DepletedNode;
-use gathering::{GATHERABLE_ENTITY_BASE, Nodes, OpenGather};
+use gathering::{GATHERABLE_ENTITY_BASE, KeptGathers, Nodes, OpenGather};
 use gear::{Gear, Stow, unix_ns};
 use level_assets::{ASSET_ENTITY_BASE, AssetViews, asset_gde_ref, spell_gde_ref};
 use level_flow::{AchievementRules, LevelFlow};
@@ -189,7 +201,7 @@ use replica::{RemoteCandidate, Replica, ReplicaSource};
 use slots::Slots;
 use stamina::Stamina;
 use statics::{
-    STATIC_ENTITY_BASE, StaticViews, bag_emptied, bag_loot, chest_gather_ended,
+    GatherCounters, STATIC_ENTITY_BASE, StaticViews, bag_emptied, bag_loot, chest_gather_ended,
     chest_gather_started, facet_of, interactor_target,
 };
 
@@ -714,6 +726,14 @@ struct Player {
     auto_pin: bool,
     /// The player's PvP flag is on (after its countdown: [`faction`]); combat counts it.
     pvp_flagged: bool,
+    /// Its faction holds the fort of the territory it is in: its character experience gains get
+    /// [`nw_db::FORT_EXPERIENCE_BONUS_PERCENT`] more ([`control_points`]).
+    fort_experience_bonus: bool,
+    /// The share its territory standing experience points add to its character experience
+    /// gains in the territory it is in ([`quest_objects`]).
+    territory_experience_share: f64,
+    /// Its affliction meters ([`afflictions`]).
+    afflictions: afflictions::AfflictionMeters,
     /// The PvP flag on its way on ([`faction`]).
     pvp_wait: faction::PvpFlagWait,
     /// Its free-for-all flag ([`faction::FfaWatch`]).
@@ -763,6 +783,8 @@ struct Player {
     /// Its experience points, and whether they changed since the last bundle.
     experience: u32,
     experience_changed: bool,
+    /// Its rested experience pool.
+    rested: rested::RestedPool,
     /// Its coins, and whether they changed since the last bundle.
     coins: u64,
     coins_changed: bool,
@@ -879,11 +901,14 @@ struct Player {
     /// Own-group members to append to the next bundle (the interactor target of a take, the
     /// gather states of the chest).
     extra_members: Vec<BundleMember>,
+    /// Its last game events on this sim and what its client has not had of them
+    /// ([`game_event_log`]).
+    game_events: game_event_log::GameEventLog,
     /// Its replicated social states and group entity from the social service
     /// ([`social_states`]).
     social: social_states::PlayerSocial,
-    /// Gathers this player made, for the counters of the gather state.
-    gathers: u32,
+    /// The counters of its own gather state ([`GatherCounters`]).
+    gathers: GatherCounters,
     /// Its turns of each cyclic gatherable whose gatherable shows in many states (a puzzle
     /// stone), by lowercase variant id: the state it sees is the turns modulo its states, from 0
     /// (retail `99c_msq_03_ancientbridge`: the first turn of a stone was its state 0, the third
@@ -893,6 +918,8 @@ struct Player {
     node_versions: HashMap<u64, u32>,
     /// The version of each encounter root its client has ([`encounter_roots`]).
     encounter_root_versions: HashMap<u64, u32>,
+    /// The version of each encounter start object its client has ([`encounter_roots`]).
+    encounter_object_versions: HashMap<u64, u32>,
     /// The version of each loot bag its client has, by slot key.
     bag_versions: HashMap<u64, u32>,
     /// Its loot tracker's bags.
@@ -985,6 +1012,9 @@ impl Player {
                 .collect(),
             fishing_bait: self.fishing.bait().map(str::to_owned),
             season: self.season.carried(),
+            rested_experience: self.rested.experience(),
+            // A handoff counts no time away.
+            away_ns: 0,
         }
     }
 
@@ -1079,6 +1109,8 @@ pub struct SimWorld {
     coin_moves: HashMap<Uuid, (nw_bus::CoinReply, u64)>,
     /// The territory claims and the companies that own them ([`land_claims`]).
     territories: land_claims::Territories,
+    /// The fort and tower captures of this sim's players ([`control_points`]).
+    faction_control: control_points::FactionControl,
     /// The land claim entity of each territory ([`claim_entities`]).
     claim_entities: claim_entities::ClaimEntities,
     /// The world clock anchor reads and sets ([`day_night`]).
@@ -1125,6 +1157,8 @@ pub struct SimWorld {
     quests: HashMap<u64, Vec<ActiveQuest>>,
     /// The time of the last tick, for the quest runs that a save takes between ticks.
     last_now_ms: u64,
+    /// The players' hits on each mob that credit them for its kill.
+    kill_credits: kill_rewards::KillCredits,
     /// The scripts of the level and their runs.
     scripts: scripts::Scripts,
     /// The events of the level and the running ones.
@@ -1153,6 +1187,8 @@ pub struct SimWorld {
     performances: music::Performances,
     /// The gathers that run.
     open_gathers: Vec<OpenGather>,
+    /// The work left of the stopped gathers that keep it.
+    kept_gathers: KeptGathers,
     /// The crafts that run.
     crafts: Vec<crafting::PendingCraft>,
     /// The dead mobs that were skinned, and those whose corpse state the bundles sent.
@@ -1160,6 +1196,8 @@ pub struct SimWorld {
     skinned_shown: HashSet<u64>,
     /// The block state each mob's clients were last sent.
     blocks_shown: HashMap<u64, bool>,
+    /// The guard segments each mob's states last carried (ALC child 44).
+    guard_segments_shown: HashMap<u64, u8>,
     dice: Dice,
     deaths: Vec<Departure>,
     /// Hit, death and facet messages since the last [`SimWorld::take_messages`].
@@ -1182,6 +1220,8 @@ pub struct SimWorld {
     effect_flights: Vec<abilities::EffectFlight>,
     /// The spell areas of player abilities, open or still to open.
     spell_areas: Vec<spell_areas::SpellArea>,
+    /// The players in the status effect areas of the level and of the open spell areas.
+    effect_area_runs: effect_areas::EffectAreaRuns,
     /// The hits of the mobs' spell areas on players this tick.
     spell_area_mob_hits: Vec<AttackOutcome>,
     /// The spell entities in the world: their slot key and when each one goes.
@@ -1192,6 +1232,8 @@ pub struct SimWorld {
     duels: duel::Duels,
     /// The arena match of this instance sim ([`arena_match`]).
     arena_matches: arena_match::ArenaMatches,
+    /// The company names and crests read from the world database ([`company_looks`]).
+    company_looks: company_looks::CompanyLooks,
     /// The matchmaking queue calls for the director since the last tick ([`queue`]).
     queue_calls: Vec<nw_bus::QueueCall>,
     /// The projectiles mobs fired, on their way to where they aimed.
@@ -1332,6 +1374,7 @@ impl SimWorld {
             &content.structure_costs,
         );
         stations.add_level(dungeon_entrances::stations(&content.entrance_entities));
+        level_doors::add_to(&mut stations, &content.level_doors);
         // Only an instance sim names the levels of the game modes.
         let (instance_levels, war_levels) = if settings.instance_role {
             (
@@ -1349,6 +1392,7 @@ impl SimWorld {
             tutorials: HashMap::new(),
             quests: HashMap::new(),
             last_now_ms: 0,
+            kill_credits: kill_rewards::KillCredits::default(),
             scripts: scripts::Scripts::default(),
             events: events::Events::default(),
             mob_timelines: MobTimelines::default(),
@@ -1364,10 +1408,12 @@ impl SimWorld {
             bags: loot_bag::LootBags::default(),
             performances: music::Performances::default(),
             open_gathers: Vec::new(),
+            kept_gathers: KeptGathers::default(),
             crafts: Vec::new(),
             skinned: HashMap::new(),
             skinned_shown: HashSet::new(),
             blocks_shown: HashMap::new(),
+            guard_segments_shown: HashMap::new(),
             content,
             mobs: Mobs::new(Arc::clone(&combat.spawns), &combat),
             raw_ids: IdHolder::new(),
@@ -1387,11 +1433,13 @@ impl SimWorld {
             projectile_flights: Vec::new(),
             effect_flights: Vec::new(),
             spell_areas: Vec::new(),
+            effect_area_runs: effect_areas::EffectAreaRuns::default(),
             spell_area_mob_hits: Vec::new(),
             spell_entities: Vec::new(),
             live_shots: Vec::new(),
             duels: duel::Duels::default(),
             arena_matches: arena_match::ArenaMatches::default(),
+            company_looks: company_looks::CompanyLooks::default(),
             queue_calls: Vec::new(),
             mob_shots: Vec::new(),
             scripted_swings: Vec::new(),
@@ -1403,6 +1451,7 @@ impl SimWorld {
             instance_run: None,
             coin_moves: HashMap::new(),
             territories: land_claims::Territories::default(),
+            faction_control: control_points::FactionControl::default(),
             world_clock: day_night::WorldClock::default(),
             wars: wars::Wars::of_world(ids.calendar_block.value),
             invasion: None,
@@ -2173,6 +2222,8 @@ impl SimWorld {
         let entity = *self.by_connection.get(connection)?;
         // A leave of a running arena match bars the queue: the saved departure holds it.
         self.arena_left_sim(entity);
+        // An expedition keeps the player's place offline until it comes again.
+        self.expedition_went_offline(entity);
         let departure = self.departure(entity);
         self.remove_player(connection, entity);
         departure
@@ -2191,6 +2242,7 @@ impl SimWorld {
         }
         self.queue_left_sim(entity);
         self.arena_left_sim(entity);
+        self.expedition_left_sim(entity);
         self.despawn_camp(entity);
         self.despawn_houses(entity);
         self.world.despawn(entity);
@@ -2613,7 +2665,11 @@ impl SimWorld {
         self.tick_duels();
         self.tick_arena();
         self.tick_catacombs();
+        self.tick_expedition_mode();
+        self.tick_effect_areas();
+        self.tick_afflictions();
         self.tick_war_fight();
+        self.tick_control_points();
         self.tick_invasion();
         player_attacks.extend(self.tick_turrets(now_ms));
         self.tick_queue();
@@ -3103,6 +3159,9 @@ impl SimWorld {
                 self.gain_mission_influence(number, &quest.def.id, event);
             }
         }
+        if quest.def.mission.is_some() {
+            self.gain_project_points(number, &quest.def.id);
+        }
         let items: Vec<(String, u32)> = quest.def.reward.into_iter().chain(reward.item).collect();
         self.give_loot(number, items, self.last_now_ms);
         self.quest_event(
@@ -3555,15 +3614,15 @@ impl SimWorld {
                             CHEST_DISPLAY_NAME,
                         );
                         send_now(&mut self.combat_messages, &player.connection, &[accept]);
-                        let started = chest_gather_started(request.target_entity, player.gathers);
+                        let started =
+                            chest_gather_started(request.target_entity, &mut player.gathers);
                         player.extra_members.extend(started);
                     }
                     Order::EndGather(request) => {
                         let end = gather_end(number, request);
                         send_now(&mut self.combat_messages, &player.connection, &end);
-                        let ended = chest_gather_ended(request.target_entity, player.gathers);
+                        let ended = chest_gather_ended(request.target_entity, &mut player.gathers);
                         player.extra_members.push(ended);
-                        player.gathers = player.gathers.saturating_add(1);
                         // The looted chest goes in the loot tracker, so the client offers it no
                         // more; without it the client opened it again with no answer and its
                         // player stayed in the open animation (live 2026-09-29).
@@ -3574,7 +3633,6 @@ impl SimWorld {
                             encounter::CHEST_AT,
                             self.server_ms,
                             self.server_ms.saturating_add(encounter::CHEST_LOCKOUT_MS),
-                            false,
                             version,
                         );
                         player.extra_members.push(tracked);
@@ -3798,21 +3856,31 @@ impl SimWorld {
             match request.kind {
                 TALK_KIND => self.talk(entity, number, request, name, now_ms),
                 TOWN_BOARD_KIND => self.open_board(entity, number, request, name, now_ms),
-                governance::GOVERNOR_DESK_KIND => {
+                governance::GOVERNOR_DESK_KIND | town_projects::PLANNING_BOARD_KIND => {
                     self.open_governor_desk(entity, number, request, name);
                 }
                 CRAFTING_STATION_KIND => self.open_station(entity, number, request),
                 LORE_KIND => self.read_lore(entity, number, request, name, now_ms),
-                GATHER_KIND => self.gather_open_world(entity, number, request, name, now_ms),
+                GATHER_KIND => {
+                    if !self.outpost_rush_portal_gather(entity, number, request, now_ms) {
+                        self.gather_open_world(entity, number, request, name, now_ms);
+                    }
+                }
                 WATER_GATHER_KIND => self.gather_water(number, request, now_ms),
                 LOOT_KIND => self.take_loot_bag(entity, number, request, now_ms),
                 REVIVE_PLAYER_KIND => self.revive_player(entity, number, request, name),
-                item_calls::OPEN_STORAGE_KIND => self.open_storage(entity, number, request, name),
+                item_calls::OPEN_STORAGE_KIND => {
+                    if !self.open_outpost_rush_shed(entity, number, request, name) {
+                        self.open_storage(entity, number, request, name);
+                    }
+                }
                 economy::TRADING_POST_KIND => {
                     self.open_trading_post(entity, number, request, name);
                 }
                 kind => {
-                    if !self.travel_interaction(entity, number, request, name, now_ms)
+                    if !self.outpost_rush_interaction(entity, number, request, name)
+                        && !self.outpost_rush_summoning(entity, number, request, name)
+                        && !self.travel_interaction(entity, number, request, name, now_ms)
                         && !self.turret_interaction(entity, number, request, name, now_ms)
                         && !self.instance_interaction(entity, number, request, name)
                         && !self.capture_the_flag_interaction(entity, number, request, name)
@@ -3883,6 +3951,7 @@ impl SimWorld {
                 self.cancel_gather(entity, *interaction, now_ms);
                 self.cancel_camp_build(entity, *interaction);
                 self.turret_interaction_ended(entity, *interaction);
+                self.outpost_rush_shed_closed(entity, Some(*interaction));
                 self.leave_station(entity, *interaction);
                 self.give_weapon_back(entity, Stow::Gather, now_ms);
                 self.close_container(entity);
@@ -4591,6 +4660,9 @@ impl SimWorld {
             let was_blocking = self.blocks_shown.insert(entity, card.blocking);
             card.blocking_changed = was_blocking.map_or(card.blocking, |was| was != card.blocking);
             card.guard = self.mobs.guard(entity);
+            card.affiliations = self
+                .outpost_rush_summon_team(entity)
+                .map(members::summon_affiliations);
             let unseen = owner.is_some_and(|owner| !spawned.contains(&owner));
             if let Some(look) = content
                 .mob_looks
@@ -4628,6 +4700,15 @@ impl SimWorld {
                 }
                 card.alc = Some(frame);
             }
+            // The guard's segments go with the card and with the next state after each change;
+            // a change waits for a state.
+            card.guard_segments = self.guard_segments(entity);
+            card.guard_segments_changed = card.guard_segments.is_some()
+                && card.guard_segments != self.guard_segments_shown.get(&entity).copied();
+            let stepped = card.alc.as_ref().is_some_and(|frame| frame.step.is_some());
+            if let Some(segments) = card.guard_segments.filter(|_| stepped) {
+                self.guard_segments_shown.insert(entity, segments);
+            }
             cards.insert(entity, card);
         }
         let shown: HashSet<u64> = cards.keys().copied().collect();
@@ -4649,6 +4730,8 @@ impl SimWorld {
         self.skinned_shown
             .retain(|entity| skinned.contains_key(entity));
         self.blocks_shown
+            .retain(|entity, _| mobs.health(*entity).is_some());
+        self.guard_segments_shown
             .retain(|entity, _| mobs.health(*entity).is_some());
         // The radius is checked at start to be a finite number above 0.
         let Some(mut grid) = SpatialGrid::new(self.settings.interest_radius_m) else {
@@ -4678,6 +4761,7 @@ impl SimWorld {
             mutations: &content.mutations,
             mutation_unix_s: self.unix_s(),
             territories: &self.territories,
+            territory_projects: &content.territory_projects,
             wars: &self.wars,
             war_unix_ms: self.unix_ms(),
             replicas,
@@ -4858,6 +4942,9 @@ impl SimWorld {
                     defer_throttle_clear: false,
                     auto_pin: arrival.auto_pin,
                     pvp_flagged: arrival.pvp_flagged,
+                    fort_experience_bonus: false,
+                    territory_experience_share: 0.0,
+                    afflictions: afflictions::AfflictionMeters::default(),
                     pvp_wait: faction::PvpFlagWait::wanted(
                         arrival.progression.pvp_wanted && !arrival.pvp_flagged,
                         arrival.pvp_flag_left_ms,
@@ -4880,6 +4967,12 @@ impl SimWorld {
                     tracker_floor: arrival.quests.tracker_version,
                     experience: arrival.progression.experience,
                     experience_changed: false,
+                    rested: rested::RestedPool::at_join(
+                        &self.content.progression,
+                        arrival.progression.experience,
+                        arrival.progression.rested_experience,
+                        arrival.progression.away_ns,
+                    ),
                     coins: arrival.progression.coins,
                     coins_changed: false,
                     loot: loot_bag::PlayerLoot::with_limits(&arrival.progression.loot_limits),
@@ -4990,8 +5083,9 @@ impl SimWorld {
                     combat: CombatTimer::default(),
                     list_version: FIRST_VERSION,
                     extra_members: Vec::new(),
+                    game_events: game_event_log::GameEventLog::default(),
                     social: social_states::PlayerSocial::default(),
-                    gathers: 0,
+                    gathers: GatherCounters::default(),
                     cyclic_turns: arrival
                         .progression
                         .cyclic_turns
@@ -5000,6 +5094,7 @@ impl SimWorld {
                         .collect(),
                     node_versions: HashMap::new(),
                     encounter_root_versions: HashMap::new(),
+                    encounter_object_versions: HashMap::new(),
                     bag_versions: HashMap::new(),
                     ended_gather: None,
                     statics: StaticViews::default(),
@@ -5336,6 +5431,8 @@ struct Neighbourhood<'a> {
     mutation_unix_s: u64,
     /// The territory claims and their owners.
     territories: &'a land_claims::Territories,
+    /// The town projects of the content, for the planning boards.
+    territory_projects: &'a nw_content::territory_projects::TerritoryProjects,
     /// The territory wars.
     wars: &'a wars::Wars,
     /// Unix ms of this tick, for the wars' phases.
@@ -5563,19 +5660,29 @@ impl Neighbourhood<'_> {
                 });
                 // The experience and the level: whole with the first card, then after each
                 // change; a change of level sends the new level with the experience (retail
-                // 899 at each level up, progression-and-gm-mode note section 3).
+                // 899 at each level up, progression-and-gm-mode note section 3). The rested
+                // pool goes with the first card and with each change of it.
+                let rested_changed = player.rested.take_change();
                 let progression = if first {
                     let level = self.progression.level_of(player.experience);
                     player.level_sent = Some(level);
-                    Some(ProgressionState::login_at_level(level, player.experience))
+                    Some(
+                        ProgressionState::login_at_level(level, player.experience)
+                            .with_rested(player.rested.experience()),
+                    )
                 } else if std::mem::take(&mut player.experience_changed) {
                     let level = self.progression.level_of(player.experience);
                     let leveled = player.level_sent != Some(level);
                     player.level_sent = Some(level);
-                    Some(if leveled {
+                    let state = if leveled {
                         ProgressionState::level_up(level, player.experience)
                     } else {
                         ProgressionState::experience(player.experience)
+                    };
+                    Some(if rested_changed {
+                        state.with_rested(player.rested.experience())
+                    } else {
+                        state
                     })
                 } else {
                     None
@@ -5815,6 +5922,9 @@ impl Neighbourhood<'_> {
                     if let Some(member) = player.status_effects.take_member(first) {
                         put_member(&mut group.members, member);
                     }
+                    if let Some(lists) = player.afflictions.take_lists() {
+                        afflictions::put_afflictions(&mut group.members, lists);
+                    }
                     if let Some(member) = player.mount.take_own_member(first) {
                         put_member(&mut group.members, member);
                     }
@@ -5841,6 +5951,13 @@ impl Neighbourhood<'_> {
                     // and the client failed to read the bundle (run 17, beach: stateSequence 9).
                     for member in player.extra_members.drain(..) {
                         put_member(&mut group.members, member);
+                    }
+                    if player.game_events.has_change() {
+                        player.list_version += 1;
+                        let version = player.list_version;
+                        if let Some(member) = player.game_events.take_member(version) {
+                            put_member(&mut group.members, member);
+                        }
                     }
                     groups.push(group);
                 }
@@ -5946,18 +6063,21 @@ impl Neighbourhood<'_> {
                             number,
                             slot,
                             self.territories,
+                            self.territory_projects,
                             nw_common::time::unix_ms(),
                         ));
                     }
                     continue;
                 }
                 if number >= encounter_roots::ENCOUNTER_OBJECT_ENTITY_BASE {
-                    groups.extend(
-                        player
-                            .slots
-                            .slot(number)
-                            .and_then(|slot| self.encounter_objects.group(number, slot)),
-                    );
+                    if let Some(slot) = player.slots.slot(number) {
+                        let player = &mut **player;
+                        groups.extend(self.encounter_objects.group(
+                            number,
+                            slot,
+                            &mut player.encounter_object_versions,
+                        ));
+                    }
                     continue;
                 }
                 if number >= encounter_roots::ENCOUNTER_ROOT_ENTITY_BASE {
@@ -6511,6 +6631,12 @@ mod tests {
     ) -> SimWorld {
         let mut combat = test_combat();
         combat.spawns = spawns.into();
+        world_with_combat(settings, combat)
+    }
+
+    /// A world of `sim-a` with `settings` and the combat settings `combat` (its rows and
+    /// spawns).
+    pub(super) fn world_with_combat(settings: WorldSettings, combat: CombatSettings) -> SimWorld {
         SimWorld::new(
             settings,
             WorldIds::random(0).expect("ids"),
@@ -6955,12 +7081,14 @@ mod tests {
             );
         }
         assert_eq!(nw_messages::entity_of_raw_id(&mob_id), Some(mob));
-        // The mob's cell goes to another sim: the mob leaves with its id.
+        assert!(nw_messages::holds_raw_id(world.raw_ids, mob));
+        // The mob's cell goes to another sim: the mob leaves with its id. The registry is
+        // process-wide and mob numbers come from spawn indexes, so another test's world may
+        // hold the same mob's entry: this world's hold is what goes.
         world.set_table(&table(&["sim-b", "sim-a"])).expect("table");
         tick(&mut world, NOW + CYCLES);
-        assert_eq!(
-            nw_messages::entity_of_raw_id(&mob_id),
-            None,
+        assert!(
+            !nw_messages::holds_raw_id(world.raw_ids, mob),
             "a mob's id goes with it"
         );
     }
@@ -8133,8 +8261,10 @@ mod tests {
         );
         world.set_table(&table(&["sim-a"])).expect("table");
         let who = connection(1);
-        let mut admit = admit_at(1, TUTORIAL_START.x, true);
-        admit.position = Point::from(nw_sim_core::TUTORIAL_START);
+        // The player stands at the chest it opens: the looted entry stays listed within the
+        // loot container's 80 m (finding D11, retail newchar 2026-09-18 216.86 s to 282.33 s).
+        let mut admit = admit_at(1, encounter::CHEST_AT.x, true);
+        admit.position = Point::from(encounter::CHEST_AT);
         world.admit(&admit, NOW, SERVER_TIME).expect("admit");
         let spawn_at = NOW + OWN_CARD_DELAY_MS;
         tick(&mut world, spawn_at);
@@ -8209,7 +8339,7 @@ mod tests {
         );
         let entity = world.by_connection[&who];
         let player = world.world.get::<Player>(entity).expect("player");
-        assert_eq!(player.gathers, 1, "one gather made");
+        assert_eq!(player.gathers.gathers(), 1, "one gather made");
     }
 
     #[test]
@@ -9137,6 +9267,10 @@ mod tests {
         /// Retail nodule A: its capital and GDE id (newchar 2026-09-18).
         const NODULE_CAPITAL: &str = "64f2702e-9c3b-a5a5-1dae-1b0d80c5666b";
         const NODULE_ID: u64 = 0x795c_6b23_1cfe_c3cb;
+        /// Its variant, whose tag is its tracker entry's, and its slice's `m_aoiRadius`
+        /// (`io_custom_msq_corruptednodule_a`: instanced, `m_instancedLootType` 4, 100 m).
+        const NODULE_VARIANT: &str = "MSQ_Grace_CorruptedNodule_1";
+        const NODULE_AOI_RADIUS_M: f32 = 100.0;
         const MANIFEST: &[u8] = b"@00_Aeternum_Title_31_01";
         const TREASURE_GATHER_MS: u64 = 1_000;
         const NODULE_RESPAWN_MS: u64 = 33_000;
@@ -9180,8 +9314,30 @@ mod tests {
         let capital = nw_world::records::Capital {
             id: NODULE_CAPITAL.to_owned(),
             position: nodule.position,
+            variant_name: Some(NODULE_VARIANT.to_owned()),
             ..nw_world::records::Capital::default()
         };
+        let interact_tags = nw_content::interact_tags::InteractTags::build(
+            &HashMap::from([(
+                NODULE_VARIANT.to_lowercase(),
+                nw_content::interact_tags::VariantTag {
+                    tag: NODULE_LOOT.to_owned(),
+                    only_on_quest: true,
+                },
+            )]),
+            [(NODULE_CAPITAL, Some(NODULE_VARIANT), &[][..])],
+            [],
+        );
+        let instanced_gathers = nw_content::gathering::InstancedGathers::build(
+            [(
+                NODULE_CAPITAL,
+                nw_content::gathering::InstancedObject {
+                    loot_type: nw_messages::LOOT_QUEST_OBJECT,
+                    aoi_radius_m: Some(NODULE_AOI_RADIUS_M),
+                },
+            )],
+            [],
+        );
         let quest_objects = QuestObjects::build(
             &[nodule],
             &gatherables,
@@ -9241,9 +9397,15 @@ mod tests {
                 )]),
                 poi_tags: PoiTags::build([(u32::from(WRECK_TERRITORY), WRECK_POI.to_owned())]),
                 quest_objects,
+                interact_tags,
+                instanced_gathers,
                 ..PlayerContent::default()
             }),
         );
+        // The reset clock that the nodule's lock needs.
+        let mut content = (*world.content).clone();
+        gathering::tests::with_resets(&mut content);
+        world.content = Arc::new(content);
         world.set_table(&table(&["sim-a"])).expect("table");
         let mut admit = admit_at(1, X, true);
         admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
@@ -10794,7 +10956,8 @@ mod tests {
     /// A [`loot_world`] whose table always drops the flint, which a weekly loot limit of 1
     /// holds (retail clock: Tuesday 09:00 UTC).
     fn limited_flint_world() -> SimWorld {
-        use nw_content::loot_limits::{LimitRow, LootLimitRules, LootLimits, ResetClock, Weekday};
+        use nw_content::loot_limits::{LimitRow, LootLimitRules, LootLimits};
+        use nw_content::resets::{ResetClock, ServerRegion};
         let tables = LootTables::build(LootSource {
             rows: loot_rows(FLINT_TABLE, &[(gear::tests::FLINT, "0")]),
             bucket_items: Vec::new(),
@@ -10809,8 +10972,7 @@ mod tests {
                 replicated: true,
             }]),
             clock: ResetClock {
-                hour_utc: 9,
-                weekly_day: Weekday::Tuesday,
+                region: ServerRegion::UsEast,
             },
         });
         world

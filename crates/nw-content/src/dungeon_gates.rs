@@ -145,6 +145,9 @@ pub struct Gate {
     pub gatherable_component: Option<u64>,
     /// Its timelines.
     pub timelines: Vec<GateTimeline>,
+    /// The component of its interact state (a switch's); `None` for a gate without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interact_component: Option<u64>,
 }
 
 impl Gate {
@@ -356,6 +359,13 @@ pub enum Trigger {
     /// A player used the switch, the gate of that level-script name (its gather ended).
     SwitchUsed {
         /// The switch's level-script name.
+        switch: String,
+    },
+    /// A player began to use the switch of that name (its gather started). Observed: the
+    /// catacombs' hidden gate opened in the tick its lever's pull began (`CATACOMBS2`
+    /// 431.572 s), the lever itself changed at the pull's end (433.574 s).
+    SwitchStarted {
+        /// The switch's name.
         switch: String,
     },
 }

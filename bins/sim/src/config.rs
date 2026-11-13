@@ -14,7 +14,7 @@ use std::sync::Arc;
 use nw_content::combat::{CombatData, CombatRows};
 use nw_content::instances::{InstanceCatalog, InstanceKind};
 use nw_content::leaderboards::{RotationCalendar, RotationSettings};
-use nw_content::loot_limits::{HOURS_PER_DAY, ResetClock};
+use nw_content::resets::ResetClock;
 use nw_messages::LevelSpec;
 use nw_sim_core::{CellBounds, MoveLimits, MoveLimitsError, TICKS_PER_SECOND};
 use serde::Deserialize;
@@ -190,8 +190,9 @@ pub struct SimConfig {
     /// The `edge-http` config whose `[remote_config]` sets the sim reads its gameplay values
     /// from: the same layers the client gets (`crate::gameplay`).
     pub edge_config: PathBuf,
-    /// The server's daily and weekly resets of the loot limits.
-    pub loot_limits: ResetClock,
+    /// The server's daily and weekly resets (loot limits, recipe cooldowns, instance refreshes,
+    /// gather locks).
+    pub resets: ResetClock,
     /// Folder of the world files (`world-<build>-<level>.bin`).
     pub content_dir: PathBuf,
     /// The open map level; the same as the director's.
@@ -427,9 +428,6 @@ impl SimConfig {
             return invalid("global_database_password_env", "must start with NW_SECRET_");
         }
         self.leaderboard_calendar()?;
-        if self.loot_limits.hour_utc >= HOURS_PER_DAY {
-            return invalid("loot_limits.hour_utc", "must be below 24");
-        }
         if self.level.is_empty() {
             return invalid("level", "must not be empty");
         }
@@ -693,13 +691,13 @@ pub(crate) mod tests {
     /// The fixed dice seed of the tests.
     const TEST_SEED: u64 = 1;
 
-    /// The committed config closes the catacombs queue (its run has no end yet) and keeps every
-    /// other queued mode open; an entrance kind is never a closed queue.
+    /// The committed config keeps every queued mode open (the catacombs run is complete from
+    /// its queue to its end and rewards); an entrance kind is never a closed queue.
     #[test]
-    fn the_committed_config_closes_only_the_catacombs_queue() {
+    fn the_committed_config_keeps_every_queue_open() {
         let closed = ClosedQueues::of(&committed().closed_queues);
-        assert!(closed.holds(InstanceKind::Catacombs));
         for open in [
+            InstanceKind::Catacombs,
             InstanceKind::Arena,
             InstanceKind::OutpostRush,
             InstanceKind::CaptureTheFlag,
@@ -707,6 +705,18 @@ pub(crate) mod tests {
         ] {
             assert!(!closed.holds(open), "{open:?}");
         }
+        // An operator can still close a queue: the committed config with the catacombs closed.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(COMMITTED_CONFIG);
+        let text = std::fs::read_to_string(&path).expect("committed config");
+        let closed_path =
+            std::env::temp_dir().join(format!("sim-closed-queues-{}.toml", std::process::id()));
+        std::fs::write(&closed_path, format!("closed_queues = [\"catacombs\"]\n{text}"))
+            .expect("write the closed config");
+        let loaded = load_sim_config(&closed_path);
+        std::fs::remove_file(&closed_path).expect("remove the closed config");
+        let closed = ClosedQueues::of(&loaded.expect("closed config").closed_queues);
+        assert!(closed.holds(InstanceKind::Catacombs));
+        assert!(!closed.holds(InstanceKind::Arena));
     }
 
     #[test]
@@ -737,23 +747,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_loot_limits_reset_at_a_valid_hour() {
-        use nw_content::loot_limits::Weekday;
+    fn the_committed_resets_are_the_us_east_servers() {
+        use nw_content::resets::ServerRegion;
 
-        let config = committed();
         assert_eq!(
-            config.loot_limits,
+            committed().resets,
             ResetClock {
-                hour_utc: 9,
-                weekly_day: Weekday::Tuesday,
+                region: ServerRegion::UsEast,
             },
-            "the captured resets of the US East server"
+            "the region of the committed edge world (`us-east`)"
         );
-        for (hour, ok) in [(0, true), (23, true), (HOURS_PER_DAY, false)] {
-            let mut config = committed();
-            config.loot_limits.hour_utc = hour;
-            assert_eq!(config.validate().is_ok(), ok, "hour {hour}");
-        }
     }
 
     #[test]

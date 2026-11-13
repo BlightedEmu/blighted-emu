@@ -24,7 +24,8 @@ use std::path::Path;
 
 use nw_ai::data::{
     AiData, Archetype, BlockActivity, BlockEffect, CageAction, CageCondition, Completion, Creature,
-    EntityTrigger, FacingMode, FragmentLength, FragmentVariant, Grid, NavConfig, ProcWindow,
+    EntityTrigger, FacingMode, FragmentCase, FragmentLength, FragmentVariant, Grid, NavConfig,
+    ProcWindow,
     ProjectileSlice, RangedAttack, SliceTriggerRef, TagActivity, TagEffect, TreeRef, Vision,
 };
 use nw_ai::decode::{DecodeError, ServerPakError, TreeDecoder, decode_entries, server_pak_entries};
@@ -35,8 +36,9 @@ use nw_formats::azcs::{decode_azcs, is_azcs};
 use nw_formats::datasheet::Datasheet;
 use nw_formats::mannequin::{
     ActionList, AnimDatabase, BlockActivity as NwBlockActivity, BlockChange, CageGrid, Condition,
-    EntityTrigger as NwEntityTrigger, GridList, MannequinError, Node as XmlNode, StaminaActivities,
-    TagCase, TagChange, parse_tree,
+    EntityTrigger as NwEntityTrigger, Fragment, FragmentCase as NwFragmentCase, GridList,
+    MannequinError, Node as XmlNode,
+    StaminaActivities, TagCase, TagChange, parse_tree,
 };
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
 use nw_formats::pak::{PakArchive, PakError, find_paks};
@@ -88,6 +90,18 @@ const NAV_TURN_ACTION: &str = "m_turnActionName";
 const NAV_START_ACTION: &str = "m_startActionName";
 const NAV_START_RULE: &str = "m_navStartRule";
 const MAX_SLOPE: &str = "m_maxSlope";
+/// The `StatusEffectsComponent` field of the effects the creature spawns with.
+const INITIAL_STATUS_EFFECTS: &str = "m_initialStatusEffects";
+/// The `GritComponent` field (client reflection `FUN_1468e90f0`) that makes the grit value the
+/// stamina.
+const GRIT_USES_STAMINA: &str = "m_useStaminaAsValue";
+/// The `FxScriptComponent` field of the FX lists it names, and the name of each entry (client
+/// reflection strings beside `FxScriptComponent`; Observed in the bear slice:
+/// `m_scriptDataContainer` > element > `m_scriptName`).
+const FX_SCRIPT_CONTAINER: &str = "m_scriptDataContainer";
+const FX_SCRIPT_NAME: &str = "m_scriptName";
+/// The FX list of the large bodies ([`nw_ai::data::Archetype::large_status_effects_fx`]).
+const LARGE_STATUS_EFFECTS_FX: &str = "fxscriptlist_npc_statuseffects_large";
 const ACTION_GRID: &str = "m_actionGridNew";
 const ANIMATION_DATABASE: &str = "m_animationDatabase";
 const DAMAGE_TABLE: &str = "m_damageTable";
@@ -114,21 +128,6 @@ const MOTION_MULTIPLIER: &str = "MotionMultiplier";
 /// The facing activity (Observed in `baseai_turninplace.actionlist`).
 const FACING_ACTIVITY: &str = "SetDesiredFacingBlendParam";
 const FACING_MODE: &str = "FacingMode";
-
-/// Animation database XML (Observed in `npc_boar_anims.adb`).
-const FRAGMENT_LIST: &str = "FragmentList";
-const FRAGMENT_ELEMENT: &str = "Fragment";
-const ANIM_LAYER: &str = "AnimLayer";
-const BLEND_ELEMENT: &str = "Blend";
-const ANIMATION_ELEMENT: &str = "Animation";
-const EXIT_TIME: &str = "ExitTime";
-const START_TIME: &str = "StartTime";
-const ANIMATION_NAME: &str = "name";
-const ANIMATION_SPEED: &str = "speed";
-const ANIMATION_FLAGS: &str = "flags";
-const LOOP_FLAG: &str = "Loop";
-/// The playback speed of a clip without `speed`.
-const DEFAULT_SPEED: f64 = 1.0;
 
 /// Animation files by extension.
 const CAF_EXTENSION: &str = ".caf";
@@ -252,23 +251,44 @@ struct SliceAi {
     main_hand: Option<String>,
     /// The slice's `TriggerEntityComponent`s: name, child (main `Id` XOR owner `Id`), component.
     triggers: Vec<(String, u64, u64)>,
+    /// `m_initialStatusEffects`, in stream order.
+    initial_effects: Vec<String>,
+    /// `GritComponent.m_useStaminaAsValue`.
+    grit_uses_stamina: bool,
+    /// An `FxScriptComponent` names [`LARGE_STATUS_EFFECTS_FX`].
+    large_status_effects_fx: bool,
 }
 
 fn crc(name: &str) -> u32 {
     lowercase_crc32(name)
 }
 
+/// The first text value at or below `element`, depth first.
+fn text_leaf(element: &Element) -> Option<String> {
+    if !element.value.is_empty() {
+        return element.as_string().ok().map(str::to_owned);
+    }
+    element.children.iter().find_map(text_leaf)
+}
+
 /// The first element named `name` below `element`, depth first.
 fn first<'a>(element: &'a Element, name: &str) -> Option<&'a Element> {
+    every(element, name).next()
+}
+
+/// Every element named `name` below `element`, depth first.
+fn every<'a>(element: &'a Element, name: &str) -> impl Iterator<Item = &'a Element> + use<'a> {
     let wanted = crc(name);
     let mut stack: Vec<&Element> = element.children.iter().rev().collect();
-    while let Some(next) = stack.pop() {
-        if next.name_crc == Some(wanted) {
-            return Some(next);
+    std::iter::from_fn(move || {
+        while let Some(next) = stack.pop() {
+            stack.extend(next.children.iter().rev());
+            if next.name_crc == Some(wanted) {
+                return Some(next);
+            }
         }
-        stack.extend(next.children.iter().rev());
-    }
-    None
+        None
+    })
 }
 
 /// The field `name` of a class element: a direct child, or one in its `BaseClass1` chain
@@ -378,6 +398,24 @@ impl SliceAi {
         slice.group_aggro_distance = float(decoder, root, GROUP_AGGRO_DISTANCE)?;
         slice.group_aggro_cap = float(decoder, root, GROUP_AGGRO_CAP)?.map(|cap| cap as u32);
         slice.max_slope_deg = float(decoder, root, MAX_SLOPE)?;
+        if let Some(effects) = first(root, INITIAL_STATUS_EFFECTS) {
+            // Each entry holds the effect id as its one text value (Observed in the bear slice).
+            slice.initial_effects = effects
+                .children
+                .iter()
+                .filter_map(text_leaf)
+                .collect();
+        }
+        slice.grit_uses_stamina = first(root, GRIT_USES_STAMINA)
+            .and_then(|element| element.as_bool().ok())
+            .unwrap_or(false);
+        slice.large_status_effects_fx = every(root, FX_SCRIPT_CONTAINER)
+            .flat_map(|container| &container.children)
+            .filter_map(|entry| child(entry, FX_SCRIPT_NAME))
+            .any(|name| {
+                name.as_string()
+                    .is_ok_and(|name| name.eq_ignore_ascii_case(LARGE_STATUS_EFFECTS_FX))
+            });
         let overridden = match first(root, OVERRIDE_AGGRO_DELAY) {
             Some(element) => value(decoder, element, OVERRIDE_AGGRO_DELAY)?.as_bool(),
             None => None,
@@ -532,6 +570,8 @@ struct ListAction {
     deactivation: Option<Condition>,
     blocks: Vec<NwBlockActivity>,
     stamina: StaminaActivities,
+    /// Its `ChangeActionFragment` cases (read by `nw_formats::mannequin`).
+    fragment_cases: Vec<NwFragmentCase>,
 }
 
 fn parse_number(text: Option<&str>) -> Option<f32> {
@@ -589,12 +629,14 @@ fn list_actions(text: &str) -> Result<ParsedList, MannequinError> {
     root.descendants(ACTION_ELEMENT, &mut actions);
     let mut out = Vec::new();
     for action in actions {
-        let (Some(name), Some(fragment)) = (
-            action.attribute(NAME_ATTRIBUTE),
-            action.attribute(FRAGMENT_NAME_ATTRIBUTE),
-        ) else {
+        let Some(name) = action.attribute(NAME_ATTRIBUTE) else {
             continue;
         };
+        // An action without a `FragmentName` is kept when the engine starts it by its
+        // condition (the `ActivateGrit` action of `baseai_stagger.actionlist`); one a task
+        // names needs a fragment to play.
+        let engine_started = children_named(action, ACTIVATION_ELEMENT).next().is_some();
+        let fragment = action.attribute(FRAGMENT_NAME_ATTRIBUTE).unwrap_or_default();
         let mut tasks = Vec::new();
         for activation in children_named(action, ACTIVATION_ELEMENT) {
             for test in TASK_TESTS {
@@ -607,6 +649,11 @@ fn list_actions(text: &str) -> Result<ParsedList, MannequinError> {
                         .map(str::to_owned),
                 );
             }
+        }
+        if action.attribute(FRAGMENT_NAME_ATTRIBUTE).is_none()
+            && (!engine_started || !tasks.is_empty())
+        {
+            continue;
         }
         let mut completion = None;
         let mut motion_multiplier = None;
@@ -655,6 +702,7 @@ fn list_actions(text: &str) -> Result<ParsedList, MannequinError> {
             deactivation: None,
             blocks: Vec::new(),
             stamina: StaminaActivities::default(),
+            fragment_cases: Vec::new(),
         });
     }
     let parsed = ActionList::parse(text)?;
@@ -672,6 +720,9 @@ fn list_actions(text: &str) -> Result<ParsedList, MannequinError> {
             action.deactivation.clone_from(&list_action.deactivation);
             action.blocks.clone_from(&list_action.block_activities);
             action.stamina.clone_from(&list_action.stamina);
+            action
+                .fragment_cases
+                .clone_from(&list_action.fragment_cases);
         }
     }
     Ok(ParsedList {
@@ -701,65 +752,15 @@ struct GridLists {
     aliases: Vec<(String, String)>,
 }
 
-/// One clip of a fragment's base animation layer.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct LayerClip {
-    exit_s: f64,
-    start_s: f64,
-    /// The animation's name, lower case.
-    pub(crate) animation: String,
-    speed: f64,
-    looping: bool,
-}
-
-/// The base animation layer of one fragment entry; the entry's name, tags and procedural clips
-/// are those of the `nw_formats::mannequin::Fragment` at the same index.
-pub(crate) type AdbEntry = Vec<LayerClip>;
-
-/// The base layers of the entries of an animation database, in file order (the order of
-/// `AnimDatabase::parse`).
-pub(crate) fn adb_entries(text: &str) -> Result<Vec<AdbEntry>, MannequinError> {
-    let root = parse_tree(text)?;
-    let mut entries = Vec::new();
-    for named in &root.child(FRAGMENT_LIST)?.children {
-        for entry in children_named(named, FRAGMENT_ELEMENT) {
-            let mut clips = Vec::new();
-            if let Some(layer) = children_named(entry, ANIM_LAYER).next() {
-                let mut blend: Option<(f64, f64)> = None;
-                for node in &layer.children {
-                    if node.name == BLEND_ELEMENT {
-                        blend = Some((
-                            parse_number(node.attribute(EXIT_TIME)).map_or(0.0, f64::from),
-                            parse_number(node.attribute(START_TIME)).map_or(0.0, f64::from),
-                        ));
-                    } else if node.name == ANIMATION_ELEMENT {
-                        let (exit_s, start_s) = blend.take().unwrap_or((0.0, 0.0));
-                        clips.push(LayerClip {
-                            exit_s,
-                            start_s,
-                            animation: node
-                                .attribute(ANIMATION_NAME)
-                                .unwrap_or_default()
-                                .to_lowercase(),
-                            speed: parse_number(node.attribute(ANIMATION_SPEED))
-                                .map_or(DEFAULT_SPEED, f64::from),
-                            looping: node
-                                .attribute(ANIMATION_FLAGS)
-                                .is_some_and(|flags| flags.contains(LOOP_FLAG)),
-                        });
-                    }
-                }
-            }
-            entries.push(clips);
-        }
-    }
-    Ok(entries)
-}
-
 /// The length of one clip in seconds, or why it is Unknown.
 pub(crate) type ClipLength = Result<f64, String>;
 
-/// The length of a `.caf` (its `MotionParams` chunk).
+/// The length of a `.caf` (its `MotionParams` chunk): its frames times its ticks per frame times
+/// its f32 seconds per tick, in f32 as the game holds it (Inferred from the retail scope times:
+/// the corruption grunt's `Fidget` of 150 frames at speed 1.25 stopped at tick 120 in 105
+/// plays, so its length is past 4 s, as 150 x 0.033333335 rounded to f32 (5.0000005) / 1.25;
+/// the same product in f64 rounds to exactly 4 s, a tick short; the damned great axe
+/// `POI_Patrol_Fidget` of 540 frames stopped at 539 in 59 plays: 18 s in f32).
 fn caf_seconds(bytes: &[u8]) -> Option<f64> {
     if bytes.get(..CAF_MAGIC.len())? != CAF_MAGIC {
         return None;
@@ -781,11 +782,15 @@ fn caf_seconds(bytes: &[u8]) -> Option<f64> {
             continue;
         }
         let at = u32_at(entry + CAF_CHUNK_OFFSET_AT)? as usize;
-        let ticks_per_frame = f64::from(u32_at(at + MOTION_TICKS_PER_FRAME_AT)? as i32);
-        let seconds_per_tick = f64::from(f32::from_bits(u32_at(at + MOTION_SECONDS_PER_TICK_AT)?));
-        let start = f64::from(u32_at(at + MOTION_START_AT)? as i32);
-        let end = f64::from(u32_at(at + MOTION_END_AT)? as i32);
-        return Some((end - start) * ticks_per_frame * seconds_per_tick);
+        // Frame and tick counts of a few thousand at most.
+        #[allow(clippy::cast_precision_loss, reason = "counts of a few thousand")]
+        let (ticks_per_frame, start, end) = (
+            u32_at(at + MOTION_TICKS_PER_FRAME_AT)? as i32 as f32,
+            u32_at(at + MOTION_START_AT)? as i32 as f32,
+            u32_at(at + MOTION_END_AT)? as i32 as f32,
+        );
+        let seconds_per_tick = f32::from_bits(u32_at(at + MOTION_SECONDS_PER_TICK_AT)?);
+        return Some(f64::from((end - start) * ticks_per_frame * seconds_per_tick));
     }
     None
 }
@@ -976,45 +981,62 @@ impl ClipLengths {
     }
 }
 
-/// How long a fragment entry plays, from its base layer: each clip starts `ExitTime` seconds
-/// after the one before (a negative exit time: at its end) and plays `(length - StartTime) /
-/// speed`; the entry ends with its last clip, or where an empty clip starts; a looping last clip
-/// never ends. The time base of `ExitTime` and `StartTime` (seconds) is Inferred; it fits the
-/// retail boar `Attack_Gore` (one clip; 1,465 and 1,498 ms observed against 1,404 ms + one or two
-/// ticks) and `Combat_Turn` (a blend space of 1.8 s clips, 1,632 and 1,683 ms against 1,600 ms).
+/// How long a fragment entry plays, from its base animation layer (the first; the shared
+/// clip timing of [`Fragment::time_chained_clips`]): each clip starts at the sum of the layer's
+/// exit times, a chained clip (negative exit time) where the clip before it ends, and plays
+/// `(length - StartTime) / speed`; a layer whose last `<Animation>` is empty ends where that
+/// clip starts ([`Fragment::layer_ends_s`]; one of negative exit time: at the end of the clip
+/// before, [`nw_formats::mannequin::AnimClip::chained_end`]); else the entry ends with its last
+/// clip, and a looping last clip never ends. The time base of `ExitTime` and `StartTime`
+/// (seconds) is Inferred; it fits the retail boar `Attack_Gore` (one clip; 1,465 and 1,498 ms
+/// observed against 1,404 ms + one or two ticks) and `Combat_Turn` (a blend space of 1.8 s
+/// clips, 1,632 and 1,683 ms against 1,600 ms). Unknown: an entry without an animation layer or
+/// whose base layer has no `<Animation>`, and one whose last clip or a clip before a chained
+/// clip has no known length.
 pub(crate) fn fragment_length(
-    clips: &[LayerClip],
+    fragment: &Fragment,
     lengths: &ClipLengths,
 ) -> Result<FragmentLength, String> {
-    let Some(last) = clips.len().checked_sub(1) else {
+    let Some(layer) = fragment.anim_layers.first() else {
         return Err("no animation layer".to_owned());
     };
-    let mut start = 0.0;
-    let mut previous = 0.0;
-    for (index, clip) in clips.iter().enumerate() {
-        if index > 0 {
-            start += if clip.exit_s < 0.0 {
-                previous
-            } else {
-                clip.exit_s
-            };
-        }
-        if clip.animation.is_empty() {
-            if index == last {
-                return Ok(FragmentLength::Seconds(start as f32));
-            }
-            previous = 0.0;
-            continue;
-        }
-        if clip.looping && index == last {
-            return Ok(FragmentLength::Loops);
-        }
-        let length = lengths
-            .get(&clip.animation)
-            .map_err(|reason| format!("{}: {reason}", clip.animation))?;
-        previous = (length - clip.start_s).max(0.0) / clip.speed;
+    let mut base = Fragment {
+        anim_layers: vec![layer.clone()],
+        layer_ends_s: vec![fragment.layer_ends_s.first().copied().flatten()],
+        ..Fragment::default()
+    };
+    base.time_chained_clips(&|name| lengths.get(&name.to_lowercase()).ok());
+    if base.awaits_clip_lengths {
+        return Err("a chained clip follows a clip of no known end".to_owned());
     }
-    Ok(FragmentLength::Seconds((start + previous) as f32))
+    if let Some(end_s) = base.layer_ends_s[0] {
+        return Ok(FragmentLength::Seconds(end_s as f32));
+    }
+    let Some(last) = base.anim_layers[0].last() else {
+        return Err("the base layer has no animation".to_owned());
+    };
+    if last.looped {
+        return Ok(FragmentLength::Loops);
+    }
+    let length = lengths
+        .get(&last.name.to_lowercase())
+        .map_err(|reason| format!("{}: {reason}", last.name))?;
+    let end_s = last.natural_end_s(length);
+    Ok(FragmentLength::Seconds(end_s as f32))
+}
+
+/// The lower-case names of the clips the base animation layers of `databases` play: the clips
+/// whose lengths [`fragment_length`] reads.
+pub(crate) fn base_clip_names<'a>(
+    databases: impl IntoIterator<Item = &'a AnimDatabase>,
+) -> BTreeSet<String> {
+    databases
+        .into_iter()
+        .flat_map(|database| &database.fragments)
+        .filter_map(|fragment| fragment.anim_layers.first())
+        .flatten()
+        .map(|clip| clip.name.to_lowercase())
+        .collect()
 }
 
 fn cage_condition(decoder: &mut TreeDecoder, condition: &Condition) -> CageCondition {
@@ -1036,8 +1058,15 @@ fn cage_condition(decoder: &mut TreeDecoder, condition: &Condition) -> CageCondi
         Condition::Tag(tag) => CageCondition::Tag(decoder.intern(tag)),
         Condition::Marker(marker) => CageCondition::Marker(decoder.intern(marker)),
         Condition::StatusEffect(effect) => CageCondition::StatusEffect(decoder.intern(effect)),
-        // A mob's tree reads tags, markers and status effects only: every other test stays a
-        // test by its element name, as before the parser knew them.
+        Condition::FragmentPlaying(Some(fragment)) => {
+            CageCondition::FragmentPlaying(decoder.intern(fragment))
+        }
+        Condition::DamagedByAngle { min_deg, max_deg } => CageCondition::DamagedByAngle {
+            min_deg: *min_deg,
+            max_deg: *max_deg,
+        },
+        // A mob's tree reads tags, markers, status effects and named playing fragments only:
+        // every other test stays a test by its element name, as before the parser knew them.
         other => CageCondition::Other(decoder.intern(other.test_element().unwrap_or_default())),
     }
 }
@@ -1258,7 +1287,7 @@ pub fn build_ai_data(
         .filter_map(|slice| slice.animation_database.clone())
         .chain(weapon_adbs.values().cloned())
         .collect();
-    let mut adbs: HashMap<String, (Vec<AdbEntry>, AnimDatabase)> = HashMap::new();
+    let mut adbs: HashMap<String, AnimDatabase> = HashMap::new();
     for (path, parsed) in read_databases(source, &adb_paths)? {
         match parsed {
             Ok(parsed) => {
@@ -1269,12 +1298,7 @@ pub fn build_ai_data(
             }
         }
     }
-    let clip_names: BTreeSet<String> = adbs
-        .values()
-        .flat_map(|(entries, _)| entries.iter().flatten())
-        .map(|clip| clip.animation.clone())
-        .filter(|name| !name.is_empty())
-        .collect();
+    let clip_names = base_clip_names(adbs.values());
     let lengths = ClipLengths::read(source, game_dir, &clip_names)?;
     for name in &clip_names {
         if let Err(reason) = lengths.get(name) {
@@ -1395,6 +1419,13 @@ pub fn build_ai_data(
                 .into_iter()
                 .map(|tag| decoder.intern(tag))
                 .collect(),
+            initial_effects: slice
+                .initial_effects
+                .iter()
+                .map(|effect| decoder.intern(effect))
+                .collect(),
+            grit_uses_stamina: slice.grit_uses_stamina,
+            large_status_effects_fx: slice.large_status_effects_fx,
             triggers: slice
                 .triggers
                 .iter()
@@ -1589,9 +1620,9 @@ fn ranged_shots(
 
 /// The parsed animation database at `path` among `adbs`, with its path.
 fn database<'a>(
-    adbs: &'a HashMap<String, (Vec<AdbEntry>, AnimDatabase)>,
+    adbs: &'a HashMap<String, AnimDatabase>,
     path: Option<&'a str>,
-) -> Option<(&'a str, &'a (Vec<AdbEntry>, AnimDatabase))> {
+) -> Option<(&'a str, &'a AnimDatabase)> {
     let path = path?;
     Some((path, adbs.get(path)?))
 }
@@ -1613,8 +1644,8 @@ impl CageBuilder<'_> {
         &mut self,
         decoder: &mut TreeDecoder,
         list_paths: &[String],
-        adb: Option<(&str, &(Vec<AdbEntry>, AnimDatabase))>,
-        weapon_adb: Option<(&str, &(Vec<AdbEntry>, AnimDatabase))>,
+        adb: Option<(&str, &AnimDatabase)>,
+        weapon_adb: Option<(&str, &AnimDatabase)>,
     ) -> GridIndex {
         let mut tasks: BTreeMap<NameId, u32> = BTreeMap::new();
         let mut names: BTreeMap<NameId, u32> = BTreeMap::new();
@@ -1658,8 +1689,8 @@ impl CageBuilder<'_> {
         list: NameId,
         action: &ListAction,
         conditions: &[(String, Condition)],
-        adb: Option<(&str, &(Vec<AdbEntry>, AnimDatabase))>,
-        weapon_adb: Option<(&str, &(Vec<AdbEntry>, AnimDatabase))>,
+        adb: Option<(&str, &AnimDatabase)>,
+        weapon_adb: Option<(&str, &AnimDatabase)>,
     ) -> CageAction {
         let completion = action
             .completion
@@ -1679,6 +1710,15 @@ impl CageBuilder<'_> {
             });
         let variants = self.variants(decoder, &action.fragment, adb);
         let weapon_variants = self.variants(decoder, &action.fragment, weapon_adb);
+        let fragment_cases = action
+            .fragment_cases
+            .iter()
+            .map(|case| FragmentCase {
+                condition: cage_condition(decoder, &case.condition),
+                fragment: decoder.intern(&case.fragment),
+                variants: self.variants(decoder, &case.fragment, adb),
+            })
+            .collect();
         CageAction {
             list,
             action: decoder.intern(&action.name),
@@ -1734,6 +1774,12 @@ impl CageBuilder<'_> {
                 .reset_on_exit
                 .as_ref()
                 .map(|condition| cage_condition(decoder, condition)),
+            grit_on: action
+                .stamina
+                .grit_on
+                .as_ref()
+                .map(|condition| cage_condition(decoder, condition)),
+            fragment_cases,
         }
     }
 
@@ -1742,15 +1788,15 @@ impl CageBuilder<'_> {
         &mut self,
         decoder: &mut TreeDecoder,
         fragment: &str,
-        adb: Option<(&str, &(Vec<AdbEntry>, AnimDatabase))>,
+        adb: Option<(&str, &AnimDatabase)>,
     ) -> Vec<FragmentVariant> {
         let mut variants = Vec::new();
-        if let Some((adb_path, (entries, clips))) = adb {
-            for (entry, procedural) in entries.iter().zip(&clips.fragments) {
+        if let Some((adb_path, clips)) = adb {
+            for procedural in &clips.fragments {
                 if procedural.name != fragment {
                     continue;
                 }
-                let length = fragment_length(entry, self.lengths).unwrap_or_else(|_| {
+                let length = fragment_length(procedural, self.lengths).unwrap_or_else(|_| {
                     *self
                         .unknown_fragments
                         .entry(adb_path.to_owned())
@@ -1828,20 +1874,24 @@ mod tests {
         ClipLengths::of(entries)
     }
 
-    fn clip(exit_s: f64, animation: &str, speed: f64, looping: bool) -> LayerClip {
-        LayerClip {
-            exit_s,
-            start_s: 0.0,
-            animation: animation.to_owned(),
-            speed,
-            looping,
-        }
+    /// The one entry of a database whose base animation layer is `layer` (XML).
+    fn entry(layer: &str) -> Fragment {
+        let adb = format!(
+            "<AnimDB><FragmentList><Attack><Fragment Tags=\"\"><AnimLayer>{layer}</AnimLayer>\
+             </Fragment></Attack></FragmentList></AnimDB>"
+        );
+        let mut database = AnimDatabase::parse(&adb).expect("adb");
+        database.fragments.remove(0)
     }
 
     #[test]
     fn a_caf_length_is_its_frames_times_the_frame_time() {
         let seconds = caf_seconds(&caf(GORE_FRAMES)).expect("length");
         assert!((seconds - f64::from(GORE_FRAMES) * f64::from(SECONDS_PER_FRAME)).abs() < 1e-6);
+        // The corruption grunt's pain `Fidget`: 150 frames, f32 5.0000005 s (not 5.00000026).
+        const PAIN_FRAMES: i32 = 150;
+        const PAIN_F32_S: f32 = 5.000_000_5;
+        assert_eq!(caf_seconds(&caf(PAIN_FRAMES)), Some(f64::from(PAIN_F32_S)));
         let mut other = caf(GORE_FRAMES);
         other[0] = b'X';
         assert_eq!(caf_seconds(&other), None);
@@ -1856,32 +1906,99 @@ mod tests {
             ("loop", Ok(1.0)),
             ("bad", Err("x".into())),
         ]);
-        let one = [clip(0.0, "boar_gore", GORE_SPEED, false)];
+        let one = entry(&format!(
+            r#"<Blend ExitTime="0"/><Animation name="Boar_Gore" speed="{GORE_SPEED}"/>"#
+        ));
         let FragmentLength::Seconds(seconds) = fragment_length(&one, &known).expect("length")
         else {
             panic!("seconds");
         };
         assert!((f64::from(seconds) - gore_s / GORE_SPEED).abs() < 1e-5);
-        let cut = [
-            clip(0.0, "boar_gore", 1.0, false),
-            clip(2.0, "", 1.0, false),
-        ];
+        let cut = entry(
+            r#"<Blend ExitTime="0"/><Animation name="boar_gore"/><Blend ExitTime="2"/><Animation name=""/>"#,
+        );
         assert_eq!(
             fragment_length(&cut, &known),
-            Ok(FragmentLength::Seconds(2.0))
+            Ok(FragmentLength::Seconds(2.0)),
+            "an empty clip ends it"
         );
-        let chained = [
-            clip(0.0, "loop", 1.0, false),
-            clip(-1.0, "loop", 1.0, false),
-        ];
+        let chained = entry(
+            r#"<Blend ExitTime="0"/><Animation name="loop"/><Blend ExitTime="-1"/><Animation name="loop"/>"#,
+        );
         assert_eq!(
             fragment_length(&chained, &known),
-            Ok(FragmentLength::Seconds(2.0))
+            Ok(FragmentLength::Seconds(2.0)),
+            "a chained clip starts where the one before ends"
         );
-        let looping = [clip(0.0, "loop", 1.0, true)];
+        let from_start = entry(
+            r#"<Blend ExitTime="0.5" StartTime="0.25"/><Animation name="loop" speed="0.5"/>"#,
+        );
+        assert_eq!(
+            fragment_length(&from_start, &known),
+            Ok(FragmentLength::Seconds(2.0)),
+            "0.5 s, then 0.75 s of the clip at half speed"
+        );
+        let outro = entry(
+            r#"<Blend ExitTime="0"/><Animation name="loop" flags="Loop"/><Blend ExitTime="0.5"/><Animation name=""/><Blend ExitTime="1"/><Animation name=""/>"#,
+        );
+        assert_eq!(
+            fragment_length(&outro, &known),
+            Ok(FragmentLength::Seconds(1.5)),
+            "the last empty clip ends it (the Imhotep `Outro` shape)"
+        );
+        let looping = entry(r#"<Blend ExitTime="0"/><Animation name="loop" flags="Loop"/>"#);
         assert_eq!(fragment_length(&looping, &known), Ok(FragmentLength::Loops));
-        assert!(fragment_length(&[clip(0.0, "bad", 1.0, false)], &known).is_err());
-        assert!(fragment_length(&[], &known).is_err());
+        let after_loop = entry(
+            r#"<Blend ExitTime="0"/><Animation name="loop" flags="Loop"/><Blend ExitTime="-1"/><Animation name="loop"/>"#,
+        );
+        assert!(
+            fragment_length(&after_loop, &known).is_err(),
+            "a chained clip after a loop has no start"
+        );
+        let bad_first = entry(
+            r#"<Blend ExitTime="0"/><Animation name="bad"/><Blend ExitTime="1"/><Animation name="loop"/>"#,
+        );
+        assert_eq!(
+            fragment_length(&bad_first, &known),
+            Ok(FragmentLength::Seconds(2.0)),
+            "a clip that neither ends the entry nor leads a chained one needs no length"
+        );
+        assert!(
+            fragment_length(
+                &entry(r#"<Blend ExitTime="0"/><Animation name="bad"/>"#),
+                &known
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fragment_length(
+                &entry(r#"<Blend ExitTime="0"/><Animation name=""/>"#),
+                &known
+            ),
+            Ok(FragmentLength::Seconds(0.0)),
+            "a base layer of only an empty clip ends at once"
+        );
+        let silent = entry(
+            r#"<Blend ExitTime="0.5"/><Animation name=""/><Blend ExitTime="0.25"/><Animation name=""/>"#,
+        );
+        assert_eq!(
+            fragment_length(&silent, &known),
+            Ok(FragmentLength::Seconds(0.75)),
+            "it ends where its last empty clip starts"
+        );
+        assert!(
+            fragment_length(&entry(""), &known).is_err(),
+            "an empty AnimLayer"
+        );
+        let mut no_layer = entry(r#"<Blend ExitTime="0"/><Animation name="loop"/>"#);
+        no_layer.anim_layers.clear();
+        assert!(fragment_length(&no_layer, &known).is_err());
+        assert_eq!(
+            base_clip_names([&AnimDatabase {
+                fragments: vec![one, cut],
+            }]),
+            BTreeSet::from(["boar_gore".to_owned()])
+        );
     }
 
     #[test]
@@ -1941,6 +2058,88 @@ mod tests {
             "an empty condition"
         );
         assert!(testing(block.activation.as_ref()).is_some());
+    }
+
+    #[test]
+    fn a_stagger_list_keeps_its_engine_grit_action_without_a_fragment_and_drops_a_task_one() {
+        // Retail `baseai_stagger.actionlist` (build 25810808), trimmed, and a made-up task
+        // action without a fragment.
+        let text = r#"<ActionList><Actions>
+ <Action Name="ActivateGrit">
+  <ActivationCondition><And><IfHasStatusEffect StatusEffect="AI_Enable_Stagger"/><Not><IfFragmentPlaying UseHostActionFragment="false" FragmentName="r_Stagger"/></Not></And></ActivationCondition>
+  <DeactivationCondition><Or><IfFragmentPlaying UseHostActionFragment="false" FragmentName="r_Stagger"/></Or></DeactivationCondition>
+  <Activities><ActivateGrit><Default OnEnter="Activate" OnExit="Deactivate" DamageTableRow=""/></ActivateGrit></Activities>
+ </Action>
+ <Action Name="Fragmentless_Task">
+  <ActivationCondition><IfBehaviorTreeTask ActionName="Fragmentless_CAGE_Task"/></ActivationCondition>
+ </Action>
+</Actions></ActionList>"#;
+        let parsed = list_actions(text).expect("list");
+        let [grit] = &parsed.actions[..] else {
+            panic!("only the engine action: {:?}", parsed.actions);
+        };
+        assert_eq!((grit.name.as_str(), grit.fragment.as_str()), ("ActivateGrit", ""));
+        assert_eq!(grit.stamina.grit_on, Some(Condition::True));
+        let mut decoder = TreeDecoder::default();
+        let stagger = decoder.intern("r_Stagger");
+        let deactivation =
+            cage_condition(&mut decoder, grit.deactivation.as_ref().expect("a deactivation"));
+        let mob = |playing: bool| {
+            deactivation.holds_with(&nw_ai::data::MobCage {
+                has_tag: &|_| false,
+                has_marker: &|_| false,
+                has_effect: &|_| false,
+                plays_fragment: &|fragment| playing && fragment == stagger,
+                hit_angle_deg: None,
+            })
+        };
+        assert!(mob(true), "the playing stagger stops the grit");
+        assert!(!mob(false));
+    }
+
+    #[test]
+    fn a_stagger_keeps_its_front_and_back_fragments_and_their_hit_sides() {
+        // Retail `baseai_stagger.actionlist` (build 25810808), trimmed.
+        let text = r#"<ActionList><Actions>
+ <Action Name="Reaction_Staggered" FragmentName="r_Stagger" ServerStarted="true">
+  <ActivationCondition><IfStaminaValue ComparisonValue="0.0"/></ActivationCondition>
+  <Activities><ChangeActionFragment ResetWhenReinstalled="true">
+   <Default UseDefaultFragment="true" FragmentName=""/>
+   <Conditional Name="damaged_front" UseDefaultFragment="false" FragmentName="r_Stagger_F"/>
+   <Conditional Name="damaged_back" UseDefaultFragment="false" FragmentName="r_Stagger_B"/>
+  </ChangeActionFragment></Activities>
+ </Action>
+</Actions><Conditions>
+ <Or Name="damaged_front"><IfDamagedByAngle Max="90.000000" Min="0.000000" Tolerance="0.010000"/><IfDamagedByAngle Max="0.000000" Min="-90.000000" Tolerance="0.010000"/></Or>
+ <Or Name="damaged_back"><IfDamagedByAngle Max="180.000000" Min="90.000000" Tolerance="0.010000"/><IfDamagedByAngle Max="-90.000000" Min="-180.000000" Tolerance="0.010000"/></Or>
+</Conditions></ActionList>"#;
+        let parsed = list_actions(text).expect("list");
+        let [stagger] = &parsed.actions[..] else {
+            panic!("one action: {:?}", parsed.actions);
+        };
+        let fragments: Vec<&str> = stagger
+            .fragment_cases
+            .iter()
+            .map(|case| case.fragment.as_str())
+            .collect();
+        assert_eq!(fragments, ["r_Stagger_F", "r_Stagger_B"]);
+        let mut decoder = TreeDecoder::default();
+        let sides: Vec<CageCondition> = stagger
+            .fragment_cases
+            .iter()
+            .map(|case| cage_condition(&mut decoder, &case.condition))
+            .collect();
+        let holds = |side: &CageCondition, angle: f32| {
+            side.holds_with(&nw_ai::data::MobCage {
+                has_tag: &|_| false,
+                has_marker: &|_| false,
+                has_effect: &|_| false,
+                plays_fragment: &|_| false,
+                hit_angle_deg: Some(angle),
+            })
+        };
+        assert!(holds(&sides[0], -45.0) && !holds(&sides[1], -45.0));
+        assert!(holds(&sides[1], 170.0) && !holds(&sides[0], 170.0));
     }
 
     #[test]
@@ -2007,19 +2206,19 @@ mod tests {
     }
 
     #[test]
-    fn an_animation_database_gives_each_entry_its_base_layer() {
+    fn an_animation_database_gives_each_entry_its_base_layer_and_clips() {
         let adb = r#"<AnimDB><FragmentList><Attack_Gore>
 <Fragment BlendOutDuration="0.2" Tags=""><AnimLayer><Blend ExitTime="0" StartTime="0" Duration="0.1"/><Animation name="boar_gore" speed="0.85000002"/></AnimLayer>
 <ProcLayer><Blend ExitTime="0.69999999" StartTime="0" Duration="0"/><Procedural type="CAGE-Damage"><ProceduralParams><DamageTableRow value="Attack_Gore"/></ProceduralParams></Procedural><Blend ExitTime="0.19999999"/><Procedural type=""/></ProcLayer>
 </Fragment>
 <Fragment Tags="Armadillo"><AnimLayer><Blend ExitTime="0"/><Animation name="armadillo_idle" flags="Loop"/></AnimLayer></Fragment>
 </Attack_Gore></FragmentList></AnimDB>"#;
-        let entries = adb_entries(adb).expect("adb");
         let clips = AnimDatabase::parse(adb).expect("clips");
-        assert_eq!(entries.len(), clips.fragments.len());
-        assert_eq!(entries[0][0].animation, "boar_gore");
-        assert!((entries[0][0].speed - GORE_SPEED).abs() < 1e-6);
-        assert!(entries[1][0].looping);
+        assert_eq!(clips.fragments.len(), 2);
+        let base = &clips.fragments[0].anim_layers[0][0];
+        assert_eq!(base.name, "boar_gore");
+        assert!((base.speed - GORE_SPEED).abs() < 1e-6);
+        assert!(clips.fragments[1].anim_layers[0][0].looped);
         assert_eq!(clips.fragments[1].tags, ["Armadillo"]);
         let damage = &clips.fragments[0].clips[0];
         assert!((damage.start_s - 0.7).abs() < 1e-6);
@@ -2050,6 +2249,49 @@ mod tests {
 
     fn text(name: &str, value: &str) -> Element {
         typed(name, Class::String, value.as_bytes().to_vec(), Vec::new())
+    }
+
+    /// An `FxScriptComponent`'s lists as the bear slice holds them: the component's base class >
+    /// `m_scriptDataContainer` > element > `m_scriptName`.
+    fn fx_lists(names: &[&str]) -> Element {
+        let entries = names
+            .iter()
+            .map(|name| {
+                typed(
+                    "element",
+                    Class::Node,
+                    Vec::new(),
+                    vec![text(FX_SCRIPT_NAME, name)],
+                )
+            })
+            .collect();
+        typed(
+            BASE_CLASS,
+            Class::Node,
+            Vec::new(),
+            vec![typed(FX_SCRIPT_CONTAINER, Class::Node, Vec::new(), entries)],
+        )
+    }
+
+    /// A slice whose FX lists are the plain status effect list and a kind's own (the Inquisitor
+    /// warden's: `fxscriptlist_npc_statuseffects`, `fxscriptlist_npc`) is not a large body; one
+    /// that also names the large list in a second component is.
+    #[test]
+    fn a_slice_is_a_large_body_only_when_an_fx_script_component_names_the_large_list() {
+        let read = |components: Vec<Element>| {
+            let root = typed("root", Class::Node, Vec::new(), components);
+            SliceAi::read(&root, &mut TreeDecoder::default(), "warden")
+                .expect("slice")
+                .large_status_effects_fx
+        };
+        const PLAIN: &str = "fxscriptlist_npc_statuseffects";
+        const OWN: &str = "fxscriptlist_npc";
+        assert!(!read(vec![fx_lists(&[PLAIN, OWN])]));
+        assert!(!read(Vec::new()), "no FX script component");
+        assert!(read(vec![
+            fx_lists(&[OWN]),
+            fx_lists(&[PLAIN, LARGE_STATUS_EFFECTS_FX])
+        ]));
     }
 
     fn asset(name: &str, hint: &str) -> Element {
@@ -2199,10 +2441,28 @@ mod tests {
                 navigation,
                 float(MAX_SLOPE, 70.0),
                 asset(ACTION_GRID, "SharedAssets/Boar.grid"),
+                // As the bear slice holds them: `m_initialStatusEffects` > element > text, and
+                // the `GritComponent` flag.
+                typed(
+                    INITIAL_STATUS_EFFECTS,
+                    Class::Node,
+                    Vec::new(),
+                    vec![typed(
+                        "element",
+                        Class::Node,
+                        Vec::new(),
+                        vec![text("m_statusEffectId", "AI_Enable_Stagger")],
+                    )],
+                ),
+                typed(GRIT_USES_STAMINA, Class::Bool, vec![1], Vec::new()),
+                fx_lists(&[LARGE_STATUS_EFFECTS_FX]),
             ],
         );
         let mut decoder = TreeDecoder::default();
         let slice = SliceAi::read(&root, &mut decoder, "boar").expect("slice");
+        assert_eq!(slice.initial_effects, ["AI_Enable_Stagger"]);
+        assert!(slice.grit_uses_stamina);
+        assert!(slice.large_status_effects_fx);
         assert_eq!(
             slice.trees,
             ["sharedassets/ai/behaviortrees/predator/boar/boar_base.behaviortree"]

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The governor's desk of a town (territory upkeep study 2026-11-11): its governance data and the
-//! upkeep payment.
+//! upkeep payment; and the territory planning board, the same kind of level entity whose 1746
+//! also carries the progression data ([`super::town_projects`]).
 //!
 //! Observed (ledgers `pay-territory-tax`, `territory-status`, `MSQ6-lv28`): the player uses the
 //! desk (interaction kind [`GOVERNOR_DESK_KIND`], `@ui_governorsdesk`); retail accepts it (3743),
@@ -44,6 +45,7 @@ use super::gathering::{GATHER_ACCEPTED, GATHER_BUSY};
 use super::land_claims::{CLAIM_LEVEL, Territories};
 use super::slots::Slot;
 use super::{Player, SimWorld, gather_answer, send_now};
+use nw_content::territory_projects::TerritoryProjects;
 
 /// The interaction kind of a governor's desk (Observed: 3743 kind 54 `@ui_governorsdesk` in the
 /// three desk ledgers).
@@ -90,6 +92,8 @@ struct DeskView {
     territory: u16,
     /// Its entity id (the card's `GdeRef`).
     target: [u8; RAW_ID_LEN],
+    /// A territory planning board (its 1746 carries the progression data too).
+    planning: bool,
     /// The upkeep version its client has; `None` before its first group.
     sent: Option<u64>,
 }
@@ -103,8 +107,9 @@ pub(super) struct PlayerDesk {
 }
 
 impl PlayerDesk {
-    /// Shows the desk `target` of `territory` (the same desk keeps its slot).
-    fn open(&mut self, territory: u16, target: [u8; RAW_ID_LEN]) {
+    /// Shows the desk `target` of `territory`, a planning board when `planning` (the same desk
+    /// keeps its slot).
+    fn open(&mut self, territory: u16, target: [u8; RAW_ID_LEN], planning: bool) {
         if self
             .view
             .as_ref()
@@ -117,12 +122,21 @@ impl PlayerDesk {
             number: DESK_ENTITY_BASE + self.opened,
             territory,
             target,
+            planning,
             sent: None,
         });
     }
 
+    /// The territory of the open planning board.
+    pub(super) fn planning_territory(&self) -> Option<u16> {
+        self.view
+            .as_ref()
+            .filter(|view| view.planning)
+            .map(|view| view.territory)
+    }
+
     /// Shows the open desk its governance data again with the next bundle.
-    fn show_again(&mut self) {
+    pub(super) fn show_again(&mut self) {
         if let Some(view) = self.view.as_mut() {
             view.sent = None;
         }
@@ -145,13 +159,15 @@ impl PlayerDesk {
     }
 
     /// The bundle group of desk `number` in `slot` at Unix ms `now_ms`: in a new slot the card and
-    /// the 1746 with slot 0 and the governance data; after a change of the claims' upkeep the
-    /// governance data alone; else nothing.
+    /// the 1746 with slot 0 and the governance data (and a planning board's progression data of
+    /// the town projects `projects`); after a change of the claims' upkeep or projects that data
+    /// alone; else nothing.
     pub(super) fn group(
         &mut self,
         number: u64,
         slot: Slot,
         territories: &Territories,
+        projects: &TerritoryProjects,
         now_ms: u64,
     ) -> Option<BundleGroup> {
         let view = self.view.as_mut().filter(|view| view.number == number)?;
@@ -174,10 +190,19 @@ impl PlayerDesk {
             // The owner is gone: the client keeps the last data (no retail form takes it away).
             return None;
         }
+        let dominion = territories.dominion();
+        let progression = view.planning.then(|| {
+            dominion
+                .projects()
+                .progression_data(view.territory, projects, |upgrade| {
+                    dominion.tier(view.territory, upgrade)
+                })
+        });
         members.push(BundleMember {
             component: DESK_TERRITORY_COMPONENT,
             state: MemberState::TerritoryInterface(TerritoryInterfaceState {
                 refs_set: slot.new.then_some(TERRITORY_REFS_SET),
+                progression,
                 governance,
                 ..TerritoryInterfaceState::default()
             }),
@@ -199,10 +224,11 @@ fn claim_of(territories: &[u16]) -> Option<u16> {
 }
 
 impl SimWorld {
-    /// Player `number` (`entity`) uses the governor's desk of `request` (its name `name`):
-    /// accepted (3743) with the 2722 of the claim the player is in, and the desk entity shows
-    /// with the claim's governance data. A player in no claim is refused (Inferred: every desk
-    /// stands in a town of a claim; retail's refusal status, `MSQ6-lv28`).
+    /// Player `number` (`entity`) uses the governor's desk or the territory planning board of
+    /// `request` (its name `name`): accepted (3743) with the 2722 of the claim the player is in,
+    /// and the desk entity shows with the claim's governance data (a planning board's with the
+    /// progression data too). A player in no claim is refused (Inferred: every desk stands in a
+    /// town of a claim; retail's refusal status, `MSQ6-lv28`).
     pub(super) fn open_governor_desk(
         &mut self,
         entity: Entity,
@@ -232,7 +258,8 @@ impl SimWorld {
             )),
         ];
         send_now(&mut self.combat_messages, &player.connection, &answers);
-        player.desk.open(territory, request.target);
+        let planning = request.kind == super::town_projects::PLANNING_BOARD_KIND;
+        player.desk.open(territory, request.target, planning);
     }
 
     /// The upkeep payment `call` of the player of `connection` at Unix ms `now_ms`: the social
@@ -383,11 +410,17 @@ mod tests {
     #[test]
     fn an_open_desk_shows_once_with_its_card_then_after_each_upkeep_change() {
         let mut desk = PlayerDesk::default();
-        desk.open(TERRITORY, DESK);
+        desk.open(TERRITORY, DESK, false);
         let number = desk.number_in(&[TERRITORY, AREA]).expect("shown");
         let mut territories = owned(NOW_MS);
         let first = desk
-            .group(number, NEW, &territories, NOW_MS)
+            .group(
+                number,
+                NEW,
+                &territories,
+                &TerritoryProjects::default(),
+                NOW_MS,
+            )
             .expect("the spawn");
         assert_eq!(first.members[0].component, CARD_COMPONENT);
         let MemberState::GdeMetadata(card) = &first.members[0].state else {
@@ -404,10 +437,27 @@ mod tests {
             territories.governance(TERRITORY, NOW_MS),
             "the owner's governance data"
         );
-        assert!(desk.group(number, KNOWN, &territories, NOW_MS).is_none());
+        assert_eq!(state.progression, None, "a desk shows no progression data");
+        assert_eq!(desk.planning_territory(), None);
+        assert!(
+            desk.group(
+                number,
+                KNOWN,
+                &territories,
+                &TerritoryProjects::default(),
+                NOW_MS
+            )
+            .is_none()
+        );
         desk.show_again();
         let again = desk
-            .group(number, KNOWN, &territories, NOW_MS)
+            .group(
+                number,
+                KNOWN,
+                &territories,
+                &TerritoryProjects::default(),
+                NOW_MS,
+            )
             .expect("a refused payment shows the data again");
         let [member] = again.members.as_slice() else {
             panic!("the 1746 alone: {again:?}");
@@ -416,11 +466,26 @@ mod tests {
             panic!("territory interface");
         };
         assert_eq!(state.governance, territories.governance(TERRITORY, NOW_MS));
-        assert!(desk.group(number, KNOWN, &territories, NOW_MS).is_none());
+        assert!(
+            desk.group(
+                number,
+                KNOWN,
+                &territories,
+                &TerritoryProjects::default(),
+                NOW_MS
+            )
+            .is_none()
+        );
         // The read after the payment moves the due time on the same claims.
         territories.read_again_for_test(vec![owner(NOW_MS + nw_db::UPKEEP_INTERVAL_MS)]);
         let change = desk
-            .group(number, KNOWN, &territories, NOW_MS)
+            .group(
+                number,
+                KNOWN,
+                &territories,
+                &TerritoryProjects::default(),
+                NOW_MS,
+            )
             .expect("the new due time");
         let [member] = change.members.as_slice() else {
             panic!("the 1746 alone: {change:?}");
@@ -430,12 +495,36 @@ mod tests {
         };
         assert_eq!(state.refs_set, None);
         assert_eq!(state.governance, territories.governance(TERRITORY, NOW_MS));
-        desk.open(TERRITORY, DESK);
+        desk.open(TERRITORY, DESK, false);
         assert_eq!(desk.number_in(&[TERRITORY]), Some(number), "the same desk");
-        desk.open(TERRITORY, OTHER_DESK);
+        desk.open(TERRITORY, OTHER_DESK, false);
         assert_ne!(desk.number_in(&[TERRITORY]), Some(number), "another desk");
         assert_eq!(desk.number_in(&[AREA]), None, "the player left the claim");
         assert_eq!(desk.territory(), None);
+    }
+
+    #[test]
+    fn a_planning_board_shows_the_progression_data_with_the_governance_data() {
+        let mut desk = PlayerDesk::default();
+        desk.open(TERRITORY, DESK, true);
+        assert_eq!(desk.planning_territory(), Some(TERRITORY));
+        let number = desk.number_in(&[TERRITORY]).expect("shown");
+        let territories = owned(NOW_MS);
+        let group = desk
+            .group(
+                number,
+                NEW,
+                &territories,
+                &TerritoryProjects::default(),
+                NOW_MS,
+            )
+            .expect("the spawn");
+        let MemberState::TerritoryInterface(state) = &group.members[1].state else {
+            panic!("territory interface");
+        };
+        let progression = state.progression.as_ref().expect("progression data");
+        assert_eq!(progression.slots.len(), 5, "one slot per progression type");
+        assert!(state.governance.is_some());
     }
 
     #[test]

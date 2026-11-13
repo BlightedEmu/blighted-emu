@@ -92,21 +92,17 @@
 //! string of the client hashes to them); the wild flag (no wild flag value or entity in 5 ledgers:
 //! retail runs none, so this sim runs none and sends its capture values as 0).
 
-use std::collections::HashMap;
-
 use bevy_ecs::entity::Entity;
 use nw_bus::ArenaSeat;
 use nw_content::instances::{InstanceKind, InstanceMap};
-use nw_content::rewards::{EventGrant, Reward};
 use nw_formats::objectstream::lowercase_crc32;
-use nw_messages::buildables::{GuildCrest, NO_OWNER_KIND, OwnerIdentification};
+use nw_messages::buildables::{NO_OWNER_KIND, OwnerIdentification};
 use nw_messages::client_input::{InteractionRequest, TRIGGER_KIND};
 use nw_messages::components::InteractState;
 use nw_messages::facet::facet_entity;
 use nw_messages::game_mode_participant::PARTICIPANT_FLAGS_LEN;
 use nw_messages::game_mode_state::{GameModeState, Keyed};
 use nw_messages::list_delta::{ListChange, ReplicatedList};
-use nw_messages::social::crest_of_bytes;
 use nw_messages::spell_state::SpellState;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
@@ -114,7 +110,6 @@ use nw_messages::{
     RotationComponent, Scale, ServerMessage, WorldPosition,
 };
 use nw_sim_core::Position;
-use uuid::Uuid;
 
 use super::arena_match::{
     CLEANUP_TIMER, GAME_MODE_TIMEOUT, GAME_MODE_TIMEOUT_MS, LEAVER_PENALTY_NS, OVERTIME_TIMER,
@@ -129,14 +124,9 @@ use super::game_mode_entity::{
 use super::hit_shape::PLAYER_CAPSULE;
 use super::outpost_rush::TIME_LIMIT_TIMER;
 use super::outpost_rush_doors::closed_door;
-use super::quest_objects::grant;
 use super::queue::team_spot;
-use super::seasons::SeasonEvent;
 use super::spell_areas::caster_ref;
-use super::status_effects::GainKind;
-use super::tradeskill::{AZOTH_CURRENCY, ONE_FIRING};
 use super::{Body, Player, SimWorld, gather_answer, unix_ns};
-use crate::objectives::Event;
 
 /// The script states (Observed, `FUN_146b4b0d0`).
 const RUNNING: u8 = 0;
@@ -216,10 +206,6 @@ const POWER_UP_RESPAWN_MS: u64 = 30_000;
 const WIN_EVENT: &str = "CaptureTheFlag_T4";
 const LOSS_EVENT: &str = "CaptureTheFlag_T2";
 const TIE_EVENT: &str = "CaptureTheFlag_T3";
-/// The categorical progressions of the PvP experience and the umbral shards (Observed: the 911
-/// entries `PvP_XP` +1,350 and `UmbralCurrency` to its cap 100,000 at `CTF01` 1222.234 s).
-const PVP_XP: &str = "PvP_XP";
-const UMBRAL_CURRENCY: &str = "UmbralCurrency";
 /// The trigger shapes (Observed, client slices, the `m_shape` of each trigger area with the
 /// `Player` tag): `Dropzone_A` and `Dropzone_B` of `gamemode_ctf_003_long` and
 /// `gamemode_ctf_002_wide` hold a `QueryShapeCylinder` (`{709B11EA-...}`, `FUN_141584ac0`) of
@@ -1066,18 +1052,6 @@ pub(super) struct CaptureTheFlagMatch {
     version: u64,
     list_version: u64,
     both_teams_seen: bool,
-    /// The participants' companies, read from the world database by id; `None` while the read
-    /// runs.
-    companies: HashMap<Uuid, Option<CompanyLook>>,
-    /// The companies to read next.
-    company_reads: Vec<Uuid>,
-}
-
-/// A carrier's company as its flag's ownership names it.
-#[derive(Debug, Clone, PartialEq)]
-struct CompanyLook {
-    name: Vec<u8>,
-    crest: GuildCrest,
 }
 
 /// The values every state holds (Observed, `CTF_QJ` 46.961: these nine).
@@ -1435,8 +1409,6 @@ impl SimWorld {
             version: FIRST_LIST_VERSION,
             list_version: FIRST_LIST_VERSION,
             both_teams_seen: false,
-            companies: HashMap::new(),
-            company_reads: Vec::new(),
         };
         running.barriers = layout
             .barriers
@@ -1609,7 +1581,8 @@ impl SimWorld {
     /// carrier's company (id, name and crest; all zero, empty and no crest for a carrier
     /// without one), the carrier (kind 2), rule 4, its team's raid, its faction and a PvP value
     /// that differs between carriers of one ledger. Inferred: the turn is the carrier's look
-    /// and the PvP value its PvP flag; a company whose read has not come back yet is left out.
+    /// and the PvP value its PvP flag; a company whose look is not known yet is left out
+    /// ([`super::company_looks`]).
     fn place_carried(
         &mut self,
         team: usize,
@@ -1617,7 +1590,7 @@ impl SimWorld {
         number: u64,
         raid: u64,
     ) -> Option<u64> {
-        let (owner, faction, pvp, company, yaw, at) =
+        let (owner, faction, pvp, yaw, at) =
             self.world.get::<Player>(entity).and_then(|player| {
                 let at = self.world.get::<Body>(entity)?.motion.position();
                 Some((
@@ -1628,16 +1601,11 @@ impl SimWorld {
                     },
                     player.faction.faction,
                     player.pvp_flagged,
-                    player.social.company(),
                     player.view.map_or(0.0, |view| view.yaw),
                     at,
                 ))
             })?;
-        let look = company.and_then(|id| {
-            let running = self.arena_matches.capture_the_flag.as_ref()?;
-            let look = running.companies.get(&Uuid::from_bytes(id))?.clone()?;
-            Some((id, look))
-        });
+        let look = self.company_look_of(entity);
         let half = yaw / 2.0;
         let spell = SpellState {
             spell: Some(lowercase_crc32(FLAG_EFFECTS[team])),
@@ -1678,54 +1646,17 @@ impl SimWorld {
         .into()
     }
 
-    /// Asks for the company of each participant whose company this match has not read yet.
+    /// Asks for the companies of the participants ([`super::company_looks`]).
     fn ask_ctf_companies(&mut self) {
         let Some(running) = self.arena_matches.capture_the_flag.as_ref() else {
             return;
         };
-        let wanted: Vec<Uuid> = running
+        let participants: Vec<Entity> = running
             .participants
             .iter()
-            .filter_map(|participant| self.world.get::<Player>(participant.entity))
-            .filter_map(|player| player.social.company())
-            .map(Uuid::from_bytes)
-            .filter(|id| !running.companies.contains_key(id))
+            .map(|participant| participant.entity)
             .collect();
-        let Some(running) = self.arena_matches.capture_the_flag.as_mut() else {
-            return;
-        };
-        for id in wanted {
-            if running.companies.insert(id, None).is_none() {
-                running.company_reads.push(id);
-            }
-        }
-    }
-
-    /// The companies the match asks the world database for (the server reads them).
-    pub(crate) fn take_company_reads(&mut self) -> Vec<Uuid> {
-        self.arena_matches
-            .capture_the_flag
-            .as_mut()
-            .map(|running| std::mem::take(&mut running.company_reads))
-            .unwrap_or_default()
-    }
-
-    /// The world database's answer to [`Self::take_company_reads`]: each company's name and
-    /// crest, for the next flag its members take. A company the database does not hold stays
-    /// unread (its carriers' flags name no company).
-    pub(crate) fn companies_read(&mut self, listings: &[nw_db::CompanyListing]) {
-        let Some(running) = self.arena_matches.capture_the_flag.as_mut() else {
-            return;
-        };
-        for listing in listings {
-            running.companies.insert(
-                listing.id,
-                Some(CompanyLook {
-                    name: listing.name.clone().into_bytes(),
-                    crest: crest_of_bytes(&listing.crest),
-                }),
-            );
-        }
+        self.ask_company_looks(&participants);
     }
 
     /// Sends the values and timers of the match.
@@ -2392,50 +2323,10 @@ impl SimWorld {
         }
         self.change_game_mode_state(entity, change);
         for (player, number, team) in players {
-            self.give_ctf_end_event(player, number, end_event(team, winner));
+            self.give_mode_event(player, number, end_event(team, winner));
             self.put_affiliations(player, list_version, Vec::new());
         }
         tracing::info!(?winner, "capture the flag match ended");
-    }
-
-    /// Player `entity` (`number`) gets end event `event` ([`nw_content::game_mode_rewards`]):
-    /// its coins and character experience, its `PvP_XP`, faction reputation and tokens (each
-    /// under the player's held effects), azoth and umbral shards (each to its cap), its loot
-    /// table's items, and the event counts for the player's quests and season stats. An event
-    /// the content does not hold gives nothing (logged).
-    fn give_ctf_end_event(&mut self, entity: Entity, number: u64, event: &'static str) {
-        let content = std::sync::Arc::clone(&self.content);
-        let Some(reward) = content.mode_rewards.get(event) else {
-            tracing::warn!(player = number, event, "end event not in the content");
-            return;
-        };
-        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            let wallet = Reward {
-                coins: reward.coins,
-                experience: reward.experience,
-                ..Reward::default()
-            };
-            grant(&mut player, &wallet, &content.gameplay);
-        }
-        let gains = [
-            (PVP_XP, GainKind::Progression, reward.pvp_xp),
-            (AZOTH_CURRENCY, GainKind::Azoth, reward.azoth),
-            (UMBRAL_CURRENCY, GainKind::Progression, reward.umbral),
-        ];
-        for (id, kind, points) in gains.into_iter().filter(|(_, _, points)| *points > 0.0) {
-            self.gain_categorical(number, event, id, kind, points, ONE_FIRING);
-        }
-        let faction = EventGrant {
-            faction_reputation: reward.faction_reputation,
-            faction_tokens: reward.faction_tokens,
-            ..EventGrant::default()
-        };
-        self.gain_faction(number, event, &faction, ONE_FIRING);
-        if let Some(item) = reward.item.clone() {
-            self.give_loot(number, vec![item], self.server_ms);
-        }
-        self.quest_event(number, Event::GameEvent(event), self.server_ms);
-        self.season_event(entity, SeasonEvent::GameEvent { id: event });
     }
 
     /// `Cleanup` ended: the players still in the match go back, the entities go and the
@@ -2570,6 +2461,8 @@ mod tests {
     use nw_messages::LevelSpec;
     use uuid::Uuid;
 
+    use super::super::game_event_log::{PVP_XP, UMBRAL_CURRENCY};
+    use super::super::tradeskill::AZOTH_CURRENCY;
     use super::*;
     use crate::player_content::PlayerContent;
     use crate::world::Placement;
@@ -3308,45 +3201,19 @@ mod tests {
     /// carrier's PvP flag, and turns with the carrier's look (`CTF04` 205.526 s).
     #[test]
     fn a_carried_flag_names_its_carriers_company_and_turns_with_its_look() {
-        use nw_bus::{OwnStateDelivery, SocialDeliveries, SocialStateKind};
-        use nw_messages::social::states::GuildsState;
-        use nw_messages::wire::Writer;
+        use crate::world::company_looks::tests::{join_company, listing};
         /// A made-up company.
         const COMPANY: Uuid = Uuid::from_u128(0xc0_ffee);
         const COMPANY_NAME: &str = "Test Company";
         const QUARTER_TURN: f32 = std::f32::consts::FRAC_PI_2;
         let mut world = started();
         let blue = world.player_by_number(BLUE_PLAYER).expect("player");
-        let character = world.world.get::<Player>(blue).expect("player").character;
-        let mut writer = Writer::new();
-        GuildsState {
-            guild_id: Some(*COMPANY.as_bytes()),
-            ..GuildsState::default()
-        }
-        .write(&mut writer)
-        .expect("writes");
-        world.apply_social_states(&SocialDeliveries {
-            own_states: vec![OwnStateDelivery {
-                character,
-                kind: SocialStateKind::Guilds,
-                body: writer.finish(),
-            }],
-            ..SocialDeliveries::default()
-        });
+        join_company(&mut world, blue, COMPANY);
         tick_at(&mut world, START_MS + PREGAME_MS + 1);
         assert_eq!(world.take_company_reads(), vec![COMPANY]);
         tick_at(&mut world, START_MS + PREGAME_MS + 2);
         assert!(world.take_company_reads().is_empty(), "asked once");
-        world.companies_read(&[nw_db::CompanyListing {
-            id: COMPANY,
-            name: COMPANY_NAME.to_owned(),
-            governor: None,
-            faction: 1,
-            crest: [0; nw_db::CREST_LEN],
-            members: 1,
-            claims: 0,
-            siege_hour: 0.0,
-        }]);
+        world.companies_read(&[listing(COMPANY, COMPANY_NAME)]);
         {
             let mut player = world.world.get_mut::<Player>(blue).expect("player");
             player.pvp_flagged = true;
@@ -3420,6 +3287,7 @@ mod tests {
             faction_tokens,
             azoth,
             umbral,
+            seasons_xp: 0.0,
             item: Some((REWARD_ITEM.to_owned(), items)),
         };
         let currency = |id: &str, cap| ProgressionSource {
@@ -3528,6 +3396,20 @@ mod tests {
             let player = world.world.get::<Player>(entity).expect("player");
             let gear = player.gear.as_ref().expect("gear");
             assert_eq!(gear.bag_count(REWARD_ITEM), items);
+            // Its 497 entry: the event, the coins and the item given (`CTF01` 1222.234 s).
+            let mut log = player.game_events.clone();
+            let member = log.take_member(1).expect("the end event's entry");
+            let MemberState::GameEvents(state) = member.state else {
+                panic!("a game event member");
+            };
+            let Some(ReplicatedList::Full(list)) = state.game_events else {
+                panic!("the first entry goes in full");
+            };
+            let entry = &list.elements[0];
+            let event = if number == RED_PLAYER { WIN_EVENT } else { LOSS_EVENT };
+            assert_eq!(entry.event, lowercase_crc32(event));
+            assert_eq!((entry.value_a, entry.flag), (25_000, true));
+            assert_eq!(entry.rewards[0].quantity, items);
             assert!(
                 player.extra_members.iter().any(|member| matches!(
                     &member.state,

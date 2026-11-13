@@ -146,6 +146,7 @@ impl SocialWorld {
                 now_ms: at_ms,
             },
             Transfer::WarFee(_) => TreasuryReason::WarDeclaration,
+            Transfer::ProjectFee(_) => TreasuryReason::TerritoryProgression,
         };
         let ticket = self.ticket();
         self.transfers.insert(ticket, transfer);
@@ -388,6 +389,9 @@ impl SocialWorld {
                 self.owed.entry(debt.character).or_default().push(debt);
             }
             (Some(Transfer::WarFee(request)), result) => self.war_fee_moved(request, result),
+            (Some(Transfer::ProjectFee(request)), result) => {
+                self.project_fee_moved(request, result);
+            }
             (
                 Some(Transfer::DepositReturn(_) | Transfer::Refund(_) | Transfer::Upkeep { .. }),
                 _,
@@ -414,7 +418,7 @@ impl SocialWorld {
             | Transfer::Refund(coins)
             | Transfer::DepositReturn(coins)
             | Transfer::Upkeep { coins, .. } => coins,
-            Transfer::Debt(_) | Transfer::WarFee(_) => return Vec::new(),
+            Transfer::Debt(_) | Transfer::WarFee(_) | Transfer::ProjectFee(_) => return Vec::new(),
         };
         if let TreasuryOutcome::Stored(balance) = outcome
             && let Some(state) = self.companies.get_mut(&coins.company)
@@ -471,7 +475,8 @@ impl SocialWorld {
             Transfer::Refund(_)
             | Transfer::DepositReturn(_)
             | Transfer::Debt(_)
-            | Transfer::WarFee(_) => {}
+            | Transfer::WarFee(_)
+            | Transfer::ProjectFee(_) => {}
         }
         self.refresh_views(now_ms);
         std::mem::take(&mut self.out)

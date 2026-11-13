@@ -34,7 +34,7 @@ use std::collections::{BTreeSet, HashMap};
 use nw_content::player_attacks::{MeleeShape, ShapeKind};
 use nw_formats::caf::Caf;
 use nw_formats::character::CharacterDefinition;
-use nw_formats::mannequin::{AnimClip, Fragment, ProcClip};
+use nw_formats::mannequin::{AnimClip, AnimationList, AnimationSource, Fragment, ProcClip};
 use nw_formats::objectstream::{Element, lowercase_crc32};
 use nw_formats::rigid::{Rigid, quat_from_euler_deg};
 use nw_formats::skeleton::Skeleton;
@@ -45,11 +45,17 @@ pub const PLAYER_SKELETON: &str = "objects/characters/player/male/player_male.ch
 pub const PLAYER_DEFINITION: &str = "objects/characters/player/male/player_male.cdf";
 /// The equip types database.
 pub const EQUIP_TYPES: &str = "sharedassets/genericassets/items/equiptypesdatabase.equipdb";
-/// The folders of the clips: the player's animations (`player_shared.chrparams`) and the props'.
-pub const CLIP_FOLDERS: [&str; 2] = [
-    "animations/gameplay/character/player/",
-    "animations/gameplay/prop/",
-];
+/// The player's animation list: the folders its databases' animation names find their clips in
+/// ([`clip_folders`]).
+pub const PLAYER_ANIMATION_LIST: &str = "objects/characters/player/male/player_male.chrparams";
+/// The folder of the player's animation list and of the lists it takes in
+/// (`objects/characters/player/player_shared.chrparams`).
+pub const PLAYER_ANIMATION_LIST_FOLDER: &str = "objects/characters/player/";
+/// The suffix of an animation list.
+pub const ANIMATION_LIST_SUFFIX: &str = ".chrparams";
+/// The folder of the weapons' own clips: the weapon skeletons' animation lists name folders
+/// below it (Observed: `lh_weapon_skel.chrparams`, `animations/Gameplay/Prop/Weapons/Bow/...`).
+pub const PROP_CLIP_FOLDER: &str = "animations/gameplay/prop/";
 /// The suffix of a clip file.
 pub const CLIP_SUFFIX: &str = ".caf";
 /// The suffix of a character definition.
@@ -197,8 +203,7 @@ impl Bodies {
                 Some(end) => end,
                 None if clip.looped => clip.start_s,
                 None => {
-                    let duration = f64::from(self.clip(&clip.name).ok()?.duration_s());
-                    clip.start_s + (duration - clip.anim_start_s).max(0.0) / clip.speed
+                    clip.natural_end_s(f64::from(self.clip(&clip.name).ok()?.duration_s()))
                 }
             };
             length = length.max(end);
@@ -207,9 +212,62 @@ impl Bodies {
     }
 }
 
+/// Whether an animation layer of `fragment` ends in a looping clip: its last clip has `flags`
+/// `Loop` and no clip after it (an empty clip after it ends it). Such a fragment never finishes
+/// by itself; [`Bodies::fragment_length_s`] gives the start of the loop (Observed: the fire
+/// staff's `Ability_Fire_Staff_FlameThrower` plays `elm_fire_stf_idle_to_spc_3_aim_idle_ub`, then
+/// the looping `elm_fire_stf_spc_3_aim_idle_ub` from 0.633 s; its procedural clips run to
+/// 25.09 s).
+pub fn ends_in_loop(fragment: &Fragment) -> bool {
+    fragment.anim_layers.iter().any(|layer| {
+        layer
+            .last()
+            .is_some_and(|clip| clip.looped && clip.end_s.is_none() && !clip.chained_end)
+    })
+}
+
 /// A path as the paks name it: lower case, forward slashes.
 pub fn normalized(path: &str) -> String {
     path.replace('\\', "/").to_lowercase()
+}
+
+/// The clip folders of the animation list at `path` (a pak path) among `lists` (by pak path):
+/// its `#filepath` folders, with the folders of each list it takes in (`$Include`) at the
+/// include's place, as pak paths with a trailing `/`, and then the weapons' prop folder
+/// ([`PROP_CLIP_FOLDER`]). A list taken in twice counts once. Observed: the player's list
+/// takes in `player_shared.chrparams` first, so its first folder is the beast archetype's
+/// (`animations/gameplay/character/npc/supernatural/archetypes/`), whose
+/// `archetype_beast_combat_taunt_01` the heart rune's `Ability_Rune_BeastMode_Activate` plays.
+pub fn clip_folders(lists: &HashMap<String, AnimationList>, path: &str) -> Vec<String> {
+    fn walk(
+        lists: &HashMap<String, AnimationList>,
+        path: &str,
+        seen: &mut BTreeSet<String>,
+        folders: &mut Vec<String>,
+    ) {
+        let path = normalized(path);
+        let Some(list) = lists.get(&path) else {
+            return;
+        };
+        if !seen.insert(path) {
+            return;
+        }
+        for source in &list.sources {
+            match source {
+                AnimationSource::Include(included) => walk(lists, included, seen, folders),
+                AnimationSource::Folder(folder) => {
+                    let folder = format!("{}/", normalized(folder).trim_end_matches('/'));
+                    if !folders.contains(&folder) {
+                        folders.push(folder);
+                    }
+                }
+            }
+        }
+    }
+    let mut folders = Vec::new();
+    walk(lists, path, &mut BTreeSet::new(), &mut folders);
+    folders.push(PROP_CLIP_FOLDER.to_owned());
+    folders
 }
 
 fn number(clip: &ProcClip, key: &str) -> Result<f32, String> {
@@ -624,6 +682,7 @@ mod tests {
             weight: 1.0,
             end_s: None,
             after_previous: false,
+            chained_end: false,
         }
     }
 
@@ -792,5 +851,52 @@ mod tests {
             "objects/weapons/a.cdf"
         );
         assert_eq!(ms(0.4333), 433);
+    }
+
+    /// The player's animation lists, cut (build 25810808): `player_male.chrparams` takes in
+    /// `player_shared.chrparams` (whose first folder is the beast archetype's) before its own
+    /// folders; a list taken in twice and a folder named twice count once; the weapons' prop
+    /// folder comes last.
+    #[test]
+    fn the_clip_folders_follow_the_animation_list_and_its_includes_in_order() {
+        const MALE: &str = "objects/characters/player/male/player_male.chrparams";
+        const SHARED: &str = "objects/characters/player/player_shared.chrparams";
+        let list = |sources: Vec<AnimationSource>| AnimationList { sources };
+        let lists = HashMap::from([
+            (
+                MALE.to_owned(),
+                list(vec![
+                    AnimationSource::Include(SHARED.to_owned()),
+                    AnimationSource::Folder("animations/marketing".to_owned()),
+                    AnimationSource::Include("Objects\\Characters\\Player\\Player_Shared.chrparams".to_owned()),
+                    AnimationSource::Folder(
+                        "animations/Gameplay/Character/Npc/SuperNatural/Archetypes/".to_owned(),
+                    ),
+                ]),
+            ),
+            (
+                SHARED.to_owned(),
+                list(vec![
+                    AnimationSource::Folder(
+                        "animations/Gameplay/Character/Npc/SuperNatural/Archetypes".to_owned(),
+                    ),
+                    AnimationSource::Folder("animations/Gameplay/Character/Player/male/HeartGems".to_owned()),
+                ]),
+            ),
+        ]);
+        assert_eq!(
+            clip_folders(&lists, MALE),
+            [
+                "animations/gameplay/character/npc/supernatural/archetypes/",
+                "animations/gameplay/character/player/male/heartgems/",
+                "animations/marketing/",
+                PROP_CLIP_FOLDER,
+            ]
+        );
+        assert_eq!(
+            clip_folders(&lists, "objects/characters/player/missing.chrparams"),
+            [PROP_CLIP_FOLDER],
+            "a list the paks do not hold names no folder"
+        );
     }
 }

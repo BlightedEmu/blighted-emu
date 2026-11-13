@@ -15,8 +15,9 @@
 //! A role choice (5390) sets the role child of the player's member block in its group entity
 //! (Observed, `raid_group_influence_race` 71.624 s and 75.675 s). A group grows into a players'
 //! raid by the convert-to-raid vote (5317, 5318); the raid calls (moves 3501, swaps 541,
-//! permissions 2422), a raid member's invites and leave are [`crate::player_raids`]; a plain
-//! group refuses the raid calls. The raids of wars and matches are [`crate::raids`].
+//! permissions 2422, kicks 3500), a raid member's invites and leave are
+//! [`crate::player_raids`]; a plain group refuses the raid calls. The raids of wars and matches
+//! are [`crate::raids`].
 
 use nw_bus::GroupAnswer;
 use nw_db::SocialGroup;
@@ -91,6 +92,9 @@ impl SocialWorld {
                 group,
             } => {
                 self.move_raid_member(character, &member, group);
+            }
+            GroupCall::RemoveRaidMember { character: member } => {
+                self.remove_raid_member(character, &member);
             }
             GroupCall::SwapRaidMembers { first, second } => {
                 self.swap_raid_members(character, &first, &second);

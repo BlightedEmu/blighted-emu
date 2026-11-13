@@ -213,7 +213,9 @@ pub enum CombatEffectMsg {
         position: [f32; 3],
         /// The target (a facet entity; no target in retail is `0x0000_0000_ffff_ffff`).
         target: u64,
-        /// The result byte (meaning Unknown).
+        /// The index of the target's hit volume that the shot met, `0xff` for none (Observed:
+        /// the client handler at `0x144167b00` passes it to the impact handler `0x14451ab80`,
+        /// which asks the target's `HitVolumeComponent` for the volume at that index).
         result: u8,
     },
     /// 327: the projectile a turret shot of the player spawned.

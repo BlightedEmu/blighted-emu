@@ -1449,7 +1449,8 @@ mod tests {
 
     #[test]
     fn a_recipe_cooldown_counts_its_crafts_and_refuses_past_its_quantity() {
-        use nw_content::loot_limits::{LootLimitRules, ResetClock, Weekday};
+        use nw_content::loot_limits::LootLimitRules;
+        use nw_content::resets::{ResetClock, ServerRegion};
         use nw_content::recipe_cooldowns::RecipeCooldown;
         use nw_messages::crafting_state::{CRAFTING_STATE_COMPONENT, CRAFTING_STATE_TYPE_INDEX};
         /// A daily cooldown of 2 crafts (`LeatherT51` has 10).
@@ -1459,8 +1460,7 @@ mod tests {
         content.loot_limits = Some(LootLimitRules {
             limits: Default::default(),
             clock: ResetClock {
-                hour_utc: 3,
-                weekly_day: Weekday::Tuesday,
+                region: ServerRegion::EuCentral,
             },
         });
         let cooldown = RecipeCooldown::from_cells(Some(86_400), Some(i64::from(QUANTITY)));

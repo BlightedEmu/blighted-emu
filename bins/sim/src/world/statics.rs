@@ -61,6 +61,9 @@ const GATHER_DONE: u8 = 3;
 const CHEST_AMOUNT: f32 = 2.5;
 const CHEST_EFFICIENCY: f32 = 1.0;
 const CHEST_GATHERERS: u8 = 0;
+/// The gatherer count of a gather state once its gather ends (Observed: retail sends 0 at the end
+/// of a gather whose start counted 1, `Playthrough_Part_04` 4545.40 s and 4620.13 s).
+const NO_GATHERERS: u8 = 0;
 /// List version of the bag's filled and emptied containers (retail values).
 const BAG_FILLED_VERSION: u64 = 5;
 const BAG_EMPTIED_VERSION: u64 = 6;
@@ -291,16 +294,106 @@ pub(super) const fn interaction_enabled(enabled: bool) -> BundleMember {
     }
 }
 
-/// The counters of a gather grow by one with each of its two states (retail chest: 1 at the
+/// `m_syncGatherRefCount` grows by one with each of a gather's two states (retail chest: 1 at the
 /// start, 2 at the end; open-world gathers count on over the session).
 const STATES_PER_GATHER: u32 = 2;
 
-/// The own members when gather number `gather` (0 for the first) of the chest with facet entity
-/// `facet` starts: the interactor target and the running gather (retail 237308 and 237342).
-pub(super) fn chest_gather_started(facet: u64, gather: u32) -> [BundleMember; 2] {
+/// The two counters of a player's own gather state, counted over its session.
+///
+/// Observed (finding D8 "`m_gatherRefCount`", 11,437 of 11,944 steps of the own gather states of
+/// 694 retail ledgers): `m_gatherRefCount` (child 4) steps by one for each change of the gather's
+/// status and one for each change of its gatherer count: a shared object's start and end step it
+/// by 2 each (status, count 0 to 1 and back), an instanced object's by 1 each, a count change in
+/// the middle of a gather by 1 (monolith `EXP-The-Depths` 735.30 s 38 to 39, totem
+/// `Playthrough_Part_18` 3334.58 s 133 to 134); at a group node's end in one tick each gatherer's
+/// steps once more for each gatherer that ended before it (the count fell while it still
+/// gathered: +3 for the second ender `HiveNormaleTheDepths` 1754.06 s, +4 for the third
+/// `the_depths_group_run_tank_pov` 1708.60 s). A state that holds a whole gather (a broken quest
+/// object, 12-5 nodules: +2; a water gather's end, `Hive_Dye` 74.05 s: 2 after none) steps it by
+/// its start's and its end's status. Observed (finding D10, the 867 retail states of children 4,
+/// 7 and 8, 787 of them with no interaction request of their player in the 6 s before): a whole
+/// gather of an instanced object steps it by 2 (465 states; 399 with the object's tracker entry
+/// within 1 s, the proximity and damageable quest objects of `master_quest_*_instanced`), one of
+/// a shared object by 3 (402 states, 397 without a tracker entry; every one placed by a known
+/// slice is shared: the Edengrove vines `IO_World_Damageable_CollisionVines`, the crypt coins,
+/// the fire droppers; finding D11: 27 + 7 states of the vines, none with a tracker entry). The
+/// sim sends a whole gather for its quest objects that a player breaks or comes near
+/// ([`object_gathered_whole`]). `m_syncGatherRefCount` (child 8) steps by one at each start and end
+/// ([`STATES_PER_GATHER`]). Unknown: the 431 retail states that send child 4 alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct GatherCounters {
+    /// Gathers ended (`m_syncGatherRefCount` is twice this at an end).
+    gathers: u32,
+    /// `m_gatherRefCount`.
+    refs: u32,
+}
+
+/// One step of `m_gatherRefCount`: a status change or a gatherer count change.
+const REF_STEP: u32 = 1;
+
+impl GatherCounters {
+    /// The gathers ended so far.
+    #[cfg(test)]
+    pub(super) const fn gathers(&self) -> u32 {
+        self.gathers
+    }
+
+    /// One step for a change of the gatherer count to or from `gatherers` (none for a gather
+    /// that counts no gatherer).
+    const fn count_step(gatherers: u8) -> u32 {
+        if gatherers > NO_GATHERERS { REF_STEP } else { 0 }
+    }
+
+    /// A gather that counts `gatherers` starts: `(m_gatherRefCount, m_syncGatherRefCount)`.
+    fn started(&mut self, gatherers: u8) -> (u32, u32) {
+        self.refs = self
+            .refs
+            .saturating_add(REF_STEP)
+            .saturating_add(Self::count_step(gatherers));
+        let sync = self
+            .gathers
+            .saturating_mul(STATES_PER_GATHER)
+            .saturating_add(1);
+        (self.refs, sync)
+    }
+
+    /// The gatherer count of the running gather changes.
+    fn gatherers_changed(&mut self) -> u32 {
+        self.refs = self.refs.saturating_add(REF_STEP);
+        self.refs
+    }
+
+    /// The gather whose start counted `counted` gatherers ends, after `ended_before` other
+    /// gatherers of its group node ended in the same tick: the counters of its done state.
+    fn ended(&mut self, counted: u8, ended_before: u32) -> (u32, u32) {
+        self.refs = self
+            .refs
+            .saturating_add(REF_STEP)
+            .saturating_add(Self::count_step(counted))
+            .saturating_add(ended_before);
+        self.gathers = self.gathers.saturating_add(1);
+        (self.refs, self.gathers.saturating_mul(STATES_PER_GATHER))
+    }
+
+    /// A gather that counts `gatherers` and whose one state holds its start and its end (a quest
+    /// object broken or come near, a water gather's end): the counters of that state, its
+    /// start's status and gatherer count steps and its end's ([`Self::ended`]).
+    fn whole_gather(&mut self, gatherers: u8) -> (u32, u32) {
+        self.refs = self.refs.saturating_add(REF_STEP);
+        self.ended(gatherers, 0)
+    }
+}
+
+/// The own members when the next gather of player counters `counters` starts at the chest with
+/// facet entity `facet`: the interactor target and the running gather (retail 237308 and
+/// 237342).
+pub(super) fn chest_gather_started(
+    facet: u64,
+    counters: &mut GatherCounters,
+) -> [BundleMember; 2] {
     gather_started(
         facet,
-        gather,
+        counters,
         GatherRun {
             amount: CHEST_AMOUNT,
             efficiency: CHEST_EFFICIENCY,
@@ -318,10 +411,14 @@ pub(super) struct GatherRun {
     pub(super) gatherers: u8,
 }
 
-/// The own members when gather number `gather` of the object with facet entity `facet` starts:
-/// the interactor target and the running gather `run`.
-pub(super) fn gather_started(facet: u64, gather: u32, run: GatherRun) -> [BundleMember; 2] {
-    let count = gather.saturating_mul(STATES_PER_GATHER).saturating_add(1);
+/// The own members when the next gather of player counters `counters` starts at the object
+/// with facet entity `facet`: the interactor target and the running gather `run`.
+pub(super) fn gather_started(
+    facet: u64,
+    counters: &mut GatherCounters,
+    run: GatherRun,
+) -> [BundleMember; 2] {
+    let (refs, sync) = counters.started(run.gatherers);
     [
         interactor_target(facet),
         BundleMember {
@@ -331,26 +428,48 @@ pub(super) fn gather_started(facet: u64, gather: u32, run: GatherRun) -> [Bundle
                 amount_remaining: Some(run.amount),
                 efficiency: Some(run.efficiency),
                 gatherer_count: Some(run.gatherers),
-                gather_ref_count: Some(count),
+                gather_ref_count: Some(refs),
                 is_gathering: Some(true),
                 gatherable: Some(NO_GATHERABLE),
-                sync_ref_count: Some(count),
+                sync_ref_count: Some(sync),
             }),
         },
     ]
 }
 
-/// The counter of gather number `gather` (0 for the first) at its end.
-const fn gather_count(gather: u32) -> u32 {
-    gather.saturating_add(1).saturating_mul(STATES_PER_GATHER)
+/// The own member that gives a gatherer (player counters `counters`) of a shared object the
+/// object's new gatherer count `gatherers` and, when the object's work done so far was counted,
+/// the work `amount` left, with its `m_gatherRefCount` one step on ([`GatherCounters`]).
+/// Observed (retail `HiveNormaleTheDepths` 1687.61 s, a group monolith: `{amount 7.5,
+/// gatherers 2, ref 70}` when the third gatherer left; `EXP-The-Depths` 735.30 s: `{gatherers 3,
+/// ref 39}` when a third came).
+pub(super) fn gatherers_changed(
+    counters: &mut GatherCounters,
+    gatherers: u8,
+    amount: Option<f32>,
+) -> BundleMember {
+    BundleMember {
+        component: GATHERING_COMPONENT,
+        state: MemberState::Gathering(GatheringState {
+            status: None,
+            amount_remaining: amount,
+            efficiency: None,
+            gatherer_count: Some(gatherers),
+            gather_ref_count: Some(counters.gatherers_changed()),
+            is_gathering: None,
+            gatherable: None,
+            sync_ref_count: None,
+        }),
+    }
 }
 
-/// The own member when water gather number `gather` ends: a done state that names no
-/// gatherable, amount or efficiency (Observed: retail `Hive_Dye` 74.05 s, status 3, counters 2,
-/// after the 3746; the client ends its gather animation on it, and the 3746 alone left it running
-/// live 2026-11-03).
-pub(super) const fn water_gather_ended(gather: u32) -> BundleMember {
-    let count = gather_count(gather);
+/// The own member when the water gather of player counters `counters` ends: a done state that
+/// names no gatherable, amount or efficiency (Observed: retail `Hive_Dye` 74.05 s, status 3,
+/// counters 2, after the 3746; the client ends its gather animation on it, and the 3746 alone left
+/// it running live 2026-11-03). It holds the whole gather ([`GatherCounters`]): a water gather
+/// sends no start state.
+pub(super) fn water_gather_ended(counters: &mut GatherCounters) -> BundleMember {
+    let (refs, sync) = counters.whole_gather(NO_GATHERERS);
     BundleMember {
         component: GATHERING_COMPONENT,
         state: MemberState::Gathering(GatheringState {
@@ -358,40 +477,72 @@ pub(super) const fn water_gather_ended(gather: u32) -> BundleMember {
             amount_remaining: None,
             efficiency: None,
             gatherer_count: None,
-            gather_ref_count: Some(count),
+            gather_ref_count: Some(refs),
             is_gathering: Some(false),
             gatherable: None,
-            sync_ref_count: Some(count),
+            sync_ref_count: Some(sync),
         }),
     }
 }
 
-/// The own member when gather number `gather` of the object with facet entity `facet` ends
-/// (retail chest 239343 and flint, with the 3746), or stops at a cancel (retail `NH-MSQ-1`
-/// 1789560435207: the same done state).
-pub(super) fn chest_gather_ended(facet: u64, gather: u32) -> BundleMember {
-    let count = gather_count(gather);
+/// The own member when the gather of player counters `counters` at the chest with facet entity
+/// `facet` ends: the done state of a gather that counted [`CHEST_GATHERERS`] ([`gather_ended`]).
+pub(super) fn chest_gather_ended(facet: u64, counters: &mut GatherCounters) -> BundleMember {
+    gather_ended(facet, counters, CHEST_GATHERERS, 0)
+}
+
+/// The own member when the gather of player counters `counters` at the object with facet entity
+/// `facet`, whose start counted `counted` gatherers, ends after `ended_before` other gatherers of
+/// its group node ended in the same tick ([`GatherCounters`]) (retail chest 239343 and flint,
+/// with the 3746), or stops at a cancel (retail `NH-MSQ-1` 1789560435207: the same done state).
+/// Its gatherer count goes back to [`NO_GATHERERS`] when the start counted any, and is not sent
+/// when it counted none (Observed: retail `Playthrough_Part_04` 114.01 s after a start that
+/// counted 0).
+pub(super) fn gather_ended(
+    facet: u64,
+    counters: &mut GatherCounters,
+    counted: u8,
+    ended_before: u32,
+) -> BundleMember {
+    let (refs, sync) = counters.ended(counted, ended_before);
     BundleMember {
         component: GATHERING_COMPONENT,
         state: MemberState::Gathering(GatheringState {
             status: Some(GATHER_DONE),
             amount_remaining: Some(0.0),
             efficiency: Some(0.0),
-            gatherer_count: None,
-            gather_ref_count: Some(count),
+            gatherer_count: (counted > NO_GATHERERS).then_some(NO_GATHERERS),
+            gather_ref_count: Some(refs),
             is_gathering: Some(false),
             gatherable: Some(facet),
-            sync_ref_count: Some(count),
+            sync_ref_count: Some(sync),
         }),
     }
 }
 
-/// The own member when the player breaks the quest object of facet entity `facet` after
-/// `gather` gathers (retail `12-5_survivors` 1790515520732 ms: with the loot tracker's broken
-/// entry, the player's gather state names the nodule and counts on; status, amount, efficiency
-/// and gathering are not sent).
-pub(super) fn object_broken(facet: u64, gather: u32) -> BundleMember {
-    let count = gather_count(gather);
+/// The gatherers a whole gather of a shared object counts in its counter steps: the player
+/// (Inferred: the +3 of the retail shared whole gathers is the +1 of an instanced object's start
+/// and end each, plus the start's count change from none; the end sends no count change).
+const SHARED_WHOLE_GATHERERS: u8 = 1;
+
+/// The own member when the player of counters `counters` gathers the quest object of facet entity
+/// `facet` in one state: it breaks it or comes near it. Observed (retail `12-5_survivors`
+/// 1790515520732 ms: with the loot tracker's broken entry, the player's gather state names the
+/// nodule and counts on, both counters by 2 (156.57 s, 159.44 s, 163.76 s); finding D10, 867
+/// states of children 4, 7 and 8 only): status, amount, efficiency and gathering are not sent,
+/// `m_syncGatherRefCount` steps by 2, `m_gatherRefCount` by 2 for an instanced object (465
+/// states) and by 3 for a `shared` one (402 states, [`SHARED_WHOLE_GATHERERS`]).
+pub(super) fn object_gathered_whole(
+    facet: u64,
+    counters: &mut GatherCounters,
+    shared: bool,
+) -> BundleMember {
+    let gatherers = if shared {
+        SHARED_WHOLE_GATHERERS
+    } else {
+        NO_GATHERERS
+    };
+    let (refs, sync) = counters.whole_gather(gatherers);
     BundleMember {
         component: GATHERING_COMPONENT,
         state: MemberState::Gathering(GatheringState {
@@ -399,10 +550,10 @@ pub(super) fn object_broken(facet: u64, gather: u32) -> BundleMember {
             amount_remaining: None,
             efficiency: None,
             gatherer_count: None,
-            gather_ref_count: Some(count),
+            gather_ref_count: Some(refs),
             is_gathering: None,
             gatherable: Some(facet),
-            sync_ref_count: Some(count),
+            sync_ref_count: Some(sync),
         }),
     }
 }
@@ -699,7 +850,8 @@ mod tests {
 
     #[test]
     fn the_first_chest_gather_sends_the_retail_states() {
-        let [target, running] = chest_gather_started(CHEST_FACET, 0);
+        let mut counters = GatherCounters::default();
+        let [target, running] = chest_gather_started(CHEST_FACET, &mut counters);
         // Retail 237308: 26:3752 `01 01 <chest facet>`.
         const TARGET: [u8; 10] = [0x01, 0x01, 0x58, 0x70, 0x35, 0x81, 0x9f, 0xa0, 0xa5, 0xef];
         assert_eq!(target.component, INTERACTOR_COMPONENT);
@@ -722,7 +874,7 @@ mod tests {
             0x02, 0xd7, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x00, 0x03, 0x58, 0x70, 0x35,
             0x81, 0x9f, 0xa0, 0xa5, 0xef, 0, 0, 0, 0x02,
         ];
-        let ended = chest_gather_ended(CHEST_FACET, 0);
+        let ended = chest_gather_ended(CHEST_FACET, &mut counters);
         assert_eq!(ended.component, GATHERING_COMPONENT);
         assert_eq!(
             ended.state,
@@ -730,17 +882,125 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_later_gather_counts_on() {
-        let counts = |member: &BundleMember| match member.state {
+    /// `(m_gatherRefCount, m_syncGatherRefCount)` of a gather state.
+    fn counts(member: &BundleMember) -> (Option<u32>, Option<u32>) {
+        match member.state {
             MemberState::Gathering(state) => (state.gather_ref_count, state.sync_ref_count),
             _ => panic!("gathering"),
-        };
-        let [_, running] = chest_gather_started(CHEST_FACET, 1);
+        }
+    }
+
+    #[test]
+    fn a_later_gather_counts_on() {
+        let mut counters = GatherCounters::default();
+        chest_gather_started(CHEST_FACET, &mut counters);
+        chest_gather_ended(CHEST_FACET, &mut counters);
+        let [_, running] = chest_gather_started(CHEST_FACET, &mut counters);
         assert_eq!(counts(&running), (Some(3), Some(3)));
         assert_eq!(
-            counts(&chest_gather_ended(CHEST_FACET, 1)),
+            counts(&chest_gather_ended(CHEST_FACET, &mut counters)),
             (Some(4), Some(4))
+        );
+        assert_eq!(counters.gathers(), 2);
+    }
+
+    /// Retail `01-Amrine_Excavation` 38.23 s to 71.11 s: an instanced object's gather (refs 1, 2),
+    /// then two shared ones (refs 4, 6 and 8, 10); the sync counter steps by one per state.
+    #[test]
+    fn the_ref_counter_steps_by_status_and_gatherer_count_changes() {
+        const SHARED: GatherRun = GatherRun {
+            amount: 15.0,
+            efficiency: 1.0,
+            gatherers: 1,
+        };
+        const INSTANCED: GatherRun = GatherRun {
+            gatherers: NO_GATHERERS,
+            ..SHARED
+        };
+        let mut counters = GatherCounters::default();
+        let mut gather = |run: GatherRun| {
+            let [_, running] = gather_started(CHEST_FACET, &mut counters, run);
+            let done = gather_ended(CHEST_FACET, &mut counters, run.gatherers, 0);
+            (counts(&running), counts(&done))
+        };
+        assert_eq!(gather(INSTANCED), ((Some(1), Some(1)), (Some(2), Some(2))));
+        assert_eq!(gather(SHARED), ((Some(4), Some(3)), (Some(6), Some(4))));
+        assert_eq!(gather(SHARED), ((Some(8), Some(5)), (Some(10), Some(6))));
+    }
+
+    /// Retail group monolith (`EXP-The-Depths`): refs 38 at a start with 2 gatherers, 39 when a
+    /// third came; the end of a group node in one tick steps each gatherer once more for each
+    /// gatherer that ended before it (+3 for the second, +4 for the third).
+    #[test]
+    fn a_count_change_and_the_earlier_enders_of_a_group_node_step_the_ref_counter() {
+        const GROUP: GatherRun = GatherRun {
+            amount: 10.0,
+            efficiency: 1.0,
+            gatherers: 2,
+        };
+        const THIRD: u8 = 3;
+        let mut counters = GatherCounters::default();
+        let [_, running] = gather_started(CHEST_FACET, &mut counters, GROUP);
+        assert_eq!(counts(&running).0, Some(2));
+        assert_eq!(
+            counts(&gatherers_changed(&mut counters, THIRD, None)).0,
+            Some(3),
+            "a count change in the middle of the gather"
+        );
+        let mut second = counters;
+        let mut third = counters;
+        assert_eq!(
+            counts(&gather_ended(CHEST_FACET, &mut counters, GROUP.gatherers, 0)).0,
+            Some(5),
+            "the first ender: status and count"
+        );
+        assert_eq!(
+            counts(&gather_ended(CHEST_FACET, &mut second, GROUP.gatherers, 1)).0,
+            Some(6)
+        );
+        assert_eq!(
+            counts(&gather_ended(CHEST_FACET, &mut third, GROUP.gatherers, 2)).0,
+            Some(7)
+        );
+    }
+
+    /// Retail `12-5_survivors` 156.57 s to 163.76 s: each broken nodule steps both counters by 2;
+    /// retail `Hive_Dye` 74.05 s: the first water gather's end has both counters at 2.
+    #[test]
+    fn a_state_that_holds_a_whole_gather_steps_both_counters_by_two() {
+        let mut counters = GatherCounters::default();
+        assert_eq!(
+            counts(&water_gather_ended(&mut counters)),
+            (Some(2), Some(2))
+        );
+        assert_eq!(
+            counts(&object_gathered_whole(CHEST_FACET, &mut counters, false)),
+            (Some(4), Some(4))
+        );
+        assert_eq!(counters.gathers(), 2);
+    }
+
+    /// Finding D10 (402 retail states of children 4, 7 and 8 of shared objects, the Edengrove
+    /// vines `IO_World_Damageable_CollisionVines` among them): a shared object's whole gather
+    /// steps `m_gatherRefCount` by 3 and `m_syncGatherRefCount` by 2, and names the object.
+    #[test]
+    fn a_whole_gather_of_a_shared_object_steps_the_ref_counter_by_three() {
+        let mut counters = GatherCounters::default();
+        let shared = object_gathered_whole(CHEST_FACET, &mut counters, true);
+        assert_eq!(counts(&shared), (Some(3), Some(2)));
+        let MemberState::Gathering(state) = shared.state else {
+            panic!("gathering");
+        };
+        assert_eq!(state.gatherable, Some(CHEST_FACET));
+        assert_eq!(
+            (state.status, state.gatherer_count, state.is_gathering),
+            (None, None, None),
+            "children 4, 7 and 8 only"
+        );
+        assert_eq!(
+            counts(&object_gathered_whole(CHEST_FACET, &mut counters, false)),
+            (Some(5), Some(4)),
+            "an instanced one after it: +2 and +2"
         );
     }
 

@@ -27,7 +27,10 @@
 //! later, with no roster call between): from the instance lead before the start
 //! ([`crate::war_instances::INVASION_INSTANCE_LEAD_MS`]) to the end, the invasion's sign-ups
 //! without a roster place get the free places ([`nw_db::fill_invasion_roster`]). A sign-up after
-//! the instance opened gets a place but no move (as a late war roster player).
+//! the instance opened gets a place, and the sim of the player invites it at the next wars read
+//! (Observed for a war: `RS_offensive_war` sign-up 39.067 s, roster selection 63.838 s, the raid
+//! invite 63.868 s, the accept and the move 88.406 s, while the instance was open: the start was
+//! 843.803 s; sim `raids` `invite_late_roster_players`).
 
 use std::collections::BTreeSet;
 

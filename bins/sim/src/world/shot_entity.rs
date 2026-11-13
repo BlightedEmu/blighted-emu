@@ -40,10 +40,12 @@ const TIME_ANCHOR_MS: u64 = 66;
 /// How long after its end (a hit, or the end of its flight) the entity leaves the views
 /// (Observed: the slice's lifetime plus 1.0 s in every slice).
 const AFTER_END_MS: u64 = 1_000;
-/// The hit volume a hit names (`collidedWithHitVolumeIndex`). The sim does not know the
-/// target's hit volumes, so it sends retail's most common value (Observed: 0 in 21,158 of the
-/// 65,265 first hits of player shots on mobs; 11,018 held no volume).
-const BODY_HIT_VOLUME: u8 = 0;
+/// The hit volume a hit on a player or a mob names (`collidedWithHitVolumeIndex`, and the
+/// 2720 result byte of a turret shot). The sim does not know the target's hit volumes, so it
+/// sends retail's most common value (Observed: 0 in 21,158 of the 65,265 first hits of player
+/// shots on mobs, 11,018 held no volume; 791 of the 1,377 indexed 2720 results of the 12
+/// ledgers with 2720).
+pub(super) const BODY_HIT_VOLUME: u8 = 0;
 /// Milliseconds per second.
 const MS_PER_SECOND: f32 = 1_000.0;
 /// Microseconds per millisecond.

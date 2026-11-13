@@ -37,6 +37,7 @@ use nw_content::progression::{Mastery, RankPerks};
 use nw_content::rewards::{EventGrant, Reward};
 use nw_content::tradeskill_xp::{NEUTRAL_MODIFIER, gather_reward};
 
+use super::game_event_log::GrantedEvent;
 use super::quest_objects::{gain_experience, grant};
 use super::seasons::SeasonEvent;
 use super::status_effects::GainKind;
@@ -145,8 +146,10 @@ impl SimWorld {
 
     /// Player `number` fires game event `event` `times` times, each scaled by `scale`: the
     /// categorical progression it names gains its experience, the territory the player is in
-    /// its standing, its coins (each firing rolled) go to the wallet, and the player earns its
-    /// achievement. An event with a loot limit counts each firing on it; a firing at the limit
+    /// its standing, its coins (each firing rolled) go to the wallet, the player earns its
+    /// achievement, and the grant goes into the player's game event log as one entry
+    /// ([`super::game_event_log`]; Observed: one entry for each gather and salvage; Inferred: one
+    /// entry with the totals for several firings at once). An event with a loot limit counts each firing on it; a firing at the limit
     /// grants nothing and fires the event's limit-reached event instead. An event without a
     /// grant, or a progression the content does not know, gives nothing of it (logged).
     pub(super) fn grant_scaled_event(
@@ -187,12 +190,14 @@ impl SimWorld {
             self.gain_categorical(number, event, id, kind_of(id), points, times);
         }
         self.gain_faction(number, event, event_grant, times);
+        let mut granted = GrantedEvent::of(event);
         if event_grant.territory_standing > 0.0 {
             let standing = scale.standing(event_grant.territory_standing);
             match self.current_territory(number) {
                 Some(territory) => {
                     let kind = GainKind::Standing;
                     self.gain_categorical(number, event, &territory, kind, standing, times);
+                    granted.standing = standing * f64::from(times);
                 }
                 None => {
                     tracing::debug!(player = number, event, "standing outside a territory");
@@ -209,10 +214,12 @@ impl SimWorld {
                 ..Reward::default()
             };
             grant(&mut player, &reward, &content.gameplay);
+            granted.coins = coins;
         }
         if let Some(achievement) = &event_grant.achievement {
             self.earn_achievement(number, achievement, now_ms);
         }
+        self.log_game_event(number, &granted);
     }
 
     /// Player `number` gets the territory standing of game event `event` once (a quest's turn-in
@@ -574,11 +581,33 @@ mod tests {
         assert_eq!(standing(&world), Some(6));
         world.grant_event_standing(PLAYER, RATION_EVENT);
         assert_eq!(standing(&world), Some(9));
+        // Each grant is one entry of the game event log: the first without standing, the second
+        // with the standing of both firings in the player's territory.
+        let mut log = world
+            .world
+            .get::<Player>(entity)
+            .expect("player")
+            .game_events
+            .clone();
+        let member = log.take_member(1).expect("two entries");
+        let nw_messages::MemberState::GameEvents(state) = member.state else {
+            panic!("a game event member");
+        };
+        let Some(nw_messages::ReplicatedList::Full(list)) = state.game_events else {
+            panic!("the first entries go in full");
+        };
+        let standings: Vec<(u32, u16)> = list
+            .elements
+            .iter()
+            .map(|entry| (entry.standing, entry.territory))
+            .collect();
+        assert_eq!(standings, [(0, 0), (2, WINDSWARD)]);
     }
 
     #[test]
     fn an_event_with_a_loot_limit_grants_up_to_the_limit_then_its_reached_event() {
-        use nw_content::loot_limits::{LimitRow, LootLimitRules, LootLimits, ResetClock, Weekday};
+        use nw_content::loot_limits::{LimitRow, LootLimitRules, LootLimits};
+        use nw_content::resets::{ResetClock, ServerRegion};
         // Content bundle 25810808: `Mount_GrantRidingXP_Small` gives `Riding` 2,500 and counts on
         // `Mount_FoodDailyXP_Limit` (3 a day); its limit-reached event gives `Riding` 0, here a
         // test progression to see it fire.
@@ -626,8 +655,7 @@ mod tests {
                     replicated: true,
                 }]),
                 clock: ResetClock {
-                    hour_utc: 3,
-                    weekly_day: Weekday::Tuesday,
+                    region: ServerRegion::EuCentral,
                 },
             }),
             ..PlayerContent::default()

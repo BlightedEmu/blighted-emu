@@ -23,7 +23,7 @@ pub const AI_DATA_SPEC: ContainerSpec = ContainerSpec {
     schema_hash: SCHEMA_VERSION,
 };
 /// Raised when the body layout changes.
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 8;
 const FILE_PREFIX: &str = "ai-data-";
 const FILE_SUFFIX: &str = ".bin";
 
@@ -144,6 +144,20 @@ pub struct Archetype {
     pub default_tags: Vec<NameId>,
     /// The slice's `TriggerEntityComponent`s, in stream order.
     pub triggers: Vec<SliceTriggerRef>,
+    /// `m_initialStatusEffects`: the status effects the creature holds from its spawn
+    /// (Observed: 141 character slices hold `AI_Enable_Stagger` there, the effect the
+    /// `ActivateGrit` and `Reaction_Staggered` actions of `baseai_stagger.actionlist` test).
+    pub initial_effects: Vec<NameId>,
+    /// The slice's `GritComponent` has `m_useStaminaAsValue`: its grit value is its stamina, so
+    /// a hit while its grit is on lowers the stamina (Observed: client reflection
+    /// `FUN_1468e90f0`; set in the bear, brute, heavy, dragon and Seraphim slices).
+    pub grit_uses_stamina: bool,
+    /// The slice's `FxScriptComponent` names the FX list `fxscriptlist_npc_statuseffects_large`
+    /// in `m_scriptDataContainer` (Observed in 248 slices: bears, alligators, dragons,
+    /// chameleons, mammoths, ogres, cyclops, tendrils, brutes; the others name
+    /// `fxscriptlist_npc_statuseffects` or a kind's own list): one half of the large body rule of
+    /// its grit (`nw_content::combat::GritBody::of`).
+    pub large_status_effects_fx: bool,
 }
 
 /// Where one `TriggerEntityComponent` of an archetype's slice sits: what a 3135 to it needs
@@ -206,6 +220,17 @@ pub enum CageCondition {
     Marker(NameId),
     /// `<IfHasStatusEffect StatusEffect>`.
     StatusEffect(NameId),
+    /// `<IfFragmentPlaying FragmentName>`: the mob plays that fragment (the stagger lists test
+    /// `r_Stagger` with it).
+    FragmentPlaying(NameId),
+    /// `<IfDamagedByAngle Min Max>`: the last hit came from between these whole degrees of the
+    /// mob's facing (0 ahead, positive to its right).
+    DamagedByAngle {
+        /// `Min`, degrees.
+        min_deg: i32,
+        /// `Max`, degrees.
+        max_deg: i32,
+    },
     /// Any other test, by element name: false for the runtime (it holds no input or ability
     /// state).
     Other(NameId),
@@ -219,6 +244,8 @@ impl CageCondition {
             has_tag,
             has_marker: &|_| false,
             has_effect: &|_| false,
+            plays_fragment: &|_| false,
+            hit_angle_deg: None,
         })
     }
 
@@ -232,6 +259,13 @@ impl CageCondition {
             Self::Tag(tag) => (mob.has_tag)(*tag),
             Self::Marker(marker) => (mob.has_marker)(*marker),
             Self::StatusEffect(effect) => (mob.has_effect)(*effect),
+            Self::FragmentPlaying(fragment) => (mob.plays_fragment)(*fragment),
+            Self::DamagedByAngle { min_deg, max_deg } => mob.hit_angle_deg.is_some_and(|angle| {
+                // The whole degrees are a few hundred at most.
+                #[allow(clippy::cast_precision_loss, reason = "whole degrees")]
+                let (min, max) = (*min_deg as f32, *max_deg as f32);
+                (min - ANGLE_TOLERANCE_DEG..=max + ANGLE_TOLERANCE_DEG).contains(&angle)
+            }),
             Self::Other(_) => false,
         }
     }
@@ -246,7 +280,16 @@ pub struct MobCage<'a> {
     pub has_marker: &'a dyn Fn(NameId) -> bool,
     /// Whether it holds the status effect.
     pub has_effect: &'a dyn Fn(NameId) -> bool,
+    /// Whether it plays the fragment now.
+    pub plays_fragment: &'a dyn Fn(NameId) -> bool,
+    /// The side the hit that is tested came from, degrees from its facing (-180 to 180, positive
+    /// to its right); `None` when no hit is tested.
+    pub hit_angle_deg: Option<f32>,
 }
+
+/// The `Tolerance` of every retail `IfDamagedByAngle` (0.01 degrees; Observed in the action
+/// lists).
+const ANGLE_TOLERANCE_DEG: f32 = 0.01;
 
 /// When a CAGE action tells the tree that it is done: `HTNPlanDoneActivity` or
 /// `BehaviorTreeTask` `CompletionFragmentOffset` (study section 3.2).
@@ -419,6 +462,26 @@ pub struct CageAction {
     pub regen_off: Option<CageCondition>,
     /// `ResetStamina` on its end, in this branch condition.
     pub stamina_reset: Option<CageCondition>,
+    /// `ActivateGrit` with `OnEnter="Activate"`, in this branch condition: the mob's grit is on
+    /// while it runs (the `ActivateGrit` action of the `*_stagger` lists).
+    pub grit_on: Option<CageCondition>,
+    /// Its `ChangeActionFragment` cases, in file order: the first whose condition holds as it
+    /// starts plays in place of its fragment.
+    pub fragment_cases: Vec<FragmentCase>,
+}
+
+/// A `ChangeActionFragment` case of a CAGE action: while its condition holds as the action
+/// starts, `fragment` plays (its entries `variants`) in place of the action's (Observed:
+/// `Reaction_Staggered` plays `r_Stagger_F` for a hit from ahead, `r_Stagger_B` for one from
+/// behind; retail Blind Seraph cards played `r_Stagger_F`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FragmentCase {
+    /// The case's named condition.
+    pub condition: CageCondition,
+    /// `FragmentName`.
+    pub fragment: NameId,
+    /// The fragment's entries in the creature's animation database.
+    pub variants: Vec<FragmentVariant>,
 }
 
 /// The entry of `variants` Mannequin plays for a mob with the tags `has_tag` says it has: of the
@@ -462,6 +525,27 @@ impl CageAction {
         self.blocks
             .iter()
             .any(|block| block.on_enter == BlockEffect::Raise && block.condition.holds_with(mob))
+    }
+
+    /// The fragment it plays as it starts for the mob `mob` tells of, with that fragment's
+    /// entries: the first of its [`CageAction::fragment_cases`] whose condition holds, else its
+    /// own fragment.
+    pub fn starting_fragment(&self, mob: &MobCage<'_>) -> (NameId, &[FragmentVariant]) {
+        self.fragment_cases
+            .iter()
+            .find(|case| case.condition.holds_with(mob))
+            .map_or((self.fragment, self.variants.as_slice()), |case| {
+                (case.fragment, case.variants.as_slice())
+            })
+    }
+
+    /// The entry of `variants` Mannequin plays for a mob with the tags `has_tag` says it has
+    /// ([`best_variant`]).
+    pub fn variant_of<'a>(
+        variants: &'a [FragmentVariant],
+        has_tag: &impl Fn(NameId) -> bool,
+    ) -> Option<&'a FragmentVariant> {
+        best_variant(variants, has_tag)
     }
 
     /// The entry of the weapon's database its `WeaponContext` scope plays ([`best_variant`]).
@@ -761,16 +845,24 @@ mod tests {
     const ARMADILLO_TAG: NameId = 8;
 
     #[test]
-    fn a_condition_reads_markers_and_status_effects_and_a_marker_clip_any_case() {
+    fn a_condition_reads_markers_status_effects_the_playing_fragment_and_a_marker_clip_any_case() {
         const BLOCK_TAG: NameId = 3;
         const DISABLE: NameId = 4;
         const RESET_AI: NameId = 5;
+        const STAGGER_FRAGMENT: NameId = 6;
         let mob = MobCage {
             has_tag: &|tag| tag == BLOCK_TAG,
             has_marker: &|marker| marker == DISABLE,
             has_effect: &|effect| effect == RESET_AI,
+            plays_fragment: &|fragment| fragment == STAGGER_FRAGMENT,
+            hit_angle_deg: None,
         };
         assert!(!CageCondition::Not(Box::new(CageCondition::Marker(DISABLE))).holds_with(&mob));
+        assert!(CageCondition::FragmentPlaying(STAGGER_FRAGMENT).holds_with(&mob));
+        assert!(
+            !CageCondition::FragmentPlaying(BLOCK_TAG).holds_with(&mob),
+            "another fragment plays not"
+        );
         assert!(CageCondition::StatusEffect(RESET_AI).holds_with(&mob));
         assert!(
             !CageCondition::Marker(DISABLE).holds(&|_| true),
@@ -807,6 +899,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_action_starts_the_fragment_of_its_first_case_whose_hit_side_holds() {
+        // `Reaction_Staggered`: `r_Stagger_F` for a hit from ahead, `r_Stagger_B` from behind.
+        const FRONT_FRAGMENT: NameId = 20;
+        const BACK_FRAGMENT: NameId = 21;
+        const FRONT_S: f32 = 5.0;
+        const BACK_S: f32 = 4.0;
+        let side = |min_deg, max_deg| CageCondition::DamagedByAngle { min_deg, max_deg };
+        let case = |sides, fragment, seconds| FragmentCase {
+            condition: CageCondition::Any(sides),
+            fragment,
+            variants: vec![FragmentVariant {
+                tags: Vec::new(),
+                frag_tags: Vec::new(),
+                length: FragmentLength::Seconds(seconds),
+                windows: Vec::new(),
+            }],
+        };
+        let stagger = CageAction {
+            fragment_cases: vec![
+                case(vec![side(0, 90), side(-90, 0)], FRONT_FRAGMENT, FRONT_S),
+                case(vec![side(90, 180), side(-180, -90)], BACK_FRAGMENT, BACK_S),
+            ],
+            ..gore()
+        };
+        let hit_from = |angle: Option<f32>| {
+            let (fragment, variants) = stagger.starting_fragment(&MobCage {
+                has_tag: &|_| false,
+                has_marker: &|_| false,
+                has_effect: &|_| false,
+                plays_fragment: &|_| false,
+                hit_angle_deg: angle,
+            });
+            let length = CageAction::variant_of(variants, &|_| false).map(|v| v.length);
+            (fragment, length)
+        };
+        assert_eq!(
+            hit_from(Some(30.0)),
+            (FRONT_FRAGMENT, Some(FragmentLength::Seconds(FRONT_S)))
+        );
+        assert_eq!(hit_from(Some(-90.0)).0, FRONT_FRAGMENT, "the edge is ahead");
+        assert_eq!(
+            hit_from(Some(-150.0)),
+            (BACK_FRAGMENT, Some(FragmentLength::Seconds(BACK_S)))
+        );
+        assert_eq!(hit_from(None).0, stagger.fragment, "no hit: its own fragment");
+    }
+
     fn gore() -> CageAction {
         CageAction {
             list: 0,
@@ -840,6 +980,8 @@ mod tests {
             blocks: Vec::new(),
             regen_off: None,
             stamina_reset: None,
+            grit_on: None,
+            fragment_cases: Vec::new(),
         }
     }
 
@@ -943,6 +1085,9 @@ mod tests {
                 main_hand_item: None,
                 default_tags: Vec::new(),
                 triggers: Vec::new(),
+                initial_effects: Vec::new(),
+                grit_uses_stamina: false,
+                large_status_effects_fx: false,
             }],
             grids: vec![Grid {
                 path: 0,

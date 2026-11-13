@@ -45,18 +45,32 @@
 //! the first group with room; a move into a full group is refused (the client swaps then). The
 //! leader sets permissions: a new leader makes the old one an assistant (Observed above), a leader
 //! that leaves hands the raid to its first assistant or first member, and the raid ends when one
-//! member is left. A players' raid keeps an offline member (a group does), but lives in the
-//! service only: a restart of the service ends it. Raid ids count from [`PLAYER_RAID_ID_BASE`].
+//! member is left. A players' raid keeps an offline member (a group does) and is stored at each
+//! change (world migration 0044), so it stays across a restart of the service as a group does.
+//! Raid ids count from [`PLAYER_RAID_ID_BASE`], or from the highest stored one.
+//!
+//! The raid kick (3500, Observed form in [`nw_messages::social::groups`]): the leader or an
+//! assistant removes a member whose permission is below its own (Observed: the client offers
+//! `@ui_raid_kick` only then, `playerflyouthandler.luac`); the member and its raid group get a
+//! 5283 with [`REMOVED_KICKED`]. Inferred: the service checks the same rule.
+//!
+//! The leader's AFK demotion (the client knows `javelin.enable-raid-group-leader-afk-demotion-
+//! telemetry`, a server rule; its time is in no client file or remote config): Inferred, a
+//! leader that has not moved [`RAID_LEADER_AFK_MOVE_M`] for [`RAID_LEADER_AFK_MS`] (online or
+//! not) hands the raid to its first assistant that moved within that time, or else to the first
+//! such member, and becomes an assistant (as a leader that hands the raid on with 2422, Observed
+//! above); with no such member the raid keeps its leader.
 
 use std::collections::HashMap;
 
 use nw_bus::RaidSpec;
+use nw_db::PlayerRaidRecord;
 use nw_messages::as_dynamic_raw_id;
 use nw_messages::social::groups::{
     CONVERT_TO_RAID_ALREADY_VOTED, CONVERT_TO_RAID_CONVERTED, CONVERT_TO_RAID_NOT_CONVERTED,
     CONVERT_TO_RAID_TOO_FREQUENT, CONVERT_TO_RAID_VOTE_IN_PROGRESS,
     CONVERT_TO_RAID_VOTE_NOT_IN_PROGRESS, RAID_PERMISSION_ASSISTANT, RAID_PERMISSION_LEADER,
-    RAID_PERMISSION_NORMAL,
+    RAID_PERMISSION_NORMAL, REMOVED_KICKED,
 };
 use nw_messages::social::raid_data::{PLAYER_RAID_GROUPS, RAID_TYPE_PLAYER};
 use nw_messages::social::{CharacterRef, GroupPush, SocialPush};
@@ -65,7 +79,7 @@ use uuid::Uuid;
 use crate::effects::{Effect, StoreOp};
 use crate::groups::GROUP_MEMBER_LIMIT;
 use crate::raids::Raid;
-use crate::world::{GroupInvite, METRIC_CALLS, REFUSED, RESULT_LABEL, SocialWorld};
+use crate::world::{GroupInvite, METRIC_CALLS, Person, REFUSED, RESULT_LABEL, SocialWorld};
 
 /// The groups state's `createSource` of a players' raid member (Observed in 8 of 8 ledgers,
 /// module doc).
@@ -85,6 +99,13 @@ const NO_OPPOSING_RAID: u64 = 0;
 const CONVERTED_GROUP: u8 = 0;
 /// Nanoseconds in a millisecond: the vote's end goes out in Unix nanoseconds.
 const NANOS_PER_MS: u64 = 1_000_000;
+/// How long a players' raid leader may stand still before it loses the lead (Inferred, module
+/// doc): the `DisconnectSeconds` 300 of the `Expedition` AFK row (`javelindata_afkmodes`), the
+/// AFK time of retail group content.
+pub(crate) const RAID_LEADER_AFK_MS: u64 = 300_000;
+/// The distance that counts as a move for [`RAID_LEADER_AFK_MS`] (Inferred): the `ResetMinMove`
+/// 1.0 m of the same row.
+pub(crate) const RAID_LEADER_AFK_MOVE_M: f32 = 1.0;
 
 /// An open convert-to-raid vote of a group.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +131,59 @@ fn permission_of(raid: &Raid, member: Uuid) -> u8 {
 
 fn refused() {
     metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
+}
+
+/// The stored players' raids of `records` as the service keeps them, each member's raid set in
+/// `people`, and the raid id of the next players' raid: one above the highest stored, or
+/// [`PLAYER_RAID_ID_BASE`]. A record without four raid groups is left out; a member the world does
+/// not know is left out of its raid.
+pub(crate) fn stored_player_raids(
+    records: Vec<PlayerRaidRecord>,
+    people: &mut HashMap<Uuid, Person>,
+) -> (HashMap<[u8; 16], Raid>, u64) {
+    let mut raids = HashMap::new();
+    let mut next = PLAYER_RAID_ID_BASE;
+    for record in records {
+        if record.groups.len() != PLAYER_RAID_GROUPS {
+            continue;
+        }
+        let entity = *record.entity.as_bytes();
+        let seats: Vec<(Uuid, u8)> = record
+            .seats
+            .into_iter()
+            .filter(|(member, group)| {
+                usize::from(*group) < PLAYER_RAID_GROUPS && people.contains_key(member)
+            })
+            .collect();
+        for (member, _) in &seats {
+            if let Some(person) = people.get_mut(member) {
+                person.raid = Some(entity);
+            }
+        }
+        next = next.max(record.raid.saturating_add(1));
+        let seated = |member: &Uuid| seats.iter().any(|(known, _)| known == member);
+        let leader = record.leader.filter(seated);
+        let assistants = record.assistants.into_iter().filter(seated).collect();
+        raids.insert(
+            entity,
+            Raid {
+                spec: RaidSpec {
+                    raid: record.raid,
+                    kind: RAID_TYPE_PLAYER,
+                    opposing: NO_OPPOSING_RAID,
+                    entity,
+                    groups: record.groups,
+                },
+                shown_seats: seats.clone(),
+                seats,
+                leader,
+                assistants,
+                voice_channel: record.voice_channel,
+                leads: Vec::new(),
+            },
+        );
+    }
+    (raids, next)
 }
 
 impl SocialWorld {
@@ -282,6 +356,9 @@ impl SocialWorld {
                 seats: Vec::new(),
                 leader: Some(leader),
                 assistants: Vec::new(),
+                voice_channel: known.voice_channel,
+                shown_seats: Vec::new(),
+                leads: Vec::new(),
             },
         );
         for member in known.members {
@@ -387,7 +464,7 @@ impl SocialWorld {
         Some((entity, at))
     }
 
-    /// Tells every member of raid `entity` that the raid changed.
+    /// Tells every member of players' raid `entity` that the raid changed, and stores it.
     fn touch_raid(&mut self, entity: [u8; 16]) {
         let members: Vec<Uuid> = self
             .raids
@@ -397,6 +474,89 @@ impl SocialWorld {
         for member in members {
             self.touch(member);
         }
+        self.store_player_raid(entity);
+    }
+
+    /// Stores players' raid `entity` as it is now, or deletes it when it ended.
+    pub(crate) fn store_player_raid(&mut self, entity: [u8; 16]) {
+        let id = Uuid::from_bytes(entity);
+        let op = match self.raids.get(&entity) {
+            Some(raid) => StoreOp::SavePlayerRaid(PlayerRaidRecord {
+                entity: id,
+                raid: raid.spec.raid,
+                groups: raid.spec.groups.clone(),
+                voice_channel: raid.voice_channel.clone(),
+                seats: raid.seats.clone(),
+                leader: raid.leader,
+                assistants: raid.assistants.clone(),
+            }),
+            None => StoreOp::DeletePlayerRaid(id),
+        };
+        self.store(op);
+    }
+
+    /// 3500: `character` removes `member` from its players' raid (module doc). A caller that is
+    /// no leader or assistant, a member the raid lacks, the caller itself or a member whose
+    /// permission is not below the caller's: refused.
+    pub(crate) fn remove_raid_member(&mut self, character: Uuid, member: &str) {
+        let target = Uuid::parse_str(member)
+            .ok()
+            .filter(|member| *member != character);
+        let allowed = self
+            .player_raid_of(character)
+            .zip(target)
+            .and_then(|(entity, member)| {
+                let raid = self.raids.get(&entity)?;
+                let own = permission_of(raid, character);
+                let fits = own >= RAID_PERMISSION_ASSISTANT
+                    && raid.seats.iter().any(|(known, _)| *known == member)
+                    && permission_of(raid, member) < own;
+                fits.then_some((entity, member))
+            });
+        let Some((entity, member)) = allowed else {
+            refused();
+            return;
+        };
+        self.remove_from_raid(member, entity, REMOVED_KICKED);
+    }
+
+    /// The players' raid leaders that stood still for [`RAID_LEADER_AFK_MS`] at Unix ms `now_ms`
+    /// hand the raid on (module doc); the members see the new marks.
+    pub fn demote_afk_raid_leaders(&mut self, now_ms: u64) -> Vec<Effect> {
+        let active = |world: &SocialWorld, member: Uuid| {
+            world
+                .people
+                .get(&member)
+                .is_some_and(|person| now_ms.saturating_sub(person.moved_ms) < RAID_LEADER_AFK_MS)
+        };
+        let demoted: Vec<([u8; 16], Uuid, Uuid)> = self
+            .raids
+            .values()
+            .filter(|raid| raid.spec.kind == RAID_TYPE_PLAYER)
+            .filter_map(|raid| {
+                let leader = raid.leader?;
+                if active(self, leader) {
+                    return None;
+                }
+                let next = raid
+                    .assistants
+                    .iter()
+                    .copied()
+                    .chain(raid.seats.iter().map(|(member, _)| *member))
+                    .find(|member| *member != leader && active(self, *member))?;
+                Some((raid.spec.entity, leader, next))
+            })
+            .collect();
+        for (entity, leader, next) in demoted {
+            if let Some(raid) = self.raids.get_mut(&entity) {
+                raid.assistants.retain(|assistant| *assistant != next);
+                raid.assistants.push(leader);
+                raid.leader = Some(next);
+            }
+            self.touch_raid(entity);
+        }
+        self.refresh_views(now_ms);
+        std::mem::take(&mut self.out)
     }
 
     /// 3501: `character` moves `member` to the end of raid group `group` (module doc). Without
@@ -485,22 +645,31 @@ impl SocialWorld {
 
 #[cfg(test)]
 mod tests {
+    use nw_bus::SocialPlayer;
     use nw_bus::{LeaveReason, SocialInput, SocialStateKind};
+    use nw_db::SocialRecords;
     use nw_messages::payload::MemberState;
-    use nw_messages::social::group_data::{FLAG_CONNECTED, FLAG_RAID_ASSISTANT, FLAG_RAID_LEADER};
+    use nw_messages::social::group_data::{
+        FLAG_CONNECTED, FLAG_LEADER, FLAG_RAID_ASSISTANT, FLAG_RAID_LEADER,
+    };
     use nw_messages::social::groups::{
         CONVERT_TO_RAID_VOTE_ENDED_TYPE_INDEX, CONVERT_TO_RAID_VOTE_INITIATED_TYPE_INDEX,
         CONVERT_TO_RAID_VOTE_TYPE_INDEX, GROUP_ERROR_TYPE_INDEX, GROUP_INVITE_TYPE_INDEX,
         INITIATE_CONVERT_TO_RAID_FAILED_TYPE_INDEX, INITIATE_CONVERT_TO_RAID_TYPE_INDEX,
-        LEAVE_GROUP_TYPE_INDEX, LEAVE_VALUE, MOVE_RAID_MEMBER_TYPE_INDEX, REPLY_ACCEPT,
+        LEAVE_GROUP_TYPE_INDEX, LEAVE_VALUE, MEMBER_REMOVED_TYPE_INDEX,
+        MOVE_RAID_MEMBER_TYPE_INDEX, REMOVE_RAID_MEMBER_TYPE_INDEX, REPLY_ACCEPT,
         REPLY_TO_INVITE_TYPE_INDEX, SET_RAID_PERMISSION_TYPE_INDEX,
         SUBMIT_CONVERT_TO_RAID_VOTE_FAILED_TYPE_INDEX, SWAP_RAID_MEMBERS_TYPE_INDEX,
     };
     use nw_messages::social::raid_data::{PLAYER_RAID_LIFETIME, RAID_DATA_TYPE_INDEX};
     use nw_messages::social::states::{GROUPS_STATE_TYPE_INDEX, GroupsState};
+    use nw_messages::social::voice::{
+        GROUP_CHANNEL_TYPE_INDEX, GROUP_CHANNEL_URI_TYPE_INDEX, VoicePush,
+    };
 
     use super::*;
     use crate::groups::tests::invite_args;
+    use crate::raids::RAID_GROUP_LEAD_SHOWN_MS;
     use crate::world::tests::{NOW_MS, call, character, join, pushes, text, world};
 
     const ON: &str = "sim-a";
@@ -650,8 +819,18 @@ mod tests {
             .expect("group entity");
         assert_eq!(
             entity_state.members[1].flags,
+            Some([FLAG_CONNECTED | FLAG_LEADER | FLAG_RAID_LEADER, 0]),
+            "the raid leader leads raid group 0 (retail 0x13)"
+        );
+        assert_eq!(entity_state.members[0].flags, Some([FLAG_CONNECTED, 0]));
+        world.end_due_raid_group_leads(NOW_MS + RAID_GROUP_LEAD_SHOWN_MS);
+        let (_, entity_state) = world
+            .own_raid_group_entity(character(1))
+            .expect("group entity");
+        assert_eq!(
+            entity_state.members[1].flags,
             Some([FLAG_CONNECTED | FLAG_RAID_LEADER, 0]),
-            "the leader's bit"
+            "the lead's bit cleared, the raid leader's kept"
         );
         assert!(
             deliveries_of_class(&effects, RAID_DATA_TYPE_INDEX),
@@ -912,5 +1091,251 @@ mod tests {
             .expect("group entity");
         assert_eq!(state.members[1].flags, Some([0, 0]), "offline");
         assert!(world.people[&character(2)].group.is_none());
+    }
+
+    fn kick(world: &mut SocialWorld, from: u128, member: u128) -> Vec<Effect> {
+        send(
+            world,
+            from,
+            REMOVE_RAID_MEMBER_TYPE_INDEX,
+            &text(&character(member).to_string()),
+        )
+    }
+
+    fn promote(world: &mut SocialWorld, member: u128, permission: u8) {
+        let mut args = text(&character(member).to_string());
+        args.push(permission);
+        send(world, 1, SET_RAID_PERMISSION_TYPE_INDEX, &args);
+    }
+
+    #[test]
+    fn the_leader_and_assistants_kick_members_below_them_who_hear_it() {
+        let (mut world, entity) = raid_of(5);
+        promote(&mut world, 2, RAID_PERMISSION_ASSISTANT);
+        promote(&mut world, 3, RAID_PERMISSION_ASSISTANT);
+        for (from, member, why) in [
+            (4, 5, "a normal member"),
+            (2, 1, "an assistant and the leader"),
+            (2, 3, "an assistant and another assistant"),
+            (1, 1, "the leader itself"),
+        ] {
+            let effects = kick(&mut world, from, member);
+            assert!(
+                group_push(&effects, MEMBER_REMOVED_TYPE_INDEX).is_empty(),
+                "{why}"
+            );
+            assert_eq!(world.raids[&entity].seats.len(), 5, "{why}");
+        }
+
+        let effects = kick(&mut world, 2, 4);
+        let removed = group_push(&effects, MEMBER_REMOVED_TYPE_INDEX);
+        let [
+            (
+                to,
+                GroupPush::MemberRemoved {
+                    character: gone,
+                    reason,
+                },
+            ),
+        ]: [_; 1] = removed.try_into().expect("one 5283")
+        else {
+            panic!("a member removed push");
+        };
+        assert_eq!(reason, REMOVED_KICKED);
+        assert_eq!(gone, CharacterRef(Some(*character(4).as_bytes())));
+        for member in [1, 2, 3, 4, 5] {
+            assert!(to.contains(&character(member)), "member {member} hears it");
+        }
+        assert!(world.player_raid_of(character(4)).is_none());
+        assert_eq!(world.raids[&entity].seats.len(), 4);
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Store(StoreOp::SavePlayerRaid(raid)) if raid.seats.len() == 4
+        )));
+
+        let effects = kick(&mut world, 1, 3);
+        assert_eq!(group_push(&effects, MEMBER_REMOVED_TYPE_INDEX).len(), 1);
+        assert!(
+            !world.raids[&entity].assistants.contains(&character(3)),
+            "the leader kicks an assistant"
+        );
+    }
+
+    #[test]
+    fn a_players_raid_is_stored_at_each_change_and_deleted_at_its_end() {
+        let mut world = grouped(3, 3);
+        send(&mut world, 1, INITIATE_CONVERT_TO_RAID_TYPE_INDEX, &[]);
+        vote(&mut world, 2, true);
+        let effects = vote(&mut world, 3, true);
+        let entity = world.player_raid_of(character(1)).expect("a raid");
+        let saved = effects.iter().rev().find_map(|effect| match effect {
+            Effect::Store(StoreOp::SavePlayerRaid(raid)) => Some(raid.clone()),
+            _ => None,
+        });
+        let raid = &world.raids[&entity];
+        assert_eq!(
+            saved,
+            Some(PlayerRaidRecord {
+                entity: Uuid::from_bytes(entity),
+                raid: raid.spec.raid,
+                groups: raid.spec.groups.clone(),
+                voice_channel: raid.voice_channel.clone(),
+                seats: raid.seats.clone(),
+                leader: Some(character(1)),
+                assistants: Vec::new(),
+            }),
+            "the whole raid"
+        );
+        let leave = LEAVE_VALUE.to_be_bytes();
+        send(&mut world, 3, LEAVE_GROUP_TYPE_INDEX, &leave);
+        let effects = send(&mut world, 2, LEAVE_GROUP_TYPE_INDEX, &leave);
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Store(StoreOp::DeletePlayerRaid(id)) if *id == Uuid::from_bytes(entity)
+            )),
+            "the raid ended with one member"
+        );
+    }
+
+    #[test]
+    fn a_stored_players_raid_comes_back_with_its_members_and_raid_ids_go_on() {
+        let groups: Vec<Uuid> = (0..PLAYER_RAID_GROUPS)
+            .map(|index| Uuid::from_u128(500 + index as u128))
+            .collect();
+        let record = PlayerRaidRecord {
+            entity: Uuid::from_u128(0x2828),
+            raid: PLAYER_RAID_ID_BASE + 6,
+            groups,
+            voice_channel: "stored-raid".to_owned(),
+            seats: vec![(character(1), 0), (character(2), 1), (character(3), 1)],
+            leader: Some(character(1)),
+            assistants: vec![character(3)],
+        };
+        let mut world = crate::world::tests::world_of(SocialRecords {
+            characters: crate::world::tests::characters(),
+            player_raids: vec![record],
+            ..SocialRecords::default()
+        });
+        let entity = *Uuid::from_u128(0x2828).as_bytes();
+        assert_eq!(world.player_raid_of(character(2)), Some(entity));
+        assert_eq!(seat_of(&world, 3), 1);
+        assert_eq!(world.raids[&entity].leader, Some(character(1)));
+        assert_eq!(world.raids[&entity].assistants, vec![character(3)]);
+        assert_eq!(world.next_player_raid, PLAYER_RAID_ID_BASE + 7);
+        assert_eq!(
+            world.own_voice_channel(character(3)),
+            Some("stored-raid".to_owned())
+        );
+        join(&mut world, 1, "Ann", ON);
+        join(&mut world, 2, "Bob", ON);
+        assert!(
+            world.raids[&entity].leads.is_empty(),
+            "a stored raid shows no new lead"
+        );
+        let effects = kick(&mut world, 1, 3);
+        let removed = group_push(&effects, MEMBER_REMOVED_TYPE_INDEX);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(
+            removed[0].0,
+            vec![character(2)],
+            "its online raid group mate"
+        );
+    }
+
+    /// Character `number` reports position `at` at Unix ms `now_ms`.
+    fn moved(world: &mut SocialWorld, number: u128, at: [f32; 2], now_ms: u64) {
+        let player = SocialPlayer {
+            position: at,
+            ..crate::world::tests::player(number, &format!("P{number}"), ON)
+        };
+        world.input(
+            &crate::world::tests::sim(ON),
+            SocialInput::Updated(player),
+            now_ms,
+        );
+    }
+
+    #[test]
+    fn a_still_leader_hands_the_raid_to_the_first_moving_assistant_or_member() {
+        let (mut world, entity) = raid_of(3);
+        promote(&mut world, 3, RAID_PERMISSION_ASSISTANT);
+        let late = NOW_MS + RAID_LEADER_AFK_MS / 2;
+        moved(&mut world, 1, [100.5, 100.0], late);
+        moved(&mut world, 2, [150.0, 100.0], late);
+        world.demote_afk_raid_leaders(late);
+        assert_eq!(
+            world.raids[&entity].leader,
+            Some(character(1)),
+            "half a metre is no move: the time runs from the join"
+        );
+
+        let effects = world.demote_afk_raid_leaders(NOW_MS + RAID_LEADER_AFK_MS);
+        let raid = &world.raids[&entity];
+        assert_eq!(
+            raid.leader,
+            Some(character(2)),
+            "the assistant stood still too: the moving member leads"
+        );
+        assert_eq!(raid.assistants, vec![character(3), character(1)]);
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Store(StoreOp::SavePlayerRaid(saved)) if saved.leader == Some(character(2))
+        )));
+
+        let later = late + RAID_LEADER_AFK_MS;
+        let effects = world.demote_afk_raid_leaders(later);
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Store(StoreOp::SavePlayerRaid(_)))),
+            "nobody moved since: the raid keeps its leader"
+        );
+        assert_eq!(world.raids[&entity].leader, Some(character(2)));
+    }
+
+    #[test]
+    fn every_group_of_a_raid_hears_the_raids_voice_channel() {
+        let mut world = grouped(6, 3);
+        let group = world.people[&character(1)].group.expect("a group");
+        let group_channel = world.groups[&group].voice_channel.clone();
+        world.rules.voice = Some(crate::voice::VoiceService {
+            api_url: "https://voice.example/api2/".to_owned(),
+            issuer: "made-up".to_owned(),
+            domain: "voice.example".to_owned(),
+            key: b"key".to_vec(),
+            channel_suffix: "S".to_owned(),
+            cell_size_m: 512.0,
+        });
+        send(&mut world, 1, INITIATE_CONVERT_TO_RAID_TYPE_INDEX, &[]);
+        vote(&mut world, 2, true);
+        vote(&mut world, 3, true);
+        for invitee in 4..=6 {
+            send(
+                &mut world,
+                1,
+                GROUP_INVITE_TYPE_INDEX,
+                &invite_args(invitee),
+            );
+            accept_last_invite(&mut world, invitee);
+        }
+        let mut args = text(&character(6).to_string());
+        args.push(1);
+        send(&mut world, 1, MOVE_RAID_MEMBER_TYPE_INDEX, &args);
+        assert_eq!(seat_of(&world, 6), 1);
+        for member in [1, 4, 6] {
+            let effects = send(&mut world, member, GROUP_CHANNEL_TYPE_INDEX, &[]);
+            let [(_, SocialPush::Voice(VoicePush::GroupChannel { channel, .. }))]: [_; 1] =
+                pushes(&effects, GROUP_CHANNEL_URI_TYPE_INDEX)
+                    .try_into()
+                    .expect("one answer")
+            else {
+                panic!("a group channel");
+            };
+            assert_eq!(
+                channel, group_channel,
+                "member {member}: the converted group's channel"
+            );
+        }
     }
 }

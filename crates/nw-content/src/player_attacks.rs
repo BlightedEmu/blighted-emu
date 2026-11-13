@@ -1357,6 +1357,97 @@ mod tests {
         (ms * RECORDS_PER_SECOND + MS_PER_SECOND_U64 / 2) / MS_PER_SECOND_U64
     }
 
+    /// The stances of the player attack table in `NW_CONTENT_DIR`.
+    fn built_stances() -> Vec<Stance> {
+        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
+        let text = std::fs::read_to_string(player_attacks_path(Path::new(&dir), CONTENT_BUILD))
+            .expect("player attack table");
+        serde_json::from_str(&text).expect("stances")
+    }
+
+    /// Every basic attack of `stance`: its own, its combo steps' and its variants' stances'.
+    fn all_attacks(stance: &Stance) -> Vec<&BasicAttack> {
+        let own = [
+            &stance.light,
+            &stance.heavy,
+            &stance.charged,
+            &stance.aimed,
+            &stance.aimed_charged,
+        ];
+        let steps = stance
+            .combo
+            .iter()
+            .flat_map(|step| [&step.light, &step.heavy, &step.charged]);
+        own.into_iter()
+            .chain(steps)
+            .flatten()
+            .chain(
+                stance
+                    .variants
+                    .iter()
+                    .flat_map(|variant| all_attacks(&variant.stance)),
+            )
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "needs the build 25810808 content in NW_CONTENT_DIR"]
+    fn every_built_attack_lasts_and_a_clip_an_empty_clip_ends_plays_to_its_end() {
+        // Observed (client data, `player_dagger.adb` and `player_blunderbuss.adb`): these
+        // fragments hold one clip and then an empty clip whose blend has `ExitTime -1`, which
+        // ends the layer when the clip ends. Before `AnimClip::chained_end` the empty clip ended
+        // the clip at 0 s, and the three attacks lasted 0 ms. The dagger's light attack is
+        // `dual_daggers_prim_1` (1.867 s long), its third charged heavy
+        // `dual_daggers_hvy_3` (1.233 s); the Mortar Shot aim of the blunderbuss
+        // (`TEMP_WeaponMaster`, under `Blunderbuss_MortarShotActiveTimer`) is
+        // `blunderbuss_a6_mortarcharge_fire` (0.967 s) at speed 0.6. Retail: no capture holds a
+        // player dagger attack or a Mortar Shot aim (Unknown); the rule itself is Observed on
+        // the retail mobs (`creature_animations` test of the built fragment ticks).
+        const DAGGER: &str = "1H_Melee,Dagger";
+        const DAGGER_LIGHT_MS: u64 = 1_867;
+        const DAGGER_CHARGED_C3_MS: u64 = 1_233;
+        const DAGGER_CHARGED_C3: &str = "Attack_Heavy_Charged_C3";
+        const MORTAR_TAG: &str = "TEMP_WeaponMaster";
+        const MORTAR_AIMED_MS: u64 = 1_611;
+        let stances = built_stances();
+        for stance in &stances {
+            for attack in all_attacks(stance) {
+                assert!(
+                    attack.length_ms > 0,
+                    "{} {}: {attack:?}",
+                    stance.tags,
+                    attack.action
+                );
+            }
+        }
+        let dagger = stances
+            .iter()
+            .find(|stance| stance.tags == DAGGER)
+            .expect("dagger");
+        assert_eq!(
+            dagger.light.as_ref().map(|light| light.length_ms),
+            Some(DAGGER_LIGHT_MS)
+        );
+        let charged_c3: Vec<u64> = dagger
+            .combo
+            .iter()
+            .filter_map(|step| step.charged.as_ref())
+            .filter(|charged| charged.action == DAGGER_CHARGED_C3)
+            .map(|charged| charged.length_ms)
+            .collect();
+        assert!(
+            !charged_c3.is_empty() && charged_c3.iter().all(|ms| *ms == DAGGER_CHARGED_C3_MS),
+            "{charged_c3:?}"
+        );
+        let mortar = stances
+            .iter()
+            .flat_map(|stance| &stance.variants)
+            .find(|variant| variant.tag == MORTAR_TAG)
+            .and_then(|variant| variant.stance.aimed.as_ref())
+            .expect("the Mortar Shot aim");
+        assert_eq!(mortar.length_ms, MORTAR_AIMED_MS);
+    }
+
     #[test]
     #[ignore = "needs the build 25810808 content in NW_CONTENT_DIR"]
     fn the_built_reactions_end_at_their_retail_times_and_no_marker_lies_past_its_fragment() {
@@ -1368,10 +1459,7 @@ mod tests {
         const KNOCKDOWN_RECORDS: u64 = 50;
         const OVERHEAD_MS: u64 = 1_500;
         const GREATSWORD_R3_RECORDS: u64 = 29;
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let text = std::fs::read_to_string(player_attacks_path(Path::new(&dir), CONTENT_BUILD))
-            .expect("player attack table");
-        let stances: Vec<Stance> = serde_json::from_str(&text).expect("stances");
+        let stances = built_stances();
         let entry = |tags: &str, fragment: &str| -> ReactionEntry {
             stances
                 .iter()

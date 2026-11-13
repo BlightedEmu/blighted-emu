@@ -13,9 +13,11 @@
 //!   ([`SimWorld::mutation_refusal`]).
 //! - The instance sim takes the mutation from the first player's stay
 //!   ([`SimWorld::adopt_mutation`]) and mutates every live mob: health and damage factors, and
-//!   the status effects ([`SimWorld::mutate_live_mobs`]); the status effects and the players'
-//!   curse afflictions wait in a queue for the status effect runtime
-//!   ([`SimWorld::take_mutation_effects`]).
+//!   the status effects ([`SimWorld::mutate_live_mobs`]); each arriving player gets the curse's
+//!   major effect ([`nw_content::mutations::MutationCatalog::player_effects`]). Both wait in a
+//!   queue for the status effect runtime ([`SimWorld::take_mutation_effects`]). A curse with a
+//!   `GlobalAffliction` starts the run's curse meter on the expedition's game mode entity
+//!   ([`super::expedition_mode`], [`nw_content::mutations::CurseMeter`]).
 //! - A mob kill rolls the mutation's tags and its injected creature tables
 //!   ([`SimWorld::mutation_kill_loot`]); a completed run grants the difficulty's completion event
 //!   and raises the players' rank ([`SimWorld::complete_mutated_instance`]).
@@ -43,8 +45,6 @@ const NS_PER_SECOND: u64 = 1_000_000_000;
 /// The rank of a mutated slot a player has without one (best guess: difficulty 1 is open to
 /// everyone of the level).
 const FIRST_RANK: u8 = 1;
-/// The potency of a curse's global affliction on a player (an affliction has none in its row).
-const AFFLICTION_POTENCY: f64 = 1.0;
 /// A completion event's item, once.
 const ONE: u32 = 1;
 
@@ -192,8 +192,9 @@ impl SimWorld {
             .map(|mutation| &mutation.context)
     }
 
-    /// The instance sim takes the mutation of `stay` (the first player's that arrives with one)
-    /// and mutates every live mob; the arriving player `number` gets the curse's affliction.
+    /// The instance sim takes the mutation of `stay` (the first player's that arrives with one),
+    /// starts the run's curse meter ([`SimWorld::start_run_curse`]) and mutates every live mob;
+    /// the arriving player `number` gets the curse's major effect.
     pub(super) fn adopt_mutation(&mut self, stay: &InstanceStay, number: u64) {
         let Some(difficulty) = stay.mutation_difficulty else {
             return;
@@ -225,18 +226,23 @@ impl SimWorld {
                 .sets
                 .iter()
                 .position(|set| set.game_mode.eq_ignore_ascii_case(&context.set.game_mode));
+            let curse = content.mutations.curse_meter(&context);
             run.set_mutation(InstanceMutation::new(context, slot));
+            if let Some(curse) = curse {
+                self.start_run_curse(curse);
+            }
         }
-        if let Some(mutation) = run.mutation_mut()
-            && let Some(affliction) = content.mutations.player_affliction(&mutation.context)
-        {
-            mutation.effects.push((
-                number,
-                AppliedEffect {
-                    status_id: affliction.to_owned(),
-                    potency: AFFLICTION_POTENCY,
-                },
-            ));
+        let Some(run) = self.instance_run.as_mut() else {
+            return;
+        };
+        if let Some(mutation) = run.mutation_mut() {
+            let dice = &mut self.dice;
+            let effects = content
+                .mutations
+                .player_effects(&mutation.context, &mut |below| dice.below(below));
+            mutation
+                .effects
+                .extend(effects.into_iter().map(|effect| (number, effect)));
         }
         self.mutate_live_mobs();
     }
@@ -294,6 +300,18 @@ impl SimWorld {
             mutation
                 .effects
                 .extend(change.effects.into_iter().map(|effect| (entity, effect)));
+        }
+    }
+
+    /// Queues `effects` of the mutation for the status effect runtime (a curse's explosion,
+    /// [`super::expedition_mode`]); nothing outside a mutated instance.
+    pub(super) fn queue_mutation_effects(&mut self, effects: Vec<(u64, AppliedEffect)>) {
+        if let Some(mutation) = self
+            .instance_run
+            .as_mut()
+            .and_then(|run| run.mutation_mut())
+        {
+            mutation.effects.extend(effects);
         }
     }
 
@@ -407,6 +425,7 @@ impl SimWorld {
 mod tests {
     use super::*;
     use nw_content::mutations::MutationSet;
+    use nw_formats::objectstream::lowercase_crc32;
 
     fn week() -> MutationWeek {
         MutationWeek {
@@ -444,6 +463,51 @@ mod tests {
         assert_eq!(scaled(1_000, 3.2), 3_200);
         assert_eq!(scaled(3, 1.5), 5);
         assert_eq!(scaled(0, 2.0), 1);
+    }
+
+    /// The first player who arrives with a mutated stay brings the mutation (the week's set and
+    /// its difficulty): the run's curse meter starts (Fiendish: its minor curse is the run
+    /// players' `OnPerform` holder) and the player's major curse waits for the status effect
+    /// runtime; a later player keeps the run's mutation and gets its major too.
+    #[test]
+    fn the_first_mutated_arrival_adopts_the_mutation_and_starts_the_curse_meter() {
+        use crate::world::expedition_mode::tests::{arrive_mutated, opened_mutated};
+        const FIRST: u64 = 71;
+        const SECOND: u64 = 72;
+        const MAJOR: &str = "Mut_Curse2_Ice_Major_Buff";
+        let mut world = opened_mutated();
+        assert!(
+            world.instance_mutation().is_none(),
+            "no player brought one yet"
+        );
+        let first = arrive_mutated(&mut world, FIRST, 3);
+        let context = world.instance_mutation().expect("mutated").clone();
+        assert_eq!(
+            (context.set.curse.as_str(), context.set.elemental.as_str()),
+            ("Fiendish", "Ice")
+        );
+        assert_eq!(context.difficulty, 3);
+        assert_eq!(
+            world.run_minor_curse(first),
+            Some(lowercase_crc32("Mut_Curse2_Minor_Buff"))
+        );
+        let major = |number| {
+            (
+                number,
+                AppliedEffect {
+                    status_id: MAJOR.to_owned(),
+                    potency: 1.0,
+                },
+            )
+        };
+        assert!(world.take_mutation_effects().contains(&major(FIRST)));
+        arrive_mutated(&mut world, SECOND, 1);
+        assert_eq!(
+            world.instance_mutation().map(|context| context.difficulty),
+            Some(3),
+            "the first player's mutation stays"
+        );
+        assert!(world.take_mutation_effects().contains(&major(SECOND)));
     }
 
     #[test]

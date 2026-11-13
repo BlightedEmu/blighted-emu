@@ -577,6 +577,13 @@ pub struct PlayerProgression {
     /// Its season pass state (world migration 0041).
     #[serde(default)]
     pub season: PlayerSeason,
+    /// Its rested experience pool (world migration 0048).
+    #[serde(default)]
+    pub rested_experience: u32,
+    /// How long it was away before a join from the database, in nanoseconds since the save of
+    /// its rested experience; 0 on a handoff, which counts no time away.
+    #[serde(default)]
+    pub away_ns: u64,
 }
 
 /// A player's season pass state (world migration 0041), as a join, a handoff and a save carry
@@ -1272,8 +1279,9 @@ pub struct Hit {
     /// a player's hit.
     #[serde(default)]
     pub hit_stun: u32,
-    /// A mob's hit on a player: the grit it takes while the player's grit is on, in thousandths
-    /// ([`Hit::block_stamina_milli`]'s unit); 0 for a player's hit.
+    /// The hit's stagger, in thousandths ([`Hit::block_stamina_milli`]'s unit): a mob's hit on a
+    /// player takes it from the player's grit while that is on, a player's hit on a mob from the
+    /// mob's grit; 0 for a player's hit on a player.
     #[serde(default)]
     pub stagger_milli: u32,
     /// A mob's or a player's hit on a player: what it adds to the player's reaction count, in
@@ -1303,7 +1311,7 @@ impl Hit {
             .map(|milli| milli as f32 / MILLI_PER_UNIT)
     }
 
-    /// The grit this mob hit takes while the player's grit is on ([`Hit::stagger_milli`]).
+    /// The stagger of this hit ([`Hit::stagger_milli`]).
     #[must_use]
     // Thousandths of a stagger of a few hundred.
     #[allow(clippy::cast_precision_loss)]
@@ -1658,6 +1666,8 @@ mod tests {
                 first_connect_ns: u64::MAX,
                 versions: (u64::MAX, 1),
             },
+            rested_experience: u32::MAX,
+            away_ns: u64::MAX,
         }
     }
 

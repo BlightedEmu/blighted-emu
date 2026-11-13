@@ -9,7 +9,8 @@ use nw_bus::{
     BusId, LeaveReason, SocialDelivery, SocialFacetKind, SocialHeader, SocialInput, SocialPlayer,
 };
 use nw_db::{
-    CoinReturn, Company, LinkKind, SocialGroup, SocialRecords, SocialSettings, WarRequest,
+    CoinReturn, Company, LinkKind, ProjectStart, SocialGroup, SocialRecords, SocialSettings,
+    WarRequest,
 };
 use nw_messages::FacetHeader;
 use nw_messages::social::group_data::ROLE_NONE;
@@ -19,7 +20,7 @@ use uuid::Uuid;
 
 use crate::companies::CompanyRules;
 use crate::effects::{Effect, StoreOp};
-use crate::player_raids::{PLAYER_RAID_ID_BASE, RaidVote};
+use crate::player_raids::{RAID_LEADER_AFK_MOVE_M, RaidVote, stored_player_raids};
 use crate::privacy::PrivacyByAccount;
 use crate::profanity::ProfanityFilter;
 use crate::raids::{Raid, RaidInvite};
@@ -90,6 +91,12 @@ pub(crate) struct Person {
     pub(crate) group_role: u8,
     /// The raid it is in, by raid entity id ([`crate::raids`]).
     pub(crate) raid: Option<[u8; 16]>,
+    /// When it last moved [`RAID_LEADER_AFK_MOVE_M`] from [`Self::moved_at`] or came online,
+    /// Unix milliseconds (0 before either): the AFK rule of a players' raid leader
+    /// ([`crate::player_raids`]).
+    pub(crate) moved_ms: u64,
+    /// Where it was at [`Self::moved_ms`], metres (east, north).
+    pub(crate) moved_at: [f32; 2],
 }
 
 impl Person {
@@ -113,6 +120,8 @@ impl Person {
             vitals: GroupVitals::default(),
             group_role: ROLE_NONE,
             raid: None,
+            moved_ms: 0,
+            moved_at: [0.0; 2],
         }
     }
 }
@@ -173,6 +182,9 @@ pub(crate) enum Transfer {
     /// A war declaration paid from the player's wallet: its coins leave the player, then the
     /// declaration goes to the database ([`crate::war_declaration`]).
     WarFee(WarRequest),
+    /// A town project start paid from the player's wallet: its coins leave the player, then the
+    /// start goes to the database ([`crate::town_projects`]).
+    ProjectFee(ProjectStart),
 }
 
 /// The social state of one world.
@@ -221,6 +233,10 @@ pub struct SocialWorld {
     pub(crate) next_player_raid: u64,
     /// The war declarations the database has now, by ticket ([`crate::war_declaration`]).
     pub(crate) war_requests: HashMap<u64, WarRequest>,
+    /// The town project starts the database has now, by ticket ([`crate::town_projects`]).
+    pub(crate) project_starts: HashMap<u64, ProjectStart>,
+    /// The town project cancels the database has now, by ticket.
+    pub(crate) project_cancels: HashMap<u64, crate::town_projects::PendingCancel>,
 }
 
 impl SocialWorld {
@@ -317,6 +333,7 @@ impl SocialWorld {
             }
             groups.insert(group.id, group);
         }
+        let (raids, next_player_raid) = stored_player_raids(records.player_raids, &mut people);
         let mut withdrawals: HashMap<Uuid, Vec<(u64, i64)>> = HashMap::new();
         for (character, at_ms, change) in records.withdrawals {
             withdrawals
@@ -348,12 +365,14 @@ impl SocialWorld {
             sent: HashMap::new(),
             company_invite_ms: HashMap::new(),
             claim_counts: HashMap::new(),
-            raids: HashMap::new(),
+            raids,
             raid_invites: HashMap::new(),
             raid_votes: HashMap::new(),
             raid_vote_starts: HashMap::new(),
-            next_player_raid: PLAYER_RAID_ID_BASE,
+            next_player_raid,
             war_requests: HashMap::new(),
+            project_starts: HashMap::new(),
+            project_cancels: HashMap::new(),
         }
     }
 
@@ -395,6 +414,8 @@ impl SocialWorld {
                 body,
             } => self.call(character, type_index, &body, now_ms),
             SocialInput::PayUpkeep(payment) => self.pay_upkeep(payment),
+            SocialInput::StartTownProject(start) => self.start_town_project(start),
+            SocialInput::CancelTownProject(cancel) => self.cancel_town_project(cancel),
             SocialInput::RaidJoin {
                 character,
                 raid,
@@ -456,6 +477,14 @@ impl SocialWorld {
             return;
         };
         let came_online = person.online.is_none();
+        let (east, north) = (
+            player.position[0] - person.moved_at[0],
+            player.position[1] - person.moved_at[1],
+        );
+        if came_online || east.hypot(north) >= RAID_LEADER_AFK_MOVE_M {
+            person.moved_ms = now_ms;
+            person.moved_at = player.position;
+        }
         let look_changed = person.settings.level != player.level
             || person.settings.icon != Some(player.icon)
             || person.settings.faction != player.faction
@@ -731,9 +760,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// A world with characters 1 (Ann), 2 (Bob) and 3 (Cid), none online.
-    pub(crate) fn world() -> SocialWorld {
-        let characters = [(1, "Ann"), (2, "Bob"), (3, "Cid")]
+    /// Characters 1 (Ann), 2 (Bob) and 3 (Cid).
+    pub(crate) fn characters() -> Vec<nw_db::SocialCharacter> {
+        [(1, "Ann"), (2, "Bob"), (3, "Cid")]
             .into_iter()
             .map(|(number, name)| nw_db::SocialCharacter {
                 id: character(number),
@@ -741,7 +770,19 @@ pub(crate) mod tests {
                 name: name.to_owned(),
                 appearance: serde_json::json!({}),
             })
-            .collect();
+            .collect()
+    }
+
+    /// A world with [`characters`], none online.
+    pub(crate) fn world() -> SocialWorld {
+        world_of(SocialRecords {
+            characters: characters(),
+            ..SocialRecords::default()
+        })
+    }
+
+    /// The state of the test rules over `records`.
+    pub(crate) fn world_of(records: SocialRecords) -> SocialWorld {
         SocialWorld::new(
             SocialRules {
                 world_id: Uuid::from_u128(77),
@@ -750,10 +791,7 @@ pub(crate) mod tests {
             },
             ProfanityFilter::of_lists(["_bad_\n".as_bytes()]),
             Loaded {
-                records: SocialRecords {
-                    characters,
-                    ..SocialRecords::default()
-                },
+                records,
                 icons: HashMap::new(),
             },
         )

@@ -3,9 +3,10 @@
 //! of its lowercase `GatherableID`, and the gatherable's `FinalLootTable` gives the items (see
 //! [`crate::loot`]). A loot crate's items come from its variant instead ([`CrateLoot`]).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use nw_formats::objectstream::lowercase_crc32;
+use serde::{Deserialize, Serialize};
 
 use crate::Tables;
 
@@ -18,6 +19,8 @@ const TOOL_REQUIRED: &str = "ToolRequired";
 const BY_HAND: &str = "None";
 /// Milliseconds per second.
 const MS_PER_SECOND: f64 = 1_000.0;
+/// The gatherers a gatherable without a `NumRequiredToGather` above it needs.
+pub const ONE_GATHERER: u32 = 1;
 /// The tradeskills of the gatherables whose node entity holds its gatherable controller in bundle
 /// slot 3 and its interact in slot 4: every card of the 110 kinds of these tradeskills in 2,265
 /// retail ledgers (scan of 2026-11-10).
@@ -77,6 +80,12 @@ pub struct Gatherable {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Gatherables {
     by_crc: HashMap<u32, Gatherable>,
+    /// The CRC-32 of the lowercase id of each gatherable whose stopped gathers keep their work
+    /// done ([`Gatherables::keeps_progress`]).
+    kept_progress: HashSet<u32>,
+    /// The gatherers each group gatherable needs, by the CRC-32 of its lowercase id
+    /// ([`Gatherables::gatherers_needed`]).
+    gatherers_needed: HashMap<u32, u32>,
 }
 
 impl Gatherable {
@@ -115,38 +124,100 @@ fn ms_of(seconds: f64) -> u64 {
 }
 
 impl Gatherables {
-    /// The gatherables of `tables`.
+    /// The gatherables of `tables`, with the progress kept by each gatherable whose
+    /// `ResetGatherTimeOnEndInteraction` is not true ([`Gatherables::keeps_progress`]) and the
+    /// gatherers of each `NumRequiredToGather` above one ([`Gatherables::gatherers_needed`]).
     pub fn from_tables(tables: &Tables) -> Self {
-        Self::build(
-            tables
-                .gatherable_data
-                .iter()
-                .flat_map(|table| &table.rows)
-                .map(|row| Gatherable {
-                    id: row.gatherable_id.clone(),
-                    gather_ms: ms_of(row.base_gather_time),
-                    respawn_ms: (ms_of(row.min_respawn_rate), ms_of(row.max_respawn_rate)),
-                    loot_table: row.final_loot_table.clone(),
-                    loot_container: row.is_loot_container.unwrap_or_default(),
-                    tradeskill: row.tradeskill.clone(),
-                    tool_required: row.restriction.as_deref() == Some(TOOL_REQUIRED),
-                    by_hand: row
-                        .gathering_type
-                        .as_deref()
-                        .is_none_or(|kind| kind == BY_HAND),
-                    game_event: row.game_event_id.clone().filter(|event| !event.is_empty()),
-                }),
+        let rows = || tables.gatherable_data.iter().flat_map(|table| &table.rows);
+        Self::build(rows().map(|row| Gatherable {
+            id: row.gatherable_id.clone(),
+            gather_ms: ms_of(row.base_gather_time),
+            respawn_ms: (ms_of(row.min_respawn_rate), ms_of(row.max_respawn_rate)),
+            loot_table: row.final_loot_table.clone(),
+            loot_container: row.is_loot_container.unwrap_or_default(),
+            tradeskill: row.tradeskill.clone(),
+            tool_required: row.restriction.as_deref() == Some(TOOL_REQUIRED),
+            by_hand: row
+                .gathering_type
+                .as_deref()
+                .is_none_or(|kind| kind == BY_HAND),
+            game_event: row.game_event_id.clone().filter(|event| !event.is_empty()),
+        }))
+        .with_kept_progress(
+            rows()
+                .filter(|row| row.reset_gather_time_on_end_interaction != Some(true))
+                .map(|row| row.gatherable_id.as_str()),
         )
+        .with_gatherers_needed(rows().filter_map(|row| {
+            let needed = u32::try_from(row.num_required_to_gather?).ok()?;
+            (needed > ONE_GATHERER).then_some((row.gatherable_id.as_str(), needed))
+        }))
     }
 
-    /// The gatherables of `gatherables`.
+    /// The gatherables of `gatherables`; none keeps the progress of a stopped gather, and each
+    /// needs one gatherer.
     pub fn build(gatherables: impl IntoIterator<Item = Gatherable>) -> Self {
         Self {
             by_crc: gatherables
                 .into_iter()
                 .map(|gatherable| (lowercase_crc32(&gatherable.id), gatherable))
                 .collect(),
+            kept_progress: HashSet::new(),
+            gatherers_needed: HashMap::new(),
         }
+    }
+
+    /// The same gatherables, with each gatherable of `needed` (id in any case, gatherers) needing
+    /// that many gatherers.
+    #[must_use]
+    pub fn with_gatherers_needed<'a>(
+        mut self,
+        needed: impl IntoIterator<Item = (&'a str, u32)>,
+    ) -> Self {
+        self.gatherers_needed.extend(
+            needed
+                .into_iter()
+                .map(|(id, gatherers)| (lowercase_crc32(id), gatherers)),
+        );
+        self
+    }
+
+    /// The gatherers that must gather the gatherable whose lowercase id has the CRC-32 `crc`
+    /// together for its work to go on: its `NumRequiredToGather`, else [`ONE_GATHERER`].
+    ///
+    /// Observed (finding 2026-11-13 "gatherer counts and group gathers"): the 6 gatherables of
+    /// build 25810808 with a `NumRequiredToGather` above 1 (3 for
+    /// `DungeonRestlessShores_MinorMonolith` and `RW_Siege_Pool_Blighted_Totem`) are the only
+    /// ones that 2 or 3 players gathered at once in 694 retail ledgers. The monolith's work went
+    /// on only while 3 players gathered it (`EXP-The-Depths`: 10.0 left with 2 gatherers from
+    /// 730.93 s, a third at 735.30 s, a stop at 735.64 s left 9.70; the next gather started
+    /// with 9.70 and 3 gatherers at 736.20 s and ended at 745.89 s).
+    pub fn gatherers_needed(&self, crc: u32) -> u32 {
+        self.gatherers_needed
+            .get(&crc)
+            .copied()
+            .unwrap_or(ONE_GATHERER)
+    }
+
+    /// The same gatherables, with the gatherables of ids `ids` (any case) keeping the progress
+    /// of their stopped gathers.
+    #[must_use]
+    pub fn with_kept_progress<'a>(mut self, ids: impl IntoIterator<Item = &'a str>) -> Self {
+        self.kept_progress.extend(ids.into_iter().map(lowercase_crc32));
+        self
+    }
+
+    /// Whether a stopped gather of the gatherable whose lowercase id has the CRC-32 `crc` keeps
+    /// its work done for the next gather of its object.
+    ///
+    /// Observed (finding 2026-11-13 "gather progress and quest interacts", 694 retail ledgers):
+    /// after an interrupt, 62 gathers of gatherables whose `ResetGatherTimeOnEndInteraction` is
+    /// 0 or empty started with the amount left (the sun disk shield of
+    /// `1624_0401_thedemonscauldron`: 20.0, then 10.85 at 202.69 s, then 3.06 at 217.43 s),
+    /// and every one of the 121 with 1 started over. The client reads the cell as true only for
+    /// `true` or `1` (`FUN_145bf7cf0`), so an empty cell keeps the progress as 0 does.
+    pub fn keeps_progress(&self, crc: u32) -> bool {
+        self.kept_progress.contains(&crc)
     }
 
     /// The gatherable whose lowercase id has the CRC-32 `crc`.
@@ -610,6 +681,75 @@ impl CrateLoot {
     }
 }
 
+/// The level objects whose gathers are instanced (the world file's instanced gathers,
+/// `nw_world::instanced_loot`): a gather of one is the gatherer's own and counts no gatherer on
+/// the object. Any other object, a region gatherable point among them, is one shared world
+/// object that counts each of its gatherers.
+///
+/// Observed (finding 2026-11-13 "gatherer counts and group gathers"): every one of 2,584 retail
+/// gathers of an instanced object sent `m_numGathering` 0 in the gatherer's own gather state, and
+/// none of them kept its work after a stop (the well `98_Syndicate_03_Well_02` of
+/// `Playthrough_Part_21`, 1376.65 s and 1383.65 s, started from full); every one of 795 gathers of
+/// a shared one sent 1 (the Brimstone glyph locks among them, which kept their work).
+///
+/// Each object keeps its slice's values that its gatherer's loot tracker entry follows
+/// ([`InstancedObject`], [`InstancedGathers::of`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InstancedGathers {
+    /// Each object's slice values, by its facet key.
+    objects: HashMap<u64, InstancedObject>,
+}
+
+/// The values of an instanced object's slice that its looter's loot tracker entry follows.
+///
+/// Observed (finding D9 "tracker entries out of range", 2,669 early removals and 560 re-adds of
+/// looted entries in 401 retail ledgers): an entry leaves its looter's list when the looter is
+/// farther from the object than its slice's `m_aoiRadius` and comes back when the looter is
+/// within it again (medians 79.3 m and 78.6 m for `master_lootcontainer`, radius 80; 99.5 m and
+/// 98.5 m for `master_quest_instanced`, radius 100; the Catacombs health chest about 198 m, the
+/// Reekwater Azoth pool about 142 m).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct InstancedObject {
+    /// The slice's `m_instancedLootType` (client enum `InstancedLootType`).
+    pub loot_type: u32,
+    /// The slice's `m_aoiRadius` (`Javelin::AoiComponent`, reflection `FUN_14175f1a0`), m;
+    /// `None` for a slice that holds none (Unknown in retail: every instanced slice read holds
+    /// one).
+    pub aoi_radius_m: Option<f32>,
+}
+
+impl InstancedGathers {
+    /// The objects of the capitals `capitals` (GUID text, slice values) and the spawned slices
+    /// `spawned` (GDE id, slice values).
+    pub fn build<'a>(
+        capitals: impl IntoIterator<Item = (&'a str, InstancedObject)>,
+        spawned: impl IntoIterator<Item = (u64, InstancedObject)>,
+    ) -> Self {
+        Self {
+            objects: capitals
+                .into_iter()
+                .filter_map(|(guid, object)| Some((capital_key(guid)?, object)))
+                .chain(
+                    spawned
+                        .into_iter()
+                        .map(|(id, object)| (id & !FACET_FREE_BITS, object)),
+                )
+                .collect(),
+        }
+    }
+
+    /// Whether the gathers of the object with facet entity `facet` are instanced.
+    pub fn instanced(&self, facet: u64) -> bool {
+        self.of(facet).is_some()
+    }
+
+    /// The slice values of the instanced object with facet entity `facet`; `None` for a shared
+    /// one.
+    pub fn of(&self, facet: u64) -> Option<InstancedObject> {
+        self.objects.get(&(facet & !FACET_FREE_BITS)).copied()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,6 +822,46 @@ mod tests {
             ["SingleStone"]
         );
         assert_eq!(ms_of(0.25), 250);
+    }
+
+    /// A gatherable row with only the required columns and its
+    /// `ResetGatherTimeOnEndInteraction` cell `reset` (absent for an empty cell).
+    fn gatherable_row(id: &str, reset: Option<bool>) -> crate::generated::GatherableData {
+        serde_json::from_value(serde_json::json!({
+            "base_gather_time": 20.0,
+            "gatherable_id": id,
+            "max_respawn_rate": 300.0,
+            "min_respawn_rate": 200.0,
+            "reset_gather_time_on_end_interaction": reset,
+        }))
+        .expect("gatherable row")
+    }
+
+    #[test]
+    fn a_gatherable_keeps_its_progress_unless_its_reset_cell_is_true() {
+        // Build 25810808: the sun disk shield has 0, a loot crate 1, a tree an empty cell.
+        let mut tables = Tables::default();
+        tables.gatherable_data.push(crate::table::Table {
+            source_path: "javelindata_gatherables.datasheet".to_owned(),
+            unique_id: "Gatherables".to_owned(),
+            rows: vec![
+                gatherable_row("1624_0401_DiskAtumStart", Some(false)),
+                gatherable_row("LootLargeT3", Some(true)),
+                gatherable_row("TreeHardwoodMedium", None),
+            ],
+        });
+        let gatherables = Gatherables::from_tables(&tables);
+        assert!(gatherables.keeps_progress(lowercase_crc32("1624_0401_diskatumstart")));
+        assert!(!gatherables.keeps_progress(lowercase_crc32("lootlarget3")));
+        assert!(
+            gatherables.keeps_progress(lowercase_crc32("treehardwoodmedium")),
+            "an empty cell reads as false"
+        );
+        assert!(
+            !Gatherables::build([gatherable_of("TreeHardwoodMedium", Some("Logging"))])
+                .keeps_progress(lowercase_crc32("treehardwoodmedium")),
+            "a built set keeps nothing unless told"
+        );
     }
 
     #[test]
@@ -865,6 +1045,75 @@ mod tests {
             crates.table(BEACH_CHEST_FACET, chest, SUPPLIES_NAME),
             None,
             "a request whose name is not its capital's variant's"
+        );
+    }
+
+    #[test]
+    fn a_placed_or_spawned_object_of_an_instanced_slice_has_instanced_gathers() {
+        const SPAWNED_WELL: u64 = 0x1234_5678_9abc_def0;
+        /// `master_lootcontainer`: `InstancedLootType::POILoot`, `m_aoiRadius` 80 m.
+        const CHEST: InstancedObject = InstancedObject {
+            loot_type: 0,
+            aoi_radius_m: Some(80.0),
+        };
+        /// `master_quest_instanced`: `InstancedLootType::Quest`, `m_aoiRadius` 100 m.
+        const WELL: InstancedObject = InstancedObject {
+            loot_type: 4,
+            aoi_radius_m: Some(100.0),
+        };
+        let instanced = InstancedGathers::build(
+            [(BEACH_CHEST_GUID, CHEST), ("not a guid", CHEST)],
+            [(SPAWNED_WELL, WELL)],
+        );
+        assert!(instanced.instanced(BEACH_CHEST_FACET));
+        assert_eq!(instanced.of(BEACH_CHEST_FACET), Some(CHEST));
+        assert_eq!(
+            instanced.of(SPAWNED_WELL),
+            Some(WELL),
+            "its own slice's values"
+        );
+        assert!(
+            instanced.instanced(BEACH_CHEST_FACET | FACET_FREE_BITS),
+            "the low 3 bits are free"
+        );
+        assert!(instanced.instanced(SPAWNED_WELL | FACET_FREE_BITS));
+        assert!(
+            !instanced.instanced(BEACH_CHEST_FACET + 8),
+            "another object is shared"
+        );
+        assert_eq!(instanced.of(BEACH_CHEST_FACET + 8), None);
+    }
+
+    #[test]
+    fn a_group_gatherable_needs_its_num_required_to_gather() {
+        // Build 25810808: the Restless Shores monolith needs 3, a tree none, a quest object 1.
+        let row = |id: &str, needed: Option<i64>| {
+            let mut row = gatherable_row(id, None);
+            row.num_required_to_gather = needed;
+            row
+        };
+        let mut tables = Tables::default();
+        tables.gatherable_data.push(crate::table::Table {
+            source_path: "javelindata_gatherables.datasheet".to_owned(),
+            unique_id: "Gatherables".to_owned(),
+            rows: vec![
+                row("DungeonRestlessShores_MinorMonolith", Some(3)),
+                row("TreeHardwoodMedium", None),
+                row("99B_MSQ_04_OrePiles", Some(1)),
+            ],
+        });
+        let gatherables = Gatherables::from_tables(&tables);
+        assert_eq!(
+            gatherables.gatherers_needed(lowercase_crc32("dungeonrestlessshores_minormonolith")),
+            3
+        );
+        assert_eq!(
+            gatherables.gatherers_needed(lowercase_crc32("treehardwoodmedium")),
+            ONE_GATHERER
+        );
+        assert_eq!(
+            gatherables.gatherers_needed(lowercase_crc32("99b_msq_04_orepiles")),
+            ONE_GATHERER
         );
     }
 

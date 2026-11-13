@@ -50,8 +50,20 @@ pub struct FragmentMarker {
     pub name: String,
     /// When it starts, ms after the fragment starts.
     pub start_ms: u64,
-    /// When it ends, ms after the fragment starts.
-    pub end_ms: u64,
+    /// When it ends, ms after the fragment starts; `None` for a clip that is the last of its
+    /// layer: it lasts while its fragment plays ([`FragmentRow::markers_at`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ms: Option<u64>,
+}
+
+/// Whether a clip from `start_ms` to `end_ms` (`None`: while its fragment plays) is on
+/// `since_start_ms` after its fragment started. A clip that is the last of its procedural layer
+/// has no end of its own and stays on while its action keeps the fragment, also past the end of
+/// the fragment's animation layers (Inferred from the data: the fire staff's
+/// `Ability_Fire_Staff_Speed_Loop` sets `BlockDisabled` from 0 s with no end, and its animation
+/// loops; the client data has no other end for it).
+fn clip_on(start_ms: u64, end_ms: Option<u64>, since_start_ms: u64) -> bool {
+    since_start_ms >= start_ms && end_ms.is_none_or(|end_ms| since_start_ms < end_ms)
 }
 
 /// A `CAGE-TransitionInstant` clip of a fragment: while it plays, the action it names takes the
@@ -71,12 +83,22 @@ pub struct FragmentTransition {
     pub condition: Option<Condition>,
     /// When it starts, ms after the fragment starts.
     pub start_ms: u64,
-    /// When it ends, ms after the fragment starts.
-    pub end_ms: u64,
+    /// When it ends, ms after the fragment starts; `None` for a clip that is the last of its
+    /// layer: it lasts while its fragment plays ([`FragmentTransition::on_at`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_ms: Option<u64>,
     /// When its `CAGE-TransitionBuffered` clip starts, ms after the fragment starts; `None`
     /// without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer_start_ms: Option<u64>,
+}
+
+impl FragmentTransition {
+    /// Whether it is on `since_start_ms` after its fragment started: from its start to its end,
+    /// or while the fragment plays when it has no end.
+    pub fn on_at(&self, since_start_ms: u64) -> bool {
+        clip_on(self.start_ms, self.end_ms, since_start_ms)
+    }
 }
 
 /// Where a transition clip leads.
@@ -102,8 +124,20 @@ pub struct FragmentRow {
     /// controller definitions do not name the fragment.
     #[serde(default)]
     pub scopes: Vec<String>,
-    /// How long it plays, ms; 0 when the build found no clip of it.
+    /// How long its animation layers play, ms: the longest layer, its last clip played to the
+    /// clip's end; for a fragment that ends in a loop ([`FragmentRow::loops`]), until that loop
+    /// starts. 0 when the build found no clip of it, or for an entry without clips (the musket's
+    /// `Ability_Musket_LoadChargeShot_UB` for the tags `2H_Ranged+Rifle`).
     pub length_ms: u64,
+    /// Whether an animation layer ends in a looping clip (`flags="Loop"`, no clip after it): the
+    /// fragment never finishes by itself, and plays until its action stops or a transition
+    /// moves it on (Observed: 30 retail fire staff Flame Thrower plays, whose
+    /// `Ability_Fire_Staff_FlameThrower` loops from 0.633 s and whose action stops when it is
+    /// done, lasted 1.39 to 3.82 s (p10 to p90) until its exit transition; 19 Ice Gauntlet
+    /// Entombed plays 2.2 to 10.5 s, whose `Ability_IceMagic_Entombed_Loop` loops from 0 s;
+    /// ability ends of `abilityends`, all 1,195 retail ledgers of the capture index).
+    #[serde(default)]
+    pub loops: bool,
     /// Its markers, by start.
     pub markers: Vec<FragmentMarker>,
     /// Its transitions, by start.
@@ -114,18 +148,27 @@ pub struct FragmentRow {
 }
 
 impl FragmentRow {
-    /// The markers it sets `since_start_ms` after it starts. A marker that ends no later than
-    /// it starts has no end: its fragment ends in a loop, whose length is the loop's start (the
-    /// life staff's aim loop sets `Magic_IsReady_Heal` from 0.067 s on).
+    /// The markers it sets `since_start_ms` after it starts: each from its start to its end,
+    /// one without an end while the fragment plays (the life staff's aim loop sets
+    /// `Magic_IsReady_Heal` from 0.067 s on). A marker past the end of the animation layers is
+    /// on while the action keeps the fragment (`IfFragmentDone` holds at the end of the
+    /// animation layers, not of the procedural ones: Observed, 133 retail blunderbuss Vortex
+    /// Shot plays, whose `Ability_Blunderbuss_VortexShot` animation lasts 1.333 s and whose
+    /// `CanDodgeCancel` clip lasts to 3.05 s, ended 1.19 to 1.26 s after the server's answer in
+    /// 105 of them; its action's only deactivation is `IfFragmentDone`).
     pub fn markers_at(&self, since_start_ms: u64) -> Vec<&str> {
         self.markers
             .iter()
-            .filter(|marker| {
-                since_start_ms >= marker.start_ms
-                    && (since_start_ms < marker.end_ms || marker.start_ms >= marker.end_ms)
-            })
+            .filter(|marker| clip_on(marker.start_ms, marker.end_ms, since_start_ms))
             .map(|marker| marker.name.as_str())
             .collect()
+    }
+
+    /// Whether it is done `since_start_ms` after it started, `exit_offset_ms` before its end
+    /// (`IfFragmentDone`): its animation layers played to their end; a fragment that ends in a
+    /// loop is never done.
+    pub fn done_at(&self, since_start_ms: u64, exit_offset_ms: u32) -> bool {
+        !self.loops && since_start_ms + u64::from(exit_offset_ms) >= self.length_ms
     }
 }
 
@@ -438,10 +481,11 @@ mod tests {
                 name: "Smite".to_owned(),
                 scopes: Vec::new(),
                 length_ms: 1_000,
+                loops: false,
                 markers: vec![FragmentMarker {
                     name: MARKER.to_owned(),
                     start_ms: MARKER_START_MS,
-                    end_ms: MARKER_END_MS,
+                    end_ms: Some(MARKER_END_MS),
                 }],
                 transitions: Vec::new(),
                 hit: None,
@@ -476,6 +520,69 @@ mod tests {
         assert_eq!(list.mana_cost("lifestaff_smite"), Some(16.0));
     }
 
+    /// The fire staff's `Ability_Fire_Staff_Speed_Loop` (build 25810808): its animation loops
+    /// from 0 s, `BlockDisabled` has no end, and its transition to `Ability_Fire_Staff_Speed_Stop`
+    /// is on from 0.867 s with no end.
+    #[test]
+    fn a_looping_fragment_is_never_done_and_its_open_clips_stay_on() {
+        const BLOCK_DISABLED: &str = "BlockDisabled";
+        const STOP_START_MS: u64 = 867;
+        const LONG_AFTER_MS: u64 = 60_000;
+        let mut fragment = FragmentRow {
+            name: "Ability_Fire_Staff_Speed_Loop".to_owned(),
+            scopes: Vec::new(),
+            length_ms: 0,
+            loops: true,
+            markers: vec![FragmentMarker {
+                name: BLOCK_DISABLED.to_owned(),
+                start_ms: 0,
+                end_ms: None,
+            }],
+            transitions: vec![FragmentTransition {
+                to: TransitionTo::Action("Ability_Fire_Staff_Speed_Stop".to_owned()),
+                input: None,
+                condition: None,
+                start_ms: STOP_START_MS,
+                end_ms: None,
+                buffer_start_ms: None,
+            }],
+            hit: None,
+        };
+        assert!(!fragment.done_at(LONG_AFTER_MS, 0), "a loop is never done");
+        assert_eq!(fragment.markers_at(LONG_AFTER_MS), [BLOCK_DISABLED]);
+        let transition = &fragment.transitions[0];
+        assert!(!transition.on_at(STOP_START_MS - 1));
+        assert!(transition.on_at(STOP_START_MS));
+        assert!(transition.on_at(LONG_AFTER_MS), "no end: on while it plays");
+        fragment.loops = false;
+        assert!(
+            fragment.done_at(0, 0),
+            "without the loop, a fragment of no length is done at once"
+        );
+    }
+
+    #[test]
+    fn a_fragment_is_done_at_the_end_of_its_animation_less_its_offset() {
+        const EXIT_OFFSET_MS: u32 = 100;
+        let list = smite_list();
+        let fragment = list.fragment("Smite").expect("fragment");
+        let length = fragment.length_ms;
+        assert!(!fragment.done_at(length - u64::from(EXIT_OFFSET_MS) - 1, EXIT_OFFSET_MS));
+        assert!(fragment.done_at(length - u64::from(EXIT_OFFSET_MS), EXIT_OFFSET_MS));
+        assert!(fragment.done_at(length, 0));
+        assert!(!fragment.done_at(length - 1, 0));
+    }
+
+    #[test]
+    fn a_table_with_numbered_clip_ends_reads_them_as_ends() {
+        let text = r#"{"name":"Smite","start_ms":200,"end_ms":600}"#;
+        let marker: FragmentMarker = serde_json::from_str(text).expect("marker");
+        assert_eq!(marker.end_ms, Some(MARKER_END_MS));
+        let open: FragmentMarker =
+            serde_json::from_str(r#"{"name":"Smite","start_ms":200}"#).expect("open marker");
+        assert_eq!(open.end_ms, None);
+    }
+
     #[test]
     fn a_weapon_finds_the_lists_of_its_classes() {
         let table = PlayerAbilities {
@@ -496,5 +603,107 @@ mod tests {
             serde_json::from_str::<PlayerAbilities>(&text).expect("back"),
             table
         );
+    }
+
+    #[test]
+    #[ignore = "needs the build 25810808 content in NW_CONTENT_DIR"]
+    fn a_built_fragment_that_an_empty_clip_ends_lasts_its_clip() {
+        // Observed (client data): `player_blunderbuss.adb`
+        // `Ability_Blunderbuss_ClawShot_Hit_Confirm` plays `blunderbuss_a1_clawshot_wait` (0.333
+        // s long) and `player.adb`
+        // `Ability_Rune_Sandworm_Cast` plays `heartgems_ability_sandworm_cast` (1.167 s), each
+        // then an empty clip whose blend has `ExitTime -1`: the fragment ends with its clip.
+        // Before `nw_formats::mannequin::AnimClip::chained_end` both lasted 0 ms, and every
+        // marker and transition of them ended at 0. Retail length: Unknown (no capture tells
+        // these fragments' ends apart from the ability's later states).
+        const BUILD: &str = "25810808";
+        const CLAW_SHOT: (&str, u64) = ("Ability_Blunderbuss_ClawShot_Hit_Confirm", 333);
+        const SANDWORM: (&str, u64) = ("Ability_Rune_Sandworm_Cast", 1_167);
+        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
+        let table = PlayerAbilities::load(Path::new(&dir), BUILD).expect("table");
+        for (name, length_ms) in [CLAW_SHOT, SANDWORM] {
+            let fragment = table
+                .lists
+                .iter()
+                .find_map(|list| list.fragment(name))
+                .expect(name);
+            assert_eq!(fragment.length_ms, length_ms, "{name}");
+            assert!(
+                fragment
+                    .markers
+                    .iter()
+                    .map(|marker| marker.end_ms)
+                    .chain(fragment.transitions.iter().map(|to| to.end_ms))
+                    .any(|end_ms| end_ms.is_none()),
+                "{name}: a marker or transition lasts while the fragment plays: {fragment:?}"
+            );
+            assert!(!fragment.done_at(length_ms - 1, 0), "{name}");
+            assert!(fragment.done_at(length_ms, 0), "{name}");
+        }
+    }
+
+    #[test]
+    #[ignore = "needs the build 25810808 content in NW_CONTENT_DIR"]
+    fn the_built_loops_beast_form_and_dry_fire_have_their_clip_data() {
+        // Observed (client data, build 25810808): the aim and loop fragments end in a looping
+        // clip (`Bow_Aim_UpperBody` `bow_aim_halfdrw_idle_ub`, `Ability_VoidGauntlet_Harvest`
+        // `void_gnt_harvest_loop_ub`, the fire staff's Flame Thrower loop from 0.633 s); the
+        // heart rune's beast form plays `archetype_beast_combat_taunt_01` (3.3333335 s at speed 2)
+        // and `_02` (2.6666667 s at speed 1.5) of the beast archetype's folder, which
+        // `player_shared.chrparams` names; the musket's dry fire for `2H_Ranged+Crouch+HeavyAim`
+        // (the tags `Musket_ShootersStance_Ready` sets) plays `rifle_crch_aim_idle` to an empty
+        // clip at 0.8 s, sets `ForceReload` from 0.633 s and goes back to
+        // `Ability_Musket_ShootersStance_Aim` from 0.667 s. Before, each was 0 ms long.
+        const BUILD: &str = "25810808";
+        const LOOPS: [(&str, u64); 4] = [
+            ("Bow_Aim_UpperBody", 0),
+            ("Ability_VoidGauntlet_Harvest", 0),
+            ("Ability_Fire_Staff_FlameThrower", 633),
+            ("Ability_IceMagic_Entombed_Loop", 0),
+        ];
+        const BEAST_FORM: [(&str, u64); 2] = [
+            ("Ability_Rune_BeastMode_Activate", 1_667),
+            ("Ability_Rune_BeastMode_Deactivate", 1_778),
+        ];
+        const DRY_FIRE: &str = "Firearm_Shoot_DryFire_UpperBody";
+        const DRY_FIRE_MS: u64 = 800;
+        const FORCE_RELOAD: (&str, u64) = ("ForceReload", 633);
+        // The action of the list that plays `Ability_Musket_ShootersStance_Aim`.
+        const BACK_TO_AIM: (&str, u64) = ("Musket_ShootersStance_Aim_SubState", 667);
+        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
+        let table = PlayerAbilities::load(Path::new(&dir), BUILD).expect("table");
+        let fragment = |name: &str| {
+            table
+                .lists
+                .iter()
+                .find_map(|list| list.fragment(name))
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        for (name, loop_start_ms) in LOOPS {
+            let row = fragment(name);
+            assert!(row.loops, "{name}");
+            assert_eq!(row.length_ms, loop_start_ms, "{name}");
+            assert!(!row.done_at(u64::MAX / 2, 0), "{name}");
+        }
+        for (name, length_ms) in BEAST_FORM {
+            let row = fragment(name);
+            assert!(!row.loops, "{name}");
+            assert_eq!(row.length_ms, length_ms, "{name}");
+        }
+        let back_to_aim = |transition: &FragmentTransition| {
+            transition.to == TransitionTo::Action(BACK_TO_AIM.0.to_owned())
+                && transition.start_ms == BACK_TO_AIM.1
+        };
+        let musket = table
+            .lists
+            .iter()
+            .filter(|list| list.weapon_classes.iter().any(|class| class == "Musket"))
+            .find_map(|list| {
+                list.fragment(DRY_FIRE)
+                    .filter(|row| row.transitions.iter().any(back_to_aim))
+            })
+            .expect(DRY_FIRE);
+        assert_eq!((musket.length_ms, musket.loops), (DRY_FIRE_MS, false));
+        assert!(musket.markers_at(FORCE_RELOAD.1).contains(&FORCE_RELOAD.0));
     }
 }

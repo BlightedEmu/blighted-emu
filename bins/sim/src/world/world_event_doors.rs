@@ -30,10 +30,11 @@
 //! they are the slice's `Door_Teleport` entities, members 67 and 71 of the root group, `Closed`,
 //! and a player passes them by the door interaction (kind 67, [`super::travel`]).
 //!
-//! Observed difference (not changed here): retail destroyed the gathered glyph 3 s after the
-//! gather (gatherable 8 and a 3 s delayed event at 242.570 s, slot stop at 245.585 s), and the
-//! Interact stage ended with it; this server's gathering removes a start object at the gather
-//! ([`super::gathering`]), so the stage ends and the door spawns 3 s earlier.
+//! **The glyph's end** (Observed, the same ledger): at the gather's end (242.570 s) the glyph
+//! goes `Depleted`, its interact state off and its 3 s delayed event starts; its slot stops at
+//! 245.585 s, in the tick that ends the Interact stage. The sim does the same
+//! ([`super::encounter_roots::EncounterObjects::gathered`]), so the stage ends and the one-way
+//! door spawns 3 s after the gather, as retail.
 
 #[cfg(test)]
 mod tests {
@@ -127,6 +128,15 @@ mod tests {
     const CLEANUP_MS: u64 = 3_000;
     /// The spawner's respawn (the range 10 to 0 s).
     const RESPAWN_MS: u64 = 10_000;
+    /// The glyph's delayed event after its gather (Observed: 242.570 to 245.585 s).
+    const GLYPH_DELAY_MS: u64 = 3_000;
+    /// The glyph's states that its gather changes (Observed, 242.570 s: gatherable `Depleted`,
+    /// interact off with no interactor, the delayed event's 3 s).
+    const GLYPH_GATHERED: [(u64, &str); 3] = [
+        (3, "030c010108"),
+        (4, "04b22d01030000000000"),
+        (6, "06833101014200"),
+    ];
     /// The stronghold siren's encounter slice, its retail root's place (x, y, raw height;
     /// `Playthrough_Part_18` 4558.190 s), its stage count and its two teleport doors (whole
     /// members on the root, components 67 and 71).
@@ -184,6 +194,19 @@ mod tests {
                 self.mobs.remove(&entity);
             }
         }
+
+        // The holdout has no hazard objects: no player takes an area effect here.
+        fn afflict(
+            &mut self,
+            _sphere: ([f32; 3], f32),
+            _effects: &[String],
+            _source_at: (u64, u64),
+            _skip: &[u64],
+        ) -> Vec<u64> {
+            Vec::new()
+        }
+
+        fn end_effects(&mut self, _players: &[u64], _effects: &[String], _: u64, _: u64) {}
 
         fn health(&self, entity: u64) -> Option<u32> {
             if EncounterObjects::is_object(entity) {
@@ -268,7 +291,12 @@ mod tests {
     ) -> Vec<(u64, BundleGroup)> {
         let mut found: Vec<(u64, BundleGroup)> = objects
             .numbers_near(at, RADIUS_M)
-            .filter_map(|number| Some((number, objects.group(number, new_slot())?)))
+            .filter_map(|number| {
+                Some((
+                    number,
+                    objects.group(number, new_slot(), &mut HashMap::new())?,
+                ))
+            })
             .filter(|(_, group)| {
                 matches!(&group.members[0].state, MemberState::GdeMetadata(card)
                     if card.asset.is_some_and(|id| hex::encode(id.id) == asset))
@@ -299,7 +327,8 @@ mod tests {
     }
 
     /// Ticks `run` from `from_ms` to `to_ms`; each tick shows its statuses on the root, as the
-    /// sim's encounter tick does.
+    /// sim's encounter tick does, and ends the gathered objects whose delayed event ended, as
+    /// the sim's gather tick does.
     fn run_until(
         run: &mut DungeonRun,
         host: &mut Holdout,
@@ -309,6 +338,7 @@ mod tests {
     ) {
         let mut now = from_ms;
         while now <= to_ms {
+            host.objects.tick(now);
             run.tick(host, view, &[true], now);
             if let Some((manager, stages)) = run.client_status(0) {
                 roots.set(0, true, manager, &stages);
@@ -373,16 +403,45 @@ mod tests {
         assert_eq!(glyphs.len(), 1, "the glyph stands");
         assert_eq!(objects_of(&host.objects, SOLID_DOOR, door_at).len(), 1);
         assert!(objects_of(&host.objects, ONE_WAY_DOOR, door_at).is_empty());
-        // The player gathers the glyph: the gathering removes it.
-        host.objects.remove(glyphs[0].0);
-        let holdout_ms = interact_ms + TICK_MS;
+        // The player gathers the glyph: it empties and starts its delayed event; a viewer that
+        // holds its slot gets the three changed states.
+        let glyph = glyphs[0].0;
+        host.objects.gathered(glyph, interact_ms);
+        let held = Slot {
+            interest: new_slot().interest,
+            new: false,
+        };
+        let change = host
+            .objects
+            .group(glyph, held, &mut HashMap::from([(glyph, 0)]))
+            .expect("the gather's change");
+        assert_eq!(change.members.len(), GLYPH_GATHERED.len());
+        for (component, retail) in GLYPH_GATHERED {
+            assert_eq!(hex_of(&change, component), retail, "glyph c{component}");
+        }
+        let gone_ms = interact_ms + GLYPH_DELAY_MS;
         run_until(
             &mut run,
             &mut host,
             &mut roots,
             &view,
-            (holdout_ms, holdout_ms + TICK_MS),
+            (interact_ms + TICK_MS, gone_ms - TICK_MS),
         );
+        assert!(host.objects.stands(glyph), "the glyph stands through its delay");
+        assert_eq!(
+            stage_states(&mut roots, &run),
+            STAGES_INTERACT,
+            "Interact runs until the glyph goes"
+        );
+        let holdout_ms = gone_ms + TICK_MS;
+        run_until(
+            &mut run,
+            &mut host,
+            &mut roots,
+            &view,
+            (gone_ms, holdout_ms + TICK_MS),
+        );
+        assert!(!host.objects.stands(glyph), "the glyph goes at its delay's end");
         assert_eq!(
             stage_states(&mut roots, &run),
             STAGES_HOLDOUT,
@@ -453,6 +512,28 @@ mod tests {
             (done_ms + TICK_MS, done_ms + RESPAWN_MS + TICK_MS),
         );
         assert!(!host.objects.stands(*door), "the door goes at the respawn");
+    }
+
+    /// The siren's retail task tree (`Playthrough_Part_18` 4870.045 to 5403.609 s): tasks
+    /// 1 and 3 kill objectives, task 5 `EncounterObjectiveSliceSpawned` (0x8745b685, Wave_02)
+    /// with container 6 (0xa515dbce), the root at 15, on objectives component 4.
+    #[test]
+    #[ignore = "needs the build 25810808 content files in NW_CONTENT_DIR"]
+    fn the_stronghold_siren_s_objective_has_its_retail_task_tree() {
+        const SLICE_SPAWNED: u32 = 0x8745_b685;
+        const CONTAINER_6: u32 = 0xa515_dbce;
+        const ROOT_INDEX: u8 = 15;
+        const OBJECTIVES_COMPONENT: u64 = 4;
+        let encounter = open_world_encounter(&content_dir(), SIREN_SLICE, SIREN_X, SIREN_Y);
+        assert_eq!(encounter.objectives_component, Some(OBJECTIVES_COMPONENT));
+        let tree = encounter.objective_tasks().expect("tasks");
+        assert_eq!(tree.root_index, ROOT_INDEX);
+        let third = tree.tasks[2];
+        assert_eq!(
+            (third.index, third.task, third.container),
+            (5, SLICE_SPAWNED, CONTAINER_6)
+        );
+        assert!(encounter.stages[third.stage].name.starts_with("Wave_02"));
     }
 
     #[test]

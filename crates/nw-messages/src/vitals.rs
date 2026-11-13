@@ -290,9 +290,10 @@ impl VitalsState {
     /// `StaminaBaseTickRate` `tick_rate`. Observed: the retail card of the damned pistoleer
     /// (vitals id `0501e946`, MSQ13-lv56 ledger 654,127 ms) holds 50, 50 and `0x4000` (2.0, its
     /// row's 2), and the player's tick rate `0x5100` is its row's 40. Retail sends the stamina in
-    /// the first state only: no later vitals state of that mob held a stamina child while its
-    /// raised block took eight hits (768,464 to 775,578 ms) and broke (775,604 ms), nor in the
-    /// other 25 dungeon and expedition ledgers swept.
+    /// the first vitals state only: in all 1,193 ledgers, of the 86,013 later stamina-only
+    /// vitals deltas of the 1,750 blocking mob cards, the 7,802 sent while a block was up all
+    /// hold 0.0 to 0.8 (a meter of max 1), never a guard's value. The guard's later stamina rides
+    /// the mob's ALC states as whole segments ([`crate::stamina_segments`]).
     #[must_use]
     pub fn with_stamina(mut self, amount: f32, max: f32, tick_rate: f32) -> Self {
         let slot = self.slot_0.get_or_insert_with(VitalsSlot0::default);

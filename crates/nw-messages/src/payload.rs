@@ -25,7 +25,7 @@ use crate::components::{
     COMBAT_STATUS_TYPE_INDEX, CURRENCY_TYPE_INDEX, CombatStatusState, CurrencyState,
     DAMAGE_RECEIVER_TYPE_INDEX, DELAYED_EVENT_TYPE_INDEX, DamageReceiverState, DelayedEventState,
     GATHERABLE_CONTROLLER_TYPE_INDEX, GatherableControllerState, INTERACT_TYPE_INDEX,
-    InteractState, LOOK_TARGETING_TYPE_INDEX, LookTargetingState, MANA_TYPE_INDEX, ManaState,
+    InteractCooldownState, InteractState, LOOK_TARGETING_TYPE_INDEX, LookTargetingState, MANA_TYPE_INDEX, ManaState,
     STAMINA_TYPE_INDEX, StaminaState,
 };
 use crate::containers::{
@@ -121,6 +121,8 @@ pub enum MemberState {
     GatherableController(GatherableControllerState),
     /// `MB::InteractReplicatedState`.
     Interact(InteractState),
+    /// `MB::InteractReplicatedState` with its `CooldownUpdates` child.
+    InteractCooldown(InteractCooldownState),
     /// `MB::SpellComponentReplicatedState`.
     Spell(SpellState),
     /// `MB::ProjectileReplicatedState`: a shot the sim spawns (written only; a capture's own
@@ -128,7 +130,7 @@ pub enum MemberState {
     Projectile(ProjectileState),
     /// `Javelin::GameModeReplicatedState`: a game mode entity the sim runs (written only; a
     /// capture's own reads through the member table).
-    GameMode(GameModeState),
+    GameMode(Box<GameModeState>),
     /// `Javelin::GameModeParticipantReplicatedState`: the game modes of a player (written
     /// only; a capture's own reads through the member table).
     GameModeParticipant(GameModeParticipantState),
@@ -279,7 +281,7 @@ impl MemberState {
             Self::Achievement(_) => ACHIEVEMENT_TYPE_INDEX,
             Self::DamageReceiver(_) => DAMAGE_RECEIVER_TYPE_INDEX,
             Self::GatherableController(_) => GATHERABLE_CONTROLLER_TYPE_INDEX,
-            Self::Interact(_) => INTERACT_TYPE_INDEX,
+            Self::Interact(_) | Self::InteractCooldown(_) => INTERACT_TYPE_INDEX,
             Self::Spell(_) => SPELL_TYPE_INDEX,
             Self::Projectile(_) => PROJECTILE_TYPE_INDEX,
             Self::GameMode(_) => GAME_MODE_TYPE_INDEX,
@@ -408,7 +410,13 @@ impl MemberState {
                 GatherableControllerState::read(reader).map(Self::GatherableController)
             }
             TypeId::FileSlot(INTERACT_TYPE_INDEX) => {
-                InteractState::read(reader).map(Self::Interact)
+                InteractState::read(reader).map(|(interact, cooldowns)| match cooldowns {
+                    None => Self::Interact(interact),
+                    Some(cooldown_updates) => Self::InteractCooldown(InteractCooldownState {
+                        interact,
+                        cooldown_updates,
+                    }),
+                })
             }
             TypeId::FileSlot(SPELL_TYPE_INDEX) => SpellState::read(reader).map(Self::Spell),
             TypeId::FileSlot(CURRENCY_TYPE_INDEX) => {
@@ -609,6 +617,7 @@ impl MemberState {
                 state.write(writer);
                 Ok(())
             }
+            Self::InteractCooldown(state) => state.write(writer),
             Self::Spell(state) => {
                 state.write(writer);
                 Ok(())

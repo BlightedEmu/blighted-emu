@@ -157,6 +157,15 @@ impl SimWorld {
         let mut answers: Vec<ServerMessage> = Vec::new();
         match call {
             WarClientMsg::WarboardEnabled { .. } => {
+                // An Outpost Rush player gets its match's board ([`super::outpost_rush`]).
+                let number = self
+                    .by_connection
+                    .get(connection)
+                    .and_then(|entity| self.world.get::<Player>(*entity))
+                    .map(|player| player.number);
+                if number.is_some_and(|number| self.outpost_rush_board_enabled(number)) {
+                    return;
+                }
                 match WarServerMsg::full_manifest(
                     header,
                     &WarboardManifest::of_participants(Vec::new()),

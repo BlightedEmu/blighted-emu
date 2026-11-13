@@ -7,6 +7,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::{DbError, is_unique_violation};
+use crate::player_raids::{PlayerRaidRecord, load_player_raids};
 use crate::territory::move_upkeep_due;
 
 /// Bytes of a stored crest.
@@ -91,6 +92,9 @@ pub enum TreasuryReason {
     /// A declaration that lost its lottery got its coin back (the client's
     /// `WarDeclarationFailed`, 5).
     WarDeclarationFailed,
+    /// A member started a town project from the treasury (world migration 0045; the client's
+    /// treasury log reason `TerritoryProgression`, 2).
+    TerritoryProgression,
 }
 
 impl TreasuryReason {
@@ -102,6 +106,7 @@ impl TreasuryReason {
             Self::Upkeep { .. } => "upkeep",
             Self::WarDeclaration => "war declaration",
             Self::WarDeclarationFailed => "war declaration failed",
+            Self::TerritoryProgression => "territory progression",
         }
     }
 }
@@ -272,6 +277,8 @@ pub struct SocialRecords {
     pub withdrawals: Vec<(Uuid, u64, i64)>,
     /// The coin owed to characters (world migration 0031).
     pub coin_returns: Vec<CoinReturn>,
+    /// Every players' raid (world migration 0044).
+    pub player_raids: Vec<PlayerRaidRecord>,
 }
 
 /// Coin the social service owes a character (world migration 0031): a deposit the treasury did
@@ -573,6 +580,7 @@ pub async fn load_social(world: &PgPool) -> Result<SocialRecords, DbError> {
         groups,
         withdrawals,
         coin_returns,
+        player_raids: load_player_raids(world).await?,
     })
 }
 

@@ -39,9 +39,11 @@
 //! (16 bytes), its sub id and type, then the hint path as a big-endian `u64` length at byte 48
 //! and the text (Observed: 9,821 of 9,821 references of the dungeon slices).
 
+use nw_content::dungeon_gates::GateTimeline;
 use nw_formats::objectstream::{Element, ObjectStreamError, UUID_SIZE, lowercase_crc32};
 use serde::{Deserialize, Serialize};
 
+use crate::collision::Geometry;
 use crate::slice_data::{Basis, GUID_LEN, IDENTITY, SliceDataError, transform_from_bytes};
 use crate::slice_triggers::TriggerEvent;
 
@@ -61,6 +63,40 @@ pub const PREFAB_SPAWNER_TYPE: [u8; UUID_SIZE] = [
 pub const POINT_SPAWNER_TYPE: [u8; UUID_SIZE] = [
     0xd4, 0x07, 0xe6, 0x73, 0x6f, 0x0b, 0x42, 0x83, 0x8c, 0x30, 0xae, 0x9a, 0x39, 0x6f, 0x58, 0x22,
 ];
+/// `{55A5FED5-B91E-4CEC-B605-1BA0553735BD}`: the area spawner (class name Unknown; the client
+/// registers the id in `FUN_142585540`). Observed in
+/// `catacombs_extraction_sustainwave.dynamicslice`: the fields `m_sliceAsset`, `m_aliasAsset`,
+/// `m_liveCount` (4), `m_minRespawnRange` (2 s), `m_maxRespawnRange` (7 s), `m_spawnOnEnable`
+/// and `m_locations` (its nine spawn point entities).
+pub const AREA_SPAWNER_TYPE: [u8; UUID_SIZE] = [
+    0x55, 0xa5, 0xfe, 0xd5, 0xb9, 0x1e, 0x4c, 0xec, 0xb6, 0x05, 0x1b, 0xa0, 0x55, 0x37, 0x35, 0xbd,
+];
+/// `{1D3D6391-52BC-7703-563A-E2C7E674B255}`: a persistent area status effect (client field
+/// lists `FUN_143ff0820`: `m_detectionEntity`, `m_addStatusEffects`, `m_removeStatusEffects`,
+/// `m_removeOnExit`, `m_initialDelaySeconds`, `m_reapplicationDelaySeconds`, ..., and
+/// `FUN_143ff0b20` `PersistentAreaStatusEffectData`). Observed on the catacomb falling debris's
+/// `DamageVolumeStun` entity: it adds `Stunned_Afflict` to the characters in the entity's
+/// 1.2 m detection sphere.
+pub const AREA_STATUS_EFFECT_TYPE: [u8; UUID_SIZE] = [
+    0x1d, 0x3d, 0x63, 0x91, 0x52, 0xbc, 0x77, 0x03, 0x56, 0x3a, 0xe2, 0xc7, 0xe6, 0x74, 0xb2, 0x55,
+];
+/// `{1FF7A74B-8C58-42F2-8A68-1706D75F57D0}`: the spawn settings next to a spawner component on
+/// the same entity (class name Unknown; its field list is the client's `FUN_143c17190`:
+/// `m_destroySpawnsOnDeactivate`, `m_destroySpawnsOnDeath`, `m_destroySpawnsOnDestroyed`,
+/// `m_spawnCap`, `m_aggroDelayOverride`, ...). Observed on the holdout's and the corrupted
+/// breaches' area spawner entities.
+pub const SPAWNER_SETTINGS_TYPE: [u8; UUID_SIZE] = [
+    0x1f, 0xf7, 0xa7, 0x4b, 0x8c, 0x58, 0x42, 0xf2, 0x8a, 0x68, 0x17, 0x06, 0xd7, 0x5f, 0x57, 0xd0,
+];
+/// `{0C848755-1F41-4408-B2BE-0A3627674F50}`: a creature slice's vitals component (class name
+/// Unknown), whose field [`CREATURE_VITALS_NAME`] names the creature's vitals row.
+pub const CREATURE_VITALS_TYPE: [u8; UUID_SIZE] = [
+    0x0c, 0x84, 0x87, 0x55, 0x1f, 0x41, 0x44, 0x08, 0xb2, 0xbe, 0x0a, 0x36, 0x27, 0x67, 0x4f, 0x50,
+];
+/// The vitals row field of [`CREATURE_VITALS_TYPE`] (name Unknown, CRC `9304da38`). Observed:
+/// `dg_catacombs_extraction_bloodbeast` holds `Lost_Bloodbeast_Catacombs_Extraction`, and the
+/// retail mob of that slice has the vitals CRC `0d513e33` of that row (`CATACOMBS5` 1604.9 s).
+pub const CREATURE_VITALS_NAME: u32 = 0x9304_da38;
 /// `{8B86F1ED-3CA0-4E28-B816-4F5BA3267C13}` `AIVariantProviderComponent`.
 pub const VARIANT_PROVIDER_TYPE: [u8; UUID_SIZE] = [
     0x8b, 0x86, 0xf1, 0xed, 0x3c, 0xa0, 0x4e, 0x28, 0xb8, 0x16, 0x4f, 0x5b, 0xa3, 0x26, 0x7c, 0x13,
@@ -69,6 +105,38 @@ pub const VARIANT_PROVIDER_TYPE: [u8; UUID_SIZE] = [
 pub const DETECTION_VOLUME_TYPE: [u8; UUID_SIZE] = [
     0x41, 0xbc, 0x3b, 0xb3, 0xef, 0x30, 0x41, 0xe4, 0xb7, 0x51, 0x12, 0xc4, 0xea, 0xb9, 0x7c, 0x0e,
 ];
+/// `{E3DF5790-F0AD-43AE-9FB2-0A37F873DECB}` `TriggerAreaComponent` (the client's type id
+/// function `FUN_140d65c30`, called by the component's allocator `FUN_140964980`).
+pub const TRIGGER_AREA_TYPE: [u8; UUID_SIZE] = [
+    0xe3, 0xdf, 0x57, 0x90, 0xf0, 0xad, 0x43, 0xae, 0x9f, 0xb2, 0x0a, 0x37, 0xf8, 0x73, 0xde, 0xcb,
+];
+/// `{5EDF4B9E-0D3D-40B8-8C91-5142BCFC30A6}` the engine's `BoxShapeComponent` (`Dimensions`, the
+/// full size).
+pub const BOX_SHAPE_TYPE: [u8; UUID_SIZE] = [
+    0x5e, 0xdf, 0x4b, 0x9e, 0x0d, 0x3d, 0x40, 0xb8, 0x8c, 0x91, 0x51, 0x42, 0xbc, 0xfc, 0x30, 0xa6,
+];
+/// `{E24CBFF0-2531-4F8D-A8AB-47AF4D54BCD2}` the engine's `SphereShapeComponent` (`Radius`).
+pub const SPHERE_SHAPE_TYPE: [u8; UUID_SIZE] = [
+    0xe2, 0x4c, 0xbf, 0xf0, 0x25, 0x31, 0x4f, 0x8d, 0xa8, 0xab, 0x47, 0xaf, 0x4d, 0x54, 0xbc, 0xd2,
+];
+/// `{B0C6AA97-E754-4E33-8D32-33E267DB622F}` the engine's `CylinderShapeComponent` (`Height`,
+/// `Radius`).
+pub const CYLINDER_SHAPE_TYPE: [u8; UUID_SIZE] = [
+    0xb0, 0xc6, 0xaa, 0x97, 0xe7, 0x54, 0x4e, 0x33, 0x8d, 0x32, 0x33, 0xe2, 0x67, 0xdb, 0x62, 0x2f,
+];
+/// `{967EC13D-364D-4696-AB5C-C00CC05A2305}` the engine's `CapsuleShapeComponent` (`Height`,
+/// `Radius`).
+pub const CAPSULE_SHAPE_TYPE: [u8; UUID_SIZE] = [
+    0x96, 0x7e, 0xc1, 0x3d, 0x36, 0x4d, 0x46, 0x96, 0xab, 0x5c, 0xc0, 0x0c, 0xc0, 0x5a, 0x23, 0x05,
+];
+/// The full size field of [`BOX_SHAPE_TYPE`] (`Dimensions`).
+pub const SHAPE_DIMENSIONS_NAME: u32 = 0xe27d_8ba5;
+/// The radius field of the engine's round shapes (`Radius`).
+pub const SHAPE_RADIUS_NAME: u32 = 0x3b7c_6e5a;
+/// The end to end length field of the engine's cylinder and capsule (`Height`).
+pub const SHAPE_HEIGHT_NAME: u32 = 0xf54d_e50f;
+/// Half of a full size.
+const HALF: f32 = 0.5;
 /// `{0B382AF4-7946-4698-9223-206D1187B612}` `GatherableControllerComponent`.
 pub const GATHERABLE_CONTROLLER_TYPE: [u8; UUID_SIZE] = [
     0x0b, 0x38, 0x2a, 0xf4, 0x79, 0x46, 0x46, 0x98, 0x92, 0x23, 0x20, 0x6d, 0x11, 0x87, 0xb6, 0x12,
@@ -96,6 +164,21 @@ pub const DELAYED_EVENT_TYPE: [u8; UUID_SIZE] = [
 pub const PLACEMENT_OBSTRUCTION_TYPE: [u8; UUID_SIZE] = [
     0xfe, 0xcc, 0x87, 0x85, 0x5d, 0x77, 0x71, 0x38, 0x0b, 0xdf, 0x57, 0x3d, 0xe2, 0x20, 0xd9, 0x0e,
 ];
+/// `{B69045A3-A129-4334-BDFB-069C18CC84A2}`: an interact component (its replica is an
+/// `InteractReplicatedState`, class 2930; the client's interact option handlers use the type,
+/// `FUN_1428920f0` "Invalid interact option", `FUN_14288e630` `GatherWaterOption`). Observed:
+/// replica 4 of the catacomb wall torch lever, which retail sent as an interact state at the
+/// pull (`CATACOMBS2` 431.572 s `HasInteractors` 1, 433.574 s `Enabled` false).
+pub const INTERACT_TYPE: [u8; UUID_SIZE] = [
+    0xb6, 0x90, 0x45, 0xa3, 0xa1, 0x29, 0x43, 0x34, 0xbd, 0xfb, 0x06, 0x9c, 0x18, 0xcc, 0x84, 0xa2,
+];
+/// `{A42A47DB-4F14-41C6-81D1-19A95BA99F84}`: an encounter root's objectives component (its
+/// replica is an objectives state, class 3857). Observed: its replica index is the component
+/// number of the retail 3857 member of the root (stronghold siren 4 in `Playthrough_Part_18`,
+/// morgaine 4 in `NH-MSQ-6.3`, the remnant 3).
+pub const OBJECTIVES_TYPE: [u8; UUID_SIZE] = [
+    0xa4, 0x2a, 0x47, 0xdb, 0x4f, 0x14, 0x41, 0xc6, 0x81, 0xd1, 0x19, 0xa9, 0x5b, 0xa9, 0x9f, 0x84,
+];
 /// The name CRC of a component's replica index, `m_replicationIndex` (a big-endian `u32` in its
 /// base class; Observed: the lower-case CRC-32 of that client string in `NewWorld.exe`).
 pub const REPLICA_INDEX_NAME: u32 = 0x81e5_98c5;
@@ -106,6 +189,45 @@ pub const TIMELINE_ASSET_NAME: u32 = 0x5e82_df32;
 /// the name is the lower-case CRC-32 of that client string in `NewWorld.exe`;
 /// Observed: 3.5 and 0.1 on the Dynasty `DeathEvent`, the `totalDelayDuration` retail sent).
 pub const DELAY_NAME: u32 = 0x63bf_7cb0;
+/// The name CRC of a delayed event's `m_startDelayOnInit` (the lower-case CRC-32 of that client
+/// string, `FUN_143075ae0`).
+pub const START_ON_INIT_NAME: u32 = 0x59e3_80bd;
+/// `{28E4C1A4-B9B4-8675-59E8-A21527D9DA65}` `DestroyGDEComponent` (client `FUN_14338f3f0`): a
+/// trigger of its entity removes the slice it stands in, with what the slice spawned. Observed:
+/// the lightning hazard's `Destroy` entity, triggered 33 s after the slice started by its
+/// `Delay` entity; the three tornadoes went together 31 s after the first one, which came 2 s
+/// after the start (`CATACOMBS3` 449.6 to 480.6 s).
+pub const DESTROY_GDE_TYPE: [u8; UUID_SIZE] = [
+    0x28, 0xe4, 0xc1, 0xa4, 0xb9, 0xb4, 0x86, 0x75, 0x59, 0xe8, 0xa2, 0x15, 0x27, 0xd9, 0xda, 0x65,
+];
+/// `{1ADB6EF8-E043-FE2E-2351-E6E288346391}` `Javelin::PrefabSpawnRandomizer` (type name
+/// `FUN_143bf2190`, field list `FUN_143bf01e0`: `m_minSpawnCount`, `m_maxSpawnCount`,
+/// `m_normalSpawnTime`, `m_belowMinSpawnTime`, `m_spawnOnStartup`): it triggers some of the
+/// spawners under its entity. Observed on the Reekwater skeleton closet
+/// (`dungeon_reekwater_monster_closet_skeleton_randomizer`, counts 1 and 1, spawn on startup).
+pub const PREFAB_SPAWN_RANDOMIZER_TYPE: [u8; UUID_SIZE] = [
+    0x1a, 0xdb, 0x6e, 0xf8, 0xe0, 0x43, 0xfe, 0x2e, 0x23, 0x51, 0xe6, 0xe2, 0x88, 0x34, 0x63, 0x91,
+];
+/// `{1E6354A4-E970-4B41-B9E1-1BE15DDDC8DE}` `DetectableObjectComponent` (type id
+/// `FUN_141799510`, type name `FUN_141777ce0`, fields `m_center`, `m_shape`, `m_strFilter`,
+/// `FUN_1417613a0`): an object that detection volumes see. Observed on the Reekwater
+/// `dungeon_reekwater_deactivate_closet` (a 1 m sphere, filter `DungeonScripted`).
+pub const DETECTABLE_OBJECT_TYPE: [u8; UUID_SIZE] = [
+    0x1e, 0x63, 0x54, 0xa4, 0xe9, 0x70, 0x4b, 0x41, 0xb9, 0xe1, 0x1b, 0xe1, 0x5d, 0xdd, 0xc8, 0xde,
+];
+/// The name CRC of a timeline component's layer bindings, `LayerEntityAssignments` (the
+/// lower-case CRC-32 of the name; Observed in `io_worldevent_1624_diskatumshield`).
+pub const LAYER_ASSIGNMENTS_NAME: u32 = 0xf5ad_439c;
+/// The name CRC of a layer binding's layer id, `layerId` (a 16 byte UUID).
+pub const LAYER_ID_NAME: u32 = 0x437d_690e;
+/// The name CRC of a timeline asset's layer list, `Layers`.
+pub const TIMELINE_LAYERS_NAME: u32 = 0xe688_ed50;
+/// The name CRC of a timeline layer's clip list, `Clips`.
+pub const TIMELINE_CLIPS_NAME: u32 = 0xc875_1be4;
+/// The name CRC of a clip's start, `starttime` (seconds on the timeline, a big-endian `f32`).
+pub const CLIP_START_NAME: u32 = 0x2e94_9e19;
+/// How many levels under its clip entry a clip's start lies (the clip, its base, the start).
+const CLIP_START_DEPTH: usize = 3;
 /// Objective classes (`m_objectives` entries).
 pub mod objective_type {
     use super::UUID_SIZE;
@@ -138,6 +260,13 @@ pub mod objective_type {
     pub const INVASION_WAVE: [u8; UUID_SIZE] = [
         0xcd, 0xdd, 0x16, 0x1a, 0x9a, 0x85, 0x4b, 0x81, 0x9f, 0x7f, 0x18, 0x84, 0x5c, 0x65, 0x60,
         0xc9,
+    ];
+    /// `{3FB4F4AF-5840-4FB0-AE8A-BD72A3F03AC7}` `SliceSpawnedObjective` (client reflection
+    /// `FUN_142728d00`; Observed in the stronghold siren's `Wave_02 - Objective: Stop Cannons`
+    /// with the tracked slice, alias and count fields of `SliceDestroyedObjective`).
+    pub const SLICE_SPAWNED: [u8; UUID_SIZE] = [
+        0x3f, 0xb4, 0xf4, 0xaf, 0x58, 0x40, 0x4f, 0xb0, 0xae, 0x8a, 0xbd, 0x72, 0xa3, 0xf0, 0x3a,
+        0xc7,
     ];
 }
 /// Action classes (`m_startActions`, `m_endActions` entries).
@@ -172,10 +301,10 @@ const WINDOWS_SEPARATOR: char = '\\';
 /// The path separator of a pak path.
 const PAK_SEPARATOR: char = '/';
 /// An entity id that names no entity (`m_parentId` of a root entity).
-const NO_ENTITY: u64 = 0xffff_ffff;
+pub(crate) const NO_ENTITY: u64 = 0xffff_ffff;
 /// Deepest descendant searched for a component field: a component keeps its fields in itself,
 /// its server facet or its base class (Observed: at most 3 levels).
-const FIELD_DEPTH: usize = 3;
+pub(crate) const FIELD_DEPTH: usize = 3;
 /// Deepest descendant searched for a loot table id (`GatherableController` → instanced loot
 /// entry → `m_lootTableId`).
 const LOOT_TABLE_DEPTH: usize = 4;
@@ -221,6 +350,17 @@ pub struct Spawner {
     pub on_initialize: bool,
     /// `m_spawnOnTrigger`.
     pub on_trigger: bool,
+    /// `m_locations`: the entities an area spawner spawns at (empty for other spawners).
+    pub locations: Vec<u64>,
+    /// `m_destroySpawnsOnDeactivate` of the entity's [`SPAWNER_SETTINGS_TYPE`] component (client
+    /// field list `FUN_143c17190`). Observed: the only
+    /// spawner field that tells the holdout's area spawners (set; `99a_msq_01b_learnsoulwardens`
+    /// 246.0 to 305.6 s: nine swordsmen in three spawns of three, none came back in its 5 to
+    /// 10 s respawn range after the deaths at 253.2, 265.8 and 270.4 s) from the area spawners
+    /// that brought their dead back (unset: the festering hive's swarmer 7.1 s after its death,
+    /// `Corrupted-Breaches-Festering-Hive-lvl45` 58.0 -> 65.1 s and `-lvl55` 30.4 -> 37.5 s; the
+    /// catacomb survive waves, `CATACOMBS5` 1604.9 s).
+    pub destroys_spawns_on_deactivate: bool,
 }
 
 /// The kind of a spawner entity's spawn rules.
@@ -334,6 +474,16 @@ pub enum ObjectiveKind {
     WaitForParent,
     /// `InvasionWaveObjective`.
     InvasionWave,
+    /// `SliceSpawnedObjective`: `required` slices spawned by the spawners of the tracked slice
+    /// or alias.
+    SliceSpawned {
+        /// `m_trackedSlice`.
+        slice: Option<AssetRef>,
+        /// `m_trackedAlias`.
+        alias: Option<AssetRef>,
+        /// `m_requiredCount`.
+        required: u32,
+    },
 }
 
 /// One objective of a stage.
@@ -452,13 +602,20 @@ pub enum ReplicatedKind {
         /// The asset (`None` when the component names none).
         asset: Option<AssetRef>,
     },
-    /// A delayed event and its delay, seconds.
+    /// A delayed event: after its delay it sends its event to its entity.
     DelayedEvent {
         /// The delay ([`DELAY_NAME`]).
         delay_s: f32,
+        /// The entity of its event (`m_eventData.m_entityRef`) and the event (`m_type`);
+        /// `None` when it names no entity.
+        event: Option<(u64, TriggerEvent)>,
+        /// Its delay starts when the slice starts (`m_startDelayOnInit`, [`START_ON_INIT_NAME`]).
+        starts_on_init: bool,
     },
     /// A placement obstruction.
     PlacementObstruction,
+    /// An interact component ([`INTERACT_TYPE`]).
+    Interact,
 }
 
 /// One replicated component of an entity: its kind and its replica index (its component number
@@ -498,12 +655,64 @@ pub struct ScriptEntity {
     pub detection_radius_m: Option<f32>,
     /// Its detection volume's first query shape (`m_shape`) and that volume's offset.
     pub detection_shape: Option<(Element, [f32; 3])>,
+    /// The shape of its engine shape component, centred on it ([`engine_shape`]).
+    pub shape: Option<Geometry>,
+    /// It holds a [`TRIGGER_AREA_TYPE`] component.
+    pub trigger_area: bool,
     /// Its loot container's loot table (`m_lootTableId`).
     pub loot_table: Option<String>,
     /// The spawn rules of its spawner.
     pub rules: Option<SpawnerRules>,
     /// Its rewards by difficulty.
     pub rewards: Option<DifficultyRewards>,
+    /// Its creature vitals row ([`CREATURE_VITALS_TYPE`]): a creature slice's own mob.
+    pub creature_vitals: Option<String>,
+    /// It holds a [`CREATURE_VITALS_TYPE`] component, with or without a row.
+    pub has_vitals: bool,
+    /// The status effects its [`AREA_STATUS_EFFECT_TYPE`] component adds (`m_addStatusEffects`,
+    /// each `m_effectId`); empty without one.
+    pub area_effects: Vec<String>,
+    /// It holds a [`DESTROY_GDE_TYPE`] component: its trigger removes its slice.
+    pub destroys_slice: bool,
+    /// Its [`PREFAB_SPAWN_RANDOMIZER_TYPE`] component's counts; `None` without one.
+    pub randomizer: Option<RandomizerRules>,
+    /// The radius of its [`DETECTABLE_OBJECT_TYPE`] component's sphere, metres; `None` without
+    /// one.
+    pub detectable_radius_m: Option<f32>,
+    /// The entity and event its gatherable controller sends when a gather starts
+    /// (`m_gatheringStartEvent`); `None` when it names no entity.
+    pub gathering_start: Option<(u64, TriggerEvent)>,
+    /// The layers of its timeline component (`LayerEntityAssignments`): each layer id with the
+    /// entity it drives.
+    pub timeline_layers: Vec<([u8; UUID_SIZE], u64)>,
+    /// The replica index of its [`OBJECTIVES_TYPE`] component; `None` without one.
+    pub objectives_component: Option<u32>,
+}
+
+/// The counts of a [`PREFAB_SPAWN_RANDOMIZER_TYPE`] component.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RandomizerRules {
+    /// `m_minSpawnCount` and `m_maxSpawnCount`: how many of its spawners it triggers.
+    pub picks: [u32; 2],
+    /// `m_spawnOnStartup`: it triggers them when its slice starts.
+    pub on_startup: bool,
+}
+
+impl ScriptEntity {
+    /// Whether its spawner spawns only when something triggers it: `m_spawnOnTrigger` without
+    /// `m_spawnOnInitialize` (a point or prefab spawner) or `m_spawnOnEnable` (an area spawner).
+    /// Observed: the soul harvester's `catacombs_soulharvester_boss_flightspawner` area
+    /// spawners (`m_spawnOnEnable` 0, `m_spawnOnTrigger` 1) spawn the boss's flights only during
+    /// its attack (`catacombshigh` 468.9 s, five flights for 1 s), and the lightning hazard's
+    /// `Single_*` point spawners (`m_spawnOnInitialize` 0, `m_spawnOnTrigger` 1) never showed a
+    /// spawn in the four retail hazard runs (`CATACOMBS3` 449.6 s, `CATACOMBS5` 823.6 s).
+    pub fn waits_for_trigger(&self) -> bool {
+        let Some(spawner) = &self.spawner else {
+            return false;
+        };
+        let spawns_when_enabled = self.rules.is_some_and(|rules| rules.spawn_on_enable);
+        spawner.on_trigger && !spawner.on_initialize && !spawns_when_enabled
+    }
 }
 
 /// The entities of one script slice, in stream order.
@@ -517,6 +726,22 @@ impl SliceScript {
     /// The entity `id`.
     pub fn entity(&self, id: u64) -> Option<&ScriptEntity> {
         self.entities.iter().find(|entity| entity.id == id)
+    }
+
+    /// The events its delayed event components send on their own after the slice starts
+    /// (`m_startDelayOnInit`): (delay in seconds, entity, event), in stream order.
+    pub fn timed_events(&self) -> impl Iterator<Item = (f32, u64, TriggerEvent)> + '_ {
+        self.entities
+            .iter()
+            .flat_map(|entity| &entity.replicated)
+            .filter_map(|component| match &component.kind {
+                ReplicatedKind::DelayedEvent {
+                    delay_s,
+                    event: Some((entity, event)),
+                    starts_on_init: true,
+                } => Some((*delay_s, *entity, *event)),
+                _ => None,
+            })
     }
 
     /// The transform of entity `id` relative to the slice's placement: its `m_worldTM` when it
@@ -555,11 +780,77 @@ impl SliceScript {
             .find_map(|entity| entity.variant.as_ref())
     }
 
+    /// The creature vitals row of the slice, when it is a creature slice
+    /// ([`CREATURE_VITALS_TYPE`]).
+    pub fn creature_vitals(&self) -> Option<&str> {
+        self.entities
+            .iter()
+            .find_map(|entity| entity.creature_vitals.as_deref())
+    }
+
+    /// Whether an entity of the slice holds a creature vitals component: a slice without one has
+    /// no body (a place marker such as `stag_spawn_loc` or `isabella_dynastyshipyard_stage2_
+    /// mark`: one entity with only its transform).
+    pub fn has_vitals(&self) -> bool {
+        self.entities.iter().any(|entity| entity.has_vitals)
+    }
+
     /// The rewards by difficulty of the slice, when an entity holds them.
     pub fn rewards(&self) -> Option<&DifficultyRewards> {
         self.entities
             .iter()
             .find_map(|entity| entity.rewards.as_ref())
+    }
+
+    /// The component of the slice's first gatherable controller state, when it has one.
+    pub fn gatherable_component(&self) -> Option<u64> {
+        self.entities
+            .iter()
+            .flat_map(|entity| &entity.replicated)
+            .find(|component| matches!(component.kind, ReplicatedKind::Gatherable))
+            .map(|component| u64::from(component.index))
+    }
+
+    /// The component of the slice's first interact state, when it has one.
+    pub fn interact_component(&self) -> Option<u64> {
+        self.entities
+            .iter()
+            .flat_map(|entity| &entity.replicated)
+            .find(|component| matches!(component.kind, ReplicatedKind::Interact))
+            .map(|component| u64::from(component.index))
+    }
+
+    /// The timeline assets of the slice's timeline components.
+    pub fn timeline_assets(&self) -> impl Iterator<Item = &AssetRef> {
+        self.entities
+            .iter()
+            .flat_map(|entity| &entity.replicated)
+            .filter_map(|component| match &component.kind {
+                ReplicatedKind::Timeline { asset } => asset.as_ref(),
+                _ => None,
+            })
+    }
+
+    /// Every timeline component of the slice, named after its entity, with the length
+    /// `length_of` gives its timeline asset's pak path (0 for a timeline without an asset).
+    pub fn timelines(&self, length_of: impl Fn(&str) -> f32) -> Vec<GateTimeline> {
+        self.entities
+            .iter()
+            .flat_map(|owner| {
+                owner
+                    .replicated
+                    .iter()
+                    .map(move |component| (owner, component))
+            })
+            .filter_map(|(owner, component)| match &component.kind {
+                ReplicatedKind::Timeline { asset } => Some(GateTimeline {
+                    name: owner.name.clone(),
+                    component: u64::from(component.index),
+                    length_s: asset.as_ref().map_or(0.0, |asset| length_of(&asset.path)),
+                }),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The loot table of the slice's loot container, when it is one.
@@ -623,6 +914,9 @@ struct Names {
     alias_asset: u32,
     on_initialize: u32,
     on_trigger: u32,
+    destroy_spawns_on_deactivate: u32,
+    add_status_effects: u32,
+    effect_id: u32,
     vitals_row: u32,
     category_row: u32,
     vitals_level: u32,
@@ -637,6 +931,7 @@ struct Names {
     spawn_delay: u32,
     count: u32,
     spawn_locations: u32,
+    locations: u32,
     objectives: u32,
     start_actions: u32,
     end_actions: u32,
@@ -667,6 +962,10 @@ struct Names {
     spawn_on_enable: u32,
     respawn_after_death: u32,
     maintain_population: u32,
+    min_spawn_count: u32,
+    max_spawn_count: u32,
+    spawn_on_startup: u32,
+    gathering_start_event: u32,
 }
 
 impl Names {
@@ -686,6 +985,9 @@ impl Names {
             alias_asset: lowercase_crc32("m_aliasAsset"),
             on_initialize: lowercase_crc32("m_spawnOnInitialize"),
             on_trigger: lowercase_crc32("m_spawnOnTrigger"),
+            destroy_spawns_on_deactivate: lowercase_crc32("m_destroySpawnsOnDeactivate"),
+            add_status_effects: lowercase_crc32("m_addStatusEffects"),
+            effect_id: lowercase_crc32("m_effectId"),
             vitals_row: lowercase_crc32("m_vitalsTableRowId"),
             category_row: lowercase_crc32("m_vitalsCategoryTableRowId"),
             vitals_level: lowercase_crc32("m_vitalsLevel"),
@@ -700,6 +1002,7 @@ impl Names {
             spawn_delay: lowercase_crc32("m_spawnDelay"),
             count: lowercase_crc32("m_count"),
             spawn_locations: lowercase_crc32("m_spawnLocations"),
+            locations: lowercase_crc32("m_locations"),
             objectives: lowercase_crc32("m_objectives"),
             start_actions: lowercase_crc32("m_startActions"),
             end_actions: lowercase_crc32("m_endActions"),
@@ -730,13 +1033,17 @@ impl Names {
             spawn_on_enable: lowercase_crc32("m_spawnOnEnable"),
             respawn_after_death: lowercase_crc32("m_respawnAfterDeath"),
             maintain_population: lowercase_crc32("m_maintainPopulation"),
+            min_spawn_count: lowercase_crc32("m_minSpawnCount"),
+            max_spawn_count: lowercase_crc32("m_maxSpawnCount"),
+            spawn_on_startup: lowercase_crc32("m_spawnOnStartup"),
+            gathering_start_event: lowercase_crc32("m_gatheringStartEvent"),
         }
     }
 }
 
 /// The first descendant of `element` named `name_crc`, breadth first, at most `depth` levels
-/// down.
-fn find(element: &Element, name_crc: u32, depth: usize) -> Option<&Element> {
+/// down. The effect areas ([`crate::effect_areas`]) read their component fields with it too.
+pub(crate) fn find(element: &Element, name_crc: u32, depth: usize) -> Option<&Element> {
     let mut level: Vec<&Element> = vec![element];
     for _ in 0..depth {
         let mut next = Vec::new();
@@ -780,6 +1087,54 @@ fn asset(element: Option<&Element>) -> Result<Option<AssetRef>, LevelScriptError
     guid.copy_from_slice(&value[..GUID_LEN]);
     let path = pak_path(&String::from_utf8_lossy(hint));
     Ok((guid != [0; GUID_LEN] || !path.is_empty()).then_some(AssetRef { guid, path }))
+}
+
+/// The shape of an engine shape component `component`, centred on its entity: a box of its
+/// `Dimensions` (the full size), a sphere of its `Radius`, a cylinder or a capsule standing
+/// along z, its `Height` from end to end (a capsule's with its round ends). `None` for another
+/// component or one without its sizes.
+///
+/// # Errors
+///
+/// Returns [`LevelScriptError`] when a size has the wrong form.
+pub fn engine_shape(component: &Element) -> Result<Option<Geometry>, LevelScriptError> {
+    let float = |name: u32| {
+        find(component, name, FIELD_DEPTH)
+            .map(Element::as_f32)
+            .transpose()
+    };
+    Ok(match component.type_id {
+        BOX_SHAPE_TYPE => find(component, SHAPE_DIMENSIONS_NAME, FIELD_DEPTH)
+            .map(Element::as_vec3)
+            .transpose()?
+            .map(|size| Geometry::Box {
+                half_extents: size.map(|side| side * HALF),
+            }),
+        SPHERE_SHAPE_TYPE => float(SHAPE_RADIUS_NAME)?.map(|radius| Geometry::Sphere { radius }),
+        CYLINDER_SHAPE_TYPE => match (float(SHAPE_HEIGHT_NAME)?, float(SHAPE_RADIUS_NAME)?) {
+            (Some(height), Some(radius)) => {
+                let half = height * HALF;
+                Some(Geometry::Cylinder {
+                    from: [0.0, 0.0, -half],
+                    to: [0.0, 0.0, half],
+                    radius,
+                })
+            }
+            _ => None,
+        },
+        CAPSULE_SHAPE_TYPE => match (float(SHAPE_HEIGHT_NAME)?, float(SHAPE_RADIUS_NAME)?) {
+            (Some(height), Some(radius)) => {
+                let half = (height * HALF - radius).max(0.0);
+                Some(Geometry::Capsule {
+                    from: [0.0, 0.0, -half],
+                    to: [0.0, 0.0, half],
+                    radius,
+                })
+            }
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
 fn flag(element: &Element, name_crc: u32) -> Result<bool, LevelScriptError> {
@@ -850,6 +1205,38 @@ fn references(list: Option<&Element>, names: &Names) -> Result<Vec<u64>, LevelSc
     Ok(ids)
 }
 
+/// The entity and event of delayed event component `component` (`m_eventData`: its
+/// `m_entityRef` and `m_type`); `None` when it names no entity.
+fn delayed_event(
+    component: &Element,
+    names: &Names,
+) -> Result<Option<(u64, TriggerEvent)>, LevelScriptError> {
+    match find(component, names.event_data, FIELD_DEPTH) {
+        Some(data) => entity_event(data, names),
+        None => Ok(None),
+    }
+}
+
+/// The entity and event of event data `data` (an `m_entityRef` and an `m_type`); `None` when
+/// it names no entity.
+fn entity_event(
+    data: &Element,
+    names: &Names,
+) -> Result<Option<(u64, TriggerEvent)>, LevelScriptError> {
+    let Some(entity) = data
+        .child(names.entity_ref)
+        .map(|holder| reference(holder, names))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    Ok(Some((
+        entity,
+        TriggerEvent::from(number(data, names.event_type)?),
+    )))
+}
+
 /// The class entries of a list of pointers (`m_objectives`, `m_startActions`): each entry
 /// holds its class as its one child.
 fn pointed(list: Option<&Element>) -> impl Iterator<Item = &Element> {
@@ -885,6 +1272,11 @@ fn objective(class: &Element, names: &Names) -> Result<Option<Objective>, LevelS
         },
         objective_type::WAIT_FOR_PARENT => ObjectiveKind::WaitForParent,
         objective_type::INVASION_WAVE => ObjectiveKind::InvasionWave,
+        objective_type::SLICE_SPAWNED => ObjectiveKind::SliceSpawned {
+            slice: asset(class.child(names.tracked_slice))?,
+            alias: asset(class.child(names.tracked_alias))?,
+            required: number(class, names.required)?,
+        },
         _ => return Ok(None),
     };
     let base = class.child(names.base_class).unwrap_or(class);
@@ -1031,12 +1423,17 @@ fn spawner(component: &Element, names: &Names) -> Result<Spawner, LevelScriptErr
         alias: asset(find(component, names.alias_asset, FIELD_DEPTH))?,
         on_initialize: flag(component, names.on_initialize)?,
         on_trigger: flag(component, names.on_trigger)?,
+        locations: references(find(component, names.locations, FIELD_DEPTH), names)?,
+        destroys_spawns_on_deactivate: false,
     })
 }
 
 /// The replicated component `component` is, when it is of a kind this reader keeps and has a
 /// replica index above 0 (0 is the card's, which no kind kept here has).
-fn replicated(component: &Element) -> Result<Option<ReplicatedComponent>, LevelScriptError> {
+fn replicated(
+    component: &Element,
+    names: &Names,
+) -> Result<Option<ReplicatedComponent>, LevelScriptError> {
     let kind = match component.type_id {
         NETWORK_POSITION_TYPE => ReplicatedKind::Position,
         GATHERABLE_CONTROLLER_TYPE => ReplicatedKind::Gatherable,
@@ -1045,12 +1442,81 @@ fn replicated(component: &Element) -> Result<Option<ReplicatedComponent>, LevelS
         },
         DELAYED_EVENT_TYPE => ReplicatedKind::DelayedEvent {
             delay_s: find(component, DELAY_NAME, FIELD_DEPTH).map_or(Ok(0.0), Element::as_f32)?,
+            event: delayed_event(component, names)?,
+            starts_on_init: flag(component, START_ON_INIT_NAME)?,
         },
         PLACEMENT_OBSTRUCTION_TYPE => ReplicatedKind::PlacementObstruction,
+        INTERACT_TYPE => ReplicatedKind::Interact,
         _ => return Ok(None),
     };
     let index = find(component, REPLICA_INDEX_NAME, FIELD_DEPTH).map_or(Ok(0), Element::as_u32)?;
     Ok((index > 0).then_some(ReplicatedComponent { kind, index }))
+}
+
+/// The 16 byte UUID value of `element`, when it holds one.
+fn uuid(element: &Element) -> Option<[u8; UUID_SIZE]> {
+    <[u8; UUID_SIZE]>::try_from(element.value.as_slice()).ok()
+}
+
+/// The layer bindings of timeline component `component` ([`ScriptEntity::timeline_layers`]):
+/// each `LayerEntityAssignments` entry's `layerId` and entity.
+fn timeline_layers(
+    component: &Element,
+    names: &Names,
+) -> Result<Vec<([u8; UUID_SIZE], u64)>, LevelScriptError> {
+    let mut layers = Vec::new();
+    let Some(list) = find(component, LAYER_ASSIGNMENTS_NAME, FIELD_DEPTH) else {
+        return Ok(layers);
+    };
+    for entry in &list.children {
+        let Some(layer) = entry.child(LAYER_ID_NAME).and_then(uuid) else {
+            continue;
+        };
+        if let Some(entity) = reference(entry, names)? {
+            layers.push((layer, entity));
+        }
+    }
+    Ok(layers)
+}
+
+/// One timeline layer's clip starts: its layer id and the seconds on the timeline at which its
+/// clips start, in order.
+pub type LayerClipStarts = ([u8; UUID_SIZE], Vec<f32>);
+
+/// The clip starts of each layer of the timeline asset whose ObjectStream root is `root`:
+/// (layer id, the seconds on the timeline at which its clips start, in order). Observed in
+/// `libs/timeline/io/diskatumshield_ai_spawns.timeline`: four layers `Spawn1` to `Spawn4` of two
+/// clips each, started 3.172 and 15.403 s (`Spawn1`) to 10.108 and 16.989 s (`Spawn4`).
+///
+/// # Errors
+///
+/// Returns [`LevelScriptError`] when a clip start is not a number.
+pub fn timeline_clip_starts(
+    root: &Element,
+) -> Result<Vec<LayerClipStarts>, LevelScriptError> {
+    let names = Names::new();
+    let mut layers = Vec::new();
+    let Some(list) = find(root, TIMELINE_LAYERS_NAME, FIELD_DEPTH) else {
+        return Ok(layers);
+    };
+    for layer in &list.children {
+        let Some(id) = layer.child(names.id).and_then(uuid) else {
+            continue;
+        };
+        let mut starts = Vec::new();
+        for clip in layer
+            .child(TIMELINE_CLIPS_NAME)
+            .map(|clips| clips.children.as_slice())
+            .unwrap_or_default()
+        {
+            if let Some(start) = find(clip, CLIP_START_NAME, CLIP_START_DEPTH) {
+                starts.push(start.as_f32()?);
+            }
+        }
+        starts.sort_by(f32::total_cmp);
+        layers.push((id, starts));
+    }
+    Ok(layers)
 }
 
 fn entity(element: &Element, names: &Names) -> Result<ScriptEntity, LevelScriptError> {
@@ -1068,6 +1534,7 @@ fn entity(element: &Element, names: &Names) -> Result<ScriptEntity, LevelScriptE
             .to_owned(),
         ..ScriptEntity::default()
     };
+    let mut destroys_spawns_on_deactivate = false;
     for component in element
         .child(names.components)
         .map(|list| list.children.as_slice())
@@ -1094,12 +1561,39 @@ fn entity(element: &Element, names: &Names) -> Result<ScriptEntity, LevelScriptE
         if read.rewards.is_none() {
             read.rewards = difficulty_rewards(component)?;
         }
-        read.replicated.extend(replicated(component)?);
+        read.replicated.extend(replicated(component, names)?);
+        read.destroys_slice |= component.type_id == DESTROY_GDE_TYPE;
+        read.trigger_area |= component.type_id == TRIGGER_AREA_TYPE;
         match component.type_id {
             ENCOUNTER_MANAGER_TYPE => read.manager = Some(manager(component, names)?),
             ENCOUNTER_STAGE_TYPE => read.stage = Some(stage(component, names)?),
-            PREFAB_SPAWNER_TYPE | POINT_SPAWNER_TYPE => {
+            OBJECTIVES_TYPE => {
+                read.objectives_component = Some(
+                    find(component, REPLICA_INDEX_NAME, FIELD_DEPTH)
+                        .map_or(Ok(0), Element::as_u32)?,
+                );
+            }
+            PREFAB_SPAWNER_TYPE | POINT_SPAWNER_TYPE | AREA_SPAWNER_TYPE => {
                 read.spawner = Some(spawner(component, names)?);
+            }
+            AREA_STATUS_EFFECT_TYPE => {
+                if let Some(list) = find(component, names.add_status_effects, FIELD_DEPTH) {
+                    for entry in &list.children {
+                        let effect = text(entry, names.effect_id, FIELD_DEPTH)?;
+                        if !effect.is_empty() {
+                            read.area_effects.push(effect);
+                        }
+                    }
+                }
+            }
+            SPAWNER_SETTINGS_TYPE => {
+                destroys_spawns_on_deactivate |=
+                    flag(component, names.destroy_spawns_on_deactivate)?;
+            }
+            CREATURE_VITALS_TYPE => {
+                let vitals = text(component, CREATURE_VITALS_NAME, FIELD_DEPTH)?;
+                read.creature_vitals = (!vitals.is_empty()).then_some(vitals);
+                read.has_vitals = true;
             }
             VARIANT_PROVIDER_TYPE => {
                 read.variant = Some(VitalsVariant {
@@ -1107,6 +1601,9 @@ fn entity(element: &Element, names: &Names) -> Result<ScriptEntity, LevelScriptE
                     category_id: text(component, names.category_row, FIELD_DEPTH)?,
                     level: number(component, names.vitals_level)?,
                 });
+            }
+            BOX_SHAPE_TYPE | SPHERE_SHAPE_TYPE | CYLINDER_SHAPE_TYPE | CAPSULE_SHAPE_TYPE => {
+                read.shape = engine_shape(component)?;
             }
             DETECTION_VOLUME_TYPE => {
                 read.detection_radius_m = component
@@ -1128,6 +1625,27 @@ fn entity(element: &Element, names: &Names) -> Result<ScriptEntity, LevelScriptE
             GATHERABLE_CONTROLLER_TYPE => {
                 let table = text(component, names.loot_table, LOOT_TABLE_DEPTH)?;
                 read.loot_table = (!table.is_empty()).then_some(table);
+                read.gathering_start = find(component, names.gathering_start_event, FIELD_DEPTH)
+                    .map(|data| entity_event(data, names))
+                    .transpose()?
+                    .flatten();
+            }
+            TIMELINE_TYPE => read.timeline_layers = timeline_layers(component, names)?,
+            PREFAB_SPAWN_RANDOMIZER_TYPE => {
+                read.randomizer = Some(RandomizerRules {
+                    picks: [
+                        number(component, names.min_spawn_count)?,
+                        number(component, names.max_spawn_count)?,
+                    ],
+                    on_startup: flag(component, names.spawn_on_startup)?,
+                });
+            }
+            DETECTABLE_OBJECT_TYPE => {
+                read.detectable_radius_m = component
+                    .child(names.shape)
+                    .and_then(|shape| find(shape, names.radius, FIELD_DEPTH))
+                    .map(Element::as_f32)
+                    .transpose()?;
             }
             // A spawner of another class: a component that names a slice or alias asset spawns
             // it (Observed: the open world's `WorldEvent_SpawnGroup_Single_Master` names its
@@ -1141,6 +1659,9 @@ fn entity(element: &Element, names: &Names) -> Result<ScriptEntity, LevelScriptE
             }
             _ => {}
         }
+    }
+    if let Some(spawner) = read.spawner.as_mut() {
+        spawner.destroys_spawns_on_deactivate = destroys_spawns_on_deactivate;
     }
     Ok(read)
 }
@@ -1239,9 +1760,65 @@ mod tests {
             (REWARD_RADIUS_NAME, "m_requiredContribution"),
             (REWARD_EVENTS_NAME, "m_rewardEventIdStrs"),
             (GLOBAL_SUCCESS_EVENT_NAME, "m_universalSuccessGameEventId"),
+            (SHAPE_DIMENSIONS_NAME, "Dimensions"),
+            (SHAPE_RADIUS_NAME, "Radius"),
+            (SHAPE_HEIGHT_NAME, "Height"),
         ] {
             assert_eq!(crc, lowercase_crc32(name), "{name}");
         }
+    }
+
+    /// The Starstone `AreaMutatorStart` holds a box of `Dimensions` 3 x 20 x 20 under its
+    /// `Configuration`; the Empyrean one a sphere of `Radius` 30.
+    #[test]
+    fn an_engine_shape_component_gives_its_box_or_sphere() {
+        let floats = |values: &[f32]| values.iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>();
+        let box_shape = typed(
+            named(
+                "element",
+                vec![named(
+                    "Configuration",
+                    vec![value("Dimensions", &floats(&[3.0, 20.0, 20.0]))],
+                )],
+            ),
+            BOX_SHAPE_TYPE,
+        );
+        assert_eq!(
+            engine_shape(&box_shape),
+            Ok(Some(Geometry::Box {
+                half_extents: [1.5, 10.0, 10.0]
+            }))
+        );
+        let sphere = typed(
+            named(
+                "element",
+                vec![named("Configuration", vec![value("Radius", &floats(&[30.0]))])],
+            ),
+            SPHERE_SHAPE_TYPE,
+        );
+        assert_eq!(
+            engine_shape(&sphere),
+            Ok(Some(Geometry::Sphere { radius: 30.0 }))
+        );
+        let capsule = typed(
+            named(
+                "element",
+                vec![
+                    value("Height", &floats(&[4.0])),
+                    value("Radius", &floats(&[0.5])),
+                ],
+            ),
+            CAPSULE_SHAPE_TYPE,
+        );
+        assert_eq!(
+            engine_shape(&capsule),
+            Ok(Some(Geometry::Capsule {
+                from: [0.0, 0.0, -1.5],
+                to: [0.0, 0.0, 1.5],
+                radius: 0.5
+            }))
+        );
+        assert_eq!(engine_shape(&named("element", Vec::new())), Ok(None));
     }
 
     fn named(name: &str, children: Vec<Element>) -> Element {
@@ -1606,6 +2183,154 @@ mod tests {
         assert!(!point.spawn_on_enable);
     }
 
+    /// An area spawner component (`catacombs_extraction_sustainwave`) is a spawner: its alias,
+    /// its area rules and the entities of its `m_locations` under its base class.
+    #[test]
+    fn an_area_spawner_names_its_alias_rules_and_locations() {
+        const ALIAS: &str = "sharedassets/genericassets/aliasassets/catacombs/encounters/\
+                             catacombs_extraction_sustainwave_fodder.aliasasset";
+        let spawner = typed(
+            named(
+                "element",
+                vec![named(
+                    "BaseClass1",
+                    vec![
+                        asset_value("m_aliasAsset", [7; GUID_LEN], ALIAS),
+                        value("m_liveCount", &4_u32.to_be_bytes()),
+                        value("m_minRespawnRange", &2.0_f64.to_be_bytes()),
+                        value("m_maxRespawnRange", &7.0_f64.to_be_bytes()),
+                        value("m_spawnOnEnable", &[1]),
+                        named("m_locations", vec![reference(2), reference(3)]),
+                    ],
+                )],
+            ),
+            AREA_SPAWNER_TYPE,
+        );
+        // The holdout's spawners name the flag on their spawn settings component.
+        let settings = typed(
+            named(
+                "element",
+                vec![value("m_destroySpawnsOnDeactivate", &[1])],
+            ),
+            SPAWNER_SETTINGS_TYPE,
+        );
+        let root = named(
+            "root",
+            vec![named(
+                "Components",
+                vec![named(
+                    "element",
+                    vec![named(
+                        "Entities",
+                        vec![
+                            entity(
+                                1,
+                                "Catacombs_Extraction_SustainWave_Fodder",
+                                vec![settings, spawner],
+                            ),
+                            entity(2, "EnemySp", Vec::new()),
+                            entity(3, "EnemySp", Vec::new()),
+                        ],
+                    )],
+                )],
+            )],
+        );
+        let script = slice_script(&root).expect("script");
+        let group = script.entity(1).expect("spawner entity");
+        let read = group
+            .spawner
+            .as_ref()
+            .expect("an area spawner is a spawner");
+        assert_eq!(
+            read.alias.as_ref().map(|alias| alias.path.as_str()),
+            Some(ALIAS)
+        );
+        assert_eq!(read.locations, [2, 3]);
+        assert!(read.destroys_spawns_on_deactivate);
+        let rules = group.rules.expect("rules");
+        assert_eq!(rules.kind, SpawnerKind::Area);
+        assert_eq!(rules.live_count, 4);
+        assert_eq!(rules.respawn_s, [2.0, 7.0]);
+    }
+
+    /// A creature slice's vitals component names its vitals row (`dg_catacombs_extraction_
+    /// bloodbeast`); a slice without one names none.
+    #[test]
+    fn a_creature_slice_names_its_vitals_row() {
+        let vitals = Element {
+            type_id: CREATURE_VITALS_TYPE,
+            ..named(
+                "element",
+                vec![Element::with_value(
+                    CREATURE_VITALS_NAME,
+                    b"Lost_Bloodbeast_Catacombs_Extraction".to_vec(),
+                )],
+            )
+        };
+        let slice = |components: Vec<Element>| {
+            named(
+                "root",
+                vec![named(
+                    "Components",
+                    vec![named(
+                        "element",
+                        vec![named("Entities", vec![entity(1, "Bloodbeast", components)])],
+                    )],
+                )],
+            )
+        };
+        let script = slice_script(&slice(vec![vitals])).expect("script");
+        assert_eq!(
+            script.creature_vitals(),
+            Some("Lost_Bloodbeast_Catacombs_Extraction")
+        );
+        assert!(script.has_vitals());
+        let rowless = Element {
+            type_id: CREATURE_VITALS_TYPE,
+            ..named("element", Vec::new())
+        };
+        let rowless = slice_script(&slice(vec![rowless])).expect("script");
+        assert_eq!(rowless.creature_vitals(), None);
+        assert!(rowless.has_vitals(), "a vitals component without a row");
+        let none = slice_script(&slice(Vec::new())).expect("script");
+        assert_eq!(none.creature_vitals(), None);
+        assert!(!none.has_vitals(), "a place marker has no body");
+    }
+
+    /// The falling debris's `DamageVolumeStun` entity: its persistent area status effect names
+    /// the effect it adds.
+    #[test]
+    fn an_area_status_effect_names_the_effects_it_adds() {
+        let area = typed(
+            named(
+                "element",
+                vec![named(
+                    "m_addStatusEffects",
+                    vec![named(
+                        "element",
+                        vec![value("m_effectId", b"Stunned_Afflict")],
+                    )],
+                )],
+            ),
+            AREA_STATUS_EFFECT_TYPE,
+        );
+        let root = named(
+            "root",
+            vec![named(
+                "Components",
+                vec![named(
+                    "element",
+                    vec![named("Entities", vec![entity(1, "DamageVolumeStun", vec![area])])],
+                )],
+            )],
+        );
+        let script = slice_script(&root).expect("script");
+        assert_eq!(
+            script.entity(1).expect("entity").area_effects,
+            ["Stunned_Afflict"]
+        );
+    }
+
     /// A transform component with `m_localTM` and `m_worldTM` at `translation` under `parent`.
     fn world_transform(parent: u64, translation: [f32; 3]) -> Element {
         let mut component = transform(parent, translation);
@@ -1635,12 +2360,93 @@ mod tests {
         }
     }
 
+    /// The stronghold siren's `Wave_02` shape: a user wave whose `SliceSpawnedObjective` tracks
+    /// three of a slice, on a root whose objectives component has replica index 4.
+    #[test]
+    fn a_user_wave_keeps_its_slice_spawned_objective_and_the_root_its_objectives_component() {
+        const ROOT: u64 = 0x71;
+        const STAGE: u64 = 0x72;
+        const OBJECTIVES_INDEX: u32 = 4;
+        const REQUIRED: u32 = 3;
+        const GATHERABLE_GUID: [u8; GUID_LEN] = [7; GUID_LEN];
+        const GATHERABLE_PATH: &str =
+            "slices/worldevents/elite_stronghold_siege/siren/rw_siren_cannonball_complete_gatherable.dynamicslice";
+        let objectives = typed(
+            named(
+                "element",
+                vec![named(
+                    "BaseClass1",
+                    vec![Element::with_value(
+                        REPLICA_INDEX_NAME,
+                        OBJECTIVES_INDEX.to_be_bytes().to_vec(),
+                    )],
+                )],
+            ),
+            OBJECTIVES_TYPE,
+        );
+        let stage = typed(
+            named(
+                "element",
+                vec![
+                    named("m_serverFacetPtr", vec![value("m_userWave", &[1])]),
+                    named(
+                        "m_objectives",
+                        vec![pointer(typed(
+                            named(
+                                "element",
+                                vec![
+                                    base(0, false),
+                                    asset_value("m_trackedSlice", GATHERABLE_GUID, GATHERABLE_PATH),
+                                    asset_value("m_trackedAlias", [0; GUID_LEN], ""),
+                                    value("m_requiredCount", &REQUIRED.to_be_bytes()),
+                                ],
+                            ),
+                            objective_type::SLICE_SPAWNED,
+                        ))],
+                    ),
+                ],
+            ),
+            ENCOUNTER_STAGE_TYPE,
+        );
+        let script = slice_script(&slice(vec![
+            entity(ROOT, "Enc_WorldEvent_Stronghold_Siren", vec![objectives]),
+            entity(STAGE, "Wave_02 - Objective: Stop Cannons", vec![stage]),
+        ]))
+        .expect("script");
+        assert_eq!(
+            script.entity(ROOT).and_then(|root| root.objectives_component),
+            Some(OBJECTIVES_INDEX)
+        );
+        let wave = script
+            .entity(STAGE)
+            .and_then(|e| e.stage.clone())
+            .expect("wave");
+        assert!(wave.user_wave);
+        assert_eq!(
+            wave.objectives,
+            [Objective {
+                time_limit_s: 0,
+                succeed_on_timeout: false,
+                failure: false,
+                kind: ObjectiveKind::SliceSpawned {
+                    slice: Some(AssetRef {
+                        guid: GATHERABLE_GUID,
+                        path: GATHERABLE_PATH.to_owned(),
+                    }),
+                    alias: None,
+                    required: REQUIRED,
+                },
+            }]
+        );
+    }
+
     #[test]
     fn replicated_components_keep_their_replica_index() {
         const GATE: u64 = 0x61;
         const TIMELINE_PATH: &str = "Timelines/Gate/Gate_Open.timeline";
         const OPEN_INDEX: u32 = 4;
         const DELAY_S: f32 = 3.5;
+        const DESTROYER: u64 = 0x62;
         let indexed = |type_id, index: u32, mut fields: Vec<Element>| {
             fields.push(named(
                 "BaseClass1",
@@ -1656,22 +2462,36 @@ mod tests {
             reference.name_crc = Some(TIMELINE_ASSET_NAME);
             named("m_sequences", vec![named("element", vec![reference])])
         };
-        let script = slice_script(&slice(vec![entity(
-            GATE,
-            "Timeline_Open",
-            vec![
-                indexed(NETWORK_POSITION_TYPE, 0, Vec::new()),
-                indexed(TIMELINE_TYPE, OPEN_INDEX, vec![timeline_asset]),
-                indexed(
-                    DELAYED_EVENT_TYPE,
-                    OPEN_INDEX + 1,
-                    vec![Element::with_value(
-                        DELAY_NAME,
-                        DELAY_S.to_be_bytes().to_vec(),
-                    )],
-                ),
-            ],
-        )]))
+        let script = slice_script(&slice(vec![
+            entity(
+                GATE,
+                "Timeline_Open",
+                vec![
+                    indexed(NETWORK_POSITION_TYPE, 0, Vec::new()),
+                    indexed(TIMELINE_TYPE, OPEN_INDEX, vec![timeline_asset]),
+                    indexed(
+                        DELAYED_EVENT_TYPE,
+                        OPEN_INDEX + 1,
+                        vec![
+                            Element::with_value(DELAY_NAME, DELAY_S.to_be_bytes().to_vec()),
+                            value("m_startDelayOnInit", &[1]),
+                            named(
+                                "m_eventData",
+                                vec![
+                                    named("m_entityRef", vec![id_holder("EntityId", DESTROYER)]),
+                                    value("m_type", &0_u32.to_be_bytes()),
+                                ],
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+            entity(
+                DESTROYER,
+                "Destroy",
+                vec![typed(named("element", Vec::new()), DESTROY_GDE_TYPE)],
+            ),
+        ]))
         .expect("script");
         let replicated = &script.entities[0].replicated;
         assert_eq!(replicated.len(), 2, "index 0 is no replica of a kept kind");
@@ -1683,7 +2503,16 @@ mod tests {
         ));
         assert_eq!(
             replicated[1].kind,
-            ReplicatedKind::DelayedEvent { delay_s: DELAY_S }
+            ReplicatedKind::DelayedEvent {
+                delay_s: DELAY_S,
+                event: Some((DESTROYER, TriggerEvent::Trigger)),
+                starts_on_init: true,
+            }
+        );
+        assert!(script.entities[1].destroys_slice && !script.entities[0].destroys_slice);
+        assert_eq!(
+            script.timed_events().collect::<Vec<_>>(),
+            [(DELAY_S, DESTROYER, TriggerEvent::Trigger)]
         );
     }
 
@@ -1833,5 +2662,154 @@ mod tests {
         let plain =
             slice_script(&slice(vec![entity(ENCOUNTER, "Plain", Vec::new())])).expect("script");
         assert!(plain.rewards().is_none());
+    }
+
+    /// The trigger sources of the open world events: a prefab spawn randomizer's counts (the
+    /// Reekwater closet), a detectable object's sphere (its deactivator), a gatherable's
+    /// gathering start event and a timeline's layer bindings (the sun disk shield), and the
+    /// clip starts of a timeline asset by layer.
+    #[test]
+    fn the_trigger_sources_read_their_counts_events_layers_and_clip_starts() {
+        const CLOSET: u64 = 0xc1;
+        const DEACTIVATOR: u64 = 0xc2;
+        const SHIELD: u64 = 0xc3;
+        const SPAWN: u64 = 0xc4;
+        const DETECTABLE_RADIUS_M: f32 = 1.0;
+        const LAYER: [u8; UUID_SIZE] = [0x1f; UUID_SIZE];
+        const OTHER_LAYER: [u8; UUID_SIZE] = [0x85; UUID_SIZE];
+        const STARTS: [f32; 2] = [3.172, 15.403];
+        const OTHER_START: f32 = 10.108;
+        let randomizer = typed(
+            named(
+                "element",
+                vec![
+                    value("m_minSpawnCount", &1_u32.to_be_bytes()),
+                    value("m_maxSpawnCount", &2_u32.to_be_bytes()),
+                    value("m_spawnOnStartup", &[1]),
+                ],
+            ),
+            PREFAB_SPAWN_RANDOMIZER_TYPE,
+        );
+        let detectable = typed(
+            named(
+                "element",
+                vec![named(
+                    "m_shape",
+                    vec![named(
+                        "element",
+                        vec![value("m_radius", &DETECTABLE_RADIUS_M.to_be_bytes())],
+                    )],
+                )],
+            ),
+            DETECTABLE_OBJECT_TYPE,
+        );
+        let gatherable = typed(
+            named(
+                "element",
+                vec![named(
+                    "m_gatheringStartEvent",
+                    vec![
+                        named("m_entityRef", vec![id_holder("EntityId", SPAWN)]),
+                        value("m_type", &0_u32.to_be_bytes()),
+                    ],
+                )],
+            ),
+            GATHERABLE_CONTROLLER_TYPE,
+        );
+        let binding = named(
+            "element",
+            vec![
+                id_holder("EntityId", SPAWN),
+                Element::with_value(LAYER_ID_NAME, LAYER.to_vec()),
+            ],
+        );
+        let timeline = typed(
+            named(
+                "element",
+                vec![named(
+                    "m_timelines",
+                    vec![named(
+                        "element",
+                        vec![Element::with_children(LAYER_ASSIGNMENTS_NAME, vec![binding])],
+                    )],
+                )],
+            ),
+            TIMELINE_TYPE,
+        );
+        let script = slice_script(&slice(vec![
+            entity(CLOSET, "Closet_Randomizer", vec![randomizer]),
+            entity(DEACTIVATOR, "Deactivate_Closet", vec![detectable]),
+            entity(SHIELD, "IO_Shield", vec![gatherable]),
+            entity(SPAWN, "Timeline", vec![timeline]),
+        ]))
+        .expect("script");
+        assert_eq!(
+            script.entity(CLOSET).and_then(|entity| entity.randomizer),
+            Some(RandomizerRules {
+                picks: [1, 2],
+                on_startup: true
+            })
+        );
+        let radius = script
+            .entity(DEACTIVATOR)
+            .and_then(|entity| entity.detectable_radius_m)
+            .expect("a detectable sphere");
+        assert!((radius - DETECTABLE_RADIUS_M).abs() < f32::EPSILON);
+        assert_eq!(
+            script.entity(SHIELD).and_then(|entity| entity.gathering_start),
+            Some((SPAWN, TriggerEvent::Trigger))
+        );
+        assert_eq!(
+            script.entity(SPAWN).map(|entity| entity.timeline_layers.clone()),
+            Some(vec![(LAYER, SPAWN)])
+        );
+        let clip = |start: f32| {
+            named(
+                "element",
+                vec![named(
+                    "element",
+                    vec![named(
+                        "BaseClass1",
+                        vec![Element::with_value(
+                            CLIP_START_NAME,
+                            start.to_be_bytes().to_vec(),
+                        )],
+                    )],
+                )],
+            )
+        };
+        let layer = |id: [u8; UUID_SIZE], starts: &[f32]| {
+            named(
+                "element",
+                vec![
+                    Element::with_value(lowercase_crc32("Id"), id.to_vec()),
+                    Element::with_children(
+                        TIMELINE_CLIPS_NAME,
+                        starts.iter().rev().map(|start| clip(*start)).collect(),
+                    ),
+                ],
+            )
+        };
+        let asset = named(
+            "root",
+            vec![Element::with_children(
+                TIMELINE_LAYERS_NAME,
+                vec![layer(LAYER, &STARTS), layer(OTHER_LAYER, &[OTHER_START])],
+            )],
+        );
+        assert_eq!(
+            timeline_clip_starts(&asset).expect("clips"),
+            vec![(LAYER, STARTS.to_vec()), (OTHER_LAYER, vec![OTHER_START])],
+            "each layer's clip starts, in order"
+        );
+        for (crc, name) in [
+            (LAYER_ASSIGNMENTS_NAME, "LayerEntityAssignments"),
+            (LAYER_ID_NAME, "layerId"),
+            (TIMELINE_LAYERS_NAME, "Layers"),
+            (TIMELINE_CLIPS_NAME, "Clips"),
+            (CLIP_START_NAME, "starttime"),
+        ] {
+            assert_eq!(crc, lowercase_crc32(name), "{name}");
+        }
     }
 }

@@ -37,6 +37,8 @@ use content_tool::dungeon_scripts::{DungeonScriptsReport, build_dungeon_scripts}
 use content_tool::error::ToolError;
 use content_tool::ftue_entities::{FtueScan, Timeline, read_ledger, write_table};
 use content_tool::leaderboards::write_leaderboard_table;
+use content_tool::effect_areas::{EffectAreasReport, build_effect_areas};
+use content_tool::level_doors::{LevelDoorsReport, build_level_doors};
 use content_tool::map_tiles::{DEFAULT_MAP_DIR, MapTilesReport, YIndex, run_map_tiles};
 use content_tool::mob_prefabs::{
     DEFAULT_CAPTURE_ROOTS, LedgerSource, MobPrefabsError, PrefabTable, SourceList,
@@ -71,6 +73,13 @@ const DEFAULT_CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
 const DEFAULT_COLLISION_LEVEL: &str = "ftue_v2";
 /// The level `roads` builds by default: the open world, whose tract maps hold the roads.
 const DEFAULT_ROADS_LEVEL: &str = "newworld_vitaeeterna";
+/// The levels whose effect areas `effect-areas` reads by default: the open world, the
+/// catacombs and the dungeon whose sulfur pools hold `Env_SulfurPool_DoT`.
+const DEFAULT_EFFECT_AREA_LEVELS: [&str; 3] = [
+    DEFAULT_ROADS_LEVEL,
+    "nw_catacomb_00",
+    "nw_dungeon_brimstonesands_00",
+];
 /// The team's design files (admin studio spec section 5).
 const DEFAULT_DESIGN_DIR: &str = "content";
 const DEFAULT_GENERATED_DIR: &str = "crates/nw-content/src/generated";
@@ -333,6 +342,31 @@ enum Command {
         /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
         #[arg(long)]
         bundle: Option<PathBuf>,
+    },
+    /// Writes the effect areas file: the status effect areas of the levels' placed slices and
+    /// of the spell slices whose effects change an affliction meter, from the game paks and the
+    /// content bundle.
+    EffectAreas {
+        /// Levels whose status effect areas are read.
+        #[arg(default_values = DEFAULT_EFFECT_AREA_LEVELS)]
+        levels: Vec<String>,
+        /// Output folder for `effect-areas-<build>.json`.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        out_dir: PathBuf,
+        /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+    },
+    /// Writes the level doors file: every capital of a level whose slice has a door, with the
+    /// replicated components retail sends at its spawn, from the level's world file and the
+    /// game paks.
+    LevelDoors {
+        /// Level whose world file is read.
+        #[arg(long, default_value = DEFAULT_LEVEL)]
+        level: String,
+        /// Folder of the world file and of the output `level-doors-<build>-<level>.json`.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        out_dir: PathBuf,
     },
     /// Writes the music chart file: the notes of every music sheet, from the game paks.
     MusicCharts {
@@ -772,6 +806,38 @@ fn run(cli: Cli) -> Result<(), ToolError> {
                 &out_dir,
             )?);
         }
+        Command::EffectAreas {
+            levels,
+            out_dir,
+            bundle,
+        } => {
+            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
+            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
+            let index =
+                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
+            print_effect_areas(&build_effect_areas(
+                &index,
+                &tables,
+                &levels,
+                &client_build,
+                &out_dir,
+            )?);
+        }
+        Command::LevelDoors { level, out_dir } => {
+            let world = WorldFile::load(
+                &world_file_path(&out_dir, &client_build, &level),
+                &client_build,
+            )?;
+            let index =
+                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
+            print_level_doors(&build_level_doors(
+                &index,
+                &world,
+                &level,
+                &client_build,
+                &out_dir,
+            )?);
+        }
         Command::MusicCharts { out_dir } => {
             let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
             let report = build_music_charts(&source, &client_build, &out_dir)?;
@@ -796,6 +862,12 @@ fn run(cli: Cli) -> Result<(), ToolError> {
                 report.props,
                 report.encounters,
                 report.power_ups
+            );
+            println!(
+                "{}: {} art tiles with solids, {} shapes",
+                report.collision_path.display(),
+                report.solid_art_tiles,
+                report.solid_bodies
             );
         }
         Command::CampSlices { out_dir } => {
@@ -871,6 +943,30 @@ fn run(cli: Cli) -> Result<(), ToolError> {
         }
     }
     Ok(())
+}
+
+fn print_effect_areas(report: &EffectAreasReport) {
+    println!(
+        "{}: {} slices read, level areas {:?}, stage areas {:?}, {} spells with areas, {} areas whose volume does not read",
+        report.path.display(),
+        report.slices,
+        report.level_areas,
+        report.stage_areas,
+        report.spells,
+        report.unread_volumes
+    );
+}
+
+fn print_level_doors(report: &LevelDoorsReport) {
+    println!(
+        "{}: {} capitals ({} slices not in the catalog), {} slices read, {} door slices, {} door capitals",
+        report.path.display(),
+        report.capitals,
+        report.unresolved,
+        report.slices,
+        report.door_slices,
+        report.doors
+    );
 }
 
 fn print_dungeon_gates(report: &DungeonGatesReport) {

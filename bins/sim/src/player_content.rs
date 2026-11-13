@@ -7,7 +7,7 @@ use nw_content::attribute_bonuses::AttributeBonuses;
 use nw_content::attribute_damage::AttributeDamage;
 use nw_content::camps::CampRules;
 use nw_content::charms::ItemNames;
-use nw_content::chest_lockouts::ChestLockouts;
+use nw_content::chest_lockouts::EliteChests;
 use nw_content::crafting::{Recipes, StructureCosts};
 use nw_content::creature_animations::CreatureAnimations;
 use nw_content::deaths_door::DeathsDoorRules;
@@ -18,7 +18,7 @@ use nw_content::game_mode_rewards::ModeRewards;
 use nw_content::gameplay_config::GameplayConfig;
 use nw_content::gathering::{
     CrateLoot, CrateVariant, CyclicGatherables, DetectionSpheres, GatherRules, Gatherables,
-    ToolEfficiencies,
+    InstancedGathers, ToolEfficiencies,
 };
 use nw_content::instances::InstanceCatalog;
 use nw_content::interact_tags::{InteractTags, gatherable_tags, variant_tags};
@@ -28,7 +28,7 @@ use nw_content::item_rules::ItemRules;
 use nw_content::kill_rewards::KillRewards;
 use nw_content::leaderboards::LeaderboardStats;
 use nw_content::loot::{LootTables, MobLoot, PlayerLootLevels};
-use nw_content::loot_limits::{LootLimitRules, LootLimits, ResetClock};
+use nw_content::loot_limits::{LootLimitRules, LootLimits};
 use nw_content::meta_achievements::MetaAchievementRules;
 use nw_content::mission_weights::MissionWeights;
 use nw_content::mounts::MountRules;
@@ -41,6 +41,7 @@ use nw_content::perk_effects::PerkEffects;
 use nw_content::poi_tags::PoiTags;
 use nw_content::progression::Progression;
 use nw_content::quick_courses::QuickCourseRules;
+use nw_content::resets::ResetClock;
 use nw_content::rewards::{EventGrants, KillExperience, Rewards};
 use nw_content::salvage::Salvage;
 use nw_content::skins::{DyeCatalog, SkinCatalog};
@@ -73,6 +74,7 @@ use nw_messages::{AlcState, AssetId, BundleMember, MemberState, VitalsState};
 
 use crate::asset_solids::AssetSolids;
 use crate::charting::ChartRules;
+use crate::control_point_rules::ControlPointRules;
 use crate::invite_rules::InviteRules;
 use crate::objectives::{
     KillTypes, ObjectiveTree, TaskBook, TaskRow, counted_game_events, quest_drop_sources, task_rows,
@@ -769,6 +771,8 @@ pub struct PlayerContent {
     pub mob_loot: MobLoot,
     /// The loot table of each loot crate of the level.
     pub crates: CrateLoot,
+    /// The level's objects whose gathers are instanced (the gatherer's own).
+    pub instanced_gathers: InstancedGathers,
     /// The interact tags of the level's objects, for `TaskInteract`.
     pub interact_tags: InteractTags,
     /// The level's quest trigger volumes, for `TaskTriggerArea` (their `m_targetTag` is a place
@@ -789,6 +793,9 @@ pub struct PlayerContent {
     /// The catacombs tiles, for the tile entities of a run; empty until the sim loads the
     /// catacombs tile file.
     pub catacomb_tiles: nw_world::catacomb_tiles::CatacombTiles,
+    /// The solids of the catacombs' art tiles; empty until the sim sets them from the level
+    /// collision (the catacombs level's file holds them).
+    pub catacomb_solids: nw_world::catacomb_tiles::CatacombSolids,
     /// The level's claim plots, for the land claim entities; empty until the sim loads the
     /// claim plot file.
     pub claim_plots: Vec<PlacedClaimPlot>,
@@ -814,6 +821,9 @@ pub struct PlayerContent {
     /// The dungeon entrances of the level that are network entities ([`entrance_entities`]);
     /// empty until the sim loads the entrance table.
     pub entrance_entities: Vec<EntranceEntity>,
+    /// The door capitals of the level ([`nw_content::level_doors`]); empty until the sim loads
+    /// their file.
+    pub level_doors: nw_content::level_doors::LevelDoors,
     /// The forts of the territory wars ([`nw_content::war_forts`]); empty until the sim loads
     /// their file.
     pub war_forts: nw_content::war_forts::WarForts,
@@ -822,8 +832,18 @@ pub struct PlayerContent {
     pub invasion_forts: nw_content::invasion_forts::InvasionForts,
     /// The siege structure build costs and the supply generator recipes.
     pub siege_blueprints: nw_content::war_forts::SiegeBlueprints,
+    /// The structures of the Outpost Rush outposts ([`nw_content::outpost_structures`]); empty
+    /// until the sim loads their file.
+    pub outpost_structures: nw_content::outpost_structures::OutpostStructures,
+    /// The health and build time of the Outpost Rush structure blueprints.
+    pub outpost_blueprints: nw_content::outpost_structures::OutpostBlueprints,
+    /// The stats of the Outpost Rush war board ([`nw_content::warboard_stats`]).
+    pub outpost_rush_board: nw_content::warboard_stats::BoardStats,
     /// The slice each spell spawns; empty until the sim loads the spell slice file.
     pub spell_slices: nw_content::spell_slices::SpellSlices,
+    /// The status effect areas of the sim's level and of the spell slices
+    /// ([`nw_world::effect_areas`]); empty until the sim loads them.
+    pub effect_areas: nw_world::effect_areas::EffectAreas,
     /// The ability instance type of each spell slice and the player's instance limits
     /// ([`nw_content::ability_instances`]); empty until the sim loads their file.
     pub ability_instances: nw_content::ability_instances::AbilityInstanceTable,
@@ -839,6 +859,8 @@ pub struct PlayerContent {
     pub poi_tags: PoiTags,
     /// The upkeep cost of each territory claim.
     pub upkeep_costs: nw_content::territory_upkeep::UpkeepCosts,
+    /// The town projects and the town board missions that add points to them.
+    pub territory_projects: nw_content::territory_projects::TerritoryProjects,
     /// The level's quest objects that the player breaks with its weapons.
     pub quest_objects: QuestObjects,
     /// The doors of the level's locked interact plots ([`crate::world::locked_doors`]).
@@ -852,6 +874,8 @@ pub struct PlayerContent {
     /// The creature type and level gap factors of a kill and the weapon mastery of each
     /// weapon item.
     pub kill_rewards: KillRewards,
+    /// The affliction meters, their effects and abilities ([`crate::world`] afflictions).
+    pub afflictions: nw_content::afflictions::AfflictionRules,
     /// The meta achievements of the achievements window.
     pub meta_achievements: MetaAchievementRules,
     /// The live season's pass: reward track, journey, activity card and tracked stats.
@@ -904,6 +928,8 @@ pub struct PlayerContent {
     pub mounts: MountRules,
     /// The landmarks, discoverable territories, spawn points and timings of travel.
     pub travel: TravelRules,
+    /// The influence towers ([`crate::control_point_rules`]).
+    pub control_points: ControlPointRules,
     /// The chartable areas, the territory of each area and what a chart and a standing rank
     /// give.
     pub charting: ChartRules,
@@ -920,8 +946,8 @@ pub struct PlayerContent {
     pub bonus_chances: BonusChances,
     /// The categorical progression ranks a new character of each archetype pick starts with.
     pub starting_ranks: StartingRanks,
-    /// How long each loot container stays locked for the player who opened it.
-    pub chest_lockouts: ChestLockouts,
+    /// The elite chests: their lock lasts until the next daily reset.
+    pub elite_chests: EliteChests,
     /// The tradeskill ranks and items that gatherables ask for.
     pub gather_rules: GatherRules,
     /// The cyclic states each gatherable shows.
@@ -1119,11 +1145,6 @@ pub struct QuestObject {
     /// the object by it (Observed: retail newchar 2026-09-18 carded Grace's four nodules, the
     /// capitals `IO_Custom_MSQ_CorruptedNodule_A` to `_D` on their points, by these ids).
     pub id: Option<u64>,
-    /// The lowercase CRC-32 of `IO_` and its gatherable's id: the interact tag of its broken
-    /// entry in the player's loot tracker (Observed: `io_msq_grace_corruptednodule_1`,
-    /// `0x8d40_a880`, on the retail nodules' entries, and `io_mb_msq2_destroyrune_tablet`,
-    /// `0xb0be_7cc2`, on the tablet's at 133.96 s; the tablet's `FinalLootTable` is `Empty`).
-    pub loot_tag: u32,
     /// The radius of its gatherable's detection sphere ([`DetectionSpheres`]), in metres: a
     /// player inside it sets off its game event.
     pub detection_m: Option<f32>,
@@ -1153,7 +1174,7 @@ fn zone_plots(level: &WorldFile) -> Vec<([f32; 3], [u8; MISSION_BOARD_ID_LEN])> 
 /// The interact tags of `level`'s capitals and spawned slices: their slices' tags and their
 /// gatherable variants' `InteractTag` (`tables`), and those of each gatherable's variants for the
 /// gathers of region points.
-fn level_interact_tags(tables: &Tables, level: &WorldFile) -> InteractTags {
+pub(crate) fn level_interact_tags(tables: &Tables, level: &WorldFile) -> InteractTags {
     let mut capital_tags = HashMap::new();
     let mut spawned_tags = HashMap::new();
     for tagged in &level.interact_tags {
@@ -1189,6 +1210,21 @@ fn level_interact_tags(tables: &Tables, level: &WorldFile) -> InteractTags {
     .with_gatherables(gatherable_tags(tables))
 }
 
+/// The objects of `level` whose gathers are instanced, with their slices' values.
+fn level_instanced_gathers(level: &WorldFile) -> InstancedGathers {
+    let gathers = || level.instanced_gathers.iter();
+    InstancedGathers::build(
+        gathers().filter_map(|gather| match &gather.owner {
+            TagOwner::Capital(guid) => Some((guid.as_str(), gather.object)),
+            TagOwner::Spawned(_) => None,
+        }),
+        gathers().filter_map(|gather| match gather.owner {
+            TagOwner::Capital(_) => None,
+            TagOwner::Spawned(id) => Some((id, gather.object)),
+        }),
+    )
+}
+
 /// The largest difference on each axis between a quest object's point and the capital on it, m
 /// (Observed: 0 on the four nodules; a float's rounding).
 const CAPITAL_ON_POINT_M: f32 = 0.01;
@@ -1196,8 +1232,6 @@ const CAPITAL_ON_POINT_M: f32 = 0.01;
 /// the 162 `Master_Quest_Damageable_Instanced` capitals of the open world and the other
 /// `*_Damageable_*` quest slices).
 const DAMAGEABLE_SLICE_MARK: &str = "damageable";
-/// What a quest object's loot tracker tag starts with before its gatherable's id.
-const LOOT_TAG_PREFIX: &str = "IO_";
 /// The folder of the generated spawn masters (`CoatGen\\<hash>\\WorldEvent_SpawnGroup_…_Master_…`,
 /// `Master_Plants_…`). Such a capital spawns the object on its point as an entity of its own; it
 /// is a spawner, not the object (Observed: the tutorial's spawn group at (484.5, 218.9); carding
@@ -1284,7 +1318,6 @@ impl QuestObjects {
                         position: Position { x, y, z },
                         respawn_ms: gatherable.respawn_ms.0,
                         id: capital.and_then(|capital| capital_id(&capital.id)),
-                        loot_tag: lowercase_crc32(&format!("{LOOT_TAG_PREFIX}{}", gatherable.id)),
                         detection_m: spheres.radius_of(point.gatherable_id),
                     }
                 })
@@ -1380,8 +1413,7 @@ impl PlayerContent {
     /// The player content of `tables` (with the datasheet overrides of `gameplay` applied)
     /// with the mob looks `mob_looks`, the creature animations `creature_animations`, the
     /// tutorial level's entities `tutorial_level`, the gatherable points and capitals of the
-    /// sim's level `level`, the gameplay values `gameplay` and the loot limit resets
-    /// `loot_reset`.
+    /// sim's level `level`, the gameplay values `gameplay` and the server's resets `resets`.
     pub fn new(
         tables: &Tables,
         mob_looks: MobLooks,
@@ -1389,7 +1421,7 @@ impl PlayerContent {
         tutorial_level: FtueLevel,
         level: &WorldFile,
         gameplay: GameplayConfig,
-        loot_reset: ResetClock,
+        resets: ResetClock,
     ) -> Self {
         let level_gatherables = &level.gatherables;
         let rows = task_rows(tables);
@@ -1457,6 +1489,7 @@ impl PlayerContent {
                     .map(|slice| (slice.id, slice.variant.as_str())),
             ),
             interact_tags: level_interact_tags(tables, level),
+            instanced_gathers: level_instanced_gathers(level),
             quest_volumes: Vec::new(),
             zone_plots: zone_plots(level),
             stations: level.stations.clone(),
@@ -1464,6 +1497,7 @@ impl PlayerContent {
             camps: CampRules::from_tables(tables),
             camp_slices: CampSlices::default(),
             catacomb_tiles: nw_world::catacomb_tiles::CatacombTiles::default(),
+            catacomb_solids: nw_world::catacomb_tiles::CatacombSolids::default(),
             claim_plots: Vec::new(),
             quick_courses: QuickCourseRules::from_tables(tables),
             store: StoreTable::default(),
@@ -1474,10 +1508,20 @@ impl PlayerContent {
             encounter_roots: nw_content::town_props::TownProps::default(),
             encounter_objects: nw_content::town_props::TownProps::default(),
             entrance_entities: Vec::new(),
+            level_doors: nw_content::level_doors::LevelDoors::default(),
             war_forts: nw_content::war_forts::WarForts::default(),
             invasion_forts: nw_content::invasion_forts::InvasionForts::default(),
             siege_blueprints: nw_content::war_forts::SiegeBlueprints::from_tables(tables),
+            outpost_structures: nw_content::outpost_structures::OutpostStructures::default(),
+            outpost_blueprints: nw_content::outpost_structures::OutpostBlueprints::from_tables(
+                tables,
+            ),
+            outpost_rush_board: nw_content::warboard_stats::BoardStats::from_tables(
+                tables,
+                nw_content::warboard_stats::OUTPOST_RUSH_TABLE,
+            ),
             spell_slices: nw_content::spell_slices::SpellSlices::default(),
+            effect_areas: nw_world::effect_areas::EffectAreas::default(),
             ability_instances: nw_content::ability_instances::AbilityInstanceTable::default(),
             shot_entities: nw_content::shot_entities::ShotEntities::default(),
             dungeon_gates: nw_content::dungeon_gates::DungeonGates::default(),
@@ -1485,6 +1529,9 @@ impl PlayerContent {
             player_loot_levels: PlayerLootLevels::from_tables(tables),
             poi_tags: PoiTags::from_tables(tables),
             upkeep_costs: nw_content::territory_upkeep::UpkeepCosts::from_tables(tables),
+            territory_projects: nw_content::territory_projects::TerritoryProjects::from_tables(
+                tables,
+            ),
             quest_objects,
             locked_doors: crate::world::locked_doors::LockedDoors::build(
                 &level.capitals,
@@ -1493,6 +1540,7 @@ impl PlayerContent {
             leaderboards: LeaderboardStats::from_tables(tables),
             kill_experience: KillExperience::from_tables(tables),
             kill_rewards: KillRewards::from_tables(tables),
+            afflictions: nw_content::afflictions::AfflictionRules::of_tables(tables),
             meta_achievements: MetaAchievementRules::from_tables(tables),
             seasons: nw_content::seasons::SeasonCatalog::from_tables(tables),
             disabled_items: disabled_items(
@@ -1506,7 +1554,7 @@ impl PlayerContent {
             artifact_objectives: nw_content::artifacts::ArtifactObjectives::from_tables(tables),
             loot_limits: Some(LootLimitRules {
                 limits: LootLimits::from_tables(tables),
-                clock: loot_reset,
+                clock: resets,
             }),
             gameplay,
             progression: Progression::of_tables(tables),
@@ -1551,6 +1599,7 @@ impl PlayerContent {
             shops: ShopCatalog::from_tables(tables),
             invites: InviteRules::from_tables(tables),
             travel,
+            control_points: ControlPointRules::of(tables, level),
             charting,
             phasing_areas: phasing_areas(tables),
             event_grants: EventGrants::from_tables(tables),
@@ -1558,7 +1607,7 @@ impl PlayerContent {
             tradeskill_curves: TradeskillCurves::from_tables(tables),
             bonus_chances: BonusChances::from_tables(tables),
             starting_ranks: StartingRanks::from_tables(tables),
-            chest_lockouts: ChestLockouts::from_tables(tables),
+            elite_chests: EliteChests::from_tables(tables),
             gather_rules: GatherRules::from_tables(tables),
             cyclic_gatherables: CyclicGatherables::from_tables(tables),
             tools: ToolEfficiencies::from_tables(tables),
@@ -1643,7 +1692,49 @@ fn disabled_items<'a>(
 
 #[cfg(test)]
 mod tests {
+    use nw_content::gathering::InstancedObject;
+    use nw_world::instanced_loot::{InstancedGather, POI_LOOT};
+
     use super::*;
+
+    #[test]
+    fn the_levels_instanced_capitals_and_spawned_slices_have_instanced_gathers() {
+        /// The retail start-beach armour chest's capital and the facet entity of its retail
+        /// request (ledger newchar-retail-2026-09-18).
+        const CHEST_GUID: &str = "aabcf082-9526-2edf-760b-043d3db212c4";
+        const CHEST_FACET: u64 = 0xdcb7_f4bf_a894_3c1b;
+        const SPAWNED_WELL: u64 = 0x1234_5678_9abc_def0;
+        /// `master_lootcontainer`: `InstancedLootType::POILoot`, `m_aoiRadius` 80 m.
+        const CHEST: InstancedObject = InstancedObject {
+            loot_type: POI_LOOT,
+            aoi_radius_m: Some(80.0),
+        };
+        /// `master_quest_instanced`: `InstancedLootType::Quest`, `m_aoiRadius` 100 m.
+        const WELL: InstancedObject = InstancedObject {
+            loot_type: 4,
+            aoi_radius_m: Some(100.0),
+        };
+        let level = WorldFile {
+            instanced_gathers: vec![
+                InstancedGather {
+                    owner: TagOwner::Capital(CHEST_GUID.to_owned()),
+                    object: CHEST,
+                },
+                InstancedGather {
+                    owner: TagOwner::Spawned(SPAWNED_WELL),
+                    object: WELL,
+                },
+            ],
+            ..WorldFile::default()
+        };
+        let instanced = level_instanced_gathers(&level);
+        assert_eq!(instanced.of(CHEST_FACET), Some(CHEST));
+        assert_eq!(instanced.of(SPAWNED_WELL), Some(WELL));
+        assert!(
+            !instanced.instanced(CHEST_FACET + 8),
+            "another object is shared"
+        );
+    }
 
     #[test]
     #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]

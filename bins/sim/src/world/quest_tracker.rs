@@ -207,6 +207,7 @@ impl QuestTracker {
             completed: None,
             active: self.list(self.records()),
             tasks: self.list(self.task_entries()),
+            ..ObjectivesState::default()
         }
     }
 

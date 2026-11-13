@@ -293,6 +293,7 @@ fn member_position(state: &MemberState) -> Option<[f32; 3]> {
         | MemberState::DamageReceiver(_)
         | MemberState::GatherableController(_)
         | MemberState::Interact(_)
+        | MemberState::InteractCooldown(_)
         | MemberState::Spell(_)
         | MemberState::Projectile(_)
         | MemberState::GameMode(_)

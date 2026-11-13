@@ -85,6 +85,11 @@ enum AreaCaster {
     },
     /// A mob; `table` is the unique id of its damage table.
     Mob { table: Option<String> },
+    /// The game mode of the instance (a mutation curse's zone, [`super::expedition_mode`]): its
+    /// spell takes the players only, as a mob's takes them, and gives no mob its effects
+    /// (Observed: no creature held `Mut_Curse2_Minor_SlowRend` in the Fiendish run
+    /// `20261002-184508-050`).
+    GameMode,
 }
 
 /// A spell area of a player or a mob.
@@ -160,6 +165,28 @@ impl SpellArea {
         )
     }
 
+    /// The area of `spell` that the game mode casts at `centre` for `source` (the player it is
+    /// cast on: `TargetOwnsSpell`) from `starts_ms`, lasting `lasting_ms` (a spell of
+    /// `UseStatusEffectDuration` lasts its cast effect's `BaseDuration`).
+    pub(super) fn of_game_mode(
+        source: u64,
+        spell: &SpellRow,
+        centre: Position,
+        starts_ms: u64,
+        lasting_ms: u64,
+    ) -> Self {
+        let mut area = Self::of(
+            AreaCaster::GameMode,
+            source,
+            spell,
+            (centre, 0.0),
+            starts_ms,
+            0.0,
+        );
+        area.ends_ms = starts_ms.saturating_add(lasting_ms);
+        area
+    }
+
     fn of(
         caster: AreaCaster,
         source: u64,
@@ -184,6 +211,19 @@ impl SpellArea {
             shown: false,
             entity: None,
         }
+    }
+}
+
+impl SpellArea {
+    /// The open area's caster number, spell, start and centre at `now_ms`, for the effect
+    /// areas of its slice ([`super::effect_areas`]); `None` before its start and from its end.
+    pub(super) fn open_slice(&self, now_ms: u64) -> Option<(u64, &str, u64, Position)> {
+        (self.starts_ms <= now_ms && now_ms < self.ends_ms).then_some((
+            self.source,
+            self.spell.id.as_str(),
+            self.starts_ms,
+            self.centre,
+        ))
     }
 }
 
@@ -398,7 +438,7 @@ impl SimWorld {
                         })?;
                 Some(owner)
             }
-            AreaCaster::Mob { .. } => None,
+            AreaCaster::Mob { .. } | AreaCaster::GameMode => None,
         };
         let Ok(states) = slice
             .members
@@ -487,7 +527,11 @@ impl SimWorld {
                 self.player_area_pass(area, (&connection, entity), now_ms)
             }
             AreaCaster::Mob { table } => {
-                self.mob_area_pass(area, table.as_deref(), now_ms);
+                self.mob_area_pass(area, table.as_deref(), true, now_ms);
+                Vec::new()
+            }
+            AreaCaster::GameMode => {
+                self.mob_area_pass(area, None, false, now_ms);
                 Vec::new()
             }
         }
@@ -623,8 +667,15 @@ impl SimWorld {
     }
 
     /// A pass of the area of a mob, whose damage table is `table`: the players are its
-    /// enemies, the mobs its friends (a self heal or buff holds on the mob alone).
-    fn mob_area_pass(&mut self, area: &mut SpellArea, table: Option<&str>, now_ms: u64) {
+    /// enemies, the mobs its friends (a self heal or buff holds on the mob alone) when
+    /// `with_friends` (the game mode's area has no friends).
+    fn mob_area_pass(
+        &mut self,
+        area: &mut SpellArea,
+        table: Option<&str>,
+        with_friends: bool,
+        now_ms: u64,
+    ) {
         let radius = area.spell.radius_m.unwrap_or(POINT_RADIUS_M);
         let targets = area.spell.target_types.clone().unwrap_or_default();
         let effects = area.spell.status_effects.clone();
@@ -669,7 +720,7 @@ impl SimWorld {
                 area.players_in.retain(|player| inside.contains(player));
             }
         }
-        if !effects.is_empty() && FRIEND_TARGETS.contains(&targets.as_str()) {
+        if with_friends && !effects.is_empty() && FRIEND_TARGETS.contains(&targets.as_str()) {
             let inside = if targets == SELF_TARGET {
                 vec![area.source]
             } else {
@@ -797,6 +848,24 @@ mod tests {
             clear_on_end: false,
             secondary: None,
         }
+    }
+
+    /// A game mode's area of a one-pass spell (`Duration` -1, `UseStatusEffectDuration`) lasts
+    /// the cast effect's time and belongs to the player it is cast on.
+    #[test]
+    fn a_game_mode_area_lasts_its_cast_effects_time() {
+        const LASTING_MS: u64 = 10_000;
+        let mut weary = bomb("All");
+        weary.duration_ms = Some(-1);
+        let area = SpellArea::of_game_mode(TARGET, &weary, MOB_AT, NOW, LASTING_MS);
+        assert_eq!(area.caster, AreaCaster::GameMode);
+        assert_eq!(area.source, TARGET);
+        assert_eq!((area.starts_ms, area.ends_ms), (NOW, NOW + LASTING_MS));
+        assert_eq!(
+            area.open_slice(NOW + LASTING_MS),
+            None,
+            "it ends after the cast's time"
+        );
     }
 
     #[test]

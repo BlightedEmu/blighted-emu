@@ -9,7 +9,7 @@
 //! whose `MannequinTag` adds tags (retail: the sailor's `1H_Melee` and `Club` come from its
 //! `1hClubT2FTUE`). The controller definitions name the tag definition.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use nw_ai::data::FragmentLength;
@@ -22,7 +22,7 @@ use nw_formats::mannequin::{
 };
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
 
-use crate::ai_data::{AdbEntry, ClipLengths, adb_entries, fragment_length};
+use crate::ai_data::{ClipLengths, base_clip_names, fragment_length};
 use crate::collision::types::QUERY_SHAPE_CAPSULE;
 use crate::error::ToolError;
 use crate::source::GameSource;
@@ -76,9 +76,6 @@ const GATHERABLE_REMAINS_TYPE: [u8; 16] = [
 ];
 /// Scope time ticks per second (`DAT_14807f948` = 1/30 s).
 const SCOPE_TICKS_PER_SECOND: f64 = 30.0;
-/// The slack of a length counted in ticks: a length is a sum of f32 frame times, so a length
-/// of exactly 56 ticks can come out a millionth of a tick short.
-const TICK_SLACK: f64 = 1e-3;
 
 /// A failure of the creature animation build.
 #[derive(Debug, thiserror::Error)]
@@ -252,13 +249,17 @@ fn asset_path_below(field: &Element) -> Option<String> {
         .map(|path| path.to_lowercase())
 }
 
-/// A length in whole scope ticks (the last tick the fragment plays); `None` for a loop, an
-/// Unknown length or one beyond `u32`.
+/// A length in whole scope ticks: the last tick the fragment plays, the last whole tick before
+/// its end (0 for a length of 0); `None` for a loop, an Unknown length or one beyond `u32`.
+/// Observed: the damned `1H_Melee` `POI_Patrol_Fidget` options of `ExitTime` 6.6999998 and 5 s
+/// stopped at retail scope times 200 and 149, not 201 and 150; a clip end of 56 frames at the clip's f32 1/30 s (a hair past 56 ticks) at 56, as the sailor's and
+/// the risen's `r_Death` and the great axeman's `POI_Patrol_Fidget` (235) did.
 fn whole_ticks(length: FragmentLength) -> Option<u32> {
     let FragmentLength::Seconds(seconds) = length else {
         return None;
     };
-    let ticks = (f64::from(seconds) * SCOPE_TICKS_PER_SECOND + TICK_SLACK).floor();
+    let ticks = (f64::from(seconds) * SCOPE_TICKS_PER_SECOND).ceil() - 1.0;
+    let ticks = ticks.max(0.0);
     if !(0.0..=f64::from(u32::MAX)).contains(&ticks) {
         return None;
     }
@@ -271,48 +272,30 @@ fn whole_ticks(length: FragmentLength) -> Option<u32> {
     Some(whole)
 }
 
-/// An animation database: its entries' base layers and its fragments, in the same order.
-struct ParsedDatabase {
-    /// The base animation layer of each entry.
-    entries: Vec<AdbEntry>,
-    /// The entries.
-    database: AnimDatabase,
-}
-
-impl ParsedDatabase {
-    /// The whole scope ticks of each option of each fragment of `fragments` for `tags`
-    /// (Mannequin's options, [`AnimDatabase::options`]), by `lengths`; a fragment without an
-    /// option of known length is left out.
-    fn fragment_ticks(
-        &self,
-        fragments: &[String],
-        tags: &[String],
-        lengths: &ClipLengths,
-    ) -> BTreeMap<String, Vec<Option<u32>>> {
-        let tags: Vec<&str> = tags.iter().map(String::as_str).collect();
-        fragments
-            .iter()
-            .filter_map(|name| {
-                let ticks: Vec<Option<u32>> = self
-                    .database
-                    .options(name, &tags)
-                    .into_iter()
-                    .map(|option| {
-                        let index = self
-                            .database
-                            .fragments
-                            .iter()
-                            .position(|entry| std::ptr::eq(entry, option))?;
-                        whole_ticks(fragment_length(self.entries.get(index)?, lengths).ok()?)
-                    })
-                    .collect();
-                ticks
-                    .iter()
-                    .any(Option::is_some)
-                    .then(|| (name.clone(), ticks))
-            })
-            .collect()
-    }
+/// The whole scope ticks of each option of each fragment of `fragments` in `database` for
+/// `tags` (Mannequin's options, [`AnimDatabase::options`]), by `lengths`; a fragment without an
+/// option of known length is left out.
+fn fragment_ticks(
+    database: &AnimDatabase,
+    fragments: &[String],
+    tags: &[String],
+    lengths: &ClipLengths,
+) -> BTreeMap<String, Vec<Option<u32>>> {
+    let tags: Vec<&str> = tags.iter().map(String::as_str).collect();
+    fragments
+        .iter()
+        .filter_map(|name| {
+            let ticks: Vec<Option<u32>> = database
+                .options(name, &tags)
+                .into_iter()
+                .map(|option| whole_ticks(fragment_length(option, lengths).ok()?))
+                .collect();
+            ticks
+                .iter()
+                .any(Option::is_some)
+                .then(|| (name.clone(), ticks))
+        })
+        .collect()
 }
 
 /// The item of the main hand of the creature slice `root`'s paperdoll.
@@ -412,9 +395,8 @@ pub(crate) fn read_entries(
     Ok(read)
 }
 
-/// One animation database as read: its entries' base layers and its fragments, in the same
-/// order, or why it could not be read.
-pub(crate) type ReadDatabase = Result<(Vec<AdbEntry>, AnimDatabase), String>;
+/// One animation database as read with its fragments, or why it could not be read.
+pub(crate) type ReadDatabase = Result<AnimDatabase, String>;
 
 /// The animation databases `paths` of the paks, each with the fragments of its sub databases
 /// ([`AnimDatabase::sub_databases`], to any depth): its entries' base layers and its fragments,
@@ -454,18 +436,13 @@ pub(crate) fn read_databases(
 fn database_of(path: &str, bytes: &HashMap<String, Vec<u8>>) -> ReadDatabase {
     let text = text_of(bytes.get(path))
         .ok_or_else(|| "animation database missing or not UTF-8".to_owned())?;
-    let mut entries = adb_entries(text).map_err(|error| error.to_string())?;
     let mut database = AnimDatabase::parse(text).map_err(|error| error.to_string())?;
-    if database.fragments.len() != entries.len() {
-        return Err("fragment entries and procedural clips do not line up".to_owned());
-    }
     for sub in AnimDatabase::sub_databases(text).map_err(|error| error.to_string())? {
-        let (sub_entries, sub_database) =
+        let sub_database =
             database_of(&sub.file, bytes).map_err(|why| format!("{}: {why}", sub.file))?;
-        entries.extend(sub_entries);
         database.adopt(sub_database, &sub.tags);
     }
-    Ok((entries, database))
+    Ok(database)
 }
 
 pub(crate) fn text_of(bytes: Option<&Vec<u8>>) -> Option<&str> {
@@ -581,19 +558,11 @@ pub fn build_rows(
         .values()
         .filter_map(|mannequin| mannequin.animation_database.clone())
         .collect();
-    let databases: HashMap<String, ParsedDatabase> = read_databases(source, &database_paths)?
+    let databases: HashMap<String, AnimDatabase> = read_databases(source, &database_paths)?
         .into_iter()
-        .filter_map(|(path, parsed)| {
-            let (entries, database) = parsed.ok()?;
-            Some((path, ParsedDatabase { entries, database }))
-        })
+        .filter_map(|(path, parsed)| Some((path, parsed.ok()?)))
         .collect();
-    let clip_names: BTreeSet<String> = databases
-        .values()
-        .flat_map(|parsed| parsed.entries.iter().flatten())
-        .map(|clip| clip.animation.clone())
-        .filter(|name| !name.is_empty())
-        .collect();
+    let clip_names = base_clip_names(databases.values());
     let lengths = ClipLengths::read(source, game_dir, &clip_names)?;
     let weapons = item_weapons(tables);
     let mut rows = Vec::new();
@@ -645,7 +614,9 @@ pub fn build_rows(
             .animation_database
             .as_ref()
             .and_then(|path| databases.get(path))
-            .map(|parsed| parsed.fragment_ticks(&controller.fragments, &default_tags, &lengths))
+            .map(|database| {
+                fragment_ticks(database, &controller.fragments, &default_tags, &lengths)
+            })
             .unwrap_or_default();
         rows.push(CreatureRow {
             asset: name,
@@ -677,11 +648,8 @@ mod tests {
     use super::*;
 
     /// The database `text` without sub databases.
-    fn parsed_database(text: &str) -> Option<ParsedDatabase> {
-        Some(ParsedDatabase {
-            entries: adb_entries(text).ok()?,
-            database: AnimDatabase::parse(text).ok()?,
-        })
+    fn parsed_database(text: &str) -> Option<AnimDatabase> {
+        AnimDatabase::parse(text).ok()
     }
 
     fn named(name: &str, children: Vec<Element>) -> Element {
@@ -859,7 +827,7 @@ mod tests {
             ("boar_idle", Ok(1.0)),
         ]);
         let fragments = ["r_Death".to_owned(), "Idle".to_owned(), "Spawn".to_owned()];
-        let ticks = parsed.fragment_ticks(&fragments, &["Boar".to_owned()], &lengths);
+        let ticks = fragment_ticks(&parsed, &fragments, &["Boar".to_owned()], &lengths);
         assert_eq!(
             ticks,
             BTreeMap::from([("r_Death".to_owned(), vec![Some(0x58)])]),
@@ -884,7 +852,8 @@ mod tests {
             ("risen_death_a", Ok(1.866_666_7)),
             ("risen_death_b", Ok(2.433_333_4)),
         ]);
-        let ticks = parsed.fragment_ticks(
+        let ticks = fragment_ticks(
+            &parsed,
             &["r_Death".to_owned()],
             &["Base".to_owned(), "DT5".to_owned()],
             &lengths,
@@ -894,12 +863,17 @@ mod tests {
 
     #[test]
     fn whole_ticks_count_the_last_tick_the_fragment_plays() {
-        // The sailor's `r_Death_F`: 56 frames at 1/30 s, a little short in f32 (retail 0x38).
-        assert_eq!(
-            whole_ticks(FragmentLength::Seconds(1.866_666_6)),
-            Some(0x38)
-        );
+        // The sailor's `r_Death_F`: 56 frames of the clip's f32 1/30 s (retail 0x38).
+        const SECONDS_PER_FRAME: f32 = 1.0 / 30.0;
+        #[allow(clippy::cast_possible_truncation, reason = "as the clip reader's f32 length")]
+        let death_s = (56.0 * f64::from(SECONDS_PER_FRAME)) as f32;
+        assert_eq!(whole_ticks(FragmentLength::Seconds(death_s)), Some(0x38));
         assert_eq!(whole_ticks(FragmentLength::Seconds(2.963)), Some(88));
+        // The damned `POI_Patrol_Fidget` options that an empty clip ends at `ExitTime` 6.6999998
+        // and 5 s: retail stopped at 200 and 149.
+        assert_eq!(whole_ticks(FragmentLength::Seconds(6.7)), Some(200));
+        assert_eq!(whole_ticks(FragmentLength::Seconds(5.0)), Some(149));
+        assert_eq!(whole_ticks(FragmentLength::Seconds(0.0)), Some(0));
         assert_eq!(whole_ticks(FragmentLength::Loops), None);
         assert_eq!(whole_ticks(FragmentLength::Unknown), None);
     }

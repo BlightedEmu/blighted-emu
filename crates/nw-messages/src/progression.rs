@@ -76,6 +76,17 @@ impl ProgressionState {
         }
     }
 
+    /// This state with the rested experience `rested`. Retail sends it at login, with a full
+    /// state, and with each gain that took from the pool, the one that emptied it included
+    /// (`Playthrough_Part_02` 898.2 s: experience and rested 0; findings `2026-11-13-rested-xp.md`).
+    #[must_use]
+    pub const fn with_rested(self, rested: u32) -> Self {
+        Self {
+            rested: Some(rested),
+            ..self
+        }
+    }
+
     /// Reads the state from the bundle path.
     ///
     /// # Errors
@@ -196,5 +207,29 @@ mod tests {
             reader.finish().expect("whole");
             assert_eq!(bytes(state), body);
         }
+    }
+
+    #[test]
+    fn a_gain_that_takes_from_the_rested_pool_sends_both_values() {
+        // Retail `Playthrough_Part_04`: the login (level 38, 425,671 points, pool 1,261) and the
+        // gain at 24.6 s (426,871 points, pool 661).
+        const LOGIN: [u8; 15] = [
+            0x03, 0x01, 0x00, 0x00, 0x00, 0x26, 0x03, 0x00, 0x06, 0x7e, 0xc7, 0x00, 0x00, 0x04,
+            0xed,
+        ];
+        const GAIN: [u8; 10] = [0x02, 0x03, 0x00, 0x06, 0x83, 0x77, 0x00, 0x00, 0x02, 0x95];
+        const LEVEL: u32 = 38;
+        assert_eq!(
+            bytes(ProgressionState::login_at_level(LEVEL, 425_671).with_rested(1_261)),
+            LOGIN
+        );
+        assert_eq!(
+            bytes(ProgressionState::experience(426_871).with_rested(661)),
+            GAIN
+        );
+        let mut reader = Reader::new(&GAIN);
+        let state = ProgressionState::read(&mut reader).expect("read");
+        reader.finish().expect("whole");
+        assert_eq!(state.rested, Some(661));
     }
 }

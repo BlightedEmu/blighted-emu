@@ -1497,34 +1497,53 @@ pub(crate) mod tests {
 
     /// [`kits_with`] for `extra` items with a stack size: (item id, item class, `MaxStackSize`).
     pub(crate) fn kits_with_stacks(extra: &[(&str, &str, Option<u32>)]) -> StarterKits {
-        let row = |item_id: &str, item_class: &str| ItemRow {
+        kits_with_rows(extra.iter().map(|(item_id, item_class, max_stack)| ItemRow {
+            max_stack: *max_stack,
+            ..gear_row(item_id, item_class)
+        }))
+    }
+
+    /// [`kits`] with the resource rows of `extra` items too: (item id, item class).
+    pub(crate) fn kits_with_resources(extra: &[(&str, &str)]) -> StarterKits {
+        kits_with_rows(
+            extra
+                .iter()
+                .map(|(item_id, item_class)| resource_row(item_id, item_class)),
+        )
+    }
+
+    /// A master row of a bound piece of gear with a gear score and durability of its own.
+    fn gear_row(item_id: &str, item_class: &str) -> ItemRow {
+        ItemRow {
             item_id: item_id.to_owned(),
             item_class: Some(item_class.to_owned()),
             gear_score: Some(75),
             durability: Some(375),
             bind_on_pickup: true,
             ..ItemRow::default()
-        };
+        }
+    }
+
+    /// A master row of a resource as the data has it (`FlintT1`): no durability, not bound, it
+    /// stacks.
+    fn resource_row(item_id: &str, item_class: &str) -> ItemRow {
+        ItemRow {
+            durability: None,
+            bind_on_pickup: false,
+            ..gear_row(item_id, item_class)
+        }
+    }
+
+    /// The kit of [`BACKSTORY`] with the master rows of its items and of `extra`.
+    fn kits_with_rows(extra: impl IntoIterator<Item = ItemRow>) -> StarterKits {
         let mut rows = vec![
-            row("MysticArchetypeChest", "EquippableChest+Armor+Light"),
-            row(SWORD, "Weapon+EquippableMainHand+Sword+Melee"),
-            row(STAFF, "Weapon+EquippableTwoHand+LifeStaff+Magic"),
-            row(POTION, "Consumable+Potion"),
-            // A resource as the data has it (`FlintT1`): no durability, not bound, it stacks.
-            ItemRow {
-                durability: None,
-                bind_on_pickup: false,
-                ..row(FLINT, "Resource")
-            },
+            gear_row("MysticArchetypeChest", "EquippableChest+Armor+Light"),
+            gear_row(SWORD, "Weapon+EquippableMainHand+Sword+Melee"),
+            gear_row(STAFF, "Weapon+EquippableTwoHand+LifeStaff+Magic"),
+            gear_row(POTION, "Consumable+Potion"),
+            resource_row(FLINT, "Resource"),
         ];
-        rows.extend(
-            extra
-                .iter()
-                .map(|(item_id, item_class, max_stack)| ItemRow {
-                    max_stack: *max_stack,
-                    ..row(item_id, item_class)
-                }),
-        );
+        rows.extend(extra);
         StarterKits::build(StarterSource {
             item_sheets: vec![("MasterItemDefinitions_Quest".to_owned(), rows)],
             backstories: vec![(

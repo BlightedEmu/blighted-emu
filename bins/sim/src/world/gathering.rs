@@ -33,15 +33,42 @@
 //! roll gives grows by their yield share for the tradeskill (`MULT_*`: `Token_Proficiency_1`
 //! 0.1), a fraction left rolled. Inferred: the form is the data's (a share added to 1, a bonus
 //! added to the roll); no retail gather was measured with and without a yield or luck effect.
+//!
+//! A gather of an instanced object ([`nw_content::gathering::InstancedGathers`]: its slice names
+//! an instanced loot entity) is the gatherer's own: its start counts no gatherer, it keeps no
+//! work, and its end locks the object for its gatherer alone until its loot tracker entry's reset
+//! ([`SimWorld::lock_of`]); the object stays for every other player. A gather of any other
+//! object counts its node's gatherers, and its end sets the count back to 0
+//! ([`super::statics::gather_ended`]). Observed (finding 2026-11-13 "gatherer counts and group
+//! gathers"): 2,584 of 2,584 retail gathers of instanced objects sent 0, 795 of 795 of shared ones
+//! sent 1.
+//!
+//! The node of a group gatherable (`NumRequiredToGather` above one) takes several gatherers, and
+//! its work goes on only while enough of them gather it ([`GroupWork`]); each gatherer's own
+//! state gets the node's new count when one comes or goes ([`super::statics::gatherers_changed`]).
+//!
+//! A stopped gather keeps its work done when its gatherable keeps it
+//! ([`nw_content::gathering::Gatherables::keeps_progress`]: `ResetGatherTimeOnEndInteraction` 0
+//! or empty) and its object is shared ([`KeptGathers`]); the next gather of the same object
+//! starts with the amount left. Observed (finding 2026-11-13 "gather progress and quest
+//! interacts"): the retail sun disk shield's gathers started with 20.0, 10.85 and 3.06 after two
+//! interrupts, the work counted in whole steps of [`PROGRESS_STEP_MS`].
+//!
+//! A gather of an object whose variant is only on quest (`InteractOnlyOnQuest`,
+//! [`nw_content::interact_tags::InteractTags::quest_gate`]) is refused to a player whose quests
+//! have no active task that names its tag ([`crate::objectives::ObjectiveRun::enables_interact`]).
+//! Observed (client `FUN_1435c3ed0`): the client offers such an interact only then; the object
+//! itself is shown to every player alike. Inferred: the server refuses as the client does.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
-use nw_content::chest_lockouts::Lockout;
+use nw_content::chest_lockouts::CONTAINER_LOCKOUT_MS;
 use nw_content::corpse_times::{DEFAULT_CORPSE_MS, SKINNED_CORPSE_MS, corpse_ms};
-use nw_content::gathering::Gatherable;
+use nw_content::gathering::{Gatherable, InstancedObject, ONE_GATHERER};
 use nw_content::loot::{LootContext, LootRoll, TABLE_PREFIX, loot_level};
+use nw_content::resets::ResetCycle;
 use nw_content::tradeskill_xp::NEUTRAL_MODIFIER;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::items::SYNC_MOVED;
@@ -57,10 +84,11 @@ use nw_sim_core::Position;
 use super::abilities::held_abilities;
 use super::crafting::unowned;
 use super::gates::timeline_member;
-use super::loot_bag::LimitsSent;
+use super::loot_bag::{EntryRange, LimitsSent};
 use super::slots::Slot;
 use super::statics::{
-    GatherRun, chest_gather_ended, gather_started, interactor_target, water_gather_ended,
+    GatherCounters, GatherRun, gather_ended, gather_started, gatherers_changed,
+    interactor_target, water_gather_ended,
 };
 use super::tradeskill::EventScale;
 use super::{Body, Player, SimWorld, gather_answer, gather_interrupted, send_now};
@@ -149,10 +177,26 @@ const GATHER_TICK_MS: u64 = 33;
 /// The efficiency of a gather by hand (retail flint, bushes and chests: 1.0), and of a tool
 /// gather whose tool has no efficiency row, before the tradeskill's.
 const HAND_EFFICIENCY: f32 = 1.0;
-/// The gatherers of an open-world node (retail 1).
-const ONE_GATHERER: u8 = 1;
+/// The step of a gather's work: a stopped gather keeps the work of its whole steps, each step
+/// of this much gather time taking the efficiency's share off the amount left. Observed
+/// (`1624_0401_thedemonscauldron`, the sun disk shield, efficiency 1.2362): 7.43 s of gather
+/// left 10.852 of 20 (74 steps), 6.34 s more left 3.064 (63 steps); 10 gathers stopped within
+/// 0.1 s of their start kept nothing.
+const PROGRESS_STEP_MS: u64 = 100;
+/// The gatherer count a gather of a shared corpse or start object sends at its start, which one
+/// player gathers at a time (Observed: retail 1 for 795 of 795 gathers of a shared open-world
+/// object, [`nw_content::gathering::InstancedGathers`]); a node sends its own gatherers.
+const SOLE_GATHERER: u8 = 1;
+/// The gatherer count of a gather that counts none: an instanced object's (Observed: retail 0 at
+/// the start of 2,584 of 2,584 such gathers), and a water gather's, which sends no start state.
+const NO_GATHERERS: u8 = 0;
 /// Milliseconds per second.
 const MS_PER_SECOND: f32 = 1_000.0;
+/// The respawn time (`MinRespawnRate`, `MaxRespawnRate`) of a gatherable without one, whose
+/// instanced lock is [`CONTAINER_LOCKOUT_MS`] ([`SimWorld::lock_of`]).
+const NO_RESPAWN_RATE: (u64, u64) = (0, 0);
+/// The interact tag of a tracker entry of an object without one (Observed: retail 0).
+const NO_TRACKED_TAG: u32 = 0;
 /// The paperdoll slot of each tradeskill's tool (beach-quests note: retail equips of the
 /// skinning knife, the pick and the hatchet; the client's `PaperdollSlotTypes` order puts
 /// `CHOPPING_SLOT` at 33, `CUTTING_SLOT`, the sickle's, at 34, `DRESSING_SLOT` at 35 and
@@ -239,8 +283,10 @@ enum GatherRefusal {
     Rank,
     /// The bag lacks the gatherable's `ItemRestrictionId`.
     Item,
-    /// The player opened this loot container and its lockout has not reset.
+    /// The player gathered this instanced object and its lock has not reset.
     Opened,
+    /// The object is only on quest and no active task of the player's quests names its tag.
+    NotOnQuest,
 }
 
 /// A gather that runs.
@@ -259,19 +305,107 @@ pub(super) struct OpenGather {
     /// gather's end takes it away, and its stage counts it; or the switch of the instance's gates
     /// ([`super::gates`]) whose rules the gather's end fires.
     object: Option<u64>,
+    /// When it started, ms.
+    started_ms: u64,
+    /// The work it had left at its start, ms of `BaseGatherTime` (less a kept gather's work).
+    work_ms: u64,
+    /// The work done per ms of gather.
+    efficiency: f32,
     end_ms: u64,
+    /// The gatherer count its start sent ([`NO_GATHERERS`] for a start that sent none).
+    gatherers: u8,
+    /// Its object is instanced ([`nw_content::gathering::InstancedGathers`]): the gather is the
+    /// gatherer's own.
+    instanced: bool,
+    /// It gathers a group node ([`GroupWork`]), which holds its work and its end.
+    group: bool,
 }
 
 impl OpenGather {
-    /// The own done state of the gather that ends (or stops) as the player's gather number
-    /// `gather`.
-    fn done_state(&self, gather: u32) -> BundleMember {
+    /// The encounter start object (or gate switch) it gathers; `None` for another gather.
+    pub(super) const fn object(&self) -> Option<u64> {
+        self.object
+    }
+
+    /// The work it has left when it stops at `now_ms`: the work of its whole
+    /// [`PROGRESS_STEP_MS`] steps is done.
+    fn work_left_ms(&self, now_ms: u64) -> u64 {
+        self.work_ms.saturating_sub(work_done_ms(
+            now_ms.saturating_sub(self.started_ms),
+            self.efficiency,
+        ))
+    }
+
+    /// The own done state of the gather that ends (or stops) with the player's counters
+    /// `counters`, after `ended_before` other gatherers of its group node ended in the same tick.
+    fn done_state(&self, counters: &mut GatherCounters, ended_before: u32) -> BundleMember {
         if self.water {
-            water_gather_ended(gather)
+            water_gather_ended(counters)
         } else {
-            chest_gather_ended(self.request.target_entity, gather)
+            gather_ended(
+                self.request.target_entity,
+                counters,
+                self.gatherers,
+                ended_before,
+            )
         }
     }
+}
+
+/// The lock an instanced object's gather leaves for its gatherer ([`SimWorld::lock_of`],
+/// [`SimWorld::instanced_lock`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct GatherLock {
+    /// When it ends, server ms.
+    pub(super) reset_ms: u64,
+    /// The loot type of the object's slice.
+    loot_type: u32,
+    /// The position of its tracker entry.
+    at: Position,
+    /// How its tracker entry follows the gatherer; `None` for a slice without an area of
+    /// interest radius.
+    range: Option<EntryRange>,
+}
+
+impl GatherLock {
+    /// Lists the lock in the loot tracker of `player` for object `object` (interact tag `tag`),
+    /// looted at server time `server_ms`: the tracker member goes out with the player's next
+    /// bundle, and the player may not gather the object again before the reset
+    /// ([`super::loot_bag::PlayerLoot::opened`]).
+    pub(super) fn list_for(
+        self,
+        player: &mut Player,
+        object: [u8; RAW_ID_LEN],
+        tag: u32,
+        server_ms: u64,
+    ) {
+        player.list_version += 1;
+        let version = player.list_version;
+        let tracked = player.loot.track_instanced(
+            object,
+            self.loot_type,
+            tag,
+            self.at,
+            server_ms,
+            self.reset_ms,
+            self.range,
+            version,
+        );
+        player.extra_members.push(tracked);
+    }
+}
+
+/// The work `elapsed_ms` of gather at `efficiency` did: that of its whole [`PROGRESS_STEP_MS`]
+/// steps, ms of `BaseGatherTime`.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a gather's ms of a few minutes at a positive efficiency"
+)]
+fn work_done_ms(elapsed_ms: u64, efficiency: f32) -> u64 {
+    let steps = elapsed_ms / PROGRESS_STEP_MS;
+    (steps.saturating_mul(PROGRESS_STEP_MS) as f32 * efficiency) as u64
 }
 
 impl SimWorld {
@@ -377,13 +511,21 @@ impl SimWorld {
             return;
         };
         let table = self.gather_table(&gatherable, request, name);
-        let opened = gatherable.loot_container
+        let instanced = mob.is_none()
+            && self
+                .content
+                .instanced_gathers
+                .instanced(request.target_entity);
+        // An instanced object stays locked for its gatherer until its tracker entry's reset.
+        let opened = instanced
             && self
                 .world
                 .get::<Player>(entity)
                 .is_some_and(|player| player.loot.opened(&request.target));
         let allowed = if opened {
             Err(GatherRefusal::Opened)
+        } else if !self.quest_opens(number, &request) {
+            Err(GatherRefusal::NotOnQuest)
         } else if self.holds_tool(entity, &gatherable) {
             self.meets_gather_rule(entity, &gatherable, request.gatherable)
         } else {
@@ -399,11 +541,18 @@ impl SimWorld {
         }
         let tool_efficiency =
             (!gatherable.by_hand).then(|| self.gather_efficiency(entity, &gatherable));
-        let single_swing = tool_efficiency.is_some() && {
+        let needed = request.gatherable.map_or(ONE_GATHERER, |crc| {
+            self.content.gatherables.gatherers_needed(crc)
+        });
+        // A group gatherable's node holds the work of all its gatherers.
+        let group = (needed > ONE_GATHERER && !instanced && mob.is_none() && object.is_none())
+            .then(|| GroupWork::new(needed, gatherable.gather_ms));
+        // Inferred: a group node's work, not one swing, ends its gathers.
+        let single_swing = tool_efficiency.is_some() && group.is_none() && {
             let chance = self.instant_gather_chance(entity, &gatherable);
             self.dice.chance(chance)
         };
-        let started = match (mob, point) {
+        let started: Result<u8, ()> = match (mob, point) {
             (None, _) if let Some(object) = object => {
                 // One player gathers a start object at a time.
                 if self
@@ -414,32 +563,46 @@ impl SimWorld {
                     tracing::debug!(player = number, object, "start object gathered by another");
                     Err(())
                 } else {
-                    Ok(())
+                    Ok(SOLE_GATHERER)
                 }
             }
-            (Some(mob), _) => self.start_skinning(mob, number),
+            (Some(mob), _) => self.start_skinning(mob, number).map(|()| SOLE_GATHERER),
             (None, Some((point, at))) => self
                 .nodes
-                .start(
+                .join(
                     request.target,
                     point,
                     at,
                     number,
                     NodeLayout::of(&gatherable),
+                    group,
                 )
+                .map(|gatherers| u8::try_from(gatherers).unwrap_or(u8::MAX))
                 .map_err(|busy| tracing::debug!(player = number, ?busy, "gather refused")),
             (None, None) => Err(()),
         };
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
-        if started.is_err() {
+        let Ok(gatherers) = started else {
             let refusal = gather_answer(number, request, GATHER_BUSY, NO_NAME);
             send_now(&mut self.combat_messages, &player.connection, &[refusal]);
             return;
+        };
+        let gatherers = if instanced {
+            NO_GATHERERS
+        } else {
+            gatherers
+        };
+        // A group node holds its work; a stopped gather of another object left its work for the
+        // next one, whoever gathers it.
+        let work_ms = match group {
+            Some(_) => self.nodes.group_work_left(&request.target, now_ms),
+            None => self.kept_gathers.take(&request.target),
         }
+        .unwrap_or(gatherable.gather_ms);
         #[allow(clippy::cast_precision_loss, reason = "a gather time of seconds")]
-        let amount = gatherable.gather_ms as f32 / MS_PER_SECOND;
+        let amount = work_ms as f32 / MS_PER_SECOND;
         let (duration_ms, efficiency) = match tool_efficiency {
             Some(efficiency) => {
                 #[allow(
@@ -448,7 +611,7 @@ impl SimWorld {
                     clippy::cast_sign_loss,
                     reason = "a gather time of seconds over a positive efficiency"
                 )]
-                let tool_ms = (gatherable.gather_ms as f32 / efficiency) as u64;
+                let tool_ms = (work_ms as f32 / efficiency) as u64;
                 (
                     if single_swing {
                         GATHER_TICK_MS
@@ -459,18 +622,18 @@ impl SimWorld {
                 )
             }
             None => (
-                gatherable.gather_ms.div_ceil(GATHER_TICK_MS) * GATHER_TICK_MS + GATHER_TICK_MS,
+                work_ms.div_ceil(GATHER_TICK_MS) * GATHER_TICK_MS + GATHER_TICK_MS,
                 HAND_EFFICIENCY,
             ),
         };
         let run = GatherRun {
             amount,
             efficiency,
-            gatherers: ONE_GATHERER,
+            gatherers,
         };
         let accept = gather_answer(number, request, GATHER_ACCEPTED, NO_NAME);
         send_now(&mut self.combat_messages, &player.connection, &[accept]);
-        let started = gather_started(request.target_entity, player.gathers, run);
+        let started = gather_started(request.target_entity, &mut player.gathers, run);
         player.extra_members.extend(started);
         tracing::debug!(player = number, gatherable = %gatherable.id, duration_ms, single_swing, "gather");
         self.open_gathers.push(OpenGather {
@@ -481,8 +644,25 @@ impl SimWorld {
             mob,
             water: false,
             object,
+            started_ms: now_ms,
+            work_ms,
+            efficiency,
             end_ms: now_ms.saturating_add(duration_ms),
+            gatherers,
+            instanced,
+            group: group.is_some(),
         });
+        if group.is_some() {
+            let keeps = self.keeps_progress(&request);
+            self.regroup(&request.target, keeps, now_ms, Some(number));
+        }
+        // A switch of the instance's gates fires its rules that wait for the pull's start
+        // ([`super::gates`]); a start object counts its interactor
+        // ([`super::encounter_roots::EncounterObjects::gather_started`]).
+        if let Some(object) = object {
+            self.gate_switch_started(object);
+            self.encounter_objects.gather_started(object);
+        }
     }
 
     /// Player `number` gathers water at `now_ms` (interaction kind 15; craft2 report, retail
@@ -502,8 +682,8 @@ impl SimWorld {
             tracing::debug!(player = number, "water gather without a water gatherable");
             return;
         };
-        let duration_ms =
-            gatherable.gather_ms.div_ceil(GATHER_TICK_MS) * GATHER_TICK_MS + GATHER_TICK_MS;
+        let work_ms = gatherable.gather_ms;
+        let duration_ms = work_ms.div_ceil(GATHER_TICK_MS) * GATHER_TICK_MS + GATHER_TICK_MS;
         tracing::debug!(player = number, duration_ms, "water gather");
         if let Some(entity) = self.player_by_number(number)
             && let Some(mut player) = self.world.get_mut::<Player>(entity)
@@ -520,7 +700,13 @@ impl SimWorld {
             mob: None,
             water: true,
             object: None,
+            started_ms: now_ms,
+            work_ms,
+            efficiency: HAND_EFFICIENCY,
             end_ms: now_ms.saturating_add(duration_ms),
+            gatherers: NO_GATHERERS,
+            instanced: false,
+            group: false,
         });
     }
 
@@ -669,6 +855,21 @@ impl SimWorld {
             .sum()
     }
 
+    /// Whether the quests of player `number` open the object that `request` gathers: one whose
+    /// variant is only on quest ([`nw_content::interact_tags::InteractTags::quest_gate`]) only
+    /// while an active task of one of them names its tag; any other object always.
+    fn quest_opens(&self, number: u64, request: &InteractionRequest) -> bool {
+        let gate = self
+            .content
+            .interact_tags
+            .quest_gate(request.target_entity, request.gatherable);
+        gate.is_empty()
+            || self
+                .quests_of_player(number)
+                .iter()
+                .any(|quest| gate.iter().any(|tag| quest.run.enables_interact(tag)))
+    }
+
     /// Whether player `entity` may gather `gatherable`: one that needs its tradeskill's tool
     /// (`Restriction` ToolRequired) only with an item in the tool's slot (Inferred: retail
     /// answered the skinning knife's absence with the client's "No equipped Knife" prompt, live
@@ -776,6 +977,41 @@ impl SimWorld {
             .and_then(|gear| gear.worn_item(slot))
     }
 
+    /// Whether the gatherable that `request` gathers keeps the work of a stopped gather
+    /// ([`nw_content::gathering::Gatherables::keeps_progress`]).
+    fn keeps_progress(&self, request: &InteractionRequest) -> bool {
+        request
+            .gatherable
+            .is_some_and(|crc| self.content.gatherables.keeps_progress(crc))
+    }
+
+    /// The gather `gather` stops at `now_ms` without its harvest: the work it has left stays for
+    /// the next gather of its object when its gatherable keeps it and its object is shared
+    /// (Observed: no retail gather of an instanced object kept its work, the well
+    /// `98_Syndicate_03_Well_02` among them; the shared Brimstone glyph locks, loot containers,
+    /// kept theirs). A water gather has no object; a group node holds its own work
+    /// ([`SimWorld::regroup`]).
+    fn keep_work_left(&mut self, gather: &OpenGather, now_ms: u64) {
+        let keeps = !gather.water
+            && !gather.instanced
+            && !gather.group
+            && self.keeps_progress(&gather.request);
+        if !keeps {
+            return;
+        }
+        let start_object = gather
+            .object
+            .filter(|object| self.encounter_objects.stands(*object));
+        self.kept_gathers.keep(
+            gather.request.target,
+            KeptGather {
+                work_ms: gather.work_left_ms(now_ms),
+                mob: gather.mob,
+                start_object,
+            },
+        );
+    }
+
     /// Player `number` starts to skin `mob`: only a dead mob that nobody skinned or skins.
     fn start_skinning(&self, mob: u64, number: u64) -> Result<(), ()> {
         let dead = self.mobs.health(mob) == Some(0);
@@ -797,15 +1033,32 @@ impl SimWorld {
     /// and its quest drops go into the bag and to the
     /// open-world quest, its game event goes to the quest (a quest object), and the node is
     /// depleted until its respawn (a corpse is skinned). The depleted nodes whose time came grow
-    /// back.
+    /// back, and the gathered start objects whose delayed event ended go
+    /// ([`super::encounter_roots::EncounterObjects::tick`]).
     pub(super) fn gathers_due(&mut self, now_ms: u64) {
         self.nodes.tick(now_ms);
+        self.encounter_objects.tick(now_ms);
+        let (mobs, objects) = (&self.mobs, &self.encounter_objects);
+        self.kept_gathers.retain(|kept| {
+            kept.mob.is_none_or(|mob| mobs.health(mob) == Some(0))
+                && kept.start_object.is_none_or(|object| objects.stands(object))
+        });
         let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.open_gathers)
             .into_iter()
             .partition(|gather| now_ms >= gather.end_ms);
         self.open_gathers = later;
+        // The gathers of each group node that ended before in this tick (`GatherCounters`).
+        let mut group_ends: HashMap<[u8; RAW_ID_LEN], u32> = HashMap::new();
         for gather in due {
-            self.end_gather(&gather, now_ms);
+            let ended_before = if gather.group {
+                let ended = group_ends.entry(gather.request.target).or_default();
+                let before = *ended;
+                *ended += 1;
+                before
+            } else {
+                0
+            };
+            self.end_gather(&gather, ended_before, now_ms);
         }
     }
 
@@ -841,7 +1094,9 @@ impl SimWorld {
         }
     }
 
-    fn end_gather(&mut self, gather: &OpenGather, now_ms: u64) {
+    /// `gather` ends at `now_ms`, after `ended_before` other gatherers of its group node ended
+    /// in the same tick.
+    fn end_gather(&mut self, gather: &OpenGather, ended_before: u32, now_ms: u64) {
         let content = std::sync::Arc::clone(&self.content);
         let mob_tags = gather
             .mob
@@ -894,32 +1149,30 @@ impl SimWorld {
                 self.skinned.insert(mob, now_ms);
             }
             None if gather.water => {}
-            // A start object goes: its encounter's stage counts it. A switch of the instance's
-            // gates ([`super::gates`]) stays: its rules change it.
+            // A catacombs chest stays, emptied, and feeds the run's pool ([`super::catacombs`]).
+            // Another start object goes (the holdout glyph at its delayed event's end): its
+            // encounter's stage counts it. A switch of the
+            // instance's gates ([`super::gates`]) stays: its rules change it. An erosion shrine
+            // adds its effect ([`super::afflictions`]).
             None if let Some(object) = gather.object => {
-                self.encounter_objects.remove(object);
-                self.gate_switch_used(object);
+                if !self.catacomb_chest_opened(object) {
+                    self.encounter_objects.gathered(object, now_ms);
+                    self.gate_switch_used(object);
+                }
+                self.erosion_gathered(gather.number, &gather.gatherable.id);
             }
-            // A container stays for everyone else: only its opener's tracker locks it.
-            None if self.lockout_of(gather).is_some() => self.nodes.release(&gather.request.target),
+            // An instanced object stays for everyone else: only its gatherer's tracker locks it.
+            None if gather.instanced => self
+                .nodes
+                .release(&gather.request.target, gather.number),
             None => {
-                let (shortest, longest) = gather.gatherable.respawn_ms;
-                let spread = u32::try_from(longest.saturating_sub(shortest)).unwrap_or(u32::MAX);
-                let respawn_at_ms = now_ms
-                    .saturating_add(shortest)
-                    .saturating_add(u64::from(self.dice.below(spread.saturating_add(1))));
+                let respawn_at_ms = now_ms.saturating_add(self.respawn_roll_ms(&gather.gatherable));
                 self.nodes
                     .deplete(&gather.request.target, now_ms, respawn_at_ms);
             }
         }
-        // A container's lockout ends at the next reset of its kind, from now.
-        let opened = self.lockout_of(gather).and_then(|lockout| {
-            let opened_unix_ms = self.server_ms.saturating_add(SERVER_EPOCH_UNIX_MS);
-            let reset_ms = lockout
-                .ends_at(opened_unix_ms)
-                .saturating_sub(SERVER_EPOCH_UNIX_MS);
-            Some((reset_ms, self.nodes.position_of(&gather.request.target)?))
-        });
+        let locked = self.lock_of(gather);
+        let tag = self.tracked_tag(gather.request.target_entity, gather.request.gatherable);
         let Some(entity) = self.player_by_number(gather.number) else {
             return;
         };
@@ -933,24 +1186,13 @@ impl SimWorld {
             ),
         });
         send_now(&mut self.combat_messages, &player.connection, &[end]);
-        let ended = gather.done_state(player.gathers);
+        let ended = gather.done_state(&mut player.gathers, ended_before);
         player.extra_members.push(ended);
-        player.gathers = player.gathers.saturating_add(1);
         if !gather.water {
             player.ended_gather = Some(gather.request);
         }
-        if let Some((reset_ms, at)) = opened {
-            player.list_version += 1;
-            let version = player.list_version;
-            let tracked = player.loot.track_opened(
-                gather.request.target,
-                at,
-                self.server_ms,
-                reset_ms,
-                true,
-                version,
-            );
-            player.extra_members.push(tracked);
+        if let Some(lock) = locked {
+            lock.list_for(&mut player, gather.request.target, tag, self.server_ms);
         }
         let (items, rolls) = self.roll_drops(gather.number, gather.mob, loot, &hints);
         let gathered = items.clone();
@@ -961,6 +1203,7 @@ impl SimWorld {
             now_ms,
         );
         for (item, quantity) in &gathered {
+            self.outpost_rush_gathered(gather.number, item, *quantity);
             self.quest_event(
                 gather.number,
                 Event::Gathered {
@@ -1032,16 +1275,100 @@ impl SimWorld {
             .collect()
     }
 
-    /// The lockout of the loot container `gather` opens; `None` for a gather of another kind
-    /// ([`nw_content::chest_lockouts`]).
-    fn lockout_of(&self, gather: &OpenGather) -> Option<Lockout> {
-        if !gather.gatherable.loot_container || gather.mob.is_some() || gather.water {
+    /// A roll of the respawn time of `gatherable`: from its `MinRespawnRate` to its
+    /// `MaxRespawnRate`, ms.
+    fn respawn_roll_ms(&mut self, gatherable: &Gatherable) -> u64 {
+        let (shortest, longest) = gatherable.respawn_ms;
+        let spread = u32::try_from(longest.saturating_sub(shortest)).unwrap_or(u32::MAX);
+        shortest.saturating_add(u64::from(self.dice.below(spread.saturating_add(1))))
+    }
+
+    /// The lock that `gather` leaves on its instanced object for its gatherer
+    /// ([`Self::instanced_lock`], at the node's point: Inferred, retail's entry lies within 2 m
+    /// of the well's capital); `None` for a gather of a shared object, a corpse, water or an
+    /// encounter's object.
+    fn lock_of(&mut self, gather: &OpenGather) -> Option<GatherLock> {
+        if !gather.instanced || gather.mob.is_some() || gather.water || gather.object.is_some() {
             return None;
         }
-        gather
-            .request
-            .gatherable
-            .and_then(|crc| self.content.chest_lockouts.of(crc))
+        let at = self.nodes.position_of(&gather.request.target)?;
+        let object = self
+            .content
+            .instanced_gathers
+            .of(gather.request.target_entity)?;
+        self.instanced_lock(object, &gather.gatherable, gather.request.gatherable, at)
+    }
+
+    /// The lock that a gather of instanced object `object` (its slice's values) of gatherable
+    /// `gatherable` (CRC `crc`), ended now, leaves for its gatherer, its tracker entry at `at`;
+    /// `None` without the server's reset clock (the loot limit rules carry it).
+    ///
+    /// Observed (finding D8 "per-player gather lock", 2,122 tracker entries of retail gathers of
+    /// instanced objects, loot containers and others): the entry's reset is the gather's end plus
+    /// a roll of the gatherable's respawn time (1,047 entries strictly between a
+    /// `MinRespawnRate` and a `MaxRespawnRate` that differ: the Syndicate wells 228.3 s and
+    /// 226.3 s of 200 to 300, the whisper plants 33.0 to 57.3 s of 30 to 60;
+    /// `Catacombs_LevelUp` 0.1 s, 28 of 28), 3,600 s for a gatherable without one (842 of 842
+    /// chests of 0 and 0), and never after the world's next daily reset, whole seconds after the
+    /// end (139 entries that end there, the respawn time longer: the vistas of 86,400 s, the
+    /// catacomb chests of 64,000 s; [`nw_content::resets`]); an elite chest's is the daily reset
+    /// ([`nw_content::chest_lockouts`]). Observed (finding D11, retail quest objects): the same
+    /// rule holds for the whole gathers of instanced quest objects, 232 of 232 proximity entries
+    /// (213 inside the respawn range, 19 capped at the daily reset: the trails of 86,400 s) and
+    /// 139 of 139 damageable ones. The entry's loot type and range are the object's slice's
+    /// ([`nw_content::gathering::InstancedGathers::of`], [`EntryRange`]), the range's daily
+    /// reset set when the lock ends there.
+    pub(super) fn instanced_lock(
+        &mut self,
+        object: InstancedObject,
+        gatherable: &Gatherable,
+        crc: Option<u32>,
+        at: Position,
+    ) -> Option<GatherLock> {
+        let clock = self.content.loot_limits.as_ref()?.clock;
+        let opened_unix_ms = self.server_ms.saturating_add(SERVER_EPOCH_UNIX_MS);
+        let daily_reset_unix_ms = clock.end_ns(
+            ResetCycle::Daily,
+            opened_unix_ms.saturating_mul(nw_messages::NS_PER_MS),
+        ) / nw_messages::NS_PER_MS;
+        let elite = crc.is_some_and(|crc| self.content.elite_chests.contains(crc));
+        let rolled_unix_ms = if elite {
+            daily_reset_unix_ms
+        } else {
+            let span_ms = if gatherable.respawn_ms == NO_RESPAWN_RATE {
+                CONTAINER_LOCKOUT_MS
+            } else {
+                self.respawn_roll_ms(gatherable)
+            };
+            opened_unix_ms.saturating_add(span_ms)
+        };
+        let reset_unix_ms = rolled_unix_ms.min(daily_reset_unix_ms);
+        Some(GatherLock {
+            reset_ms: reset_unix_ms.saturating_sub(SERVER_EPOCH_UNIX_MS),
+            loot_type: object.loot_type,
+            at,
+            range: object.aoi_radius_m.map(|radius_m| EntryRange {
+                radius_m,
+                daily_reset: reset_unix_ms == daily_reset_unix_ms,
+            }),
+        })
+    }
+
+    /// The interact tag its tracker entry gives the object of facet entity `facet` that gathers
+    /// `gatherable` (a CRC): the CRC-32 of its lowercase tag (Observed:
+    /// `IO_98_Syndicate_03_Well_01` 0x0f02dfa8; 1,180 of 1,180 retail entries with a tag carry
+    /// one of their gatherable's variant tags, 847 of 847 whose variants have none carry 0;
+    /// finding D11: 232 of 232 quest proximity entries and 139 of 149 damageable ones carry their
+    /// capital's variant tag, `IO_17_IQ_CorruptionTrail_02` of a variant of gatherable
+    /// `17_IQ_CorruptionTrail_01` among them), [`NO_TRACKED_TAG`] for an object without one.
+    /// Inferred: an object whose own slice holds no tag carries the first tag of its
+    /// gatherable's variants.
+    pub(super) fn tracked_tag(&self, facet: u64, gatherable: Option<u32>) -> u32 {
+        self.content
+            .interact_tags
+            .of_interaction(facet, gatherable)
+            .first()
+            .map_or(NO_TRACKED_TAG, |tag| lowercase_crc32(tag))
     }
 
     /// How the game event of `gather` scales: a skinned corpse by the `GatherableLevelModifier`
@@ -1147,14 +1474,39 @@ impl SimWorld {
         reason: u8,
         now_ms: u64,
     ) -> bool {
+        self.give_loot_rolled(number, loot, reason, now_ms).0
+    }
+
+    /// [`SimWorld::give_loot`] that also tells the items rolled and given (item id, quantity),
+    /// for a game event's entry ([`super::game_event_log`]).
+    pub(super) fn give_loot_listed(
+        &mut self,
+        number: u64,
+        loot: Vec<(String, u32)>,
+        now_ms: u64,
+    ) -> Vec<(String, u32)> {
+        self.give_loot_rolled(number, loot, SYNC_MOVED, now_ms).1
+    }
+
+    /// Rolls `loot` for player `number` and gives it in a bag change of sync reason `reason`:
+    /// whether every item went into the bag, and the items rolled.
+    fn give_loot_rolled(
+        &mut self,
+        number: u64,
+        loot: Vec<(String, u32)>,
+        reason: u8,
+        now_ms: u64,
+    ) -> (bool, Vec<(String, u32)>) {
         let items = self.rolled_tables(number, loot);
         let (entries, values) = self.roll_drops(number, None, items, &BTreeMap::new());
-        self.give_drops(
+        let rolled = entries.clone();
+        let whole = self.give_drops(
             number,
             entries.into_iter().zip(values).collect(),
             reason,
             now_ms,
-        )
+        );
+        (whole, rolled)
     }
 
     /// `loot` with each `[LTID]` entry rolled for player `number` (its quantity times) within its
@@ -1180,6 +1532,66 @@ impl SimWorld {
         items
     }
 
+    /// The gatherers of group node `target` changed at `now_ms`: the work done so far stays on it,
+    /// its work goes on at the mean efficiency of its gatherers while enough of them gather
+    /// ([`GroupWork`]), each of its gathers ends when its work does, and each of its gatherers
+    /// but `joined` (whose start state holds the same) gets the new count, with the work left
+    /// when work was counted ([`gatherers_changed`]). A node nobody gathers any more starts over
+    /// when its gatherable does not keep its progress (`keeps`; Inferred: as a stopped gather of
+    /// such a gatherable does; the 6 group gatherables of build 25810808 keep it).
+    fn regroup(
+        &mut self,
+        target: &[u8; RAW_ID_LEN],
+        keeps: bool,
+        now_ms: u64,
+        joined: Option<u64>,
+    ) {
+        let gathers: Vec<usize> = self
+            .open_gathers
+            .iter()
+            .enumerate()
+            .filter(|(_, gather)| gather.group && gather.request.target == *target)
+            .map(|(index, _)| index)
+            .collect();
+        let efficiencies: f32 = gathers
+            .iter()
+            .map(|index| self.open_gathers[*index].efficiency)
+            .sum();
+        #[allow(clippy::cast_precision_loss, reason = "a few gatherers")]
+        let rate = if gathers.is_empty() {
+            HAND_EFFICIENCY
+        } else {
+            efficiencies / gathers.len() as f32
+        };
+        let Some(work) = self.nodes.group_work(target) else {
+            return;
+        };
+        let counted = work.change(now_ms, gathers.len(), rate);
+        if gathers.is_empty() && !keeps {
+            work.reset();
+        }
+        #[allow(clippy::cast_precision_loss, reason = "a gather time of seconds")]
+        let amount = counted.then(|| work.left_ms as f32 / MS_PER_SECOND);
+        let end_ms = work.end_ms().unwrap_or(u64::MAX);
+        let gatherers = u8::try_from(gathers.len()).unwrap_or(u8::MAX);
+        let mut told = Vec::new();
+        for index in gathers {
+            let gather = &mut self.open_gathers[index];
+            gather.end_ms = end_ms;
+            if Some(gather.number) != joined {
+                told.push(gather.number);
+            }
+        }
+        for number in told {
+            if let Some(entity) = self.player_by_number(number)
+                && let Some(mut player) = self.world.get_mut::<Player>(entity)
+            {
+                let changed = gatherers_changed(&mut player.gathers, gatherers, amount);
+                player.extra_members.push(changed);
+            }
+        }
+    }
+
     /// The client of player `entity` ends interaction `interaction` at `now_ms`: a gather that
     /// still runs stops without a harvest, unless its end time has come (then it ends with its
     /// harvest) (the own gather state done, as retail sends it after a cancel);
@@ -1202,19 +1614,26 @@ impl SimWorld {
             && now_ms >= self.open_gathers[at].end_ms
         {
             let gather = self.open_gathers.remove(at);
-            self.end_gather(&gather, now_ms);
+            self.end_gather(&gather, 0, now_ms);
             running = None;
         }
         let request = match running {
             Some(at) => {
                 let gather = self.open_gathers.remove(at);
+                self.keep_work_left(&gather, now_ms);
                 if gather.mob.is_none() {
-                    self.nodes.release(&gather.request.target);
+                    self.nodes.release(&gather.request.target, number);
+                }
+                if gather.group {
+                    let keeps = self.keeps_progress(&gather.request);
+                    self.regroup(&gather.request.target, keeps, now_ms, None);
+                }
+                if let Some(object) = gather.object {
+                    self.encounter_objects.gather_stopped(object);
                 }
                 if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-                    let stopped = gather.done_state(player.gathers);
+                    let stopped = gather.done_state(&mut player.gathers, 0);
                     player.extra_members.push(stopped);
-                    player.gathers = player.gathers.saturating_add(1);
                 }
                 gather.request
             }
@@ -1242,6 +1661,71 @@ impl SimWorld {
     }
 }
 
+/// The work left of a stopped gather, for the next gather of its object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct KeptGather {
+    /// The work left, ms of `BaseGatherTime`.
+    work_ms: u64,
+    /// The mob whose corpse was skinned: the work stays while the mob is dead.
+    mob: Option<u64>,
+    /// The encounter start object gathered: the work stays while it stands.
+    start_object: Option<u64>,
+}
+
+/// The work left of the stopped gathers that keep it, by the raw id of the object they gathered.
+///
+/// Observed (finding 2026-11-13 "gather progress and quest interacts"): the work belongs to the
+/// object, not to the player's last gather (a `PigmentPlantTan` kept 8.87 left over 239 s with
+/// a wolf skinned between, a `TreeHardwoodMedium` across a `TreeHardwoodLarge` gather). Inferred:
+/// the next gather of the object starts with it whoever gathers it (one shared world object; no
+/// retail capture has a second player on a stopped node), and it stays until that gather, the
+/// longest pause of a retail capture being 239 s.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(super) struct KeptGathers {
+    by_target: HashMap<[u8; RAW_ID_LEN], KeptGather>,
+}
+
+impl KeptGathers {
+    /// The gather of object `target` stopped with `kept` left.
+    fn keep(&mut self, target: [u8; RAW_ID_LEN], kept: KeptGather) {
+        self.by_target.insert(target, kept);
+    }
+
+    /// The work left on object `target` for the gather that starts there now, which takes it.
+    fn take(&mut self, target: &[u8; RAW_ID_LEN]) -> Option<u64> {
+        self.by_target.remove(target).map(|kept| kept.work_ms)
+    }
+
+    /// Keeps only the work for which `stays` holds.
+    fn retain(&mut self, stays: impl Fn(&KeptGather) -> bool) {
+        self.by_target.retain(|_, kept| stays(kept));
+    }
+}
+
+/// What the last change of a node set.
+///
+/// Observed (interact states of the gatherables of 513 retail ledgers): a gatherable counts its
+/// gatherers in `HasInteractors`, as a change of that child alone at each gather's start
+/// (`010200000001`) and stop (`010200000000`, 222 slots); the harvest that depletes it sends
+/// `Enabled` off with `HasInteractors` 0 (`01030000000000`, 1,483 slots).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeChange {
+    /// Its gatherable or interact state or its timeline (a growth, a timeline's end).
+    States,
+    /// Its interactor count alone (a gather's start or stop).
+    Interactors,
+    /// The harvest that depleted it and ended its gather.
+    Harvest,
+}
+
+/// The interact state's component of a node of `layout`.
+const fn interact_component(layout: NodeLayout) -> u64 {
+    match layout {
+        NodeLayout::Plant => INTERACT_COMPONENT,
+        NodeLayout::BreakingWallsCannon => CANNON_INTERACT_COMPONENT,
+    }
+}
+
 /// One gather node that left its default state.
 #[derive(Debug, Clone, PartialEq)]
 struct Node {
@@ -1250,8 +1734,10 @@ struct Node {
     point: usize,
     /// Where its first gatherer stood (Inferred: a node is within reach of its gatherer).
     position: Position,
-    /// The player who gathers it now.
-    gatherer: Option<u64>,
+    /// The players who gather it now: one at most, but for a group node.
+    gatherers: Vec<u64>,
+    /// The work of a group node.
+    group: Option<GroupWork>,
     /// When it grows back, while it is depleted.
     respawn_at_ms: Option<u64>,
     /// Where its entity holds the states sent to the players near it; `None`: none is sent.
@@ -1262,6 +1748,8 @@ struct Node {
     timeline_version: u32,
     /// Counts its state changes, so each player gets each one once.
     version: u32,
+    /// What its last change set.
+    last_change: NodeChange,
     /// Its depletion is not saved yet.
     unsaved: bool,
 }
@@ -1285,6 +1773,45 @@ impl Node {
         self.respawn_at_ms.is_some()
     }
 
+    /// Its interactor count changed: a new version that sets the count alone.
+    fn interactors_changed(&mut self) {
+        self.version += 1;
+        self.last_change = NodeChange::Interactors;
+    }
+
+    /// Its interact state's `HasInteractors`: its gatherers (Observed: 1 while a player gathers
+    /// a node; Inferred: each gatherer of a group node counts).
+    fn interactors(&self) -> u32 {
+        u32::try_from(self.gatherers.len()).unwrap_or(u32::MAX)
+    }
+
+    /// The `HasInteractors` of its whole interact state: in a card only while a player gathers
+    /// it (Inferred: a card holds the states that left their default; Observed: the Fire
+    /// Cannon's card after its use `06b22d010100`), none after a change of its other states
+    /// (Observed: its growth `06b22d010101`), 0 after the harvest that ends its gather, its
+    /// count after a gather's start or stop.
+    fn whole_interactors(&self, with_card: bool) -> Option<u32> {
+        if with_card {
+            return (self.interactors() > 0).then(|| self.interactors());
+        }
+        match self.last_change {
+            NodeChange::States => None,
+            NodeChange::Harvest => Some(0),
+            NodeChange::Interactors => Some(self.interactors()),
+        }
+    }
+
+    /// The interact state member of its layout with its interactor count alone.
+    fn interactors_member(&self, layout: NodeLayout) -> BundleMember {
+        BundleMember {
+            component: interact_component(layout),
+            state: MemberState::Interact(InteractState {
+                enabled: None,
+                has_interactors: Some(self.interactors()),
+            }),
+        }
+    }
+
     /// Its card and states (`with_card`), or its states alone, in the slots of its layout.
     fn members(&self, layout: NodeLayout, with_card: bool) -> Vec<BundleMember> {
         let (state, enabled) = if self.depleted() {
@@ -1293,9 +1820,9 @@ impl Node {
             (HEALTHY, true)
         };
         let (controller, interact) = match layout {
-            NodeLayout::Plant => (CONTROLLER_COMPONENT, INTERACT_COMPONENT),
+            NodeLayout::Plant => (CONTROLLER_COMPONENT, interact_component(layout)),
             NodeLayout::BreakingWallsCannon => {
-                (CANNON_CONTROLLER_COMPONENT, CANNON_INTERACT_COMPONENT)
+                (CANNON_CONTROLLER_COMPONENT, interact_component(layout))
             }
         };
         let card = with_card.then_some(BundleMember {
@@ -1316,7 +1843,7 @@ impl Node {
                 component: interact,
                 state: MemberState::Interact(InteractState {
                     enabled: Some(enabled),
-                    has_interactors: None,
+                    has_interactors: self.whole_interactors(with_card),
                 }),
             },
         ];
@@ -1361,6 +1888,94 @@ impl Node {
     }
 }
 
+/// The work of the node of a group gatherable (`NumRequiredToGather` above one,
+/// [`nw_content::gathering::Gatherables::gatherers_needed`]): it goes on only while at least
+/// `needed` players gather the node, and the work done stays on the node when a gatherer leaves.
+///
+/// Observed (finding 2026-11-13 "gatherer counts and group gathers": 4 retail sequences of
+/// `DungeonRestlessShores_MinorMonolith`, needed 3, every gatherer at efficiency 1.0):
+/// - `EXP-The-Depths`: 10.0 left with 2 gatherers from 730.93 s, a third at 735.30 s; the POV's
+///   stop at 735.64 s left 9.70 (3 steps); it came back at 736.20 s with 9.70 and 3 gatherers and
+///   ended at 745.89 s, 9.70 s later.
+/// - `EXP-The-Ennead`: 2 gatherers from 994.85 s, a third at 999.00 s, a stop at 1000.32 s left
+///   8.70; 50 s later a gather started with 8.70 alone, others came at 1052.45 s and 1052.52 s, and
+///   it ended at 1061.22 s.
+/// - `HiveNormaleTheDepths`: 3 gatherers from 1685.04 s; one left at 1687.61 s and the others got
+///   7.5 left and 2 gatherers; 35.7 s with 2 gatherers did no work; with a third at 1746.54 s it
+///   ended at 1754.06 s, 7.5 s later.
+///
+/// Inferred: the work goes on at the mean efficiency of the gatherers (the totem
+/// `RW_Siege_Pool_Blighted_Totem`'s gathers with 3 gatherers did 1.07 to 1.18 of work per second
+/// while the POV's own efficiency was 1.0; the other gatherers' efficiencies are in no ledger).
+/// Unknown: the totem's own state got 6.886 and 6.750 left when its count rose to 3 and to 2
+/// (`Playthrough_Part_18` 3334.58 s and 3466.34 s), work with fewer than 3 gatherers or another
+/// gatherer's; its two gathers with 1 and 2 gatherers at 3481.30 s and 3485.87 s started from full,
+/// as no work went on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct GroupWork {
+    /// The gatherers its work needs.
+    needed: usize,
+    /// Its gatherable's `BaseGatherTime`, ms.
+    full_ms: u64,
+    /// The work it had left when it last changed, ms of `BaseGatherTime`.
+    left_ms: u64,
+    /// While its work goes on: since when, and at which efficiency.
+    running: Option<(u64, f32)>,
+}
+
+impl GroupWork {
+    /// The work of a node that needs `needed` gatherers and `full_ms` of work.
+    pub(super) fn new(needed: u32, full_ms: u64) -> Self {
+        Self {
+            needed: usize::try_from(needed).unwrap_or(usize::MAX),
+            full_ms,
+            left_ms: full_ms,
+            running: None,
+        }
+    }
+
+    /// The work left at `now_ms`: that of its whole [`PROGRESS_STEP_MS`] steps since its work
+    /// went on is done.
+    fn left_at(&self, now_ms: u64) -> u64 {
+        match self.running {
+            Some((since_ms, rate)) => self
+                .left_ms
+                .saturating_sub(work_done_ms(now_ms.saturating_sub(since_ms), rate)),
+            None => self.left_ms,
+        }
+    }
+
+    /// Its gatherers changed at `now_ms` to `gatherers`, whose mean efficiency is `rate`: the
+    /// work done so far stays, and the work goes on from now while enough of them gather.
+    /// Whether work went on before (so the work left was counted).
+    fn change(&mut self, now_ms: u64, gatherers: usize, rate: f32) -> bool {
+        let counted = self.running.is_some();
+        self.left_ms = self.left_at(now_ms);
+        self.running = (gatherers >= self.needed).then_some((now_ms, rate));
+        counted
+    }
+
+    /// When its work ends while it goes on; `None` while it waits for gatherers.
+    fn end_ms(&self) -> Option<u64> {
+        self.running.map(|(since_ms, rate)| {
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a gather time of seconds over a positive efficiency"
+            )]
+            let run_ms = (self.left_ms as f32 / rate) as u64;
+            since_ms.saturating_add(run_ms)
+        })
+    }
+
+    /// Its work starts over: all of it is left, and it waits for gatherers.
+    fn reset(&mut self) {
+        self.left_ms = self.full_ms;
+        self.running = None;
+    }
+}
+
 /// Why a gather request is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NodeBusy {
@@ -1388,14 +2003,19 @@ impl Nodes {
     /// `position`; refused while another player gathers it, while it is depleted, and when the
     /// point and the node id do not name the same node they named first (a new id cannot skip a
     /// depleted node). `layout`: where its entity holds the states sent to the players near it.
-    pub(super) fn start(
+    /// A node of a group gatherable (`group`: its work when nobody worked on it yet) takes every
+    /// player who comes (Observed: 2 and 3 players gathered the group monolith at once, and no
+    /// other gatherable had a second gatherer in 694 retail ledgers). Its gatherers once the
+    /// player joined.
+    pub(super) fn join(
         &mut self,
         gde_ref: [u8; RAW_ID_LEN],
         point: usize,
         position: Position,
         player: u64,
         layout: Option<NodeLayout>,
-    ) -> Result<(), NodeBusy> {
+        group: Option<GroupWork>,
+    ) -> Result<usize, NodeBusy> {
         let index = match (self.by_ref.get(&gde_ref), self.by_point.get(&point)) {
             (Some(by_ref), Some(by_point)) if by_ref == by_point => *by_ref,
             (None, None) => {
@@ -1403,12 +2023,14 @@ impl Nodes {
                     gde_ref,
                     point,
                     position,
-                    gatherer: None,
+                    gatherers: Vec::new(),
+                    group: None,
                     respawn_at_ms: None,
                     layout,
                     timeline_ends_at_ms: None,
                     timeline_version: 0,
                     version: 0,
+                    last_change: NodeChange::States,
                     unsaved: false,
                 });
                 let index = self.nodes.len() - 1;
@@ -1422,22 +2044,42 @@ impl Nodes {
         if node.depleted() {
             return Err(NodeBusy::Depleted);
         }
-        if node.gatherer.is_some_and(|gatherer| gatherer != player) {
+        if node.group.is_none() {
+            node.group = group;
+        }
+        if node.group.is_none() && node.gatherers.iter().any(|gatherer| *gatherer != player) {
             return Err(NodeBusy::Gathered);
         }
-        node.gatherer = Some(player);
-        Ok(())
+        if !node.gatherers.contains(&player) {
+            node.gatherers.push(player);
+            node.interactors_changed();
+        }
+        Ok(node.gatherers.len())
     }
 
-    /// The gather of node `gde_ref` ends without a harvest (a cancel).
-    pub(super) fn release(&mut self, gde_ref: &[u8; RAW_ID_LEN]) {
+    /// The gather of node `gde_ref` by player `player` ends without a harvest (a cancel).
+    pub(super) fn release(&mut self, gde_ref: &[u8; RAW_ID_LEN], player: u64) {
         if let Some(node) = self
             .by_ref
             .get(gde_ref)
             .map(|index| &mut self.nodes[*index])
+            && let Some(at) = node.gatherers.iter().position(|gatherer| *gatherer == player)
         {
-            node.gatherer = None;
+            node.gatherers.remove(at);
+            node.interactors_changed();
         }
+    }
+
+    /// The work group node `gde_ref` has left at `now_ms`; `None` for another node.
+    pub(super) fn group_work_left(&self, gde_ref: &[u8; RAW_ID_LEN], now_ms: u64) -> Option<u64> {
+        let index = self.by_ref.get(gde_ref)?;
+        self.nodes[*index].group.map(|work| work.left_at(now_ms))
+    }
+
+    /// The work of group node `gde_ref`; `None` for another node.
+    fn group_work(&mut self, gde_ref: &[u8; RAW_ID_LEN]) -> Option<&mut GroupWork> {
+        let index = self.by_ref.get(gde_ref)?;
+        self.nodes[*index].group.as_mut()
     }
 
     /// The level point that node id `gde_ref` names among the points `near` (in reach, nearest
@@ -1467,17 +2109,24 @@ impl Nodes {
             .map(|index| self.nodes[*index].position)
     }
 
-    /// Node `gde_ref` was harvested at `now_ms`: depleted until `respawn_at_ms`. A Fire Cannon's
-    /// timeline plays from now for [`CANNON_TIMELINE_MS`].
+    /// Node `gde_ref` was harvested at `now_ms`: depleted until `respawn_at_ms`, and a group
+    /// node's work starts over. A Fire Cannon's timeline plays from now for
+    /// [`CANNON_TIMELINE_MS`]. The other gathers of a group node that end with the same harvest
+    /// change nothing more.
     pub(super) fn deplete(&mut self, gde_ref: &[u8; RAW_ID_LEN], now_ms: u64, respawn_at_ms: u64) {
         if let Some(node) = self
             .by_ref
             .get(gde_ref)
             .map(|index| &mut self.nodes[*index])
+            && !node.depleted()
         {
-            node.gatherer = None;
+            node.gatherers.clear();
+            if let Some(work) = node.group.as_mut() {
+                work.reset();
+            }
             node.respawn_at_ms = Some(respawn_at_ms);
             node.version += 1;
+            node.last_change = NodeChange::Harvest;
             node.unsaved = true;
             if node.layout == Some(NodeLayout::BreakingWallsCannon) {
                 node.timeline_ends_at_ms = Some(now_ms.saturating_add(CANNON_TIMELINE_MS));
@@ -1521,12 +2170,14 @@ impl Nodes {
             gde_ref: saved.gde_ref,
             point: saved.point,
             position: saved.position,
-            gatherer: None,
+            gatherers: Vec::new(),
+            group: None,
             respawn_at_ms: Some(respawn_at_ms),
             layout,
             timeline_ends_at_ms: None,
             timeline_version: 1,
             version: 1,
+            last_change: NodeChange::States,
             unsaved: false,
         });
         let index = self.nodes.len() - 1;
@@ -1542,10 +2193,12 @@ impl Nodes {
                 node.timeline_ends_at_ms = None;
                 node.version += 1;
                 node.timeline_version = node.version;
+                node.last_change = NodeChange::States;
             }
             if node.respawn_at_ms.is_some_and(|at| now_ms >= at) {
                 node.respawn_at_ms = None;
                 node.version += 1;
+                node.last_change = NodeChange::States;
             }
         }
     }
@@ -1579,13 +2232,21 @@ impl Nodes {
         let index = usize::try_from(number.checked_sub(GATHERABLE_ENTITY_BASE)?).ok()?;
         let node = self.nodes.get(index)?;
         let layout = node.layout?;
-        if !slot.new && sent.get(&number) == Some(&node.version) {
+        let known = sent.insert(number, node.version);
+        if !slot.new && known == Some(node.version) {
             return None;
         }
-        sent.insert(number, node.version);
+        let members = if !slot.new
+            && node.last_change == NodeChange::Interactors
+            && known == node.version.checked_sub(1)
+        {
+            vec![node.interactors_member(layout)]
+        } else {
+            node.members(layout, slot.new)
+        };
         Some(BundleGroup {
             interest: u64::from(slot.interest),
-            members: node.members(layout, slot.new),
+            members,
         })
     }
 }
@@ -1595,11 +2256,13 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     use nw_content::gathering::{
-        CyclicGatherables, GatherRule, GatherRules, Gatherables, ToolEfficiencies, ToolEfficiency,
+        CyclicGatherables, GatherRule, GatherRules, Gatherables, InstancedGathers,
+        InstancedObject, ToolEfficiencies, ToolEfficiency,
     };
     use nw_content::progression::{Progression, RankPerks, TradeskillRankRow, TradeskillSource};
     use nw_content::rewards::{EventGrant, EventGrants};
     use nw_formats::objectstream::lowercase_crc32;
+    use nw_messages::GatheringState;
 
     use super::*;
     use crate::placed_points::PlacedPoints;
@@ -1744,31 +2407,31 @@ pub(crate) mod tests {
     fn a_level_point_keeps_the_node_id_it_first_had() {
         const OTHER: [u8; RAW_ID_LEN] = [0x6c; RAW_ID_LEN];
         let mut nodes = Nodes::default();
-        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT), Ok(()));
+        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None), Ok(1));
         nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
         assert_eq!(
-            nodes.start(OTHER, FLINT_POINT, AT, PLAYER, SENT),
+            nodes.join(OTHER, FLINT_POINT, AT, PLAYER, SENT, None),
             Err(NodeBusy::OtherNode),
             "a new id does not skip the depleted node"
         );
         assert_eq!(
-            nodes.start(FLINT, FLINT_POINT + 1, AT, PLAYER, SENT),
+            nodes.join(FLINT, FLINT_POINT + 1, AT, PLAYER, SENT, None),
             Err(NodeBusy::OtherNode),
             "the id of one node does not gather another"
         );
         assert_eq!(
-            nodes.start(OTHER, FLINT_POINT + 1, AT, PLAYER, SENT),
-            Ok(())
+            nodes.join(OTHER, FLINT_POINT + 1, AT, PLAYER, SENT, None),
+            Ok(1)
         );
     }
 
     #[test]
     fn a_node_of_another_layout_is_never_sent() {
         let mut nodes = Nodes::default();
-        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER, None), Ok(()));
+        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, None, None), Ok(1));
         nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
         assert_eq!(
-            nodes.start(FLINT, FLINT_POINT, AT, PLAYER, None),
+            nodes.join(FLINT, FLINT_POINT, AT, PLAYER, None, None),
             Err(NodeBusy::Depleted),
             "the server still keeps it depleted"
         );
@@ -1789,7 +2452,7 @@ pub(crate) mod tests {
     fn a_depletion_is_saved_once_and_a_restored_node_stays_depleted_until_its_time() {
         const UNIX_OF_ZERO_MS: u64 = 1_798_761_600_000;
         let mut nodes = Nodes::default();
-        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT), Ok(()));
+        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None), Ok(1));
         nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
         let saved = nodes.take_unsaved(|at_ms| at_ms + UNIX_OF_ZERO_MS);
         assert_eq!(
@@ -1806,14 +2469,14 @@ pub(crate) mod tests {
         let mut restarted = Nodes::default();
         restarted.restore(&saved[0], RESPAWN_AT_MS, SENT);
         assert_eq!(
-            restarted.start(FLINT, FLINT_POINT, AT, PLAYER, SENT),
+            restarted.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
             Err(NodeBusy::Depleted)
         );
         assert_eq!(restarted.numbers_near(AT, RADIUS_M).count(), 1);
         restarted.tick(RESPAWN_AT_MS);
         assert_eq!(
-            restarted.start(FLINT, FLINT_POINT, AT, PLAYER, SENT),
-            Ok(())
+            restarted.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
+            Ok(1)
         );
         assert!(
             restarted.take_unsaved(|at_ms| at_ms).is_empty(),
@@ -1821,22 +2484,66 @@ pub(crate) mod tests {
         );
     }
 
+    /// Retail gatherables count their gatherers: `HasInteractors` alone at a gather's start
+    /// (`010200000001`) and stop (`010200000000`), and `Enabled` off with `HasInteractors` 0 at
+    /// the harvest that depletes them (`01030000000000`).
+    #[test]
+    fn a_node_counts_its_gatherer_from_the_gathers_start_to_its_stop_or_harvest() {
+        let interact_bytes = |group: &BundleGroup| -> Vec<String> {
+            group
+                .members
+                .iter()
+                .filter(|member| matches!(member.state, MemberState::Interact(_)))
+                .map(|member| hex::encode(member.encode().expect("encodes")))
+                .collect()
+        };
+        let mut nodes = Nodes::default();
+        let number = GATHERABLE_ENTITY_BASE;
+        let mut sent = HashMap::new();
+        let new = Slot {
+            interest: 9,
+            new: true,
+        };
+        let kept = Slot { new: false, ..new };
+        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None), Ok(1));
+        let card = nodes.group(number, new, &mut sent).expect("card");
+        assert_eq!(interact_bytes(&card), ["04b22d01030100000001"], "the card with its gatherer");
+        nodes.release(&FLINT, PLAYER);
+        let stopped = nodes.group(number, kept, &mut sent).expect("stop");
+        assert_eq!(stopped.members.len(), 1, "the count alone");
+        assert_eq!(interact_bytes(&stopped), ["04b22d010200000000"]);
+        nodes.release(&FLINT, PLAYER);
+        assert_eq!(nodes.group(number, kept, &mut sent), None, "no gatherer to stop");
+        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None), Ok(1));
+        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None), Ok(1));
+        let started = nodes.group(number, kept, &mut sent).expect("start");
+        assert_eq!(interact_bytes(&started), ["04b22d010200000001"]);
+        assert_eq!(nodes.group(number, kept, &mut sent), None, "one start, one change");
+        nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
+        let harvested = nodes.group(number, kept, &mut sent).expect("harvest");
+        assert_eq!(interact_bytes(&harvested), ["04b22d01030000000000"]);
+        assert_eq!(state_of(&harvested), Some(DEPLETED));
+        nodes.tick(RESPAWN_AT_MS);
+        let grown = nodes.group(number, kept, &mut sent).expect("growth");
+        assert_eq!(interact_bytes(&grown), ["04b22d010101"]);
+    }
+
     #[test]
     fn a_node_is_gathered_once_until_it_grows_back() {
         let mut nodes = Nodes::default();
-        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT), Ok(()));
+        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None), Ok(1));
         assert_eq!(
-            nodes.start(FLINT, FLINT_POINT, AT, PLAYER + 1, SENT),
+            nodes.join(FLINT, FLINT_POINT, AT, PLAYER + 1, SENT, None),
             Err(NodeBusy::Gathered)
         );
         assert_eq!(
             nodes.numbers_near(AT, RADIUS_M).count(),
-            0,
-            "a node in its default state is not shown"
+            1,
+            "a node in gather shows its gatherer"
         );
         nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
         assert_eq!(
-            nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT),
+            nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
             Err(NodeBusy::Depleted)
         );
         let number = GATHERABLE_ENTITY_BASE;
@@ -1856,7 +2563,7 @@ pub(crate) mod tests {
         assert_eq!(nodes.group(number, kept, &mut sent), None, "sent once");
         nodes.tick(RESPAWN_AT_MS - 1);
         assert_eq!(
-            nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT),
+            nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
             Err(NodeBusy::Depleted)
         );
         nodes.tick(RESPAWN_AT_MS);
@@ -1864,13 +2571,13 @@ pub(crate) mod tests {
         assert_eq!(grown.members.len(), 2, "the states without the card");
         assert_eq!(state_of(&grown), Some(HEALTHY));
         assert_eq!(
-            nodes.start(FLINT, FLINT_POINT, AT, PLAYER + 1, SENT),
-            Ok(())
+            nodes.join(FLINT, FLINT_POINT, AT, PLAYER + 1, SENT, None),
+            Ok(1)
         );
-        nodes.release(&FLINT);
+        nodes.release(&FLINT, PLAYER + 1);
         assert_eq!(
-            nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT),
-            Ok(()),
+            nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
+            Ok(1),
             "a cancel frees it"
         );
         let far = Position {
@@ -2052,6 +2759,102 @@ pub(crate) mod tests {
             .map_or(0, |player| player.masteries.experience(mastery))
     }
 
+    /// A gather of an instance gate's switch fires the rules of its start when it begins and
+    /// those of its use when it ends (the catacombs' secret lever: its door opens at the pull's
+    /// start, the lever moves at its end, `CATACOMBS2` 431.572 and 433.574 s).
+    #[test]
+    fn a_gate_switch_gather_fires_its_start_then_its_use() {
+        use nw_content::dungeon_gates::{
+            Entry, Gate, GateAction, GateLevel, GateRule, GateRuleSet, LevelRules, Trigger,
+        };
+        use nw_messages::{DEPLETED_GATHERABLE, HEALTHY_GATHERABLE};
+
+        use super::super::gates::{GateChange, LevelGates, gatherable_member};
+        /// The lever's gatherable (`catacombs_lever_wall_torch`).
+        const SWITCH: &str = "Raid_CutlassKeys00_SplitSwitch";
+        const LEVER: &str = "SecretLeverA@0";
+        const DOOR: &str = "SecretDoorA@0";
+        const GATHERABLE: u64 = 2;
+        const LEVER_NUMBER: u64 = 70;
+        const DOOR_NUMBER: u64 = 71;
+        let (mut world, entity) = admitted();
+        let mut content = (*world.content).clone();
+        content.gatherables = Gatherables::build([gatherable(SWITCH, true)]);
+        world.content = Arc::new(content);
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position())
+            .expect("body");
+        let gate = |name: &str| Gate {
+            name: name.to_owned(),
+            entity: 1,
+            slice: format!("slices/test/{name}.dynamicslice"),
+            asset: [5; 16],
+            position: [at.x, at.y, at.z],
+            yaw_deg: 0.0,
+            position_component: Some(1),
+            gatherable_component: Some(GATHERABLE),
+            timelines: Vec::new(),
+            interact_component: None,
+        };
+        let opens = |gate: &str, when: Trigger| GateRuleSet {
+            gate: gate.to_owned(),
+            entry: Entry::Present {
+                state: Some(HEALTHY_GATHERABLE),
+            },
+            rules: vec![GateRule {
+                when,
+                then: GateAction::Set {
+                    state: DEPLETED_GATHERABLE,
+                    timeline: None,
+                },
+            }],
+        };
+        let level = GateLevel {
+            gates: vec![gate(LEVER), gate(DOOR)],
+            ..GateLevel::default()
+        };
+        let rules = LevelRules {
+            gates: vec![
+                opens(LEVER, Trigger::SwitchUsed { switch: LEVER.to_owned() }),
+                opens(DOOR, Trigger::SwitchStarted { switch: LEVER.to_owned() }),
+            ],
+            ..LevelRules::default()
+        };
+        let (mut gates, _) = LevelGates::new(&level, Some(&rules), 3);
+        gates.set_number(0, Some(LEVER_NUMBER));
+        gates.set_number(1, Some(DOOR_NUMBER));
+        let (lever_ref, _) = gates.identity(0).expect("lever");
+        world.dungeon_gates = Some(gates);
+        let pull = InteractionRequest {
+            target: lever_ref,
+            ..request(1, 0, SWITCH)
+        };
+        world.gather_open_world(entity, NUMBER, pull, &[], NOW);
+        let end_ms = world.open_gathers.first().expect("the pull runs").end_ms;
+        let opened = world
+            .dungeon_gates
+            .as_mut()
+            .map(|gates| gates.step(&[], NOW))
+            .unwrap_or_default();
+        let open = gatherable_member(GATHERABLE, DEPLETED_GATHERABLE);
+        let changed = |changes: &[GateChange], wanted: usize| {
+            changes.iter().any(|change| {
+                matches!(change, GateChange::Change { gate, members }
+                    if *gate == wanted && members.contains(&open))
+            })
+        };
+        assert!(changed(&opened, 1) && !changed(&opened, 0), "{opened:?}");
+        world.gathers_due(end_ms);
+        let pulled = world
+            .dungeon_gates
+            .as_mut()
+            .map(|gates| gates.step(&[], end_ms))
+            .unwrap_or_default();
+        assert!(changed(&pulled, 0), "{pulled:?}");
+    }
+
     #[test]
     fn a_tool_gather_runs_at_the_tools_efficiency_and_gives_its_tradeskill_experience() {
         let (mut world, entity) = admitted();
@@ -2171,6 +2974,225 @@ pub(crate) mod tests {
             mining(&world, entity) > 0,
             "the harvest of a gather whose time came"
         );
+    }
+
+    /// The amount left that the own running gather state of player `entity` last sent.
+    fn amount_sent(world: &SimWorld, entity: Entity) -> Option<f32> {
+        world
+            .world
+            .get::<Player>(entity)?
+            .extra_members
+            .iter()
+            .filter_map(|member| match &member.state {
+                MemberState::Gathering(state) => state.amount_remaining,
+                _ => None,
+            })
+            .next_back()
+    }
+
+    /// Vein `0x11`'s target, the object whose work the tests keep.
+    const KEPT_VEIN: [u8; RAW_ID_LEN] = [0x11; RAW_ID_LEN];
+
+    /// The object keys of the test requests' facets ([`request`]: interactions 0 to 7).
+    const TEST_REQUESTS_OBJECT: u64 = 0;
+
+    /// The test content's vein keeps the work of its stopped gathers; the objects of the test
+    /// requests are `instanced` or shared.
+    fn with_kept_vein(world: &mut SimWorld, instanced: bool) {
+        world.content = Arc::new(PlayerContent {
+            gatherables: Gatherables::build([gatherable(VEIN, false)]).with_kept_progress([VEIN]),
+            instanced_gathers: instanced_objects(instanced),
+            ..(*world.content).clone()
+        });
+    }
+
+    /// The objects of the test requests when they are `instanced`, else none; their slice has
+    /// no area of interest radius, so their tracker entries stay listed at any distance.
+    fn instanced_objects(instanced: bool) -> InstancedGathers {
+        if instanced {
+            instanced_within(None)
+        } else {
+            InstancedGathers::default()
+        }
+    }
+
+    /// The objects of the test requests as instanced quest objects of area of interest radius
+    /// `aoi_radius_m` (`None`: none).
+    fn instanced_within(aoi_radius_m: Option<f32>) -> InstancedGathers {
+        InstancedGathers::build(
+            [],
+            [(
+                TEST_REQUESTS_OBJECT,
+                InstancedObject {
+                    loot_type: QUEST_LOOT,
+                    aoi_radius_m,
+                },
+            )],
+        )
+    }
+
+    /// `InstancedLootType::Quest`: the loot type of the test requests' instanced objects (the
+    /// type of `master_quest_instanced`).
+    const QUEST_LOOT: u32 = 4;
+
+    /// The sun disk shield's three gathers of `1624_0401_thedemonscauldron` (20.0, then 10.85 and
+    /// 3.06 left): a stopped gather of a gatherable that keeps its work leaves the work of its
+    /// whole 100 ms steps done, the next gather of the object starts with the rest, a gather of
+    /// another object between changes nothing, and the harvest takes it.
+    #[test]
+    fn a_stopped_gather_that_keeps_its_work_resumes_with_what_is_left() {
+        /// 1,250 ms of gather: 12 whole steps of 100 ms at efficiency 2 did 2,400 ms of work.
+        const STOPPED_AFTER_MS: u64 = 1_250;
+        const LEFT_MS: u64 = VEIN_MS - 2_400;
+        const RESUMED_AT_MS: u64 = 3_000;
+        let (mut world, entity) = admitted();
+        with_kept_vein(&mut world, false);
+        world.gather_open_world(entity, NUMBER, request(1, 0x11, VEIN), &[], NOW);
+        world.cancel_gather(entity, 1, NOW + STOPPED_AFTER_MS);
+        assert!(world.open_gathers.is_empty(), "stopped");
+        assert_eq!(mining(&world, entity), 0, "no harvest");
+        // Another vein, stopped within its first step: all its work is left.
+        world.gather_open_world(entity, NUMBER, request(2, 0x12, VEIN), &[], NOW + 2_000);
+        world.cancel_gather(entity, 2, NOW + 2_050);
+        world.gather_open_world(entity, NUMBER, request(3, 0x11, VEIN), &[], NOW + RESUMED_AT_MS);
+        let [gather] = world.open_gathers.as_slice() else {
+            panic!("one gather runs: {:?}", world.open_gathers);
+        };
+        assert_eq!(gather.work_ms, LEFT_MS, "the first vein's work left");
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "a gather time of seconds"
+        )]
+        let left_at_tool_ms = (LEFT_MS as f64 / PICK_EFFICIENCY) as u64;
+        assert_eq!(gather.end_ms, NOW + RESUMED_AT_MS + left_at_tool_ms);
+        #[allow(clippy::cast_precision_loss, reason = "a gather time of seconds")]
+        let left_s = LEFT_MS as f32 / MS_PER_SECOND;
+        assert!(
+            amount_sent(&world, entity).is_some_and(|amount| (amount - left_s).abs() < f32::EPSILON),
+            "the own state's amount left: {:?}",
+            amount_sent(&world, entity)
+        );
+        world.gathers_due(NOW + RESUMED_AT_MS + left_at_tool_ms);
+        assert!(mining(&world, entity) > 0, "the harvest");
+        assert_eq!(world.kept_gathers.take(&KEPT_VEIN), None, "the harvest took it");
+        assert_eq!(
+            world.kept_gathers.take(&[0x12; RAW_ID_LEN]),
+            Some(VEIN_MS),
+            "a stop within the first step did no work"
+        );
+    }
+
+    /// Every retail gather of a gatherable whose `ResetGatherTimeOnEndInteraction` is 1 started
+    /// over after an interrupt, and so did the gathers of instanced objects (the well
+    /// `98_Syndicate_03_Well_02`, which keeps its work by its cell).
+    #[test]
+    fn a_stopped_gather_that_starts_over_keeps_nothing() {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "a gather time of seconds"
+        )]
+        let full_ms = (VEIN_MS as f64 / PICK_EFFICIENCY) as u64;
+        let (mut world, entity) = admitted();
+        world.gather_open_world(entity, NUMBER, request(1, 0x11, VEIN), &[], NOW);
+        world.cancel_gather(entity, 1, NOW + 1_250);
+        world.gather_open_world(entity, NUMBER, request(2, 0x11, VEIN), &[], NOW + 2_000);
+        let end_ms = world.open_gathers.first().expect("the gather runs").end_ms;
+        assert_eq!(end_ms, NOW + 2_000 + full_ms, "a gatherable that starts over");
+        world.cancel_gather(entity, 2, NOW + 2_500);
+        let (mut world, entity) = admitted();
+        with_kept_vein(&mut world, true);
+        world.gather_open_world(entity, NUMBER, request(1, 0x11, VEIN), &[], NOW);
+        world.cancel_gather(entity, 1, NOW + 1_250);
+        assert_eq!(world.kept_gathers.take(&KEPT_VEIN), None, "an instanced object");
+    }
+
+    /// The work left on a corpse goes when its mob is no longer dead, on a start object when it
+    /// no longer stands; any other stays.
+    #[test]
+    fn kept_work_goes_with_its_corpse_or_its_start_object() {
+        const NO_SUCH_MOB: u64 = 0x7777;
+        const NO_SUCH_OBJECT: u64 = 0x8888;
+        let (mut world, _) = admitted();
+        let kept = |mob, start_object| KeptGather {
+            work_ms: VEIN_MS,
+            mob,
+            start_object,
+        };
+        world.kept_gathers.keep([1; RAW_ID_LEN], kept(Some(NO_SUCH_MOB), None));
+        world.kept_gathers.keep([2; RAW_ID_LEN], kept(None, Some(NO_SUCH_OBJECT)));
+        world.kept_gathers.keep(KEPT_VEIN, kept(None, None));
+        world.gathers_due(NOW);
+        assert_eq!(world.kept_gathers.take(&[1; RAW_ID_LEN]), None, "no dead mob");
+        assert_eq!(world.kept_gathers.take(&[2; RAW_ID_LEN]), None, "no standing object");
+        assert_eq!(world.kept_gathers.take(&KEPT_VEIN), Some(VEIN_MS), "a level node's");
+    }
+
+    /// `0513_LighthouseLure` (`InteractOnlyOnQuest` 1, tag `IO_0513_LighthouseLure`): a gather of
+    /// an object that is only on quest is refused until an active task of the player's quest
+    /// names its tag, and refused again when that task is done.
+    #[test]
+    fn a_quest_only_object_is_gathered_only_while_a_task_names_its_tag() {
+        use nw_content::interact_tags::{InteractTags, VariantTag};
+
+        use crate::objectives::{TaskBook, TaskRow};
+        use crate::player_content::{ObjectiveRow, QuestBook};
+        const LURE_TAG: &str = "IO_0513_LighthouseLure";
+        const LURE_QUEST: &str = "0511_0101";
+        const LURE_EVENT: &str = "0513_LighthouseLure_interact";
+        let (mut world, entity) = admitted();
+        let task = |id: &str, kind: &str| TaskRow {
+            task_id: id.to_owned(),
+            kind: kind.to_owned(),
+            ..TaskRow::default()
+        };
+        let quests = QuestBook::build(
+            [ObjectiveRow {
+                id: LURE_QUEST.to_owned(),
+                root: "lure_root".to_owned(),
+                ..ObjectiveRow::default()
+            }],
+            TaskBook::new(vec![
+                TaskRow {
+                    sub_tasks: vec!["lure_use".to_owned(), "lure_after".to_owned()],
+                    ..task("lure_root", "ConsecutiveTaskContainer")
+                },
+                TaskRow {
+                    kill_enemy_type: Some(LURE_EVENT.to_owned()),
+                    interact_tag: Some(LURE_TAG.to_owned()),
+                    target_qty: Some(1),
+                    ..task("lure_use", "TaskGameEvent")
+                },
+                TaskRow {
+                    item_name: Some(PICK.to_owned()),
+                    ..task("lure_after", "TaskEquipItem")
+                },
+            ]),
+        );
+        let interact_tags = InteractTags::build(&HashMap::new(), [], []).with_gatherables([(
+            lowercase_crc32(VEIN),
+            VariantTag {
+                tag: LURE_TAG.to_owned(),
+                only_on_quest: true,
+            },
+        )]);
+        world.content = Arc::new(PlayerContent {
+            quests,
+            interact_tags,
+            ..(*world.content).clone()
+        });
+        world.gather_open_world(entity, NUMBER, request(1, 0x11, VEIN), &[], NOW);
+        assert!(world.open_gathers.is_empty(), "no quest names the tag");
+        world.start_quest(NUMBER, LURE_QUEST, NOW).expect("start");
+        world.gather_open_world(entity, NUMBER, request(2, 0x11, VEIN), &[], NOW);
+        assert_eq!(world.open_gathers.len(), 1, "the lure task is active");
+        world.cancel_gather(entity, 2, NOW + 1);
+        world.quest_event(NUMBER, Event::GameEvent(LURE_EVENT), NOW + 2);
+        world.gather_open_world(entity, NUMBER, request(3, 0x11, VEIN), &[], NOW + 3);
+        assert!(world.open_gathers.is_empty(), "the lure task is done");
     }
 
     #[test]
@@ -2404,14 +3426,15 @@ pub(crate) mod tests {
             end_ms,
             NOW + VEIN_MS.div_ceil(GATHER_TICK_MS) * GATHER_TICK_MS + GATHER_TICK_MS
         );
-        let gathers = world.world.get::<Player>(entity).expect("player").gathers;
+        let mut gathers = world.world.get::<Player>(entity).expect("player").gathers;
         world.gathers_due(end_ms);
         assert!(world.open_gathers.is_empty());
         let player = world.world.get::<Player>(entity).expect("player");
-        assert_eq!(player.gathers, gathers + 1);
+        let done = water_gather_ended(&mut gathers);
+        assert_eq!(player.gathers, gathers, "one whole gather counted");
         assert_eq!(
             player.extra_members.last(),
-            Some(&water_gather_ended(gathers)),
+            Some(&done),
             "the done state (retail Hive_Dye 74.05 s: status 3, no gatherable)"
         );
         assert_eq!(world.nodes.numbers_near(AT, RADIUS_M).count(), 0, "no node");
@@ -2471,9 +3494,9 @@ pub(crate) mod tests {
         assert_eq!(world.open_gathers.len(), 1, "after a pause: a new press");
     }
 
+    /// An instanced chest (`master_lootcontainer`) is opened for its opener alone.
     #[test]
     fn an_opened_chest_is_locked_for_its_opener_only() {
-        use nw_content::chest_lockouts::{ChestLockouts, ContainerRow};
         const CHEST: &str = "SupplyCrate";
         let (mut world, entity) = admitted();
         let mut content = (*world.content).clone();
@@ -2481,12 +3504,8 @@ pub(crate) mod tests {
             loot_container: true,
             ..gatherable(CHEST, true)
         }]);
-        content.chest_lockouts = ChestLockouts::build([ContainerRow {
-            id: CHEST,
-            container: true,
-            elite: false,
-            max_respawn_s: 0.0,
-        }]);
+        with_resets(&mut content);
+        content.instanced_gathers = instanced_objects(true);
         world.content = Arc::new(content);
         place_nodes(&mut world, NUMBER, &[CHEST]);
         world.gather_open_world(entity, NUMBER, request(1, 0x15, CHEST), &[], NOW);
@@ -2500,13 +3519,478 @@ pub(crate) mod tests {
         let player = world.world.get::<Player>(entity).expect("player");
         assert!(player.loot.opened(&target), "the opener's tracker holds it");
         assert_eq!(
-            world.nodes.start(target, FLINT_POINT, AT, PLAYER, SENT),
-            Ok(()),
+            world.nodes.join(target, FLINT_POINT, AT, PLAYER, SENT, None),
+            Ok(1),
             "the chest is not depleted for others"
         );
-        world.nodes.release(&target);
+        world.nodes.release(&target, PLAYER);
         world.gather_open_world(entity, NUMBER, request(2, 0x15, CHEST), &[], end_ms);
         assert!(world.open_gathers.is_empty(), "locked for its opener");
+    }
+
+    /// Gives `content` the reset clock of the EU Central server (the well ledgers' server).
+    pub(crate) fn with_resets(content: &mut PlayerContent) {
+        use nw_content::loot_limits::{LootLimitRules, LootLimits};
+        use nw_content::resets::{ResetClock, ServerRegion};
+        content.loot_limits = Some(LootLimitRules {
+            limits: LootLimits::default(),
+            clock: ResetClock {
+                region: ServerRegion::EuCentral,
+            },
+        });
+    }
+
+    /// The respawn time of the test well (retail `98_Syndicate_03_Well_01`: 200 to 300 s).
+    const WELL_RESPAWN_MS: (u64, u64) = (200_000, 300_000);
+    /// The test well's gatherable and its variant's interact tag.
+    const WELL: &str = "98_Syndicate_03_Well_01";
+    const WELL_TAG: &str = "IO_98_Syndicate_03_Well_01";
+    /// The test well's target.
+    const WELL_TARGET: [u8; RAW_ID_LEN] = [0x17; RAW_ID_LEN];
+    /// Sunday 2026-10-25 04:00 UTC, Unix ms: the EU Central reset (05:00 CET) of the day
+    /// European summer time ended (retail: 25 capped entries at 04:00 UTC from then).
+    const WINTER_RESET_UNIX_MS: u64 = 1_792_900_800_000;
+
+    /// A world whose instanced test well (no loot container, slice radius `aoi_radius_m`) is at
+    /// the player's feet, its end at `server_ms`.
+    fn with_instanced_well(server_ms: u64, aoi_radius_m: Option<f32>) -> (SimWorld, Entity) {
+        use nw_content::interact_tags::{InteractTags, VariantTag};
+        let (mut world, entity) = admitted();
+        let mut content = (*world.content).clone();
+        content.gatherables = Gatherables::build([Gatherable {
+            respawn_ms: WELL_RESPAWN_MS,
+            ..gatherable(WELL, true)
+        }]);
+        with_resets(&mut content);
+        content.instanced_gathers = instanced_within(aoi_radius_m);
+        content.interact_tags = InteractTags::build(&HashMap::new(), [], []).with_gatherables([(
+            lowercase_crc32(WELL),
+            VariantTag {
+                tag: WELL_TAG.to_owned(),
+                only_on_quest: false,
+            },
+        )]);
+        world.content = Arc::new(content);
+        place_nodes(&mut world, NUMBER, &[WELL]);
+        world.gather_open_world(entity, NUMBER, request(1, 0x17, WELL), &[], NOW);
+        let end_ms = world.open_gathers.first().expect("the well is gathered").end_ms;
+        world.server_ms = server_ms;
+        world.gathers_due(end_ms);
+        (world, entity)
+    }
+
+    /// Retail `Playthrough_Part_21` 1341.31 s: the instanced well `98_Syndicate_03_Well_01`
+    /// gave its gatherer a quest entry (type 4, its variant's tag `0x0f02dfa8`) whose reset came
+    /// 228.3 s later, of its respawn time of 200 to 300 s; the well stayed for the others, and
+    /// its gatherer could not gather it again while the entry lived.
+    #[test]
+    fn an_instanced_object_is_locked_for_its_gatherer_until_a_roll_of_its_respawn_time() {
+        /// Midnight UTC (the server epoch, a winter day): the next daily reset is 4 h away
+        /// (05:00 CET).
+        const MIDNIGHT_SERVER_MS: u64 = 0;
+        let (mut world, entity) = with_instanced_well(MIDNIGHT_SERVER_MS, None);
+        {
+            let mut player = world.world.get_mut::<Player>(entity).expect("player");
+            assert_eq!(
+                player.loot.opened_kind(&WELL_TARGET),
+                Some((QUEST_LOOT, lowercase_crc32(WELL_TAG))),
+                "the slice's loot type and the variant's tag"
+            );
+            assert!(
+                player
+                    .loot
+                    .due(AT, MIDNIGHT_SERVER_MS + WELL_RESPAWN_MS.0 - 1, None, 1)
+                    .is_none(),
+                "locked for at least the shortest respawn time"
+            );
+        }
+        assert_eq!(
+            world
+                .nodes
+                .join(WELL_TARGET, FLINT_POINT, AT, PLAYER, SENT, None),
+            Ok(1),
+            "the well is not depleted for the others"
+        );
+        world.nodes.release(&WELL_TARGET, PLAYER);
+        world.gather_open_world(entity, NUMBER, request(2, 0x17, WELL), &[], NOW);
+        assert!(world.open_gathers.is_empty(), "locked for its gatherer");
+        let mut player = world.world.get_mut::<Player>(entity).expect("player");
+        assert!(
+            player
+                .loot
+                .due(AT, MIDNIGHT_SERVER_MS + WELL_RESPAWN_MS.1, None, 2)
+                .is_some(),
+            "the lock ends by the longest respawn time"
+        );
+        assert!(!player.loot.opened(&WELL_TARGET), "free again");
+    }
+
+    /// Retail (139 entries, the vistas of 86,400 s and the catacomb chests of 64,000 s among
+    /// them): an instanced object's lock never outlasts the world's next daily reset.
+    #[test]
+    fn an_instanced_lock_ends_at_the_next_daily_reset_at_the_latest() {
+        /// The time left to the daily reset, shorter than the well's shortest respawn time.
+        const BEFORE_RESET_MS: u64 = 100_000;
+        let reset_server_ms = WINTER_RESET_UNIX_MS - SERVER_EPOCH_UNIX_MS;
+        let (mut world, entity) = with_instanced_well(reset_server_ms - BEFORE_RESET_MS, None);
+        let mut player = world.world.get_mut::<Player>(entity).expect("player");
+        assert!(player.loot.opened(&WELL_TARGET), "locked");
+        assert!(
+            player.loot.due(AT, reset_server_ms - 1, None, 1).is_none(),
+            "locked until the reset"
+        );
+        assert!(
+            player.loot.due(AT, reset_server_ms, None, 2).is_some(),
+            "free at the daily reset"
+        );
+    }
+
+    /// Finding D9 "tracker entries out of range" (`master_quest_instanced`, radius 100 m: 1,481
+    /// retail removals of median 99.5 m, 241 re-adds of median 98.5 m) and D10 (12 of 12
+    /// re-adds of capped entries): the well's entry leaves its gatherer's list beyond its slice's
+    /// radius while the lock stays, and comes back within it looted at the return; its lock,
+    /// capped at the daily reset, then ends whole seconds after the return at that reset.
+    #[test]
+    fn an_instanced_objects_entry_follows_its_gatherer_by_its_slice_radius() {
+        /// The `m_aoiRadius` of `master_quest_instanced`, m.
+        const QUEST_AOI_RADIUS_M: f32 = 100.0;
+        /// The time left to the daily reset at the gather's end, shorter than the well's
+        /// shortest respawn time: its lock is capped there.
+        const BEFORE_RESET_MS: u64 = 100_000;
+        /// When the gatherer is far, ms after the gather's end.
+        const FAR_AFTER_MS: u64 = 1_000;
+        /// When the gatherer is back, ms after the gather's end (the end is a whole second),
+        /// and its sub-second part.
+        const BACK_AFTER_MS: u64 = 21_250;
+        const BACK_SUBSECOND_MS: u64 = 250;
+        let reset_server_ms = WINTER_RESET_UNIX_MS - SERVER_EPOCH_UNIX_MS;
+        let ended_ms = reset_server_ms - BEFORE_RESET_MS;
+        let (mut world, entity) = with_instanced_well(ended_ms, Some(QUEST_AOI_RADIUS_M));
+        let clock = world.content.loot_limits.as_ref().map(|rules| rules.clock);
+        let feet = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        // Twice the radius: beyond it from each of the test nodes, a metre apart.
+        let far = Position {
+            x: feet.x + 2.0 * QUEST_AOI_RADIUS_M,
+            ..feet
+        };
+        let mut player = world.world.get_mut::<Player>(entity).expect("player");
+        assert!(
+            player.loot.due(feet, ended_ms + 1, clock, 1).is_none(),
+            "listed within the radius"
+        );
+        assert!(
+            player
+                .loot
+                .due(far, ended_ms + FAR_AFTER_MS, clock, 2)
+                .is_some()
+        );
+        assert_eq!(
+            player.loot.listed(&WELL_TARGET),
+            None,
+            "off the list beyond it"
+        );
+        assert!(player.loot.opened(&WELL_TARGET), "still locked");
+        let back_ms = ended_ms + BACK_AFTER_MS;
+        assert!(player.loot.due(feet, back_ms, clock, 3).is_some());
+        let entry = player.loot.listed(&WELL_TARGET).expect("listed again");
+        assert_eq!(
+            entry.looted_ns,
+            gear::unix_ns(back_ms),
+            "looted at the return"
+        );
+        assert_eq!(
+            entry.reset_ns,
+            gear::unix_ns(reset_server_ms + BACK_SUBSECOND_MS),
+            "the daily reset with the return's sub-second part"
+        );
+        assert!(
+            player
+                .loot
+                .due(feet, reset_server_ms + BACK_SUBSECOND_MS, clock, 4)
+                .is_some(),
+            "free at its reset"
+        );
+        assert!(!player.loot.opened(&WELL_TARGET));
+    }
+
+    /// Retail: 842 of 842 entries of chests without a respawn time reset 3,600 s after the open.
+    #[test]
+    fn an_instanced_object_without_a_respawn_time_is_locked_an_hour() {
+        let (mut world, entity) = admitted();
+        let mut content = (*world.content).clone();
+        content.gatherables = Gatherables::build([Gatherable {
+            respawn_ms: NO_RESPAWN_RATE,
+            ..gatherable(WELL, true)
+        }]);
+        with_resets(&mut content);
+        content.instanced_gathers = instanced_objects(true);
+        world.content = Arc::new(content);
+        place_nodes(&mut world, NUMBER, &[WELL]);
+        world.gather_open_world(entity, NUMBER, request(1, 0x17, WELL), &[], NOW);
+        let end_ms = world.open_gathers.first().expect("gathered").end_ms;
+        world.server_ms = 0;
+        world.gathers_due(end_ms);
+        let mut player = world.world.get_mut::<Player>(entity).expect("player");
+        assert_eq!(
+            player.loot.opened_kind(&WELL_TARGET),
+            Some((QUEST_LOOT, NO_TRACKED_TAG)),
+            "no tag"
+        );
+        assert!(
+            player
+                .loot
+                .due(AT, CONTAINER_LOCKOUT_MS - 1, None, 1)
+                .is_none()
+        );
+        assert!(player.loot.due(AT, CONTAINER_LOCKOUT_MS, None, 2).is_some());
+    }
+
+    /// Retail (94 of 96 elite chest entries): an elite chest stays locked for its opener until
+    /// the server's next daily reset, not for its hour.
+    #[test]
+    fn an_elite_chest_is_locked_until_the_next_daily_reset() {
+        use nw_content::chest_lockouts::{ContainerRow, EliteChests};
+        const CHEST: &str = "EliteChest";
+        /// Saturday 2026-10-24 12:00 UTC, Unix ms.
+        const OPENED_UNIX_MS: u64 = 1_792_843_200_000;
+        /// Sunday 2026-10-25 04:00 UTC, Unix ms: the next EU Central reset (05:00 CET).
+        const RESET_UNIX_MS: u64 = 1_792_900_800_000;
+        let (mut world, entity) = admitted();
+        let mut content = (*world.content).clone();
+        content.gatherables = Gatherables::build([Gatherable {
+            loot_container: true,
+            respawn_ms: NO_RESPAWN_RATE,
+            ..gatherable(CHEST, true)
+        }]);
+        content.elite_chests = EliteChests::build([ContainerRow {
+            id: CHEST,
+            container: true,
+            elite: true,
+        }]);
+        with_resets(&mut content);
+        content.instanced_gathers = instanced_objects(true);
+        world.content = Arc::new(content);
+        place_nodes(&mut world, NUMBER, &[CHEST]);
+        world.gather_open_world(entity, NUMBER, request(1, 0x15, CHEST), &[], NOW);
+        let end_ms = world.open_gathers.first().expect("the chest is opened").end_ms;
+        let opened_server_ms = OPENED_UNIX_MS - SERVER_EPOCH_UNIX_MS;
+        let reset_server_ms = RESET_UNIX_MS - SERVER_EPOCH_UNIX_MS;
+        world.server_ms = opened_server_ms;
+        world.gathers_due(end_ms);
+        let mut player = world.world.get_mut::<Player>(entity).expect("player");
+        assert!(
+            player
+                .loot
+                .due(AT, opened_server_ms + CONTAINER_LOCKOUT_MS, None, 1)
+                .is_none(),
+            "still locked after the hour of a common chest"
+        );
+        assert!(player.loot.due(AT, reset_server_ms - 1, None, 2).is_none());
+        assert!(
+            player.loot.due(AT, reset_server_ms, None, 3).is_some(),
+            "free at the daily reset"
+        );
+    }
+
+    /// The own gather states that player `entity` got, in order.
+    fn gathering_states(world: &SimWorld, entity: Entity) -> Vec<GatheringState> {
+        world
+            .world
+            .get::<Player>(entity)
+            .map(|player| {
+                player
+                    .extra_members
+                    .iter()
+                    .filter_map(|member| match member.state {
+                        MemberState::Gathering(state) => Some(state),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Retail `Playthrough_Part_04`: a shared object's gather counts its gatherer at its start
+    /// (4540.67 s, 4617.04 s) and sets the count back to 0 at its end (4545.40 s, 4620.13 s); an
+    /// instanced quest object's counts none and its end sends no count (110.99 s, 114.01 s).
+    #[test]
+    fn a_gather_counts_its_gatherer_unless_its_object_is_instanced() {
+        for (instanced, start, end) in [(false, Some(1), Some(0)), (true, Some(0), None)] {
+            let (mut world, entity) = admitted();
+            with_kept_vein(&mut world, instanced);
+            world.gather_open_world(entity, NUMBER, request(1, 0x11, VEIN), &[], NOW);
+            let end_ms = world.open_gathers.first().expect("the gather runs").end_ms;
+            world.gathers_due(end_ms);
+            let states = gathering_states(&world, entity);
+            let counts: Vec<Option<u8>> = states.iter().map(|state| state.gatherer_count).collect();
+            assert_eq!(counts, [start, end], "instanced {instanced}");
+        }
+    }
+
+    /// The Brimstone glyph locks (`16BS_AncientGlyphLock_Chest`, a shared loot container whose
+    /// cell keeps its work) kept their work after a stop and gave no loot tracker entry: a shared
+    /// container is depleted for everyone, an instanced one locks for its opener alone.
+    #[test]
+    fn a_shared_loot_container_keeps_its_work_and_is_depleted_for_everyone() {
+        const LOCK: &str = "16BS_AncientGlyphLock_Chest";
+        let (mut world, entity) = admitted();
+        let mut content = (*world.content).clone();
+        content.gatherables = Gatherables::build([Gatherable {
+            loot_container: true,
+            ..gatherable(LOCK, true)
+        }])
+        .with_kept_progress([LOCK]);
+        with_resets(&mut content);
+        world.content = Arc::new(content);
+        place_nodes(&mut world, NUMBER, &[LOCK]);
+        let target = [0x16; RAW_ID_LEN];
+        world.gather_open_world(entity, NUMBER, request(1, 0x16, LOCK), &[], NOW);
+        world.cancel_gather(entity, 1, NOW + 1_000);
+        world.gather_open_world(entity, NUMBER, request(2, 0x16, LOCK), &[], NOW + 2_000);
+        let gather = world.open_gathers.first().expect("the gather runs");
+        assert_eq!(gather.work_ms, VEIN_MS - 1_000, "the work left of the stop");
+        let end_ms = gather.end_ms;
+        world.gathers_due(end_ms);
+        let player = world.world.get::<Player>(entity).expect("player");
+        assert!(!player.loot.opened(&target), "no tracker entry");
+        assert_eq!(
+            world.nodes.join(target, FLINT_POINT, AT, PLAYER, SENT, None),
+            Err(NodeBusy::Depleted),
+            "depleted for everyone"
+        );
+    }
+
+    /// The group monolith of `EXP-The-Depths` (needs 3): no work with 2 gatherers, a third's
+    /// stop 340 ms after it came leaves 3 steps done, and the other two get the work left with
+    /// their new count; with 3 again the work goes on and every gather ends with it.
+    #[test]
+    fn a_group_node_works_only_while_enough_players_gather_it() {
+        const MONOLITH: &str = "DungeonRestlessShores_MinorMonolith";
+        const MONOLITH_MS: u64 = 10_000;
+        const NEEDED: u32 = 3;
+        const THIRD_AT_MS: u64 = 4_370;
+        const THIRD_STOP_AT_MS: u64 = 4_710;
+        const THIRD_BACK_AT_MS: u64 = 5_270;
+        const LEFT_MS: u64 = MONOLITH_MS - 300;
+        let (mut world, first) = admitted();
+        world.content = Arc::new(PlayerContent {
+            gatherables: Gatherables::build([Gatherable {
+                gather_ms: MONOLITH_MS,
+                ..gatherable(MONOLITH, true)
+            }])
+            .with_kept_progress([MONOLITH])
+            .with_gatherers_needed([(MONOLITH, NEEDED)]),
+            ..(*world.content).clone()
+        });
+        place_nodes(&mut world, NUMBER, &[MONOLITH]);
+        let mut players = vec![(NUMBER, first)];
+        for number in [NUMBER + 1, NUMBER + 2] {
+            world
+                .admit(&admit_at(number, 0.0, true), NOW, SERVER_TIME)
+                .expect("admit");
+            players.push((number, world.by_connection[&connection(number)]));
+        }
+        let gather = |world: &mut SimWorld, at: usize, interaction: u64, at_ms: u64| {
+            let (number, entity) = players[at];
+            let request = request(interaction, 0x30, MONOLITH);
+            world.gather_open_world(entity, number, request, &[], NOW + at_ms);
+        };
+        gather(&mut world, 0, 1, 0);
+        gather(&mut world, 1, 2, 100);
+        assert!(
+            world.open_gathers.iter().all(|gather| gather.end_ms == u64::MAX),
+            "no work with 2 gatherers"
+        );
+        gather(&mut world, 2, 3, THIRD_AT_MS);
+        assert!(
+            world
+                .open_gathers
+                .iter()
+                .all(|gather| gather.end_ms == NOW + THIRD_AT_MS + MONOLITH_MS),
+            "3 gatherers: the work goes on"
+        );
+        let (_, third) = players[2];
+        world.cancel_gather(third, 3, NOW + THIRD_STOP_AT_MS);
+        #[allow(clippy::cast_precision_loss, reason = "a gather time of seconds")]
+        let left_s = LEFT_MS as f32 / MS_PER_SECOND;
+        let (_, firsts) = players[0];
+        let told: Vec<(Option<u8>, Option<f32>)> = gathering_states(&world, firsts)
+            .iter()
+            .map(|state| (state.gatherer_count, state.amount_remaining))
+            .collect();
+        assert_eq!(
+            told,
+            [
+                (Some(1), Some(10.0)),
+                (Some(2), None),
+                (Some(3), None),
+                (Some(2), Some(left_s))
+            ],
+            "the first gatherer's start and the counts of the others' comings and goings"
+        );
+        gather(&mut world, 2, 4, THIRD_BACK_AT_MS);
+        assert_eq!(
+            gathering_states(&world, third)
+                .last()
+                .map(|state| (state.gatherer_count, state.amount_remaining)),
+            Some((Some(3), Some(left_s))),
+            "the third comes back to the work left"
+        );
+        let end_ms = NOW + THIRD_BACK_AT_MS + LEFT_MS;
+        assert!(world.open_gathers.iter().all(|gather| gather.end_ms == end_ms));
+        world.gathers_due(end_ms);
+        assert!(world.open_gathers.is_empty(), "every gather ends with the work");
+        assert_eq!(
+            world.nodes.group_work_left(&[0x30; RAW_ID_LEN], end_ms),
+            Some(MONOLITH_MS),
+            "the harvest starts the work over"
+        );
+        // Retail monolith ends in one tick: +2 for the first ender, +3 for the second
+        // (`HiveNormaleTheDepths` 1754.06 s), +4 for the third (`the_depths_group_run_tank_pov`
+        // 1708.60 s).
+        let end_steps: Vec<u32> = players
+            .iter()
+            .map(|(_, entity)| {
+                let refs: Vec<u32> = gathering_states(&world, *entity)
+                    .iter()
+                    .filter_map(|state| state.gather_ref_count)
+                    .collect();
+                refs[refs.len() - 1] - refs[refs.len() - 2]
+            })
+            .collect();
+        assert_eq!(end_steps, [2, 3, 4]);
+        let first_refs: Vec<u32> = gathering_states(&world, firsts)
+            .iter()
+            .filter_map(|state| state.gather_ref_count)
+            .collect();
+        assert_eq!(
+            first_refs,
+            [2, 3, 4, 5, 6, 8],
+            "a shared start, a step for each count change, the end"
+        );
+    }
+
+    /// A group node's work counts whole 100 ms steps at its gatherers' mean efficiency, only
+    /// while enough of them gather; with nobody left the work done stays.
+    #[test]
+    fn group_work_goes_on_only_while_enough_gather() {
+        const RATE: f32 = 1.5;
+        let mut work = GroupWork::new(3, 8_000);
+        assert!(!work.change(0, 2, RATE), "no work before");
+        assert_eq!(work.end_ms(), None, "2 of 3 wait");
+        assert_eq!(work.left_at(5_000), 8_000);
+        assert!(!work.change(5_000, 3, RATE));
+        assert_eq!(work.left_at(5_250), 8_000 - 300, "2 whole steps at 1.5");
+        assert_eq!(work.end_ms(), Some(5_000 + 5_333));
+        assert!(work.change(5_250, 0, RATE), "the work done was counted");
+        assert_eq!(work.left_at(60_000), 7_700, "kept while nobody gathers");
+        work.reset();
+        assert_eq!(work.left_at(60_000), 8_000);
     }
 
     /// The gatherable controller and the interact of `group` are in the Fire Cannon's slots.

@@ -51,26 +51,47 @@
 //! - A dead player asks for its respawn (1938) 8 to 30 s after its death, at one respawn point
 //!   per match (the same point id in every request of a ledger).
 //!
-//! Inferred: the capture rule (each second the progress moves 2 toward the team with more living
-//! players in the outpost; an equal count holds it; an empty outpost falls back 2 a second; the
-//! end at 100); the outpost places on a map (the slice's places from the map's middle, 1024,
-//! 1024: Observed exactly for the B outposts of both maps); the capture area (the slice's
+//! - The capture rule (game mode helper B13, findings `2026-11-13-outpost-rush-shed-and-points.md`):
+//!   the capture point slices hold `m_captureTime` 60 s, `m_captureTimeDecreasePerPlayer` 10 s,
+//!   `m_captureTimeMinimum` 10 s and `m_captureMaxPlayerDelta` 5; retail captures took 61, 51,
+//!   41, 30 to 32 and 11 to 19 s (7-step windows of all 8 Trench and Vertical ledgers); the
+//!   progress shown is a whole number (steps 2, 2, 1 for a 60 s capture); a built Protection Ward
+//!   of the owner stops the capture ([`capture_points`]).
+//!
+//! Inferred: the capture rule (each second the team with more living players in the outpost
+//! leads by the difference; a capture takes `60 - 10 x min(lead - 1, 5)` s; the owner's lead
+//! takes another team's progress back at the same rate; an equal count holds it; an empty
+//! outpost falls back 1 a second, as the retail falls of about 102 s); the outpost places on a
+//! map (the slice's places from the map's middle, 1024, 1024: Observed exactly for the B outposts of both maps); the capture area (the slice's
 //! `radius` 21.35 m around the outpost, its `height` above and below); PvP between the two teams
 //! while the match runs; the respawn at the team's spot as soon as the client asks; at
 //! `TimeLimit` the team with more points wins (no capture ran that long), and a tie has no
 //! winner; a team with no participant left loses; the players still in the match at the end of
 //! `Cleanup` go back; a leave of a running match bars the queue as the arena's does.
 //!
-//! Not built (no capture shows them in full, or they need entities this sim does not make): the
-//! capture point entities (333), the outpost gates and structures (2270, 2646; the fort
-//! barriers are built: [`super::outpost_rush_doors`]), the turrets (4276),
-//! resources and the armory, the summons (the summoning circles, the azoth portal and the
-//! timers `7a0740b0` and `5543c08f`), the events of those parts, the end statistics, the score
-//! board (839) and the rewards, and a backfill into a running match.
+//! - The outpost structures (gates, command posts, turrets, wards, storage sheds, armories and
+//!   the AI objective managers) spawn with the match, are built, upgraded, ruined and repaired
+//!   ([`super::outpost_rush_structures`]); their outpost statuses are the values
+//!   `OutpostStructureStatusesA` to `C`. A built turret is used, fired and taken as a war
+//!   turret ([`super::turrets`]).
+//!
+//! - The summoning circles, the summons, the corrupted portal with its timers `7a0740b0` and
+//!   `5543c08f` and its events, and the end statistics `bearsummoncounts`,
+//!   `brutesummoncounts` and `wraithsummoncounts` ([`super::outpost_rush_summons`]).
+//!
+//! - The capture point entities (333) show each outpost's capture ([`capture_points`]); the
+//!   storage sheds hold their team's match items ([`storage_shed`]); the armory shop opens for
+//!   the owner team ([`SimWorld::armory_status`]).
+//!
+//! Not built: a backfill into a running match.
+//!
+//! The war board (839, 3530, 2968) of the two teams runs with the match ([`board`]). The end
+//! statistics of the outposts are built ([`capture_counts`]).
 
 use bevy_ecs::entity::Entity;
 use nw_bus::ArenaSeat;
 use nw_content::instances::{InstanceKind, InstanceMap};
+use nw_content::outpost_structures::StructureRole;
 use nw_messages::game_mode_participant::PARTICIPANT_FLAGS_LEN;
 use nw_messages::game_mode_state::{GameModeState, Keyed};
 use nw_messages::list_delta::{ListChange, ReplicatedList};
@@ -85,9 +106,18 @@ use super::game_mode_entity::team_affiliations;
 use super::game_mode_entity::{
     FIRST_LIST_VERSION, MatchEntry, MatchParticipant, PLAYING_STATUS, full, participant_lists,
 };
+use self::board::Board;
+use self::capture_points::CapturePoints;
+use self::storage_shed::StorageSheds;
 use super::outpost_rush_boss::BaronessRun;
 use super::outpost_rush_doors::{FortBarrier, ISLAND_FOLDER};
-use super::outpost_rush_events::{ARMORY_BUILT, EventFeed};
+use super::outpost_rush_events::{
+    ARMORY_BUILT, AttackWatch, EventFeed, OUTPOST_ATTACKED, command_post_events,
+};
+use super::camps::APPLY_ALL_RESOURCES_KIND;
+use super::outpost_rush_structures::{OutpostStructures, RUIN_BIT, UPGRADE_BUILDABLE_KIND};
+use super::outpost_rush_summons::SummonRun;
+use super::turrets::{USE_ACCEPTED, USE_REFUSED};
 use super::queue::team_spot;
 use super::{Body, Player, SimWorld, unix_ns};
 
@@ -108,8 +138,29 @@ const OUTPOST_A_STATUS: u32 = 0x448d_d922;
 const OUTPOST_B_STATUS: u32 = 0xca02_dec1;
 const OUTPOST_C_STATUS: u32 = 0x06a8_de5f;
 const DOMINATION_MULTIPLIER: u32 = 0xe78c_48f6;
+/// The end statistics of the outposts A, B and C: `OutpostACaptureCounts`,
+/// `OutpostBCaptureCounts` and `OutpostCCaptureCounts` (the keys are the CRC-32 of the lowercase
+/// names, found in the client's `outpostrushhud.luac` words; Observed only in the end state of
+/// every ledger that saw an end: `opr_que_and_lost` 2105.783 s, `OPR_TEST3` 1851.453 s,
+/// `OPR-coral-divide2` 660.014 s and eight more).
+const OUTPOST_CAPTURE_COUNTS: [u32; 3] = [0x89f1_06dc, 0xf590_2307, 0x689f_c271];
+/// The structure statuses of the outposts A, B and C: `OutpostStructureStatusesA`, `..B` and
+/// `..C` (CRC-32 of the lowercase names), three bits a structure in the client's
+/// `OutpostRush_OutpostStructure` order (Armory first, then CommandPost, DefensiveStructure1-4,
+/// Gate1-4, ProtectionWard, StorageShed, AIObjectiveManager): the tier in the low two bits, 4
+/// for a ruin. Observed: each is 1 in the match's first state (the armory at tier 1, with the
+/// three `armorybuilt` events; 8 of 8 ledgers that saw the opening, `opr_match_2` 0.793 s,
+/// `OPR_TEST3` 216.746 s); the values of the match's structures
+/// ([`super::outpost_rush_structures::OutpostStructures::statuses`]).
+const OUTPOST_STRUCTURE_STATUSES: [u32; 3] = [0xe691_e6e4, 0x7f98_b75e, 0x089f_87c8];
 /// The value of no team in an outpost status (Observed `ff`).
-const NO_TEAM: u8 = 0xff;
+mod board;
+mod capture_points;
+mod storage_shed;
+
+/// The interaction kind `OpenArmory` (Observed: the client's `InteractionUIActions`).
+const OPEN_ARMORY_KIND: u8 = 78;
+pub(super) const NO_TEAM: u8 = 0xff;
 /// The bits of a team's score in `TeamScores` (Observed: team 1 high, team 0 low).
 const SCORE_BITS: u32 = 16;
 /// The shifts of an outpost status: the capturing team, the progress (Observed).
@@ -127,17 +178,26 @@ const KILL_POINTS: u32 = 1;
 const BASE_MULTIPLIER: u32 = 1;
 const DOMINATION_FIRST_STEP_MS: u64 = 60_000;
 const DOMINATION_STEP_MS: u64 = 30_000;
-/// The capture tick and the progress step of a tick (Observed: about one change a second, steps
-/// of about 2), and the progress that ends a capture (Inferred: the last retail value was 98).
+/// The capture tick (Observed: about one progress change a second).
 const CAPTURE_TICK_MS: u64 = 1_000;
-const CAPTURE_STEP: u8 = 2;
-const CAPTURE_DONE: u8 = 100;
+/// The capture point slices' `m_captureTime`, `m_captureTimeDecreasePerPlayer` and
+/// `m_captureMaxPlayerDelta` (Observed, both point slices); the shortest capture is
+/// `m_captureTimeMinimum` (10 s), which the most counted players reach.
+const CAPTURE_TIME_MS: u64 = 60_000;
+const CAPTURE_DECREASE_PER_PLAYER_MS: u64 = 10_000;
+const CAPTURE_MAX_PLAYER_DELTA: usize = 5;
+/// The progress units of one percent (the status shows whole percents, module doc).
+const UNITS_PER_PERCENT: u32 = 1_000;
+/// The progress that ends a capture: 100 percent (Inferred: the last retail value was 99).
+const CAPTURE_DONE: u32 = 100 * UNITS_PER_PERCENT;
+/// The fall of a tick in an empty outpost: 1 percent (Inferred, module doc).
+const EMPTY_FALL: u32 = UNITS_PER_PERCENT;
 /// The dead bit of a participant status (Observed `07` and `27`).
 const DEAD_BIT: u8 = 0x04;
 /// The participant flags of the whole match (Observed).
 const MATCH_FLAGS: [u8; PARTICIPANT_FLAGS_LEN] = [0x13, 0xca, 0x61, 0x08, 0x00, 0x00];
 /// The teams of a match.
-const TEAMS: usize = 2;
+pub(super) const TEAMS: usize = 2;
 /// The namespace of the match entity's `GdeRef` ("oprmatch").
 const MATCH_NAMESPACE: u64 = 0x6f70_726d_6174_6368;
 /// The capture radius of an outpost (Observed: the field `radius` 21.35 of every outpost of the
@@ -230,12 +290,37 @@ const OUTPOST_MAPS: [OutpostMap; 3] = [
     },
 ];
 
-/// The state of one outpost.
+/// The bits of one structure in an outpost's structure status, the tier's bits among them
+/// (Observed: [`super::outpost_rush_structures`], helper B10).
+const STATUS_SLOT_BITS: u32 = 3;
+const STATUS_SLOT_MASK: u64 = 0b111;
+const STATUS_TIER_MASK: u64 = 0b011;
+
+/// The outposts whose Protection Ward stands built and whole (its status shows a tier and no
+/// ruin), which stops their capture ([`capture_points`]).
+fn wards_standing(structures: &OutpostStructures) -> [bool; 3] {
+    let Some(slot) = StructureRole::ProtectionWard.status_slot(0) else {
+        return [false; 3];
+    };
+    structures.statuses().map(|status| {
+        let code = (status >> (slot * STATUS_SLOT_BITS)) & STATUS_SLOT_MASK;
+        code & STATUS_TIER_MASK != 0 && code & RUIN_BIT == 0
+    })
+}
+
+/// The state of one outpost; `progress` in [`UNITS_PER_PERCENT`] of a percent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OutpostState {
     owner: u8,
     capturer: u8,
-    progress: u8,
+    progress: u32,
+}
+
+/// The progress a lead of `lead` players gives in one capture tick (module doc).
+fn rise_of(lead: usize) -> u32 {
+    let counted = lead.saturating_sub(1).min(CAPTURE_MAX_PLAYER_DELTA) as u64;
+    let capture_ms = CAPTURE_TIME_MS - CAPTURE_DECREASE_PER_PLAYER_MS * counted;
+    u32::try_from(u64::from(CAPTURE_DONE) * CAPTURE_TICK_MS / capture_ms).unwrap_or(CAPTURE_DONE)
 }
 
 impl OutpostState {
@@ -245,22 +330,29 @@ impl OutpostState {
         progress: 0,
     };
 
+    /// The whole percent the status and the capture point show.
+    fn shown_progress(self) -> u8 {
+        u8::try_from(self.progress / UNITS_PER_PERCENT).unwrap_or(u8::MAX)
+    }
+
     /// The status value of the outpost.
     fn value(self) -> u64 {
         u64::from(self.owner)
             | u64::from(self.capturer) << CAPTURER_SHIFT
-            | u64::from(self.progress) << PROGRESS_SHIFT
+            | u64::from(self.shown_progress()) << PROGRESS_SHIFT
     }
 
-    /// One capture tick with `present` living players of each team in the outpost.
-    fn step(self, present: [usize; TEAMS]) -> Self {
-        let pusher = match present[0].cmp(&present[1]) {
-            std::cmp::Ordering::Greater => Some(0),
-            std::cmp::Ordering::Less => Some(1),
-            std::cmp::Ordering::Equal => None,
+    /// One capture tick with `present` living players of each team in the outpost; while
+    /// `protected` (the owner's Protection Ward stands) a capture names its team and does not
+    /// rise ([`capture_points`]).
+    fn step(self, present: [usize; TEAMS], protected: bool) -> Self {
+        let (pusher, lead) = match present[0].cmp(&present[1]) {
+            std::cmp::Ordering::Greater => (Some(0), present[0] - present[1]),
+            std::cmp::Ordering::Less => (Some(1), present[1] - present[0]),
+            std::cmp::Ordering::Equal => (None, 0),
         };
-        let back = |state: Self, idle_capturer: u8| {
-            let progress = state.progress.saturating_sub(CAPTURE_STEP);
+        let back = |state: Self, fall: u32, idle_capturer: u8| {
+            let progress = state.progress.saturating_sub(fall);
             Self {
                 progress,
                 capturer: if progress == 0 {
@@ -274,10 +366,11 @@ impl OutpostState {
         match pusher {
             // An equal count of players holds the progress.
             None if present[0] > 0 => self,
-            None => back(self, NO_TEAM),
-            Some(team) if team == self.owner => back(self, NO_TEAM),
+            None => back(self, EMPTY_FALL, NO_TEAM),
+            Some(team) if team == self.owner => back(self, rise_of(lead), NO_TEAM),
             Some(team) if self.capturer == team || self.capturer == NO_TEAM => {
-                let progress = self.progress.saturating_add(CAPTURE_STEP);
+                let rise = if protected { 0 } else { rise_of(lead) };
+                let progress = self.progress.saturating_add(rise);
                 if progress >= CAPTURE_DONE {
                     Self {
                         owner: team,
@@ -291,14 +384,81 @@ impl OutpostState {
                     }
                 }
             }
-            Some(team) => back(self, team),
+            Some(team) => back(self, rise_of(lead), team),
         }
     }
 }
 
+/// The end events of a player's team (Observed, the 497 entry of each ledger's end): a win
+/// `OutpostRush_T1` (`OPR-coral-divide2` 660.0 s, `opr_match_2` 381.0 s, `OPR---Tower-2`
+/// 317.2 s, `OPR---ISLAND-2` 1408.8 s), a loss `OutpostRush_LOSS_T1` (`OPR_BAGGUNS` 932.4 s,
+/// `OPR-Coral-Divide-2` 1308.2 s, `opr_match_4` 1245.3 s, `opr_que_and_lost` 2105.8 s). Two wins
+/// gave a higher tier (`OPR---Tower` 325.4 s `_T2`, `OPR_TEST3` 1851.5 s `_T4`): retail's rule
+/// that picks `_T2` to `_T4` is Unknown (it is server script; no client function or table names
+/// the tiers). No value of the match picks the tier (helper B9, 2026-11-13,
+/// all 13 Outpost Rush ledgers of the capture index: the end values, the war board 839 of each
+/// player and the 497 entries): the `_T2` win (`OPR---Tower`: own board score 853, 1,001 to 329,
+/// about 703 s) lies between `_T1` wins of a higher own score (`opr_match_2` 894,
+/// `OPR---ISLAND-2` 1,981, `OPR-coral-divide2` 1,856), a closer result (`OPR---ISLAND-2` 1,002
+/// to 393) and a longer match (`OPR---ISLAND-2` about 1,346 s, joined at its start); the `_T4`
+/// win (`OPR_TEST3`: 6,441, rank 12 of 20 in its team, 1,000 to 716, about 1,664 s) is no top
+/// rank either. No function of the client decompile names the tier rows; the 497 list's daily
+/// bonuses are empty in every ledger. The tier rows `javelindata_gameevents` `OutpostRush_T1` to
+/// `_T4` and their `javelindata_rewardmodifiers` rows hold amounts only (`UniversalExpAmount`
+/// 1,000, 2,500, 5,000 and 10,000; `PvpXp` 500, 1,500, 2,000 and 2,500), no condition.
+///
+/// Inferred (player's design choice, 2026-11-13): a winner's tier rises one step for each
+/// [`TIER_STEP_SCORE`] points of its own war board score ([`board`]), up to `_T4`: below 2,000
+/// `_T1`, from 2,000 `_T2`, from 4,000 `_T3`, from 6,000 `_T4`. It rewards the play the board
+/// scores (kills, assists, damage, healing, captures, deposits), and it fits 5 of the 6 retail
+/// wins (`_T1` at 570, 894, 1,856 and 1,981; `_T4` at 6,441; not `OPR---Tower`'s `_T2` at 853).
+/// Losses stay `_LOSS_T1` (Observed, every loss). A tie at the time limit (no ledger) is
+/// `_LOSS_T1`, as no team won (Inferred).
+const WIN_EVENTS: [&str; 4] = [
+    "OutpostRush_T1",
+    "OutpostRush_T2",
+    "OutpostRush_T3",
+    "OutpostRush_T4",
+];
+const LOSS_EVENT: &str = "OutpostRush_LOSS_T1";
+/// The board score of one tier step (Inferred, player's design choice: module text above).
+const TIER_STEP_SCORE: u32 = 2_000;
+/// The game event a player gets when it joins the match: its loot table
+/// `OutpostRush_Azoth_Grant` gives 50 of the match's azoth (Observed: the 497 entry with 50 of
+/// item 324048019 at the first arrival of seven OPR ledgers, `opr_match_4` 0.6 s,
+/// `opr_match_2` 0.7 s, `opr_que_and_lost` 577.4 s after its 5449, `OPR-coral-divide2`
+/// 102.0 s, `OPR_TEST3` 215.4 s). Some ledgers show it again later at a level resend
+/// (`opr_match_4` 153.9 and 618.1 s, not at 307.0, 464.8 or 770.0 s): the rule of those repeats
+/// is Unknown, so a player gets it once, at its join.
+const PRE_GAME_EVENT: &str = "OutpostRush_PreGameGrant";
+
+/// The end event of a player of team `team` with the war board score `board_score` when
+/// `winner` won (`None`: a tie).
+fn end_event(team: u8, winner: Option<u8>, board_score: u32) -> &'static str {
+    if winner != Some(team) {
+        return LOSS_EVENT;
+    }
+    let steps = usize::try_from(board_score / TIER_STEP_SCORE).unwrap_or(usize::MAX);
+    WIN_EVENTS[steps.min(WIN_EVENTS.len() - 1)]
+}
+
 /// `TeamScores` of `scores`.
-fn team_scores(scores: [u32; TEAMS]) -> u64 {
+pub(super) fn team_scores(scores: [u32; TEAMS]) -> u64 {
     u64::from(scores[1]) << SCORE_BITS | u64::from(scores[0])
+}
+
+/// The end statistics of the outposts: for each outpost the points each team scored from it,
+/// packed as `TeamScores` (team 1 in the high half). Observed: in `opr_que_and_lost` team 1's
+/// three values 98 + 339 + 444 = 881 of its 1,000 points and team 0's 339 + 107 + 5 = 451 of its
+/// 535, the rest of each score the kills (`OPR_TEST3` and `OPR-coral-divide2` fit the same).
+/// Inferred: a team the Baroness froze scores nothing, so its outposts count nothing then.
+fn capture_counts(outpost_points: &[[u32; TEAMS]; 3]) -> [Keyed; 3] {
+    std::array::from_fn(|index| {
+        (
+            OUTPOST_CAPTURE_COUNTS[index],
+            team_scores(outpost_points[index]),
+        )
+    })
 }
 
 /// The multiplier of a team that owns every outpost since `held_ms` ms.
@@ -327,6 +487,8 @@ pub(super) struct OutpostRushMatch {
     timeout_ms: u64,
     points: [OutpostState; 3],
     scores: [u32; TEAMS],
+    /// The points each team scored from each outpost (its end statistic, [`capture_counts`]).
+    outpost_points: [[u32; TEAMS]; 3],
     /// The team that owns every outpost and since when (server ms).
     dominating: Option<(u8, u64)>,
     multiplier: u32,
@@ -343,6 +505,20 @@ pub(super) struct OutpostRushMatch {
     pub(super) baroness: Option<BaronessRun>,
     /// The event feed ([`super::outpost_rush_events`]).
     pub(super) feed: EventFeed,
+    /// The outpost structures ([`super::outpost_rush_structures`]) and the server ms of their
+    /// last tick.
+    pub(super) structures: OutpostStructures,
+    structures_ms: u64,
+    /// The summons and the corrupted portal ([`super::outpost_rush_summons`]).
+    pub(super) summons: SummonRun,
+    /// The war board ([`board`]).
+    board: Board,
+    /// The last `outpostattacked` of each outpost ([`super::outpost_rush_events`]).
+    attacks: AttackWatch,
+    /// The capture point entities ([`capture_points`]).
+    capture_points: CapturePoints,
+    /// The storage sheds ([`storage_shed`]).
+    sheds: StorageSheds,
 }
 
 impl OutpostRushMatch {
@@ -369,6 +545,17 @@ impl OutpostRushMatch {
         self.of(number).map(|participant| participant.team)
     }
 
+    /// The team whose raid is `raid` (no team for raid 0).
+    pub(super) fn team_of_raid(&self, raid: u64) -> Option<u8> {
+        let team = self.raids.iter().position(|team_raid| raid != 0 && *team_raid == raid)?;
+        u8::try_from(team).ok()
+    }
+
+    /// Whether the match runs (state 0).
+    pub(super) const fn is_running(&self) -> bool {
+        self.state == RUNNING
+    }
+
     /// The score of team `team`.
     pub(super) fn score_of(&self, team: u8) -> u32 {
         self.scores[usize::from(team.min(1))]
@@ -389,6 +576,7 @@ impl OutpostRushMatch {
             .zip(self.points)
             .map(|(outpost, point)| (outpost.key, point.value()))
             .collect();
+        values.extend(OUTPOST_STRUCTURE_STATUSES.into_iter().zip(self.structures.statuses()));
         if self.state != PREGAME {
             values.push((TEAM_SCORES, team_scores(self.scores)));
             values.push((DOMINATION_MULTIPLIER, u64::from(self.multiplier)));
@@ -396,6 +584,10 @@ impl OutpostRushMatch {
         }
         if let Some(winner) = self.winner {
             values.push((WINNING_TEAM, u64::from(winner)));
+        }
+        if self.state == ENDED {
+            values.extend(capture_counts(&self.outpost_points));
+            values.extend(self.summons.end_values());
         }
         values
     }
@@ -410,6 +602,7 @@ impl OutpostRushMatch {
         let mut timers = vec![(own, self.ends_ms), (GAME_MODE_TIMEOUT, self.timeout_ms)];
         if self.state == RUNNING {
             timers.extend(self.baroness.iter().flat_map(BaronessRun::timers));
+            timers.extend(self.summons.timers());
         }
         timers
     }
@@ -469,14 +662,17 @@ impl OutpostRushMatch {
         }
     }
 
+    /// Whether the Baroness froze team `team`.
+    fn frozen(&self, team: u8) -> bool {
+        self.baroness
+            .as_ref()
+            .is_some_and(|run| run.frozen_team() == Some(team.min(1)))
+    }
+
     /// Team `team` scores `points` (none while the Baroness froze it); `true` when it reached
     /// the win.
     fn score(&mut self, team: u8, points: u32) -> bool {
-        if self
-            .baroness
-            .as_ref()
-            .is_some_and(|run| run.frozen_team() == Some(team.min(1)))
-        {
+        if self.frozen(team) {
             return false;
         }
         let score = &mut self.scores[usize::from(team.min(1))];
@@ -503,10 +699,7 @@ impl OutpostRushMatch {
 impl SimWorld {
     /// Whether this instance sim's game mode is Outpost Rush.
     pub(super) fn runs_outpost_rush(&self) -> bool {
-        self.instance_run
-            .as_ref()
-            .and_then(|run| self.content.instances.by_id(run.game_mode()))
-            .is_some_and(|mode| mode.kind == InstanceKind::OutpostRush)
+        self.instance_kind() == Some(InstanceKind::OutpostRush)
     }
 
     /// Player `entity` arrived with its seat `seat`: it joins the match (the first one opens it)
@@ -558,6 +751,19 @@ impl SimWorld {
         self.change_game_mode_state(mode_entity, lists);
         self.put_match_joined(entity, entry, server_ms);
         self.put_affiliations(entity, list_version, team_affiliations(seat.team));
+        self.give_mode_event(entity, number, PRE_GAME_EVENT);
+        let content = std::sync::Arc::clone(&self.content);
+        let board = self.arena_matches.outpost_rush.as_mut().map(|running| {
+            running.board.join(
+                number,
+                entity,
+                character,
+                seat.team,
+                server_ms,
+                &content.outpost_rush_board,
+            )
+        });
+        self.send_outpost_rush_board(board.unwrap_or_default());
         tracing::info!(
             player = number,
             team = seat.team,
@@ -602,6 +808,7 @@ impl SimWorld {
             timeout_ms: server_ms.saturating_add(GAME_MODE_TIMEOUT_MS),
             points: [OutpostState::NEUTRAL; 3],
             scores: [0; TEAMS],
+            outpost_points: [[0; TEAMS]; 3],
             dominating: None,
             multiplier: BASE_MULTIPLIER,
             next_score_ms: pregame_end.saturating_add(SCORE_TICK_MS),
@@ -614,6 +821,13 @@ impl SimWorld {
             barriers: Vec::new(),
             baroness: None,
             feed: EventFeed::default(),
+            structures: self.spawn_outpost_structures(folder, started),
+            capture_points: self.spawn_capture_points(folder, started),
+            sheds: StorageSheds::default(),
+            structures_ms: server_ms,
+            summons: SummonRun::of_map(folder),
+            board: Board::new(&[0; RAW_ID_LEN]),
+            attacks: AttackWatch::default(),
         };
         for outpost in 0..running.outposts.len() {
             let number = u32::try_from(outpost).unwrap_or(u32::MAX);
@@ -644,6 +858,8 @@ impl SimWorld {
         running.baroness =
             BaronessRun::of_map(folder, self.spawn_baroness_barriers(folder, started));
         running.gde_ref = gde_ref;
+        running.board = Board::new(&gde_ref);
+        running.sheds = self.storage_sheds_of(&running.structures, &mode.items_removed_on_exit);
         tracing::info!(level = %running.map.folder, "Outpost Rush match opened");
         self.arena_matches.outpost_rush = Some(running);
         true
@@ -675,8 +891,9 @@ impl SimWorld {
         self.change_game_mode_state(entity, change);
     }
 
-    /// Player `target` died to `attacker`: its status is dead and, in the running match, a
-    /// participant of the other team scores the kill for its team.
+    /// Player `target` died to `attacker`: its status is dead, the board counts the death, the
+    /// kill and the assists ([`board`]) and, in the running match, a participant of the other
+    /// team scores the kill for its team.
     pub(super) fn outpost_rush_death(&mut self, target: u64, attacker: u64) {
         let Some(running) = self.arena_matches.outpost_rush.as_mut() else {
             return;
@@ -700,6 +917,7 @@ impl SimWorld {
         }
         let entity = running.entity;
         self.change_game_mode_state(entity, change);
+        self.board_player_death(target, attacker, killer);
         if let Some((team, true)) = won {
             self.end_outpost_rush(Some(team));
         }
@@ -746,10 +964,19 @@ impl SimWorld {
         )
     }
 
-    /// Runs the match: the pregame's end, the captures, the scores, the time limit, a team with
-    /// no participant left, and the end of `Cleanup`.
+    /// Runs the match: the board's pushes ([`board`]), the pregame's end, the captures, the
+    /// scores, the time limit, a team with no participant left, and the end of `Cleanup`.
     pub(super) fn tick_outpost_rush(&mut self) {
         let now_ms = self.server_ms;
+        let Some(running) = self.arena_matches.outpost_rush.as_ref() else {
+            return;
+        };
+        let participants: Vec<Entity> = running
+            .participants
+            .iter()
+            .map(|participant| participant.entity)
+            .collect();
+        self.ask_company_looks(&participants);
         let Some(running) = self.arena_matches.outpost_rush.as_ref() else {
             return;
         };
@@ -762,16 +989,27 @@ impl SimWorld {
             self.end_outpost_rush(Some(1 - team));
             return;
         }
+        if state != ENDED {
+            let content = std::sync::Arc::clone(&self.content);
+            let pushes = self.arena_matches.outpost_rush.as_mut().map(|running| {
+                running.board.flush(now_ms, &content.outpost_rush_board)
+            });
+            self.send_outpost_rush_board(pushes.unwrap_or_default());
+        }
         match state {
             PREGAME if now_ms >= ends_ms => self.start_outpost_rush(),
+            PREGAME => self.run_outpost_structures(now_ms),
             RUNNING => {
                 self.run_outpost_rush(now_ms);
+                self.run_outpost_structures(now_ms);
                 let still_running = self
                     .arena_matches
                     .outpost_rush
                     .as_ref()
                     .is_some_and(|running| running.state == RUNNING);
-                if still_running && self.tick_baroness(now_ms) {
+                if still_running
+                    && (self.tick_baroness(now_ms) | self.tick_outpost_rush_summons(now_ms))
+                {
                     self.send_outpost_rush_values_and_timers();
                 }
             }
@@ -792,6 +1030,7 @@ impl SimWorld {
         if let Some(run) = running.baroness.as_mut() {
             run.start(server_ms);
         }
+        running.summons.start(server_ms);
         let change = running.script_change(RUNNING, server_ms.saturating_add(TIME_LIMIT_MS));
         let entity = running.entity;
         let (barriers, raids) = (running.barriers.clone(), running.raids);
@@ -807,47 +1046,40 @@ impl SimWorld {
             return;
         };
         let outposts = running.outposts;
-        let players: Vec<(Entity, u8)> = running
+        let inside: Vec<(u64, u8, usize)> = running
             .participants
             .iter()
             .filter(|participant| participant.status & DEAD_BIT == 0)
-            .map(|participant| (participant.entity, participant.team))
-            .collect();
-        let places: Vec<(Position, u8)> = players
-            .iter()
-            .filter_map(|(entity, team)| {
-                self.world
-                    .get::<Body>(*entity)
-                    .map(|body| (body.motion.position(), *team))
+            .filter_map(|participant| {
+                let at = self.world.get::<Body>(participant.entity)?.motion.position();
+                let index = board::outpost_index_at(&outposts, at)?;
+                Some((participant.number, participant.team, index))
             })
             .collect();
-        let present: Vec<[usize; TEAMS]> = outposts
-            .iter()
-            .map(|outpost| {
-                let mut count = [0; TEAMS];
-                for (at, team) in &places {
-                    let [x, y, z] = outpost.position;
-                    let (east, north) = (at.x - x, at.y - y);
-                    if (east * east + north * north).sqrt() <= CAPTURE_RADIUS_M
-                        && (at.z - z).abs() <= outpost.height_m
-                    {
-                        count[usize::from((*team).min(1))] += 1;
-                    }
-                }
-                count
-            })
-            .collect();
+        let protected = wards_standing(&running.structures);
         let Some(running) = self.arena_matches.outpost_rush.as_mut() else {
             return;
         };
         let mut changed = false;
         let mut won = None;
+        let mut score_ticks: u32 = 0;
+        let ticked = now_ms >= running.next_capture_ms;
+        if ticked {
+            running.capture_points.note_presence(&inside);
+        }
+        let present = running.capture_points.present;
         while now_ms >= running.next_capture_ms {
             running.next_capture_ms = running.next_capture_ms.saturating_add(CAPTURE_TICK_MS);
-            for (point, present) in running.points.iter_mut().zip(&present) {
-                let next = point.step(*present);
+            for (index, (point, present)) in running.points.iter_mut().zip(&present).enumerate() {
+                let next = point.step(*present, protected[index]);
                 changed |= next != *point;
                 *point = next;
+                let taken_from_owner =
+                    next.owner != NO_TEAM && next.capturer != NO_TEAM && next.capturer != next.owner;
+                if taken_from_owner && running.attacks.attacked(index, now_ms) {
+                    running.feed.note(OUTPOST_ATTACKED, now_ms, u32::try_from(index).unwrap_or(u32::MAX));
+                    changed = true;
+                }
             }
         }
         let dominating = running.owner_of_all();
@@ -861,18 +1093,25 @@ impl SimWorld {
         running.multiplier = multiplier;
         while now_ms >= running.next_score_ms && won.is_none() {
             running.next_score_ms = running.next_score_ms.saturating_add(SCORE_TICK_MS);
+            score_ticks = score_ticks.saturating_add(1);
             for team in 0..TEAMS as u8 {
-                let owned = running
-                    .points
-                    .iter()
-                    .filter(|point| point.owner == team)
-                    .count();
                 let factor = if running.dominating.is_some_and(|(owner, _)| owner == team) {
                     running.multiplier
                 } else {
                     BASE_MULTIPLIER
                 };
-                let points = u32::try_from(owned).unwrap_or(u32::MAX) * OUTPOST_POINTS * factor;
+                let per_outpost = OUTPOST_POINTS * factor;
+                let mut points = 0;
+                let unfrozen = !running.frozen(team);
+                for (point, scored) in running.points.iter().zip(&mut running.outpost_points) {
+                    if point.owner == team {
+                        points += per_outpost;
+                        if unfrozen {
+                            let scored = &mut scored[usize::from(team)];
+                            *scored = scored.saturating_add(per_outpost);
+                        }
+                    }
+                }
                 if points > 0 {
                     changed = true;
                     if running.score(team, points) {
@@ -888,11 +1127,216 @@ impl SimWorld {
         if let Some(change) = change {
             self.change_game_mode_state(entity, change);
         }
+        self.board_contests(score_ticks);
+        self.show_capture_points(protected);
         if let Some(team) = won {
             self.end_outpost_rush(Some(team));
         } else if timed_out {
             self.end_outpost_rush(leader);
         }
+    }
+
+    /// The outpost structures at `now_ms` ([`super::outpost_rush_structures`]): each takes the
+    /// raid of its outpost's owner, then the build accepts and the rising health run; the
+    /// resources taken count on the board ([`board`]); a command post's new tier goes to the
+    /// event feed ([`super::outpost_rush_events`]); a status change goes out with the values.
+    fn run_outpost_structures(&mut self, now_ms: u64) {
+        let Some(running) = self.arena_matches.outpost_rush.as_mut() else {
+            return;
+        };
+        let raids = running.points.map(|point| {
+            running
+                .raids
+                .get(usize::from(point.owner))
+                .copied()
+                .unwrap_or_default()
+        });
+        let teams: Vec<(u64, u64)> = running
+            .participants
+            .iter()
+            .filter_map(|participant| {
+                let raid = running.raids.get(usize::from(participant.team))?;
+                Some((participant.number, *raid))
+            })
+            .collect();
+        let elapsed_ms = now_ms.saturating_sub(running.structures_ms);
+        running.structures_ms = now_ms;
+        let mut set = std::mem::take(&mut running.structures);
+        let before = set.statuses();
+        self.own_outpost_structures(&mut set, raids);
+        let raid_of = |number: u64| {
+            teams
+                .iter()
+                .find(|(player, _)| *player == number)
+                .map(|(_, raid)| *raid)
+        };
+        let changed = self.tick_outpost_structures(&mut set, raid_of, now_ms, elapsed_ms);
+        let deposits = std::mem::take(&mut set.deposits);
+        let events = command_post_events(&before, &set.statuses());
+        let Some(running) = self.arena_matches.outpost_rush.as_mut() else {
+            return;
+        };
+        running.structures = set;
+        for (name, number) in events {
+            running.feed.note(name, now_ms, number);
+        }
+        for (number, item, quantity) in deposits {
+            self.outpost_rush_deposited(number, &item, quantity);
+        }
+        let Some(running) = self.arena_matches.outpost_rush.as_mut() else {
+            return;
+        };
+        if changed {
+            let change = running.values_change();
+            let entity = running.entity;
+            self.change_game_mode_state(entity, change);
+        }
+    }
+
+    /// The build or upgrade `request` (named `name`) of player `entity` (`number`) on a
+    /// structure of the match ([`super::outpost_rush_structures`]), or its use of an armory
+    /// shop ([`Self::armory_status`]); `false` when it is none.
+    pub(super) fn outpost_rush_interaction(
+        &mut self,
+        entity: Entity,
+        number: u64,
+        request: nw_messages::InteractionRequest,
+        name: &[u8],
+    ) -> bool {
+        if request.kind == OPEN_ARMORY_KIND {
+            let Some(status) = self.armory_status(entity, &request.target) else {
+                return false;
+            };
+            self.send_travel(entity, &[super::gather_answer(number, request, status, name)]);
+            return true;
+        }
+        if !matches!(request.kind, APPLY_ALL_RESOURCES_KIND | UPGRADE_BUILDABLE_KIND) {
+            return false;
+        }
+        let now_ms = self.server_ms;
+        self.arena_matches
+            .outpost_rush
+            .as_mut()
+            .is_some_and(|running| running.structures.ask(entity, number, request, name, now_ms))
+    }
+
+    /// The answer to player `entity`'s use of the armory `target` (kind 78 `OpenArmory`): its
+    /// accept when the armory stands built for the player's team, else its refusal; `None` when
+    /// `target` is no armory of the match.
+    ///
+    /// Observed (`OPR_TEST3`, the player's team owning outpost A): the request at 227.800 s is
+    /// accepted (3743, status 1, no name) 39 ms later; the shop's purchase is the 3741 of the
+    /// `ItemCurrencyConversionData` rows `OR_*` (`OR_FoodPvP` at 230.585 s, paid with
+    /// `OutpostRushAzothEssence`: [`crate::shop`]), and the client's 2473 closes it (231.023 s)
+    /// with no answer. Inferred: the other team's players are refused (no capture shows a use
+    /// of an enemy armory).
+    fn armory_status(&self, entity: Entity, target: &[u8; RAW_ID_LEN]) -> Option<u8> {
+        let running = self.arena_matches.outpost_rush.as_ref()?;
+        let owner = running.structures.built_raid(target, StructureRole::Armory)?;
+        let raid = self.outpost_rush_raid_of(entity);
+        Some(if raid == Some(owner) {
+            USE_ACCEPTED
+        } else {
+            USE_REFUSED
+        })
+    }
+
+    /// Player `shooter` hit for `amount` with a turret it uses ([`super::turrets`]): the
+    /// shooter's `DamageWithSiegeWeapons` on the war board, in its row alone, as the hit's own
+    /// row already counted it in `TotalDamageDealt` and the score ([`board::Board::note_row_alone`]).
+    pub(super) fn outpost_rush_siege_hit(&mut self, shooter: u64, amount: u32) {
+        let content = std::sync::Arc::clone(&self.content);
+        let Some(running) = self.arena_matches.outpost_rush.as_mut() else {
+            return;
+        };
+        if running.state == ENDED {
+            return;
+        }
+        running.board.note_row_alone(
+            shooter,
+            nw_content::warboard_stats::DAMAGE_WITH_SIEGE_WEAPONS,
+            amount,
+            &content.outpost_rush_board,
+        );
+    }
+
+    /// The raid of the team of player `entity` in the match.
+    pub(super) fn outpost_rush_raid_of(&self, entity: Entity) -> Option<u64> {
+        let number = self.world.get::<Player>(entity)?.number;
+        let running = self.arena_matches.outpost_rush.as_ref()?;
+        running.raid_seat_of(number).map(|(raid, _)| raid)
+    }
+
+    /// The outpost structures an attack of player `entity` can meet while the match runs:
+    /// slot key and place ([`super::outpost_rush_structures`]).
+    pub(super) fn outpost_rush_structure_targets(&self, entity: Entity) -> Vec<(u64, Position)> {
+        let Some(raid) = self.outpost_rush_raid_of(entity) else {
+            return Vec::new();
+        };
+        self.arena_matches
+            .outpost_rush
+            .as_ref()
+            .filter(|running| running.state == RUNNING)
+            .map(|running| running.structures.targets_of(raid))
+            .unwrap_or_default()
+    }
+
+    /// Whether slot key `number` is a structure of the match.
+    pub(super) fn is_outpost_rush_structure(&self, number: u64) -> bool {
+        self.arena_matches
+            .outpost_rush
+            .as_ref()
+            .is_some_and(|running| running.structures.holds(number))
+    }
+
+    /// A hit of `amount` by player `entity` on the structure of slot key `target`: `None` when
+    /// it meets no structure open to that player; the board counts its `DamageToOther`
+    /// ([`board`]); a foe's hit on an owned outpost reports it attacked
+    /// ([`super::outpost_rush_events`]); a ruin changes the outpost's status.
+    pub(super) fn hit_outpost_rush_structure(
+        &mut self,
+        entity: Entity,
+        target: u64,
+        amount: u32,
+    ) -> Option<bool> {
+        let raid = self.outpost_rush_raid_of(entity)?;
+        let running = self.arena_matches.outpost_rush.as_mut()?;
+        if running.state != RUNNING {
+            return None;
+        }
+        let mut set = std::mem::take(&mut running.structures);
+        let outpost = set
+            .structures
+            .iter()
+            .find(|structure| structure.number == target)
+            .map(|structure| usize::from(structure.outpost));
+        let ruined = self.hurt_outpost_structure(&mut set, raid, target, amount);
+        let number = self.world.get::<Player>(entity).map(|player| player.number);
+        if ruined.is_some()
+            && let Some(number) = number
+        {
+            self.note_outpost_rush_stat(number, nw_content::warboard_stats::DAMAGE_TO_OTHER, amount);
+        }
+        let running = self.arena_matches.outpost_rush.as_mut()?;
+        running.structures = set;
+        let now_ms = self.server_ms;
+        let attacker_team = number.and_then(|number| running.team_of(number));
+        let attacked = ruined.is_some()
+            && outpost.is_some_and(|outpost| {
+                let owner = running.points.get(outpost).map_or(NO_TEAM, |point| point.owner);
+                owner != NO_TEAM
+                    && attacker_team.is_some_and(|team| team != owner)
+                    && running.attacks.attacked(outpost, now_ms)
+            });
+        if let Some(outpost) = outpost.filter(|_| attacked) {
+            running.feed.note(OUTPOST_ATTACKED, now_ms, u32::try_from(outpost).unwrap_or(u32::MAX));
+        }
+        if ruined == Some(true) || attacked {
+            let change = running.values_change();
+            let entity = running.entity;
+            self.change_game_mode_state(entity, change);
+        }
+        ruined
     }
 
     /// Sends the match's values and timers.
@@ -905,18 +1349,27 @@ impl SimWorld {
         self.change_game_mode_state(entity, change);
     }
 
-    /// Mob `mob` died by a hit of player `killer`: the Baroness's death freezes a team
-    /// ([`super::outpost_rush_boss`]).
+    /// Mob `mob` died by a hit of player `killer`: the board counts the kill ([`board`]) and
+    /// the Baroness's death freezes a team ([`super::outpost_rush_boss`]).
     pub(super) fn outpost_rush_mob_killed(&mut self, mob: u64, killer: u64) {
+        self.board_mob_death(mob, killer);
         if self.baroness_killed(mob, killer) {
             self.send_outpost_rush_values_and_timers();
         }
     }
 
-    /// The match ended with `winner` (`None`: a tie at the time limit): state 1 with
-    /// `WinningTeamIdx` and `Cleanup`, and the participants' temporary affiliations go.
+    /// The match ended with `winner` (`None`: a tie at the time limit): the board's end push
+    /// ([`board`]), then state 1 with
+    /// `WinningTeamIdx` and `Cleanup`, each participant gets its end event ([`end_event`]) and
+    /// the participants' temporary affiliations go.
     fn end_outpost_rush(&mut self, winner: Option<u8>) {
         let server_ms = self.server_ms;
+        let content = std::sync::Arc::clone(&self.content);
+        let Some(running) = self.arena_matches.outpost_rush.as_mut() else {
+            return;
+        };
+        let board = running.board.close(&content.outpost_rush_board);
+        self.send_outpost_rush_board(board);
         let Some(running) = self.arena_matches.outpost_rush.as_mut() else {
             return;
         };
@@ -925,13 +1378,17 @@ impl SimWorld {
         let entity = running.entity;
         running.list_version += 1;
         let list_version = running.list_version;
-        let players: Vec<Entity> = running
+        let players: Vec<(Entity, u64, u8, u32)> = running
             .participants
             .iter()
-            .map(|participant| participant.entity)
+            .map(|participant| {
+                let score = running.board.score_of(participant.number);
+                (participant.entity, participant.number, participant.team, score)
+            })
             .collect();
         self.change_game_mode_state(entity, change);
-        for player in players {
+        for (player, number, team, score) in players {
+            self.give_mode_event(player, number, end_event(team, winner, score));
             self.put_affiliations(player, list_version, Vec::new());
         }
         tracing::info!(?winner, "Outpost Rush match ended");
@@ -959,6 +1416,9 @@ impl SimWorld {
             if let Some(run) = &running.baroness {
                 self.remove_baroness(run);
             }
+            self.remove_outpost_structures(&running.structures);
+            self.remove_capture_points(&running.capture_points);
+            self.remove_outpost_rush_summons(&running.summons);
         }
         if let Some(instance) = self.instance_run.as_ref().map(|run| run.id()) {
             self.close_instance(instance);
@@ -968,6 +1428,7 @@ impl SimWorld {
     /// Takes player `entity` out of the match's lists; a leave of a running match bars its
     /// queue. The participant and the list version, when it played.
     fn drop_outpost_rush_participant(&mut self, entity: Entity) -> Option<(MatchParticipant, u64)> {
+        self.outpost_rush_shed_closed(entity, None);
         let now_ns = unix_ns(self.server_ms);
         let running = self.arena_matches.outpost_rush.as_mut()?;
         let index = running
@@ -975,6 +1436,7 @@ impl SimWorld {
             .iter()
             .position(|participant| participant.entity == entity)?;
         let participant = running.participants.remove(index);
+        running.board.leave(participant.number);
         let running_match = running.state != ENDED;
         let crc = running.crc;
         running.list_version += 1;
@@ -1013,12 +1475,16 @@ pub(super) mod tests {
         EntryCounter, InstanceCatalog, InstanceMode, NO_INDEX, OUTPOST_RUSH_GAME_MODE, Teleport,
     };
     use nw_formats::objectstream::lowercase_crc32;
-    use nw_messages::{LevelSpec, MemberState};
+    use nw_messages::{LevelSpec, MemberState, ServerMessage};
     use uuid::Uuid;
 
     use super::*;
     use crate::world::Placement;
-    use crate::world::tests::{NOW, admit_at, slot};
+    use crate::world::outpost_rush_structures::tests as structure_tests;
+    use crate::world::outpost_rush_structures::{ACCEPT_DELAY_MS, BUILD_SEND_MS, Phase, RUIN_BIT};
+    use crate::world::tests::{NOW, admit_at, messages_to, slot};
+    use crate::world::turrets::tests::{bag_count, give};
+
 
     /// Players of the test sim.
     const MANY_PLAYERS: usize = 10;
@@ -1043,6 +1509,20 @@ pub(super) mod tests {
             assert_eq!(key, lowercase_crc32(name), "{name}");
         }
         assert_eq!(lowercase_crc32(OUTPOST_RUSH_GAME_MODE), 0x91b9_9a18);
+        for (key, name) in OUTPOST_CAPTURE_COUNTS
+            .into_iter()
+            .chain(OUTPOST_STRUCTURE_STATUSES)
+            .zip([
+                "OutpostACaptureCounts",
+                "OutpostBCaptureCounts",
+                "OutpostCCaptureCounts",
+                "OutpostStructureStatusesA",
+                "OutpostStructureStatusesB",
+                "OutpostStructureStatusesC",
+            ])
+        {
+            assert_eq!(key, lowercase_crc32(name), "{name}");
+        }
     }
 
     #[test]
@@ -1051,7 +1531,7 @@ pub(super) mod tests {
         let capturing = OutpostState {
             owner: NO_TEAM,
             capturer: 0,
-            progress: 0x62,
+            progress: 0x62 * UNITS_PER_PERCENT,
         };
         assert_eq!(OutpostState::NEUTRAL.value(), 0xffff);
         assert_eq!(capturing.value(), 0x62_00ff);
@@ -1065,24 +1545,59 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn the_end_statistics_pack_as_retail() {
+        // `OPR_TEST3` 1851.453 s: A 118/407, B 324/167, C 407/73 (team 1 / team 0).
+        let points = [[407, 118], [167, 324], [73, 407]];
+        assert_eq!(
+            capture_counts(&points),
+            [
+                (OUTPOST_CAPTURE_COUNTS[0], 7_733_655),
+                (OUTPOST_CAPTURE_COUNTS[1], 21_233_831),
+                (OUTPOST_CAPTURE_COUNTS[2], 26_673_225),
+            ]
+        );
+    }
+
+    /// The capture ticks a lead of `lead` players needs from 0 to the end.
+    pub(in crate::world) fn capture_ticks(lead: usize) -> u64 {
+        u64::from(CAPTURE_DONE.div_ceil(rise_of(lead)))
+    }
+
+    #[test]
+    fn a_capture_takes_sixty_seconds_less_ten_for_each_extra_player_down_to_ten() {
+        assert_eq!(capture_ticks(1), 61, "60 s: 1,666 units a second, steps 2, 2, 1");
+        assert_eq!(capture_ticks(2), 50);
+        assert_eq!(capture_ticks(3), 40);
+        assert_eq!(capture_ticks(6), 10, "m_captureTimeMinimum");
+        assert_eq!(capture_ticks(9), 10, "m_captureMaxPlayerDelta counts five extra players");
+        let shown: Vec<u8> = (1..=5)
+            .scan(OutpostState::NEUTRAL, |point, _| {
+                *point = point.step([1, 0], false);
+                Some(point.shown_progress())
+            })
+            .collect();
+        assert_eq!(shown, [1, 3, 4, 6, 8], "retail steps of 1 and 2");
+    }
+
+    #[test]
     fn a_capture_rises_toward_the_bigger_team_and_ends_at_one_hundred() {
         let mut point = OutpostState::NEUTRAL;
-        point = point.step([1, 0]);
-        assert_eq!((point.capturer, point.progress), (0, CAPTURE_STEP));
-        assert_eq!(point.step([1, 1]), point, "an equal count holds it");
+        point = point.step([1, 0], false);
+        assert_eq!((point.capturer, point.progress), (0, rise_of(1)));
+        assert_eq!(point.step([1, 1], false), point, "an equal count holds it");
         assert_eq!(
-            point.step([0, 0]),
-            OutpostState::NEUTRAL,
-            "an empty outpost falls back"
+            point.step([0, 0], false).progress,
+            rise_of(1) - EMPTY_FALL,
+            "an empty outpost falls back 1 a second"
         );
-        let pushed = point.step([0, 2]);
+        let pushed = point.step([0, 2], false);
         assert_eq!(
             (pushed.capturer, pushed.progress),
             (1, 0),
             "the other team pushes it back"
         );
-        for _ in 0..CAPTURE_DONE / CAPTURE_STEP {
-            point = point.step([3, 1]);
+        for _ in 0..capture_ticks(2) {
+            point = point.step([3, 1], false);
         }
         assert_eq!(
             point,
@@ -1091,12 +1606,30 @@ pub(super) mod tests {
                 ..OutpostState::NEUTRAL
             }
         );
-        assert_eq!(point.step([2, 0]), point, "the owner holds its outpost");
-        let taken = (0..CAPTURE_DONE / CAPTURE_STEP).fold(point, |point, _| point.step([0, 1]));
+        assert_eq!(point.step([2, 0], false), point, "the owner holds its outpost");
+        let taken = (0..capture_ticks(1)).fold(point, |point, _| point.step([0, 1], false));
         assert_eq!(
             taken.owner, 1,
             "an owned outpost goes straight to the other team"
         );
+    }
+
+    #[test]
+    fn a_standing_ward_names_the_capturer_and_holds_its_progress() {
+        let owned = OutpostState {
+            owner: 0,
+            ..OutpostState::NEUTRAL
+        };
+        let held = (0..capture_ticks(1)).fold(owned, |point, _| point.step([0, 1], true));
+        assert_eq!(
+            held,
+            OutpostState {
+                capturer: 1,
+                ..owned
+            },
+            "retail: capturer team 1 at progress 0 (opr_match_4 731.330 to 742.798 s)"
+        );
+        assert_eq!(held.step([0, 1], false).progress, rise_of(1), "the ruined ward lets it rise");
     }
 
     #[test]
@@ -1158,6 +1691,16 @@ pub(super) mod tests {
         }
     }
 
+    /// Outpost `index` of the match of `world` is team `team`'s, as a finished capture leaves it.
+    pub(in crate::world) fn own_outpost(world: &mut SimWorld, index: usize, team: u8) {
+        if let Some(running) = world.arena_matches.outpost_rush.as_mut() {
+            running.points[index] = OutpostState {
+                owner: team,
+                ..OutpostState::NEUTRAL
+            };
+        }
+    }
+
     /// The Outpost Rush instance sim with the match open and two players, one per team.
     fn rush_sim() -> SimWorld {
         rush_sim_on(outpost_rush())
@@ -1194,6 +1737,16 @@ pub(super) mod tests {
     /// The Outpost Rush instance sim of `mode` with the match open and two players, one per
     /// team.
     pub(in crate::world) fn rush_sim_on(mode: InstanceMode) -> SimWorld {
+        let table = structure_tests::table_on(&mode.map.folder);
+        rush_sim_with(mode, table)
+    }
+
+    /// The match of [`rush_sim_on`] with the outpost structures of `table`; its players arrive
+    /// with the gear of a kit, and the kits hold the match's wood and ore.
+    pub(in crate::world) fn rush_sim_with(
+        mode: InstanceMode,
+        table: nw_content::outpost_structures::OutpostStructures,
+    ) -> SimWorld {
         let mut settings = crate::world::tests::settings(MANY_PLAYERS, MANY_PLAYERS as u32);
         settings.instance_role = true;
         settings.level = LevelSpec::instance(
@@ -1210,6 +1763,17 @@ pub(super) mod tests {
             crate::combat::tests::test_combat(),
             std::sync::Arc::new(crate::player_content::PlayerContent {
                 instances: InstanceCatalog::build([mode.clone()]),
+                mode_rewards: nw_content::game_mode_rewards::ModeRewards::build([(
+                    PRE_GAME_EVENT.to_owned(),
+                    nw_content::game_mode_rewards::ModeReward::default(),
+                )]),
+                outpost_structures: table,
+                outpost_blueprints: structure_tests::gate_blueprints(),
+                structure_costs: structure_tests::gate_costs(),
+                kits: crate::world::gear::tests::kits_with_resources(&[
+                    (structure_tests::WOOD, structure_tests::WOOD_CLASS),
+                    (structure_tests::ORE, structure_tests::ORE_CLASS),
+                ]),
                 ..crate::player_content::PlayerContent::default()
             }),
         );
@@ -1217,6 +1781,7 @@ pub(super) mod tests {
             .into_iter()
             .map(|(number, team)| {
                 let mut admit = admit_at(number, 940.0, false);
+                admit.backstory = Some(crate::world::gear::tests::BACKSTORY.to_owned());
                 admit.progression.arena.stay = Some(InstanceStay {
                     instance: Uuid::from_u128(INSTANCE),
                     game_mode: mode.id.clone(),
@@ -1248,6 +1813,50 @@ pub(super) mod tests {
         world
     }
 
+    /// A table of one storage shed (container 4, interact 5) at outpost A and one standing
+    /// tier 1 Protection Ward at outpost C of the map in `folder`.
+    pub(in crate::world) fn shed_and_ward_table(folder: &str) -> nw_content::outpost_structures::OutpostStructures {
+        use nw_messages::{BundleMember, ContainerState, InteractState};
+        let encoded = |member: BundleMember| hex::encode(member.encode().expect("encode"));
+        let container = encoded(BundleMember {
+            component: SHED_CONTAINER_COMPONENT,
+            state: MemberState::Container(ContainerState {
+                bonus_max_encumbrance: Some(0),
+                was_emptied: Some(false),
+                ..ContainerState::default()
+            }),
+        });
+        let interact = encoded(BundleMember {
+            component: SHED_CONTAINER_COMPONENT + 1,
+            state: MemberState::Interact(InteractState {
+                enabled: None,
+                has_interactors: Some(0),
+            }),
+        });
+        let shed = hex::encode(storage_shed::SHED_ASSET);
+        let text = format!(
+            r#"{{"kinds": [
+            {{"asset": "{shed}", "slice": "slices/outpostrush/structures/or_storage.dynamicslice",
+             "blueprint": null, "tier": 0, "foundation": null, "built":
+             {{"card_component": 0, "place_component": 1, "ownership_component": 2,
+               "members": ["{container}", "{interact}"]}}}},
+            {{"asset": "{WARD_ASSET}", "slice": "slices/outpostrush/structures/or_protection_ward.dynamicslice",
+             "blueprint": null, "tier": 1, "foundation": null, "built":
+             {{"card_component": 0, "place_component": 1, "ownership_component": 2, "members": []}}}}],
+            "maps": [{{"folder": "{folder}", "spawners": [
+              {{"name": "StorageShedA", "outpost": 0, "role": "storage_shed", "number": 1,
+                "asset": "{shed}", "place": [-60.0, 40.0, 107.125], "yaw": 0.0}},
+              {{"name": "ProtectionWardC", "outpost": 2, "role": "protection_ward", "number": 1,
+                "asset": "{WARD_ASSET}", "place": [62.0, 44.0, 107.125], "yaw": 0.0}}]}}]}}"#
+        );
+        nw_content::outpost_structures::OutpostStructures::parse(&text).expect("table")
+    }
+
+    /// The container component of the test shed.
+    pub(in crate::world) const SHED_CONTAINER_COMPONENT: u64 = 4;
+    /// The slice asset of the test ward (Observed: `or_protection_ward`, `opr_match_4`).
+    const WARD_ASSET: &str = "646ec6cf1b715b1492f95bf1cb130647";
+
     pub(in crate::world) fn running(world: &SimWorld) -> &OutpostRushMatch {
         world
             .arena_matches
@@ -1263,7 +1872,7 @@ pub(super) mod tests {
             .members(running(world).entity)
             .and_then(|members| {
                 members.iter().find_map(|member| match &member.state {
-                    MemberState::GameMode(state) => Some(state.clone()),
+                    MemberState::GameMode(state) => Some((**state).clone()),
                     _ => None,
                 })
             })
@@ -1293,12 +1902,51 @@ pub(super) mod tests {
         assert_eq!(events, armories);
     }
 
-    fn tick_at(world: &mut SimWorld, server_ms: u64) {
-        world.tick(NOW, server_ms).expect("tick");
+    /// Retail: each player gets `OutpostRush_PreGameGrant` when it joins the match, once.
+    #[test]
+    fn a_joining_player_gets_the_pre_game_grant_once() {
+        use nw_messages::ReplicatedList;
+        let mut world = rush_sim();
+        for number in [FIRST, SECOND] {
+            let entity = world.player_by_number(number).expect("player");
+            let seat = ArenaSeat { team: 0, place: 0 };
+            world.join_outpost_rush(entity, seat);
+            let mut log = world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .game_events
+                .clone();
+            let member = log.take_member(1).expect("the grant's entry");
+            let MemberState::GameEvents(state) = member.state else {
+                panic!("a game event member");
+            };
+            let Some(ReplicatedList::Full(list)) = state.game_events else {
+                panic!("the first entry goes in full");
+            };
+            let events: Vec<u32> = list.elements.iter().map(|entry| entry.event).collect();
+            assert_eq!(
+                events,
+                [lowercase_crc32(PRE_GAME_EVENT)],
+                "one grant, a second join gives none"
+            );
+        }
+    }
+
+    pub(in crate::world) fn tick_at(world: &mut SimWorld, server_ms: u64) {
+        tick_sent(world, server_ms);
+    }
+
+    /// [`tick_at`] with what the tick sends: the messages sent while it runs go out with it.
+    pub(in crate::world) fn tick_sent(
+        world: &mut SimWorld,
+        server_ms: u64,
+    ) -> Vec<crate::world::Outgoing> {
+        world.tick(NOW, server_ms).expect("tick").messages
     }
 
     /// Puts player `number` at outpost `index` of the Trench map.
-    fn stand_in_outpost(world: &mut SimWorld, number: u64, index: usize) {
+    pub(in crate::world) fn stand_in_outpost(world: &mut SimWorld, number: u64, index: usize) {
         let [x, y, z] = OUTPOST_MAPS[0].outposts[index].position;
         let entity = world.player_by_number(number).expect("player");
         world.place_player(entity, Position { x, y, z }, None, Placement::Drop, NOW);
@@ -1346,6 +1994,20 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn the_winners_get_the_tier_of_their_board_score_and_the_others_the_loss_event() {
+        // The retail wins: `_T1` at 570, 894, 1,856 and 1,981, `_T4` at 6,441.
+        for score in [570, 894, 1_856, 1_981] {
+            assert_eq!(end_event(0, Some(0), score), "OutpostRush_T1", "{score}");
+        }
+        assert_eq!(end_event(1, Some(1), 6_441), "OutpostRush_T4");
+        assert_eq!(end_event(0, Some(0), 2_000), "OutpostRush_T2");
+        assert_eq!(end_event(0, Some(0), 5_999), "OutpostRush_T3");
+        assert_eq!(end_event(0, Some(0), u32::MAX), "OutpostRush_T4", "no tier above T4");
+        assert_eq!(end_event(1, Some(0), 9_000), LOSS_EVENT, "a loss stays T1");
+        assert_eq!(end_event(0, None, 9_000), LOSS_EVENT, "a tie");
+    }
+
+    #[test]
     fn an_island_instance_owns_the_spawns_of_its_frame_only() {
         let world = rush_sim_on(island_rush());
         assert_eq!(world.instance_frame(), Some(island_rush().map.frame));
@@ -1364,9 +2026,13 @@ pub(super) mod tests {
             (PREGAME, 2)
         );
         assert_eq!(
-            match_state.values().len(),
-            3,
-            "the outposts only in the pregame"
+            match_state.values()[match_state.outposts.len()..],
+            [
+                (OUTPOST_STRUCTURE_STATUSES[0], ARMORY_TIER_ONE),
+                (OUTPOST_STRUCTURE_STATUSES[1], 0),
+                (OUTPOST_STRUCTURE_STATUSES[2], 0),
+            ],
+            "the outposts and their structure statuses (the test armory A) only in the pregame"
         );
         assert_eq!(
             world.outpost_rush_foes(first, second),
@@ -1383,7 +2049,7 @@ pub(super) mod tests {
         assert_eq!(running(&world).state, RUNNING);
         assert_eq!(world.outpost_rush_foes(first, second), Some(true));
         stand_in_outpost(&mut world, FIRST, 0);
-        let captured_ms = start_ms + u64::from(CAPTURE_DONE / CAPTURE_STEP) * CAPTURE_TICK_MS;
+        let captured_ms = start_ms + capture_ticks(1) * CAPTURE_TICK_MS;
         tick_at(&mut world, captured_ms);
         assert_eq!(running(&world).points[0].owner, 0, "team 0 owns outpost A");
         let score = running(&world).scores[0];
@@ -1400,6 +2066,21 @@ pub(super) mod tests {
         let match_state = running(&world);
         assert_eq!((match_state.state, match_state.winner), (ENDED, Some(0)));
         assert!(match_state.values().contains(&(WINNING_TEAM, 0)));
+        let from_outpost_a = match_state.scores[0] - KILL_POINTS;
+        let capture_counts: Vec<Keyed> = match_state
+            .values()
+            .into_iter()
+            .filter(|(key, _)| OUTPOST_CAPTURE_COUNTS.contains(key))
+            .collect();
+        assert_eq!(
+            capture_counts,
+            [
+                (OUTPOST_CAPTURE_COUNTS[0], u64::from(from_outpost_a)),
+                (OUTPOST_CAPTURE_COUNTS[1], 0),
+                (OUTPOST_CAPTURE_COUNTS[2], 0),
+            ],
+            "the end statistics: team 0 scored all but its kill from outpost A"
+        );
         tick_at(
             &mut world,
             captured_ms + ticks_to_win * SCORE_TICK_MS + CLEANUP_MS,
@@ -1408,6 +2089,135 @@ pub(super) mod tests {
             world.arena_matches.outpost_rush.is_none(),
             "the players go back"
         );
+    }
+
+    /// The status of outpost A whose armory stands at tier 1 (Observed in every first state).
+    const ARMORY_TIER_ONE: u64 = 1;
+    /// The status bits of the gate 1 (slot 6, three bits a slot).
+    const GATE_ONE_SHIFT: u32 = 18;
+
+    fn build_request(target: [u8; 16]) -> nw_messages::InteractionRequest {
+        nw_messages::InteractionRequest {
+            kind: APPLY_ALL_RESOURCES_KIND,
+            target,
+            ..crate::world::turrets::tests::use_request(target)
+        }
+    }
+
+    fn status_of_a(world: &SimWorld) -> u64 {
+        running(world)
+            .values()
+            .into_iter()
+            .find(|(key, _)| *key == OUTPOST_STRUCTURE_STATUSES[0])
+            .map_or(0, |(_, value)| value)
+    }
+
+    #[test]
+    fn the_owner_team_builds_a_gate_with_its_wood_and_the_foes_ruin_it() {
+        let mut world = rush_sim();
+        let start_ms = START_MS + PREGAME_MS;
+        tick_at(&mut world, start_ms);
+        stand_in_outpost(&mut world, FIRST, 0);
+        let captured_ms = start_ms + capture_ticks(1) * CAPTURE_TICK_MS;
+        tick_at(&mut world, captured_ms);
+        let first = world.player_by_number(FIRST).expect("player");
+        let second = world.player_by_number(SECOND).expect("player");
+        let (gate, number) = running(&world)
+            .structures
+            .structures
+            .iter()
+            .find(|structure| structure.phase == Phase::Foundation)
+            .map(|structure| (structure.gde_ref, structure.number))
+            .expect("the gate foundation");
+        assert_eq!(status_of_a(&world), ARMORY_TIER_ONE, "no gate yet");
+        give(&mut world, first, structure_tests::WOOD, structure_tests::GATE_WOOD);
+        world.take_messages();
+        assert!(world.outpost_rush_interaction(first, FIRST, build_request(gate), &[]));
+        assert!(world.outpost_rush_interaction(second, SECOND, build_request(gate), &[]));
+        let outgoing = tick_sent(&mut world, captured_ms + ACCEPT_DELAY_MS);
+        let answered = |number: u64, status: u8| {
+            messages_to(&outgoing, number).iter().any(|message| {
+                matches!(message, ServerMessage::InteractionValidated(answer) if answer.status == status)
+            })
+        };
+        assert!(answered(FIRST, USE_ACCEPTED), "the owner team builds");
+        assert!(answered(SECOND, USE_REFUSED), "the other team does not");
+        assert_eq!(bag_count(&world, first, structure_tests::WOOD), 0, "the whole cost");
+        let build_ms = (structure_tests::GATE_BUILD_S * 1_000.0) as u64;
+        tick_at(&mut world, captured_ms + ACCEPT_DELAY_MS + build_ms + BUILD_SEND_MS);
+        assert_eq!(
+            status_of_a(&world),
+            ARMORY_TIER_ONE | 1 << GATE_ONE_SHIFT,
+            "the gate stands at tier 1"
+        );
+        let whole = structure_tests::GATE_HEALTH as u32;
+        assert_eq!(world.hit_outpost_rush_structure(first, number, whole), None, "own team");
+        assert_eq!(world.hit_outpost_rush_structure(second, number, whole), Some(true));
+        assert_eq!(
+            status_of_a(&world),
+            ARMORY_TIER_ONE | (1 | RUIN_BIT) << GATE_ONE_SHIFT,
+            "a ruin keeps its tier (Observed gate 1 -> 5)"
+        );
+        assert_eq!(world.hit_outpost_rush_structure(second, number, whole), None, "a ruin");
+    }
+
+
+    #[test]
+    fn an_upgrade_replaces_the_built_gate_with_the_next_tier_built_from_nothing() {
+        let mut world = rush_sim();
+        let start_ms = START_MS + PREGAME_MS;
+        tick_at(&mut world, start_ms);
+        stand_in_outpost(&mut world, FIRST, 0);
+        let mut now_ms = start_ms + capture_ticks(1) * CAPTURE_TICK_MS;
+        tick_at(&mut world, now_ms);
+        let first = world.player_by_number(FIRST).expect("player");
+        let gate = |world: &SimWorld, phase: Phase| {
+            running(world)
+                .structures
+                .structures
+                .iter()
+                .find(|structure| structure.phase == phase && structure.max_health > 0.0)
+                .map(|structure| structure.gde_ref)
+        };
+        let t1 = gate(&world, Phase::Foundation).expect("the t1 foundation");
+        give(&mut world, first, structure_tests::WOOD, structure_tests::GATE_WOOD);
+        assert!(world.outpost_rush_interaction(first, FIRST, build_request(t1), &[]));
+        let t1_build_ms = (structure_tests::GATE_BUILD_S * 1_000.0) as u64;
+        now_ms += ACCEPT_DELAY_MS;
+        tick_at(&mut world, now_ms);
+        now_ms += t1_build_ms + BUILD_SEND_MS;
+        tick_at(&mut world, now_ms);
+        assert_eq!(gate(&world, Phase::Built), Some(t1));
+        let upgrade = nw_messages::InteractionRequest {
+            kind: UPGRADE_BUILDABLE_KIND,
+            ..build_request(t1)
+        };
+        assert!(world.outpost_rush_interaction(first, FIRST, upgrade, &[]));
+        now_ms += ACCEPT_DELAY_MS;
+        tick_at(&mut world, now_ms);
+        assert_eq!(gate(&world, Phase::Replaced), Some(t1), "state 7 while the t2 builds");
+        let t2 = gate(&world, Phase::Foundation).expect("the t2 foundation");
+        assert_ne!(t2, t1, "a new entity");
+        assert_eq!(
+            status_of_a(&world),
+            ARMORY_TIER_ONE | 1 << GATE_ONE_SHIFT,
+            "the status keeps tier 1 while the t2 builds (Observed 1054.1 to 1060.1 s)"
+        );
+        give(&mut world, first, structure_tests::WOOD, structure_tests::GATE_WOOD);
+        give(&mut world, first, structure_tests::ORE, structure_tests::GATE_T2_ORE);
+        assert!(world.outpost_rush_interaction(first, FIRST, build_request(t2), &[]));
+        now_ms += ACCEPT_DELAY_MS;
+        tick_at(&mut world, now_ms);
+        assert_eq!(bag_count(&world, first, structure_tests::ORE), 0);
+        now_ms += (structure_tests::GATE_T2_BUILD_S * 1_000.0) as u64 + BUILD_SEND_MS;
+        tick_at(&mut world, now_ms);
+        assert_eq!(
+            status_of_a(&world),
+            ARMORY_TIER_ONE | 2 << GATE_ONE_SHIFT,
+            "tier 2 when it is built"
+        );
+        assert_eq!(gate(&world, Phase::Replaced), None, "the old tier left");
+        assert_eq!(gate(&world, Phase::Built), Some(t2));
     }
 
     #[test]
@@ -1498,5 +2308,106 @@ pub(super) mod tests {
         for barrier in &barriers {
             assert!(barrier_view(&world, barrier.number).is_none(), "gone");
         }
+    }
+
+    /// The test match with the board rules of [`board::tests::rules`].
+    fn board_sim() -> SimWorld {
+        let mut world = rush_sim();
+        with_board_rules(&mut world);
+        world
+    }
+
+    /// Gives the content of `world` the board's test rules.
+    pub(in crate::world) fn with_board_rules(world: &mut SimWorld) {
+        let mut content = (*world.content).clone();
+        content.outpost_rush_board = board::tests::rules();
+        world.content = std::sync::Arc::new(content);
+    }
+
+    /// The board value of stat `slot` of player `number` in the test match.
+    pub(in crate::world) fn board_value(world: &SimWorld, number: u64, slot: u8) -> u32 {
+        running(world).board.value(number, slot)
+    }
+
+    #[test]
+    fn the_board_counts_the_hits_the_kills_the_deaths_and_the_contests_of_the_match() {
+        use nw_content::warboard_stats::{
+            CAPTURE_POINT_CONTESTS, DAMAGE_TO_PLAYERS, DEATHS, PLAYER_KILLS, TOTAL_DAMAGE_DEALT,
+        };
+        let mut world = board_sim();
+        let start_ms = START_MS + PREGAME_MS;
+        tick_at(&mut world, start_ms);
+        stand_in_outpost(&mut world, FIRST, 0);
+        tick_at(&mut world, start_ms + SCORE_TICK_MS);
+        let board = &running(&world).board;
+        assert_eq!(board.value(FIRST, CAPTURE_POINT_CONTESTS), board::CONTESTS_PER_SCORE_TICK);
+        assert_eq!(board.value(SECOND, CAPTURE_POINT_CONTESTS), 0, "not in an outpost");
+        world.outpost_rush_hit(SECOND, FIRST, 2_000);
+        world.outpost_rush_hit(FIRST, FIRST, 2_000);
+        world.outpost_rush_death(SECOND, FIRST);
+        let board = &running(&world).board;
+        assert_eq!(board.value(FIRST, DAMAGE_TO_PLAYERS), 2_000, "a hit on a team mate counts nothing");
+        assert_eq!(board.value(FIRST, TOTAL_DAMAGE_DEALT), 2_000);
+        assert_eq!(board.value(FIRST, PLAYER_KILLS), 1);
+        assert_eq!(board.value(SECOND, DEATHS), 1);
+        assert!(board.score_of(FIRST) >= 50, "the kill's 50 points");
+        assert!(world.outpost_rush_board_enabled(FIRST), "a 3206 gets the full pair");
+        assert!(!world.outpost_rush_board_enabled(FIRST + SECOND + 1), "not a participant");
+    }
+
+    #[test]
+    fn a_foe_taking_an_owned_outpost_reports_it_attacked() {
+        use super::super::outpost_rush_events::OUTPOST_ATTACKED;
+        let mut world = rush_sim();
+        let start_ms = START_MS + PREGAME_MS;
+        tick_at(&mut world, start_ms);
+        stand_in_outpost(&mut world, FIRST, 0);
+        let captured_ms = start_ms + capture_ticks(1) * CAPTURE_TICK_MS;
+        tick_at(&mut world, captured_ms);
+        assert_eq!(running(&world).points[0].owner, 0);
+        let attacked = |world: &SimWorld| {
+            held_state(world)
+                .events
+                .iter()
+                .filter(|(_, event)| event.name == OUTPOST_ATTACKED && event.number == 0)
+                .count()
+        };
+        assert_eq!(attacked(&world), 0, "no foe yet");
+        stand_in_outpost(&mut world, FIRST, 2);
+        stand_in_outpost(&mut world, SECOND, 0);
+        tick_at(&mut world, captured_ms + CAPTURE_TICK_MS);
+        assert_eq!(running(&world).points[0].capturer, 1);
+        assert_eq!(attacked(&world), 1, "outpost A attacked");
+        tick_at(&mut world, captured_ms + 2 * CAPTURE_TICK_MS);
+        assert_eq!(attacked(&world), 1, "once in twenty seconds");
+    }
+
+    #[test]
+    fn the_armory_opens_for_the_team_that_owns_its_outpost() {
+        let mut world = rush_sim();
+        let first = world.player_by_number(FIRST).expect("player");
+        let second = world.player_by_number(SECOND).expect("player");
+        let armory = running(&world)
+            .structures
+            .structures
+            .iter()
+            .map(|structure| structure.gde_ref)
+            .find(|gde_ref| {
+                running(&world)
+                    .structures
+                    .built_raid(gde_ref, StructureRole::Armory)
+                    .is_some()
+            })
+            .expect("the test armory A");
+        assert_eq!(world.armory_status(first, &armory), Some(USE_REFUSED), "no owner yet");
+        let start_ms = START_MS + PREGAME_MS;
+        tick_at(&mut world, start_ms);
+        stand_in_outpost(&mut world, FIRST, 0);
+        let captured_ms = start_ms + capture_ticks(1) * CAPTURE_TICK_MS;
+        tick_at(&mut world, captured_ms);
+        tick_at(&mut world, captured_ms + CAPTURE_TICK_MS);
+        assert_eq!(world.armory_status(first, &armory), Some(USE_ACCEPTED), "the owner team");
+        assert_eq!(world.armory_status(second, &armory), Some(USE_REFUSED), "the other team");
+        assert_eq!(world.armory_status(first, &[0; RAW_ID_LEN]), None, "no armory");
     }
 }

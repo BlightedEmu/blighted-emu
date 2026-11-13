@@ -104,7 +104,10 @@ const STOP_AFTER: Duration = Duration::from_millis(1500);
 const RESUMED_AFTER: Duration = Duration::from_millis(3500);
 /// The move after the resume, east of the start.
 const RESUME_STEP_M: f32 = 1.0;
-const JUMP_M: f32 = 50.0;
+/// The far move: farther than a full distance budget reaches (`config/sim.toml`: 13 m/s for an
+/// 8 s burst, 104 m), as the real teleports of the retail captures (400 m or more). A jump
+/// within the budget is an honest move that the walk's spare budget allows.
+const JUMP_M: f32 = 400.0;
 /// M4 spec section 1.2 criterion 3.3.
 const PATH_TOLERANCE_M: f32 = 1.0;
 /// M4 spec section 1.2 criterion 3.5.

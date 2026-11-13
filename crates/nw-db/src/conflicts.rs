@@ -41,6 +41,7 @@
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::control_points::{faction_bonus, take_tower_influence, with_bonus};
 use crate::error::DbError;
 use crate::progression::{from_column, to_column};
 use crate::social_graph::{TreasuryReason, narrow};
@@ -82,6 +83,11 @@ pub const WAR_CAMP_TIERS: u8 = 3;
 /// refuses with `InsufficientContribution`, its threshold is the server asset's
 /// `MinimumInfluenceThresholdForWar`, in no client file).
 pub const MIN_COMPANY_CONTRIBUTION: u64 = 50;
+/// The influence one company's members earned in a territory's race that sets the claims'
+/// war declaration threshold faction to the company's faction (Inferred: the server asset's
+/// value is in no client file; the least faction influence at a retail flip was 3 % (32 flips of
+/// the 1,111 claims ledgers, at 3 % to 58 %), the most one company can have earned there).
+pub const WAR_DEC_THRESHOLD_POINTS: u64 = 300;
 /// The faction byte of no faction.
 pub const NO_FACTION: u8 = 0;
 /// The factions, 1 to 3.
@@ -115,14 +121,31 @@ fn siege_ms_of_day(siege_hour: f32) -> u64 {
 /// before the siege hour) not before `now_ms` and at least [`RACE_MIN_MS`] after the race start;
 /// `None` before the first slot.
 pub fn conflict_slot(race_start_ms: u64, siege_hour: f32, now_ms: u64) -> Option<u64> {
+    let first = first_slot(race_start_ms, siege_hour);
+    (now_ms >= first).then(|| first + (now_ms - first) / DAY_MS * DAY_MS)
+}
+
+/// The first conflict slot of a race that started at Unix ms `race_start_ms` for an owner of
+/// siege hour `siege_hour`: [`CONFLICT_BEFORE_SIEGE_MS`] before the siege hour, at least
+/// [`RACE_MIN_MS`] after the race start.
+fn first_slot(race_start_ms: u64, siege_hour: f32) -> u64 {
     let earliest = race_start_ms.saturating_add(RACE_MIN_MS);
     let slot_of_day = (siege_ms_of_day(siege_hour) + DAY_MS - CONFLICT_BEFORE_SIEGE_MS) % DAY_MS;
-    let day_start = earliest - earliest % DAY_MS;
-    let mut first = day_start + slot_of_day;
+    let first = earliest - earliest % DAY_MS + slot_of_day;
     if first < earliest {
-        first += DAY_MS;
+        first + DAY_MS
+    } else {
+        first
     }
-    (now_ms >= first).then(|| first + (now_ms - first) / DAY_MS * DAY_MS)
+}
+
+/// The first conflict slot after Unix ms `now_ms` of such a race: the end of the race window
+/// that runs or comes next (`crate::control_points`).
+pub fn next_conflict_slot(race_start_ms: u64, siege_hour: f32, now_ms: u64) -> u64 {
+    conflict_slot(race_start_ms, siege_hour, now_ms).map_or_else(
+        || first_slot(race_start_ms, siege_hour),
+        |slot| slot + DAY_MS,
+    )
 }
 
 /// When a conflict that started at `start_ms` ends: at its lottery end `lottery_end_ms` when a
@@ -176,9 +199,15 @@ pub struct TerritoryConflict {
     pub conflict_start_ms: u64,
     /// When the last lottery ends or ended, Unix ms; 0 for none.
     pub lottery_end_ms: u64,
+    /// The attacking faction that met the war declaration threshold in the race
+    /// ([`WAR_DEC_THRESHOLD_POINTS`]), [`NO_FACTION`] for none.
+    pub war_dec_faction: u8,
+    /// The next conflict slot, Unix ms: the end of the race window that runs or comes next
+    /// ([`next_conflict_slot`]); 0 for a claim without an owner (no siege hour, no window).
+    pub next_slot_ms: u64,
 }
 
-type ConflictRow = (i16, i64, i16, i64, i64);
+type ConflictRow = (i16, i64, i16, i64, i64, i16, Option<f32>);
 
 /// Every territory with a race, with each faction's influence at Unix ms `now_ms`, by territory.
 ///
@@ -191,8 +220,10 @@ pub async fn territory_conflicts(
     now_ms: u64,
 ) -> Result<Vec<TerritoryConflict>, DbError> {
     let rows: Vec<ConflictRow> = sqlx::query_as(
-        "SELECT territory_id, race_start_ms, conflict_faction, conflict_start_ms, lottery_end_ms \
-         FROM territory_conflict ORDER BY territory_id",
+        "SELECT r.territory_id, r.race_start_ms, r.conflict_faction, r.conflict_start_ms, \
+         r.lottery_end_ms, r.war_dec_faction, c.siege_hour FROM territory_conflict r \
+         LEFT JOIN territory_owner o ON o.territory_id = r.territory_id \
+         LEFT JOIN company c ON c.company_id = o.company_id ORDER BY r.territory_id",
     )
     .fetch_all(world)
     .await?;
@@ -201,34 +232,40 @@ pub async fn territory_conflicts(
             .fetch_all(world)
             .await?;
     rows.into_iter()
-        .map(|(territory, race, faction, start, lottery)| {
-            let conflict_faction = narrow(i64::from(faction), FACTION_FIELD)?;
-            let mut influence = [0; 3];
-            for (entry, faction, points, decayed_ms) in &points {
-                if entry != &territory {
-                    continue;
+        .map(
+            |(territory, race, faction, start, lottery, war_dec, siege_hour)| {
+                let conflict_faction = narrow(i64::from(faction), FACTION_FIELD)?;
+                let mut influence = [0; 3];
+                for (entry, faction, points, decayed_ms) in &points {
+                    if entry != &territory {
+                        continue;
+                    }
+                    let index = usize::from(narrow::<u8>(i64::from(*faction), FACTION_FIELD)?)
+                        .saturating_sub(1)
+                        .min(FACTIONS.len() - 1);
+                    let points = from_column(*points, POINTS_FIELD)?;
+                    let decayed_ms = from_column(*decayed_ms, TIME_FIELD)?;
+                    let left = if conflict_faction == NO_FACTION {
+                        decayed(points, decayed_ms, now_ms).0
+                    } else {
+                        points
+                    };
+                    influence[index] = influence_percent(left);
                 }
-                let index = usize::from(narrow::<u8>(i64::from(*faction), FACTION_FIELD)?)
-                    .saturating_sub(1)
-                    .min(FACTIONS.len() - 1);
-                let points = from_column(*points, POINTS_FIELD)?;
-                let decayed_ms = from_column(*decayed_ms, TIME_FIELD)?;
-                let left = if conflict_faction == NO_FACTION {
-                    decayed(points, decayed_ms, now_ms).0
-                } else {
-                    points
-                };
-                influence[index] = influence_percent(left);
-            }
-            Ok(TerritoryConflict {
-                territory: narrow(i64::from(territory), TERRITORY_FIELD)?,
-                influence,
-                race_start_ms: from_column(race, TIME_FIELD)?,
-                conflict_faction,
-                conflict_start_ms: from_column(start, TIME_FIELD)?,
-                lottery_end_ms: from_column(lottery, TIME_FIELD)?,
-            })
-        })
+                let race_start_ms = from_column(race, TIME_FIELD)?;
+                Ok(TerritoryConflict {
+                    territory: narrow(i64::from(territory), TERRITORY_FIELD)?,
+                    influence,
+                    race_start_ms,
+                    next_slot_ms: siege_hour
+                        .map_or(0, |hour| next_conflict_slot(race_start_ms, hour, now_ms)),
+                    conflict_faction,
+                    conflict_start_ms: from_column(start, TIME_FIELD)?,
+                    lottery_end_ms: from_column(lottery, TIME_FIELD)?,
+                    war_dec_faction: narrow(i64::from(war_dec), FACTION_FIELD)?,
+                })
+            },
+        )
         .collect()
 }
 
@@ -256,36 +293,69 @@ async fn lock_conflict(
     .await?)
 }
 
-/// Gives the faction `faction` of the player `character` `points` influence in `territory` at
-/// Unix ms `now_ms`, and the same to the player's company when it is in one; the points stop at
-/// [`MAX_INFLUENCE`]. False when the territory is in a conflict (no gain then).
-///
-/// # Errors
-///
-/// Returns [`DbError::Database`] when a query fails and [`DbError::OutOfRange`] for a value a
-/// column cannot hold.
-pub async fn add_influence(
-    world: &PgPool,
-    territory: u16,
+/// The next conflict slot of `territory` at Unix ms `now_ms` ([`next_conflict_slot`]); 0 when it
+/// has no race or no owner.
+async fn next_slot_of(
+    transaction: &mut Transaction<'_, Postgres>,
+    territory: i16,
+    now_ms: u64,
+) -> Result<u64, DbError> {
+    let row: Option<(i64, Option<f32>)> = sqlx::query_as(
+        "SELECT r.race_start_ms, c.siege_hour FROM territory_conflict r \
+         LEFT JOIN territory_owner o ON o.territory_id = r.territory_id \
+         LEFT JOIN company c ON c.company_id = o.company_id WHERE r.territory_id = $1",
+    )
+    .bind(territory)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some((race, Some(siege_hour))) = row else {
+        return Ok(0);
+    };
+    Ok(next_conflict_slot(
+        from_column(race, TIME_FIELD)?,
+        siege_hour,
+        now_ms,
+    ))
+}
+
+/// Gives the influence of the towers held in `territory` in the race window before `slot_ms`,
+/// up to Unix ms `now_ms`, to their factions, with each faction's bonus.
+async fn give_tower_influence(
+    transaction: &mut Transaction<'_, Postgres>,
+    territory: i16,
+    slot_ms: u64,
+    now_ms: u64,
+) -> Result<(), DbError> {
+    for (faction, points) in take_tower_influence(transaction, territory, slot_ms, now_ms).await? {
+        let bonus = faction_bonus(transaction, territory, faction, slot_ms, now_ms).await?;
+        store_faction_points(
+            transaction,
+            territory,
+            faction,
+            with_bonus(points, bonus),
+            now_ms,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Adds `points` to the influence of `faction` in `territory` at Unix ms `now_ms`, after the
+/// decay since it was last counted; the points stop at [`MAX_INFLUENCE`].
+async fn store_faction_points(
+    transaction: &mut Transaction<'_, Postgres>,
+    territory: i16,
     faction: u8,
-    character: Uuid,
     points: u64,
     now_ms: u64,
-) -> Result<bool, DbError> {
-    let territory = narrow::<i16>(i64::from(territory), TERRITORY_FIELD)?;
-    let now = to_column(now_ms, TIME_FIELD)?;
-    let mut transaction = world.begin().await?;
-    let (conflict, _, _) = lock_conflict(&mut transaction, territory, now).await?;
-    if conflict != i16::from(NO_FACTION) {
-        return Ok(false);
-    }
+) -> Result<(), DbError> {
     let stored: Option<(i64, i64)> = sqlx::query_as(
         "SELECT points, decayed_ms FROM territory_influence \
          WHERE territory_id = $1 AND faction = $2 FOR UPDATE",
     )
     .bind(territory)
     .bind(i16::from(faction))
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(&mut **transaction)
     .await?;
     let (left, decayed_ms) = match stored {
         Some((stored, at)) => decayed(
@@ -307,19 +377,65 @@ pub async fn add_influence(
     .bind(i16::from(faction))
     .bind(to_column(total, POINTS_FIELD)?)
     .bind(to_column(decayed_ms, TIME_FIELD)?)
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await?;
-    sqlx::query(
+    Ok(())
+}
+
+/// Gives the faction `faction` of the player `character` `points` influence in `territory` at
+/// Unix ms `now_ms`, with the faction's control point and underdog bonus
+/// (`crate::control_points`), and the same to the player's company when it is in one; the points
+/// stop at [`MAX_INFLUENCE`]. False when the territory is in a conflict (no gain then).
+///
+/// # Errors
+///
+/// Returns [`DbError::Database`] when a query fails and [`DbError::OutOfRange`] for a value a
+/// column cannot hold.
+pub async fn add_influence(
+    world: &PgPool,
+    territory: u16,
+    faction: u8,
+    character: Uuid,
+    points: u64,
+    now_ms: u64,
+) -> Result<bool, DbError> {
+    let territory = narrow::<i16>(i64::from(territory), TERRITORY_FIELD)?;
+    let now = to_column(now_ms, TIME_FIELD)?;
+    let mut transaction = world.begin().await?;
+    let (conflict, _, _) = lock_conflict(&mut transaction, territory, now).await?;
+    if conflict != i16::from(NO_FACTION) {
+        return Ok(false);
+    }
+    let next_slot_ms = next_slot_of(&mut transaction, territory, now_ms).await?;
+    let bonus = faction_bonus(&mut transaction, territory, faction, next_slot_ms, now_ms).await?;
+    let points = with_bonus(points, bonus);
+    store_faction_points(&mut transaction, territory, faction, points, now_ms).await?;
+    let company_points: Option<i64> = sqlx::query_scalar(
         "INSERT INTO company_influence (territory_id, company_id, points) \
          SELECT $1, company_id, $3 FROM company_member WHERE character_id = $2 \
          ON CONFLICT (territory_id, company_id) \
-         DO UPDATE SET points = company_influence.points + EXCLUDED.points",
+         DO UPDATE SET points = company_influence.points + EXCLUDED.points RETURNING points",
     )
     .bind(territory)
     .bind(character)
     .bind(to_column(points, POINTS_FIELD)?)
-    .execute(&mut *transaction)
+    .fetch_optional(&mut *transaction)
     .await?;
+    if from_column::<u64>(company_points.unwrap_or_default(), POINTS_FIELD)?
+        >= WAR_DEC_THRESHOLD_POINTS
+    {
+        // The first attacking faction whose company met the threshold; never the owner's.
+        sqlx::query(
+            "UPDATE territory_conflict SET war_dec_faction = $2 \
+             WHERE territory_id = $1 AND war_dec_faction = 0 AND NOT EXISTS ( \
+             SELECT 1 FROM territory_owner o JOIN company c ON c.company_id = o.company_id \
+             WHERE o.territory_id = $1 AND c.faction = $2)",
+        )
+        .bind(territory)
+        .bind(i16::from(faction))
+        .execute(&mut *transaction)
+        .await?;
+    }
     transaction.commit().await?;
     Ok(true)
 }
@@ -327,6 +443,10 @@ pub async fn add_influence(
 /// A declaration a company asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WarRequest {
+    /// The id of this request (world migration 0046): the same request tried again (the
+    /// database's answer was lost) finds its own stored declaration and is not refused, so a
+    /// wallet payment is never given back for a declaration that stands.
+    pub id: Uuid,
     /// The territory id.
     pub territory: u16,
     /// The declaring company.
@@ -386,7 +506,7 @@ pub enum Declaration {
 /// Takes the treasury change `change` of `company` for `character` with `reason` in
 /// `transaction`, as `crate::change_treasury` does; the new balance, `None` when the treasury
 /// has too little.
-async fn treasury_change(
+pub(crate) async fn treasury_change(
     transaction: &mut Transaction<'_, Postgres>,
     company: Uuid,
     character: Uuid,
@@ -434,6 +554,27 @@ pub async fn declare_in_lottery(
     let territory = narrow::<i16>(i64::from(request.territory), TERRITORY_FIELD)?;
     let now = to_column(now_ms, TIME_FIELD)?;
     let mut transaction = world.begin().await?;
+    let stored: Option<i64> =
+        sqlx::query_scalar("SELECT lottery_end_ms FROM war_declaration WHERE request_id = $1")
+            .bind(request.id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    if let Some(lottery_end) = stored {
+        let treasury = if request.from_treasury {
+            let balance: i64 =
+                sqlx::query_scalar("SELECT treasury FROM company WHERE company_id = $1")
+                    .bind(request.company)
+                    .fetch_one(&mut *transaction)
+                    .await?;
+            Some(from_column(balance, COST_FIELD)?)
+        } else {
+            None
+        };
+        return Ok(Declaration::InLottery {
+            lottery_end_ms: from_column(lottery_end, TIME_FIELD)?,
+            treasury,
+        });
+    }
     let (faction, start, lottery) = lock_conflict(&mut transaction, territory, now).await?;
     let start_ms: u64 = from_column(start, TIME_FIELD)?;
     let lottery_ms: u64 = from_column(lottery, TIME_FIELD)?;
@@ -491,7 +632,7 @@ pub async fn declare_in_lottery(
     let inserted = sqlx::query(
         "INSERT INTO war_declaration (territory_id, conflict_start_ms, company_id, character_id, \
          defender_company, cost, war_camp, from_treasury, lottery_end_ms, war_starts_ms, \
-         declared_ms) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+         declared_ms, request_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
          ON CONFLICT (territory_id, conflict_start_ms, company_id) DO NOTHING",
     )
     .bind(territory)
@@ -505,6 +646,7 @@ pub async fn declare_in_lottery(
     .bind(to_column(lottery_end_ms, TIME_FIELD)?)
     .bind(to_column(war_start_ms(start_ms), TIME_FIELD)?)
     .bind(now)
+    .bind(request.id)
     .execute(&mut *transaction)
     .await?;
     if inserted.rows_affected() == 0 {
@@ -546,6 +688,8 @@ pub struct LotteryEntry {
     pub company: Uuid,
     /// The declaring player.
     pub character: Uuid,
+    /// The defending company the declaration named.
+    pub defender: Uuid,
     /// What it paid, hundredths of a coin.
     pub cost: u64,
     /// The treasury paid; its balance after the refund of a lost lottery.
@@ -600,6 +744,7 @@ async fn draw_lottery(
         let mut entry = LotteryEntry {
             company,
             character,
+            defender,
             cost: from_column(cost, COST_FIELD)?,
             treasury: None,
         };
@@ -683,7 +828,18 @@ pub async fn advance_conflicts(
         let (Some(owner_faction), Some(siege_hour)) = (owner_faction, siege_hour) else {
             continue;
         };
-        let Some(slot) = conflict_slot(from_column(race, TIME_FIELD)?, siege_hour, now_ms) else {
+        let race_start_ms = from_column(race, TIME_FIELD)?;
+        let last_slot = conflict_slot(race_start_ms, siege_hour, now_ms);
+        // The window that ended at the last slot gets its last intervals, the running one its
+        // intervals so far.
+        for window_slot in
+            last_slot
+                .into_iter()
+                .chain([next_conflict_slot(race_start_ms, siege_hour, now_ms)])
+        {
+            give_tower_influence(&mut transaction, territory, window_slot, now_ms).await?;
+        }
+        let Some(slot) = last_slot else {
             continue;
         };
         if now_ms >= conflict_end_ms(slot, 0) {
@@ -777,7 +933,7 @@ async fn end_conflict(
         .await?;
     sqlx::query(
         "UPDATE territory_conflict SET conflict_faction = 0, conflict_start_ms = 0, \
-         race_start_ms = $2 WHERE territory_id = $1",
+         war_dec_faction = 0, race_start_ms = $2 WHERE territory_id = $1",
     )
     .bind(territory)
     .bind(end)
@@ -938,6 +1094,7 @@ mod infra_tests {
 
     fn request(company: Uuid, character: Uuid, defender: Uuid, from_treasury: bool) -> WarRequest {
         WarRequest {
+            id: Uuid::new_v4(),
             territory: TERRITORY,
             company,
             faction: ATTACKING_FACTION,
@@ -1050,18 +1207,22 @@ mod infra_tests {
             .await
             .expect("declare");
             assert_eq!(again, Declaration::Refused(WarRefusal::AlreadyDeclared));
-            let paid =
-                declare_in_lottery(pool, &request(second, second_player, owner, true), slot + 1)
+            let treasury_request = request(second, second_player, owner, true);
+            let after = TREASURY as u64 - WAR_DECLARATION_COST;
+            // The second try of the same request (its answer was lost) finds it and pays nothing
+            // again, even past the lottery's first refusal reasons.
+            for at_ms in [slot + 1, slot + 2] {
+                let paid = declare_in_lottery(pool, &treasury_request, at_ms)
                     .await
                     .expect("declare");
-            let after = TREASURY as u64 - WAR_DECLARATION_COST;
-            assert_eq!(
-                paid,
-                Declaration::InLottery {
-                    lottery_end_ms,
-                    treasury: Some(after)
-                }
-            );
+                assert_eq!(
+                    paid,
+                    Declaration::InLottery {
+                        lottery_end_ms,
+                        treasury: Some(after)
+                    }
+                );
+            }
             // The lottery draws the first entry: the treasury of the second gets its coin back.
             let draws = advance_conflicts(pool, lottery_end_ms, |entries| {
                 assert_eq!(entries, 2);
@@ -1076,6 +1237,10 @@ mod infra_tests {
             assert_eq!(winner.company, attacker);
             assert_eq!(draw.refunds.len(), 1);
             assert_eq!(draw.refunds[0].treasury, Some(TREASURY as u64));
+            assert_eq!(
+                draw.refunds[0].defender, owner,
+                "the lost declaration's defender"
+            );
             assert_eq!(treasury(pool, second).await, TREASURY);
             let wars = crate::territory_wars(pool, lottery_end_ms)
                 .await
@@ -1166,6 +1331,50 @@ mod infra_tests {
                 .expect("read");
             assert_eq!(read[0].conflict_faction, NO_FACTION);
             assert_eq!(read[0].race_start_ms, slot + CONFLICT_LENGTH_MS);
+            assert_eq!(read[0].war_dec_faction, NO_FACTION, "the new race has none");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_company_that_meets_the_threshold_sets_its_faction_never_the_owners() {
+        with_test_schema(async |pool| {
+            WORLD_MIGRATOR.run(pool).await.expect("migrate");
+            let owner = company(pool, OWNER, OWNER_FACTION).await;
+            let attacker = company(pool, ATTACKER, ATTACKING_FACTION).await;
+            assert!(
+                set_territory_owner(pool, TERRITORY, OWNER)
+                    .await
+                    .expect("owner")
+            );
+            let (owner_player, attacker_player) =
+                (founder(pool, owner).await, founder(pool, attacker).await);
+            let missions = WAR_DEC_THRESHOLD_POINTS / MISSION_POINTS;
+            let gain = async |player, faction| {
+                add_influence(
+                    pool,
+                    TERRITORY,
+                    faction,
+                    player,
+                    MISSION_POINTS,
+                    MIDNIGHT_MS,
+                )
+                .await
+                .expect("gain")
+            };
+            for _ in 0..missions {
+                assert!(gain(owner_player, OWNER_FACTION).await);
+            }
+            let faction = async || {
+                territory_conflicts(pool, MIDNIGHT_MS).await.expect("read")[0].war_dec_faction
+            };
+            assert_eq!(faction().await, NO_FACTION, "the owner's faction never");
+            for _ in 1..missions {
+                assert!(gain(attacker_player, ATTACKING_FACTION).await);
+            }
+            assert_eq!(faction().await, NO_FACTION, "below the threshold");
+            assert!(gain(attacker_player, ATTACKING_FACTION).await);
+            assert_eq!(faction().await, ATTACKING_FACTION);
         })
         .await;
     }

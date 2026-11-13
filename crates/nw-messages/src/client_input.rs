@@ -473,6 +473,43 @@ impl Bit8 {
         let length = usize::try_from(reader.wide_prefixed().ok()?).ok()?;
         reader.bytes(length).ok().map(<[u8]>::to_vec)
     }
+
+    /// The item and the action of a body's steps 19 to 25 (after the name, steps 12 to 14,
+    /// the `f32` of step 15 and two flags): `None` for an empty body or one too short.
+    ///
+    /// Observed (`opr_match_4` 724.499 s, interaction kind 53 `InteractWithItemCost` on a
+    /// summoning circle): the item CRC `e861084d` (`or_summonstonebear`), the count 1 and the
+    /// action CRC `2b339e09` (`addsummoningstonebear`); the kind 76 request before it names the
+    /// same item, count 0 and the action `6e652796` (`addsummoningstone`).
+    pub fn interaction_action(&self) -> Option<InteractionAction> {
+        let Self::Body(body) = self else {
+            return None;
+        };
+        let mut reader = Reader::new(body.get(NAME_LENGTH_AT..)?);
+        for _ in 0..LONG_STRINGS_11_TO_14 {
+            let length = usize::try_from(reader.wide_prefixed().ok()?).ok()?;
+            reader.bytes(length).ok()?;
+        }
+        reader.f32().ok()?;
+        reader.u8().ok()?;
+        reader.u8().ok()?;
+        Some(InteractionAction {
+            item: reader.u32().ok()?,
+            count: reader.u8().ok()?,
+            action: reader.u32().ok()?,
+        })
+    }
+}
+
+/// The item and the action a bit-8 body names ([`Bit8::interaction_action`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InteractionAction {
+    /// The CRC-32 of the lowercase item id.
+    pub item: u32,
+    /// The count beside it (Observed: 1 on a use of the item, 0 on the opening of the choice).
+    pub count: u8,
+    /// The CRC-32 of the lowercase action name.
+    pub action: u32,
 }
 
 /// One record (`FUN_142a25d90`). `None` means the field is not in the record.
@@ -1082,6 +1119,16 @@ impl ClientInputMsg {
                 Some(bit_8.interaction_name().unwrap_or_default())
             })
             .unwrap_or_default()
+    }
+
+    /// The item and the action of the interaction of [`ClientInputMsg::interaction`]
+    /// ([`Bit8::interaction_action`]).
+    pub fn interaction_action(&self) -> Option<InteractionAction> {
+        self.records.iter().find_map(|record| {
+            let bit_8 = record.bit_8.as_ref()?;
+            bit_8.interaction()?;
+            bit_8.interaction_action()
+        })
     }
 }
 
@@ -2283,6 +2330,41 @@ mod tests {
             })
         );
         assert_eq!(Bit8::Empty.interaction(), None);
+    }
+
+    #[test]
+    fn a_use_of_an_item_cost_names_its_item_and_action() {
+        // Retail kind 53 on a summoning circle (`opr_match_4` 724.499 s), all 163 bytes.
+        const RETAIL: &str = concat!(
+            "1beccf11d4281858492a346a20ab86ec581828d411cfec1b61c22c3883169292354c5818287811cfec1b",
+            "000000000000000000000000000000000000214075695f6f7574706f73745f727573685f73756d6d6f6e",
+            "696e675f636972636c650000003f8000000000e861084d012b339e09",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000",
+        );
+        const STONE_BEAR: u32 = 0xe861_084d;
+        const ADD_STONE_BEAR: u32 = 0x2b33_9e09;
+        const USE_KIND: u8 = 53;
+        const ONE: u8 = 1;
+        let bit_8 = Bit8::Body(hex::decode(RETAIL).expect("hex"));
+        assert_eq!(bit_8.interaction().expect("a request").kind, USE_KIND);
+        assert_eq!(
+            bit_8.interaction_name().as_deref(),
+            Some(&b"@ui_outpost_rush_summoning_circle"[..])
+        );
+        assert_eq!(
+            bit_8.interaction_action(),
+            Some(InteractionAction {
+                item: STONE_BEAR,
+                count: ONE,
+                action: ADD_STONE_BEAR,
+            })
+        );
+        let Bit8::Body(body) = &bit_8 else {
+            unreachable!("a body")
+        };
+        let cut = Bit8::Body(body[..NAME_LENGTH_AT].to_vec());
+        assert_eq!(cut.interaction_action(), None, "too short for the action");
     }
 
     #[test]

@@ -263,6 +263,17 @@ pub fn renew_raw_id(number: u64) -> [u8; RAW_ID_LEN] {
     id
 }
 
+/// Whether `holder` holds the entry of entity `number`: the registry is process-wide, so
+/// another holder may keep an entry that `holder` released.
+pub fn holds_raw_id(holder: IdHolder, number: u64) -> bool {
+    registry()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .by_number
+        .get(&number)
+        .is_some_and(|entry| entry.holders.contains(&holder))
+}
+
 /// Entries in the registry now.
 pub fn raw_id_count() -> usize {
     registry()

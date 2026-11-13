@@ -13,10 +13,27 @@
 //! **The other structures** ([`StructureRun`]): the fire barrel droppers, horns of resilience and
 //! supply generators retail showed in the frame spawn with the war's instance, each with its
 //! retail first members and the ownership of its side's company (Observed: the T1 and T2
-//! droppers and generators of `joining_defending_war_2`, `CK_offensive_war`, the T3 droppers
-//! and horns of `arvaysa_ES_attacker_war_45vs45` and `everfall_war_2` carry the same company
-//! ownership as the fort's turrets). The uses of the droppers and horns are in
-//! [`super::siege_areas`], the generators' supply in [`super::supply_generators`].
+//! droppers of `joining_defending_war_2`, `CK_offensive_war`, the T3 droppers and horns of
+//! `arvaysa_ES_attacker_war_45vs45` and `everfall_war_2` carry the same company ownership as the
+//! fort's turrets). A supply generator names no company (Observed: the first ownership of every
+//! `siege_supplygenerator_t1` of the five war ledgers with turret flows, `joining_defending_war_2`
+//! 0.714 s, `everfall_war_2` 0.526 s, `nighthaven_defensive_war` 0.638 s, ES 929.552 s,
+//! `CK_offensive_war` 946.444 s: the zero company id, no name, the white crest, no owner,
+//! permission rule 4, raid 0, faction 0; [`generator_ownership`]). The uses of the droppers and
+//! horns are in [`super::siege_areas`], the generators' supply in [`super::supply_generators`].
+//!
+//! **The war's run** (Observed, `joining_defending_war_2` 83.729 to 83.858 s, ES 925 s,
+//! `CK_offensive_war` 942 s): at the start every turret, dropper and horn of the fort gets its
+//! permission rule 4 ([`WAR_RUN_PERMISSION_RULE`]) and the raid id of its side (mask 0x50; the
+//! defender's 536 on the 12 repeaters and 5 droppers of jdw2), and every generator the zero
+//! company id again with the raid id (mask 0x41, rule 4 already); the cards sent while the war
+//! runs carry both (jdw2 320.592 s, a generator with raid 536). At the result they go back
+//! (ES 2141.7 s, `everfall_war_2` 258 s, jdw2 1883.719 s): rule 3 and raid 0 for the turrets,
+//! droppers and horns, the zero company id and raid 0 for a generator
+//! ([`SimWorld::show_war_run_ownership`]). Retail sent each change again in the next ticks
+//! (jdw2: 5 to 7 times over 130 ms; Inferred: its replication's resend, the sim's channel
+//! sends once). The fort gates and war camp gates of retail also change (rule 4 with the
+//! defender's faction, Observed mask 0xd0), but the sim holds no gate.
 //!
 //! **A build** (Observed, `fort-equipements-territory`, 17 calls, one player of the fort's
 //! company in the territory's open-world fort): the client's interaction of kind
@@ -40,8 +57,10 @@
 
 use bevy_ecs::entity::Entity;
 use nw_bus::ConnectionRef;
-use nw_content::war_forts::{FortStructure, SIEGE_SUPPLY, StructureKind, StructureRole};
-use nw_messages::buildables::{CommittedResources, GuildCrest, ResourceItem};
+use nw_content::war_forts::{
+    FortStructure, SIDE_ATTACKER, SIDE_DEFENDER, SIEGE_SUPPLY, StructureKind, StructureRole,
+};
+use nw_messages::buildables::{CommittedResources, GUILD_ID_LEN, GuildCrest, ResourceItem};
 use nw_messages::item_descriptor::ItemDescriptor;
 use nw_messages::items::SYNC_CRAFT_USED;
 use nw_messages::keyed_list::KeyedList;
@@ -54,12 +73,13 @@ use nw_messages::{
     VitalsSlot0, VitalsState,
 };
 use nw_sim_core::Position;
+use uuid::Uuid;
 
 use super::crafting::{Station, dynamic_ref};
-use super::siege_areas::UseState;
+use super::siege_areas::{UseState, apply_ownership_change};
 use super::supply_generators::GeneratorRun;
 use super::turrets::{USE_ACCEPTED, USE_REFUSED, turret_ownership};
-use super::war_fight::{WarFight, replace_member};
+use super::war_fight::{WarFight, replace_member, side_numbers};
 use super::{Player, SimWorld, gather_answer, send_now};
 
 /// The interaction kind that opens a structure's build choices (`InteractionUIActions`
@@ -81,6 +101,13 @@ pub(super) const INVULNERABLE: u8 = 1;
 const HIT_FLAGS: u8 = FIRST_DAMAGE_FLAGS;
 /// The interactors of a structure nobody uses.
 pub(super) const NO_INTERACTORS: u32 = 0;
+/// The permission rule of a fort structure while its war runs, and of a supply generator
+/// always (Observed, module doc, **The war's run**).
+pub(super) const WAR_RUN_PERMISSION_RULE: u8 = 4;
+/// The raid id of a fort structure outside its war's run (Observed, module doc).
+const NO_WAR_RAID: u64 = 0;
+/// The company id of a structure no company owns (Observed: 16 zero bytes on the generators).
+const NO_COMPANY: [u8; GUILD_ID_LEN] = [0; GUILD_ID_LEN];
 
 /// A structure's health share of its committed resource ([`super::turrets`] module doc).
 #[derive(Debug, Clone, PartialEq)]
@@ -442,6 +469,30 @@ impl StructureBody {
     }
 }
 
+/// The ownership of a supply generator outside the war's run (Observed, module doc): no
+/// company, no owner, [`WAR_RUN_PERMISSION_RULE`], raid 0, faction 0.
+pub(super) fn generator_ownership() -> OwnershipState {
+    OwnershipState {
+        permission_rule: Some(WAR_RUN_PERMISSION_RULE),
+        ..turret_ownership(&ClaimOwner::NONE)
+    }
+}
+
+/// The part of `shown`, a fort structure's ownership at the war's start or result, that retail
+/// sent then (Observed, module doc, **The war's run**): the zero company id of a structure whose
+/// `resting` ownership names no company, the permission rule of one whose `resting` rule is not
+/// [`WAR_RUN_PERMISSION_RULE`], and the raid id.
+pub(super) fn war_run_change(resting: &OwnershipState, shown: &OwnershipState) -> OwnershipState {
+    OwnershipState {
+        guild_id: resting.guild_id.filter(|id| *id == NO_COMPANY),
+        permission_rule: shown
+            .permission_rule
+            .filter(|_| resting.permission_rule != Some(WAR_RUN_PERMISSION_RULE)),
+        raid_id: shown.raid_id,
+        ..OwnershipState::default()
+    }
+}
+
 /// The first retail member of class `class` of `structure`.
 fn retail_member(structure: &FortStructure, class: u64) -> Option<BundleMember> {
     structure.members.iter().find_map(|bytes| {
@@ -451,7 +502,8 @@ fn retail_member(structure: &FortStructure, class: u64) -> Option<BundleMember> 
 }
 
 /// The members of `body` at its spawn: its card, its retail members with the vitals, buildable
-/// and interact states of `body` and those `own` gives (a turret's), and `ownership`.
+/// and interact states of `body` and those `own` gives (a turret's), its slice's use interact
+/// when no retail member holds it (the use and its cooldown show there), and `ownership`.
 pub(super) fn spawn_members(
     body: &StructureBody,
     own: impl Fn(&BundleMember) -> Option<BundleMember>,
@@ -488,6 +540,12 @@ pub(super) fn spawn_members(
         };
         members.push(state);
     }
+    let retail_interact = members
+        .iter()
+        .any(|member| Some(member.component) == structure.interact_component);
+    if !retail_interact {
+        members.extend(body.interact_member(NO_INTERACTORS));
+    }
     if let Some(component) = structure.ownership_component {
         members.push(BundleMember {
             component,
@@ -508,10 +566,24 @@ pub(crate) struct StructureRun {
 }
 
 impl StructureRun {
+    /// The vat of an Outpost Rush outpost structure (`structure`, at slot key `number`) as its
+    /// build makes it ([`super::siege_areas`] module doc): free and open to damage; its vitals
+    /// and buildable states are the outpost structure's ([`super::outpost_rush_structures`]),
+    /// so `structure` carries none.
+    pub(super) fn outpost_dropper(structure: FortStructure, number: u64) -> Self {
+        let mut body = StructureBody::new(structure);
+        body.number = number;
+        body.invulnerable = false;
+        Self {
+            body,
+            uses: UseState::default(),
+            generation: None,
+        }
+    }
+
     /// Its full members that change: its interact, vitals and buildable states.
     fn full_members(&self) -> Vec<BundleMember> {
-        self.body
-            .interact_member(NO_INTERACTORS)
+        self.resting_interact()
             .into_iter()
             .chain(self.body.vitals_member())
             .chain(self.body.buildable_member())
@@ -575,41 +647,189 @@ fn built_structure(
 
 impl SimWorld {
     /// The ownership of a structure of `side` of `fight`'s war: its side company's (Observed,
-    /// [`super::turrets`] module doc).
+    /// [`super::turrets`] module doc; `joining_defending_war_2` 125.039 s: the barrel of a use
+    /// names the side's company, not the user's), with its name and crest from its claims or the
+    /// world database ([`super::company_looks`]; the fight asks for both sides' companies), and
+    /// while the war runs its rule and its side's raid id (module doc, **The war's run**).
     pub(super) fn structure_ownership(&self, fight: &WarFight, side: u8) -> OwnershipState {
-        let company = self
-            .wars
+        self.in_war_run(fight, side, self.side_resting(fight, side))
+    }
+
+    /// The ownership of a structure of `side` of `fight`'s war outside the war's run: its side
+    /// company's with permission rule 3 and raid 0 ([`turret_ownership`]).
+    fn side_resting(&self, fight: &WarFight, side: u8) -> OwnershipState {
+        let company = self.side_company(fight, side);
+        let look = self.company_look(*company.as_bytes());
+        turret_ownership(&ClaimOwner {
+            guild_id: *company.as_bytes(),
+            guild_name: look.as_ref().map(|look| look.name.clone()).unwrap_or_default(),
+            crest: look.map_or(GuildCrest::NONE, |look| look.crest),
+            ..ClaimOwner::NONE
+        })
+    }
+
+    /// The ownership of `structure` of `fight` outside the war's run: a supply generator's
+    /// names no company ([`generator_ownership`]), every other structure's names its side's
+    /// company ([`Self::side_resting`]).
+    fn resting_ownership(&self, fight: &WarFight, structure: &FortStructure) -> OwnershipState {
+        if self.is_generator(structure) {
+            generator_ownership()
+        } else {
+            self.side_resting(fight, structure.side)
+        }
+    }
+
+    /// The ownership of `structure` of `fight` as it is now ([`Self::resting_ownership`], with
+    /// the war's run values while it runs).
+    pub(super) fn fort_structure_ownership(
+        &self,
+        fight: &WarFight,
+        structure: &FortStructure,
+    ) -> OwnershipState {
+        self.in_war_run(fight, structure.side, self.resting_ownership(fight, structure))
+    }
+
+    /// `resting`, an ownership of a structure of `side` outside the war's run, as it is now:
+    /// with [`WAR_RUN_PERMISSION_RULE`] and the side's raid id while `fight` runs.
+    fn in_war_run(&self, fight: &WarFight, side: u8, resting: OwnershipState) -> OwnershipState {
+        if !fight.running() {
+            return resting;
+        }
+        OwnershipState {
+            permission_rule: Some(WAR_RUN_PERMISSION_RULE),
+            raid_id: Some(self.side_raid(fight, side)),
+            ..resting
+        }
+    }
+
+    /// Whether `structure` is a supply generator.
+    fn is_generator(&self, structure: &FortStructure) -> bool {
+        self.content
+            .war_forts
+            .structure_kind(&structure.asset)
+            .is_some_and(|kind| kind.role == StructureRole::SupplyGenerator)
+    }
+
+    /// The company of `side` of `fight`'s war; the nil id when the war is not known.
+    fn side_company(&self, fight: &WarFight, side: u8) -> Uuid {
+        self.wars
             .war(fight.war().war)
             .map(|war| {
-                if side == nw_content::war_forts::SIDE_ATTACKER {
+                if side == SIDE_ATTACKER {
                     war.attacker.0
                 } else {
                     war.defender.0
                 }
             })
-            .unwrap_or_default();
-        let owner = self
-            .territories
-            .company(*company.as_bytes())
-            .cloned()
-            .unwrap_or_else(|| ClaimOwner {
-                guild_id: *company.as_bytes(),
-                crest: GuildCrest::NONE,
-                ..ClaimOwner::NONE
-            });
-        turret_ownership(&owner)
+            .unwrap_or_default()
     }
 
-    /// Spawns `structure`, a fort structure that is not a turret, in `fight` (module doc).
+    /// The raid id of `side` of `fight`'s war: its war side number ([`side_numbers`]);
+    /// [`NO_WAR_RAID`] when the war is not known.
+    fn side_raid(&self, fight: &WarFight, side: u8) -> u64 {
+        self.wars
+            .war(fight.war().war)
+            .map_or(NO_WAR_RAID, |war| {
+                let (attacker, defender) = side_numbers(war);
+                if side == SIDE_ATTACKER {
+                    attacker
+                } else {
+                    defender
+                }
+            })
+    }
+
+    /// Every turret and structure of `fight` shows the war's start or result (module doc,
+    /// **The war's run**; `fight` already runs, or already has its result): the change of
+    /// [`war_run_change`] goes to its viewers and into its full ownership, which keeps the rest
+    /// (a used turret's user too).
+    pub(super) fn show_war_run_ownership(&mut self, fight: &WarFight) {
+        let turrets = fight.turrets.iter().map(|run| &run.body);
+        let structures = fight.structures.iter().map(|run| &run.body);
+        for body in turrets.chain(structures) {
+            let Some(component) = body.structure.ownership_component else {
+                continue;
+            };
+            let resting = self.resting_ownership(fight, &body.structure);
+            let shown = self.in_war_run(fight, body.structure.side, resting.clone());
+            let change = BundleMember {
+                component,
+                state: MemberState::Ownership(war_run_change(&resting, &shown)),
+            };
+            let full = change.clone();
+            self.stations.change_camp(
+                body.number,
+                |members| apply_ownership_change(members, &full),
+                vec![change],
+            );
+        }
+    }
+
+    /// The structures and turrets of the war fight's sides whose company is one of `read` show
+    /// their side company's ownership again, with the look the world database just gave
+    /// ([`super::company_looks`]: they spawn at the fight's first tick, before the answer). A
+    /// turret or a structure that was used keeps its own: it names its user (Observed: the full
+    /// ownership keeps the user after the use, `joining_defending_war_2` 165.349 s). A supply
+    /// generator names no company (module doc), so it has no look to show.
+    pub(super) fn show_side_looks(&mut self, read: &[Uuid]) {
+        self.with_turrets(|world, fight| {
+            for side in [SIDE_ATTACKER, SIDE_DEFENDER] {
+                if !read.contains(&world.side_company(fight, side)) {
+                    continue;
+                }
+                let ownership = world.structure_ownership(fight, side);
+                let turrets = fight
+                    .turrets
+                    .iter()
+                    .filter(|run| !run.used())
+                    .map(|run| &run.body);
+                let structures = fight
+                    .structures
+                    .iter()
+                    .filter(|run| !run.uses.used())
+                    .map(|run| &run.body);
+                let shown: Vec<(u64, u64)> = turrets
+                    .chain(structures)
+                    .filter(|body| {
+                        body.structure.side == side && !world.is_generator(&body.structure)
+                    })
+                    .filter_map(|body| Some((body.number, body.structure.ownership_component?)))
+                    .collect();
+                for (number, component) in shown {
+                    let member = BundleMember {
+                        component,
+                        state: MemberState::Ownership(ownership.clone()),
+                    };
+                    let full = member.clone();
+                    world.stations.change_camp(
+                        number,
+                        |members| replace_member(members, &full),
+                        vec![member],
+                    );
+                }
+            }
+        });
+    }
+
+    /// Spawns `structure`, a fort structure that is not a turret, in `fight` (module doc). A
+    /// dropper whose first retail state had no interact uses its slice's use interact
+    /// ([`nw_content::war_forts::StructureKind::use_interact`]; Observed in the forts of the
+    /// table: territories 2 and 5 each hold a dropper whose first state had interact 17, the
+    /// slice's, and one whose first state had none; territory 10 one with none).
     pub(super) fn spawn_structure(&mut self, fight: &mut WarFight, structure: FortStructure) {
+        let content = std::sync::Arc::clone(&self.content);
+        let kind = content.war_forts.structure_kind(&structure.asset);
+        let structure = FortStructure {
+            interact_component: structure
+                .interact_component
+                .or(kind.and_then(|kind| kind.use_interact)),
+            ..structure
+        };
         let mut body = StructureBody::new(structure);
         body.invulnerable = !fight.running();
-        let ownership = self.structure_ownership(fight, body.structure.side);
+        let ownership = self.fort_structure_ownership(fight, &body.structure);
         let mut members = spawn_members(&body, |_| None, ownership);
-        let generator_tier = self
-            .content
-            .war_forts
-            .structure_kind(&body.structure.asset)
+        let generator_tier = kind
             .filter(|kind| kind.role == StructureRole::SupplyGenerator)
             .map(|kind| kind.tier);
         let generation = generator_tier

@@ -29,11 +29,19 @@
 //!   entry, `OR` one).
 //! - The promotion's `Promotion<tier>` status effect goes to the strong creature types (best
 //!   guess: `Dungeon+`, `DungeonMiniBoss`, `DungeonBoss`; the client names no target).
-//! - A difficulty with `HasMinorCurse` / `HasMajorCurse` gives every mutated creature the curse's
-//!   `CurseMinor` / `CurseMajor`, its `Wildcard` replaced by the week's category
-//!   (`Mut_Curse1_Wildcard_Major_Buff` is `Mut_Curse1_Fir_Major_Buff` in a fire week: Observed,
-//!   every such id exists for the 4 categories), at potency `BaseCurseDamageMod` (best guess);
-//!   the players get the curse's `GlobalAffliction`.
+//! - A difficulty with `HasMajorCurse` gives every player of the run the curse's `CurseMajor`,
+//!   its `Wildcard` replaced by the week's category (`Mut_Curse2_Wildcard_Major_Buff` is
+//!   `Mut_Curse2_Fir_Major_Buff` in a fire week: every such id exists for the 4 categories), at
+//!   potency 1 ([`MutationCatalog::player_effects`]). **Observed** (retail
+//!   `20261002-184508-050`, a fire Fiendish run): every run player holds
+//!   `Mut_Curse2_Fir_Major_Buff` (potency 1) from 4988.954 s, no creature holds a curse effect,
+//!   and no one holds the `CurseMinor` `Mut_Curse2_Minor_Buff`; its ability's effect
+//!   (`Mut_Curse2_Affliction_Tick`) comes with the run's global affliction meter, which the
+//!   server runs (findings `2026-11-13-catacomb-erosion.md`, section C13). **Observed** (the
+//!   client's copy of the curse script, `FUN_1461f1790` at the start and `FUN_1461f1600` at a
+//!   player's arrival): only Frenzied and Fiendish give every player the `CurseMajor`; Desiccated
+//!   gives its major to the player its full meter marks ([`CurseFill::MarkLowestHealth`]),
+//!   Censored none.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -73,6 +81,10 @@ const RANGE_SEPARATOR: char = '-';
 const DEFAULT_POTENCY: f64 = 1.0;
 /// The factor of a mob stat without a mutation.
 const UNCHANGED: f64 = 1.0;
+/// Milliseconds in a second.
+const MS_PER_SECOND: f64 = 1_000.0;
+/// The `CastingTypes` of a spell that chains from target to target.
+const CHAIN_CASTING: &str = "Chain";
 /// Perk roll multipliers of a difficulty (`PerkRollMult1` to `PerkRollMult5`).
 pub const PERK_ROLL_MULTS: usize = 5;
 /// Seed of the pick of the weeks without an observation (any constant: it only has to be the
@@ -401,12 +413,8 @@ pub struct Difficulty {
     pub health_potency: PerCreature<f64>,
     /// `DamagePotency*`.
     pub damage_potency: PerCreature<f64>,
-    /// `HasMinorCurse`.
-    pub minor_curse: bool,
     /// `HasMajorCurse`.
     pub major_curse: bool,
-    /// `BaseCurseDamageMod`.
-    pub curse_potency: f64,
     /// `InjectedLootTags`.
     pub loot_tags: Vec<String>,
     /// `InjectedCreatureLoot`.
@@ -454,9 +462,151 @@ struct Curse {
     minor: String,
     /// `CurseMajor`.
     major: String,
-    /// `GlobalAffliction`.
-    affliction: Option<String>,
+    /// `GlobalAffliction`: the run's meter kind.
+    global_affliction: Option<String>,
 }
+
+/// What a full curse meter does ([`CurseMeter::fill`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CurseFill {
+    /// Each living run player casts `spell` (the `CastSpell` of the curse's cast effect) at its
+    /// place for `lasting_ms` (the cast effect's `BaseDuration`).
+    CastOnEach {
+        /// `SpellID`.
+        spell: String,
+        /// How long the spell's area stays.
+        lasting_ms: u64,
+    },
+    /// The living run player with the lowest share of its health gets `mark`, every run player
+    /// gets `weaken`, and the marked player explodes when the meter's fall ends.
+    MarkLowestHealth {
+        /// `StatusID`: the curse's `CurseMinor`, or its `CurseMajor` at a difficulty with the
+        /// major curse.
+        mark: String,
+        /// `StatusID` every run player gets, at a difficulty with the major curse.
+        weaken: Option<String>,
+        /// The explosion of the marked player.
+        explosion: Option<CurseExplosion>,
+    },
+}
+
+/// The explosion of a Desiccated mark ([`CurseFill::MarkLowestHealth`]): the marked player gets
+/// `cast` (its `CastSpell` is the chain), and the chain jumps from it to the nearest living
+/// target within `radius_m` that it did not hit yet, `jumps` times, `delay_ms` apart; each
+/// target gets `effects` (`Mut_<Cat>_Curse3_Minor`: `Chain`, `MaxChainNum` 4,
+/// `ChainDelayDuration` 0.25, `Radius` 4, `IgnoreSelf`, `IgnoreTargetIfDead`,
+/// `IgnoreTargetIfAtDeathsDoor`, `Mut_<Cat>_Curse3_Minor_Damage` -50 % health).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CurseExplosion {
+    /// `StatusID` of the cast effect.
+    pub cast: String,
+    /// `StatusEffects` of the chain spell.
+    pub effects: Vec<String>,
+    /// `Radius`, m.
+    pub radius_m: f32,
+    /// `MaxChainNum`.
+    pub jumps: u32,
+    /// `ChainDelayDuration`, ms.
+    pub delay_ms: u64,
+}
+
+/// A spell that chains (`CastingTypes` `Chain`): its row's chain cells.
+#[derive(Debug, Clone, PartialEq)]
+struct ChainSpell {
+    effects: Vec<String>,
+    radius_m: f32,
+    jumps: u32,
+    delay_ms: u64,
+}
+
+/// The global curse meter of a mutated run (findings `2026-11-13-catacomb-erosion.md`, sections
+/// C13 and C15). **Observed** (the client's copy of the server's curse script
+/// `MutatorsCursesData`, by `CurseMutationId` CRC): its rise timer runs each 1.0 s
+/// (`DAT_147eff940`); on each Fiendish tick (`FUN_1461f2730`, timer `72959eca`) the first run
+/// player that is alive, not at death's door and in combat gets `Mut_Curse2_Affliction` tick /
+/// 10 + 1 times (the tick count starts again at the fill, `FUN_1461f2370`); on each Desiccated
+/// tick (timer `b9c94d6f`) the first living one gets `Mut_Curse3_Affliction` once. At the fill
+/// (`FUN_1461f2370`) Fiendish casts on every run player and stops its timer, Desiccated marks the
+/// living player with the lowest health share (`FUN_1461f10c0`: health / max, sorted up) with its
+/// `CurseMinor`, or with its `CurseMajor` and `Mut_Curse3_Weaken` on every player at a difficulty
+/// with the major curse, Censored casts Blowback on every player; at the fall's end
+/// (`FUN_1461f2170`) Fiendish starts its timer again and the marked Desiccated player gets
+/// `Mut_Wildcard_Curse3_Minor_Cast` with the week's category and loses its mark. Retail
+/// `20261002-184508-050` (Fiendish): each of the 103 fills put `Mut_Curse2_Minor_SlowRend`
+/// (Weary, the spell of `Mut_Curse2_Minor_Cast`) on 3 to 5 run players, and the rise was +1 to
+/// +5 a second.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CurseMeter {
+    /// `GlobalAffliction`: the meter kind's `AfflictionID`.
+    pub kind: String,
+    /// The `CurseMinor` with the week's category: the run's players perform through its
+    /// abilities (its `OnPerform` ability: Fiendish -1, Censored +1); no player holds it
+    /// (Observed: 0 map lines of `Mut_Curse2_Minor_Buff`).
+    pub minor: String,
+    /// The effect whose `Afflictions` cell the meter gains on each tick of its rise timer, for
+    /// a timer kind (Fiendish `Mut_Curse2_Affliction`, Desiccated `Mut_Curse3_Affliction`);
+    /// `None` for Censored, which abilities fill.
+    pub rise: Option<String>,
+    /// The rise needs a run player in combat (Fiendish).
+    pub rise_needs_combat: bool,
+    /// The rise gains its effect tick / 10 + 1 times (Fiendish); else once.
+    pub rise_escalates: bool,
+    /// What the full meter does.
+    pub fill: Option<CurseFill>,
+}
+
+/// How one curse's meter rises and fills (module text of [`CurseMeter`]).
+struct CurseMeterRule {
+    /// `CurseMutationId`.
+    id: &'static str,
+    /// The rise effect.
+    rise: Option<&'static str>,
+    /// The rise needs a run player in combat.
+    rise_needs_combat: bool,
+    /// The rise escalates.
+    rise_escalates: bool,
+    /// The cast effect of the fill on every run player; `None`: the fill marks one player.
+    cast: Option<&'static str>,
+    /// The cast effect of the marked player's explosion (with the wildcard).
+    explosion: Option<&'static str>,
+    /// What every run player gets at a mark of the major curse.
+    weaken: Option<&'static str>,
+}
+
+/// The curses whose `CurseMajor` every run player gets at a difficulty with the major curse
+/// (module text).
+const MAJOR_FOR_EVERY_PLAYER: [&str; 2] = ["Frenzied", "Fiendish"];
+
+/// How each curse's meter rises and fills (module text of [`CurseMeter`]).
+const CURSE_METER_RULES: [CurseMeterRule; 3] = [
+    CurseMeterRule {
+        id: "Fiendish",
+        rise: Some("Mut_Curse2_Affliction"),
+        rise_needs_combat: true,
+        rise_escalates: true,
+        cast: Some("Mut_Curse2_Minor_Cast"),
+        explosion: None,
+        weaken: None,
+    },
+    CurseMeterRule {
+        id: "Desiccated",
+        rise: Some("Mut_Curse3_Affliction"),
+        rise_needs_combat: false,
+        rise_escalates: false,
+        cast: None,
+        explosion: Some("Mut_Wildcard_Curse3_Minor_Cast"),
+        weaken: Some("Mut_Curse3_Weaken"),
+    },
+    CurseMeterRule {
+        id: "Censored",
+        rise: None,
+        rise_needs_combat: false,
+        rise_escalates: false,
+        cast: Some("Mut_Wildcard_Curse4_Minor_Cast"),
+        explosion: None,
+        weaken: None,
+    },
+];
 
 /// The loot of one elemental category (`MutationPerksStaticData`).
 #[derive(Debug, Clone, PartialEq)]
@@ -621,6 +771,11 @@ pub struct MutationCatalog {
     buckets: HashMap<String, Bucket>,
     /// Every status effect id, by lowercase id.
     effects: HashMap<String, String>,
+    /// The `CastSpell` and the `BaseDuration` (ms) of each status effect that casts a spell, by
+    /// lowercase id.
+    casts: HashMap<String, (String, u64)>,
+    /// The spells that chain, by lowercase id.
+    chains: HashMap<String, ChainSpell>,
     /// The stat mods of the difficulties' scale effects, by lowercase id: (`MaxHealthMod`,
     /// the largest `Dmg*` mod).
     scale_mods: HashMap<String, (f64, f64)>,
@@ -680,9 +835,7 @@ fn difficulty(row: &MutationDifficultyStaticData) -> Option<Difficulty> {
             boss: potency(row.damage_potency_dungeon_boss),
             mini_boss: potency(row.damage_potency_dungeon_mini_boss),
         },
-        minor_curse: row.has_minor_curse.eq_ignore_ascii_case(TRUE_CELL),
         major_curse: row.has_major_curse.eq_ignore_ascii_case(TRUE_CELL),
-        curse_potency: row.base_curse_damage_mod,
         loot_tags: list(Some(&row.injected_loot_tags)),
         creature_loot: non_empty(&row.injected_creature_loot),
         container_loot: non_empty(&row.injected_container_loot),
@@ -835,7 +988,7 @@ impl MutationCatalog {
                 id: row.curse_mutation_id.clone(),
                 minor: row.curse_minor.clone(),
                 major: row.curse_major.clone(),
-                affliction: row.global_affliction.as_deref().and_then(non_empty),
+                global_affliction: row.global_affliction.as_deref().and_then(non_empty),
             })
             .collect();
         let perks = tables
@@ -882,6 +1035,47 @@ impl MutationCatalog {
         };
         let effects = status_rows()
             .map(|row| (row.status_id.to_lowercase(), row.status_id.clone()))
+            .collect();
+        let casts = status_rows()
+            .filter_map(|row| {
+                let spell = row.cast_spell.as_deref().and_then(non_empty)?;
+                // A cast lasts a few seconds.
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "clamped to 0 first; a few seconds"
+                )]
+                let lasting_ms =
+                    (row.base_duration.unwrap_or_default().max(0.0) * MS_PER_SECOND).round() as u64;
+                Some((row.status_id.to_lowercase(), (spell, lasting_ms)))
+            })
+            .collect();
+        let chains = tables
+            .spell_data
+            .iter()
+            .flat_map(|table| &table.rows)
+            .filter(|row| {
+                row.casting_types
+                    .as_deref()
+                    .is_some_and(|types| types.eq_ignore_ascii_case(CHAIN_CASTING))
+            })
+            .map(|row| {
+                // A chain jumps a handful of times, a fraction of a second apart.
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "clamped to 0 first; small values"
+                )]
+                let chain = ChainSpell {
+                    effects: list(row.status_effects.as_deref()),
+                    radius_m: row.radius.unwrap_or_default() as f32,
+                    jumps: row.max_chain_num.unwrap_or_default().max(0) as u32,
+                    delay_ms: (row.chain_delay_duration.unwrap_or_default().max(0.0)
+                        * MS_PER_SECOND)
+                        .round() as u64,
+                };
+                (row.spell_id.to_lowercase(), chain)
+            })
             .collect();
         let scaling: HashSet<String> = difficulties
             .values()
@@ -943,9 +1137,71 @@ impl MutationCatalog {
             perks,
             buckets,
             effects,
+            casts,
+            chains,
             scale_mods,
             modes,
         }
+    }
+
+    /// The global curse meter of a run of `context` (module text of [`CurseMeter`]); `None` for
+    /// a curse without a `GlobalAffliction` (Frenzied).
+    pub fn curse_meter(&self, context: &MutationContext) -> Option<CurseMeter> {
+        let curse = self.curse(&context.set.curse)?;
+        let kind = curse.global_affliction.clone()?;
+        let category = &context.set.elemental;
+        let rule = CURSE_METER_RULES
+            .iter()
+            .find(|rule| rule.id.eq_ignore_ascii_case(&curse.id))?;
+        let minor = Self::with_category(&curse.minor, category);
+        let major_curse = self
+            .difficulty(context.difficulty)
+            .is_some_and(|difficulty| difficulty.major_curse);
+        let fill = match rule.cast {
+            Some(cast) => self
+                .casts
+                .get(&Self::with_category(cast, category).to_lowercase())
+                .map(|(spell, lasting_ms)| CurseFill::CastOnEach {
+                    spell: spell.clone(),
+                    lasting_ms: *lasting_ms,
+                }),
+            None => Some(CurseFill::MarkLowestHealth {
+                mark: if major_curse {
+                    Self::with_category(&curse.major, category)
+                } else {
+                    minor.clone()
+                },
+                weaken: rule
+                    .weaken
+                    .filter(|_| major_curse)
+                    .map(str::to_owned),
+                explosion: rule
+                    .explosion
+                    .and_then(|cast| self.explosion(&Self::with_category(cast, category))),
+            }),
+        };
+        Some(CurseMeter {
+            kind,
+            minor,
+            rise: rule.rise.map(str::to_owned),
+            rise_needs_combat: rule.rise_needs_combat,
+            rise_escalates: rule.rise_escalates,
+            fill,
+        })
+    }
+
+    /// The explosion of the cast effect `cast`: its `CastSpell`'s chain; `None` when the effect
+    /// casts no chain spell.
+    fn explosion(&self, cast: &str) -> Option<CurseExplosion> {
+        let (spell, _) = self.casts.get(&cast.to_lowercase())?;
+        let chain = self.chains.get(&spell.to_lowercase())?;
+        Some(CurseExplosion {
+            cast: self.effects.get(&cast.to_lowercase())?.clone(),
+            effects: chain.effects.clone(),
+            radius_m: chain.radius_m,
+            jumps: chain.jumps,
+            delay_ms: chain.delay_ms,
+        })
     }
 
     /// Difficulty `tier`.
@@ -1223,21 +1479,6 @@ impl MutationCatalog {
         {
             self.resolve(effect, DEFAULT_POTENCY, 0, below, &mut effects);
         }
-        if let Some(curse) = self.curse(&set.curse) {
-            let curse_potency = if difficulty.curse_potency > 0.0 {
-                difficulty.curse_potency
-            } else {
-                DEFAULT_POTENCY
-            };
-            let parts = [
-                (difficulty.minor_curse, &curse.minor),
-                (difficulty.major_curse, &curse.major),
-            ];
-            for (_, id) in parts.into_iter().filter(|(has, _)| *has) {
-                let id = Self::with_category(id, &set.elemental);
-                self.resolve(&id, curse_potency, 0, below, &mut effects);
-            }
-        }
         MobMutation {
             health_factor: self.scale(
                 &difficulty.health_effect,
@@ -1259,14 +1500,28 @@ impl MutationCatalog {
             .find(|curse| curse.id.eq_ignore_ascii_case(id))
     }
 
-    /// The affliction every player of an instance of `context` gets: the curse's
-    /// `GlobalAffliction` when the difficulty has a curse.
-    pub fn player_affliction(&self, context: &MutationContext) -> Option<&str> {
-        let difficulty = self.difficulty(context.difficulty)?;
-        if !(difficulty.minor_curse || difficulty.major_curse) {
-            return None;
+    /// The status effects every player of an instance of `context` gets (module text): the
+    /// curse's `CurseMajor` with the week's category when the difficulty has a major curse and
+    /// the curse gives it to every player ([`MAJOR_FOR_EVERY_PLAYER`]); `below` picks an entry of
+    /// a bucket.
+    pub fn player_effects(
+        &self,
+        context: &MutationContext,
+        below: &mut impl FnMut(u32) -> u32,
+    ) -> Vec<AppliedEffect> {
+        let mut effects = Vec::new();
+        if let (Some(difficulty), Some(curse)) = (
+            self.difficulty(context.difficulty),
+            self.curse(&context.set.curse),
+        ) && difficulty.major_curse
+            && MAJOR_FOR_EVERY_PLAYER
+                .iter()
+                .any(|id| id.eq_ignore_ascii_case(&curse.id))
+        {
+            let id = Self::with_category(&curse.major, &context.set.elemental);
+            self.resolve(&id, DEFAULT_POTENCY, 0, below, &mut effects);
         }
-        self.curse(&context.set.curse)?.affliction.as_deref()
+        effects
     }
 
     /// What mutation `context` adds to the loot of its instance.
@@ -1320,21 +1575,20 @@ impl MutationCatalog {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// A mutation catalog of the retail rows of build 25810808, cut to what the tests read: the
+/// difficulty 3 row, the four categories, the curses, the promotions, the perks and five mutable
+/// expeditions; for the tests of this and other crates (`test-util` feature).
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_catalog {
     use super::*;
     use crate::generated::{
         BuffBucketData, CurseMutationStaticData, ElementalMutationStaticData, GameModeData,
-        MutationPerksStaticData, PromotionMutationStaticData, StatusEffectData,
+        MutationPerksStaticData, PromotionMutationStaticData, SpellData, StatusEffectData,
     };
     use crate::table::Table;
 
     /// 2026-10-20 07:00 UTC plus a day: inside the last observed week.
-    const LAST_OBSERVED_DAY: u64 = 1_792_479_600 + 86_400;
-    /// One roll: always the first.
-    fn first(_: u32) -> u32 {
-        0
-    }
+    pub const LAST_OBSERVED_DAY: u64 = 1_792_479_600 + 86_400;
 
     fn table<T>(rows: Vec<T>) -> Vec<Table<T>> {
         vec![Table {
@@ -1432,7 +1686,7 @@ mod tests {
         clippy::field_reassign_with_default,
         reason = "Tables has hundreds of sheets; the test sets only the ones it reads"
     )]
-    fn catalog() -> MutationCatalog {
+    pub fn catalog() -> MutationCatalog {
         let mut tables = Tables::default();
         tables.mutation_difficulty_static_data = table(vec![difficulty_three()]);
         tables.elemental_mutation_static_data = table(
@@ -1596,7 +1850,27 @@ mod tests {
             status("Mut_Enrage_Buff", serde_json::json!({})),
             status("Mut_Curse2_Minor_Buff", serde_json::json!({})),
             status("Mut_Curse2_Ice_Major_Buff", serde_json::json!({})),
+            status(
+                "Mut_Curse2_Minor_Cast",
+                serde_json::json!({ "cast_spell": "Mut_Curse2_Minor", "base_duration": 10.0 }),
+            ),
+            status(
+                "Mut_Ice_Curse4_Minor_Cast",
+                serde_json::json!({ "cast_spell": "Mut_Ice_Curse4_Minor", "base_duration": 17.0 }),
+            ),
+            status(
+                "Mut_Ice_Curse3_Minor_Cast",
+                serde_json::json!({ "cast_spell": "Mut_Ice_Curse3_Minor", "base_duration": 1.0 }),
+            ),
         ]);
+        tables.spell_data = table(vec![row::<SpellData>(serde_json::json!({
+            "spell_id": "Mut_Ice_Curse3_Minor",
+            "status_effects": "Mut_Ice_Curse3_Minor_Damage",
+            "casting_types": "Chain",
+            "radius": 4.0,
+            "max_chain_num": 4,
+            "chain_delay_duration": 0.25
+        }))]);
         tables.game_mode_data = table(
             [
                 "DungeonCutlassKeys00",
@@ -1610,6 +1884,17 @@ mod tests {
             .collect(),
         );
         MutationCatalog::from_tables(&tables)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_catalog::{LAST_OBSERVED_DAY, catalog};
+    use super::*;
+
+    /// One roll: always the first.
+    fn first(_: u32) -> u32 {
+        0
     }
 
     fn context(difficulty: u8) -> MutationContext {
@@ -1691,17 +1976,105 @@ mod tests {
             .iter()
             .map(|effect| effect.status_id.as_str())
             .collect();
-        // The boss bucket is not in this test's buckets; the promotion of tier 3 and both curse
-        // parts (the major with its wildcard replaced) are.
+        // The boss bucket is not in this test's buckets; the promotion of tier 3 is, and no
+        // curse effect goes to a creature.
+        assert_eq!(ids, ["Mut_Enrage_Buff"]);
+    }
+
+    #[test]
+    fn the_players_get_the_major_curse_with_the_weeks_category_at_potency_one() {
+        let catalog = catalog();
+        let effects = catalog.player_effects(&context(3), &mut first);
         assert_eq!(
-            ids,
-            [
-                "Mut_Enrage_Buff",
-                "Mut_Curse2_Minor_Buff",
-                "Mut_Curse2_Ice_Major_Buff"
-            ]
+            effects,
+            [AppliedEffect {
+                status_id: "Mut_Curse2_Ice_Major_Buff".to_owned(),
+                potency: 1.0,
+            }]
         );
-        assert!((mutation.effects[1].potency - 2.0).abs() < 1e-9);
+        let unknown = MutationContext {
+            difficulty: 2,
+            ..context(3)
+        };
+        assert!(
+            catalog.player_effects(&unknown, &mut first).is_empty(),
+            "a difficulty the table does not hold gives the players nothing"
+        );
+        for curse in ["Desiccated", "Censored"] {
+            let other = MutationContext {
+                set: MutationSet {
+                    curse: curse.to_owned(),
+                    ..context(3).set
+                },
+                ..context(3)
+            };
+            assert!(
+                catalog.player_effects(&other, &mut first).is_empty(),
+                "{curse} gives no player its major at the start"
+            );
+        }
+    }
+
+    /// The Fiendish meter rises by `Mut_Curse2_Affliction` and casts the Weary zone of
+    /// `Mut_Curse2_Minor_Cast` for its 10 s at the fill (Observed); Desiccated marks the player
+    /// with the lowest health with its Combustible minor and Censored casts Blowback, both with
+    /// the week's category (Inferred); Frenzied has no meter.
+    #[test]
+    fn each_global_curse_has_its_meter_rise_and_fill() {
+        let catalog = catalog();
+        let fiendish = context(3);
+        assert_eq!(
+            catalog.curse_meter(&fiendish),
+            Some(CurseMeter {
+                kind: "AfflictionCurse2".to_owned(),
+                minor: "Mut_Curse2_Minor_Buff".to_owned(),
+                rise: Some("Mut_Curse2_Affliction".to_owned()),
+                rise_needs_combat: true,
+                rise_escalates: true,
+                fill: Some(CurseFill::CastOnEach {
+                    spell: "Mut_Curse2_Minor".to_owned(),
+                    lasting_ms: 10_000,
+                }),
+            })
+        );
+        let with_curse = |curse: &str| MutationContext {
+            set: MutationSet {
+                curse: curse.to_owned(),
+                ..fiendish.set.clone()
+            },
+            ..fiendish.clone()
+        };
+        let desiccated = catalog
+            .curse_meter(&with_curse("Desiccated"))
+            .expect("meter");
+        assert_eq!(desiccated.rise.as_deref(), Some("Mut_Curse3_Affliction"));
+        assert!(!desiccated.rise_needs_combat && !desiccated.rise_escalates);
+        assert_eq!(
+            desiccated.fill,
+            Some(CurseFill::MarkLowestHealth {
+                mark: "Mut_Ice_Curse3_Major_Buff".to_owned(),
+                weaken: Some("Mut_Curse3_Weaken".to_owned()),
+                explosion: Some(CurseExplosion {
+                    cast: "Mut_Ice_Curse3_Minor_Cast".to_owned(),
+                    effects: vec!["Mut_Ice_Curse3_Minor_Damage".to_owned()],
+                    radius_m: 4.0,
+                    jumps: 4,
+                    delay_ms: 250,
+                }),
+            }),
+            "difficulty 3 has the major curse"
+        );
+        let censored = catalog.curse_meter(&with_curse("Censored")).expect("meter");
+        assert_eq!(censored.minor, "Mut_Ice_Curse4_Minor_Buff");
+        assert_eq!(censored.rise, None, "abilities fill it");
+        assert_eq!(
+            censored.fill,
+            Some(CurseFill::CastOnEach {
+                spell: "Mut_Ice_Curse4_Minor".to_owned(),
+                lasting_ms: 17_000,
+            })
+        );
+        assert_eq!(catalog.curse_meter(&with_curse("Frenzied")), None);
     }
 
     #[test]
@@ -1763,10 +2136,6 @@ mod tests {
         assert_eq!(loot.gear_score_range, Some((730, 730)));
         assert_eq!(loot.perk_buckets, ["PerkBucket_MutatorIce"]);
         assert_eq!(catalog.completion_event(&context(3)), Some("MutDiff3T1"));
-        assert_eq!(
-            catalog.player_affliction(&context(3)),
-            Some("AfflictionCurse2")
-        );
         assert!(catalog.is_mutable("dungeonshattermtn00"));
         assert_eq!(catalog.highest_difficulty(), Some(3));
     }

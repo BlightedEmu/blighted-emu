@@ -53,17 +53,23 @@
 //! with the owners; times in Unix nanoseconds as retail sends them. The PvP mission gains of this
 //! sim's players go to the database with the next read ([`super::influence`]); the social
 //! service moves the races, conflicts and lotteries on. `replicatedWarDecThresholdMetFaction`
-//! stays at no faction: retail sets it at 7 % to 54 % with no rule the captures show
-//! (**Unknown**).
+//! is the race's threshold faction ([`nw_db::WAR_DEC_THRESHOLD_POINTS`]): Observed in 32 retail
+//! flips of the 1,111 claims ledgers, it is set in the same state as a one-percent rise of that
+//! faction (at 3 % to 58 %), never to the owner's faction, and is cleared when the race starts
+//! again; Inferred: one company of the faction met a contribution threshold (the hidden part).
+//! The claims' faction control point list, the fort lock timers and their anchor come from the
+//! forts and towers ([`super::control_points`]), whose shared state is read and stored with the
+//! wars.
 
 use std::collections::BTreeMap;
 
 use nw_bus::ConnectionRef;
 use nw_content::crafting::RecipeDetails;
 use nw_db::{
-    DbError, PgPool, TerritoryConflict, TerritoryOwner, TerritoryWar, UPKEEP_INTERVAL_MS,
-    add_influence, clear_territory_owner, set_territory_owner, territory_conflicts,
-    territory_owners, territory_wars,
+    ControlPoint, DbError, PgPool, TerritoryConflict, TerritoryOwner, TerritoryWar,
+    UPKEEP_INTERVAL_MS, add_influence, add_project_points, clear_territory_owner, control_points,
+    set_territory_owner, store_control_point, territory_conflicts, territory_owners,
+    territory_wars,
 };
 use nw_messages::gde::AssetId;
 use nw_messages::items::FullList;
@@ -78,8 +84,10 @@ use nw_messages::{
 use uuid::Uuid;
 
 use super::SimWorld;
+use super::control_points::ControlPointStore;
 use super::crafting::CARD_COMPONENT;
 use super::gm_chat::DONE;
+use super::town_projects::ProjectPoints;
 use super::wars::{WarAnswer, WarJob};
 
 /// The slice of the slot-2 world entity (Observed: the same in the three retail ledgers).
@@ -148,10 +156,6 @@ const LEAST_STATION_FEE: u32 = 1;
 /// How often a sim reads the owners again (Inferred: retail re-sends the claims about every
 /// 30 s, `nw_messages::land_claim`).
 pub(super) const OWNER_READ_MS: u64 = 30_000;
-/// A fort lock timer that runs no lock (Observed: on every claim without a lock).
-const NO_FCP_LOCK: u16 = u16::MAX;
-/// Entries of `replicatedFactionControlPointData` (Observed: 29 in the three retail ledgers).
-const FACTION_CONTROL_POINT_ENTRIES: usize = 29;
 /// The faction byte of no faction.
 const NO_FACTION: u8 = 0;
 /// The zero time of a conflict, darkness cycle or influence race that does not run.
@@ -262,7 +266,8 @@ pub(super) struct InfluenceGain {
 /// A database job of the territory owners: a change first, when one was asked, then a read of
 /// every owner. It also carries the war jobs ([`super::wars`]), run before the owner change (a
 /// war's result may give its claim to the attacker), and then reads the wars; and the influence
-/// gains, stored before the conflicts are read with the wars.
+/// gains and the town project points, stored before the conflicts and the projects are read with
+/// the wars.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TerritoryJob {
     change: Option<AskedChange>,
@@ -270,8 +275,12 @@ pub(crate) struct TerritoryJob {
     wars: Option<(Vec<WarJob>, u64)>,
     /// The influence gains to store.
     gains: Vec<InfluenceGain>,
+    /// The town project points to store ([`super::town_projects`]).
+    points: Vec<ProjectPoints>,
     /// The darkness and the upgrades read with the wars ([`super::invasions`]).
     dominion: Option<super::invasions::Dominion>,
+    /// The control point changes to store ([`super::control_points`]).
+    control_writes: Vec<ControlPoint>,
 }
 
 impl TerritoryJob {
@@ -291,17 +300,45 @@ impl TerritoryJob {
                 tracing::error!(%error, territory, points, "influence gain not stored; lost");
             }
         }
-        let (wars, conflicts) = match self.wars.take() {
-            None => (None, None),
+        for point in std::mem::take(&mut self.control_writes) {
+            if let Err(error) = store_control_point(world, &point).await {
+                tracing::error!(%error, entry = point.index, "control point not stored; lost");
+            }
+        }
+        for gain in std::mem::take(&mut self.points) {
+            let ProjectPoints {
+                territory,
+                kind,
+                upgrade,
+                points,
+                at_ms,
+            } = gain;
+            match add_project_points(world, territory, kind, upgrade, points, at_ms).await {
+                Ok(progress) => tracing::debug!(
+                    territory,
+                    kind,
+                    upgrade,
+                    points,
+                    ?progress,
+                    "town project points"
+                ),
+                Err(error) => {
+                    tracing::error!(%error, territory, points, "town project points not stored; lost");
+                }
+            }
+        }
+        let (wars, conflicts, points) = match self.wars.take() {
+            None => (None, None, None),
             Some((jobs, now_ms)) => {
                 let mut answers = Vec::with_capacity(jobs.len());
                 for job in jobs {
                     answers.push(job.run(world).await);
                 }
-                self.dominion = super::invasions::Dominion::read(world).await;
+                self.dominion = super::invasions::Dominion::read(world, now_ms).await;
                 (
                     Some((answers, territory_wars(world, now_ms).await)),
                     Some(territory_conflicts(world, now_ms).await),
+                    Some(control_points(world).await),
                 )
             }
         };
@@ -320,6 +357,7 @@ impl TerritoryJob {
             written,
             wars,
             conflicts,
+            points,
         }
     }
 }
@@ -335,6 +373,8 @@ pub(crate) struct TerritoryDone {
     wars: Option<WarsDone>,
     /// The races and conflicts, read with the wars.
     conflicts: Option<Result<Vec<TerritoryConflict>, DbError>>,
+    /// The control points, read with the wars.
+    points: Option<Result<Vec<ControlPoint>, DbError>>,
 }
 
 /// The answers of a job's war jobs and the wars read after them.
@@ -410,8 +450,8 @@ pub(super) struct Territories {
     upkeep: BTreeMap<u16, ClaimUpkeep>,
     /// Rises with each change of the owners: a client with an older one gets the claims again.
     version: u64,
-    /// Rises with each change of an owner's upkeep or of the owners: a desk shown with an older
-    /// one gets its governance data again ([`super::governance`]).
+    /// Rises with each change of an owner's upkeep, of the owners or of the town projects and
+    /// tiers: a desk shown with an older one gets its data again ([`super::governance`]).
     upkeep_version: u64,
     /// When the next read is due, sim ms.
     next_read_ms: u64,
@@ -423,17 +463,22 @@ pub(super) struct Territories {
     conflicts: BTreeMap<u16, TerritoryConflict>,
     /// The influence gains that wait for the next read job.
     gains: Vec<InfluenceGain>,
+    /// The town project points that wait for the next read job.
+    points: Vec<ProjectPoints>,
     /// The darkness and the upgrades, as last read ([`super::invasions`]).
     dominion: super::invasions::Dominion,
+    /// The control points ([`super::control_points`]).
+    control: ControlPointStore,
 }
 
 impl Territories {
     /// The manager state of the claims.
     fn state(&self) -> LandClaimManagerState {
         LandClaimManagerState {
-            fcp_lock_timers: per_claim(NO_FCP_LOCK),
-            // Observed: one retail ledger leaves the anchor out.
-            fcp_lock_anchor: None,
+            fcp_lock_timers: all_claims(self.control.locks()),
+            // Observed: one retail ledger leaves the anchor out; Inferred: no anchor while no
+            // lock runs.
+            fcp_lock_anchor: self.control.anchor_ms(),
             claim_keys: all_claims(CLAIM_KEYS.to_vec()),
             conflict_faction: self.per_conflict(|conflict| conflict.conflict_faction, NO_FACTION),
             conflict_lottery_end_time: self
@@ -452,7 +497,7 @@ impl Territories {
                     .map(|key| self.dominion.cycle_end_ns(*key))
                     .collect(),
             ),
-            faction_control_point_data: all_claims(vec![NO_FACTION; FACTION_CONTROL_POINT_ENTRIES]),
+            faction_control_point_data: all_claims(self.control.data()),
             faction_influence: [0, 1, 2].map(|faction| {
                 self.per_conflict(|conflict| conflict.influence[faction], NO_INFLUENCE)
             }),
@@ -472,7 +517,8 @@ impl Territories {
                     .map(|key| self.owners.get(key).cloned().unwrap_or(ClaimOwner::NONE))
                     .collect(),
             ),
-            war_dec_threshold_met_faction: per_claim(NO_FACTION),
+            war_dec_threshold_met_faction: self
+                .per_conflict(|conflict| conflict.war_dec_faction, NO_FACTION),
         }
     }
 
@@ -493,9 +539,34 @@ impl Territories {
         )
     }
 
+    /// The race and conflict of `territory`, as last read.
+    pub(super) fn conflict(&self, territory: u16) -> Option<&TerritoryConflict> {
+        self.conflicts.get(&territory)
+    }
+
+    /// The control points ([`super::control_points`]).
+    pub(super) const fn control(&self) -> &ControlPointStore {
+        &self.control
+    }
+
+    /// The control points, to change ([`super::control_points`]).
+    pub(super) const fn control_mut(&mut self) -> &mut ControlPointStore {
+        &mut self.control
+    }
+
+    /// The claims changed: every client gets them again.
+    pub(super) const fn claims_changed(&mut self) {
+        self.version += 1;
+    }
+
     /// Keeps the influence gain `gain` for the next read job.
     pub(super) fn gain(&mut self, gain: InfluenceGain) {
         self.gains.push(gain);
+    }
+
+    /// Stores town project `points` with the next read job.
+    pub(super) fn add_points(&mut self, points: ProjectPoints) {
+        self.points.push(points);
     }
 
     /// The slot-2 members a client with the claims version `sent` needs, in retail order (after
@@ -559,7 +630,9 @@ impl Territories {
             }),
             wars: None,
             gains: Vec::new(),
+            points: Vec::new(),
             dominion: None,
+            control_writes: Vec::new(),
         });
         Ok(())
     }
@@ -621,13 +694,20 @@ impl Territories {
         unix_ms: u64,
     ) -> Vec<TerritoryJob> {
         let read_due = now_ms >= self.next_read_ms && self.running == 0 && self.jobs.is_empty();
-        if read_due || !wars.is_empty() || !self.gains.is_empty() {
+        if read_due
+            || !wars.is_empty()
+            || !self.gains.is_empty()
+            || !self.points.is_empty()
+            || self.control.has_writes()
+        {
             self.next_read_ms = now_ms.saturating_add(OWNER_READ_MS);
             self.jobs.push(TerritoryJob {
                 change: None,
                 wars: Some((wars, unix_ms)),
                 gains: std::mem::take(&mut self.gains),
+                points: std::mem::take(&mut self.points),
                 dominion: None,
+                control_writes: self.control.take_writes(),
             });
         }
         self.running += self.jobs.len();
@@ -649,8 +729,10 @@ impl Territories {
         if let Some(dominion) = done.job.dominion.take()
             && dominion != self.dominion
         {
+            // The claims show the tiers and the projects, the planning boards the projects.
             self.dominion = dominion;
             self.version += 1;
+            self.upkeep_version += 1;
         }
         match done.owners {
             Ok(read) => {
@@ -685,6 +767,11 @@ impl Territories {
                 }
             }
             Some(Err(error)) => tracing::warn!(%error, "territory conflicts not read"),
+            None => {}
+        }
+        match done.points {
+            Some(Ok(read)) => self.control.read(read),
+            Some(Err(error)) => tracing::warn!(%error, "control points not read"),
             None => {}
         }
         let asked = done.job.change?;
@@ -747,6 +834,7 @@ impl Territories {
             owners: Ok(owners),
             wars: None,
             conflicts: None,
+            points: None,
         });
     }
 
@@ -758,6 +846,7 @@ impl Territories {
             owners: Ok(Vec::new()),
             wars: None,
             conflicts: Some(Ok(conflicts)),
+            points: None,
         });
     }
 
@@ -823,6 +912,7 @@ mod tests {
             owners: Ok(owners),
             wars: None,
             conflicts: None,
+            points: None,
         }
     }
 
@@ -948,6 +1038,8 @@ mod tests {
             conflict_faction: 2,
             conflict_start_ms: START_MS,
             lottery_end_ms: LOTTERY_MS,
+            war_dec_faction: 2,
+            next_slot_ms: 0,
         }]);
         let members = territories
             .members_due(&mut sent)
@@ -981,6 +1073,15 @@ mod tests {
             .as_ref()
             .and_then(ReplicatedList::full);
         assert_eq!(factions.expect("full").elements[index], 2);
+        let war_dec = state
+            .war_dec_threshold_met_faction
+            .as_ref()
+            .and_then(ReplicatedList::full);
+        assert_eq!(
+            war_dec.expect("full").elements[index],
+            2,
+            "the threshold faction"
+        );
         assert_eq!(
             full(&state.conflict_start_time)[index],
             START_MS * NS_PER_MS
@@ -1098,6 +1199,7 @@ mod tests {
             owners: Err(DbError::OutOfRange { field: "test" }),
             wars: None,
             conflicts: None,
+            points: None,
         });
         assert_eq!(territories.owners, before.owners);
         assert_eq!(territories.version, before.version);
@@ -1154,6 +1256,7 @@ mod tests {
                 owners: Ok(vec![owner()]),
                 wars: None,
                 conflicts: None,
+                points: None,
             })
         };
         assert_eq!(answer(Ok(true)), Some((connection(), DONE)));
@@ -1176,6 +1279,7 @@ mod tests {
                 owners: Ok(Vec::new()),
                 wars: None,
                 conflicts: None,
+                points: None,
             }),
             Some((connection(), NO_OWNER))
         );

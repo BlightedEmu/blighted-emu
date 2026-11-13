@@ -11,8 +11,8 @@
 //! a limit counts the drops of the item whose id it has. Its end time was the next Tuesday
 //! 09:00 UTC. Every entry of a limit with `LimitExpireSeconds` 604800 ends on a Tuesday (853
 //! entries), every one with 64800 or 86400 at the next day's reset (553 entries), always at the
-//! same hour of the server: 09:00 UTC on 31 ledgers (the newchar ledger among them) and 03:00 UTC
-//! on 417. The reset hour is the server's ([`ResetClock`]).
+//! server's reset: 09:00 UTC on 31 ledgers (US East, the newchar ledger among them) and 03:00 UTC
+//! on 417 (EU Central), both 05:00 local time ([`crate::resets`]).
 //!
 //! **Observed, the two times.** The second time is the end of the count, with a sub-second
 //! part: the newchar entry ends at 1793091600.894621 s, its kill bundle came at
@@ -42,35 +42,17 @@
 
 use std::collections::HashMap;
 
-use nw_common::time::SECONDS_PER_DAY;
 use nw_formats::objectstream::lowercase_crc32;
-use serde::Deserialize;
 
 use crate::Tables;
+use crate::resets::{ResetClock, ResetCycle};
 
 /// `LimitExpireSeconds` of the limits that reset with each day (Observed).
 const DAILY_EXPIRES: [i64; 2] = [64_800, 86_400];
 /// `LimitExpireSeconds` of the limits that reset with each week (Observed).
 const WEEKLY_EXPIRES: i64 = 604_800;
-const SECONDS_PER_HOUR: i64 = 3_600;
-/// Hours in one day: a reset hour is below it.
-pub const HOURS_PER_DAY: u32 = 24;
-const DAYS_PER_WEEK: i64 = 7;
-/// 1970-01-01 was a Thursday: the weekday index (Monday 0) of Unix day 0.
-const UNIX_DAY_ZERO_WEEKDAY: i64 = 3;
-/// Nanoseconds in one second.
-const NS_PER_SECOND: u64 = 1_000_000_000;
 /// The count a [`LootLimitCounts::visit`] adds.
 const VISIT_COUNT: u64 = 1;
-
-/// When a limit's count goes back to 0.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResetCycle {
-    /// At the next daily reset.
-    Daily,
-    /// At the next weekly reset.
-    Weekly,
-}
 
 /// One limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,73 +152,6 @@ impl LootLimits {
     /// Whether no limit applies.
     pub fn is_empty(&self) -> bool {
         self.by_id.is_empty()
-    }
-}
-
-/// A day of the week.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Weekday {
-    /// Monday.
-    Monday,
-    /// Tuesday.
-    Tuesday,
-    /// Wednesday.
-    Wednesday,
-    /// Thursday.
-    Thursday,
-    /// Friday.
-    Friday,
-    /// Saturday.
-    Saturday,
-    /// Sunday.
-    Sunday,
-}
-
-impl Weekday {
-    /// Its index, Monday 0.
-    const fn index(self) -> i64 {
-        match self {
-            Self::Monday => 0,
-            Self::Tuesday => 1,
-            Self::Wednesday => 2,
-            Self::Thursday => 3,
-            Self::Friday => 4,
-            Self::Saturday => 5,
-            Self::Sunday => 6,
-        }
-    }
-}
-
-/// The server's resets: each day at `hour_utc`, and each week on `weekly_day` at that hour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResetClock {
-    /// The reset hour, UTC, below [`HOURS_PER_DAY`].
-    pub hour_utc: u32,
-    /// The day of the weekly reset.
-    pub weekly_day: Weekday,
-}
-
-impl ResetClock {
-    /// The first reset of `cycle` after Unix second `now_s`.
-    pub fn next(&self, cycle: ResetCycle, now_s: i64) -> i64 {
-        let hour_s = i64::from(self.hour_utc) * SECONDS_PER_HOUR;
-        let mut day = (now_s - hour_s).div_euclid(SECONDS_PER_DAY) + 1;
-        if cycle == ResetCycle::Weekly {
-            let weekday = (day + UNIX_DAY_ZERO_WEEKDAY).rem_euclid(DAYS_PER_WEEK);
-            day += (self.weekly_day.index() - weekday).rem_euclid(DAYS_PER_WEEK);
-        }
-        day * SECONDS_PER_DAY + hour_s
-    }
-
-    /// The end of a count of `cycle` that starts at Unix nanosecond `now_ns`: whole seconds
-    /// after it, at the first reset after it (module notes: the end keeps the start's
-    /// sub-second part).
-    pub fn end_ns(&self, cycle: ResetCycle, now_ns: u64) -> u64 {
-        let now_s = i64::try_from(now_ns / NS_PER_SECOND).unwrap_or(i64::MAX);
-        let ahead_s = u64::try_from(self.next(cycle, now_s) - now_s).unwrap_or_default();
-        now_ns.saturating_add(ahead_s.saturating_mul(NS_PER_SECOND))
     }
 }
 
@@ -443,6 +358,7 @@ impl LootLimitCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resets::ServerRegion;
 
     /// 2026-10-22 19:22:31 UTC, the newchar ledger's kill (a Thursday).
     const KILL_S: i64 = 1_792_696_951;
@@ -455,14 +371,14 @@ mod tests {
     const WEEKLY_END_S: i64 = 1_793_091_600;
     /// The next day's reset: Friday 2026-10-23 09:00 UTC.
     const DAILY_END_S: i64 = 1_792_746_000;
+    /// The newchar ledger's server.
     const RETAIL_CLOCK: ResetClock = ResetClock {
-        hour_utc: 9,
-        weekly_day: Weekday::Tuesday,
+        region: ServerRegion::UsEast,
     };
     const WARHAMMER: &str = "2hWarhammer_FTUE_CorruptedSailer_V2";
     const WEEKLY_EXPIRE: i64 = 604_800;
     const DAILY_EXPIRE: i64 = 64_800;
-    const ONE_SECOND_NS: u64 = NS_PER_SECOND;
+    const ONE_SECOND_NS: u64 = 1_000_000_000;
 
     fn row(id: &str, count_limit: i64, expire_seconds: i64, max_limit_mult: i64) -> LimitRow<'_> {
         LimitRow {
@@ -494,22 +410,13 @@ mod tests {
     }
 
     const fn ns(seconds: i64) -> u64 {
-        seconds.unsigned_abs() * NS_PER_SECOND
+        seconds.unsigned_abs() * ONE_SECOND_NS
     }
 
     #[test]
     fn the_resets_fall_on_the_captured_times() {
         assert_eq!(RETAIL_CLOCK.next(ResetCycle::Weekly, KILL_S), WEEKLY_END_S);
         assert_eq!(RETAIL_CLOCK.next(ResetCycle::Daily, KILL_S), DAILY_END_S);
-        // At the reset itself the next one is a cycle later.
-        assert_eq!(
-            RETAIL_CLOCK.next(ResetCycle::Daily, DAILY_END_S),
-            DAILY_END_S + SECONDS_PER_DAY
-        );
-        assert_eq!(
-            RETAIL_CLOCK.next(ResetCycle::Weekly, WEEKLY_END_S),
-            WEEKLY_END_S + DAYS_PER_WEEK * SECONDS_PER_DAY
-        );
         assert_eq!(
             RETAIL_CLOCK.end_ns(ResetCycle::Weekly, KILL_NS),
             WEEKLY_END_NS,

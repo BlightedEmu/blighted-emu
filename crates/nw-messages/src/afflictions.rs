@@ -11,6 +11,7 @@
 //! two big-endian binary16 values and two big-endian `u64` (20 bytes); the cold long form is a
 //! binary16, a byte and a flag (4 bytes).
 
+use crate::alc::half_bits;
 use crate::slots::children_mask;
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -71,7 +72,16 @@ pub trait LongForm: Sized {
 }
 
 /// The hot long form (`FUN_145ce61b0`): two big-endian binary16 values (kept as their bits) and
-/// two big-endian `u64`. The meaning is Unknown.
+/// two big-endian `u64`.
+///
+/// **Observed** (every retail ledger with an own affliction list, 871): a line of the meter from
+/// value `a` at time `c` to value `b` at time `d`, the times in ns since 2000-01-01. A meter
+/// after a change holds `a` = `b` = its value and `d` = `c` + the affliction's `DrainDelay`
+/// (erosion 9,999 s, `CATACOMBS2` 36.440 s: 1.5, 1.5; blight 1.1 s, `CATACOMBS6` 1310.842 s: 5,
+/// 5); after the hold it falls to 0 at its `DrainRate` (`CATACOMBS6` 1315.939 s: 25, 0 over
+/// 25 s); a full meter falls to 0 over its share of the `AfflictedDrainTime` (`CATACOMBS3`
+/// 947.871 s: 40, 0 over 10 s; Hive Genesis 759.155 s: blight 45.156, 0 over 135.5 s of 180 s
+/// for 60).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HotLong {
     /// The first binary16.
@@ -82,6 +92,18 @@ pub struct HotLong {
     pub c: u64,
     /// The second `u64`.
     pub d: u64,
+}
+
+impl HotLong {
+    /// The meter line from `from` at `from_ns` to `to` at `to_ns` (ns since 2000-01-01).
+    pub fn line(from: f32, to: f32, from_ns: u64, to_ns: u64) -> Self {
+        Self {
+            a: half_bits(from),
+            b: half_bits(to),
+            c: from_ns,
+            d: to_ns,
+        }
+    }
 }
 
 impl LongForm for HotLong {
@@ -100,7 +122,12 @@ impl LongForm for HotLong {
 }
 
 /// The cold long form (`FUN_145ce6130`): a big-endian binary16 (kept as its bits), a byte and a
-/// flag (`FUN_1407d7c20`). The meaning is Unknown.
+/// flag (`FUN_1407d7c20`).
+///
+/// **Observed** (every retail ledger with an own affliction list): the meter's top (the holder's
+/// `Res<Kind>` plus the affliction's `Max`: erosion 40, blight 60), its `IntId` (erosion 15,
+/// blight 8) and whether the meter is full (the holder is afflicted): `CATACOMBS3` 947.871 s
+/// sets the flag with the full meter, the first gain after it clears it (966.384 s).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColdLong {
     /// The binary16.
@@ -109,6 +136,17 @@ pub struct ColdLong {
     pub byte: u8,
     /// The flag.
     pub flag: bool,
+}
+
+impl ColdLong {
+    /// The cold data of an affliction of `max` and int id `id`, `afflicted` or not.
+    pub fn of(max: f32, id: u8, afflicted: bool) -> Self {
+        Self {
+            value: half_bits(max),
+            byte: id,
+            flag: afflicted,
+        }
+    }
 }
 
 impl LongForm for ColdLong {
@@ -125,10 +163,96 @@ impl LongForm for ColdLong {
     }
 }
 
+/// The `IntID` of a game mode with no global affliction (Observed: `ff` in every first game mode
+/// state).
+pub const NO_GLOBAL_AFFLICTION_ID: u8 = 0xff;
+
+/// The global affliction meter of a game mode (`AfflictionData`, client `FUN_145c95fd0`, game
+/// mode child 22 `globalAfflictionData`): `m_lastAmount` (f32), `m_lastAmountTimePoint` (u64),
+/// `m_targetAmount` (f32), `m_targetAmountTimePoint` (u64), `m_max` (f32), `m_afflictionID`
+/// (u8) and `m_isAfflicted` (u8), all big-endian, the times in ns since 2000-01-01.
+///
+/// **Observed** (retail `20261002-184508-050`, a Fiendish run, 664 changes; findings
+/// `2026-11-13-catacomb-erosion.md` sections C11 to C13): a meter line from `last` at
+/// `last_ns` to `target` at `target_ns`, as the vitals' hot long form but in full floats; a
+/// held value runs to its `DrainDelay` (9,999 s), a full meter falls from 45 to 0 over the
+/// `AfflictedDrainTime` with the flag 1; the id is the row's `IntID` (`AfflictionCurse2` 11).
+/// A mode with none sends zeros, id `ff` and flag 0. The floats are kept as their bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobalAffliction {
+    /// `m_lastAmount`, as its bits.
+    pub last_bits: u32,
+    /// `m_lastAmountTimePoint`.
+    pub last_ns: u64,
+    /// `m_targetAmount`, as its bits.
+    pub target_bits: u32,
+    /// `m_targetAmountTimePoint`.
+    pub target_ns: u64,
+    /// `m_max`, as its bits.
+    pub max_bits: u32,
+    /// `m_afflictionID`: the row's `IntID`.
+    pub id: u8,
+    /// `m_isAfflicted`: the meter is full.
+    pub afflicted: bool,
+}
+
+/// A line of a global meter: from `last` at `last_ns` to `target` at `target_ns`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeterLine {
+    /// The value at `last_ns`.
+    pub last: f32,
+    /// ns since 2000-01-01.
+    pub last_ns: u64,
+    /// The value at `target_ns`.
+    pub target: f32,
+    /// ns since 2000-01-01.
+    pub target_ns: u64,
+}
+
+impl GlobalAffliction {
+    /// The data of a game mode with no global affliction.
+    pub const NONE: Self = Self {
+        last_bits: 0,
+        last_ns: 0,
+        target_bits: 0,
+        target_ns: 0,
+        max_bits: 0,
+        id: NO_GLOBAL_AFFLICTION_ID,
+        afflicted: false,
+    };
+
+    /// The meter `line` of top `max`, `IntID` `id`, full or not.
+    pub fn of(line: MeterLine, max: f32, id: u8, afflicted: bool) -> Self {
+        Self {
+            last_bits: line.last.to_bits(),
+            last_ns: line.last_ns,
+            target_bits: line.target.to_bits(),
+            target_ns: line.target_ns,
+            max_bits: max.to_bits(),
+            id,
+            afflicted,
+        }
+    }
+
+    /// Writes the 30 bytes of the data.
+    pub fn write(&self, writer: &mut Writer) {
+        writer
+            .u32(self.last_bits)
+            .u64(self.last_ns)
+            .u32(self.target_bits)
+            .u64(self.target_ns)
+            .u32(self.max_bits)
+            .u8(self.id)
+            .boolean(self.afflicted);
+    }
+}
+
 /// One item of the counted form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Affliction<L> {
-    /// The byte before the id. The meaning is Unknown.
+    /// The byte before the id: the meter's key, its `IntId` (Observed: `CATACOMBS6` 1325.741 s
+    /// erosion 15, 1325.809 s blight 8; client `FUN_1467dd9d0` keys the meter by the row's
+    /// `GetAfflictionIntID`).
     pub head: u8,
     /// The id.
     pub id: AfflictionId,
@@ -146,7 +270,8 @@ pub enum AfflictionList<L> {
     Full {
         /// The list id.
         id: AfflictionId,
-        /// The items: the byte and the long form.
+        /// The items: the meter's key (its `IntId`, as [`Affliction::head`]) and the long form,
+        /// in key order (Observed: `CATACOMBS6` 1325.775 s blight 8, then erosion 15).
         items: Vec<(u8, L)>,
     },
 }
@@ -260,6 +385,111 @@ mod tests {
     const WIDE_ID: u64 = 300;
     const HALF: u16 = 0x3c00;
     const TIME: u64 = 0x0102_0304_0506_0708;
+
+    fn global_hex(data: &GlobalAffliction) -> String {
+        let mut writer = Writer::new();
+        data.write(&mut writer);
+        writer
+            .finish()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// Retail `20261002-184508-050` (Unix ms 1790964499092): the Fiendish meter's first change,
+    /// 1 held for the row's 9,999 s, max 45, `AfflictionCurse2` (11), not full; and the empty
+    /// data of every first state.
+    #[test]
+    fn the_global_affliction_writes_the_retail_bytes() {
+        const LAST_NS: u64 = 844_279_689_985_784_851;
+        const TARGET_NS: u64 = 844_289_688_985_784_851;
+        const CURSE2: u8 = 11;
+        let held = GlobalAffliction::of(
+            MeterLine {
+                last: 1.0,
+                last_ns: LAST_NS,
+                target: 1.0,
+                target_ns: TARGET_NS,
+            },
+            45.0,
+            CURSE2,
+            false,
+        );
+        assert_eq!(
+            global_hex(&held),
+            "3f8000000bb77be7a4adfc133f8000000bb784ffb785d213423400000b00"
+        );
+        assert_eq!(
+            global_hex(&GlobalAffliction::NONE),
+            "00000000000000000000000000000000000000000000000000000000ff00"
+        );
+    }
+
+    /// The erosion meter of `CATACOMBS2` at 36.440 s: 1.5 from Unix ms 1790337386472 for
+    /// 9,999 s, item 15 of max 40, not full.
+    #[test]
+    fn the_erosion_meter_lines_and_cold_data_are_the_retail_bytes() {
+        const FROM_NS: u64 = 843_652_586_472_068_077;
+        const DRAIN_DELAY_NS: u64 = 9_999_000_000_000;
+        const VALUE: f32 = 1.5;
+        const MAX: f32 = 40.0;
+        const EROSION: u8 = 15;
+        assert_eq!(
+            HotLong::line(VALUE, VALUE, FROM_NS, FROM_NS + DRAIN_DELAY_NS),
+            HotLong {
+                a: 15_872,
+                b: 15_872,
+                c: FROM_NS,
+                d: 843_662_585_472_068_077,
+            }
+        );
+        assert_eq!(
+            ColdLong::of(MAX, EROSION, false),
+            ColdLong {
+                value: 20_736,
+                byte: EROSION,
+                flag: false,
+            }
+        );
+    }
+
+    /// The blight meter of `CATACOMBS6`: 5 at 1310.842 s, item 8 of top 60, and full at
+    /// 1323.808 s, 60 to 0 over its 180 s.
+    #[test]
+    fn the_blight_meter_lines_and_cold_data_are_the_retail_bytes() {
+        const GAIN_NS: u64 = 843_736_447_074_073_890;
+        const HOLD_END_NS: u64 = 843_736_448_174_073_914;
+        const FULL_NS: u64 = 843_736_460_039_857_206;
+        const AFFLICTED_NS: u64 = 180_000_000_000;
+        const BLIGHT: u8 = 8;
+        const TOP: f32 = 60.0;
+        assert_eq!(
+            HotLong::line(5.0, 5.0, GAIN_NS, HOLD_END_NS),
+            HotLong {
+                a: 17_664,
+                b: 17_664,
+                c: GAIN_NS,
+                d: HOLD_END_NS,
+            }
+        );
+        assert_eq!(
+            HotLong::line(TOP, 0.0, FULL_NS, FULL_NS + AFFLICTED_NS),
+            HotLong {
+                a: 21_376,
+                b: 0,
+                c: FULL_NS,
+                d: 843_736_640_039_857_206,
+            }
+        );
+        assert_eq!(
+            ColdLong::of(TOP, BLIGHT, true),
+            ColdLong {
+                value: 21_376,
+                byte: BLIGHT,
+                flag: true,
+            }
+        );
+    }
 
     fn hot() -> HotLong {
         HotLong {

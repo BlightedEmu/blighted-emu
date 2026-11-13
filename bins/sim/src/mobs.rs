@@ -42,7 +42,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::combat::CombatSettings;
 use crate::mob_ai::{
-    COMBAT_LEASH_KEY, GuardHit, HeldEffects, MobAi, RemoteFact, Shown, SpawnAi, SpellCast, Strike,
+    COMBAT_LEASH_KEY, GritHit, GuardHit, HeldEffects, MobAi, RemoteFact, Shown, SpawnAi, SpellCast, Strike,
     Summon, Surroundings, TaggedMob, TreeMind, floor_line, height_after_move,
 };
 use crate::objectives::KillTypes;
@@ -398,6 +398,9 @@ pub struct Mobs {
     gm: BTreeMap<u32, VitalsSpawn>,
     /// The design overrides of the GM mobs that have any, by spawn index.
     gm_ai: BTreeMap<u32, SpawnAi>,
+    /// The slice assets of the GM mobs shown with their own slice (an invasion's cow launcher
+    /// grunt), by spawn index; the others show their vitals id's most seen look.
+    gm_assets: BTreeMap<u32, [u8; ASSET_ID_LEN]>,
     /// Mobs a tree spawned (`ExecuteSpawn`) by index; their indexes follow the spawn list too.
     summoned: FxHashMap<u32, Summoned>,
     /// The design overrides of each spawn of the spawn list (empty: none).
@@ -492,7 +495,7 @@ pub struct SpawnFilter<'a> {
 const SPAWN_GROUP_M: f32 = 2.0;
 
 /// Whether the encounter spawn `spawn` belongs to a spawn group at one of `places`.
-fn in_scripted_group(spawn: &VitalsSpawn, places: &[[f32; 3]]) -> bool {
+pub(crate) fn in_scripted_group(spawn: &VitalsSpawn, places: &[[f32; 3]]) -> bool {
     spawn.is_encounter
         && places.iter().any(|place| {
             (spawn.position[0] - place[0]).hypot(spawn.position[1] - place[1]) <= SPAWN_GROUP_M
@@ -725,6 +728,7 @@ impl Mobs {
             personal: FxHashMap::default(),
             gm: BTreeMap::new(),
             gm_ai: BTreeMap::new(),
+            gm_assets: BTreeMap::new(),
             summoned: FxHashMap::default(),
             overrides: Arc::from([]),
             next_personal,
@@ -899,18 +903,27 @@ impl Mobs {
         self.overrides = overrides;
     }
 
-    /// Spawns a GM mob of `spawn` with the design overrides `ai` (a script mob's waypoints);
-    /// its entity number, or `None` without its rows.
-    pub fn spawn_gm(&mut self, spawn: VitalsSpawn, ai: Option<SpawnAi>) -> Option<u64> {
+    /// Spawns a GM mob of `spawn` with the design overrides `ai` (a script mob's waypoints),
+    /// shown with slice asset `asset` when given (its archetype follows the slice); its entity
+    /// number, or `None` without its rows.
+    pub fn spawn_gm(
+        &mut self,
+        spawn: VitalsSpawn,
+        ai: Option<SpawnAi>,
+        asset: Option<[u8; ASSET_ID_LEN]>,
+    ) -> Option<u64> {
         let index = self.next_personal;
         if let Some(ai) = ai {
             self.gm_ai.insert(index, ai);
         }
-        let Some(mob) = self.make(index, &spawn, None) else {
+        let Some(mob) = self.make(index, &spawn, asset) else {
             self.gm_ai.remove(&index);
             return None;
         };
         self.next_personal = index.checked_add(1)?;
+        if let Some(asset) = asset {
+            self.gm_assets.insert(index, asset);
+        }
         self.live.insert(index, mob);
         self.wake_index(index);
         self.gm.insert(index, spawn);
@@ -924,6 +937,7 @@ impl Mobs {
             return false;
         };
         self.gm_ai.remove(&index);
+        self.gm_assets.remove(&index);
         self.live.remove(&index);
         self.awake.remove(&index);
         self.left.push(entity);
@@ -986,13 +1000,15 @@ impl Mobs {
             .map(|personal| personal.owner)
     }
 
-    /// The slice asset of personal mob `entity`'s retail card, when it has one.
+    /// The slice asset of mob `entity`'s retail card, when it has its own (a personal, summoned
+    /// or GM mob spawned with one).
     pub fn asset(&self, entity: u64) -> Option<[u8; ASSET_ID_LEN]> {
         let index = spawn_index(entity)?;
         self.personal
             .get(&index)
             .and_then(|personal| personal.asset)
             .or_else(|| self.summoned.get(&index).map(|summoned| summoned.asset))
+            .or_else(|| self.gm_assets.get(&index).copied())
     }
 
     /// The state of mob `entity`, when it lives here.
@@ -1025,8 +1041,11 @@ impl Mobs {
         let action = self.ai.cage_action(shown.action)?;
         let action_name = self.ai.name(action.action);
         let fragment = mind
-            .waypoint_task()
-            .filter(|_| WAYPOINT_TASK_ACTIONS.contains(&action_name))
+            .stagger_fragment()
+            .or_else(|| {
+                mind.waypoint_task()
+                    .filter(|_| WAYPOINT_TASK_ACTIONS.contains(&action_name))
+            })
             .unwrap_or(action.fragment);
         Some((shown, action_name, self.ai.name(fragment)))
     }
@@ -1576,7 +1595,7 @@ impl Mobs {
     }
 
     /// The tree of living mob `entity`.
-    fn tree_mut(&mut self, entity: u64) -> Option<&mut TreeMind> {
+    pub fn tree_mut(&mut self, entity: u64) -> Option<&mut TreeMind> {
         let mob = self.live.get_mut(&spawn_index(entity)?)?;
         if mob.dead_since_ms.is_some() || mob.health.is_dead() {
             return None;
@@ -1946,6 +1965,11 @@ impl Mobs {
         self.tree(entity).and_then(TreeMind::guard)
     }
 
+    /// The guard stamina mob `entity` has now, when it can block ([`TreeMind::guard_stamina`]).
+    pub fn guard_stamina(&self, entity: u64) -> Option<f32> {
+        self.tree(entity).and_then(TreeMind::guard_stamina)
+    }
+
     /// Where mob `entity` faces (its tree's yaw: forward is `(-sin, cos)`).
     pub fn facing(&self, entity: u64) -> Option<f32> {
         self.tree(entity).map(TreeMind::yaw)
@@ -1970,6 +1994,25 @@ impl Mobs {
             return None;
         };
         mind.guard_hit(&ai, mob.position, now_ms, loss)
+    }
+
+    /// An unblocked hit of stagger `stagger` from `from` (the attacker's position, when known)
+    /// lands on mob `entity` at `now_ms`, with the status effects the sim holds on it
+    /// ([`TreeMind::grit_hit`]).
+    pub fn grit_hit(
+        &mut self,
+        entity: u64,
+        stagger: f32,
+        from: Option<Position>,
+        now_ms: u64,
+    ) -> Option<GritHit> {
+        let ai = Arc::clone(&self.ai);
+        let held = self.held.get(&entity);
+        let mob = spawn_index(entity).and_then(|index| self.live.get_mut(&index))?;
+        let Mind::Tree(mind) = &mut mob.mind else {
+            return None;
+        };
+        mind.grit_hit(&ai, (mob.position, from), now_ms, stagger, held)
     }
 
     /// A hit reaction of `length_ms` of mob `entity` starts at `now_ms`.
@@ -3144,7 +3187,7 @@ mod tests {
         const LATER_MS: u64 = 600_000;
         let mut mobs = mobs(Vec::new());
         let entity = mobs
-            .spawn_gm(spawn_at(10.0, TEST_MOB, TEST_LEVEL), None)
+            .spawn_gm(spawn_at(10.0, TEST_MOB, TEST_LEVEL), None, None)
             .expect("gm mob");
         assert_eq!(mobs.owner(entity), None, "every player sees it");
         assert_eq!(mobs.gm_mobs(), [entity]);
@@ -3163,7 +3206,7 @@ mod tests {
     fn a_gm_mob_without_rows_is_refused() {
         let mut mobs = mobs(Vec::new());
         assert_eq!(
-            mobs.spawn_gm(spawn_at(10.0, "no_such_mob", TEST_LEVEL), None),
+            mobs.spawn_gm(spawn_at(10.0, "no_such_mob", TEST_LEVEL), None, None),
             None
         );
     }
@@ -3601,6 +3644,86 @@ mod retail_tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
+    /// The retail bear slice has the stagger: its grit is its stamina, it spawns with
+    /// `AI_Enable_Stagger`, its grid runs `ActivateGrit` (grit on) and has `Reaction_Staggered`
+    /// (`r_Stagger`, `r_Stagger_F` for a hit from ahead and `r_Stagger_B` from behind);
+    /// Commander Loth's slice holds the effect but its grid has no grit action
+    /// (Observed: none of its 92 own hits in the ledgers lowered its child 44).
+    #[test]
+    fn the_retail_bear_has_the_stagger_and_commander_loth_has_no_grit() {
+        let data = retail_data();
+        let arch = |slice: &str| {
+            data.archetypes
+                .iter()
+                .find(|arch| data.name(arch.slice) == slice)
+                .expect(slice)
+        };
+        let grid_action = |arch: &nw_ai::data::Archetype, name: &str| {
+            let grid = &data.grids[arch.grid.expect("a grid") as usize];
+            grid.actions
+                .iter()
+                .find(|(action, _)| data.name(*action) == name)
+                .map(|(_, index)| &data.cage_actions[*index as usize])
+        };
+        let bear = arch("slices/characters/bear.dynamicslice");
+        assert!(bear.grit_uses_stamina);
+        assert!(
+            bear.initial_effects
+                .iter()
+                .any(|effect| data.name(*effect) == "AI_Enable_Stagger")
+        );
+        let grit = grid_action(bear, "ActivateGrit").expect("the grit action");
+        assert!(grit.grit_on.is_some() && grit.activation.is_some());
+        let stagger = grid_action(bear, "Reaction_Staggered").expect("the stagger");
+        assert_eq!(data.name(stagger.fragment), "r_Stagger");
+        // Its `ChangeActionFragment`: `r_Stagger_F` ahead, `r_Stagger_B` behind.
+        let cases: Vec<&str> = stagger
+            .fragment_cases
+            .iter()
+            .map(|case| data.name(case.fragment))
+            .collect();
+        assert_eq!(cases, ["r_Stagger_F", "r_Stagger_B"]);
+        let loth = arch("slices/characters/evil_knight_heavy_commanderloth_boss.dynamicslice");
+        assert!(grid_action(loth, "ActivateGrit").is_none());
+    }
+
+    /// The retail bear and withered brute slices name the large status effect FX list (their
+    /// grit takes hits as a large body); the Motherwell stag and the Mute Seraph name only
+    /// `fxscriptlist_npc_statuseffects` (the stag is a large body through its `Beast` row).
+    #[test]
+    fn the_retail_bear_and_brute_slices_hold_the_large_status_effect_fx_list() {
+        let data = retail_data();
+        let large = |slice: &str| {
+            data.archetypes
+                .iter()
+                .find(|arch| data.name(arch.slice) == slice)
+                .expect(slice)
+                .large_status_effects_fx
+        };
+        assert!(large("slices/characters/bear.dynamicslice"));
+        assert!(large("slices/characters/undead_brute.dynamicslice"));
+        assert!(!large("slices/characters/elk_motherwell_stag.dynamicslice"));
+        assert!(!large(
+            "slices/characters/trials/seraphim/trial_quest_seraphim_boss_mute_seraph.dynamicslice"
+        ));
+    }
+
+    /// The retail stagger resist takes half of a hit's stagger off, and it follows the
+    /// stagger's tracker (`AI_Staggered_Tracker` `OnEndStatusEffect`).
+    #[test]
+    fn the_retail_stagger_resist_halves_the_stagger_after_the_tracker() {
+        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
+        let path = nw_content::bundle::bundle_path(&repo().join("local-data/content"), &build);
+        let bundle = nw_content::ContentBundle::load(&path, &build).expect("the content bundle");
+        let rules = nw_content::status_effects::StatusEffectRules::from_tables(&bundle.tables);
+        let resist = rules
+            .by_id("AI_Staggered_StaggerDamageResist")
+            .expect("the resist");
+        assert!((resist.stagger_reduction - 0.5).abs() < f64::EPSILON);
+        let tracker = rules.by_id("AI_Staggered_Tracker").expect("the tracker");
+        assert_eq!(tracker.on_end, vec![resist.crc]);
+    }
+
     fn retail_data() -> AiData {
         let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
         AiData::load(&repo().join("local-data/content"), &build)
@@ -3637,27 +3760,73 @@ mod retail_tests {
         }
     }
 
+    /// Retail: the invasion siege grunt shares `Invasion_Grunt`'s vitals but shows
+    /// `invasion_grunt_cowlauncher.dynamicslice` (mob prefab table, build 25810808): a GM mob
+    /// spawned with that slice shows it on its card and runs the slice's tree; one spawned
+    /// without shows the vitals id's most seen look.
     #[test]
-    fn a_retail_shield_soldier_raises_and_drops_its_block_in_a_fight() {
+    fn a_gm_mob_shows_its_own_slice_and_runs_its_tree() {
+        const ID: &str = "Invasion_Grunt";
+        const PLAIN: &str = "1d607a8e69625e18a309ad9500e85138";
+        const COW_LAUNCHER: &str = "312cc027e57a5b7a9484d54b0a1e28b4";
+        let mut mobs = retail_mobs(Vec::new(), &[(ID, asset(PLAIN))]);
+        let siege = mobs
+            .spawn_gm(
+                spawn_at(SPAWN_X, ID, TEST_LEVEL),
+                None,
+                Some(asset(COW_LAUNCHER)),
+            )
+            .expect("siege grunt");
+        let plain = mobs
+            .spawn_gm(spawn_at(SPAWN_X, ID, TEST_LEVEL), None, None)
+            .expect("plain grunt");
+        assert_eq!(mobs.asset(siege), Some(asset(COW_LAUNCHER)));
+        assert_eq!(mobs.asset(plain), None, "the vitals id's look");
+        let archetype = mobs.ai.archetype_of(&asset(COW_LAUNCHER));
+        assert!(archetype.is_some(), "the cow launcher slice has a tree");
+        assert_eq!(mobs.tree(siege).map(TreeMind::archetype), archetype);
+        assert_eq!(
+            mobs.tree(plain).map(TreeMind::archetype),
+            mobs.ai.archetype_of(&asset(PLAIN))
+        );
+        assert!(mobs.remove_gm(siege));
+        assert_eq!(mobs.asset(siege), None, "a removed mob keeps no slice");
+    }
+
+    #[test]
+    fn a_retail_shield_soldier_blocks_in_a_fight_and_its_attacks_spend_no_guard_stamina() {
         // Retail: `Dryad_Soldier_32` raised its block 90 times in the captures (all-capture
         // sweep 2026-11-09); its type's guard (`VitalsBaseData`, build 25810808).
         const ID: &str = "Dryad_Soldier_32";
         const ASSET: &str = "692a1f1462025e428fe568e45ed9c8d6";
         const FIGHT_MS: u64 = 60_000;
-        let guard = nw_content::combat::MobGuard::of((50, 50, 2, 1), (1, 0.8)).expect("guard");
+        let guard = nw_content::combat::MobGuard::of((50, 50, 2, 1), 1).expect("guard");
         let mut mobs = retail_mobs(
             vec![spawn_at(SPAWN_X, ID, TEST_LEVEL)],
             &[(ID, asset(ASSET))],
         );
         mobs.set_guard(mob_entity(0), guard);
-        let (mut rises, mut was) = (0, false);
+        let (mut rises, mut was, mut attacks) = (0, false, 0);
         for now in (0..FIGHT_MS).step_by(TICK_MS as usize) {
-            mobs.tick(&[player_at(SPAWN_X + 2.0)], now, &Flat, 1);
+            attacks += mobs.tick(&[player_at(SPAWN_X + 2.0)], now, &Flat, 1).len();
             let up = mobs.blocking(mob_entity(0));
             rises += u32::from(up && !was);
             was = up;
+            // Its own attacks spend no guard stamina (Observed: Arvaysa empyrean M1 run 4
+            // interest 34, `Evil_Knight_Mace_DG_GreatCleave01_00`: its `Attack_Charge` at
+            // 78.25 s and 104.85 s, `Attack_Swing_L` at 81.12 s and 118.19 s and
+            // `Attack_Shield_Bash` at 73.22 s and 96.92 s left child 44 at 40 or rising one
+            // segment at a time; each of its falls came with a block reaction, `r_B2_F` at
+            // 59.29 s and 85.09 s, `r_B3_F` at 99.72 s, of a blocked hit of another player,
+            // whose 2071 goes to that player only).
+            assert_eq!(
+                mobs.guard_stamina(mob_entity(0)),
+                Some(guard.stamina_max),
+                "unhit at {now} ms"
+            );
         }
         assert!(rises > 0, "it raises its block while it fights");
+        assert!(attacks > 0, "it attacks while it fights");
     }
 
     #[test]

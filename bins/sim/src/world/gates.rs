@@ -35,8 +35,8 @@ use nw_content::dungeon_gates::{
 };
 use nw_messages::timeline_state::{TIMELINE_TYPE_INDEX, TimelineState};
 use nw_messages::{
-    BundleMember, DEPLETED_GATHERABLE, GatherableControllerState, HEALTHY_GATHERABLE, MemberState,
-    RAW_ID_LEN,
+    BundleMember, DEPLETED_GATHERABLE, GatherableControllerState, HEALTHY_GATHERABLE,
+    InteractState, MemberState, RAW_ID_LEN,
 };
 use nw_sim_core::Position;
 
@@ -49,9 +49,19 @@ use super::encounter_roots::{
 
 /// The namespace of the `GdeRef`s of gate entities ("gatesdor").
 const GATE_NAMESPACE: u64 = 0x6761_7465_7364_6f72;
-/// The version of a gate's timeline lists at its spawn (Observed: 4 on a closed Amrine tall gate
-/// at 243.836; Inferred for every gate).
-const ENTRY_VERSION: u64 = 4;
+/// The versions each timeline of a gate takes before its spawn: the entity's version counter
+/// starts at this many times its timeline count, and goes up by one with each change of one of
+/// its states (its gatherable, its interact state, a timeline's start or end). Observed: 4 on
+/// the closed Amrine tall gate (two timelines, 243.836 s) and on the catacomb hidden gate (two),
+/// 2 on the catacomb wall torch lever (one); the hidden gate went to 8 and then played at 6
+/// (`CATACOMBS2` 431.572 and 431.605 s), the lever took its interact state twice and its
+/// gatherable, then played at 6 and ended at 7 (431.572 to 436.938 s), and the Amrine boss door
+/// played at 6 and ended at 7 after its gatherable change. Inferred for the other timeline
+/// counts.
+const VERSIONS_PER_TIMELINE: u64 = 2;
+/// The `HasInteractors` a switch's interact state takes when its use begins (Observed:
+/// `CATACOMBS2` 431.572 s, the one retail lever pull).
+const ONE_INTERACTOR: u32 = 1;
 /// Milliseconds per second.
 const MS_PER_S: f32 = 1_000.0;
 /// Half of an angle.
@@ -72,6 +82,8 @@ pub(super) enum ScriptEvent {
     StageStarted(String, String),
     /// A player used the switch of that gate name.
     SwitchUsed(String),
+    /// A player began to use the switch of that gate name.
+    SwitchStarted(String),
 }
 
 /// A change of the gate entities for the sim to send.
@@ -129,7 +141,7 @@ struct LiveGate {
 }
 
 /// The gatherable state member of component `component`.
-fn gatherable_member(component: u64, state: u8) -> BundleMember {
+pub(super) fn gatherable_member(component: u64, state: u8) -> BundleMember {
     BundleMember {
         component,
         state: MemberState::GatherableController(GatherableControllerState {
@@ -189,14 +201,20 @@ pub(super) fn merge_members(members: &mut Vec<BundleMember>, changed: &[BundleMe
     }
 }
 
+/// The version of `gate`'s timeline lists at its spawn ([`VERSIONS_PER_TIMELINE`]).
+fn entry_version(gate: &Gate) -> u64 {
+    VERSIONS_PER_TIMELINE.saturating_mul(u64::try_from(gate.timelines.len()).unwrap_or(u64::MAX))
+}
+
 impl LiveGate {
     fn new(def: Gate, namespace: u64, index: usize) -> Self {
+        let version = entry_version(&def);
         Self {
             def,
             gde_ref: dynamic_ref(namespace, index),
             present: false,
             state: None,
-            version: ENTRY_VERSION,
+            version,
             end: None,
             closed_by: None,
             number: None,
@@ -245,6 +263,9 @@ impl LiveGate {
             .map(|component| gatherable_member(component, state))
             .into_iter()
             .collect();
+        if !members.is_empty() {
+            self.version += 1;
+        }
         let played = match play {
             Play::Named(name) => {
                 name.and_then(|name| self.def.timelines.iter().find(|t| t.name == name))
@@ -268,6 +289,42 @@ impl LiveGate {
     }
 }
 
+impl LiveGate {
+    /// Its interact state changes to `state` (a switch's use begins or ends); `None` for a
+    /// gate without an interact state or out of the world.
+    fn interact(&mut self, state: InteractState) -> Option<Vec<BundleMember>> {
+        let component = self.def.interact_component.filter(|_| self.present)?;
+        self.version += 1;
+        Some(vec![BundleMember {
+            component,
+            state: MemberState::Interact(state),
+        }])
+    }
+}
+
+/// The interact state a switch named by `event` takes: one interactor when its use begins, no
+/// longer enabled when it ends (Observed: the catacomb wall torch lever, `CATACOMBS2` 431.572
+/// and 433.574 s).
+fn interact_change(event: &ScriptEvent) -> Option<(&str, InteractState)> {
+    match event {
+        ScriptEvent::SwitchStarted(name) => Some((
+            name,
+            InteractState {
+                enabled: None,
+                has_interactors: Some(ONE_INTERACTOR),
+            },
+        )),
+        ScriptEvent::SwitchUsed(name) => Some((
+            name,
+            InteractState {
+                enabled: Some(false),
+                has_interactors: None,
+            },
+        )),
+        _ => None,
+    }
+}
+
 /// Whether `trigger` names `event`.
 fn fires(trigger: &Trigger, event: &ScriptEvent) -> bool {
     match (trigger, event) {
@@ -280,7 +337,8 @@ fn fires(trigger: &Trigger, event: &ScriptEvent) -> bool {
             Trigger::StageStarted { encounter, stage },
             ScriptEvent::StageStarted(name, stage_name),
         ) => encounter == name && stage == stage_name,
-        (Trigger::SwitchUsed { switch }, ScriptEvent::SwitchUsed(name)) => switch == name,
+        (Trigger::SwitchUsed { switch }, ScriptEvent::SwitchUsed(name))
+        | (Trigger::SwitchStarted { switch }, ScriptEvent::SwitchStarted(name)) => switch == name,
         _ => false,
     }
 }
@@ -303,6 +361,8 @@ pub(super) struct LevelGates {
     rules: Vec<(usize, GateRule)>,
     /// Switches used since the last step.
     switches_used: Vec<String>,
+    /// Switches whose use began since the last step.
+    switches_started: Vec<String>,
     /// The encounter statuses of the last step.
     watch: EncounterWatch,
 }
@@ -348,6 +408,7 @@ impl LevelGates {
             gates,
             rules: all_rules,
             switches_used: Vec::new(),
+            switches_started: Vec::new(),
             watch: EncounterWatch::default(),
         };
         (gates, spawns)
@@ -402,10 +463,23 @@ impl LevelGates {
         }
     }
 
-    /// One step at `now_ms` with the script's `events` (and the switches used since the last
-    /// step): the rules that fire, the reopenings after a reset, and the timeline ends due.
+    /// A player began to use the gate of slot key `number` (its gather started).
+    pub(super) fn switch_started(&mut self, number: u64) {
+        if let Some(live) = self.gates.iter().find(|live| live.number == Some(number)) {
+            self.switches_started.push(live.def.name.clone());
+        }
+    }
+
+    /// One step at `now_ms` with the script's `events` (and the switches begun and used since
+    /// the last step): the rules that fire, the reopenings after a reset, and the timeline ends
+    /// due.
     pub(super) fn step(&mut self, events: &[ScriptEvent], now_ms: u64) -> Vec<GateChange> {
         let mut events = events.to_vec();
+        events.extend(
+            std::mem::take(&mut self.switches_started)
+                .into_iter()
+                .map(ScriptEvent::SwitchStarted),
+        );
         events.extend(
             std::mem::take(&mut self.switches_used)
                 .into_iter()
@@ -413,6 +487,18 @@ impl LevelGates {
         );
         let mut changes = Vec::new();
         for event in &events {
+            if let Some((switch, state)) = interact_change(event) {
+                for (index, live) in self.gates.iter_mut().enumerate() {
+                    if live.def.name == switch
+                        && let Some(members) = live.interact(state)
+                    {
+                        changes.push(GateChange::Change {
+                            gate: index,
+                            members,
+                        });
+                    }
+                }
+            }
             if let ScriptEvent::EncounterReset(name) = event {
                 for (index, live) in self.gates.iter_mut().enumerate() {
                     if live.closed_by.as_deref() == Some(name.as_str()) {
@@ -545,18 +631,28 @@ impl EncounterWatch {
 }
 
 impl SimWorld {
-    /// The gates of game mode `game_mode`'s level for the instance whose ids take `salt`: the
-    /// last instance's gates go, the new ones spawn in their entry state.
+    /// The gates of game mode `game_mode`'s level for the instance whose ids take `salt` (a
+    /// catacombs run's: its secret doors and levers, [`super::catacombs`]): the last instance's
+    /// gates go, the new ones spawn in their entry state.
     pub(super) fn start_gates(&mut self, game_mode: Option<&str>, salt: u64) {
         self.stop_gates();
-        let Some(level) = game_mode.and_then(|mode| self.content.dungeon_gates.of_mode(mode))
-        else {
+        if let Some((level, rules)) = self
+            .catacomb_run()
+            .map(super::catacombs::CatacombRun::gates)
+        {
+            self.spawn_gates(&level, Some(&rules), salt);
+            return;
+        }
+        let content = std::sync::Arc::clone(&self.content);
+        let Some(level) = game_mode.and_then(|mode| content.dungeon_gates.of_mode(mode)) else {
             return;
         };
-        let rules = self
-            .content
-            .dungeon_gate_rules
-            .of_level(&level.script_slice);
+        let rules = content.dungeon_gate_rules.of_level(&level.script_slice);
+        self.spawn_gates(level, rules, salt);
+    }
+
+    /// The gates of `level` with its `rules`, their ids salted with `salt`, in the world.
+    fn spawn_gates(&mut self, level: &GateLevel, rules: Option<&LevelRules>, salt: u64) {
         tracing::info!(
             level = %level.script_slice,
             gates = level.gates.len(),
@@ -605,6 +701,13 @@ impl SimWorld {
     pub(super) fn gate_switch_used(&mut self, number: u64) {
         if let Some(gates) = &mut self.dungeon_gates {
             gates.switch_used(number);
+        }
+    }
+
+    /// A player's gather of the gate of slot key `number` started.
+    pub(super) fn gate_switch_started(&mut self, number: u64) {
+        if let Some(gates) = &mut self.dungeon_gates {
+            gates.switch_started(number);
         }
     }
 
@@ -670,6 +773,8 @@ mod tests {
     const PORTAL: &str = "PortalStoneArt";
     const CHAMBER: &str = "EncounterChamber";
     const BOSS: &str = "EncounterBoss";
+    /// The version of a test gate (two timelines) at its spawn: retail's 4 (Amrine 243.836 s).
+    const ENTRY: u64 = 4;
 
     fn gate(name: &str, at: [f32; 3]) -> Gate {
         Gate {
@@ -681,6 +786,7 @@ mod tests {
             yaw_deg: 90.0,
             position_component: Some(POSITION),
             gatherable_component: Some(GATHERABLE),
+            interact_component: None,
             timelines: vec![
                 GateTimeline {
                     name: "Timeline_Close".to_owned(),
@@ -800,11 +906,7 @@ mod tests {
         assert_eq!(gatherable_of(opened), Some(DEPLETED_GATHERABLE));
         assert_eq!(
             body_of(opened, OPEN_TIMELINE),
-            Some(
-                TimelineState::start(ENTRY_VERSION + 1)
-                    .body()
-                    .expect("start")
-            )
+            Some(TimelineState::start(ENTRY + 2).body().expect("start"))
         );
         assert!(
             change_of(&changes, 1).is_some(),
@@ -814,11 +916,7 @@ mod tests {
         let ended = gates.step(&[], NOW + GATE_MS);
         assert_eq!(
             body_of(change_of(&ended, 0).expect("end"), OPEN_TIMELINE),
-            Some(
-                TimelineState::end(ENTRY_VERSION + 2, GATE_S)
-                    .body()
-                    .expect("end")
-            )
+            Some(TimelineState::end(ENTRY + 3, GATE_S).body().expect("end"))
         );
     }
 
@@ -927,19 +1025,11 @@ mod tests {
         // Retail closed tall gate (Amrine 243.836): close at its end, open at 0.
         assert_eq!(
             body_of(&group.members, CLOSE_TIMELINE),
-            Some(
-                TimelineState::end(ENTRY_VERSION, GATE_S)
-                    .body()
-                    .expect("end")
-            )
+            Some(TimelineState::end(ENTRY, GATE_S).body().expect("end"))
         );
         assert_eq!(
             body_of(&group.members, OPEN_TIMELINE),
-            Some(
-                TimelineState::unplayed(ENTRY_VERSION)
-                    .body()
-                    .expect("unplayed")
-            )
+            Some(TimelineState::unplayed(ENTRY).body().expect("unplayed"))
         );
     }
 
@@ -1024,6 +1114,102 @@ mod tests {
         assert_eq!(
             gatherable_of(change_of(&changes, 3).expect("the switch")),
             Some(DEPLETED_GATHERABLE)
+        );
+    }
+
+    /// The retail lever pull (`CATACOMBS2` 431.572 to 436.938 s): the lever (one timeline)
+    /// spawns at version 2; the pull's start gives it one interactor (3); its end turns its
+    /// interact state off (4) and its gatherable to 8 (5) and plays its timeline at 6, which
+    /// ends at 7.
+    #[test]
+    fn a_lever_takes_its_interact_states_and_plays_at_the_retail_versions() {
+        const LEVER: &str = "SecretLeverA@0";
+        const INTERACT: u64 = 4;
+        const LEVER_S: f32 = 3.325;
+        const LEVER_MS: u64 = 3_325;
+        let mut lever = gate(LEVER, [10.0, 20.0, 30.0]);
+        lever.interact_component = Some(INTERACT);
+        lever.timelines = vec![GateTimeline {
+            name: "Timeline_Lever".to_owned(),
+            component: CLOSE_TIMELINE,
+            length_s: LEVER_S,
+        }];
+        let level = GateLevel {
+            gates: vec![lever],
+            ..level()
+        };
+        let rules = LevelRules {
+            script_slice: level.script_slice.clone(),
+            ledgers: Vec::new(),
+            gates: vec![GateRuleSet {
+                gate: LEVER.to_owned(),
+                entry: Entry::Present {
+                    state: Some(HEALTHY_GATHERABLE),
+                },
+                rules: vec![GateRule {
+                    when: Trigger::SwitchUsed {
+                        switch: LEVER.to_owned(),
+                    },
+                    then: set(DEPLETED_GATHERABLE, "Timeline_Lever"),
+                }],
+            }],
+        };
+        let (mut gates, spawns) = LevelGates::new(&level, Some(&rules), NAMESPACE);
+        let GateChange::Spawn { members, .. } = &spawns[0] else {
+            panic!("the lever spawns");
+        };
+        assert_eq!(
+            body_of(members, CLOSE_TIMELINE),
+            Some(TimelineState::unplayed(2).body().expect("unplayed"))
+        );
+        assert!(
+            body_of(members, INTERACT).is_none(),
+            "no interact state at the spawn"
+        );
+        gates.set_number(0, Some(7));
+        gates.switch_started(7);
+        let started = gates.step(&[], NOW);
+        let interact = |changes: &[GateChange]| {
+            change_of(changes, 0).and_then(|members| {
+                members.iter().find_map(|member| match &member.state {
+                    MemberState::Interact(state) if member.component == INTERACT => Some(*state),
+                    _ => None,
+                })
+            })
+        };
+        assert_eq!(
+            interact(&started),
+            Some(InteractState {
+                enabled: None,
+                has_interactors: Some(1),
+            })
+        );
+        gates.switch_used(7);
+        let used = gates.step(&[], NOW + 2_000);
+        let members: Vec<BundleMember> = used
+            .iter()
+            .filter_map(|change| match change {
+                GateChange::Change { gate: 0, members } => Some(members.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert!(members.iter().any(|member| matches!(
+            member.state,
+            MemberState::Interact(InteractState {
+                enabled: Some(false),
+                ..
+            })
+        )));
+        assert_eq!(gatherable_of(&members), Some(DEPLETED_GATHERABLE));
+        assert_eq!(
+            body_of(&members, CLOSE_TIMELINE),
+            Some(TimelineState::start(6).body().expect("start"))
+        );
+        let ended = gates.step(&[], NOW + 2_000 + LEVER_MS);
+        assert_eq!(
+            body_of(change_of(&ended, 0).expect("end"), CLOSE_TIMELINE),
+            Some(TimelineState::end(7, LEVER_S).body().expect("end"))
         );
     }
 }

@@ -160,17 +160,24 @@ impl SocialWorld {
                     touched
                 }
                 StoreOp::SaveGroup(group) => group.members.clone(),
+                StoreOp::SavePlayerRaid(raid) => {
+                    raid.seats.iter().map(|(member, _)| *member).collect()
+                }
                 StoreOp::Settings { .. }
                 | StoreOp::Report(_)
                 | StoreOp::AddCoinReturn(_)
                 | StoreOp::RemoveCoinReturn(_)
                 | StoreOp::DeleteCompany(_)
-                | StoreOp::DeleteGroup(_) => Vec::new(),
+                | StoreOp::DeleteGroup(_)
+                | StoreOp::DeletePlayerRaid(_) => Vec::new(),
             },
             // The treasury changes when its change is stored (`treasury_changed` touches, and
             // `war_declared` for a declaration).
             Effect::Treasury { .. }
             | Effect::DeclareWar { .. }
+            | Effect::StartTownProject { .. }
+            | Effect::CancelTownProject { .. }
+            | Effect::TownProjectAnswered { .. }
             | Effect::FindAccount { .. }
             | Effect::Deliver { .. }
             | Effect::MoveCoins { .. }
@@ -192,6 +199,7 @@ impl SocialWorld {
     /// Sends every state that changed of the players this input touched, their group and
     /// company included.
     pub(crate) fn refresh_views(&mut self, now_ms: u64) {
+        self.update_raid_group_leads(now_ms);
         let from_effects: Vec<Uuid> = self
             .out
             .iter()

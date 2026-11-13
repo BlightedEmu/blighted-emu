@@ -17,6 +17,13 @@
 //!   saw the mob, not when it spawned (a mob the player did not see is not in the table).
 //! - The fort's structures (4103 child 2, six entries of kinds 4 to 9) and the reward event the
 //!   player got at the end (`Invasion_T4` at territory 16, `Invasion_T3` at 5 and 2).
+//! - The lanes (the `invasionlanes` bin over the same ledgers): every invasion mob's positions
+//!   over time, the mobs put together by their first place (within 8 m: 69 places at territory
+//!   16, 81 at 5, 55 at 2); a place's lane is the track of its mob that walked the longest way
+//!   (up to 415 m), cut to points 4 m apart at least ([`WaveSpawn::path`]; 975 of 978 spawns of
+//!   territory 5 and 1,316 of 1,320 of territory 2 have one). Inferred: the retail lanes are
+//!   server data no capture holds, and the longest walk of a place is the most of its lane the
+//!   captures show (a mob that met a player fought it on the way).
 //!
 //! The table file is mined from the captures (no tracked file holds capture data): a fort that
 //! no invasion capture shows has no entry, and gets no invasion.
@@ -115,6 +122,8 @@ struct SpawnRow {
     vitals: u32,
     place: [f32; 3],
     siege: bool,
+    #[serde(default)]
+    path: Vec<[f32; 3]>,
 }
 
 /// The invasion encounter entity of a fort.
@@ -147,7 +156,7 @@ pub struct FortWall {
 }
 
 /// One mob of a wave.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WaveSpawn {
     /// Milliseconds from its wave's start.
     pub after_ms: u64,
@@ -157,6 +166,39 @@ pub struct WaveSpawn {
     pub place: [f32; 3],
     /// It carries a cow launcher: a siege mob.
     pub siege: bool,
+    /// Its lane after [`Self::place`]: the world positions it walks through, in order (module
+    /// doc); empty when no retail mob of its place walked.
+    pub path: Vec<[f32; 3]>,
+}
+
+/// The vitals id of `Invasion_Grunt` (the CRC-32 of the lowercase row id).
+const INVASION_GRUNT_VITALS: u32 = 0x8b24_1eb8;
+/// The vitals id of `Invasion_Bomber`.
+const INVASION_BOMBER_VITALS: u32 = 0xaeeb_87b9;
+/// `slices/characters/invasion/invasion_grunt_cowlauncher.dynamicslice`.
+const GRUNT_COW_LAUNCHER_SLICE: [u8; ID_LEN] = [
+    0x31, 0x2c, 0xc0, 0x27, 0xe5, 0x7a, 0x5b, 0x7a, 0x94, 0x84, 0xd5, 0x4b, 0x0a, 0x1e, 0x28, 0xb4,
+];
+/// `slices/characters/invasion/invasion_bomber_cowlauncher.dynamicslice`.
+const BOMBER_COW_LAUNCHER_SLICE: [u8; ID_LEN] = [
+    0xb8, 0xad, 0x52, 0xae, 0xd8, 0xd5, 0x52, 0x12, 0x81, 0xa3, 0x75, 0x28, 0xdc, 0xdf, 0x71, 0xd1,
+];
+
+impl WaveSpawn {
+    /// The slice asset it shows when that is not its vitals id's most seen look: the cow
+    /// launcher slice of a siege grunt or bomber.
+    ///
+    /// Observed (mob prefab table, build 25810808, from the invasion ledgers): the siege mobs
+    /// share the vitals of the plain grunt (`Invasion_Grunt`, 37 siege spawns in the fort
+    /// table) and bomber (`Invasion_Bomber`, 37) and show their own slice; no other vitals id
+    /// carries a cow launcher.
+    pub const fn slice(&self) -> Option<[u8; ID_LEN]> {
+        match (self.siege, self.vitals) {
+            (true, INVASION_GRUNT_VITALS) => Some(GRUNT_COW_LAUNCHER_SLICE),
+            (true, INVASION_BOMBER_VITALS) => Some(BOMBER_COW_LAUNCHER_SLICE),
+            _ => None,
+        }
+    }
 }
 
 /// One wave of an invasion.
@@ -267,6 +309,7 @@ fn fort_of(row: FortRow) -> Result<InvasionFort, InvasionFortsError> {
                     vitals: spawn.vitals,
                     place: spawn.place,
                     siege: spawn.siege,
+                    path: spawn.path,
                 })
                 .collect();
             spawns.sort_by_key(|spawn| spawn.after_ms);
@@ -329,7 +372,8 @@ mod tests {
             {"after_ms": 9000, "vitals": 2334400185, "place": [5805.0, 7283.0, 71.0], "siege": false}]},
           {"component": 6, "start_after_ms": 0, "spawns": [
             {"after_ms": 8000, "vitals": 2334400185, "place": [5805.0, 7283.0, 71.0], "siege": false},
-            {"after_ms": 4100, "vitals": 2934671289, "place": [5801.0, 7281.0, 71.0], "siege": true}]}]}]}"#;
+            {"after_ms": 4100, "vitals": 2934671289, "place": [5801.0, 7281.0, 71.0], "siege": true,
+             "path": [[5806.0, 7290.0, 71.0], [5807.0, 7297.0, 71.0]]}]}]}]}"#;
 
     #[test]
     fn the_table_reads_with_its_waves_and_spawns_in_time_order() {
@@ -351,6 +395,15 @@ mod tests {
             .collect();
         assert_eq!(firsts, vec![4100, 8000]);
         assert!(fort.waves[0].spawns[0].siege);
+        assert_eq!(
+            fort.waves[0].spawns[0].path,
+            vec![[5806.0, 7290.0, 71.0], [5807.0, 7297.0, 71.0]],
+            "its lane in order"
+        );
+        assert!(
+            fort.waves[0].spawns[1].path.is_empty(),
+            "a spawn without a lane"
+        );
         assert_eq!(forts.territories().collect::<Vec<_>>(), vec![16]);
         assert!(forts.fort(5).is_none());
     }
@@ -367,5 +420,31 @@ mod tests {
             r#""reward_event": null"#,
         );
         assert!(InvasionForts::parse(&no_reward).is_err());
+    }
+
+    #[test]
+    fn a_siege_grunt_or_bomber_shows_its_cow_launcher_slice() {
+        let spawn = |vitals, siege| WaveSpawn {
+            after_ms: 0,
+            vitals,
+            place: [0.0; 3],
+            siege,
+            path: Vec::new(),
+        };
+        assert_eq!(
+            spawn(INVASION_GRUNT_VITALS, true).slice(),
+            Some(GRUNT_COW_LAUNCHER_SLICE)
+        );
+        assert_eq!(
+            spawn(INVASION_BOMBER_VITALS, true).slice(),
+            Some(BOMBER_COW_LAUNCHER_SLICE)
+        );
+        assert_eq!(
+            spawn(INVASION_GRUNT_VITALS, false).slice(),
+            None,
+            "plain look"
+        );
+        assert_eq!(spawn(INVASION_BOMBER_VITALS, false).slice(), None);
+        assert_eq!(spawn(1, true).slice(), None, "no other cow launcher slice");
     }
 }

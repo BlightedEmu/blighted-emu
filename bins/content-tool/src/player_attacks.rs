@@ -37,7 +37,7 @@ use nw_formats::azcs::{decode_azcs, is_azcs};
 use nw_formats::caf::Caf;
 use nw_formats::character::CharacterDefinition;
 use nw_formats::mannequin::{
-    Action, ActionList, AnimClip, AnimDatabase, CageGrid, Condition, ControllerDef, DrivenMotion,
+    Action, ActionList, AnimClip, AnimDatabase, AnimationList, CageGrid, Condition, ControllerDef, DrivenMotion,
     Fragment, GridList, ProcClip, ReactionRow, reaction_table,
 };
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
@@ -45,8 +45,9 @@ use nw_formats::skeleton::Skeleton;
 
 use crate::error::ToolError;
 use crate::melee_shapes::{
-    Bodies, CLIP_FOLDERS, CLIP_SUFFIX, ClipContext, DEFINITION_SUFFIX, EQUIP_TYPES, MS_PER_SECOND,
-    PLAYER_DEFINITION, PLAYER_SKELETON, WeaponBody, equip_attachments, melee_shape, ms, normalized,
+    ANIMATION_LIST_SUFFIX, Bodies, CLIP_SUFFIX, ClipContext, DEFINITION_SUFFIX, EQUIP_TYPES, MS_PER_SECOND,
+    PLAYER_ANIMATION_LIST, PLAYER_ANIMATION_LIST_FOLDER, PLAYER_DEFINITION, PLAYER_SKELETON,
+    WeaponBody, clip_folders, equip_attachments, melee_shape, ms, normalized,
     root_path,
 };
 use crate::source::GameSource;
@@ -1398,20 +1399,22 @@ fn clip_names<'a>(databases: impl Iterator<Item = &'a AnimDatabase>) -> BTreeSet
         .collect()
 }
 
-/// The animation name of the clip file at `path` (lower case) under the clip folders.
-fn clip_name(path: &str) -> Option<&str> {
-    CLIP_FOLDERS
+/// The animation name of the clip file at `path` (lower case) under the clip folders `folders`
+/// ([`clip_folders`]).
+fn clip_name<'a>(path: &'a str, folders: &[String]) -> Option<&'a str> {
+    folders
         .iter()
-        .any(|folder| path.starts_with(folder))
+        .any(|folder| path.starts_with(folder.as_str()))
         .then(|| path.strip_suffix(CLIP_SUFFIX))
         .flatten()
         .and_then(|stem| stem.rsplit('/').next())
 }
 
 /// Reads the animation sources of `rows` from `source`: a first walk for the databases, action
-/// lists, ranged attacks, projectile slices, character definitions and equip types, a second for
-/// the skeletons and the clips they name; then the databases' chained clips are timed with the
-/// clip lengths ([`AnimDatabase::time_chained_clips`]).
+/// lists, ranged attacks, projectile slices, character definitions, equip types and the
+/// player's animation lists, a second for the skeletons and the clips the databases name, in the
+/// folders of the player's animation list ([`clip_folders`]); then the databases' chained clips
+/// are timed with the clip lengths ([`AnimDatabase::time_chained_clips`]).
 ///
 /// # Errors
 ///
@@ -1438,6 +1441,7 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
         input_files: HashMap::new(),
         bodies: Bodies::default(),
     };
+    let mut animation_lists: HashMap<String, AnimationList> = HashMap::new();
     source.for_each_entry(
         |path| {
             (path.starts_with(PLAYER_ADB_PREFIX) && path.ends_with(ADB_SUFFIX))
@@ -1451,10 +1455,16 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
                 || path == PLAYER_DEFINITION
                 || path == EQUIP_TYPES
                 || definitions.contains(path)
+                || (path.starts_with(PLAYER_ANIMATION_LIST_FOLDER)
+                    && path.ends_with(ANIMATION_LIST_SUFFIX))
         },
         |path, bytes| {
             let text = || std::str::from_utf8(&bytes).ok();
-            if path == RANGED_ATTACK_DATABASE {
+            if path.ends_with(ANIMATION_LIST_SUFFIX) {
+                if let Some(list) = text().and_then(|text| AnimationList::parse(text).ok()) {
+                    animation_lists.insert(path.to_owned(), list);
+                }
+            } else if path == RANGED_ATTACK_DATABASE {
                 if let Some(root) = stream_root(&bytes) {
                     sources.ranged = ranged_attacks(&root);
                 }
@@ -1517,6 +1527,7 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
         },
     )?;
     let names = clip_names(sources.player.iter().chain(sources.attach.values()));
+    let folders = clip_folders(&animation_lists, PLAYER_ANIMATION_LIST);
     let skeletons: BTreeSet<String> = std::iter::once(PLAYER_SKELETON.to_owned())
         .chain(
             sources
@@ -1528,7 +1539,10 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
         .collect();
     let bodies = &mut sources.bodies;
     source.for_each_entry(
-        |path| skeletons.contains(path) || clip_name(path).is_some_and(|name| names.contains(name)),
+        |path| {
+            skeletons.contains(path)
+                || clip_name(path, &folders).is_some_and(|name| names.contains(name))
+        },
         |path, bytes| {
             if skeletons.contains(path) {
                 if let Ok(skeleton) = Skeleton::parse(&bytes) {
@@ -1537,7 +1551,7 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
                     }
                     bodies.skeletons.insert(path.to_owned(), skeleton);
                 }
-            } else if let Some(name) = clip_name(path) {
+            } else if let Some(name) = clip_name(path, &folders) {
                 // Two files of one name: the name is not known for sure.
                 let clip = Caf::parse(&bytes).ok();
                 bodies

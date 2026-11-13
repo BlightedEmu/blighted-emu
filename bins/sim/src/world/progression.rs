@@ -560,6 +560,14 @@ impl Masteries {
         Ok(())
     }
 
+    /// The points spent on territory standing bonus `point` of `pool`; 0 for none.
+    pub(super) fn territory_point_level(&self, pool: u32, point: u32) -> u16 {
+        self.territory_points
+            .iter()
+            .find(|entry| entry.pool == pool && entry.point == point)
+            .map_or(0, |entry| entry.level)
+    }
+
     /// These masteries with the saved territory points `saved` (pool, point, level, in
     /// first-spent order), as a join or a handoff carries them.
     pub(super) fn with_territory_points(mut self, saved: &[(u32, u32, u16)]) -> Self {

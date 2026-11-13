@@ -21,9 +21,9 @@ use nw_content::player_abilities::{
 };
 use nw_content::player_attacks::stance_tags;
 use nw_formats::input_profile::input_actions;
-use nw_formats::mannequin::{ActionList, Condition, Fragment, GridList, ProcClip};
+use nw_formats::mannequin::{ActionList, Condition, Fragment, GridList, ProcClip, TagChange};
 
-use crate::melee_shapes::ms;
+use crate::melee_shapes::{ends_in_loop, ms};
 use crate::player_attacks::{
     AnimationSources, BundleRows, NAMED_CLIP, NAMED_CLIP_NAME, fragment_attack, weapon_body,
 };
@@ -201,8 +201,9 @@ fn stance_of<'a>(rows: &'a BundleRows, classes: &[String]) -> Option<&'a String>
         })
 }
 
-/// The `CAGE-Named` markers of `fragments`, by start; a marker without an end lasts to `end_ms`.
-fn markers_of(fragments: &[&Fragment], end_ms: u64) -> Vec<FragmentMarker> {
+/// The `CAGE-Named` markers of `fragments`, by start; a marker that is the last clip of its
+/// layer has no end ([`FragmentMarker::end_ms`]).
+fn markers_of(fragments: &[&Fragment]) -> Vec<FragmentMarker> {
     let mut markers: Vec<FragmentMarker> = fragments
         .iter()
         .flat_map(|fragment| fragment.clips_of(NAMED_CLIP))
@@ -210,7 +211,7 @@ fn markers_of(fragments: &[&Fragment], end_ms: u64) -> Vec<FragmentMarker> {
             Some(FragmentMarker {
                 name: clip.param(NAMED_CLIP_NAME)?.to_owned(),
                 start_ms: ms(clip.start_s),
-                end_ms: clip.end_s.map_or(end_ms, ms),
+                end_ms: clip.end_s.map(ms),
             })
         })
         .collect();
@@ -222,14 +223,13 @@ fn markers_of(fragments: &[&Fragment], end_ms: u64) -> Vec<FragmentMarker> {
 /// (`NewAction`, else the action that plays its `NewFragment`: the ice gauntlet's Ice Storm intro
 /// goes on to `Ability_IceMagic_IceStorm_Aim`, the fragment of `IceMagic_IceStorm_AimSubState`),
 /// or to a `NewFragment` that no action plays ([`TransitionTo::Fragment`]); a
-/// clip without an end lasts to `end_ms`. A clip's named condition is the one of `list`, else of
+/// clip that is the last of its layer has no end ([`FragmentTransition::end_ms`]). A clip's named condition is the one of `list`, else of
 /// another of the action lists `all` (the bow's aim fragment tests the archery list's); a name
 /// that none has stays a test that never holds. The buffer of a clip is the
 /// `CAGE-TransitionBuffered` clip of its layer that starts last before it with the same
 /// `NewAction` and `NewFragment`.
 fn transitions_of(
     fragments: &[&Fragment],
-    end_ms: u64,
     list: &ActionList,
     all: &[ActionList],
 ) -> Vec<FragmentTransition> {
@@ -268,7 +268,7 @@ fn transitions_of(
                         .unwrap_or_else(|| Condition::External(name.to_owned()))
                 }),
                 start_ms: ms(clip.start_s),
-                end_ms: clip.end_s.map_or(end_ms, ms),
+                end_ms: clip.end_s.map(ms),
                 buffer_start_ms,
             })
         })
@@ -297,6 +297,33 @@ fn buffer_start_of(fragment: &Fragment, instant: &ProcClip) -> Option<u64> {
         })
         .map(|buffered| ms(buffered.start_s))
         .max()
+}
+
+/// The Mannequin tags action `action` of `list` sets as it starts or in a branch (an `OnEnter`
+/// of `Set`, in its default or a named case). A fragment of the action that has no entry for
+/// the stance's tags plays the entry of the stance's tags and these (Inferred: the musket's
+/// `Firearm_Shoot_DryFire_UpperBody` has entries only for tag states with `Aim` or `HeavyAim`,
+/// which the aim actions set; `Musket_ShootersStance_Ready`, which switches to it, sets
+/// `Crouch` and `HeavyAim`, and the entry for `2H_Ranged+Crouch+HeavyAim` goes back to
+/// `Ability_Musket_ShootersStance_Aim` after 0.667 s).
+fn tags_set_by(list: &ActionList, action: &str) -> Vec<String> {
+    let mut tags: Vec<String> = list
+        .actions
+        .iter()
+        .filter(|own| own.name == action)
+        .flat_map(|own| &own.tag_activities)
+        .flat_map(|activity| {
+            activity
+                .default
+                .iter()
+                .chain(activity.cases.iter().map(|(_, case)| case))
+        })
+        .filter(|case| case.on_enter == TagChange::Set)
+        .map(|case| case.tag.clone())
+        .collect();
+    tags.sort();
+    tags.dedup();
+    tags
 }
 
 /// The cooldown and mana cost ids `condition` tests, into `cooldowns` and `costs`.
@@ -350,7 +377,17 @@ fn list_of(
         {
             continue;
         }
-        let player = sources.player_fragment_any_case(&fragment_name, &tags);
+        let player = sources
+            .player_fragment_any_case(&fragment_name, &tags)
+            .or_else(|| {
+                let set = tags_set_by(action_list, &action_name);
+                let with_set: Vec<&str> = tags
+                    .iter()
+                    .copied()
+                    .chain(set.iter().map(String::as_str))
+                    .collect();
+                sources.player_fragment_any_case(&fragment_name, &with_set)
+            });
         let attach = weapon
             .and_then(|weapon| weapon.attach.as_ref())
             .and_then(|path| sources.attach.get(path))
@@ -386,7 +423,7 @@ fn list_of(
             },
             |hit| hit.length_ms,
         );
-        let transitions = transitions_of(&found, length_ms, action_list, &sources.actions);
+        let transitions = transitions_of(&found, action_list, &sources.actions);
         wanted.extend(
             transitions
                 .iter()
@@ -401,7 +438,8 @@ fn list_of(
             name: fragment_name.clone(),
             scopes: sources.controller.scopes_of(&fragment_name, &tags).to_vec(),
             length_ms,
-            markers: markers_of(&found, length_ms),
+            loops: found.iter().any(|fragment| ends_in_loop(fragment)),
+            markers: markers_of(&found),
             transitions,
             hit,
         });
@@ -609,11 +647,10 @@ mod tests {
  <Action Name="ReadyAction" FragmentName="Ready"/>
  <Action Name="CastAction" FragmentName="Cast"/>
 </Actions></ActionList>"#;
-        const LENGTH_MS: u64 = 600;
         let adb = AnimDatabase::parse(ADB).expect("adb");
         let list = ActionList::parse(ACTIONS).expect("actions");
         let ready = adb.best("Ready", &["MagicStaff"]).expect("fragment");
-        let transitions = transitions_of(&[ready], LENGTH_MS, &list, &[]);
+        let transitions = transitions_of(&[ready], &list, &[]);
         let leads: Vec<(&TransitionTo, Option<&str>)> = transitions
             .iter()
             .map(|transition| (&transition.to, transition.input.as_deref()))
@@ -650,11 +687,10 @@ mod tests {
 </Actions>
 <Conditions><And name="CanAttack_Flail_Blast"><IfMannequinTag TagName="Flail"/></And></Conditions>
 </ActionList>"#;
-        const LENGTH_MS: u64 = 2_067;
         let adb = AnimDatabase::parse(ADB).expect("adb");
         let list = ActionList::parse(ACTIONS).expect("actions");
         let slam = adb.best("Slam", &["Flail"]).expect("fragment");
-        let transitions = transitions_of(&[slam], LENGTH_MS, &list, &[]);
+        let transitions = transitions_of(&[slam], &list, &[]);
         let windows: Vec<(&TransitionTo, Option<u64>, u64)> = transitions
             .iter()
             .map(|transition| {
@@ -681,6 +717,89 @@ mod tests {
             list.resolved_condition("CanAttack_Flail_Blast"),
             "the lower-case name resolves"
         );
+    }
+
+    /// The fire staff's Burn Out loop, cut (`player_magicstaff_fire.adb`, build 25810808): its
+    /// clip loops from 0 s, `BlockDisabled` is the last clip of its layer, and the transition
+    /// to `Ability_Fire_Staff_Speed_Stop` from 0.867 s too; a marker with a clip after it ends
+    /// there.
+    #[test]
+    fn a_looping_fragment_keeps_its_open_clips_without_an_end() {
+        use nw_formats::mannequin::AnimDatabase;
+
+        const ADB: &str = r#"<AnimDB><FragmentList>
+ <Speed_Loop><Fragment Tags="MagicStaff+Fire">
+  <AnimLayer><Blend ExitTime="0" StartTime="0" Duration="0.00077056885"/><Animation name="elm_fire_stf_dash_loop" flags="Loop"/></AnimLayer>
+  <ProcLayer><Blend ExitTime="0"/><Procedural type="CAGE-Named"><ProceduralParams><Name value="BlockDisabled"/></ProceduralParams></Procedural></ProcLayer>
+  <ProcLayer><Blend ExitTime="0"/><Procedural type="CAGE-Named"><ProceduralParams><Name value="Ability_Startup"/></ProceduralParams></Procedural><Blend ExitTime="0.3"/><Procedural type=""/></ProcLayer>
+  <ProcLayer><Blend ExitTime="0.86666667"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Input value=""/><Condition value=""/><NewFragment value=""/><NewAction value="Speed_Stop"/></ProceduralParams></Procedural></ProcLayer>
+ </Fragment></Speed_Loop>
+ <Speed_Stop><Fragment Tags="MagicStaff+Fire">
+  <AnimLayer><Blend ExitTime="0"/><Animation name="elm_fire_stf_dash_end"/><Blend ExitTime="0.5"/><Animation name=""/></AnimLayer>
+ </Fragment></Speed_Stop>
+</FragmentList></AnimDB>"#;
+        const ACTIONS: &str = r#"<ActionList><Actions>
+ <Action Name="Speed_Loop" FragmentName="Speed_Loop"/>
+ <Action Name="Speed_Stop" FragmentName="Speed_Stop"/>
+</Actions></ActionList>"#;
+        const STARTUP_END_MS: u64 = 300;
+        const STOP_START_MS: u64 = 867;
+        let adb = AnimDatabase::parse(ADB).expect("adb");
+        let list = ActionList::parse(ACTIONS).expect("actions");
+        let tags = ["MagicStaff", "Fire"];
+        let looped = adb.best("Speed_Loop", &tags).expect("loop");
+        assert!(ends_in_loop(looped));
+        assert!(
+            !ends_in_loop(adb.best("Speed_Stop", &tags).expect("stop")),
+            "an empty clip ends the layer"
+        );
+        let markers = markers_of(&[looped]);
+        let ends: Vec<(&str, Option<u64>)> = markers
+            .iter()
+            .map(|marker| (marker.name.as_str(), marker.end_ms))
+            .collect();
+        assert_eq!(
+            ends,
+            [("BlockDisabled", None), ("Ability_Startup", Some(STARTUP_END_MS))]
+        );
+        let transitions = transitions_of(&[looped], &list, &[]);
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(
+            transitions[0].to,
+            TransitionTo::Action("Speed_Stop".to_owned())
+        );
+        assert_eq!(
+            (transitions[0].start_ms, transitions[0].end_ms),
+            (STOP_START_MS, None)
+        );
+    }
+
+    /// The musket's Shooter's Stance ready action, cut (`playeractions_ability_musket.actionlist`,
+    /// build 25810808): it sets `Crouch` and `HeavyAim` (one in a branch), unsets `Aim` and
+    /// leaves `Stand` as it is; another action's tags are not its.
+    #[test]
+    fn an_action_sets_the_tags_of_its_set_cases() {
+        const ACTIONS: &str = r#"<ActionList><Actions>
+ <Action Name="Musket_ShootersStance_Ready" FragmentName="Ability_Musket_ShootersStance_Ready">
+  <Activities>
+   <SetMannequinTag><Default TagName="HeavyAim" OnEnter="Set" OnExit="Unset"/></SetMannequinTag>
+   <IfThenElse><IfCondition><IfMannequinTag TagName="Stand"/></IfCondition><ThenActivity><Group>
+    <SetMannequinTag><Default TagName="Crouch" OnEnter="Set" OnExit="NoEffect"/></SetMannequinTag>
+   </Group></ThenActivity></IfThenElse>
+   <SetMannequinTag><Default TagName="Aim" OnEnter="Unset" OnExit="NoEffect"/></SetMannequinTag>
+   <SetMannequinTag><Default TagName="Stand" OnEnter="NoEffect" OnExit="Set"/></SetMannequinTag>
+  </Activities>
+ </Action>
+ <Action Name="Other" FragmentName="Other">
+  <Activities><SetMannequinTag><Default TagName="Prone" OnEnter="Set"/></SetMannequinTag></Activities>
+ </Action>
+</Actions></ActionList>"#;
+        let list = ActionList::parse(ACTIONS).expect("actions");
+        assert_eq!(
+            tags_set_by(&list, "Musket_ShootersStance_Ready"),
+            ["Crouch", "HeavyAim"]
+        );
+        assert!(tags_set_by(&list, "Missing").is_empty());
     }
 
     #[test]

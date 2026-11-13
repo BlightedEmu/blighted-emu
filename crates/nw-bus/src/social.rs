@@ -17,6 +17,10 @@
 //! - A sim asks the service to pay a territory's upkeep from the payer's company treasury
 //!   ([`SocialInput::PayUpkeep`]); the service tells the payer's sim whether it paid
 //!   ([`SocialDeliveries::upkeep_answers`]).
+//! - A sim asks the service to start or cancel a town project of a territory
+//!   ([`SocialInput::StartTownProject`], [`SocialInput::CancelTownProject`]) after it checked the
+//!   planning board, the project and its slot; the service tells the player's sim whether it was
+//!   done ([`SocialDeliveries::project_answers`]).
 //! - The sim that runs a war, an arena match or an Outpost Rush match puts its players into the
 //!   raid of their side or team ([`SocialInput::RaidJoin`], [`SocialInput::RaidLeave`]); the
 //!   service owns the raid as it owns the groups and sends each member its raid entity and the
@@ -114,6 +118,11 @@ pub enum SocialInput {
     /// A player asks to pay the upkeep of a territory claim from its company's treasury; the
     /// sim checked the claim and the cost.
     PayUpkeep(UpkeepPayment),
+    /// A player asks to start a town project, paid from its wallet or its company's treasury;
+    /// the sim checked the board, the project and its slot.
+    StartTownProject(TownProjectStart),
+    /// A player asks to cancel the running town project of a territory.
+    CancelTownProject(TownProjectCancel),
     /// The sim that runs a raid's war or match puts a player into group `group` (from 0) of raid
     /// `raid`; the service makes the raid at its first member.
     RaidJoin {
@@ -183,6 +192,57 @@ pub struct UpkeepAnswer {
     pub territory: u16,
     /// Whether the service took the payment from the treasury; `false` for a refused one.
     pub paid: bool,
+}
+
+/// A town project start a player asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TownProjectStart {
+    /// The player.
+    pub character: Uuid,
+    /// The territory id.
+    pub territory: u16,
+    /// The project's `TerritoryProgressionType`.
+    pub kind: u8,
+    /// The CRC-32 of its lowercase `ProjectId`.
+    pub project: u32,
+    /// The upgrade id it raises.
+    pub upgrade: u8,
+    /// The tier it gives.
+    pub level: u8,
+    /// The points it needs.
+    pub needed: u32,
+    /// Its cost, hundredths of a coin.
+    pub cost: u64,
+    /// The company treasury pays (else the player's wallet).
+    pub from_treasury: bool,
+    /// When the player asked, Unix milliseconds.
+    pub at_ms: u64,
+    /// When the project ends, Unix milliseconds.
+    pub ends_ms: u64,
+}
+
+/// A town project cancel a player asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TownProjectCancel {
+    /// The player.
+    pub character: Uuid,
+    /// The territory id.
+    pub territory: u16,
+    /// The CRC-32 of the project's lowercase `ProjectId`.
+    pub project: u32,
+    /// When the player asked, Unix milliseconds.
+    pub at_ms: u64,
+}
+
+/// The service's answer to a town project start or cancel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TownProjectAnswer {
+    /// The player.
+    pub character: Uuid,
+    /// The territory id.
+    pub territory: u16,
+    /// Whether the start or cancel was done.
+    pub done: bool,
 }
 
 /// A player's answer to the raid invite of activity `activity` ([`SocialInput::RaidInvite`]).
@@ -326,6 +386,9 @@ pub struct SocialDeliveries {
     /// The answers of this sim's players to the raid invites it asked for.
     #[serde(default)]
     pub raid_invite_answers: Vec<RaidInviteAnswer>,
+    /// The service's answers to the town project starts and cancels of this sim's players.
+    #[serde(default)]
+    pub project_answers: Vec<TownProjectAnswer>,
 }
 
 /// Service to sim, request/reply: add `change` coins to a player (a negative change takes them).
@@ -400,6 +463,25 @@ mod tests {
                     territory: 6,
                     cost: 100_000,
                     at_ms: 1_000,
+                }),
+                SocialInput::StartTownProject(TownProjectStart {
+                    character,
+                    territory: 6,
+                    kind: 2,
+                    project: 0xc0ff_ee00,
+                    upgrade: 3,
+                    level: 2,
+                    needed: 1500,
+                    cost: 500_000,
+                    from_treasury: true,
+                    at_ms: 1_000,
+                    ends_ms: 86_401_000,
+                }),
+                SocialInput::CancelTownProject(TownProjectCancel {
+                    character,
+                    territory: 6,
+                    project: 0xc0ff_ee00,
+                    at_ms: 2_000,
                 }),
                 SocialInput::RaidJoin {
                     character,
@@ -479,6 +561,11 @@ mod tests {
                 character,
                 activity: Uuid::from_u128(4),
                 accepted: true,
+            }],
+            project_answers: vec![TownProjectAnswer {
+                character,
+                territory: 6,
+                done: false,
             }],
         };
         assert_eq!(

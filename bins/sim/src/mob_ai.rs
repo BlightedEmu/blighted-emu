@@ -44,8 +44,8 @@ use std::sync::Arc;
 
 use nw_ai::brain::{Brain, Command, Destination, MotionOutcome, Runtime, Slot, World};
 use nw_ai::data::{
-    AiData, Archetype, CageAction, FacingMode, FragmentLength, MobCage, NavConfig, ProcWindow,
-    SliceTriggerRef,
+    AiData, Archetype, CageAction, FacingMode, FragmentLength, FragmentVariant, MobCage,
+    NavConfig, ProcWindow, SliceTriggerRef,
 };
 use nw_ai::keys::EngineKey;
 use nw_ai::node::{
@@ -170,6 +170,27 @@ const BROKEN_GUARD_ACTION: &str = "BrokenGuard";
 /// How long a broken guard's reaction lasts when its fragment's length is Unknown (Inferred:
 /// about a hit reaction's length).
 const BROKEN_GUARD_MS: u64 = 1_000;
+/// The stagger of a mob whose grit took its last stamina (`baseai_stagger.actionlist` and the
+/// other `*_stagger` lists: fragment `r_Stagger`, started by the server).
+const STAGGER_ACTION: &str = "Reaction_Staggered";
+/// The status effect a mob's slice gives it to have the stagger (`m_initialStatusEffects`; the
+/// list: "Add this into your character's initial status effects to enable the Stagger
+/// mechanic on them").
+const ENABLE_STAGGER_EFFECT: &str = "AI_Enable_Stagger";
+/// The markers that keep the stagger from starting (`DisableStagger`: "Fully disables Stagger
+/// during specific fragments"; `DisableStaggerReaction`: grit stays on, the stagger waits for
+/// the next hit after the marker).
+const DISABLE_STAGGER_MARKERS: [&str; 2] = ["DisableStagger", "DisableStaggerReaction"];
+/// The effect the stagger holds while it plays (`ModifyStatusEffects` of `Reaction_Staggered`:
+/// applied on enter, removed on exit; `StaminaRate` -100 holds the regen, and its
+/// `OnEndStatusEffect` `AI_Staggered_StaggerDamageResist` follows).
+const STAGGER_TRACKER_EFFECT: &str = "AI_Staggered_Tracker";
+/// How long before its fragment's end the stagger ends and its `ResetStamina` fills the
+/// stamina: its deactivation `IfFragmentDone ExitOffsetSeconds="0.1"` (Observed: the ledgers'
+/// child 44 was full 5.80 s after the zero state on the dynasty, corruption and sand heavies,
+/// whose `r_Stagger` lasts 6.0 s, and 5.13 s after it on the Motherwell stag, 5.33 s; the other
+/// 0.1 s lie within the state delay, `zero44` 2026-11-13).
+const STAGGER_EXIT_OFFSET_MS: u64 = 100;
 /// Milliseconds per second of a fragment length.
 const MS_PER_SECOND_F32: f32 = 1_000.0;
 /// The procedural clips of a fragment and their parameters (Observed in `npc_boar_anims.adb`).
@@ -307,6 +328,10 @@ struct Names {
     named_clip: Option<NameId>,
     named_clip_name: Option<NameId>,
     broken_guard: Option<NameId>,
+    stagger: Option<NameId>,
+    enable_stagger: Option<NameId>,
+    disable_stagger: [Option<NameId>; 2],
+    stagger_tracker: Option<NameId>,
     damage_clip: Option<NameId>,
     homing_clip: Option<NameId>,
     damage_row: Option<NameId>,
@@ -367,6 +392,10 @@ impl MobAi {
             named_clip: name(NAMED_CLIP),
             named_clip_name: name(NAMED_CLIP_NAME),
             broken_guard: name(BROKEN_GUARD_ACTION),
+            stagger: name(STAGGER_ACTION),
+            enable_stagger: name(ENABLE_STAGGER_EFFECT),
+            disable_stagger: DISABLE_STAGGER_MARKERS.map(name),
+            stagger_tracker: name(STAGGER_TRACKER_EFFECT),
             damage_clip: name(DAMAGE_CLIP),
             homing_clip: name(HOMING_CLIP),
             damage_row: name(DAMAGE_ROW_PARAM),
@@ -672,6 +701,10 @@ pub struct SpawnAi {
     pub route: Option<Arc<Route>>,
     /// Its respawn time.
     pub respawn_ms: Option<u64>,
+    /// The place it guards: the engine key `Guard_Objective_Pos` and the position type
+    /// `GuardObjectivePosition` of its trees (an Outpost Rush summon guards its summoning
+    /// circle, [`crate::world`]'s `outpost_rush_summons`); `None` for a mob with no objective.
+    pub guard_objective: Option<[f32; 3]>,
 }
 
 /// The overrides of each vitals spawn of `world`, in spawn order; `None` keeps the slice's AI.
@@ -747,6 +780,7 @@ pub fn resolve_ai(world: &WorldFile, ai: &MobAi) -> Arc<[Option<SpawnAi>]> {
                     matches!(profile.behaviour, AiBehaviour::Patrol | AiBehaviour::Wander)
                 }),
                 respawn_ms: profile.respawn_ms,
+                guard_objective: None,
             })
         })
         .collect()
@@ -1243,6 +1277,12 @@ pub struct HeldEffects {
     pub categories: Vec<String>,
     /// What they keep the mob from doing.
     pub control: Control,
+    /// The sum of their `StaminaRate`: its guard's regen is `1 +` this times the plain one
+    /// ([`MobGuard::regen_with`]).
+    pub stamina_rate: f32,
+    /// The sum of the `StaggerDamageReduction` of their equip abilities: the share of a hit's
+    /// stagger its grit does not take ([`MobGuard::grit_loss`]).
+    pub stagger_reduction: f32,
 }
 
 /// The other mobs a tree's remote actions reach in one step: the mob's own entity and the
@@ -1355,6 +1395,9 @@ struct MindState {
     engine_runs: Vec<EngineRun>,
     /// The action of the reaction that plays (the grid's `Reaction`, or a broken guard's).
     reaction_action: Option<u32>,
+    /// The stagger that plays, as its replicated animation shows it, and the fragment its
+    /// `ChangeActionFragment` chose by the side of the hit ([`TreeMind::stagger`]).
+    staggered: Option<(Shown, NameId)>,
     /// Its guard, for a mob type that can block.
     guard: Option<GuardState>,
     /// Its block is up (after its last step).
@@ -1366,6 +1409,10 @@ struct MindState {
     /// Its chase distance where the data gives none ([`MobAi::chase_fallback`]): the engine key
     /// `CombatLeashDistance`.
     chase_fallback_m: Option<f32>,
+    /// The place it guards ([`SpawnAi::guard_objective`]).
+    guard_objective: Option<[f32; 3]>,
+    /// The players it never takes as targets ([`TreeMind::spare`]).
+    spared: Vec<u64>,
 }
 
 /// Why a mob's target changed, for the log of its decisions.
@@ -1395,6 +1442,15 @@ struct GuardState {
     stamina: f32,
     /// When its regen last ran.
     regen_ms: Option<u64>,
+}
+
+/// What a hit did to a mob whose grit is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GritHit {
+    /// The stamina took the hit.
+    Held,
+    /// The hit left no stamina: the stagger started.
+    Staggered,
 }
 
 /// What a blocked hit did to a mob's guard.
@@ -1675,7 +1731,13 @@ impl MindState {
         around: &Surroundings<'_>,
     ) -> Perceived {
         let combat = self.vision(ai, true);
-        let seen: &[Seen] = if self.resetting(ai) { &[] } else { around.seen };
+        let open: Vec<Seen> = around
+            .seen
+            .iter()
+            .filter(|player| !self.spared.contains(&player.entity))
+            .copied()
+            .collect();
+        let seen: &[Seen] = if self.resetting(ai) { &[] } else { &open };
         let near = |entity: u64| seen.iter().find(|player| player.entity == entity).copied();
         let had = self.target;
         if self.target.is_some_and(|target| near(target).is_none()) {
@@ -2398,7 +2460,11 @@ impl TreeMind {
                 last_damage: None,
                 reachable_ms: None,
                 reach: None,
-                statuses: Vec::new(),
+                // The slice's `m_initialStatusEffects` (`AI_Enable_Stagger`); the cards do
+                // not show them (Observed: no such effect on the heavies' and Seraphim's cards).
+                statuses: ai
+                    .arch(archetype)
+                    .map_or_else(Vec::new, |arch| arch.initial_effects.clone()),
                 reaction_until_ms: None,
                 route: spawn_ai
                     .and_then(|overrides| overrides.route.clone())
@@ -2424,11 +2490,14 @@ impl TreeMind {
                 status_changes: Vec::new(),
                 engine_runs: Vec::new(),
                 reaction_action: None,
+                staggered: None,
                 guard: None,
                 blocking: false,
                 decision: None,
                 target_reason: None,
                 chase_fallback_m: None,
+                guard_objective: spawn_ai.and_then(|overrides| overrides.guard_objective),
+                spared: Vec::new(),
             },
         })
     }
@@ -2453,6 +2522,12 @@ impl TreeMind {
         self.state.guard.map(|guard| guard.rules)
     }
 
+    /// Its guard stamina now, when it can block: blocked hits lower it, its regen and the end of
+    /// `BlockBroken` raise it.
+    pub fn guard_stamina(&self) -> Option<f32> {
+        self.state.guard.map(|guard| guard.stamina)
+    }
+
     /// Its block is up: a task action it plays raises one (`Block_On`), or an action the engine
     /// runs does (`Block`, while no `DisableBlock` marker of its fragment is on), as of its last
     /// step. A mob without a guard never blocks.
@@ -2460,8 +2535,9 @@ impl TreeMind {
         self.state.blocking
     }
 
-    /// A blocked hit takes `loss` stamina (times the guard's `BlockStaminaCost`) from the mob at
-    /// `at` at `now_ms`; the hit that takes the last breaks its guard: the `BrokenGuard`
+    /// A blocked hit of block stamina `loss` takes its guard share ([`MobGuard::blocked_loss`])
+    /// from the mob at `at` at `now_ms`; the hit that takes the last breaks its guard: the
+    /// `BrokenGuard`
     /// reaction plays and sets `BlockBroken`, whose engine action holds the regen and fills the
     /// stamina at its end. `None` for a mob without a guard.
     pub fn guard_hit(
@@ -2472,12 +2548,160 @@ impl TreeMind {
         loss: f32,
     ) -> Option<GuardHit> {
         let guard = self.state.guard.as_mut()?;
-        guard.stamina = (guard.stamina - loss * guard.rules.stamina_cost).max(0.0);
+        guard.stamina = (guard.stamina - MobGuard::blocked_loss(loss)).max(0.0);
         if guard.stamina > 0.0 {
             return Some(GuardHit::Held);
         }
         self.break_guard(ai, at, now_ms);
         Some(GuardHit::Broken)
+    }
+
+    /// The length of the entry of reaction action `action` the mob plays with its tags now;
+    /// `None` when it loops or is Unknown.
+    fn reaction_length_ms(&self, ai: &MobAi, action: u32) -> Option<u64> {
+        self.entry_length_ms(&ai.data().cage_actions.get(action as usize)?.variants)
+    }
+
+    /// The length of the entry of `variants` the mob plays with its tags now; `None` when it
+    /// loops or is Unknown.
+    fn entry_length_ms(&self, variants: &[FragmentVariant]) -> Option<u64> {
+        let tags = self.brain.tags();
+        let has_tag = |tag: NameId| tags.contains(&tag);
+        CageAction::variant_of(variants, &has_tag)
+            .and_then(|variant| match variant.length {
+                // A reaction of a few seconds.
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "a reaction of a few seconds"
+                )]
+                FragmentLength::Seconds(seconds) => {
+                    Some((seconds * MS_PER_SECOND_F32).round() as u64)
+                }
+                FragmentLength::Loops | FragmentLength::Unknown => None,
+            })
+    }
+
+    /// Its grit is on at `now_ms` while it holds the effects `held`: its slice's grit is its
+    /// stamina (`m_useStaminaAsValue`) and a running engine action's `ActivateGrit` branch
+    /// holds (the stagger lists' `ActivateGrit`: while it holds `AI_Enable_Stagger`, no
+    /// `DisableStagger` marker is on and `r_Stagger` does not play).
+    fn grit_on(&self, ai: &MobAi, now_ms: u64, held: Option<&HeldEffects>) -> bool {
+        if !ai
+            .arch(self.state.archetype)
+            .is_some_and(|arch| arch.grit_uses_stamina)
+        {
+            return false;
+        }
+        let data = ai.data();
+        self.with_cage(ai, now_ms, held, |mob| {
+            self.state
+                .engine_runs
+                .iter()
+                .filter_map(|run| data.cage_actions.get(run.action as usize))
+                .any(|cage| {
+                    cage.grit_on
+                        .as_ref()
+                        .is_some_and(|condition| condition.holds_with(mob))
+                })
+        })
+    }
+
+    /// An unblocked hit of stagger `stagger` from `from` (the attacker's position, when known)
+    /// lands on the mob at `at` at `now_ms` while it holds the effects `held`: with its grit
+    /// on, its stamina loses [`MobGuard::grit_loss`] of it (Observed: 3,427 of 40,765 own
+    /// direct hits of the ledgers lowered a mob's child 44, on the slices that hold
+    /// `AI_Enable_Stagger`), and a hit that leaves none starts its stagger
+    /// ([`Self::stagger`]). `None`: it has no stamina, or its grit is off.
+    pub fn grit_hit(
+        &mut self,
+        ai: &MobAi,
+        (at, from): (Position, Option<Position>),
+        now_ms: u64,
+        stagger: f32,
+        held: Option<&HeldEffects>,
+    ) -> Option<GritHit> {
+        if self.state.guard.is_none() || !self.grit_on(ai, now_ms, held) {
+            return None;
+        }
+        let reduction = held.map_or(0.0, |held| held.stagger_reduction);
+        let side = from.map(|from| self.hit_angle_deg(at, from));
+        let large_status_effects_fx = ai
+            .arch(self.state.archetype)
+            .is_some_and(|arch| arch.large_status_effects_fx);
+        let guard = self.state.guard.as_mut()?;
+        let body = guard.rules.grit_body(large_status_effects_fx);
+        guard.stamina = (guard.stamina - MobGuard::grit_loss(stagger, reduction, body)).max(0.0);
+        if guard.stamina > 0.0 || !self.stagger(ai, at, now_ms, held, side) {
+            return Some(GritHit::Held);
+        }
+        Some(GritHit::Staggered)
+    }
+
+    /// The side a hit from `from` comes from for the mob at `at`, in degrees from its facing
+    /// (-180 to 180), positive to its right (Inferred: the lists name 45 to 135 degrees
+    /// `damaged_right`; the stagger's front and back need only the size).
+    fn hit_angle_deg(&self, at: Position, from: Position) -> f32 {
+        -yaw_gap(self.state.yaw, yaw_toward(at, from)).to_degrees()
+    }
+
+    /// The stagger (`Reaction_Staggered`) of the mob at `at` starts at `now_ms` after a hit
+    /// from `side` degrees of its facing (`None`: Unknown), when its grid has one whose
+    /// fragment length is known and its activation holds: the mob holds `AI_Enable_Stagger`
+    /// (and not `ResetAI`), no `DisableStagger` or `DisableStaggerReaction` marker is on, it is
+    /// not stunned and no stagger plays. The fragment its `ChangeActionFragment` picks by the
+    /// side plays (`r_Stagger_F` from ahead, `r_Stagger_B` from behind, else `r_Stagger`) and
+    /// shows (Observed: retail Blind Seraph cards played `r_Stagger_F`), with its `Stunned`
+    /// tag; the tree's plan stops, it holds `AI_Staggered_Tracker`, and its end
+    /// ([`STAGGER_EXIT_OFFSET_MS`] before the fragment's) fills the stamina. Whether it started.
+    fn stagger(
+        &mut self,
+        ai: &MobAi,
+        at: Position,
+        now_ms: u64,
+        held: Option<&HeldEffects>,
+        side: Option<f32>,
+    ) -> bool {
+        let names = ai.names;
+        let Some(action) = ai.named(self.state.archetype, names.stagger) else {
+            return false;
+        };
+        let Some(cage) = ai.data().cage_actions.get(action as usize) else {
+            return false;
+        };
+        let (fragment, variants) =
+            self.with_cage_hit(ai, now_ms, held, side, |mob| cage.starting_fragment(mob));
+        let Some(length_ms) = self.entry_length_ms(variants) else {
+            return false;
+        };
+        let free = self.with_cage(ai, now_ms, held, |mob| {
+            names.enable_stagger.is_some_and(|effect| (mob.has_effect)(effect))
+                && !names.reset.is_some_and(|effect| (mob.has_effect)(effect))
+                && !names
+                    .disable_stagger
+                    .iter()
+                    .flatten()
+                    .any(|marker| (mob.has_marker)(*marker))
+        });
+        let stunned = held.is_some_and(|held| !held.control.may_fight());
+        if !free || stunned || self.state.reaction_action == Some(action) {
+            return false;
+        }
+        self.state.reaction_until_ms =
+            Some(now_ms + length_ms.saturating_sub(STAGGER_EXIT_OFFSET_MS));
+        self.reaction(ai, at, now_ms, action, true);
+        self.state.serial = self.state.serial.wrapping_add(1);
+        self.state.staggered = Some((
+            Shown {
+                action,
+                started_ms: now_ms,
+                serial: self.state.serial,
+            },
+            fragment,
+        ));
+        self.state.stop_moving();
+        self.state.end_attack();
+        true
     }
 
     /// The guard of the mob at `at` breaks at `now_ms`: its `BrokenGuard` reaction plays.
@@ -2486,20 +2710,8 @@ impl TreeMind {
         let Some(action) = ai.named(self.state.archetype, ai.names.broken_guard) else {
             return;
         };
-        let tags = self.brain.tags().to_vec();
-        let has_tag = |tag: NameId| tags.contains(&tag);
-        let length_ms = ai
-            .data()
-            .cage_actions
-            .get(action as usize)
-            .and_then(|cage| cage.variant(&has_tag))
-            .and_then(|variant| match variant.length {
-                // A reaction of a second or two.
-                FragmentLength::Seconds(seconds) => {
-                    Some((seconds * MS_PER_SECOND_F32).round() as u64)
-                }
-                FragmentLength::Loops | FragmentLength::Unknown => None,
-            })
+        let length_ms = self
+            .reaction_length_ms(ai, action)
             .unwrap_or(BROKEN_GUARD_MS);
         self.state.reaction_until_ms = Some(now_ms + length_ms);
         self.reaction(ai, at, now_ms, action, true);
@@ -2508,12 +2720,24 @@ impl TreeMind {
     }
 
     /// The tags, markers and status effects its CAGE conditions read at `now_ms`, with the
-    /// effects `held` the world holds on it, given to `with`.
+    /// effects `held` the world holds on it, given to `with`; no hit is tested.
     fn with_cage<R>(
         &self,
         ai: &MobAi,
         now_ms: u64,
         held: Option<&HeldEffects>,
+        with: impl FnOnce(&MobCage<'_>) -> R,
+    ) -> R {
+        self.with_cage_hit(ai, now_ms, held, None, with)
+    }
+
+    /// [`Self::with_cage`] testing a hit from `hit_angle_deg` degrees of its facing.
+    fn with_cage_hit<R>(
+        &self,
+        ai: &MobAi,
+        now_ms: u64,
+        held: Option<&HeldEffects>,
+        hit_angle_deg: Option<f32>,
         with: impl FnOnce(&MobCage<'_>) -> R,
     ) -> R {
         let data = ai.data();
@@ -2546,10 +2770,23 @@ impl TreeMind {
                         .any(|held| held.eq_ignore_ascii_case(name))
                 })
         };
+        let playing = [
+            self.state.shown.map(|shown| shown.action),
+            self.state.reaction_action,
+        ];
+        let plays_fragment = |fragment: NameId| {
+            playing
+                .iter()
+                .flatten()
+                .filter_map(|action| data.cage_actions.get(*action as usize))
+                .any(|cage| cage.fragment == fragment)
+        };
         with(&MobCage {
             has_tag: &has_tag,
             has_marker: &has_marker,
             has_effect: &has_effect,
+            plays_fragment: &plays_fragment,
+            hit_angle_deg,
         })
     }
 
@@ -2671,8 +2908,9 @@ impl TreeMind {
         self.guard_step(ai, now_ms, held);
     }
 
-    /// The guard's regen at `now_ms` (none while a running engine action holds it) and the
-    /// block state.
+    /// The guard's regen at `now_ms` (none while a running engine action holds it; faster by
+    /// the `StaminaRate` of the status effects `held`, [`MobGuard::regen_with`]) and the block
+    /// state.
     fn guard_step(&mut self, ai: &MobAi, now_ms: u64, held: Option<&HeldEffects>) {
         if self.state.guard.is_none() {
             return;
@@ -2708,7 +2946,8 @@ impl TreeMind {
                 // A step of a second or less.
                 #[allow(clippy::cast_precision_loss, reason = "a step of a second or less")]
                 let seconds = now_ms.saturating_sub(from) as f32 / MS_PER_SECOND_F32;
-                guard.stamina = (guard.stamina + guard.rules.regen_per_s * seconds)
+                let rate = held.map_or(0.0, |held| held.stamina_rate);
+                guard.stamina = (guard.stamina + guard.rules.regen_with(rate) * seconds)
                     .min(guard.rules.stamina_max);
             }
         }
@@ -2735,9 +2974,17 @@ impl TreeMind {
         self.state.target
     }
 
-    /// The action it plays.
-    pub const fn shown(&self) -> Option<Shown> {
-        self.state.shown
+    /// The action it plays: its stagger while one plays, else its tree's action.
+    pub fn shown(&self) -> Option<Shown> {
+        self.state
+            .staggered
+            .map(|(shown, _)| shown)
+            .or(self.state.shown)
+    }
+
+    /// The fragment its stagger plays, while one plays ([`Self::stagger`]).
+    pub fn stagger_fragment(&self) -> Option<NameId> {
+        self.state.staggered.map(|(_, fragment)| fragment)
     }
 
     /// The task of the route point it is at, when the point has one.
@@ -2820,6 +3067,35 @@ impl TreeMind {
         true
     }
 
+    /// The mob never takes the players `players` as targets, and drops its target and their
+    /// threat when they are among them (an Outpost Rush summon spares its own team; Inferred
+    /// from the summons' cards, which carry the summoning team's temporary affiliations).
+    pub fn spare(&mut self, players: Vec<u64>) {
+        for player in &players {
+            self.forget(*player);
+        }
+        self.state.spared = players;
+    }
+
+    /// Whether it spares player `player` ([`Self::spare`]): the player's hits on it are
+    /// refused (Inferred: the summon's card carries the temporary affiliations of the player's
+    /// team, which make it a friend of that team; no capture shows a hit on an own summon).
+    pub fn spares(&self, player: u64) -> bool {
+        self.state.spared.contains(&player)
+    }
+
+    /// The players it spares ([`Self::spare`]).
+    #[cfg(test)]
+    pub fn spared(&self) -> &[u64] {
+        &self.state.spared
+    }
+
+    /// The place it guards ([`SpawnAi::guard_objective`]).
+    #[cfg(test)]
+    pub const fn guard_objective(&self) -> Option<[f32; 3]> {
+        self.state.guard_objective
+    }
+
     /// The mob takes `target` as its target when it has none (group aggro).
     pub fn share_target(&mut self, target: u64) {
         if self.state.target.is_none() {
@@ -2855,6 +3131,18 @@ impl TreeMind {
     fn reaction(&mut self, ai: &MobAi, at: Position, now_ms: u64, action: u32, playing: bool) {
         self.state.next_tick_ms = 0;
         self.state.reaction_action = playing.then_some(action);
+        if Some(action) == ai.named(self.state.archetype, ai.names.stagger) {
+            if !playing {
+                self.state.staggered = None;
+            }
+            // `ModifyStatusEffects`: the tracker on enter, off on exit; `ResetStamina` on exit.
+            if let Some(tracker) = ai.names.stagger_tracker {
+                self.state.status_changes.push((tracker, playing));
+            }
+            if let Some(guard) = self.state.guard.as_mut().filter(|_| !playing) {
+                guard.stamina = guard.rules.stamina_max;
+            }
+        }
         let passive = self.passive(ai);
         let mut out = Vec::new();
         {
@@ -3749,6 +4037,7 @@ impl World for View<'_> {
                 Value::Int(tier.round() as i64)
             }
             EngineKey::AiOrder => Value::Int(i64::from(state.order?)),
+            EngineKey::GuardObjectivePos => Value::Vec3(state.guard_objective?),
             // The engine's leash: the fallback of a mob whose data gives none; else the slice
             // config and the trees' literals hold it.
             EngineKey::CombatLeashDistance => Value::Float(state.chase_fallback_m?),
@@ -3786,12 +4075,12 @@ impl World for View<'_> {
             PositionType::SpawnPosition => state.spawn,
             PositionType::LastDamagePosition => state.last_damage?,
             PositionType::WaypointPosition => state.route.as_ref()?.point()?,
-            // Group, objective, nav link and above-start positions: the sim has no such data
-            // (a selected position is a tree fact, read through the blackboard).
+            PositionType::GuardObjectivePosition => return state.guard_objective,
+            // Group, attack objective, nav link and above-start positions: the sim has no such
+            // data (a selected position is a tree fact, read through the blackboard).
             PositionType::SelectedPosition
             | PositionType::GroupCenter
             | PositionType::AttackObjectivePosition
-            | PositionType::GuardObjectivePosition
             | PositionType::AboveStartPosition
             | PositionType::NavLinkEndPosition => return None,
         };
@@ -4328,6 +4617,8 @@ pub mod test_support {
             blocks: Vec::new(),
             regen_off: None,
             stamina_reset: None,
+            grit_on: None,
+            fragment_cases: Vec::new(),
         };
         let tag = |tag: u32, on_enter, on_exit, delay_s| TagActivity {
             condition: CageCondition::True,
@@ -4382,13 +4673,107 @@ pub mod test_support {
         data.grids[0].actions.sort_unstable();
     }
 
+    /// How long the test `r_Stagger` plays.
+    pub const TEST_STAGGER_S: f32 = 6.0;
+
+    /// The test AI data whose slice has the stagger of the retail `baseai_stagger.actionlist`,
+    /// trimmed: its grit is its stamina and it spawns with `AI_Enable_Stagger`; the engine runs
+    /// `ActivateGrit` (grit on while it holds the effect and `r_Stagger` does not play), and
+    /// `Reaction_Staggered` plays `r_Stagger` with the `Stunned` tag.
+    pub fn test_stagger_ai_data() -> AiData {
+        let mut data = test_ai_data();
+        let mut name = |text: &str| {
+            data.names.push(text.to_owned());
+            u32::try_from(data.names.len() - 1).expect("name id")
+        };
+        let (grit, stagger, fragment, enable, stunned) = (
+            name("ActivateGrit"),
+            name(super::STAGGER_ACTION),
+            name("r_Stagger"),
+            name(super::ENABLE_STAGGER_EFFECT),
+            name("Stunned"),
+        );
+        name(super::STAGGER_TRACKER_EFFECT);
+        let list = name("baseai_stagger.actionlist");
+        let playing = CageCondition::FragmentPlaying(fragment);
+        let plain = |name: u32, fragment: u32, length: FragmentLength| CageAction {
+            list,
+            action: name,
+            fragment,
+            completion: None,
+            tags: Vec::new(),
+            triggers: Vec::new(),
+            motion_multiplier: None,
+            facing: None,
+            variants: vec![FragmentVariant {
+                tags: Vec::new(),
+                frag_tags: Vec::new(),
+                length,
+                windows: Vec::new(),
+            }],
+            weapon_variants: Vec::new(),
+            activation: None,
+            deactivation: None,
+            blocks: Vec::new(),
+            regen_off: None,
+            stamina_reset: None,
+            grit_on: None,
+            fragment_cases: Vec::new(),
+        };
+        let actions = [
+            (
+                grit,
+                CageAction {
+                    activation: Some(CageCondition::All(vec![
+                        CageCondition::StatusEffect(enable),
+                        CageCondition::Not(Box::new(playing.clone())),
+                    ])),
+                    deactivation: Some(playing),
+                    grit_on: Some(CageCondition::True),
+                    variants: Vec::new(),
+                    ..plain(grit, grit, FragmentLength::Unknown)
+                },
+            ),
+            (
+                stagger,
+                CageAction {
+                    tags: vec![TagActivity {
+                        condition: CageCondition::True,
+                        tag: stunned,
+                        on_enter: TagEffect::Set,
+                        on_exit: TagEffect::Clear,
+                        delay_s: 0.0,
+                    }],
+                    ..plain(stagger, fragment, FragmentLength::Seconds(TEST_STAGGER_S))
+                },
+            ),
+        ];
+        for (name, cage) in actions {
+            let index = u32::try_from(data.cage_actions.len()).expect("action index");
+            data.cage_actions.push(cage);
+            data.grids[0].actions.push((name, index));
+        }
+        data.grids[0].actions.sort_unstable();
+        for arch in &mut data.archetypes {
+            arch.grit_uses_stamina = true;
+            arch.initial_effects = vec![enable];
+        }
+        data
+    }
+
     /// The test AI with the retail tick rates; the mobs of `vitals_ids` show the test slice.
     pub fn test_ai(vitals_ids: &[&str]) -> MobAi {
+        test_ai_with(test_ai_data(), vitals_ids)
+    }
+
+    /// The AI of `data` with the retail tick rates; the mobs of `vitals_ids` show the test
+    /// slice.
+    pub fn test_ai_with(data: AiData, vitals_ids: &[&str]) -> MobAi {
         let looks: LookAssets = vitals_ids
             .iter()
             .map(|id| (lowercase_crc32(id), TEST_ASSET))
             .collect();
-        MobAi::new(test_ai_data(), AiRates::default(), looks)
+        MobAi::new(data, AiRates::default(), looks)
     }
 }
 
@@ -4397,6 +4782,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use nw_ai::data::ProcWindow;
+    use nw_content::combat::{GritBody, LARGE_BODY_GRIT_SHARE};
     use nw_sim_core::test_support::FlatGround;
     use nw_world::records::SpawnAi as DesignSpawn;
 
@@ -5281,6 +5667,7 @@ mod tests {
                 stunned: true,
                 ..Control::default()
             },
+            ..HeldEffects::default()
         };
         {
             let mut view = mind.state.view(&ai, START, 0, false);
@@ -5303,16 +5690,17 @@ mod tests {
     /// takes the last breaks the guard: `BlockBroken` takes the block down for 8 s, holds the
     /// regen, then fills the stamina, and the block rises again (retail `damned_block`).
     /// The guard of nearly every blocking mob type (`StaminaBaseMax` 50, `StaminaBaseTickRate`
-    /// 2 per `StaminaTickDelay` 1, `BlockStaminaCost` 0.8: 130 of the 180 vitals rows of the
-    /// mobs that blocked in the retail ledgers, the damned pistoleer's too), with its regen of
-    /// [`MobGuard::of`].
+    /// 2 per `StaminaTickDelay` 1: 130 of the 180 vitals rows of the mobs that blocked in the
+    /// retail ledgers, the damned pistoleer's too), with its regen of [`MobGuard::of`].
     const GUARD: MobGuard = MobGuard {
         stamina_max: 50.0,
         stamina_initial: 50.0,
+        row_stamina_max: 50.0,
+        row_stamina_initial: 50.0,
         tick_rate: 2.0,
-        regen_per_s: 3.0,
+        regen_per_s: 2.0,
         mitigation: 1.0,
-        stamina_cost: 0.8,
+        beast: false,
     };
 
     #[test]
@@ -5338,9 +5726,24 @@ mod tests {
         mind.set_guard(GUARD);
         mind.step(&ai, &mut at, &around(0));
         assert!(mind.blocking(), "its block rises");
+        assert_eq!(
+            mind.guard_stamina(),
+            Some(GUARD.stamina_max),
+            "a fresh guard is full"
+        );
         assert_eq!(mind.guard_hit(&ai, at, 0, 20.0), Some(GuardHit::Held));
+        assert_eq!(
+            mind.guard_stamina(),
+            Some(GUARD.stamina_max - MobGuard::blocked_loss(20.0)),
+            "a blocked hit lowers it"
+        );
         assert_eq!(mind.guard_hit(&ai, at, 0, 50.0), Some(GuardHit::Broken));
         assert!(!mind.blocking());
+        assert_eq!(
+            mind.guard_stamina(),
+            Some(0.0),
+            "a broken guard shows empty"
+        );
         let broken_ms = (TEST_BLOCK_BROKEN_S * 1000.0) as u64;
         let mut rose_ms = None;
         for now_ms in (STEP_MS..broken_ms * 2).step_by(STEP_MS as usize) {
@@ -5350,16 +5753,305 @@ mod tests {
             }
         }
         let rose_ms = rose_ms.expect("the block rises again");
+        assert_eq!(
+            mind.guard_stamina(),
+            Some(GUARD.stamina_max),
+            "the end of BlockBroken fills it"
+        );
         assert!(
             rose_ms >= broken_ms
                 && rose_ms <= broken_ms + (TEST_BROKEN_GUARD_S * 1000.0) as u64 + 2_000,
             "after BlockBroken: {rose_ms}"
         );
         assert_eq!(
-            mind.guard_hit(&ai, at, broken_ms * 2, 50.0 / 0.8 - 1.0),
+            mind.guard_hit(
+                &ai,
+                at,
+                broken_ms * 2,
+                GUARD.stamina_max / nw_content::combat::MOB_GUARD_STAMINA_SHARE - 1.0
+            ),
             Some(GuardHit::Held),
             "the stamina is full again"
         );
+    }
+
+    /// A heavy mob (its slice's grit is its stamina, `AI_Enable_Stagger` from its spawn) loses
+    /// stamina to unblocked hits while its grit is on, less under a stagger resist; the hit that
+    /// leaves none staggers it: `r_Stagger` plays with the tracker on, its grit is off and the
+    /// stamina stays empty, and the stagger's end fills the stamina, takes the tracker off and
+    /// turns the grit on again. A mob without the stagger loses none.
+    #[test]
+    fn a_heavy_mobs_grit_takes_unblocked_hits_from_its_stamina_and_staggers_it_at_none() {
+        use super::test_support::{TEST_STAGGER_S, test_ai_with, test_stagger_ai_data};
+        /// `Bear_Grizzly_Named_00`: 1,000 stamina, `BlockDamageMitigation` 0, a `Beast`.
+        const BEAR: MobGuard = MobGuard {
+            stamina_max: 1_000.0,
+            stamina_initial: 1_000.0,
+            row_stamina_max: 1_000.0,
+            row_stamina_initial: 1_000.0,
+            tick_rate: 0.0,
+            regen_per_s: 0.0,
+            mitigation: 0.0,
+            beast: true,
+        };
+        const BEAR_BODY: GritBody = GritBody::Large;
+        /// A great sword heavy: 60 x 1.85.
+        const HEAVY_STAGGER: f32 = 111.0;
+        const RESIST: f32 = 0.5;
+        const MOST_HITS: u64 = 20;
+        let ai = test_ai_with(test_stagger_ai_data(), &[]);
+        let tracker = ai.data().name_id(super::STAGGER_TRACKER_EFFECT);
+        let ground = FlatGround(GROUND_Z);
+        let around = |now_ms| Surroundings {
+            now_ms,
+            seen: &[],
+            ground: &ground,
+            health_share: 1.0,
+            entity: 1,
+            tagged: &[],
+            held: None,
+        };
+        let trackers = |mind: &mut TreeMind| -> Vec<bool> {
+            mind.take_status_changes()
+                .into_iter()
+                .filter(|(effect, _)| Some(*effect) == tracker)
+                .map(|(_, on)| on)
+                .collect()
+        };
+        let mut at = START;
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        mind.set_guard(BEAR);
+        assert_eq!(
+            mind.grit_hit(&ai, (at, None), 0, HEAVY_STAGGER, None),
+            None,
+            "before its first step its grit is off"
+        );
+        mind.step(&ai, &mut at, &around(0));
+        assert_eq!(
+            mind.grit_hit(&ai, (at, None), 0, HEAVY_STAGGER, None),
+            Some(GritHit::Held)
+        );
+        let after_one = BEAR.stamina_max - MobGuard::grit_loss(HEAVY_STAGGER, 0.0, BEAR_BODY);
+        assert_eq!(mind.guard_stamina(), Some(after_one));
+        let resisting = HeldEffects {
+            stagger_reduction: RESIST,
+            ..HeldEffects::default()
+        };
+        mind.grit_hit(&ai, (at, None), 0, HEAVY_STAGGER, Some(&resisting));
+        assert_eq!(
+            mind.guard_stamina(),
+            Some(after_one - MobGuard::grit_loss(HEAVY_STAGGER, RESIST, BEAR_BODY)),
+            "the stagger resist takes half off"
+        );
+        let staggered_ms = (1..=MOST_HITS)
+            .find(|now_ms| {
+                mind.grit_hit(&ai, (at, None), *now_ms, HEAVY_STAGGER, None) == Some(GritHit::Staggered)
+            })
+            .expect("the hits stagger it");
+        assert_eq!(mind.guard_stamina(), Some(0.0));
+        assert_eq!(trackers(&mut mind), [true], "the tracker holds its regen");
+        mind.step(&ai, &mut at, &around(staggered_ms + 1));
+        assert_eq!(
+            mind.grit_hit(&ai, (at, None), staggered_ms + 1, HEAVY_STAGGER, None),
+            None,
+            "r_Stagger plays: its grit is off"
+        );
+        let end_ms =
+            staggered_ms + (TEST_STAGGER_S * 1_000.0) as u64 - super::STAGGER_EXIT_OFFSET_MS;
+        mind.step(&ai, &mut at, &around(end_ms - 1));
+        assert_eq!(mind.guard_stamina(), Some(0.0), "empty while it plays");
+        mind.step(&ai, &mut at, &around(end_ms));
+        assert_eq!(
+            mind.guard_stamina(),
+            Some(BEAR.stamina_max),
+            "its end fills it"
+        );
+        assert_eq!(trackers(&mut mind), [false]);
+        assert_eq!(
+            mind.grit_hit(&ai, (at, None), end_ms, HEAVY_STAGGER, None),
+            Some(GritHit::Held),
+            "its grit is on again"
+        );
+        let plain_ai = test_ai(&[]);
+        let mut plain = TreeMind::new(&plain_ai, 0, START, 0.0, 1, None).expect("a tree");
+        plain.set_guard(BEAR);
+        plain.step(&plain_ai, &mut at, &around(0));
+        assert_eq!(plain.grit_hit(&plain_ai, (at, None), 0, HEAVY_STAGGER, None), None);
+        assert_eq!(plain.guard_stamina(), Some(BEAR.stamina_max));
+    }
+
+    /// A hit takes 0.75 of the grit share from a large body: a mob whose slice holds the large
+    /// status effect FX list (an ogre, a brute) or whose vitals row is a `Beast` (the Motherwell
+    /// stag), and all of it from the others (a dynasty heavy, a Seraph boss).
+    #[test]
+    fn a_large_bodys_grit_takes_three_quarters_of_the_share_from_a_hit() {
+        use super::test_support::{test_ai_with, test_stagger_ai_data};
+        /// A great sword heavy: 60 x 1.85.
+        const HEAVY_STAGGER: f32 = 111.0;
+        /// `Dynasty_Heavy`: 500 stamina, its block stops all.
+        const HEAVY: MobGuard = MobGuard {
+            stamina_max: 500.0,
+            stamina_initial: 500.0,
+            row_stamina_max: 500.0,
+            row_stamina_initial: 500.0,
+            tick_rate: 0.0,
+            regen_per_s: 0.0,
+            mitigation: 1.0,
+            beast: false,
+        };
+        const STAG: MobGuard = MobGuard {
+            beast: true,
+            ..HEAVY
+        };
+        let ground = FlatGround(GROUND_Z);
+        let around = Surroundings {
+            now_ms: 0,
+            seen: &[],
+            ground: &ground,
+            health_share: 1.0,
+            entity: 1,
+            tagged: &[],
+            held: None,
+        };
+        let first_loss = |large_status_effects_fx: bool, guard: MobGuard| {
+            let mut data = test_stagger_ai_data();
+            for arch in &mut data.archetypes {
+                arch.large_status_effects_fx = large_status_effects_fx;
+            }
+            let ai = test_ai_with(data, &[]);
+            let mut at = START;
+            let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+            mind.set_guard(guard);
+            mind.step(&ai, &mut at, &around);
+            assert_eq!(
+                mind.grit_hit(&ai, (at, None), 0, HEAVY_STAGGER, None),
+                Some(GritHit::Held)
+            );
+            guard.stamina_max - mind.guard_stamina().expect("a stamina")
+        };
+        let full = MobGuard::grit_loss(HEAVY_STAGGER, 0.0, GritBody::Standard);
+        let large = full * LARGE_BODY_GRIT_SHARE;
+        assert!(
+            (first_loss(false, HEAVY) - full).abs() < 1e-3,
+            "a humanoid heavy"
+        );
+        assert!(
+            (first_loss(true, HEAVY) - large).abs() < 1e-3,
+            "the large FX list"
+        );
+        assert!((first_loss(false, STAG) - large).abs() < 1e-3, "a beast");
+        assert!((first_loss(true, STAG) - large).abs() < 1e-3, "both: once");
+    }
+
+    /// A staggered mob plays the stagger its `ChangeActionFragment` picks by the side it was
+    /// hit from (`r_Stagger_F` ahead, `r_Stagger_B` behind), shows it while it plays, and the
+    /// picked fragment's length ends it; a hit from an Unknown side plays its own `r_Stagger`.
+    #[test]
+    fn a_staggered_mob_plays_the_front_or_back_stagger_of_the_side_it_was_hit_from() {
+        use nw_ai::data::{CageCondition, FragmentCase};
+
+        use super::test_support::{TEST_STAGGER_S, test_ai_with, test_stagger_ai_data};
+        const FRONT_S: f32 = 5.0;
+        const BACK_S: f32 = 4.0;
+        /// A great sword heavy: 60 x 1.85.
+        const HEAVY_STAGGER: f32 = 111.0;
+        const MOST_HITS: u64 = 20;
+        const AWAY_M: f32 = 5.0;
+        const GUARD: MobGuard = MobGuard {
+            stamina_max: 250.0,
+            stamina_initial: 250.0,
+            row_stamina_max: 250.0,
+            row_stamina_initial: 250.0,
+            tick_rate: 0.0,
+            regen_per_s: 0.0,
+            mitigation: 0.0,
+            beast: false,
+        };
+        let mut data = test_stagger_ai_data();
+        let mut name = |text: &str| {
+            data.names.push(text.to_owned());
+            u32::try_from(data.names.len() - 1).expect("name id")
+        };
+        let (front, back) = (name("r_Stagger_F"), name("r_Stagger_B"));
+        let entry = |seconds| {
+            vec![FragmentVariant {
+                tags: Vec::new(),
+                frag_tags: Vec::new(),
+                length: FragmentLength::Seconds(seconds),
+                windows: Vec::new(),
+            }]
+        };
+        let side = |min_deg, max_deg| CageCondition::DamagedByAngle { min_deg, max_deg };
+        let stagger_name = data.name_id(super::STAGGER_ACTION).expect("stagger name");
+        let own_fragment = {
+            let stagger = data
+                .cage_actions
+                .iter_mut()
+                .find(|cage| cage.action == stagger_name)
+                .expect("stagger action");
+            stagger.fragment_cases = vec![
+                FragmentCase {
+                    condition: CageCondition::Any(vec![side(0, 90), side(-90, 0)]),
+                    fragment: front,
+                    variants: entry(FRONT_S),
+                },
+                FragmentCase {
+                    condition: CageCondition::Any(vec![side(90, 180), side(-180, -90)]),
+                    fragment: back,
+                    variants: entry(BACK_S),
+                },
+            ];
+            stagger.fragment
+        };
+        let ai = test_ai_with(data, &[]);
+        let ground = FlatGround(GROUND_Z);
+        let around = |now_ms| Surroundings {
+            now_ms,
+            seen: &[],
+            ground: &ground,
+            health_share: 1.0,
+            entity: 1,
+            tagged: &[],
+            held: None,
+        };
+        // The mob faces yaw 0 (+y): ahead is +y, behind -y.
+        let staggered_by = |from: Option<Position>, seconds: f32| {
+            let mut at = START;
+            let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+            mind.set_guard(GUARD);
+            mind.step(&ai, &mut at, &around(0));
+            let staggered_ms = (1..=MOST_HITS)
+                .find(|now_ms| {
+                    mind.grit_hit(&ai, (at, from), *now_ms, HEAVY_STAGGER, None)
+                        == Some(GritHit::Staggered)
+                })
+                .expect("the hits stagger it");
+            let fragment = mind.stagger_fragment();
+            assert_eq!(
+                mind.shown().map(|shown| shown.action),
+                ai.named(0, ai.names.stagger),
+                "the stagger shows"
+            );
+            let end_ms = staggered_ms + (seconds * 1_000.0) as u64 - super::STAGGER_EXIT_OFFSET_MS;
+            mind.step(&ai, &mut at, &around(end_ms - 1));
+            let empty_before = mind.guard_stamina() == Some(0.0);
+            mind.step(&ai, &mut at, &around(end_ms));
+            let full_at_end = mind.guard_stamina() == Some(GUARD.stamina_max);
+            assert!(empty_before && full_at_end, "its fragment's length ends it");
+            assert_eq!(mind.stagger_fragment(), None, "it shows no more");
+            fragment
+        };
+        let ahead = Position {
+            y: START.y + AWAY_M,
+            ..START
+        };
+        let behind = Position {
+            y: START.y - AWAY_M,
+            ..START
+        };
+        assert_eq!(staggered_by(Some(ahead), FRONT_S), Some(front));
+        assert_eq!(staggered_by(Some(behind), BACK_S), Some(back));
+        assert_eq!(staggered_by(None, TEST_STAGGER_S), Some(own_fragment));
     }
 
     /// One retail guard sequence: the attacker's weapon, its blocked hits (seconds after the
@@ -5389,15 +6081,15 @@ mod tests {
             ],
             Some(6),
         ),
-        // Playthrough_Part_04 interest 62, a sword (36): four lights (0.33), then the charged
-        // attack (2.4) at 104.76 s.
+        // Playthrough_Part_04 interest 62, a sword (36): four lights (`1H_Sword_Attack1` of the
+        // player damage table, 0.4), then the charged attack (2.4) at 104.76 s.
         (
             "sword",
             &[
-                (0.0, 36.0 * 0.33),
-                (3.86, 36.0 * 0.33),
-                (4.29, 36.0 * 0.33),
-                (4.76, 36.0 * 0.33),
+                (0.0, 36.0 * 0.4),
+                (3.86, 36.0 * 0.4),
+                (4.29, 36.0 * 0.4),
+                (4.76, 36.0 * 0.4),
                 (7.15, 36.0 * 2.4),
             ],
             Some(4),
@@ -5442,12 +6134,11 @@ mod tests {
         ),
     ];
 
-    /// A blocked hit takes the attacker's weapon `BlockStaminaDamage` x the row's
-    /// `BlockStaminaDmgMod` x the guard's `BlockStaminaCost`, and the guard regains its stamina
-    /// at its regen between them: the retail sequences break where retail broke (Observed: this
-    /// rule put 71 of the 81 fresh-guard sequences of the 45 ledgers with breaks right, light,
-    /// charged and ability hits; the weapon's `BlockStaminaDamage` x any factor without the row
-    /// put at most 38 right).
+    /// A blocked hit takes [`nw_content::combat::MOB_GUARD_STAMINA_SHARE`] of the attacker's
+    /// weapon `BlockStaminaDamage` x the row's `BlockStaminaDmgMod`, and the guard regains its
+    /// stamina at 2 per second between them: the six retail sequences break where retail broke,
+    /// the hatchet run at its seventh light (Observed: the guard's ALC child 44 of each run gives
+    /// the same loss and regen, [`MobGuard::regen_per_s`]).
     #[test]
     fn the_retail_blocked_hits_break_the_guard_where_retail_broke() {
         const STEP_MS: u64 = 50;
@@ -5482,6 +6173,57 @@ mod tests {
                 }
             }
             assert_eq!(broken, broken_at, "the {weapon}'s sequence");
+        }
+    }
+
+    /// A guard regains its stamina at its plain regen (2 per second for 2 per 1 s and for the
+    /// `Inquisitor_Warden` 2 per 0 s, a `Dungeon` guard of 200 too) and `1 +` the held
+    /// `StaminaRate` times it while the world holds status effects on the mob
+    /// (`AI_EvilKnight_Rally` 5: 12 per second, a segment of 5 points in 0.417 s).
+    #[test]
+    fn a_guard_regains_its_stamina_at_its_plain_or_held_rate() {
+        const STEP_MS: u64 = 100;
+        const STEPS: u64 = 10;
+        const SPENT: f32 = 40.0;
+        const RALLY_RATE: f32 = 5.0;
+        const DUNGEON_STAMINA_MOD: f64 = 4.0;
+        let ai = test_ai(&[]);
+        let ground = FlatGround(GROUND_Z);
+        let rally = HeldEffects {
+            stamina_rate: RALLY_RATE,
+            ..HeldEffects::default()
+        };
+        let warden = MobGuard::of((75, 75, 2, 0), 1).expect("a guard");
+        let dungeon = GUARD.in_category(DUNGEON_STAMINA_MOD);
+        for (guard, held, per_s) in [
+            (GUARD, None, 2.0),
+            (warden, None, 2.0),
+            (dungeon, None, 2.0),
+            (GUARD, Some(&rally), 12.0),
+        ] {
+            let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+            mind.set_guard(guard);
+            let mut at = START;
+            let around = |now_ms| Surroundings {
+                now_ms,
+                seen: &[],
+                ground: &ground,
+                health_share: 1.0,
+                entity: 1,
+                tagged: &[],
+                held,
+            };
+            mind.step(&ai, &mut at, &around(0));
+            assert_eq!(mind.guard_hit(&ai, at, 0, SPENT), Some(GuardHit::Held));
+            let after_hit = mind.guard_stamina().expect("a guard");
+            for step in 1..=STEPS {
+                mind.step(&ai, &mut at, &around(step * STEP_MS));
+            }
+            let regained = mind.guard_stamina().expect("a guard") - after_hit;
+            assert!(
+                (regained - per_s).abs() < 1e-3,
+                "{guard:?} {held:?}: {regained} in 1 s"
+            );
         }
     }
 
@@ -5667,6 +6409,61 @@ mod tests {
             "it takes the player behind the wall"
         );
         assert_eq!(mind.state.reachable_ms, Some(LATE_MS));
+    }
+
+    /// An Outpost Rush summon never takes a player of its own team, and drops one it held.
+    #[test]
+    fn a_spared_player_is_never_its_target() {
+        const NOW_MS: u64 = 1_000;
+        const OWN: u64 = 7;
+        const FOE: u64 = 8;
+        let ai = test_ai(&[]);
+        let own = [Seen {
+            entity: OWN,
+            position: east(5.0),
+        }];
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let mut at = START;
+        mind.step(&ai, &mut at, &alone_with(NOW_MS, &own, &Wall));
+        assert_eq!(mind.target(), Some(OWN));
+        mind.spare(vec![OWN]);
+        assert_eq!(mind.target(), None, "the held target is dropped");
+        assert!(mind.spares(OWN), "its team's hits on it are refused");
+        assert!(!mind.spares(FOE), "a foe's hits land");
+        mind.step(&ai, &mut at, &alone_with(2 * NOW_MS, &own, &Wall));
+        assert_eq!(mind.target(), None, "a spared player is never taken");
+        let both = [
+            own[0],
+            Seen {
+                entity: FOE,
+                position: east(6.0),
+            },
+        ];
+        mind.step(&ai, &mut at, &alone_with(3 * NOW_MS, &both, &Wall));
+        assert_eq!(mind.target(), Some(FOE));
+    }
+
+    /// The guard objective of the spawn's overrides is the engine's `Guard_Objective_Pos` and
+    /// the trees' `GuardObjectivePosition`.
+    #[test]
+    fn a_guard_objective_is_its_engine_key_and_position() {
+        const GUARD: [f32; 3] = [3.0, 4.0, 5.0];
+        let ai = test_ai(&[]);
+        let overrides = SpawnAi {
+            guard_objective: Some(GUARD),
+            ..SpawnAi::default()
+        };
+        let guarding = TreeMind::new(&ai, 0, START, 0.0, 1, Some(&overrides)).expect("a tree");
+        let view = guarding.state.view(&ai, START, 0, false);
+        assert_eq!(
+            view.engine_value(EngineKey::GuardObjectivePos),
+            Some(Value::Vec3(GUARD))
+        );
+        assert_eq!(view.position(PositionType::GuardObjectivePosition), Some(GUARD));
+        let plain = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let view = plain.state.view(&ai, START, 0, false);
+        assert_eq!(view.engine_value(EngineKey::GuardObjectivePos), None);
+        assert_eq!(view.position(PositionType::GuardObjectivePosition), None);
     }
 
     /// A damage clip written twice in one entry is one hit (retail damned bear

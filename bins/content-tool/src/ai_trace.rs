@@ -1063,6 +1063,7 @@ mod tests {
             facing: place.map(|_| YAW),
             scope,
             awake: false,
+            stamina_segments: None,
         };
         BundleMember {
             component,

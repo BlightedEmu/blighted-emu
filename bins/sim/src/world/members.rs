@@ -22,12 +22,15 @@ use nw_messages::{
     DYNAMIC_SLICE_SUB_ID, DamageReceiverState, EffectMap, GATHERABLE_CONTROLLER_TYPE_INDEX,
     GDE_METADATA_COMPONENT, GatherableControllerState, GdeMetadataReplicatedState, InputPosition,
     LOCAL_PLAYER_INTEREST, LookDir, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState,
-    MessageError, PLAYER_SLICE_ASSET, POS3_LEN, PlayerStates, RemoteEffect, ReplicatedStateBundle,
-    SPAWN_MOVEMENT, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, STATUS_EFFECTS_TYPE_INDEX,
-    ServerMessage, StatusEffectsState, StepPlace, TeleportStep, VitalsData, VitalsState,
-    boss_phase_change, change_members, offset_from, player_members, raw_id_of_entity,
-    remote_player_members,
+    MessageError, MobStep, PLAYER_SLICE_ASSET, POS3_LEN, PlayerStates, RemoteEffect,
+    ReplicatedStateBundle, SPAWN_MOVEMENT, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT,
+    STATUS_EFFECTS_TYPE_INDEX, ServerMessage, StatusEffectsState, StepPlace, TeleportStep,
+    VitalsData, VitalsState, boss_phase_change, change_members, offset_from, player_members,
+    raw_id_of_entity, remote_player_members,
 };
+use nw_messages::items::FullList;
+use nw_messages::list_delta::ReplicatedList;
+use nw_messages::temporary_affiliation::Affiliation;
 use nw_sim_core::Position;
 
 use super::MAX_BUNDLE_MEMBERS;
@@ -105,6 +108,15 @@ pub(super) struct MobCard {
     /// Its guard, for a mob of this sim that can block ([`crate::mobs::Mobs::guard`]): its
     /// first vitals state carries the guard's stamina ([`VitalsState::with_stamina`]).
     pub(super) guard: Option<MobGuard>,
+    /// Its guard stamina in whole segments ([`nw_messages::stamina_segments`]), for a mob of
+    /// this sim that can block: its card and its states carry it as ALC child 44, from which the
+    /// client draws the guard bar.
+    pub(super) guard_segments: Option<u8>,
+    /// Its guard segments changed since the last state of it that carried them.
+    pub(super) guard_segments_changed: bool,
+    /// The temporary affiliations (3563) of an Outpost Rush summon: its team's pair, in place
+    /// of its prefab's recorded list ([`summon_affiliations`]).
+    pub(super) affiliations: Option<Vec<Affiliation>>,
 }
 
 impl MobCard {
@@ -138,6 +150,9 @@ pub(super) const fn card_of(
         blocking: false,
         blocking_changed: false,
         guard: None,
+        guard_segments: None,
+        guard_segments_changed: false,
+        affiliations: None,
         asset: None,
         server_ms: 0,
         look_target: None,
@@ -317,6 +332,36 @@ pub(super) fn remote_group(
     Ok(Some(group))
 }
 
+/// The temporary affiliations of an Outpost Rush summon of team `team`: the other team, then its
+/// own. **Observed** (`opr_match_4`, team 0's bear on circle A_2, its card at unix
+/// 1782163744.356 s, the summon's first sighting at 724.6 s; findings
+/// `2026-11-13-outpost-rush-summons.md`): component 7 list version 2 `(1,4),(0,0)`; the prefabs'
+/// recorded team 1 list is `(0,4),(1,0)`. The players hold their own team first
+/// ([`super::game_mode_entity::team_affiliations`]).
+pub(super) fn summon_affiliations(team: u8) -> Vec<Affiliation> {
+    let mut affiliations = super::game_mode_entity::team_affiliations(team);
+    affiliations.reverse();
+    affiliations
+}
+
+/// Puts `affiliations` into the recorded temporary affiliation member of a summon's card
+/// `members`, keeping its list version. A prefab that records no such member gets none: the
+/// client's prefab then has no component for it.
+fn put_summon_affiliations(members: &mut [BundleMember], affiliations: &[Affiliation]) {
+    for member in members {
+        if let MemberState::TemporaryAffiliation(state) = &mut member.state {
+            let version = match &state.affiliations {
+                Some(ReplicatedList::Full(list)) => list.version,
+                _ => None,
+            };
+            state.affiliations = Some(ReplicatedList::Full(FullList {
+                version,
+                elements: affiliations.to_vec(),
+            }));
+        }
+    }
+}
+
 /// The group of the mob of `card` in slot `interest`. With its prefab `look`, a carded group
 /// carries the prefab's first states and the whole vitals, a later group the health when it
 /// changed, and the group of a mob that just died the death states (mob-cards note, sections 2
@@ -378,8 +423,24 @@ pub(super) fn mob_group(
                     )?,
                     _ => None,
                 }
+                .map(|card_alc| match card.guard_segments {
+                    Some(segments) => card_alc.with_stamina_segments(segments),
+                    None => card_alc,
+                })
             } else {
-                frame.step.as_ref().map(AlcState::mob_step).transpose()?
+                // A changed guard goes with the mob's next state (Observed: retail sent child 44
+                // in the states after each blocked hit and each regen step).
+                frame
+                    .step
+                    .map(|step| MobStep {
+                        stamina_segments: card
+                            .guard_segments
+                            .filter(|_| card.guard_segments_changed),
+                        ..step
+                    })
+                    .as_ref()
+                    .map(AlcState::mob_step)
+                    .transpose()?
             };
             match alc {
                 Some(alc) => Some(BundleMember {
@@ -394,6 +455,9 @@ pub(super) fn mob_group(
     let dead = mob.health == 0;
     let vitals = if carded {
         group.members.extend(look.first.iter().cloned());
+        if let Some(affiliations) = &card.affiliations {
+            put_summon_affiliations(&mut group.members, affiliations);
+        }
         let mut vitals = match &look.vitals {
             Some(recorded) => recorded.creature_as_recorded(
                 mob.health,
@@ -414,15 +478,18 @@ pub(super) fn mob_group(
             slot.vitals_data = Some(VitalsData::creature_first(mob.health, card.server_ms));
         }
         // A recorded retail state holds its own stamina; a mob without one shows its guard's
-        // (retail sends no later stamina change: [`VitalsState::with_stamina`]).
+        // (later vitals carry no stamina; the ALC states carry the guard's segments:
+        // [`VitalsState::with_stamina`]).
         let unrecorded = vitals
             .slot_0
             .as_ref()
             .is_none_or(|slot| slot.stamina_max.is_none());
         match card.guard.filter(|_| unrecorded) {
-            Some(guard) => {
-                Some(vitals.with_stamina(guard.stamina_initial, guard.stamina_max, guard.tick_rate))
-            }
+            Some(guard) => Some(vitals.with_stamina(
+                guard.row_stamina_initial,
+                guard.row_stamina_max,
+                guard.tick_rate,
+            )),
             None => Some(vitals),
         }
     } else {
@@ -960,7 +1027,7 @@ fn group_bytes(group: &BundleGroup) -> Result<usize, MessageError> {
 mod tests {
     use nw_messages::{
         EntitySlots, GDE_ID_LEN, LOGIN_CLIENT_CONTEXT, PLAYER_COMPONENT_TYPE_INDEX, POS_REL_CHILD,
-        PlayerLook, SlotRead,
+        PlayerLook, SlotRead, TemporaryAffiliationState,
     };
     use nw_reflect::Envelope;
     use uuid::Uuid;
@@ -1020,6 +1087,38 @@ mod tests {
                 SlotRead::of(&bundle).expect("read")
             })
             .collect()
+    }
+
+    #[test]
+    fn a_summon_card_carries_its_own_team_s_affiliations_in_the_prefab_s_list() {
+        const PREFAB_VERSION: u64 = 2;
+        const COMPONENT: u64 = 7;
+        let pair = |first: (u32, u32), second: (u32, u32)| {
+            vec![
+                Affiliation {
+                    id: first.0,
+                    kind: first.1,
+                },
+                Affiliation {
+                    id: second.0,
+                    kind: second.1,
+                },
+            ]
+        };
+        assert_eq!(summon_affiliations(0), pair((1, 4), (0, 0)), "opr_match_4 team 0 bear");
+        assert_eq!(summon_affiliations(1), pair((0, 4), (1, 0)), "the prefabs' team 1 list");
+        let recorded = |elements: Vec<Affiliation>| BundleMember {
+            component: COMPONENT,
+            state: MemberState::TemporaryAffiliation(TemporaryAffiliationState {
+                affiliations: Some(ReplicatedList::Full(FullList {
+                    version: Some(PREFAB_VERSION),
+                    elements,
+                })),
+            }),
+        };
+        let mut members = vec![recorded(summon_affiliations(1))];
+        put_summon_affiliations(&mut members, &summon_affiliations(0));
+        assert_eq!(members, vec![recorded(summon_affiliations(0))]);
     }
 
     #[test]
@@ -1791,7 +1890,7 @@ mod tests {
         // A shield mob's card carries its guard's stamina (retail damned pistoleer: 50 of 50,
         // tick rate `0x4000`), and its later health changes carry none.
         const GUARD_TICK_RATE_BITS: u16 = 0x4000;
-        let guard = MobGuard::of((50, 50, 2, 1), (1, 0.8));
+        let guard = MobGuard::of((50, 50, 2, 1), 1);
         let guarded = MobCard {
             guard,
             ..card.clone()
@@ -1810,6 +1909,26 @@ mod tests {
                 slot.stamina_tick_rate
             ),
             (Some(50.0), Some(50.0), Some(GUARD_TICK_RATE_BITS))
+        );
+        // A category's stamina mod stays off the card: retail
+        // `Evil_Knight_Heavy_Named_DG_GreatCleave_00` (250 x `Dungeon+` 6) sends 250 of 250.
+        const DUNGEON_PLUS_STAMINA_MOD: f64 = 6.0;
+        const KNIGHT_ROW_STAMINA: f32 = 250.0;
+        let knight = MobCard {
+            guard: MobGuard::of((250, 250, 2, 0), 1)
+                .map(|guard| guard.in_category(DUNGEON_PLUS_STAMINA_MOD)),
+            ..card.clone()
+        };
+        let knight = mob_group(FIRST_REMOTE_INTEREST, &knight, Some(&look), true)
+            .expect("encode")
+            .expect("group");
+        let MemberState::Vitals(vitals) = &knight.members[2].state else {
+            panic!("the vitals third: {knight:?}");
+        };
+        let slot = vitals.slot_0.expect("slot 0");
+        assert_eq!(
+            (slot.stamina_amount, slot.stamina_max),
+            (Some(KNIGHT_ROW_STAMINA), Some(KNIGHT_ROW_STAMINA))
         );
         let hurt_shield = MobCard {
             guard,
@@ -1840,13 +1959,14 @@ mod tests {
             None,
             "no health change and no state due: nothing to send"
         );
-        let step = nw_messages::MobStep {
+        let step = MobStep {
             stamp,
             anchored: false,
             position: InputPosition::from_metres(at().x, at().y, at().z).map(StepPlace::Anchor),
             facing: None,
             scope: None,
             awake: false,
+            stamina_segments: None,
         };
         let moving = MobCard {
             alc: Some(frame(Some(step))),
@@ -1895,6 +2015,134 @@ mod tests {
                 .and_then(|slot| slot.vitals_data)
                 .map(|data| data.head),
             Some(1)
+        );
+    }
+
+    /// The ALC slot-0 child 44 of `members`' last state, when it sends one.
+    fn guard_segments_of(group: &BundleGroup) -> Option<u8> {
+        const STAMINA_SEGMENTS_CHILD: usize = 44;
+        let MemberState::Alc(alc) = &group.members.last()?.state else {
+            return None;
+        };
+        alc.slot0_children()
+            .ok()?
+            .into_iter()
+            .find(|(child, _)| *child == STAMINA_SEGMENTS_CHILD)
+            .and_then(|(_, bytes)| bytes.first().copied())
+    }
+
+    #[test]
+    fn a_guarded_mob_shows_its_guard_segments_on_its_card_and_in_the_state_after_a_change() {
+        // Retail MSQ13-lv56 interest 103: a blocked hit at 772.600 s, child 44 = 5 in the state
+        // 40 ms later; the cards of blocking mobs carry their guard's segments (10 for 50).
+        const HALF_GUARD_SEGMENTS: u8 = 5;
+        let at_pos = InputPosition::from_metres(at().x, at().y, at().z).expect("finite");
+        let stamp = nw_messages::AlcStamp {
+            id: 7,
+            anchor_us: NOW * 1000,
+            offset_ms: 33,
+        };
+        // A recorded first state that sends child 44 (the own spawn state: 20).
+        let recorded = AlcState::spawn(
+            CardPlace {
+                anchor: None,
+                at: at_pos,
+            },
+            stamp,
+        )
+        .expect("spawn");
+        let look = MobLook {
+            asset: AssetId {
+                id: [0xb7; GDE_ID_LEN],
+                sub_id: DYNAMIC_SLICE_SUB_ID,
+            },
+            alc_component: MOB_ALC_COMPONENT,
+            vitals_component: 9,
+            alc: Some(recorded),
+            vitals: None,
+            first: Vec::new(),
+            death: Vec::new(),
+            drawn: Vec::new(),
+        };
+        let ghost = MobGhost {
+            health: 100,
+            max_health: 100,
+            returning: false,
+            vitals_id: 1,
+            category_id: 2,
+            level: 1,
+        };
+        let frame = |step| MobFrame {
+            stamp,
+            animation: None,
+            facing: None,
+            anchor: None,
+            step,
+            alert_started: false,
+            fresh: false,
+            drawing: false,
+        };
+        let step = MobStep {
+            stamp,
+            anchored: false,
+            position: None,
+            facing: None,
+            scope: None,
+            awake: false,
+            stamina_segments: None,
+        };
+        let guarded = |step, changed| MobCard {
+            alc: Some(frame(step)),
+            health_changed: false,
+            guard_segments: Some(HALF_GUARD_SEGMENTS),
+            guard_segments_changed: changed,
+            ..card_of(ENTITY, at(), ghost, None)
+        };
+        let card = mob_group(
+            FIRST_REMOTE_INTEREST,
+            &guarded(None, true),
+            Some(&look),
+            true,
+        )
+        .expect("encode")
+        .expect("group");
+        assert_eq!(
+            guard_segments_of(&card),
+            Some(HALF_GUARD_SEGMENTS),
+            "the card shows the guard as it is"
+        );
+        let after_hit = mob_group(
+            FIRST_REMOTE_INTEREST,
+            &guarded(Some(step), true),
+            Some(&look),
+            false,
+        )
+        .expect("encode")
+        .expect("group");
+        assert_eq!(guard_segments_of(&after_hit), Some(HALF_GUARD_SEGMENTS));
+        let unchanged = mob_group(
+            FIRST_REMOTE_INTEREST,
+            &guarded(Some(step), false),
+            Some(&look),
+            false,
+        )
+        .expect("encode")
+        .expect("group");
+        assert_eq!(
+            guard_segments_of(&unchanged),
+            None,
+            "a state after no change leaves child 44 out"
+        );
+        assert_eq!(
+            mob_group(
+                FIRST_REMOTE_INTEREST,
+                &guarded(None, true),
+                Some(&look),
+                false
+            )
+            .expect("encode"),
+            None,
+            "a change with no state due waits for the next state"
         );
     }
 

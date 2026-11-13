@@ -24,6 +24,7 @@
 //!
 //! The sim writes this state; the captures' own states read through the member table.
 
+use crate::afflictions::GlobalAffliction;
 use crate::items::FullList;
 use crate::list_delta::{ReplicatedList, write_child};
 use crate::slots::{SLOT_0, write_known_wide_children};
@@ -58,13 +59,6 @@ const ICONS_CHILD: u8 = 28;
 const LINKED_MODE_CHILD: u8 = 29;
 /// The flag of a participant's character id in its raw form (Observed: `05`, then 16 bytes).
 const RAW_CHARACTER_ID: u8 = 0x05;
-/// The global affliction data of a mode with none (Observed in every first state: three zero
-/// ids with two zero times, then `ff 00`).
-const NO_AFFLICTION: [u8; 30] = {
-    let mut bytes = [0; 30];
-    bytes[28] = 0xff;
-    bytes
-};
 
 /// One participant of a game mode (`participantFacetRefs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,8 +144,12 @@ pub struct GameModeState {
     pub timers: Option<FullList<Keyed>>,
     /// Children 12 to 21, `Event1` to `Event10`: each slot sent (0 to 9) and its event.
     pub events: Vec<(u8, GameModeEvent)>,
-    /// Child 22, `globalAfflictionData`: sent empty with the first state.
+    /// Child 22, `globalAfflictionData`: sent empty with the first state when `affliction` is
+    /// `None` (Observed in every first state: [`GlobalAffliction::NONE`]).
     pub no_affliction: bool,
+    /// Child 22, `globalAfflictionData`, with a meter: the mutation curse meter of a mutated
+    /// expedition (Observed: retail `20261002-184508-050`); it goes before `no_affliction`.
+    pub affliction: Option<GlobalAffliction>,
     /// Children 23 to 28: the map of a generated level.
     pub level_map: GeneratedMap,
     /// Child 29, `linkedMode`.
@@ -193,7 +191,10 @@ impl GameModeState {
             (RAIDS_CHILD, self.raids.is_some()),
             (VALUES_CHILD, self.values.is_some()),
             (TIMERS_CHILD, self.timers.is_some()),
-            (AFFLICTION_CHILD, self.no_affliction),
+            (
+                AFFLICTION_CHILD,
+                self.no_affliction || self.affliction.is_some(),
+            ),
             (MAP_ORIGIN_CHILD, self.level_map.origin_m.is_some()),
             (TILE_SIZE_CHILD, self.level_map.tile_size_m.is_some()),
             (MAP_SIZE_CHILD, self.level_map.size_in_tiles.is_some()),
@@ -259,7 +260,9 @@ impl GameModeState {
                 VALUES_CHILD => write_keyed_list(writer, self.values.as_ref()),
                 TIMERS_CHILD => write_keyed_list(writer, self.timers.as_ref()),
                 AFFLICTION_CHILD => {
-                    writer.bytes(&NO_AFFLICTION);
+                    self.affliction
+                        .unwrap_or(GlobalAffliction::NONE)
+                        .write(writer);
                     Ok(())
                 }
                 MAP_ORIGIN_CHILD => {
@@ -430,6 +433,30 @@ mod tests {
         };
         assert_eq!(hex(&back), "0140010101011303");
         assert_eq!(hex(&GameModeState::default()), "00", "no child: no slot");
+    }
+
+    /// Retail `20261002-184508-050` at Unix ms 1790964499092: the change of the Fiendish meter
+    /// alone, 1 held for 9,999 s (child 22 only).
+    #[test]
+    fn a_retail_curse_meter_change_writes_the_same_bytes() {
+        let change = GameModeState {
+            affliction: Some(GlobalAffliction::of(
+                crate::afflictions::MeterLine {
+                    last: 1.0,
+                    last_ns: 844_279_689_985_784_851,
+                    target: 1.0,
+                    target_ns: 844_289_688_985_784_851,
+                },
+                45.0,
+                11,
+                false,
+            )),
+            ..GameModeState::default()
+        };
+        assert_eq!(
+            hex(&change),
+            "01808080023f8000000bb77be7a4adfc133f8000000bb784ffb785d213423400000b00"
+        );
     }
 
     /// Retail `opr_que_and_lost`: three later states of the Outpost Rush match that hold one

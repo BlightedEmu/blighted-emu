@@ -25,6 +25,15 @@
 //!   for T4 and T2. For T3, `WarExperience` 2,400 times 1.1459 is 2,750, the event's own
 //!   `UniversalExpAmount` (Inferred: the same rule).
 //! - Items: the event's `ItemReward` loot table (`[LTID]CaptureTheFlagRewardT4`).
+//! - Season experience: the 497 entry's `value_g` is `RewardData.SeasonsXp` (1 at level 60) times
+//!   `SeasonsXpModifier`: 15 for `CaptureTheFlag_T2`/`_T4` (`CTF01`-`CTF04`), 25 for
+//!   `OutpostRush_T2`/`_T4` (`OPR---Tower` 325.357 s, `OPR_TEST3` 1851.5 s), 0 for
+//!   `OutpostRush_T1` and `_LOSS_T1` (6 ledgers). An event whose modifier gives none takes its own
+//!   `SeasonsXp` cell (`Arena3v3_Win_3_Round` 5: `arena` 159.741 s, `3v3` 638.083 s).
+//!
+//! The same rule fits the Outpost Rush end events (Observed, 9 ledgers: `OutpostRush_T1` 18,000
+//! coins, azoth 125, umbral 25; `_LOSS_T1` 27,000, 175, 50; `_T2` 27,000, 175, 200; `_T4`
+//! 36,000, 250, 200) and the arena's (`Arena3v3_Win_3_Round`: no coins, no azoth, umbral 75).
 //!
 //! Inferred: the event's `Level` (60 for every capture the flag event) picks the `RewardData`
 //! row; the player was level 69 and rows 60 to 66 hold the same `War*` values, so no ledger
@@ -58,6 +67,8 @@ pub struct ModeReward {
     pub azoth: f64,
     /// Umbral shards (the event's `UmbralCurrency`).
     pub umbral: f64,
+    /// Season experience (`SeasonsXp` x `SeasonsXpModifier`, else the event's `SeasonsXp`).
+    pub seasons_xp: f64,
     /// The event's `ItemReward` and `ItemRewardQty` (a `[LTID]` loot table or an item).
     pub item: Option<(String, u32)>,
 }
@@ -77,6 +88,8 @@ pub struct WarAmounts {
     pub faction_tokens: f64,
     /// `WarAzoth`.
     pub azoth: f64,
+    /// `SeasonsXp`.
+    pub seasons_xp: f64,
 }
 
 /// The factors of one `RewardModifierData` row (an empty cell is 0).
@@ -94,6 +107,8 @@ pub struct ModeModifiers {
     pub faction_tokens: f64,
     /// `Azoth`.
     pub azoth: f64,
+    /// `SeasonsXpModifier`.
+    pub seasons_xp: f64,
 }
 
 /// An `i64` table cell as a float (table amounts are far below 2^53).
@@ -125,6 +140,7 @@ impl WarAmounts {
             faction_reputation: amount(row.war_faction_reputation),
             faction_tokens: amount(row.war_faction_tokens),
             azoth: amount(row.war_azoth),
+            seasons_xp: amount(row.seasons_xp),
         }
     }
 }
@@ -139,6 +155,7 @@ impl ModeModifiers {
             faction_reputation: factor(row.faction_reputation_modifier),
             faction_tokens: factor(row.faction_token_modifier),
             azoth: factor(row.azoth),
+            seasons_xp: amount(row.seasons_xp_modifier),
         }
     }
 }
@@ -159,13 +176,17 @@ impl ModeReward {
             faction_tokens: war.faction_tokens * modifiers.faction_tokens,
             azoth: war.azoth * modifiers.azoth,
             umbral,
+            seasons_xp: war.seasons_xp * modifiers.seasons_xp,
             item,
         }
     }
 }
 
-/// The rewards of the events that have a `RewardModifierData` row of their own id and a
-/// `RewardData` row at their `Level`, by lowercase event id.
+/// The rewards of the game events by lowercase event id: an event with a `RewardModifierData` row
+/// of its own id and a `RewardData` row at its `Level` gets the rule of the module note; any
+/// other only its own `UmbralCurrency`, `SeasonsXp` and `ItemReward` (Observed: the catacombs'
+/// `CatacombsKillEvent_Boss_01` entry, `CATACOMBS5` 1674.582 s: umbral 10 and the 100 souls of
+/// its item, nothing else).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModeRewards {
     by_id: HashMap<String, ModeReward>,
@@ -191,10 +212,14 @@ impl ModeRewards {
                 .game_event_data
                 .iter()
                 .flat_map(|table| &table.rows)
-                .filter_map(|row| {
+                .map(|row| {
                     let id = row.event_id.to_lowercase();
-                    let war = *war_by_level.get(&row.level?)?;
-                    let modifiers = *modifiers.get(&id)?;
+                    let (war, modifiers) = row
+                        .level
+                        .and_then(|level| war_by_level.get(&level))
+                        .zip(modifiers.get(&id))
+                        .map(|(war, modifiers)| (*war, *modifiers))
+                        .unwrap_or_default();
                     let item =
                         row.item_reward
                             .clone()
@@ -207,10 +232,11 @@ impl ModeRewards {
                                 (item, quantity)
                             });
                     let umbral = row.umbral_currency.map_or(NO_FACTOR, amount);
-                    Some((
-                        row.event_id.clone(),
-                        ModeReward::of(war, modifiers, umbral, item),
-                    ))
+                    let mut reward = ModeReward::of(war, modifiers, umbral, item);
+                    if reward.seasons_xp <= 0.0 {
+                        reward.seasons_xp = row.seasons_xp.map_or(NO_FACTOR, amount);
+                    }
+                    (row.event_id.clone(), reward)
                 }),
         )
     }
@@ -243,6 +269,7 @@ mod tests {
         faction_reputation: 800.0,
         faction_tokens: 800.0,
         azoth: 250.0,
+        seasons_xp: 1.0,
     };
     /// Retail `RewardModifierData` `CaptureTheFlag_T4`, `_T2` and `_T3`.
     const WIN: ModeModifiers = ModeModifiers {
@@ -252,6 +279,7 @@ mod tests {
         faction_reputation: 1.375,
         faction_tokens: 1.6875,
         azoth: 0.5,
+        seasons_xp: 15.0,
     };
     const LOSS: ModeModifiers = ModeModifiers {
         currency: 2.7778,
@@ -260,6 +288,7 @@ mod tests {
         faction_reputation: 0.6875,
         faction_tokens: 1.0,
         azoth: 0.3,
+        seasons_xp: 15.0,
     };
     const TIE: ModeModifiers = ModeModifiers {
         currency: 2.7778,
@@ -268,6 +297,7 @@ mod tests {
         faction_reputation: 1.0,
         faction_tokens: 1.375,
         azoth: 0.4,
+        seasons_xp: 15.0,
     };
 
     #[test]
@@ -283,6 +313,7 @@ mod tests {
         assert!((win.faction_tokens - 1_350.0).abs() < f64::EPSILON);
         assert!((win.azoth - 125.0).abs() < f64::EPSILON, "value_f 125");
         assert!((win.umbral - 150.0).abs() < f64::EPSILON, "value_h 150");
+        assert!((win.seasons_xp - 15.0).abs() < f64::EPSILON, "value_g 15");
         assert_eq!(win.item, item);
         let loss = ModeReward::of(LEVEL_60, LOSS, 40.0, None);
         assert_eq!(loss.coins, 25_000, "CTF03 value_a 25,000");
@@ -332,5 +363,27 @@ mod tests {
         assert!((loss.umbral - 40.0).abs() < f64::EPSILON);
         let tie = rewards.get("CaptureTheFlag_T3").expect("tie");
         assert_eq!(tie.experience, 2_750);
+        // The 497 entries of the Outpost Rush and arena ends (module note).
+        for (event, coins, azoth, umbral, seasons_xp) in [
+            ("OutpostRush_T1", 18_000, 125.0, 25.0, 0.0),
+            ("OutpostRush_LOSS_T1", 27_000, 175.0, 50.0, 0.0),
+            ("OutpostRush_T2", 27_000, 175.0, 200.0, 25.0),
+            ("OutpostRush_T4", 36_000, 250.0, 200.0, 25.0),
+            ("Arena3v3_Win_3_Round", 0, 0.0, 75.0, 5.0),
+        ] {
+            let reward = rewards.get(event).expect(event);
+            assert_eq!(reward.coins, coins, "{event}");
+            assert!((reward.azoth - azoth).abs() < f64::EPSILON, "{event}");
+            assert!((reward.umbral - umbral).abs() < f64::EPSILON, "{event}");
+            assert!((reward.seasons_xp - seasons_xp).abs() < f64::EPSILON, "{event}");
+        }
+        // An event without a modifier row: only its own cells (`CATACOMBS5` 1674.582 s).
+        let boss = rewards.get("CatacombsKillEvent_Boss_01").expect("boss 1");
+        assert_eq!((boss.coins, boss.experience), (0, 0));
+        assert!((boss.umbral - 10.0).abs() < f64::EPSILON);
+        assert_eq!(
+            boss.item,
+            Some(("[LTID]Catacombs_Currency_Souls_Boss".to_owned(), ONE_ITEM))
+        );
     }
 }

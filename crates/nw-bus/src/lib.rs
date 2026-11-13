@@ -51,5 +51,6 @@ pub use social::{
     CoinReply, CoinTransfer, GroupEntityDelivery, GroupEntityView, LeaveReason, OwnStateDelivery,
     PlayerVitals, RaidEntityDelivery, RaidEntityView, RaidInviteAnswer, RaidSpec, SocialBatch,
     SocialDeliveries, SocialDelivery, SocialFacetKind, SocialHeader, SocialInput, SocialPlayer,
-    SocialStateKind, UpkeepAnswer, UpkeepPayment,
+    SocialStateKind, TownProjectAnswer, TownProjectCancel, TownProjectStart, UpkeepAnswer,
+    UpkeepPayment,
 };

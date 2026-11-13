@@ -104,6 +104,22 @@ const TEAM_0_WON_ROUND: u32 = 0x2983_3fc1;
 pub(super) const WINNING_TEAM: u32 = 0x428a_d202;
 /// Round wins that win the match.
 pub(super) const ROUNDS_TO_WIN: u32 = 3;
+/// The end events by the rounds a team won (Observed: the winners of `arena` 159.741 s and `3v3`
+/// 638.083 s got `Arena3v3_Win_3_Round`; no ledger holds a loser's end). Inferred from the
+/// content rows: a team that lost with 1 or 2 round wins gets `Arena3v3_Win_1_Round` or
+/// `_Win_2_Round` (rewards between the loss and the win), one with none `Arena3v3_Loss`.
+const ARENA_END_EVENTS: [&str; ROUNDS_TO_WIN as usize + 1] = [
+    "Arena3v3_Loss",
+    "Arena3v3_Win_1_Round",
+    "Arena3v3_Win_2_Round",
+    "Arena3v3_Win_3_Round",
+];
+
+/// The end event of a team that won `wins` rounds.
+fn arena_end_event(wins: u32) -> &'static str {
+    let index = usize::try_from(wins.min(ROUNDS_TO_WIN)).unwrap_or_default();
+    ARENA_END_EVENTS[index]
+}
 /// The status bits: ready, and dead in the round (Observed `23` and `07`).
 pub(super) const READY_BIT: u8 = 0x20;
 const DEAD_STATUS: u8 = 0x07;
@@ -917,7 +933,8 @@ impl SimWorld {
         }
     }
 
-    /// Team `winner` won the match: state 2 with `WinningTeamIdx` and `Cleanup`.
+    /// Team `winner` won the match: state 2 with `WinningTeamIdx` and `Cleanup`, and each
+    /// participant gets the end event of its team's round wins ([`arena_end_event`]).
     fn end_arena_match(&mut self, winner: u8) {
         let server_ms = self.server_ms;
         let Some(running) = self.arena_matches.running.as_mut() else {
@@ -948,6 +965,14 @@ impl SimWorld {
             .iter()
             .map(|participant| participant.entity)
             .collect();
+        let events: Vec<(Entity, u64, &'static str)> = running
+            .participants
+            .iter()
+            .map(|participant| {
+                let wins = running.wins[usize::from(participant.team.min(1))];
+                (participant.entity, participant.number, arena_end_event(wins))
+            })
+            .collect();
         self.change_game_mode_state(entity, change);
         for hazard in hazards {
             self.stations.remove_camp(hazard);
@@ -956,6 +981,9 @@ impl SimWorld {
             self.stand_arena_player(*player);
         }
         self.put_flags(&players, MATCH_FLAGS);
+        for (player, number, event) in events {
+            self.give_mode_event(player, number, event);
+        }
         tracing::info!(winner, "arena match ended");
     }
 
@@ -1020,10 +1048,15 @@ impl SimWorld {
         }
     }
 
-    /// Player `entity` leaves the match (1980 `Leave`, 3309, or the end of `Cleanup`): 3455 and
+    /// Player `entity` leaves the match (1980 `Leave`, 3309, or the end of `Cleanup`; a catacombs
+    /// run's own leave: [`super::catacombs`]): 3455 and
     /// 5283, its participant state names no mode, the others' lists lose it, a leave of a running
     /// match bars its queue, and it goes back to where it came from.
     pub(super) fn leave_arena(&mut self, entity: Entity) {
+        if self.catacomb_run().is_some() {
+            self.leave_catacombs(entity);
+            return;
+        }
         if self.arena_matches.capture_the_flag.is_some() {
             self.leave_capture_the_flag(entity);
             return;
@@ -1067,6 +1100,10 @@ impl SimWorld {
     /// its queue (Observed: the kicked player of `3v3_arena_group_2` got the 30 minutes), and its
     /// entry goes from the lists.
     pub(super) fn arena_left_sim(&mut self, entity: Entity) {
+        if self.catacomb_run().is_some() {
+            self.catacombs_left_sim(entity);
+            return;
+        }
         if self.arena_matches.capture_the_flag.is_some() {
             self.capture_the_flag_left_sim(entity);
             return;
@@ -1190,6 +1227,14 @@ pub(super) mod tests {
     use nw_formats::objectstream::lowercase_crc32;
 
     use super::*;
+
+    #[test]
+    fn each_team_gets_the_end_event_of_its_round_wins() {
+        assert_eq!(arena_end_event(ROUNDS_TO_WIN), "Arena3v3_Win_3_Round");
+        assert_eq!(arena_end_event(2), "Arena3v3_Win_2_Round");
+        assert_eq!(arena_end_event(1), "Arena3v3_Win_1_Round");
+        assert_eq!(arena_end_event(0), "Arena3v3_Loss");
+    }
 
     #[test]
     fn the_keys_are_the_crcs_of_their_names() {

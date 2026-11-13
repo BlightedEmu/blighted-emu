@@ -103,7 +103,7 @@ pub fn load_gameplay(edge_config: &Path, world: Uuid) -> Result<GameplayConfig, 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use nw_content::gameplay_config::NEUTRAL_MULTIPLIER;
     use serde_json::Map;
 
@@ -113,11 +113,11 @@ mod tests {
     const COMMITTED_WORLD: &str = "8d0f4c2e-0000-4000-8000-000000000001";
 
     /// No change of the committed edge config but its config set folder.
-    const AS_COMMITTED: [(&str, &str); 0] = [];
+    pub(crate) const AS_COMMITTED: [(&str, &str); 0] = [];
 
     /// The edge config of the repository, with its relative config set folder made absolute and
     /// each `(line, replacement)` of `changes` applied.
-    fn committed_edge_config(folder: &Path, changes: &[(&str, &str)]) -> PathBuf {
+    pub(crate) fn committed_edge_config(folder: &Path, changes: &[(&str, &str)]) -> PathBuf {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let text = std::fs::read_to_string(root.join(COMMITTED_EDGE_CONFIG)).expect("edge.toml");
         let sets = root.join("config/remote-config");

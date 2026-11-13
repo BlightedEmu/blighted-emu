@@ -359,4 +359,166 @@ mod tests {
             Err(CreatureAnimationsError::Asset(_))
         ));
     }
+
+    /// A retail mob's FullBody entry of one fragment: the largest scope time its states carried.
+    struct RetailPlay {
+        /// The creature slice asset, hex.
+        asset: &'static str,
+        /// The fragment the entry played.
+        fragment: &'static str,
+        /// The entry's last byte, which picks the option.
+        tail: u8,
+        /// The largest scope time (children 28/38, 1/30 s ticks) of the entry.
+        ticks: u32,
+        /// The mob stayed in the entry past its end, so the scope time stopped at the last tick.
+        played_out: bool,
+    }
+
+    /// Retail plays of the fragments whose ticks the shared Mannequin reader fix changed
+    /// (2026-11-13; `blighted-emu-tools` `scratch-work/guardshow/src/bin/fragticks.rs` over all
+    /// 1,195 ledgers of `local-data/capture-index.tsv`). Ledger and start of each play:
+    /// bloodbeast `ION---FULL-RUN-201b7a933118afb5` 2908.490 s; damned great axeman
+    /// `09-shattered-mountain-19eb69b005537359/99g_msq_sm_freeprisoner-...` 308.570 s; spider
+    /// `NH-MSQ-7.2-e2b07100d015b1ed` 362.537 s; Hercyne spider `Gorgon-6820df85e53a6be0`
+    /// 654.496 s; Upyr thrall grunt `12-2-nighthaven-420c3fb8288cc0a2/quest_18031-...`
+    /// 318.074 s; swamp fiend `05-Garden_of_Genesis-58d803fc3701e708` 206.017 s; flame grunt
+    /// `Hatchery-ddd73429b051c23c` 407.348 s; twin jesters `ION---FULL-RUN-201b7a933118afb5`
+    /// 969.387 s; fire naga `10-Empyrean_Forge-af76ac3a945e1721/EXP-Empyrian-Forge-M1`
+    /// 677.552 s; risen `01-Amrine_Excavation-7f9a78dd54b66ed2` 101.573 s. The whole-tick rule
+    /// (combat helper A7, the same sweep): damned swordsman
+    /// `06-great-cleave-b543aedabd76e9a7/99d_msq_08_thorpefight-...` 108.538 and 116.056 s;
+    /// withered grunt `03-Smuggler-s-Ring-Circuit-Complete-d5f5ea88cef84010/...-Divers-Bluff-Rally`
+    /// 115.133 s.
+    const RETAIL_PLAYS: [RetailPlay; 13] = [
+        // `Attack_Slash_Overhead`: the first blend's ExitTime 1.5025 s, then a clip chained to
+        // the clip before (ExitTime -1). The table before the fix: 116 ticks.
+        RetailPlay {
+            asset: "548ff45fcc795a48a0468cc44bf1dfd4",
+            fragment: "Attack_Slash_Overhead",
+            tail: 155,
+            ticks: 161,
+            played_out: true,
+        },
+        // `POI_Patrol_Fidget` (`2H_Melee` entries): one clip, then an empty clip of ExitTime -1
+        // that ends the fragment when the clip ends (`AnimClip::chained_end`).
+        RetailPlay {
+            asset: "2adfbcb03e2355ab8b6c0030aece4140",
+            fragment: "POI_Patrol_Fidget",
+            tail: 108,
+            ticks: 235,
+            played_out: true,
+        },
+        // Before the fix: 100.
+        RetailPlay {
+            asset: "96f792d1fbe5545b95f3b484f8fa1dda",
+            fragment: "Fidget",
+            tail: 199,
+            ticks: 101,
+            played_out: true,
+        },
+        // Before the fix: 66 (the first blend's ExitTime 0.0112 s was left out).
+        RetailPlay {
+            asset: "99e9772feceb549b9c4338c50131077a",
+            fragment: "Attack_Stab",
+            tail: 113,
+            ticks: 67,
+            played_out: true,
+        },
+        // Before the fix: 109.
+        RetailPlay {
+            asset: "889a1f9064865a3cb8f69cf2a8170531",
+            fragment: "Attack_BattleScreech",
+            tail: 118,
+            ticks: 110,
+            played_out: true,
+        },
+        // Before the fix: no option of known length.
+        RetailPlay {
+            asset: "a8c7c532c30d53408cd887a5b58adb1d",
+            fragment: "Alert_Turn",
+            tail: 12,
+            ticks: 43,
+            played_out: true,
+        },
+        // Before the fix: 45 ticks, short of the 69 retail played.
+        RetailPlay {
+            asset: "22ecbab2ef425ee1b53d44e43e68b755",
+            fragment: "Spawn",
+            tail: 73,
+            ticks: 69,
+            played_out: false,
+        },
+        // Before the fix: 52.
+        RetailPlay {
+            asset: "9f30668ec4e2504197019c68330e462b",
+            fragment: "GoneInSmoke_End",
+            tail: 223,
+            ticks: 64,
+            played_out: false,
+        },
+        // Before the fix: 88.
+        RetailPlay {
+            asset: "7a10b72b0f9658dc9d681f66c93108e8",
+            fragment: "Attack_Multi_Fire_Shot",
+            tail: 126,
+            ticks: 91,
+            played_out: false,
+        },
+        // `POI_Patrol_Fidget` (`1H_Melee` entries): one clip, then an empty clip at `ExitTime`
+        // 5 s (6.6999998 s): the last tick before the end, 149 (200); the table had 150 (201).
+        RetailPlay {
+            asset: "951489b2be9a52bab140276140b09494",
+            fragment: "POI_Patrol_Fidget",
+            tail: 161,
+            ticks: 149,
+            played_out: true,
+        },
+        RetailPlay {
+            asset: "951489b2be9a52bab140276140b09494",
+            fragment: "POI_Patrol_Fidget",
+            tail: 46,
+            ticks: 200,
+            played_out: true,
+        },
+        // `Fidget` (the pain option): 150 frames at speed 1.25, a length a hair past 4 s in f32.
+        RetailPlay {
+            asset: "1c14682cf7a45b8291fb5b8703b9e437",
+            fragment: "Fidget",
+            tail: 2,
+            ticks: 120,
+            played_out: true,
+        },
+        // Before the fix: 31.
+        RetailPlay {
+            asset: "497a0037653a53cc9b2677b2da932ade",
+            fragment: "Alert_Turn",
+            tail: 113,
+            ticks: 43,
+            played_out: false,
+        },
+    ];
+
+    #[test]
+    #[ignore = "needs the build 25810808 content in NW_CONTENT_DIR"]
+    fn the_built_fragment_ticks_hold_the_retail_scope_times() {
+        // Observed (the same sweep): a retail scope time stops at the fragment's last tick (the
+        // spider's `Fidget` and the great axeman's `POI_Patrol_Fidget` stay at it while the
+        // entry holds). A play the mob left early only bounds the length from below.
+        const BUILD: &str = "25810808";
+        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
+        let table = CreatureAnimations::load(Path::new(&dir), BUILD).expect("table");
+        for play in &RETAIL_PLAYS {
+            let asset = <[u8; ASSET_ID_LEN]>::try_from(hex::decode(play.asset).expect("hex"))
+                .expect("len");
+            let ticks = table
+                .get(&asset)
+                .and_then(|creature| creature.fragment_ticks(play.fragment, play.tail))
+                .expect(play.fragment);
+            if play.played_out {
+                assert_eq!(ticks, play.ticks, "{} {}", play.asset, play.fragment);
+            } else {
+                assert!(ticks >= play.ticks, "{} {}: {ticks}", play.asset, play.fragment);
+            }
+        }
+    }
 }

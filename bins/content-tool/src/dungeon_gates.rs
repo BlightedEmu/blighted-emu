@@ -91,7 +91,7 @@ pub struct DungeonGatesReport {
 }
 
 /// The latest clip end under `element`, seconds; `None` when it has none.
-fn latest_clip_end(element: &Element) -> Option<f32> {
+pub(crate) fn latest_clip_end(element: &Element) -> Option<f32> {
     let own = (element.name_crc == Some(CLIP_END_NAME) && element.value.len() == CLIP_END_LEN)
         .then(|| element.as_f32().ok())
         .flatten();
@@ -131,6 +131,17 @@ impl Reader<'_> {
         Ok(length)
     }
 
+    /// The timelines of `spawned` with their lengths ([`SliceScript::timelines`]).
+    fn timelines(
+        &mut self,
+        spawned: &SliceScript,
+    ) -> Result<Vec<GateTimeline>, DungeonScriptsBuildError> {
+        for asset in spawned.timeline_assets() {
+            self.length(&asset.path)?;
+        }
+        Ok(spawned.timelines(|path| self.lengths.get(path).copied().unwrap_or_default()))
+    }
+
     /// The length of a timeline component of `kind`.
     fn timeline_length(&mut self, kind: &ReplicatedKind) -> Result<f32, DungeonScriptsBuildError> {
         match kind {
@@ -151,16 +162,13 @@ impl Reader<'_> {
         let Some(slice) = &spawner.slice else {
             return Ok(None);
         };
-        let component_of = |wanted: fn(&ReplicatedKind) -> bool| {
-            spawned
-                .entities
-                .iter()
-                .flat_map(|entity| &entity.replicated)
-                .find(|component| wanted(&component.kind))
-                .map(|component| u64::from(component.index))
-        };
-        let gatherable_component = component_of(|kind| matches!(kind, ReplicatedKind::Gatherable));
-        let position_component = component_of(|kind| matches!(kind, ReplicatedKind::Position));
+        let gatherable_component = spawned.gatherable_component();
+        let position_component = spawned
+            .entities
+            .iter()
+            .flat_map(|entity| &entity.replicated)
+            .find(|component| matches!(component.kind, ReplicatedKind::Position))
+            .map(|component| u64::from(component.index));
         let path = slice.path.to_lowercase();
         let named = |parts: &[&str], text: &str| parts.iter().any(|part| text.contains(part));
         let gate = gatherable_component.is_some()
@@ -172,18 +180,7 @@ impl Reader<'_> {
         if !gate && !blocker {
             return Ok(None);
         }
-        let mut timelines = Vec::new();
-        for owner in &spawned.entities {
-            for component in &owner.replicated {
-                if matches!(component.kind, ReplicatedKind::Timeline { .. }) {
-                    timelines.push(GateTimeline {
-                        name: owner.name.clone(),
-                        component: u64::from(component.index),
-                        length_s: self.timeline_length(&component.kind)?,
-                    });
-                }
-            }
-        }
+        let timelines = self.timelines(spawned)?;
         self.report.gates += 1;
         self.report.blockers += usize::from(blocker);
         self.report.timelines += timelines.len();
@@ -200,6 +197,7 @@ impl Reader<'_> {
             position_component,
             gatherable_component,
             timelines,
+            interact_component: spawned.interact_component(),
         }))
     }
 
@@ -218,14 +216,16 @@ impl Reader<'_> {
                         component: index,
                         length_s: self.timeline_length(&component.kind)?,
                     },
-                    ReplicatedKind::DelayedEvent { delay_s } => EntityComponent::DelayedEvent {
+                    ReplicatedKind::DelayedEvent { delay_s, .. } => EntityComponent::DelayedEvent {
                         component: index,
                         delay_s: *delay_s,
                     },
                     ReplicatedKind::PlacementObstruction => {
                         EntityComponent::PlacementObstruction { component: index }
                     }
-                    ReplicatedKind::Position | ReplicatedKind::Gatherable => continue,
+                    ReplicatedKind::Position
+                    | ReplicatedKind::Gatherable
+                    | ReplicatedKind::Interact => continue,
                 });
             }
             if !components.is_empty() {

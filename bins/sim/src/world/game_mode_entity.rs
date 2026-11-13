@@ -15,8 +15,8 @@ use bevy_ecs::entity::Entity;
 use nw_messages::NS_PER_MS;
 use nw_messages::facet::{FacetHeader, component, facet_entity};
 use nw_messages::game_mode_participant::{
-    ActiveGameMode, GAME_MODE_PARTICIPANT_COMPONENT, GameModeParticipantState, NO_TEAM,
-    PARTICIPANT_FLAGS_LEN,
+    ActiveGameMode, GAME_MODE_PARTICIPANT_COMPONENT, GameModeParticipantState,
+    MutationContextWire, NO_TEAM, PARTICIPANT_FLAGS_LEN,
 };
 use nw_messages::game_mode_state::{GameModeState, GeneratedMap, ParticipantRef};
 use nw_messages::items::FullList;
@@ -29,6 +29,7 @@ use nw_messages::temporary_affiliation::{
 use nw_messages::wire::{RAW_ID_LEN, raw_id_of_entity};
 use nw_messages::{
     AssetId, BundleMember, DYNAMIC_SLICE_SUB_ID, GdeMetadataReplicatedState, MemberState,
+    ObjectivesState,
 };
 use nw_sim_core::Position;
 
@@ -195,6 +196,7 @@ pub(super) fn merged(state: &GameModeState, change: &GameModeState) -> GameModeS
         timers: change.timers.clone().or_else(|| state.timers.clone()),
         events,
         no_affliction: state.no_affliction,
+        affliction: change.affliction.or(state.affliction),
         level_map,
         linked_mode: change.linked_mode.or(state.linked_mode),
     }
@@ -232,12 +234,58 @@ pub(super) fn mode_facet(gde_ref: &[u8; RAW_ID_LEN]) -> u64 {
     u64::from_le_bytes(half)
 }
 
+/// The participant state of a player that joined the match `entry` at server ms `server_ms`
+/// ([`SimWorld::put_match_joined`]).
+pub(super) fn match_joined_state(entry: MatchEntry, server_ms: u64) -> GameModeParticipantState {
+    let facet = mode_facet(&entry.gde_ref);
+    let version = entry.list_version;
+    GameModeParticipantState {
+        active: Some(full(
+            version,
+            vec![ActiveGameMode {
+                raw_id: entry.gde_ref,
+                facet,
+                second: facet.wrapping_add(GAME_MODE_FACET),
+                mode: entry.mode,
+                map: entry.map,
+                joined_ns: server_ms.saturating_mul(NS_PER_MS),
+                phase: entry.phase,
+            }],
+        )),
+        flags: Some(entry.flags),
+        eligible: (!entry.eligible.is_empty()).then(|| full(version, entry.eligible)),
+        last_team: Some(entry.team),
+        ..GameModeParticipantState::default()
+    }
+}
+
+/// The objectives state `state` with the children `change` sets: a child of the change replaces
+/// the held one.
+fn merged_objectives(state: &ObjectivesState, change: &ObjectivesState) -> ObjectivesState {
+    ObjectivesState {
+        grace_period_end: change.grace_period_end.or(state.grace_period_end),
+        task_start_times: change
+            .task_start_times
+            .clone()
+            .or_else(|| state.task_start_times.clone()),
+        tracked: change.tracked.clone().or_else(|| state.tracked.clone()),
+        completed: change.completed.clone().or_else(|| state.completed.clone()),
+        active: change.active.clone().or_else(|| state.active.clone()),
+        tasks: change.tasks.clone().or_else(|| state.tasks.clone()),
+        poi_entities: change
+            .poi_entities
+            .clone()
+            .or_else(|| state.poi_entities.clone()),
+        dynamic_poi_version: change.dynamic_poi_version.or(state.dynamic_poi_version),
+    }
+}
+
 /// The participant state of a player who left its game mode, at list version `version`.
 pub(super) fn left_state(version: u64) -> GameModeParticipantState {
     GameModeParticipantState {
         active: Some(full(version, Vec::new())),
         flags: Some([0; PARTICIPANT_FLAGS_LEN]),
-        no_mutation_context: true,
+        mutation_context: Some(MutationContextWire::NONE),
         last_team: Some(NO_TEAM),
         ..GameModeParticipantState::default()
     }
@@ -249,29 +297,7 @@ impl SimWorld {
     /// flags, the queue bars and the team (Observed: the first 3312 on every retail arena and
     /// Outpost Rush instance).
     pub(super) fn put_match_joined(&mut self, entity: Entity, entry: MatchEntry, server_ms: u64) {
-        let facet = mode_facet(&entry.gde_ref);
-        let version = entry.list_version;
-        self.put_participant_state(
-            entity,
-            GameModeParticipantState {
-                active: Some(full(
-                    version,
-                    vec![ActiveGameMode {
-                        raw_id: entry.gde_ref,
-                        facet,
-                        second: facet.wrapping_add(GAME_MODE_FACET),
-                        mode: entry.mode,
-                        map: entry.map,
-                        joined_ns: server_ms.saturating_mul(NS_PER_MS),
-                        phase: entry.phase,
-                    }],
-                )),
-                flags: Some(entry.flags),
-                eligible: (!entry.eligible.is_empty()).then(|| full(version, entry.eligible)),
-                last_team: Some(entry.team),
-                ..GameModeParticipantState::default()
-            },
-        );
+        self.put_participant_state(entity, match_joined_state(entry, server_ms));
     }
 
     /// What player `entity` (`participant`) gets when it leaves its match: 3455 and 5283 (its
@@ -326,6 +352,20 @@ impl SimWorld {
         position: Position,
         state: GameModeState,
     ) -> (u64, [u8; RAW_ID_LEN]) {
+        self.place_game_mode_entity_with(component, namespace, asset, position, state, Vec::new())
+    }
+
+    /// [`Self::place_game_mode_entity_on`] with the members `extra` after the game mode state
+    /// (an expedition's objectives, [`super::expedition_mode`]).
+    pub(super) fn place_game_mode_entity_with(
+        &mut self,
+        component: u64,
+        namespace: u64,
+        asset: Option<[u8; RAW_ID_LEN]>,
+        position: Position,
+        state: GameModeState,
+        extra: Vec<BundleMember>,
+    ) -> (u64, [u8; RAW_ID_LEN]) {
         let namespace = namespace ^ self.me.generation;
         let mut gde_ref = [0; RAW_ID_LEN];
         let entity = self.stations.place_camp(|number| {
@@ -336,7 +376,7 @@ impl SimWorld {
                 position,
                 station_type: String::new(),
                 name: Vec::new(),
-                members: vec![
+                members: [
                     BundleMember {
                         component: CARD_COMPONENT,
                         state: MemberState::GdeMetadata(GdeMetadataReplicatedState {
@@ -349,9 +389,12 @@ impl SimWorld {
                     },
                     BundleMember {
                         component,
-                        state: MemberState::GameMode(state),
+                        state: MemberState::GameMode(Box::new(state)),
                     },
-                ],
+                ]
+                .into_iter()
+                .chain(extra)
+                .collect(),
             }
         });
         (entity, gde_ref)
@@ -374,13 +417,41 @@ impl SimWorld {
             |members| {
                 for member in members {
                     if let MemberState::GameMode(state) = &mut member.state {
-                        *state = merged(state, &merge);
+                        **state = merged(state, &merge);
                     }
                 }
             },
             vec![BundleMember {
                 component,
-                state: MemberState::GameMode(change),
+                state: MemberState::GameMode(Box::new(change)),
+            }],
+        );
+    }
+
+    /// Sends the change `change` of the objectives member of the game mode entity `entity`, and
+    /// keeps it for the viewers that get the entity later.
+    pub(super) fn change_game_mode_objectives(&mut self, entity: u64, change: ObjectivesState) {
+        let Some(component) = self.stations.members(entity).and_then(|members| {
+            members
+                .iter()
+                .find(|member| matches!(member.state, MemberState::Objectives(_)))
+                .map(|member| member.component)
+        }) else {
+            return;
+        };
+        let merge = change.clone();
+        self.stations.change_camp(
+            entity,
+            |members| {
+                for member in members {
+                    if let MemberState::Objectives(state) = &mut member.state {
+                        *state = merged_objectives(state, &merge);
+                    }
+                }
+            },
+            vec![BundleMember {
+                component,
+                state: MemberState::Objectives(change),
             }],
         );
     }
@@ -547,6 +618,6 @@ mod tests {
         assert_eq!(mode_facet(&gde_ref), 0xf300_0000_0000_0043);
         let left = left_state(9);
         assert_eq!(left.last_team, Some(NO_TEAM));
-        assert!(left.no_mutation_context);
+        assert_eq!(left.mutation_context, Some(MutationContextWire::NONE));
     }
 }
