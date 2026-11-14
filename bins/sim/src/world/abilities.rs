@@ -66,6 +66,9 @@ const CLIENT_FRAME_MS: u64 = 34;
 const MS_PER_S: f32 = 1_000.0;
 /// Microseconds per millisecond.
 const US_PER_MS: u64 = 1_000;
+/// The end and the start of a cooldown that does not run, in a whole cooldown map (Observed:
+/// every entry of retail's login maps is `(1, 1)`).
+const NO_COOLDOWN_US: u64 = 1;
 /// Tests the server takes as passing for a standing player with a weapon in the hand, by element
 /// name (Inferred: the client's character fits its controller, the weapon its requirements and
 /// its slot (the abilities run only while a weapon is in the hand), and the client checks its own
@@ -761,6 +764,7 @@ impl AbilityRun {
         if let Some(press) = self.press.as_mut() {
             press.read_ms.get_or_insert(now_ms);
         }
+        self.leave_lists_not_in(lists);
         let mut events = Vec::new();
         for list in lists {
             self.tick_list(lists, list, holder, (now_ms, server_ms), &mut events);
@@ -1266,9 +1270,25 @@ impl AbilityRun {
     /// Actions `actions` of list `list` stop: their tag activities that are on end.
     fn leave(&mut self, list: &AbilityList, actions: &[usize]) {
         let key = list_key(list);
+        self.leave_where(|running| running.list == key && actions.contains(&running.action));
+    }
+
+    /// The running actions of the lists not in `lists` stop: the weapon whose lists they are left
+    /// the hand, and no tick tests their ends any more. Live 2026-11-14: a swap to the flail
+    /// while the life staff's Sacred Ground aimed kept its two actions running and its `Aim` tag
+    /// on; no flail press started a chain (no cooldown, no animation) until a swap back to the
+    /// staff let the aim end.
+    fn leave_lists_not_in(&mut self, lists: &[&AbilityList]) {
+        let held: Vec<usize> = lists.iter().map(|list| list_key(list)).collect();
+        self.leave_where(|running| !held.contains(&running.list));
+    }
+
+    /// The running actions that `stops` picks stop: the press owner among them ends its ability,
+    /// and their tag activities that are on end.
+    fn leave_where(&mut self, stops: impl Fn(&Running) -> bool) {
         let (left, kept): (Vec<Running>, Vec<Running>) = std::mem::take(&mut self.running)
             .into_iter()
-            .partition(|running| running.list == key && actions.contains(&running.action));
+            .partition(|running| stops(running));
         self.running = kept;
         if let Some(owner) = self.owner.filter(|owner| {
             left.iter()
@@ -1398,6 +1418,13 @@ impl AbilityRun {
         )]
         let time_ms = (table_ms as f64 * (1.0 + stats.cooldown).max(0.0)).round() as u64;
         let ability = lowercase_crc32(id);
+        tracing::debug!(
+            ability = id,
+            table_ms,
+            share = stats.cooldown,
+            time_ms,
+            "ability cooldown"
+        );
         self.cooldowns
             .retain(|cooldown| cooldown.ability != ability && cooldown.end_ms > now_ms);
         let key = self.press.map_or(0, |press| press.key);
@@ -1503,6 +1530,49 @@ impl AbilityRun {
     /// The cooldowns started since the last call, with the key (0, 1 or 2) of their press.
     pub fn take_cooldown_changes(&mut self) -> Vec<(usize, AbilityCooldown)> {
         std::mem::take(&mut self.cooldown_changes)
+    }
+
+    /// Each key's whole cooldown map for a first own state at `server_ms`: every ability of
+    /// `abilities` (the `CooldownData` table) at [`NO_COOLDOWN_US`], and the cooldowns of that
+    /// key that run on at their own times. The changes waiting go with them, so none is left.
+    /// Observed (`general-other-01` 0.501, 169.824 and 458.665 s, each with a first own card):
+    /// `cdmap1` to `cdmap3` each name the 98 abilities, all `(1, 1)`. Inferred: a cooldown that
+    /// runs on keeps its end and start in its key's map (none ran at those cards). Ours sent no
+    /// whole map: after a life staff cast and a swap the client showed cooldowns on the flail's
+    /// keys that the server never started (live 2026-11-14).
+    pub(super) fn whole_cooldown_maps(
+        &mut self,
+        abilities: &[u32],
+        server_ms: u64,
+    ) -> [Vec<AbilityCooldown>; nw_messages::MAX_MAPPED_SLOTS] {
+        self.cooldown_changes.clear();
+        let server_us = server_ms.saturating_mul(US_PER_MS);
+        std::array::from_fn(|key| {
+            abilities
+                .iter()
+                .map(|&ability| {
+                    self.cooldowns
+                        .iter()
+                        .find(|cooldown| {
+                            cooldown.key == key
+                                && cooldown.ability == ability
+                                && cooldown.end_us > server_us
+                        })
+                        .map_or(
+                            AbilityCooldown {
+                                ability,
+                                end_us: NO_COOLDOWN_US,
+                                start_us: NO_COOLDOWN_US,
+                            },
+                            |cooldown| AbilityCooldown {
+                                ability,
+                                end_us: cooldown.end_us,
+                                start_us: cooldown.start_us,
+                            },
+                        )
+                })
+                .collect()
+        })
     }
 
     /// Whether `condition` holds for the player now (for the world's own checks).
@@ -2375,6 +2445,56 @@ mod tests {
     use crate::combat::test_support::TEST_SWORD_DAMAGE;
     use crate::mobs::mob_entity;
     use crate::world::tests::{CELL_M, NOW, join, table, test_spawn, tick, world_with_spawns};
+
+    #[test]
+    fn a_first_own_state_gets_each_keys_whole_map_with_the_running_cooldowns() {
+        const SERVER_MS: u64 = 1_000_000;
+        const TRIP: u32 = 11;
+        const SLAM: u32 = 12;
+        const BLAST: u32 = 13;
+        let end_us = (SERVER_MS + 5_000) * US_PER_MS;
+        let start_us = (SERVER_MS - 1_000) * US_PER_MS;
+        let mut run = AbilityRun::default();
+        run.restore_cooldowns(
+            &[
+                PlayerAbilityCooldown {
+                    ability: SLAM,
+                    key: 1,
+                    start_us,
+                    end_us,
+                },
+                PlayerAbilityCooldown {
+                    ability: BLAST,
+                    key: 2,
+                    start_us,
+                    end_us: start_us + 1,
+                },
+            ],
+            (0, SERVER_MS - 2_000),
+        );
+        let maps = run.whole_cooldown_maps(&[TRIP, SLAM, BLAST], SERVER_MS);
+        let idle = |ability| AbilityCooldown {
+            ability,
+            end_us: NO_COOLDOWN_US,
+            start_us: NO_COOLDOWN_US,
+        };
+        assert_eq!(maps[0], [idle(TRIP), idle(SLAM), idle(BLAST)]);
+        assert_eq!(
+            maps[1],
+            [
+                idle(TRIP),
+                AbilityCooldown {
+                    ability: SLAM,
+                    end_us,
+                    start_us,
+                },
+                idle(BLAST)
+            ],
+            "the running cooldown in its key's map"
+        );
+        assert_eq!(maps[2], [idle(TRIP), idle(SLAM), idle(BLAST)], "an ended one is idle");
+        assert!(run.take_cooldown_changes().is_empty(), "the maps carry the changes");
+    }
 
     const SMITE: &str = "Ability_Life_Staff_Smite";
     /// The upgrade the test staff holder has.
@@ -4387,6 +4507,51 @@ mod retail_tests {
         let mapped = |key: usize| (key == 0).then(|| lowercase_crc32(SACRED_GROUND));
         let (_, casts) = press_then_click(&lists, &UpgradedLifeStaff, mapped);
         assert_eq!(casts, [SACRED_GROUND_UPGRADE_SPELL]);
+    }
+
+    /// Live 2026-11-14: a swap to the flail in the middle of Sacred Ground's aim left the staff's
+    /// actions running with their `Aim` tag; the flail's Trip did not start.
+    #[test]
+    fn a_weapon_swap_ends_the_old_weapons_actions_and_the_new_ones_start() {
+        const AIM_TICKS: u64 = 10;
+        const TRIP: &str = "Ability_Flail_Trip";
+        let table = table();
+        let staff = table.lists_for(&["LifeStaff"]);
+        let flail = table.lists_for(&["Flail"]);
+        let ground = |key: usize| (key == 0).then(|| lowercase_crc32(SACRED_GROUND));
+        let trip = |key: usize| (key == 0).then(|| lowercase_crc32(TRIP));
+        let flail_holder = Armed {
+            tags: &["1H_Melee", "Flail"],
+            effects: Vec::new(),
+        };
+        let mut run = AbilityRun::default();
+        run.press(&[key_1(1)], ground, no_inputs);
+        for tick in 0..AIM_TICKS {
+            run.tick(&staff, &LifeStaff, tick * TICK_MS, SERVER_MS);
+        }
+        assert!(!run.running.is_empty(), "Sacred Ground aims");
+        let swap = run.tick(&flail, &flail_holder, AIM_TICKS * TICK_MS, SERVER_MS);
+        assert!(run.running.is_empty(), "the staff's actions end with the swap");
+        assert!(
+            !run.tags_on.iter().any(|tag| tag.eq_ignore_ascii_case("Aim")),
+            "{:?}",
+            run.tags_on
+        );
+        assert!(swap.iter().any(|event| matches!(
+            event,
+            AbilityEvent::Ended { ability } if *ability == lowercase_crc32(SACRED_GROUND)
+        )));
+        run.press(&[key_1(2)], trip, no_inputs);
+        let started = (AIM_TICKS + 1..AIM_TICKS + 5).flat_map(|tick| {
+            run.tick(&flail, &flail_holder, tick * TICK_MS, SERVER_MS)
+        });
+        assert!(
+            started.into_iter().any(|event| matches!(
+                event,
+                AbilityEvent::Started { ability, .. } if ability == lowercase_crc32(TRIP)
+            )),
+            "the Trip starts after the swap"
+        );
     }
 
     /// Live 2026-11-10: Sacred Ground cast once, then no press cast again (its aim action ran on

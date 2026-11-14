@@ -28,6 +28,8 @@ use nw_messages::{
 };
 use nw_sim_core::{Intent, Posture};
 
+use super::attack::counter_is_newer;
+
 /// The value of a slot's state, sequence or marker that clears it (retail `19=00 21=00 48=00`).
 const CLEARED_SLOT: u64 = 0;
 
@@ -804,7 +806,15 @@ impl SlayerTrack {
             self.swim = next;
             stroke = sequence;
         }
-        let mut movement = if entered_air {
+        // A full-body ability holds the first slot until its own end, which starts the movement
+        // the player is in then ([`SlayerTrack::ability_ended`]). Retail `general-other-01`: the
+        // flail's Burst at 171.506, 498.311 and 717.672 s, with the move keys held, kept its
+        // state until its end 617 to 634 ms later, as the two starts with no move key did. Ours
+        // sent the stop of the move 235 ms into a Trip; the client then played none of that
+        // Trip, Slam and Blast, and played all three a minute later with no cut (live
+        // 2026-11-14).
+        let ability_holds = self.ability.is_some_and(|on| on.first);
+        let movement = if entered_air {
             Some((swim::FALL_STATE, swim::FALL_SEQUENCE))
         } else if entered_water {
             Some((swim::STATE, swim::IDLE_SEQUENCE))
@@ -817,7 +827,9 @@ impl SlayerTrack {
                 started
             })
         };
-        if upper.is_some() && movement.is_none() && !self.keeps_attack() {
+        let mut movement = movement.filter(|_| !ability_holds);
+        let stroke = stroke.filter(|_| !ability_holds);
+        if upper.is_some() && movement.is_none() && !self.keeps_attack() && !ability_holds {
             // The walk changes with the block or aim: retail sent the new walk sequence in the
             // state of the right-click (`15=af10` with the aim). A draw that arrives after a
             // tap has already started the light must not replace that attack with a walk.
@@ -843,7 +855,11 @@ impl SlayerTrack {
             .or_else(|| stroke.map(Pending::Sequence));
         let posture_sequence =
             self.posture_sequence(posture_change, set, movement.is_some(), started.is_some());
-        let started = started.or_else(|| posture_sequence.map(Pending::Sequence));
+        let started = started.or_else(|| {
+            posture_sequence
+                .filter(|_| !ability_holds)
+                .map(Pending::Sequence)
+        });
         if let Some(input) = record.action {
             // The attack the client named runs now: a release or a hold follows it.
             self.running = Some((first_slot(input.sequence), record.counter));
@@ -1167,6 +1183,10 @@ impl SlayerTrack {
     /// with it as retail's `13=08 14=<press> 15=<sequence> 17=<press>`); every ability sets the
     /// slots past it and the marker it names.
     pub(super) fn ability_started(&mut self, ability: u32, play: &AbilityPlay, started: u16) {
+        let started = play
+            .first
+            .and_then(|first| self.client_named_since(first.sequence, started))
+            .unwrap_or(started);
         if let Some(first) = play.first {
             self.pending = Some((Pending::Ability(first), started, self.newest_frame_s));
             self.sequence_s = self.newest_frame_s;
@@ -1193,6 +1213,22 @@ impl SlayerTrack {
                 .is_some_and(|state| state != CLEARED_SLOT),
             cast: false,
         });
+    }
+
+    /// The record from press record `pressed` on in which the client named first-slot sequence
+    /// `sequence` itself (row 1), when it did: a full-body ability starts there. Retail
+    /// `general-other-01` 171.471 s: the client named the flail's Burst in frame 0x0e49 and the
+    /// server's start was `13=08 14=0e49 15=2c 17=0e49`. Ours started a Blast that the client
+    /// named at a later record (pressed in the Slam, it ran when the Slam let it) from the press
+    /// record, 16 records before the client's own start: two starts, the second older, and no
+    /// Blast played (live 2026-11-14).
+    fn client_named_since(&self, sequence: u64, pressed: u16) -> Option<u16> {
+        self.running
+            .filter(|(attack, counter)| {
+                *attack == first_slot(sequence)
+                    && (*counter == pressed || counter_is_newer(*counter, pressed))
+            })
+            .map(|(_, counter)| counter)
     }
 
     /// Weapon ability `ability` cast its first spell: an aimed one plays its cast `play.cast`,
@@ -3340,6 +3376,86 @@ pub(crate) mod tests {
             "back to standing still, once"
         );
         assert_eq!(end.slots.expect("the marker").marker, Some(0));
+    }
+
+    #[test]
+    fn a_full_body_ability_holds_its_state_while_the_player_starts_and_stops_moving() {
+        let table = table();
+        let forward = Intent::of_keys(true, false, false, false);
+        let mut track = spawned();
+        track.record(quiet_record(PRESS_RECORD - 1, forward), &table);
+        own_state(&mut track, PRESS_RECORD - 1);
+        track.record(quiet_record(PRESS_RECORD, forward), &table);
+        track.ability_started(TRIP, &trip(), PRESS_RECORD);
+        let start = own_state(&mut track, PRESS_RECORD + 1)
+            .state
+            .expect("the ability");
+        assert_eq!((start.state, start.sequence), (Some(8), 2344));
+        let mut counter = PRESS_RECORD;
+        for intent in [Intent::default(), Intent::default(), forward, Intent::default()] {
+            counter += 1;
+            track.record(quiet_record(counter, intent), &table);
+            let state = own_state(&mut track, counter + 1).state;
+            assert!(
+                state.is_none_or(|state| state == start),
+                "no move replaces the ability: {state:?}"
+            );
+        }
+        counter += 1;
+        track.record(quiet_record(counter, Intent::default()), &table);
+        track.ability_ended(TRIP);
+        let end = own_state(&mut track, counter + 1)
+            .state
+            .expect("the movement at the end");
+        assert_eq!(end.started, Some(counter));
+        assert_ne!(end.state, Some(8), "the ability's end leaves its state");
+    }
+
+    /// A record in which the client names the Trip's sequence in row 1.
+    fn trip_named(counter: u16) -> SlayerRecord {
+        SlayerRecord {
+            action: Some(SlayerInput {
+                sequence: 2344,
+                state: 8,
+                second_state: 0,
+                second_sequence: 0,
+            }),
+            ..quiet_record(counter, Intent::default())
+        }
+    }
+
+    #[test]
+    fn a_full_body_ability_the_client_names_starts_at_the_clients_record() {
+        let table = table();
+        let mut track = spawned();
+        track.record(quiet_record(PRESS_RECORD, Intent::default()), &table);
+        own_state(&mut track, PRESS_RECORD);
+        let named = PRESS_RECORD + 16;
+        track.record(trip_named(named), &table);
+        track.ability_started(TRIP, &trip(), PRESS_RECORD);
+        let state = own_state(&mut track, named + 1)
+            .state
+            .expect("the ability");
+        assert_eq!(
+            (state.state, state.started, state.sequence),
+            (Some(8), Some(named), 2344),
+            "one start, at the client's record"
+        );
+        assert_eq!(state.second.map(|second| second.started), Some(named));
+
+        let mut earlier = spawned();
+        earlier.record(trip_named(PRESS_RECORD - 5), &table);
+        own_state(&mut earlier, PRESS_RECORD - 5);
+        earlier.record(quiet_record(PRESS_RECORD, Intent::default()), &table);
+        earlier.ability_started(TRIP, &trip(), PRESS_RECORD);
+        let state = own_state(&mut earlier, PRESS_RECORD + 1)
+            .state
+            .expect("the ability");
+        assert_eq!(
+            state.started,
+            Some(PRESS_RECORD),
+            "a start the client named before the press is not this one"
+        );
     }
 
     #[test]

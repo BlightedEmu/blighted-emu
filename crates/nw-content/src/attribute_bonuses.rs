@@ -44,6 +44,21 @@ impl AbilityStats {
     }
 }
 
+/// The share that a held ability's `CooldownTimer` adds to every cooldown it starts: none for a
+/// row with `CDRImmediatelyOptions`, whose timer cuts running cooldowns once at its event
+/// ([`crate::passive_abilities`]). Build 25810808: 131 rows with a timer have the option (the
+/// flail's `Upgrade_Flail_Slam_Upgrade1`, `AbilitySpecific` for its Slam on a hit;
+/// `Foc_Bonus_350_1`, `All` when a heart rune is used); `Foc_Bonus_25_1` (-0.03) has none.
+/// Ours added the 131 to every cooldown: the server's flail and life staff cooldowns ended
+/// before the client's, and the client played no animation for a press the server took
+/// (live 2026-11-14).
+fn lasting_cooldown(timer: Option<f64>, immediately: Option<&str>) -> f64 {
+    if immediately.is_some_and(|options| !options.trim().is_empty()) {
+        return 0.0;
+    }
+    timer.unwrap_or_default()
+}
+
 /// The threshold abilities of every attribute and their stats.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AttributeBonuses {
@@ -58,7 +73,8 @@ pub struct AttributeBonuses {
 
 impl AttributeBonuses {
     /// The bonuses of `tables`: the `EquipAbilities` of each attribute table's rows, and the
-    /// `MaxMana`, `ManaRate` and `CooldownTimer` of every `AbilityData` row.
+    /// `MaxMana`, `ManaRate` and lasting `CooldownTimer` ([`lasting_cooldown`]) of every
+    /// `AbilityData` row.
     pub fn from_tables(tables: &Tables) -> Self {
         let thresholds = tables.attribute_definition.iter().flat_map(|table| {
             let attribute = ATTRIBUTE_NAMES
@@ -83,7 +99,10 @@ impl AttributeBonuses {
                     AbilityStats {
                         max_mana: row.max_mana.unwrap_or_default(),
                         mana_rate: row.mana_rate.unwrap_or_default(),
-                        cooldown: row.cooldown_timer.unwrap_or_default(),
+                        cooldown: lasting_cooldown(
+                            row.cooldown_timer,
+                            row.cdr_immediately_options.as_deref(),
+                        ),
                     },
                 )
             })
@@ -232,6 +251,36 @@ mod tests {
             bonuses.stats_of(["foc_bonus_25_2"]),
             AbilityStats::default()
         );
+    }
+
+    #[test]
+    fn a_cooldown_cut_at_an_event_is_no_lasting_share() {
+        assert!((lasting_cooldown(Some(-0.03), None) + 0.03).abs() < 1e-9);
+        assert!((lasting_cooldown(Some(-0.03), Some(" ")) + 0.03).abs() < 1e-9);
+        assert_eq!(lasting_cooldown(Some(-0.05), Some("AbilitySpecific")), 0.0);
+        assert_eq!(lasting_cooldown(Some(-0.07), Some("All")), 0.0);
+        assert_eq!(lasting_cooldown(None, None), 0.0);
+    }
+
+    /// The real rows: Focus 25 cuts every cooldown by 3 %; Focus 350 and the Slam's first
+    /// upgrade cut only at their events (build 25810808).
+    #[test]
+    #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
+    fn the_real_event_cuts_are_no_lasting_share() {
+        const BUILD: &str = "25810808";
+        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
+        let path = crate::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
+        let bundle = crate::ContentBundle::load(&path, BUILD).expect("bundle");
+        let bonuses = AttributeBonuses::from_tables(&bundle.tables);
+        assert!((bonuses.stats_of(["Foc_Bonus_25_1"]).cooldown + 0.03).abs() < 1e-9);
+        for event_cut in [
+            "Foc_Bonus_350_1",
+            "Upgrade_Flail_Slam_Upgrade1",
+            "Passive_Flail_Eldritch_Passive2",
+            "GlobalPerk_Ability_Flail_DefensiveStrike",
+        ] {
+            assert_eq!(bonuses.stats_of([event_cut]).cooldown, 0.0, "{event_cut}");
+        }
     }
 
     #[test]

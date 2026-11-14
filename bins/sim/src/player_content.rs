@@ -919,6 +919,10 @@ pub struct PlayerContent {
     /// The abilities attribute values hold and their mana and cooldown shares
     /// ([`nw_content::attribute_bonuses`]).
     pub attribute_bonuses: AttributeBonuses,
+    /// The CRC-32 of the lowercase `CooldownData` ability ids, in table order: the abilities of
+    /// each key's whole cooldown map (retail `general-other-01` 0.501 s: `cdmap1` to `cdmap3`
+    /// each name the 98 abilities of the table, `(1, 1)`).
+    pub cooldown_abilities: Vec<u32>,
     /// The passive abilities combat events fire, and the traits of the damage rows
     /// ([`nw_content::passive_abilities`]).
     pub passive_abilities: PassiveAbilities,
@@ -1232,6 +1236,58 @@ fn level_instanced_gathers(level: &WorldFile) -> InstancedGathers {
 /// The largest difference on each axis between a quest object's point and the capital on it, m
 /// (Observed: 0 on the four nodules; a float's rounding).
 const CAPITAL_ON_POINT_M: f32 = 0.01;
+
+/// The capitals that are no spawn group (`SPAWN_MASTER_FOLDER`), by the cell of
+/// [`CAPITAL_ON_POINT_M`] they stand in: a point's capitals are in its cell and the 26 around
+/// it. Each point scanned every capital of the level before, and the open world's quest points
+/// held the sim's start for 59 s (live 2026-11-13: since then a client could not rejoin after a
+/// restart, the world refused it while the sims loaded).
+struct CapitalsOnPoints<'a> {
+    capitals: &'a [Capital],
+    cells: HashMap<[i64; 3], Vec<usize>>,
+}
+
+impl<'a> CapitalsOnPoints<'a> {
+    fn of(capitals: &'a [Capital]) -> Self {
+        let mut cells: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
+        for (index, capital) in capitals.iter().enumerate() {
+            if !capital.slice_name.starts_with(SPAWN_MASTER_FOLDER) {
+                cells
+                    .entry(on_point_cell(capital.position))
+                    .or_default()
+                    .push(index);
+            }
+        }
+        Self { capitals, cells }
+    }
+
+    /// The capitals on `point` (each axis within [`CAPITAL_ON_POINT_M`]), in their order.
+    fn on(&self, point: [f32; 3]) -> Vec<&'a Capital> {
+        let [x, y, z] = on_point_cell(point);
+        let mut near: Vec<usize> = (-1..=1)
+            .flat_map(|dx| (-1..=1).flat_map(move |dy| (-1..=1).map(move |dz| [x + dx, y + dy, z + dz])))
+            .filter_map(|cell| self.cells.get(&cell))
+            .flatten()
+            .copied()
+            .filter(|&index| {
+                self.capitals[index]
+                    .position
+                    .iter()
+                    .zip(point)
+                    .all(|(a, b)| (a - b).abs() <= CAPITAL_ON_POINT_M)
+            })
+            .collect();
+        near.sort_unstable();
+        near.into_iter().map(|index| &self.capitals[index]).collect()
+    }
+}
+
+/// The [`CAPITAL_ON_POINT_M`] cell of `position`.
+fn on_point_cell(position: [f32; 3]) -> [i64; 3] {
+    // A world coordinate over a centimetre fits an i64.
+    #[allow(clippy::cast_possible_truncation, reason = "world coordinates in metres")]
+    position.map(|axis| (axis / CAPITAL_ON_POINT_M).floor() as i64)
+}
 /// The part of a capital's slice name that marks an object broken by weapon hits (lower case:
 /// the 162 `Master_Quest_Damageable_Instanced` capitals of the open world and the other
 /// `*_Damageable_*` quest slices).
@@ -1286,22 +1342,13 @@ impl QuestObjects {
         drop_sources: &HashSet<String>,
         capitals: &[Capital],
     ) -> Self {
+        let on_points = CapitalsOnPoints::of(capitals);
         let objects: Vec<QuestObject> = points
             .iter()
             .filter_map(|point| {
                 let gatherable = gatherables.get(point.gatherable_id)?;
                 let event = gatherable.game_event.clone()?;
-                let on_point: Vec<&Capital> = capitals
-                    .iter()
-                    .filter(|capital| {
-                        !capital.slice_name.starts_with(SPAWN_MASTER_FOLDER)
-                            && capital
-                                .position
-                                .iter()
-                                .zip(point.position)
-                                .all(|(a, b)| (a - b).abs() <= CAPITAL_ON_POINT_M)
-                    })
-                    .collect();
+                let on_point = on_points.on(point.position);
                 // The damageable capital is the object when one stands on the point (the
                 // tablet's point holds another capital too).
                 let damageable = on_point.iter().copied().find(|capital| {
@@ -1587,6 +1634,12 @@ impl PlayerContent {
                 .collect(),
             perk_effects: PerkEffects::from_tables(tables),
             attribute_bonuses: AttributeBonuses::from_tables(tables),
+            cooldown_abilities: tables
+                .cooldown_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .map(|row| lowercase_crc32(&row.ability_id))
+                .collect(),
             passive_abilities: PassiveAbilities::from_tables(tables),
             deaths_door: DeathsDoorRules::from_tables(tables),
             mounts: MountRules::from_tables(tables),
@@ -1845,6 +1898,31 @@ mod tests {
             None,
             "a mission without a place changes nothing"
         );
+    }
+
+    #[test]
+    fn the_capitals_on_a_point_are_those_within_a_centimetre_in_their_order() {
+        const HALF_CELL_M: f32 = CAPITAL_ON_POINT_M / 2.0;
+        let capital = |id: &str, slice: &str, position| Capital {
+            id: id.to_owned(),
+            slice_name: slice.to_owned(),
+            position,
+            ..Capital::default()
+        };
+        let capitals = [
+            capital("near-across-a-cell", "slices/a", [-HALF_CELL_M, 0.0, HALF_CELL_M]),
+            capital("too-far", "slices/b", [3.0 * CAPITAL_ON_POINT_M, 0.0, 0.0]),
+            capital("spawn-group", "CoatGen\\x\\Master", [0.0, 0.0, 0.0]),
+            capital("on-it", "slices/c", [HALF_CELL_M, 0.0, 0.0]),
+        ];
+        let on = CapitalsOnPoints::of(&capitals);
+        let ids: Vec<&str> = on
+            .on([HALF_CELL_M / 2.0, 0.0, 0.0])
+            .into_iter()
+            .map(|capital| capital.id.as_str())
+            .collect();
+        assert_eq!(ids, ["near-across-a-cell", "on-it"]);
+        assert!(on.on([100.0, 0.0, 0.0]).is_empty());
     }
 
     #[test]

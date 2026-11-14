@@ -4758,6 +4758,7 @@ impl SimWorld {
             bags: &self.bags,
             performances: &self.performances,
             progression: &content.progression,
+            cooldown_abilities: &content.cooldown_abilities,
             mutations: &content.mutations,
             mutation_unix_s: self.unix_s(),
             territories: &self.territories,
@@ -5425,6 +5426,8 @@ struct Neighbourhood<'a> {
     performances: &'a music::Performances,
     /// The level table and the weapon masteries.
     progression: &'a Progression,
+    /// The abilities of each key's whole cooldown map ([`PlayerContent::cooldown_abilities`]).
+    cooldown_abilities: &'a [u32],
     /// The week's mutated expeditions.
     mutations: &'a MutationCatalog,
     /// Unix seconds of this tick, for the mutation week.
@@ -5742,8 +5745,22 @@ impl Neighbourhood<'_> {
                         elements: player.cooldowns.clone(),
                     }
                 });
-                let mut keys: [Option<CooldownMap>; nw_messages::MAX_MAPPED_SLOTS] =
-                    Default::default();
+                // A first own state carries each key's whole map, as retail's login and level
+                // cards do ([`super::abilities::AbilityRun::whole_cooldown_maps`]).
+                let mut keys: [Option<CooldownMap>; nw_messages::MAX_MAPPED_SLOTS] = if first {
+                    player
+                        .abilities
+                        .whole_cooldown_maps(self.cooldown_abilities, self.server_time)
+                        .map(|elements| {
+                            player.list_version += 1;
+                            Some(CooldownMap::Full(FullList {
+                                version: Some(player.list_version),
+                                elements,
+                            }))
+                        })
+                } else {
+                    Default::default()
+                };
                 for (key, cooldown) in player.abilities.take_cooldown_changes() {
                     player.list_version += 1;
                     let change = CooldownChange {
@@ -5875,11 +5892,12 @@ impl Neighbourhood<'_> {
                 let plain_tick = own_card != OwnCard::Spawn && teleport.is_none();
                 let hold_throttle = std::mem::take(&mut player.defer_throttle_clear);
                 let slayer = player.slayer.take_due();
-                if let Some(state) = slayer.state {
+                if slayer.state.is_some() || slayer.slots.is_some() {
                     tracing::debug!(
                         player = player.number,
-                        ?state,
+                        state = ?slayer.state,
                         time = ?slayer.time,
+                        slots = ?slayer.slots,
                         "own slayer state"
                     );
                 }
