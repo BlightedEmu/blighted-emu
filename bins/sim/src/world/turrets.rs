@@ -187,6 +187,20 @@
 //! for the damage a player dealt with a siege weapon). A kit refill or repair of an Outpost
 //! Rush turret is refused (Inferred: it lacks no ammo, and its health is repaired with
 //! resources as any outpost structure).
+//!
+//! **The Isle of Night ballista** (batch E1; Observed, game mode `RaidMonarchsBluffs00`, the
+//! encounter `EncounterCh01Boss01` spawns `ion_ballista` as its target 22; `ION-a9280e800e2eccdc`
+//! 440.476 to 816.116 s, the ballistas other players used): each spawns with one bolt (spawner
+//! ammo 1, not blocked); a use shows one interactor, its shot leaves it with no ammo and firing
+//! blocked (530.724 s), the user goes (531.192 s); the `AddAmmo` option
+//! (`RaidMonarchsBluffs00AddAmmo`, `m_ammoAmount` 1) then shows its cooldown (option 1, ending
+//! 1 s later, [`AMMO_ADD_COOLDOWN_MS`]) and the ammo 1 (532.259 s), and the firing block goes
+//! (533.228 s). An encounter's turret is the level's ([`TurretHost::Level`]:
+//! [`SimWorld::spawn_encounter_turret`], [`SimWorld::remove_encounter_turret`]), of the level's
+//! side: every player uses it. Inferred: its ammo add costs the status effect of the gatherable
+//! `IoN_Balista_Bolt` (`Raid_IoN_Balista_Bolt`; the Isle of Night tables name no other cost and
+//! no item), which the player loses ([`nw_content::war_forts::TurretKind::ammo_effect`]); it
+//! takes no harm (no capture shows a hit on one).
 
 use bevy_ecs::entity::Entity;
 use nw_bus::ConnectionRef;
@@ -203,17 +217,18 @@ use nw_messages::turrets::{
     TurretClientMsg, gde_ref_of, turret_half,
 };
 use nw_messages::war_states::GDE_REF_LEN;
+use nw_messages::position::POSITION_IN_THE_WORLD_TYPE_INDEX;
 use nw_messages::{
-    BundleMember, ClaimOwner, FacetHeader, InteractionRequest, MemberState, OwnershipState,
-    ServerMessage, TurretState,
+    BundleMember, ClaimOwner, FacetHeader, FullList, InteractCooldown, InteractCooldownState,
+    InteractState, InteractionRequest, MemberState, OwnershipState, ServerMessage, TurretState,
 };
 use nw_sim_core::{Ground, Position};
 
 use super::attack::Vitals;
-use super::crafting::Station;
+use super::crafting::{Station, dynamic_ref};
 use super::projectile::AimLine;
 use super::shot_entity::{BODY_HIT_VOLUME, ProjectileSpawn, velocity};
-use super::siege_areas::{AreaSource, rotation_of};
+use super::siege_areas::{AreaSource, LEVEL_SIDE, level_ownership, rotation_of};
 use super::siege_structures::{
     Hurt, NO_INTERACTORS, OPEN_SELECTION_KIND, StructureBody, StructureRun, spawn_members,
 };
@@ -286,12 +301,30 @@ pub(super) const ITEM_COST_KIND: u8 = 53;
 pub(super) const AMMO_KIT: &str = "AmmoKit";
 pub(super) const REPAIR_KIT: &str = "RepairKit";
 const KIT_COST: u32 = 1;
+/// The option of an encounter turret's ammo add and how long it stays on cooldown after it
+/// (Observed: option 1, `RaidMonarchsBluffs00AddAmmo`, its end 1 s after the add,
+/// `ION-a9280e800e2eccdc` 532.259 and 689.652 s; module doc, **The Isle of Night ballista**).
+const AMMO_ADD_OPTION: u32 = 1;
+const AMMO_ADD_COOLDOWN_MS: u64 = 1_000;
+/// The namespace of the `GdeRef`s of encounter turrets ("encturet").
+const ENCOUNTER_TURRET_NAMESPACE: u64 = 0x656e_6374_7572_6574;
 /// The body a shot meets on a turret (Inferred: the turret's collision shape is not read; about
 /// its base, 3 m wide and 3 m high).
 const TURRET_BODY: Capsule = Capsule {
     radius_m: 1.5,
     height_m: 3.0,
 };
+/// The body a hit or a shot meets on the structure `body`: a gate's reaches its slice's
+/// physical radius and as high (Inferred: the gate slices' collision shapes are not read; their
+/// `m_slicePhysicalGridRadius`, 10.23 m for `siege_fortgate_l_t2`, bounds the slice), every other
+/// structure's is [`TURRET_BODY`].
+fn structure_body(body: &StructureBody) -> Capsule {
+    body.reach_m.map_or(TURRET_BODY, |reach_m| Capsule {
+        radius_m: reach_m,
+        height_m: reach_m,
+    })
+}
+
 /// The body a shot meets on a war capture point (Inferred: the point slice's collision shape is
 /// not read; the two retail impacts, `joining_defending_war_2` 1282.655 and 1282.887 s, met it
 /// 0.5 m from its place and 0.2 m above it, so a low disc around its place).
@@ -467,6 +500,8 @@ pub(super) enum TurretHost {
     War,
     /// The Outpost Rush match ([`super::outpost_rush_structures::OutpostStructures::turrets`]).
     OutpostRush,
+    /// The level itself, outside a fight ([`super::siege_areas::LevelSiege`]).
+    Level,
 }
 
 /// A cannon ball on its way.
@@ -513,6 +548,8 @@ pub(crate) struct TurretRun {
     last_shot_ns: Option<u64>,
     /// Its balls on their way.
     pub(super) balls: Vec<BallFlight>,
+    /// How many ammo adds paid with a status effect it took (the version of its cooldown list).
+    effect_adds: u64,
 }
 
 impl TurretRun {
@@ -543,6 +580,7 @@ impl TurretRun {
             used: false,
             last_shot_ns: None,
             balls: Vec::new(),
+            effect_adds: 0,
         })
     }
 
@@ -930,10 +968,10 @@ impl SimWorld {
         if self.war_fight().is_some() {
             return Some(TurretHost::War);
         }
-        self.arena_matches
-            .outpost_rush
-            .as_ref()
-            .map(|_| TurretHost::OutpostRush)
+        if self.arena_matches.outpost_rush.is_some() {
+            return Some(TurretHost::OutpostRush);
+        }
+        Some(TurretHost::Level)
     }
 
     /// Runs `body` on the turrets of this sim's fight ([`Self::turret_host`]) and puts them
@@ -954,6 +992,7 @@ impl SimWorld {
                 .as_mut()
                 .map(|running| std::mem::take(&mut running.structures.turrets))
                 .unwrap_or_default(),
+            TurretHost::Level => std::mem::take(&mut self.wars.level.turrets),
         };
         let result = body(self, &mut turrets);
         match host {
@@ -965,6 +1004,7 @@ impl SimWorld {
                     running.structures.turrets = turrets;
                 }
             }
+            TurretHost::Level => self.wars.level.turrets = turrets,
         }
         Some(result)
     }
@@ -977,7 +1017,10 @@ impl SimWorld {
             return Some(side);
         }
         let number = self.world.get::<Player>(entity)?.number;
-        self.arena_matches.outpost_rush.as_ref()?.team_of(number)
+        match self.turret_host() {
+            Some(TurretHost::Level) => Some(LEVEL_SIDE),
+            _ => self.arena_matches.outpost_rush.as_ref()?.team_of(number),
+        }
     }
 
     /// Turret `index` of this sim's fight takes `amount` from a shot of player `shooter`: a war
@@ -1005,6 +1048,12 @@ impl SimWorld {
                     self.hit_outpost_target(target, amount, shooter);
                 }
             }
+            Some(TurretHost::Level) => {
+                if let Some(mut run) = self.wars.level.turrets.get(index).cloned() {
+                    self.hurt_turret(&mut run, amount);
+                    self.wars.level.turrets[index] = run;
+                }
+            }
             None => {}
         }
     }
@@ -1029,6 +1078,19 @@ impl SimWorld {
             }
             (HeldHit::Structure(number), Some(TurretHost::OutpostRush)) => {
                 self.hit_outpost_target(number, amount, shooter);
+            }
+            (HeldHit::Structure(number), Some(TurretHost::Level)) => {
+                if let Some(index) = self
+                    .wars
+                    .level
+                    .droppers
+                    .iter()
+                    .position(|run| run.body.number == number)
+                {
+                    let mut run = self.wars.level.droppers[index].clone();
+                    self.hurt_structure_run(&mut run, amount);
+                    self.wars.level.droppers[index] = run;
+                }
             }
             (HeldHit::Structure(_), None) => {}
         }
@@ -1204,10 +1266,15 @@ impl SimWorld {
     }
 
     /// Player `entity` spends one kit on `run` (module doc): an ammo kit on a turret that lacks
-    /// ammo, else a repair kit on one that lacks health; whether it spent one.
+    /// ammo, else a repair kit on one that lacks health; whether it spent one. An encounter's
+    /// turret whose ammo costs a status effect takes that effect instead of the ammo kit
+    /// ([`Self::add_ammo_for_effect`]).
     fn spend_kit_on(&mut self, entity: Entity, run: &mut TurretRun) -> bool {
         let refill = run.kind.ammo_refill.filter(|_| run.kind.uses_ammo);
         let lacks_ammo = refill.is_some() && run.ammo < run.kind.max_ammo;
+        if let Some(effect) = run.kind.ammo_effect.clone() {
+            return lacks_ammo && self.add_ammo_for_effect(entity, run, &effect);
+        }
         let lacks_health = run.body.health < run.body.max_health;
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return false;
@@ -1235,6 +1302,116 @@ impl SimWorld {
             return true;
         }
         false
+    }
+
+    /// Player `entity` adds the ammo of `run`'s `AddAmmo` option (`m_ammoAmount`) for status
+    /// effect `effect`, which it loses (module doc, **The Isle of Night ballista**): the spawner
+    /// shows the ammo, and the interact the option's cooldown; `false` when the player holds no
+    /// such effect.
+    fn add_ammo_for_effect(&mut self, entity: Entity, run: &mut TurretRun, effect: &str) -> bool {
+        let crc = nw_formats::objectstream::lowercase_crc32(effect);
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return false;
+        };
+        if !player.status_effects.holds(crc) {
+            return false;
+        }
+        player.status_effects.remove(crc);
+        let refill = run.kind.ammo_refill.unwrap_or_default();
+        run.ammo = run.ammo.saturating_add(refill).min(run.kind.max_ammo);
+        run.effect_adds = run.effect_adds.saturating_add(1);
+        let cooldown = run.body.structure.interact_component.map(|component| BundleMember {
+            component,
+            state: MemberState::InteractCooldown(InteractCooldownState {
+                interact: InteractState {
+                    enabled: None,
+                    has_interactors: Some(NO_INTERACTORS),
+                },
+                cooldown_updates: FullList {
+                    version: Some(run.effect_adds),
+                    elements: vec![InteractCooldown {
+                        option: AMMO_ADD_OPTION,
+                        ends_unix_ns: super::unix_ns(
+                            self.server_ms.saturating_add(AMMO_ADD_COOLDOWN_MS),
+                        ),
+                    }],
+                },
+            }),
+        });
+        let partial = cooldown
+            .into_iter()
+            .chain(run.spawner_member(ProjectileSpawnerState {
+                ammo: Some(run.ammo),
+                firing_blocked: None,
+            }))
+            .collect();
+        self.sync_turret(run, partial);
+        true
+    }
+
+    /// Spawns the turret of slice `slice` that an encounter of this instance puts at `at` turned
+    /// `yaw_deg` (module doc, **The Isle of Night ballista**; the dungeon script's object spawn):
+    /// its retail template ([`nw_content::war_forts::WarForts::encounter_turret`]) with that place
+    /// and a new `GdeRef`, of the level's side, held by the level
+    /// ([`super::siege_areas::LevelSiege`]): its slot key; `None` when the table holds no turret
+    /// of that slice.
+    pub(crate) fn spawn_encounter_turret(
+        &mut self,
+        slice: &str,
+        at: [f32; 3],
+        yaw_deg: f32,
+    ) -> Option<u64> {
+        const HALF: f32 = 0.5;
+        let content = std::sync::Arc::clone(&self.content);
+        let (template, kind) = content.war_forts.encounter_turret(slice)?;
+        let yaw = yaw_deg.to_radians();
+        let members = template
+            .members
+            .iter()
+            .map(|bytes| match BundleMember::read_from(bytes) {
+                Ok((member, _))
+                    if member.state.type_index() == POSITION_IN_THE_WORLD_TYPE_INDEX =>
+                {
+                    super::encounter_roots::place_member(member.component, at, yaw * HALF)
+                        .encode()
+                        .unwrap_or_else(|_| bytes.clone())
+                }
+                _ => bytes.clone(),
+            })
+            .collect();
+        self.wars.level.turrets_made = self.wars.level.turrets_made.saturating_add(1);
+        let turret = FortStructure {
+            gde_ref: dynamic_ref(ENCOUNTER_TURRET_NAMESPACE, self.wars.level.turrets_made),
+            place: at,
+            yaw,
+            side: LEVEL_SIDE,
+            members,
+            ..template.clone()
+        };
+        let run = self.place_turret(turret, kind.clone(), level_ownership(), false)?;
+        let number = run.body.number;
+        self.wars.level.turrets.push(run);
+        Some(number)
+    }
+
+    /// The encounter's turret of slot key `number` goes (the dungeon script removed its object):
+    /// its user is let go and its slot stops; `false` when `number` is none of them.
+    pub(crate) fn remove_encounter_turret(&mut self, number: u64) -> bool {
+        let Some(index) = self
+            .wars
+            .level
+            .turrets
+            .iter()
+            .position(|run| run.body.number == number)
+        else {
+            return false;
+        };
+        let mut run = self.wars.level.turrets.remove(index);
+        if run.user.is_some() {
+            self.release_turret(&mut run);
+        }
+        self.stations.remove_camp(run.body.number);
+        true
     }
 
     /// Turret `run` takes `amount` health (module doc): a hit, or its break at 0 (a user of a
@@ -1335,12 +1512,8 @@ impl SimWorld {
             .into_iter()
             .map(|(target, at, body)| (TurretShotTarget::Shot(target), at, body))
             .collect();
-        let structure = |number, facet, at, foe| {
-            (
-                TurretShotTarget::Structure { number, facet, foe },
-                at,
-                TURRET_BODY,
-            )
+        let structure = |number, facet, at, foe, capsule| {
+            (TurretShotTarget::Structure { number, facet, foe }, at, capsule)
         };
         if let Some(fight) = self.war_fight() {
             targets.extend(
@@ -1351,7 +1524,13 @@ impl SimWorld {
                     .map(|run| {
                         let body = &run.body;
                         let foe = body.structure.side != side;
-                        structure(body.number, body.structure.facet_entity(), body.place(), foe)
+                        structure(
+                            body.number,
+                            body.structure.facet_entity(),
+                            body.place(),
+                            foe,
+                            structure_body(body),
+                        )
                     }),
             );
             targets.extend(fight.standing_points().map(|(facet, at)| {
@@ -1369,7 +1548,7 @@ impl SimWorld {
                     .structures
                     .shot_structures(raid, &turret_numbers)
                     .into_iter()
-                    .map(|(number, facet, at, foe)| structure(number, facet, at, foe)),
+                    .map(|(number, facet, at, foe)| structure(number, facet, at, foe, TURRET_BODY)),
             );
         }
         targets
@@ -1483,7 +1662,7 @@ impl SimWorld {
             .map(|run| &run.body)
             .chain(fight.structures.iter().map(|run| &run.body))
             .filter(|body| body.structure.side != side && !body.broken && !body.invulnerable)
-            .map(|body| (body.number, body.place(), TURRET_BODY))
+            .map(|body| (body.number, body.place(), structure_body(body)))
             .collect()
     }
 
@@ -1574,11 +1753,18 @@ impl SimWorld {
         let body = body_on_line(muzzle, line, (run.kind.range_m, run.kind.radius_m), bodies)
             .filter(|(_, along)| ground_m.is_none_or(|ground_m| *along <= ground_m));
         let along = body.map_or(ground_m.unwrap_or(run.kind.range_m), |(_, along)| along);
-        let at = point_on(muzzle, line, along);
+        // A solid of the level on the way stops the shot: its level entity is the target, no
+        // hit volume (projectile module doc, **Level stops**; `opr_que_and_lost` 54 shots).
+        let level = self.level_stop(muzzle, point_on(muzzle, line, along));
+        let body = body.filter(|_| level.is_none());
+        let at = level.map_or_else(|| point_on(muzzle, line, along), |stop| stop.at);
         let result = CombatEffectMsg::TurretHitscanResult {
             header: run.turret_header(),
             position: [at.x, at.y, at.z],
-            target: body.map_or(NO_TARGET, |(target, _)| target.facet()),
+            target: level.map_or_else(
+                || body.map_or(NO_TARGET, |(target, _)| target.facet()),
+                |stop| stop.entity.unwrap_or(NO_TARGET),
+            ),
             result: body.map_or(NO_HIT_VOLUME, |(target, _)| target.hit_volume()),
         };
         self.send_to_all(&[ServerMessage::CombatEffect(result)]);
@@ -1638,6 +1824,19 @@ impl SimWorld {
             bodies,
             |x, y| ground.height_at(x, y),
         );
+        // A solid of the level on the ball's way stops it (Inferred: the straight line from the
+        // muzzle to its end, the flight time by the share of the way).
+        let (flight_s, at, target) = match self.level_stop(muzzle, at) {
+            Some(stop) => {
+                let way_m = muzzle.horizontal_distance(at).max(f32::EPSILON);
+                (
+                    flight_s * stop.along_m / way_m,
+                    stop.at,
+                    stop.entity.map(|facet| TurretShotTarget::Obstacle { facet }),
+                )
+            }
+            None => (flight_s, at, target),
+        };
         let flight_ms = (flight_s * MS_PER_SECOND) as u64;
         let spawn = ProjectileSpawn {
             asset: projectile.asset,
@@ -1794,6 +1993,7 @@ impl SimWorld {
         &mut self,
         now_ms: u64,
     ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
+        self.spawn_level_droppers();
         self.with_turrets(|world, fight| world.tick_siege_builds(fight, now_ms));
         let mut outcomes = Vec::new();
         let (structure_hits, shell_areas) = self
@@ -1882,7 +2082,12 @@ impl SimWorld {
                 Some(TurretShotTarget::Shot(ShotTarget::Body(number))) => Some(number),
                 _ => None,
             };
-            self.shot_entity_impact(ball.entity, body, ball.at, now_ms);
+            match ball.target {
+                Some(TurretShotTarget::Obstacle { facet }) => {
+                    self.shot_entity_on_level(ball.entity, Some(facet), ball.at, now_ms);
+                }
+                _ => self.shot_entity_impact(ball.entity, body, ball.at, now_ms),
+            }
             if let Some(area) = &run.kind.area {
                 let source = self.area_source(
                     run.body.structure.side,
@@ -2293,9 +2498,9 @@ pub(crate) mod tests {
         /// A supply generator of the fort (made-up: its ownership component alone) and its kind.
         const GENERATOR_ASSET: &str = "55245fed30cd5320a05871053318e674";
         const GENERATOR_REF: [u8; 16] = [0x46; 16];
-        /// The side numbers of the test war (number 4714).
-        const ATTACKER_RAID: u64 = 9_428;
-        const DEFENDER_RAID: u64 = 9_429;
+        /// The side numbers of the test war (number 4714: the war's number and the next).
+        const ATTACKER_RAID: u64 = 4_714;
+        const DEFENDER_RAID: u64 = 4_715;
         const NO_RAID: u64 = 0;
         const NO_COMPANY: [u8; 16] = [0; 16];
         const RESULT_MS: u64 = 1;
@@ -3327,5 +3532,79 @@ pub(crate) mod tests {
             NO_HIT_VOLUME
         );
         assert_eq!(NO_HIT_VOLUME, 0xff, "the client's none");
+    }
+
+    /// Module doc, **The Isle of Night ballista**: an encounter's ballista spawns on the level
+    /// holder at its place with its template; with no bolt effect an ammo add is refused, with
+    /// one it takes the effect for one bolt and shows the add's 1 s cooldown on option 1.
+    #[test]
+    fn an_encounter_ballista_adds_a_bolt_for_the_bolt_effect() {
+        use nw_content::status_effects::{EffectSourceRow, StatusEffectRules, StatusEffectSource};
+        const ION: [u8; 16] = *b"\xf6\x8a\x9e\x17\x8a\xb3\x52\x69\xaa\x84\x07\x0e\x17\x87\x74\x43";
+        const BOLT: &str = "Raid_IoN_Balista_Bolt";
+        const BOLT_S: f64 = 600.0;
+        const POTENCY: f64 = 1.0;
+        let table = r#"{"forts": [],
+          "encounter_turrets": [{"asset": "f68a9e178ab35269aa84070e17877443", "gde_ref": "ea26269102231a28c9bba7d9f6e172d0",
+            "card_component": 0, "turret_component": 18, "interact_component": 16, "spawner_component": 20,
+            "ownership_component": 4, "members": ["020d010346561b6a45c6e19412f2037a6a", "14390103000100"]}],
+          "turret_kinds": [{"asset": "f68a9e178ab35269aa84070e17877443", "slice": "slices/characters/expeditions/isleofnight/ion_ballista.dynamicslice",
+            "hold_to_fire": false, "repeat_fire_delay_s": 0.0, "fire_speed_mps": 50.0, "yaw_max_deg": 75.0,
+            "pitch_min_deg": -20.0, "pitch_max_deg": 25.0, "heat_capacity": 0.0, "heat_gain_per_s": 0.0,
+            "heat_loss_per_s": 0.0, "heat_loss_delay_s": 0.0, "fire_cooldown_s": 3.0, "gravity_mps2": 13.0,
+            "uses_ammo": true, "max_ammo": 1, "ammo_refill": 1, "repair_health": 5000.0,
+            "damage_table": "DamageTable_Structures", "damage_row": "Ballista_Projectile", "range_m": 115.0, "radius_m": 0.3,
+            "turret_facet": {"component": "0000000000000001", "xor": "0000000000000002"},
+            "spawner_facet": {"component": "0000000000000003", "xor": "0000000000000004"},
+            "projectile": {"asset": "047a2b6174ae57e49a703b1f72516490", "component": 1, "ranged_attack": 261,
+                           "damage_table_crc": 81017683, "row_index": 6},
+            "ammo_effect": "Raid_IoN_Balista_Bolt"}]}"#;
+        let mut world = world_with_spawns(Vec::new());
+        world.content = Arc::new(PlayerContent {
+            war_forts: WarForts::parse(table).expect("table"),
+            status_effects: StatusEffectRules::build(StatusEffectSource {
+                effects: vec![EffectSourceRow {
+                    status_id: BOLT.to_owned(),
+                    base_duration_s: Some(BOLT_S),
+                    stack_max: Some(1),
+                    ..EffectSourceRow::default()
+                }],
+                ..StatusEffectSource::default()
+            }),
+            ..PlayerContent::default()
+        });
+        let admit = admit_at(DEFENDER, 0.0, true);
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let entity = world.player_by_number(DEFENDER).expect("player");
+        const SLICE: &str = "slices/characters/expeditions/isleofnight/ion_ballista.dynamicslice";
+        let number = world.spawn_encounter_turret(SLICE, [5.0, 0.0, 0.0], 0.0).expect("spawned");
+        assert!(world.spawn_encounter_turret("slices/none.dynamicslice", [5.0, 0.0, 0.0], 0.0).is_none(), "no such turret");
+        let ion_ref = world.wars.level.turrets[0].body.structure.gde_ref;
+        assert_eq!(world.wars.level.turrets[0].body.structure.asset, ION);
+        let run = &world.wars.level.turrets[0];
+        assert_eq!((run.ammo, run.body.structure.side), (1, LEVEL_SIDE), "one bolt");
+        world.wars.level.turrets[0].ammo = 0;
+        let add = InteractionRequest {
+            kind: ITEM_COST_KIND,
+            ..use_request(ion_ref)
+        };
+        assert!(world.turret_interaction(entity, DEFENDER, add, &[], NOW));
+        assert_eq!(world.wars.level.turrets[0].ammo, 0, "no bolt effect: refused");
+        let content = Arc::clone(&world.content);
+        let crc = nw_formats::objectstream::lowercase_crc32(BOLT);
+        {
+            let mut player = world.world.get_mut::<Player>(entity).expect("player");
+            assert!(player.status_effects.add_by_id(&content.status_effects, BOLT, POTENCY, DEFENDER, NOW));
+        }
+        assert!(world.turret_interaction(entity, DEFENDER, add, &[], NOW));
+        assert_eq!(world.wars.level.turrets[0].ammo, 1, "one bolt added");
+        assert!(!world.world.get::<Player>(entity).expect("player").status_effects.holds(crc), "the effect is spent");
+        let slot = crate::world::slots::Slot { interest: 1, new: false };
+        let sent = world.stations.group(number, slot).map(|group| group.members).unwrap_or_default();
+        assert!(sent.iter().any(|member| matches!(&member.state,
+            MemberState::InteractCooldown(state) if state.cooldown_updates.elements.iter().any(|entry| entry.option == AMMO_ADD_OPTION))));
+        assert!(!world.remove_encounter_turret(number.saturating_add(1)), "not a turret");
+        assert!(world.remove_encounter_turret(number));
+        assert!(world.wars.level.turrets.is_empty() && world.stations.members(number).is_none());
     }
 }

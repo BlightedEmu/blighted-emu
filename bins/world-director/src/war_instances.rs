@@ -122,7 +122,7 @@ mod tests {
                   "card_component": 0, "state_component": 2},
         "points": [{"number": 4, "asset": "33333333333333333333333333333333",
            "gde_ref": "08070605040302011111111111111111", "facet": "0a0b0c0d0e0f0001",
-           "place": [5902.48, 5428.12, 57.7], "kind": 6, "position": "020d0103",
+           "place": [5902.48, 5428.12, 57.7], "kind": 6, "position": "020d010345b873d645a9a0f2133903b309",
            "card_component": 0, "position_component": 2, "ownership_component": 1, "point_component": 4}]}]}"#;
 
     fn signup(character: u128, place: Option<(u8, u8)>) -> WarSignup {

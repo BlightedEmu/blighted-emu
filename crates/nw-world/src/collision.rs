@@ -10,7 +10,9 @@
 //! marks are [`NavMark`]s. Shapes are kept once in [`LevelCollision::geometries`]
 //! and shared by the bodies that place them. The solids of slices that a spawner places later
 //! (an encounter's fog wall, an event's walls: not on initialize) are kept apart as
-//! [`DeferredSlice`]s, which the server adds while it shows them. The file is the shared header of
+//! [`DeferredSlice`]s, which the server adds while it shows them. The level entity that places
+//! each body of the level as it loads is a [`BodyEntity`]: what a shot that meets the body names.
+//! The file is the shared header of
 //! `nw_content::container` with magic `NWCO`, then a postcard body of one [`LevelCollision`].
 //! [`crate::collision_index::CollisionIndex`] answers the floor and ray queries.
 
@@ -30,7 +32,7 @@ pub const COLLISION_MAGIC: [u8; 4] = *b"NWCO";
 pub const COLLISION_FORMAT_VERSION: u16 = 1;
 /// Version of the record types. Raise it when a type in this module changes; the golden test
 /// fails until it is raised.
-pub const COLLISION_SCHEMA_VERSION: u32 = 4;
+pub const COLLISION_SCHEMA_VERSION: u32 = 5;
 /// Header fields of the collision file.
 pub const COLLISION_CONTAINER: ContainerSpec = ContainerSpec {
     magic: COLLISION_MAGIC,
@@ -68,6 +70,30 @@ pub struct LevelCollision {
     pub player_only: Vec<u32>,
     /// The level designers' navigation marks of the level as it loads.
     pub nav_marks: Vec<NavMark>,
+    /// The level entity of each body of [`Self::bodies`] that one places, by body index in
+    /// increasing order ([`Self::entity_of`]).
+    pub entities: Vec<BodyEntity>,
+}
+
+/// The level entity that places a body of [`LevelCollision::bodies`]: a capital, or a slice that
+/// a capital's slice spawns as the level loads.
+///
+/// Observed (findings `2026-11-13-outpost-rush-turrets.md`, helpers B15 and B19): a retail turret
+/// shot that meets the level names its GDE id as the 2720 target with hit volume `ff`
+/// (`opr_que_and_lost` 54 shots on `d2667a566f022663`, the capital id of the OPR Vertical outer
+/// perimeter wall `opr_vertical_outer_perimeter_5112…`; `0975e411d7be28b3`, the capital
+/// `opr_vertical_capturepoint_fort_1`), and the projectile state names it as its
+/// `collidedWithGDEId`. A capital's id is [`crate::capitals::capital_id`] (tag 3); a spawned
+/// slice's is its packed place [`crate::slice_data::spawned_gde_id`] (tag 7, GDE id note
+/// section 4: the Reekwater targets `58…`, `02…` and `86d05b09352aba87` differ in the asset bits
+/// only, three slices on one place). The solids of the region chunks and of the trees and stones
+/// of `region.distribution` belong to no entity of either kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BodyEntity {
+    /// The body, by index into [`LevelCollision::bodies`].
+    pub body: u32,
+    /// The entity's GDE id (the facet entity the client knows it by).
+    pub id: u64,
 }
 
 /// A level designer's navigation mark (the navigation obstacle mesh component, `m_navArea` 0
@@ -267,6 +293,15 @@ impl LevelCollision {
             .filter(|(distance, _)| *distance <= within)
             .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(_, deferred)| deferred)
+    }
+
+    /// The GDE id of the level entity that places body `body` of [`Self::bodies`]; `None` for a
+    /// body of no entity.
+    pub fn entity_of(&self, body: u32) -> Option<u64> {
+        self.entities
+            .binary_search_by_key(&body, |entity| entity.body)
+            .ok()
+            .map(|index| self.entities[index].id)
     }
 
     /// The bodies that block `filter` as the level loads.
@@ -477,7 +512,11 @@ mod tests {
         1, 0, // nav_marks: the top of box 1 in place.
         1, 1, 1, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0,
+        // entities: body 0 of the start beach watchtower's capital.
+        1, 0, 195, 164, 161, 130, 196, 179, 152, 138, 140, 1,
     ];
+    /// The capital id of the start beach watchtower ([`crate::capitals::capital_id`]).
+    const WATCHTOWER: u64 = 0x8c14_619c_4048_5243;
 
     /// One geometry of every kind and one body.
     fn sample() -> LevelCollision {
@@ -545,7 +584,20 @@ mod tests {
                 geometry: 1,
                 place: IDENTITY_AFFINE,
             }],
+            entities: vec![BodyEntity {
+                body: 0,
+                id: WATCHTOWER,
+            }],
         }
+    }
+
+    #[test]
+    fn a_body_names_the_level_entity_that_places_it() {
+        let mut level = sample();
+        assert_eq!(level.entity_of(0), Some(WATCHTOWER));
+        assert_eq!(level.entity_of(1), None, "no such body");
+        level.bodies.push(level.bodies[0]);
+        assert_eq!(level.entity_of(1), None, "a body of no entity");
     }
 
     #[test]

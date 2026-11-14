@@ -2143,6 +2143,130 @@ mod tests {
         );
     }
 
+    /// A world that runs the open world's encounters when `world_events`, with one encounter of
+    /// slice [`ENCOUNTER_SLICE`] at `encounter_at` whose only stage spawns the test boar;
+    /// `starts_by_itself` makes it start when a player comes near.
+    fn encounter_world(world_events: bool, starts_by_itself: bool, encounter_at: f32) -> SimWorld {
+        use nw_world::dungeon_scripts::{
+            DungeonScripts, Encounter, LevelScript, Spawn, Stage, Target, TargetMob, TargetSlice,
+        };
+        use nw_world::level_script::{SpawnerKind, SpawnerRules};
+
+        let boar = TargetSlice {
+            mob: Some(TargetMob {
+                vitals_id: TEST_MOB.to_owned(),
+                ..TargetMob::default()
+            }),
+            ..TargetSlice::default()
+        };
+        let encounter = Encounter {
+            slice: ENCOUNTER_SLICE.to_owned(),
+            position: [encounter_at, 10.0, 50.0],
+            auto_activate: false,
+            spawner: Some(SpawnerRules {
+                kind: SpawnerKind::Area,
+                live_count: 1,
+                respawn_s: [0.0, 0.0],
+                spawn_on_enable: starts_by_itself,
+                respawn_after_death: false,
+                maintain_population: false,
+            }),
+            stages: vec![Stage {
+                spawns: vec![Spawn {
+                    target: 0,
+                    count: 1,
+                    ..Spawn::default()
+                }],
+                ..Stage::default()
+            }],
+            targets: vec![Target {
+                name: "walk_boar_spawner".to_owned(),
+                slices: vec![boar],
+            }],
+            ..Encounter::default()
+        };
+        let scripts = DungeonScripts {
+            game_modes: std::collections::BTreeMap::from([(
+                OPEN_WORLD_LEVEL.to_owned(),
+                LevelScript {
+                    encounters: vec![encounter],
+                    ..LevelScript::default()
+                },
+            )]),
+        };
+        SimWorld::new(
+            super::super::WorldSettings {
+                world_events,
+                ..settings(MANY, MAX_PLAYERS)
+            },
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            test_combat(),
+            Arc::new(PlayerContent {
+                dungeon_scripts: scripts,
+                ..PlayerContent::default()
+            }),
+        )
+    }
+
+    /// The slice of [`encounter_world`]'s encounter.
+    const ENCOUNTER_SLICE: &str = "slices/encounters/walk_boar_encounter.dynamicslice";
+    /// Where the encounter spawn of the boar stands (x).
+    const SPAWN_X: f32 = CELL_M / 2.0 + 30.0;
+    /// Far beyond any spawn group of the boar.
+    const FAR_M: f32 = 1_000.0;
+
+    /// The level's encounter spawn of the test boar at [`SPAWN_X`].
+    fn encounter_spawn() -> VitalsSpawn {
+        VitalsSpawn {
+            is_encounter: true,
+            ..test_spawn(SPAWN_X)
+        }
+    }
+
+    #[test]
+    fn an_encounter_that_starts_by_itself_near_the_spawn_spawns_its_mob() {
+        let world = encounter_world(true, true, SPAWN_X);
+        assert_eq!(
+            world.spawning_encounter(&encounter_spawn()),
+            Some(ENCOUNTER_SLICE.to_owned())
+        );
+        assert_eq!(
+            world.spawning_encounter(&test_spawn(SPAWN_X)),
+            None,
+            "a placed spawn is in no encounter's group"
+        );
+        let other_mob = VitalsSpawn {
+            vitals_id: lowercase_crc32("Walk_Wolf"),
+            ..encounter_spawn()
+        };
+        assert_eq!(
+            world.spawning_encounter(&other_mob),
+            None,
+            "no stage spawns that mob"
+        );
+    }
+
+    #[test]
+    fn no_encounter_spawns_the_mob_when_it_is_not_run_far_or_waits_for_a_start() {
+        assert_eq!(
+            encounter_world(false, true, SPAWN_X).spawning_encounter(&encounter_spawn()),
+            None,
+            "this sim does not run the open world's encounters"
+        );
+        assert_eq!(
+            encounter_world(true, true, SPAWN_X + FAR_M).spawning_encounter(&encounter_spawn()),
+            None,
+            "the spawn is outside the encounter's group"
+        );
+        assert_eq!(
+            encounter_world(true, false, SPAWN_X).spawning_encounter(&encounter_spawn()),
+            None,
+            "the encounter waits for a script to start it"
+        );
+    }
+
     #[test]
     fn an_expression_names_each_achievement_and_its_negation() {
         assert_eq!(

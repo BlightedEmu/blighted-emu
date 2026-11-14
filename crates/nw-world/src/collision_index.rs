@@ -143,6 +143,9 @@ pub struct RayHit {
     pub normal: Vec3,
     /// How far along the line, as a share of its length (0 at its start, 1 at its end).
     pub share: f32,
+    /// The GDE id of the level entity whose body it is ([`crate::collision::BodyEntity`]);
+    /// `None` for a body of no entity.
+    pub entity: Option<u64>,
 }
 
 /// What a line meets in one shape: the parameter and the outward normal in the shape's space.
@@ -161,11 +164,12 @@ enum Faces {
     Both,
 }
 
-/// A body with its bounds.
+/// A body with its bounds and the level entity that places it.
 #[derive(Debug, Clone, Copy)]
 struct PlacedBody {
     body: Body,
     bounds: Bounds,
+    entity: Option<u64>,
 }
 
 /// The grid of the bodies' ground-plane bounds.
@@ -251,9 +255,13 @@ pub struct CollisionIndex {
 }
 
 impl CollisionIndex {
-    /// The index of `collision`. A body whose geometry index is out of range or whose place
-    /// cannot be inverted is left out.
+    /// The index of `collision`, each body with its level entity. A body whose geometry index is
+    /// out of range or whose place cannot be inverted is left out.
     pub fn new(collision: LevelCollision) -> Self {
+        let entities: Vec<Option<u64>> = (0u32..)
+            .take(collision.bodies.len())
+            .map(|body| collision.entity_of(body))
+            .collect();
         let LevelCollision {
             geometries, bodies, ..
         } = collision;
@@ -263,7 +271,7 @@ impl CollisionIndex {
             closed: geometries.iter().map(is_closed_mesh).collect(),
             geometries,
         };
-        Self::over(Arc::new(shapes), bodies)
+        Self::over(Arc::new(shapes), bodies.into_iter().zip(entities))
     }
 
     /// The number of closed meshes among the shapes.
@@ -325,20 +333,26 @@ impl CollisionIndex {
     /// An index over other `bodies` of this index's level, sharing its shapes (the solids of a
     /// deferred slice the server shows).
     pub fn with_bodies(&self, bodies: Vec<Body>) -> Self {
-        Self::over(Arc::clone(&self.shapes), bodies)
+        Self::over(
+            Arc::clone(&self.shapes),
+            bodies.into_iter().map(|body| (body, None)),
+        )
     }
 
-    /// The index of `bodies` over `shapes`.
-    fn over(shapes: Arc<Shapes>, bodies: Vec<Body>) -> Self {
+    /// The index of `bodies` (each with its level entity) over `shapes`.
+    fn over(shapes: Arc<Shapes>, bodies: impl Iterator<Item = (Body, Option<u64>)>) -> Self {
         let bodies: Vec<PlacedBody> = bodies
-            .into_iter()
-            .filter(|body| invert(&body.place).is_some())
-            .filter_map(|body| {
+            .filter(|(body, _)| invert(&body.place).is_some())
+            .filter_map(|(body, entity)| {
                 let bounds = shapes
                     .local_bounds
                     .get(body.geometry as usize)?
                     .placed(&body.place);
-                Some(PlacedBody { body, bounds })
+                Some(PlacedBody {
+                    body,
+                    bounds,
+                    entity,
+                })
             })
             .collect();
         let grid = build_grid(&bodies);
@@ -521,12 +535,12 @@ impl CollisionIndex {
             self.grid
                 .cell_range(low[1], high[1], self.grid.origin[1], self.grid.rows);
         let one_cell = first_column == last_column && first_row == last_row;
-        let mut best: Option<(f32, Vec3)> = None;
+        let mut best: Option<(f32, Vec3, Option<u64>)> = None;
         for row in first_row..=last_row {
             for column in first_column..=last_column {
                 for &index in self.grid.bodies_in(column, row) {
                     let placed = &self.bodies[index as usize];
-                    let reach = best.map_or(length, |(t, _)| t);
+                    let reach = best.map_or(length, |(t, _, _)| t);
                     if placed.bounds.clip(from, unit, reach).is_none() {
                         continue;
                     }
@@ -541,17 +555,18 @@ impl CollisionIndex {
                         }
                     }
                     for (t, normal) in self.hits_in_body(placed, from, unit, reach, faces, None) {
-                        if best.is_none_or(|(known, _)| t < known) {
-                            best = Some((t, normal));
+                        if best.is_none_or(|(known, _, _)| t < known) {
+                            best = Some((t, normal, placed.entity));
                         }
                     }
                 }
             }
         }
-        best.map(|(t, normal)| RayHit {
+        best.map(|(t, normal, entity)| RayHit {
             point: add(from, scale(unit, t)),
             normal,
             share: t / length,
+            entity,
         })
     }
 
@@ -1767,6 +1782,61 @@ mod tests {
             index.raycast([0.0, 0.0, 9.0], [20.0, 0.0, 9.0]),
             None,
             "over it"
+        );
+    }
+
+    #[test]
+    fn a_ray_names_the_level_entity_of_the_wall_it_meets() {
+        use crate::collision::BodyEntity;
+
+        /// The capital id of the OPR Vertical outer perimeter wall (retail 2720 target).
+        const PERIMETER: u64 = 0xd266_7a56_6f02_2663;
+        let wall = Geometry::Box {
+            half_extents: [0.125, 5.0, 2.0],
+        };
+        let flat = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0; 4]];
+        let index = CollisionIndex::new(LevelCollision {
+            geometries: vec![wall],
+            bodies: vec![
+                // Left out (its place flattens space): the entities of the others stay theirs.
+                Body {
+                    geometry: 0,
+                    place: flat,
+                },
+                Body {
+                    geometry: 0,
+                    place: moved(10.0, 0.0, 2.0),
+                },
+                Body {
+                    geometry: 0,
+                    place: moved(-10.0, 0.0, 2.0),
+                },
+            ],
+            entities: vec![BodyEntity {
+                body: 1,
+                id: PERIMETER,
+            }],
+            ..LevelCollision::default()
+        });
+        let hit = index
+            .raycast([0.0, 0.0, 1.0], [20.0, 0.0, 1.0])
+            .expect("the perimeter wall");
+        assert_eq!(hit.entity, Some(PERIMETER));
+        let other = index
+            .raycast([0.0, 0.0, 1.0], [-20.0, 0.0, 1.0])
+            .expect("the other wall");
+        assert_eq!(other.entity, None, "a wall of no entity");
+        let shown = index.with_bodies(vec![Body {
+            geometry: 0,
+            place: moved(10.0, 0.0, 2.0),
+        }]);
+        assert_eq!(
+            shown
+                .raycast([0.0, 0.0, 1.0], [20.0, 0.0, 1.0])
+                .expect("shown")
+                .entity,
+            None,
+            "the solids of a shown slice name no level entity"
         );
     }
 

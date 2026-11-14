@@ -17,8 +17,18 @@
 //! timeline is read too, placed at each of its spawn locations (the stage's own entity when it
 //! names none, Inferred), and its areas are kept by level and stage name (the corruption areas
 //! of the dunwood fort's `Setup` stage, [`nw_world::effect_areas::StageAreas`]).
+//!
+//! The encounter slices of the dungeon scripts file ([`nw_world::dungeon_scripts`], built
+//! before this one) and the slices of their targets are read too ([`slice_space_areas`]): the
+//! areas of their entities that are active as the slice spawns are kept in the slice's own
+//! space ([`nw_world::effect_areas::EffectAreas::slices`]: the darkness hazards a breach's setup
+//! stage spawns, the Myrkgard portal's own hazard).
+//!
+//! A detection volume without a query shape detects with its entity's engine shape component
+//! (box, sphere, cylinder, capsule) or its polygon prism (Inferred: the darkness hazards hold
+//! no other shape).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
 use nw_content::Tables;
@@ -27,6 +37,9 @@ use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, AssetCatalogError, AssetKey
 use nw_formats::objectstream::{Element, lowercase_crc32};
 use nw_formats::pak::PakError;
 use nw_world::collision::{Affine, IDENTITY_AFFINE, compose};
+use nw_world::dungeon_scripts::{
+    Detector, DungeonScripts, DungeonScriptsError, dungeon_scripts_path,
+};
 use nw_world::effect_areas::{
     EffectArea, EffectAreas, EffectAreasError, StageAreas, effect_areas_path, slice_areas,
 };
@@ -74,6 +87,9 @@ pub enum EffectAreasBuildError {
     /// An area does not read, or the file cannot be written or read back.
     #[error(transparent)]
     File(#[from] EffectAreasError),
+    /// The dungeon scripts file does not read.
+    #[error(transparent)]
+    Scripts(#[from] DungeonScriptsError),
     /// The written file reads back other than it was written.
     #[error("{0} reads back other than written")]
     Reload(PathBuf),
@@ -107,6 +123,31 @@ pub fn placed_areas(
     place: &Affine,
     kept: &HashSet<u32>,
 ) -> Result<(Vec<EffectArea>, usize), EffectAreasBuildError> {
+    areas_of(root, place, kept, false)
+}
+
+/// The areas of the slice whose ObjectStream root is `root`, in its own space, that give effects
+/// of `kept` and whose entities are active as the slice spawns (module text); the count of those
+/// whose volume does not read.
+///
+/// # Errors
+///
+/// Returns [`EffectAreasBuildError`] when the slice's entities or an area do not read.
+pub fn slice_space_areas(
+    root: &Element,
+    kept: &HashSet<u32>,
+) -> Result<(Vec<EffectArea>, usize), EffectAreasBuildError> {
+    areas_of(root, &IDENTITY_AFFINE, kept, true)
+}
+
+/// The areas of `root` placed at `place` that give effects of `kept`, only those of active
+/// entities when `active_only`; the count of those whose volume does not read.
+fn areas_of(
+    root: &Element,
+    place: &Affine,
+    kept: &HashSet<u32>,
+    active_only: bool,
+) -> Result<(Vec<EffectArea>, usize), EffectAreasBuildError> {
     let areas = slice_areas(root)?;
     if areas.is_empty() {
         return Ok((Vec::new(), 0));
@@ -120,19 +161,24 @@ pub fn placed_areas(
             .filter(|effect| kept.contains(&lowercase_crc32(effect)))
             .collect()
     };
-    for area in areas {
+    for area in areas.into_iter().filter(|area| area.active || !active_only) {
         let effects = keep(area.effects);
         let removes = keep(area.removes);
         if effects.is_empty() && removes.is_empty() {
             continue;
         }
-        let volume = script
-            .entity(area.detection_entity)
+        let entity = script.entity(area.detection_entity);
+        let at = compose(place, &affine_of(&script.placement_of(area.detection_entity)));
+        let engine_shape = || {
+            entity
+                .and_then(|entity| entity.shape.clone())
+                .or(area.prism.clone())
+                .map(|shape| Detector { shape, place: at })
+        };
+        let volume = entity
             .and_then(|entity| entity.detection_shape.as_ref())
-            .and_then(|(shape, offset)| {
-                let at = compose(place, &affine_of(&script.placement_of(area.detection_entity)));
-                detector_volume(shape, *offset, &at)
-            });
+            .and_then(|(shape, offset)| detector_volume(shape, *offset, &at))
+            .or_else(engine_shape);
         match volume {
             Some(volume) => placed.push(EffectArea {
                 effects,
@@ -357,6 +403,30 @@ pub fn build_effect_areas(
         Ok(())
     })?;
     report.spells = file.spells.len();
+    let scripts = DungeonScripts::load(&dungeon_scripts_path(out_dir, client_build))?;
+    let wanted: BTreeSet<&str> = scripts
+        .game_modes
+        .values()
+        .flat_map(|level| &level.encounters)
+        .flat_map(|encounter| {
+            std::iter::once(encounter.slice.as_str()).chain(
+                encounter
+                    .targets
+                    .iter()
+                    .flat_map(|target| target.slices.iter().map(|slice| slice.path.as_str())),
+            )
+        })
+        .collect();
+    let paths = index.paths(|path| wanted.contains(path));
+    read_slices(index, &paths, |path, root| {
+        report.slices += 1;
+        let (areas, unread) = slice_space_areas(root, &kept)?;
+        report.unread_volumes += unread;
+        if !areas.is_empty() {
+            file.slices.insert(path.to_owned(), areas);
+        }
+        Ok(())
+    })?;
     let path = effect_areas_path(out_dir, client_build);
     file.write(&path)?;
     if EffectAreas::load(out_dir, client_build)? != file {
@@ -550,6 +620,56 @@ mod tests {
         assert!(!has_stage(&chunk("ApplyBlight", &[])));
         let staged = node("Components", vec![typed(ENCOUNTER_STAGE_TYPE, Vec::new())]);
         assert!(has_stage(&Element::with_children(0, vec![staged])));
+    }
+
+    /// `{B0C6AA97-E754-4E33-8D32-33E267DB622F}` the engine's `CylinderShapeComponent`.
+    const CYLINDER_SHAPE: [u8; 16] = [
+        0xb0, 0xc6, 0xaa, 0x97, 0xe7, 0x54, 0x4e, 0x33, 0x8d, 0x32, 0x33, 0xe2, 0x67, 0xdb, 0x62,
+        0x2f,
+    ];
+    /// The darkness hazards' cylinder (`darkness_hazard_corruption_major_l4`): 30 m round, 25 m
+    /// high.
+    const HAZARD_RADIUS_M: f32 = 30.0;
+    const HAZARD_HEIGHT_M: f32 = 25.0;
+
+    /// A darkness hazard slice: its area detects with an empty `DetectionVolumeComponent` and
+    /// the entity's cylinder; its entity is active as the slice spawns when `active`.
+    fn hazard(active: bool) -> Element {
+        let mut slice = chunk("ApplyCurseL4", &[]);
+        let entity = &mut slice.children[0].children[0].children[0].children[0];
+        entity.children.push(value("IsRuntimeActive", &[u8::from(active)]));
+        let components = &mut entity.children[1].children;
+        components.retain(|component| component.type_id != DETECTION_VOLUME);
+        components.push(typed(DETECTION_VOLUME, vec![node("m_shape", Vec::new())]));
+        components.push(typed(
+            CYLINDER_SHAPE,
+            vec![node(
+                "Configuration",
+                vec![
+                    value("Height", &HAZARD_HEIGHT_M.to_be_bytes()),
+                    value("Radius", &HAZARD_RADIUS_M.to_be_bytes()),
+                ],
+            )],
+        ));
+        slice
+    }
+
+    #[test]
+    fn a_hazard_detects_with_its_cylinder_and_only_an_active_one_is_kept_in_its_slice() {
+        let kept = HashSet::from([lowercase_crc32("ApplyCurseL4")]);
+        let (areas, unread) = slice_space_areas(&hazard(true), &kept).expect("areas");
+        assert_eq!(unread, 0);
+        let [area] = areas.as_slice() else {
+            panic!("one area: {areas:?}");
+        };
+        let [x, y, z] = LOCAL_AT;
+        assert!(area.contains([x + HAZARD_RADIUS_M - 1.0, y, z]));
+        assert!(!area.contains([x + HAZARD_RADIUS_M + 1.0, y, z]));
+        assert!(!area.contains([x, y, z + HAZARD_HEIGHT_M]), "above its half height");
+        let (inactive, _) = slice_space_areas(&hazard(false), &kept).expect("areas");
+        assert!(inactive.is_empty());
+        let (placed, _) = placed_areas(&hazard(false), &IDENTITY_AFFINE, &kept).expect("areas");
+        assert_eq!(placed.len(), 1, "a level area of an inactive entity stays as it was");
     }
 
     #[test]

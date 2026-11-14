@@ -39,7 +39,7 @@ use super::gear::Gear;
 use super::hit_shape::PLAYER_CAPSULE;
 use super::points::Attributes;
 use super::progression::Masteries;
-use super::projectile::{AimLine, Shot, ShotHit, first_on_line, flight_ms, meets_head};
+use super::projectile::{AimLine, Shot, ShotEnd, ShotHit, first_on_line, flight_ms, meets_head};
 use super::spell_areas::SpellArea;
 use super::status_effects::StatusEffects;
 use super::{Player, SimWorld};
@@ -2043,25 +2043,26 @@ impl SimWorld {
             (caster.from, aim),
             now_ms,
         );
-        match (reaches_enemies, met_mob) {
-            (true, Some((mob, flight_s))) => {
-                let effects = (!spell.status_effects.is_empty())
-                    .then_some((spell.status_effects.as_slice(), caster.number));
+        let end =
+            reaches_enemies.then(|| self.shot_stop(&shot, (caster.from, aim), met_mob, &places));
+        let effects = (!spell.status_effects.is_empty())
+            .then_some((spell.status_effects.as_slice(), caster.number));
+        match end {
+            Some(ShotEnd::Body { target: mob, flight_s }) => {
                 let hit = ShotHit {
                     damage_id: enemy_row,
                     effects,
                     headshot: meets_head(&shot, (caster.from, aim), mob, &places),
                 };
-                self.launch(
-                    &caster.connection,
-                    (shot, hit),
-                    (mob, entity),
-                    flight_s,
-                    now_ms,
-                );
+                self.launch(&caster.connection, (shot, hit), (mob, entity), flight_s, now_ms);
             }
-            (true, None) => results.push(Ok(AttackOutcome::Missed)),
-            (false, _) => {}
+            Some(ShotEnd::Level { stop, flight_s }) => {
+                let hit = ShotHit { damage_id: enemy_row, effects, headshot: false };
+                self.launch_to_level(&caster.connection, (shot, hit), (stop, entity), flight_s, now_ms);
+                results.push(Ok(AttackOutcome::Missed));
+            }
+            Some(ShotEnd::Free) => results.push(Ok(AttackOutcome::Missed)),
+            None => {}
         }
         if let Some((met, flight_s)) = met_friend {
             self.effect_flights.push(EffectFlight {

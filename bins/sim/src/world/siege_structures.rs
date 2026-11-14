@@ -32,8 +32,26 @@
 //! droppers and horns, the zero company id and raid 0 for a generator
 //! ([`SimWorld::show_war_run_ownership`]). Retail sent each change again in the next ticks
 //! (jdw2: 5 to 7 times over 130 ms; Inferred: its replication's resend, the sim's channel
-//! sends once). The fort gates and war camp gates of retail also change (rule 4 with the
-//! defender's faction, Observed mask 0xd0), but the sim holds no gate.
+//! sends once).
+//!
+//! **The gates** (Observed, `joining_defending_war_2` 0.499 to 0.714 s, the instance's first
+//! states; batch E1): the fort's gates spawn with the instance, each with its retail first
+//! members (card, place, vitals, damage receiver, buildable, its two closed doors, placement
+//! obstruction, delayed events, interact). A fort gate (`siege_fortgate_<s|m|l>_t<n>`) names the
+//! defending company with permission rule 1 ([`GATE_PERMISSION_RULE`]), raid 0 and faction 0;
+//! a war camp gate (`siege_warcamp_gate_t<n>`) names no company, rule 1, and has no vitals and no
+//! damage receiver (it takes no harm). At the start (83.710 to 83.745 s) a fort gate gets rule 4,
+//! the defender's raid id and the defender's faction (mask 0xd0: raid 536, faction 3), a war camp
+//! gate the zero company id, rule 4 and the attacker's raid id (mask 0x51, 535); at the result
+//! (1883.719 s) a fort gate gets rule 1 and raid 0 (mask 0x50: the faction stays), a war camp
+//! gate the zero company id, rule 1 and raid 0 (mask 0x51). [`war_run_change`] sends what
+//! changed. A fort gate is hurt and breaks as every structure of its body does (Observed,
+//! `RS_offensive_war` 927.638 to 939.069 s: its vitals and committed `SiegeSupply` fall with each
+//! hit; at no health its buildable state 6 with ruin type 10, its interact off and its
+//! `RepairDelay` timer started at 30 s, 933.736 s), and is whole again at the result (957.321 s:
+//! full vitals, state 5, the timer at 0, the interact on). Each fort gate is a major structure of
+//! the siege data ([`super::war_fight`]). A player's hit or a turret's shot meets a gate within
+//! its slice's physical radius ([`StructureBody::reach_m`]).
 //!
 //! **A build** (Observed, `fort-equipements-territory`, 17 calls, one player of the fort's
 //! company in the territory's open-world fort): the client's interaction of kind
@@ -58,7 +76,8 @@
 use bevy_ecs::entity::Entity;
 use nw_bus::ConnectionRef;
 use nw_content::war_forts::{
-    FortStructure, SIDE_ATTACKER, SIDE_DEFENDER, SIEGE_SUPPLY, StructureKind, StructureRole,
+    FortStructure, SIDE_ATTACKER, SIDE_DEFENDER, SIEGE_SUPPLY, SiegeTimer, StructureKind,
+    StructureRole,
 };
 use nw_messages::buildables::{CommittedResources, GUILD_ID_LEN, GuildCrest, ResourceItem};
 use nw_messages::item_descriptor::ItemDescriptor;
@@ -76,10 +95,10 @@ use nw_sim_core::Position;
 use uuid::Uuid;
 
 use super::crafting::{Station, dynamic_ref};
-use super::siege_areas::{UseState, apply_ownership_change};
+use super::siege_areas::{COMPLETED_DELAY_S, UseState, apply_ownership_change, timer_member};
 use super::supply_generators::GeneratorRun;
 use super::turrets::{USE_ACCEPTED, USE_REFUSED, turret_ownership};
-use super::war_fight::{WarFight, replace_member, side_numbers};
+use super::war_fight::{WarFight, WarPhase, replace_member, side_numbers};
 use super::{Player, SimWorld, gather_answer, send_now};
 
 /// The interaction kind that opens a structure's build choices (`InteractionUIActions`
@@ -108,6 +127,10 @@ pub(super) const WAR_RUN_PERMISSION_RULE: u8 = 4;
 const NO_WAR_RAID: u64 = 0;
 /// The company id of a structure no company owns (Observed: 16 zero bytes on the generators).
 const NO_COMPANY: [u8; GUILD_ID_LEN] = [0; GUILD_ID_LEN];
+/// The permission rule of a gate outside its war's run (Observed, module doc, **The gates**).
+pub(super) const GATE_PERMISSION_RULE: u8 = 1;
+/// The faction of a structure outside its war's run (Observed: 0 on every fort structure).
+const NO_FACTION: u8 = 0;
 
 /// A structure's health share of its committed resource ([`super::turrets`] module doc).
 #[derive(Debug, Clone, PartialEq)]
@@ -151,6 +174,13 @@ pub(crate) struct StructureBody {
     pub(super) invulnerable: bool,
     /// It broke at 0 health.
     pub(super) broken: bool,
+    /// The timer its break starts (a gate's `RepairDelay`, module doc).
+    pub(super) repair_delay: Option<SiegeTimer>,
+    /// The interact its break turns off and its mend on (a gate's door, module doc).
+    pub(super) door_interact: Option<u64>,
+    /// How far from its place its body reaches, metres (a gate's slice physical radius); `None`
+    /// for a turret's body.
+    pub(super) reach_m: Option<f32>,
 }
 
 impl StructureBody {
@@ -210,6 +240,48 @@ impl StructureBody {
             committed,
             invulnerable: true,
             broken: false,
+            repair_delay: None,
+            door_interact: None,
+            reach_m: None,
+        }
+    }
+
+    /// The change of its door interact to `enabled`, for a gate.
+    fn door_change(&self, enabled: bool) -> Option<BundleMember> {
+        Some(BundleMember {
+            component: self.door_interact?,
+            state: MemberState::Interact(InteractState {
+                enabled: Some(enabled),
+                has_interactors: None,
+            }),
+        })
+    }
+
+    /// Whether it takes harm at all: it has vitals (a war camp gate has none, module doc).
+    pub(super) const fn takes_harm(&self) -> bool {
+        self.vitals.is_some()
+    }
+
+    /// Its health in percent of its most, rounded up (Inferred: a whole one shows 100 and only a
+    /// broken one 0; Observed values 100, 85, 66, 43, 32 and 0 with the break,
+    /// `RS_offensive_war`).
+    pub(super) fn health_percent(&self) -> u8 {
+        const WHOLE_PERCENT: f32 = 100.0;
+        if self.broken || self.max_health <= 0.0 {
+            return 0;
+        }
+        // A share of 100 at most.
+        (self.health / self.max_health * WHOLE_PERCENT)
+            .ceil()
+            .clamp(0.0, WHOLE_PERCENT) as u8
+    }
+
+    /// Its buildable state now ([`BUILT_STATE`] or [`BROKEN_STATE`]).
+    pub(super) const fn state(&self) -> u8 {
+        if self.broken {
+            BROKEN_STATE
+        } else {
+            BUILT_STATE
         }
     }
 
@@ -399,6 +471,9 @@ impl StructureBody {
                         has_interactors: None,
                     }),
                 }),
+            self.repair_delay
+                .map(|timer| timer_member(timer.component, timer.delay_s, None)),
+            self.door_change(false),
         ];
         Some(Hurt::Broke(partial.into_iter().flatten().collect()))
     }
@@ -422,8 +497,11 @@ impl StructureBody {
         partial
     }
 
-    /// The war started: it may be hurt; the changed members.
+    /// The war started: it may be hurt (one with no vitals never is); the changed members.
     pub(super) fn open_to_damage(&mut self) -> Vec<BundleMember> {
+        if !self.takes_harm() {
+            return Vec::new();
+        }
         self.invulnerable = false;
         self.vitals_change(VitalsSlot0 {
             invulnerability: Some(VULNERABLE),
@@ -458,6 +536,11 @@ impl StructureBody {
         }
         if was_broken {
             partial.extend(self.interact_member(NO_INTERACTORS));
+            partial.extend(
+                self.repair_delay
+                    .map(|timer| timer_member(timer.component, COMPLETED_DELAY_S, None)),
+            );
+            partial.extend(self.door_change(true));
         }
         partial
     }
@@ -478,17 +561,22 @@ pub(super) fn generator_ownership() -> OwnershipState {
     }
 }
 
-/// The part of `shown`, a fort structure's ownership at the war's start or result, that retail
-/// sent then (Observed, module doc, **The war's run**): the zero company id of a structure whose
-/// `resting` ownership names no company, the permission rule of one whose `resting` rule is not
-/// [`WAR_RUN_PERMISSION_RULE`], and the raid id.
-pub(super) fn war_run_change(resting: &OwnershipState, shown: &OwnershipState) -> OwnershipState {
+/// The part of `after`, a fort structure's ownership after the war's start or result, that
+/// retail sent then, from `before`, its ownership just before (Observed, module doc, **The war's
+/// run** and **The gates**): the zero company id of a structure that names no company, the
+/// permission rule and the faction when they changed, and the raid id (turrets, droppers and
+/// horns mask 0x50, generators 0x41, fort gates 0xd0 at the start and 0x50 at the result, war
+/// camp gates 0x51).
+pub(super) fn war_run_change(before: &OwnershipState, after: &OwnershipState) -> OwnershipState {
     OwnershipState {
-        guild_id: resting.guild_id.filter(|id| *id == NO_COMPANY),
-        permission_rule: shown
+        guild_id: after.guild_id.filter(|id| *id == NO_COMPANY),
+        permission_rule: after
             .permission_rule
-            .filter(|_| resting.permission_rule != Some(WAR_RUN_PERMISSION_RULE)),
-        raid_id: shown.raid_id,
+            .filter(|rule| before.permission_rule != Some(*rule)),
+        raid_id: after.raid_id,
+        faction_type: after
+            .faction_type
+            .filter(|faction| before.faction_type != Some(*faction)),
         ..OwnershipState::default()
     }
 }
@@ -652,7 +740,12 @@ impl SimWorld {
     /// world database ([`super::company_looks`]; the fight asks for both sides' companies), and
     /// while the war runs its rule and its side's raid id (module doc, **The war's run**).
     pub(super) fn structure_ownership(&self, fight: &WarFight, side: u8) -> OwnershipState {
-        self.in_war_run(fight, side, self.side_resting(fight, side))
+        let resting = self.side_resting(fight, side);
+        if fight.running() {
+            self.in_war_run(fight, side, resting)
+        } else {
+            resting
+        }
     }
 
     /// The ownership of a structure of `side` of `fight`'s war outside the war's run: its side
@@ -668,33 +761,66 @@ impl SimWorld {
         })
     }
 
-    /// The ownership of `structure` of `fight` outside the war's run: a supply generator's
-    /// names no company ([`generator_ownership`]), every other structure's names its side's
-    /// company ([`Self::side_resting`]).
+    /// The ownership of `structure` of `fight` before the war's run: a supply generator's names
+    /// no company ([`generator_ownership`]), a war camp gate's no company with rule
+    /// [`GATE_PERMISSION_RULE`], a fort gate's its side's company with that rule, every other
+    /// structure's its side's company ([`Self::side_resting`]).
     fn resting_ownership(&self, fight: &WarFight, structure: &FortStructure) -> OwnershipState {
-        if self.is_generator(structure) {
-            generator_ownership()
-        } else {
-            self.side_resting(fight, structure.side)
+        match self.role_of(structure) {
+            Some(StructureRole::SupplyGenerator) => generator_ownership(),
+            Some(StructureRole::WarCampGate) => OwnershipState {
+                permission_rule: Some(GATE_PERMISSION_RULE),
+                ..turret_ownership(&ClaimOwner::NONE)
+            },
+            Some(StructureRole::FortGate) => OwnershipState {
+                permission_rule: Some(GATE_PERMISSION_RULE),
+                ..self.side_resting(fight, structure.side)
+            },
+            _ => self.side_resting(fight, structure.side),
         }
     }
 
-    /// The ownership of `structure` of `fight` as it is now ([`Self::resting_ownership`], with
-    /// the war's run values while it runs).
+    /// The ownership of `structure` of `fight` at `phase` of its war (module doc): before the
+    /// run its resting one ([`Self::resting_ownership`]); in the run with
+    /// [`WAR_RUN_PERMISSION_RULE`] and its side's raid id; a fort gate with the defender's
+    /// faction from the start on (the result sends no faction).
+    fn ownership_at(
+        &self,
+        fight: &WarFight,
+        structure: &FortStructure,
+        phase: WarPhase,
+    ) -> OwnershipState {
+        let resting = self.resting_ownership(fight, structure);
+        let faction = if self.role_of(structure) == Some(StructureRole::FortGate) {
+            Some(self.side_faction(fight, SIDE_DEFENDER))
+        } else {
+            resting.faction_type
+        };
+        match phase {
+            WarPhase::Waiting => resting,
+            WarPhase::Running => OwnershipState {
+                faction_type: faction,
+                ..self.in_war_run(fight, structure.side, resting)
+            },
+            WarPhase::Ended => OwnershipState {
+                faction_type: faction,
+                ..resting
+            },
+        }
+    }
+
+    /// The ownership of `structure` of `fight` as it is now ([`Self::ownership_at`]).
     pub(super) fn fort_structure_ownership(
         &self,
         fight: &WarFight,
         structure: &FortStructure,
     ) -> OwnershipState {
-        self.in_war_run(fight, structure.side, self.resting_ownership(fight, structure))
+        self.ownership_at(fight, structure, fight.phase())
     }
 
-    /// `resting`, an ownership of a structure of `side` outside the war's run, as it is now:
-    /// with [`WAR_RUN_PERMISSION_RULE`] and the side's raid id while `fight` runs.
+    /// `resting`, an ownership of a structure of `side` outside the war's run, in the run: with
+    /// [`WAR_RUN_PERMISSION_RULE`] and the side's raid id.
     fn in_war_run(&self, fight: &WarFight, side: u8, resting: OwnershipState) -> OwnershipState {
-        if !fight.running() {
-            return resting;
-        }
         OwnershipState {
             permission_rule: Some(WAR_RUN_PERMISSION_RULE),
             raid_id: Some(self.side_raid(fight, side)),
@@ -702,12 +828,23 @@ impl SimWorld {
         }
     }
 
-    /// Whether `structure` is a supply generator.
-    fn is_generator(&self, structure: &FortStructure) -> bool {
+    /// The role of `structure`'s kind.
+    fn role_of(&self, structure: &FortStructure) -> Option<StructureRole> {
         self.content
             .war_forts
             .structure_kind(&structure.asset)
-            .is_some_and(|kind| kind.role == StructureRole::SupplyGenerator)
+            .map(|kind| kind.role)
+    }
+
+    /// The faction of `side` of `fight`'s war; [`NO_FACTION`] when the war is not known.
+    fn side_faction(&self, fight: &WarFight, side: u8) -> u8 {
+        self.wars.war(fight.war().war).map_or(NO_FACTION, |war| {
+            if side == SIDE_ATTACKER {
+                war.attacker.1
+            } else {
+                war.defender.1
+            }
+        })
     }
 
     /// The company of `side` of `fight`'s war; the nil id when the war is not known.
@@ -744,17 +881,24 @@ impl SimWorld {
     /// [`war_run_change`] goes to its viewers and into its full ownership, which keeps the rest
     /// (a used turret's user too).
     pub(super) fn show_war_run_ownership(&mut self, fight: &WarFight) {
+        let now = fight.phase();
+        let before = match now {
+            WarPhase::Waiting => return,
+            WarPhase::Running => WarPhase::Waiting,
+            WarPhase::Ended => WarPhase::Running,
+        };
         let turrets = fight.turrets.iter().map(|run| &run.body);
         let structures = fight.structures.iter().map(|run| &run.body);
         for body in turrets.chain(structures) {
             let Some(component) = body.structure.ownership_component else {
                 continue;
             };
-            let resting = self.resting_ownership(fight, &body.structure);
-            let shown = self.in_war_run(fight, body.structure.side, resting.clone());
             let change = BundleMember {
                 component,
-                state: MemberState::Ownership(war_run_change(&resting, &shown)),
+                state: MemberState::Ownership(war_run_change(
+                    &self.ownership_at(fight, &body.structure, before),
+                    &self.ownership_at(fight, &body.structure, now),
+                )),
             };
             let full = change.clone();
             self.stations.change_camp(
@@ -777,7 +921,6 @@ impl SimWorld {
                 if !read.contains(&world.side_company(fight, side)) {
                     continue;
                 }
-                let ownership = world.structure_ownership(fight, side);
                 let turrets = fight
                     .turrets
                     .iter()
@@ -788,14 +931,20 @@ impl SimWorld {
                     .iter()
                     .filter(|run| !run.uses.used())
                     .map(|run| &run.body);
-                let shown: Vec<(u64, u64)> = turrets
+                // A structure that names no company (a generator, a war camp gate) has no look.
+                let shown: Vec<(u64, u64, OwnershipState)> = turrets
                     .chain(structures)
-                    .filter(|body| {
-                        body.structure.side == side && !world.is_generator(&body.structure)
+                    .filter(|body| body.structure.side == side)
+                    .filter_map(|body| {
+                        let ownership = world.fort_structure_ownership(fight, &body.structure);
+                        (ownership.guild_id != Some(NO_COMPANY)).then_some((
+                            body.number,
+                            body.structure.ownership_component?,
+                            ownership,
+                        ))
                     })
-                    .filter_map(|body| Some((body.number, body.structure.ownership_component?)))
                     .collect();
-                for (number, component) in shown {
+                for (number, component, ownership) in shown {
                     let member = BundleMember {
                         component,
                         state: MemberState::Ownership(ownership.clone()),
@@ -826,7 +975,11 @@ impl SimWorld {
             ..structure
         };
         let mut body = StructureBody::new(structure);
-        body.invulnerable = !fight.running();
+        body.invulnerable = !fight.running() || !body.takes_harm();
+        let gate = kind.and_then(|kind| kind.gate);
+        body.repair_delay = gate.and_then(|gate| gate.repair_delay);
+        body.door_interact = gate.and_then(|gate| gate.door_interact);
+        body.reach_m = gate.map(|gate| gate.physical_radius_m);
         let ownership = self.fort_structure_ownership(fight, &body.structure);
         let mut members = spawn_members(&body, |_| None, ownership);
         let generator_tier = kind
@@ -1417,4 +1570,270 @@ pub(crate) mod tests {
 
     /// The sim ms of the tests' calls.
     const NOW_MS: u64 = 1_000;
+
+    /// The retail fort gate `siege_fortgate_m_t2` and war camp gate `siege_warcamp_gate_t3` of
+    /// territory 11 with their first members (`joining_defending_war_2` 0.601 and 0.499 s; the
+    /// doors left out), their kinds with the gate parts of the retail `l_t2` gate
+    /// (`RS_offensive_war`: `RepairDelay` component 8, 30 s, door interact 17) and a made-up
+    /// reach, the fort gate a major structure of a made-up kind.
+    const FORT_GATE_REF: [u8; 16] =
+        *b"\x68\x0d\x78\xc1\x60\x0d\xf9\x0a\x29\x35\x7b\x8f\x47\x29\xb2\xd5";
+    const CAMP_GATE_REF: [u8; 16] =
+        *b"\x32\x4e\xfc\xf5\xf6\x7a\x9e\x04\xe9\x77\x73\x03\x6c\x5e\x27\x46";
+    const GATE_MAJOR_KIND: u32 = 7;
+    const GATE_HEALTH: u32 = 252_000;
+    const REPAIR_DELAY_COMPONENT: u64 = 8;
+    const REPAIR_DELAY_S: f32 = 30.0;
+    const DOOR_COMPONENT: u64 = 17;
+    const GATE_REACH_M: f32 = 8.0;
+    /// The war of the turret tests: defender faction 1, side numbers 4714 and 4715.
+    const DEFENDER_FACTION: u8 = 1;
+    const ATTACKER_RAID: u64 = 4_714;
+    const DEFENDER_RAID: u64 = 4_715;
+    const NO_RAID: u64 = 0;
+    const FULL_PERCENT: u8 = 100;
+
+    fn gate_world() -> (SimWorld, Entity) {
+        use crate::world::turrets::tests::{TABLE, war_world_with};
+        let gates = r#""yaw": 0.0},
+          {"asset": "a658fcb950ed5621bcbb5faccce6055e", "card_component": 0, "gde_ref": "680d78c1600df90a29357b8f4729b2d5",
+           "interact_component": null, "spawner_component": null, "ownership_component": 14,
+           "place": [13656.726, 6298.0083, 50.5], "side": 2, "yaw": 0.0,
+           "members": ["010f01ff4876180000000000000b9790c0aeb6012a0000000000000000ff004876180000003f800000530000328038de01d860",
+             "050d0103465562e745c4d011120c0321a0",
+             "03ba1801070500000102010b5369656765537570706c79573a918000000000008400ffffffff00000033000000000000",
+             "02b81701030000000020", "0883310103000000", "0b83310103000000", "0a8b22010100"]},
+          {"asset": "a894c09ea7f25448a8f5d54384abb960", "card_component": 0, "gde_ref": "324efcf5f67a9e04e97773036c5e2746",
+           "interact_component": null, "spawner_component": null, "ownership_component": 9,
+           "place": [13555.03, 6462.569, 46.5], "side": 1, "yaw": 0.0,
+           "members": ["030d01034653cc1f45c9f48d118403f07c",
+             "01ba1801070500000102010b5369656765537570706c79573a918000000000006400ffffffff00000033000000000000",
+             "0483310103000000", "068b22010100"]}]}],"#;
+        let table = TABLE
+            .replacen(r#""yaw": 0.0}]}],"#, gates, 1)
+            .replacen(
+                r#""points": ["#,
+                r#""major_structures": [{"gde_ref": "680d78c1600df90a29357b8f4729b2d5", "kind": 7}],
+        "points": ["#,
+                1,
+            );
+        let kinds = r#", "structure_kinds": [
+        {"asset": "a658fcb950ed5621bcbb5faccce6055e", "slice": "slices/structures/siege/siege_fortgate_m_t2.dynamicslice",
+         "template": null, "gate": {"physical_radius_m": 8.0,
+           "repair_delay": {"component": 8, "delay_s": 30.0, "on_open": false}, "door_interact": 17}},
+        {"asset": "a894c09ea7f25448a8f5d54384abb960", "slice": "slices/structures/siege/siege_warcamp_gate_t3.dynamicslice",
+         "template": null, "gate": {"physical_radius_m": 8.0, "repair_delay": null, "door_interact": null}}]}"#;
+        let table = format!("{}{kinds}", &table[..table.len() - 1]);
+        war_world_with(WarForts::parse(&table).expect("table"), SIDE_ATTACKER, |content| content)
+    }
+
+    fn gate(world: &SimWorld, gde_ref: [u8; 16]) -> StructureRun {
+        world
+            .war_fight()
+            .and_then(|fight| {
+                fight
+                    .structures
+                    .iter()
+                    .find(|run| run.body.structure.gde_ref == gde_ref)
+            })
+            .cloned()
+            .expect("the gate spawned")
+    }
+
+    /// The members of slot key `number`'s last change that went out.
+    fn sent(world: &SimWorld, number: u64) -> Vec<BundleMember> {
+        let slot = crate::world::slots::Slot {
+            interest: 1,
+            new: false,
+        };
+        world
+            .stations
+            .group(number, slot)
+            .map(|group| group.members)
+            .unwrap_or_default()
+    }
+
+    fn ownership_of(members: &[BundleMember]) -> Option<OwnershipState> {
+        members.iter().rev().find_map(|member| match &member.state {
+            MemberState::Ownership(state) => Some(state.clone()),
+            _ => None,
+        })
+    }
+
+    fn start_war(world: &mut SimWorld) -> nw_db::TerritoryWar {
+        let mut war = world.wars.war(Uuid::from_u128(0x77)).cloned().expect("the war");
+        war.starts_ms = world.unix_ms();
+        world.wars.read(Ok(vec![war.clone()]));
+        world.tick_war_fight();
+        war
+    }
+
+    /// Observed (module doc, **The gates**): a fort gate spawns with the defender's company,
+    /// rule 1, raid 0 and faction 0, a war camp gate with no company and rule 1; at the start the
+    /// fort gate gets rule 4, the defender's raid and faction (mask 0xd0), the camp gate the zero
+    /// company, rule 4 and the attacker's raid (0x51); at the result the fort gate rule 1 and
+    /// raid 0 (0x50; the faction stays), the camp gate the zero company, rule 1 and raid 0.
+    #[test]
+    fn the_gates_spawn_with_rule_1_and_show_the_war_run_as_retail() {
+        let (mut world, _) = gate_world();
+        let fort = gate(&world, FORT_GATE_REF);
+        let camp = gate(&world, CAMP_GATE_REF);
+        let card = |world: &SimWorld, number| {
+            ownership_of(world.stations.members(number).expect("members")).expect("ownership")
+        };
+        let fort_card = card(&world, fort.body.number);
+        assert_eq!(fort_card.guild_id, Some(*Uuid::from_u128(0xd1).as_bytes()));
+        assert_eq!(
+            (fort_card.permission_rule, fort_card.raid_id, fort_card.faction_type),
+            (Some(GATE_PERMISSION_RULE), Some(NO_RAID), Some(NO_FACTION))
+        );
+        let camp_card = card(&world, camp.body.number);
+        assert_eq!(camp_card.guild_id, Some(NO_COMPANY));
+        assert_eq!(camp_card.permission_rule, Some(GATE_PERMISSION_RULE));
+        let mut war = start_war(&mut world);
+        assert_eq!(
+            ownership_of(&sent(&world, fort.body.number)),
+            Some(OwnershipState {
+                permission_rule: Some(WAR_RUN_PERMISSION_RULE),
+                raid_id: Some(DEFENDER_RAID),
+                faction_type: Some(DEFENDER_FACTION),
+                ..OwnershipState::default()
+            }),
+            "mask 0xd0"
+        );
+        assert_eq!(
+            ownership_of(&sent(&world, camp.body.number)),
+            Some(OwnershipState {
+                guild_id: Some(NO_COMPANY),
+                permission_rule: Some(WAR_RUN_PERMISSION_RULE),
+                raid_id: Some(ATTACKER_RAID),
+                ..OwnershipState::default()
+            }),
+            "mask 0x51"
+        );
+        war.result = Some((war.defender.0, world.unix_ms()));
+        world.wars.read(Ok(vec![war]));
+        world.tick_war_fight();
+        assert_eq!(
+            ownership_of(&sent(&world, fort.body.number)),
+            Some(OwnershipState {
+                permission_rule: Some(GATE_PERMISSION_RULE),
+                raid_id: Some(NO_RAID),
+                ..OwnershipState::default()
+            }),
+            "mask 0x50"
+        );
+        assert_eq!(
+            card(&world, fort.body.number).faction_type,
+            Some(DEFENDER_FACTION),
+            "the faction stays"
+        );
+        assert_eq!(
+            ownership_of(&sent(&world, camp.body.number)),
+            Some(OwnershipState {
+                guild_id: Some(NO_COMPANY),
+                permission_rule: Some(GATE_PERMISSION_RULE),
+                raid_id: Some(NO_RAID),
+                ..OwnershipState::default()
+            }),
+            "mask 0x51"
+        );
+    }
+
+    /// Observed (`RS_offensive_war` 933.736 and 957.321 s): a fort gate at no health breaks with
+    /// its `RepairDelay` timer at 30 s and its door interact off, its siege data entry goes to 0
+    /// and state 6, and at the result it is whole with the timer at 0 and the door on; a war
+    /// camp gate (no vitals) takes no harm; the gate's body reaches its slice's radius.
+    #[test]
+    fn a_fort_gate_breaks_and_mends_as_retail_and_a_camp_gate_takes_no_harm() {
+        use crate::world::turrets::HeldHit;
+        let (mut world, entity) = gate_world();
+        let mut war = start_war(&mut world);
+        let fort = gate(&world, FORT_GATE_REF);
+        let camp = gate(&world, CAMP_GATE_REF);
+        assert!(!fort.body.invulnerable && camp.body.invulnerable);
+        assert_eq!(fort.body.health_percent(), FULL_PERCENT);
+        let places = world.structure_places(entity);
+        let reach = places
+            .iter()
+            .find(|(number, _, _)| *number == fort.body.number)
+            .map(|(_, _, body)| body.radius_m);
+        assert_eq!(reach, Some(GATE_REACH_M), "the gate's reach");
+        assert!(
+            !places.iter().any(|(number, _, _)| *number == camp.body.number),
+            "a camp gate is no target"
+        );
+        world.hurt_held(HeldHit::Structure(camp.body.number), GATE_HEALTH, DEFENDER);
+        assert!(!gate(&world, CAMP_GATE_REF).body.broken, "no harm");
+        world.hurt_held(HeldHit::Structure(fort.body.number), GATE_HEALTH, DEFENDER);
+        assert!(gate(&world, FORT_GATE_REF).body.broken);
+        let broke = sent(&world, fort.body.number);
+        assert!(broke.iter().any(|member| member.component == REPAIR_DELAY_COMPONENT
+            && matches!(&member.state, MemberState::DelayedEvent(timer)
+                if timer.total_delay_s == Some(REPAIR_DELAY_S) && timer.completed.is_none())));
+        assert!(broke.iter().any(|member| member.component == DOOR_COMPONENT
+            && matches!(&member.state, MemberState::Interact(state)
+                if state.enabled == Some(false) && state.has_interactors.is_none())));
+        world.tick_war_fight();
+        let siege = world.war_fight().and_then(WarFight::siege_entity).expect("siege");
+        let majors = world.stations.members(siege).and_then(|members| {
+            members.iter().find_map(|member| match &member.state {
+                MemberState::SiegeWarfareData(state) => state.structures.clone(),
+                _ => None,
+            })
+        });
+        let Some(KeyedList::Full(majors)) = majors else {
+            panic!("the major structures");
+        };
+        let facet = gate(&world, FORT_GATE_REF).body.structure.facet_entity();
+        let entry = majors
+            .elements
+            .iter()
+            .find(|(key, _)| *key == facet)
+            .map(|(_, entry)| (entry.kind, entry.health, entry.flag));
+        assert_eq!(entry, Some((GATE_MAJOR_KIND, 0, BROKEN_STATE)));
+        war.result = Some((war.attacker.0, world.unix_ms()));
+        world.wars.read(Ok(vec![war]));
+        world.tick_war_fight();
+        let mended = gate(&world, FORT_GATE_REF);
+        assert!(!mended.body.broken && mended.body.invulnerable);
+        let restored = world.stations.members(mended.body.number).expect("members");
+        assert!(restored.iter().any(|member| matches!(&member.state,
+            MemberState::BuildableController(state) if state.current_state == Some(BUILT_STATE))));
+        let sent = sent(&world, mended.body.number);
+        let shown = |component, check: &dyn Fn(&MemberState) -> bool| {
+            sent.iter()
+                .any(|member| member.component == component && check(&member.state))
+        };
+        assert!(shown(REPAIR_DELAY_COMPONENT, &|state| matches!(state,
+            MemberState::DelayedEvent(timer) if timer.total_delay_s == Some(0.0))));
+        assert!(shown(DOOR_COMPONENT, &|state| matches!(state,
+            MemberState::Interact(door) if door.enabled == Some(true))));
+    }
+
+    /// The war run change sends what changed between two phases: no faction of a turret, the
+    /// faction of a fort gate at the start only.
+    #[test]
+    fn the_war_run_change_sends_the_rule_the_raid_and_a_changed_faction() {
+        let before = OwnershipState {
+            permission_rule: Some(GATE_PERMISSION_RULE),
+            raid_id: Some(NO_RAID),
+            faction_type: Some(NO_FACTION),
+            guild_id: Some([0xd1; GUILD_ID_LEN]),
+            ..OwnershipState::default()
+        };
+        let after = OwnershipState {
+            permission_rule: Some(WAR_RUN_PERMISSION_RULE),
+            raid_id: Some(DEFENDER_RAID),
+            faction_type: Some(DEFENDER_FACTION),
+            ..before.clone()
+        };
+        let change = war_run_change(&before, &after);
+        assert_eq!(change.guild_id, None, "a company stays");
+        assert_eq!(change.faction_type, Some(DEFENDER_FACTION));
+        let back = war_run_change(&after, &OwnershipState { faction_type: Some(DEFENDER_FACTION), ..before.clone() });
+        assert_eq!(back.faction_type, None, "the faction stays");
+        assert_eq!(back.permission_rule, Some(GATE_PERMISSION_RULE));
+        assert_eq!(back.raid_id, Some(NO_RAID));
+    }
 }

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! What the game mode script of each expedition holds that the sim needs for its game mode
-//! entity ([`super::expedition_mode`]): the objective's tasks, the run's time to beat, the
-//! objective's id and instance, where the run's end leaves the script state, the delay of the
-//! state after it and what a mutated run's normal kill scores (findings
-//! `2026-11-13-catacomb-erosion.md`, sections C15 and C16).
+//! entity ([`super::expedition_mode`]): the objective's tasks and what ends them, the run's time
+//! to beat, the objective's id and instance, where the run's end leaves the script state, the
+//! delay of the state after it, what a mutated run's normal kill scores and what a gathered
+//! resource node scores (findings `2026-11-13-catacomb-erosion.md`, sections C15, C16 and E2).
 //!
 //! **Observed** (client): each expedition's script class (`DungeonShatteredObeliskData` and
 //! eleven more, the constructors `FUN_140fafde0`, `FUN_1461e1920`, ...) pushes its objective's
@@ -33,10 +33,30 @@
 //! 83.030 s `AreaSealedChamber`): [`ExpeditionScript::area_tasks`]. Two of them meet two
 //! overlapping areas at once (the Depths' `AreaR3TP2Exit` with `AreaGlyphEventFail`, and
 //! `AreaThorpeFight` with `AreaThorpeFail`): the one that is no fail area is kept (Inferred).
-//! The other steps meet no area in every run: encounter ends, interactions and events the
-//! client does not get (not built; the run's end does them).
+//!
+//! **Observed** (batch E2, scratch `local-data/scratch-work/batch-e/E2/`: `gwfull.sh` writes
+//! the level entity traffic of 38 expedition ledgers, `taskevents.py` and `tieclass.py` set each
+//! script state step beside the encounter manager changes, the gathered objects and the turned
+//! off interacts of the 1.5 s before it; `tieclass.txt`): 113 more steps meet an event in every
+//! run that shows them, 0.00 to 0.08 s before or after it ([`ExpeditionScript::event_tasks`],
+//! 115 ties: the Dynasty's two keg steps also meet their dock encounter's start):
+//! an encounter's success (its manager's status 3; the Amrine vestibule 3 of 3 runs), an
+//! encounter's start (status 2; the Ebonscale courtyard), or a player's use of an object (its
+//! gatherable at 8 and its interact off; the Dynasty powder kegs). An encounter or an object is
+//! named by its slice's file name. The other steps meet no such event in every run (the
+//! `NONE` rows of `tieclass.txt`: talks, cutscenes, areas of one run): they end with the next
+//! task that ends (Inferred, as the area tasks).
+//!
 //! The objective id is the CRC of `SlayerScript` and a runtime entity id
 //! (`FUN_143248d10`): no capture explains its number, so the observed one is kept.
+//!
+//! **Observed** (batch E2, `gwrun.sh` and `gathertie.py`: the gatherable states of 14 runs
+//! beside each rise of `gatherablesCollected`, `8f3d2f0e`): every rise comes 0.00 to 0.04 s
+//! after a resource node (`slices/gatherables/master_alchemy`, `_minerals`, `_plants`,
+//! `_tree`) went to its depleted state (8), by any player; no chest, switch or door counts. The
+//! score rises by [`ExpeditionScript::gatherable_points`] at each one (`pointsPerGatherable`;
+//! the eleventh in run 18 too: no cap at the client's `numGatherablesForScore` 10, and no
+//! multiplier change).
 
 /// A task that ends when a player stands in a trigger area of the level script
 /// ([`nw_world::dungeon_scripts::LevelScript::trigger_area`]).
@@ -46,6 +66,51 @@ pub(super) struct AreaTask {
     pub(super) done: u8,
     /// The trigger area's entity name.
     pub(super) area: &'static str,
+}
+
+/// What ends a task of [`ExpeditionScript::event_tasks`] (module text): each names an encounter
+/// slice or an object slice by its file name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TaskEvent {
+    /// The encounter of this slice succeeded.
+    EncounterSucceeded(&'static str),
+    /// The encounter of this slice started.
+    EncounterStarted(&'static str),
+    /// A player used an object of this slice (its gather ended).
+    ObjectUsed(&'static str),
+}
+
+/// A task that ends at an event of the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct EventTask {
+    /// The done task count while it waits (the script state before its end).
+    pub(super) done: u8,
+    /// The event.
+    pub(super) event: TaskEvent,
+}
+
+/// The task waiting at `done` ends when encounter `slice` succeeds.
+const fn succeeded(done: u8, slice: &'static str) -> EventTask {
+    EventTask {
+        done,
+        event: TaskEvent::EncounterSucceeded(slice),
+    }
+}
+
+/// The task waiting at `done` ends when encounter `slice` starts.
+const fn started(done: u8, slice: &'static str) -> EventTask {
+    EventTask {
+        done,
+        event: TaskEvent::EncounterStarted(slice),
+    }
+}
+
+/// The task waiting at `done` ends when a player uses an object of `slice`.
+const fn used(done: u8, slice: &'static str) -> EventTask {
+    EventTask {
+        done,
+        event: TaskEvent::ObjectUsed(slice),
+    }
 }
 
 /// One expedition's script values.
@@ -74,6 +139,12 @@ pub(super) struct ExpeditionScript {
     pub(super) kills_for_bonus: u64,
     /// The tasks that end when a player stands in a trigger area (module text).
     pub(super) area_tasks: &'static [AreaTask],
+    /// The tasks that end at an encounter's success or start or an object's use, by their
+    /// done counts (module text).
+    pub(super) event_tasks: &'static [EventTask],
+    /// The points of a gathered resource node, `pointsPerGatherable` (module text); 0 for a
+    /// script that counts none.
+    pub(super) gatherable_points: u64,
     /// The script keeps the run's score and times (Observed: Amrine sent no value change in 4
     /// runs, every other expedition did).
     pub(super) scored: bool,
@@ -117,6 +188,17 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
         kill_points: TEMPEST_KILL_POINTS,
         kills_for_bonus: TEMPEST_KILLS_FOR_BONUS,
         area_tasks: &[],
+        event_tasks: &[
+            used(3, "interactobject_azothscipt_prototype_02"),
+            started(5, "dg_enc_windsward_00_vestibule"),
+            succeeded(6, "dg_enc_windsward_00_vestibule"),
+            used(7, "interactobject_pressureplate_ancient_locked"),
+            started(9, "dg_enc_windsward_00_chamber"),
+            succeeded(10, "dg_enc_windsward_00_chamber"),
+            succeeded(12, "dg_enc_windsward_00_boss"),
+        ],
+        // Observed: no value change in 4 runs (the script keeps no score).
+        gatherable_points: 0,
         scored: false,
     },
     // The Starstone Barrows.
@@ -189,6 +271,15 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
                 area: "AreaBoss",
             },
         ],
+        event_tasks: &[
+            used(6, "shattered_monolith"),
+            used(15, "interactobject_arcaneprotectionstatus_well"),
+            succeeded(16, "dg_enc_everfall_00_ancientshrine"),
+            used(19, "dungeon_everfall_00_azoth_shrine"),
+            succeeded(23, "dg_enc_everfall_00_ancientheavyboss"),
+        ],
+        // Observed: no rise in runs 3 and 30 (19 and 36 node gathers).
+        gatherable_points: 0,
         scored: true,
     },
     // The Depths.
@@ -268,6 +359,18 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
                 area: "AreaThorpeFight",
             },
         ],
+        event_tasks: &[
+            used(2, "interactobject_switch_azothseal"),
+            used(3, "interactobject_ancient_artifact_locked"),
+            used(13, "interactobject_switch_azothseal_locked"),
+            succeeded(15, "dg_enc_restlessshores_01_corruptedpriest"),
+            started(17, "dg_enc_restlessshores_01_core_01"),
+            succeeded(19, "dg_enc_restlessshores_01_bear_00"),
+            used(20, "interactobject_minormonolith"),
+            succeeded(22, "dg_enc_restlessshores_01_boss_00"),
+        ],
+        // Observed: +400 a gather (runs 4, 31, 45).
+        gatherable_points: 400,
         scored: true,
     },
     // Dynasty Shipyard.
@@ -319,6 +422,23 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
                 area: "AreaEmpress",
             },
         ],
+        event_tasks: &[
+            succeeded(1, "dg_enc_ebonscale_00_cave_monolith"),
+            used(2, "interactobject_powderkeg_ebonscale01"),
+            used(3, "interactobject_rockets_ebonscale01"),
+            started(4, "dg_enc_ebonscale_00_courtyard"),
+            succeeded(5, "dg_enc_ebonscale_00_courtyard"),
+            used(6, "interactobject_powderkeg_ebonscale00"),
+            started(6, "dg_enc_ebonscale_00_dock_00"),
+            succeeded(7, "dg_enc_ebonscale_00_dock_00"),
+            used(8, "interactobject_powderkeg_ebonscale00"),
+            started(8, "dg_enc_ebonscale_00_dock_01"),
+            succeeded(11, "dg_enc_ebonscale_00_isabella"),
+            succeeded(12, "dg_enc_ebonscale_00_barracks"),
+            succeeded(14, "dg_enc_ebonscale_00_empress"),
+        ],
+        // Observed: +350 a gather (runs 6, 39).
+        gatherable_points: 350,
         scored: true,
     },
     // Garden of Genesis.
@@ -365,6 +485,19 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
                 area: "AreaBogmonster",
             },
         ],
+        event_tasks: &[
+            succeeded(3, "dg_enc_edengrove_00_swampbeast"),
+            used(6, "interactobject_ae_imbuedshrine_a"),
+            succeeded(7, "dg_enc_edengrove_00_blightedhollow"),
+            succeeded(10, "dg_enc_edengrove_00_bogmonster"),
+            used(11, "interactobject_startpurifyingflame"),
+            used(12, "interactobject_getpurifyingflame"),
+            started(14, "dg_enc_edengrove_00_fulgda"),
+            succeeded(15, "dg_enc_edengrove_00_fulgda"),
+            succeeded(17, "dg_enc_edengrove_00_nagaangryearth"),
+        ],
+        // Observed: +400 a gather (runs 7, 32, 41).
+        gatherable_points: 400,
         scored: true,
     },
     // Lazarus Instrumentality.
@@ -423,6 +556,23 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
                 area: "AreaControlRoomUpper",
             },
         ],
+        event_tasks: &[
+            used(2, "dungeon_reekwater_glyph_light"),
+            used(4, "interactobject_switch_azothseal"),
+            succeeded(5, "dg_enc_reekwater_00_well_door"),
+            succeeded(7, "dg_enc_reekwater_00_tributarium_02"),
+            succeeded(10, "dg_enc_reekwater_00_naga"),
+            used(11, "dungeon_reekwater_pressureplate_large"),
+            started(12, "dg_enc_reekwater_00_bathhouse_03"),
+            succeeded(16, "dg_enc_reekwater_00_control_room_02"),
+            started(17, "dg_enc_reekwater_00_torso_boss"),
+            succeeded(18, "dg_enc_reekwater_00_miniboss_mage"),
+            used(19, "dungeon_reekwater_ancient_guardian_heart"),
+            used(20, "dungeon_reekwater_ancient_device"),
+            succeeded(21, "dg_enc_reekwater_00_torso_boss"),
+        ],
+        // Observed: +400 a gather (runs 8, 33, 42).
+        gatherable_points: 400,
         scored: true,
     },
     // Barnacles and Black Powder.
@@ -469,6 +619,27 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
         kill_points: TEMPEST_KILL_POINTS,
         kills_for_bonus: TEMPEST_KILLS_FOR_BONUS,
         area_tasks: &[],
+        event_tasks: &[
+            succeeded(0, "dg_enc_cutlasskeys_00_entry"),
+            used(1, "dungeon_cutlasskeys00_scalleywag_interactable"),
+            succeeded(5, "dg_enc_cutlasskeys_00_docksexit"),
+            succeeded(9, "dg_enc_cutlasskeys_00_spectators"),
+            succeeded(10, "dg_enc_cutlasskeys_00_fireagent"),
+            succeeded(12, "dg_enc_cutlasskeys_00_gauntletexit"),
+            used(13, "dungeon_cutlasskeys00_explosives"),
+            started(14, "dg_enc_cutlasskeys_00_piratecove"),
+            succeeded(15, "dg_enc_cutlasskeys_00_piratecove"),
+            succeeded(17, "dg_enc_cutlasskeys_00_ship"),
+            used(18, "dungeon_cutlasskeys00_cannon_ship_interactable"),
+            succeeded(19, "dg_enc_cutlasskeys_00_admiralbrute"),
+            succeeded(20, "dg_enc_cutlasskeys_00_treasureghost"),
+            succeeded(22, "dg_enc_cutlasskeys_00_berserker"),
+            used(23, "dungeon_cutlasskeys00_mariner_interactable"),
+            used(24, "dungeon_cutlasskeys00_spring"),
+            succeeded(26, "dg_enc_cutlasskeys_00_dryadsiren"),
+        ],
+        // Observed: +350 a gather (run 13).
+        gatherable_points: 350,
         scored: true,
     },
     // Empyrean Forge.
@@ -506,6 +677,20 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
         kill_points: 24,
         kills_for_bonus: 85,
         area_tasks: &[],
+        event_tasks: &[
+            used(2, "interactobject_switch_azothseal"),
+            used(4, "dungeon_greatcleave01_nora_interactable"),
+            succeeded(8, "dg_enc_greatcleave_00_theheel"),
+            succeeded(9, "dg_enc_greatcleave_00_theheelfinal"),
+            succeeded(11, "dg_enc_greatcleave_01_nagafire"),
+            used(12, "interactobject_switch_azothseal_locked"),
+            succeeded(14, "dg_enc_greatcleave_01_skarin"),
+            used(15, "interactobject_pressureplate_ancient_locked"),
+            succeeded(16, "dg_enc_greatcleave_01_ghostsendless"),
+            succeeded(18, "dg_enc_greatcleave_01_evil_knight_fire_champion"),
+        ],
+        // Observed: +400 a gather (runs 17, 26).
+        gatherable_points: 400,
         scored: true,
     },
     // Tempest's Heart.
@@ -577,6 +762,23 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
                 area: "AreaCityStatue",
             },
         ],
+        event_tasks: &[
+            succeeded(3, "dg_enc_shattermtn_00_towerambush"),
+            succeeded(4, "dg_enc_shattermtn_00_corruptedspriggan"),
+            succeeded(7, "dg_enc_shattermtn_00_voidtunnel"),
+            used(10, "dungeon_shattermtn00_lock_cellar"),
+            succeeded(14, "dg_enc_shattermtn_00_basilicahall"),
+            succeeded(16, "dg_enc_shattermtn_00_basilicaalter_001"),
+            succeeded(18, "dg_enc_shattermtn_00_isabella_basilica"),
+            used(21, "dungeon_shattermtn00_relic_bubble"),
+            used(23, "dungeon_shattermtn00_relic_statue"),
+            started(24, "dg_enc_shattermtn_00_corruptedmine"),
+            succeeded(25, "dg_enc_shattermtn_00_corruptedmine"),
+            succeeded(28, "dg_enc_shattermtn_00_nagacorrupted"),
+            succeeded(31, "dg_enc_shattermtn_00_isabella_throne"),
+        ],
+        // Observed: +225 a gather (runs 12, 34, 37).
+        gatherable_points: 225,
         scored: true,
     },
     // The Ennead.
@@ -604,6 +806,15 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
         kill_points: TEMPEST_KILL_POINTS,
         kills_for_bonus: TEMPEST_KILLS_FOR_BONUS,
         area_tasks: &[],
+        event_tasks: &[
+            succeeded(0, "dg_brimstone_00_plazaencounterslice"),
+            succeeded(2, "dg_brimstone_00_scarabbossencounter"),
+            used(3, "interactobject_minormonolith"),
+            succeeded(5, "dg_brimstone_00_crassusencounter"),
+            succeeded(7, "dg_brimstone_00_goliathsencounter"),
+        ],
+        // Observed: +400 a gather (run 27).
+        gatherable_points: 400,
         scored: true,
     },
     // Savage Divide.
@@ -658,6 +869,19 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
                 area: "Area_Approach_Boss_1",
             },
         ],
+        event_tasks: &[
+            succeeded(5, "dg_enc_firstlight_01_pressureplates_01"),
+            used(6, "interactobject_pressure_plate_overgrown2"),
+            succeeded(11, "dg_enc_firstlight_01_armoreddragon_named"),
+            started(12, "dg_enc_firstlight_01_ape_attack"),
+            succeeded(15, "dg_enc_firstlight_01_gorilla_boss"),
+            started(18, "dg_enc_firstlight_01_hub2return"),
+            started(19, "dg_enc_firstlight_01_hub2return"),
+            succeeded(20, "dg_enc_firstlight_01_pre_mammoth"),
+            succeeded(21, "dg_enc_firstlight_01_mammoth_boss"),
+        ],
+        // Observed: +350 a gather (runs 18, 36).
+        gatherable_points: 350,
         scored: true,
     },
     // Glacial Tarn.
@@ -693,6 +917,16 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
         kill_points: TEMPEST_KILL_POINTS,
         kills_for_bonus: TEMPEST_KILLS_FOR_BONUS,
         area_tasks: &[],
+        event_tasks: &[
+            used(3, "interactobject_switch_azothseal_locked"),
+            succeeded(5, "dg_enc_greatcleave_00_troll_boss"),
+            succeeded(6, "dg_enc_greatcleave_00_knight"),
+            succeeded(7, "dg_enc_greatcleave_00_pistons"),
+            used(8, "interactobject_switch_azothseal_locked"),
+            succeeded(15, "dg_greatcleave_00_icetorsoencounter"),
+        ],
+        // Observed: +400 a gather (run 19).
+        gatherable_points: 400,
         scored: true,
     },
 ];
@@ -776,6 +1010,51 @@ mod tests {
                 area: "AreaSealedChamber"
             }
         );
+    }
+
+    /// Every event tie waits before the run's end, the ties of a script in rising order; 115
+    /// ties of 113 steps in the twelve expeditions (Amrine's vestibule starts at 5 and succeeds
+    /// at 6, retail runs 2, 29 and 38).
+    #[test]
+    fn the_event_tasks_end_before_the_run_does() {
+        for script in &EXPEDITION_SCRIPTS {
+            assert!(
+                script.event_tasks.windows(2).all(|pair| pair[0].done <= pair[1].done),
+                "{}",
+                script.game_mode
+            );
+            assert!(
+                script.event_tasks.iter().all(|task| task.done < script.end_done),
+                "{}",
+                script.game_mode
+            );
+        }
+        let ties: usize = EXPEDITION_SCRIPTS
+            .iter()
+            .map(|script| script.event_tasks.len())
+            .sum();
+        assert_eq!(ties, 115);
+        let amrine = expedition_script("DungeonAmrine").expect("Amrine");
+        assert_eq!(
+            amrine.event_tasks[1..3],
+            [
+                started(5, "dg_enc_windsward_00_vestibule"),
+                succeeded(6, "dg_enc_windsward_00_vestibule"),
+            ]
+        );
+    }
+
+    /// Retail `gatherablesCollected` rises: 400 a node in the Depths (run 4: 90.635 and
+    /// 513.635 s), 350 in Savage Divide (run 18, eleven), 225 in Tempest's Heart (run 12), none
+    /// in Starstone (runs 3 and 30) and Amrine.
+    #[test]
+    fn the_gatherable_points_are_the_retail_ones() {
+        let points = |mode: &str| expedition_script(mode).expect("script").gatherable_points;
+        assert_eq!(points("DungeonRestlessShores01"), 400);
+        assert_eq!(points("DungeonFirstLight01"), 350);
+        assert_eq!(points("DungeonShatterMtn00"), 225);
+        assert_eq!(points("DungeonShatteredObelisk"), 0);
+        assert_eq!(points("DungeonAmrine"), 0);
     }
 
     /// Retail mutated runs: Empyrean (run 16) scores +24 a kill up to 85, Tempest (runs 20 and

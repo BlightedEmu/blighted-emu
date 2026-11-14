@@ -40,6 +40,11 @@
 //! columns to actions on its entities (`Change Mesh` on `StartMesh`); the variant's row gives the
 //! values (a tree's own trunk mesh, an ore's own boulder). The gatherable's depleted state
 //! ([`DEPLETED_GROUP`]) is not shown as the level loads.
+//!
+//! Each body that a capital's slice places carries the capital's GDE id, and each body of a slice
+//! that a spawner places as the level loads that slice's own id ([`BodyEntity`]: what a shot that
+//! meets the body names; the ids of the GDE id note, tag 3 and tag 7). The chunks' and the
+//! distribution rows' bodies carry none.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -58,14 +63,15 @@ use nw_formats::objectstream::{Element, ObjectStreamError, lowercase_crc32, pars
 use nw_formats::pak::{PakArchive, PakEntry, PakError, find_paks};
 use nw_formats::rnr::{RNR_EXTENSION, RnrError, Shape, ShapeKind, parse_rnr};
 use nw_oodle::KrakenDecompressor;
-use nw_world::capitals::parse_capitals;
+use nw_world::capitals::{capital_id, parse_capitals};
 use nw_world::collision::{
-    Affine, Body, DeferredSlice, Geometry, IDENTITY_AFFINE, LevelCollision, NavMark, NavMarkKind,
-    QuestVolume, SolidFor, collision_file_path, compose, hull_planes, place_of,
+    Affine, Body, BodyEntity, DeferredSlice, Geometry, IDENTITY_AFFINE, LevelCollision, NavMark,
+    NavMarkKind, QuestVolume, SolidFor, collision_file_path, compose, hull_planes, place_of,
 };
 use nw_world::collision_index::CollisionIndex;
 use nw_world::level_script::DETECTION_OFFSET_NAME;
 use nw_world::records::WorldFile;
+use nw_world::slice_data::spawned_gde_id;
 use nw_world::water::{WaterMap, water_file_path};
 use nw_world::world_file::world_file_path;
 
@@ -1463,6 +1469,10 @@ struct Pending {
     /// The region's slice data of a distribution row's slice and variant: its meshes when no
     /// variation table holds the variant.
     meta: Option<Arc<SliceMeta>>,
+    /// The GDE id of the level entity it is: a capital's, or a slice's that a spawner places as
+    /// the level loads ([`BodyEntity`]); `None` for a chunk, a distribution row and a slice
+    /// placed later.
+    entity: Option<u64>,
 }
 
 /// The slices placed so far and those still to read.
@@ -1480,6 +1490,18 @@ struct PlacedSolid {
     deferred: Option<usize>,
     solid_for: SolidFor,
     mark: Option<NavMarkKind>,
+    /// [`Pending::entity`] of the slice that places it.
+    entity: Option<u64>,
+}
+
+/// The GDE id of slice `slice` that a spawner places at `place` (world from the slice's space)
+/// as the level loads: its packed place, yaw and asset ([`spawned_gde_id`]).
+fn spawned_entity(place: &Affine, slice: &AssetKey) -> u64 {
+    let position = [place[0][AXES], place[1][AXES], place[2][AXES]].map(f64::from);
+    let yaw_deg = f64::from(place[1][0])
+        .atan2(f64::from(place[0][0]))
+        .to_degrees();
+    spawned_gde_id(position, yaw_deg, &slice.0)
 }
 
 /// Builds, writes and reloads the collision file of `level`.
@@ -1534,6 +1556,7 @@ pub fn build_slices_collision(
             deferred: Some(deferred),
             variant: None,
             meta: None,
+            entity: None,
         })
         .collect();
     let placements = Placements {
@@ -1643,6 +1666,7 @@ fn collide(
                             deferred: pending.deferred,
                             solid_for: body.solid_for,
                             mark: body.mark,
+                            entity: pending.entity,
                         });
                     }
                 }
@@ -1654,6 +1678,7 @@ fn collide(
                             deferred: pending.deferred,
                             solid_for,
                             mark: None,
+                            entity: pending.entity,
                         });
                     }
                 }
@@ -1674,6 +1699,7 @@ fn collide(
                         deferred: pending.deferred,
                         solid_for: body.solid_for,
                         mark: body.mark,
+                        entity: pending.entity,
                     }),
                     None => report.shapeless_entities += 1,
                 }
@@ -1704,6 +1730,9 @@ fn collide(
                     ));
                     Some(deferred_slices.len() - 1)
                 };
+                let entity = deferred
+                    .is_none()
+                    .then(|| spawned_entity(&place, &spawn.slice));
                 placements.pending.push(Pending {
                     slice: spawn.slice,
                     place,
@@ -1711,6 +1740,7 @@ fn collide(
                     deferred,
                     variant: None,
                     meta: None,
+                    entity,
                 });
             }
         }
@@ -1944,6 +1974,7 @@ fn level_placements(index: &PakIndex, level: &str) -> Result<Placements, Collisi
                     deferred: None,
                     variant: capital.variant_name.as_deref().map(Arc::from),
                     meta: None,
+                    entity: capital_id(&capital.id),
                 });
             }
         }
@@ -1963,6 +1994,7 @@ fn level_placements(index: &PakIndex, level: &str) -> Result<Placements, Collisi
                 deferred: None,
                 variant: None,
                 meta: None,
+                entity: None,
             });
         }
     }
@@ -2079,6 +2111,7 @@ fn distribution_placements(
                 deferred: None,
                 variant: variants[slice_index].clone(),
                 meta: metas[slice_index].clone(),
+                entity: None,
             });
         }
     }
@@ -2182,6 +2215,7 @@ fn place_solids(
             deferred: group,
             solid_for,
             mark,
+            entity,
         } = solid;
         let mut put = |bodies: &mut dyn Iterator<Item = Body>| match group {
             Some(group) => {
@@ -2191,7 +2225,7 @@ fn place_solids(
             }
             None => {
                 for body in bodies {
-                    sorted.put(body, *solid_for, *mark);
+                    sorted.put(body, *solid_for, *mark, *entity);
                 }
             }
         };
@@ -2261,6 +2295,7 @@ fn place_solids(
         ai_bodies: sorted.ai_bodies,
         player_only: sorted.player_only,
         nav_marks: sorted.nav_marks,
+        entities: sorted.entities,
     })
 }
 
@@ -2271,14 +2306,26 @@ struct SortedBodies {
     ai_bodies: Vec<Body>,
     player_only: Vec<u32>,
     nav_marks: Vec<NavMark>,
+    entities: Vec<BodyEntity>,
 }
 
 impl SortedBodies {
-    /// Keeps `body` for the filters `solid_for` blocks, and as a mark of `mark`.
-    fn put(&mut self, body: Body, solid_for: SolidFor, mark: Option<NavMarkKind>) {
+    /// Keeps `body` for the filters `solid_for` blocks, and as a mark of `mark`; a body that
+    /// blocks the players keeps the level entity `entity` that places it.
+    fn put(
+        &mut self,
+        body: Body,
+        solid_for: SolidFor,
+        mark: Option<NavMarkKind>,
+        entity: Option<u64>,
+    ) {
         if solid_for.player {
+            let index = small_index(self.bodies.len());
             if !solid_for.ai {
-                self.player_only.push(small_index(self.bodies.len()));
+                self.player_only.push(index);
+            }
+            if let Some(id) = entity {
+                self.entities.push(BodyEntity { body: index, id });
             }
             self.bodies.push(body);
         } else if solid_for.ai {
@@ -2602,9 +2649,16 @@ mod tests {
             player: true,
             ai: true,
         };
+        /// The capital id of the start beach watchtower.
+        const WATCHTOWER: u64 = 0x8c14_619c_4048_5243;
         let mut sorted = SortedBodies::default();
-        sorted.put(body(0), both, None);
-        sorted.put(body(1), SolidFor { ai: false, ..both }, None);
+        sorted.put(body(0), both, None, None);
+        sorted.put(
+            body(1),
+            SolidFor { ai: false, ..both },
+            None,
+            Some(WATCHTOWER),
+        );
         sorted.put(
             body(2),
             SolidFor {
@@ -2612,17 +2666,44 @@ mod tests {
                 ..both
             },
             None,
+            Some(WATCHTOWER),
         );
         sorted.put(
             body(3),
             SolidFor::default(),
             Some(NavMarkKind::NoFloorVolume),
+            None,
         );
         assert_eq!(sorted.bodies, [body(0), body(1)]);
         assert_eq!(sorted.player_only, [1]);
         assert_eq!(sorted.ai_bodies, [body(2)]);
         assert_eq!(sorted.nav_marks.len(), 1);
         assert_eq!(sorted.nav_marks[0].geometry, 3);
+        assert_eq!(
+            sorted.entities,
+            [BodyEntity {
+                body: 1,
+                id: WATCHTOWER
+            }],
+            "only the players' bodies keep their entity"
+        );
+    }
+
+    #[test]
+    fn a_slice_spawned_as_the_level_loads_is_the_entity_of_its_packed_place() {
+        // A tinderbox spawned at (5510.780, 4359.501, 91.792), yaw 3.1867 rad, asset GUID
+        // `b00a…`: the retail id (GDE id note section 4; `nw_world::slice_data` tests).
+        const TINDERBOX_ID: u64 = 0x5838_b791_0785_61b7;
+        const YAW_RAD: f32 = 3.1867;
+        let mut asset = [0; GUID_LEN];
+        asset[..2].copy_from_slice(&[0xb0, 0x0a]);
+        let half = YAW_RAD * HALF;
+        let place = place_of(
+            [0.0, 0.0, half.sin(), half.cos()],
+            1.0,
+            [5_510.78, 4_359.501, 91.792],
+        );
+        assert_eq!(spawned_entity(&place, &(asset, 2)), TINDERBOX_ID);
     }
 
     #[test]

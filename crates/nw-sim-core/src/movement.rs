@@ -72,6 +72,14 @@ pub trait Ground {
         None
     }
 
+    /// The first solid that the straight line from `_from` to `_to` meets, either side of it:
+    /// where it meets it, and the GDE id of the level entity whose solid it is (`None` for a
+    /// solid of no entity, [`nw_world::collision::BodyEntity`]). None where the implementation
+    /// knows only the terrain.
+    fn first_solid(&self, _from: Position, _to: Position) -> Option<(Position, Option<u64>)> {
+        None
+    }
+
     /// How much of the ground at (`_x`, `_y`) is road, 0 to 1: the share of the road cells of the
     /// level's tract map in the bilinear blend around the point ([`nw_world::roads::RoadMap`]).
     /// No road where the implementation knows no tract map.
@@ -119,6 +127,10 @@ impl<T: Ground + ?Sized> Ground for &T {
         (**self).wall(from, to)
     }
 
+    fn first_solid(&self, from: Position, to: Position) -> Option<(Position, Option<u64>)> {
+        (**self).first_solid(from, to)
+    }
+
     fn road_share(&self, x: f32, y: f32) -> f32 {
         (**self).road_share(x, y)
     }
@@ -152,6 +164,10 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
 
     fn wall(&self, from: Position, to: Position) -> Option<[f32; 2]> {
         (**self).wall(from, to)
+    }
+
+    fn first_solid(&self, from: Position, to: Position) -> Option<(Position, Option<u64>)> {
+        (**self).first_solid(from, to)
     }
 
     fn road_share(&self, x: f32, y: f32) -> f32 {

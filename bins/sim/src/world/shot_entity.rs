@@ -10,9 +10,12 @@
 //! flag. The entity leaves the views the slice's `m_stuckLifetime` plus [`AFTER_END_MS`] after
 //! the hit, or `m_flyingLifetime` plus [`AFTER_END_MS`] after the card when it hits nothing.
 //!
-//! Unknown: the clock of the time anchor (the server time of the shot is sent); the impact
-//! point of a shot that hits the world (the sim has no impact point for a miss, so a miss
-//! sends no hit); the weapon effect of a weapon with a gem (the default effect is sent).
+//! A shot that a solid of the level stops ([`super::projectile`] **Level stops**) gets the impact
+//! point, the solid's level entity (none for a solid of no entity) and the collided flag, with no
+//! hit volume (Observed: `opr_que_and_lost`, 940 states on the OPR Vertical outer perimeter wall).
+//!
+//! Unknown: the clock of the time anchor (the server time of the shot is sent); the weapon
+//! effect of a weapon with a gem (the default effect is sent).
 
 use bevy_ecs::entity::Entity;
 use nw_content::shot_entities::ShotEntity;
@@ -29,8 +32,7 @@ use nw_messages::{
 use nw_sim_core::Position;
 
 use super::crafting::{CARD_COMPONENT, Station, dynamic_ref};
-use super::hit_shape::PLAYER_CAPSULE;
-use super::projectile::AimLine;
+use super::projectile::{AimLine, muzzle_of};
 use super::{Player, SimWorld};
 
 /// The namespace of the `GdeRef`s of shot entities ("shotenty").
@@ -50,8 +52,6 @@ pub(super) const BODY_HIT_VOLUME: u8 = 0;
 const MS_PER_SECOND: f32 = 1_000.0;
 /// Microseconds per millisecond.
 const US_PER_MS: u64 = 1_000;
-/// Half of a height.
-const HALF: f32 = 0.5;
 
 /// A projectile entity to spawn ([`SimWorld::spawn_projectile`]): a player's shot or a turret's.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -153,10 +153,7 @@ impl SimWorld {
         let shot: ShotEntity = *self.content.shot_entities.of(damage_id)?;
         let owner = facet_entity(self.world.get::<Player>(shooter)?.number);
         // The shot leaves the middle of the shooter's body ([`AimLine::of`]).
-        let muzzle = Position {
-            z: from.z + PLAYER_CAPSULE.height_m * HALF,
-            ..from
-        };
+        let muzzle = muzzle_of(from);
         let state = ProjectileState {
             velocity: Some(velocity(aim, shot.base_speed_mps)),
             owner: Some(owner),
@@ -260,6 +257,32 @@ impl SimWorld {
         at: Position,
         now_ms: u64,
     ) {
+        let collided = target.map(|target| (facet_entity(target), Some(BODY_HIT_VOLUME)));
+        self.shot_entity_collided(number, collided, at, now_ms);
+    }
+
+    /// The shot entity of slot key `number` met a solid of the level at `at` at `now_ms`: its
+    /// state names the solid's level entity `level` (its GDE id; `None` for a solid of no
+    /// entity, a hit of the world) with no hit volume (module doc); it stays its stuck lifetime.
+    pub(super) fn shot_entity_on_level(
+        &mut self,
+        number: u64,
+        level: Option<u64>,
+        at: Position,
+        now_ms: u64,
+    ) {
+        self.shot_entity_collided(number, level.map(|id| (id, None)), at, now_ms);
+    }
+
+    /// The shot entity of slot key `number` ended its flight at `at` at `now_ms`, on the entity
+    /// of facet entity and hit volume `collided` (`None`: none); it stays its stuck lifetime.
+    fn shot_entity_collided(
+        &mut self,
+        number: u64,
+        collided: Option<(u64, Option<u8>)>,
+        at: Position,
+        now_ms: u64,
+    ) {
         let Some(live) = self
             .live_shots
             .iter_mut()
@@ -276,8 +299,8 @@ impl SimWorld {
         };
         let hit = ProjectileState {
             position: Some(impact),
-            collided_with: target.map(facet_entity),
-            hit_volume: target.map(|_| BODY_HIT_VOLUME),
+            collided_with: collided.map(|(facet, _)| facet),
+            hit_volume: collided.and_then(|(_, volume)| volume),
             flags: Some(COLLIDED_FLAGS),
             ..ProjectileState::default()
         };

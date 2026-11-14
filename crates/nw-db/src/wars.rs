@@ -522,6 +522,37 @@ mod infra_tests {
         id
     }
 
+    /// A second territory of the same owner.
+    const OTHER_TERRITORY: u16 = 9;
+    /// The numbers a war takes: its attacker side and its defender side.
+    const WAR_SIDES: u64 = 2;
+
+    #[tokio::test]
+    async fn the_next_war_takes_its_number_after_the_last_wars_defender() {
+        with_test_schema(async |pool| {
+            WORLD_MIGRATOR.run(pool).await.expect("migrate");
+            company(pool, OWNER, 1).await;
+            company(pool, ATTACKER, 2).await;
+            for territory in [TERRITORY, OTHER_TERRITORY] {
+                set_territory_owner(pool, territory, OWNER)
+                    .await
+                    .expect("owner");
+                assert_eq!(
+                    declare_war(pool, territory, ATTACKER, STARTS_MS)
+                        .await
+                        .expect("declare"),
+                    Declared::Declared
+                );
+            }
+            let wars = territory_wars(pool, STARTS_MS).await.expect("wars");
+            let [first, second] = wars.as_slice() else {
+                panic!("two wars: {wars:?}");
+            };
+            assert_eq!(second.number, first.number + WAR_SIDES);
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn a_war_is_declared_signed_up_for_rostered_and_won() {
         with_test_schema(async |pool| {

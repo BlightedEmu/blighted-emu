@@ -91,6 +91,26 @@
 //! stops a use of the other team. The interact change of the use carries the vat's cooldown
 //! (1714.326 s: option 0, version 62, ending 19.95 s after the use on that capture's clock), as
 //! the war droppers' do (**The cooldown**).
+//!
+//! **Level structures** ([`LevelSiege`], batch E1): outside a fight the holder is the level's
+//! own ([`super::turrets::TurretHost::Level`]): the open world's fire droppers (the five
+//! `Dropper_Fire_POI_<n>` capitals of the Hedet canyon, [`nw_content::war_forts::LevelDropper`];
+//! the quest SQ-Brimestone-Sands-2 sends the player to one) and the turrets an instance's
+//! encounter spawns. Observed (the quest ledgers of `SQ-Brimestone-Sands-2`, 183.547 to
+//! 720.941 s): a player near one gets its level card (no asset: the capital id and 8 zero bytes),
+//! no place state, its vitals (71,996 of 72,000, invulnerable), its buildable state 5, its
+//! delayed events, its projectile spawner (ammo `ffff`), its container and placement
+//! obstruction, and an ownership of no company with rule 1 ([`LEVEL_PERMISSION_RULE`]) that
+//! names the last user (kind 2); a dropper used before shows its use interact (component 16)
+//! with the cooldown of that use, long ended. The slot stops when the player goes away, and the
+//! same states come back (337.256 and 342.790 s). No ledger holds a use of one; its slice is a
+//! dropper's (the `DropFlameBarrel` option on interact 16, `ProjectileSpawnDelay` 0.3 s on
+//! component 18, `Dropper_T3_FireBarrel_Projectile`), so a use runs as a war dropper's (the
+//! pour, the barrel, its `dropper_t3_firebarrel_aoe` area and its `FireBarrelDropper_DoT` hits on
+//! the mobs and the player's foes, the 20 s cooldown after which it is ready again). Inferred:
+//! every player uses it ([`LEVEL_SIDE`]), one at a time; it takes no harm (no capture shows a
+//! hit on one), so it never breaks and needs no respawn; its use names the user as the owner,
+//! as a war dropper's does.
 
 use bevy_ecs::entity::Entity;
 use nw_content::war_forts::{
@@ -114,8 +134,8 @@ use super::attack::MobHitStyle;
 use super::crafting::{CARD_COMPONENT, Station, dynamic_ref};
 use super::gates::merge_members;
 use super::shot_entity::ProjectileSpawn;
-use super::siege_structures::{NO_INTERACTORS, StructureRun};
-use super::turrets::{ShotTarget, TurretHost, USE_ACCEPTED, USE_REFUSED};
+use super::siege_structures::{NO_INTERACTORS, StructureBody, StructureRun, spawn_members};
+use super::turrets::{ShotTarget, TurretHost, TurretRun, USE_ACCEPTED, USE_REFUSED, turret_ownership};
 use super::war_fight::replace_member;
 use super::{Player, SimWorld, gather_answer, send_now, unix_ns};
 use crate::combat::{AttackOutcome, AttackRefusal};
@@ -157,8 +177,14 @@ const ONE_USER: u32 = 1;
 const EFFECT_POTENCY: f64 = 1.0;
 /// The namespace of the `GdeRef`s of siege areas ("siegeare").
 const AREA_NAMESPACE: u64 = 0x7369_6567_6561_7265;
+/// The side of every player and every level structure outside a fight (module doc, **Level
+/// structures**).
+pub(super) const LEVEL_SIDE: u8 = nw_content::war_forts::SIDE_DEFENDER;
+/// The permission rule of a level structure's ownership (Observed: 1 on the Hedet canyon
+/// droppers).
+pub(super) const LEVEL_PERMISSION_RULE: u8 = 1;
 /// The delay a completed timer shows (Observed: `total_delay_s` 0 with the completed flag).
-const COMPLETED_DELAY_S: f32 = 0.0;
+pub(super) const COMPLETED_DELAY_S: f32 = 0.0;
 const MS_PER_SECOND: f32 = 1_000.0;
 const TWICE: f32 = 2.0;
 
@@ -281,6 +307,22 @@ pub(crate) struct AreaRun {
     timers: Vec<RunningTimer>,
 }
 
+/// The trigger structures and turrets of the level itself, with what their uses opened (module
+/// doc, **Level structures**); the sim's wars state holds it ([`super::wars`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct LevelSiege {
+    /// The level's fire droppers.
+    pub(super) droppers: Vec<StructureRun>,
+    /// What their uses opened.
+    pub(super) uses: SiegeUses,
+    /// The turrets an encounter of the instance spawned ([`super::turrets`]).
+    pub(super) turrets: Vec<TurretRun>,
+    /// The level's droppers spawned.
+    spawned: bool,
+    /// How many encounter turrets it spawned (their `GdeRef`s count on).
+    pub(super) turrets_made: usize,
+}
+
 /// What the uses of the trigger structures of one fight opened (module doc, **The holder**).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct SiegeUses {
@@ -291,7 +333,7 @@ pub(crate) struct SiegeUses {
 }
 
 /// The `DelayedEvent` member of a timer that starts with `delay_s` (`completed` as sent).
-fn timer_member(component: u64, delay_s: f32, completed: Option<bool>) -> BundleMember {
+pub(super) fn timer_member(component: u64, delay_s: f32, completed: Option<bool>) -> BundleMember {
     BundleMember {
         component,
         state: MemberState::DelayedEvent(DelayedEventState {
@@ -304,6 +346,15 @@ fn timer_member(component: u64, delay_s: f32, completed: Option<bool>) -> Bundle
 /// The member of a timer that ended.
 fn completed_member(component: u64) -> BundleMember {
     timer_member(component, COMPLETED_DELAY_S, Some(true))
+}
+
+/// The resting ownership of a level structure (module doc, **Level structures**): no company,
+/// no owner, rule [`LEVEL_PERMISSION_RULE`], raid 0, faction 0.
+pub(super) fn level_ownership() -> OwnershipState {
+    OwnershipState {
+        permission_rule: Some(LEVEL_PERMISSION_RULE),
+        ..turret_ownership(&nw_messages::ClaimOwner::NONE)
+    }
 }
 
 /// The turn of `structure`: the rotation of its retail place member.
@@ -485,6 +536,10 @@ impl SimWorld {
                     )
                 })
                 .unwrap_or_default(),
+            TurretHost::Level => (
+                std::mem::take(&mut self.wars.level.droppers),
+                std::mem::take(&mut self.wars.level.uses),
+            ),
         };
         let result = body(self, &mut runs, &mut uses);
         match host {
@@ -499,6 +554,10 @@ impl SimWorld {
                     running.structures.droppers = runs;
                     running.structures.uses = uses;
                 }
+            }
+            TurretHost::Level => {
+                self.wars.level.droppers = runs;
+                self.wars.level.uses = uses;
             }
         }
         Some(result)
@@ -530,10 +589,9 @@ impl SimWorld {
             raid_id: Some(raid),
             faction_type: Some(AREA_FACTION),
             permission_options: Some(AREA_PERMISSION_OPTIONS),
-            ..self
-                .war_fight()
-                .map(|fight| self.structure_ownership(fight, side))
-                .unwrap_or_default()
+            ..self.war_fight().map_or_else(level_ownership, |fight| {
+                self.structure_ownership(fight, side)
+            })
         }
     }
 
@@ -640,7 +698,7 @@ impl SimWorld {
             };
             let Some(kind) = content
                 .war_forts
-                .structure_kind(&runs[index].body.structure.asset)
+                .use_kind(&runs[index].body.structure)
                 .filter(|kind| kind.trigger.is_some())
             else {
                 return false;
@@ -773,7 +831,7 @@ impl SimWorld {
     ) {
         let content = std::sync::Arc::clone(&self.content);
         for run in runs.iter_mut() {
-            if let Some(kind) = content.war_forts.structure_kind(&run.body.structure.asset) {
+            if let Some(kind) = content.war_forts.use_kind(&run.body.structure) {
                 self.tick_use(uses, run, kind, now_ms);
             }
         }
@@ -977,10 +1035,12 @@ impl SimWorld {
                     }),
                 });
             }
+            // A timer that starts on a trigger of the slice opens at 0 (Observed: the cow
+            // launcher's area, `invasion` 335.079 s; [`SiegeTimer::on_open`]).
             members.extend(
                 area.timers
                     .iter()
-                    .map(|timer| timer_member(timer.component, timer.delay_s, Some(false))),
+                    .map(|timer| timer_member(timer.component, timer.open_delay_s(), Some(false))),
             );
             Station {
                 gde_ref,
@@ -1000,6 +1060,7 @@ impl SimWorld {
             timers: area
                 .timers
                 .iter()
+                .filter(|timer| timer.on_open)
                 .map(|timer| RunningTimer::of(timer, now_ms))
                 .collect(),
         };
@@ -1111,6 +1172,52 @@ impl SimWorld {
                     );
                 }
             }
+        }
+    }
+
+    /// Spawns the level's fire droppers once, on an open-world sim (module doc, **Level
+    /// structures**): each with its retail first members, its level card (no asset), its slice's
+    /// use interact when its first state had none, and the resting level ownership.
+    pub(super) fn spawn_level_droppers(&mut self) {
+        if self.instance_sim || self.wars.level.spawned {
+            return;
+        }
+        self.wars.level.spawned = true;
+        let content = std::sync::Arc::clone(&self.content);
+        for dropper in content.war_forts.level_droppers() {
+            let structure = FortStructure {
+                interact_component: dropper
+                    .structure
+                    .interact_component
+                    .or(dropper.kind.use_interact),
+                side: LEVEL_SIDE,
+                ..dropper.structure.clone()
+            };
+            let mut body = StructureBody::new(structure);
+            let gde_ref = body.structure.gde_ref;
+            let mut members = spawn_members(&body, |_| None, level_ownership());
+            if let Some(card) = members
+                .iter_mut()
+                .find(|member| member.component == body.structure.card_component)
+            {
+                card.state = MemberState::GdeMetadata(GdeMetadataReplicatedState {
+                    asset: None,
+                    gde_ref: Some(gde_ref),
+                });
+            }
+            let position = body.place();
+            body.number = self.stations.place_camp(|_| Station {
+                gde_ref,
+                position,
+                station_type: String::new(),
+                name: Vec::new(),
+                members,
+            });
+            self.wars.level.droppers.push(StructureRun {
+                body,
+                uses: UseState::default(),
+                generation: None,
+            });
         }
     }
 
@@ -1876,5 +1983,89 @@ mod tests {
             (shell_hit - SHELL_HIT).abs() < RETAIL_PRECISION,
             "{shell_hit}"
         );
+    }
+
+    /// The Hedet canyon dropper `Dropper_Fire_POI_2209365890` (capital id `c6822e7ecf34dcb3`) as a
+    /// level dropper with the test dropper's members and use parts (its own slice holds the same
+    /// dropper parts: the `DropFlameBarrel` option, a 0.3 s pour, a fire barrel and its area).
+    const LEVEL_REF: [u8; 16] =
+        *b"\xb3\xdc\x34\xcf\x7e\x2e\x82\xc6\x00\x00\x00\x00\x00\x00\x00\x00";
+
+    /// An open-world sim with the level dropper and one player near it.
+    fn level_world() -> (SimWorld, Entity) {
+        use crate::world::tests::{SERVER_TIME, admit_at, world_with_spawns};
+        let mut structure = structures()[0].clone();
+        structure["gde_ref"] = serde_json::json!(hex::encode(LEVEL_REF));
+        structure["place"] = serde_json::json!([5.0, 0.0, 0.0]);
+        let mut kind = kinds()[0].clone();
+        kind["slice"] = serde_json::json!("coatgen/a4041713/dropper_fire_poi_2209365890.dynamicslice");
+        let table = serde_json::json!({"forts": [], "level_droppers": [{
+            "capital": "b212b88f-c633-a507-7490-96f1090779b4", "members_inferred": false,
+            "structure": structure, "kind": kind}]});
+        let forts = WarForts::parse(&table.to_string()).expect("table");
+        let mut world = world_with_spawns(Vec::new());
+        world.content = std::sync::Arc::new(PlayerContent {
+            war_forts: forts,
+            ..PlayerContent::default()
+        });
+        let admit = admit_at(DEFENDER, 0.0, true);
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let entity = world.player_by_number(DEFENDER).expect("player");
+        world.tick_turrets(NOW);
+        world.take_messages();
+        (world, entity)
+    }
+
+    fn level_dropper(world: &SimWorld) -> &StructureRun {
+        world
+            .wars
+            .level
+            .droppers
+            .iter()
+            .find(|run| run.body.structure.gde_ref == LEVEL_REF)
+            .expect("the level dropper spawned")
+    }
+
+    /// Module doc, **Level structures**: the level dropper spawns once on an open-world sim
+    /// with its level card (no asset) and the resting level ownership; any player uses it, its
+    /// pour drops the barrel, and its 20 s cooldown refuses another use.
+    #[test]
+    fn a_level_dropper_shows_its_level_card_and_drops_a_barrel_for_any_player() {
+        let (mut world, entity) = level_world();
+        assert_eq!(world.turret_host(), Some(TurretHost::Level));
+        assert_eq!(world.turret_side(entity), Some(LEVEL_SIDE));
+        let number = level_dropper(&world).body.number;
+        let shown = members(&world, number);
+        assert!(shown.iter().any(|member| matches!(&member.state,
+            MemberState::GdeMetadata(card) if card.asset.is_none() && card.gde_ref == Some(LEVEL_REF))));
+        let ownership = shown.iter().find_map(|member| match &member.state {
+            MemberState::Ownership(state) => Some(state.clone()),
+            _ => None,
+        });
+        assert_eq!(ownership, Some(level_ownership()));
+        world.tick_turrets(NOW);
+        assert_eq!(world.wars.level.droppers.len(), 1, "spawned once");
+        assert!(world.turret_interaction(
+            entity,
+            DEFENDER,
+            trigger_request(LEVEL_REF),
+            b"Dropper_Fire_POI",
+            NOW
+        ));
+        let sent = messages_to(&world.take_messages(), DEFENDER);
+        assert!(accepted(&sent), "{sent:?}");
+        world.tick_turrets(NOW + POUR_MS);
+        assert!(world.wars.level.uses.first_drop().is_some(), "the barrel falls");
+        world.tick_turrets(NOW + DROPPER_USE_MS);
+        assert!(world.turret_interaction(
+            entity,
+            DEFENDER,
+            trigger_request(LEVEL_REF),
+            b"Dropper_Fire_POI",
+            NOW + DROPPER_USE_MS + 1
+        ));
+        let sent = messages_to(&world.take_messages(), DEFENDER);
+        assert!(!accepted(&sent), "the cooldown runs");
+        assert!(level_dropper(&world).body.invulnerable, "no harm in the open world");
     }
 }

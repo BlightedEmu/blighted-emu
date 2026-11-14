@@ -57,7 +57,7 @@ use nw_messages::social::{CharacterRef, GroupPush};
 use nw_messages::war::WarServerMsg;
 use nw_messages::war_states::{
     CAPTURE_POINT_CAPTURING, CAPTURE_POINT_FLAG, CAPTURE_POINT_LOCKED, CAPTURE_POINT_OPEN,
-    CapturePointCold,
+    CapturePointCold, FortStructure as MajorState,
 };
 use nw_messages::{
     AssetId, BundleMember, CapturePointState, ClaimOwner, DYNAMIC_SLICE_SUB_ID,
@@ -117,6 +117,17 @@ const FIRST_VERSION: u64 = nw_messages::items::FIRST_VERSION;
 /// The hot data of a point with no progress.
 const NO_PROGRESS: u8 = 0;
 
+/// Where a war fight is in its run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WarPhase {
+    /// Before the start.
+    Waiting,
+    /// From the start to the result.
+    Running,
+    /// From the result on.
+    Ended,
+}
+
 /// One capture point of the running fight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PointRun {
@@ -152,6 +163,8 @@ pub(crate) struct WarFight {
     pub(super) built: usize,
     /// What the uses of its droppers and horns opened ([`super::siege_areas`]).
     pub(super) uses: SiegeUses,
+    /// The major structure entries the siege data last showed.
+    majors_shown: Vec<(u64, MajorState)>,
 }
 
 impl WarFight {
@@ -186,12 +199,22 @@ impl WarFight {
             builds: Vec::new(),
             built: 0,
             uses: SiegeUses::default(),
+            majors_shown: Vec::new(),
         }
     }
 
     /// Whether the war runs: started, with no result yet (its structures may be hurt).
     pub(super) const fn running(&self) -> bool {
         self.started && self.ended_ms.is_none()
+    }
+
+    /// Where the war is in its run.
+    pub(super) const fn phase(&self) -> WarPhase {
+        match (self.started, self.ended_ms) {
+            (false, _) => WarPhase::Waiting,
+            (true, None) => WarPhase::Running,
+            (true, Some(_)) => WarPhase::Ended,
+        }
     }
 
     /// The framed level of the instance.
@@ -242,8 +265,31 @@ impl WarFight {
         })
     }
 
-    /// The siege warfare data: the points' cold and hot data (Inferred: the fort's structures,
-    /// weapons and buildables are left out; they are not built here).
+    /// The fort's major structures as they are now: each gate of
+    /// [`nw_content::war_forts::WarFort::major_structures`] by its facet entity, with its place,
+    /// its kind, its health in percent and its buildable state (Observed, `RS_offensive_war`;
+    /// [`nw_content::war_forts::MajorStructure`]).
+    fn majors(&self) -> Vec<(u64, MajorState)> {
+        self.structures
+            .iter()
+            .filter_map(|run| {
+                let body = &run.body;
+                let kind = self.fort.major_kind(&body.structure.gde_ref)?;
+                Some((
+                    body.structure.facet_entity(),
+                    MajorState {
+                        place: body.structure.place,
+                        kind,
+                        health: body.health_percent(),
+                        flag: body.state(),
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// The siege warfare data: the points' cold and hot data and the major structures
+    /// (Inferred: the weapons and buildables are left out).
     fn siege_state(&self, value: u64) -> SiegeWarfareDataState {
         let cold = (0..self.points.len())
             .filter_map(|index| Some((self.fort.points[index].key(), self.cold(index, value)?)))
@@ -255,9 +301,11 @@ impl WarFight {
             .zip(&self.points)
             .map(|(point, run)| (point.key(), run.progress))
             .collect();
+        let majors = self.majors();
         SiegeWarfareDataState {
             points_cold: Some(KeyedList::full(FIRST_VERSION, cold)),
             points_hot: Some(KeyedList::full(FIRST_VERSION, hot)),
+            structures: (!majors.is_empty()).then(|| KeyedList::full(FIRST_VERSION, majors)),
             ..SiegeWarfareDataState::default()
         }
     }
@@ -431,11 +479,23 @@ fn point_member(point: &FortPoint, cold: CapturePointCold, progress: u8) -> Bund
     }
 }
 
-/// The war side numbers of `war` (the war data's: the attacker's is twice the war's number,
-/// the defender's one more; Observed 9428 and 9429).
+/// The war side numbers of `war`, (attacker, defender): the war data's side numbers, which are
+/// the sides' raid ids ([`super::wars`], [`super::raids`]).
+///
+/// Observed (the war data 1739 of 320 ledgers, 173 wars and 127 invasions; findings
+/// `2026-11-13-outpost-rush-turrets.md`, **Batch E1**): a war's defender number is its attacker
+/// number + 1 in every entry, and the attacker number has no parity rule (88 even, 85 odd:
+/// `arvaysa_ES` 10120/10121 and 9428/9429, `joining_defending_war_2` 535/536, `everfall_war_2`
+/// 80/81, `CK_won_offensive_war` 5142/5143, `nighthaven_defensive_war` 1280/1281,
+/// `RS_offensive_war` 1370/1371); an invasion's attacker side is empty (0) and its defender takes
+/// one number; no two entries of one world list share a number. So retail counts the raid ids of
+/// a world: a war takes two in a row, an invasion one. The war's database number is that count's
+/// value (world migration 0049: a war takes two of its sequence, an invasion one).
 pub(super) const fn side_numbers(war: &TerritoryWar) -> (u64, u64) {
-    let attacker = war.number.saturating_mul(2);
-    (attacker, attacker.saturating_add(1))
+    if war.is_invasion() {
+        return (NO_SIDE_NUMBER, war.number);
+    }
+    (war.number, war.number.saturating_add(1))
 }
 
 impl SimWorld {
@@ -619,9 +679,11 @@ impl SimWorld {
         let (attacker_number, defender_number) = side_numbers(war);
         self.ask_company_ids([war.attacker.0, war.defender.0]);
         if fight.siege.is_none() {
-            self.spawn_siege(fight, NO_SIDE_NUMBER);
             self.spawn_structures(fight);
+            self.spawn_siege(fight, NO_SIDE_NUMBER);
+            fight.majors_shown = fight.majors();
         }
+        self.show_majors(fight, attacker_number);
         if !fight.started && now_ms >= war.starts_ms && war.result.is_none() {
             self.start_war(fight, war, (attacker_number, defender_number));
             fight.next_capture_ms = now_ms.saturating_add(CAPTURE_TICK_MS);
@@ -739,6 +801,23 @@ impl SimWorld {
             self.send_war_start(entity, war_id, &messages);
         }
         tracing::info!(war = %war_id, territory = war.territory, "war started in its instance");
+    }
+
+    /// The siege data shows the major structures again when one changed its health percent or
+    /// its state (Observed: the entries changed with the gates' hits and break,
+    /// `RS_offensive_war`); its cold value is the attacker's number from the start on.
+    fn show_majors(&mut self, fight: &mut WarFight, attacker: u64) {
+        let majors = fight.majors();
+        if majors == fight.majors_shown {
+            return;
+        }
+        fight.majors_shown = majors;
+        let value = if fight.started {
+            attacker
+        } else {
+            NO_SIDE_NUMBER
+        };
+        self.change_siege(fight, value);
     }
 
     /// The siege data entity gets the points' data as they are now.
@@ -971,7 +1050,9 @@ mod tests {
         )
     }
 
-    /// A made-up fort of territory 8 with an outer point and the claim point.
+    /// A made-up fort of territory 8 with two points of the retail ES fort: outer point 2 and
+    /// the claim point, each with its retail place and position member (the war forts table of
+    /// territory 8, `arvaysa_ES_attacker_war_45vs45`).
     fn nw_content_table() -> &'static str {
         r#"{"forts": [{
         "territory": 8, "frame": [5632.0, 5120.0, 512.0, 512.0],
@@ -981,11 +1062,11 @@ mod tests {
         "points": [
           {"number": 1, "asset": "33333333333333333333333333333333",
            "gde_ref": "aabbccddeeff00112222222222222222", "facet": "0a0b0c0d0e0f0002",
-           "place": [5972.2, 5363.1, 56.9], "kind": 4, "position": "020d0103",
+           "place": [5972.198, 5363.1045, 56.932175], "kind": 4, "position": "020d010345baa19645a798d6132103b309",
            "card_component": 0, "position_component": 2, "ownership_component": 1, "point_component": 3},
           {"number": 4, "asset": "33333333333333333333333333333333",
            "gde_ref": "08070605040302011111111111111111", "facet": "0a0b0c0d0e0f0001",
-           "place": [5902.48, 5428.12, 57.7], "kind": 6, "position": "020d0103",
+           "place": [5902.4795, 5428.118, 57.691372], "kind": 6, "position": "020d010345b873d645a9a0f2133903b309",
            "card_component": 0, "position_component": 2, "ownership_component": 1, "point_component": 4}]}]}"#
     }
 
@@ -1036,18 +1117,81 @@ mod tests {
         ));
     }
 
+    /// Observed: each capture point's place state is the retail member of its point (component,
+    /// class 13, place and turn); it reads, at the point's place (a cut-short member does not
+    /// read, and the war's start leaves such a point out).
     #[test]
-    fn the_side_numbers_follow_the_war_number() {
-        let war = TerritoryWar {
+    fn each_point_place_member_reads_at_its_place() {
+        const PLACE_PRECISION_M: f32 = 0.01;
+        let fight = fight();
+        for point in &fight.fort().points {
+            let (member, _) = BundleMember::read_from(&point.position).expect("the member reads");
+            assert_eq!(member.component, point.position_component);
+            let MemberState::Position(state) = member.state else {
+                panic!("a place state");
+            };
+            let at = state.position.expect("a place");
+            assert!((at.x - point.place[0]).abs() < PLACE_PRECISION_M);
+            assert!((at.y - point.place[1]).abs() < PLACE_PRECISION_M);
+            assert_eq!(member.encode().expect("encodes"), point.position, "the retail bytes");
+        }
+    }
+
+    /// The war's start spawns each capture point with its retail place member, the defender's
+    /// company ownership with the defender's raid id, and the attacker's number as its cold value
+    /// (Observed, module doc; the table of territory 11 of the turret tests).
+    #[test]
+    fn the_start_spawns_the_points_with_their_retail_place_and_the_side_numbers() {
+        use crate::world::turrets::tests::war_world_of;
+        let (mut world, _) = war_world_of(SIDE_DEFENDER);
+        let mut war = world.wars.war(Uuid::from_u128(0x77)).cloned().expect("the war");
+        war.starts_ms = world.unix_ms();
+        world.wars.read(Ok(vec![war.clone()]));
+        world.tick_war_fight();
+        let (attacker, defender) = side_numbers(&war);
+        let fight = world.war_fight().expect("fight");
+        let point = &fight.fort().points[0];
+        let number = fight.points[0].entity.expect("the point spawned");
+        let members = world.stations.members(number).expect("members");
+        let place = members
+            .iter()
+            .find(|member| member.component == point.position_component)
+            .and_then(|member| member.encode().ok());
+        assert_eq!(place.as_ref(), Some(&point.position), "the retail place member");
+        let ownership = members.iter().find_map(|member| match &member.state {
+            MemberState::Ownership(state) => Some(state.raid_id),
+            _ => None,
+        });
+        assert_eq!(ownership, Some(Some(defender)), "the defender's raid");
+        let cold = members.iter().find_map(|member| match &member.state {
+            MemberState::CapturePoint(state) => state.cold.map(|cold| cold.value),
+            _ => None,
+        });
+        assert_eq!(cold, Some(attacker), "the attacker's number");
+    }
+
+    /// Observed: the attacker number is the war's count value of either parity, the defender's
+    /// the next (`joining_defending_war_2` 535/536, `arvaysa_ES` 9428/9429); an invasion has an
+    /// empty attacker side and one defender number.
+    #[test]
+    fn the_side_numbers_are_the_war_number_and_the_next() {
+        let war = |number: u64, attacker: Uuid| TerritoryWar {
             war: Uuid::from_u128(0x77),
             territory: 8,
-            attacker: (Uuid::from_u128(0xa1), 2),
+            attacker: (attacker, 2),
             defender: (Uuid::from_u128(0xd1), 1),
-            number: 4714,
+            number,
             starts_ms: 0,
             result: None,
             signups: Vec::new(),
         };
-        assert_eq!(side_numbers(&war), (9428, 9429));
+        const ODD_WAR: u64 = 535;
+        const EVEN_WAR: u64 = 9428;
+        const INVASION: u64 = 5338;
+        assert_eq!(side_numbers(&war(ODD_WAR, Uuid::from_u128(0xa1))), (535, 536));
+        assert_eq!(side_numbers(&war(EVEN_WAR, Uuid::from_u128(0xa1))), (9428, 9429));
+        let invasion = war(INVASION, Uuid::nil());
+        assert!(invasion.is_invasion());
+        assert_eq!(side_numbers(&invasion), (NO_SIDE_NUMBER, INVASION));
     }
 }

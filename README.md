@@ -85,7 +85,7 @@ just collision
 
 `just design` reads the retail files, merges the team's design files from `content/` over them (see [content/README.md](content/README.md)), and writes `local-data/content/bundle-<build>.bin`, `local-data/content/world-<build>-<level>.bin` and `local-data/content/design-<build>.json`. The servers and the admin tools read these files. It does not read the game install. With no design files, the merged files are equal to the retail files. When a design file has a problem, it prints each one and writes nothing.
 
-`just collision` writes the level collision files `local-data/content/collision-<build>-<level>.bin` of the tutorial and the open world (about 104 MB in all). A collision file holds the solid shapes of the placed slices of a level, read from the game's physics assets (`.rnr`). It includes the variant capitals as their variation data shows them, and the slices that encounters spawn later. The sims stand the players and mobs on these shapes. A sim does not start without the collision file of its level. See `docs/re/2026-09-20-level-collision.md`.
+`just collision` writes the level collision files `local-data/content/collision-<build>-<level>.bin` of the tutorial and the open world (about 145 MB in all). A collision file holds the solid shapes of the placed slices of a level, read from the game's physics assets (`.rnr`). It includes the variant capitals as their variation data shows them, and the slices that encounters spawn later. The sims stand the players and mobs on these shapes. A sim does not start without the collision file of its level. See `docs/re/2026-09-20-level-collision.md`.
 
 A sim needs only the bundle, the world file and the collision file of its level. It also reads the files below from `content_dir` when they exist. When one is missing, the sim logs a warning and runs without that part.
 
@@ -105,7 +105,7 @@ A sim needs only the bundle, the world file and the collision file of its level.
 | `dungeon-gate-rules-<build>.json` | No tool here. It is mined from the retail captures (`gaterules.py` of the capture tools) | Every gate is open from the start |
 | `catacomb-tiles-<build>.json` | `cargo run --release -p content-tool -- catacomb-tiles` (needs the mob prefab table) | A catacombs run has no tile entities |
 | `level-doors-<build>-<level>.json` | `cargo run --release -p content-tool -- level-doors` (default `newworld_vitaeeterna`; reads the level's world file) | No door capital of the level is shown |
-| `effect-areas-<build>.json` | `cargo run --release -p content-tool -- effect-areas` | No level area or spell gas gives an affliction |
+| `effect-areas-<build>.json` | `cargo run --release -p content-tool -- effect-areas` (reads `dungeon-scripts-<build>.json`, so build that first) | No level area or spell gas gives an affliction |
 | `ability-instances-<build>.json` | `cargo run --release -p content-tool -- ability-instances` | No placed ability is tracked |
 | `claim-plots-<build>.json` | `cargo run --release -p content-tool -- claim-plots` | No land claim entity is shown |
 | `music-charts-<build>.json` | `cargo run --release -p content-tool -- music-charts` | Each played note counts as missed |

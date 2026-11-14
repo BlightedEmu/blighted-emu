@@ -130,6 +130,29 @@ impl<T: Ground> Ground for LevelGround<T> {
             .or_else(|| self.terrain.wall(from, to))
     }
 
+    /// The nearer of the first solid surface of the structures on the line
+    /// ([`CollisionIndex::raycast`], with its level entity) and the first solid of the ground
+    /// it stands on.
+    fn first_solid(&self, from: Position, to: Position) -> Option<(Position, Option<u64>)> {
+        let own = self
+            .collision
+            .raycast([from.x, from.y, from.z], [to.x, to.y, to.z])
+            .map(|hit| {
+                let [x, y, z] = hit.point;
+                (Position { x, y, z }, hit.entity)
+            });
+        let distance = |at: &Position| {
+            let (dx, dy, dz) = (at.x - from.x, at.y - from.y, at.z - from.z);
+            dx * dx + dy * dy + dz * dz
+        };
+        match (own, self.terrain.first_solid(from, to)) {
+            (Some(own), Some(under)) => {
+                Some(if distance(&own.0) <= distance(&under.0) { own } else { under })
+            }
+            (own, under) => own.or(under),
+        }
+    }
+
     fn road_share(&self, x: f32, y: f32) -> f32 {
         self.roads.as_ref().map_or_else(
             || self.terrain.road_share(x, y),

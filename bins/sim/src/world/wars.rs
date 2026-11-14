@@ -71,6 +71,8 @@ use uuid::Uuid;
 
 use super::gm_chat::DONE;
 use super::raids::raid_spec;
+use super::siege_areas::LevelSiege;
+use super::war_fight::side_numbers;
 use super::{Player, SimWorld, send_now};
 
 /// The own player component of the territory interactor state (Observed: component 7 in the
@@ -132,16 +134,12 @@ fn side_company(war: &TerritoryWar, side: u32) -> Option<(Uuid, u8)> {
     }
 }
 
-/// The war data number of `side` of `war`: the attacker's is twice the war's number, the
-/// defender's one more (Observed: 9428 and 9429 in `arvaysa_ES_attacker_war_45vs45`). It is the
-/// side's raid id ([`super::raids`]).
-fn side_number(war: &TerritoryWar, side: u32) -> u64 {
-    if war.is_invasion() && side == SIDE_ATTACKER {
-        return u64::from(NO_SIDE);
-    }
-    let attacker = war.number.saturating_mul(2);
+/// The war data number of `side` of `war` ([`side_numbers`]: the war's number and the next,
+/// an invasion's empty attacker side 0). It is the side's raid id ([`super::raids`]).
+const fn side_number(war: &TerritoryWar, side: u32) -> u64 {
+    let (attacker, defender) = side_numbers(war);
     if side == SIDE_DEFENDER {
-        attacker.saturating_add(1)
+        defender
     } else {
         attacker
     }
@@ -538,6 +536,9 @@ pub(super) struct Wars {
     ending: BTreeSet<Uuid>,
     /// The world's value: the game mode field of a running or resolved war.
     world: u32,
+    /// The level's own siege structures, outside any fight ([`super::siege_areas`], **Level
+    /// structures**): every sim has them with its wars state.
+    pub(super) level: LevelSiege,
 }
 
 impl Wars {

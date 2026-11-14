@@ -920,6 +920,8 @@ const STOPPED_INTERACT: InteractState = InteractState {
 /// One start object in the world.
 #[derive(Debug, Clone, PartialEq)]
 struct StartObject {
+    /// Its slice's pak path.
+    slice: String,
     gde_ref: [u8; nw_messages::RAW_ID_LEN],
     position: Position,
     members: Vec<BundleMember>,
@@ -1051,6 +1053,7 @@ impl EncounterObjects {
         self.objects.insert(
             number,
             StartObject {
+                slice: slice.to_owned(),
                 gde_ref,
                 position: Position { x, y, z },
                 members,
@@ -1156,6 +1159,11 @@ impl EncounterObjects {
     /// Whether `entity` is a start object's number.
     pub(super) const fn is_object(entity: u64) -> bool {
         entity >= ENCOUNTER_OBJECT_ENTITY_BASE
+    }
+
+    /// The slice path of standing start object `number`.
+    pub(super) fn slice_of(&self, number: u64) -> Option<&str> {
+        self.objects.get(&number).map(|object| object.slice.as_str())
     }
 
     /// Whether start object `number` stands.
@@ -1584,6 +1592,7 @@ mod tests {
         assert_eq!(objects.spawn("slices/other.dynamicslice", AT, 0.0), None);
         let number = objects.spawn(OBJECT_SLICE, AT, 0.0).expect("spawned");
         assert!(EncounterObjects::is_object(number) && objects.stands(number));
+        assert_eq!(objects.slice_of(number), Some(OBJECT_SLICE));
         let near = Position {
             x: AT[0],
             y: AT[1],
@@ -1624,6 +1633,7 @@ mod tests {
         );
         objects.remove(number);
         assert!(!objects.stands(number));
+        assert_eq!(objects.slice_of(number), None);
         assert_eq!(objects.numbers_near(near, 10.0).count(), 0);
     }
 

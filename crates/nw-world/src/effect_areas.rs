@@ -32,20 +32,37 @@
 //!   delays 0) at its four spawn locations `CorruptionArea1` to `CorruptionArea4`. Of the 774
 //!   static chunk slices that name a slice, no other stage spawns an affliction area.
 //!
+//! - The areas of the encounter slices and of the slices their stages spawn ([`EffectAreas::slices`];
+//!   findings section E2), in the slice's own space: the darkness hazards
+//!   (`darkness_hazard_corruption_minor_l1` to `_major_l4`: `ApplyCurseL1` to `L4`, remove on exit,
+//!   delays 0, a 30 m by 25 m `CylinderShapeComponent` beside a `DetectionVolumeComponent` with no
+//!   query shape) that every corrupted breach's setup stage spawns, and the Myrkgard portal's
+//!   own `Darkness_Hazard_Corruption_Minor_L4` entity (`enc_darkness_major_portal_sm_01`:
+//!   `ApplyCurseL4` in a `PolygonPrismShapeComponent` of 17 corners, 13 m high). Only the areas of
+//!   entities that are active as their slice spawns (`IsRuntimeActive`) are kept
+//!   ([`SliceArea::active`]). **Observed** (`Playthrough_Part_18`, the portal at 9766.9,
+//!   9616.5): other players held `ApplyCurseL4` from 1175.7 s, 9 s after the portal's manager
+//!   showed its run; the own player from 1270.6 s, as it came near, to 1427.3 s, 10.2 s after the
+//!   manager's success (1417.1 s).
+//!
 //! **Inferred**: a detection volume stands where its entity stands in the placed slice, as the
-//! encounter detectors do (without the entity's scale); a slice a stage spawns stands at its spawn
-//! location's place in the placed slice, as the encounter mobs do; an area of a slice that a
-//! placed slice spawns in another way is not read (every other static area found lies in a
-//! chunk slice itself).
+//! encounter detectors do (without the entity's scale); a detection volume with no query shape
+//! detects with its entity's engine shape component (the darkness hazards hold no other shape);
+//! a polygon prism stands on its entity, its corners in the entity's plane and its height up (the
+//! engine's `PolygonPrismShape`); a slice a stage spawns stands at its spawn location's place in
+//! the placed slice, as the encounter mobs do; an area of a slice that a placed slice spawns in
+//! another way is not read (every other static area found lies in a chunk slice itself).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use nw_formats::objectstream::{Element, ObjectStreamError, lowercase_crc32};
+use nw_formats::objectstream::{Element, ObjectStreamError, UUID_SIZE, lowercase_crc32};
+use nw_formats::rigid::Vec3;
 use serde::{Deserialize, Serialize};
 
+use crate::collision::{Geometry, invert, transform_point};
 use crate::dungeon_scripts::Detector;
-use crate::level_script::{AREA_STATUS_EFFECT_TYPE, FIELD_DEPTH, find};
+use crate::level_script::{AREA_STATUS_EFFECT_TYPE, FIELD_DEPTH, SHAPE_HEIGHT_NAME, find};
 
 /// The file name before the client build.
 const FILE_PREFIX: &str = "effect-areas-";
@@ -55,6 +72,23 @@ const FILE_SUFFIX: &str = ".json";
 const MS_PER_S: f32 = 1_000.0;
 /// The column of an affine place that holds its translation.
 const TRANSLATION_COLUMN: usize = 3;
+/// `{AD882674-1D5D-4E40-B079-449B47D2492C}` the engine's `PolygonPrismShapeComponent`
+/// (`Configuration`, `PolygonPrism`: `Height` and `VertexContainer`'s `Vertices`).
+pub const POLYGON_PRISM_TYPE: [u8; UUID_SIZE] = [
+    0xad, 0x88, 0x26, 0x74, 0x1d, 0x5d, 0x4e, 0x40, 0xb0, 0x79, 0x44, 0x9b, 0x47, 0xd2, 0x49, 0x2c,
+];
+/// `{3D80F623-C85C-4741-90D0-E4E66164E6BF}` `AZ::Vector2`: one corner of a polygon prism.
+const VECTOR2_TYPE: [u8; UUID_SIZE] = [
+    0x3d, 0x80, 0xf6, 0x23, 0xc8, 0x5c, 0x47, 0x41, 0x90, 0xd0, 0xe4, 0xe6, 0x61, 0x64, 0xe6, 0xbf,
+];
+/// The bytes of one big-endian `f32`.
+const F32_LEN: usize = 4;
+/// The fewest corners of a polygon.
+const MIN_CORNERS: usize = 3;
+/// How deep a polygon prism component keeps its fields (Observed in
+/// `enc_darkness_major_portal_sm_01`: `Configuration`, `PolygonPrism`, its base, then `Height`
+/// and `VertexContainer`'s `Vertices`, 4 and 5 levels down).
+const PRISM_DEPTH: usize = 5;
 
 /// The file of client build `client_build` in content directory `dir`.
 pub fn effect_areas_path(dir: &Path, client_build: &str) -> PathBuf {
@@ -108,9 +142,27 @@ pub struct EffectArea {
 }
 
 impl EffectArea {
-    /// Whether point `point` (in the volume's space) is inside it.
+    /// Whether point `point` (in the volume's space) is inside it: a closed mesh (a polygon
+    /// prism, [`prism_mesh`]) by [`mesh_contains`], any other shape as a detector.
     pub fn contains(&self, point: [f32; 3]) -> bool {
-        self.volume.contains(point)
+        match &self.volume.shape {
+            Geometry::Mesh { points, triangles } => invert(&self.volume.place).is_some_and(
+                |inverse| mesh_contains(points, triangles, transform_point(&inverse, point)),
+            ),
+            _ => self.volume.contains(point),
+        }
+    }
+
+    /// The area placed by `place` (the world from the area's slice space).
+    #[must_use]
+    pub fn placed(&self, place: &crate::collision::Affine) -> Self {
+        Self {
+            volume: Detector {
+                shape: self.volume.shape.clone(),
+                place: crate::collision::compose(place, &self.volume.place),
+            },
+            ..self.clone()
+        }
     }
 
     /// Where its volume stands (in the volume's space).
@@ -143,6 +195,10 @@ pub struct EffectAreas {
     /// The areas the encounter stages of each level folder's placed slices spawn, in the world.
     #[serde(default)]
     pub stages: BTreeMap<String, Vec<StageAreas>>,
+    /// The areas of each encounter slice and of each slice an encounter's stage spawns, by pak
+    /// path, in the slice's own space (module text).
+    #[serde(default)]
+    pub slices: BTreeMap<String, Vec<EffectArea>>,
 }
 
 impl EffectAreas {
@@ -184,6 +240,11 @@ impl EffectAreas {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// The areas of encounter slice or stage spawn slice `path`, in its own space.
+    pub fn of_slice(&self, path: &str) -> &[EffectArea] {
+        self.slices.get(path).map_or(&[], Vec::as_slice)
+    }
+
     /// The areas that the stages named `stage` (any case) of the placed slices of every level
     /// spawn.
     pub fn of_stage<'a>(&'a self, stage: &'a str) -> impl Iterator<Item = &'a EffectArea> + 'a {
@@ -202,7 +263,13 @@ impl EffectAreas {
             .flatten()
             .map(|spawned| spawned.areas.len())
             .sum();
-        self.levels.values().chain(self.spells.values()).map(Vec::len).sum::<usize>() + staged
+        self.levels
+            .values()
+            .chain(self.spells.values())
+            .chain(self.slices.values())
+            .map(Vec::len)
+            .sum::<usize>()
+            + staged
     }
 
     /// Whether the file holds no area.
@@ -212,7 +279,7 @@ impl EffectAreas {
 }
 
 /// A `PersistentAreaStatusEffect` component of a slice, before its volume is placed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SliceArea {
     /// The entity of its detection volume (`m_detectionEntity`).
     pub detection_entity: u64,
@@ -228,6 +295,12 @@ pub struct SliceArea {
     pub removes: Vec<String>,
     /// Its rules.
     pub rules: AreaRules,
+    /// Its entity is active as the slice spawns (`IsRuntimeActive`; true when the entity names
+    /// none).
+    pub active: bool,
+    /// The closed mesh of its detection entity's polygon prism ([`prism_mesh`]), when that entity
+    /// has one.
+    pub prism: Option<Geometry>,
 }
 
 /// The names of the fields read, as their name CRCs.
@@ -243,6 +316,8 @@ struct Names {
     remove_on_exit: u32,
     initial_delay: u32,
     reapply_delay: u32,
+    runtime_active: u32,
+    vertices: u32,
 }
 
 impl Names {
@@ -259,6 +334,8 @@ impl Names {
             remove_on_exit: lowercase_crc32("m_removeOnExit"),
             initial_delay: lowercase_crc32("m_initialDelaySeconds"),
             reapply_delay: lowercase_crc32("m_reapplicationDelaySeconds"),
+            runtime_active: lowercase_crc32("IsRuntimeActive"),
+            vertices: lowercase_crc32("Vertices"),
         }
     }
 }
@@ -295,6 +372,88 @@ fn effect_list(
         .unwrap_or_default())
 }
 
+/// The closed mesh of a polygon prism with the corners `corners` (in its entity's plane) and
+/// the height `height` (up from the plane): the two rings of corners, a fan of triangles on each
+/// cap and two on each side. A fan of a simple polygon covers each inside point an odd number of
+/// times, so [`mesh_contains`] holds for a polygon that is not convex too.
+pub fn prism_mesh(corners: &[[f32; 2]], height: f32) -> Option<Geometry> {
+    if corners.len() < MIN_CORNERS || height <= 0.0 {
+        return None;
+    }
+    // Both rings' corners take a `u16` index.
+    let count = u16::try_from(corners.len())
+        .ok()
+        .filter(|count| count.checked_mul(2).is_some())?;
+    let points: Vec<Vec3> = corners
+        .iter()
+        .map(|[x, y]| [*x, *y, 0.0])
+        .chain(corners.iter().map(|[x, y]| [*x, *y, height]))
+        .collect();
+    let mut triangles = Vec::new();
+    for corner in 1..count - 1 {
+        triangles.push([0, corner + 1, corner]);
+        triangles.push([count, count + corner, count + corner + 1]);
+    }
+    for corner in 0..count {
+        let next = (corner + 1) % count;
+        triangles.push([corner, next, count + next]);
+        triangles.push([corner, count + next, count + corner]);
+    }
+    Some(Geometry::Mesh { points, triangles })
+}
+
+/// Whether `local` is inside the closed mesh of `points` and `triangles`: a ray from it straight
+/// up crosses its triangles an odd number of times (triangles that stand upright are not
+/// crossed).
+pub fn mesh_contains(points: &[Vec3], triangles: &[[u16; 3]], local: Vec3) -> bool {
+    let [x, y, z] = local;
+    let crossings = triangles
+        .iter()
+        .filter_map(|triangle| {
+            let [a, b, c] = triangle.map(|corner| points.get(usize::from(corner)).copied());
+            let (a, b, c) = (a?, b?, c?);
+            let area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+            if area.abs() <= f32::EPSILON {
+                return None;
+            }
+            let u = ((b[0] - x) * (c[1] - y) - (c[0] - x) * (b[1] - y)) / area;
+            let v = ((c[0] - x) * (a[1] - y) - (a[0] - x) * (c[1] - y)) / area;
+            let w = 1.0 - u - v;
+            let inside = u >= 0.0 && v >= 0.0 && w >= 0.0;
+            let height = u * a[2] + v * b[2] + w * c[2];
+            (inside && height > z).then_some(())
+        })
+        .count();
+    crossings % 2 == 1
+}
+
+/// The corners and the height of `component`, a [`POLYGON_PRISM_TYPE`] component, as its closed
+/// mesh; `None` when it has fewer than three corners or no height.
+fn component_prism(component: &Element, names: &Names) -> Result<Option<Geometry>, EffectAreasError> {
+    let Some(height) = find(component, SHAPE_HEIGHT_NAME, PRISM_DEPTH)
+        .map(Element::as_f32)
+        .transpose()?
+    else {
+        return Ok(None);
+    };
+    let corners = find(component, names.vertices, PRISM_DEPTH)
+        .map(|vertices| {
+            vertices
+                .children
+                .iter()
+                .filter(|corner| corner.type_id == VECTOR2_TYPE)
+                .filter_map(|corner| {
+                    let bytes = corner.value.as_slice();
+                    let x = bytes.get(..F32_LEN)?.try_into().ok()?;
+                    let y = bytes.get(F32_LEN..2 * F32_LEN)?.try_into().ok()?;
+                    Some([f32::from_be_bytes(x), f32::from_be_bytes(y)])
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(prism_mesh(&corners, height))
+}
+
 /// The area of `component` of entity `owner`; `None` when it neither gives nor removes an
 /// effect.
 fn slice_area(
@@ -323,6 +482,8 @@ fn slice_area(
             initial_delay_ms: delay_ms(component, names.initial_delay)?,
             reapply_ms: delay_ms(component, names.reapply_delay)?,
         },
+        active: true,
+        prism: None,
     }))
 }
 
@@ -343,6 +504,7 @@ pub fn slice_areas(root: &Element) -> Result<Vec<SliceArea>, EffectAreasError> {
         return Ok(Vec::new());
     };
     let mut areas = Vec::new();
+    let mut prisms: HashMap<u64, Geometry> = HashMap::new();
     for entity in &entities.children {
         let Some(owner) = entity
             .child(names.id)
@@ -352,15 +514,27 @@ pub fn slice_areas(root: &Element) -> Result<Vec<SliceArea>, EffectAreasError> {
         else {
             continue;
         };
-        for component in entity
+        let active = entity
+            .child(names.runtime_active)
+            .map_or(Ok(true), Element::as_bool)?;
+        let components = entity
             .child(names.components)
             .map(|list| list.children.as_slice())
-            .unwrap_or_default()
-            .iter()
-            .filter(|component| component.type_id == AREA_STATUS_EFFECT_TYPE)
-        {
-            areas.extend(slice_area(component, owner, &names)?);
+            .unwrap_or_default();
+        for component in components {
+            if component.type_id == AREA_STATUS_EFFECT_TYPE
+                && let Some(area) = slice_area(component, owner, &names)?
+            {
+                areas.push(SliceArea { active, ..area });
+            } else if component.type_id == POLYGON_PRISM_TYPE
+                && let Some(prism) = component_prism(component, &names)?
+            {
+                prisms.insert(owner, prism);
+            }
         }
+    }
+    for area in &mut areas {
+        area.prism = prisms.get(&area.detection_entity).cloned();
     }
     Ok(areas)
 }
@@ -444,6 +618,8 @@ mod tests {
                     initial_delay_ms: 500,
                     reapply_ms: 500,
                 },
+                active: true,
+                prism: None,
             }]
         );
     }
@@ -490,6 +666,7 @@ mod tests {
                     areas: vec![area.clone()],
                 }],
             )]),
+            slices: BTreeMap::from([(HAZARD.to_owned(), vec![area.clone()])]),
         };
         assert_eq!(areas.of_level("newworld_vitaeeterna"), std::slice::from_ref(&area));
         assert!(areas.of_level("nw_catacomb_00").is_empty());
@@ -499,7 +676,9 @@ mod tests {
         );
         assert_eq!(areas.of_stage("setup").collect::<Vec<_>>(), [&area]);
         assert_eq!(areas.of_stage("Stage_1").count(), 0);
-        assert_eq!(areas.len(), 3);
+        assert_eq!(areas.of_slice(HAZARD), std::slice::from_ref(&area));
+        assert!(areas.of_slice("slices/other.dynamicslice").is_empty());
+        assert_eq!(areas.len(), 4);
         assert!(area.contains([1.0, 1.0, 1.0]) && !area.contains([2.0, 1.0, 0.0]));
         let text = serde_json::to_string(&areas).expect("json");
         assert_eq!(serde_json::from_str::<EffectAreas>(&text).expect("back"), areas);
@@ -523,6 +702,90 @@ mod tests {
         assert_eq!(area.centre(), [10.0, 20.0, 30.0]);
         let old: EffectAreas =
             serde_json::from_str(r#"{"source": "", "levels": {}, "spells": {}}"#).expect("old");
-        assert!(old.stages.is_empty() && old.is_empty());
+        assert!(old.stages.is_empty() && old.slices.is_empty() && old.is_empty());
+        let mut turn = IDENTITY_AFFINE;
+        turn[0][TRANSLATION_COLUMN] = 5.0;
+        assert_eq!(area.placed(&turn).centre(), [15.0, 20.0, 30.0]);
+    }
+
+    /// A darkness hazard's slice path.
+    const HAZARD: &str =
+        "slices/darkness/events/general/hazards/darkness_hazard_corruption_minor_l4.dynamicslice";
+
+    /// An L-shaped polygon prism 13 m high (the Myrkgard portal's hazard is a polygon of 17
+    /// corners that is not convex): inside in the L, outside in its notch, below and above it.
+    #[test]
+    fn a_polygon_prism_holds_the_points_of_its_polygon_up_to_its_height() {
+        const HEIGHT_M: f32 = 13.0;
+        let corners = [[0.0, 0.0], [10.0, 0.0], [10.0, 4.0], [4.0, 4.0], [4.0, 10.0], [0.0, 10.0]];
+        let prism = prism_mesh(&corners, HEIGHT_M).expect("prism");
+        let area = EffectArea {
+            effects: vec!["ApplyCurseL4".to_owned()],
+            removes: Vec::new(),
+            volume: Detector {
+                shape: prism,
+                place: IDENTITY_AFFINE,
+            },
+            rules: AreaRules::default(),
+        };
+        assert!(area.contains([2.0, 8.0, 1.0]), "in the upright arm");
+        assert!(area.contains([8.0, 2.0, 12.0]), "in the flat arm");
+        assert!(!area.contains([8.0, 8.0, 1.0]), "in the notch");
+        assert!(!area.contains([2.0, 2.0, -1.0]), "below");
+        assert!(!area.contains([2.0, 2.0, 14.0]), "above");
+        assert!(prism_mesh(&corners[..2], HEIGHT_M).is_none(), "two corners");
+        let moved = area.placed(&{
+            let mut place = IDENTITY_AFFINE;
+            place[2][TRANSLATION_COLUMN] = 100.0;
+            place
+        });
+        assert!(moved.contains([2.0, 8.0, 101.0]) && !moved.contains([2.0, 8.0, 1.0]));
+    }
+
+    /// A polygon prism component's corners (`AZ::Vector2`, big-endian) and height; an area's
+    /// entity that is not active as the slice spawns marks its area.
+    #[test]
+    fn a_slice_area_takes_its_detection_entitys_prism_and_its_activity() {
+        const OWNER: u64 = 0x2b1f_a2d1_bc77;
+        let corner = |x: f32, y: f32| {
+            let mut element = value("element", &[x.to_be_bytes(), y.to_be_bytes()].concat());
+            element.type_id = VECTOR2_TYPE;
+            element
+        };
+        let mut prism = node(
+            "element",
+            vec![node(
+                "Configuration",
+                vec![node(
+                    "PolygonPrism",
+                    vec![node(
+                        "element",
+                        vec![
+                            value("Height", &13.0_f32.to_be_bytes()),
+                            node(
+                                "VertexContainer",
+                                vec![node(
+                                    "Vertices",
+                                    vec![corner(0.0, 0.0), corner(4.0, 0.0), corner(0.0, 4.0)],
+                                )],
+                            ),
+                        ],
+                    )],
+                )],
+            )],
+        );
+        prism.type_id = POLYGON_PRISM_TYPE;
+        let mut slice = gas_slice(OWNER, OWNER, "ApplyCurseL4", &[]);
+        let entity = &mut slice.children[0].children[0].children[0].children[0];
+        entity.children.push(value("IsRuntimeActive", &[0]));
+        entity.children[1].children.push(prism);
+        let areas = slice_areas(&slice).expect("areas");
+        assert_eq!(areas.len(), 1);
+        assert!(!areas[0].active);
+        let Some(Geometry::Mesh { points, .. }) = &areas[0].prism else {
+            panic!("a prism");
+        };
+        assert_eq!(points.len(), 6);
+        assert_eq!(points[4], [4.0, 0.0, 13.0]);
     }
 }

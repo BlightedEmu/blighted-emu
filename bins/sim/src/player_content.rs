@@ -1112,6 +1112,9 @@ pub fn phasing_areas(tables: &Tables) -> Vec<u32> {
 /// The smallest side of a detection square, in metres.
 const MIN_DETECTION_CELL_M: f32 = 1.0;
 
+/// The scale of a capital that names none.
+const UNSCALED: f32 = 1.0;
+
 /// The detection square of side `cell_m` that holds `at`.
 fn detection_cell(at: Position, cell_m: f32) -> (i32, i32) {
     // Level places are a few thousand metres: the squares fit an i32.
@@ -1145,8 +1148,9 @@ pub struct QuestObject {
     /// the object by it (Observed: retail newchar 2026-09-18 carded Grace's four nodules, the
     /// capitals `IO_Custom_MSQ_CorruptedNodule_A` to `_D` on their points, by these ids).
     pub id: Option<u64>,
-    /// The radius of its gatherable's detection sphere ([`DetectionSpheres`]), in metres: a
-    /// player inside it sets off its game event.
+    /// The radius of its gatherable's detection sphere ([`DetectionSpheres`]) times its
+    /// capital's scale, in metres: a player inside it sets off its game event (Observed:
+    /// GothicTorch capitals scale 1.5, entries at 9.1-11.4 m of a 7 m sphere).
     pub detection_m: Option<f32>,
 }
 
@@ -1318,7 +1322,9 @@ impl QuestObjects {
                         position: Position { x, y, z },
                         respawn_ms: gatherable.respawn_ms.0,
                         id: capital.and_then(|capital| capital_id(&capital.id)),
-                        detection_m: spheres.radius_of(point.gatherable_id),
+                        detection_m: spheres.radius_of(point.gatherable_id).map(|radius_m| {
+                            radius_m * capital.and_then(|capital| capital.scale).unwrap_or(UNSCALED)
+                        }),
                     }
                 })
             })

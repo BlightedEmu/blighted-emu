@@ -99,7 +99,7 @@ use super::gates::merge_members;
 use super::gm_chat::DONE;
 use super::land_claims::CLAIM_POSITIONS;
 use super::town_projects::ProjectSlots;
-use super::war_fight::{CAPTURE_RADIUS_M, point_ownership};
+use super::war_fight::{CAPTURE_RADIUS_M, point_ownership, side_numbers};
 use super::wars::WarAnswer;
 use super::{Body, Player, SimWorld};
 use crate::mob_ai::script_mob_ai;
@@ -793,7 +793,7 @@ impl SimWorld {
     fn spawn_invasion_entity(&mut self, run: &mut InvasionRun, war: &TerritoryWar) {
         let encounter = &run.fort.encounter;
         let owner = self.territories.owner(war.territory).cloned();
-        let defender_number = war.number.saturating_mul(2).saturating_add(1);
+        let (_, defender_number) = side_numbers(war);
         let members: Vec<BundleMember> = std::iter::once(BundleMember {
             component: encounter.card_component,
             state: MemberState::GdeMetadata(nw_messages::GdeMetadataReplicatedState {

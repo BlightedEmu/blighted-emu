@@ -556,8 +556,12 @@ impl SimWorld {
     /// 9.8 to 10.2 m, the `99a_MSQ_05_PopClot` clots of 0.75 m at 0.4 to 1.2 m); no instanced
     /// proximity object of the base slice (257 states in 49 ledgers) gathered twice in a ledger,
     /// while shared ones did on each way in (`99f_msq_er_fightliang`: the same objects about
-    /// 20 s apart). Unknown: why 48 entries lie 1 to 4 m beyond the sphere (the
-    /// `17_MSQ_GothicTorch` torches of 7 m at 9.6 to 11.4 m).
+    /// 20 s apart). The sphere takes its capital's scale ([`crate::player_content::QuestObject::
+    /// detection_m`]): the 23 entries of the `17_MSQ_GothicTorch` torches (radius 7, capitals of
+    /// scale 1.5 in `17dw_lore.capitals.json`) lie at 9.1 to 11.4 m, about the 10.5 m of the
+    /// scaled sphere, and the 6 of `1432_0103_DogPrintTrail` (radius 3, scale 2) at 5.1 to
+    /// 6.3 m; the 18 other entries beyond their sphere (scale 1) lie 0.5 to 1.4 m out, where a
+    /// running player gets in one server tick.
     pub(super) fn detect_quest_objects(&mut self, now_ms: u64) {
         let numbers: Vec<u64> = self.quests.keys().copied().collect();
         for number in numbers {

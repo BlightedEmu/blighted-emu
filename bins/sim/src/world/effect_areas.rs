@@ -26,6 +26,12 @@
 //! stage, [`super::invasions`]); they apply as no one, as the level areas do, and their closing
 //! takes back what they gave, as a spell area's end does.
 //!
+//! The areas of an encounter's slice and of the slices its stages spawn
+//! ([`nw_world::effect_areas::EffectAreas::slices`], in the slice's own space) stand where the
+//! dungeon script places their slice, turned with it, from [`SimWorld::open_slice_areas`] to
+//! [`SimWorld::close_slice_areas`] ([`super::dungeon_script`]: the darkness hazards of the
+//! corrupted breaches and of the Myrkgard events); they apply as no one too.
+//!
 //! **Inferred**: an area without a reapplication delay gives its effects once per entry; a
 //! player that leaves an area with `m_removeOnExit` (every level area found), dies in it, or
 //! stays in it when its spell ends, loses the applications that area gave; the level areas
@@ -38,6 +44,7 @@ use std::sync::Arc;
 use bevy_ecs::entity::Entity;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_sim_core::Position;
+use nw_world::collision::Affine;
 use nw_world::effect_areas::{AreaRules, EffectArea};
 
 /// The world origin: the place of the level and stage areas, whose volumes are in the world.
@@ -95,6 +102,15 @@ struct OpenStage {
     runs: Vec<Vec<Inside<Entity>>>,
 }
 
+/// The open areas of a slice the dungeon script placed, in the world, and the players in each.
+#[derive(Debug, Clone)]
+struct OpenSlice {
+    /// Its handle ([`SimWorld::open_slice_areas`]).
+    handle: u64,
+    areas: Vec<EffectArea>,
+    runs: Vec<Vec<Inside<Entity>>>,
+}
+
 /// The players in each effect area.
 #[derive(Debug, Clone, Default)]
 pub(super) struct EffectAreaRuns {
@@ -104,6 +120,18 @@ pub(super) struct EffectAreaRuns {
     spells: Vec<(SpellKey, Vec<Vec<Inside<Entity>>>)>,
     /// The open stage areas, in the order they opened.
     stages: Vec<OpenStage>,
+    /// The open areas of placed slices, in the order they opened.
+    slices: Vec<OpenSlice>,
+    /// The handles given so far.
+    handles: u64,
+}
+
+/// The world place of a slice standing at `at`, turned `yaw_deg` counter-clockwise about the up
+/// axis.
+fn yaw_place(at: [f32; 3], yaw_deg: f32) -> Affine {
+    let (sin, cos) = yaw_deg.to_radians().sin_cos();
+    let [x, y, z] = at;
+    [[cos, -sin, 0.0, x], [sin, cos, 0.0, y], [0.0, 0.0, 1.0, z]]
 }
 
 /// One step of an area with `rules` at `now_ms`, whose volume holds `present` now (module
@@ -191,6 +219,15 @@ impl SimWorld {
             }
         }
         self.effect_area_runs.stages = stages;
+        let mut slices = std::mem::take(&mut self.effect_area_runs.slices);
+        for open in &mut slices {
+            for (area, run) in open.areas.iter().zip(&mut open.runs) {
+                let present = within(area, ORIGIN);
+                let done = step(run, &present, area.rules, now_ms);
+                self.run_effect_area(area, LEVEL_AREA_SOURCE, &done, now_ms);
+            }
+        }
+        self.effect_area_runs.slices = slices;
         let open: Vec<(SpellKey, Position)> = self
             .spell_areas
             .iter()
@@ -282,6 +319,48 @@ impl SimWorld {
             .into_iter()
             .partition(|open| open.stage.eq_ignore_ascii_case(stage));
         self.effect_area_runs.stages = open;
+        let now_ms = self.server_ms;
+        for closed in closed {
+            for (area, run) in closed.areas.iter().zip(&closed.runs) {
+                self.close_effect_area(area, LEVEL_AREA_SOURCE, run, now_ms);
+            }
+        }
+    }
+
+    /// Opens the areas of slice `slice` standing at `at`, turned `yaw_deg` (module text); they
+    /// give their effects from the next step on. Their handle, or `None` for a slice without
+    /// areas.
+    pub(super) fn open_slice_areas(&mut self, slice: &str, at: [f32; 3], yaw_deg: f32) -> Option<u64> {
+        let place = yaw_place(at, yaw_deg);
+        let areas: Vec<EffectArea> = self
+            .content
+            .effect_areas
+            .of_slice(slice)
+            .iter()
+            .map(|area| area.placed(&place))
+            .collect();
+        if areas.is_empty() {
+            return None;
+        }
+        let runs = &mut self.effect_area_runs;
+        runs.handles += 1;
+        let handle = runs.handles;
+        tracing::debug!(slice, areas = areas.len(), handle, "slice areas open");
+        runs.slices.push(OpenSlice {
+            handle,
+            runs: vec![Vec::new(); areas.len()],
+            areas,
+        });
+        Some(handle)
+    }
+
+    /// Closes the areas of handle `handle`: the players in one with `m_removeOnExit` give back
+    /// the applications it gave them.
+    pub(super) fn close_slice_areas(&mut self, handle: u64) {
+        let (closed, open): (Vec<_>, Vec<_>) = std::mem::take(&mut self.effect_area_runs.slices)
+            .into_iter()
+            .partition(|open| open.handle == handle);
+        self.effect_area_runs.slices = open;
         let now_ms = self.server_ms;
         for closed in closed {
             for (area, run) in closed.areas.iter().zip(&closed.runs) {
@@ -500,6 +579,56 @@ mod tests {
         world.open_stage_areas("Stage_1", |_| true);
         world.tick_effect_areas();
         assert_eq!(applications(&world, entity), None, "only the named stage opens");
+    }
+
+    /// The Myrkgard portal's hazard (`ApplyCurseL4`, remove on exit, delays 0) in its slice's
+    /// space: a sphere 10 m east of the slice's origin. The portal at 1000 m east, turned a
+    /// quarter, puts it 10 m north of the portal.
+    #[test]
+    fn a_placed_slices_area_stands_turned_with_it_and_its_close_takes_it_back() {
+        use nw_world::collision::{Geometry, IDENTITY_AFFINE};
+        use nw_world::dungeon_scripts::Detector;
+        const HAZARD: &str = "slices/darkness/events/pois/enc_darkness_major_portal_sm_01.dynamicslice";
+        const PORTAL: [f32; 3] = [1_000.0, 0.0, 0.0];
+        const QUARTER_DEG: f32 = 90.0;
+        const RADIUS_M: f32 = 3.0;
+        let (mut world, entity) = invasion_world();
+        let mut place = IDENTITY_AFFINE;
+        place[0][3] = 10.0;
+        Arc::make_mut(&mut world.content).effect_areas.slices.insert(
+            HAZARD.to_owned(),
+            vec![EffectArea {
+                effects: vec![CORRUPTION_EFFECT.to_owned()],
+                removes: Vec::new(),
+                volume: Detector {
+                    shape: Geometry::Sphere { radius: RADIUS_M },
+                    place,
+                },
+                rules: CORRUPTION,
+            }],
+        );
+        assert_eq!(world.open_slice_areas("slices/other.dynamicslice", PORTAL, 0.0), None);
+        let handle = world.open_slice_areas(HAZARD, PORTAL, QUARTER_DEG).expect("areas");
+        let set_at = |world: &mut SimWorld, at: [f32; 3]| {
+            use crate::world::tests::NOW;
+            let [x, y, z] = at;
+            let limits = world.settings.limits;
+            world.world.get_mut::<Body>(entity).expect("body").motion =
+                crate::world::Motion::new(Position { x, y, z }, NOW, &limits);
+        };
+        set_at(&mut world, [1_000.0, 10.0, 0.0]);
+        world.tick_effect_areas();
+        assert_eq!(applications(&world, entity), Some(1), "north of the turned portal");
+        set_at(&mut world, [1_010.0, 0.0, 0.0]);
+        world.tick_effect_areas();
+        assert_eq!(applications(&world, entity), None, "east is outside it");
+        set_at(&mut world, [1_000.0, 10.0, 0.0]);
+        world.tick_effect_areas();
+        assert_eq!(applications(&world, entity), Some(1));
+        world.close_slice_areas(handle);
+        assert_eq!(applications(&world, entity), None, "the close takes it back");
+        world.tick_effect_areas();
+        assert_eq!(applications(&world, entity), None);
     }
 
     #[test]

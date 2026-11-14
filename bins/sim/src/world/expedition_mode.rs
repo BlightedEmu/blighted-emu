@@ -76,11 +76,14 @@
 //!   creature type `DungeonBoss` or `DungeonMiniBoss` (the client's score data names them; no
 //!   capture holds the named list's ids); a team wipe is every participant dead or at death's
 //!   door at once.
-//! - `gatherablesCollected` (`8f3d2f0e`, its lower-case CRC) rises by the expedition's points in
-//!   normal and mutated runs (Depths, Lazarus, Ennead, Genesis, Glacial, Empyrean 400; Dynasty,
-//!   Barnacles, Savage 350; Tempest 225; no boss death meets a rise, the Depths' priest boss died
-//!   at 575.6 s and the rises are at 90.635 and 513.635 s): what a gatherable is, the ledgers do
-//!   not show (no own interaction meets every rise), so the sim keeps it at 0.
+//! - `gatherablesCollected` (`8f3d2f0e`, its lower-case CRC) counts the resource nodes any
+//!   player of the run gathered, in normal and mutated runs, and each adds the expedition's
+//!   points ([`ExpeditionScript::gatherable_points`]: Depths, Lazarus, Ennead, Genesis, Glacial,
+//!   Empyrean 400; Dynasty, Barnacles, Savage 350; Tempest 225; Starstone none). Each rise came
+//!   0.00 to 0.04 s after a `slices/gatherables/master_*` node went depleted (the Depths 90.603
+//!   and 513.603 s, its rises 90.635 and 513.635 s; 14 runs, scratch `batch-e/E2/gathertie.py`),
+//!   with no cap (run 18: eleven, each +350) and no multiplier change
+//!   ([`SimWorld::expedition_node_gathered`]).
 //! - The `TimeLimit` timer goes at its end: the timers list again with `GameModeTimeout` alone
 //!   (Starstone 606.379 s, Depths 604.364 s, Dynasty 607.784 s).
 //! - Retail sends the changed values and tasks alone; the sim sends each list whole at its new
@@ -106,11 +109,16 @@
 //!   the only Fiendish ledger are all removals of a key the list never held (none adds it), so the
 //!   client's timers list is the same without them and the sim sends none.
 //!
-//! **Not built**: the spawner list, the level script's timer (`66281118`), the gatherables, and
-//! the tasks between the start and the end that wait for no trigger area: they follow server
-//! script events the client does not get; the ledgers tie only the last boss task to an
-//! encounter's end (Starstone 874.535 s, its boss encounter succeeded, 874.617 s the task), so
-//! the run's end does the rest at once.
+//! - A task of [`ExpeditionScript::event_tasks`] ends at its event: an encounter of the level
+//!   script succeeds or starts (the managers' statuses after the script's step,
+//!   [`SimWorld::expedition_encounter_events`]) or a player's gather of an object of its slice
+//!   ends ([`SimWorld::expedition_object_used`]); the tasks before it end with it, and a tie at
+//!   the next count with the same event ends that task too (Savage Divide's `hub2return` start
+//!   ends tasks 19 and 20 together, as retail did within 0.04 s).
+//!
+//! **Not built**: the spawner list and the level script's timer (`66281118`): no capture shows
+//! what fills them. The tasks that meet no event in every run (talks, cutscenes) end with the
+//! next task that ends, and the run's end does the rest at once.
 
 use bevy_ecs::entity::Entity;
 use nw_content::afflictions::AfflictionGain;
@@ -128,7 +136,11 @@ use nw_sim_core::Position;
 use nw_world::dungeon_scripts::{Detector, START_AREA_ENTITY};
 
 use super::afflictions::{AfflictionMeters, Change};
-use super::expedition_scripts::{AreaTask, ExpeditionScript, expedition_script};
+use super::dungeon_script::DungeonRun;
+use super::encounter_roots::{
+    EncounterObjects, STATUS_IN_PROGRESS, STATUS_SUCCEEDED, STATUS_UNINITIALIZED,
+};
+use super::expedition_scripts::{AreaTask, ExpeditionScript, TaskEvent, expedition_script};
 use super::game_mode_entity::{
     FIRST_LIST_VERSION, GAME_MODE_COMPONENT, MatchEntry, MatchParticipant, full, left_state,
     match_joined_state, participant_lists,
@@ -324,6 +336,8 @@ struct RunScore {
     named: u64,
     /// The normal kills of a mutated run.
     kills: u64,
+    /// The resource nodes gathered.
+    gathered: u64,
     /// The bonuses still met.
     multiplier: u64,
     /// Every participant is down now (a team wipe counted).
@@ -340,6 +354,7 @@ impl Default for RunScore {
             team_wipes: 0,
             named: 0,
             kills: 0,
+            gathered: 0,
             multiplier: FIRST_MULTIPLIER,
             wiped: false,
         }
@@ -363,6 +378,8 @@ pub(crate) struct ExpeditionMode {
     start_area: Option<Detector>,
     /// The tasks that end in a trigger area, with the area's volume.
     task_areas: Vec<(AreaTask, Detector)>,
+    /// The manager status of each encounter of the level script at the last script step.
+    managers: Vec<u32>,
     /// The version of its lists, its objectives' too.
     version: u64,
     /// The timers of its first state.
@@ -544,6 +561,13 @@ fn reach_m(from: Position, to: Position) -> f32 {
     (east * east + north * north + up * up).sqrt()
 }
 
+/// The file name of slice path `path` without its folder and extension: the name an event
+/// task gives ([`TaskEvent`]).
+fn slice_stem(path: &str) -> &str {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    file.split('.').next().unwrap_or(file)
+}
+
 /// The rank of the final score `score` ([`RANK_POINTS`]).
 fn rank_of(score: i64) -> u64 {
     RANK_POINTS
@@ -638,6 +662,7 @@ impl SimWorld {
                 offline: Vec::new(),
                 start_area,
                 task_areas,
+                managers: Vec::new(),
                 version: FIRST_LIST_VERSION,
                 timers,
                 time_limit_ends_ms: Some(time_limit_ends_ms),
@@ -938,6 +963,7 @@ impl SimWorld {
             (TEAM_WIPES, score.team_wipes),
             (NAMED_ENEMIES_KILLED, score.named),
             (NORMAL_KILLS, score.kills),
+            (GATHERABLES, score.gathered),
             (MULTIPLIER, score.multiplier),
         ]);
         if score.deaths > DEATHS_FOR_BONUS {
@@ -1107,6 +1133,120 @@ impl SimWorld {
                 score.multiplier = score.multiplier.saturating_add(1);
             }
         });
+    }
+
+    /// A player's gather of a resource node ended: the run counts it in `gatherablesCollected`
+    /// and scores the script's points (module text); nothing in a script without them.
+    pub(super) fn expedition_node_gathered(&mut self) {
+        let Some(points) = self
+            .expedition()
+            .and_then(|expedition| expedition.script)
+            .map(|script| script.gatherable_points)
+            .filter(|points| *points > 0)
+        else {
+            return;
+        };
+        self.score_run(i64::try_from(points).unwrap_or(i64::MAX), |score| {
+            score.gathered += 1;
+        });
+    }
+
+    /// The encounters of the instance's script `run` after its step: each one that succeeded
+    /// or started since the last step ends its event tasks (module text).
+    pub(super) fn expedition_encounter_events(&mut self, run: &DungeonRun) {
+        let Some(expedition) = self.expedition_mut() else {
+            return;
+        };
+        let encounters = &run.script().encounters;
+        expedition.managers.resize(encounters.len(), STATUS_UNINITIALIZED);
+        let mut events = Vec::new();
+        for (index, encounter) in encounters.iter().enumerate() {
+            let Some((manager, _)) = run.client_status(index) else {
+                continue;
+            };
+            if manager == expedition.managers[index] {
+                continue;
+            }
+            expedition.managers[index] = manager;
+            let stem = slice_stem(&encounter.slice).to_owned();
+            match manager {
+                STATUS_SUCCEEDED => events.push((stem, true)),
+                STATUS_IN_PROGRESS => events.push((stem, false)),
+                _ => {}
+            }
+        }
+        for (stem, succeeded) in events {
+            self.end_event_tasks(|event| match event {
+                TaskEvent::EncounterSucceeded(slice) => succeeded && slice == stem,
+                TaskEvent::EncounterStarted(slice) => !succeeded && slice == stem,
+                TaskEvent::ObjectUsed(_) => false,
+            });
+        }
+    }
+
+    /// A player's gather of object `object` (a start object of an encounter or a gate of the
+    /// level) ended: it ends the event tasks of its slice (module text).
+    pub(super) fn expedition_object_used(&mut self, object: u64) {
+        let content = std::sync::Arc::clone(&self.content);
+        let slice = if EncounterObjects::is_object(object) {
+            self.encounter_objects.slice_of(object).map(str::to_owned)
+        } else {
+            let gates = self.dungeon_gates.as_ref();
+            let level = self
+                .instance_run
+                .as_ref()
+                .and_then(|run| content.dungeon_gates.of_mode(run.game_mode()));
+            level.and_then(|level| {
+                level
+                    .gates
+                    .iter()
+                    .enumerate()
+                    .find(|(index, _)| gates.and_then(|gates| gates.number(*index)) == Some(object))
+                    .map(|(_, gate)| gate.slice.clone())
+            })
+        };
+        let Some(slice) = slice else {
+            return;
+        };
+        let stem = slice_stem(&slice).to_owned();
+        self.end_event_tasks(|event| matches!(event, TaskEvent::ObjectUsed(used) if used == stem));
+    }
+
+    /// The first event task at or after the done count that `meets` matches ends, with the
+    /// tasks before it; then a tie of the new count that `meets` matches ends its task too, and
+    /// so on (module text).
+    fn end_event_tasks(&mut self, meets: impl Fn(TaskEvent) -> bool) {
+        let mut first = true;
+        loop {
+            let Some(expedition) = self
+                .expedition()
+                .filter(|expedition| !expedition.score.ended)
+            else {
+                return;
+            };
+            let done = expedition.done;
+            let Some(waiting) = expedition
+                .script
+                .map_or(&[][..], |script| script.event_tasks)
+                .iter()
+                .filter(|task| {
+                    let due = if first { task.done >= done } else { task.done == done };
+                    due && meets(task.event)
+                })
+                .map(|task| task.done)
+                .min()
+            else {
+                return;
+            };
+            first = false;
+            self.advance_expedition_tasks(waiting.saturating_add(1));
+            let moved = self
+                .expedition()
+                .is_some_and(|expedition| expedition.done > done);
+            if !moved {
+                return;
+            }
+        }
     }
 
     /// The expedition's tasks up to `done` end: the script state and the objective's task list
@@ -2637,6 +2777,181 @@ pub(super) mod tests {
         let other = world.player_by_number(OTHER).expect("other");
         world.leave_expedition_mode(other);
         assert_eq!(statuses(&world), [PLAYING_STATUS], "an exit still leaves the lists");
+    }
+
+    /// Retail `gatherablesCollected`: each resource node gathered counts and adds the script's
+    /// points (Barnacles 350, run 13), with no cap; Starstone counts none (runs 3 and 30).
+    #[test]
+    fn a_gathered_node_counts_and_scores_the_scripts_points() {
+        let mut normal = opened();
+        arrive(&mut normal, PLAYER);
+        normal.expedition_node_gathered();
+        assert_eq!(
+            [GATHERABLES, SCORE].map(|key| value_of(&normal, key)),
+            [0, 0],
+            "Starstone"
+        );
+        let mut world = opened_mutated();
+        arrive_mutated(&mut world, PLAYER, CATALOG_DIFFICULTY);
+        let points = expedition_script(CUTLASS_KEYS).expect("Barnacles").gatherable_points;
+        const NODES: u64 = 11;
+        for _ in 0..NODES {
+            world.expedition_node_gathered();
+        }
+        assert_eq!(value_of(&world, GATHERABLES), NODES);
+        assert_eq!(value_of(&world, SCORE), points * NODES, "no cap at 10");
+        assert_eq!(value_of(&world, MULTIPLIER), FIRST_MULTIPLIER, "no bonus");
+    }
+
+    /// The opened expedition of game mode `game_mode` (its CRC, one teleport) with one player.
+    fn opened_expedition(game_mode: &str) -> SimWorld {
+        let mut mode =
+            crate::world::instances::tests::mode(game_mode, "NW_Dungeon_Test", InstanceKind::Expedition);
+        mode.crc = lowercase_crc32(game_mode);
+        let content = PlayerContent {
+            instances: InstanceCatalog::build([mode.clone()]),
+            ..content()
+        };
+        let mut world = opened_with(mode, content);
+        arrive_in(
+            &mut world,
+            PLAYER,
+            InstanceStay {
+                game_mode: game_mode.to_owned(),
+                ..stay()
+            },
+        );
+        world
+    }
+
+    /// Retail Starstone (runs 3, 30, 43): the ancient shrine encounter's success ends task 17
+    /// with the ones before it, the azoth shrine's use task 20; an event of a task already done
+    /// or of no tie changes nothing.
+    #[test]
+    fn an_encounter_end_or_an_object_use_ends_its_task_and_the_ones_before() {
+        let mut world = opened();
+        arrive(&mut world, PLAYER);
+        world.end_event_tasks(|event| {
+            event == TaskEvent::EncounterSucceeded("dg_enc_everfall_00_ancientshrine")
+        });
+        assert_eq!(tasks_of(&world).0, 17);
+        world.end_event_tasks(|event| event == TaskEvent::ObjectUsed("shattered_monolith"));
+        assert_eq!(tasks_of(&world).0, 17, "a done task's event");
+        world.end_event_tasks(|event| event == TaskEvent::ObjectUsed("an_unknown_object"));
+        assert_eq!(tasks_of(&world).0, 17);
+        world.end_event_tasks(|event| event == TaskEvent::ObjectUsed("dungeon_everfall_00_azoth_shrine"));
+        assert_eq!(tasks_of(&world).0, 20);
+    }
+
+    /// Retail Glacial Tarn (runs 19 and 40): the first locked azoth seal switch ends task 4,
+    /// the second task 9; one use ends one of them. Retail Savage Divide (runs 18 and 36): the
+    /// `hub2return` start ends tasks 19 and 20 at once.
+    #[test]
+    fn one_event_ends_the_next_tie_and_a_tie_right_after_it() {
+        const SWITCH: TaskEvent = TaskEvent::ObjectUsed("interactobject_switch_azothseal_locked");
+        let mut glacial = opened_expedition("DungeonGreatCleave00");
+        glacial.end_event_tasks(|event| event == SWITCH);
+        assert_eq!(tasks_of(&glacial).0, 4);
+        glacial.end_event_tasks(|event| event == SWITCH);
+        assert_eq!(tasks_of(&glacial).0, 9);
+        let mut savage = opened_expedition("DungeonFirstLight01");
+        savage.advance_expedition_tasks(18);
+        savage.end_event_tasks(|event| {
+            event == TaskEvent::EncounterStarted("dg_enc_firstlight_01_hub2return")
+        });
+        assert_eq!(tasks_of(&savage).0, 20);
+    }
+
+    /// Retail Starstone (runs 3, 30, 43): a player's gather of the azoth shrine (a start object
+    /// of its slice) ends task 20; a gather of an object that is neither a start object nor a
+    /// gate changes nothing.
+    #[test]
+    fn a_used_objects_slice_ends_its_task() {
+        const SHRINE: &str = "slices/dungeon/everfall/dungeon_everfall_00_azoth_shrine.dynamicslice";
+        /// A gate's slot key in no gate list.
+        const NO_GATE: u64 = 1;
+        let mut world = opened();
+        arrive(&mut world, PLAYER);
+        world.advance_expedition_tasks(19);
+        let table = nw_content::town_props::TownProps::parse(&format!(
+            r#"{{"props": [{{"asset": "11223344556677889900aabbccddeeff", "slice": "{SHRINE}",
+            "members": ["030c010104"]}}]}}"#
+        ))
+        .expect("table");
+        world.encounter_objects = EncounterObjects::build(&table);
+        world.expedition_object_used(NO_GATE);
+        assert_eq!(tasks_of(&world).0, 19);
+        let shrine = world
+            .encounter_objects
+            .spawn(SHRINE, [0.0; 3], 0.0)
+            .expect("start object");
+        world.expedition_object_used(shrine);
+        assert_eq!(tasks_of(&world).0, 20);
+    }
+
+    /// A minimal script host: nothing spawns, every mob is gone.
+    struct NoHost;
+
+    impl crate::world::dungeon_script::ScriptHost for NoHost {
+        fn spawn(
+            &mut self,
+            _mob: &nw_world::dungeon_scripts::TargetMob,
+            _at: [f32; 3],
+            _waypoints: Option<&nw_world::records::PatrolPath>,
+        ) -> Option<u64> {
+            None
+        }
+        fn spawn_object(&mut self, _slice: &str, _at: [f32; 3], _yaw_deg: f32) -> Option<u64> {
+            None
+        }
+        fn remove(&mut self, _entity: u64) {}
+        fn afflict(
+            &mut self,
+            _sphere: ([f32; 3], f32),
+            _effects: &[String],
+            _source_at: (u64, u64),
+            _skip: &[u64],
+        ) -> Vec<u64> {
+            Vec::new()
+        }
+        fn end_effects(&mut self, _players: &[u64], _effects: &[String], _source: u64, _now_ms: u64) {}
+        fn health(&self, _entity: u64) -> Option<u32> {
+            None
+        }
+        fn boss_phase(&self, _entity: u64) -> Option<u32> {
+            None
+        }
+        fn pick(&mut self, _below: u32) -> u32 {
+            0
+        }
+    }
+
+    /// The instance script's encounter `dg_enc_everfall_00_ancientshrine` succeeds in its first
+    /// step (one stage without objectives): the managers after the step end task 17.
+    #[test]
+    fn the_instance_scripts_encounter_success_ends_its_task() {
+        use nw_world::dungeon_scripts::{Encounter, LevelScript, Stage};
+        let mut world = opened();
+        arrive(&mut world, PLAYER);
+        let script = LevelScript {
+            encounters: vec![Encounter {
+                name: "Shrine".to_owned(),
+                slice: "slices/dungeon/everfall/dg_enc_everfall_00_ancientshrine.dynamicslice"
+                    .to_owned(),
+                auto_activate: true,
+                top_stages: vec![0],
+                stages: vec![Stage::default()],
+                ..Encounter::default()
+            }],
+            ..LevelScript::default()
+        };
+        let mut run = DungeonRun::new(Uuid::from_u128(INSTANCE), script);
+        world.expedition_encounter_events(&run);
+        assert_eq!(tasks_of(&world).0, 0, "not started");
+        let now = world.server_ms;
+        run.tick(&mut NoHost, &crate::world::dungeon_script::ScriptView::default(), &[], now);
+        world.expedition_encounter_events(&run);
+        assert_eq!(tasks_of(&world).0, 17);
     }
 
     /// Retail Amrine (4 runs): its script keeps no score, so no value changes; its end leaves

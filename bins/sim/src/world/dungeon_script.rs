@@ -54,10 +54,35 @@
 //! - a breach runs at its place's difficulty ([`Encounter::difficulty`], Observed per place from
 //!   the retail world map): its spawns of a target with one slice per difficulty spawn that
 //!   difficulty's slice and mob ([`TargetSlice::difficulty`], [`TargetSlice::difficulty_mobs`]);
-//! - its success fires its difficulty's reward event ([`Encounter::rewards`]) and the global
-//!   success event for each player within the rewards' radius (Observed: each won retail breach
-//!   gave the own player `Darkness_<Minor|Major>_DT<n>_T<k>` at the manager's succeeded status,
-//!   16 to 50 ms after it; the radius rule is Inferred from the slice's 500 m field).
+//! - its success fires its difficulty's reward event ([`Encounter::rewards`]) for each player
+//!   within the rewards' radius (Observed: each won retail breach gave the own player
+//!   `Darkness_<Minor|Major>_DT<n>_T<k>` at the manager's succeeded status, 16 to 50 ms after
+//!   it; the radius rule is Inferred from the slice's 500 m field). The list's
+//!   `Darkness_Any_GlobalSuccess` goes to no player (Observed: none in the own game events of
+//!   28 won breaches and 3 won Myrkgard events, batch E2 `breach_events.txt`).
+//!
+//! The darkness events of Myrkgard (findings `2026-11-13-catacomb-erosion.md` section E2) are
+//! open world encounters of their spawn slices (`Enc_Darkness_Major_Portal_SM_01_Spawn` and four
+//! more: two portals, three monoliths), at difficulty 6 (Observed: their portals' cores were
+//! `darkness_core_major_portal_dt6`). Each one's reward list names one event, its key fragment,
+//! given at any difficulty (Observed, `Playthrough_Part_18`: `Event_MyrkgardKeyFragment5` at the
+//! north portal's success, unix 1793539616.726 s, 21 ms before its manager's succeeded status
+//! reached the player; `Event_MyrkgardKeyFragment2` at the east monolith's, 1793539736.349 s).
+//!
+//! - A target of no mob (a hazard) of several difficulties spawns the slice of the highest one
+//!   not above the encounter's (Inferred: the hazard aliases hold `_l1` to `_l4` only, and the
+//!   difficulty 6 Myrkgard events gave `ApplyCurseL4`); a mob target keeps the slice of the
+//!   encounter's own difficulty (above); a target of no mob spawns each of its slices once,
+//!   though its alias names one more than once (Observed data: the minor hazard alias names
+//!   `_l4` three times; retail players held one `ApplyCurseL4`, application 1).
+//! - The effect areas of an encounter's slice and of the slices its stages spawn
+//!   ([`nw_world::effect_areas::EffectAreas::slices`]) stand while their slice does
+//!   ([`ScriptHost::open_slice_areas`]): an encounter's own from the time it is shown, a stage
+//!   spawn's from its spawn; a reset takes the spawns' areas away, and both go
+//!   [`AREAS_AFTER_SUCCESS_MS`] after the success (Observed: the own player lost the north
+//!   portal's `ApplyCurseL4` 10.2 s after its manager's success, `Playthrough_Part_18`
+//!   1427.3 s). Inferred: an encounter whose root another sim shows, or that its group did not
+//!   choose, shows no areas here.
 
 use nw_bus::Point;
 use nw_sim_core::Position;
@@ -103,6 +128,10 @@ const BOSS_PHASE_KEY: &str = "Boss_Phase";
 const HAZARD_EFFECT_POTENCY: f64 = 1.0;
 /// Spawns of one GM spawn call.
 const ONE: u32 = 1;
+/// How long an encounter's areas stand after its success (module text), ms.
+const AREAS_AFTER_SUCCESS_MS: u64 = 10_200;
+/// A reward list of one event gives it at every difficulty (module text).
+const ONE_EVENT: usize = 1;
 
 /// What the script asks of the sim.
 pub(super) trait ScriptHost {
@@ -142,6 +171,13 @@ pub(super) trait ScriptHost {
     }
     /// A random number below `below`.
     fn pick(&mut self, below: u32) -> u32;
+    /// Opens the effect areas of slice `slice` standing at `at`, turned `yaw_deg`: a handle for
+    /// their close, or `None` when the slice has none. A host without effect areas opens none.
+    fn open_slice_areas(&mut self, _slice: &str, _at: [f32; 3], _yaw_deg: f32) -> Option<u64> {
+        None
+    }
+    /// Closes the effect areas of handle `handle`.
+    fn close_slice_areas(&mut self, _handle: u64) {}
 }
 
 /// The health a standing start object reports: it is not dead until it is gathered.
@@ -390,6 +426,14 @@ struct EncounterRun {
     left_since_ms: Option<u64>,
     /// Open world: when it ended.
     done_ms: Option<u64>,
+    /// When its last top stage ended.
+    ended_ms: Option<u64>,
+    /// The handles of the effect areas its stage spawns opened.
+    spawn_areas: Vec<u64>,
+    /// The handle of its own slice's effect areas while they stand.
+    own_areas: Option<u64>,
+    /// Its slice has no effect areas of its own (a host gave no handle).
+    no_own_areas: bool,
 }
 
 /// How the encounters of the open world start and end (see the module text).
@@ -512,21 +556,23 @@ impl DungeonRun {
             .is_none_or(|group| group.choice() == Some(index))
     }
 
-    /// The rewards of encounter `index` at its difficulty: its place, the radius, and its
-    /// difficulty's game event and the global success event (those it names).
-    pub(super) fn rewards_of(&self, index: usize) -> Option<([f32; 3], f32, Vec<&str>)> {
+    /// The reward of encounter `index` at its difficulty: its place, the radius and its
+    /// difficulty's game event, or the list's one event (module text).
+    pub(super) fn rewards_of(&self, index: usize) -> Option<([f32; 3], f32, &str)> {
         let encounter = self.script.encounters.get(index)?;
         let rewards = encounter.rewards.as_ref()?;
         let difficulty = usize::try_from(encounter.difficulty?).ok()?;
-        let events = difficulty
+        let event = difficulty
             .checked_sub(1)
             .and_then(|at| rewards.events.get(at))
-            .into_iter()
-            .chain(std::iter::once(&rewards.global_event))
-            .map(String::as_str)
-            .filter(|event| !event.is_empty())
-            .collect();
-        Some((encounter.position, rewards.radius_m, events))
+            .or_else(|| {
+                rewards
+                    .events
+                    .first()
+                    .filter(|_| rewards.events.len() == ONE_EVENT)
+            })
+            .filter(|event| !event.is_empty())?;
+        Some((encounter.position, rewards.radius_m, event.as_str()))
     }
 
     /// The run of the open world's `script` by `rules`: every encounter idle; a spawn group
@@ -675,7 +721,9 @@ impl DungeonRun {
                 .and_then(|group| self.groups.get(group))
                 .is_none_or(|group| group.choice() == Some(index));
             let run = &mut self.encounters[index];
-            if !owned.get(index).copied().unwrap_or(true) || !chosen {
+            let shown = owned.get(index).copied().unwrap_or(true) && chosen;
+            sync_own_areas(encounter, run, host, shown, now_ms);
+            if !shown {
                 if run.status != EncounterStatus::Idle {
                     reset(run, host, now_ms);
                 }
@@ -1026,6 +1074,45 @@ fn run_tops(
         }
     }
     run.status = EncounterStatus::Done;
+    run.ended_ms = Some(now_ms);
+}
+
+/// Whether the areas of `run`'s encounter and of its spawns still stand at `now_ms`: not
+/// [`AREAS_AFTER_SUCCESS_MS`] after its success.
+fn areas_stand(run: &EncounterRun, now_ms: u64) -> bool {
+    run.status != EncounterStatus::Done
+        || run
+            .ended_ms
+            .is_none_or(|ended| now_ms.saturating_sub(ended) < AREAS_AFTER_SUCCESS_MS)
+}
+
+/// The effect areas of `encounter`'s own slice stand while it is `shown` and its areas stand
+/// ([`areas_stand`]), and those of its stage spawns go with its success's (module text).
+fn sync_own_areas(
+    encounter: &Encounter,
+    run: &mut EncounterRun,
+    host: &mut impl ScriptHost,
+    shown: bool,
+    now_ms: u64,
+) {
+    let stand = areas_stand(run, now_ms);
+    if !stand {
+        for handle in std::mem::take(&mut run.spawn_areas) {
+            host.close_slice_areas(handle);
+        }
+    }
+    match run.own_areas {
+        Some(handle) if !(shown && stand) => {
+            host.close_slice_areas(handle);
+            run.own_areas = None;
+        }
+        None if shown && stand && !run.no_own_areas => {
+            run.own_areas =
+                host.open_slice_areas(&encounter.slice, encounter.position, encounter.yaw_deg);
+            run.no_own_areas = run.own_areas.is_none();
+        }
+        _ => {}
+    }
 }
 
 /// The encounter starts again: its mobs go, its stages wait, it is idle.
@@ -1037,9 +1124,14 @@ fn reset(run: &mut EncounterRun, host: &mut impl ScriptHost, now_ms: u64) {
     for area in &run.hazard_areas {
         host.end_effects(&area.given, &area.effects, area.object, now_ms);
     }
+    for handle in std::mem::take(&mut run.spawn_areas) {
+        host.close_slice_areas(handle);
+    }
     let stages = run.stages.len();
     *run = EncounterRun {
         stages: vec![StageRun::default(); stages],
+        own_areas: run.own_areas,
+        no_own_areas: run.no_own_areas,
         ..EncounterRun::default()
     };
 }
@@ -1273,12 +1365,19 @@ fn spawn_one(
     let per_spawn = |slice: usize| target.slices[slice].mobs_per_spawn.max(ONE);
     if mobs.is_empty() {
         for number in 0..spawn.count {
+            // An alias that names one slice more than once (`darkness_hazard_corruption_minor_l4`
+            // twice in `alias_darkness_corruption_hazard_minor`) spawns it once.
+            let mut placed: Vec<&str> = Vec::new();
             for (slice, target_slice) in target
                 .slices
                 .iter()
                 .enumerate()
                 .filter(|(_, slice)| of_difficulty(target, slice, difficulty))
             {
+                if placed.contains(&target_slice.path.as_str()) {
+                    continue;
+                }
+                placed.push(&target_slice.path);
                 let (at, yaw_deg) = (at_of(number), yaw_of(number));
                 if let Some(randomizer) = &target_slice.randomizer {
                     let place = (spawn.target, slice, stage);
@@ -1307,6 +1406,9 @@ fn spawn_one(
                         );
                     }
                     continue;
+                }
+                if let Some(handle) = host.open_slice_areas(&target_slice.path, at, yaw_deg) {
+                    run.spawn_areas.push(handle);
                 }
                 let ends_ms = target_slice
                     .lifetime_s
@@ -1793,11 +1895,23 @@ fn completable(encounter: &Encounter, is_object: &impl Fn(&str) -> bool) -> bool
 }
 
 /// Whether `slice` of `target` spawns at `difficulty`: the target holds no slice of one
-/// difficulty, or the encounter has none, or the slice is of it.
+/// difficulty, or the encounter has none, or the slice is of it; for a target of no mob (a
+/// hazard), the slice of the highest difficulty of the target's slices not above it (module
+/// text).
 fn of_difficulty(target: &Target, slice: &TargetSlice, difficulty: Option<u32>) -> bool {
     let by_difficulty = target.slices.iter().any(|slice| slice.difficulty.is_some());
+    let of_mobs = target.slices.iter().any(|slice| slice.mob.is_some());
     match difficulty {
-        Some(difficulty) if by_difficulty => slice.difficulty == Some(difficulty),
+        Some(difficulty) if by_difficulty && of_mobs => slice.difficulty == Some(difficulty),
+        Some(difficulty) if by_difficulty => {
+            let nearest = target
+                .slices
+                .iter()
+                .filter_map(|slice| slice.difficulty)
+                .filter(|of| *of <= difficulty)
+                .max();
+            nearest.is_some() && slice.difficulty == nearest
+        }
         _ => true,
     }
 }
@@ -2127,10 +2241,17 @@ impl ScriptHost for SimHost<'_> {
     }
 
     fn spawn_object(&mut self, slice: &str, at: [f32; 3], yaw_deg: f32) -> Option<u64> {
+        // An encounter turret (the Isle of Night ballista) stands on the level turret holder.
+        if let Some(number) = self.world.spawn_encounter_turret(slice, at, yaw_deg) {
+            return Some(number);
+        }
         self.world.encounter_objects.spawn(slice, at, yaw_deg)
     }
 
     fn remove(&mut self, entity: u64) {
+        if self.world.remove_encounter_turret(entity) {
+            return;
+        }
         if EncounterObjects::is_object(entity) {
             self.world.encounter_objects.remove(entity);
         } else {
@@ -2230,6 +2351,14 @@ impl ScriptHost for SimHost<'_> {
     fn pick(&mut self, below: u32) -> u32 {
         self.world.dice.below(below.max(ONE))
     }
+
+    fn open_slice_areas(&mut self, slice: &str, at: [f32; 3], yaw_deg: f32) -> Option<u64> {
+        self.world.open_slice_areas(slice, at, yaw_deg)
+    }
+
+    fn close_slice_areas(&mut self, handle: u64) {
+        self.world.close_slice_areas(handle);
+    }
 }
 
 impl SimWorld {
@@ -2302,6 +2431,7 @@ impl SimWorld {
         let owned = vec![true; run.script.encounters.len()];
         self.show_encounters(&mut run, &owned, now_ms);
         self.tick_gates(&run, now_ms);
+        self.expedition_encounter_events(&run);
         for outcome in outcomes {
             match outcome {
                 ScriptOutcome::EncounterDone(index) => {
@@ -2398,9 +2528,9 @@ impl SimWorld {
                     encounter = %run.script.encounters[index].name,
                     "open world encounter done"
                 );
-                if let Some((at, radius_m, events)) = run.rewards_of(index) {
-                    let events: Vec<String> = events.into_iter().map(str::to_owned).collect();
-                    self.reward_encounter(position(at), radius_m, &events, now_ms);
+                if let Some((at, radius_m, event)) = run.rewards_of(index) {
+                    let event = event.to_owned();
+                    self.reward_encounter(position(at), radius_m, &event, now_ms);
                 }
             }
         }
@@ -2458,9 +2588,9 @@ impl SimWorld {
         self.encounter_roots.tick(now_ms);
     }
 
-    /// Each player within `radius_m` of `at` gets the game events `events` (a won breach's
-    /// rewards, see the module text).
-    fn reward_encounter(&mut self, at: Position, radius_m: f32, events: &[String], now_ms: u64) {
+    /// Each player within `radius_m` of `at` gets the game event `event` (a won breach's
+    /// reward, see the module text).
+    fn reward_encounter(&mut self, at: Position, radius_m: f32, event: &str, now_ms: u64) {
         let numbers: Vec<u64> = {
             let mut query = self.world.query::<(&Player, &Body)>();
             query
@@ -2470,9 +2600,7 @@ impl SimWorld {
                 .collect()
         };
         for number in numbers {
-            for event in events {
-                self.fire_game_event(number, event, now_ms);
-            }
+            self.fire_game_event(number, event, now_ms);
         }
     }
 
@@ -2557,6 +2685,9 @@ mod tests {
     #[derive(Default)]
     struct Host {
         next: u64,
+        /// The last slice area handle: apart from the entity numbers, which `kill` reads as the
+        /// order of `spawned`.
+        next_area: u64,
         health: HashMap<u64, u32>,
         phase: HashMap<u64, u32>,
         spawned: Vec<(String, [f32; 3])>,
@@ -2573,6 +2704,10 @@ mod tests {
         ended: Vec<(u64, u64)>,
         /// The start objects a player gathers now.
         gathered: std::collections::HashSet<u64>,
+        /// The slices that have effect areas ([`ScriptHost::open_slice_areas`]).
+        area_slices: Vec<String>,
+        /// The open slice areas: handle and slice.
+        open_areas: Vec<(u64, String)>,
     }
 
     impl ScriptHost for Host {
@@ -2635,9 +2770,24 @@ mod tests {
         fn pick(&mut self, _below: u32) -> u32 {
             self.rolls.pop_front().unwrap_or_default()
         }
+        fn open_slice_areas(&mut self, slice: &str, _at: [f32; 3], _yaw_deg: f32) -> Option<u64> {
+            self.area_slices.iter().any(|known| known == slice).then(|| {
+                self.next_area += 1;
+                self.open_areas.push((self.next_area, slice.to_owned()));
+                self.next_area
+            })
+        }
+        fn close_slice_areas(&mut self, handle: u64) {
+            self.open_areas.retain(|(open, _)| *open != handle);
+        }
     }
 
     impl Host {
+        /// The slices whose areas stand now, in their opening order.
+        fn open_area_slices(&self) -> Vec<&str> {
+            self.open_areas.iter().map(|(_, slice)| slice.as_str()).collect()
+        }
+
         fn kill(&mut self, vitals: &str) {
             let entities: Vec<u64> = self
                 .spawned
@@ -3710,13 +3860,9 @@ mod tests {
         let outcomes = run.tick(&mut host, &view(&[at]), &[], T0 + 4);
         let done = usize::from(!chosen[0]);
         assert!(outcomes.contains(&ScriptOutcome::EncounterDone(done)));
-        let (_, radius_m, events) = run.rewards_of(done).expect("rewards");
+        let (_, radius_m, event) = run.rewards_of(done).expect("rewards");
         assert!((radius_m - 500.0).abs() < f32::EPSILON);
-        assert_eq!(
-            events,
-            [DT2_EVENT, GLOBAL_EVENT],
-            "its difficulty's event, then any's"
-        );
+        assert_eq!(event, DT2_EVENT, "its difficulty's event, no global one");
         // The area spawner's respawn time (no rules here: the mob respawn time).
         let back = T0 + 5 + open_rules().respawn_ms;
         run.tick(&mut host, &view(&[at]), &[], T0 + 5);
@@ -4351,5 +4497,141 @@ mod tests {
         let markers = slices_of(None, STAG_MARKER);
         assert!(!markers.is_empty());
         assert!(markers.iter().all(|slice| slice.mob.is_none()));
+    }
+
+    /// The Myrkgard north portal (`enc_darkness_major_portal_sm_01`) and its hazard.
+    const PORTAL_SLICE: &str = "slices/darkness/events/pois/enc_darkness_major_portal_sm_01.dynamicslice";
+    const HAZARD_SLICE: &str =
+        "slices/darkness/events/general/hazards/darkness_hazard_corruption_major_l4.dynamicslice";
+
+    /// A Myrkgard event: its stage spawns the hazard and a mob and ends with the mob's death;
+    /// difficulty 6 and its one reward event (`Playthrough_Part_18`).
+    fn myrkgard_event() -> Encounter {
+        Encounter {
+            name: "Enc_Darkness_Major_Portal_SM_01_Spawn.slice".to_owned(),
+            slice: PORTAL_SLICE.to_owned(),
+            position: PLACE,
+            auto_activate: true,
+            grace_period_s: GRACE_S,
+            detection_radius_m: Some(RADIUS_M),
+            top_stages: vec![0],
+            stages: vec![Stage {
+                name: "Wave_00 - Setup".to_owned(),
+                spawns: [0, 1]
+                    .into_iter()
+                    .map(|target| Spawn {
+                        target,
+                        count: 1,
+                        ..Spawn::default()
+                    })
+                    .collect(),
+                objectives: vec![objective(
+                    ObjectiveSpec::SliceDestroyed {
+                        target: Some(0),
+                        required: 1,
+                    },
+                    0,
+                    false,
+                )],
+                ..Stage::default()
+            }],
+            targets: vec![
+                target(ADD_VITALS),
+                Target {
+                    name: HAZARD_SLICE.to_owned(),
+                    slices: vec![TargetSlice {
+                        path: HAZARD_SLICE.to_owned(),
+                        difficulty: Some(4),
+                        ..TargetSlice::default()
+                    }],
+                },
+            ],
+            difficulty: Some(6),
+            rewards: Some(nw_world::level_script::DifficultyRewards {
+                radius_m: 500.0,
+                events: vec!["Event_MyrkgardKeyFragment5".to_owned()],
+                global_event: GLOBAL_EVENT.to_owned(),
+            }),
+            ..Encounter::default()
+        }
+    }
+
+    /// Retail `Playthrough_Part_18` (the north Myrkgard portal): its success gives its one
+    /// event, the key fragment, at difficulty 6, and no global success event.
+    #[test]
+    fn a_myrkgard_event_gives_its_one_event_at_its_difficulty() {
+        let run = DungeonRun::new(Uuid::nil(), script(vec![myrkgard_event()]));
+        let (_, _, event) = run.rewards_of(0).expect("reward");
+        assert_eq!(event, "Event_MyrkgardKeyFragment5");
+    }
+
+    /// A hazard target of several difficulties spawns its highest one not above the
+    /// encounter's: the hazard alias (`_l1` to `_l4`) its `_l4` at difficulty 6 and its `_l2`
+    /// at 2, a lone `_l4` hazard at 6, nothing of `_l2` to `_l4` at 1.
+    #[test]
+    fn a_target_spawns_its_highest_difficulty_not_above_the_encounters() {
+        let slice = |difficulty: u32| TargetSlice {
+            path: format!("darkness_hazard_corruption_major_l{difficulty}.dynamicslice"),
+            difficulty: Some(difficulty),
+            ..TargetSlice::default()
+        };
+        let alias = Target {
+            name: "alias_darkness_corruption_hazard_major.aliasasset".to_owned(),
+            slices: (1..=4).map(slice).collect(),
+        };
+        let spawned = |target: &Target, difficulty: u32| -> Vec<u32> {
+            target
+                .slices
+                .iter()
+                .filter(|slice| of_difficulty(target, slice, Some(difficulty)))
+                .filter_map(|slice| slice.difficulty)
+                .collect()
+        };
+        assert_eq!(spawned(&alias, 6), [4]);
+        assert_eq!(spawned(&alias, 2), [2]);
+        let lone = Target {
+            name: HAZARD_SLICE.to_owned(),
+            slices: vec![slice(4)],
+        };
+        assert_eq!(spawned(&lone, 6), [4]);
+        let high = Target {
+            name: "high".to_owned(),
+            slices: (2..=4).map(slice).collect(),
+        };
+        assert!(spawned(&high, 1).is_empty());
+    }
+
+    /// Retail `Playthrough_Part_18`: the north portal's `ApplyCurseL4` stood while the portal
+    /// ran and went 10.2 s after its success. The event's own areas open as it is shown, its
+    /// hazard's at the stage's spawn; a reset takes the spawn's away and keeps its own; both go
+    /// 10.2 s after the success.
+    #[test]
+    fn an_events_areas_stand_until_shortly_after_its_success() {
+        let mut host = Host {
+            area_slices: vec![PORTAL_SLICE.to_owned(), HAZARD_SLICE.to_owned()],
+            ..Host::default()
+        };
+        let mut run = DungeonRun::new(Uuid::nil(), script(vec![myrkgard_event()]));
+        let here = view(&[PLACE]);
+        run.tick(&mut host, &here, &[], T0);
+        assert_eq!(host.open_area_slices(), [PORTAL_SLICE, HAZARD_SLICE]);
+        let wiped = ScriptView {
+            living: Vec::new(),
+            ..here.clone()
+        };
+        let grace_ms = u64::from(GRACE_S) * MS_PER_S;
+        run.tick(&mut host, &wiped, &[], T0 + 1);
+        run.tick(&mut host, &wiped, &[], T0 + 1 + grace_ms);
+        assert_eq!(host.open_area_slices(), [PORTAL_SLICE], "the reset keeps the event's own");
+        let start = T0 + 2 + grace_ms;
+        run.tick(&mut host, &here, &[], start);
+        assert_eq!(host.open_area_slices(), [PORTAL_SLICE, HAZARD_SLICE]);
+        host.kill(ADD_VITALS);
+        let outcomes = run.tick(&mut host, &here, &[], start + 1);
+        assert!(outcomes.contains(&ScriptOutcome::EncounterDone(0)));
+        run.tick(&mut host, &here, &[], start + AREAS_AFTER_SUCCESS_MS);
+        assert_eq!(host.open_area_slices().len(), 2, "they stand 10.2 s");
+        run.tick(&mut host, &here, &[], start + 1 + AREAS_AFTER_SUCCESS_MS);
+        assert!(host.open_area_slices().is_empty());
     }
 }

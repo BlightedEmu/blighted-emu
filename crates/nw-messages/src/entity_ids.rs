@@ -515,4 +515,28 @@ mod tests {
         release_raw_id(sim, number);
         assert_eq!(entity_of_raw_id(&new), None, "the holder came along");
     }
+
+    #[test]
+    fn only_a_holder_of_an_entry_holds_it() {
+        let number = TEST_BASE + SPAWNS + 8;
+        let (sim, other) = (IdHolder::new(), IdHolder::new());
+        assert!(!holds_raw_id(sim, number), "no entry yet");
+        raw_id_of_entity(number);
+        assert!(
+            !holds_raw_id(sim, number),
+            "an entry made without a holder is held by no one"
+        );
+        hold_raw_id(sim, number);
+        hold_raw_id(other, number);
+        assert!(holds_raw_id(sim, number));
+        assert!(holds_raw_id(other, number));
+        release_raw_id(sim, number);
+        assert!(
+            !holds_raw_id(sim, number),
+            "the released holder no longer holds the entry the other one keeps"
+        );
+        assert!(holds_raw_id(other, number));
+        release_raw_id(other, number);
+        assert!(!holds_raw_id(other, number), "the entry went");
+    }
 }

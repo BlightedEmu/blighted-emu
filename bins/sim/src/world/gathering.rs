@@ -1155,6 +1155,7 @@ impl SimWorld {
             // instance's gates ([`super::gates`]) stays: its rules change it. An erosion shrine
             // adds its effect ([`super::afflictions`]).
             None if let Some(object) = gather.object => {
+                self.expedition_object_used(object);
                 if !self.catacomb_chest_opened(object) {
                     self.encounter_objects.gathered(object, now_ms);
                     self.gate_switch_used(object);
@@ -1169,6 +1170,9 @@ impl SimWorld {
                 let respawn_at_ms = now_ms.saturating_add(self.respawn_roll_ms(&gather.gatherable));
                 self.nodes
                     .deplete(&gather.request.target, now_ms, respawn_at_ms);
+                if gather.gatherable.tradeskill.is_some() {
+                    self.expedition_node_gathered();
+                }
             }
         }
         let locked = self.lock_of(gather);

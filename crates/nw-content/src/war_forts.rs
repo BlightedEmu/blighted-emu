@@ -114,6 +114,19 @@ struct TableFile {
     turret_kinds: Vec<KindRow>,
     #[serde(default)]
     structure_kinds: Vec<StructureKindRow>,
+    #[serde(default)]
+    level_droppers: Vec<LevelDropperRow>,
+    #[serde(default)]
+    encounter_turrets: Vec<StructureRow>,
+}
+
+#[derive(Deserialize)]
+struct LevelDropperRow {
+    capital: String,
+    #[serde(default)]
+    members_inferred: bool,
+    structure: StructureRow,
+    kind: StructureKindRow,
 }
 
 #[derive(Deserialize)]
@@ -156,12 +169,30 @@ struct StructureKindRow {
     area: Option<AreaRow>,
     #[serde(default)]
     use_interact: Option<u64>,
+    #[serde(default)]
+    gate: Option<GateRow>,
+}
+
+#[derive(Deserialize)]
+struct GateRow {
+    physical_radius_m: Option<f32>,
+    repair_delay: Option<TimerRow>,
+    #[serde(default)]
+    door_interact: Option<u64>,
 }
 
 #[derive(Deserialize)]
 struct TimerRow {
     component: u64,
     delay_s: f32,
+    /// Older tables have no flag: every timer they hold starts at once.
+    #[serde(default = "starts_at_once")]
+    on_open: bool,
+}
+
+/// The start flag of a timer row of a table that names none.
+const fn starts_at_once() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -238,6 +269,8 @@ struct KindRow {
     projectile: Option<ProjectileRow>,
     #[serde(default)]
     area: Option<AreaRow>,
+    #[serde(default)]
+    ammo_effect: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -249,6 +282,14 @@ struct FortRow {
     points: Vec<PointRow>,
     #[serde(default)]
     structures: Vec<StructureRow>,
+    #[serde(default)]
+    major_structures: Vec<MajorRow>,
+}
+
+#[derive(Deserialize)]
+struct MajorRow {
+    gde_ref: String,
+    kind: u32,
 }
 
 #[derive(Deserialize)]
@@ -358,8 +399,26 @@ pub struct WarFort {
     pub siege: SiegeEntity,
     /// Its capture points, by number.
     pub points: Vec<FortPoint>,
-    /// Its siege structures: turrets, droppers, horns and supply generators.
+    /// Its siege structures: turrets, droppers, horns, supply generators, fort gates and war
+    /// camp gates.
     pub structures: Vec<FortStructure>,
+    /// Its major structures: the entries of the siege data's `fortMajorStructureStates`.
+    pub major_structures: Vec<MajorStructure>,
+}
+
+/// A major structure of a fort (4103 child 2, `fortMajorStructureStates`): a fort gate.
+///
+/// Observed (`RS_offensive_war`, the five fort gates of territory 15): each entry is keyed by
+/// its gate's facet entity ([`FortStructure::facet_entity`]), with the gate's place, a kind of
+/// its own (5 to 9, one per gate, not by size: Unknown meaning, mined per gate), its health in
+/// percent (100, 85, 66, 43, 32, 0 as the gates fell) and a byte that is the gate's buildable
+/// state (5 whole, 6 broken: the `l_t2` gate's entry went to 0 and 6 when it broke, 933.736 s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MajorStructure {
+    /// The `GdeRef` of its gate.
+    pub gde_ref: [u8; ID_LEN],
+    /// Its kind in the siege data.
+    pub kind: u32,
 }
 
 /// One siege structure of a fort, as its war capture showed it first (or, as the template of a
@@ -455,12 +514,25 @@ pub struct SiegeTimer {
     pub component: u64,
     /// Its delay, seconds.
     pub delay_s: f32,
+    /// It starts when its entity opens (`m_startDelayOnInit`); else a trigger of its slice
+    /// starts it later, and its entity opens with it at 0 (Observed: the cow launcher's area of
+    /// `invasion` 335.079 s opened with its three start-on-init timers at 3.8, 0.2 and 4.0 s and
+    /// its three start-on-trigger timers, `DestroyDelay` 2 s, `Eggsplode` 3 s and `Die_Eggsplode`
+    /// 3 s, at 0, and the last two started at its death, 338.315 s; every timer of the dropper and
+    /// horn areas starts on init).
+    pub on_open: bool,
 }
 
 impl SiegeTimer {
     /// Its delay in whole milliseconds.
     pub fn delay_ms(&self) -> u64 {
         seconds_ms(self.delay_s)
+    }
+
+    /// The delay its entity shows when it opens, seconds: its delay when it starts then, else 0
+    /// ([`Self::on_open`]).
+    pub const fn open_delay_s(&self) -> f32 {
+        if self.on_open { self.delay_s } else { 0.0 }
     }
 }
 
@@ -511,9 +583,9 @@ pub struct SiegeArea {
     pub ownership_component: Option<u64>,
     /// The component of its position state (13).
     pub position_component: Option<u64>,
-    /// Its timers; they start when it opens, and it goes when the longest ends (Observed: the
-    /// barrel's area left 15.0 s after it opened, `joining_defending_war_2` 181.773 ->
-    /// 196.771 s, its timers 15, 4 and 4 s).
+    /// Its timers; those that start on init start when it opens, and it goes when the longest of
+    /// them ends (Observed: the barrel's area left 15.0 s after it opened,
+    /// `joining_defending_war_2` 181.773 -> 196.771 s, its timers 15, 4 and 4 s).
     pub timers: Vec<SiegeTimer>,
     /// The radius its hits or effects reach, metres.
     pub radius_m: f32,
@@ -527,10 +599,11 @@ pub struct SiegeArea {
 }
 
 impl SiegeArea {
-    /// How long it lasts: its longest timer, ms.
+    /// How long it lasts: its longest timer that starts when it opens, ms.
     pub fn life_ms(&self) -> u64 {
         self.timers
             .iter()
+            .filter(|timer| timer.on_open)
             .map(SiegeTimer::delay_ms)
             .max()
             .unwrap_or_default()
@@ -611,6 +684,10 @@ pub struct TurretKind {
     /// The area its projectile opens where it lands (the explosive launcher's
     /// `turret_t<n>_explosivelauncher_aoe`); `None` for a turret whose shot opens none.
     pub area: Option<SiegeArea>,
+    /// The status effect an ammo add costs in place of an ammo kit, for an encounter's turret
+    /// (the Isle of Night ballista: `Raid_IoN_Balista_Bolt`, the effect of the gatherable
+    /// `IoN_Balista_Bolt`; Inferred: no data table names the cost of its `AddAmmo` option).
+    pub ammo_effect: Option<String>,
 }
 
 impl WarFort {
@@ -628,6 +705,14 @@ impl WarFort {
             .find(|arrival| arrival.side == side)
             .or_else(|| self.arrivals.first())
             .map(|arrival| arrival.position)
+    }
+
+    /// The siege data kind of the major structure whose gate is `gde_ref`.
+    pub fn major_kind(&self, gde_ref: &[u8; ID_LEN]) -> Option<u32> {
+        self.major_structures
+            .iter()
+            .find(|major| &major.gde_ref == gde_ref)
+            .map(|major| major.kind)
     }
 
     /// Whether `[x, y]` is inside the frame.
@@ -656,6 +741,14 @@ pub enum StructureRole {
     SupplyGenerator,
     /// A war camp platform weapon (cannon, fire launcher or repeater platform).
     Platform,
+    /// A fort gate (`siege_fortgate_<s|m|l>_t<n>`): the defender company's, with vitals; it
+    /// breaks at no health and is whole again at the war's result (Observed,
+    /// `RS_offensive_war` 933.736 to 957.321 s).
+    FortGate,
+    /// A war camp gate (`siege_warcamp_gate_t<n>`): of no company and no vitals, the attackers'
+    /// in the war's run (Observed: it takes the attacker's raid id at the start,
+    /// `joining_defending_war_2` 83.710 s).
+    WarCampGate,
 }
 
 /// The defensive structures of a 2646 build by its choice (Observed, `fort-equipements-territory`:
@@ -678,9 +771,15 @@ pub const WAR_SIEGE_SLICES: &str = "slices/structures/siege/";
 /// (1714.326 s) dropped that barrel and opened `dropper_t1_firebarrel_aoe` where it landed.
 const OUTPOST_RUSH_VAT: &str = "or_turretfire";
 const OUTPOST_RUSH_VAT_TIER: u8 = 1;
+/// The name of the open world's level fire droppers (`Dropper_Fire_POI_<n>`, the CoatGen slices
+/// of the Hedet canyon capitals) and their role and tier: a fire barrel dropper of tier 1.
+/// Observed: the slice names the blueprint `DropperFireBarrelT1` and its spawner fires
+/// `Dropper_T3_FireBarrel_Projectile` (`coatgen/a4041713/dropper_fire_poi_2209365890`).
+const LEVEL_DROPPER: &str = "dropper_fire_poi_";
+const LEVEL_DROPPER_TIER: u8 = 1;
 /// The tier part of a slice name, and the parts that name each role.
 const TIER_PREFIX: &str = "_t";
-const ROLE_PARTS: [(&str, StructureRole); 7] = [
+const ROLE_PARTS: [(&str, StructureRole); 9] = [
     ("_ballista", StructureRole::Ballista),
     ("_repeater", StructureRole::Repeater),
     ("_explosivelauncher", StructureRole::ExplosiveLauncher),
@@ -688,6 +787,8 @@ const ROLE_PARTS: [(&str, StructureRole); 7] = [
     ("_hornofresilience", StructureRole::HornOfResilience),
     ("supplygenerator_", StructureRole::SupplyGenerator),
     ("platform_", StructureRole::Platform),
+    ("siege_fortgate_", StructureRole::FortGate),
+    ("siege_warcamp_gate_", StructureRole::WarCampGate),
 ];
 
 impl StructureRole {
@@ -697,6 +798,9 @@ impl StructureRole {
         let name = path.rsplit('/').next()?.to_ascii_lowercase();
         if name.starts_with(OUTPOST_RUSH_VAT) {
             return Some((Self::FireBarrelDropper, OUTPOST_RUSH_VAT_TIER));
+        }
+        if name.starts_with(LEVEL_DROPPER) {
+            return Some((Self::FireBarrelDropper, LEVEL_DROPPER_TIER));
         }
         // A platform's own name also holds the weapon (`platform_t3_repeater`): the platform
         // part goes first.
@@ -716,7 +820,8 @@ impl StructureRole {
     }
 
     /// The `BlueprintID` of the role's structure of `tier` (`BlueprintItemDefinitions`); `None`
-    /// for a platform (its blueprints name the weapon, not the role).
+    /// for a platform (its blueprints name the weapon, not the role) and a gate (no blueprint
+    /// names one).
     pub fn blueprint(self, tier: u8) -> Option<String> {
         let name = match self {
             Self::Ballista => "TurretBallista",
@@ -725,7 +830,7 @@ impl StructureRole {
             Self::FireBarrelDropper => "DropperFireBarrel",
             Self::HornOfResilience => "SupportHornOfResilience",
             Self::SupplyGenerator => return Some(format!("Siege_SupplyGenerator_T{tier}")),
-            Self::Platform => return None,
+            Self::Platform | Self::FortGate | Self::WarCampGate => return None,
         };
         Some(format!("{name}T{tier}"))
     }
@@ -765,6 +870,24 @@ pub struct StructureKind {
     /// `or_turretfire`, `OPR_TEST3` 1714.326 s, while its build interact is component 19).
     /// `None` for a slice with no such interact.
     pub use_interact: Option<u64>,
+    /// The gate parts of a fort gate or war camp gate.
+    pub gate: Option<GateParts>,
+}
+
+/// What a gate slice holds besides its members.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GateParts {
+    /// `m_slicePhysicalGridRadius`: the reach of its body, metres (`siege_fortgate_l_t2` 10.23).
+    pub physical_radius_m: f32,
+    /// The `RepairDelay` timer its break starts (Observed: component 8 of `siege_fortgate_l_t2`
+    /// at 30 s with the break, `RS_offensive_war` 933.736 s, and 0 again when it was whole,
+    /// 957.321 s); `None` for a slice with none.
+    pub repair_delay: Option<SiegeTimer>,
+    /// The component of the interact whose options pass a player through its door
+    /// (`TeleportToOtherSideOfDoor*`): off while it is broken, on when it is whole again
+    /// (Observed: component 17 of `siege_fortgate_l_t2`, `RS_offensive_war` 933.736 and
+    /// 957.321 s; its first state holds none).
+    pub door_interact: Option<u64>,
 }
 
 impl StructureKind {
@@ -879,12 +1002,30 @@ impl SiegeBlueprints {
     }
 }
 
+/// A fire dropper of the open world's level (a capital of the Hedet canyon, findings
+/// `2026-11-13-outpost-rush-turrets.md`, **SQ-Brimestone-Sands-2 level entity**): its entity as
+/// retail shows it (the level card form: no asset, the capital id and 8 zero bytes; no place
+/// state, the client has the level's) and its own slice's use parts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LevelDropper {
+    /// Its capital's GUID.
+    pub capital: String,
+    /// Its entity: the capital's slice asset, place and facing, its first retail members.
+    pub structure: FortStructure,
+    /// Its members are another level dropper's (no capture shows it; Inferred).
+    pub members_inferred: bool,
+    /// Its slice's use parts (trigger, pour, drop, area, use interact).
+    pub kind: StructureKind,
+}
+
 /// The forts of the wars, by territory.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WarForts {
     forts: Vec<WarFort>,
     kinds: Vec<TurretKind>,
     structure_kinds: Vec<StructureKind>,
+    level_droppers: Vec<LevelDropper>,
+    encounter_turrets: Vec<FortStructure>,
 }
 
 impl WarForts {
@@ -923,10 +1064,35 @@ impl WarForts {
             .into_iter()
             .filter_map(|row| structure_kind_of(row).transpose())
             .collect::<Result<Vec<_>, _>>()?;
+        let level_droppers = file
+            .level_droppers
+            .into_iter()
+            .filter_map(|row| {
+                let structure = match structure_of(NO_TERRITORY, row.structure) {
+                    Ok(structure) => structure,
+                    Err(error) => return Some(Err(error)),
+                };
+                structure_kind_of(row.kind).transpose().map(|kind| {
+                    Ok(LevelDropper {
+                        capital: row.capital,
+                        structure,
+                        members_inferred: row.members_inferred,
+                        kind: kind?,
+                    })
+                })
+            })
+            .collect::<Result<Vec<_>, WarFortsError>>()?;
+        let encounter_turrets = file
+            .encounter_turrets
+            .into_iter()
+            .map(|row| structure_of(NO_TERRITORY, row))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             forts,
             kinds,
             structure_kinds,
+            level_droppers,
+            encounter_turrets,
         })
     }
 
@@ -945,6 +1111,36 @@ impl WarForts {
     /// Every structure kind of the catalog.
     pub fn structure_kinds(&self) -> impl Iterator<Item = &StructureKind> {
         self.structure_kinds.iter()
+    }
+
+    /// The template and the kind of the turret of slice `slice` (its pak path) that an
+    /// instance's encounter spawns (the template is the first group retail sent of it: the Isle
+    /// of Night ballista, `ION-a9280e800e2eccdc` 440.476 s); `None` when no capture holds one.
+    pub fn encounter_turret(&self, slice: &str) -> Option<(&FortStructure, &TurretKind)> {
+        let kind = self
+            .kinds
+            .iter()
+            .find(|kind| kind.slice.eq_ignore_ascii_case(slice))?;
+        let template = self
+            .encounter_turrets
+            .iter()
+            .find(|turret| turret.asset == kind.asset)?;
+        Some((template, kind))
+    }
+
+    /// The fire droppers of the open world's level.
+    pub fn level_droppers(&self) -> &[LevelDropper] {
+        &self.level_droppers
+    }
+
+    /// The use parts of `structure`: a level dropper's own slice's (the level droppers share one
+    /// slice asset, each slice with its own entity ids), else its asset's structure kind.
+    pub fn use_kind(&self, structure: &FortStructure) -> Option<&StructureKind> {
+        self.level_droppers
+            .iter()
+            .find(|dropper| dropper.structure.gde_ref == structure.gde_ref)
+            .map(|dropper| &dropper.kind)
+            .or_else(|| self.structure_kind(&structure.asset))
     }
 
     /// The structure kind of slice asset `asset`.
@@ -1044,6 +1240,7 @@ const fn timer_of(row: &TimerRow) -> SiegeTimer {
     SiegeTimer {
         component: row.component,
         delay_s: row.delay_s,
+        on_open: row.on_open,
     }
 }
 
@@ -1097,6 +1294,7 @@ fn kind_of(row: KindRow) -> Result<TurretKind, WarFortsError> {
         damage_row: row.damage_row,
         range_m: row.range_m,
         radius_m: row.radius_m,
+        ammo_effect: row.ammo_effect,
     })
 }
 
@@ -1155,6 +1353,16 @@ fn fort_of(row: FortRow) -> Result<WarFort, WarFortsError> {
         },
         points,
         structures,
+        major_structures: row
+            .major_structures
+            .iter()
+            .map(|major| {
+                Ok(MajorStructure {
+                    gde_ref: id(&major.gde_ref)?,
+                    kind: major.kind,
+                })
+            })
+            .collect::<Result<Vec<_>, WarFortsError>>()?,
     })
 }
 
@@ -1216,6 +1424,14 @@ fn structure_kind_of(row: StructureKindRow) -> Result<Option<StructureKind>, War
             .transpose()?,
         area: row.area.map(area_of).transpose()?.flatten(),
         use_interact: row.use_interact,
+        // A gate slice with no reach is no gate part (every gate slice of the catalog has one).
+        gate: row.gate.and_then(|gate| {
+            Some(GateParts {
+                physical_radius_m: gate.physical_radius_m?,
+                repair_delay: gate.repair_delay.as_ref().map(timer_of),
+                door_interact: gate.door_interact,
+            })
+        }),
     }))
 }
 
@@ -1223,7 +1439,8 @@ fn structure_kind_of(row: StructureKindRow) -> Result<Option<StructureKind>, War
 pub(crate) mod tests {
     use super::*;
 
-    /// A made-up fort in the table form: made-up ids, an outer point and the claim point.
+    /// A made-up fort in the table form: made-up ids, an outer point and the claim point with
+    /// the retail places and place members of ES points 2 and 4 (`arvaysa_ES_attacker_war_45vs45`).
     pub(crate) const TABLE: &str = r#"{"forts": [{
         "territory": 8,
         "ledger": "made-up",
@@ -1234,11 +1451,11 @@ pub(crate) mod tests {
         "points": [
           {"number": 4, "asset": "33333333333333333333333333333333",
            "gde_ref": "08070605040302011111111111111111", "facet": "0a0b0c0d0e0f0001",
-           "place": [5902.48, 5428.12, 57.7], "kind": 6, "position": "020d010345b873d645a9a0f2",
+           "place": [5902.4795, 5428.118, 57.691372], "kind": 6, "position": "020d010345b873d645a9a0f2133903b309",
            "card_component": 0, "position_component": 2, "ownership_component": 1, "point_component": 4},
           {"number": 1, "asset": "33333333333333333333333333333333",
            "gde_ref": "aabbccddeeff00112222222222222222", "facet": "0a0b0c0d0e0f0002",
-           "place": [5972.2, 5363.1, 56.9], "kind": 4, "position": "020d0103",
+           "place": [5972.198, 5363.1045, 56.932175], "kind": 4, "position": "020d010345baa19645a798d6132103b309",
            "card_component": 0, "position_component": 2, "ownership_component": 1, "point_component": 3}
         ]}]}"#;
 
@@ -1275,7 +1492,7 @@ pub(crate) mod tests {
                   "card_component": 0, "state_component": 2},
         "points": [{"number": 4, "asset": "33333333333333333333333333333333",
            "gde_ref": "08070605040302011111111111111111", "facet": "0a0b0c0d0e0f0001",
-           "place": [14046.73, 4820.7, 57.7], "kind": 6, "position": "020d0103",
+           "place": [14046.733, 4820.699, 57.647453], "kind": 6, "position": "020d0103465b7aef4596a598133743ffc1",
            "card_component": 0, "position_component": 2, "ownership_component": 1, "point_component": 4}],
         "structures": [{"asset": "44444444444444444444444444444444", "gde_ref": "c8e5b15b50b29d585555555555555555",
            "place": [14038.0, 4943.0, 58.2], "yaw": -0.5, "side": 1, "card_component": 0, "turret_component": 16,
@@ -1586,5 +1803,119 @@ pub(crate) mod tests {
         let kind = forts.kind(&turret.asset).expect("kind");
         assert_eq!(kind.ammo_refill, None);
         assert_eq!(kind.max_ammo, 15);
+    }
+
+    /// Observed (the gate slices of `joining_defending_war_2` and `RS_offensive_war`): the fort
+    /// gates and war camp gates are structures of their own roles with a tier, built by no
+    /// blueprint and no defensive build choice.
+    #[test]
+    fn the_gate_slices_are_gates_of_their_tier_with_no_blueprint() {
+        assert_eq!(
+            StructureRole::of_slice("slices/structures/siege/siege_fortgate_l_t2.dynamicslice"),
+            Some((StructureRole::FortGate, 2))
+        );
+        assert_eq!(
+            StructureRole::of_slice("slices/structures/siege/siege_fortgate_s_t3.dynamicslice"),
+            Some((StructureRole::FortGate, 3))
+        );
+        assert_eq!(
+            StructureRole::of_slice("slices/structures/siege/siege_warcamp_gate_t3.dynamicslice"),
+            Some((StructureRole::WarCampGate, 3))
+        );
+        assert_eq!(StructureRole::FortGate.blueprint(2), None);
+        assert_eq!(StructureRole::WarCampGate.blueprint(3), None);
+        assert!(!DEFENSE_CHOICES.contains(&StructureRole::FortGate));
+    }
+
+    /// A fort gate kind with its slice's parts, and a fort with its major structure kinds (the
+    /// retail `l_t2` gate of territory 15: kind 6, its `RepairDelay` component 8 at 30 s).
+    #[test]
+    fn a_gate_kind_and_the_major_structures_read() {
+        const GATE: &str = "847074e0e8035352b95d12460d479b5f";
+        const GATE_REF: &str = "4a3b68394a3652fbcc38065d07a87038";
+        let table = TABLE
+            .replace(
+                "\"points\": [",
+                &format!("\"major_structures\": [{{\"gde_ref\": \"{GATE_REF}\", \"kind\": 6}}],\n        \"points\": ["),
+            )
+            .replacen(
+                "]}]}",
+                &format!(
+                    "]}}], \"structure_kinds\": [{{\"asset\": \"{GATE}\", \"slice\": \"slices/structures/siege/siege_fortgate_l_t2.dynamicslice\",
+                     \"template\": null, \"gate\": {{\"physical_radius_m\": 10.23,
+                     \"repair_delay\": {{\"component\": 8, \"delay_s\": 30.0, \"on_open\": false}},
+                     \"door_interact\": 17}}}}]}}"
+                ),
+                1,
+            );
+        let forts = WarForts::parse(&table).expect("table");
+        let fort = forts.fort(8).expect("fort");
+        let gate_ref: [u8; ID_LEN] = hex::decode(GATE_REF).expect("hex").try_into().expect("16");
+        assert_eq!(fort.major_kind(&gate_ref), Some(6));
+        assert_eq!(fort.major_kind(&[0; ID_LEN]), None);
+        let asset: [u8; ID_LEN] = hex::decode(GATE).expect("hex").try_into().expect("16");
+        let kind = forts.structure_kind(&asset).expect("kind");
+        assert_eq!((kind.role, kind.tier), (StructureRole::FortGate, 2));
+        let gate = kind.gate.expect("gate parts");
+        assert_eq!(gate.physical_radius_m, 10.23);
+        let delay = gate.repair_delay.expect("repair delay");
+        assert_eq!((delay.component, delay.delay_ms(), delay.on_open), (8, 30_000, false));
+        assert_eq!(gate.door_interact, Some(17));
+    }
+
+    /// Observed (`invasion` 335.079 s, the cow launcher's area): a start-on-trigger timer opens
+    /// at 0 and does not hold the area open; a table row with no flag starts at once.
+    #[test]
+    fn only_the_timers_that_start_on_open_show_their_delay_and_hold_the_area() {
+        let row = |text: &str| -> TimerRow { serde_json::from_str(text).expect("row") };
+        let old = timer_of(&row(r#"{"component": 4, "delay_s": 4.0}"#));
+        assert!(old.on_open, "an old table's timer starts at once");
+        let later = timer_of(&row(r#"{"component": 13, "delay_s": 3.0, "on_open": false}"#));
+        assert_eq!(old.open_delay_s(), 4.0);
+        assert_eq!(later.open_delay_s(), 0.0);
+        let area = SiegeArea {
+            asset: [0; ID_LEN],
+            ownership_component: Some(3),
+            position_component: Some(5),
+            timers: vec![
+                timer_of(&row(r#"{"component": 8, "delay_s": 3.8, "on_open": true}"#)),
+                timer_of(&row(r#"{"component": 10, "delay_s": 4.0, "on_open": true}"#)),
+                later,
+                timer_of(&row(r#"{"component": 12, "delay_s": 9.0, "on_open": false}"#)),
+            ],
+            radius_m: 4.0,
+            once: false,
+            damage: None,
+            effects: Vec::new(),
+        };
+        assert_eq!(area.life_ms(), 4_000, "the longest start-on-init timer");
+    }
+
+    /// A level dropper reads with its own slice's use parts, a T1 fire barrel dropper by its
+    /// name (`Dropper_Fire_POI_<n>`), and is found by its `GdeRef` before its shared asset.
+    #[test]
+    fn a_level_dropper_reads_and_its_use_kind_is_its_own() {
+        const LEVEL_REF: &str = "b3dc34cf7e2e82c60000000000000000";
+        const SLICE: &str = "coatgen/a4041713/dropper_fire_poi_2209365890.dynamicslice";
+        let table = format!(
+            r#"{{"forts": [], "level_droppers": [{{"capital": "b212b88f-c633-a507-7490-96f1090779b4",
+              "structure": {{"asset": "cbb06cbea8f05c6d8307709715324c8c", "gde_ref": "{LEVEL_REF}",
+                "place": [5380.2793, 7385.836, 279.2911], "yaw": -0.401, "card_component": 0,
+                "interact_component": 16, "spawner_component": 15, "ownership_component": 2,
+                "members": ["0f390103ffff00"]}},
+              "kind": {{"asset": "cbb06cbea8f05c6d8307709715324c8c", "slice": "{SLICE}", "template": null,
+                "use_interact": 16}}}}]}}"#
+        );
+        let forts = WarForts::parse(&table).expect("table");
+        let dropper = &forts.level_droppers()[0];
+        assert!(!dropper.members_inferred);
+        assert_eq!(
+            (dropper.kind.role, dropper.kind.tier),
+            (StructureRole::FireBarrelDropper, 1)
+        );
+        assert!(!dropper.kind.is_war_siege());
+        let kind = forts.use_kind(&dropper.structure).expect("its kind");
+        assert_eq!(kind.slice, SLICE);
+        assert_eq!(kind.use_interact, Some(16));
     }
 }

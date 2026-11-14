@@ -326,8 +326,21 @@ const DOUBLED_SEPARATOR: &str = "//";
 /// The file names of the corrupted breaches' spawn groups start with this (lower case:
 /// `Darkness_SpawnGroup_Minor_Master`, `_Major_Master` and their `_Special_` kinds).
 const BREACH_GROUP_PREFIX: &str = "darkness_spawngroup_";
+/// The file names of the darkness events' spawn slices start with this (lower case): the five
+/// Myrkgard events of Shattered Mountain (`Enc_Darkness_Major_Portal_SM_01_Spawn` and the others,
+/// placed by the `07sm06_myrkgard_ai_*` capitals), each an area spawner of one event slice of
+/// `slices/darkness/events/pois/` (findings `2026-11-13-catacomb-erosion.md` section E2).
+const DARKNESS_EVENT_PREFIX: &str = "enc_darkness_";
+/// The difficulty of a darkness event (Observed: both Myrkgard portals stood with the core
+/// `darkness_core_major_portal_dt6`, `Playthrough_Part_18` near 9767, 9614 and 9869, 9416).
+const DARKNESS_EVENT_DIFFICULTY: u32 = 6;
 /// The file names of the open world's spawn group slices start with one of these (lower case).
-const SPAWN_GROUP_PREFIXES: [&str; 3] = ["worldevent_", "worldboss_", BREACH_GROUP_PREFIX];
+const SPAWN_GROUP_PREFIXES: [&str; 4] = [
+    "worldevent_",
+    "worldboss_",
+    BREACH_GROUP_PREFIX,
+    DARKNESS_EVENT_PREFIX,
+];
 
 /// The wanted script path that capital slice name `slice_name` places, if any. A story
 /// instance's capital names its script without the slices folder
@@ -356,6 +369,11 @@ fn capital_script_path(slice_name: &str) -> String {
 /// events are left out: no retail capture of theirs was studied).
 fn is_breach_group(path: &str) -> bool {
     file_name(path).starts_with(BREACH_GROUP_PREFIX)
+}
+
+/// Whether the slice at `path` spawns a darkness event ([`DARKNESS_EVENT_PREFIX`]).
+fn is_darkness_event(path: &str) -> bool {
+    file_name(path).starts_with(DARKNESS_EVENT_PREFIX)
 }
 
 /// Whether `path` is a catacombs gameplay tile: its alias slots (`EncounterNamedEnemy`,
@@ -826,10 +844,16 @@ pub fn build_dungeon_scripts(
         ..LevelScript::default()
     };
     for (script, placement) in script_placements(index, OPEN_WORLD_LEVEL, is_spawn_group)? {
-        let Some(group) = build_level(&mut slices, &script, placement, mobs, &points, &mut report)?
+        let Some(mut group) =
+            build_level(&mut slices, &script, placement, mobs, &points, &mut report)?
         else {
             continue;
         };
+        if is_darkness_event(&script) {
+            for encounter in &mut group.encounters {
+                encounter.difficulty = Some(DARKNESS_EVENT_DIFFICULTY);
+            }
+        }
         open_world.encounters.extend(group.encounters);
         open_world.chests.extend(group.chests);
     }
@@ -3652,6 +3676,12 @@ mod tests {
         ));
         assert!(!is_breach_group(
             "coatgen/efc337e6/worldevent_spawngroup_single_master_3815808514.dynamicslice"
+        ));
+        let myrkgard = "coatgen/827a175a/enc_darkness_major_portal_sm_01_spawn_169199085.dynamicslice";
+        assert!(is_darkness_event(myrkgard) && is_spawn_group(myrkgard));
+        assert!(!is_breach_group(myrkgard), "an event is no breach group");
+        assert!(!is_darkness_event(
+            "coatgen/16c655c7/darkness_spawngroup_minor_master_3023200876.dynamicslice"
         ));
     }
 

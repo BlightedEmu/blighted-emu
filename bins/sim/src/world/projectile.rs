@@ -7,6 +7,17 @@
 //! ([`nw_content::player_attacks`]). So an attack flies along the player's aim: the first mob on
 //! its line, where the client shows it ([`super::mob_trail`]), is hit once the projectile got
 //! there.
+//!
+//! **Level stops.** A solid of the level on the way stops the shot there ([`LevelStop`]): it
+//! meets no body behind it, and its projectile entity names the level entity of the solid as its
+//! `collidedWithGDEId`, with no hit volume. Observed (`opr_que_and_lost`, projectile states of
+//! class 16): 940 states of shots on the OPR Vertical outer perimeter wall `d2667a566f022663` (a
+//! capital, [`nw_world::collision::BodyEntity`]) send children 0, 7 and 9 and no child 8; a hit of
+//! the world (a solid of no entity) sends 0 and 9 only (projectile study 2026-11-11). A turret's
+//! shot names the same id as its 2720 target with result `ff` (helpers B15 and B19). Inferred: the
+//! shot's way to the solid is the straight line from its muzzle to where it ends (the body it
+//! meets, else the end of its reach with its fall), and a splash meets the bodies around the
+//! solid's point.
 
 use nw_bus::ConnectionRef;
 use nw_content::player_attacks::Flight;
@@ -104,11 +115,43 @@ impl<'a> ShotHit<'a> {
     }
 }
 
-/// A projectile on its way to the mob it hits.
+/// Where a shot meets the level's solids first ([`SimWorld::level_stop`], module doc **Level
+/// stops**).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct LevelStop {
+    /// Where it meets the solid.
+    pub(super) at: Position,
+    /// How far from where it left, in the ground plane (the distance of its flight).
+    pub(super) along_m: f32,
+    /// The GDE id of the level entity whose solid it is; `None` for a solid of no entity.
+    pub(super) entity: Option<u64>,
+}
+
+/// Where a shot ends ([`SimWorld::shot_stop`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum ShotEnd {
+    /// On the body `target`, after `flight_s` seconds.
+    Body { target: u64, flight_s: f32 },
+    /// On a solid of the level, after `flight_s` seconds.
+    Level { stop: LevelStop, flight_s: f32 },
+    /// Nowhere within its reach.
+    Free,
+}
+
+/// What a projectile flies to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FlightEnd {
+    /// The mob or PvP foe of this number.
+    Body(u64),
+    /// A solid of the level.
+    Level(LevelStop),
+}
+
+/// A projectile on its way to what it hits.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ProjectileFlight {
     attacker: ConnectionRef,
-    target: u64,
+    end: FlightEnd,
     /// [`ShotHit::damage_id`].
     damage_id: Option<String>,
     /// When it gets there.
@@ -206,6 +249,37 @@ fn line_at(
     Some((along, aside, time_s, along * (-aim.pitch).tan() - drop_m))
 }
 
+/// The point `along_m` metres (in the ground plane) along the line of `shot` that leaves
+/// `muzzle` along `aim`: it climbs or sinks with the aim's pitch and falls by its gravity until
+/// then ([`line_at`]).
+fn point_along(shot: &Shot, muzzle: Position, aim: AimLine, along_m: f32) -> Position {
+    let (east, north) = (-aim.yaw.sin(), aim.yaw.cos());
+    let drop_m = shot.flight.as_ref().map_or(0.0, |flight| {
+        flight.drop_at(flight.time_to(along_m).unwrap_or(flight.lifetime_s))
+    });
+    Position {
+        x: muzzle.x + east * along_m,
+        y: muzzle.y + north * along_m,
+        z: muzzle.z + along_m * (-aim.pitch).tan() - drop_m,
+    }
+}
+
+/// How long `shot` flies to `along_m` metres (in the ground plane): 0 for a hit scan; the end of
+/// its lifetime when its flight does not get that far.
+fn flight_time_to(shot: &Shot, along_m: f32) -> f32 {
+    shot.flight.as_ref().map_or(0.0, |flight| {
+        flight.time_to(along_m).unwrap_or(flight.lifetime_s)
+    })
+}
+
+/// The place a shot leaves from a shooter standing at `from`: the middle of its body.
+pub(super) fn muzzle_of(from: Position) -> Position {
+    Position {
+        z: from.z + PLAYER_CAPSULE.height_m * HALF,
+        ..from
+    }
+}
+
 /// The first body of `bodies` (mob, place, capsule) that `shot` from a shooter standing at `from`
 /// along `aim` meets, with how long it flies to it (seconds); `None` when it meets none. It meets
 /// a body whose edge is within its range and its radius of its line, before its flight ends,
@@ -265,20 +339,70 @@ impl SimWorld {
         now_ms: u64,
     ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
         let met = first_on_line(&shot, position, aim, places);
-        tracing::debug!(attacker = ?attacker, damage_id = ?hit.damage_id, ?aim, met = ?met, "player cast");
+        let end = self.shot_stop(&shot, (position, aim), met, places);
+        tracing::debug!(attacker = ?attacker, damage_id = ?hit.damage_id, ?aim, end = ?end, "player cast");
         let entity = self.shot_entity_of(attacker, &shot, &hit, (position, aim), now_ms);
-        let Some((target, flight_s)) = met else {
-            return vec![Ok(AttackOutcome::Missed)];
-        };
-        let headshot = meets_head(&shot, (position, aim), target, places);
-        self.launch(
-            attacker,
-            (shot, ShotHit { headshot, ..hit }),
-            (target, entity),
+        match end {
+            ShotEnd::Body { target, flight_s } => {
+                let headshot = meets_head(&shot, (position, aim), target, places);
+                self.launch(
+                    attacker,
+                    (shot, ShotHit { headshot, ..hit }),
+                    (target, entity),
+                    flight_s,
+                    now_ms,
+                );
+                Vec::new()
+            }
+            ShotEnd::Level { stop, flight_s } => {
+                self.launch_to_level(attacker, (shot, hit), (stop, entity), flight_s, now_ms);
+                vec![Ok(AttackOutcome::Missed)]
+            }
+            ShotEnd::Free => vec![Ok(AttackOutcome::Missed)],
+        }
+    }
+
+    /// The first solid of the level on the straight line from `from` to `to` (module doc
+    /// **Level stops**); `None` when the line meets none.
+    pub(super) fn level_stop(&self, from: Position, to: Position) -> Option<LevelStop> {
+        let (at, entity) = self.ground.first_solid(from, to)?;
+        Some(LevelStop {
+            at,
+            along_m: from.horizontal_distance(at),
+            entity,
+        })
+    }
+
+    /// Where `shot` from a shooter standing at `position` along `aim` ends: on the body `met`
+    /// ([`first_on_line`] of `places`) unless a solid of the level stands on the way to it,
+    /// else on the first solid within its reach (module doc **Level stops**).
+    pub(super) fn shot_stop(
+        &self,
+        shot: &Shot,
+        (position, aim): (Position, AimLine),
+        met: Option<(u64, f32)>,
+        places: &[(u64, Position, Capsule)],
+    ) -> ShotEnd {
+        let muzzle = muzzle_of(position);
+        // The shot flies along its own line ([`point_along`]) up to the body it met, or to the
+        // end of its reach: a solid of the level on that way stops it first.
+        let body = met.and_then(|(target, flight_s)| {
+            places
+                .iter()
+                .find(|(number, _, _)| *number == target)
+                .map(|(_, at, _)| (target, flight_s, muzzle.horizontal_distance(*at)))
+        });
+        let way_m = body.map_or(shot.end().0, |(_, _, along_m)| along_m);
+        if let Some(stop) = self.level_stop(muzzle, point_along(shot, muzzle, aim, way_m)) {
+            return ShotEnd::Level {
+                stop,
+                flight_s: flight_time_to(shot, stop.along_m),
+            };
+        }
+        body.map_or(ShotEnd::Free, |(target, flight_s, _)| ShotEnd::Body {
+            target,
             flight_s,
-            now_ms,
-        );
-        Vec::new()
+        })
     }
 
     /// Spawns the projectile entity of `shot` with the hit `hit`, which the player of
@@ -307,9 +431,49 @@ impl SimWorld {
         flight_s: f32,
         now_ms: u64,
     ) {
+        self.push_flight(
+            attacker,
+            (shot, hit),
+            (FlightEnd::Body(target), entity),
+            flight_s,
+            now_ms,
+        );
+    }
+
+    /// Sends `shot` of `attacker` with the hit `hit` to the solid of the level at `stop`, which
+    /// it gets to after `flight_s` from `now_ms`; `entity` is the slot key of its projectile
+    /// entity. A shot with neither an entity nor a splash leaves nothing to show.
+    pub(super) fn launch_to_level(
+        &mut self,
+        attacker: &ConnectionRef,
+        (shot, hit): (Shot, ShotHit<'_>),
+        (stop, entity): (LevelStop, Option<u64>),
+        flight_s: f32,
+        now_ms: u64,
+    ) {
+        if entity.is_none() && shot.splash_m <= 0.0 {
+            return;
+        }
+        self.push_flight(
+            attacker,
+            (shot, hit),
+            (FlightEnd::Level(stop), entity),
+            flight_s,
+            now_ms,
+        );
+    }
+
+    fn push_flight(
+        &mut self,
+        attacker: &ConnectionRef,
+        (shot, hit): (Shot, ShotHit<'_>),
+        (end, entity): (FlightEnd, Option<u64>),
+        flight_s: f32,
+        now_ms: u64,
+    ) {
         self.projectile_flights.push(ProjectileFlight {
             attacker: attacker.clone(),
-            target,
+            end,
             entity,
             damage_id: hit.damage_id.map(str::to_owned),
             land_ms: now_ms.saturating_add(flight_ms(flight_s)),
@@ -339,10 +503,10 @@ impl SimWorld {
             .or(facing)
     }
 
-    /// Lands the projectiles that got to their target (a mob or a PvP foe) at `now_ms`: a splash
-    /// also hits the other living mobs and foes within its radius of that target, and each one
-    /// it hurts takes its effects; a projectile of effects alone puts them on each living target
-    /// it reaches.
+    /// Lands the projectiles that got to their target (a mob, a PvP foe or a solid of the level)
+    /// at `now_ms`: a splash also hits the other living mobs and foes within its radius of that
+    /// target, and each one it hurts takes its effects; a projectile of effects alone puts them
+    /// on each living target it reaches. One on the level hurts only by its splash.
     pub(super) fn projectile_flights_due(
         &mut self,
         now_ms: u64,
@@ -353,16 +517,30 @@ impl SimWorld {
         self.projectile_flights = later;
         let mut results = Vec::new();
         for flight in due {
-            // The projectile entity shows the hit where its target is now.
-            if let Some((entity, at)) = flight.entity.zip(self.target_at(flight.target)) {
-                let impact = Position {
-                    z: at.z + PLAYER_CAPSULE.height_m * HALF,
-                    ..at
-                };
-                self.shot_entity_hit(entity, flight.target, impact, now_ms);
-            }
-            let splashed = self.splashed(&flight);
-            let first = std::iter::once((flight.target, true));
+            let (first, centre) = match flight.end {
+                FlightEnd::Body(target) => {
+                    let at = self.target_at(target);
+                    // The projectile entity shows the hit where its target is now.
+                    if let Some((entity, at)) = flight.entity.zip(at) {
+                        let impact = Position {
+                            z: at.z + PLAYER_CAPSULE.height_m * HALF,
+                            ..at
+                        };
+                        self.shot_entity_hit(entity, target, impact, now_ms);
+                    }
+                    (Some(target), at)
+                }
+                FlightEnd::Level(stop) => {
+                    if let Some(entity) = flight.entity {
+                        self.shot_entity_on_level(entity, stop.entity, stop.at, now_ms);
+                    }
+                    (None, Some(stop.at))
+                }
+            };
+            let splashed = centre.map_or_else(Vec::new, |centre| {
+                self.splashed(&flight, centre, first)
+            });
+            let first = first.into_iter().map(|target| (target, true));
             for (target, paced) in first.chain(splashed.into_iter().map(|other| (other, false))) {
                 let Some(damage_id) = &flight.damage_id else {
                     if let Some((effects, source)) = &flight.effects {
@@ -388,15 +566,17 @@ impl SimWorld {
         results
     }
 
-    /// The other living targets within the splash of `flight` around the target it flew to:
-    /// mobs, and the PvP foes of its attacker.
-    fn splashed(&mut self, flight: &ProjectileFlight) -> Vec<u64> {
+    /// The living targets within the splash of `flight` around `centre`, besides the target it
+    /// flew to (`flown_to`): mobs, and the PvP foes of its attacker.
+    fn splashed(
+        &mut self,
+        flight: &ProjectileFlight,
+        centre: Position,
+        flown_to: Option<u64>,
+    ) -> Vec<u64> {
         if flight.splash_m <= 0.0 {
             return Vec::new();
         }
-        let Some(centre) = self.target_at(flight.target) else {
-            return Vec::new();
-        };
         let foes = self
             .by_connection
             .get(&flight.attacker)
@@ -408,7 +588,7 @@ impl SimWorld {
             .map(|(mob, at, _)| (mob, at));
         mobs.chain(foes.into_iter().map(|(foe, at, _)| (foe, at)))
             .filter(|(other, at)| {
-                *other != flight.target && at.horizontal_distance(centre) <= flight.splash_m
+                Some(*other) != flown_to && at.horizontal_distance(centre) <= flight.splash_m
             })
             .map(|(other, _)| other)
             .collect()
@@ -621,6 +801,156 @@ mod tests {
             AimLine::of(FROM, Some(FROM), Some(0.0), Some(DOWN)),
             Some(camera)
         );
+    }
+
+    /// How far north of [`FROM`] the test wall stands, m.
+    const WALL_M: f32 = 10.0;
+    /// The level entity of the test wall: the capital id of the OPR Vertical outer perimeter
+    /// (the retail 2720 target).
+    const PERIMETER: u64 = 0xd266_7a56_6f02_2663;
+
+    /// A flat level with one wall across the north at [`WALL_M`], a solid of [`PERIMETER`].
+    struct WallGround;
+
+    impl nw_sim_core::Ground for WallGround {
+        fn height_at(&self, _x: f32, _y: f32) -> Option<f32> {
+            Some(0.0)
+        }
+
+        fn first_solid(&self, from: Position, to: Position) -> Option<(Position, Option<u64>)> {
+            let wall = FROM.y + WALL_M;
+            let rise = to.y - from.y;
+            if rise.abs() <= f32::EPSILON || (from.y - wall) * (to.y - wall) > 0.0 {
+                return None;
+            }
+            let share = (wall - from.y) / rise;
+            let at = Position {
+                x: from.x + (to.x - from.x) * share,
+                y: wall,
+                z: from.z + (to.z - from.z) * share,
+            };
+            Some((at, Some(PERIMETER)))
+        }
+    }
+
+    /// A world on the level of [`WallGround`].
+    fn wall_world() -> SimWorld {
+        use std::sync::Arc;
+
+        use super::super::tests::{MANY, MAX_PLAYERS, settings, slot};
+        use crate::combat::tests::test_combat;
+        use crate::login::WorldIds;
+
+        SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(WallGround),
+            slot("sim-a"),
+            test_combat(),
+            Arc::default(),
+        )
+    }
+
+    #[test]
+    fn a_wall_of_the_level_stops_a_shot_before_the_body_behind_it() {
+        let world = wall_world();
+        let behind = [(1, at(0.0, 15.0), BODY)];
+        let met = first_on_line(&BOLT, FROM, NORTH, &behind);
+        assert!(met.is_some(), "the body is on the bolt's line");
+        let ShotEnd::Level { stop, flight_s } = world.shot_stop(&BOLT, (FROM, NORTH), met, &behind)
+        else {
+            panic!("the wall stops the bolt");
+        };
+        assert_eq!(stop.entity, Some(PERIMETER));
+        assert!((stop.along_m - WALL_M).abs() < 1e-3, "{stop:?}");
+        assert!(
+            (stop.at.z - (FROM.z + PLAYER_CAPSULE.height_m * HALF)).abs() < 1e-3,
+            "the bolt leaves the middle of the shooter's body and stays level: {stop:?}"
+        );
+        // 100 t + 12.5 t^2 = 10: t = 0.0990 s.
+        assert!((flight_s - 0.099).abs() < 0.001, "{flight_s}");
+        let before = [(2, at(0.0, 8.0), BODY)];
+        let met = first_on_line(&BOLT, FROM, NORTH, &before);
+        assert_eq!(
+            world.shot_stop(&BOLT, (FROM, NORTH), met, &before),
+            ShotEnd::Body {
+                target: 2,
+                flight_s: met.expect("met").1
+            },
+            "a body before the wall takes the bolt"
+        );
+    }
+
+    #[test]
+    fn a_shot_that_meets_no_body_ends_on_the_wall_within_its_reach() {
+        let world = wall_world();
+        assert!(matches!(
+            world.shot_stop(&BOLT, (FROM, NORTH), None, &[]),
+            ShotEnd::Level { stop, .. } if stop.entity == Some(PERIMETER)
+        ));
+        let south = AimLine {
+            yaw: std::f32::consts::PI,
+            pitch: 0.0,
+        };
+        assert_eq!(
+            world.shot_stop(&BOLT, (FROM, south), None, &[]),
+            ShotEnd::Free,
+            "away from the wall"
+        );
+        let short = Shot::hit_scan(WALL_M / 2.0);
+        assert_eq!(
+            world.shot_stop(&short, (FROM, NORTH), None, &[]),
+            ShotEnd::Free,
+            "the wall is beyond its reach"
+        );
+    }
+
+    #[test]
+    fn a_falling_shot_reaches_the_place_of_its_flight_and_its_time() {
+        // The arrow at 80 m: 0.73 s and a fall of about 2.6 m.
+        let muzzle = muzzle_of(FROM);
+        let end = point_along(&ARROW, muzzle, NORTH, 80.0);
+        assert!((end.y - (FROM.y + 80.0)).abs() < 1e-3, "{end:?}");
+        assert!((muzzle.z - end.z - 2.6).abs() < 0.1, "{end:?}");
+        assert!((flight_time_to(&ARROW, 80.0) - 0.73).abs() < 0.01);
+        assert_eq!(flight_time_to(&Shot::hit_scan(14.0), 10.0), 0.0);
+        assert_eq!(
+            flight_time_to(&BOLT, 1_000.0),
+            0.5,
+            "a flight that does not get there ends with its lifetime"
+        );
+    }
+
+    #[test]
+    fn a_shot_on_the_level_with_nothing_to_show_flies_nowhere() {
+        let mut world = wall_world();
+        let attacker = super::super::tests::connection(1);
+        let stop = LevelStop {
+            at: at(0.0, WALL_M),
+            along_m: WALL_M,
+            entity: Some(PERIMETER),
+        };
+        world.launch_to_level(
+            &attacker,
+            (BOLT, ShotHit::plain("Test_Row")),
+            (stop, None),
+            0.1,
+            0,
+        );
+        assert!(world.projectile_flights.is_empty(), "no entity, no splash");
+        world.launch_to_level(
+            &attacker,
+            (BOLT.with_splash(3.0), ShotHit::plain("Test_Row")),
+            (stop, None),
+            0.1,
+            0,
+        );
+        assert_eq!(world.projectile_flights.len(), 1, "its splash lands");
+        assert!(
+            world.projectile_flights_due(MS_PER_SECOND as u64).is_empty(),
+            "no body stands in the splash"
+        );
+        assert!(world.projectile_flights.is_empty());
     }
 
     #[test]
