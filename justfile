@@ -102,8 +102,9 @@ map-tiles:
 # tables made from it: `just realm-data` downloads the latest pack, `just realm-data <zip>` uses a
 # zip, `--rebuild` builds the derived tables again, `--replace` replaces differing tables. Build
 # the install tables first (README, "Content data").
+[positional-arguments]
 realm-data *args:
-    scripts/realm-data.sh {{args}}
+    scripts/realm-data.sh "$@"
 
 # Decode every capture ledger under local-data/captures (unpack the capture archives there first).
 capture-check:
