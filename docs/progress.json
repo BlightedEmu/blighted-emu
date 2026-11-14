@@ -152,6 +152,10 @@
             {
               "check": "Launcher releases: a hand-started workflow builds the Windows setup file and the Linux AppImage and publishes the release only when both pass. It has not run yet; the first release (0.1.0) is not made.",
               "proof": "none"
+            },
+            {
+              "check": "The open-world sim is ready again a few seconds after a restart (live 2026-11-14, game VM): it joined the world 6.7 s after the world director started, as before 2026-11-13 (7.5 s). Since the 2026-11-13 build, the quest object scan of the sim's start tested every capital of the level for each quest point (59 s), the world refused the client's own rejoin while the sim loaded, and the client closed. The client's rejoin after a restart is not seen again yet.",
+              "proof": "live"
             }
           ]
         },
@@ -731,6 +735,26 @@
             },
             {
               "check": "A weapon ability plays its animation (tests only, 2026-11-11): the client sends no animation state for an ability; retail's server starts it in the own state after the key press (the flail's Trip: `13=08 15=2344 17=<press> 48=01`; the life staff's upper-body slots). The server sent none, so the ability's effects showed with no animation. A table of 95 abilities is mined from 17,488 retail presses; the server now sends each start, an aimed ability's cast, and the end (stand still, or clear the upper slots).",
+              "proof": "tests"
+            },
+            {
+              "check": "A full-body weapon ability keeps its animation while the player starts or stops moving (tests only, 2026-11-13): the walk's start, stop and stand now wait for the ability's own end. Retail `general-other-01`: the flail's Burst kept its state to its end 617 to 634 ms later with the move keys held. Before, the stop of a move cut a Trip after 235 ms and a Slam after 435 ms, and the client played none of the moves of that round (live 2026-11-14).",
+              "proof": "tests"
+            },
+            {
+              "check": "A full-body ability that the client starts itself (a press queued in another ability) starts at the client's record (tests only, 2026-11-13), as retail's Burst `13=08 14=0e49 15=2c 17=0e49` after the client named it in frame 0x0e49. Before, the server sent a second start with the older press record, and that Blast did not play (live 2026-11-14).",
+              "proof": "tests"
+            },
+            {
+              "check": "A weapon ability's cooldown takes only the lasting cooldown cuts of what the player holds (tests only, 2026-11-13): a `CooldownTimer` with `CDRImmediatelyOptions` (131 rows of build 25810808, for example the Slam's first upgrade and Focus 350) cuts only at its event, as before in the passives; Focus 25's 3 % still holds. Before, the server added them all to every cooldown, took presses that the client still had on cooldown, and the client played no animation for them (live 2026-11-14).",
+              "proof": "tests"
+            },
+            {
+              "check": "A weapon swap ends the running abilities of the weapon that left the hand (tests only, 2026-11-13): their tags (the life staff's `Aim`) and their animation end, as at an ability's own end. Before, a swap to the flail during Sacred Ground's aim kept the aim running: the body kept the staff's aim pose and slow walk, and no flail ability started until a swap back (live 2026-11-14).",
+              "proof": "tests"
+            },
+            {
+              "check": "A first own state sends each ability key's whole cooldown map (tests only, 2026-11-13): the 98 abilities of `CooldownData` at `(1, 1)`, a running cooldown at its own times, as retail's login and level cards (`general-other-01` 0.501, 169.824 and 458.665 s). Before, the server sent no whole map, and after a life staff cast and a swap the client showed cooldowns on the flail's keys that the server never started (live 2026-11-14).",
               "proof": "tests"
             },
             {
@@ -3535,5 +3559,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-13",
-  "lastCommit": "527d0912"
+  "lastCommit": "930a8a48"
 }
