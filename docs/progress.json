@@ -390,8 +390,8 @@
               "proof": "tests"
             },
             {
-              "check": "The first pack is shared with the community (the zip and `SHA256SUMS`).",
-              "proof": "none"
+              "check": "The first pack (version 1, 15 tables) is shared with the community, with its `SHA256SUMS` (2026-11-14).",
+              "proof": "live"
             }
           ]
         }
@@ -3307,7 +3307,6 @@
     }
   ],
   "nextSteps": [
-    "**Realm data pack:** the first pack (version 1, 15 tables) is made and passed a fresh clone test. Read its scan report, then share the zip and `SHA256SUMS` with the community.",
     "**Batch E: wars, expeditions, darkness events, level walls (2026-11-13): live check (tests only).**\n\n- Declare two wars: the second war's raid numbers start after the first war's defender.\n- In a war, the fort gate breaks and comes back at the result; the camp gate takes no harm.\n- Hedet canyon: use a fire dropper; the barrel drops and the fire area opens.\n- Myrkgard: run a portal event; its key fragment comes at its end, and the curse goes about 10 s later.\n- In a mutated expedition, gather a resource node: the score rises by the expedition's points.\n- Fire a bow and a turret at a wall: the shot stops at the wall.",
     "**Expedition start area, area tasks, kill score, offline players (2026-11-13): live check (tests only).**\n\n- Live: enter Starstone: the clock starts at the start line, the first task ends in the sealed chamber.",
     "**War structure ownership at the war's start and result (2026-11-13): live check (tests only).**\n\n- Live: in a war, the fort's turrets and generators keep working after the start; the structures show the side's raid.",
@@ -3383,6 +3382,7 @@
     "**Turret use ownership and capture point shots (2026-11-13): live check (tests only).**\n\n- Live, war: use a fort turret: the other players see the user as its owner; shoot at a capture point: the shot stops there.\n- Live, Outpost Rush: use a turret: its ownership shows the user's company; let the outpost change hands: the company stays."
   ],
   "done": [
+    "Realm data pack version 1 is shared with the community: 15 capture-made tables, scrubbed and scanned (the scan report holds random bytes and one game word only), checked on a fresh clone with the README steps (2026-11-14).",
     "Batch E built and tested: war gates, war raid numbers (migration 0049), cow launcher areas, Hedet fire droppers, the Isle of Night ballista, Myrkgard darkness events, expedition gatherable score and task triggers, shots that stop at level walls, collision entity ids; deployed to the PC and the game VM (2026-11-13, tests only).",
     "The far move of the `nw-testclient pair` check is 400 m, past the 104 m move budget of the sim, as in the gateway end-to-end test; at 50 m the sim accepted it and the check could not pass (2026-11-13, config tests only).",
     "The systems of 2026-11-13 built and tested (8,217 tests pass), with world migrations 0044 to 0048, and deployed to the PC and the game VM (2026-11-13, tests only).",
