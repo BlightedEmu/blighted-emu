@@ -3534,17 +3534,10 @@ pub(crate) mod tests {
         assert_eq!(NO_HIT_VOLUME, 0xff, "the client's none");
     }
 
-    /// Module doc, **The Isle of Night ballista**: an encounter's ballista spawns on the level
-    /// holder at its place with its template; with no bolt effect an ammo add is refused, with
-    /// one it takes the effect for one bolt and shows the add's 1 s cooldown on option 1.
-    #[test]
-    fn an_encounter_ballista_adds_a_bolt_for_the_bolt_effect() {
-        use nw_content::status_effects::{EffectSourceRow, StatusEffectRules, StatusEffectSource};
-        const ION: [u8; 16] = *b"\xf6\x8a\x9e\x17\x8a\xb3\x52\x69\xaa\x84\x07\x0e\x17\x87\x74\x43";
-        const BOLT: &str = "Raid_IoN_Balista_Bolt";
-        const BOLT_S: f64 = 600.0;
-        const POTENCY: f64 = 1.0;
-        let table = r#"{"forts": [],
+    /// The war table of the Isle of Night encounter ballista (module doc), with `extra` hex
+    /// members after its two retail ones.
+    fn ion_ballista_table(extra: &[String]) -> String {
+        const TABLE: &str = r#"{"forts": [],
           "encounter_turrets": [{"asset": "f68a9e178ab35269aa84070e17877443", "gde_ref": "ea26269102231a28c9bba7d9f6e172d0",
             "card_component": 0, "turret_component": 18, "interact_component": 16, "spawner_component": 20,
             "ownership_component": 4, "members": ["020d010346561b6a45c6e19412f2037a6a", "14390103000100"]}],
@@ -3559,9 +3552,28 @@ pub(crate) mod tests {
             "projectile": {"asset": "047a2b6174ae57e49a703b1f72516490", "component": 1, "ranged_attack": 261,
                            "damage_table_crc": 81017683, "row_index": 6},
             "ammo_effect": "Raid_IoN_Balista_Bolt"}]}"#;
+        const LAST_MEMBER: &str = "\"14390103000100\"]";
+        let extra: String = extra
+            .iter()
+            .map(|member| format!(", \"{member}\""))
+            .collect();
+        TABLE.replacen(LAST_MEMBER, &format!("\"14390103000100\"{extra}]"), 1)
+    }
+
+    /// Module doc, **The Isle of Night ballista**: an encounter's ballista spawns on the level
+    /// holder at its place with its template; with no bolt effect an ammo add is refused, with
+    /// one it takes the effect for one bolt and shows the add's 1 s cooldown on option 1.
+    #[test]
+    fn an_encounter_ballista_adds_a_bolt_for_the_bolt_effect() {
+        use nw_content::status_effects::{EffectSourceRow, StatusEffectRules, StatusEffectSource};
+        const ION: [u8; 16] = *b"\xf6\x8a\x9e\x17\x8a\xb3\x52\x69\xaa\x84\x07\x0e\x17\x87\x74\x43";
+        const BOLT: &str = "Raid_IoN_Balista_Bolt";
+        const BOLT_S: f64 = 600.0;
+        const POTENCY: f64 = 1.0;
+        let table = ion_ballista_table(&[]);
         let mut world = world_with_spawns(Vec::new());
         world.content = Arc::new(PlayerContent {
-            war_forts: WarForts::parse(table).expect("table"),
+            war_forts: WarForts::parse(&table).expect("table"),
             status_effects: StatusEffectRules::build(StatusEffectSource {
                 effects: vec![EffectSourceRow {
                     status_id: BOLT.to_owned(),
@@ -3606,5 +3618,57 @@ pub(crate) mod tests {
         assert!(!world.remove_encounter_turret(number.saturating_add(1)), "not a turret");
         assert!(world.remove_encounter_turret(number));
         assert!(world.wars.level.turrets.is_empty() && world.stations.members(number).is_none());
+    }
+
+    /// A war table from the realm data pack: its owner member keeps its component but holds the
+    /// values retail sends for a structure no one owns (no company name, ID, crest, owner or
+    /// raid). The encounter turret still spawns, and its owner state names no company.
+    #[test]
+    fn war_turret_with_a_scrubbed_owner_member_spawns() {
+        use nw_messages::buildables::{GUILD_ID_LEN, NO_OWNER_KIND};
+        use nw_messages::{BundleMember, GuildCrest, OwnershipState};
+        const SLICE: &str = "slices/characters/expeditions/isleofnight/ion_ballista.dynamicslice";
+        const OWNERSHIP_COMPONENT: u64 = 4;
+        let scrubbed = OwnershipState {
+            guild_id: Some([0; GUILD_ID_LEN]),
+            guild_owner: Some(Vec::new()),
+            guild_crest: Some(GuildCrest::NONE),
+            owner: Some(OwnerIdentification {
+                first: Vec::new(),
+                second: Vec::new(),
+                kind: NO_OWNER_KIND,
+            }),
+            raid_id: Some(0),
+            faction_type: Some(0),
+            ..OwnershipState::default()
+        };
+        let member = BundleMember {
+            component: OWNERSHIP_COMPONENT,
+            state: MemberState::Ownership(scrubbed),
+        };
+        let table = ion_ballista_table(&[hex::encode(member.encode().expect("encode"))]);
+        let mut world = world_with_spawns(Vec::new());
+        world.content = Arc::new(PlayerContent {
+            war_forts: WarForts::parse(&table).expect("table"),
+            ..PlayerContent::default()
+        });
+        let number = world
+            .spawn_encounter_turret(SLICE, [5.0, 0.0, 0.0], 0.0)
+            .expect("spawned");
+        let members = world.stations.members(number).expect("members");
+        let owners: Vec<_> = members
+            .iter()
+            .filter_map(|member| match &member.state {
+                MemberState::Ownership(state) => Some(state),
+                _ => None,
+            })
+            .collect();
+        assert!(!owners.is_empty(), "the owner state is sent");
+        assert!(
+            owners
+                .iter()
+                .all(|state| state.guild_owner.as_ref().is_none_or(Vec::is_empty)),
+            "no company name"
+        );
     }
 }

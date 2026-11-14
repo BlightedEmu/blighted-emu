@@ -19,14 +19,14 @@
 //! difficulties).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nw_capture::{Decoder, SERVER_TO_CLIENT, ledger_records};
+use nw_content::breach_tiers::{BreachTier, BreachTiersError};
 use nw_messages::{
     BodyCodec, BundlePayload, MemberState, REPLICATED_STATE_BUNDLE_TYPE_INDEX,
     ReplicatedStateBundle,
 };
-use serde::{Deserialize, Serialize};
 
 /// `Javelin::GlobalMapDataManagerComponentReplicatedState`.
 const MAP_DATA_CLASS: u64 = 3780;
@@ -47,49 +47,12 @@ const LAST_BREACH_TYPE: u16 = 8009;
 /// The grid the places are rounded to, metres (map points of one breach place lie within a few
 /// metres of each other; our choice).
 pub const PLACE_GRID_M: f32 = 5.0;
-/// The file name prefix and extension.
-const FILE_PREFIX: &str = "breach-tiers-";
-const FILE_EXTENSION: &str = ".json";
 
 /// The places of one ledger by grid cell: the first place seen and its numbers.
 type LedgerPlaces = BTreeMap<(i32, i32), ([f32; 2], Vec<u32>)>;
 /// The places of every ledger by grid cell: the first place seen and in how many ledgers each
 /// number showed.
 type PlaceCounts = BTreeMap<(i32, i32), ([f32; 2], BTreeMap<u32, u32>)>;
-
-/// The difficulty of one breach place.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct BreachTier {
-    /// The place's x, metres.
-    pub x: f32,
-    /// The place's y, metres.
-    pub y: f32,
-    /// The difficulty (the map point's number).
-    pub difficulty: u32,
-    /// In how many ledgers the place showed that difficulty.
-    pub ledgers: u32,
-}
-
-/// Why the file cannot be made or read.
-#[derive(Debug, thiserror::Error)]
-pub enum BreachTiersError {
-    /// A file cannot be read or written.
-    #[error("{path}: {source}")]
-    Io {
-        /// The file.
-        path: PathBuf,
-        /// Why.
-        source: std::io::Error,
-    },
-    /// The file is not the table's JSON.
-    #[error("breach tiers: {0}")]
-    Json(#[from] serde_json::Error),
-}
-
-/// The path of the file of `client_build` in `dir`.
-pub fn breach_tiers_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_EXTENSION}"))
-}
 
 /// The breach points (place, type, number) of one map data state body; none for a body that is
 /// no full list.
@@ -212,43 +175,6 @@ fn tiers(counts: &PlaceCounts) -> Vec<BreachTier> {
             })
         })
         .collect()
-}
-
-/// Writes `tiers` to the file of `client_build` in `dir`; its path.
-///
-/// # Errors
-///
-/// Returns [`BreachTiersError`] when the file cannot be written.
-pub fn write_breach_tiers(
-    dir: &Path,
-    client_build: &str,
-    tiers: &[BreachTier],
-) -> Result<PathBuf, BreachTiersError> {
-    let path = breach_tiers_path(dir, client_build);
-    std::fs::write(&path, serde_json::to_vec_pretty(tiers)?).map_err(|source| {
-        BreachTiersError::Io {
-            path: path.clone(),
-            source,
-        }
-    })?;
-    Ok(path)
-}
-
-/// The tiers of the file of `client_build` in `dir`; none when there is no file.
-///
-/// # Errors
-///
-/// Returns [`BreachTiersError`] when the file is there but cannot be read.
-pub fn load_breach_tiers(
-    dir: &Path,
-    client_build: &str,
-) -> Result<Vec<BreachTier>, BreachTiersError> {
-    let path = breach_tiers_path(dir, client_build);
-    match std::fs::read(&path) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(source) => Err(BreachTiersError::Io { path, source }),
-    }
 }
 
 #[cfg(test)]

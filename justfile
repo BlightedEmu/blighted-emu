@@ -25,6 +25,7 @@ test-scripts:
     scripts/live-stack.test.sh
     scripts/patch-client.test.sh
     scripts/launcher-release-manifest.test.sh
+    scripts/realm-data.test.sh
 
 # Start a local test world (edge-http on 8443, director, 1 to 8 sims, gateway) and the live
 # panel; 4 sims hold 16,000 players. Ctrl-C stops all. Build with `cargo build --release` and
@@ -96,6 +97,13 @@ check-design:
 # Write the open world map tiles into local-data/content/map/ from your install (README "Admin tools").
 map-tiles:
     cargo run --release -p content-tool -- map-tiles
+
+# Install the realm data pack (the capture-made tables) into local-data/content and build the
+# tables made from it: `just realm-data` downloads the latest pack, `just realm-data <zip>` uses a
+# zip, `--rebuild` builds the derived tables again, `--replace` replaces differing tables. Build
+# the install tables first (README, "Content data").
+realm-data *args:
+    scripts/realm-data.sh {{args}}
 
 # Decode every capture ledger under local-data/captures (unpack the capture archives there first).
 capture-check:

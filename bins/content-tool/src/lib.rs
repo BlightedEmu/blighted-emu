@@ -37,6 +37,7 @@ mod own_replay;
 pub mod player_abilities;
 pub mod player_attacks;
 pub mod quick_courses;
+pub mod realm_pack;
 pub mod roads;
 pub mod slice_meta;
 pub mod source;

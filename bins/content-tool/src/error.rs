@@ -3,6 +3,7 @@
 
 use nw_common::config::ConfigError;
 use nw_content::ContainerError;
+use nw_content::breach_tiers::BreachTiersError;
 use nw_content::combat::CombatDataError;
 use nw_content::fill::FillError;
 use nw_design::DesignRunError;
@@ -10,7 +11,6 @@ use nw_protocol::store_api::StoreTableError;
 
 use crate::ai_data::AiDataError;
 use crate::ai_trace::AiTraceError;
-use crate::breach_tiers::BreachTiersError;
 use crate::catacombs::CatacombCheckError;
 use crate::codegen::CodegenError;
 use crate::collision::CollisionError;
@@ -18,8 +18,8 @@ use crate::combat::NwdbError;
 use crate::creature_animations::CreatureAnimationsError;
 use crate::dungeon_scripts::DungeonScriptsBuildError;
 use crate::effect_areas::EffectAreasBuildError;
-use crate::level_doors::LevelDoorsBuildError;
 use crate::ftue_entities::FtueEntitiesError;
+use crate::level_doors::LevelDoorsBuildError;
 use crate::map_tiles::MapTilesError;
 use crate::mob_prefabs::MobPrefabsError;
 use crate::roads::RoadsError;
@@ -91,6 +91,9 @@ pub enum ToolError {
     /// The breach tiers file cannot be made.
     #[error(transparent)]
     BreachTiers(#[from] BreachTiersError),
+    /// The realm data pack cannot be made or installed.
+    #[error(transparent)]
+    RealmPack(#[from] crate::realm_pack::PackError),
     /// The camp slice file cannot be written.
     #[error(transparent)]
     CampSlices(#[from] nw_world::camps::CampSlicesError),

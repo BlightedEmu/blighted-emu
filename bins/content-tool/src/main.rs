@@ -15,7 +15,7 @@ use content_tool::ai_data::{AiDataReport, DEFAULT_SERVER_PAK, build_ai_data};
 use content_tool::ai_trace::{
     AiTrace, DEFAULT_TRACE_PATH, read_creatures, trace_ledger, write_trace,
 };
-use content_tool::breach_tiers::{build_breach_tiers, write_breach_tiers};
+use content_tool::breach_tiers::build_breach_tiers;
 use content_tool::build::{
     DEFAULT_CONTENT_DIR, DEFAULT_RETAIL_DIR, default_bundle_path, default_retail_bundle_path,
     run_build,
@@ -34,10 +34,10 @@ use content_tool::combat::{CombatCheck, DEFAULT_LEVEL, DEFAULT_NWDB_DIR, check, 
 use content_tool::creature_animations::{CreatureAnimationsReport, build_rows};
 use content_tool::dungeon_gates::{DungeonGatesReport, build_dungeon_gates};
 use content_tool::dungeon_scripts::{DungeonScriptsReport, build_dungeon_scripts};
+use content_tool::effect_areas::{EffectAreasReport, build_effect_areas};
 use content_tool::error::ToolError;
 use content_tool::ftue_entities::{FtueScan, Timeline, read_ledger, write_table};
 use content_tool::leaderboards::write_leaderboard_table;
-use content_tool::effect_areas::{EffectAreasReport, build_effect_areas};
 use content_tool::level_doors::{LevelDoorsReport, build_level_doors};
 use content_tool::map_tiles::{DEFAULT_MAP_DIR, MapTilesReport, YIndex, run_map_tiles};
 use content_tool::mob_prefabs::{
@@ -48,6 +48,8 @@ use content_tool::music_charts::build_music_charts;
 use content_tool::player_abilities::{PlayerAbilitiesReport, build_abilities};
 use content_tool::player_attacks::{BundleRows, PlayerAttacksReport, build_stances, read_sources};
 use content_tool::quick_courses::build_quick_courses;
+use content_tool::realm_pack::install::{TableOutcome, install_pack};
+use content_tool::realm_pack::make::make_pack;
 use content_tool::roads::{RoadsError, RoadsReport, build_level_roads};
 use content_tool::source::GameSource;
 use content_tool::store::write_store_table;
@@ -55,6 +57,7 @@ use content_tool::water::{WaterError, build_level_water};
 use content_tool::world::{LevelReport, UnmatchedIds, run_world, world_totals};
 use nw_capture::{CLIENT_TO_SERVER, CaptureError, SERVER_TO_CLIENT, TypeNames};
 use nw_content::ContentBundle;
+use nw_content::breach_tiers::BreachTiers;
 use nw_content::client_build::load_client_build;
 use nw_content::combat::{CombatData, CombatRows};
 use nw_content::creature_animations::{creature_animations_path, write_rows};
@@ -69,6 +72,8 @@ use nw_world::records::RecordCounts;
 use nw_world::world_file::world_file_path;
 
 const DEFAULT_CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
+/// Where `realm-pack make` writes the pack and `realm-data.sh` downloads it.
+const DEFAULT_PACK_DIR: &str = "local-data/realm-pack";
 /// The level the `collision` command builds when none is named.
 const DEFAULT_COLLISION_LEVEL: &str = "ftue_v2";
 /// The level `roads` builds by default: the open world, whose tract maps hold the roads.
@@ -428,6 +433,13 @@ enum Command {
         #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
         content_dir: PathBuf,
     },
+    /// Makes or installs the realm data pack: the capture-made tables, scrubbed of player data
+    /// (README, "Content data").
+    RealmPack {
+        /// What to do.
+        #[command(subcommand)]
+        action: RealmPackAction,
+    },
     /// Worker of `mob-prefabs`: reads one ledger and prints its tally as JSON.
     #[command(name = "mob-prefabs-ledger", hide = true)]
     MobPrefabsLedger {
@@ -437,6 +449,38 @@ enum Command {
         /// The ledger's entry name in the zip archive.
         #[arg(long)]
         entry: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RealmPackAction {
+    /// Scrubs and scans a copy of the pack tables of the content folder and writes
+    /// `realm-data-<build>.zip`, `SHA256SUMS` and `scan-report.txt` (read the report before
+    /// publishing). The content folder is only read.
+    Make {
+        /// Folder of the tables and the merged content bundle.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        content_dir: PathBuf,
+        /// Where the pack files go.
+        #[arg(long, default_value = DEFAULT_PACK_DIR)]
+        out_dir: PathBuf,
+        /// The pack version (one up per published pack).
+        #[arg(long)]
+        pack_version: u32,
+        /// The server commit whose loaders read these tables (`git rev-parse HEAD`).
+        #[arg(long)]
+        source_commit: String,
+    },
+    /// Checks a pack zip in full and writes its tables into the content folder.
+    Install {
+        /// The pack zip.
+        zip: PathBuf,
+        /// The content folder.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        content_dir: PathBuf,
+        /// Replace tables of the folder that differ from the pack's.
+        #[arg(long)]
+        replace: bool,
     },
 }
 
@@ -778,9 +822,11 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             print_catacombs(&report);
         }
         Command::BreachTiers { out_dir, ledgers } => {
-            let tiers = build_breach_tiers(&ledgers)?;
-            let path = write_breach_tiers(&out_dir, &client_build, &tiers)?;
-            println!("{}: {} breach places", path.display(), tiers.len());
+            let tiers = BreachTiers {
+                tiers: build_breach_tiers(&ledgers)?,
+            };
+            let path = tiers.write(&out_dir, &client_build)?;
+            println!("{}: {} breach places", path.display(), tiers.tiers.len());
         }
         Command::DungeonScripts { out_dir, bundle } => {
             let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
@@ -926,6 +972,7 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             let report = write_leaderboard_table(&content_dir, &client_build)?;
             println!("{}: {} leaderboards", report.path.display(), report.boards);
         }
+        Command::RealmPack { action } => run_realm_pack(action, &client_build)?,
         Command::MobPrefabsLedger { ledger, entry } => {
             let tally = scan_ledger(
                 &LedgerSource {
@@ -1338,6 +1385,56 @@ fn print_combat(report: &CombatCheck, unreadable: usize) {
             mismatch.vitals_id, mismatch.level, mismatch.nwdb
         );
     }
+}
+
+fn run_realm_pack(action: RealmPackAction, client_build: &str) -> Result<(), ToolError> {
+    match action {
+        RealmPackAction::Make {
+            content_dir,
+            out_dir,
+            pack_version,
+            source_commit,
+        } => {
+            let report = make_pack(
+                &content_dir,
+                &out_dir,
+                client_build,
+                pack_version,
+                &source_commit,
+            )?;
+            println!(
+                "{}: {} owner, turret and roster states looked at and set to no one, {} player ids zeroed, {} words in the review report (read it before publishing)",
+                report.zip.display(),
+                report.identity_states,
+                report.player_ids,
+                report.review_words
+            );
+        }
+        RealmPackAction::Install {
+            zip,
+            content_dir,
+            replace,
+        } => {
+            let report = install_pack(&zip, &content_dir, client_build, replace)?;
+            for (table, outcome) in &report.tables {
+                println!("{table}: {outcome:?}");
+            }
+            if report
+                .tables
+                .iter()
+                .any(|(_, outcome)| *outcome == TableOutcome::Kept)
+            {
+                println!(
+                    "kept tables differ from the pack's: run again with --replace to take the pack's"
+                );
+            }
+            println!(
+                "{} replicated members of a class with no reader were not checked",
+                report.unknown_class_members
+            );
+        }
+    }
+    Ok(())
 }
 
 fn run_capture_check(ledgers: &[PathBuf]) -> Result<CaptureReport, ToolError> {

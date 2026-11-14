@@ -8,6 +8,7 @@ pub mod afflictions;
 pub mod artifacts;
 pub mod attribute_bonuses;
 pub mod attribute_damage;
+pub mod breach_tiers;
 pub mod bundle;
 pub mod camps;
 pub mod catacombs;

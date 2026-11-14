@@ -95,35 +95,51 @@ A sim needs only the bundle, the world file and the collision file of its level.
 | `water-<build>-<level>.bin` | `cargo run --release -p content-tool -- water [levels]` (default `ftue_v2` and `newworld_vitaeeterna`) | The sea level is the only water |
 | `player-attacks-<build>.json` | `cargo run --release -p content-tool -- player-attacks` | Players cannot attack |
 | `player-abilities-<build>.json` | `cargo run --release -p content-tool -- player-abilities` | Players cannot use abilities |
-| `player-sequences-<build>.json` | No tool. It was mined from capture ledgers. A copy of the table of the pinned build is `bins/sim/src/world/testdata/player-sequences-25810808.json` | The server starts no attack, block, aim, dodge or jump |
-| `mob-prefabs-<build>.json` | `cargo run --release -p content-tool -- mob-prefabs [folders]` (reads the ledgers in `local-data/captures` and `local-data/open world captures`) | Mobs are not shown to clients |
+| `player-sequences-<build>.json` | The realm data pack (`just realm-data`), or: No tool. It was mined from capture ledgers. A copy of the table of the pinned build is `bins/sim/src/world/testdata/player-sequences-25810808.json` | The server starts no attack, block, aim, dodge or jump |
+| `mob-prefabs-<build>.json` | The realm data pack (`just realm-data`), or: `cargo run --release -p content-tool -- mob-prefabs [folders]` (reads the ledgers in `local-data/captures` and `local-data/open world captures`) | Mobs are not shown to clients |
 | `creature-animations-<build>.json` | `cargo run --release -p content-tool -- creature-animations` (needs the mob prefab table) | Mobs move without animations |
 | `ai-data-<build>.bin` | `cargo run --release -p content-tool -- ai-data` (reads `local-data/server-pak/Server.pak`; needs the creature animation table) | Every mob stands at its spawn |
-| `ftue-entities-<build>.json` | `cargo run --release -p content-tool -- ftue-entities <ledger.bin>` (a capture of a new character's tutorial) | The tutorial's level entities are not sent |
+| `ftue-entities-<build>.json` | The realm data pack (`just realm-data`), or: `cargo run --release -p content-tool -- ftue-entities <ledger.bin>` (a capture of a new character's tutorial) | The tutorial's level entities are not sent |
 | `dungeon-scripts-<build>.json` | `cargo run --release -p content-tool -- dungeon-scripts` (reads `breach-tiers-<build>.json` from `content-tool breach-tiers`) | Instances run without encounters |
 | `dungeon-gates-<build>.json` | `cargo run --release -p content-tool -- dungeon-gates` | An instance shows no gate or door |
-| `dungeon-gate-rules-<build>.json` | No tool here. It is mined from the retail captures (`gaterules.py` of the capture tools) | Every gate is open from the start |
+| `dungeon-gate-rules-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`gaterules.py` of the capture tools) | Every gate is open from the start |
 | `catacomb-tiles-<build>.json` | `cargo run --release -p content-tool -- catacomb-tiles` (needs the mob prefab table) | A catacombs run has no tile entities |
 | `level-doors-<build>-<level>.json` | `cargo run --release -p content-tool -- level-doors` (default `newworld_vitaeeterna`; reads the level's world file) | No door capital of the level is shown |
 | `effect-areas-<build>.json` | `cargo run --release -p content-tool -- effect-areas` (reads `dungeon-scripts-<build>.json`, so build that first) | No level area or spell gas gives an affliction |
 | `ability-instances-<build>.json` | `cargo run --release -p content-tool -- ability-instances` | No placed ability is tracked |
 | `claim-plots-<build>.json` | `cargo run --release -p content-tool -- claim-plots` | No land claim entity is shown |
 | `music-charts-<build>.json` | `cargo run --release -p content-tool -- music-charts` | Each played note counts as missed |
-| `town-props-<build>.json` | No tool here. It is mined from the retail captures (`cardsurvey` and `townprops.py` of the capture tools) | Station buildings, lights and house plots do not show |
-| `encounter-roots-<build>.json` | Mined with `town-props` | The world events show no encounter states |
-| `encounter-objects-<build>.json` | Mined with `town-props` | World events that wait for a start object do not go on |
-| `spell-slices-<build>.json` | No tool here. It is mined from the retail captures (`cardsurvey` and `spellslices.py` of the capture tools) | A cast spell shows nothing |
-| `shot-entities-<build>.json` | No tool here. It is mined from the retail captures with the capture tools | No player sees a shot fly |
-| `dungeon-entrances-<build>.json` | No tool here. It is mined from the retail captures (`entrancetable` of the capture tools) | No entrance shows its runs |
-| `invasion-forts-<build>.json` | No tool here. It is mined from the retail captures (`invasionforts` of the capture tools) | No invasion runs on this sim |
-| `war-forts-<build>.json` | No tool here. It is mined from the retail captures (`warforts` of the capture tools) | No war instance runs on this sim |
-| `outpost-structures-<build>.json` | No tool here. It is mined from the retail captures (`oprstructures/mine.py` of the capture tools) | Outpost Rush has no structures |
+| `town-props-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`cardsurvey` and `townprops.py` of the capture tools) | Station buildings, lights and house plots do not show |
+| `encounter-roots-<build>.json` | The realm data pack (`just realm-data`), or: Mined with `town-props` | The world events show no encounter states |
+| `encounter-objects-<build>.json` | The realm data pack (`just realm-data`), or: Mined with `town-props` | World events that wait for a start object do not go on |
+| `spell-slices-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`cardsurvey` and `spellslices.py` of the capture tools) | A cast spell shows nothing |
+| `shot-entities-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures with the capture tools | No player sees a shot fly |
+| `dungeon-entrances-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`entrancetable` of the capture tools) | No entrance shows its runs |
+| `invasion-forts-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`invasionforts` of the capture tools) | No invasion runs on this sim |
+| `war-forts-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`warforts` of the capture tools) | No war instance runs on this sim |
+| `outpost-structures-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`oprstructures/mine.py` of the capture tools) | Outpost Rush has no structures |
+| `town-stations-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`townstations`, `stationslices`, `claimtiers` and `townstations.py` of the capture tools) | The settlements have no crafting or refining station |
 | `camp-slices-<build>.json` | `cargo run --release -p content-tool -- camp-slices` | No camp can be placed |
 | `quick-courses-<build>.json` | `cargo run --release -p content-tool -- quick-courses` | No course can be ridden |
 | `store-<build>.json` | `cargo run --release -p content-tool -- store` (reads the content bundle; for `edge-http`, `[shop] store_table`) | The game's store sells nothing (the sims build the same table from the bundle themselves) |
 | `design-<build>.json` | `just design` | No scripts or events |
 
 The tools that take a bundle read the merged bundle `local-data/content/bundle-<build>.bin`, so run `just design` first. The tools that read ledgers (`mob-prefabs`, `ftue-entities`) use a lot of memory. Run them under a limit, for example `ulimit -v 4000000`. `cargo run -p content-tool -- --help` lists every subcommand.
+
+### Realm data pack
+
+Some tables come only from retail captures, so no game install can make them: the rows above that say "The realm data pack". The realm data pack holds those tables (`breach-tiers` too) for the pinned build. It holds no capture and no player data. Before the tool writes a pack, it sets every owner state to the values of a structure no one owns (no company name, company ID, crest, owner or raid), clears the player at every turret, zeroes the capturing player's ids in the tutorial table, and removes capture file names, tool notes and capture times.
+
+```bash
+just realm-data            # download the latest pack and install it
+just realm-data pack.zip   # install a pack zip you have
+```
+
+Build the install tables first (`just bundle`, `just world`, `just design`, `just collision` and the other commands of the table). The recipe checks the pack (client build, pack format, checksums, and that every table loads), writes the tables into `local-data/content/`, then builds the tables made from them: `creature-animations`, `catacomb-tiles`, `dungeon-scripts`, `effect-areas`, and `ai-data` when `local-data/server-pak/Server.pak` exists. Get `Server.pak` with a depot download of the pinned build. The recipe keeps a table you already have and installs the others: `--rebuild` builds the derived tables again, and `--replace` replaces pack tables that differ from yours.
+
+The packs are Release files of [BlightedEmu/blighted-emu-data](https://github.com/BlightedEmu/blighted-emu-data). The tables come from New World game data and belong to its owners (see "What our licence does not cover").
+
+To make a pack (maintainers): `cargo run --release -p content-tool -- realm-pack make --pack-version <n> --source-commit "$(git rev-parse HEAD)"` writes `realm-data-<build>.zip`, `SHA256SUMS` and `scan-report.txt` into `local-data/realm-pack/`. The make stops when its privacy scan finds an owner state that still names someone, a war roster with players, the capturing player's ids anywhere, a Steam ID, an email, an ID written as text or a name-shaped run of words in the binary fields, a field named for a player or an account, or a capture name. A one-word name in binary data cannot be told apart from random bytes, so the scan writes such words into `scan-report.txt`: read it before you publish the pack.
 
 ### Recovery
 

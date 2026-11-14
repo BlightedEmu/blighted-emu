@@ -974,6 +974,7 @@ dependencies = [
  "quote",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sim",
  "syn 3.0.9",
  "tempfile",

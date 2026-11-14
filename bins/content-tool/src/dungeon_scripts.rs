@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use nw_content::Tables;
+use nw_content::breach_tiers::{BreachTier, BreachTiers};
 use nw_content::instances::InstanceCatalog;
 use nw_content::mob_prefabs::{ASSET_ID_LEN, MobPrefabs};
 use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, AssetCatalogError, slice_assets_in};
@@ -40,7 +41,6 @@ use nw_world::records::{Capital, PatrolPath};
 use nw_world::slice_triggers::TriggerEvent;
 use nw_world::spawner_slices::SpawnerSlice;
 
-use crate::breach_tiers::{BreachTier, load_breach_tiers};
 use crate::collision::{PakIndex, detector_volume};
 use crate::roads::without_azcs;
 
@@ -146,7 +146,7 @@ pub enum DungeonScriptsBuildError {
     Gates(#[from] nw_content::dungeon_gates::DungeonGatesError),
     /// The breach tiers file cannot be read.
     #[error(transparent)]
-    Tiers(#[from] crate::breach_tiers::BreachTiersError),
+    Tiers(#[from] nw_content::breach_tiers::BreachTiersError),
     /// The file read back is not the one written.
     #[error("{0}: the file read back differs from the one written")]
     Reload(PathBuf),
@@ -871,7 +871,7 @@ pub fn build_dungeon_scripts(
             open_world.encounters.push(encounter);
         }
     }
-    let tiers = load_breach_tiers(out_dir, client_build)?;
+    let tiers = BreachTiers::load(out_dir, client_build)?.tiers;
     finish_grouped_encounters(&mut open_world.encounters, &tiers, levels, &mut report);
     report.open_world_encounters = open_world.encounters.len();
     scripts
