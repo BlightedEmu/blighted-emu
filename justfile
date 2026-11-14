@@ -98,10 +98,9 @@ check-design:
 map-tiles:
     cargo run --release -p content-tool -- map-tiles
 
-# Install the realm data pack (the capture-made tables) into local-data/content and build the
-# tables made from it: `just realm-data` downloads the latest pack, `just realm-data <zip>` uses a
-# zip, `--rebuild` builds the derived tables again, `--replace` replaces differing tables. Build
-# the install tables first (README, "Content data").
+# Install the realm data pack zip (the capture-made tables) into local-data/content and build the
+# tables made from it: `just realm-data <zip>`. `--rebuild` builds the derived tables again,
+# `--replace` replaces differing tables. Build the install tables first (README, "Content data").
 [positional-arguments]
 realm-data *args:
     scripts/realm-data.sh "$@"

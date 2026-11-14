@@ -87,6 +87,14 @@ status=0
 run_script --what > /dev/null 2>&1 || status=$?
 pass_if "an_unknown_option_is_refused" test "$status" -eq 2
 
+setup
+status=0
+message="$(run_script 2>&1)" || status=$?
+pass_if "no_zip_is_refused" test "$status" -eq 2
+pass_if "no_zip_names_the_pack_of_the_build" \
+  test "${message#*realm-data-$BUILD.zip}" != "$message"
+pass_if "no_zip_installs_nothing" not_logged "realm-pack"
+
 if [[ "$failures" -gt 0 ]]; then
   echo "$failures realm-data test(s) failed"
   exit 1

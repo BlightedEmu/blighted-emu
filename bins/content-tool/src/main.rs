@@ -72,7 +72,7 @@ use nw_world::records::RecordCounts;
 use nw_world::world_file::world_file_path;
 
 const DEFAULT_CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
-/// Where `realm-pack make` writes the pack and `realm-data.sh` downloads it.
+/// Where `realm-pack make` writes the pack.
 const DEFAULT_PACK_DIR: &str = "local-data/realm-pack";
 /// The level the `collision` command builds when none is named.
 const DEFAULT_COLLISION_LEVEL: &str = "ftue_v2";

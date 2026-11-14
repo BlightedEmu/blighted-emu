@@ -3,17 +3,14 @@
 # Installs the realm data pack (the capture-made tables) into local-data/content, then builds the
 # tables made from them on this machine. Build the install tables first (README, "Content data":
 # just bundle, just world, just design, just collision and the others).
-# Usage: realm-data.sh [--rebuild] [--replace] [pack.zip]
-#   no zip    download the latest pack of this client build from the data repo
+# Usage: realm-data.sh [--rebuild] [--replace] pack.zip
 #   --rebuild build the derived tables again even when they exist
 #   --replace replace tables of the content folder that differ from the pack's
 set -euo pipefail
 
 readonly EXIT_USAGE=2
-readonly PACK_REPO_URL="https://github.com/BlightedEmu/blighted-emu-data/releases/latest/download"
 readonly CLIENT_BUILD_FILE="config/client-build.toml"
 readonly CONTENT_DIR="local-data/content"
-readonly PACK_DIR="local-data/realm-pack"
 readonly SERVER_PAK="local-data/server-pak/Server.pak"
 # The tables built from the pack tables and the install, in build order (each needs the ones
 # before it): creature animations and catacomb tiles read the mob prefabs, dungeon scripts read
@@ -51,10 +48,8 @@ if [[ -z "$build" ]]; then
 fi
 
 if [[ -z "$zip" ]]; then
-  zip="$PACK_DIR/realm-data-$build.zip"
-  mkdir -p "$PACK_DIR"
-  echo "downloading the realm data pack of build $build"
-  curl -fL --proto '=https' -o "$zip" "$PACK_REPO_URL/realm-data-$build.zip"
+  echo "realm-data: give the pack zip: just realm-data realm-data-$build.zip" >&2
+  exit "$EXIT_USAGE"
 fi
 
 "${content_tool[@]}" realm-pack install "${replace_args[@]}" "$zip"

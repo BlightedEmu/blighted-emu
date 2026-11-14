@@ -128,18 +128,17 @@ The tools that take a bundle read the merged bundle `local-data/content/bundle-<
 
 ### Realm data pack
 
-Some tables come only from retail captures, so no game install can make them: the rows above that say "The realm data pack". The realm data pack holds those tables (`breach-tiers` too) for the pinned build. It holds no capture and no player data. Before the tool writes a pack, it sets every owner state to the values of a structure no one owns (no company name, company ID, crest, owner or raid), clears the player at every turret, zeroes the capturing player's ids in the tutorial table, and removes capture file names, tool notes and capture times.
+A few tables come only from retail captures, so no game install can make them: the rows above that start with "The realm data pack". The realm data pack holds those tables, and `breach-tiers`, for the pinned build. It has no captures and no player data. Before the tool writes a pack, it sets every owner state to that of a structure no one owns (no company name, company ID, crest, owner or raid), clears the player at every turret, zeroes the capturing player's IDs in the tutorial table, and drops capture file names, tool notes and capture times.
 
 ```bash
-just realm-data            # download the latest pack and install it
-just realm-data pack.zip   # install a pack zip you have
+just realm-data realm-data-25810808.zip
 ```
 
-Build the install tables first (`just bundle`, `just world`, `just design`, `just collision` and the other commands of the table). The recipe checks the pack (client build, pack format, checksums, and that every table loads), writes the tables into `local-data/content/`, then builds the tables made from them: `creature-animations`, `catacomb-tiles`, `dungeon-scripts`, `effect-areas`, and `ai-data` when `local-data/server-pak/Server.pak` exists. Get `Server.pak` with a depot download of the pinned build. The recipe keeps a table you already have and installs the others: `--rebuild` builds the derived tables again, and `--replace` replaces pack tables that differ from yours.
+Build the install tables first (`just bundle`, `just world`, `just design`, `just collision` and the other commands of the table). The recipe checks the pack (client build, pack format, checksums, and that every table loads) and writes its tables into `local-data/content/`. Then it builds the tables made from them: `creature-animations`, `catacomb-tiles`, `dungeon-scripts`, `effect-areas`, and `ai-data` if `local-data/server-pak/Server.pak` exists (get it with a depot download of the pinned build). The recipe keeps the tables you already have: `--rebuild` builds the derived tables again, and `--replace` replaces pack tables that differ from yours.
 
-The packs are Release files of [BlightedEmu/blighted-emu-data](https://github.com/BlightedEmu/blighted-emu-data). The tables come from New World game data and belong to its owners (see "What our licence does not cover").
+You get the pack from the project's community; it is not on GitHub. The tables come from New World game data and belong to its owners (see "What our licence does not cover").
 
-To make a pack (maintainers): `cargo run --release -p content-tool -- realm-pack make --pack-version <n> --source-commit "$(git rev-parse HEAD)"` writes `realm-data-<build>.zip`, `SHA256SUMS` and `scan-report.txt` into `local-data/realm-pack/`. The make stops when its privacy scan finds an owner state that still names someone, a war roster with players, the capturing player's ids anywhere, a Steam ID, an email, an ID written as text or a name-shaped run of words in the binary fields, a field named for a player or an account, or a capture name. A one-word name in binary data cannot be told apart from random bytes, so the scan writes such words into `scan-report.txt`: read it before you publish the pack.
+To make a pack (maintainers): `cargo run --release -p content-tool -- realm-pack make --pack-version <n> --source-commit "$(git rev-parse HEAD)"` writes `realm-data-<build>.zip`, `SHA256SUMS` and `scan-report.txt` into `local-data/realm-pack/`. The make stops when its privacy scan finds an owner state that still names someone, a war roster with players, the capturing player's IDs anywhere, a Steam ID, an email, an ID written as text or a name-shaped run of words in the binary fields, a field named for a player or an account, or a capture name. A one-word name in binary data looks the same as random bytes, so the scan lists such words in `scan-report.txt`. Read it before you share the pack.
 
 ### Recovery
 
