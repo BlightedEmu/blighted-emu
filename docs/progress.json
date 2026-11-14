@@ -316,6 +316,10 @@
             {
               "check": "In the 2026-10-30 camp test the client sent no chat line at all (cause: likely the chat probation flag, sent since c3c84794).",
               "proof": "none"
+            },
+            {
+              "check": "Game master `!faction <syndicate|marauder|covenant> [player]` sets a faction, and the social service hears it at once (before, only at the next save round); `!company <name>` makes a company of the game master's faction with the game master as governor, and the answer says if it was made, the name is taken, the game master is in a company or has no faction (bots, 2026-11-14: a bot set its faction, made a company, gave it Monarch's Bluffs with `!owner` and used the war board).",
+              "proof": "bots"
             }
           ]
         },
@@ -3087,6 +3091,14 @@
             {
               "check": "Turret shots stop at the walls of the level as retail (2026-11-13, tests only): the shot names the wall's level entity and no hit volume.",
               "proof": "tests"
+            },
+            {
+              "check": "The 39 war boards of the towns come into view with their card and territory interface state, as retail sends them, so the client offers their use; a use (`@ui_territory_board_war`) in a claim gets the retail accept and the territory with the player's war side, and the client then asks the sign-up counts (tests only, 2026-11-14). Live 2026-11-14 the client still offered no use with no war: every retail use was in a territory with a war or an invasion.",
+              "proof": "tests"
+            },
+            {
+              "check": "A player opens a town war board live.",
+              "proof": "none"
             }
           ]
         },
@@ -3116,6 +3128,14 @@
             },
             {
               "check": "Not made: lifestyle projects and their buffs (they raise no upgrade).",
+              "proof": "none"
+            },
+            {
+              "check": "The town project boards come into view as retail sends them (card, interact state, territory link), a use is no longer taken for a faction representative's board, and the use shows the territory's projects in the board's own slot, so the client can list the missions of those projects (tests only, 2026-11-14). Before, the board showed no active project and no mission (live 2026-11-14).",
+              "proof": "tests"
+            },
+            {
+              "check": "A player sees missions on a town project board and takes one live.",
               "proof": "none"
             }
           ]
@@ -3307,6 +3327,8 @@
     }
   ],
   "nextSteps": [
+    "**Company and town ownership for tests (2026-11-14): live check.**\n\n- `!faction syndicate`, `!company <name>`, `!owner 12 <name>`, then the Monarch's Bluffs town project board and war board.",
+    "**Town board and war board (2026-11-14): live check (tests only).**\n\n- Monarch's Bluffs town project board: the projects show, missions are listed, one can be taken.\n- Monarch's Bluffs war board: it can be used and opens the war window.",
     "**Batch E: wars, expeditions, darkness events, level walls (2026-11-13): live check (tests only).**\n\n- Declare two wars: the second war's raid numbers start after the first war's defender.\n- In a war, the fort gate breaks and comes back at the result; the camp gate takes no harm.\n- Hedet canyon: use a fire dropper; the barrel drops and the fire area opens.\n- Myrkgard: run a portal event; its key fragment comes at its end, and the curse goes about 10 s later.\n- In a mutated expedition, gather a resource node: the score rises by the expedition's points.\n- Fire a bow and a turret at a wall: the shot stops at the wall.",
     "**Expedition start area, area tasks, kill score, offline players (2026-11-13): live check (tests only).**\n\n- Live: enter Starstone: the clock starts at the start line, the first task ends in the sealed chamber.",
     "**War structure ownership at the war's start and result (2026-11-13): live check (tests only).**\n\n- Live: in a war, the fort's turrets and generators keep working after the start; the structures show the side's raid.",
