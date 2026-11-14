@@ -66,6 +66,10 @@
             {
               "check": "284 tree and stone rows name a variant that no variation table holds: they stand as their plain slice (the region's slice data file, read since 2026-11-11, does not hold them either).",
               "proof": "none"
+            },
+            {
+              "check": "Each solid of the collision names its level entity (2026-11-13, tests only): a capital's id, or the packed id of a slice the level spawns as it loads. Collision file schema 5.",
+              "proof": "tests"
             }
           ]
         },
@@ -760,6 +764,10 @@
             {
               "check": "Open: the player ability and attack tables must be rebuilt with the new builder, and the loops checked in a live game.",
               "proof": "none"
+            },
+            {
+              "check": "A player's shot stops at a wall of the level before a body behind it (2026-11-13, tests only): the shot names the wall's level entity and no hit volume.",
+              "proof": "tests"
             }
           ]
         },
@@ -1045,6 +1053,14 @@
             {
               "check": "Counted 2026-11-11: of the open world's vitals spawns, 82 % have a look and a behaviour tree, 1.5 % have a look and no tree (they stand at their spawn), and 16.6 % have no look in any retail capture (the client cannot show them).",
               "proof": "code"
+            },
+            {
+              "check": "The Myrkgard darkness events (2026-11-13, tests only): two portals and three monoliths run at difficulty 6; each gives its key fragment event at its end; their curse areas stand while the event shows and go 10.2 s after its success.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not made: the three Myrkgard monolith events cannot end (no retail entity table for their carapaces and pylons).",
+              "proof": "none"
             }
           ]
         },
@@ -1380,6 +1396,10 @@
             },
             {
               "check": "An open world encounter shows its live objective (3857 on its root) as retail: one task and one container per objective of its user waves (the tree of 74 retail roots), the task's count from its first kill or spawn, the timed task starts, the instance in the completed list at the end; the mined frozen bodies are no longer sent (code and tests written 2026-11-13, not run; the `dungeon-scripts` content file is not rebuilt yet)",
+              "proof": "tests"
+            },
+            {
+              "check": "A quest object's detection sphere grows with its capital's scale (2026-11-13, tests only): it explains the retail entries beyond the plain sphere (scale 1.5 torches, scale 2 paw print trails).",
               "proof": "tests"
             }
           ]
@@ -2317,6 +2337,22 @@
             {
               "check": "The Isle of Night ballistas as retail (one shot of ammo, the add ammo option with its 1 s cooldown, the 2.5 s reload, the encounter spawns): not done.",
               "proof": "none"
+            },
+            {
+              "check": "The Isle of Night ballista (2026-11-13, tests only): it spawns with one bolt; a player with the bolt effect adds one (the effect cost is Inferred), with the retail 1 s cooldown.",
+              "proof": "tests"
+            },
+            {
+              "check": "Mutated expedition gatherable score as retail (2026-11-13, tests only): each resource node a player gathers counts once and adds the expedition's points (400, 350, 225 or 0; 14 retail runs).",
+              "proof": "tests"
+            },
+            {
+              "check": "Expedition tasks end on their retail trigger (2026-11-13, tests only): 113 task steps of all 12 expeditions end on an encounter's success or start, or on an object's use.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not made: 89 task steps show the client no event of their own (they end with the next task), and some task objects of five expeditions have no server entity yet.",
+              "proof": "none"
             }
           ]
         },
@@ -2957,6 +2993,30 @@
             {
               "check": "Fort structures at the war's start and result as retail: at the start every turret, fire barrel dropper and horn gets permission rule 4 and its side's raid id, and a supply generator (which names no company) its raid id; at the result they go back to rule 3 and raid 0. Cards sent while the war runs carry the war's values. Tests written, not run yet.",
               "proof": "code"
+            },
+            {
+              "check": "Fort gates and war camp gates as retail (2026-11-13, tests only): a fort gate is the defender's with rule 1 before the war, takes rule 4 with the defender's raid and faction at the start and rule 1 again at the result; a camp gate is the attacker side's and takes no harm. A broken fort gate starts its 30 s repair delay and closes its door; the siege data lists each gate's health and state.",
+              "proof": "tests"
+            },
+            {
+              "check": "War raid numbers as retail (2026-11-13, tests only): one counter per world; a war takes two numbers (the defender's is the attacker's + 1) and an invasion one (173 wars and 127 invasions of the retail captures). World migration 0049.",
+              "proof": "tests"
+            },
+            {
+              "check": "Invasion cow launcher areas as retail (2026-11-13, tests only): the area opens its start-on-trigger timers at 0 and lasts its longest start-on-open timer.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not made: the invasion siege grunts build no cow launchers, and a launcher does not fire. The game builds them by mob AI at 5 sockets, and the captures show too few shots for a fire rate.",
+              "proof": "none"
+            },
+            {
+              "check": "The five fire droppers of the Hedet canyon (2026-11-13, tests only): any player uses one; it pours, drops the tier 3 barrel and opens its fire area, with a 20 s cooldown (Inferred). They take no harm (Inferred: no capture shows a hit).",
+              "proof": "tests"
+            },
+            {
+              "check": "Turret shots stop at the walls of the level as retail (2026-11-13, tests only): the shot names the wall's level entity and no hit volume.",
+              "proof": "tests"
             }
           ]
         },
@@ -3177,6 +3237,7 @@
     }
   ],
   "nextSteps": [
+    "**Batch E: wars, expeditions, darkness events, level walls (2026-11-13): live check (tests only).**\n\n- Declare two wars: the second war's raid numbers start after the first war's defender.\n- In a war, the fort gate breaks and comes back at the result; the camp gate takes no harm.\n- Hedet canyon: use a fire dropper; the barrel drops and the fire area opens.\n- Myrkgard: run a portal event; its key fragment comes at its end, and the curse goes about 10 s later.\n- In a mutated expedition, gather a resource node: the score rises by the expedition's points.\n- Fire a bow and a turret at a wall: the shot stops at the wall.",
     "**Expedition start area, area tasks, kill score, offline players (2026-11-13): live check (tests only).**\n\n- Live: enter Starstone: the clock starts at the start line, the first task ends in the sealed chamber.",
     "**War structure ownership at the war's start and result (2026-11-13): live check (tests only).**\n\n- Live: in a war, the fort's turrets and generators keep working after the start; the structures show the side's raid.",
     "**Expedition objective, times, score and Desiccated (2026-11-13): live check (tests only).**\n\n- Live: enter Starstone: the objective panel shows its first task, a death costs 500 on the score panel, the end shows the time bonus and the rank.\n- Live: a mutated Desiccated run: the full bar marks the lowest health player, which explodes on the group 10 s later.",
@@ -3251,6 +3312,7 @@
     "**Turret use ownership and capture point shots (2026-11-13): live check (tests only).**\n\n- Live, war: use a fort turret: the other players see the user as its owner; shoot at a capture point: the shot stops there.\n- Live, Outpost Rush: use a turret: its ownership shows the user's company; let the outpost change hands: the company stays."
   ],
   "done": [
+    "Batch E built and tested: war gates, war raid numbers (migration 0049), cow launcher areas, Hedet fire droppers, the Isle of Night ballista, Myrkgard darkness events, expedition gatherable score and task triggers, shots that stop at level walls, collision entity ids; deployed to the PC and the game VM (2026-11-13, tests only).",
     "The far move of the `nw-testclient pair` check is 400 m, past the 104 m move budget of the sim, as in the gateway end-to-end test; at 50 m the sim accepted it and the check could not pass (2026-11-13, config tests only).",
     "The systems of 2026-11-13 built and tested (8,217 tests pass), with world migrations 0044 to 0048, and deployed to the PC and the game VM (2026-11-13, tests only).",
     "Expedition start area, the tasks of 34 trigger areas, the score of a mutated run's kills, and offline players kept in the run's lists (2026-11-13, tests only).",
@@ -3473,5 +3535,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-13",
-  "lastCommit": "32852a05"
+  "lastCommit": "527d0912"
 }
