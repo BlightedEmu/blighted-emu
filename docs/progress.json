@@ -1822,6 +1822,18 @@
             {
               "check": "The Cooking experience of the Light Ration and Mount Vittles crafts: no held effect explains it; the rule is not known.",
               "proof": "none"
+            },
+            {
+              "check": "The settlements' crafting and refining stations stand in the towns as retail sends them (bots, 2026-11-14): 130 station places of 13 settlements, mined from 13,635 retail station cards of 415 captures, each spawned as the card of its tier's slice with its place and states. Before, no town station had a card, so the client offered no use (live 2026-11-14). A bot went to a town smelter, opened it by the id of its card and smelted `IngotT2`.",
+              "proof": "bots"
+            },
+            {
+              "check": "A town station's tier follows its claim's upgrade tier (tests only, 2026-11-14): a crafting station is the claim tier + 2 (6,598 of 6,785 retail sightings), a refining station the claim tier + 3 up to 5 (93 to 98 % per craft). A new town has T2 crafting and T3 refining stations; a finished town project or a lost invasion swaps the station for the new tier's slice.",
+              "proof": "tests"
+            },
+            {
+              "check": "A player crafts and refines at the town stations live.",
+              "proof": "none"
             }
           ]
         },
@@ -3558,6 +3570,6 @@
     "The expedition objective panel, start and end times, score, death's door status, mutation context and the Desiccated explosion (2026-11-13, tests only)."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-13",
-  "lastCommit": "930a8a48"
+  "updated": "2026-11-14",
+  "lastCommit": "6f01fabd"
 }
