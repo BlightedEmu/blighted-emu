@@ -360,6 +360,36 @@
               "proof": "none"
             }
           ]
+        },
+        {
+          "name": "Realm data pack",
+          "proof": "tests",
+          "checks": [
+            {
+              "check": "`content-tool realm-pack make` reads the 15 capture-made tables (the town crafting stations too), scrubs a copy (owner states set to the values of a structure no one owns, turret players cleared, the capturing player's ids in the tutorial bodies zeroed, capture file names and tool notes removed, unread retail times removed) and writes `realm-data-<build>.zip` with a manifest, `SHA256SUMS` and a review report. The content folder is only read.",
+              "proof": "tests"
+            },
+            {
+              "check": "The privacy scan stops the make on a named field, an owner state with a company or owner, a war roster with players, the capturing player's ids anywhere, a Steam ID, an email, an ID written as text, a capture file or folder name, or a name-shaped run of words in any binary field (UTF-8 and UTF-16); one-word text that is no game string goes into the review report.",
+              "proof": "tests"
+            },
+            {
+              "check": "`content-tool realm-pack install` checks the client build, the pack format, every checksum, that every table loads and that every replicated state decodes, and writes nothing when a check fails (the error names the pack version and its server commit); a table that differs is kept and the others are written, unless `--replace`.",
+              "proof": "tests"
+            },
+            {
+              "check": "`just realm-data` downloads or takes a pack, installs it, then builds the creature animations, catacomb tiles, dungeon scripts, effect areas and (with `Server.pak`) the AI data, only when missing unless `--rebuild`.",
+              "proof": "tests"
+            },
+            {
+              "check": "A war turret with a scrubbed owner member still spawns and names no company.",
+              "proof": "tests"
+            },
+            {
+              "check": "The first pack is published and a fresh clone starts a sim with every pack table loaded.",
+              "proof": "none"
+            }
+          ]
         }
       ]
     },
@@ -3273,6 +3303,7 @@
     }
   ],
   "nextSteps": [
+    "**Realm data pack:** make the first pack, read its scan report, check it on a fresh clone, then publish it as a Release of the data repo.",
     "**Batch E: wars, expeditions, darkness events, level walls (2026-11-13): live check (tests only).**\n\n- Declare two wars: the second war's raid numbers start after the first war's defender.\n- In a war, the fort gate breaks and comes back at the result; the camp gate takes no harm.\n- Hedet canyon: use a fire dropper; the barrel drops and the fire area opens.\n- Myrkgard: run a portal event; its key fragment comes at its end, and the curse goes about 10 s later.\n- In a mutated expedition, gather a resource node: the score rises by the expedition's points.\n- Fire a bow and a turret at a wall: the shot stops at the wall.",
     "**Expedition start area, area tasks, kill score, offline players (2026-11-13): live check (tests only).**\n\n- Live: enter Starstone: the clock starts at the start line, the first task ends in the sealed chamber.",
     "**War structure ownership at the war's start and result (2026-11-13): live check (tests only).**\n\n- Live: in a war, the fort's turrets and generators keep working after the start; the structures show the side's raid.",
