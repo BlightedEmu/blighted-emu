@@ -23,6 +23,7 @@ use std::time::Duration;
 use nw_carrier::MESSAGE_CHANNEL;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::client_input::TALK_KIND;
+use nw_messages::entity_ids::facet_of_raw_id;
 use nw_messages::social::SocialFacet;
 use nw_messages::social::chat::{ChatCall, ChatChannel};
 use nw_messages::{
@@ -1204,6 +1205,33 @@ impl Player {
         )
     }
 
+    /// Sends interaction `request` with the name `name` in the bot's input, with a fresh
+    /// interaction id (and the bot's own entity as its target entity when it names none);
+    /// returns the id, whose answer the step waits for.
+    fn interact(
+        &mut self,
+        client: &mut RepClient,
+        own: u64,
+        request: InteractionRequest,
+        name: &[u8],
+    ) -> Result<u64, RepError> {
+        self.interaction += 1;
+        let request = InteractionRequest {
+            interaction: self.interaction,
+            target_entity: if request.target_entity == 0 {
+                own
+            } else {
+                request.target_entity
+            },
+            ..request
+        };
+        if let Some(position) = self.own_input_position() {
+            let body = Bit8::of_interaction(request, name)?;
+            send_input(client, &ClientInputMsg::position(position).interacting(body))?;
+        }
+        Ok(self.interaction)
+    }
+
     /// Plays one tick of `running`; its verdict once it ended.
     fn steps_tick(
         &mut self,
@@ -1256,24 +1284,21 @@ impl Player {
                     client.send_message(MESSAGE_CHANNEL, true, type_index, body)?;
                 }
                 Act::Interact { request, name } => {
-                    self.interaction += 1;
-                    running.interaction = Some(self.interaction);
-                    let request = InteractionRequest {
-                        interaction: self.interaction,
-                        target_entity: if request.target_entity == 0 {
-                            own
-                        } else {
-                            request.target_entity
-                        },
-                        ..*request
+                    running.interaction = Some(self.interact(client, own, *request, name)?);
+                }
+                Act::InteractCard { assets, kind } => {
+                    // The card may come a few bundles after the teleport: wait for it.
+                    let Some(target) = self.combat.card_of(assets) else {
+                        return Ok(None);
                     };
-                    if let Some(position) = self.own_input_position() {
-                        let body = Bit8::of_interaction(request, name)?;
-                        send_input(
-                            client,
-                            &ClientInputMsg::position(position).interacting(body),
-                        )?;
-                    }
+                    let request = InteractionRequest {
+                        target,
+                        target_entity: facet_of_raw_id(&target),
+                        interaction: 0,
+                        kind: *kind,
+                        gatherable: None,
+                    };
+                    running.interaction = Some(self.interact(client, own, request, &[])?);
                 }
             }
             running.act += 1;

@@ -13,6 +13,8 @@ use nw_content::Tables;
 use nw_content::crafting::{IngredientKind, Recipes};
 use nw_content::instances::{InstanceCatalog, InstanceKind};
 use nw_content::poi_tags::PoiTags;
+use nw_content::town_props::ASSET_ID_LEN;
+use nw_content::town_stations::TownStations;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::arena::{
     ArenaClientMsg, PLAYER_ARENA_COMPONENT, REMOTE_INTERACT_RESULT_TYPE_INDEX,
@@ -25,7 +27,10 @@ use nw_messages::facet::{
 use nw_messages::mount::{MOUNT_FACET, MountClientMsg, SUMMON_PENDING_TYPE_INDEX};
 use nw_messages::travel::{LandmarkRef, TravelClientMsg, component};
 use nw_messages::wire::RAW_ID_LEN;
-use nw_messages::{ClientFacetMsg, CraftIngredient, FacetHeader, InteractionRequest, MessageError};
+use nw_messages::{
+    BundleMember, ClientFacetMsg, CraftIngredient, FacetHeader, InteractionRequest, MemberState,
+    MessageError,
+};
 use nw_world::WorldFile;
 use nw_world::capitals::capital_id;
 
@@ -94,6 +99,8 @@ pub enum ActivityKind {
     Harvest,
     /// Craft a recipe at a crafting station.
     Craft,
+    /// Craft a recipe at a settlement station that the server spawns: its card gives its id.
+    TownCraft,
     /// Check in at an inn, then recall to it.
     Inn,
     /// Fast travel at a shrine.
@@ -125,6 +132,15 @@ pub enum Act {
     Pause(Duration),
     /// A client call: its type index and body for the bot's own entity number.
     Call(Call),
+    /// An interaction of kind `kind` with the entity whose card, among those the bot has seen,
+    /// names one of the slice assets `assets` (an entity the server spawns, whose id only its
+    /// card tells); the act waits for such a card.
+    InteractCard {
+        /// The slice assets the entity may show.
+        assets: Vec<[u8; ASSET_ID_LEN]>,
+        /// The interaction kind.
+        kind: u8,
+    },
     /// An interaction in the bot's input, with the interaction's name.
     Interact {
         /// The interaction; the bot gives it a fresh id.
@@ -175,6 +191,8 @@ pub struct ActivityData<'a> {
     pub world: &'a WorldFile,
     /// The content bundle's tables.
     pub tables: &'a Tables,
+    /// The settlements' station slots and slices.
+    pub town_stations: &'a TownStations,
 }
 
 /// A step of `what` that sends `acts` and waits `wait` for `proof`.
@@ -251,6 +269,7 @@ impl Activity {
             ActivityKind::Pvp => Ok(pvp()),
             ActivityKind::Harvest => harvest(data),
             ActivityKind::Craft => craft(data),
+            ActivityKind::TownCraft => town_craft(data),
             ActivityKind::Inn => inn(data),
             ActivityKind::Shrine => shrine(data),
             ActivityKind::Dungeon => dungeon(data),
@@ -417,6 +436,87 @@ fn craft(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
         .iter()
         .find(|station| recipe.made_at(&station.components.station_type))
         .ok_or("no station of the level makes the retail smelt")?;
+    let mut target = [0; RAW_ID_LEN];
+    target[..size_of::<u64>()].copy_from_slice(&station.id.to_le_bytes());
+    craft_steps(
+        &recipes,
+        recipe,
+        format!(
+            "go to the {} station and open it",
+            station.components.station_type
+        ),
+        vec![
+            teleport(station.position),
+            Act::Interact {
+                request: InteractionRequest {
+                    target,
+                    target_entity: station.id,
+                    interaction: 0,
+                    kind: CRAFTING_STATION_KIND,
+                    gatherable: None,
+                },
+                name: Vec::new(),
+            },
+        ],
+    )
+}
+
+/// The retail smelt at a settlement station that makes it ([`nw_content::town_stations`]): the
+/// bot goes to the first slot of a smelting upgrade, waits for the card of one of its slices and
+/// opens it by the card's id.
+fn town_craft(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
+    let recipes = Recipes::from_tables(data.tables);
+    let recipe = recipes
+        .making(CRAFTED_ITEM)
+        .ok_or("the content has no recipe of the retail smelt")?;
+    let slot = data
+        .town_stations
+        .slots()
+        .iter()
+        .find(|slot| {
+            data.town_stations
+                .slices_of(slot.upgrade)
+                .any(|slice| recipe.made_at(&slice.station_type))
+        })
+        .ok_or("no settlement station makes the retail smelt")?;
+    let place = BundleMember::read_from(&slot.place)
+        .ok()
+        .and_then(|(member, _)| match member.state {
+            MemberState::Position(state) => state.position,
+            _ => None,
+        })
+        .ok_or("the settlement station's place does not read")?;
+    let assets = data
+        .town_stations
+        .slices_of(slot.upgrade)
+        .map(|slice| slice.asset)
+        .collect();
+    craft_steps(
+        &recipes,
+        recipe,
+        format!(
+            "go to the settlement smelter of territory {} and open it by its card",
+            slot.territory
+        ),
+        vec![
+            teleport([place.x, place.y, place.z()]),
+            Act::InteractCard {
+                assets,
+                kind: CRAFTING_STATION_KIND,
+            },
+        ],
+    )
+}
+
+/// The steps of a craft of `recipe` (of `recipes`): coins, the tradeskill's rank and the
+/// ingredients from the game master, then the station's opening `open` (described by `what`),
+/// then the craft call, proved by the progress update.
+fn craft_steps(
+    recipes: &Recipes,
+    recipe: &nw_content::crafting::Recipe,
+    what: String,
+    open: Vec<Act>,
+) -> Result<Vec<Step>, String> {
     if !recipe
         .ingredients
         .iter()
@@ -442,29 +542,7 @@ fn craft(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
             .iter()
             .map(|(item, quantity)| gm_done(format!("!give {item} {quantity}"))),
     );
-    let mut target = [0; RAW_ID_LEN];
-    target[..size_of::<u64>()].copy_from_slice(&station.id.to_le_bytes());
-    steps.push(step(
-        format!(
-            "go to the {} station and open it",
-            station.components.station_type
-        ),
-        vec![
-            teleport(station.position),
-            Act::Interact {
-                request: InteractionRequest {
-                    target,
-                    target_entity: station.id,
-                    interaction: 0,
-                    kind: CRAFTING_STATION_KIND,
-                    gatherable: None,
-                },
-                name: Vec::new(),
-            },
-        ],
-        Proof::Accepted,
-        STEP_WAIT,
-    ));
+    steps.push(step(what, open, Proof::Accepted, STEP_WAIT));
     let recipe_crc = lowercase_crc32(&recipe.id);
     let fee = details.fee;
     steps.push(step(
@@ -709,9 +787,11 @@ mod tests {
     fn the_activities_without_a_flow_name_why() {
         let tables = Tables::default();
         let world = WorldFile::default();
+        let town_stations = TownStations::default();
         let data = ActivityData {
             world: &world,
             tables: &tables,
+            town_stations: &town_stations,
         };
         for kind in [ActivityKind::Group, ActivityKind::Music] {
             assert!(Activity::of(kind, &data).steps.is_err(), "{kind:?}");
@@ -726,6 +806,10 @@ mod tests {
         assert!(
             Activity::of(ActivityKind::Harvest, &data).steps.is_err(),
             "an empty level has no node"
+        );
+        assert!(
+            Activity::of(ActivityKind::TownCraft, &data).steps.is_err(),
+            "an empty content has no recipe and no settlement station"
         );
         assert_eq!(
             Activity::of(ActivityKind::Level, &data)
@@ -752,9 +836,11 @@ mod tests {
             ],
             ..WorldFile::default()
         };
+        let town_stations = TownStations::default();
         let data = ActivityData {
             world: &world,
             tables: &tables,
+            town_stations: &town_stations,
         };
         let steps = Activity::of(ActivityKind::Harvest, &data)
             .steps

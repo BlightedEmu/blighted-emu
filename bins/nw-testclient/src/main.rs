@@ -22,6 +22,7 @@ use clap::{Parser, Subcommand};
 use nw_content::bundle::{ContentBundle, bundle_path};
 use nw_content::client_build::load_client_build;
 use nw_content::gathering::{GatherRules, Gatherables};
+use nw_content::town_stations::TownStations;
 use nw_dtls::DtlsClientConfig;
 use nw_reflect::REGISTRATION_STATUS_AUTHORIZED;
 use nw_testclient::activity::{Activity, ActivityData, ActivityKind};
@@ -624,9 +625,11 @@ async fn play(
         &build,
     )?;
     let tables = ContentBundle::load(&bundle_path(&swarm.content_dir, &build), &build)?.tables;
+    let town_stations = TownStations::load(&swarm.content_dir, &build)?;
     let data = ActivityData {
         world: &world,
         tables: &tables,
+        town_stations: &town_stations,
     };
     let activities = kinds
         .iter()

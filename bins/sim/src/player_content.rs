@@ -812,6 +812,9 @@ pub struct PlayerContent {
     pub quick_course_paths: QuickCoursePaths,
     /// The settlement and fort props the server spawns; empty until the sim loads their file.
     pub town_props: nw_content::town_props::TownProps,
+    /// The settlements' crafting and refining station slots and slices; empty until the sim
+    /// loads their file.
+    pub town_stations: nw_content::town_stations::TownStations,
     /// The root groups of the open world's encounter slices, in the town props table form;
     /// empty until the sim loads their file.
     pub encounter_roots: nw_content::town_props::TownProps,
@@ -1558,6 +1561,7 @@ impl PlayerContent {
             effect_tokens: EffectTokens::from_tables(tables),
             quick_course_paths: QuickCoursePaths::default(),
             town_props: nw_content::town_props::TownProps::default(),
+            town_stations: nw_content::town_stations::TownStations::default(),
             encounter_roots: nw_content::town_props::TownProps::default(),
             encounter_objects: nw_content::town_props::TownProps::default(),
             entrance_entities: Vec::new(),

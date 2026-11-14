@@ -88,6 +88,7 @@ pub mod territory_projects;
 pub mod territory_upkeep;
 pub mod titles;
 pub mod town_props;
+pub mod town_stations;
 pub mod tradeskill_xp;
 pub mod ui_item_class;
 pub mod war_forts;

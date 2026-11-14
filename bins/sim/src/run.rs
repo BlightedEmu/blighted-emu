@@ -465,6 +465,20 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             nw_content::town_props::TownProps::default()
         }
     };
+    content.town_stations =
+        match nw_content::town_stations::TownStations::load(&config.content_dir, &build) {
+            Ok(stations) => {
+                tracing::info!(slots = stations.slots().len(), "town stations");
+                stations
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "no town stations: the settlements have no crafting or refining station"
+                );
+                nw_content::town_stations::TownStations::default()
+            }
+        };
     content.encounter_roots = match nw_content::town_props::TownProps::load_file(
         nw_content::town_props::encounter_roots_path(&config.content_dir, &build),
     ) {

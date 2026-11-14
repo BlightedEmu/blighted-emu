@@ -26,9 +26,29 @@ pub(super) fn stations(props: &TownProps) -> Vec<Station> {
 }
 
 fn station(index: usize, prop: &TownProp) -> Option<Station> {
-    let states = prop
-        .members
-        .iter()
+    spawned_station(
+        dynamic_ref(PROP_NAMESPACE, index),
+        prop.asset,
+        prop.members.iter().map(Vec::as_slice),
+        String::new(),
+        Vec::new(),
+    )
+}
+
+/// The station that the server spawns as a card of the slice asset `asset` with the id
+/// `gde_ref`, then the retail states `members` (each the bytes of one bundle member), with the
+/// station type `station_type` and the interaction name `name`. It stands at the place its
+/// place state names; `None` when a state does not read or none names a place (without a place
+/// it is in no view).
+pub(super) fn spawned_station<'a>(
+    gde_ref: [u8; nw_messages::wire::RAW_ID_LEN],
+    asset: [u8; nw_content::town_props::ASSET_ID_LEN],
+    members: impl IntoIterator<Item = &'a [u8]>,
+    station_type: String,
+    name: Vec<u8>,
+) -> Option<Station> {
+    let states = members
+        .into_iter()
         .map(|bytes| BundleMember::read_from(bytes).map(|(member, _)| member))
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
@@ -40,12 +60,11 @@ fn station(index: usize, prop: &TownProp) -> Option<Station> {
         }),
         _ => None,
     })?;
-    let gde_ref = dynamic_ref(PROP_NAMESPACE, index);
     let card = BundleMember {
         component: CARD_COMPONENT,
         state: MemberState::GdeMetadata(GdeMetadataReplicatedState {
             asset: Some(AssetId {
-                id: prop.asset,
+                id: asset,
                 sub_id: DYNAMIC_SLICE_SUB_ID,
             }),
             gde_ref: Some(gde_ref),
@@ -54,8 +73,8 @@ fn station(index: usize, prop: &TownProp) -> Option<Station> {
     Some(Station {
         gde_ref,
         position,
-        station_type: String::new(),
-        name: Vec::new(),
+        station_type,
+        name,
         members: std::iter::once(card).chain(states).collect(),
     })
 }

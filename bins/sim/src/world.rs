@@ -169,6 +169,7 @@ mod supply_generators;
 mod title_choice;
 mod town_projects;
 mod town_props;
+mod town_stations;
 mod tradeskill;
 mod trading_post_cards;
 pub mod transmog;
@@ -1113,6 +1114,8 @@ pub struct SimWorld {
     faction_control: control_points::FactionControl,
     /// The land claim entity of each territory ([`claim_entities`]).
     claim_entities: claim_entities::ClaimEntities,
+    /// The settlements' crafting and refining stations it shows ([`town_stations`]).
+    town_stations: town_stations::TownStationsShown,
     /// The world clock anchor reads and sets ([`day_night`]).
     world_clock: day_night::WorldClock,
     /// The territory wars as this sim last read them ([`wars`]).
@@ -1405,6 +1408,7 @@ impl SimWorld {
             nodes: Nodes::default(),
             stations,
             claim_entities,
+            town_stations: town_stations::TownStationsShown::default(),
             bags: loot_bag::LootBags::default(),
             performances: music::Performances::default(),
             open_gathers: Vec::new(),
@@ -2670,6 +2674,7 @@ impl SimWorld {
         self.tick_afflictions();
         self.tick_war_fight();
         self.tick_control_points();
+        self.tick_town_stations();
         self.tick_invasion();
         player_attacks.extend(self.tick_turrets(now_ms));
         self.tick_queue();

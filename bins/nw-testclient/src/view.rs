@@ -8,7 +8,9 @@
 
 use std::collections::BTreeMap;
 
+use nw_content::town_props::ASSET_ID_LEN;
 use nw_messages::entity_ids::IdHolder;
+use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     EntitySlots, LOGIN_MESSAGE_TYPES, MemberState, MessageError, PLAYER_VITALS_ID, ServerMessage,
     SlotRead, SlotUpdate, VitalsData, WorldPosition, entity_of_facet, number_of_seen_raw_id,
@@ -275,6 +277,8 @@ pub struct CombatView {
     mob_deaths: u64,
     /// The answers to the bot's interactions since the last [`CombatView::take_interactions`].
     interactions: Vec<InteractionAnswer>,
+    /// The id of the newest card seen of each slice asset.
+    cards: BTreeMap<[u8; ASSET_ID_LEN], [u8; RAW_ID_LEN]>,
 }
 
 impl CombatView {
@@ -298,6 +302,12 @@ impl CombatView {
                     .iter()
                     .filter(|update| !update.is_local_player())
                 {
+                    if let Some((asset, gde_ref)) = update
+                        .card
+                        .and_then(|card| card.asset.zip(card.gde_ref))
+                    {
+                        self.cards.insert(asset.id, gde_ref);
+                    }
                     let Some(entity) = update.entity else {
                         continue;
                     };
@@ -331,6 +341,11 @@ impl CombatView {
             Read::Skipped | Read::Entry { .. } | Read::Other { .. } => {}
         }
         Ok(own_position)
+    }
+
+    /// The id of the newest card seen of one of the slice assets `assets`.
+    pub fn card_of(&self, assets: &[[u8; ASSET_ID_LEN]]) -> Option<[u8; RAW_ID_LEN]> {
+        assets.iter().find_map(|asset| self.cards.get(asset).copied())
     }
 
     /// The answers to the bot's interactions since the last call, oldest first.
