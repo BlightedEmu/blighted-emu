@@ -386,7 +386,11 @@
               "proof": "tests"
             },
             {
-              "check": "The first pack is published and a fresh clone starts a sim with every pack table loaded.",
+              "check": "A fresh clone of `dev` with the install tables built by the README steps from a New World install, and the version 1 pack installed by `just realm-data`, runs the starting-zone quest walk of the sim with the same result as the content folder of the maintainer's PC (2026-11-14).",
+              "proof": "tests"
+            },
+            {
+              "check": "The first pack is published as a Release of the data repo.",
               "proof": "none"
             }
           ]
@@ -3303,7 +3307,7 @@
     }
   ],
   "nextSteps": [
-    "**Realm data pack:** the first pack (version 1, 15 tables) is made; read its scan report, check it on a fresh clone, then publish it as a Release of the data repo.",
+    "**Realm data pack:** the first pack (version 1, 15 tables) is made and passed a fresh clone test; read its scan report, then publish it as a Release of the data repo.",
     "**Batch E: wars, expeditions, darkness events, level walls (2026-11-13): live check (tests only).**\n\n- Declare two wars: the second war's raid numbers start after the first war's defender.\n- In a war, the fort gate breaks and comes back at the result; the camp gate takes no harm.\n- Hedet canyon: use a fire dropper; the barrel drops and the fire area opens.\n- Myrkgard: run a portal event; its key fragment comes at its end, and the curse goes about 10 s later.\n- In a mutated expedition, gather a resource node: the score rises by the expedition's points.\n- Fire a bow and a turret at a wall: the shot stops at the wall.",
     "**Expedition start area, area tasks, kill score, offline players (2026-11-13): live check (tests only).**\n\n- Live: enter Starstone: the clock starts at the start line, the first task ends in the sealed chamber.",
     "**War structure ownership at the war's start and result (2026-11-13): live check (tests only).**\n\n- Live: in a war, the fort's turrets and generators keep working after the start; the structures show the side's raid.",
@@ -3602,5 +3606,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-14",
-  "lastCommit": "09da9ec6"
+  "lastCommit": "6afc435e"
 }
