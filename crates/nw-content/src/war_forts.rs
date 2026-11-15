@@ -171,6 +171,14 @@ struct StructureKindRow {
     use_interact: Option<u64>,
     #[serde(default)]
     gate: Option<GateRow>,
+    #[serde(default)]
+    weapon: Option<WeaponRow>,
+}
+
+#[derive(Deserialize)]
+struct WeaponRow {
+    kind: u32,
+    xor: String,
 }
 
 #[derive(Deserialize)]
@@ -271,6 +279,8 @@ struct KindRow {
     area: Option<AreaRow>,
     #[serde(default)]
     ammo_effect: Option<String>,
+    #[serde(default)]
+    weapon: Option<WeaponRow>,
 }
 
 #[derive(Deserialize)]
@@ -688,6 +698,38 @@ pub struct TurretKind {
     /// (the Isle of Night ballista: `Raid_IoN_Balista_Bolt`, the effect of the gatherable
     /// `IoN_Balista_Bolt`; Inferred: no data table names the cost of its `AddAmmo` option).
     pub ammo_effect: Option<String>,
+    /// Its entry in the siege data's weapon list; `None` for a slice with no
+    /// `SiegeWeaponComponent` (or a table mined before the miner read it).
+    pub weapon: Option<SiegeWeaponRule>,
+}
+
+/// The `SiegeWeaponComponent` of a siege slice: how its entity shows in the siege data's weapon
+/// list (4103 child 3, `siegeWeaponStates`; batch F1, 2026-11-15).
+///
+/// Observed: every element of the lists of `RS_offensive_war`, `joining_defending_war_2`,
+/// `arvaysa_ES_attacker_war_45vs45`, `everfall_war_2` and `CK_offensive_war` lies on the place of
+/// a fort weapon's card (0.00 to 0.01 m), and its key is that card's facet entity XOR one value
+/// per slice, the same in every ledger (`dropper_t1_firebarrel` `3e1cbde1cc5dc720` in RS and
+/// jdw2, `turret_t3_repeater` `e5345ad6f40cbf7d` in ES and everfall): the slice's main entity id
+/// XOR the id of the entity that holds the component (`support_t1_hornofresilience`:
+/// `0000007d90442d35` XOR `6e08eb2b78a617eb` = `6e08eb56e8e23ade`, the RS horns' value).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SiegeWeaponRule {
+    /// The component's `m_siegeWeaponType`: the client's `SiegeWeaponType` (`FUN_143e83130`:
+    /// 0 `Ballista`, 1 `Repeater`, 2 `Explosive`, 3 `FireBarrel`, 4 `Horn`, 5 `FireTrap`,
+    /// 6 `DecoyTrap`, 7 `PlatformCannon`, 8 `PlatformExplosive`, 9 `PlatformRepeater`,
+    /// 10 `PowderKeg`; Observed in the lists: 1 on the repeaters, 3 on the droppers, 4 on the
+    /// horns, 7 on the platform cannons).
+    pub kind: u32,
+    /// The slice's main entity id XOR the id of the component's entity.
+    pub xor: u64,
+}
+
+impl SiegeWeaponRule {
+    /// The key of the weapon on the entity whose facet entity is `entity`.
+    pub const fn key(&self, entity: u64) -> u64 {
+        entity ^ self.xor
+    }
 }
 
 impl WarFort {
@@ -872,6 +914,9 @@ pub struct StructureKind {
     pub use_interact: Option<u64>,
     /// The gate parts of a fort gate or war camp gate.
     pub gate: Option<GateParts>,
+    /// Its entry in the siege data's weapon list ([`SiegeWeaponRule`]); `None` for a slice with
+    /// no `SiegeWeaponComponent` (a gate, a supply generator).
+    pub weapon: Option<SiegeWeaponRule>,
 }
 
 /// What a gate slice holds besides its members.
@@ -1226,6 +1271,13 @@ fn rule_of(facet: &FacetRow) -> Result<FacetRule, WarFortsError> {
     })
 }
 
+fn weapon_of(row: &WeaponRow) -> Result<SiegeWeaponRule, WarFortsError> {
+    Ok(SiegeWeaponRule {
+        kind: row.kind,
+        xor: facet_of(NO_TERRITORY, &row.xor)?,
+    })
+}
+
 fn projectile_of(projectile: &ProjectileRow) -> Result<TurretProjectile, WarFortsError> {
     Ok(TurretProjectile {
         asset: id_of(NO_TERRITORY, &projectile.asset)?,
@@ -1273,6 +1325,7 @@ fn kind_of(row: KindRow) -> Result<TurretKind, WarFortsError> {
         spawner_facet: rule_of(&row.spawner_facet)?,
         projectile: row.projectile.as_ref().map(projectile_of).transpose()?,
         area: row.area.map(area_of).transpose()?.flatten(),
+        weapon: row.weapon.as_ref().map(weapon_of).transpose()?,
         slice: row.slice,
         hold_to_fire: row.hold_to_fire,
         repeat_fire_delay_s: row.repeat_fire_delay_s,
@@ -1432,6 +1485,7 @@ fn structure_kind_of(row: StructureKindRow) -> Result<Option<StructureKind>, War
                 door_interact: gate.door_interact,
             })
         }),
+        weapon: row.weapon.as_ref().map(weapon_of).transpose()?,
     }))
 }
 
@@ -1861,6 +1915,36 @@ pub(crate) mod tests {
         let delay = gate.repair_delay.expect("repair delay");
         assert_eq!((delay.component, delay.delay_ms(), delay.on_open), (8, 30_000, false));
         assert_eq!(gate.door_interact, Some(17));
+        assert_eq!(kind.weapon, None, "a gate is a major structure, no weapon");
+    }
+
+    /// A horn kind with its weapon entry, and the retail key of an RS horn: its card's facet
+    /// entity XOR the slice's value (Observed: `RS_offensive_war`, the horn of GdeRef
+    /// `222a70d319799f3f...` listed as `5197924f3b9210fc`, kind 4).
+    #[test]
+    fn a_weapon_entry_reads_and_keys_a_retail_horn() {
+        const HORN: &str = "d5bc9f0b3344520bb9ea1ef73c27648e";
+        const HORN_REF: &str = "222a70d319799f3f2993473fc6389175";
+        const RETAIL_KEY: u64 = 0x5197_924f_3b92_10fc;
+        let table = TABLE.replacen(
+            "]}]}",
+            &format!(
+                "]}}], \"structure_kinds\": [{{\"asset\": \"{HORN}\", \"slice\": \"slices/structures/siege/support/support_t1_hornofresilience.dynamicslice\",
+                 \"template\": null, \"weapon\": {{\"kind\": 4, \"xor\": \"6e08eb56e8e23ade\"}}}}]}}"
+            ),
+            1,
+        );
+        let forts = WarForts::parse(&table).expect("table");
+        let asset: [u8; ID_LEN] = hex::decode(HORN).expect("hex").try_into().expect("16");
+        let weapon = forts
+            .structure_kind(&asset)
+            .and_then(|kind| kind.weapon)
+            .expect("weapon");
+        assert_eq!(weapon.kind, 4);
+        let gde_ref = hex::decode(HORN_REF).expect("hex");
+        let facet_entity =
+            u64::from_le_bytes(gde_ref[..KEY_LEN].try_into().expect("first eight bytes"));
+        assert_eq!(weapon.key(facet_entity), RETAIL_KEY);
     }
 
     /// Observed (`invasion` 335.079 s, the cow launcher's area): a start-on-trigger timer opens

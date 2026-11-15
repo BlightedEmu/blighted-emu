@@ -53,6 +53,21 @@
 //! the siege data ([`super::war_fight`]). A player's hit or a turret's shot meets a gate within
 //! its slice's physical radius ([`StructureBody::reach_m`]).
 //!
+//! **A gate's door** (Observed, batch F1: 8 passes of `joining_defending_war_2` 100.942 to
+//! 1844.934 s, `arvaysa_ES_attacker_war_45vs45` 927.167 and 1026.000 s, `RS_offensive_war`
+//! 847.357 s): a player uses the door interact of a gate of its own side, a defender a fort gate
+//! (`siege_fortgate_m_t2` of jdw2), an attacker a war camp gate (`siege_warcamp_gate_t3` of ES and
+//! RS); the client sends the interaction (kind 67, `TeleportToOtherSideOfDoor_FortGate`) four or
+//! five times 30 ms apart, retail accepts it (3743, jdw2 100.988 s) and the client's next place
+//! is the pass: 6.6 to 8.4 m from where it stood, 0.2 to 2.0 m from the gate's place, from
+//! either side of the gate (jdw2 from 13684, 6327 and from 13675, 6338 to the gate at 13680.4,
+//! 6332.6). The plain door pass of [`super::travel`] takes a step of at most 6.5 m, so a gate's
+//! pass is the move that lands within [`GATE_DOOR_LANDING_M`] of the gate's place
+//! ([`SimWorld::gate_door`]). Inferred: a broken gate (its door interact off) or a gate of the
+//! other side lets no pass through: the client offers neither, and no capture holds a use of
+//! one. A broken gate is walked through as its ruin stands; the server keeps no body of it in a
+//! player's way.
+//!
 //! **A build** (Observed, `fort-equipements-territory`, 17 calls, one player of the fort's
 //! company in the territory's open-world fort): the client's interaction of kind
 //! [`OPEN_SELECTION_KIND`] on a defensive structure is accepted (3743, about 32 ms later), the
@@ -76,8 +91,8 @@
 use bevy_ecs::entity::Entity;
 use nw_bus::ConnectionRef;
 use nw_content::war_forts::{
-    FortStructure, SIDE_ATTACKER, SIDE_DEFENDER, SIEGE_SUPPLY, SiegeTimer, StructureKind,
-    StructureRole,
+    FortStructure, SIDE_ATTACKER, SIDE_DEFENDER, SIEGE_SUPPLY, SiegeTimer, SiegeWeaponRule,
+    StructureKind, StructureRole,
 };
 use nw_messages::buildables::{CommittedResources, GUILD_ID_LEN, GuildCrest, ResourceItem};
 use nw_messages::item_descriptor::ItemDescriptor;
@@ -131,6 +146,10 @@ const NO_COMPANY: [u8; GUILD_ID_LEN] = [0; GUILD_ID_LEN];
 pub(super) const GATE_PERMISSION_RULE: u8 = 1;
 /// The faction of a structure outside its war's run (Observed: 0 on every fort structure).
 const NO_FACTION: u8 = 0;
+/// How near a gate's place the move of a door pass lands, metres (Observed: the 8 retail passes
+/// landed 0.2 to 2.0 m from the gate's place, module doc; Inferred: half a metre more for the
+/// client's own landing).
+pub(super) const GATE_DOOR_LANDING_M: f32 = 2.5;
 
 /// A structure's health share of its committed resource ([`super::turrets`] module doc).
 #[derive(Debug, Clone, PartialEq)]
@@ -181,6 +200,9 @@ pub(crate) struct StructureBody {
     /// How far from its place its body reaches, metres (a gate's slice physical radius); `None`
     /// for a turret's body.
     pub(super) reach_m: Option<f32>,
+    /// Its entry in the siege data's weapon list (its slice's `SiegeWeaponComponent`,
+    /// [`super::war_fight`]); `None` for a structure with none.
+    pub(super) weapon: Option<SiegeWeaponRule>,
 }
 
 impl StructureBody {
@@ -243,6 +265,7 @@ impl StructureBody {
             repair_delay: None,
             door_interact: None,
             reach_m: None,
+            weapon: None,
         }
     }
 
@@ -264,11 +287,16 @@ impl StructureBody {
 
     /// Its health in percent of its most, rounded up (Inferred: a whole one shows 100 and only a
     /// broken one 0; Observed values 100, 85, 66, 43, 32 and 0 with the break,
-    /// `RS_offensive_war`).
+    /// `RS_offensive_war`). One with no vitals shows 100 while it stands (Observed:
+    /// `RS_offensive_war` 852.94 s, the attacker's platform cannon, a card with no vitals, listed
+    /// at `64`).
     pub(super) fn health_percent(&self) -> u8 {
         const WHOLE_PERCENT: f32 = 100.0;
-        if self.broken || self.max_health <= 0.0 {
+        if self.broken {
             return 0;
+        }
+        if self.max_health <= 0.0 {
+            return WHOLE_PERCENT as u8;
         }
         // A share of 100 at most.
         (self.health / self.max_health * WHOLE_PERCENT)
@@ -733,7 +761,37 @@ fn built_structure(
     }
 }
 
+/// What the door interaction of a war gate lets a player do (module doc, **A gate's door**).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum GateDoor {
+    /// The pass: the player's next move lands near this place, the gate's.
+    Pass(Position),
+    /// No pass: the gate is broken, or of the other side.
+    Refused,
+}
+
 impl SimWorld {
+    /// The door of the war gate whose `GdeRef` is `target`, for player `entity` (module doc,
+    /// **A gate's door**); `None` when `target` is no gate with a door in this sim's war.
+    pub(super) fn gate_door(
+        &self,
+        entity: Entity,
+        target: &[u8; nw_messages::RAW_ID_LEN],
+    ) -> Option<GateDoor> {
+        let fight = self.war_fight()?;
+        let body = fight
+            .structures
+            .iter()
+            .map(|run| &run.body)
+            .find(|body| body.structure.gde_ref == *target && body.door_interact.is_some())?;
+        let own_side = self.side_in(fight, entity) == Some(body.structure.side);
+        Some(if body.broken || !own_side {
+            GateDoor::Refused
+        } else {
+            GateDoor::Pass(body.place())
+        })
+    }
+
     /// The ownership of a structure of `side` of `fight`'s war: its side company's (Observed,
     /// [`super::turrets`] module doc; `joining_defending_war_2` 125.039 s: the barrel of a use
     /// names the side's company, not the user's), with its name and crest from its claims or the
@@ -980,6 +1038,7 @@ impl SimWorld {
         body.repair_delay = gate.and_then(|gate| gate.repair_delay);
         body.door_interact = gate.and_then(|gate| gate.door_interact);
         body.reach_m = gate.map(|gate| gate.physical_radius_m);
+        body.weapon = kind.and_then(|kind| kind.weapon);
         let ownership = self.fort_structure_ownership(fight, &body.structure);
         let mut members = spawn_members(&body, |_| None, ownership);
         let generator_tier = kind
@@ -1594,6 +1653,11 @@ pub(crate) mod tests {
     const FULL_PERCENT: u8 = 100;
 
     fn gate_world() -> (SimWorld, Entity) {
+        gate_world_of(SIDE_ATTACKER)
+    }
+
+    /// [`gate_world`] with its player on `side`.
+    fn gate_world_of(side: u8) -> (SimWorld, Entity) {
         use crate::world::turrets::tests::{TABLE, war_world_with};
         let gates = r#""yaw": 0.0},
           {"asset": "a658fcb950ed5621bcbb5faccce6055e", "card_component": 0, "gde_ref": "680d78c1600df90a29357b8f4729b2d5",
@@ -1624,7 +1688,7 @@ pub(crate) mod tests {
         {"asset": "a894c09ea7f25448a8f5d54384abb960", "slice": "slices/structures/siege/siege_warcamp_gate_t3.dynamicslice",
          "template": null, "gate": {"physical_radius_m": 8.0, "repair_delay": null, "door_interact": null}}]}"#;
         let table = format!("{}{kinds}", &table[..table.len() - 1]);
-        war_world_with(WarForts::parse(&table).expect("table"), SIDE_ATTACKER, |content| content)
+        war_world_with(WarForts::parse(&table).expect("table"), side, |content| content)
     }
 
     fn gate(world: &SimWorld, gde_ref: [u8; 16]) -> StructureRun {
@@ -1737,6 +1801,38 @@ pub(crate) mod tests {
                 ..OwnershipState::default()
             }),
             "mask 0x51"
+        );
+    }
+
+    /// Observed (module doc, **A gate's door**): a defender passes the door of its fort gate and
+    /// lands at the gate's place; an attacker gets no pass through it, nor does anyone once it
+    /// broke; a structure that is no gate has no door.
+    #[test]
+    fn a_gate_door_passes_its_own_side_while_the_gate_stands() {
+        use crate::world::turrets::HeldHit;
+        use crate::world::turrets::tests::REPEATER_REF;
+        let (mut world, defender) = gate_world_of(SIDE_DEFENDER);
+        start_war(&mut world);
+        let place = gate(&world, FORT_GATE_REF).body.place();
+        assert_eq!(
+            world.gate_door(defender, &FORT_GATE_REF),
+            Some(GateDoor::Pass(place))
+        );
+        assert_eq!(world.gate_door(defender, &REPEATER_REF), None, "no gate");
+        let (mut attacking, attacker) = gate_world();
+        start_war(&mut attacking);
+        assert_eq!(
+            attacking.gate_door(attacker, &FORT_GATE_REF),
+            Some(GateDoor::Refused),
+            "the other side's gate"
+        );
+        let number = gate(&world, FORT_GATE_REF).body.number;
+        world.hurt_held(HeldHit::Structure(number), GATE_HEALTH, DEFENDER);
+        assert!(gate(&world, FORT_GATE_REF).body.broken);
+        assert_eq!(
+            world.gate_door(defender, &FORT_GATE_REF),
+            Some(GateDoor::Refused),
+            "a broken gate"
         );
     }
 

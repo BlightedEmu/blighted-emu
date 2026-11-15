@@ -564,9 +564,11 @@ impl TurretRun {
                 _ => None,
             }
         });
+        let mut body = StructureBody::new(turret);
+        body.weapon = kind.weapon;
         Some(Self {
             ammo: full_ammo(&kind),
-            body: StructureBody::new(turret),
+            body,
             kind,
             turret_component,
             orientation,

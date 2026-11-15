@@ -261,6 +261,9 @@ pub(super) struct TravelState {
     waypoint_due: bool,
     /// Until when (sim milliseconds) a door pass may come.
     door_pass_until_ms: Option<u64>,
+    /// Where a war gate's door pass lands ([`super::siege_structures::GateDoor`]); `None` for a
+    /// plain door.
+    door_landing: Option<Position>,
     /// The house plot of the player's last housing interaction.
     plot: Option<[u8; RAW_ID_LEN]>,
     /// The plot of the house the player is in.
@@ -850,12 +853,13 @@ impl SimWorld {
         let Some(&entity) = self.by_connection.get(connection) else {
             return;
         };
-        let Some((number, channeling, pass_until)) =
+        let Some((number, channeling, pass_until, landing)) =
             self.world.get::<Player>(entity).map(|player| {
                 (
                     player.number,
                     player.travel.channel.is_some(),
                     player.travel.door_pass_until_ms,
+                    player.travel.door_landing,
                 )
             })
         else {
@@ -874,6 +878,7 @@ impl SimWorld {
         if now_ms > until {
             if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                 player.travel.door_pass_until_ms = None;
+                player.travel.door_landing = None;
             }
             return;
         }
@@ -893,9 +898,14 @@ impl SimWorld {
             z: newest.z(),
         };
         let step = at.horizontal_distance(to);
-        if step > DOOR_SPHERE_RADIUS_M && step <= DOOR_SPHERE_RADIUS_M * DOOR_PASS_RADII {
+        let crossed = landing.map_or(
+            step > DOOR_SPHERE_RADIUS_M && step <= DOOR_SPHERE_RADIUS_M * DOOR_PASS_RADII,
+            |gate| to.horizontal_distance(gate) <= super::siege_structures::GATE_DOOR_LANDING_M,
+        );
+        if crossed {
             if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                 player.travel.door_pass_until_ms = None;
+                player.travel.door_landing = None;
             }
             tracing::info!(player = number, step, "door pass");
             self.place_player(entity, to, None, Placement::Stand, now_ms);
@@ -1326,9 +1336,19 @@ impl SimWorld {
         let accepted = gather_answer(number, request, ACCEPTED, name);
         match request.kind {
             kind::DOOR => {
+                let landing = match self.gate_door(entity, &request.target) {
+                    Some(super::siege_structures::GateDoor::Refused) => {
+                        let refused = gather_answer(number, request, INTERACTION_REFUSED, name);
+                        self.send_travel(entity, &[refused]);
+                        return true;
+                    }
+                    Some(super::siege_structures::GateDoor::Pass(place)) => Some(place),
+                    None => None,
+                };
                 let until = now_ms.saturating_add(REFUSED_RESYNC_MS);
                 if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                     player.travel.door_pass_until_ms = Some(until);
+                    player.travel.door_landing = landing;
                 }
                 self.send_travel(entity, &[accepted]);
             }

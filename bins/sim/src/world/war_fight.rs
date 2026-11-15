@@ -57,7 +57,7 @@ use nw_messages::social::{CharacterRef, GroupPush};
 use nw_messages::war::WarServerMsg;
 use nw_messages::war_states::{
     CAPTURE_POINT_CAPTURING, CAPTURE_POINT_FLAG, CAPTURE_POINT_LOCKED, CAPTURE_POINT_OPEN,
-    CapturePointCold, FortStructure as MajorState,
+    CapturePointCold, FortStructure as MajorState, SiegeWeapon,
 };
 use nw_messages::{
     AssetId, BundleMember, CapturePointState, ClaimOwner, DYNAMIC_SLICE_SUB_ID,
@@ -116,6 +116,33 @@ const NO_SIDE_NUMBER: u64 = 0;
 const FIRST_VERSION: u64 = nw_messages::items::FIRST_VERSION;
 /// The hot data of a point with no progress.
 const NO_PROGRESS: u8 = 0;
+/// The flag of a weapon entry of the siege data: 1 on an attacker's weapon, 0 on the fort's
+/// (Observed: 1 on the two attacker platform cannons of `RS_offensive_war`, 0 on every fort
+/// weapon of the five war ledgers with a weapon list; Inferred: the flag names the side).
+const ATTACKER_WEAPON_FLAG: u8 = 1;
+const FORT_WEAPON_FLAG: u8 = 0;
+
+/// What the siege data shows besides its capture points: its major structure entries (child 2)
+/// and its weapon entries (child 3).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct SiegeEntries {
+    majors: Vec<(u64, MajorState)>,
+    weapons: Vec<(u64, SiegeWeapon)>,
+}
+
+/// A place as the siege data's weapon entries hold it: x, y and z as big-endian `f32`
+/// (Observed: the RS entries read so, each on its card's place).
+fn weapon_place(place: [f32; 3]) -> [u8; WEAPON_PLACE_LEN] {
+    let mut bytes = [0; WEAPON_PLACE_LEN];
+    for (chunk, value) in bytes.chunks_exact_mut(F32_LEN).zip(place) {
+        chunk.copy_from_slice(&value.to_be_bytes());
+    }
+    bytes
+}
+
+/// The bytes of a weapon entry's place, and of each of its numbers.
+const WEAPON_PLACE_LEN: usize = 12;
+const F32_LEN: usize = 4;
 
 /// Where a war fight is in its run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,11 +190,23 @@ pub(crate) struct WarFight {
     pub(super) built: usize,
     /// What the uses of its droppers and horns opened ([`super::siege_areas`]).
     pub(super) uses: SiegeUses,
-    /// The major structure entries the siege data last showed.
-    majors_shown: Vec<(u64, MajorState)>,
+    /// The major structure and weapon entries the siege data last showed.
+    entries_shown: SiegeEntries,
+    /// How many siege data states went out: the lists of the next one have the version
+    /// [`FIRST_VERSION`] and this (Observed: `RS_offensive_war` 852.24 s on, each change of a
+    /// list has the next version, 05, 06, 07 ...; live 2026-11-15 the client kept a war sign-up
+    /// list sent again at the same version, [`super::wars`]).
+    siege_sends: u64,
 }
 
 impl WarFight {
+    /// The version of the next siege data state's lists ([`Self::siege_sends`]).
+    fn next_siege_version(&mut self) -> u64 {
+        let version = FIRST_VERSION.saturating_add(self.siege_sends);
+        self.siege_sends = self.siege_sends.saturating_add(1);
+        version
+    }
+
     /// The slot key of its siege data entity, once it spawned.
     pub(super) const fn siege_entity(&self) -> Option<u64> {
         self.siege
@@ -199,7 +238,8 @@ impl WarFight {
             builds: Vec::new(),
             built: 0,
             uses: SiegeUses::default(),
-            majors_shown: Vec::new(),
+            entries_shown: SiegeEntries::default(),
+            siege_sends: 0,
         }
     }
 
@@ -288,9 +328,49 @@ impl WarFight {
             .collect()
     }
 
-    /// The siege warfare data: the points' cold and hot data and the major structures
-    /// (Inferred: the weapons and buildables are left out).
-    fn siege_state(&self, value: u64) -> SiegeWarfareDataState {
+    /// The weapon entries of the siege data (child 3, `siegeWeaponStates`;
+    /// [`nw_content::war_forts::SiegeWeaponRule`]): each turret and structure of the fight whose
+    /// slice holds a `SiegeWeaponComponent`, by its key, with its place (three big-endian
+    /// `f32`), its kind, its health in percent as the major structures show it, and the flag of
+    /// its side (Observed: `RS_offensive_war` 17 entries from the first state, each on its card's
+    /// place; a horn's percent fell with the hits on it, 95, 93, ... 0, and its entry stayed at
+    /// 0; an attacker's platform cannon came in with its build and left with its slot).
+    fn weapons(&self) -> Vec<(u64, SiegeWeapon)> {
+        self.turrets
+            .iter()
+            .map(|run| &run.body)
+            .chain(self.structures.iter().map(|run| &run.body))
+            .filter_map(|body| {
+                let rule = body.weapon?;
+                let structure = &body.structure;
+                Some((
+                    rule.key(structure.facet_entity()),
+                    SiegeWeapon {
+                        place: weapon_place(structure.place),
+                        kind: rule.kind,
+                        health: body.health_percent(),
+                        flag: if structure.side == SIDE_ATTACKER {
+                            ATTACKER_WEAPON_FLAG
+                        } else {
+                            FORT_WEAPON_FLAG
+                        },
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// The major structure and weapon entries as they are now.
+    fn entries(&self) -> SiegeEntries {
+        SiegeEntries {
+            majors: self.majors(),
+            weapons: self.weapons(),
+        }
+    }
+
+    /// The siege warfare data, its lists at `version`: the points' cold and hot data, the major
+    /// structures and the weapons (Inferred: the buildable counts are left out).
+    fn siege_state(&self, value: u64, version: u64) -> SiegeWarfareDataState {
         let cold = (0..self.points.len())
             .filter_map(|index| Some((self.fort.points[index].key(), self.cold(index, value)?)))
             .collect();
@@ -301,11 +381,12 @@ impl WarFight {
             .zip(&self.points)
             .map(|(point, run)| (point.key(), run.progress))
             .collect();
-        let majors = self.majors();
+        let SiegeEntries { majors, weapons } = self.entries();
         SiegeWarfareDataState {
-            points_cold: Some(KeyedList::full(FIRST_VERSION, cold)),
-            points_hot: Some(KeyedList::full(FIRST_VERSION, hot)),
-            structures: (!majors.is_empty()).then(|| KeyedList::full(FIRST_VERSION, majors)),
+            points_cold: Some(KeyedList::full(version, cold)),
+            points_hot: Some(KeyedList::full(version, hot)),
+            structures: (!majors.is_empty()).then(|| KeyedList::full(version, majors)),
+            weapons: (!weapons.is_empty()).then(|| KeyedList::full(version, weapons)),
             ..SiegeWarfareDataState::default()
         }
     }
@@ -681,9 +762,9 @@ impl SimWorld {
         if fight.siege.is_none() {
             self.spawn_structures(fight);
             self.spawn_siege(fight, NO_SIDE_NUMBER);
-            fight.majors_shown = fight.majors();
+            fight.entries_shown = fight.entries();
         }
-        self.show_majors(fight, attacker_number);
+        self.show_entries(fight, attacker_number);
         if !fight.started && now_ms >= war.starts_ms && war.result.is_none() {
             self.start_war(fight, war, (attacker_number, defender_number));
             fight.next_capture_ms = now_ms.saturating_add(CAPTURE_TICK_MS);
@@ -724,6 +805,8 @@ impl SimWorld {
         let Some([x, y, z]) = place else {
             return;
         };
+        let version = fight.next_siege_version();
+        let fort = &fight.fort;
         let members = vec![
             card(
                 fort.siege.card_component,
@@ -732,7 +815,7 @@ impl SimWorld {
             ),
             BundleMember {
                 component: fort.siege.state_component,
-                state: MemberState::SiegeWarfareData(Box::new(fight.siege_state(value))),
+                state: MemberState::SiegeWarfareData(Box::new(fight.siege_state(value, version))),
             },
         ];
         let gde_ref = fort.siege.gde_ref;
@@ -803,15 +886,16 @@ impl SimWorld {
         tracing::info!(war = %war_id, territory = war.territory, "war started in its instance");
     }
 
-    /// The siege data shows the major structures again when one changed its health percent or
-    /// its state (Observed: the entries changed with the gates' hits and break,
-    /// `RS_offensive_war`); its cold value is the attacker's number from the start on.
-    fn show_majors(&mut self, fight: &mut WarFight, attacker: u64) {
-        let majors = fight.majors();
-        if majors == fight.majors_shown {
+    /// The siege data shows the major structures and the weapons again when one changed its
+    /// health percent or its state, or a weapon came or went (Observed: the entries changed
+    /// with the gates' and horns' hits and the gates' break, `RS_offensive_war`); its cold value
+    /// is the attacker's number from the start on.
+    fn show_entries(&mut self, fight: &mut WarFight, attacker: u64) {
+        let entries = fight.entries();
+        if entries == fight.entries_shown {
             return;
         }
-        fight.majors_shown = majors;
+        fight.entries_shown = entries;
         let value = if fight.started {
             attacker
         } else {
@@ -821,13 +905,14 @@ impl SimWorld {
     }
 
     /// The siege data entity gets the points' data as they are now.
-    fn change_siege(&mut self, fight: &WarFight, value: u64) {
+    fn change_siege(&mut self, fight: &mut WarFight, value: u64) {
         let Some(number) = fight.siege else {
             return;
         };
+        let version = fight.next_siege_version();
         let member = BundleMember {
             component: fight.fort.siege.state_component,
-            state: MemberState::SiegeWarfareData(Box::new(fight.siege_state(value))),
+            state: MemberState::SiegeWarfareData(Box::new(fight.siege_state(value, version))),
         };
         self.stations.change_camp(
             number,
@@ -1091,7 +1176,7 @@ mod tests {
     #[test]
     fn the_siege_data_and_the_siege_messages_name_each_point() {
         let fight = fight();
-        let state = fight.siege_state(9428);
+        let state = fight.siege_state(9428, FIRST_VERSION);
         let Some(KeyedList::Full(cold)) = &state.points_cold else {
             panic!("full cold data");
         };
@@ -1193,5 +1278,92 @@ mod tests {
         let invasion = war(INVASION, Uuid::nil());
         assert!(invasion.is_invasion());
         assert_eq!(side_numbers(&invasion), (NO_SIDE_NUMBER, INVASION));
+    }
+
+    /// Observed: `joining_defending_war_2` lists its repeater `fe2d8806...` as
+    /// `dc43fb691315cbad`, its place `46561b6a 45c6e194 ...`, kind 1, 100 % and flag 0;
+    /// `RS_offensive_war` lists the attacker's platform cannon `c8e5b15b...` as
+    /// `c237bba4c26e53fd`, kind 7, flag 1 (1782158408219). A hit lowers the percent and the
+    /// entries show the change.
+    /// Each siege data state's lists have the next version, as retail's changes do.
+    #[test]
+    fn each_siege_data_state_has_the_next_list_version() {
+        use crate::world::turrets::tests::{TABLE, war_world_with};
+        let forts = WarForts::parse(TABLE).expect("forts");
+        let (world, _) = war_world_with(forts, SIDE_DEFENDER, |content| content);
+        let mut fight = world.war_fight().expect("fight").clone();
+        let first = fight.next_siege_version();
+        let second = fight.next_siege_version();
+        assert_eq!(second, first + 1);
+        let Some(KeyedList::Full(hot)) = fight.siege_state(NO_SIDE_NUMBER, second).points_hot
+        else {
+            panic!("a full hot list");
+        };
+        assert_eq!(hot.version, Some(second));
+    }
+
+    #[test]
+    fn the_siege_data_lists_each_weapon_with_its_key_kind_health_and_side() {
+        use crate::world::turrets::tests::{TABLE, war_world_with};
+        const REPEATER_KEY: u64 = 0xdc43_fb69_1315_cbad;
+        const CANNON_KEY: u64 = 0xc237_bba4_c26e_53fd;
+        const RETAIL_XY: [u8; 8] = [0x46, 0x56, 0x1b, 0x6a, 0x45, 0xc6, 0xe1, 0x94];
+        const WHOLE: u8 = 100;
+        let mut table: serde_json::Value = serde_json::from_str(TABLE).expect("table");
+        let kinds = table["turret_kinds"].as_array_mut().expect("kinds");
+        kinds[0]["weapon"] = serde_json::json!({"kind": 1, "xor": "06f03eac159de653"});
+        kinds[1]["weapon"] = serde_json::json!({"kind": 7, "xor": "9aaa09f499dfb635"});
+        let forts = WarForts::parse(&table.to_string()).expect("forts");
+        let (world, _) = war_world_with(forts, SIDE_DEFENDER, |content| content);
+        let fight = world.war_fight().expect("fight");
+        let weapons = fight
+            .siege_state(NO_SIDE_NUMBER, FIRST_VERSION)
+            .weapons
+            .expect("weapon list");
+        let KeyedList::Full(list) = weapons else {
+            panic!("a full list");
+        };
+        let entry = |key: u64| {
+            list.elements
+                .iter()
+                .find(|(listed, _)| *listed == key)
+                .map(|(_, weapon)| *weapon)
+                .expect("entry")
+        };
+        let repeater = entry(REPEATER_KEY);
+        assert_eq!(repeater.place[..RETAIL_XY.len()], RETAIL_XY);
+        assert_eq!(
+            (repeater.kind, repeater.health, repeater.flag),
+            (1, WHOLE, FORT_WEAPON_FLAG)
+        );
+        let cannon = entry(CANNON_KEY);
+        assert_eq!(
+            (cannon.kind, cannon.health, cannon.flag),
+            (7, WHOLE, ATTACKER_WEAPON_FLAG)
+        );
+        let mut hurt = fight.clone();
+        let body = &mut hurt.turrets[0].body;
+        body.health = body.max_health / 2.0;
+        assert_ne!(hurt.entries(), fight.entries(), "the change is shown");
+        let half = hurt
+            .weapons()
+            .into_iter()
+            .find(|(key, _)| *key == REPEATER_KEY)
+            .map(|(_, weapon)| weapon.health);
+        assert_eq!(half, Some(WHOLE / 2));
+    }
+
+    /// A slice with no weapon entry (a table mined before the miner read the component) lists
+    /// no weapon: the siege data leaves child 3 out, as before.
+    #[test]
+    fn a_fight_with_no_weapon_kinds_sends_no_weapon_list() {
+        use crate::world::turrets::tests::{TABLE, war_world_with};
+        let forts = WarForts::parse(TABLE).expect("forts");
+        let (world, _) = war_world_with(forts, SIDE_DEFENDER, |content| content);
+        let fight = world.war_fight().expect("fight");
+        assert_eq!(
+            fight.siege_state(NO_SIDE_NUMBER, FIRST_VERSION).weapons,
+            None
+        );
     }
 }

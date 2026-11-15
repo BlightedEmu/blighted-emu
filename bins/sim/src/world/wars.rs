@@ -15,12 +15,12 @@
 //! their end time exactly). When the attacker wins, it takes the territory's claim
 //! ([`nw_db::resolve_war`]).
 //!
-//! **Declaration**: no capture holds a war declaration (the `Social` war calls of the Azoth
-//! catalog are in no ledger), so the player flow (influence race, the declare call, its cost and
-//! its window) is **Unknown**. A game master declares a war between the owner of a territory and
-//! another company (`!war`, [`super::gm_chat`]) and gives its result; the war instance (the fort
-//! siege, its capture points and siege weapons) is not built, so a war's result comes from the
-//! game master or from the end of its time.
+//! **Declaration**: a company declares a war through the social service (2920, its lottery and
+//! answers: `nw_social::war_declaration`, built from the client's declare flow; no capture holds
+//! a declaration). A game master also declares a war between the owner of a territory and
+//! another company (`!war`, [`super::gm_chat`]) and may give its result. The war's fight runs in
+//! its instance ([`super::war_fight`]: the siege data, its capture points, gates and weapons);
+//! a war with no result at the end of its time goes to the defender.
 //!
 //! **Sign-up** (Observed, every 2762, 2784, 2767, 2771, 2791 of the index): a sign-up names the
 //! side and the territory; retail answers a done sign-up with 2169 `01 00000000` and a 2722 of
