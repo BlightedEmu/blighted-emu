@@ -30,8 +30,8 @@ use nw_messages::facet::{
 use nw_messages::mount::{MOUNT_FACET, MountClientMsg, SUMMON_PENDING_TYPE_INDEX};
 use nw_messages::travel::{LandmarkRef, TravelClientMsg, component};
 use nw_messages::war_signup::{
-    SET_ROSTER_RESPONSE_RECEIVED_TYPE_INDEX, SIDE_ATTACKER, SIGNUP_LIST_RECEIVED_TYPE_INDEX,
-    SIGNUP_RESPONSE_RECEIVED_TYPE_INDEX,
+    SET_ROSTER_RESPONSE_RECEIVED_TYPE_INDEX, SIDE_ATTACKER, SIDE_DEFENDER,
+    SIGNUP_LIST_RECEIVED_TYPE_INDEX, SIGNUP_RESPONSE_RECEIVED_TYPE_INDEX,
 };
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
@@ -134,6 +134,11 @@ pub enum ActivityKind {
     /// as its war leader, as a client's war board screen does; the war is cancelled at the end. Its owner must be a company of
     /// another faction.
     WarSignup,
+    /// The bot's company owns the territory of [`INVASION_TERRITORY`], a game master schedules
+    /// its invasion (`!invasion`), and the bot uses its war board from afar and signs up as a
+    /// defender, the only side of an invasion; the invasion is cancelled and the territory given
+    /// back to no owner at the end.
+    InvasionSignup,
 }
 
 /// One call of a step, written once the bot knows its own entity number.
@@ -305,6 +310,7 @@ impl Activity {
             ActivityKind::Company => company(data),
             ActivityKind::EnemyCompany => Ok(enemy_company()),
             ActivityKind::WarSignup => Ok(war_signup()),
+            ActivityKind::InvasionSignup => Ok(invasion_signup()),
         };
         Self { kind, steps }
     }
@@ -872,6 +878,57 @@ fn war_signup() -> Vec<Step> {
     ]
 }
 
+/// The territory of the invasion sign-up activity: an invasion fort of the content (Observed:
+/// the `invasion` ledger's), not the war sign-up's [`WAR_TERRITORY`], whose owner that activity
+/// needs.
+const INVASION_TERRITORY: u16 = 16;
+/// Minutes before the invasion sign-up activity's invasion starts.
+const INVASION_START_MINUTES: u32 = 10;
+
+/// [`ActivityKind::InvasionSignup`]: the bot's company owns the territory, its invasion is
+/// scheduled, and the bot signs up from afar as a war board screen does (2791 answered with
+/// 2722, a sign-up 2762 of the defender side with 2169).
+fn invasion_signup() -> Vec<Step> {
+    let cancel = format!("!war {INVASION_TERRITORY} cancel");
+    let mut steps = faction_and_company(BOT_FACTION, BOT_COMPANY);
+    steps.extend([
+        step(
+            cancel.clone(),
+            vec![Act::Gm(cancel.clone())],
+            Proof::Line(Box::new(|_| true), "any answer".to_owned()),
+            STEP_WAIT,
+        ),
+        gm_done(format!("!owner {INVASION_TERRITORY} {BOT_COMPANY}")),
+        gm_done(format!(
+            "!invasion {INVASION_TERRITORY} {INVASION_START_MINUTES}"
+        )),
+        step(
+            "use the war board from afar (2791)",
+            vec![war_call(|header| {
+                WarSignupClientMsg::RequestRemoteInteract {
+                    header,
+                    territory: INVASION_TERRITORY,
+                }
+            })],
+            Proof::Message(TERRITORY_FACET_READY_TYPE_INDEX),
+            STEP_WAIT,
+        ),
+        step(
+            "sign up as a defender of the invasion (2762)",
+            vec![war_call(|header| WarSignupClientMsg::RequestSignup {
+                header,
+                side: SIDE_DEFENDER,
+                territory: INVASION_TERRITORY,
+            })],
+            Proof::Message(SIGNUP_RESPONSE_RECEIVED_TYPE_INDEX),
+            STEP_WAIT,
+        ),
+        gm_done(cancel),
+        gm_done(format!("!owner {INVASION_TERRITORY} clear")),
+    ]);
+    steps
+}
+
 /// The bot joins [`ENEMY_FACTION`] and makes [`ENEMY_COMPANY`] ([`ActivityKind::EnemyCompany`]).
 fn enemy_company() -> Vec<Step> {
     faction_and_company(ENEMY_FACTION, ENEMY_COMPANY)
@@ -1034,6 +1091,26 @@ mod tests {
                 .map(|steps| steps.len()),
             Ok(7),
             "the war sign-up needs no level data"
+        );
+        assert_eq!(
+            Activity::of(ActivityKind::InvasionSignup, &data)
+                .steps
+                .map(|steps| steps
+                    .iter()
+                    .map(|step| step.what.clone())
+                    .collect::<Vec<_>>()),
+            Ok(vec![
+                "!faction syndicate".to_owned(),
+                "!company Bot Test Company".to_owned(),
+                "!war 16 cancel".to_owned(),
+                "!owner 16 Bot Test Company".to_owned(),
+                "!invasion 16 10".to_owned(),
+                "use the war board from afar (2791)".to_owned(),
+                "sign up as a defender of the invasion (2762)".to_owned(),
+                "!war 16 cancel".to_owned(),
+                "!owner 16 clear".to_owned(),
+            ]),
+            "the invasion sign-up needs no level data"
         );
         assert_eq!(
             Activity::of(ActivityKind::Level, &data)
