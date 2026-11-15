@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nw_bus::AdminReply;
-use nw_content::progression::{AZOTH_PROGRESSION, Mastery, Progression};
+use nw_content::progression::{AZOTH_PROGRESSION, CAMPING_PROGRESSION, Mastery, Progression};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::items::FIRST_VERSION;
 use nw_messages::{
@@ -436,6 +436,21 @@ impl Masteries {
         self.set(mastery, experience);
     }
 
+    /// Raises the `Camping` rank to the camp tiers open at character level `level` (zero-based,
+    /// [`Progression::camp_tiers_at`]); a higher rank stays, and a character below the first
+    /// tier gets no entry (Observed: retail `Playthrough_Part_01` had no `Camping` entry before
+    /// level 10).
+    pub(super) fn reach_camp_tiers(&mut self, progression: &Progression, level: u32) {
+        let tiers = progression.camp_tiers_at(level);
+        let Some(camping) = progression.categorical(CAMPING_PROGRESSION) else {
+            return;
+        };
+        let reached = camping.experience_for_rank(tiers);
+        if self.experience(camping) < reached {
+            self.set(camping, reached);
+        }
+    }
+
     /// The rank (zero-based) of categorical progression `id`; 0 for one it does not have.
     pub(super) fn rank(&self, progression: &Progression, id: &str) -> u16 {
         progression
@@ -650,14 +665,18 @@ impl Masteries {
             return;
         }
         self.entries[index].1 = experience;
-        let rank_changed = mastery.rank_of(before).0 != mastery.rank_of(experience).0;
-        if rank_changed {
+        let (rank_before, points_before) = mastery.rank_of(before);
+        let (rank, points) = mastery.rank_of(experience);
+        if rank != rank_before {
             self.ranked.insert(index);
         }
-        let fields = if rank_changed {
-            MasteryFields::RANK_AND_POINTS
-        } else {
-            MasteryFields::POINTS
+        // Only the lists that changed: a rank up with the same points in its rank sends the
+        // rank alone (Observed, retail `Playthrough_Part_01` 2,361.837 s: `Camping` rank 1 to 2,
+        // 0 points, child byte `02`).
+        let fields = MasteryFields {
+            progression_id: false,
+            rank: rank != rank_before,
+            points: points != points_before,
         };
         self.changed
             .entry(index)

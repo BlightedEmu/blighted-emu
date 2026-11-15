@@ -51,6 +51,14 @@ pub enum MasteryKind {
 /// points). A weapon tree respec costs `AzothRespecCost` of it.
 pub const AZOTH_PROGRESSION: &str = "Azoth_Currency";
 
+/// The categorical progression of the camp tier (`CategoricalProgressionData`, rank table
+/// `Camping`, `MaxLevel` 5, ranks `@ui_camping_reward_tier_N`, one point a rank): rank `r`
+/// places the camp of tier `r`, rank 0 none.
+pub const CAMPING_PROGRESSION: &str = "Camping";
+/// The `RewardID` prefix of the camp tier milestones of `RewardMilestones` (`CampingT1` to
+/// `CampingT5`).
+const CAMP_TIER_MILESTONE: &str = "campingt";
+
 /// What one rank of a tradeskill gives (`TradeskillRankData`).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RankPerks {
@@ -231,6 +239,9 @@ pub struct Progression {
     respec_costs: BTreeMap<u16, u32>,
     /// The rules of the attribute and weapon points.
     pub points: CharacterPoints,
+    /// The shown character level at which each camp tier opens, lowest first
+    /// ([`Self::camp_tiers_at`]).
+    camp_tier_levels: Vec<u32>,
 }
 
 impl Progression {
@@ -281,6 +292,31 @@ impl Progression {
         .with_progressions(progression_sources(tables))
         .with_respec_costs(respec_costs)
         .with_rank_rewards(rank_reward_sources(tables))
+        .with_camp_tier_levels(camp_tier_levels(tables))
+    }
+
+    /// This progression with the camp tiers opening at the shown character levels `levels`, in
+    /// any order.
+    #[must_use]
+    pub fn with_camp_tier_levels(mut self, levels: impl IntoIterator<Item = u32>) -> Self {
+        self.camp_tier_levels = levels.into_iter().collect();
+        self.camp_tier_levels.sort_unstable();
+        self
+    }
+
+    /// The camp tiers open at character level `level` (zero-based): the `Camping` rank a
+    /// character of that level has. Observed, retail `Playthrough_Part_01` to `_07`: the
+    /// `Camping` entry of the 911 list came with rank 1 in the bundle of the level 10 level up
+    /// (1,606.863 s), and rose to rank 2, 3, 4 and 5 in the bundles of levels 15, 25, 40 and 55,
+    /// the `MilestoneLevel` of `CampingT1` to `CampingT5` (content bundle 25810808).
+    pub fn camp_tiers_at(&self, level: u32) -> u16 {
+        let shown = level.saturating_add(SHOWN_LEVEL_OFFSET);
+        let open = self
+            .camp_tier_levels
+            .iter()
+            .take_while(|opens| **opens <= shown)
+            .count();
+        u16::try_from(open).unwrap_or(u16::MAX)
     }
 
     /// This progression with the rank rewards `rewards` (progression id, rank, `XPReward`):
@@ -450,6 +486,7 @@ impl Progression {
             others: Vec::new(),
             respec_costs: BTreeMap::new(),
             points: CharacterPoints::default(),
+            camp_tier_levels: Vec::new(),
         }
     }
 
@@ -581,6 +618,18 @@ fn tradeskill_sources(tables: &Tables) -> Vec<TradeskillSource> {
 /// The other categorical progressions of `tables`: the `CategoricalProgressionData` rows whose
 /// `RankTableId` names a `CategoricalProgressionRankData` table other than `WeaponMastery`,
 /// with that table's rows.
+/// The `MilestoneLevel` of each camp tier milestone of `RewardMilestones` (content bundle
+/// 25810808: `CampingT1` 10, `CampingT2` 15, `CampingT3` 25, `CampingT4` 40, `CampingT5` 55).
+fn camp_tier_levels(tables: &Tables) -> Vec<u32> {
+    tables
+        .reward_milestone_data
+        .iter()
+        .flat_map(|table| &table.rows)
+        .filter(|row| row.reward_id.to_lowercase().starts_with(CAMP_TIER_MILESTONE))
+        .filter_map(|row| u32::try_from(row.milestone_level).ok())
+        .collect()
+}
+
 /// The `XPReward` of every rank of every categorical progression's rank table (progression
 /// id, rank, reward); a rank without one is left out.
 fn rank_reward_sources(tables: &Tables) -> Vec<(String, i64, i64)> {
@@ -843,6 +892,18 @@ pub(crate) mod tests {
     const CAMPING_RANK_ONE_REWARD: i64 = 100;
     /// `AzothRespecCost` of the weapon ranks 9 to 11 (content bundle 25810808).
     const RESPEC_COSTS: [(i64, i64); 3] = [(11, 6), (9, 0), (10, 6)];
+
+    #[test]
+    fn camp_tiers_open_at_their_shown_milestone_levels() {
+        /// `MilestoneLevel` of `CampingT1` to `CampingT5` (content bundle 25810808), out of order.
+        const MILESTONES: [u32; 5] = [25, 10, 55, 15, 40];
+        let progression = Progression::default().with_camp_tier_levels(MILESTONES);
+        // Zero-based levels: 9 is shown as level 10.
+        for (level, tiers) in [(0, 0), (8, 0), (9, 1), (13, 1), (14, 2), (24, 3), (39, 4), (54, 5), (64, 5)] {
+            assert_eq!(progression.camp_tiers_at(level), tiers, "level {level}");
+        }
+        assert_eq!(Progression::default().camp_tiers_at(64), 0, "no milestones");
+    }
 
     #[test]
     fn currencies_keep_a_capped_balance_and_respecs_cost_by_rank() {

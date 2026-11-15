@@ -5699,12 +5699,14 @@ impl Neighbourhood<'_> {
                 });
                 // The experience and the level: whole with the first card, then after each
                 // change; a change of level sends the new level with the experience (retail
-                // 899 at each level up, progression-and-gm-mode note section 3). The rested
-                // pool goes with the first card and with each change of it.
+                // 899 at each level up, progression-and-gm-mode note section 3), and the camp
+                // tiers of the level go in the same bundle's 911 list. The rested pool goes
+                // with the first card and with each change of it.
                 let rested_changed = player.rested.take_change();
                 let progression = if first {
                     let level = self.progression.level_of(player.experience);
                     player.level_sent = Some(level);
+                    player.masteries.reach_camp_tiers(self.progression, level);
                     Some(
                         ProgressionState::login_at_level(level, player.experience)
                             .with_rested(player.rested.experience()),
@@ -5714,6 +5716,7 @@ impl Neighbourhood<'_> {
                     let leveled = player.level_sent != Some(level);
                     player.level_sent = Some(level);
                     let state = if leveled {
+                        player.masteries.reach_camp_tiers(self.progression, level);
                         ProgressionState::level_up(level, player.experience)
                     } else {
                         ProgressionState::experience(player.experience)
@@ -7495,6 +7498,150 @@ mod tests {
                     if vitals.slot_0.is_some_and(|slot| slot.vitals_data.is_some_and(|life| !life.is_dead()))
             )),
             "its life block: alive"
+        );
+    }
+
+    /// The `Camping` entry of the own 911 list in the bundle of `who`: its rank and points as that
+    /// bundle sends them (`None` for a list it leaves out), or `None` without a 911 or without
+    /// the entry. `ids` keeps the list's ids across bundles.
+    fn camping_in(
+        outgoing: &[Outgoing],
+        who: &ConnectionRef,
+        ids: &mut Vec<u32>,
+    ) -> Option<(Option<u16>, Option<u64>)> {
+        use nw_messages::list_delta::ReplicatedList;
+        let bundle = bundle_of(outgoing, who)?;
+        let known = nw_messages::BundlePayload::decode_known(&bundle.payload).expect("payload");
+        let state = known.members.iter().find_map(|(member, _)| match &member.state {
+            MemberState::CategoricalProgression(state) => Some(state.clone()),
+            _ => None,
+        })?;
+        match &state.progression_ids {
+            Some(ReplicatedList::Full(list)) => ids.clone_from(&list.elements),
+            Some(ReplicatedList::Changes(changes)) => {
+                for change in changes {
+                    let index = usize::try_from(change.index).expect("index");
+                    if index >= ids.len() {
+                        ids.resize(index + 1, 0);
+                    }
+                    ids[index] = change.value;
+                }
+            }
+            None => {}
+        }
+        let camping = nw_formats::objectstream::lowercase_crc32(
+            nw_content::progression::CAMPING_PROGRESSION,
+        );
+        let index = ids.iter().position(|id| *id == camping)?;
+        fn at<T: Copy>(list: Option<&ReplicatedList<T>>, index: usize) -> Option<T> {
+            match list? {
+                ReplicatedList::Full(list) => list.elements.get(index).copied(),
+                ReplicatedList::Changes(changes) => changes
+                    .iter()
+                    .find(|change| usize::try_from(change.index).is_ok_and(|at| at == index))
+                    .map(|change| change.value),
+            }
+        }
+        let sent = (
+            at(state.ranks.as_ref(), index),
+            at(state.points.as_ref(), index),
+        );
+        (sent != (None, None)).then_some(sent)
+    }
+
+    /// A world whose players level up by 100 experience a level and whose camp tiers open at
+    /// the retail milestone levels, with one player.
+    fn camping_world(number: u64) -> SimWorld {
+        use nw_content::progression::{CAMPING_PROGRESSION, Progression, ProgressionSource};
+        const LEVEL_EXPERIENCE: u32 = 100;
+        const LEVELS: u32 = 60;
+        /// `Camping`: `MaxLevel` 5, one point a rank (content bundle 25810808).
+        const CAMPING_TOP: i64 = 5;
+        /// `MilestoneLevel` of `CampingT1` to `CampingT5` (content bundle 25810808).
+        const CAMP_TIER_LEVELS: [u32; 5] = [10, 15, 25, 40, 55];
+        let progression = Progression::build(
+            (0..LEVELS).map(|level| (i64::from(level), i64::from(level * LEVEL_EXPERIENCE))),
+            std::iter::empty(),
+            std::iter::empty::<(&str, i64)>(),
+        )
+        .with_progressions([ProgressionSource {
+            id: CAMPING_PROGRESSION.to_owned(),
+            max_level: CAMPING_TOP,
+            auto_rank_up: true,
+            ranks: (0..=CAMPING_TOP).map(|rank| (rank, 1)).collect(),
+        }])
+        .with_camp_tier_levels(CAMP_TIER_LEVELS);
+        let mut world = world_with_spawns(Vec::new());
+        world.content = Arc::new(crate::player_content::PlayerContent {
+            progression,
+            ..crate::player_content::PlayerContent::default()
+        });
+        join(&mut world, number, CELL_M / 2.0);
+        world
+    }
+
+    /// Sets the level (zero-based) of player `number`.
+    fn set_level(world: &mut SimWorld, number: u64, level: u32) {
+        let command = nw_bus::AdminCommand {
+            request: Uuid::from_u128(1),
+            actor: None,
+            action: nw_bus::AdminAction::SetLevel {
+                entity: number,
+                level,
+            },
+        };
+        assert_eq!(world.admin(&command, NOW), nw_bus::AdminReply::Done);
+    }
+
+    #[test]
+    fn a_level_up_opens_its_camp_tier_in_the_same_bundle_as_retail() {
+        const PLAYER: u64 = 1;
+        let mut world = camping_world(PLAYER);
+        let who = connection(PLAYER);
+        let mut ids = Vec::new();
+        let mut now = NOW + OWN_CARD_DELAY_MS;
+        let mut next = |world: &mut SimWorld, ids: &mut Vec<u32>| {
+            let outgoing = tick(world, now);
+            now += crate::config::TICK_MS;
+            camping_in(&outgoing.messages, &who, ids)
+        };
+        assert_eq!(next(&mut world, &mut ids), None, "no camp tier at level 1");
+        set_level(&mut world, PLAYER, 8);
+        assert_eq!(next(&mut world, &mut ids), None, "none at level 9");
+        // Retail `Playthrough_Part_01` 1,606.863 s: a new entry, rank 1 and 0 points, with the
+        // level 10 level up.
+        set_level(&mut world, PLAYER, 9);
+        assert_eq!(next(&mut world, &mut ids), Some((Some(1), Some(0))));
+        // 2,361.837 s: rank 2 alone with the level 15 level up.
+        set_level(&mut world, PLAYER, 14);
+        assert_eq!(next(&mut world, &mut ids), Some((Some(2), None)));
+        set_level(&mut world, PLAYER, 13);
+        assert_eq!(next(&mut world, &mut ids), None, "a lower level keeps the tier");
+    }
+
+    #[test]
+    fn a_character_past_a_camp_tier_has_it_in_its_first_card() {
+        const PLAYER: u64 = 1;
+        /// Level 16, zero-based (the live player of 2026-11-15 had no tier at level 16).
+        const LEVEL: u32 = 15;
+        let mut world = camping_world(PLAYER);
+        set_level(&mut world, PLAYER, LEVEL);
+        let mut ids = Vec::new();
+        let outgoing = tick(&mut world, NOW + OWN_CARD_DELAY_MS);
+        assert_eq!(
+            camping_in(&outgoing.messages, &connection(PLAYER), &mut ids),
+            Some((Some(2), Some(0))),
+            "the whole list holds the tier of the level"
+        );
+        let entity = world.player_by_number(PLAYER).expect("player");
+        let player = world.world.get::<Player>(entity).expect("player");
+        assert_eq!(
+            player.masteries.rank(
+                &world.content.progression,
+                nw_content::progression::CAMPING_PROGRESSION
+            ),
+            2,
+            "a tier 2 camp may be placed"
         );
     }
 

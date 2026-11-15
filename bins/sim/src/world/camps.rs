@@ -1354,6 +1354,12 @@ mod retail_tests {
             costs.of("CampT1"),
             [("WoodT1".to_owned(), 5), ("FlintT1".to_owned(), 1)]
         );
+        // Retail `Playthrough_Part_01` to `_07`: `Camping` rank 1 to 5 with the level ups to
+        // levels 10, 15, 25, 40 and 55 (zero-based 9, 14, 24, 39, 54).
+        let progression = nw_content::progression::Progression::of_tables(&bundle.tables);
+        for (level, tiers) in [(8, 0), (9, 1), (13, 1), (14, 2), (24, 3), (39, 4), (54, 5)] {
+            assert_eq!(progression.camp_tiers_at(level), tiers, "level {level}");
+        }
         let pvp = camps
             .blueprint_of_crc(0x89a7_af2d)
             .expect("the Hivecamp blueprint");

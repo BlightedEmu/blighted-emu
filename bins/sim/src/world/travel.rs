@@ -61,7 +61,7 @@ use nw_bus::{
     ConnectionRef, HomeRecord, HousingItem, OwnedHome, PlacedCamp, PlayerTravel, Point, StoredPoint,
 };
 use nw_content::camps::default_camp;
-use nw_content::progression::AZOTH_PROGRESSION;
+use nw_content::progression::{AZOTH_PROGRESSION, CAMPING_PROGRESSION};
 use nw_messages::facet::component as player_component;
 use nw_messages::items::{FIRST_VERSION, FullList};
 use nw_messages::travel::{
@@ -141,9 +141,6 @@ const DECORATION_INVALID_ITEM_ID: u8 = 5;
 const DECORATION_ITEM_ID_EXCEEDED: u8 = 6;
 /// `eTerritoryLandmarkType_InnRespawn` (the client's enum registration `FUN_14465e8e0`).
 const INN_RESPAWN_LANDMARK: u8 = 20;
-/// The categorical progression whose rank is the tier of the camp a player places (`Camping`,
-/// `MaxLevel` 5, ranks `@ui_camping_reward_tier_N`); rank 0 places none.
-const CAMPING_PROGRESSION: &str = "Camping";
 /// The game event of a placed camp.
 pub(super) const BIND_CAMP_EVENT: &str = "BindCamp";
 /// The 441 result of a placed structure (0 in all 5 retail answers).

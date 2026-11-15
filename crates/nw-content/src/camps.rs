@@ -7,7 +7,8 @@
 //! `CampSkin_MetalFest02_A` in `Hive_camping` and `CampSkin_MetalFest02_A_PVP` in `Hivecamp`).
 //! The camp's tier is the player's `Camping` rank: its group's crafting station type is
 //! `camp<tier>` and its tier buildable `CampT<tier>` (Observed: `crc("camp5")` and
-//! `crc("campt5")` on both retail tier 5 camps, of skin blueprints).
+//! `crc("campt5")` on both retail tier 5 camps, of skin blueprints). The rank rises with the
+//! character level ([`crate::progression::Progression::camp_tiers_at`]).
 
 use std::collections::HashMap;
 

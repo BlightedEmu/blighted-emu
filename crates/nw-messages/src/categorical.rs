@@ -8,8 +8,9 @@
 //! child 2 the points (`u64`, the experience inside the current rank). The login state sends all
 //! three lists whole ([`CategoricalProgressionState::full`]). A later change names entries by
 //! list position ([`CategoricalProgressionState::changes`]): retail sends only the children that
-//! changed (child byte `04` for points, `06` for rank and points, `07` for a new entry), and a new
-//! entry goes at index = the old length on all three children.
+//! changed (child byte `02` for the rank, `04` for points, `06` for rank and points, `07` for a
+//! new entry; `02` in `Playthrough_Part_01` at 2,361.837 s, `Camping` rank 1 to 2 with 0 points),
+//! and a new entry goes at index = the old length on all three children.
 
 use crate::list_delta::{ReplicatedList, child_changes, full_child, write_child};
 use crate::slots::{SLOT_0, children_mask, read_slot_0, write_children};
@@ -209,6 +210,12 @@ mod tests {
         0x0a, 0x06, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
     ];
     const RETAIL_FIRST_KILL_VERSION: u64 = 5380;
+    /// Retail `Playthrough_Part_01` 2,361.837 s: `Camping` (index 6) from rank 1 to rank 2 with 0
+    /// points in the rank child alone, beside the rank up of another entry (index 3) with its
+    /// points.
+    const RETAIL_RANK_ALONE: [u8; 31] = [0x01, 0x06, 0x02, 0x03, 0x06, 0x01, 0xd5, 0x9e, 0x08, 0x00, 0x02, 0x03, 0x01, 0x00, 0x00, 0x09, 0x01, 0x01, 0x03, 0x01, 0xd5, 0x9e, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x74];
+    /// The list index of `Camping` in [`RETAIL_RANK_ALONE`].
+    const RETAIL_CAMPING_INDEX: u32 = 6;
     /// Retail rank up of the blunderbuss (t237696): its rank at index 6, the points of both
     /// weapons, version 6248.
     const RETAIL_RANK_UP: [u8; 35] = [
@@ -324,6 +331,26 @@ mod tests {
         );
         assert_eq!(encode(&points), RETAIL_POINTS);
         assert_eq!(decode(&RETAIL_POINTS), points);
+    }
+
+    #[test]
+    fn a_rank_up_with_the_same_points_sends_the_rank_alone_as_retail() {
+        use crate::list_delta::ReplicatedList;
+        let state = decode(&RETAIL_RANK_ALONE);
+        let Some(ReplicatedList::Changes(ranks)) = &state.ranks else {
+            panic!("rank changes: {state:?}");
+        };
+        let ranks: Vec<(u32, u16)> = ranks.iter().map(|change| (change.index, change.value)).collect();
+        assert!(ranks.contains(&(RETAIL_CAMPING_INDEX, 2)), "{ranks:?}");
+        let Some(ReplicatedList::Changes(points)) = &state.points else {
+            panic!("point changes: {state:?}");
+        };
+        assert!(
+            points.iter().all(|change| change.index != RETAIL_CAMPING_INDEX),
+            "no points of Camping: {points:?}"
+        );
+        assert_eq!(state.progression_ids, None);
+        assert_eq!(encode(&state), RETAIL_RANK_ALONE);
     }
 
     #[test]
