@@ -3109,7 +3109,15 @@
               "proof": "live"
             },
             {
-              "check": "A bot signs up for a war the way the client's war board screen does: the remote board use (2791) gets the territory and side (2722), the sign-up (2762) the done answer (2169) and the side, the sign-up list (2767) holds the bot (2726), and its sign-ups go out with a rising version (`nw-testclient` activity `war-signup`, VM 2026-11-15).",
+              "check": "A bot signs up for a war the way the client's war board screen does: the remote board use (2791) gets the territory and side (2722), the sign-up (2762) the done answer (2169) and the side, page 1 of the sign-up list (2767) holds the bot (2726), its sign-ups go out with a rising version, and its Fill Roster (2777) as war leader is done (2733) (`nw-testclient` activity `war-signup`, VM 2026-11-15).",
+              "proof": "bots"
+            },
+            {
+              "check": "The army groups screen's standby list shows the players of the viewer's side, 12 a page, as retail (the client asks for a page, not a side). Live 2026-11-15 a defender's list was empty: the server read the page number 1 as the attacker side (tests and a bot; not seen in the game yet).",
+              "proof": "tests"
+            },
+            {
+              "check": "Fill Roster puts the standby players into the free roster places (Inferred order: sign-up order, group by group; no retail capture of the call). Live 2026-11-15 the button did nothing: the server ignored the call (bot: done answer; not seen in the game yet).",
               "proof": "bots"
             },
             {
