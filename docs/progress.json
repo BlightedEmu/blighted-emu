@@ -3101,8 +3101,8 @@
               "proof": "live"
             },
             {
-              "check": "A player of the defending faction can sign up at the war board. Live 2026-11-15 both buttons were gray with \"You must have a faction to sign up for a war\": the client takes the local player's faction from its login card, and the server sent it as a change before the client was ready (a login in a town also put the sanctuary change in the card's place). The login card now carries the whole faction state as retail's does (tests only).",
-              "proof": "tests"
+              "check": "A player of the defending faction signs up at the war board (live 2026-11-15: the Reekwater war board's defender sign-up was taken and saved). Before, both buttons were gray with \"You must have a faction to sign up for a war\": the client takes the local player's faction from its login card, and the server sent it as a change before the client was ready (a login in a town also put the sanctuary change in the card's place). The login card now carries the whole faction state as retail's does.",
+              "proof": "live"
             },
             {
               "check": "War times show the server's time zone as retail (US East, EST) instead of the raw label `@ui_server_utc_0`: the client takes the zone and the siege window hours from the channel cluster id, which is now `iad` (live 2026-11-15: the war board shows the war time in EST).",
