@@ -103,7 +103,8 @@ values.
   and, during login (`QueryForRemoteConfigClass` / `WaitingForRemoteConfigClass`),
   `WorldId/<our world id>`. It asks for no `CognitoId` key.
 - **Observed (character-select note).** An empty dimension value skips that key. `RegionId` is
-  `client-connection.authorization.cluster` (ours: `blighted`), `CognitoId` is
+  `client-connection.authorization.cluster` (ours: `blighted` until 2026-11-15, now `iad`: the
+  client also takes the time zone of war times from it), `CognitoId` is
   `client-connection.authorization.cognito-pool-id`.
 - **Observed.** `-CognitoPool <id>` sets that pool id (`FUN_146467680`). The other readers of the
   pool id are config parsers, the world list field `cognitoPoolId` sent to our own gateway
@@ -207,7 +208,7 @@ retail object. Layer order (lowest first): `ProductId`, `RegionId`, `CognitoId`,
 | Retail key (private reference) | Our key |
 |---|---|
 | `public/.../ProductId/STEAM_APP_ID.1063730/versionless` | same |
-| `public/.../RegionId/iad-prod/versionless` | `public/.../RegionId/blighted/versionless` |
+| `public/.../RegionId/iad-prod/versionless` | `public/.../RegionId/iad/versionless` |
 | `public/.../CognitoId/us-east-1:<Amazon pool>/versionless` | `public/.../CognitoId/b04fbfcd-942c-472d-88c0-c762c4076b2f/versionless` |
 | `public/.../WorldId/<retail world>/versionless` | `public/.../WorldId/8d0f4c2e-0000-4000-8000-000000000001/versionless` |
 | the same four for `publicGameplay` | the same four for `publicGameplay` |

@@ -53,8 +53,14 @@ const CHANNEL_KEY_EXTRA_BYTES: [u8; 2] = [b'_', b'-'];
 /// The channel document route: one path segment, `<channel key>.json`.
 const CHANNEL_ROUTE: &str = "/{file}";
 /// Id of the one cluster in the channel document. The client also names its `RegionId`
-/// remote-config layers after it (`client-connection.authorization.cluster`).
-pub(crate) const CLUSTER_ID: &str = "blighted";
+/// remote-config layers after it (`client-connection.authorization.cluster`), and it takes the
+/// server's time zone and siege window hours from it: the `GuildSiegeWindowRegionData` rows of
+/// `sharedassets/genericassets/playerbaseattributes.pbadb` are named `iad` (UTC-5, EST), `pdx`,
+/// `fra`, `gru`, `nrt`, `syd` and `loc` (retail clusters such as `iad-prod`; `loc` for the
+/// client's built-in `localhost` channel). An id with no row shows its war times in UTC with the
+/// raw label `@ui_server_utc_0` (live war board 2026-11-15). `iad`: US East, where the servers
+/// run.
+pub(crate) const CLUSTER_ID: &str = "iad";
 /// Region text in every `publicApis` element; the client signs requests with it, and pings
 /// `dynamodb.<region>.amazonaws.com` for it (region ping note).
 pub const API_REGION: &str = "us-east-1";
@@ -908,6 +914,19 @@ pub(crate) mod tests {
         // then calls Amazon's identity host (unknowns note, second pass sections 2 and 8).
         let value = serde_json::to_value(&document).expect("json");
         assert!(value.get("platformMetadata").is_none());
+    }
+
+    #[test]
+    fn the_cluster_is_a_siege_window_region_of_the_client() {
+        /// The `GuildSiegeWindowRegionData` row names of the client (build 25810808).
+        const SIEGE_WINDOW_REGIONS: [&str; 7] = ["iad", "pdx", "fra", "gru", "nrt", "syd", "loc"];
+        let document = channel_document(&valid(), OTHER_KEY);
+        let clusters: Vec<&String> = document.clusters.keys().collect();
+        assert_eq!(clusters, [CLUSTER_ID]);
+        assert!(
+            SIEGE_WINDOW_REGIONS.contains(&CLUSTER_ID),
+            "without a row the client shows @ui_server_utc_0"
+        );
     }
 
     #[test]
