@@ -3097,8 +3097,16 @@
               "proof": "tests"
             },
             {
-              "check": "A player opens a town war board live.",
+              "check": "A player opens a town war board live: with a game master war on Reekwater the Reekwater war board opened the sign-up window with both companies, their factions and the fort (live 2026-11-15).",
+              "proof": "live"
+            },
+            {
+              "check": "A player of the defending faction can sign up at the war board. Live 2026-11-15 both buttons showed \"Sign up not available\"; by the client's sign-up script the defender button should be on, so the cause is not found yet.",
               "proof": "none"
+            },
+            {
+              "check": "War times show the server's time zone as retail (US East, EST) instead of the raw label `@ui_server_utc_0`: the client takes the zone and the siege window hours from the channel cluster id, which is now `iad` (tests only, 2026-11-15).",
+              "proof": "tests"
             }
           ]
         },
@@ -3132,6 +3140,10 @@
             },
             {
               "check": "The town project boards come into view as retail sends them (card, interact state, territory link), a use is no longer taken for a faction representative's board, and the use shows the territory's projects in the board's own slot, so the client can list the missions of those projects (tests only, 2026-11-14). Before, the board showed no active project and no mission (live 2026-11-14).",
+              "proof": "tests"
+            },
+            {
+              "check": "A player who logs in inside a town uses its boards: the server finds the town from the town's own areas, as the client names only those after a login there (before, every board use found no town and sent the board no projects). The town board state names expiration 0, as retail.",
               "proof": "tests"
             },
             {
@@ -3627,6 +3639,6 @@
     "The expedition objective panel, start and end times, score, death's door status, mutation context and the Desiccated explosion (2026-11-13, tests only)."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-14",
+  "updated": "2026-11-15",
   "lastCommit": "6afc435e"
 }
