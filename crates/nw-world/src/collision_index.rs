@@ -53,7 +53,7 @@ const ON_TOP_M: f32 = 0.1;
 
 /// An axis-aligned box.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Bounds {
+pub struct Bounds {
     min: Vec3,
     max: Vec3,
 }
@@ -63,6 +63,12 @@ impl Bounds {
         min: [f32::INFINITY; AXES],
         max: [f32::NEG_INFINITY; AXES],
     };
+
+    /// Whether `point` is in the box (its faces count as in).
+    #[must_use]
+    pub fn holds(&self, point: Vec3) -> bool {
+        (0..AXES).all(|axis| point[axis] >= self.min[axis] && point[axis] <= self.max[axis])
+    }
 
     fn grow(&mut self, point: Vec3) {
         for ((min, max), value) in self.min.iter_mut().zip(&mut self.max).zip(point) {
@@ -982,6 +988,12 @@ fn convex_hits(
 }
 
 /// The bounds of a geometry in its own space.
+/// The world box around `geometry` placed by `place`: a point outside it is outside the shape.
+#[must_use]
+pub fn shape_bounds(geometry: &Geometry, place: &Affine) -> Bounds {
+    geometry_bounds(geometry).placed(place)
+}
+
 fn geometry_bounds(geometry: &Geometry) -> Bounds {
     let mut bounds = Bounds::EMPTY;
     let spread = |bounds: &mut Bounds, centre: Vec3, radius: f32| {

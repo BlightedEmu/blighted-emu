@@ -61,6 +61,7 @@ use nw_formats::rigid::Vec3;
 use serde::{Deserialize, Serialize};
 
 use crate::collision::{Geometry, invert, transform_point};
+use crate::collision_index::{Bounds, shape_bounds};
 use crate::dungeon_scripts::Detector;
 use crate::level_script::{AREA_STATUS_EFFECT_TYPE, FIELD_DEPTH, SHAPE_HEIGHT_NAME, find};
 
@@ -151,6 +152,14 @@ impl EffectArea {
             ),
             _ => self.volume.contains(point),
         }
+    }
+
+    /// The box around its volume (in the volume's space): a point outside it is not inside.
+    /// Its corners are far cheaper than [`EffectArea::contains`] (an inverted place and every
+    /// triangle), so a caller with many points asks the box first.
+    #[must_use]
+    pub fn bounds(&self) -> Bounds {
+        shape_bounds(&self.volume.shape, &self.volume.place)
     }
 
     /// The area placed by `place` (the world from the area's slice space).
@@ -740,6 +749,39 @@ mod tests {
             place
         });
         assert!(moved.contains([2.0, 8.0, 101.0]) && !moved.contains([2.0, 8.0, 1.0]));
+    }
+
+    /// The box of an area holds every point the area holds, and not the points far outside.
+    #[test]
+    fn an_area_box_holds_its_points_and_follows_its_place() {
+        const HEIGHT_M: f32 = 13.0;
+        const LIFT_M: f32 = 100.0;
+        let corners = [[0.0, 0.0], [10.0, 0.0], [10.0, 4.0], [4.0, 4.0], [4.0, 10.0], [0.0, 10.0]];
+        let area = EffectArea {
+            effects: vec!["ApplyCurseL4".to_owned()],
+            removes: Vec::new(),
+            volume: Detector {
+                shape: prism_mesh(&corners, HEIGHT_M).expect("prism"),
+                place: IDENTITY_AFFINE,
+            },
+            rules: AreaRules::default(),
+        };
+        let bounds = area.bounds();
+        for inside in [[2.0, 8.0, 1.0], [8.0, 2.0, 12.0], [0.0, 0.0, 0.0], [10.0, 10.0, HEIGHT_M]] {
+            assert!(bounds.holds(inside), "{inside:?}");
+        }
+        assert!(
+            bounds.holds([8.0, 8.0, 1.0]),
+            "the notch is in the box, not in the area"
+        );
+        assert!(!bounds.holds([11.0, 2.0, 1.0]) && !bounds.holds([2.0, 2.0, HEIGHT_M + 1.0]));
+        let moved = area.placed(&{
+            let mut place = IDENTITY_AFFINE;
+            place[2][TRANSLATION_COLUMN] = LIFT_M;
+            place
+        });
+        assert!(moved.bounds().holds([2.0, 8.0, LIFT_M + 1.0]));
+        assert!(!moved.bounds().holds([2.0, 8.0, 1.0]));
     }
 
     /// A polygon prism component's corners (`AZ::Vector2`, big-endian) and height; an area's

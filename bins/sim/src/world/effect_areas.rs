@@ -196,10 +196,14 @@ impl SimWorld {
             .filter(|(_, _, _, vitals)| !vitals.health.is_dead())
             .map(|(entity, _, body, _)| (entity, body.motion.position()))
             .collect();
+        // The box first: a load run with 110 players spent a seventh of the sim's time in the
+        // mesh test of every level area for every player (profile, 2026-11-15).
         let within = |area: &EffectArea, centre: Position| -> Vec<Entity> {
+            let bounds = area.bounds();
             players
                 .iter()
-                .filter(|(_, at)| area.contains([at.x - centre.x, at.y - centre.y, at.z - centre.z]))
+                .map(|(entity, at)| (entity, [at.x - centre.x, at.y - centre.y, at.z - centre.z]))
+                .filter(|(_, point)| bounds.holds(*point) && area.contains(*point))
                 .map(|(entity, _)| *entity)
                 .collect()
         };
