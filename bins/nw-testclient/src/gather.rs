@@ -603,6 +603,10 @@ impl FleetBot for GatherBot {
         }
     }
 
+    fn time_sync_due(&mut self) -> Option<u64> {
+        self.view.time_sync_due()
+    }
+
     fn report(self, outcome: &RepOutcome) -> GatherBotReport {
         GatherBotReport {
             registered: outcome.status == Some(REGISTRATION_STATUS_AUTHORIZED),

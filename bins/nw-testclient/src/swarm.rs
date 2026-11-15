@@ -443,6 +443,10 @@ impl FleetBot for Bot {
         )
     }
 
+    fn time_sync_due(&mut self) -> Option<u64> {
+        self.view.time_sync_due()
+    }
+
     fn report(self, outcome: &RepOutcome) -> BotReport {
         let track = self
             .walk

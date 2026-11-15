@@ -20,6 +20,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use crate::pair::Check;
+use crate::play::send_time_sync;
 use crate::rep::{RepClient, RepError};
 use crate::udp::{ANY_LOCAL, Hold, RepOutcome, RunError, run_rep_on};
 use crate::walk::{WalkSettings, login_token, walk};
@@ -98,6 +99,10 @@ pub trait FleetBot: Send + 'static {
         outcome: &mut RepOutcome,
         since: Duration,
     ) -> Result<(), RepError>;
+
+    /// The own number once, when the first time sync request is due
+    /// ([`crate::view::OwnView::time_sync_due`]); the run sends it after the tick.
+    fn time_sync_due(&mut self) -> Option<u64>;
 
     /// The report of a run that ended.
     fn report(self, outcome: &RepOutcome) -> Self::Report;
@@ -390,7 +395,11 @@ async fn run_bot<B: FleetBot>(
         client,
         hold,
         fleet.registration_timeout,
-        |client, outcome, since| bot.tick(client, outcome, since),
+        |client, outcome, since| {
+            bot.tick(client, outcome, since)?;
+            bot.time_sync_due()
+                .map_or(Ok(()), |own| send_time_sync(client, own))
+        },
     )
     .await;
     match ran {
@@ -482,6 +491,10 @@ mod tests {
             _: Duration,
         ) -> Result<(), RepError> {
             Ok(())
+        }
+
+        fn time_sync_due(&mut self) -> Option<u64> {
+            None
         }
 
         fn report(self, _: &RepOutcome) -> String {

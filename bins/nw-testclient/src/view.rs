@@ -156,6 +156,10 @@ pub struct OwnView {
     own: Option<u64>,
     /// Its hold on the ids of its own player and the entities its owner view keeps.
     holder: IdHolder,
+    /// Whether a bundle named the own player: the own spawn card came.
+    own_card_seen: bool,
+    /// Whether [`OwnView::time_sync_due`] gave the own number already.
+    time_sync_given: bool,
 }
 
 impl OwnView {
@@ -171,7 +175,12 @@ impl OwnView {
     /// Learns the own number from `read`; returns the own position when it is in a bundle.
     fn apply(&mut self, read: &Read) -> Option<WorldPosition> {
         match read {
-            Read::Bundle(bundle) => bundle.local_player_position(),
+            Read::Bundle(bundle) => {
+                if bundle.updates.iter().any(SlotUpdate::is_local_player) {
+                    self.own_card_seen = true;
+                }
+                bundle.local_player_position()
+            }
             Read::Entry { own, .. } => {
                 self.own = *own;
                 None
@@ -190,6 +199,18 @@ impl OwnView {
     /// The own entity number, once the entry message named it.
     pub const fn own_number(&self) -> Option<u64> {
         self.own
+    }
+
+    /// The own entity number, once, when the first time sync request is due: the own spawn card
+    /// came. The client sends that request when it is in the game, and the sim holds every other
+    /// entity until then (`SimWorld::heard_from`; with the local player card on, as the
+    /// real-client stack runs). Before the card the sim ignores the request.
+    pub fn time_sync_due(&mut self) -> Option<u64> {
+        let own = self
+            .own
+            .filter(|_| self.own_card_seen && !self.time_sync_given)?;
+        self.time_sync_given = true;
+        Some(own)
     }
 }
 
@@ -251,6 +272,11 @@ impl SyncView {
     /// The own entity number, once the entry message named it.
     pub const fn own_number(&self) -> Option<u64> {
         self.own.own_number()
+    }
+
+    /// The own number when the first time sync request is due ([`OwnView::time_sync_due`]).
+    pub fn time_sync_due(&mut self) -> Option<u64> {
+        self.own.time_sync_due()
     }
 }
 
@@ -368,6 +394,11 @@ impl CombatView {
     /// The mob cards read so far.
     pub const fn mob_cards(&self) -> u64 {
         self.mob_cards
+    }
+
+    /// The own number when the first time sync request is due ([`OwnView::time_sync_due`]).
+    pub fn time_sync_due(&mut self) -> Option<u64> {
+        self.own.time_sync_due()
     }
 
     /// 2071 messages for hits this bot made.
@@ -618,6 +649,36 @@ mod tests {
         assert_eq!(view.read(&seen).expect("read"), Some(at(3.0)));
         let others_only = bundle(2, &[(OTHER, at(4.0))]);
         assert_eq!(view.read(&others_only).expect("read"), None);
+    }
+
+    #[test]
+    fn the_first_time_sync_is_due_once_after_the_own_card() {
+        let mut view = OwnView::default();
+        for message in login() {
+            view.read(&message).expect("read");
+        }
+        assert_eq!(
+            view.time_sync_due(),
+            None,
+            "the entry alone is not the own card"
+        );
+        view.read(&bundle(0, &[(OTHER, at(2.0))])).expect("read");
+        assert_eq!(view.time_sync_due(), None, "a bundle of others only");
+        view.read(&bundle(1, &[(OWN, at(1.0))])).expect("read");
+        assert_eq!(view.time_sync_due(), Some(OWN));
+        view.read(&bundle(2, &[(OWN, at(1.5))])).expect("read");
+        assert_eq!(view.time_sync_due(), None, "only the first time sync");
+    }
+
+    #[test]
+    fn a_combat_view_gives_the_first_time_sync_after_the_own_card() {
+        let mut view = CombatView::default();
+        for message in login() {
+            view.read(&message).expect("read");
+        }
+        view.read(&bundle(0, &[(OWN, at(1.0))])).expect("read");
+        assert_eq!(view.time_sync_due(), Some(OWN));
+        assert_eq!(view.time_sync_due(), None);
     }
 
     #[test]

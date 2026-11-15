@@ -92,6 +92,21 @@ const FIRST_INPUT_COUNTER: u16 = 1;
 const LEVEL_PITCH: f32 = 0.0;
 /// The facet component of the bot's calls (Inferred: the sim reads the body only).
 pub(crate) const CALL_COMPONENT: u64 = 0;
+
+/// Sends the first time sync request of the own player `own`, as the client does when it is in
+/// the game ([`crate::view::OwnView::time_sync_due`]).
+///
+/// # Errors
+///
+/// Returns [`RepError`] when the call cannot be encoded or sent.
+pub(crate) fn send_time_sync(client: &mut RepClient, own: u64) -> Result<(), RepError> {
+    Player::call(
+        client,
+        &ClientFacetMsg::TimeSyncRequest {
+            header: FacetHeader::of(CALL_COMPONENT, own),
+        },
+    )
+}
 /// Time between two acts of an activity step: a teleport lands before the next act.
 const ACT_GAP: Duration = Duration::from_millis(1500);
 /// How near its teleport's place the server's own state shows the bot once it landed, metres.
@@ -660,6 +675,9 @@ impl Player {
             let _ = self.world.read(received);
             let _ = self.combat.read(received);
         }
+        if let Some(own) = self.combat.time_sync_due() {
+            send_time_sync(client, own)?;
+        }
         self.lines.extend(
             chat_lines(&outcome.messages[self.read..])
                 .into_iter()
@@ -680,8 +698,7 @@ impl Player {
             Phase::Done => Ok(()),
             Phase::Activities => self.activity_tick(client, outcome, own, since),
             Phase::LeaveTutorial => {
-                // The first time sync marks the spawn (the sim takes no leave before it).
-                Self::call(client, &ClientFacetMsg::TimeSyncRequest { header })?;
+                // The sim takes no leave before the first time sync, sent after the own card.
                 Self::call(
                     client,
                     &ClientFacetMsg::ReturnToMainWorld {

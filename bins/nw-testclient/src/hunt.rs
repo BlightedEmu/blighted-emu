@@ -610,6 +610,10 @@ impl FleetBot for HuntBot {
         }
     }
 
+    fn time_sync_due(&mut self) -> Option<u64> {
+        self.view.time_sync_due()
+    }
+
     fn report(self, outcome: &RepOutcome) -> HuntBotReport {
         let unanswered_request = self
             .hunter
