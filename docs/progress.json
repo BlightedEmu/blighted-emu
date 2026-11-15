@@ -206,7 +206,11 @@
               "proof": "bots"
             },
             {
-              "check": "One sim with 110 bots on the PC (30 hunt, 30 gather, 50 swarm) runs ticks late (1,150 late ticks in 7 minutes) and leaves most gathers unanswered; with 5 gather bots every gather is answered.",
+              "check": "One sim with 110 bots on the PC (30 hunt, 30 gather, 50 swarm) keeps its ticks (bots, 2026-11-15). Before: 282 of 323 ticks late in 20 s, 44.6 ms a tick, the mob part 36.6 ms, most gathers unanswered. Three fixes: an effect area is tested by its box before its mesh, the open-world sim uses every core, and mob way searches run on threads of their own (one search that finds no way took up to 325 ms inside a tick). After: 7 of 598 ticks late in the same 20 s, 14.6 ms a tick, the mob part 1.2 ms, every gather answered, 31 mobs killed (12 before).",
+              "proof": "bots"
+            },
+            {
+              "check": "In the same 110-bot run the hunt and gather bots still report a stop in their bundles, and the server refused moves of dead bots; the cause is Unknown (both were there before the speed fixes).",
               "proof": "none"
             }
           ]
@@ -3383,7 +3387,7 @@
     }
   ],
   "nextSteps": [
-    "**One busy sim (2026-11-15): find what makes ticks late with about 110 bots on one sim.**\n\n- The run: `nw-testclient hunt`, `gather` and `swarm` together on the real-client stack (30, 30 and 50 bots).\n- With 5 gather bots every gather is answered; with 110 bots most are not.",
+    "**One busy sim (2026-11-15): the bundle stops of the 110-bot run.**\n\n- The run: `nw-testclient hunt`, `gather` and `swarm` together on the real-client stack (30, 30 and 50 bots).\n- The ticks keep time now; the hunt and gather bots still report a stop in their bundles. Find the cause.",
     "**Company and town ownership for tests (2026-11-14): live check.**\n\n- `!faction syndicate`, `!company <name>`, `!owner 12 <name>`, then the Monarch's Bluffs town project board and war board.",
     "**Town board and war board (2026-11-14): live check (tests only).**\n\n- Monarch's Bluffs town project board: the projects show, missions are listed, one can be taken.\n- Monarch's Bluffs war board: it can be used and opens the war window.",
     "**Batch E: wars, expeditions, darkness events, level walls (2026-11-13): live check (tests only).**\n\n- Declare two wars: the second war's raid numbers start after the first war's defender.\n- In a war, the fort gate breaks and comes back at the result; the camp gate takes no harm.\n- Hedet canyon: use a fire dropper; the barrel drops and the fire area opens.\n- Myrkgard: run a portal event; its key fragment comes at its end, and the curse goes about 10 s later.\n- In a mutated expedition, gather a resource node: the score rises by the expedition's points.\n- Fire a bow and a turret at a wall: the shot stops at the wall.",
@@ -3685,5 +3689,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-15",
-  "lastCommit": "ce754bab"
+  "lastCommit": "d4af3c48"
 }
