@@ -3105,8 +3105,8 @@
               "proof": "live"
             },
             {
-              "check": "After a sign-up the war board shows the player as signed up (standby), as retail: the server sends the player's sign-ups with a new list version each time. Live 2026-11-15 the sign-up was saved but the screen still said \"Not Signed Up\": every list had the same version, and the client kept the old one (tests and a bot capture; not seen in the game yet).",
-              "proof": "tests"
+              "check": "After a sign-up the war board shows the player as signed up (Standby, with a Leave button), as retail (live 2026-11-15): the server sends the player's sign-ups with a new list version each time; before, every list had the same version and the client kept the old one (\"Not Signed Up\").",
+              "proof": "live"
             },
             {
               "check": "A bot signs up for a war the way the client's war board screen does: the remote board use (2791) gets the territory and side (2722), the sign-up (2762) the done answer (2169) and the side, the sign-up list (2767) holds the bot (2726), and its sign-ups go out with a rising version (`nw-testclient` activity `war-signup`, VM 2026-11-15).",
