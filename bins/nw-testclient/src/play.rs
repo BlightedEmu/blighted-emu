@@ -91,7 +91,7 @@ const FIRST_INPUT_COUNTER: u16 = 1;
 /// A bot looks level.
 const LEVEL_PITCH: f32 = 0.0;
 /// The facet component of the bot's calls (Inferred: the sim reads the body only).
-const CALL_COMPONENT: u64 = 0;
+pub(crate) const CALL_COMPONENT: u64 = 0;
 /// Time between two acts of an activity step: a teleport lands before the next act.
 const ACT_GAP: Duration = Duration::from_millis(1500);
 /// How near its teleport's place the server's own state shows the bot once it landed, metres.
@@ -1585,7 +1585,7 @@ impl Player {
 }
 
 /// The client's entry into territory `territory` (2297).
-fn entered(header: FacetHeader, territory: u16) -> ClientFacetMsg {
+pub(crate) fn entered(header: FacetHeader, territory: u16) -> ClientFacetMsg {
     ClientFacetMsg::TerritoryEntered {
         header,
         area: [0; nw_messages::wire::RAW_ID_LEN],

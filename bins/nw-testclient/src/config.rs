@@ -2,6 +2,7 @@
 //! `config/nw-testclient.toml` with `NW_TESTCLIENT_` overrides (M3 spec section 8, M4 spec
 //! section 9, M5 spec section 11).
 
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +36,11 @@ pub struct TestClientConfig {
     pub login_url: String,
     /// `https://game.<domain>`.
     pub game_url: String,
+    /// The address the hosts of `login_url` and `game_url` are sent to instead of their DNS
+    /// address: for bots on a server whose public names point to another machine (a game
+    /// server behind a relay). Left out: the DNS address.
+    #[serde(default)]
+    pub connect_address: Option<IpAddr>,
     /// Account name; registered when it is new.
     pub account: String,
     /// Character created when the account has none.
@@ -186,6 +192,29 @@ pub struct ScenarioConfigError {
 }
 
 impl TestClientConfig {
+    /// The host overrides of [`Self::connect_address`]: the host of `login_url` and of
+    /// `game_url`, each with that address and the URL's port. Empty without a connect address.
+    ///
+    /// # Errors
+    ///
+    /// Returns the URL and the reason when a URL has no host or no port.
+    pub fn host_overrides(&self) -> Result<Vec<(String, SocketAddr)>, String> {
+        let Some(address) = self.connect_address else {
+            return Ok(Vec::new());
+        };
+        [&self.login_url, &self.game_url]
+            .into_iter()
+            .map(|url| {
+                let parsed = reqwest::Url::parse(url).map_err(|error| format!("{url}: {error}"))?;
+                let host = parsed.host_str().ok_or_else(|| format!("{url}: no host"))?;
+                let port = parsed
+                    .port_or_known_default()
+                    .ok_or_else(|| format!("{url}: no port"))?;
+                Ok((host.to_owned(), SocketAddr::new(address, port)))
+            })
+            .collect()
+    }
+
     /// The walk of `pair`.
     ///
     /// # Errors
@@ -470,6 +499,37 @@ mod tests {
             swarm.max_bundle_gap,
             Duration::from_millis(M5_BUNDLE_GAP_MS)
         );
+    }
+
+    #[test]
+    fn a_connect_address_sends_both_hosts_there() {
+        const LOGIN_URL: &str = "https://login.example.org:8444";
+        const GAME_URL: &str = "https://game.example.org";
+        const HTTPS_PORT: u16 = 443;
+        const BOT_EDGE_PORT: u16 = 8444;
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(COMMITTED_CONFIG);
+        let mut config = load_testclient_config(&path).expect("config");
+        assert_eq!(config.connect_address, None, "the example leaves it out");
+        assert_eq!(config.host_overrides(), Ok(Vec::new()));
+        let loopback = IpAddr::from([127, 0, 0, 1]);
+        config.connect_address = Some(loopback);
+        config.login_url = LOGIN_URL.to_owned();
+        config.game_url = GAME_URL.to_owned();
+        assert_eq!(
+            config.host_overrides(),
+            Ok(vec![
+                (
+                    "login.example.org".to_owned(),
+                    SocketAddr::new(loopback, BOT_EDGE_PORT)
+                ),
+                (
+                    "game.example.org".to_owned(),
+                    SocketAddr::new(loopback, HTTPS_PORT)
+                ),
+            ])
+        );
+        config.game_url = "not a url".to_owned();
+        assert!(config.host_overrides().is_err());
     }
 
     #[test]

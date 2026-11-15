@@ -7,6 +7,9 @@
 # The launcher API and the game routes of edge-http.
 login_url = "https://login.example.org"
 game_url = "https://game.example.org"
+# Optional: the address both hosts above are sent to instead of their DNS address, for bots on
+# a server whose public names point to another machine (a game server behind a relay), for
+# example connect_address = "127.0.0.1". Left out: the DNS address.
 # Test account; it is registered on the first run.
 account = "testclient"
 # Character made when the account has none (3 to 16 letters).

@@ -19,7 +19,10 @@ use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::arena::{
     ArenaClientMsg, PLAYER_ARENA_COMPONENT, REMOTE_INTERACT_RESULT_TYPE_INDEX,
 };
-use nw_messages::client_input::{CRAFTING_STATION_KIND, GATHER_KIND, TOWN_BOARD_KIND};
+use nw_messages::client_input::{
+    CRAFTING_STATION_KIND, GATHER_KIND, TOWN_BOARD_KIND, TOWN_BOARD_NAME, WAR_BOARD_KIND,
+    WAR_BOARD_NAME,
+};
 use nw_messages::conversation_client::ObjectiveInteractorClientMsg;
 use nw_messages::facet::{
     CRAFTING_PROGRESS_TYPE_INDEX, INGREDIENT_ITEM, TELEPORT_WITH_LOADING_SCREEN_TYPE_INDEX,
@@ -33,6 +36,8 @@ use nw_messages::{
 };
 use nw_world::WorldFile;
 use nw_world::capitals::capital_id;
+/// A game master line the sim carried out.
+use sim::world::GM_DONE as DONE;
 
 use crate::gather::{GatherNode, node_id};
 
@@ -63,8 +68,6 @@ const SUMMON_WAIT: Duration = Duration::from_millis(3500);
 const QUEST_DONE: &str = "done ";
 /// The mount part of a `!state` line of a rider.
 const STATE_RIDING: &str = " mount riding ";
-/// The town board's interaction name (retail `@ui_territory_board_town_project`).
-const TOWN_BOARD_NAME: &[u8] = b"@ui_territory_board_town_project";
 /// The progression of azoth, which a fast travel spends.
 const AZOTH: &str = "Azoth_Currency";
 /// Azoth the bot gets before a fast travel: more than any trip costs.
@@ -83,8 +86,6 @@ const STEP_WAIT: Duration = Duration::from_secs(10);
 const LONG_WAIT: Duration = Duration::from_secs(25);
 /// The first words of the sim's `!state` line.
 const STATE_LEVEL: &str = "state level ";
-/// A game master line the sim carried out.
-const DONE: &str = "Done.";
 /// How the first word of the PvP part of the `!state` line starts.
 const STATE_PVP: &str = " pvp ";
 
@@ -115,6 +116,13 @@ pub enum ActivityKind {
     Mount,
     /// Play a song on an instrument.
     Music,
+    /// A game master's company of the bot's faction owns Monarch's Bluffs, and the bot opens
+    /// the town's war board; the town is given back to no owner at the end.
+    Company,
+    /// The bot joins the Covenant and makes a company that stays: the attacker of a game
+    /// master's war test (`!war <territory id> <minutes to start> Bot War Company`), as a war
+    /// needs an attacker company of a faction other than the owner's.
+    EnemyCompany,
 }
 
 /// One call of a step, written once the bot knows its own entity number.
@@ -283,6 +291,8 @@ impl Activity {
                 "needs an instrument worn: the bot cannot read the bag slot of a given instrument to equip it"
                     .to_owned(),
             ),
+            ActivityKind::Company => company(data),
+            ActivityKind::EnemyCompany => Ok(enemy_company()),
         };
         Self { kind, steps }
     }
@@ -707,6 +717,107 @@ fn dungeon(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
     Ok(steps)
 }
 
+/// The made-up company of the company activity.
+const BOT_COMPANY: &str = "Bot Test Company";
+/// The faction the company activity's bot joins (any faction makes a company).
+const BOT_FACTION: &str = "syndicate";
+/// Monarch's Bluffs, the town of the company activity.
+const MONARCHS_BLUFFS: u16 = 12;
+/// The Monarch's Bluffs town project board (retail `SQ-Monarchs-Bluffs`, as its card names it):
+/// the company activity uses the war board nearest it.
+const MONARCHS_BLUFFS_TOWN_BOARD: [u8; 8] = [0x17, 0x28, 0xe7, 0xba, 0x8e, 0xf6, 0x90, 0x95];
+
+/// A game master's company owns Monarch's Bluffs and the bot opens the town's war board
+/// ([`ActivityKind::Company`]).
+fn company(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
+    let boards = |slice| sim::player_content::sign_boards(data.world, slice);
+    let town_board = boards(sim::player_content::TOWN_BOARD_SLICE)
+        .into_iter()
+        .find(|board| board.id == u64::from_le_bytes(MONARCHS_BLUFFS_TOWN_BOARD))
+        .ok_or("the level has no Monarch's Bluffs town board")?;
+    let war_board = boards(sim::player_content::WAR_BOARD_SLICE)
+        .into_iter()
+        .min_by(|a, b| {
+            let distance = |board: &sim::player_content::SignBoard| {
+                board.position.horizontal_distance(town_board.position)
+            };
+            distance(a).total_cmp(&distance(b))
+        })
+        .ok_or("the level has no war board")?;
+    let mut target = [0; RAW_ID_LEN];
+    target[..size_of::<u64>()].copy_from_slice(&war_board.id.to_le_bytes());
+    let at = war_board.position;
+    let mut steps = faction_and_company(BOT_FACTION, BOT_COMPANY);
+    steps.extend([
+        gm_done(format!("!owner {MONARCHS_BLUFFS} {BOT_COMPANY}")),
+        step(
+            "go to the Monarch's Bluffs war board and use it",
+            vec![
+                teleport([at.x, at.y, at.z]),
+                facet(
+                    |header| crate::play::entered(header, MONARCHS_BLUFFS),
+                    crate::play::CALL_COMPONENT,
+                ),
+                Act::Interact {
+                    request: InteractionRequest {
+                        target,
+                        target_entity: nw_messages::facet_of_raw_id(&target),
+                        interaction: 0,
+                        kind: WAR_BOARD_KIND,
+                        gatherable: None,
+                    },
+                    name: WAR_BOARD_NAME.to_vec(),
+                },
+            ],
+            Proof::Accepted,
+            STEP_WAIT,
+        ),
+        gm_done(format!("!owner {MONARCHS_BLUFFS} clear")),
+    ]);
+    Ok(steps)
+}
+
+/// The made-up company of the enemy company activity.
+const ENEMY_COMPANY: &str = "Bot War Company";
+/// The faction of the enemy company: not the faction of the company activity, so a war of the
+/// two has a side for each.
+const ENEMY_FACTION: &str = "covenant";
+
+/// The bot joins [`ENEMY_FACTION`] and makes [`ENEMY_COMPANY`] ([`ActivityKind::EnemyCompany`]).
+fn enemy_company() -> Vec<Step> {
+    faction_and_company(ENEMY_FACTION, ENEMY_COMPANY)
+}
+
+/// The bot joins `faction` and makes the company `company` (or is in it already, or the name
+/// is taken).
+fn faction_and_company(faction: &str, company: &str) -> Vec<Step> {
+    let made = sim::world::company_made(company);
+    vec![
+        step(
+            format!("!faction {faction}"),
+            vec![Act::Gm(format!("!faction {faction}"))],
+            Proof::Line(
+                Box::new(|line| line == DONE || line == sim::world::FACTION_UNCHANGED),
+                "a faction".to_owned(),
+            ),
+            STEP_WAIT,
+        ),
+        step(
+            format!("!company {company}"),
+            vec![Act::Gm(format!("!company {company}"))],
+            Proof::Line(
+                Box::new(move |line| {
+                    line == made
+                        || line == sim::world::COMPANY_IN_COMPANY
+                        || line == sim::world::COMPANY_NAME_TAKEN
+                }),
+                "the company".to_owned(),
+            ),
+            STEP_WAIT,
+        ),
+    ]
+}
+
 /// A town board mission of the content.
 fn board(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
     let row = data
@@ -810,6 +921,23 @@ mod tests {
         assert!(
             Activity::of(ActivityKind::TownCraft, &data).steps.is_err(),
             "an empty content has no recipe and no settlement station"
+        );
+        assert!(
+            Activity::of(ActivityKind::Company, &data).steps.is_err(),
+            "an empty level has no town board and no war board"
+        );
+        assert_eq!(
+            Activity::of(ActivityKind::EnemyCompany, &data)
+                .steps
+                .map(|steps| steps
+                    .iter()
+                    .map(|step| step.what.clone())
+                    .collect::<Vec<_>>()),
+            Ok(vec![
+                "!faction covenant".to_owned(),
+                "!company Bot War Company".to_owned()
+            ]),
+            "the enemy company needs no level data"
         );
         assert_eq!(
             Activity::of(ActivityKind::Level, &data)

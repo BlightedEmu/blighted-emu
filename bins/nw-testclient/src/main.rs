@@ -178,7 +178,13 @@ async fn run(cli: Cli) -> ExitCode {
 async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
     let config = load_testclient_config(&cli.config)?;
     nw_login::install_crypto_provider();
-    let http = reqwest::Client::builder().build()?;
+    let http = config
+        .host_overrides()?
+        .into_iter()
+        .fold(reqwest::Client::builder(), |builder, (host, address)| {
+            builder.resolve(&host, address)
+        })
+        .build()?;
     let trusted = DtlsClientConfig::new(&std::fs::read(&config.certificate_file)?)?;
     let ledger = Arc::new(LedgerSlot::new(match &cli.ledger {
         Some(path) => Some(nw_capture::LedgerWriter::new(
