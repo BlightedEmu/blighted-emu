@@ -1732,6 +1732,14 @@
               "proof": "live"
             },
             {
+              "check": "The trees, bushes and stones that the regions' plant files (`region.distribution`) place are gather nodes, each of the kind its variant names (`Bush_SupPawPaw_b`: `BushMedium`): 2,479,886 rows in the open world, 3,045,548 gather points in all levels (2026-11-15, tests only). Before, a player could gather no bush or tree there: since 2026-11-05 a gather needs a known node in reach, and these were not known.",
+              "proof": "tests"
+            },
+            {
+              "check": "In a one-minute run of 5 gather bots after the fix (2026-11-15), 15 of about 80 gathers were still out of reach of a known node; the cause is Unknown.",
+              "proof": "none"
+            },
+            {
               "check": "Tool levels and node respawn, live.",
               "proof": "none"
             },
@@ -2110,6 +2118,10 @@
           "checks": [
             {
               "check": "Place a camp for its costs, the retail camp entity group, respawn at its SpawnPoint, Camp crafting station, BindCamp event, the camp stands again at login.",
+              "proof": "tests"
+            },
+            {
+              "check": "A camp is placed without its materials, as the client's own text says (\"You can place the plan now and acquire more resources later\"); its build takes them once they are in the bag (2026-11-15, tests only). Before, the server refused the camp and the client showed no reason.",
               "proof": "tests"
             },
             {
@@ -3395,7 +3407,8 @@
     }
   ],
   "nextSteps": [
-    "**Camp tiers (2026-11-15): live check (tests only).**\n\n- A character of level 10 or more logs in: the camp can be placed (tier 1 at 10, tier 2 at 15).\n- A character reaches level 10: the camp can be placed right after the level up.\n- Place and build the camp of the Monarch's Bluffs camp quest (Knight in the North): the quest goes on.",
+    "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
+    "**Camp tiers (2026-11-15): live check (tests only).**\n\n- A character of level 10 or more logs in: the camp can be placed (tier 1 at 10, tier 2 at 15).\n- A character reaches level 10: the camp can be placed right after the level up.\n- Place and build the camp of the Monarch's Bluffs camp quest (Knight in the North): the quest goes on.\n- Place a camp with no wood: it stands unbuilt; gather the wood and build it.",
     "**One busy sim (2026-11-15): the bundle stops of the 110-bot run.**\n\n- The run: `nw-testclient hunt`, `gather` and `swarm` together on the real-client stack (30, 30 and 50 bots).\n- The ticks keep time now; the hunt and gather bots still report a stop in their bundles. Find the cause.",
     "**Company and town ownership for tests (2026-11-14): live check.**\n\n- `!faction syndicate`, `!company <name>`, `!owner 12 <name>`, then the Monarch's Bluffs town project board and war board.",
     "**Town board and war board (2026-11-14): live check (tests only).**\n\n- Monarch's Bluffs town project board: the projects show, missions are listed, one can be taken.\n- Monarch's Bluffs war board: it can be used and opens the war window.",
@@ -3698,5 +3711,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-15",
-  "lastCommit": "b20cbecc"
+  "lastCommit": "94565910"
 }
