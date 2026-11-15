@@ -3,7 +3,7 @@
 //! two steps of a treasury transfer.
 
 use nw_bus::{
-    BusId, CoinTransfer, GroupEntityDelivery, OwnStateDelivery, RaidEntityDelivery,
+    BusId, CoinTransfer, CompanyAnswer, GroupEntityDelivery, OwnStateDelivery, RaidEntityDelivery,
     RaidInviteAnswer, SocialDelivery, TownProjectAnswer, UpkeepAnswer,
 };
 use nw_db::{
@@ -106,6 +106,13 @@ pub enum Effect {
         company: Uuid,
         /// When the player asked, Unix milliseconds.
         at_ms: u64,
+    },
+    /// Tell the game master's sim what came of its company ([`nw_bus::SocialInput::GmCreateCompany`]).
+    CompanyAnswered {
+        /// The sim that has the game master.
+        sim: BusId,
+        /// The answer.
+        answer: CompanyAnswer,
     },
     /// Tell the player's sim whether its town project start or cancel was done.
     TownProjectAnswered {

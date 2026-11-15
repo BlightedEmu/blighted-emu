@@ -525,6 +525,15 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
                 Vec::new()
             }
         };
+    content.war_boards =
+        crate::player_content::sign_boards(&world_file, crate::player_content::WAR_BOARD_SLICE);
+    content.town_boards =
+        crate::player_content::sign_boards(&world_file, crate::player_content::TOWN_BOARD_SLICE);
+    tracing::info!(
+        war = content.war_boards.len(),
+        town = content.town_boards.len(),
+        "sign boards"
+    );
     content.level_doors = match nw_content::level_doors::LevelDoors::load(
         &config.content_dir,
         &build,

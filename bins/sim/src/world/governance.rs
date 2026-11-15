@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The governor's desk of a town (territory upkeep study 2026-11-11): its governance data and the
-//! upkeep payment; and the territory planning board, the same kind of level entity whose 1746
-//! also carries the progression data ([`super::town_projects`]).
+//! upkeep payment; the territory planning board, the same kind of level entity whose 1746 also
+//! carries the progression data ([`super::town_projects`]); and the town project board, whose
+//! 1746 carries the progression data alone ([`BoardKind::TownBoard`]).
 //!
 //! Observed (ledgers `pay-territory-tax`, `territory-status`, `MSQ6-lv28`): the player uses the
 //! desk (interaction kind [`GOVERNOR_DESK_KIND`], `@ui_governorsdesk`); retail accepts it (3743),
@@ -45,6 +46,7 @@ use super::gathering::{GATHER_ACCEPTED, GATHER_BUSY};
 use super::land_claims::{CLAIM_LEVEL, Territories};
 use super::slots::Slot;
 use super::{Player, SimWorld, gather_answer, send_now};
+use crate::charting::ChartRules;
 use nw_content::territory_projects::TerritoryProjects;
 
 /// The interaction kind of a governor's desk (Observed: 3743 kind 54 `@ui_governorsdesk` in the
@@ -83,6 +85,39 @@ impl Refusal {
     }
 }
 
+/// Which board of a town a desk view shows: what its 1746 carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BoardKind {
+    /// The governor's desk: the governance data.
+    GovernorDesk,
+    /// The territory planning board: the progression data and the governance data.
+    PlanningBoard,
+    /// The town project board: the progression data alone (Observed: `Hivetownboardmissions`
+    /// 21.342 s, the board's 1746 at the use; the client offers the town board missions of the
+    /// projects it lists, and with none it shows no active project and no mission, live
+    /// 2026-11-14).
+    TownBoard,
+}
+
+impl BoardKind {
+    /// The board kind of interaction kind `kind`: a planning board, else the governor's desk.
+    fn of_desk_kind(kind: u8) -> Self {
+        if kind == super::town_projects::PLANNING_BOARD_KIND {
+            Self::PlanningBoard
+        } else {
+            Self::GovernorDesk
+        }
+    }
+
+    const fn shows_progression(self) -> bool {
+        matches!(self, Self::PlanningBoard | Self::TownBoard)
+    }
+
+    const fn shows_governance(self) -> bool {
+        matches!(self, Self::GovernorDesk | Self::PlanningBoard)
+    }
+}
+
 /// The desk a player has open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DeskView {
@@ -92,8 +127,11 @@ struct DeskView {
     territory: u16,
     /// Its entity id (the card's `GdeRef`).
     target: [u8; RAW_ID_LEN],
-    /// A territory planning board (its 1746 carries the progression data too).
-    planning: bool,
+    /// Which board it is.
+    kind: BoardKind,
+    /// Its slot key is the board's level entity slot ([`super::level_boards`]): the level slot
+    /// sends its card, and the view adds its data alone.
+    level_slot: bool,
     /// The upkeep version its client has; `None` before its first group.
     sent: Option<u64>,
 }
@@ -107,9 +145,15 @@ pub(super) struct PlayerDesk {
 }
 
 impl PlayerDesk {
-    /// Shows the desk `target` of `territory`, a planning board when `planning` (the same desk
-    /// keeps its slot).
-    fn open(&mut self, territory: u16, target: [u8; RAW_ID_LEN], planning: bool) {
+    /// Shows the board `target` of kind `kind` of `territory` (the same board keeps its slot): in
+    /// the slot of its level entity `level_number` when it is one, else in a slot of its own.
+    pub(super) fn open(
+        &mut self,
+        territory: u16,
+        target: [u8; RAW_ID_LEN],
+        kind: BoardKind,
+        level_number: Option<u64>,
+    ) {
         if self
             .view
             .as_ref()
@@ -117,12 +161,16 @@ impl PlayerDesk {
         {
             return;
         }
-        self.opened = self.opened.wrapping_add(1);
+        let number = level_number.unwrap_or_else(|| {
+            self.opened = self.opened.wrapping_add(1);
+            DESK_ENTITY_BASE + self.opened
+        });
         self.view = Some(DeskView {
-            number: DESK_ENTITY_BASE + self.opened,
+            number,
             territory,
             target,
-            planning,
+            kind,
+            level_slot: level_number.is_some(),
             sent: None,
         });
     }
@@ -131,7 +179,7 @@ impl PlayerDesk {
     pub(super) fn planning_territory(&self) -> Option<u16> {
         self.view
             .as_ref()
-            .filter(|view| view.planning)
+            .filter(|view| view.kind == BoardKind::PlanningBoard)
             .map(|view| view.territory)
     }
 
@@ -147,11 +195,11 @@ impl PlayerDesk {
         self.view.as_ref().map(|view| view.territory)
     }
 
-    /// The slot key of the open desk while the player is in its territory (`territories`, its
-    /// territory areas); a player that left the territory closes it.
-    pub(super) fn number_in(&mut self, territories: &[u16]) -> Option<u64> {
+    /// The slot key of the open desk while the player is in its territory (`claim`, the claim the
+    /// player is in: [`claim_of`]); a player that left the territory closes it.
+    pub(super) fn number_in(&mut self, claim: Option<u16>) -> Option<u64> {
         let view = self.view.as_ref()?;
-        if territories.contains(&view.territory) {
+        if claim == Some(view.territory) {
             return Some(view.number);
         }
         self.view = None;
@@ -159,9 +207,9 @@ impl PlayerDesk {
     }
 
     /// The bundle group of desk `number` in `slot` at Unix ms `now_ms`: in a new slot the card and
-    /// the 1746 with slot 0 and the governance data (and a planning board's progression data of
-    /// the town projects `projects`); after a change of the claims' upkeep or projects that data
-    /// alone; else nothing.
+    /// the 1746 with slot 0 and the data of its kind ([`BoardKind`]: the governance data, the
+    /// progression data of the town projects `projects`); after a change of the claims' upkeep or
+    /// projects that data alone; else nothing.
     pub(super) fn group(
         &mut self,
         number: u64,
@@ -176,9 +224,14 @@ impl PlayerDesk {
             return None;
         }
         view.sent = Some(version);
-        let governance = territories.governance(view.territory, now_ms);
+        let governance = view
+            .kind
+            .shows_governance()
+            .then(|| territories.governance(view.territory, now_ms))
+            .flatten();
         let mut members = Vec::new();
-        if slot.new {
+        let own_card = slot.new && !view.level_slot;
+        if own_card {
             members.push(BundleMember {
                 component: CARD_COMPONENT,
                 state: MemberState::GdeMetadata(GdeMetadataReplicatedState {
@@ -186,12 +239,12 @@ impl PlayerDesk {
                     gde_ref: Some(view.target),
                 }),
             });
-        } else if governance.is_none() {
+        } else if view.kind.shows_governance() && governance.is_none() {
             // The owner is gone: the client keeps the last data (no retail form takes it away).
             return None;
         }
         let dominion = territories.dominion();
-        let progression = view.planning.then(|| {
+        let progression = view.kind.shows_progression().then(|| {
             dominion
                 .projects()
                 .progression_data(view.territory, projects, |upgrade| {
@@ -201,7 +254,7 @@ impl PlayerDesk {
         members.push(BundleMember {
             component: DESK_TERRITORY_COMPONENT,
             state: MemberState::TerritoryInterface(TerritoryInterfaceState {
-                refs_set: slot.new.then_some(TERRITORY_REFS_SET),
+                refs_set: own_card.then_some(TERRITORY_REFS_SET),
                 progression,
                 governance,
                 ..TerritoryInterfaceState::default()
@@ -214,13 +267,20 @@ impl PlayerDesk {
     }
 }
 
-/// The claim the player is in: the last claim among its territory areas (innermost last).
-fn claim_of(territories: &[u16]) -> Option<u16> {
-    territories
-        .iter()
-        .rev()
-        .copied()
-        .find(|territory| CLAIM_KEYS.contains(territory))
+/// The claim the player is in: the claim of the last of its territory areas (innermost last)
+/// that is a claim or lies in one (`charting`). Live 2026-11-14: a client that logs in inside a
+/// town names only the town's areas (Monarch's Bluffs area 30155), never the claim itself.
+pub(super) fn claim_of(territories: &[u16], charting: &ChartRules) -> Option<u16> {
+    territories.iter().rev().find_map(|area| {
+        let claim = if CLAIM_KEYS.contains(area) {
+            Some(*area)
+        } else {
+            charting
+                .territory_of(u32::from(*area))
+                .and_then(|territory| u16::try_from(territory).ok())
+        };
+        claim.filter(|claim| CLAIM_KEYS.contains(claim))
+    })
 }
 
 impl SimWorld {
@@ -239,7 +299,7 @@ impl SimWorld {
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
-        let Some(territory) = claim_of(&player.territories) else {
+        let Some(territory) = claim_of(&player.territories, &self.content.charting) else {
             let refusal = gather_answer(number, request, GATHER_BUSY, &[]);
             send_now(&mut self.combat_messages, &player.connection, &[refusal]);
             return;
@@ -258,8 +318,12 @@ impl SimWorld {
             )),
         ];
         send_now(&mut self.combat_messages, &player.connection, &answers);
-        let planning = request.kind == super::town_projects::PLANNING_BOARD_KIND;
-        player.desk.open(territory, request.target, planning);
+        player.desk.open(
+            territory,
+            request.target,
+            BoardKind::of_desk_kind(request.kind),
+            None,
+        );
     }
 
     /// The upkeep payment `call` of the player of `connection` at Unix ms `now_ms`: the social
@@ -401,17 +465,26 @@ mod tests {
     }
 
     #[test]
-    fn the_desk_claim_is_the_innermost_claim_of_the_areas() {
-        assert_eq!(claim_of(&[TERRITORY, AREA]), Some(TERRITORY));
-        assert_eq!(claim_of(&[AREA]), None);
-        assert_eq!(claim_of(&[]), None);
+    fn the_desk_claim_is_the_claim_of_the_innermost_area() {
+        let unknown = ChartRules::default();
+        assert_eq!(claim_of(&[TERRITORY, AREA], &unknown), Some(TERRITORY));
+        assert_eq!(claim_of(&[AREA], &unknown), None);
+        assert_eq!(claim_of(&[], &unknown), None);
+        // Live 2026-11-14: a client that logs in inside a town names only the town's areas.
+        let lists = [vec![TERRITORY, AREA]];
+        let experience = crate::charting::TerritoryExperience {
+            chart_amount: 0,
+            standing_modifier: 1.0,
+        };
+        let charting = ChartRules::build([], [(u32::from(TERRITORY), experience)], &lists);
+        assert_eq!(claim_of(&[AREA], &charting), Some(TERRITORY));
     }
 
     #[test]
     fn an_open_desk_shows_once_with_its_card_then_after_each_upkeep_change() {
         let mut desk = PlayerDesk::default();
-        desk.open(TERRITORY, DESK, false);
-        let number = desk.number_in(&[TERRITORY, AREA]).expect("shown");
+        desk.open(TERRITORY, DESK, BoardKind::GovernorDesk, None);
+        let number = desk.number_in(Some(TERRITORY)).expect("shown");
         let mut territories = owned(NOW_MS);
         let first = desk
             .group(
@@ -495,20 +568,28 @@ mod tests {
         };
         assert_eq!(state.refs_set, None);
         assert_eq!(state.governance, territories.governance(TERRITORY, NOW_MS));
-        desk.open(TERRITORY, DESK, false);
-        assert_eq!(desk.number_in(&[TERRITORY]), Some(number), "the same desk");
-        desk.open(TERRITORY, OTHER_DESK, false);
-        assert_ne!(desk.number_in(&[TERRITORY]), Some(number), "another desk");
-        assert_eq!(desk.number_in(&[AREA]), None, "the player left the claim");
+        desk.open(TERRITORY, DESK, BoardKind::GovernorDesk, None);
+        assert_eq!(
+            desk.number_in(Some(TERRITORY)),
+            Some(number),
+            "the same desk"
+        );
+        desk.open(TERRITORY, OTHER_DESK, BoardKind::GovernorDesk, None);
+        assert_ne!(
+            desk.number_in(Some(TERRITORY)),
+            Some(number),
+            "another desk"
+        );
+        assert_eq!(desk.number_in(None), None, "the player left the claim");
         assert_eq!(desk.territory(), None);
     }
 
     #[test]
     fn a_planning_board_shows_the_progression_data_with_the_governance_data() {
         let mut desk = PlayerDesk::default();
-        desk.open(TERRITORY, DESK, true);
+        desk.open(TERRITORY, DESK, BoardKind::PlanningBoard, None);
         assert_eq!(desk.planning_territory(), Some(TERRITORY));
-        let number = desk.number_in(&[TERRITORY]).expect("shown");
+        let number = desk.number_in(Some(TERRITORY)).expect("shown");
         let territories = owned(NOW_MS);
         let group = desk
             .group(
@@ -525,6 +606,53 @@ mod tests {
         let progression = state.progression.as_ref().expect("progression data");
         assert_eq!(progression.slots.len(), 5, "one slot per progression type");
         assert!(state.governance.is_some());
+    }
+
+    #[test]
+    fn a_town_board_shows_the_progression_data_alone_in_its_level_slot_and_again_after_a_change() {
+        /// The slot key of the board's level entity.
+        const LEVEL_NUMBER: u64 = crate::world::crafting::STATION_ENTITY_BASE + 7;
+        let mut desk = PlayerDesk::default();
+        desk.open(TERRITORY, DESK, BoardKind::TownBoard, Some(LEVEL_NUMBER));
+        assert_eq!(desk.planning_territory(), None, "no project starts there");
+        assert_eq!(desk.number_in(Some(TERRITORY)), Some(LEVEL_NUMBER));
+        let territories = owned(NOW_MS);
+        let projects = TerritoryProjects::default();
+        let first = desk
+            .group(LEVEL_NUMBER, NEW, &territories, &projects, NOW_MS)
+            .expect("the data with the level entity's spawn");
+        let [member] = first.members.as_slice() else {
+            panic!("the 1746 alone: the level slot sends the card: {first:?}");
+        };
+        assert_eq!(member.component, DESK_TERRITORY_COMPONENT);
+        let MemberState::TerritoryInterface(state) = &member.state else {
+            panic!("territory interface");
+        };
+        assert_eq!(
+            state.refs_set, None,
+            "the level entity's spawn sets the references"
+        );
+        assert_eq!(
+            state.progression.as_ref().map(|data| data.slots.len()),
+            Some(5),
+            "one slot per progression type"
+        );
+        assert_eq!(state.governance, None, "retail's town board 1746 has none");
+        assert!(
+            desk.group(LEVEL_NUMBER, KNOWN, &territories, &projects, NOW_MS)
+                .is_none()
+        );
+        desk.show_again();
+        let again = desk
+            .group(LEVEL_NUMBER, KNOWN, &territories, &projects, NOW_MS)
+            .expect("a change shows the progression data again, with no governance data");
+        let [member] = again.members.as_slice() else {
+            panic!("the 1746 alone: {again:?}");
+        };
+        let MemberState::TerritoryInterface(state) = &member.state else {
+            panic!("territory interface");
+        };
+        assert!(state.progression.is_some());
     }
 
     #[test]

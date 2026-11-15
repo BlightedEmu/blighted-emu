@@ -228,6 +228,12 @@ impl SimWorld {
         player.faction.faction = faction;
         push_faction(&mut player, switched);
         tracing::info!(player = number, faction, before, "faction set");
+        // The social service hears the faction at once: faction chat and a new company take it
+        // from there (the save round's update comes later).
+        let sim = self.me.id.clone();
+        if let Some(view) = self.social_player_of(entity, &sim) {
+            self.social_inputs.push(nw_bus::SocialInput::Updated(view));
+        }
         self.quest_event(number, Event::FactionChosen(faction), now_ms);
     }
 

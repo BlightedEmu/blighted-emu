@@ -416,6 +416,9 @@ impl SocialWorld {
             SocialInput::PayUpkeep(payment) => self.pay_upkeep(payment),
             SocialInput::StartTownProject(start) => self.start_town_project(start),
             SocialInput::CancelTownProject(cancel) => self.cancel_town_project(cancel),
+            SocialInput::GmCreateCompany { character, name } => {
+                self.gm_create_company(character, name);
+            }
             SocialInput::RaidJoin {
                 character,
                 raid,

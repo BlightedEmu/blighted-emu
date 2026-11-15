@@ -123,6 +123,14 @@ pub enum SocialInput {
     StartTownProject(TownProjectStart),
     /// A player asks to cancel the running town project of a territory.
     CancelTownProject(TownProjectCancel),
+    /// A game master makes company `name` with `character` as its governor (`!company`): for
+    /// tests of company and territory systems without a client's company window.
+    GmCreateCompany {
+        /// The character who governs the new company.
+        character: Uuid,
+        /// The company's name.
+        name: String,
+    },
     /// The sim that runs a raid's war or match puts a player into group `group` (from 0) of raid
     /// `raid`; the service makes the raid at its first member.
     RaidJoin {
@@ -243,6 +251,30 @@ pub struct TownProjectAnswer {
     pub territory: u16,
     /// Whether the start or cancel was done.
     pub done: bool,
+}
+
+/// How the service took a game master's company ([`SocialInput::GmCreateCompany`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompanyCreated {
+    /// The company is made, with the character as its governor.
+    Made,
+    /// The character is in a company already.
+    InCompany,
+    /// Another company has the name.
+    NameTaken,
+    /// The character has no faction (a company is of its governor's faction).
+    NoFaction,
+}
+
+/// The service's answer to a game master's company ([`SocialInput::GmCreateCompany`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompanyAnswer {
+    /// The character who asked.
+    pub character: Uuid,
+    /// The company's name.
+    pub name: String,
+    /// What the service did.
+    pub result: CompanyCreated,
 }
 
 /// A player's answer to the raid invite of activity `activity` ([`SocialInput::RaidInvite`]).
@@ -389,6 +421,9 @@ pub struct SocialDeliveries {
     /// The service's answers to the town project starts and cancels of this sim's players.
     #[serde(default)]
     pub project_answers: Vec<TownProjectAnswer>,
+    /// The service's answers to the game master companies of this sim's players.
+    #[serde(default)]
+    pub company_answers: Vec<CompanyAnswer>,
 }
 
 /// Service to sim, request/reply: add `change` coins to a player (a negative change takes them).
@@ -566,6 +601,11 @@ mod tests {
                 character,
                 territory: 6,
                 done: false,
+            }],
+            company_answers: vec![CompanyAnswer {
+                character,
+                name: "Test Company".to_owned(),
+                result: CompanyCreated::NameTaken,
             }],
         };
         assert_eq!(

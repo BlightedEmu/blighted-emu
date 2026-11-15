@@ -1189,6 +1189,7 @@ impl Loop {
         let db = self.db.clone();
         self.look_up(connection, REQUEST_GET_GUILDS_TYPE_INDEX, async move {
             let listings = company_listings(&db, &ids).await?;
+            tracing::debug!(?ids, found = listings.len(), "company look-up");
             Ok(guilds_answers(&request, &listings))
         });
     }
@@ -1931,8 +1932,8 @@ impl Loop {
         }
         let vitals = self.world.social_vitals();
         self.pending_social.extend(vitals);
-        let raids = self.world.take_raid_inputs();
-        self.pending_social.extend(raids);
+        let inputs = self.world.take_social_inputs();
+        self.pending_social.extend(inputs);
         if !self.pending_social.is_empty() {
             let batch = SocialBatch {
                 sim: self.settings.sim_id.clone(),

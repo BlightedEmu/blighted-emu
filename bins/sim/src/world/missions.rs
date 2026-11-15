@@ -2,7 +2,9 @@
 //! Mission boards (finding "mission board", retail board capture 2026-06-13). The player opens
 //! a town project board (interaction kind 51); the server accepts the interaction and names the
 //! board in the player's objective interactor state (3829) with an empty mission list (retail
-//! 21.328 s and 21.342 s). The same interaction on a faction representative (an NPC) opens the
+//! 21.328 s and 21.342 s), and the board shows the progression data of the claim the player is
+//! in ([`super::governance::BoardKind::TownBoard`]): the client lists the missions of the
+//! projects that data names. The same interaction on a faction representative (an NPC) opens the
 //! faction board, whose state lists the missions it offers ([`super::faction_board`]). The client takes a town mission by its id and its project (3819); the
 //! mission runs its objective template with its own values ([`crate::player_content::MissionRow`])
 //! and counts against the missions journal limit. The client turns a mission in at the board by
@@ -10,6 +12,7 @@
 
 use bevy_ecs::entity::Entity;
 use nw_bus::{ConnectionRef, MISSION_BOARD_ID_LEN, MissionTake};
+use nw_messages::client_input::TOWN_BOARD_NAME;
 use nw_messages::items::FullList;
 use nw_messages::list_delta::ReplicatedList;
 use nw_messages::objective_interactor::{OBJECTIVE_INTERACTOR_COMPONENT, ObjectiveInteractorState};
@@ -19,6 +22,7 @@ use super::conversation::NPC_NAME_MARK;
 use super::faction_board::Taken;
 use super::gathering::GATHER_ACCEPTED;
 use super::gear::unix_ns;
+use super::governance::{BoardKind, claim_of};
 use super::{Body, Player, SimWorld, gather_answer, send_now};
 use crate::objectives::Event;
 use nw_sim_core::Position;
@@ -27,11 +31,15 @@ use nw_sim_core::Position;
 /// `M_ReturnToAnyGiver` of the templates).
 pub(super) const TURN_IN_TAGS: [&str; 2] = ["ReturnToGiver", "ReturnToAnyGiver"];
 
+/// The expiration a town project board's state names (Observed: 0 at the Monarch's Bluffs board
+/// use, `SQ-Monarchs-Bluffs` 39.013 s).
+const TOWN_BOARD_EXPIRATION_NS: u64 = 0;
+
 impl SimWorld {
     /// Player `number` (`entity`) opens the board of `request` (its name `name`) at `now_ms`:
     /// the interaction is accepted and the player's objective interactor names the board. A
     /// town project board has no offered missions (retail: the client lists the town missions
-    /// itself and takes one by its id); a faction representative's board (the name of an NPC)
+    /// of the projects the board's progression data names, and takes one by its id); a faction representative's board (the name of an NPC)
     /// offers its missions until they expire.
     pub(super) fn open_board(
         &mut self,
@@ -48,25 +56,44 @@ impl SimWorld {
         let provider = at
             .and_then(|at| self.zone_plot_near(at))
             .unwrap_or(request.target);
-        let faction_board = name
-            .first()
-            .is_some_and(|byte| char::from(*byte) == NPC_NAME_MARK);
-        let (expiration_time, elements) = if faction_board {
-            let (expiration_ns, missions) = self.faction_offers(entity, provider, now_ms);
-            (Some(expiration_ns), missions)
+        // A town project board's name starts with the NPC mark too (live 2026-11-14: taken for a
+        // faction board, it offered a player with no faction nothing, with an expiry).
+        let faction_board = name != TOWN_BOARD_NAME
+            && name
+                .first()
+                .is_some_and(|byte| char::from(*byte) == NPC_NAME_MARK);
+        let (expiration_ns, elements) = if faction_board {
+            self.faction_offers(entity, provider, now_ms)
         } else {
-            (None, Vec::new())
+            (TOWN_BOARD_EXPIRATION_NS, Vec::new())
         };
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
         let answer = gather_answer(number, request, GATHER_ACCEPTED, name);
         send_now(&mut self.combat_messages, &player.connection, &[answer]);
+        let claim = claim_of(&player.territories, &self.content.charting);
+        tracing::debug!(
+            player = number,
+            faction_board,
+            ?claim,
+            provider = ?provider,
+            "board opened"
+        );
+        if !faction_board && let Some(territory) = claim {
+            let level_number = self.stations.number_of(&request.target);
+            player.desk.open(
+                territory,
+                request.target,
+                BoardKind::TownBoard,
+                level_number,
+            );
+        }
         player.open_board = Some(provider);
         player.board_version += 1;
         let state = ObjectiveInteractorState {
             provider: Some(provider),
-            expiration_time,
+            expiration_time: Some(expiration_ns),
             missions: Some(ReplicatedList::Full(FullList {
                 version: Some(player.board_version),
                 elements,

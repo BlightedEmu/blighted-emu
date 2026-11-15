@@ -178,6 +178,7 @@ impl SocialWorld {
             | Effect::StartTownProject { .. }
             | Effect::CancelTownProject { .. }
             | Effect::TownProjectAnswered { .. }
+            | Effect::CompanyAnswered { .. }
             | Effect::FindAccount { .. }
             | Effect::Deliver { .. }
             | Effect::MoveCoins { .. }

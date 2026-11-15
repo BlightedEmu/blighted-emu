@@ -99,11 +99,10 @@ struct WarMove {
     arrival: Position,
 }
 
-/// This sim's raid traffic: the inputs for the social service and the war moves of the raid
-/// invites it asked for, by character.
+/// This sim's raid traffic: the war moves of the raid invites it asked for, by character (the
+/// inputs for the social service go into [`SimWorld::take_social_inputs`]).
 #[derive(Debug, Default)]
 pub(super) struct SimRaids {
-    inputs: Vec<SocialInput>,
     war_moves: HashMap<Uuid, WarMove>,
     /// The open instances of the wars without a result, by war: the instance, its sim and its
     /// phase (the director's news), for the invites of players that get a roster place later.
@@ -133,9 +132,10 @@ pub(super) fn raid_spec(namespace: Uuid, raid: u64, kind: u8, opposing: u64) -> 
 }
 
 impl SimWorld {
-    /// The raid joins, leaves and invites since the last call, for the social service.
-    pub fn take_raid_inputs(&mut self) -> Vec<SocialInput> {
-        std::mem::take(&mut self.raids.inputs)
+    /// The inputs for the social service since the last call: the raid joins, leaves and
+    /// invites, and the game masters' companies ([`super::gm_chat`]).
+    pub fn take_social_inputs(&mut self) -> Vec<SocialInput> {
+        std::mem::take(&mut self.social_inputs)
     }
 
     /// The director opened war `war`'s instance `target`: roster player `entity` gets the
@@ -170,7 +170,7 @@ impl SimWorld {
                 arrival,
             },
         );
-        self.raids.inputs.push(SocialInput::RaidInvite {
+        self.social_inputs.push(SocialInput::RaidInvite {
             character,
             raid,
             group,
@@ -280,7 +280,7 @@ impl SimWorld {
         else {
             return;
         };
-        self.raids.inputs.push(SocialInput::RaidJoin {
+        self.social_inputs.push(SocialInput::RaidJoin {
             character,
             raid,
             group,
@@ -360,8 +360,7 @@ impl SimWorld {
         else {
             return;
         };
-        self.raids
-            .inputs
+        self.social_inputs
             .push(SocialInput::RaidLeave { character, raid });
     }
 
@@ -535,7 +534,7 @@ mod tests {
     fn a_roster_player_gets_the_raid_invite_and_moves_on_its_accept() {
         let (mut world, entity, character, war_id) = roster_world();
         world.invite_to_war_raid(entity, war_id, target(), ARRIVAL);
-        let inputs = world.take_raid_inputs();
+        let inputs = world.take_social_inputs();
         let [
             SocialInput::RaidInvite {
                 character: invited,
@@ -553,12 +552,12 @@ mod tests {
         assert_eq!(raid.kind, RAID_TYPE_WAR);
         // An answer of another activity moves nothing and keeps no move.
         world.raid_invites_answered(&[answer(character, Uuid::from_u128(1), true)]);
-        assert!(world.take_raid_inputs().is_empty());
+        assert!(world.take_social_inputs().is_empty());
         assert!(world.raids.war_moves.is_empty());
         world.invite_to_war_raid(entity, war_id, target(), ARRIVAL);
-        world.take_raid_inputs();
+        world.take_social_inputs();
         world.raid_invites_answered(&[answer(character, war_id, true)]);
-        let inputs = world.take_raid_inputs();
+        let inputs = world.take_social_inputs();
         assert!(
             matches!(inputs.as_slice(), [SocialInput::RaidJoin { group, .. }] if *group == ROSTER_GROUP),
             "the move joins the raid: {inputs:?}"
@@ -588,14 +587,14 @@ mod tests {
         world.wars.read(Ok(vec![signed_up.clone()]));
         world.invite_war_roster(war_id, target(), None);
         assert!(
-            world.take_raid_inputs().is_empty(),
+            world.take_social_inputs().is_empty(),
             "a sign-up without a roster place gets no invite at the opening"
         );
 
         let placed = war(vec![signup(admit.character, None, Some((ROSTER_GROUP, 0)))]);
         let before = world.wars.read(Ok(vec![placed.clone()]));
         world.invite_late_roster_players(&before);
-        let inputs = world.take_raid_inputs();
+        let inputs = world.take_social_inputs();
         assert!(
             matches!(
                 inputs.as_slice(),
@@ -622,7 +621,7 @@ mod tests {
         let before = world.wars.read(Ok(vec![placed]));
         world.invite_late_roster_players(&before);
         assert!(
-            world.take_raid_inputs().is_empty(),
+            world.take_social_inputs().is_empty(),
             "an unchanged roster invites nobody again"
         );
     }
@@ -631,16 +630,16 @@ mod tests {
     fn a_declined_raid_invite_moves_nothing_and_a_player_off_the_roster_gets_none() {
         let (mut world, entity, character, war_id) = roster_world();
         world.invite_to_war_raid(entity, war_id, target(), ARRIVAL);
-        world.take_raid_inputs();
+        world.take_social_inputs();
         world.raid_invites_answered(&[answer(character, war_id, false)]);
-        assert!(world.take_raid_inputs().is_empty(), "no move, no join");
+        assert!(world.take_social_inputs().is_empty(), "no move, no join");
         assert!(world.raids.war_moves.is_empty());
         // A player on no roster gets no invite.
         let mut other = war(Vec::new());
         other.war = Uuid::from_u128(0x78);
         world.wars.read(Ok(vec![other]));
         world.invite_to_war_raid(entity, war_id, target(), ARRIVAL);
-        assert!(world.take_raid_inputs().is_empty());
+        assert!(world.take_social_inputs().is_empty());
         assert!(world.raids.war_moves.is_empty());
     }
 
@@ -706,7 +705,7 @@ mod tests {
             NO_OPPOSING_RAID,
         );
         let joins: Vec<(RaidSpec, u8)> = world
-            .take_raid_inputs()
+            .take_social_inputs()
             .into_iter()
             .filter_map(|input| match input {
                 SocialInput::RaidJoin { raid, group, .. } => Some((raid, group)),

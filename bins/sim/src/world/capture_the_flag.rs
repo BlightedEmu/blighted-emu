@@ -2692,7 +2692,7 @@ mod tests {
         let mut world = ctf_sim();
         let raids = running(&world).raids;
         let joins: Vec<(u64, u8, u8)> = world
-            .take_raid_inputs()
+            .take_social_inputs()
             .into_iter()
             .filter_map(|input| match input {
                 nw_bus::SocialInput::RaidJoin { raid, group, .. } => {
@@ -2709,7 +2709,7 @@ mod tests {
         // A match is no run: no run raid besides the team's.
         let entity = world.player_by_number(RED_PLAYER).expect("player");
         world.join_run_raid(entity);
-        assert!(world.take_raid_inputs().is_empty());
+        assert!(world.take_social_inputs().is_empty());
     }
 
     fn running(world: &SimWorld) -> &CaptureTheFlagMatch {

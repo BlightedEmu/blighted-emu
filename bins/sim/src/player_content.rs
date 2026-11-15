@@ -827,6 +827,11 @@ pub struct PlayerContent {
     /// The door capitals of the level ([`nw_content::level_doors`]); empty until the sim loads
     /// their file.
     pub level_doors: nw_content::level_doors::LevelDoors,
+    /// The war boards of the level's towns ([`sign_boards`]); empty until the sim loads the level.
+    pub war_boards: Vec<SignBoard>,
+    /// The town project boards of the level's towns ([`sign_boards`]); empty until the sim loads
+    /// the level.
+    pub town_boards: Vec<SignBoard>,
     /// The forts of the territory wars ([`nw_content::war_forts`]); empty until the sim loads
     /// their file.
     pub war_forts: nw_content::war_forts::WarForts,
@@ -1094,6 +1099,37 @@ pub fn entrance_entities(
                 entrance_component: slice.entrance_component,
                 members: slice.members.clone(),
             })
+        })
+        .collect()
+}
+
+/// The spawned slice of a town's war board (39 in the open world of build 25810808; retail's
+/// boards of `sign_up_for_invasion`, `everfall_war` and `aasdf` are of it).
+pub const WAR_BOARD_SLICE: &str = "slices/pois/signage/war_board";
+/// The spawned slice of a town's project board (13 in the open world of build 25810808; retail's
+/// boards of `Hivetownboardmissions` and `SQ-Monarchs-Bluffs` are of it).
+pub const TOWN_BOARD_SLICE: &str = "slices/pois/signage/town_project_board";
+
+/// A sign board of a town (a war board, a town project board): a level entity whose card and
+/// territory interface state a player near it gets (town board and war board note, 2026-11-14;
+/// [`crate::world`]'s level boards).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SignBoard {
+    /// Its entity id (the `GdeRef` of its card and the facet entity of its use).
+    pub id: u64,
+    /// Where it stands.
+    pub position: Position,
+}
+
+/// The boards of spawned slice `slice` among the spawned slices of `level`.
+pub fn sign_boards(level: &WorldFile, slice: &str) -> Vec<SignBoard> {
+    level
+        .spawned
+        .iter()
+        .filter(|spawned| spawned.slice == slice)
+        .map(|spawned| SignBoard {
+            id: spawned.id,
+            position: point_position(spawned.position),
         })
         .collect()
 }
@@ -1566,6 +1602,8 @@ impl PlayerContent {
             encounter_objects: nw_content::town_props::TownProps::default(),
             entrance_entities: Vec::new(),
             level_doors: nw_content::level_doors::LevelDoors::default(),
+            war_boards: Vec::new(),
+            town_boards: Vec::new(),
             war_forts: nw_content::war_forts::WarForts::default(),
             invasion_forts: nw_content::invasion_forts::InvasionForts::default(),
             siege_blueprints: nw_content::war_forts::SiegeBlueprints::from_tables(tables),

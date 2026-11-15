@@ -49,7 +49,7 @@ const REFUSED: &str = "refused";
 /// The right that declares a war (the client's `Declare_War` privilege, 23).
 const DECLARE_RIGHT: Right = Right::Has(Privilege::DeclareWar);
 /// The faction byte of no faction.
-const NO_FACTION: u8 = 0;
+pub(crate) const NO_FACTION: u8 = 0;
 
 /// Why the service refused a declaration before the database saw it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

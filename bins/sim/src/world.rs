@@ -30,7 +30,7 @@ use nw_content::mutations::MutationCatalog;
 use nw_content::recipe_cooldowns::{CooldownCount, RecipeCooldownCounts};
 use nw_messages::client_input::{
     CRAFTING_STATION_KIND, GATHER_KIND, LOOT_KIND, LORE_KIND, REVIVE_PLAYER_KIND, TALK_KIND,
-    TOWN_BOARD_KIND, TRIGGER_KIND, WATER_GATHER_KIND,
+    TOWN_BOARD_KIND, TRIGGER_KIND, WAR_BOARD_KIND, WATER_GATHER_KIND,
 };
 use nw_messages::entity_ids::IdHolder;
 use nw_messages::items::{FIRST_VERSION, FullList};
@@ -113,6 +113,7 @@ mod item_calls;
 mod kill_rewards;
 pub(crate) mod land_claims;
 mod level_assets;
+mod level_boards;
 mod level_doors;
 mod level_flow;
 pub mod locked_doors;
@@ -207,7 +208,10 @@ use statics::{
 };
 
 pub use attack::{AttackKeys, Blow, INPUT_RECORD_MS, KeyAttack};
-pub use gm_chat::{GmChat, answer_lines};
+pub use gm_chat::{
+    COMPANY_IN_COMPANY, COMPANY_NAME_TAKEN, DONE as GM_DONE, FACTION_UNCHANGED, GmChat,
+    answer_lines, company_made,
+};
 
 use attack::{PendingMobSwing, PlayerSwing, Vitals};
 
@@ -1122,8 +1126,11 @@ pub struct SimWorld {
     wars: wars::Wars,
     /// The invasion this instance sim runs ([`invasions`]).
     invasion: Option<invasions::InvasionRun>,
-    /// The raid traffic for the social service ([`raids`]).
+    /// The raid war moves ([`raids`]).
     raids: raids::SimRaids,
+    /// The inputs for the social service of this sim's own systems
+    /// ([`SimWorld::take_social_inputs`]).
+    social_inputs: Vec<nw_bus::SocialInput>,
     /// The encounters of the running instance's level script.
     dungeon_run: Option<dungeon_script::DungeonRun>,
     /// The gates of the running instance ([`gates`]).
@@ -1378,6 +1385,7 @@ impl SimWorld {
         );
         stations.add_level(dungeon_entrances::stations(&content.entrance_entities));
         level_doors::add_to(&mut stations, &content.level_doors);
+        level_boards::add_to(&mut stations, &content.war_boards, &content.town_boards);
         // Only an instance sim names the levels of the game modes.
         let (instance_levels, war_levels) = if settings.instance_role {
             (
@@ -1460,6 +1468,7 @@ impl SimWorld {
             wars: wars::Wars::of_world(ids.calendar_block.value),
             invasion: None,
             raids: raids::SimRaids::default(),
+            social_inputs: Vec::new(),
             dungeon_run: None,
             dungeon_gates: None,
             world_events: None,
@@ -3861,6 +3870,7 @@ impl SimWorld {
             match request.kind {
                 TALK_KIND => self.talk(entity, number, request, name, now_ms),
                 TOWN_BOARD_KIND => self.open_board(entity, number, request, name, now_ms),
+                WAR_BOARD_KIND => self.open_war_board(entity, number, request, name),
                 governance::GOVERNOR_DESK_KIND | town_projects::PLANNING_BOARD_KIND => {
                     self.open_governor_desk(entity, number, request, name);
                 }
@@ -4767,6 +4777,7 @@ impl SimWorld {
             mutations: &content.mutations,
             mutation_unix_s: self.unix_s(),
             territories: &self.territories,
+            charting: &content.charting,
             territory_projects: &content.territory_projects,
             wars: &self.wars,
             war_unix_ms: self.unix_ms(),
@@ -5439,6 +5450,8 @@ struct Neighbourhood<'a> {
     mutation_unix_s: u64,
     /// The territory claims and their owners.
     territories: &'a land_claims::Territories,
+    /// The area map of the content, for the claim a player is in.
+    charting: &'a crate::charting::ChartRules,
     /// The town projects of the content, for the planning boards.
     territory_projects: &'a nw_content::territory_projects::TerritoryProjects,
     /// The territory wars.
@@ -5535,7 +5548,16 @@ impl Neighbourhood<'_> {
                 ));
                 numbers.extend(player.social.entity_numbers());
                 let desk_player = &mut **player;
-                numbers.extend(desk_player.desk.number_in(&desk_player.territories));
+                // A board view in a level entity's slot is in the list as that entity.
+                numbers.extend(
+                    desk_player
+                        .desk
+                        .number_in(governance::claim_of(
+                            &desk_player.territories,
+                            self.charting,
+                        ))
+                        .filter(|number| *number >= governance::DESK_ENTITY_BASE),
+                );
                 numbers.extend(
                     self.performances
                         .numbers_near(own_position, self.view_radius_m),
@@ -6047,10 +6069,28 @@ impl Neighbourhood<'_> {
                     continue;
                 }
                 if (crafting::STATION_ENTITY_BASE..loot_bag::BAG_ENTITY_BASE).contains(&number) {
-                    let group = self
+                    let Some(slot) = player.slots.slot(number) else {
+                        continue;
+                    };
+                    let station = self
                         .stations
-                        .zip(player.slots.slot(number))
-                        .and_then(|(stations, slot)| stations.group(number, slot));
+                        .and_then(|stations| stations.group(number, slot));
+                    // A board the player uses shows its data in the board's own slot
+                    // ([`governance::BoardKind::TownBoard`]).
+                    let board = player.desk.group(
+                        number,
+                        slot,
+                        self.territories,
+                        self.territory_projects,
+                        nw_common::time::unix_ms(),
+                    );
+                    let group = match (station, board) {
+                        (Some(mut station), Some(board)) => {
+                            station.members.extend(board.members);
+                            Some(station)
+                        }
+                        (station, board) => station.or(board),
+                    };
                     if group.is_some() {
                         tracing::debug!(player = player.number, station = number, "station shown");
                     }
@@ -12296,7 +12336,7 @@ mod tests {
             kind: nw_messages::client_input::TOWN_BOARD_KIND,
             gatherable: None,
         };
-        world.interact(&who, board, b"@ui_territory_board_town_project", NOW);
+        world.interact(&who, board, nw_messages::client_input::TOWN_BOARD_NAME, NOW);
         let take = ObjectiveInteractorClientMsg::SelectCommunityGoal {
             header: FacetHeader::of(0, 1),
             mission: MISSION_CRC,

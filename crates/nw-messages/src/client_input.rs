@@ -184,6 +184,9 @@ pub const TALK_KIND: u8 = 63;
 /// The interaction kind of a town project board (retail board capture 2026-06-13: name
 /// `@ui_territory_board_town_project`).
 pub const TOWN_BOARD_KIND: u8 = 51;
+/// The interaction name of a town project board (the same retail capture). A faction
+/// representative's board has the same kind and the representative's NPC name.
+pub const TOWN_BOARD_NAME: &[u8] = b"@ui_territory_board_town_project";
 /// The interaction kind of a revive of a downed player (the client's `InteractionUIActions`
 /// value 30, `RevivePlayer`, registered by `FUN_1435eaa20`).
 pub const REVIVE_PLAYER_KIND: u8 = 30;
@@ -195,6 +198,11 @@ pub const EXIT_DUNGEON_KIND: u8 = 74;
 /// The interaction kind of a lore note the player reads (retail 2026-09-18: Kubikiri's
 /// Occupation and La Rousette's Manifest on the start beach).
 pub const LORE_KIND: u8 = 47;
+/// The interaction kind of a town's war board (retail `sign_up_for_invasion` 26.047 s, name
+/// `@ui_territory_board_war`).
+pub const WAR_BOARD_KIND: u8 = 61;
+/// The interaction name of a war board (the same retail capture).
+pub const WAR_BOARD_NAME: &[u8] = b"@ui_territory_board_war";
 /// Where a gather's body holds the CRC-32 of its gatherable (after the kind, the kind and the
 /// facet entity again).
 const GATHERABLE_AT: usize = 42;
@@ -252,7 +260,7 @@ const DEFAULT_SHAPE: KindShape = KindShape {
 };
 
 /// The retail shape of each kind with one shape in the captures (see [`KindShape`]).
-const KIND_SHAPES: [(u8, KindShape); 9] = [
+const KIND_SHAPES: [(u8, KindShape); 10] = [
     (
         GATHER_KIND,
         KindShape {
@@ -300,6 +308,13 @@ const KIND_SHAPES: [(u8, KindShape); 9] = [
         TOWN_BOARD_KIND,
         KindShape {
             action_crc: 0xd183_d760,
+            ..DEFAULT_SHAPE
+        },
+    ),
+    (
+        WAR_BOARD_KIND,
+        KindShape {
+            action_crc: 0x4070_6885,
             ..DEFAULT_SHAPE
         },
     ),
@@ -2440,6 +2455,14 @@ mod tests {
         "0000000000000000000000000000000000000000000000000000000000000000",
         "00000000000000000000",
     );
+    /// Retail war board (`sign_up_for_invasion` 26.047 s).
+    const RETAIL_WAR_BOARD: &str = concat!(
+        "c7b64c13119d40ed0000000000000000ed409d11134cb6c79a24d9f5a59b9674",
+        "3d3ded4082ea134cb6c700000000000000000000000000000000000117407569",
+        "5f7465727269746f72795f626f6172645f776172000000000000000000000000",
+        "0000407068850000000000000000000000000000000000000000000000000000",
+        "00000000000000000000000000000000000000000000000000",
+    );
     /// Retail town project board (open-world playthrough, part 4).
     const RETAIL_BOARD: &str = concat!(
         "c754a9fd18028a950000000000000000958a0218fda954c786e96522076d657c",
@@ -2501,7 +2524,7 @@ mod tests {
         const UNSHAPED_KIND: u8 = 76;
         /// The CRC-32 of the gatherable of a retail large supplies crate.
         const SUPPLIES_LARGE: u32 = 0xaaa7_69a5;
-        let cases: [(u8, Option<u32>, &[u8]); 12] = [
+        let cases: [(u8, Option<u32>, &[u8]); 13] = [
             (GATHER_KIND, Some(SINGLE_STONE), b""),
             (
                 GATHER_KIND,
@@ -2512,7 +2535,8 @@ mod tests {
             (LOOT_KIND, None, b"@ui_loot"),
             (CRAFTING_STATION_KIND, None, b"@ui_watcherscampfire"),
             (TALK_KIND, None, b"@12_JeongIseul"),
-            (TOWN_BOARD_KIND, None, b"@ui_territory_board_town_project"),
+            (TOWN_BOARD_KIND, None, TOWN_BOARD_NAME),
+            (WAR_BOARD_KIND, None, WAR_BOARD_NAME),
             (REVIVE_PLAYER_KIND, None, b""),
             (TRIGGER_KIND, None, b"Dropper_T1_FireBarrel"),
             (EXIT_DUNGEON_KIND, None, b""),
@@ -2542,6 +2566,7 @@ mod tests {
             (RETAIL_TALK, false),
             (RETAIL_LOOT, false),
             (RETAIL_BOARD, false),
+            (RETAIL_WAR_BOARD, false),
             (RETAIL_EXIT, true),
             (RETAIL_REVIVE, false),
         ] {

@@ -130,7 +130,10 @@ mod tests {
         let members = world.stations.members(number).expect("members");
         assert_eq!(members.len(), 5, "card, place and the three slice states");
         let hex = hex::encode(members[0].encode().expect("card"));
-        assert!(hex.starts_with("000a01033c6f2d1aa36a5a1b8a4f2e7b9d1c0e5500000002"), "{hex}");
+        assert!(
+            hex.starts_with("000a01033c6f2d1aa36a5a1b8a4f2e7b9d1c0e5500000002"),
+            "{hex}"
+        );
         let near: Vec<u64> = world
             .stations
             .numbers_near(
@@ -178,7 +181,10 @@ mod tests {
                 gatherable: None,
             },
         );
-        let player = world.world.get::<crate::world::Player>(entity).expect("player");
+        let player = world
+            .world
+            .get::<crate::world::Player>(entity)
+            .expect("player");
         assert_eq!(player.station.as_deref(), Some("Smelting3"));
         assert_eq!(player.station_interaction, Some(INTERACTION));
     }
@@ -189,16 +195,104 @@ mod tests {
         world.tick_town_stations();
         let (old, _) = world.town_stations.shown[0].expect("shown");
         let table = Arc::clone(&world.content);
-        world
-            .town_stations
-            .sync(&table.town_stations, &mut world.stations, |territory, upgrade| {
-                u8::from(territory == 6 && upgrade == 9)
-            });
+        world.town_stations.sync(
+            &table.town_stations,
+            &mut world.stations,
+            |territory, upgrade| u8::from(territory == 6 && upgrade == 9),
+        );
         let (new, station_type) = world.town_stations.shown[0].expect("shown again");
         assert_eq!(station_type, 4, "claim tier 1: Smelting4");
         assert_ne!(new, old, "a new slot key: the old station left the views");
         assert!(world.stations.members(old).is_none());
-        let card = hex::encode(world.stations.members(new).expect("new")[0].encode().expect("card"));
-        assert!(card.starts_with("000a01031170a97191f759ac97698f128ab0609a"), "{card}");
+        let card = hex::encode(
+            world.stations.members(new).expect("new")[0]
+                .encode()
+                .expect("card"),
+        );
+        assert!(
+            card.starts_with("000a01031170a97191f759ac97698f128ab0609a"),
+            "{card}"
+        );
+    }
+}
+
+/// The retail table of `local-data/content` in the open world level as a live sim loads it:
+/// a guard of the town stations a player used live (2026-11-14, Monarch's Bluffs: all ten
+/// opened).
+#[cfg(all(test, feature = "local-data"))]
+mod retail_tests {
+    use std::sync::Arc;
+
+    use nw_messages::client_input::{CRAFTING_STATION_KIND, InteractionRequest};
+
+    use crate::world::Player;
+    use crate::world::tests::{NOW, connection, join};
+
+    /// 13 settlements x 10 crafts (town crafting stations study, 2026-11-14).
+    const RETAIL_SLOTS: usize = 130;
+    const CRAFTS_PER_SETTLEMENT: usize = 10;
+    /// Monarch's Bluffs (`12A_MSQ` story).
+    const MONARCHS_BLUFFS: u16 = 12;
+    const INTERACTION: u64 = 1;
+
+    #[test]
+    fn every_retail_settlement_station_stands_and_opens_with_its_station_type() {
+        let (_level, mut world) = crate::quest_walk::tests::retail_world("town-stations");
+        world.tick_town_stations();
+        let content = Arc::clone(&world.content);
+        let slots = content.town_stations.slots();
+        assert_eq!(slots.len(), RETAIL_SLOTS);
+        assert_eq!(
+            slots
+                .iter()
+                .filter(|slot| slot.territory == MONARCHS_BLUFFS)
+                .count(),
+            CRAFTS_PER_SETTLEMENT
+        );
+        for ((index, slot), number) in slots.iter().enumerate().zip(1..) {
+            let tier = world
+                .territories
+                .dominion()
+                .tier(slot.territory, slot.upgrade);
+            let slice = content
+                .town_stations
+                .slice_of(slot, tier)
+                .unwrap_or_else(|| panic!("slot {index}: no slice at tier {tier}"));
+            let (shown, _) = world.town_stations.shown[index]
+                .unwrap_or_else(|| panic!("slot {index}: not shown"));
+            let card = world
+                .stations
+                .members(shown)
+                .and_then(|members| match &members[0].state {
+                    nw_messages::MemberState::GdeMetadata(card) => card.gde_ref,
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("slot {index}: no card"));
+            join(&mut world, number, 0.0);
+            world.interact(
+                &connection(number),
+                InteractionRequest {
+                    target: card,
+                    target_entity: nw_messages::facet_of_raw_id(&card),
+                    interaction: INTERACTION,
+                    kind: CRAFTING_STATION_KIND,
+                    gatherable: None,
+                },
+                b"",
+                NOW,
+            );
+            let entity = world.player_by_number(number).expect("player");
+            let opened = world
+                .world
+                .get::<Player>(entity)
+                .and_then(|player| player.station.clone());
+            assert_eq!(
+                opened.as_deref(),
+                Some(slice.station_type.as_str()),
+                "slot {index} (territory {}, upgrade {})",
+                slot.territory,
+                slot.upgrade
+            );
+        }
     }
 }

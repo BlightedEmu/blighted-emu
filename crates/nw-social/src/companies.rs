@@ -19,6 +19,10 @@
 //!
 //! The client shows its own company from the `GuildsComponentReplicatedState`, which
 //! [`crate::views`] sends.
+//!
+//! A game master makes a company for a character of a faction (`!company`,
+//! [`nw_bus::SocialInput::GmCreateCompany`]) as that character's own creation would, with an
+//! empty crest, and its sim gets the result ([`nw_bus::CompanyAnswer`]).
 
 use nw_db::{Company, CompanyInvite, CompanyListing, CompanyMember};
 use nw_messages::FacetHeader;
@@ -29,7 +33,10 @@ use nw_messages::social::{
 };
 use uuid::Uuid;
 
+use nw_bus::{CompanyAnswer, CompanyCreated};
+
 use crate::effects::{Effect, StoreOp};
+use crate::war_declaration::NO_FACTION;
 use crate::world::{CompanyState, METRIC_CALLS, REFUSED, RESULT_LABEL, SocialWorld};
 
 /// Rank 0: the governor.
@@ -51,6 +58,8 @@ pub const JOIN_UPDATE_COPIES: usize = 3;
 const NO_WARS: u32 = 0;
 /// The id of no company.
 const NO_COMPANY: [u8; 16] = [0; 16];
+/// The crest of a game master's company: no symbol, no colors.
+const GM_CREST: [u8; nw_db::CREST_LEN] = [0; nw_db::CREST_LEN];
 
 /// A page request of the company list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,7 +258,10 @@ impl SocialWorld {
                 self.answer(character, header, SocialPush::Guild(push));
             }
             GuildCall::Create { name, crest } => {
-                self.create_company(character, name, crest_bytes(&crest));
+                if self.create_company(character, name, crest_bytes(&crest)) != CompanyCreated::Made
+                {
+                    metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
+                }
             }
             GuildCall::Refresh => {
                 let guild = self
@@ -395,10 +407,19 @@ impl SocialWorld {
             .unwrap_or_default()
     }
 
-    fn create_company(&mut self, founder: Uuid, name: String, crest: [u8; nw_db::CREST_LEN]) {
-        if self.company_of(founder).is_some() || !self.company_name_free(&name, None) {
-            metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
-            return;
+    /// Makes company `name` of `founder`'s faction with `founder` as its governor, unless the
+    /// founder is in a company or another company has the name.
+    fn create_company(
+        &mut self,
+        founder: Uuid,
+        name: String,
+        crest: [u8; nw_db::CREST_LEN],
+    ) -> CompanyCreated {
+        if self.company_of(founder).is_some() {
+            return CompanyCreated::InCompany;
+        }
+        if !self.company_name_free(&name, None) {
+            return CompanyCreated::NameTaken;
         }
         let faction = self
             .people
@@ -433,6 +454,29 @@ impl SocialWorld {
         }
         self.store(StoreOp::CreateCompany { company, founder });
         self.tell_company_changed(id, JOIN_UPDATE_COPIES, &[founder]);
+        CompanyCreated::Made
+    }
+
+    /// A game master's company `name` for `character` (module doc): a character of no faction
+    /// gets none; the character's sim gets the result.
+    pub(crate) fn gm_create_company(&mut self, character: Uuid, name: String) {
+        let faction = self
+            .people
+            .get(&character)
+            .map_or(NO_FACTION, |person| person.settings.faction);
+        let result = if faction == NO_FACTION {
+            CompanyCreated::NoFaction
+        } else {
+            self.create_company(character, name.clone(), GM_CREST)
+        };
+        if let Some(sim) = self.sim_of(character) {
+            let answer = CompanyAnswer {
+                character,
+                name,
+                result,
+            };
+            self.out.push(Effect::CompanyAnswered { sim, answer });
+        }
     }
 
     fn invite_to_company(&mut self, inviter: Uuid, invitee: &str, now_ms: u64) {
@@ -855,6 +899,70 @@ pub(crate) mod tests {
 
     fn id_text(number: u128) -> Vec<u8> {
         text(&character(number).hyphenated().to_string())
+    }
+
+    /// The answer to a game master's company `name` for character `number` on `sim-a`.
+    fn gm_company(world: &mut SocialWorld, number: u128, name: &str) -> nw_bus::CompanyAnswer {
+        let effects = world.input(
+            &crate::world::tests::sim("sim-a"),
+            nw_bus::SocialInput::GmCreateCompany {
+                character: character(number),
+                name: name.to_owned(),
+            },
+            NOW_MS,
+        );
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::CompanyAnswered { sim, answer } => {
+                    assert_eq!(sim, crate::world::tests::sim("sim-a"), "the asker's sim");
+                    Some(answer)
+                }
+                _ => None,
+            })
+            .expect("the answer")
+    }
+
+    #[test]
+    fn a_game_master_company_is_made_for_a_character_of_a_faction_and_refused_otherwise() {
+        let mut world = world();
+        join(&mut world, 1, "Ann", "sim-a");
+        join(&mut world, 2, "Bob", "sim-a");
+        let mut no_faction = crate::world::tests::player(3, "Cid", "sim-a");
+        no_faction.faction = NO_FACTION;
+        world.input(
+            &crate::world::tests::sim("sim-a"),
+            nw_bus::SocialInput::Joined(no_faction),
+            NOW_MS,
+        );
+        let made = gm_company(&mut world, 1, "Alpha");
+        assert_eq!(
+            (made.name.as_str(), made.result),
+            ("Alpha", CompanyCreated::Made)
+        );
+        let (company, rank) = world.company_of(character(1)).expect("Ann's company");
+        assert_eq!(rank, RANK_GOVERNOR);
+        assert_eq!(
+            world
+                .companies
+                .get(&company)
+                .map(|state| state.record.faction),
+            Some(1),
+            "the governor's faction"
+        );
+        assert_eq!(
+            gm_company(&mut world, 1, "Beta").result,
+            CompanyCreated::InCompany
+        );
+        assert_eq!(
+            gm_company(&mut world, 2, "alpha").result,
+            CompanyCreated::NameTaken
+        );
+        assert_eq!(
+            gm_company(&mut world, 3, "Gamma").result,
+            CompanyCreated::NoFaction
+        );
+        assert!(world.company_of(character(3)).is_none());
     }
 
     /// Ann creates Alpha and Bob joins it by invite.

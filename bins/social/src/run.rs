@@ -566,6 +566,13 @@ impl Loop {
                         .project_answers
                         .push(answer);
                 }
+                Effect::CompanyAnswered { sim, answer } => {
+                    self.pending
+                        .entry(sim)
+                        .or_default()
+                        .company_answers
+                        .push(answer);
+                }
                 Effect::Treasury {
                     ticket,
                     company,

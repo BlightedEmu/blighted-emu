@@ -45,9 +45,16 @@ const MINUTES_PER_HOUR: u64 = 60;
 /// Milliseconds per minute (`!war`'s start).
 const MS_PER_MINUTE: u64 = 60_000;
 /// The answer to a command the sim carried out.
-pub(super) const DONE: &str = "Done.";
+pub const DONE: &str = "Done.";
 /// The answer when the named player is not on this sim.
 const NOT_HERE: &str = "That player is not on this server.";
+/// The answer when `!faction` changed nothing (the player has that faction, or it cannot join).
+pub const FACTION_UNCHANGED: &str = "The player keeps its faction.";
+/// The answer to `!company` when the game master is in a company already ([`company_made`]).
+pub const COMPANY_IN_COMPANY: &str = "You are in a company already.";
+/// The answer to `!company` when another company has the name.
+pub const COMPANY_NAME_TAKEN: &str = "Another company has that name.";
+const COMPANY_NO_FACTION: &str = "Join a faction first: !faction <syndicate|marauder|covenant>.";
 /// The answer to a word that is no command.
 const UNKNOWN: &str = "Unknown command. Type !help for the list.";
 /// The answer when no event runs.
@@ -65,6 +72,13 @@ const STATE_PENDING: &str = "pending";
 const STATE_OFF: &str = "off";
 const STATE_NONE: &str = "none";
 
+/// The answer to `!company` when the social service made company `name`.
+pub fn company_made(name: &str) -> String {
+    format!(
+        "Company {name} made; you are its governor. Give it a territory: !owner <territory id> {name}"
+    )
+}
+
 /// One command word: its usage line and its reader of the words after it.
 struct Verb {
     name: &'static str,
@@ -73,7 +87,7 @@ struct Verb {
 }
 
 /// Every command, in the order of `!help`.
-const VERBS: [Verb; 28] = [
+const VERBS: [Verb; 30] = [
     Verb {
         name: "help",
         usage: "!help",
@@ -336,6 +350,24 @@ const VERBS: [Verb; 28] = [
         read: |words| words.is_empty().then_some(Command::Events),
     },
     Verb {
+        name: "faction",
+        usage: "!faction <syndicate|marauder|covenant> [player]",
+        read: |words| {
+            let (words, target) = target(words, 1)?;
+            let faction = nw_content::factions::faction_named(words[0])?;
+            Some(Command::Faction { target, faction })
+        },
+    },
+    Verb {
+        name: "company",
+        usage: "!company <company name>",
+        read: |words| {
+            (!words.is_empty()).then(|| Command::Company {
+                name: words.join(" "),
+            })
+        },
+    },
+    Verb {
         name: "owner",
         usage: "!owner <territory id> <company name|clear>",
         read: |words| {
@@ -465,6 +497,16 @@ enum Command {
     },
     State {
         target: Target,
+    },
+    /// A player's faction ([`SimWorld::set_faction`]).
+    Faction {
+        target: Target,
+        faction: u8,
+    },
+    /// A company governed by the game master ([`nw_bus::SocialInput::GmCreateCompany`]):
+    /// answered once the social service took it ([`SimWorld::company_answered`]).
+    Company {
+        name: String,
     },
     /// The owner of the claim of a territory ([`super::land_claims`]): answered once the world
     /// database took the change.
@@ -781,6 +823,27 @@ impl SimWorld {
         }
     }
 
+    /// The social service's answers to the game masters' companies (`!company`): one line to
+    /// each asker that is here.
+    pub(super) fn company_answered(&mut self, answers: &[nw_bus::CompanyAnswer]) {
+        for answer in answers {
+            let Some(connection) = self
+                .player_of_character(answer.character)
+                .and_then(|entity| self.world.get::<Player>(entity))
+                .map(|player| player.connection.clone())
+            else {
+                continue;
+            };
+            let line = match answer.result {
+                nw_bus::CompanyCreated::Made => company_made(&answer.name),
+                nw_bus::CompanyCreated::InCompany => COMPANY_IN_COMPANY.to_owned(),
+                nw_bus::CompanyCreated::NameTaken => COMPANY_NAME_TAKEN.to_owned(),
+                nw_bus::CompanyCreated::NoFaction => COMPANY_NO_FACTION.to_owned(),
+            };
+            self.answer_gm_chat(&connection, vec![line]);
+        }
+    }
+
     /// Queues `lines` for the client of `connection` as system chat lines.
     pub fn answer_gm_chat(&mut self, connection: &ConnectionRef, lines: Vec<String>) {
         let Some(character) = self.character_of(connection) else {
@@ -895,6 +958,41 @@ impl SimWorld {
                 Some(entity) => self.quest_plan_lines(entity, &objective),
                 None => vec![NOT_HERE.to_owned()],
             },
+            Command::Faction { target, faction } => {
+                match self
+                    .gm_target(&target, number)
+                    .and_then(|number| Some((number, self.player_by_number(number)?)))
+                {
+                    Some((number, entity)) => {
+                        let faction_of = |world: &Self| {
+                            world
+                                .world
+                                .get::<Player>(entity)
+                                .map(|player| player.faction.faction)
+                        };
+                        let before = faction_of(self);
+                        self.set_faction(entity, number, faction, now_ms);
+                        if before != Some(faction) && faction_of(self) == Some(faction) {
+                            vec![DONE.to_owned()]
+                        } else {
+                            vec![FACTION_UNCHANGED.to_owned()]
+                        }
+                    }
+                    None => vec![NOT_HERE.to_owned()],
+                }
+            }
+            Command::Company { name } => {
+                let Some(character) = self
+                    .world
+                    .get::<Player>(sender)
+                    .map(|player| player.character)
+                else {
+                    return Outcome::Lines(vec![NOT_HERE.to_owned()]);
+                };
+                self.social_inputs
+                    .push(nw_bus::SocialInput::GmCreateCompany { character, name });
+                Vec::new()
+            }
             Command::Owner { territory, change } => {
                 let Some(connection) = self
                     .world
@@ -1404,6 +1502,80 @@ mod tests {
             "the answer waits for the database"
         );
         assert_eq!(world.take_territory_jobs(NOW).len(), 1, "the change");
+    }
+
+    #[test]
+    fn faction_sets_the_player_s_faction_once() {
+        let mut world = world();
+        chat(&mut world, GM, "!faction covenant");
+        assert_eq!(answers(&mut world, GM)[0].body, DONE);
+        let entity = world.player_by_number(GM).expect("player");
+        assert_eq!(
+            world
+                .world
+                .get::<Player>(entity)
+                .map(|player| player.faction.faction),
+            Some(nw_content::factions::COVENANT)
+        );
+        assert!(
+            world.take_social_inputs().iter().any(|input| matches!(
+                input,
+                nw_bus::SocialInput::Updated(view) if view.faction == nw_content::factions::COVENANT
+            )),
+            "the social service hears the new faction at once"
+        );
+        chat(&mut world, GM, "!faction Covenant");
+        assert_eq!(answers(&mut world, GM)[0].body, FACTION_UNCHANGED);
+        chat(&mut world, GM, "!faction pirates");
+        assert_eq!(
+            answers(&mut world, GM)[0].body,
+            "Usage: !faction <syndicate|marauder|covenant> [player]"
+        );
+    }
+
+    #[test]
+    fn company_asks_the_social_service_and_says_its_answer() {
+        let mut world = world();
+        chat(&mut world, GM, "!company Test Company");
+        assert!(
+            answers(&mut world, GM).is_empty(),
+            "the answer waits for the social service"
+        );
+        let entity = world.player_by_number(GM).expect("player");
+        let character = world
+            .world
+            .get::<Player>(entity)
+            .map(|player| player.character)
+            .expect("character");
+        let inputs = world.take_social_inputs();
+        assert!(
+            matches!(
+                inputs.as_slice(),
+                [nw_bus::SocialInput::GmCreateCompany { character: asker, name }]
+                    if *asker == character && name == "Test Company"
+            ),
+            "{inputs:?}"
+        );
+        world.company_answered(&[
+            nw_bus::CompanyAnswer {
+                character,
+                name: "Test Company".to_owned(),
+                result: nw_bus::CompanyCreated::Made,
+            },
+            nw_bus::CompanyAnswer {
+                character,
+                name: "Test Company".to_owned(),
+                result: nw_bus::CompanyCreated::NoFaction,
+            },
+        ]);
+        let lines = answers(&mut world, GM);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].body.starts_with("Company Test Company made"),
+            "{}",
+            lines[0].body
+        );
+        assert_eq!(lines[1].body, COMPANY_NO_FACTION);
     }
 
     #[test]

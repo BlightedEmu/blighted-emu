@@ -293,6 +293,9 @@ impl SimWorld {
         if !deliveries.project_answers.is_empty() {
             self.project_answered(&deliveries.project_answers);
         }
+        if !deliveries.company_answers.is_empty() {
+            self.company_answered(&deliveries.company_answers);
+        }
         if !deliveries.raid_invite_answers.is_empty() {
             self.raid_invites_answered(&deliveries.raid_invite_answers);
         }

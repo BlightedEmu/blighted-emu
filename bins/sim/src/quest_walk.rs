@@ -394,8 +394,29 @@ fn report(level: &str, walks: &[(String, QuestWalk)]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// The open world level of the committed sim config and a walk world on it: the content of
+    /// `local-data/content` as a live sim loads it. `name` names the test's edge config folder.
+    #[cfg(feature = "local-data")]
+    pub(crate) fn retail_world(name: &str) -> (LoadedLevel, SimWorld) {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut config = load_sim_config(&repo.join("config/sim.toml")).expect("config");
+        config.client_build_config = repo.join(&config.client_build_config);
+        config.content_dir = repo.join(&config.content_dir);
+        // The edge config names its config set folder from the repository root, and a test runs
+        // in the crate folder: a copy names the folder in full.
+        let folder = std::env::temp_dir().join(format!("sim-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).expect("folder");
+        config.edge_config = crate::gameplay::tests::committed_edge_config(
+            &folder,
+            &crate::gameplay::tests::AS_COMMITTED,
+        );
+        let level = load_level(&config).expect("level");
+        let world = walk_world(&config, &level).expect("world");
+        (level, world)
+    }
 
     fn walked(quest: &str, outcome: Outcome, stop: Option<&str>) -> QuestWalk {
         QuestWalk {
@@ -434,20 +455,7 @@ mod tests {
         ];
         const STORY_INSTANCE_QUEST: &str = "12A_MSQ_24_DefeatGawain";
         const NPC_FAULTS: [&str; 2] = ["no NPC holds its topic", "not in the open world"];
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut config = load_sim_config(&repo.join("config/sim.toml")).expect("config");
-        config.client_build_config = repo.join(&config.client_build_config);
-        config.content_dir = repo.join(&config.content_dir);
-        // The edge config names its config set folder from the repository root, and a test runs
-        // in the crate folder: a copy names the folder in full.
-        let folder = std::env::temp_dir().join(format!("sim-quest-walk-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&folder).expect("folder");
-        config.edge_config = crate::gameplay::tests::committed_edge_config(
-            &folder,
-            &crate::gameplay::tests::AS_COMMITTED,
-        );
-        let level = load_level(&config).expect("level");
-        let mut world = walk_world(&config, &level).expect("world");
+        let (level, mut world) = retail_world("quest-walk");
         let gateway = BusId::try_from(WALK_GATEWAY.to_owned()).expect("id");
         let mut now_ms = START_MS;
         for (number, quest) in (1..).zip(CHAIN) {

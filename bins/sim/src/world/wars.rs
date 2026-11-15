@@ -47,6 +47,7 @@
 
 use std::collections::BTreeSet;
 
+use bevy_ecs::entity::Entity;
 use nw_bus::{ConnectionRef, RaidSpec};
 use nw_db::{
     DbError, Declared, PgPool, RosterSeat, SeatChange, TerritoryWar, WAR_RESULT_SHOWN_MS,
@@ -59,21 +60,22 @@ use nw_messages::social::raid_data::{RAID_TYPE_INVASION, RAID_TYPE_WAR};
 use nw_messages::war_states::WAR_READY;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    BundleMember, CallResult, GROUP_SLOTS, MemberState, PERMISSION_LEADER, PERMISSION_MEMBER,
-    PERMISSION_OFFICER, REASON_BANNED, REASON_NONE, REASON_ROSTER_REFUSED, ROSTER_GROUPS,
-    RosterGroup, RosterPlace, RosterPlayer, SIDE_ATTACKER, SIDE_DEFENDER, ServerMessage,
-    SignupData, SignupEntry, TerritoryFacetReadyMsg, TerritoryInteractorState, WAR_DATA_COMPONENT,
-    WAR_KIND_INVASION, WAR_KIND_WAR, WAR_PHASE_RESOLVED, WAR_PHASE_RUNNING, WAR_PHASE_SCHEDULED,
-    WAR_PLAYER_KIND, WarDataState, WarEntry, WarPlayer, WarSide, WarSignupClientMsg,
-    WarSignupServerMsg, WarStatus, facet_of_raw_id,
+    BundleMember, CallResult, GROUP_SLOTS, InteractionRequest, MemberState, PERMISSION_LEADER,
+    PERMISSION_MEMBER, PERMISSION_OFFICER, REASON_BANNED, REASON_NONE, REASON_ROSTER_REFUSED,
+    ROSTER_GROUPS, RosterGroup, RosterPlace, RosterPlayer, SIDE_ATTACKER, SIDE_DEFENDER,
+    ServerMessage, SignupData, SignupEntry, TerritoryFacetReadyMsg, TerritoryInteractorState,
+    WAR_DATA_COMPONENT, WAR_KIND_INVASION, WAR_KIND_WAR, WAR_PHASE_RESOLVED, WAR_PHASE_RUNNING,
+    WAR_PHASE_SCHEDULED, WAR_PLAYER_KIND, WarDataState, WarEntry, WarPlayer, WarSide,
+    WarSignupClientMsg, WarSignupServerMsg, WarStatus, facet_of_raw_id,
 };
 use uuid::Uuid;
 
+use super::gathering::{GATHER_ACCEPTED, GATHER_BUSY};
 use super::gm_chat::DONE;
 use super::raids::raid_spec;
 use super::siege_areas::LevelSiege;
 use super::war_fight::side_numbers;
-use super::{Player, SimWorld, send_now};
+use super::{Player, SimWorld, gather_answer, send_now};
 
 /// The own player component of the territory interactor state (Observed: component 7 in the
 /// 2,703 retail bodies).
@@ -634,6 +636,19 @@ impl Wars {
         self.jobs.push(WarJob::Invasion(job));
     }
 
+    /// The side `character` signed up for in the war without a result of `territory`, or
+    /// [`NO_SIDE`]: the access of the 2722 that opens that territory's war board.
+    pub(super) fn board_side(&self, territory: u16, character: Uuid) -> u32 {
+        self.open_war(territory)
+            .and_then(|war| {
+                war.signups
+                    .iter()
+                    .find(|signup| signup.character == character && !signup.kicked)
+                    .map(|signup| u32::from(signup.side))
+            })
+            .unwrap_or(NO_SIDE)
+    }
+
     /// The war without a result of `territory`.
     pub(super) fn open_war(&self, territory: u16) -> Option<&TerritoryWar> {
         self.wars
@@ -881,6 +896,40 @@ fn edits_roster(war: &TerritoryWar, side: u8, character: Uuid) -> bool {
 }
 
 impl SimWorld {
+    /// Player `number` (`entity`) uses the war board of `request` (its name `name`): accepted
+    /// (3743) with the 2722 of the claim the player is in and the side it signed up for in that
+    /// territory's war, as retail answered (`sign_up_for_invasion` 26.096 s and 26.102 s: territory
+    /// 15, access 0); the client then asks the sign-up counts (2771). A player in no claim is
+    /// refused (Inferred: every war board stands in a town, as every governor's desk).
+    pub(super) fn open_war_board(
+        &mut self,
+        entity: Entity,
+        number: u64,
+        request: InteractionRequest,
+        name: &[u8],
+    ) {
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        let Some(territory) =
+            super::governance::claim_of(&player.territories, &self.content.charting)
+        else {
+            let refusal = gather_answer(number, request, GATHER_BUSY, &[]);
+            send_now(&mut self.combat_messages, &player.connection, &[refusal]);
+            return;
+        };
+        player.war.board = Some(territory);
+        let answers = [
+            gather_answer(number, request, GATHER_ACCEPTED, name),
+            ServerMessage::TerritoryFacetReady(TerritoryFacetReadyMsg::of(
+                number,
+                territory,
+                self.wars.board_side(territory, player.character),
+            )),
+        ];
+        send_now(&mut self.combat_messages, &player.connection, &answers);
+    }
+
     /// Carries out the war sign-up or roster call `call` of the client of `connection`.
     pub fn war_signup_call(&mut self, connection: &ConnectionRef, call: WarSignupClientMsg) {
         let Some(&entity) = self.by_connection.get(connection) else {
@@ -993,16 +1042,10 @@ impl SimWorld {
             }
             WarSignupClientMsg::RequestRemoteInteract { territory, .. } => {
                 player.war.board = Some(*territory);
-                let side = self.wars.open_war(*territory).and_then(|war| {
-                    war.signups
-                        .iter()
-                        .find(|signup| signup.character == character && !signup.kicked)
-                        .map(|signup| u32::from(signup.side))
-                });
                 answers.push(ServerMessage::TerritoryFacetReady(TerritoryFacetReadyMsg {
                     header,
                     territory: *territory,
-                    access: side.unwrap_or(NO_SIDE),
+                    access: self.wars.board_side(*territory, character),
                 }));
             }
             WarSignupClientMsg::RequestRoster { .. } => {

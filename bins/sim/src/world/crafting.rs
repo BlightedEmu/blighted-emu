@@ -427,7 +427,7 @@ impl Stations {
     }
 
     /// The station whose `GdeRef` is `gde_ref`.
-    fn named(&self, gde_ref: &[u8; RAW_ID_LEN]) -> Option<&Station> {
+    pub(super) fn named(&self, gde_ref: &[u8; RAW_ID_LEN]) -> Option<&Station> {
         self.by_ref
             .get(gde_ref)
             .map(|index| &self.stations[*index])

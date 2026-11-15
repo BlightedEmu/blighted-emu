@@ -33,7 +33,7 @@ const fn facet_of(kind: SocialFacetKind) -> SocialFacet {
 
 impl SimWorld {
     /// What the social service knows of the player `entity`, as this sim `sim` has it.
-    fn social_player_of(&self, entity: Entity, sim: &nw_bus::BusId) -> Option<SocialPlayer> {
+    pub(super) fn social_player_of(&self, entity: Entity, sim: &nw_bus::BusId) -> Option<SocialPlayer> {
         let player = self.world.get::<Player>(entity)?;
         let at = self.world.get::<Body>(entity)?.motion.position();
         let icon = player
