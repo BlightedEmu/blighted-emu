@@ -29,10 +29,14 @@ use nw_messages::facet::{
 };
 use nw_messages::mount::{MOUNT_FACET, MountClientMsg, SUMMON_PENDING_TYPE_INDEX};
 use nw_messages::travel::{LandmarkRef, TravelClientMsg, component};
+use nw_messages::war_signup::{
+    SIDE_ATTACKER, SIGNUP_LIST_RECEIVED_TYPE_INDEX, SIGNUP_RESPONSE_RECEIVED_TYPE_INDEX,
+};
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     BundleMember, ClientFacetMsg, CraftIngredient, FacetHeader, InteractionRequest, MemberState,
-    MessageError,
+    MessageError, TERRITORY_FACET_READY_TYPE_INDEX, TERRITORY_INTERACTOR_COMPONENT,
+    WarSignupClientMsg,
 };
 use nw_world::WorldFile;
 use nw_world::capitals::capital_id;
@@ -123,6 +127,12 @@ pub enum ActivityKind {
     /// master's war test (`!war <territory id> <minutes to start> Bot War Company`), as a war
     /// needs an attacker company of a faction other than the owner's.
     EnemyCompany,
+    /// The bot's company ([`ActivityKind::EnemyCompany`]) declares a game master war on the
+    /// territory of [`WAR_TERRITORY`], and the bot uses that territory's war board from afar,
+    /// signs up as the attacker and asks for the sign-up list and the roster, as a client's
+    /// war board screen does; the war is cancelled at the end. Its owner must be a company of
+    /// another faction.
+    WarSignup,
 }
 
 /// One call of a step, written once the bot knows its own entity number.
@@ -293,6 +303,7 @@ impl Activity {
             ),
             ActivityKind::Company => company(data),
             ActivityKind::EnemyCompany => Ok(enemy_company()),
+            ActivityKind::WarSignup => Ok(war_signup()),
         };
         Self { kind, steps }
     }
@@ -783,6 +794,75 @@ const ENEMY_COMPANY: &str = "Bot War Company";
 /// two has a side for each.
 const ENEMY_FACTION: &str = "covenant";
 
+/// The territory of the war sign-up activity: Reekwater, an invasion and war fort.
+const WAR_TERRITORY: u16 = 5;
+/// Minutes before the war sign-up activity's war starts: sign-ups close at the start.
+const WAR_START_MINUTES: u32 = 10;
+/// How long the war sign-up activity waits for the client's next roster and list poll (retail
+/// `army-management`: the screen asks every 5 s).
+const ROSTER_POLL_WAIT: Duration = Duration::from_secs(5);
+
+/// A war sign-up call of the bot ([`TERRITORY_INTERACTOR_COMPONENT`]).
+fn war_call(make: impl Fn(FacetHeader) -> WarSignupClientMsg + 'static) -> Act {
+    Act::Call(Box::new(move |own| {
+        let call = make(FacetHeader::of(TERRITORY_INTERACTOR_COMPONENT, own));
+        Ok((call.type_index(), call.encode()?))
+    }))
+}
+
+/// [`ActivityKind::WarSignup`]: the calls of a client's war board screen (retail
+/// `army-management`: 2791, 2722, then 2772 and 2767 every 5 s; a sign-up 2762 is answered
+/// with 2169 and 2722).
+fn war_signup() -> Vec<Step> {
+    let cancel = format!("!war {WAR_TERRITORY} cancel");
+    vec![
+        step(
+            cancel.clone(),
+            vec![Act::Gm(cancel.clone())],
+            Proof::Line(Box::new(|_| true), "any answer".to_owned()),
+            STEP_WAIT,
+        ),
+        gm_done(format!(
+            "!war {WAR_TERRITORY} {WAR_START_MINUTES} {ENEMY_COMPANY}"
+        )),
+        step(
+            "use the war board from afar (2791)",
+            vec![war_call(|header| {
+                WarSignupClientMsg::RequestRemoteInteract {
+                    header,
+                    territory: WAR_TERRITORY,
+                }
+            })],
+            Proof::Message(TERRITORY_FACET_READY_TYPE_INDEX),
+            STEP_WAIT,
+        ),
+        step(
+            "sign up as the attacker (2762)",
+            vec![war_call(|header| WarSignupClientMsg::RequestSignup {
+                header,
+                side: SIDE_ATTACKER,
+                territory: WAR_TERRITORY,
+            })],
+            Proof::Message(SIGNUP_RESPONSE_RECEIVED_TYPE_INDEX),
+            STEP_WAIT,
+        ),
+        step(
+            "ask for the roster and the attackers' sign-up list (2772, 2767)",
+            vec![
+                Act::Pause(ROSTER_POLL_WAIT),
+                war_call(|header| WarSignupClientMsg::RequestRoster { header }),
+                war_call(|header| WarSignupClientMsg::RequestSignupList {
+                    header,
+                    side: SIDE_ATTACKER,
+                }),
+            ],
+            Proof::Message(SIGNUP_LIST_RECEIVED_TYPE_INDEX),
+            STEP_WAIT,
+        ),
+        gm_done(cancel),
+    ]
+}
+
 /// The bot joins [`ENEMY_FACTION`] and makes [`ENEMY_COMPANY`] ([`ActivityKind::EnemyCompany`]).
 fn enemy_company() -> Vec<Step> {
     faction_and_company(ENEMY_FACTION, ENEMY_COMPANY)
@@ -938,6 +1018,13 @@ mod tests {
                 "!company Bot War Company".to_owned()
             ]),
             "the enemy company needs no level data"
+        );
+        assert_eq!(
+            Activity::of(ActivityKind::WarSignup, &data)
+                .steps
+                .map(|steps| steps.len()),
+            Ok(6),
+            "the war sign-up needs no level data"
         );
         assert_eq!(
             Activity::of(ActivityKind::Level, &data)
