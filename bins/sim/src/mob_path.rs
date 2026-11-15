@@ -13,9 +13,15 @@
 //! A goal it cannot reach gives the way to the place nearest the goal that it can reach (a
 //! partial way): the mob goes there and stands, and its tree decides when to give up (the
 //! trees' `Time_Since_Target_Reachable` against their `TargetUnreachableResetTime`).
+//!
+//! The live sim runs the searches off the tick ([`PathPool`]): a mob asks, stands, and walks the
+//! way from the tick its answer comes in.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::sync::atomic::{self, AtomicU64};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use nw_sim_core::{Ground, Position};
 
@@ -251,6 +257,126 @@ fn plan(
     }
 }
 
+/// The name of a thread of a [`PathPool`].
+const PATH_THREAD_NAME: &str = "path-search";
+
+/// A way search a mob asked off the tick.
+#[derive(Debug, Clone, Copy)]
+struct PathJob {
+    mob: u64,
+    id: u64,
+    from: Position,
+    to: Position,
+    max_slope_deg: Option<f32>,
+    asked: Instant,
+}
+
+/// The answer to ask `id` of mob `mob`: the way [`find_path`] found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathAnswer {
+    /// The mob's entity.
+    pub mob: u64,
+    /// The ask ([`PathPool::ask`]).
+    pub id: u64,
+    /// The way.
+    pub plan: Option<PathPlan>,
+}
+
+/// Way searches off the tick, on threads of their own over the mobs' ground. A search that finds
+/// no way walks all its [`MAX_EXPANDED`] cells; on the tick, one such search held every mob of
+/// the sim up to 325 ms (open world, load run of 110 players, 2026-11-15). An ask older than the
+/// pool's life is dropped unsearched: its mob gave it up and asks again.
+pub struct PathPool {
+    jobs: mpsc::Sender<PathJob>,
+    answers: Mutex<mpsc::Receiver<PathAnswer>>,
+    next_id: AtomicU64,
+}
+
+impl PathPool {
+    /// A pool of `threads` threads (at least one) over `ground`, its asks living `life`.
+    ///
+    /// # Errors
+    ///
+    /// The system refused a thread.
+    pub fn new(
+        ground: Arc<dyn Ground + Send + Sync>,
+        threads: usize,
+        life: Duration,
+    ) -> std::io::Result<Self> {
+        let (jobs, queue) = mpsc::channel();
+        let (done, answers) = mpsc::channel();
+        let queue = Arc::new(Mutex::new(queue));
+        for _ in 0..threads.max(1) {
+            let (queue, done, ground) = (Arc::clone(&queue), done.clone(), Arc::clone(&ground));
+            std::thread::Builder::new()
+                .name(PATH_THREAD_NAME.to_owned())
+                .spawn(move || search_jobs(&queue, &done, &*ground, life))?;
+        }
+        Ok(Self {
+            jobs,
+            answers: Mutex::new(answers),
+            next_id: AtomicU64::new(0),
+        })
+    }
+
+    /// Asks the way of mob `mob` from `from` to `to` for its slope limit `max_slope_deg`; the
+    /// ask's id, which its answer carries ([`Self::answers`]).
+    pub fn ask(&self, mob: u64, from: Position, to: Position, max_slope_deg: Option<f32>) -> u64 {
+        let id = self.next_id.fetch_add(1, atomic::Ordering::Relaxed);
+        let job = PathJob {
+            mob,
+            id,
+            from,
+            to,
+            max_slope_deg,
+            asked: Instant::now(),
+        };
+        if self.jobs.send(job).is_err() {
+            // Every thread ended (a search panicked): the mob gets no answer and asks again.
+            tracing::warn!(mob, "no path search thread is left");
+        }
+        id
+    }
+
+    /// The answers that came in since the last call.
+    pub fn answers(&self) -> Vec<PathAnswer> {
+        self.answers
+            .lock()
+            .map(|answers| answers.try_iter().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// A thread of a [`PathPool`]: it searches the asks of `queue` over `ground` and sends their
+/// answers to `done`, until the pool is gone.
+fn search_jobs(
+    queue: &Mutex<mpsc::Receiver<PathJob>>,
+    done: &mpsc::Sender<PathAnswer>,
+    ground: &dyn Ground,
+    life: Duration,
+) {
+    loop {
+        let job = match queue.lock() {
+            Ok(queue) => queue.recv(),
+            Err(_) => return,
+        };
+        let Ok(job) = job else {
+            return;
+        };
+        if job.asked.elapsed() > life {
+            continue;
+        }
+        let answer = PathAnswer {
+            mob: job.mob,
+            id: job.id,
+            plan: find_path(ground, job.from, job.to, job.max_slope_deg),
+        };
+        if done.send(answer).is_err() {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +467,51 @@ mod tests {
             plan.advance();
         }
         assert!(plan.walked());
+    }
+
+    /// How long a test waits for the answers of a pool, at most.
+    const ANSWER_WAIT: Duration = Duration::from_secs(10);
+    /// How often a test looks for the answers of a pool.
+    const ANSWER_POLL: Duration = Duration::from_millis(5);
+
+    /// The first `count` answers of `pool`, waited for up to [`ANSWER_WAIT`].
+    fn answers_of(pool: &PathPool, count: usize) -> Vec<PathAnswer> {
+        let until = Instant::now() + ANSWER_WAIT;
+        let mut answers = Vec::new();
+        while answers.len() < count && Instant::now() < until {
+            answers.extend(pool.answers());
+            std::thread::sleep(ANSWER_POLL);
+        }
+        answers
+    }
+
+    #[test]
+    fn a_pool_gives_each_ask_the_way_of_a_search_on_the_tick() {
+        const MOB: u64 = 9;
+        const THREADS: usize = 2;
+        let pool = PathPool::new(Arc::new(two_walls()), THREADS, ANSWER_WAIT).expect("a pool");
+        let asks = [
+            (at(0.0, 0.0), at(14.0, 0.0)),
+            (at(-6.0, 0.0), at(6.0, 0.0)),
+        ];
+        let ids: Vec<u64> = asks
+            .iter()
+            .map(|&(from, to)| pool.ask(MOB, from, to, None))
+            .collect();
+        let mut answers = answers_of(&pool, asks.len());
+        answers.sort_by_key(|answer| answer.id);
+        assert_eq!(answers.len(), asks.len(), "every ask is answered");
+        for ((answer, id), (from, to)) in answers.iter().zip(ids).zip(asks) {
+            assert_eq!((answer.mob, answer.id), (MOB, id));
+            assert_eq!(answer.plan, find_path(&two_walls(), from, to, None));
+        }
+    }
+
+    #[test]
+    fn a_pool_drops_an_ask_older_than_its_life() {
+        let pool = PathPool::new(Arc::new(two_walls()), 1, Duration::ZERO).expect("a pool");
+        pool.ask(1, at(0.0, 0.0), at(14.0, 0.0), None);
+        std::thread::sleep(ANSWER_POLL * 20);
+        assert_eq!(pool.answers(), Vec::new(), "no answer to an old ask");
     }
 }

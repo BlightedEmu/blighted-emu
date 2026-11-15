@@ -538,6 +538,9 @@ pub async fn serve(
     };
     state.world.set_mob_ai(mob_ai);
     state.world.set_mob_ground(mob_ground);
+    if let Err(error) = state.world.search_paths_off_tick() {
+        tracing::warn!(%error, "mob path searches stay in the tick");
+    }
     state.world.set_design(&design);
     state.load_depleted_nodes().await;
     let mut clock = TickClock::new(0);

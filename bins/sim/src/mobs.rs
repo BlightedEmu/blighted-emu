@@ -42,9 +42,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::combat::CombatSettings;
 use crate::mob_ai::{
-    COMBAT_LEASH_KEY, GritHit, GuardHit, HeldEffects, MobAi, RemoteFact, Shown, SpawnAi, SpellCast, Strike,
+    COMBAT_LEASH_KEY, GritHit, GuardHit, HeldEffects, MobAi, PATH_ASK_LIFE, RemoteFact, Shown, SpawnAi, SpellCast, Strike,
     Summon, Surroundings, TaggedMob, TreeMind, floor_line, height_after_move,
 };
+use crate::mob_path::PathPool;
 use crate::objectives::KillTypes;
 
 /// How far apart the points a knockback checks on its way are (our choice: a lunge's floor step).
@@ -441,6 +442,8 @@ pub struct Mobs {
     status_changes: Vec<(u64, String, bool)>,
     /// The spells the mobs' clips cast since the last [`Mobs::take_casts`]: (mob, cast).
     casts: Vec<(u64, SpellCast)>,
+    /// The way searches off the tick ([`Mobs::search_paths_off_tick`]); `None`: in the tick.
+    paths: Option<PathPool>,
 }
 
 /// Metres between mobs spawned together (a GM command, a tree's summon), on a ring around the
@@ -621,6 +624,8 @@ struct TickView<'a> {
     tagged: &'a [TaggedMob],
     /// The status effects on the mobs.
     held: &'a FxHashMap<u64, HeldEffects>,
+    /// The way searches off the tick.
+    paths: Option<&'a PathPool>,
 }
 
 impl TickView<'_> {
@@ -679,6 +684,7 @@ impl TickView<'_> {
             entity: mob_entity(index),
             tagged: self.tagged,
             held: self.held.get(&mob_entity(index)),
+            paths: self.paths,
         };
         if !mob.grounded {
             let at = mob.position;
@@ -754,6 +760,38 @@ impl Mobs {
             held: FxHashMap::default(),
             status_changes: Vec::new(),
             casts: Vec::new(),
+            paths: None,
+        }
+    }
+
+    /// The mobs' way searches run off the tick, on `threads` threads over `ground` (the ground of
+    /// [`Mobs::tick`]): a mob asks, and walks the way from the tick its answer comes in.
+    ///
+    /// # Errors
+    ///
+    /// The system refused a thread; the searches stay in the tick.
+    pub fn search_paths_off_tick(
+        &mut self,
+        ground: Arc<dyn Ground + Send + Sync>,
+        threads: usize,
+    ) -> std::io::Result<()> {
+        self.paths = Some(PathPool::new(ground, threads, PATH_ASK_LIFE)?);
+        Ok(())
+    }
+
+    /// Gives each tree mob the answers of its way searches off the tick.
+    fn take_path_answers(&mut self) {
+        let Some(paths) = &self.paths else {
+            return;
+        };
+        for answer in paths.answers() {
+            let Some(mob) = spawn_index(answer.mob).and_then(|index| self.live.get_mut(&index))
+            else {
+                continue;
+            };
+            if let Mind::Tree(mind) = &mut mob.mind {
+                mind.path_answered(&self.ai, answer);
+            }
         }
     }
 
@@ -1455,6 +1493,7 @@ impl Mobs {
         }
         self.respawn_due(now_ms);
         self.wake_near(players);
+        self.take_path_answers();
         let tagged = self.tagged_mobs();
         let mut chasers: Vec<u32> = Vec::new();
         let steps: Vec<Step> = {
@@ -1498,6 +1537,7 @@ impl Mobs {
                 now_ms,
                 tagged: &tagged,
                 held: &self.held,
+                paths: self.paths.as_ref(),
             };
             let threads = threads.min(trees.len() / MIN_MOBS_PER_THREAD).max(1);
             if threads == 1 {

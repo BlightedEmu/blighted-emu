@@ -1504,6 +1504,17 @@ impl SimWorld {
         self.mob_ground = ground;
     }
 
+    /// The mobs' way searches run off the tick, on the tick's threads, over the mobs' ground; set
+    /// after [`Self::set_mob_ground`] ([`Mobs::search_paths_off_tick`]).
+    ///
+    /// # Errors
+    ///
+    /// The system refused a thread; the searches stay in the tick.
+    pub fn search_paths_off_tick(&mut self) -> std::io::Result<()> {
+        self.mobs
+            .search_paths_off_tick(Arc::clone(&self.mob_ground), self.settings.tick_threads)
+    }
+
     /// The design overrides of the level's spawns (`mob_ai::resolve_ai`); set before the first
     /// cells.
     pub fn set_mob_ai(&mut self, ai: Arc<[Option<SpawnAi>]>) {

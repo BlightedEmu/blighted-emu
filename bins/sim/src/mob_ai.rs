@@ -65,7 +65,7 @@ use nw_world::records::{AiBehaviour, AiProfile, PathMode, PatrolPath};
 use serde::Deserialize;
 
 use crate::mob_homing::{self, Body, HOMING_CLIP, HomingClip, HomingRun, PARAM_TRUE};
-use crate::mob_path::{PathPlan, find_path};
+use crate::mob_path::{PathAnswer, PathPlan, PathPool, find_path};
 use crate::mobs::MobReach;
 
 /// A moving mob keeps its own height when the level's ground lies more than this far below it
@@ -108,6 +108,9 @@ const REACH_RECHECK_M: f32 = FLOOR_STEP_M;
 const PATH_RECHECK_M: f32 = 3.0;
 /// The least time between two way searches of one mob, ms (our engineering limit).
 const PATH_RETRY_MS: u64 = 1_000;
+/// How long an ask of a way search off the tick lives ([`PathPool`]): its mob asks again after
+/// [`PATH_RETRY_MS`].
+pub const PATH_ASK_LIFE: std::time::Duration = std::time::Duration::from_millis(PATH_RETRY_MS);
 /// A way serves a goal this near the goal it was searched for, m (our engineering limit: about a
 /// navigation config's pick around its target).
 const PATH_GOAL_SLACK_M: f32 = 3.0;
@@ -1329,6 +1332,8 @@ pub struct Surroundings<'a> {
     pub tagged: &'a [TaggedMob],
     /// The status effects the sim holds on it.
     pub held: Option<&'a HeldEffects>,
+    /// The way searches off the tick; `None`: a search runs in the step that asks it.
+    pub paths: Option<&'a PathPool>,
 }
 
 /// One mob's mind: its tree's brain and what the engine keeps for it.
@@ -1361,6 +1366,8 @@ struct MindState {
     path: Option<PathPlan>,
     /// When it may search for a way again.
     next_path_ms: u64,
+    /// The way search it asked off the tick and waits for.
+    pending_path: Option<PendingPath>,
     /// Its places of the way out of a fight, for its way home ([`TRAIL_STEP_M`]).
     trail: Vec<Position>,
     target: Option<u64>,
@@ -1472,6 +1479,24 @@ enum EngineStep {
     Toggle(u32, usize, bool),
 }
 
+/// What a mob searches a way for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathPurpose {
+    /// Whether its target can be reached ([`MindState::search_reach`]).
+    Reach,
+    /// A way around the solid its move ran into ([`MindState::plan_way`]).
+    Way,
+}
+
+/// A way search a mob asked off the tick: the ask's id, what for, and from and to where.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PendingPath {
+    id: u64,
+    purpose: PathPurpose,
+    from: Position,
+    to: Position,
+}
+
 /// The last reach check of a mob: where it and its target stood, and the answer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ReachCheck {
@@ -1535,49 +1560,88 @@ impl MindState {
         self.speed_mps = 0.0;
     }
 
+    /// A way search from `from` to `to` for `purpose`: in this step without a pool of
+    /// `around` (its way), else off the tick (`None`: the answer comes in a later tick,
+    /// [`TreeMind::path_answered`]). The mob's next search waits [`PATH_RETRY_MS`].
+    fn ask_path(
+        &mut self,
+        around: &Surroundings<'_>,
+        purpose: PathPurpose,
+        from: Position,
+        to: Position,
+        max_slope: Option<f32>,
+    ) -> Option<Option<PathPlan>> {
+        self.next_path_ms = around.now_ms + PATH_RETRY_MS;
+        let Some(paths) = around.paths else {
+            return Some(find_path(around.ground, from, to, max_slope));
+        };
+        self.pending_path = Some(PendingPath {
+            id: paths.ask(around.entity, from, to, max_slope),
+            purpose,
+            from,
+            to,
+        });
+        None
+    }
+
     /// Whether a way search reaches `to` from `at` (its answer and how long it holds): a way
     /// that ends at the target serves the mob's next move to it. A mob whose last search is not
-    /// [`PATH_RETRY_MS`] old keeps its last answer.
+    /// [`PATH_RETRY_MS`] old, or whose search runs off the tick, keeps its last answer.
     fn search_reach(
         &mut self,
-        ground: &dyn Ground,
+        around: &Surroundings<'_>,
         at: Position,
         to: Position,
         max_slope: Option<f32>,
-        now_ms: u64,
     ) -> (bool, f32) {
-        if now_ms < self.next_path_ms {
-            return (
-                self.reach.is_some_and(|check| check.reachable),
-                REACH_RECHECK_M,
-            );
+        let last = (
+            self.reach.is_some_and(|check| check.reachable),
+            REACH_RECHECK_M,
+        );
+        if around.now_ms < self.next_path_ms {
+            return last;
         }
-        self.next_path_ms = now_ms + PATH_RETRY_MS;
-        let plan = find_path(ground, at, to, max_slope).filter(|plan| plan.complete);
+        match self.ask_path(around, PathPurpose::Reach, at, to, max_slope) {
+            Some(plan) => (self.reach_found(plan), PATH_RECHECK_M),
+            None => last,
+        }
+    }
+
+    /// Takes the way of a reach search: whether it ends at the target, and then the way to walk.
+    fn reach_found(&mut self, plan: Option<PathPlan>) -> bool {
+        let plan = plan.filter(|plan| plan.complete);
         let reachable = plan.is_some();
         if reachable {
             self.path = plan;
         }
-        (reachable, PATH_RECHECK_M)
+        reachable
     }
 
-    /// A way from `at` to `goal` when the straight move failed: a way search, or for a mob on
-    /// its way home with no way found, its trail of the way out walked back. `false` when no
-    /// way is found or the last search is not [`PATH_RETRY_MS`] old.
+    /// A way from `at` to `goal` when the straight move failed ([`Self::way_found`]). `false`
+    /// when no way is found or the last search is not [`PATH_RETRY_MS`] old; `true` too while
+    /// the mob waits for its search off the tick.
     fn plan_way(
         &mut self,
         ai: &MobAi,
-        ground: &dyn Ground,
+        around: &Surroundings<'_>,
         at: Position,
         goal: Position,
-        now_ms: u64,
     ) -> bool {
-        if now_ms < self.next_path_ms {
-            return false;
+        if around.now_ms < self.next_path_ms {
+            return self
+                .pending_path
+                .is_some_and(|pending| pending.purpose == PathPurpose::Way);
         }
-        self.next_path_ms = now_ms + PATH_RETRY_MS;
         let max_slope = ai.arch(self.archetype).and_then(|arch| arch.max_slope_deg);
-        let plan = find_path(ground, at, goal, max_slope);
+        match self.ask_path(around, PathPurpose::Way, at, goal, max_slope) {
+            Some(plan) => self.way_found(ai, goal, plan),
+            None => true,
+        }
+    }
+
+    /// Takes the way a search found to `goal`, or for a mob on its way home with no way found,
+    /// its trail of the way out walked back. Whether it has a way.
+    fn way_found(&mut self, ai: &MobAi, goal: Position, plan: Option<PathPlan>) -> bool {
         let plan = if plan.as_ref().is_some_and(|plan| plan.complete)
             || !self.resetting(ai)
             || self.trail.is_empty()
@@ -1803,7 +1867,7 @@ impl MindState {
                     {
                         (true, REACH_RECHECK_M)
                     } else {
-                        self.search_reach(around.ground, at, position, max_slope, around.now_ms)
+                        self.search_reach(around, at, position, max_slope)
                     };
                     self.reach = Some(ReachCheck {
                         from: at,
@@ -2335,7 +2399,7 @@ impl MindState {
             }
             // The straight move is closed: it searches a way around and walks it from its next
             // step.
-            None if goal.is_some_and(|goal| self.plan_way(ai, ground, *at, goal, now_ms)) => {
+            None if goal.is_some_and(|goal| self.plan_way(ai, around, *at, goal)) => {
                 mover.speed_mps = 0.0;
                 outcome
             }
@@ -2451,6 +2515,7 @@ impl TreeMind {
                 homing: Vec::new(),
                 path: None,
                 next_path_ms: 0,
+                pending_path: None,
                 trail: Vec::new(),
                 target: None,
                 target_at: None,
@@ -3005,6 +3070,32 @@ impl TreeMind {
     /// Its networked tags (`UpdateNWTags`).
     pub fn nw_tags(&self) -> &[NameId] {
         &self.state.nw_tags
+    }
+
+    /// The answer of its way search off the tick ([`PathPool`]); an answer to an ask it gave up
+    /// is dropped.
+    pub fn path_answered(&mut self, ai: &MobAi, answer: PathAnswer) {
+        let state = &mut self.state;
+        let Some(pending) = state
+            .pending_path
+            .take_if(|pending| pending.id == answer.id)
+        else {
+            return;
+        };
+        match pending.purpose {
+            PathPurpose::Reach => {
+                let reachable = state.reach_found(answer.plan);
+                state.reach = Some(ReachCheck {
+                    from: pending.from,
+                    to: pending.to,
+                    reachable,
+                    recheck_m: PATH_RECHECK_M,
+                });
+            }
+            PathPurpose::Way => {
+                state.way_found(ai, pending.to, answer.plan);
+            }
+        }
     }
 
     /// Another mob's tree sets `fact` on its tree ([`RemoteFact`]); its tree runs at once.
@@ -5025,6 +5116,7 @@ mod tests {
             entity: 1,
             tagged: &[],
             held: None,
+            paths: None,
         };
         let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
         let mut at = START;
@@ -5035,6 +5127,95 @@ mod tests {
             nearest = nearest.min(at.horizontal_distance(player));
         }
         assert!(nearest <= TEST_REACH_M, "it got to its target: {nearest}");
+    }
+
+    /// The first answer of `pool`, waited for up to a few seconds.
+    fn first_answer(pool: &PathPool) -> PathAnswer {
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+        const POLL: std::time::Duration = std::time::Duration::from_millis(1);
+        let until = std::time::Instant::now() + WAIT;
+        loop {
+            if let Some(answer) = pool.answers().pop() {
+                return answer;
+            }
+            assert!(std::time::Instant::now() < until, "no answer");
+            std::thread::sleep(POLL);
+        }
+    }
+
+    #[test]
+    fn a_mob_stands_while_its_way_is_searched_off_the_tick_and_then_walks_it() {
+        use super::test_support::TEST_REACH_M;
+        const STEP_MS: usize = 33;
+        const UNTIL_MS: u64 = 30_000;
+        let ai = test_ai(&[]);
+        let player = east(14.0);
+        let seen = [Seen {
+            entity: 7,
+            position: player,
+        }];
+        let pool = PathPool::new(std::sync::Arc::new(TwoWalls), 1, PATH_ASK_LIFE).expect("a pool");
+        let around = |now_ms| Surroundings {
+            now_ms,
+            seen: &seen,
+            ground: &TwoWalls,
+            health_share: 1.0,
+            entity: 1,
+            tagged: &[],
+            held: None,
+            paths: Some(&pool),
+        };
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let mut at = START;
+        let mut nearest = f32::MAX;
+        let mut asks = 0;
+        for now_ms in (0..UNTIL_MS).step_by(STEP_MS) {
+            let before = at;
+            let pending = mind.state.pending_path;
+            mind.step(&ai, &mut at, &around(now_ms));
+            assert!(!TwoWalls.no_stand(at), "never in a wall: {at:?}");
+            nearest = nearest.min(at.horizontal_distance(player));
+            let asked = mind.state.pending_path.filter(|ask| Some(*ask) != pending);
+            if let Some(ask) = asked {
+                asks += 1;
+                if ask.purpose == PathPurpose::Way {
+                    assert_eq!(at, before, "it stands while it waits");
+                }
+                // The answer comes in before the next tick.
+                mind.path_answered(&ai, first_answer(&pool));
+                assert_eq!(mind.state.pending_path, None, "the answer is taken");
+            }
+        }
+        assert!(asks > 0, "the searches ran off the tick");
+        assert!(nearest <= TEST_REACH_M, "it got to its target: {nearest}");
+    }
+
+    #[test]
+    fn an_answer_to_an_ask_the_mob_gave_up_is_dropped() {
+        const ASK: u64 = 4;
+        let ai = test_ai(&[]);
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let pending = PendingPath {
+            id: ASK,
+            purpose: PathPurpose::Way,
+            from: START,
+            to: east(14.0),
+        };
+        mind.state.pending_path = Some(pending);
+        let plan = find_path(&TwoWalls, START, east(14.0), None);
+        assert!(plan.is_some(), "a way");
+        mind.path_answered(
+            &ai,
+            PathAnswer {
+                mob: 1,
+                id: ASK + 1,
+                plan: plan.clone(),
+            },
+        );
+        assert_eq!(mind.state.path, None, "an old answer gives no way");
+        assert_eq!(mind.state.pending_path, Some(pending), "it still waits");
+        mind.path_answered(&ai, PathAnswer { mob: 1, id: ASK, plan: plan.clone() });
+        assert_eq!(mind.state.path, plan, "its own answer gives its way");
     }
 
     #[test]
@@ -5265,6 +5446,7 @@ mod tests {
             entity: 1,
             tagged: &[],
             held: None,
+            paths: None,
         };
         let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
         let mut at = START;
@@ -5717,6 +5899,7 @@ mod tests {
             entity: 1,
             tagged: &[],
             held: None,
+            paths: None,
         };
         let mut plain = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
         let mut at = START;
@@ -5810,6 +5993,7 @@ mod tests {
             entity: 1,
             tagged: &[],
             held: None,
+            paths: None,
         };
         let trackers = |mind: &mut TreeMind| -> Vec<bool> {
             mind.take_status_changes()
@@ -5912,6 +6096,7 @@ mod tests {
             entity: 1,
             tagged: &[],
             held: None,
+            paths: None,
         };
         let first_loss = |large_status_effects_fx: bool, guard: MobGuard| {
             let mut data = test_stagger_ai_data();
@@ -6013,6 +6198,7 @@ mod tests {
             entity: 1,
             tagged: &[],
             held: None,
+            paths: None,
         };
         // The mob faces yaw 0 (+y): ahead is +y, behind -y.
         let staggered_by = |from: Option<Position>, seconds: f32| {
@@ -6153,6 +6339,7 @@ mod tests {
             entity: 1,
             tagged: &[],
             held: None,
+            paths: None,
         };
         for (weapon, hits, broken_at) in RETAIL_GUARD_SEQUENCES {
             let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
@@ -6212,6 +6399,7 @@ mod tests {
                 entity: 1,
                 tagged: &[],
                 held,
+                paths: None,
             };
             mind.step(&ai, &mut at, &around(0));
             assert_eq!(mind.guard_hit(&ai, at, 0, SPENT), Some(GuardHit::Held));
@@ -6245,6 +6433,7 @@ mod tests {
             entity: 1,
             tagged: &[],
             held,
+            paths: None,
         };
         let stunned = HeldEffects {
             control: Control {
@@ -6364,6 +6553,7 @@ mod tests {
             entity: 1,
             tagged: &[],
             held: None,
+            paths: None,
         }
     }
 
