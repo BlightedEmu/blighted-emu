@@ -370,13 +370,22 @@ impl SimWorld {
 }
 
 impl Player {
-    /// The faction state of its own card ([`PublicFaction::own_card`]): retail logs a character
-    /// in with its faction in the card, and the client takes the faction from there.
-    pub(super) fn own_faction_card(&self) -> FactionStateChange {
+    /// The faction state of its own card at sim ms `now_ms` (server ms `server_ms`):
+    /// [`PublicFaction::own_card`] with the countdowns that run (Inferred: the card holds the
+    /// whole state, as no change goes before it, [`push_member`]). Retail logs a character in
+    /// with its faction in the card, and the client takes the faction from there.
+    pub(super) fn own_faction_card(&self, now_ms: u64, server_ms: u64) -> FactionStateChange {
+        let ends_ns =
+            |ends_ms: u64| unix_ns(server_ms.saturating_add(ends_ms.saturating_sub(now_ms)));
         let switched =
             (self.faction.changes > 0).then_some((self.faction.changed_ns, self.faction.changes));
-        self.public_faction()
-            .own_card(self.pvp_wait.is_pending(), switched)
+        FactionStateChange {
+            pvp_flag_pending_end_ns: self.pvp_wait.ends_ms.map(ends_ns),
+            ffa_pending_end_ns: self.ffa.changes_ms.map(ends_ns),
+            ..self
+                .public_faction()
+                .own_card(self.pvp_wait.is_pending(), switched)
+        }
     }
 
     /// Its faction and PvP flags as other players get them: the PvP flag is its own or the
@@ -396,11 +405,17 @@ fn push_state(player: &mut Player, change: &FactionStateChange) {
     push_member(player, change.member());
 }
 
-/// Queues the encoded faction state member `member` of `player`.
+/// Queues the encoded faction state member `member` of `player`. Before its own card nothing is
+/// queued: the card carries the whole state ([`Player::own_faction_card`]), and a change in the
+/// card's bundle would take its place (live 2026-11-15: a login in a town sent `hasSanctuary`
+/// alone, and the client had no faction).
 fn push_member(
     player: &mut Player,
     member: Result<nw_messages::BundleMember, nw_messages::wire::MessageError>,
 ) {
+    if !player.own_card_sent {
+        return;
+    }
     match member {
         Ok(member) => player.extra_members.push(member),
         Err(error) => tracing::warn!(%error, "faction state not encoded"),
@@ -474,6 +489,12 @@ mod tests {
             .admit(&admit_at(PLAYER, 0.0, true), NOW, SERVER_TIME)
             .expect("admit");
         let entity = world.by_connection[&connection(PLAYER)];
+        // The own card went out: the changes after it are queued.
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .own_card_sent = true;
         (world, entity)
     }
 

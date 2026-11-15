@@ -5983,7 +5983,12 @@ impl Neighbourhood<'_> {
                     // The card carries the faction, as retail's (a change sent before the
                     // client took the player as its own was lost: live 2026-11-15).
                     if first {
-                        put_member(&mut group.members, player.own_faction_card().member()?);
+                        put_member(
+                            &mut group.members,
+                            player
+                                .own_faction_card(self.now_ms, self.server_time)
+                                .member()?,
+                        );
                     }
                     if achievements.is_some() {
                         player.mount.achievements_changed();
@@ -10004,11 +10009,19 @@ mod tests {
 
     #[test]
     fn the_own_card_carries_the_saved_faction() {
+        use crate::trading_post::{Settlement, Settlements};
         use nw_messages::faction_state::FACTION_TYPE_INDEX;
         const SYNDICATE: u8 = 1;
+        const TOWN_ID: u64 = 1;
         let mut world = world_with_spawns(Vec::new());
         world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
         let mut admit = admit_at(1, CELL_M / 2.0, true);
+        // A login in a town: its first sanctuary check goes with the card.
+        Arc::make_mut(&mut world.content).settlements = Settlements::of(vec![Settlement {
+            id: TOWN_ID,
+            x: admit.position.x,
+            y: admit.position.y,
+        }]);
         admit.progression.faction.faction = SYNDICATE;
         world.admit(&admit, NOW, SERVER_TIME).expect("admit");
         let messages = tick(&mut world, NOW + OWN_CARD_DELAY_MS).messages;
@@ -10027,8 +10040,9 @@ mod tests {
         });
         assert_eq!(
             faction,
-            Some(vec![0x06, 0x41, 0x00, 0x00, 0x0b, SYNDICATE, 0x00, 0x00]),
-            "retail's login body (general-other-01): the client takes the faction from the card"
+            Some(vec![0x06, 0x41, 0x00, 0x00, 0x0f, SYNDICATE, 0x00, 0x01, 0x00]),
+            "retail's login body (general-other-01) with the sanctuary: the client takes the \
+             faction from the card, and no change takes the card's place"
         );
     }
 
