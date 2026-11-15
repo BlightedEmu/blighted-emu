@@ -187,8 +187,6 @@ enum CampRefusal {
     Skin,
     /// The content has no slice of the blueprint.
     Slice,
-    /// The bag lacks a cost item.
-    Cost,
 }
 
 /// What a channel is for.
@@ -1868,8 +1866,10 @@ impl SimWorld {
 
     /// What player `entity` places with `placement` (2236): the camp of its `Camping` rank's
     /// tier, of the blueprint the placement names (the default camp of the tier when it names
-    /// none), in a territory that allows camps, of a skin it may use, with a slice and its costs
-    /// in the bag.
+    /// none), in a territory that allows camps, of a skin it may use, with a slice. Its costs
+    /// need not be in the bag: the build takes them as they come (the client's
+    /// `ui_insufficientStructureMaterials`: "You don't have enough resources to complete this
+    /// structure. You can place the plan now and acquire more resources later.").
     fn camp_placement(
         &self,
         entity: Entity,
@@ -1915,16 +1915,6 @@ impl SimWorld {
         }
         if self.content.camp_slices.get(&blueprint.id).is_none() {
             return Err(CampRefusal::Slice);
-        }
-        let in_bag = player.gear.as_ref().is_some_and(|gear| {
-            self.content
-                .structure_costs
-                .of(&blueprint.id)
-                .iter()
-                .all(|(item, quantity)| gear.bag_count(item) >= *quantity)
-        });
-        if !in_bag {
-            return Err(CampRefusal::Cost);
         }
         let [x, y, z] = placement.position;
         Ok(CampPlacement {
@@ -4192,12 +4182,28 @@ mod tests {
         }
 
         #[test]
-        fn a_camp_without_its_costs_in_the_bag_is_refused() {
+        fn a_camp_is_placed_without_its_costs_and_built_once_they_are_in_the_bag() {
             let (mut world, entity) = camp_world(false, 0);
-            assert_eq!(place(&mut world, NOW), [placed(PLACEMENT_REFUSED)]);
-            assert_eq!(camp_of(&world, entity), None);
-            let player = world.world.get::<Player>(entity).expect("player");
-            assert!(player.travel.saved.placed_camp.is_none());
+            assert_eq!(place(&mut world, NOW), [placed(PLACEMENT_PLACED)], "the plan is placed");
+            let camp = camp_of(&world, entity).expect("the camp stands unbuilt");
+            tick(&mut world, NOW + COMMITTABLE_DELAY_MS);
+            let accept_ms = start_build(&mut world, entity, &camp, NOW + COMMITTABLE_DELAY_MS + 1);
+            let empty = messages_to(
+                &tick(&mut world, accept_ms + COMMIT_INTERVAL_MS).messages,
+                CAMPER,
+            );
+            assert_eq!(build_answers(&empty), (Vec::new(), 1), "nothing to take: the build ends");
+            {
+                let content = Arc::clone(&world.content);
+                let mut player = world.world.get_mut::<Player>(entity).expect("player");
+                let gear = player.gear.as_mut().expect("gear");
+                for (id, quantity) in costs() {
+                    assert!(gear.add(&content.kits.item(&id).cloned().expect("item"), quantity));
+                }
+            }
+            let again = start_build(&mut world, entity, &camp, accept_ms + 2 * COMMIT_INTERVAL_MS);
+            tick(&mut world, again + COMMIT_INTERVAL_MS);
+            assert_eq!(bag(&world, entity, WOOD), 4, "the build takes the first unit");
         }
 
         #[test]
