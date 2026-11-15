@@ -319,8 +319,11 @@ fn interactor_state(wars: &[TerritoryWar], character: Uuid) -> TerritoryInteract
 pub(super) struct WarView {
     /// The wars version and the phase of each war its war data showed.
     data: Option<(u64, Vec<u32>)>,
-    /// The territory interactor state it got last.
+    /// The territory interactor state it got last, its sign-up list at [`FIRST_VERSION`].
     interactor: Option<TerritoryInteractorState>,
+    /// How many territory interactor states it got: the version of the next one's sign-up
+    /// list is [`FIRST_VERSION`] and this ([`Wars::interactor_due`]).
+    interactor_sends: u64,
     /// The territory of the war board it uses (2791, 2762, 2784).
     board: Option<u16>,
 }
@@ -775,16 +778,25 @@ impl Wars {
         })
     }
 
-    /// The territory interactor member of `character` when it changed since the view.
+    /// The territory interactor member of `character` when it changed since the view. Its
+    /// sign-up list has a new version each time (Observed: `army-management` 0x597, 0x698,
+    /// 0x7a1 ... at each send, `sign_up_for_invasion` and `RS_offensive_war` the same): the
+    /// client keeps the list it has for a list of the same version (live 2026-11-15: with
+    /// every list at [`FIRST_VERSION`], a player who signed up still showed "Not Signed Up").
     fn interactor_due(&self, view: &mut WarView, character: Uuid) -> Option<BundleMember> {
         let state = interactor_state(&self.wars, character);
         if view.interactor.as_ref() == Some(&state) {
             return None;
         }
         view.interactor = Some(state.clone());
+        let mut sent = state;
+        if let Some(KeyedList::Full(signups)) = &mut sent.signups {
+            signups.version = Some(FIRST_VERSION.saturating_add(view.interactor_sends));
+        }
+        view.interactor_sends = view.interactor_sends.saturating_add(1);
         Some(BundleMember {
             component: INTERACTOR_COMPONENT,
-            state: MemberState::TerritoryInteractor(Box::new(state)),
+            state: MemberState::TerritoryInteractor(Box::new(sent)),
         })
     }
 }
@@ -1378,6 +1390,45 @@ pub(super) mod tests {
             interactor_state(&wars, OTHER).players.len(),
             0,
             "no roster without a sign-up"
+        );
+    }
+
+    /// Each interactor state's sign-up list has a new version, as retail's.
+    #[test]
+    fn each_interactor_state_has_a_new_sign_up_list_version() {
+        let version_of = |member: Option<BundleMember>| match member.map(|member| member.state) {
+            Some(MemberState::TerritoryInteractor(state)) => match state.signups {
+                Some(KeyedList::Full(list)) => (list.version, list.elements.len()),
+                other => panic!("full sign-ups: {other:?}"),
+            },
+            other => panic!("an interactor state: {other:?}"),
+        };
+        let mut wars = Wars::default();
+        wars.read(Ok(vec![war(Vec::new())]));
+        let mut view = WarView::default();
+        assert_eq!(
+            version_of(wars.interactor_due(&mut view, LEADER)),
+            (Some(FIRST_VERSION), 0)
+        );
+        assert!(
+            wars.interactor_due(&mut view, LEADER).is_none(),
+            "no change"
+        );
+        wars.read(Ok(vec![war(vec![signup(
+            LEADER,
+            Some(RANK_GOVERNOR),
+            None,
+        )])]));
+        assert_eq!(
+            version_of(wars.interactor_due(&mut view, LEADER)),
+            (Some(FIRST_VERSION + 1), 1),
+            "the sign-up goes out with a new version"
+        );
+        // A roster call asks for the state again: it goes out with a new version too.
+        view.interactor = None;
+        assert_eq!(
+            version_of(wars.interactor_due(&mut view, LEADER)),
+            (Some(FIRST_VERSION + 2), 1)
         );
     }
 
