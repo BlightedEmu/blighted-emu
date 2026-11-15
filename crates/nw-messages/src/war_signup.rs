@@ -8,7 +8,9 @@
 //!
 //! - 2762 sign-up: the side `u32` ([`SIDE_ATTACKER`] or [`SIDE_DEFENDER`]; an invasion's
 //!   sign-up is always the defender), then the territory `u16`.
-//! - 2767 list and 2771 count: the side `u32`. 2772 roster: the header alone.
+//! - 2767 list: the page `u32`, from 1 (Observed: 1 at every screen open, 2 to 4 at the standby
+//!   list's next button, `opr_que_and_lost` and `CK_offensive_war`; the client's
+//!   `RequestSignupList(1)`). 2771 count: the side `u32`. 2772 roster: the header alone.
 //! - 2784 leave and 2791 remote board use: the territory `u16`.
 //! - 2779 add to roster: a [`WarPlayer`], then the group `u32`.
 //! - 2781 remove from roster: a [`WarPlayer`], its group and slot `u32`.
@@ -17,6 +19,8 @@
 //! - 1676 move: a [`WarPlayer`], its group and slot, the target group (Inferred order: the
 //!   three retail calls were refused, so no roster change shows which `u32` is which).
 //! - 1892 kick: a [`WarPlayer`].
+//! - 2777 fill roster: the header alone (Observed live 2026-11-15, the army groups screen's Fill
+//!   Roster button: `RequestFillRoster()` takes no argument; no retail capture holds one).
 //!
 //! Answers:
 //!
@@ -24,9 +28,10 @@
 //!   done call; `00 0000000c` for a player the war leader banned, `00 0000000e` for a refused
 //!   swap or move).
 //! - 2230 to a leave: the territory `u16`, then a [`CallResult`].
-//! - 2726 to a list: the side `u32`, a second `u32` (Observed: the side again in 41 of 44
-//!   bodies, 4 in the rest; meaning Unknown), the entry count, then per signed-up player a
-//!   [`WarPlayer`], its company id and its gear score `u16`.
+//! - 2726 to a list: the page `u32`, the page count `u32`, the entry count, then per signed-up
+//!   player a [`WarPlayer`], its company id and its gear score `u16` (Observed: pages of
+//!   [`SIGNUP_LIST_PAGE`] players, `opr_que_and_lost` pages 1 to 3 of 4 with 12 entries and
+//!   page 4 with 7; a defender's list for page 1 in `aasdf` and `sign_up_for_invasion`).
 //! - 2729 to a count: the side `u32` and the count `u32`.
 
 use crate::facet::FacetHeader;
@@ -65,6 +70,8 @@ pub const REQUEST_SWAP_PLAYERS_TYPE_INDEX: u64 = 1871;
 pub const REQUEST_MOVE_PLAYER_TYPE_INDEX: u64 = 1676;
 /// Type index of `TerritoryInteractorComponentServerFacet_RequestKickPlayer`.
 pub const REQUEST_KICK_PLAYER_TYPE_INDEX: u64 = 1892;
+/// Type index of `TerritoryInteractorComponentServerFacet_RequestFillRoster`.
+pub const REQUEST_FILL_ROSTER_TYPE_INDEX: u64 = 2777;
 /// Type index of `TerritoryInteractorComponentClientFacet_OnSetRosterResponseReceived`.
 pub const SET_ROSTER_RESPONSE_RECEIVED_TYPE_INDEX: u64 = 2733;
 
@@ -87,6 +94,8 @@ pub const REASON_BANNED: u32 = 12;
 /// 1781898776428; the client's text for it is Unknown).
 pub const REASON_ROSTER_REFUSED: u32 = 14;
 
+/// The players of one page of a 2726 (module doc).
+pub const SIGNUP_LIST_PAGE: usize = 12;
 /// The most sign-ups of one 2726 (an entry is at least 21 bytes).
 const MAX_SIGNUPS: u64 = 0x1_0000;
 
@@ -191,12 +200,12 @@ impl CallResult {
 /// A war sign-up or roster call of the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WarSignupClientMsg {
-    /// 2767: send the sign-up list of this side.
+    /// 2767: send a page of the sign-up list of the player's side.
     RequestSignupList {
         /// The header.
         header: FacetHeader,
-        /// The side.
-        side: u32,
+        /// The page, from 1.
+        page: u32,
     },
     /// 2772: send the current war roster.
     RequestRoster {
@@ -289,6 +298,11 @@ pub enum WarSignupClientMsg {
         /// The player.
         player: WarPlayer,
     },
+    /// 2777: put the side's standby players into the roster's free places.
+    FillRoster {
+        /// The header.
+        header: FacetHeader,
+    },
 }
 
 impl WarSignupClientMsg {
@@ -304,7 +318,7 @@ impl WarSignupClientMsg {
             REQUEST_SIGNUP_LIST_TYPE_INDEX => read(|header, reader| {
                 Ok(Self::RequestSignupList {
                     header,
-                    side: reader.u32()?,
+                    page: reader.u32()?,
                 })
             }),
             REQUEST_ROSTER_TYPE_INDEX => read(|header, _| Ok(Self::RequestRoster { header })),
@@ -376,6 +390,7 @@ impl WarSignupClientMsg {
                     player: WarPlayer::read(reader)?,
                 })
             }),
+            REQUEST_FILL_ROSTER_TYPE_INDEX => read(|header, _| Ok(Self::FillRoster { header })),
             _ => return None,
         })
     }
@@ -395,6 +410,7 @@ impl WarSignupClientMsg {
             Self::SwapPlayers { .. } => REQUEST_SWAP_PLAYERS_TYPE_INDEX,
             Self::MovePlayer { .. } => REQUEST_MOVE_PLAYER_TYPE_INDEX,
             Self::KickPlayer { .. } => REQUEST_KICK_PLAYER_TYPE_INDEX,
+            Self::FillRoster { .. } => REQUEST_FILL_ROSTER_TYPE_INDEX,
         }
     }
 
@@ -412,7 +428,8 @@ impl WarSignupClientMsg {
             | Self::SetPermissions { header, .. }
             | Self::SwapPlayers { header, .. }
             | Self::MovePlayer { header, .. }
-            | Self::KickPlayer { header, .. } => *header,
+            | Self::KickPlayer { header, .. }
+            | Self::FillRoster { header } => *header,
         }
     }
 
@@ -425,10 +442,13 @@ impl WarSignupClientMsg {
         let mut writer = Writer::new();
         self.header().write(&mut writer);
         match self {
-            Self::RequestSignupList { side, .. } | Self::RequestSignupCount { side, .. } => {
+            Self::RequestSignupList { page, .. } => {
+                writer.u32(*page);
+            }
+            Self::RequestSignupCount { side, .. } => {
                 writer.u32(*side);
             }
-            Self::RequestRoster { .. } => {}
+            Self::RequestRoster { .. } | Self::FillRoster { .. } => {}
             Self::RequestRemoteInteract { territory, .. }
             | Self::RequestLeave { territory, .. } => {
                 writer.u16(*territory);
@@ -481,14 +501,14 @@ impl WarSignupClientMsg {
 /// A war sign-up or roster answer of the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WarSignupServerMsg {
-    /// 2726: the players who signed up for a side.
+    /// 2726: a page of the players who signed up for the player's side.
     SignupListReceived {
         /// The header.
         header: FacetHeader,
-        /// The side of the 2767 it answers.
-        side: u32,
-        /// A second value (module doc).
-        extra: u32,
+        /// The page of the 2767 it answers.
+        page: u32,
+        /// How many pages the list has.
+        pages: u32,
         /// The signed-up players.
         entries: Vec<SignupEntry>,
     },
@@ -572,8 +592,8 @@ impl WarSignupServerMsg {
         let header = FacetHeader::read(&mut reader)?;
         let message = match type_index {
             SIGNUP_LIST_RECEIVED_TYPE_INDEX => {
-                let side = reader.u32()?;
-                let extra = reader.u32()?;
+                let page = reader.u32()?;
+                let pages = reader.u32()?;
                 let count = reader.prefixed()?;
                 if count > MAX_SIGNUPS {
                     return Err(MessageError::CountTooLarge {
@@ -592,8 +612,8 @@ impl WarSignupServerMsg {
                     .collect::<Result<_, MessageError>>()?;
                 Self::SignupListReceived {
                     header,
-                    side,
-                    extra,
+                    page,
+                    pages,
                     entries,
                 }
             }
@@ -636,14 +656,14 @@ impl WarSignupServerMsg {
         self.header().write(&mut writer);
         match self {
             Self::SignupListReceived {
-                side,
-                extra,
+                page,
+                pages,
                 entries,
                 ..
             } => {
                 writer
-                    .u32(*side)
-                    .u32(*extra)
+                    .u32(*page)
+                    .u32(*pages)
                     .prefixed(entries.len() as u64)?;
                 for entry in entries {
                     entry.player.write(&mut writer)?;
@@ -716,6 +736,8 @@ mod tests {
                 format!("{player}000000030000000100000004"),
             ),
             (REQUEST_KICK_PLAYER_TYPE_INDEX, player.to_owned()),
+            // The live body: the header alone.
+            (REQUEST_FILL_ROSTER_TYPE_INDEX, String::new()),
         ] {
             let call = client(type_index, &args);
             assert_eq!(call.type_index(), type_index);
@@ -752,10 +774,16 @@ mod tests {
             .replace(' ', "");
         let answer = WarSignupServerMsg::decode(SIGNUP_LIST_RECEIVED_TYPE_INDEX, &hex(&list))
             .expect("reads");
-        let WarSignupServerMsg::SignupListReceived { side, entries, .. } = &answer else {
+        let WarSignupServerMsg::SignupListReceived {
+            page,
+            pages,
+            entries,
+            ..
+        } = &answer
+        else {
             panic!("a list");
         };
-        assert_eq!(*side, SIDE_ATTACKER);
+        assert_eq!((*page, *pages), (1, 1));
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].gear_score, 800);
         assert_eq!(entries[1].gear_score, 781);

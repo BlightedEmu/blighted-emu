@@ -315,7 +315,7 @@ pub use war_roster::{
 };
 pub use war_signup::{
     CallResult, REASON_BANNED, REASON_NONE, REASON_ROSTER_REFUSED, RosterPlace, SIDE_ATTACKER,
-    SIDE_DEFENDER, SignupEntry, WAR_PLAYER_KIND, WarPlayer, WarSignupClientMsg, WarSignupServerMsg,
+    SIDE_DEFENDER, SIGNUP_LIST_PAGE, SignupEntry, WAR_PLAYER_KIND, WarPlayer, WarSignupClientMsg, WarSignupServerMsg,
 };
 pub use war_states::{
     BUILDER_BUILDING, BUILDER_IDLE, BUILDER_STATE_COMPONENT, BUILDER_TYPE_INDEX, BuilderState,

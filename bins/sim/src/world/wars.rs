@@ -63,10 +63,11 @@ use nw_messages::{
     BundleMember, CallResult, GROUP_SLOTS, InteractionRequest, MemberState, PERMISSION_LEADER,
     PERMISSION_MEMBER, PERMISSION_OFFICER, REASON_BANNED, REASON_NONE, REASON_ROSTER_REFUSED,
     ROSTER_GROUPS, RosterGroup, RosterPlace, RosterPlayer, SIDE_ATTACKER, SIDE_DEFENDER,
-    ServerMessage, SignupData, SignupEntry, TerritoryFacetReadyMsg, TerritoryInteractorState,
-    WAR_DATA_COMPONENT, WAR_KIND_INVASION, WAR_KIND_WAR, WAR_PHASE_RESOLVED, WAR_PHASE_RUNNING,
-    WAR_PHASE_SCHEDULED, WAR_PLAYER_KIND, WarDataState, WarEntry, WarPlayer, WarSide,
-    WarSignupClientMsg, WarSignupServerMsg, WarStatus, facet_of_raw_id,
+    SIGNUP_LIST_PAGE, ServerMessage, SignupData, SignupEntry, TerritoryFacetReadyMsg,
+    TerritoryInteractorState, WAR_DATA_COMPONENT, WAR_KIND_INVASION, WAR_KIND_WAR,
+    WAR_PHASE_RESOLVED, WAR_PHASE_RUNNING, WAR_PHASE_SCHEDULED, WAR_PLAYER_KIND, WarDataState,
+    WarEntry, WarPlayer, WarSide, WarSignupClientMsg, WarSignupServerMsg, WarStatus,
+    facet_of_raw_id,
 };
 use uuid::Uuid;
 
@@ -893,8 +894,77 @@ fn roster_changes(
                 kicked: true,
             }])
         }
+        // Inferred (no retail capture): the standby players in sign-up order take the free
+        // places group by group, slot by slot; refused when none is placed.
+        WarSignupClientMsg::FillRoster { .. } => {
+            let free = (0..ROSTER_GROUPS)
+                .flat_map(|group| (0..GROUP_SLOTS).map(move |slot| (group, slot)))
+                .filter(|place| {
+                    !war.signups
+                        .iter()
+                        .any(|signup| signup.side == side && signup.roster.place == Some(*place))
+                });
+            let changes: Vec<SeatChange> = war
+                .signups
+                .iter()
+                .filter(|signup| {
+                    signup.side == side && !signup.kicked && signup.roster.place.is_none()
+                })
+                .zip(free)
+                .map(|(signup, place)| seat(signup, Some(place)))
+                .collect();
+            (!changes.is_empty()).then_some(changes)
+        }
         _ => None,
     }
+}
+
+/// The first page of a sign-up list (2767).
+const FIRST_PAGE: u32 = 1;
+
+/// The side whose sign-up list `character` (of company `company`) sees in `war`: the side it
+/// signed up for, else the side of its company (a war leader before its own sign-up).
+/// Observed: the client asks for a page alone (2767), a defender gets the defenders' list
+/// (`aasdf`, `sign_up_for_invasion`) and an attacker the attackers' (`army-management`).
+fn list_side(war: &TerritoryWar, character: Uuid, company: Option<Uuid>) -> Option<u8> {
+    war.signups
+        .iter()
+        .find(|signup| signup.character == character && !signup.kicked)
+        .map(|signup| signup.side)
+        .or_else(|| {
+            let company = company?;
+            [SIDE_ATTACKER, SIDE_DEFENDER]
+                .into_iter()
+                .find(|side| side_company(war, *side).is_some_and(|(id, _)| id == company))
+                .and_then(|side| u8::try_from(side).ok())
+        })
+}
+
+/// Page `page` (from [`FIRST_PAGE`]) of the sign-ups of `side` of `war`, and the page count
+/// ([`SIGNUP_LIST_PAGE`] players a page; one empty page for none).
+fn signup_page(war: &TerritoryWar, side: u8, page: u32) -> (Vec<SignupEntry>, u32) {
+    let signed: Vec<&WarSignup> = war
+        .signups
+        .iter()
+        .filter(|signup| signup.side == side && !signup.kicked)
+        .collect();
+    let pages = signed.len().div_ceil(SIGNUP_LIST_PAGE).max(1);
+    let skipped = usize::try_from(page.saturating_sub(FIRST_PAGE))
+        .unwrap_or(usize::MAX)
+        .saturating_mul(SIGNUP_LIST_PAGE);
+    let entries = signed
+        .into_iter()
+        .skip(skipped)
+        .take(SIGNUP_LIST_PAGE)
+        .map(|signup| SignupEntry {
+            player: war_player(signup),
+            company: signup
+                .company
+                .map_or(NO_ID, |(company, _)| *company.as_bytes()),
+            gear_score: signup.gear_score,
+        })
+        .collect();
+    (entries, u32::try_from(pages).unwrap_or(u32::MAX))
 }
 
 /// Whether the player `character` of `company` may edit the roster of `side` of `war`
@@ -1006,30 +1076,20 @@ impl SimWorld {
                     )),
                 }
             }
-            WarSignupClientMsg::RequestSignupList { side, .. } => {
-                let entries = self
+            WarSignupClientMsg::RequestSignupList { page, .. } => {
+                let company = player.social.company().map(Uuid::from_bytes);
+                let (entries, pages) = self
                     .wars
                     .board_war(player.war.board, character)
-                    .map(|war| {
-                        war.signups
-                            .iter()
-                            .filter(|signup| u32::from(signup.side) == *side && !signup.kicked)
-                            .map(|signup| SignupEntry {
-                                player: war_player(signup),
-                                company: signup
-                                    .company
-                                    .map_or(NO_ID, |(company, _)| *company.as_bytes()),
-                                gear_score: signup.gear_score,
-                            })
-                            .collect()
+                    .and_then(|war| {
+                        list_side(war, character, company).map(|side| signup_page(war, side, *page))
                     })
-                    .unwrap_or_default();
+                    .unwrap_or((Vec::new(), FIRST_PAGE));
                 answers.push(ServerMessage::WarSignup(
                     WarSignupServerMsg::SignupListReceived {
                         header,
-                        side: *side,
-                        // Observed: equal to the side in every retail body.
-                        extra: *side,
+                        page: *page,
+                        pages,
                         entries,
                     },
                 ));
@@ -1335,6 +1395,18 @@ pub(super) mod tests {
             group: u32::from(ROSTER_GROUPS),
         };
         assert_eq!(roster_changes(&entry, 1, &bad_group), None);
+        // A fill puts the standby players into the first free places; a full fill is refused.
+        let fill = WarSignupClientMsg::FillRoster { header: HEADER };
+        let filled = roster_changes(&entry, 1, &fill).expect("one standby player");
+        assert_eq!(
+            filled
+                .iter()
+                .map(|change| (change.character, change.seat.place))
+                .collect::<Vec<_>>(),
+            [(OTHER, Some((0, 2)))]
+        );
+        let seated = war(vec![signup(LEADER, Some(RANK_GOVERNOR), Some((0, 0)))]);
+        assert_eq!(roster_changes(&seated, 1, &fill), None, "no standby player");
         let swap = WarSignupClientMsg::SwapPlayers {
             header: HEADER,
             first: (player(LEADER), RosterPlace { group: 0, slot: 0 }),
@@ -1391,6 +1463,41 @@ pub(super) mod tests {
             0,
             "no roster without a sign-up"
         );
+    }
+
+    /// A player gets the list of its own side, a page at a time; a war leader before its own
+    /// sign-up gets its company's side (retail asks with a page alone).
+    #[test]
+    fn the_sign_up_list_is_the_player_s_side_by_page() {
+        const DEFENDERS: u128 = 13;
+        let defender = |n: u128| WarSignup {
+            side: 2,
+            company: Some((DEFENDER, RANK_GOVERNOR)),
+            ..signup(Uuid::from_u128(0xd000 + n), None, None)
+        };
+        let mut signups = vec![signup(LEADER, Some(RANK_GOVERNOR), None)];
+        signups.extend((0..DEFENDERS).map(defender));
+        let war = war(signups);
+        let first_defender = Uuid::from_u128(0xd000);
+        assert_eq!(list_side(&war, first_defender, None), Some(2));
+        assert_eq!(list_side(&war, LEADER, None), Some(1));
+        assert_eq!(
+            list_side(&war, OTHER, Some(DEFENDER)),
+            Some(2),
+            "the leader's company"
+        );
+        assert_eq!(list_side(&war, OTHER, None), None);
+        let (first, pages) = signup_page(&war, 2, FIRST_PAGE);
+        assert_eq!((first.len(), pages), (SIGNUP_LIST_PAGE, 2));
+        assert_eq!(
+            first[0].player.character,
+            first_defender.hyphenated().to_string()
+        );
+        let (second, _) = signup_page(&war, 2, FIRST_PAGE + 1);
+        assert_eq!(second.len(), 1, "13 defenders: 12 and 1");
+        let (attackers, attacker_pages) = signup_page(&war, 1, FIRST_PAGE);
+        assert_eq!((attackers.len(), attacker_pages), (1, 1));
+        assert_eq!(signup_page(&war, 1, FIRST_PAGE + 1).0.len(), 0);
     }
 
     /// Each interactor state's sign-up list has a new version, as retail's.
