@@ -200,6 +200,14 @@
             {
               "check": "A build or a screen recorder on the same PC slows the sims.",
               "proof": "none"
+            },
+            {
+              "check": "A busy sim keeps its heartbeat (bots, 2026-11-15): with 110 bots on the one open-world sim of the real-client stack, its beats came up to 2.67 s apart, the world director took the sim for silent after 3 s and all 97 players left. The loop now sends a due beat before each wait (the tick and input branches were always ready); in the same run the worst gap was 1.57 s and no player left.",
+              "proof": "bots"
+            },
+            {
+              "check": "One sim with 110 bots on the PC (30 hunt, 30 gather, 50 swarm) runs ticks late (1,150 late ticks in 7 minutes) and leaves most gathers unanswered; with 5 gather bots every gather is answered.",
+              "proof": "none"
             }
           ]
         },
@@ -3375,6 +3383,7 @@
     }
   ],
   "nextSteps": [
+    "**One busy sim (2026-11-15): find what makes ticks late with about 110 bots on one sim.**\n\n- The run: `nw-testclient hunt`, `gather` and `swarm` together on the real-client stack (30, 30 and 50 bots).\n- With 5 gather bots every gather is answered; with 110 bots most are not.",
     "**Company and town ownership for tests (2026-11-14): live check.**\n\n- `!faction syndicate`, `!company <name>`, `!owner 12 <name>`, then the Monarch's Bluffs town project board and war board.",
     "**Town board and war board (2026-11-14): live check (tests only).**\n\n- Monarch's Bluffs town project board: the projects show, missions are listed, one can be taken.\n- Monarch's Bluffs war board: it can be used and opens the war window.",
     "**Batch E: wars, expeditions, darkness events, level walls (2026-11-13): live check (tests only).**\n\n- Declare two wars: the second war's raid numbers start after the first war's defender.\n- In a war, the fort gate breaks and comes back at the result; the camp gate takes no harm.\n- Hedet canyon: use a fire dropper; the barrel drops and the fire area opens.\n- Myrkgard: run a portal event; its key fragment comes at its end, and the curse goes about 10 s later.\n- In a mutated expedition, gather a resource node: the score rises by the expedition's points.\n- Fire a bow and a turret at a wall: the shot stops at the wall.",
@@ -3676,5 +3685,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-15",
-  "lastCommit": "6afc435e"
+  "lastCommit": "ce754bab"
 }
