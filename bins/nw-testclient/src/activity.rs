@@ -30,7 +30,8 @@ use nw_messages::facet::{
 use nw_messages::mount::{MOUNT_FACET, MountClientMsg, SUMMON_PENDING_TYPE_INDEX};
 use nw_messages::travel::{LandmarkRef, TravelClientMsg, component};
 use nw_messages::war_signup::{
-    SIDE_ATTACKER, SIGNUP_LIST_RECEIVED_TYPE_INDEX, SIGNUP_RESPONSE_RECEIVED_TYPE_INDEX,
+    SET_ROSTER_RESPONSE_RECEIVED_TYPE_INDEX, SIDE_ATTACKER, SIGNUP_LIST_RECEIVED_TYPE_INDEX,
+    SIGNUP_RESPONSE_RECEIVED_TYPE_INDEX,
 };
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
@@ -129,8 +130,8 @@ pub enum ActivityKind {
     EnemyCompany,
     /// The bot's company ([`ActivityKind::EnemyCompany`]) declares a game master war on the
     /// territory of [`WAR_TERRITORY`], and the bot uses that territory's war board from afar,
-    /// signs up as the attacker and asks for the sign-up list and the roster, as a client's
-    /// war board screen does; the war is cancelled at the end. Its owner must be a company of
+    /// signs up as the attacker, asks for the sign-up list and the roster and fills the roster
+    /// as its war leader, as a client's war board screen does; the war is cancelled at the end. Its owner must be a company of
     /// another faction.
     WarSignup,
 }
@@ -798,6 +799,8 @@ const ENEMY_FACTION: &str = "covenant";
 const WAR_TERRITORY: u16 = 5;
 /// Minutes before the war sign-up activity's war starts: sign-ups close at the start.
 const WAR_START_MINUTES: u32 = 10;
+/// The sign-up list page a client's war board screen asks for first (2767).
+const FIRST_LIST_PAGE: u32 = 1;
 /// How long the war sign-up activity waits for the client's next roster and list poll (retail
 /// `army-management`: the screen asks every 5 s).
 const ROSTER_POLL_WAIT: Duration = Duration::from_secs(5);
@@ -812,7 +815,7 @@ fn war_call(make: impl Fn(FacetHeader) -> WarSignupClientMsg + 'static) -> Act {
 
 /// [`ActivityKind::WarSignup`]: the calls of a client's war board screen (retail
 /// `army-management`: 2791, 2722, then 2772 and 2767 every 5 s; a sign-up 2762 is answered
-/// with 2169 and 2722).
+/// with 2169 and 2722), and the war leader's Fill Roster (2777, answered with 2733).
 fn war_signup() -> Vec<Step> {
     let cancel = format!("!war {WAR_TERRITORY} cancel");
     vec![
@@ -847,16 +850,22 @@ fn war_signup() -> Vec<Step> {
             STEP_WAIT,
         ),
         step(
-            "ask for the roster and the attackers' sign-up list (2772, 2767)",
+            "ask for the roster and the first page of its side's sign-up list (2772, 2767)",
             vec![
                 Act::Pause(ROSTER_POLL_WAIT),
                 war_call(|header| WarSignupClientMsg::RequestRoster { header }),
                 war_call(|header| WarSignupClientMsg::RequestSignupList {
                     header,
-                    side: SIDE_ATTACKER,
+                    page: FIRST_LIST_PAGE,
                 }),
             ],
             Proof::Message(SIGNUP_LIST_RECEIVED_TYPE_INDEX),
+            STEP_WAIT,
+        ),
+        step(
+            "fill the roster as the war leader (2777)",
+            vec![war_call(|header| WarSignupClientMsg::FillRoster { header })],
+            Proof::Message(SET_ROSTER_RESPONSE_RECEIVED_TYPE_INDEX),
             STEP_WAIT,
         ),
         gm_done(cancel),
@@ -1023,7 +1032,7 @@ mod tests {
             Activity::of(ActivityKind::WarSignup, &data)
                 .steps
                 .map(|steps| steps.len()),
-            Ok(6),
+            Ok(7),
             "the war sign-up needs no level data"
         );
         assert_eq!(
