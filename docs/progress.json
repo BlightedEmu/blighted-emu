@@ -2117,11 +2117,19 @@
               "proof": "tests"
             },
             {
+              "check": "The camp tier (the `Camping` rank) rises with the character level as retail: tier 1 at level 10, then 15, 25, 40 and 55 (the `CampingT1` to `CampingT5` rows of `RewardMilestones`), sent with the level up; a character already past a tier gets it at its next login. Before, no character got a tier, so the client let no one place a camp (a player reported it, 2026-11-15).",
+              "proof": "tests"
+            },
+            {
               "check": "Live check.",
               "proof": "none"
             },
             {
-              "check": "PvP destruction, how a new character earns the Camping rank (Unknown), guild and faction.",
+              "check": "One retail new character had camp tier 1 at level 1 (new character capture of 2026-09-18); two others had none until level 10. The cause is Unknown.",
+              "proof": "none"
+            },
+            {
+              "check": "PvP destruction, guild and faction.",
               "proof": "none"
             }
           ]
@@ -3387,6 +3395,7 @@
     }
   ],
   "nextSteps": [
+    "**Camp tiers (2026-11-15): live check (tests only).**\n\n- A character of level 10 or more logs in: the camp can be placed (tier 1 at 10, tier 2 at 15).\n- A character reaches level 10: the camp can be placed right after the level up.\n- Place and build the camp of the Monarch's Bluffs camp quest (Knight in the North): the quest goes on.",
     "**One busy sim (2026-11-15): the bundle stops of the 110-bot run.**\n\n- The run: `nw-testclient hunt`, `gather` and `swarm` together on the real-client stack (30, 30 and 50 bots).\n- The ticks keep time now; the hunt and gather bots still report a stop in their bundles. Find the cause.",
     "**Company and town ownership for tests (2026-11-14): live check.**\n\n- `!faction syndicate`, `!company <name>`, `!owner 12 <name>`, then the Monarch's Bluffs town project board and war board.",
     "**Town board and war board (2026-11-14): live check (tests only).**\n\n- Monarch's Bluffs town project board: the projects show, missions are listed, one can be taken.\n- Monarch's Bluffs war board: it can be used and opens the war window.",
@@ -3689,5 +3698,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-15",
-  "lastCommit": "d4af3c48"
+  "lastCommit": "b20cbecc"
 }
