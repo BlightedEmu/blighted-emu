@@ -36,7 +36,12 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::collision::{AssetKey, CHUNKS_EXTENSION, capital_asset, chunk_lists, chunk_placements};
+use crate::distribution::{DISTRIBUTION_FILE, Distribution, DistributionError, parse_distribution};
 use crate::error::ToolError;
+use crate::plant_gatherables::{
+    PlantGatherables, PlantSlice, plant_points, plant_slice_keys, variation_gatherables,
+};
+use crate::slice_meta::{slice_key, slice_pak_path};
 use crate::source::GameSource;
 
 /// Folder of the level data inside the paks.
@@ -142,6 +147,15 @@ pub enum WorldBuildError {
         /// Reader error.
         #[source]
         source: MetadataError,
+    },
+    /// A `region.distribution` does not fit its reader.
+    #[error("{path}: {source}")]
+    Distribution {
+        /// Entry path.
+        path: String,
+        /// Reader error.
+        #[source]
+        source: DistributionError,
     },
     /// A `region.slicedata` does not fit its reader.
     #[error("{path}: {source}")]
@@ -301,7 +315,63 @@ pub fn is_world_input(path: &str) -> bool {
             || path.ends_with(METADATA_EXTENSION)
             || path.ends_with(CAPITALS_EXTENSION)
             || path.ends_with(CHUNKS_EXTENSION)
-            || path.ends_with(SLICE_DATA_FILE))
+            || path.ends_with(SLICE_DATA_FILE)
+            || path.ends_with(DISTRIBUTION_FILE))
+}
+
+/// The distributions of `level` among its `files`, each with its region folder.
+fn level_distributions(
+    level: &str,
+    files: &LevelFiles,
+) -> Result<Vec<(String, Distribution)>, WorldBuildError> {
+    files
+        .iter()
+        .filter_map(|(path, bytes)| {
+            let region = path
+                .strip_prefix(REGIONS_DIR)?
+                .strip_suffix(DISTRIBUTION_FILE)?
+                .strip_suffix(PATH_SEPARATOR)?;
+            Some((region, path, bytes))
+        })
+        .map(|(region, path, bytes)| {
+            let distribution =
+                parse_distribution(bytes).map_err(|source| WorldBuildError::Distribution {
+                    path: entry_path(level, path),
+                    source,
+                })?;
+            Ok((region.to_owned(), distribution))
+        })
+        .collect()
+}
+
+/// The gatherables of the plant slices that `distributions` place, from their `.dynamicslice`
+/// files in `source`, with the variation rows of `tables`.
+fn plant_gatherables(
+    source: &GameSource,
+    tables: &nw_content::Tables,
+    distributions: &[Vec<(String, Distribution)>],
+) -> Result<PlantGatherables, ToolError> {
+    let paths: HashSet<String> = plant_slice_keys(
+        distributions
+            .iter()
+            .flatten()
+            .map(|(_, distribution)| distribution),
+    )
+    .iter()
+    .map(|key| slice_pak_path(key))
+    .collect();
+    let mut slices = HashMap::new();
+    source.for_each_entry(
+        |path| paths.contains(path),
+        |path, bytes| {
+            let plant = PlantSlice::of(&stream_of(path, &bytes)?);
+            if plant != PlantSlice::default() {
+                slices.insert(slice_key(path), plant);
+            }
+            Ok::<(), ToolError>(())
+        },
+    )?;
+    Ok(PlantGatherables::build(slices, variation_gatherables(tables)))
 }
 
 /// Groups entries by level folder. Only folders with a `tracts.json` are levels.
@@ -445,7 +515,8 @@ pub fn run_world(
     bundle_path: &Path,
     out_dir: &Path,
 ) -> Result<Vec<LevelReport>, ToolError> {
-    let known = KnownIds::from_bundle(&ContentBundle::load(bundle_path, client_build)?);
+    let bundle = ContentBundle::load(bundle_path, client_build)?;
+    let known = KnownIds::from_bundle(&bundle);
     let mut entries = BTreeMap::new();
     source.for_each_entry(is_world_input, |path, bytes| {
         entries.insert(path.to_owned(), bytes);
@@ -455,6 +526,20 @@ pub fn run_world(
     let mut built = in_parallel(&levels, |(level, files)| build_level(level, files))
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
+    // The plants of the regions' distributions that are gatherables ([`crate::plant_gatherables`]).
+    let distributions = levels
+        .iter()
+        .map(|(level, files)| level_distributions(level, files))
+        .collect::<Result<Vec<_>, _>>()?;
+    let plants = plant_gatherables(source, &bundle.tables, &distributions)?;
+    drop(bundle);
+    for ((world, _), level_distributions) in built.iter_mut().zip(&distributions) {
+        let points: Vec<_> = level_distributions
+            .iter()
+            .flat_map(|(region, distribution)| plant_points(region, distribution, world, &plants))
+            .collect();
+        world.gatherables.extend(points);
+    }
     let slice_files: HashSet<String> = built
         .iter()
         .flat_map(|(world, _)| &world.spawned)

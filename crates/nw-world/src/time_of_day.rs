@@ -20,6 +20,8 @@
 //!   flags by day or night, glyph chest force fields, the lucky rabbit spawner of the fast travel
 //!   shrines, spawn group masters of no open world encounter).
 
+use std::collections::HashMap;
+
 use nw_formats::objectstream::{Element, lowercase_crc32};
 use serde::{Deserialize, Serialize};
 
@@ -203,22 +205,53 @@ pub fn points_under(
     holders: &[TimedHolder],
     points: impl IntoIterator<Item = Position>,
 ) -> Vec<TimedPoint> {
+    // The holders by cell of [`ON_POINT_M`]: a holder within it on each axis is in the point's
+    // cell or a neighbour (a level holds millions of plant points, `crate::records`).
+    let mut cells: HashMap<[i64; AXES], Vec<usize>> = HashMap::new();
+    for (index, holder) in holders.iter().enumerate() {
+        cells.entry(holder.at.map(cell_of)).or_default().push(index);
+    }
     (0_u32..)
         .zip(points)
         .filter_map(|(index, point)| {
-            let holder = holders.iter().find(|holder| {
-                holder
-                    .at
-                    .iter()
-                    .zip(point)
-                    .all(|(a, b)| (a - b).abs() <= ON_POINT_M)
-            })?;
+            let home = point.map(cell_of);
+            let holder = NEIGHBOUR_STEPS
+                .iter()
+                .flat_map(|dx| NEIGHBOUR_STEPS.iter().map(move |dy| (*dx, *dy)))
+                .flat_map(|(dx, dy)| NEIGHBOUR_STEPS.iter().map(move |dz| [dx, dy, *dz]))
+                .filter_map(|step| {
+                    cells.get(&[home[0] + step[0], home[1] + step[1], home[2] + step[2]])
+                })
+                .flatten()
+                .copied()
+                .filter(|holder| {
+                    holders[*holder]
+                        .at
+                        .iter()
+                        .zip(point)
+                        .all(|(a, b)| (a - b).abs() <= ON_POINT_M)
+                })
+                .min()?;
             Some(TimedPoint {
                 index,
-                window: holder.window,
+                window: holders[holder].window,
             })
         })
         .collect()
+}
+
+/// The cell steps to a cell's neighbours on one axis, the cell itself included.
+const NEIGHBOUR_STEPS: [i64; 3] = [-1, 0, 1];
+
+/// The cell of [`ON_POINT_M`] that holds `value`.
+fn cell_of(value: f32) -> i64 {
+    // A level coordinate of a few km over a hundredth of a metre.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a level coordinate in hundredths of a metre"
+    )]
+    let cell = (value / ON_POINT_M).floor() as i64;
+    cell
 }
 
 #[cfg(test)]

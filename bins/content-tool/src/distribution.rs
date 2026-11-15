@@ -19,6 +19,8 @@
 //! The height source picks the row's height: 0 the terrain, 2 the water surface, any other the
 //! higher of the two.
 
+/// The file name of a region's distribution.
+pub const DISTRIBUTION_FILE: &str = "region.distribution";
 /// The optional mark at the start.
 const MARK: u16 = 0xB9D6;
 /// The first version with a height source per row.

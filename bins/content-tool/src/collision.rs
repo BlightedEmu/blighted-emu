@@ -75,7 +75,9 @@ use nw_world::slice_data::spawned_gde_id;
 use nw_world::water::{WaterMap, water_file_path};
 use nw_world::world_file::world_file_path;
 
-use crate::distribution::{DistributionError, parse_distribution, region_origin};
+use crate::distribution::{
+    DISTRIBUTION_FILE, DistributionError, parse_distribution, region_origin,
+};
 use crate::slice_meta::{SliceMeta, SliceMetaError, SliceVariant, parse_slice_meta};
 
 use crate::world::{LEVELS_PREFIX, in_parallel};
@@ -92,7 +94,6 @@ const AI_FILTER: &str = "AI";
 /// filter's name: the static world).
 const DEFAULT_ENGINE_FILTER: &str = "Static";
 /// A region's trees and stones.
-const REGION_DISTRIBUTION_FILE: &str = "region.distribution";
 /// A region's slice data: the meshes of its distribution's slice variants.
 const REGION_SLICE_DATA_FILE: &str = "region.slicedata";
 /// The slices folder a distribution's short slice names lie under.
@@ -132,6 +133,9 @@ const HALF: f32 = 0.5;
 /// `Healthy` and a `Depleted` entity under the root, the tree's stump and the ore's fragments in
 /// `Depleted`).
 const DEPLETED_GROUP: &str = "Depleted";
+/// The field of a `VariationDataComponent` that names its variation table (field name Unknown;
+/// `Gatherable_Trees`, `Gatherable_Bushes`).
+pub(crate) const VARIATION_TABLE_FIELD: u32 = 0x095a_1d04;
 /// The datasheet type of the variation tables.
 const VARIATION_DATA_TYPE: &str = "VariationData";
 /// The variation tables' column of the variant id (a capital's `variantName`).
@@ -1024,8 +1028,6 @@ fn in_depleted_group(entity: &SliceEntity, parents: &HashMap<u64, (Option<u64>, 
 /// build's gatherable slices: the table `Gatherable_Trees`, then per binding an entity, an
 /// action and a column of the table).
 fn variation_of(component: &Element, names: &Names) -> Variation {
-    /// The variation table's name.
-    const TABLE: u32 = 0x095a_1d04;
     /// The list of bindings.
     const BINDINGS: u32 = 0xaedd_dde9;
     /// A binding's column.
@@ -1054,7 +1056,7 @@ fn variation_of(component: &Element, names: &Names) -> Variation {
         })
         .collect();
     Variation {
-        table: text(component.child(TABLE)),
+        table: text(component.child(VARIATION_TABLE_FIELD)),
         bindings,
     }
 }
@@ -2023,7 +2025,7 @@ fn distribution_placements(
 ) -> Result<Vec<Pending>, CollisionError> {
     let folder = format!("{LEVELS_PREFIX}{level}{PATH_SEPARATOR}{REGIONS_DIR}");
     let files =
-        index.paths(|path| path.starts_with(&folder) && path.ends_with(REGION_DISTRIBUTION_FILE));
+        index.paths(|path| path.starts_with(&folder) && path.ends_with(DISTRIBUTION_FILE));
     let mut files_with_rows = Vec::new();
     for (path, read) in index.read_each(&files, |path, bytes| {
         parse_distribution(&bytes).map_err(|source| CollisionError::Distribution {

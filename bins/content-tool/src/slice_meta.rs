@@ -36,14 +36,24 @@ pub struct SliceVariant {
 impl SliceVariant {
     /// The key of `slice` and `variant` as either file writes them.
     pub fn of(slice: &str, variant: &str) -> Self {
-        let slice = slice.to_lowercase().replace('\\', "/");
-        let slice = slice.strip_prefix(SLICES_PREFIX).unwrap_or(&slice);
-        let slice = slice.strip_suffix(SLICE_EXTENSION).unwrap_or(slice);
         Self {
-            slice: slice.to_owned(),
+            slice: slice_key(slice),
             variant: variant.to_lowercase(),
         }
     }
+}
+
+/// The lookup key of slice name `slice`: lowercase, without the `slices/` folder and the
+/// extension.
+pub fn slice_key(slice: &str) -> String {
+    let slice = slice.to_lowercase().replace('\\', "/");
+    let slice = slice.strip_prefix(SLICES_PREFIX).unwrap_or(&slice);
+    slice.strip_suffix(SLICE_EXTENSION).unwrap_or(slice).to_owned()
+}
+
+/// The pak path of the slice whose key is `key` ([`slice_key`]).
+pub fn slice_pak_path(key: &str) -> String {
+    format!("{SLICES_PREFIX}{key}{SLICE_EXTENSION}")
 }
 
 /// One mesh of a slice variant.

@@ -35,6 +35,7 @@ pub mod music_charts;
 #[cfg(all(test, feature = "own-replay"))]
 mod own_replay;
 pub mod player_abilities;
+pub mod plant_gatherables;
 pub mod player_attacks;
 pub mod quick_courses;
 pub mod realm_pack;
