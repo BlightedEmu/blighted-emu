@@ -2427,6 +2427,10 @@
             {
               "check": "Not made: 89 task steps show the client no event of their own (they end with the next task), and some task objects of five expeditions have no server entity yet.",
               "proof": "none"
+            },
+            {
+              "check": "Three more expedition objective steps end with an encounter stage's success, as retail: Amrine boss stage 3 (task 11), Lazarus naga stage 5 (task 9), Tempest's Heart gate monolith stage 5 (task 0) (Observed in 2 to 3 runs each; tests only).",
+              "proof": "tests"
             }
           ]
         },
@@ -3123,6 +3127,22 @@
             {
               "check": "War times show the server's time zone as retail (US East, EST) instead of the raw label `@ui_server_utc_0`: the client takes the zone and the siege window hours from the channel cluster id, which is now `iad` (live 2026-11-15: the war board shows the war time in EST).",
               "proof": "live"
+            },
+            {
+              "check": "The siege data lists the war's siege weapons (child 3) as retail: each turret and structure with a siege weapon component, keyed by its card's facet entity and a per-slice constant, with its place, kind, health percent and side flag; a standing weapon with no vitals shows 100 (Observed: `RS_offensive_war`, 9 slices checked against the captures; tests only).",
+              "proof": "tests"
+            },
+            {
+              "check": "Each siege data change goes out with the next list version, as retail's changes do, so the client takes gate health and capture progress changes (before, every send had the same version; the same fault kept a war sign-up off the screen live; tests only).",
+              "proof": "tests"
+            },
+            {
+              "check": "A war gate's door lets a player of its own side through while the gate stands: the pass lands within 2.5 m of the gate (Observed 0.2-2.0 m in 8 retail uses); a broken gate or the other side's gate refuses the use (Inferred; tests only).",
+              "proof": "tests"
+            },
+            {
+              "check": "A bot signs up for an invasion the way the client does: the remote board use (2791) gets the territory (2722) and the defender sign-up (2762) the answer (2169) (`nw-testclient` activity `invasion-signup`, PC 2026-11-15).",
+              "proof": "bots"
             }
           ]
         },
