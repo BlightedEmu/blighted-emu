@@ -1669,7 +1669,6 @@ impl SimWorld {
             // Retail's login state lists the loot limit counts and the recipe cooldowns.
             self.send_loot_limits(admit.entity, loot_bag::LimitsSent::Spawn);
             self.send_recipe_cooldowns(admit.entity, loot_bag::LimitsSent::Spawn);
-            self.send_faction(admit.entity);
         }
         if admit.login && self.is_tutorial() {
             self.start_tutorial(admit.entity, now_ms);
@@ -1832,7 +1831,6 @@ impl SimWorld {
             // A new level's spawn state lists them as a login's does (Inferred).
             self.send_loot_limits(offer.entity, loot_bag::LimitsSent::Spawn);
             self.send_recipe_cooldowns(offer.entity, loot_bag::LimitsSent::Spawn);
-            self.send_faction(offer.entity);
         }
         // From the tutorial only: an instance move keeps the quests (its offer has a stay).
         if enters
@@ -5982,6 +5980,11 @@ impl Neighbourhood<'_> {
                     if let Some(member) = player.music.take_own_member(first, self.server_time) {
                         put_member(&mut group.members, member);
                     }
+                    // The card carries the faction, as retail's (a change sent before the
+                    // client took the player as its own was lost: live 2026-11-15).
+                    if first {
+                        put_member(&mut group.members, player.own_faction_card().member()?);
+                    }
                     if achievements.is_some() {
                         player.mount.achievements_changed();
                     }
@@ -9996,6 +9999,36 @@ mod tests {
             character_id,
             Some(*admit.character.as_bytes()),
             "the client sees its local player only when characterId is its login character"
+        );
+    }
+
+    #[test]
+    fn the_own_card_carries_the_saved_faction() {
+        use nw_messages::faction_state::FACTION_TYPE_INDEX;
+        const SYNDICATE: u8 = 1;
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        let mut admit = admit_at(1, CELL_M / 2.0, true);
+        admit.progression.faction.faction = SYNDICATE;
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let messages = tick(&mut world, NOW + OWN_CARD_DELAY_MS).messages;
+        let bundle = bundle_of(&messages, &connection(1)).expect("bundle");
+        let own = SlotRead::of(&bundle)
+            .expect("read")
+            .updates
+            .into_iter()
+            .find(SlotUpdate::is_local_player)
+            .expect("own group");
+        let faction = own.members.iter().find_map(|member| match &member.state {
+            MemberState::Recorded { class, body } if *class == FACTION_TYPE_INDEX => {
+                Some(body.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            faction,
+            Some(vec![0x06, 0x41, 0x00, 0x00, 0x0b, SYNDICATE, 0x00, 0x00]),
+            "retail's login body (general-other-01): the client takes the faction from the card"
         );
     }
 

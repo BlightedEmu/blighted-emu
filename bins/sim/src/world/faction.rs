@@ -236,18 +236,6 @@ impl SimWorld {
         }
         self.quest_event(number, Event::FactionChosen(faction), now_ms);
     }
-
-    /// The client of player `number`, which just spawned, gets its faction when it has one
-    /// (retail logs a character with a faction in with it; the card's first body has none).
-    pub(super) fn send_faction(&mut self, number: u64) {
-        if let Some(mut player) = self
-            .player_by_number(number)
-            .and_then(|entity| self.world.get_mut::<Player>(entity))
-            && player.faction.faction != NO_FACTION
-        {
-            push_faction(&mut player, None);
-        }
-    }
 }
 
 impl SimWorld {
@@ -382,6 +370,15 @@ impl SimWorld {
 }
 
 impl Player {
+    /// The faction state of its own card ([`PublicFaction::own_card`]): retail logs a character
+    /// in with its faction in the card, and the client takes the faction from there.
+    pub(super) fn own_faction_card(&self) -> FactionStateChange {
+        let switched =
+            (self.faction.changes > 0).then_some((self.faction.changed_ns, self.faction.changes));
+        self.public_faction()
+            .own_card(self.pvp_wait.is_pending(), switched)
+    }
+
     /// Its faction and PvP flags as other players get them: the PvP flag is its own or the
     /// free-for-all zone's.
     pub(super) fn public_faction(&self) -> PublicFaction {

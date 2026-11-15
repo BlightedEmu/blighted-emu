@@ -5,7 +5,8 @@
 //! `factionChangeCount` (u16), 5 `ffaPendingEndTime` (u64 unix ns) and 6
 //! `ffaAntiGroupingIsCursing`; slot 2 children 0 `faction`, 1 `pvpFlag`, 2 `hasSanctuary`, 3
 //! `ffaFlag` and 4 `ffaAntiGroupingCurseStacks` (member layout table; one byte each for the
-//! flags). The two anti-grouping children are not written: their rule is Unknown.
+//! flags). Of the two anti-grouping children only `ffaAntiGroupingIsCursing` is written, as 0 on
+//! the own card as retail sends it; their rule is Unknown.
 //!
 //! **Observed** (the free-for-all zone, `FFA_ExitFFAAndCleanse`, `FFA_KillPlayerAndLoot`,
 //! `FFA_LightningStrikeDeath`): 0.17 s after the client enters a free-for-all area (2297) the
@@ -20,7 +21,9 @@
 //! bundle after the 3161: `04 01 03`); a change from one faction to another sets the time and the
 //! count with it (`Change-Faction`: `06 18 <time> 00 01 01 01`, the time 10 ms after the 3161).
 //! A character with a faction logs in with its faction in the spawn body (`general-other-01`:
-//! `06 41 00 00 0b 02 00 00`, faction 2). The changes go as recorded bodies
+//! `06 41 00 00 0b 02 00 00`, faction 2; `RS_offensive_war`, a character that changed faction
+//! seven times: `06 59 00 <time> 0007 00 0b 02 00 00`), and retail sends no faction change at
+//! the login ([`PublicFaction::own_card`]). The changes go as recorded bodies
 //! ([`MemberState::Recorded`]): the bundle walk passes the class by its layout.
 
 use crate::payload::{BundleMember, MemberState};
@@ -47,6 +50,8 @@ const CHANGED_AT_CHILD: u8 = 3;
 const CHANGES_CHILD: u8 = 4;
 /// `ffaPendingEndTime` (u64 unix ns; slot 1).
 const FFA_PENDING_END_CHILD: u8 = 5;
+/// `ffaAntiGroupingIsCursing` (slot 1).
+const FFA_CURSING_CHILD: u8 = 6;
 /// `faction`, `pvpFlag`, `hasSanctuary` and `ffaFlag` (slot 2).
 const FACTION_CHILD: u8 = 0;
 const PVP_FLAG_CHILD: u8 = 1;
@@ -85,6 +90,8 @@ pub struct FactionStateChange {
     pub ffa_pending_end_ns: Option<u64>,
     /// `ffaFlag`: the player is flagged for free-for-all PvP.
     pub ffa_flag: Option<bool>,
+    /// `ffaAntiGroupingIsCursing` (Observed: 0 on every retail own card).
+    pub ffa_anti_grouping_cursing: Option<bool>,
 }
 
 impl FactionStateChange {
@@ -101,6 +108,7 @@ impl FactionStateChange {
             self.last_faction_change_ns.is_some(),
             self.faction_change_count.is_some(),
             self.ffa_pending_end_ns.is_some(),
+            self.ffa_anti_grouping_cursing.is_some(),
         ];
         let public = [
             self.faction.is_some(),
@@ -137,6 +145,7 @@ impl FactionStateChange {
                         FFA_PENDING_END_CHILD => {
                             writer.u64(self.ffa_pending_end_ns.unwrap_or_default())
                         }
+                        FFA_CURSING_CHILD => writer.u8(flag(self.ffa_anti_grouping_cursing)),
                         // The mask holds no other child.
                         _ => writer,
                     };
@@ -209,6 +218,27 @@ impl PublicFaction {
             has_sanctuary: self.sanctuary.then_some(true),
             ffa_flag: Some(self.ffa_flag),
             ..FactionStateChange::default()
+        }
+    }
+
+    /// The state of the player's own card: [`Self::card`] with the owner's slot, the pending PvP
+    /// flag `pvp_flag_pending`, the change's time and count of a player that changed faction
+    /// (`switched`) and `ffaAntiGroupingIsCursing` 0, as retail logs a player in (module doc).
+    /// The client sets the local player's faction to none when it takes the player as its own
+    /// (`FUN_1430b98e0`) and then reads it from the card, which retail sends again until the
+    /// client spawns; a faction sent as a change before that is lost (live 2026-11-15: the war
+    /// board said "You must have a faction to sign up for a war").
+    pub fn own_card(
+        &self,
+        pvp_flag_pending: bool,
+        switched: Option<(u64, u16)>,
+    ) -> FactionStateChange {
+        FactionStateChange {
+            pvp_flag_pending: Some(pvp_flag_pending),
+            last_faction_change_ns: switched.map(|(changed_ns, _)| changed_ns),
+            faction_change_count: switched.map(|(_, changes)| changes),
+            ffa_anti_grouping_cursing: Some(false),
+            ..self.card()
         }
     }
 
@@ -413,5 +443,39 @@ mod tests {
             [0x04, 0x0a, 0x01, 0x01]
         );
         assert_eq!(flagged.change_from(&flagged), None);
+    }
+
+    #[test]
+    fn the_own_card_is_the_retail_login_body() {
+        const CHANGED_NS: u64 = 0x18b9_db08_e3da_36a0;
+        const CHANGES: u16 = 7;
+        let marauder = PublicFaction {
+            faction: 2,
+            ..PublicFaction::default()
+        };
+        // general-other-01: a faction, never changed.
+        assert_eq!(
+            marauder.own_card(false, None).body().expect("card"),
+            [0x06, 0x41, 0x00, 0x00, 0x0b, 0x02, 0x00, 0x00]
+        );
+        // RS_offensive_war: the change's time and count go with it.
+        let mut changed = vec![0x06, 0x59, 0x00];
+        changed.extend_from_slice(&CHANGED_NS.to_be_bytes());
+        changed.extend_from_slice(&[0x00, 0x07, 0x00, 0x0b, 0x02, 0x00, 0x00]);
+        assert_eq!(
+            marauder
+                .own_card(false, Some((CHANGED_NS, CHANGES)))
+                .body()
+                .expect("card"),
+            changed
+        );
+        // Both retail new characters: no faction.
+        assert_eq!(
+            PublicFaction::default()
+                .own_card(false, None)
+                .body()
+                .expect("card"),
+            [0x06, 0x41, 0x00, 0x00, 0x0a, 0x00, 0x00]
+        );
     }
 }
