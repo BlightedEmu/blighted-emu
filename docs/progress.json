@@ -3113,12 +3113,12 @@
               "proof": "bots"
             },
             {
-              "check": "The army groups screen's standby list shows the players of the viewer's side, 12 a page, as retail (the client asks for a page, not a side). Live 2026-11-15 a defender's list was empty: the server read the page number 1 as the attacker side (tests and a bot; not seen in the game yet).",
-              "proof": "tests"
+              "check": "The army groups screen's standby list shows the players of the viewer's side, 12 a page, as retail: the client asks for a page, not a side (live 2026-11-15: a defender's list held the defender; before, the server read page 1 as the attacker side and the list was empty).",
+              "proof": "live"
             },
             {
-              "check": "Fill Roster puts the standby players into the free roster places (Inferred order: sign-up order, group by group; no retail capture of the call). Live 2026-11-15 the button did nothing: the server ignored the call (bot: done answer; not seen in the game yet).",
-              "proof": "bots"
+              "check": "Fill Roster puts the standby players into the free roster places (live 2026-11-15: the war leader's Fill Roster put the leader into group 1; Inferred order: sign-up order, group by group, as no retail capture holds the call).",
+              "proof": "live"
             },
             {
               "check": "War times show the server's time zone as retail (US East, EST) instead of the raw label `@ui_server_utc_0`: the client takes the zone and the siege window hours from the channel cluster id, which is now `iad` (live 2026-11-15: the war board shows the war time in EST).",
