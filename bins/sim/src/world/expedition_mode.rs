@@ -110,8 +110,9 @@
 //!   client's timers list is the same without them and the sim sends none.
 //!
 //! - A task of [`ExpeditionScript::event_tasks`] ends at its event: an encounter of the level
-//!   script succeeds or starts (the managers' statuses after the script's step,
-//!   [`SimWorld::expedition_encounter_events`]) or a player's gather of an object of its slice
+//!   script succeeds or starts, or one of its stages succeeds (the managers' and stages'
+//!   statuses after the script's step, [`SimWorld::expedition_encounter_events`]) or a player's
+//!   gather of an object of its slice
 //!   ends ([`SimWorld::expedition_object_used`]); the tasks before it end with it, and a tie at
 //!   the next count with the same event ends that task too (Savage Divide's `hub2return` start
 //!   ends tasks 19 and 20 together, as retail did within 0.04 s).
@@ -380,6 +381,8 @@ pub(crate) struct ExpeditionMode {
     task_areas: Vec<(AreaTask, Detector)>,
     /// The manager status of each encounter of the level script at the last script step.
     managers: Vec<u32>,
+    /// The status of each stage of each encounter of the level script at the last script step.
+    stages: Vec<Vec<u32>>,
     /// The version of its lists, its objectives' too.
     version: u64,
     /// The timers of its first state.
@@ -561,6 +564,15 @@ fn reach_m(from: Position, to: Position) -> f32 {
     (east * east + north * north + up * up).sqrt()
 }
 
+/// A change of the level script's encounters at a script step that may end an event task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RunEvent {
+    /// The encounter of this slice stem succeeded (`true`) or started (`false`).
+    Encounter(String, bool),
+    /// The stage of this index of the encounter of this slice stem succeeded.
+    StageSucceeded(String, usize),
+}
+
 /// The file name of slice path `path` without its folder and extension: the name an event
 /// task gives ([`TaskEvent`]).
 fn slice_stem(path: &str) -> &str {
@@ -663,6 +675,7 @@ impl SimWorld {
                 start_area,
                 task_areas,
                 managers: Vec::new(),
+                stages: Vec::new(),
                 version: FIRST_LIST_VERSION,
                 timers,
                 time_limit_ends_ms: Some(time_limit_ends_ms),
@@ -1151,35 +1164,54 @@ impl SimWorld {
         });
     }
 
-    /// The encounters of the instance's script `run` after its step: each one that succeeded
-    /// or started since the last step ends its event tasks (module text).
+    /// The encounters of the instance's script `run` after its step: each stage that succeeded
+    /// and each encounter that succeeded or started since the last step ends its event tasks
+    /// (module text).
     pub(super) fn expedition_encounter_events(&mut self, run: &DungeonRun) {
         let Some(expedition) = self.expedition_mut() else {
             return;
         };
         let encounters = &run.script().encounters;
         expedition.managers.resize(encounters.len(), STATUS_UNINITIALIZED);
+        expedition.stages.resize_with(encounters.len(), Vec::new);
         let mut events = Vec::new();
         for (index, encounter) in encounters.iter().enumerate() {
-            let Some((manager, _)) = run.client_status(index) else {
+            let Some((manager, stages)) = run.client_status(index) else {
                 continue;
             };
+            let stem = slice_stem(&encounter.slice);
+            let shown = &mut expedition.stages[index];
+            shown.resize(stages.len(), STATUS_UNINITIALIZED);
+            for (stage, (status, before)) in stages.into_iter().zip(shown.iter_mut()).enumerate() {
+                if status != *before {
+                    *before = status;
+                    if status == STATUS_SUCCEEDED {
+                        events.push(RunEvent::StageSucceeded(stem.to_owned(), stage));
+                    }
+                }
+            }
             if manager == expedition.managers[index] {
                 continue;
             }
             expedition.managers[index] = manager;
-            let stem = slice_stem(&encounter.slice).to_owned();
             match manager {
-                STATUS_SUCCEEDED => events.push((stem, true)),
-                STATUS_IN_PROGRESS => events.push((stem, false)),
+                STATUS_SUCCEEDED => events.push(RunEvent::Encounter(stem.to_owned(), true)),
+                STATUS_IN_PROGRESS => events.push(RunEvent::Encounter(stem.to_owned(), false)),
                 _ => {}
             }
         }
-        for (stem, succeeded) in events {
-            self.end_event_tasks(|event| match event {
-                TaskEvent::EncounterSucceeded(slice) => succeeded && slice == stem,
-                TaskEvent::EncounterStarted(slice) => !succeeded && slice == stem,
-                TaskEvent::ObjectUsed(_) => false,
+        for seen in events {
+            self.end_event_tasks(|event| match (&seen, event) {
+                (RunEvent::Encounter(stem, succeeded), TaskEvent::EncounterSucceeded(slice)) => {
+                    *succeeded && slice == stem
+                }
+                (RunEvent::Encounter(stem, succeeded), TaskEvent::EncounterStarted(slice)) => {
+                    !*succeeded && slice == stem
+                }
+                (RunEvent::StageSucceeded(stem, stage), TaskEvent::StageSucceeded(slice, at)) => {
+                    slice == stem && at == *stage
+                }
+                _ => false,
             });
         }
     }
@@ -2952,6 +2984,87 @@ pub(super) mod tests {
         run.tick(&mut NoHost, &crate::world::dungeon_script::ScriptView::default(), &[], now);
         world.expedition_encounter_events(&run);
         assert_eq!(tasks_of(&world).0, 17);
+    }
+
+    /// Retail Amrine (runs 2, 29 and 38): the boss encounter's stage 3 (`Phase 0 Wait`)
+    /// succeeds while the encounter still runs, and that ends task 12; the boss stage that
+    /// waits on goes on.
+    #[test]
+    fn a_stage_success_ends_its_task() {
+        use nw_world::dungeon_scripts::{
+            Encounter, LevelScript, ObjectiveSpec, Stage, StageObjective,
+        };
+        const AMRINE: &str = "DungeonAmrine";
+        /// An encounter event no mob of the test sends.
+        const NO_EVENT: &str = "an_event_no_tree_sends";
+        let mut mode = crate::world::instances::tests::mode(
+            AMRINE,
+            "NW_Dungeon_Windsward_00",
+            InstanceKind::Expedition,
+        );
+        mode.crc = lowercase_crc32(AMRINE);
+        let content = PlayerContent {
+            instances: InstanceCatalog::build([mode.clone()]),
+            ..content()
+        };
+        let mut world = opened_with(mode, content);
+        arrive_in(
+            &mut world,
+            PLAYER,
+            InstanceStay {
+                game_mode: AMRINE.to_owned(),
+                ..stay()
+            },
+        );
+        world.advance_expedition_tasks(11);
+        let boss_fight = Stage {
+            objectives: vec![StageObjective {
+                time_limit_s: 0,
+                succeed_on_timeout: false,
+                failure: false,
+                kind: ObjectiveSpec::EncounterEvent {
+                    event: NO_EVENT.to_owned(),
+                },
+            }],
+            ..Stage::default()
+        };
+        let script = LevelScript {
+            encounters: vec![Encounter {
+                name: "EncounterBoss".to_owned(),
+                slice:
+                    "slices/dungeon_eventmanager/encounters/dg_enc_windsward_00_boss.dynamicslice"
+                        .to_owned(),
+                auto_activate: true,
+                top_stages: vec![3, 0],
+                stages: vec![
+                    boss_fight,
+                    Stage::default(),
+                    Stage::default(),
+                    Stage::default(),
+                ],
+                ..Encounter::default()
+            }],
+            ..LevelScript::default()
+        };
+        let mut run = DungeonRun::new(Uuid::from_u128(INSTANCE), script);
+        world.expedition_encounter_events(&run);
+        assert_eq!(tasks_of(&world).0, 11, "not started");
+        let now = world.server_ms;
+        run.tick(
+            &mut NoHost,
+            &crate::world::dungeon_script::ScriptView::default(),
+            &[],
+            now,
+        );
+        assert_eq!(
+            run.client_status(0).map(|(manager, _)| manager),
+            Some(STATUS_IN_PROGRESS),
+            "the boss fight goes on"
+        );
+        world.expedition_encounter_events(&run);
+        assert_eq!(tasks_of(&world).0, 12);
+        world.expedition_encounter_events(&run);
+        assert_eq!(tasks_of(&world).0, 12, "a stage ends its task once");
     }
 
     /// Retail Amrine (4 runs): its script keeps no score, so no value changes; its end leaves

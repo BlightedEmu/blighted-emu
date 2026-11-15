@@ -100,7 +100,7 @@ pub(super) const LOOTED_KEEP_MS: u64 = 3_000;
 /// The byte after `m_interactTag`: retail 0 for every bag whose items have no perks and no
 /// `ForceRarity` (230 of 234 one-item bags); for gear it follows the perk count (1-2 perks 1,
 /// 3 perks 2, 4 perks 3, 5 perks 4: the item rarity, [`nw_content::perks::rarity`]). A bag of
-/// rolled items carries the highest rarity of them (best guess for bags of several items).
+/// rolled items carries the highest rarity of them (Inferred for bags of several items).
 const NO_PERK_RARITY: u8 = 0;
 /// `m_interactTag` of every retail creature bag.
 const NO_INTERACT_TAG: u32 = 0;

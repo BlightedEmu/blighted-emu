@@ -39,7 +39,7 @@ use uuid::Uuid;
 
 use super::catacombs::{CatacombRun, open_run};
 use super::expedition_mode::ExpeditionMode;
-use super::mutations::{InstanceMutation, difficulty_of_request};
+use super::mutations::{FIRST_RANK, InstanceMutation, difficulty_of_request};
 use super::war_fight::WarFight;
 use super::{
     Body, HandoffStart, PHASING_BEFORE_HANDOFF_MS, Player, SimWorld, Vitals, gather_answer,
@@ -58,8 +58,6 @@ pub mod kind {
     pub use nw_messages::client_input::EXIT_DUNGEON_KIND as EXIT_DUNGEON;
 }
 
-/// The rank of a mutated slot a player has not raised (best guess: difficulty 1 is open).
-const FIRST_MUTATION_RANK: u8 = 1;
 /// The 3743 status of an accepted dungeon interaction (as for the travel interactions).
 const ACCEPTED: u8 = 1;
 /// The shown character level less the zero-based level of the experience table.
@@ -162,11 +160,11 @@ impl ArenaPlayer {
     }
 
     /// Raises its rank of slot `slot` to `rank` (a smaller rank stays); the slots before it get
-    /// rank [`FIRST_MUTATION_RANK`].
+    /// rank [`FIRST_RANK`].
     pub(super) fn raise_rank(&mut self, slot: usize, rank: u8) {
         let ranks = &mut self.record.ranks;
         if ranks.len() <= slot {
-            ranks.resize(slot + 1, FIRST_MUTATION_RANK);
+            ranks.resize(slot + 1, FIRST_RANK);
         }
         if let Some(current) = ranks.get_mut(slot) {
             *current = (*current).max(rank);

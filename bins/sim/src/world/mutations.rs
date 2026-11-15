@@ -5,7 +5,7 @@
 //! - Every player's client gets the week's mutations once it spawned, and again when the week
 //!   turns: `GameModeMutationSchedulerReplicatedState` (2201) as component 6 of entity slot 2
 //!   (Observed in 549 retail ledgers; [`schedule_group`]).
-//! - A 5037's byte is the difficulty the player asks for (best guess: 0 in every capture, all of
+//! - A 5037's byte is the difficulty the player asks for (Inferred: 0 in every capture, all of
 //!   which were normal runs; [`difficulty_of_request`]). An activation of a mutated difficulty
 //!   is refused with `ScheduledNotAvailable` when the game mode is not mutated this week,
 //!   `MutationLevelReq` below the difficulty's `MatchmakingMinLevel`, and
@@ -42,9 +42,9 @@ use nw_content::rewards::Reward;
 const NORMAL_RUN: u8 = 0;
 /// Nanoseconds in a second.
 const NS_PER_SECOND: u64 = 1_000_000_000;
-/// The rank of a mutated slot a player has without one (best guess: difficulty 1 is open to
-/// everyone of the level).
-const FIRST_RANK: u8 = 1;
+/// The rank of a mutated slot a player has without one, or has not raised (Inferred: difficulty
+/// 1 is open to everyone of the level; no capture shows a player's first rank).
+pub(super) const FIRST_RANK: u8 = 1;
 /// A completion event's item, once.
 const ONE: u32 = 1;
 

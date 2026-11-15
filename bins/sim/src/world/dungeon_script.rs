@@ -6,7 +6,7 @@
 //!
 //! The level script's own layout is data (encounter slices, `EncounterManagerComponent`,
 //! `EncounterComponent`); how the server runs it is not in the client. The rules here follow
-//! the class names, the fields and their values (best guesses, dungeon2 REPORT):
+//! the class names, the fields and their values (Inferred, dungeon2 REPORT):
 //!
 //! - an encounter with `m_autoActivate` starts with the instance (after its delay); another
 //!   starts when a living player comes within its volume's radius;
@@ -116,9 +116,9 @@ pub(super) const EVENT_TRIGGER: u32 = 0;
 pub(super) const EVENT_ACTIVATE: u32 = 2;
 pub(super) const EVENT_DEACTIVATE: u32 = 3;
 /// The volume radius of an encounter whose slice has none: the most common sphere radius of the
-/// encounter slices' detection volumes (best guess).
+/// encounter slices' detection volumes (Inferred).
 const DEFAULT_VOLUME_RADIUS_M: f32 = 30.0;
-/// How long a dead encounter mob's body stays before it goes (best guess: the retail bodies of
+/// How long a dead encounter mob's body stays before it goes (Inferred: the retail bodies of
 /// the tutorial stayed 5.1 to 7.1 s after their death, encounter note).
 const CORPSE_MS: u64 = 7_000;
 /// The blackboard key of a boss's phase (behavior-tree study, engine key table).
@@ -765,7 +765,7 @@ impl DungeonRun {
         outcomes
     }
 
-    /// The loot containers whose nearest encounter is encounter `index` (best guess: an
+    /// The loot containers whose nearest encounter is encounter `index` (Inferred: an
     /// encounter's end opens the containers beside it; the level script's own key and gate
     /// logic is server script that the client does not have).
     pub(super) fn chests_of(&self, index: usize) -> impl Iterator<Item = (&str, [f32; 3])> + '_ {
@@ -1995,7 +1995,7 @@ fn is_under(encounter: &Encounter, stage: usize, ancestor: usize) -> bool {
         })
 }
 
-/// The mobs an objective of stage `stage` tracks: those of `target` (best guess: when no mob
+/// The mobs an objective of stage `stage` tracks: those of `target` (Inferred: when no mob
 /// of the encounter is of it, the target is a creature the stage's spawner slices pick by
 /// their own alias, so the stage's own mobs), or the stage's own mobs without a target.
 fn tracked<'a>(
@@ -2113,7 +2113,7 @@ fn objective_met(
                 Some(target) => tracked(encounter, run, stage, Some(*target)),
                 None => run.mobs.iter().collect(),
             };
-            // Best guess: the boss's death also ends its phases.
+            // Inferred: the boss's death also ends its phases.
             candidates.into_iter().any(|mob| {
                 mob.died_ms.is_some()
                     || host
@@ -2139,7 +2139,7 @@ fn objective_met(
                 (*on_activated && sent(EVENT_ACTIVATE))
                     || (*on_deactivated && sent(EVENT_DEACTIVATE))
             } else {
-                // Best guess: the entity is a timeline that the encounter's trigger area starts
+                // Inferred: the entity is a timeline that the encounter's trigger area starts
                 // when a player comes in.
                 sent(EVENT_TRIGGER) || run.engaged
             }

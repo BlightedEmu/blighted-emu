@@ -47,6 +47,17 @@
 //! `NONE` rows of `tieclass.txt`: talks, cutscenes, areas of one run): they end with the next
 //! task that ends (Inferred, as the area tasks).
 //!
+//! **Observed** (batch F2, scratch `local-data/scratch-work/batch-f/F2/stagetie2.py` over the
+//! same 38 ledgers: those `NONE` steps beside the encounter stage status changes, 2133, of the
+//! 1.5 s before them): three more steps meet one stage's success in every run that shows them,
+//! 0.00 to 0.02 s before the step, each with the next stage's start: Amrine's boss `Phase 0
+//! Wait` (stage 3 of `dg_enc_windsward_00_boss`, replica component 9; runs 2, 29 and 38, 11 to
+//! 12), the Lazarus naga's `Intro 0 - Wait` (stage 5 of `dg_enc_reekwater_00_naga`, component 9;
+//! runs 8, 33 and 42, 9 to 10) and Tempest's Heart's gate monolith `Wave_00 - Wait` (stage 5 of
+//! `dg_enc_shattermtn_00_gatemadnessmonolith`, component 10; runs 12 and 37, 0 to 1). A stage's
+//! index is the rank of its component among the root row's stage components (the encounter
+//! roots file, [`super::encounter_roots`]).
+//!
 //! The objective id is the CRC of `SlayerScript` and a runtime entity id
 //! (`FUN_143248d10`): no capture explains its number, so the observed one is kept.
 //!
@@ -78,6 +89,9 @@ pub(super) enum TaskEvent {
     EncounterStarted(&'static str),
     /// A player used an object of this slice (its gather ended).
     ObjectUsed(&'static str),
+    /// The stage of this index (the encounter's `EncounterComponent`s in stream order, as
+    /// [`super::encounter_roots`] numbers them) of the encounter of this slice succeeded.
+    StageSucceeded(&'static str, usize),
 }
 
 /// A task that ends at an event of the run.
@@ -110,6 +124,14 @@ const fn used(done: u8, slice: &'static str) -> EventTask {
     EventTask {
         done,
         event: TaskEvent::ObjectUsed(slice),
+    }
+}
+
+/// The task waiting at `done` ends when stage `stage` of encounter `slice` succeeds.
+const fn stage_succeeded(done: u8, slice: &'static str, stage: usize) -> EventTask {
+    EventTask {
+        done,
+        event: TaskEvent::StageSucceeded(slice, stage),
     }
 }
 
@@ -195,6 +217,7 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
             used(7, "interactobject_pressureplate_ancient_locked"),
             started(9, "dg_enc_windsward_00_chamber"),
             succeeded(10, "dg_enc_windsward_00_chamber"),
+            stage_succeeded(11, "dg_enc_windsward_00_boss", 3),
             succeeded(12, "dg_enc_windsward_00_boss"),
         ],
         // Observed: no value change in 4 runs (the script keeps no score).
@@ -561,6 +584,7 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
             used(4, "interactobject_switch_azothseal"),
             succeeded(5, "dg_enc_reekwater_00_well_door"),
             succeeded(7, "dg_enc_reekwater_00_tributarium_02"),
+            stage_succeeded(9, "dg_enc_reekwater_00_naga", 5),
             succeeded(10, "dg_enc_reekwater_00_naga"),
             used(11, "dungeon_reekwater_pressureplate_large"),
             started(12, "dg_enc_reekwater_00_bathhouse_03"),
@@ -763,6 +787,7 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
             },
         ],
         event_tasks: &[
+            stage_succeeded(0, "dg_enc_shattermtn_00_gatemadnessmonolith", 5),
             succeeded(3, "dg_enc_shattermtn_00_towerambush"),
             succeeded(4, "dg_enc_shattermtn_00_corruptedspriggan"),
             succeeded(7, "dg_enc_shattermtn_00_voidtunnel"),
@@ -1012,9 +1037,9 @@ mod tests {
         );
     }
 
-    /// Every event tie waits before the run's end, the ties of a script in rising order; 115
-    /// ties of 113 steps in the twelve expeditions (Amrine's vestibule starts at 5 and succeeds
-    /// at 6, retail runs 2, 29 and 38).
+    /// Every event tie waits before the run's end, the ties of a script in rising order; 118
+    /// ties in the twelve expeditions: batch E2's 115 of 113 steps and F2's three stage ties
+    /// (Amrine's vestibule starts at 5 and succeeds at 6, retail runs 2, 29 and 38).
     #[test]
     fn the_event_tasks_end_before_the_run_does() {
         for script in &EXPEDITION_SCRIPTS {
@@ -1033,7 +1058,7 @@ mod tests {
             .iter()
             .map(|script| script.event_tasks.len())
             .sum();
-        assert_eq!(ties, 115);
+        assert_eq!(ties, 118);
         let amrine = expedition_script("DungeonAmrine").expect("Amrine");
         assert_eq!(
             amrine.event_tasks[1..3],
@@ -1042,6 +1067,43 @@ mod tests {
                 succeeded(6, "dg_enc_windsward_00_vestibule"),
             ]
         );
+    }
+
+    /// Retail stage ties (module text): Amrine's boss `Phase 0 Wait` (stage 3, runs 2, 29 and
+    /// 38), the Lazarus naga's `Intro 0 - Wait` (stage 5, runs 8, 33 and 42) and Tempest's
+    /// Heart's gate monolith `Wave_00 - Wait` (stage 5, runs 12 and 37).
+    #[test]
+    fn the_stage_ties_are_the_retail_ones() {
+        let stage_ties = |mode: &str| -> Vec<EventTask> {
+            expedition_script(mode)
+                .expect("script")
+                .event_tasks
+                .iter()
+                .copied()
+                .filter(|task| matches!(task.event, TaskEvent::StageSucceeded(..)))
+                .collect()
+        };
+        assert_eq!(
+            stage_ties("DungeonAmrine"),
+            [stage_succeeded(11, "dg_enc_windsward_00_boss", 3)]
+        );
+        assert_eq!(
+            stage_ties("DungeonReekwater00"),
+            [stage_succeeded(9, "dg_enc_reekwater_00_naga", 5)]
+        );
+        assert_eq!(
+            stage_ties("DungeonShatterMtn00"),
+            [stage_succeeded(
+                0,
+                "dg_enc_shattermtn_00_gatemadnessmonolith",
+                5
+            )]
+        );
+        let all: usize = EXPEDITION_SCRIPTS
+            .iter()
+            .map(|script| stage_ties(script.game_mode).len())
+            .sum();
+        assert_eq!(all, 3);
     }
 
     /// Retail `gatherablesCollected` rises: 400 a node in the Depths (run 4: 90.635 and
