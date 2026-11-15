@@ -106,6 +106,39 @@ pub const OUTPUT_QUEUE: usize = 256;
 const SIM_QUEUE: usize = 256;
 /// Heartbeats that may wait for NATS.
 const HEARTBEAT_QUEUE: usize = 16;
+
+/// When the next heartbeat is due. The loop asks it before each wait, not as one more branch of
+/// its `select!`: under load the tick ([`POLL`]) and the input branches are ready every round, and
+/// the random first branch of `select!` reached the beat about once in 30 rounds, so a beat
+/// left up to 2.7 s after the one before (bus listener, 2026-11-15, 110 bots on one sim) and the
+/// director took the sim for silent after 3 s and moved its cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BeatClock {
+    due: Instant,
+    interval: Duration,
+}
+
+impl BeatClock {
+    /// A clock whose first beat is due at `now`.
+    const fn new(now: Instant, interval: Duration) -> Self {
+        Self { due: now, interval }
+    }
+
+    /// Whether a beat is due at `now`; the next one is then due one interval after `now`, so a
+    /// late loop sends one beat, not the missed ones.
+    fn take(&mut self, now: Instant) -> bool {
+        if now < self.due {
+            return false;
+        }
+        self.due = now + self.interval;
+        true
+    }
+
+    /// When the next beat is due.
+    const fn due(&self) -> Instant {
+        self.due
+    }
+}
 /// Longest wait at shutdown for the last saves.
 pub const SHUTDOWN_SAVE_WAIT: Duration = Duration::from_secs(10);
 /// One tick at 30 Hz, rounded down to whole milliseconds: the M5 limit of a handoff and a tick.
@@ -510,13 +543,16 @@ pub async fn serve(
     let mut clock = TickClock::new(0);
     let mut poll = tokio::time::interval(POLL);
     let mut save_timer = tokio::time::interval(state.settings.save_interval);
-    let mut beat_timer = tokio::time::interval(state.settings.heartbeat_interval);
+    let mut beats = BeatClock::new(Instant::now(), state.settings.heartbeat_interval);
     let mut snapshot_timer = state.settings.snapshot_interval.map(tokio::time::interval);
     let mut delivery_timer = tokio::time::interval(Duration::from_millis(
         state.settings.content.trading_post.delivery_poll_ms,
     ));
     tokio::pin!(shutdown);
     loop {
+        if beats.take(Instant::now()) {
+            state.heartbeat();
+        }
         tokio::select! {
             () = &mut shutdown => break,
             Some(admit) = inbox.admits.next() => match admit {
@@ -610,7 +646,7 @@ pub async fn serve(
             },
             _ = poll.tick() => state.tick(&mut clock),
             _ = save_timer.tick() => state.save_all(),
-            _ = beat_timer.tick() => state.heartbeat(),
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(beats.due())) => {}
             () = next_snapshot(snapshot_timer.as_mut()) => state.snapshot(),
         }
     }
@@ -2697,6 +2733,35 @@ fn ghost_ids(ghosts: &[Ghost]) -> Vec<(u64, [u8; nw_messages::RAW_ID_LEN])> {
         .iter()
         .map(|ghost| (ghost.entity, nw_messages::raw_id_of_entity(ghost.entity)))
         .collect()
+}
+
+#[cfg(test)]
+mod beat_clock_tests {
+    use super::*;
+
+    const INTERVAL: Duration = Duration::from_secs(1);
+    const HALF: Duration = Duration::from_millis(500);
+    const LATE: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn the_first_beat_is_due_at_the_start_and_the_next_one_interval_later() {
+        let start = Instant::now();
+        let mut beats = BeatClock::new(start, INTERVAL);
+        assert!(beats.take(start));
+        assert!(!beats.take(start + HALF));
+        assert_eq!(beats.due(), start + INTERVAL);
+        assert!(beats.take(start + INTERVAL));
+    }
+
+    #[test]
+    fn a_late_loop_sends_one_beat_not_the_missed_ones() {
+        let start = Instant::now();
+        let mut beats = BeatClock::new(start, INTERVAL);
+        assert!(beats.take(start));
+        assert!(beats.take(start + LATE));
+        assert!(!beats.take(start + LATE));
+        assert_eq!(beats.due(), start + LATE + INTERVAL);
+    }
 }
 
 #[cfg(test)]
