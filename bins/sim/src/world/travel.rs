@@ -145,8 +145,11 @@ const INN_RESPAWN_LANDMARK: u8 = 20;
 pub(super) const BIND_CAMP_EVENT: &str = "BindCamp";
 /// The 441 result of a placed structure (0 in all 5 retail answers).
 const PLACEMENT_PLACED: u8 = 0;
-/// The 441 result of a refused structure (best guess: the first value after success; the
-/// client's result enum is Unknown).
+/// The 441 result of a refused structure. Observed (client `FUN_1447d2b20`,
+/// `BuilderComponentClientFacet::SyncPlacementRequestResults`): the client takes 0 as placed and
+/// any other value as refused, which it only logs ("Unable to build for reason %i, client
+/// thought you could build but server refused"); it shows the player no reason, so the value
+/// past 0 is ours (the server's reason list is not in the client).
 const PLACEMENT_REFUSED: u8 = 1;
 /// The second number of 441 (0 in all 5 retail answers).
 const PLACEMENT_VALUE: u32 = 0;
@@ -171,8 +174,8 @@ const NO_HOUSE_RESPONSE: u8 = 0;
 /// The house flags retail sets on 756 of 804 owned houses.
 const HOUSE_HANDSHAKE: bool = true;
 
-/// Why a camp placement is refused (the 441 result of each is Unknown: all answer
-/// [`PLACEMENT_REFUSED`]).
+/// Why a camp placement is refused (each answers [`PLACEMENT_REFUSED`]: the client shows no
+/// reason for any value).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CampRefusal {
     /// The player is dead or not here.

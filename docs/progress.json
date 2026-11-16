@@ -2129,8 +2129,8 @@
               "proof": "tests"
             },
             {
-              "check": "A refused camp shows no reason in the game: the client's codes for the 441 answer are Unknown (the server sends 1).",
-              "proof": "none"
+              "check": "A refused camp shows no reason in the game, as on retail: the client takes any 441 code but 0 as refused and only writes it to its log (client function `SyncPlacementRequestResults`); its own checks before the request show its camp messages.",
+              "proof": "code"
             },
             {
               "check": "Camp build as retail: the placed camp comes unbuilt (state 3, then 4), the owner's build interaction is accepted after its hold, one unit of each cost leaves the bag per 767 ms in the retail list forms, the builder state and interactor count follow the build, a cancel keeps what is in, and the built camp (state 5) fires BindCamp; the completion call (5361) goes once the camp's group is out.",
