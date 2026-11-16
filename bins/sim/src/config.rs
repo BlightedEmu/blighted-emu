@@ -193,9 +193,6 @@ pub struct SimConfig {
     /// The server's daily and weekly resets (loot limits, recipe cooldowns, instance refreshes,
     /// gather locks).
     pub resets: ResetClock,
-    /// The content folder: the files of the pinned build are in its build folder
-    /// (`nw_content::layout`).
-    pub content_dir: PathBuf,
     /// The open map level; the same as the director's.
     pub level: String,
     /// Most players in this sim.
@@ -691,6 +688,28 @@ pub(crate) mod tests {
 
     /// The fixed dice seed of the tests.
     const TEST_SEED: u64 = 1;
+
+    /// The content folder comes from `NW_CONTENT_DIR` now; the old key is refused.
+    #[test]
+    fn an_old_content_dir_key_is_refused() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(COMMITTED_CONFIG);
+        let committed = std::fs::read_to_string(path).expect("committed config");
+        let dir = std::env::temp_dir().join(format!("sim-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let old = dir.join("sim.toml");
+        std::fs::write(
+            &old,
+            format!("content_dir = \"local-data/content\"\n{committed}"),
+        )
+        .expect("write");
+        let loaded = load_sim_config(&old);
+        let same = dir.join("same.toml");
+        std::fs::write(&same, &committed).expect("write");
+        let same_loaded = load_sim_config(&same);
+        std::fs::remove_dir_all(&dir).expect("clean");
+        assert!(loaded.is_err());
+        assert!(same_loaded.is_ok(), "the copy without the key loads");
+    }
 
     /// The committed config keeps every queued mode open (the catacombs run is complete from
     /// its queue to its end and rewards); an entrance kind is never a closed queue.

@@ -16,9 +16,10 @@ the login (Discord when `[access.discord]` is set), and `[access.relay]` serves 
 relay on another machine.
 
 The pages read the files that `just content` (or `just bundle`, `just world`, `just design` and
-`just collision`) writes into the build folder `local-data/content/<build>/`, and the map tiles
-that `just map-tiles` writes into `local-data/content/map/`. Live, Live 3D and GM need the game
-servers running (`[live]` in the configuration).
+`just collision`) writes into the build folder `<content folder>/<build>/`, and the map tiles
+that `just map-tiles` writes into `<content folder>/map/`. The content folder is
+`NW_CONTENT_DIR`, default `local-data/content` (README, "Where the content folder lives"). Live,
+Live 3D and GM need the game servers running (`[live]` in the configuration).
 
 ## The pages
 

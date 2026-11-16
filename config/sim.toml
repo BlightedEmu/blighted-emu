@@ -16,8 +16,8 @@ client_build_config = "config/client-build.toml"
 # classes, datasheet overrides, ...) from the same remote config sets edge-http gives the client
 # ([remote_config] there), so the server and the client use one source.
 edge_config = "config/edge.toml"
-# The content folder: the files of the pinned build are in <content_dir>/<build>/ (`just content`).
-content_dir = "local-data/content"
+# The content folder (the files of the pinned build are in <content folder>/<build>/, `just
+# content`) comes from NW_CONTENT_DIR, default local-data/content (README "Content data").
 # The open map level; the same as in config/world-director.toml.
 level = "newworld_vitaeeterna"
 # What this sim runs: "openmap" (cells of the open map, or the tutorial) or "instance" (one

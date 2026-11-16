@@ -30,8 +30,6 @@ pub struct AdminConfig {
     pub log_filter: String,
     /// File with the pinned client build.
     pub client_build_config: PathBuf,
-    /// Folder of the world files, the content bundle and `map/`.
-    pub content_dir: PathBuf,
     /// Level of the map.
     pub level: String,
     /// Most spawn points one request returns.
@@ -169,7 +167,7 @@ impl AccessConfig {
 #[serde(deny_unknown_fields)]
 pub struct StudioConfig {
     /// The design files (`content/`). The retail files and the merged files are those of the
-    /// content folder (`content_dir`).
+    /// content folder (`NW_CONTENT_DIR`).
     pub design_dir: PathBuf,
     /// The control FIFO of `scripts/live-stack.sh`.
     pub control_fifo: PathBuf,
@@ -383,6 +381,27 @@ mod tests {
 
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// The content folder comes from `NW_CONTENT_DIR` now; the old top-level key is refused.
+    #[test]
+    fn an_old_content_dir_key_is_refused() {
+        let committed = std::fs::read_to_string(repo_root().join("config/blighted-admin.toml"))
+            .expect("committed config");
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("blighted-admin.toml");
+        std::fs::write(
+            &path,
+            format!("content_dir = \"local-data/content\"\n{committed}"),
+        )
+        .expect("write");
+        assert!(load_admin_config(&path).is_err());
+        let same = dir.path().join("same.toml");
+        std::fs::write(&same, &committed).expect("write");
+        assert!(
+            load_admin_config(&same).is_ok(),
+            "the copy without the key loads"
+        );
     }
 
     #[test]

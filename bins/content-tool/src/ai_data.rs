@@ -53,6 +53,8 @@ use crate::stand_in_trees::{StandInError, stand_in_trees};
 
 /// Where the user keeps the retrieved Server.pak (server-pak note).
 pub const DEFAULT_SERVER_PAK: &str = "local-data/server-pak/Server.pak";
+/// The environment variable that names the Server.pak file of `content-tool`.
+pub const SERVER_PAK_ENV: &str = "NW_SERVER_PAK";
 /// The `CAGE-RangedAttack` parameter that names the projectile slice.
 const SLICE_OVERRIDE_PARAM: &str = "SliceOverride";
 

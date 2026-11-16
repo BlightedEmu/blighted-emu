@@ -14,6 +14,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::manifest::Manifest;
 
+/// The environment variable that names the content folder of every program (README "Content
+/// data", "Where the content folder lives").
+pub const CONTENT_DIR_ENV: &str = "NW_CONTENT_DIR";
+/// The content folder when [`CONTENT_DIR_ENV`] is not set, from the folder the program runs in.
+pub const DEFAULT_CONTENT_DIR: &str = "local-data/content";
 /// The folder of the admin map tiles, beside the build folders (`<content_dir>/map/<level>/`).
 pub const MAP_FOLDER: &str = "map";
 /// The folder of the level folders inside a topic folder.
@@ -783,6 +788,20 @@ pub enum LayoutError {
     },
 }
 
+/// The content folder: the value of [`CONTENT_DIR_ENV`] (a relative value starts at the folder
+/// the program runs in, an absolute one works anywhere), else [`DEFAULT_CONTENT_DIR`].
+pub fn content_dir() -> PathBuf {
+    content_dir_of(std::env::var_os(CONTENT_DIR_ENV))
+}
+
+/// The content folder for the value `value` of [`CONTENT_DIR_ENV`]: an unset or empty value
+/// gives [`DEFAULT_CONTENT_DIR`].
+fn content_dir_of(value: Option<std::ffi::OsString>) -> PathBuf {
+    value
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| PathBuf::from(DEFAULT_CONTENT_DIR), PathBuf::from)
+}
+
 /// The paths of the content files of one client build in a content folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentLayout {
@@ -823,7 +842,7 @@ impl ContentLayout {
         Ok(layout)
     }
 
-    /// The content folder (`content_dir` of the configs).
+    /// The content folder (from [`content_dir`] for the programs).
     pub fn content_dir(&self) -> &Path {
         &self.content_dir
     }
@@ -1123,8 +1142,9 @@ fn create_parent(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// The content layout of this repository's `local-data/content` (or of `NW_CONTENT_DIR`) at the
-/// pinned build of `config/client-build.toml`, for the tests that read the live content.
+/// The content layout of this repository at the pinned build of `config/client-build.toml`, for
+/// the tests that read the live content: the content folder of [`content_dir`], a relative one
+/// from the repository folder (a test runs in its crate's folder).
 ///
 /// # Panics
 ///
@@ -1133,18 +1153,12 @@ fn create_parent(path: &Path) -> std::io::Result<()> {
 pub fn repo_layout() -> ContentLayout {
     /// The repository folder, from this crate's folder.
     const REPO_FROM_CRATE: &str = "../..";
-    /// The content folder of the repository.
-    const REPO_CONTENT_DIR: &str = "local-data/content";
     /// The client build file of the repository.
     const REPO_CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
-    /// Overrides the content folder.
-    const CONTENT_DIR_ENV: &str = "NW_CONTENT_DIR";
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join(REPO_FROM_CRATE);
     let build = crate::client_build::load_client_build(&repo.join(REPO_CLIENT_BUILD_CONFIG))
         .expect("client build");
-    let content_dir =
-        std::env::var(CONTENT_DIR_ENV).map_or_else(|_| repo.join(REPO_CONTENT_DIR), Into::into);
-    ContentLayout::open(content_dir, &build).expect("content layout")
+    ContentLayout::open(repo.join(content_dir()), &build).expect("content layout")
 }
 
 #[cfg(test)]
@@ -1158,6 +1172,22 @@ mod tests {
     const README_SECTION: &str = "## Content data";
     /// The README table cells of the content files start with this.
     const README_TABLE_CELL: &str = "| `";
+
+    #[test]
+    fn the_content_folder_is_the_variable_or_the_default() {
+        assert_eq!(content_dir_of(None), Path::new(DEFAULT_CONTENT_DIR));
+        assert_eq!(
+            content_dir_of(Some("".into())),
+            Path::new(DEFAULT_CONTENT_DIR)
+        );
+        let relative = content_dir_of(Some("game/content".into()));
+        assert_eq!(relative, Path::new("game/content"));
+        assert!(relative.is_relative());
+        assert_eq!(
+            content_dir_of(Some("/srv/blighted/content".into())),
+            Path::new("/srv/blighted/content")
+        );
+    }
 
     #[test]
     fn names_and_paths_are_unique() {

@@ -11,8 +11,8 @@ nats_url = "nats://127.0.0.1:4222"
 valkey_url = "redis://127.0.0.1:6379"
 world_database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
 client_build_config = "config/client-build.toml"
-# The content folder: the files of the pinned build are in <content_dir>/<build>/ (`just content`).
-content_dir = "local-data/content"
+# The content folder (the files of the pinned build are in <content folder>/<build>/, `just
+# content`) comes from NW_CONTENT_DIR, default local-data/content (README "Content data").
 # The open map level; every sim of this world runs it.
 level = "newworld_vitaeeterna"
 # Where characters that were never in the world appear, in turn (by entity number): next to a

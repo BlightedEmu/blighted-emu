@@ -66,8 +66,8 @@ max_sync_latency_ms = 100
 # The metrics listener of every sim.
 metrics_urls = ["http://127.0.0.1:9102/metrics"]
 client_build_config = "config/client-build.toml"
-# The content folder: the files of the pinned build are in <content_dir>/<build>/ (`just content`).
-content_dir = "local-data/content"
+# The content folder (the files of the pinned build are in <content folder>/<build>/, `just
+# content`) comes from NW_CONTENT_DIR, default local-data/content (README "Content data").
 level = "newworld_vitaeeterna"
 
 # hunt (M6-B exit test): bots walk to the nearest mob they see, stop in reach and attack it; a

@@ -236,10 +236,9 @@ pub struct RemoteConfigConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShopConfig {
-    /// The content folder whose build folder holds the store table (`services/store.json`); no
-    /// table, or no folder set, gives an empty store.
-    pub content_dir: Option<PathBuf>,
-    /// The file with the pinned client build, which names the build folder of the store table.
+    /// The file with the pinned client build, which names the build folder of the store table
+    /// (`services/store.json` in the content folder of `NW_CONTENT_DIR`); no table gives an
+    /// empty store.
     #[serde(default = "default_client_build_config")]
     pub client_build_config: PathBuf,
     /// Whether the store sells. Off, the catalog is empty and purchases are refused; the mounts an
@@ -280,7 +279,6 @@ const fn default_mount_price() -> u32 {
 impl Default for ShopConfig {
     fn default() -> Self {
         Self {
-            content_dir: None,
             client_build_config: default_client_build_config(),
             enabled: switched_on(),
             free: switched_on(),
@@ -782,6 +780,18 @@ max_connections = 5
     /// The valid two-world configuration as a value.
     pub(crate) fn valid_two_worlds() -> EdgeConfig {
         load(&two_worlds()).expect("valid two-world config")
+    }
+
+    /// The content folder comes from `NW_CONTENT_DIR` now; a config that still names it in
+    /// `[shop]` is refused, so a config left from before shows at start.
+    #[test]
+    fn a_shop_content_dir_is_refused() {
+        let old = VALID.replace(
+            "[cms]",
+            "[shop]\ncontent_dir = \"local-data/content\"\n\n[cms]",
+        );
+        assert!(load(&old).is_err());
+        assert!(load(&VALID.replace("[cms]", "[shop]\nfree = true\n\n[cms]")).is_ok());
     }
 
     fn load(text: &str) -> Result<EdgeConfig, EdgeConfigError> {

@@ -175,8 +175,6 @@ pub struct SwarmConfig {
     pub metrics_urls: Vec<String>,
     /// The pinned client build file.
     pub client_build_config: PathBuf,
-    /// Folder of the world files; the bots walk on the ground of the level.
-    pub content_dir: PathBuf,
     /// The open map level.
     pub level: String,
 }

@@ -15,7 +15,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use nw_common::logging::{LoggingError, init_logging};
 use nw_content::client_build::load_client_build;
-use nw_content::layout::{ContentLayout, STORE};
+use nw_content::layout::{ContentLayout, STORE, content_dir};
 
 use nw_db::{
     DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, account_by_discord, characters_for_account,
@@ -249,14 +249,11 @@ async fn serve_async(config: EdgeConfig, secrets: Secrets) -> Result<(), RunErro
         tokio::spawn(MotdPull::new(http, website, cms.documents()).run());
         tracing::info!(url = %website.motd_url(), "pulling the message of the day");
     }
-    let store = Arc::new(match &config.shop.content_dir {
-        Some(content_dir) => {
-            let build = load_client_build(&config.shop.client_build_config)
-                .map_err(RunError::ClientBuild)?;
-            StoreTable::load(&ContentLayout::open(content_dir, &build)?.file(STORE))?
-        }
-        None => StoreTable::default(),
-    });
+    let build =
+        load_client_build(&config.shop.client_build_config).map_err(RunError::ClientBuild)?;
+    let store = Arc::new(StoreTable::load(
+        &ContentLayout::open(content_dir(), &build)?.file(STORE),
+    )?);
     if store.mounts.is_empty() {
         tracing::warn!("the store table has no mounts: the store sells nothing");
     }

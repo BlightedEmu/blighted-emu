@@ -10,7 +10,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use nw_common::config::ConfigError;
 use nw_content::client_build::load_client_build;
 use nw_content::ids::{gatherable_ids, vitals_ids};
-use nw_content::layout::{ContentLayout, LayoutError};
+use nw_content::layout::{ContentLayout, LayoutError, content_dir};
 use nw_content::progression::Progression;
 use nw_content::{ContainerError, ContentBundle, Tables};
 use nw_formats::objectstream::lowercase_crc32;
@@ -292,7 +292,7 @@ impl WorldLayer {
     pub fn load(config: &AdminConfig) -> Result<Self, WorldLayerError> {
         let build =
             load_client_build(&config.client_build_config).map_err(WorldLayerError::ClientBuild)?;
-        let layout = ContentLayout::open(&config.content_dir, &build)?;
+        let layout = ContentLayout::open(content_dir(), &build)?;
         let world = WorldFile::load(&layout, &config.level)?;
         let (names, progression) = {
             let bundle = ContentBundle::load(&layout)?;

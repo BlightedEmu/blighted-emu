@@ -32,9 +32,9 @@ client_build_config = "config/client-build.toml"
 # The edge-http config of this world: its remote config sets give the season end
 # (javelin.leaderboard-season-end-datetime), the time the season boards reset.
 edge_config = "config/edge.toml"
-# The content folder: the leaderboard table is <build>/services/leaderboards.json in it. Make it
-# with `content-tool leaderboards` (from the content bundle of the same build folder).
-content_dir = "local-data/content"
+# The leaderboard table is <build>/services/leaderboards.json in the content folder, which comes
+# from NW_CONTENT_DIR, default local-data/content (README "Content data"). Make it with
+# `content-tool leaderboards` (from the content bundle of the same build folder).
 
 # The metrics pages (metrics_listen) of each part of the world. A part is up when every page of
 # it answers; the website shows the world Offline when the gateway or the sims are down, and

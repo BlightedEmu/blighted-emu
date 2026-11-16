@@ -131,7 +131,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         global: secret(&config.global_database_password_env)?,
     };
     init_logging(&config.log_filter)?;
-    let level = load_level(&config)?;
+    let level = load_level(&config, &nw_content::layout::content_dir())?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -156,15 +156,16 @@ pub struct LoadedLevel {
 }
 
 /// Reads the world file, the level collision, the content bundle and the side tables of the
-/// level of `config`.
+/// level of `config` from the content folder `content_dir`
+/// ([`nw_content::layout::content_dir`] for a server).
 ///
 /// # Errors
 ///
 /// Returns [`RunError`] when the client build file, the world file, the collision file, the
 /// gameplay values, the bundle or a combat row is missing or not valid.
-pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
+pub fn load_level(config: &SimConfig, content_dir: &Path) -> Result<LoadedLevel, RunError> {
     let build = load_client_build(&config.client_build_config).map_err(RunError::ClientBuild)?;
-    let layout = ContentLayout::open(&config.content_dir, &build)?;
+    let layout = ContentLayout::open(content_dir, &build)?;
     let world_file = Arc::new(WorldFile::load(&layout, &config.level)?);
     let level_collision =
         LevelCollision::load(&layout, &config.level).map_err(RunError::Collision)?;

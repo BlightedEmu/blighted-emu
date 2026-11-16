@@ -5,10 +5,9 @@
 listen = "127.0.0.1:9180"
 log_filter = "info"
 client_build_config = "config/client-build.toml"
-# The content folder: the merged world file and content bundle of the pinned build (`just
-# content`, in <content_dir>/<build>/), and the map tiles from `just map-tiles` (in
-# <content_dir>/map/).
-content_dir = "local-data/content"
+# The content folder comes from NW_CONTENT_DIR, default local-data/content (README "Content
+# data"): the merged world file and content bundle of the pinned build (`just content`, in
+# <content folder>/<build>/), and the map tiles from `just map-tiles` (in <content folder>/map/).
 level = "newworld_vitaeeterna"
 # Most spawn points one map request returns.
 max_spawns_per_request = 5000
@@ -55,9 +54,9 @@ heartbeat_misses = 3
 
 [studio]
 # The team's design files and the control FIFO that `just live` (scripts/live-stack.sh) reads.
-# The design files are merged over the retail files of content_dir (`<build>/retail/`, from
-# `just bundle` and `just world`). Apply writes the merged files into the build folder of
-# content_dir, then restarts the sims and waits for them. Each sim reads the world files at
+# The design files are merged over the retail files of the content folder (`<build>/retail/`,
+# from `just bundle` and `just world`). Apply writes the merged files into the build folder of
+# the content folder, then restarts the sims and waits for them. Each sim reads the world files at
 # start; from a spinning disk with a cold cache that takes several minutes.
 design_dir = "content"
 control_fifo = "local-data/logs/live/control"

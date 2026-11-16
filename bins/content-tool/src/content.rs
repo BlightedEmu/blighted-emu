@@ -21,7 +21,7 @@ use crate::error::ToolError;
 /// `made_by` of the content files this program writes: its commit (set by the build script).
 pub const MADE_BY: &str = env!("CONTENT_TOOL_COMMIT");
 /// `made_by` of the files `content migrate` moves.
-pub const MADE_BY_MIGRATED: &str = "migrated";
+const MADE_BY_MIGRATED: &str = "migrated";
 /// The folder of the retail files in the old flat content folder.
 const LEGACY_RETAIL_FOLDER: &str = "retail";
 /// The start of the registry name of a retail file; the old flat name has the rest only.

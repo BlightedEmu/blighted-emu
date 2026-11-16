@@ -260,7 +260,7 @@ fn prepare(config: ReporterConfig) -> Result<Ready, RunError> {
     let build = nw_content::client_build::load_client_build(&config.client_build_config)
         .map_err(RunError::ClientBuild)?;
     let table = LeaderboardTable::load(&nw_content::layout::ContentLayout::open(
-        &config.content_dir,
+        nw_content::layout::content_dir(),
         &build,
     )?)?;
     let calendar = config

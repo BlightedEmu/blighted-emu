@@ -22,7 +22,7 @@ use clap::{Parser, Subcommand};
 use nw_content::bundle::ContentBundle;
 use nw_content::client_build::load_client_build;
 use nw_content::gathering::{GatherRules, Gatherables};
-use nw_content::layout::ContentLayout;
+use nw_content::layout::{ContentLayout, content_dir};
 use nw_content::town_stations::TownStations;
 use nw_dtls::DtlsClientConfig;
 use nw_reflect::REGISTRATION_STATUS_AUTHORIZED;
@@ -396,7 +396,7 @@ fn gather_nodes(
 ) -> Result<LevelNodes, Box<dyn std::error::Error>> {
     let swarm = &config.swarm;
     let build = load_client_build(&swarm.client_build_config)?;
-    let tables = ContentBundle::load(&ContentLayout::open(&swarm.content_dir, &build)?)?.tables;
+    let tables = ContentBundle::load(&ContentLayout::open(content_dir(), &build)?)?.tables;
     let gatherables = Gatherables::from_tables(&tables);
     let rules = GatherRules::from_tables(&tables);
     let tradeskills = &config.gather.tradeskills;
@@ -460,7 +460,7 @@ fn fleet_parts(
 ) -> Result<(Arc<WorldFile>, NewClient), Box<dyn std::error::Error>> {
     let swarm = &config.swarm;
     let build = load_client_build(&swarm.client_build_config)?;
-    let layout = ContentLayout::open(&swarm.content_dir, &build)?;
+    let layout = ContentLayout::open(content_dir(), &build)?;
     let ground = Arc::new(WorldFile::load(&layout, &swarm.level)?);
     let mtu = config.mtu;
     let trusted = Arc::new(trusted);
@@ -626,7 +626,7 @@ async fn play(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let swarm = &config.swarm;
     let build = load_client_build(&swarm.client_build_config)?;
-    let layout = ContentLayout::open(&swarm.content_dir, &build)?;
+    let layout = ContentLayout::open(content_dir(), &build)?;
     let world = WorldFile::load(&layout, &swarm.level)?;
     let tables = ContentBundle::load(&layout)?.tables;
     let town_stations = TownStations::load(&layout)?;

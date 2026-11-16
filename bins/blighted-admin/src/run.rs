@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use nw_common::logging::{LoggingError, init_logging};
 use nw_content::client_build::load_client_build;
-use nw_content::layout::ContentLayout;
+use nw_content::layout::{ContentLayout, content_dir};
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
@@ -116,7 +116,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let origin = origin_of(front);
     let client_build =
         load_client_build(&config.client_build_config).map_err(RunError::ClientBuild)?;
-    let layout = ContentLayout::open(&config.content_dir, &client_build)?;
+    let layout = ContentLayout::open(content_dir(), &client_build)?;
     let map = map_dir(&layout, &config.level);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

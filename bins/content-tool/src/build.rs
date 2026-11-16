@@ -10,9 +10,6 @@ use nw_content::layout::{ContentLayout, RETAIL_BUNDLE};
 use crate::error::ToolError;
 use crate::source::GameSource;
 
-/// The content folder (README "Content data"). It is inside `local-data/`, which git ignores.
-pub const DEFAULT_CONTENT_DIR: &str = "local-data/content";
-
 /// Result of [`run_build`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildSummary {

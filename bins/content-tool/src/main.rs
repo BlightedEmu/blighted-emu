@@ -11,12 +11,12 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use content_tool::ability_instances::build_ability_instances;
-use content_tool::ai_data::{AiDataReport, DEFAULT_SERVER_PAK, build_ai_data};
+use content_tool::ai_data::{AiDataReport, DEFAULT_SERVER_PAK, SERVER_PAK_ENV, build_ai_data};
 use content_tool::ai_trace::{
     AiTrace, DEFAULT_TRACE_PATH, read_creatures, trace_ledger, write_trace,
 };
 use content_tool::breach_tiers::build_breach_tiers;
-use content_tool::build::{DEFAULT_CONTENT_DIR, run_build};
+use content_tool::build::run_build;
 use content_tool::camp_slices::build_camp_slices;
 use content_tool::capture::CaptureReport;
 use content_tool::catacomb_tiles::build_catacomb_tiles;
@@ -64,11 +64,11 @@ use nw_content::combat::{CombatData, CombatRows};
 use nw_content::creature_animations::write_rows;
 use nw_content::layout::{
     ABILITY_INSTANCES, AI_DATA, BREACH_TIERS, CAMP_SLICES, CATACOMB_LEVEL, CATACOMB_TILES,
-    CLAIM_PLOTS, COLLISION, COLLISION_LEVELS, CREATURE_ANIMATIONS, ContentLayout, DUNGEON_GATES,
-    DUNGEON_SCRIPTS, EFFECT_AREAS, FTUE_ENTITIES, FileRef, LEADERBOARDS, LEVEL_DOORS,
-    LEVEL_DOORS_LEVELS, LevelFile, MOB_PREFABS, MUSIC_CHARTS, OPEN_WORLD_LEVEL, PLAYER_ABILITIES,
-    PLAYER_ATTACKS, QUICK_COURSES, RETAIL_BUNDLE, RETAIL_WORLD, ROADS, ROADS_LEVELS, STEPS, STORE,
-    Step, StepLevels, StepSpec, WATER, WATER_LEVELS,
+    CLAIM_PLOTS, COLLISION, COLLISION_LEVELS, CONTENT_DIR_ENV, CREATURE_ANIMATIONS, ContentLayout,
+    DEFAULT_CONTENT_DIR, DUNGEON_GATES, DUNGEON_SCRIPTS, EFFECT_AREAS, FTUE_ENTITIES, FileRef,
+    LEADERBOARDS, LEVEL_DOORS, LEVEL_DOORS_LEVELS, LevelFile, MOB_PREFABS, MUSIC_CHARTS,
+    OPEN_WORLD_LEVEL, PLAYER_ABILITIES, PLAYER_ATTACKS, QUICK_COURSES, RETAIL_BUNDLE, RETAIL_WORLD,
+    ROADS, ROADS_LEVELS, STEPS, STORE, Step, StepLevels, StepSpec, WATER, WATER_LEVELS,
 };
 use nw_content::manifest::{record, record_made_from};
 use nw_content::mob_prefabs::MobPrefabs;
@@ -122,8 +122,14 @@ struct Cli {
     client_build_config: PathBuf,
     /// The content folder: the files of the pinned build go into `<content-dir>/<build>/`
     /// (README, "Content data").
-    #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+    #[arg(long, env = CONTENT_DIR_ENV, default_value = DEFAULT_CONTENT_DIR)]
     content_dir: PathBuf,
+    /// The team's design files, merged over the retail files by `design` and `content build`.
+    #[arg(long, default_value = DEFAULT_DESIGN_DIR)]
+    design_dir: PathBuf,
+    /// The Server.pak file the AI data is made from (`ai-data`, `content build`).
+    #[arg(long, env = SERVER_PAK_ENV, default_value = DEFAULT_SERVER_PAK)]
+    server_pak: PathBuf,
     #[command(subcommand)]
     command: Command,
 }
@@ -171,9 +177,6 @@ enum Command {
     /// Merges the design files over the retail files and writes the bundle and world files the
     /// servers read. Needs no game install.
     Design {
-        /// The design files.
-        #[arg(long, default_value = DEFAULT_DESIGN_DIR)]
-        design: PathBuf,
         /// Runs every check and writes nothing.
         #[arg(long)]
         check: bool,
@@ -232,11 +235,7 @@ enum Command {
     /// Builds the AI data file (every Server.pak behavior tree, the AI of every creature slice
     /// and the CAGE task resolution of their grids) from Server.pak and the game paks, for the
     /// creatures of the creature animation table.
-    AiData {
-        /// The Server.pak file.
-        #[arg(long, default_value = DEFAULT_SERVER_PAK)]
-        server_pak: PathBuf,
-    },
+    AiData,
     /// Writes what the retail mobs of a capture ledger did (ALC states, FullBody animations),
     /// the own player's positions and the hits on the player, as JSON (run it under a memory
     /// limit, for example `ulimit -v 4000000`).
@@ -364,23 +363,10 @@ enum ContentAction {
         /// Builds only the tables made from the capture-made ones (`just realm-data`).
         #[arg(long)]
         derived: bool,
-        /// The design files.
-        #[arg(long, default_value = DEFAULT_DESIGN_DIR)]
-        design: PathBuf,
-        /// The Server.pak file.
-        #[arg(long, default_value = DEFAULT_SERVER_PAK)]
-        server_pak: PathBuf,
     },
     /// Prints every content file with its topic, source, state (ok, old, missing) and when it
     /// was made.
-    Status {
-        /// The design files.
-        #[arg(long, default_value = DEFAULT_DESIGN_DIR)]
-        design: PathBuf,
-        /// The Server.pak file.
-        #[arg(long, default_value = DEFAULT_SERVER_PAK)]
-        server_pak: PathBuf,
-    },
+    Status,
     /// Moves an old flat content folder (`<table>-<build>.json`, `retail/`) into the layout:
     /// renames only, a merged file equal to its retail file becomes a hard link to it.
     Migrate {
@@ -826,13 +812,11 @@ fn run(cli: Cli) -> Result<(), ToolError> {
     } else {
         ContentLayout::new(&cli.content_dir, &client_build)
     };
-    let design_dir = Path::new(DEFAULT_DESIGN_DIR);
-    let server_pak = Path::new(DEFAULT_SERVER_PAK);
     let context = StepContext {
         layout: &layout,
         game_dir: cli.game_dir.as_deref(),
-        design_dir,
-        server_pak,
+        design_dir: &cli.design_dir,
+        server_pak: &cli.server_pak,
     };
     let at_levels = |step: Step, levels: &[String]| run_recorded(&context, step, levels);
     let with_build_levels = |step: Step| at_levels(step, &build_levels(spec_of(step)));
@@ -856,23 +840,16 @@ fn run(cli: Cli) -> Result<(), ToolError> {
         Command::Water { levels } => at_levels(Step::Water, &levels)?,
         Command::LevelDoors { levels } => at_levels(Step::LevelDoors, &levels)?,
         Command::EffectAreas { levels } => at_levels(Step::EffectAreas, &levels)?,
-        Command::Design { design, check } => {
+        Command::Design { check } => {
             let mode = if check {
                 DesignMode::Check
             } else {
                 DesignMode::Write
             };
-            run_design_step(&layout, &design, mode)?;
+            run_design_step(&layout, &cli.design_dir, mode)?;
         }
         Command::CreatureAnimations => with_build_levels(Step::CreatureAnimations)?,
-        Command::AiData { server_pak } => run_recorded(
-            &StepContext {
-                server_pak: &server_pak,
-                ..context
-            },
-            Step::AiData,
-            &[],
-        )?,
+        Command::AiData => with_build_levels(Step::AiData)?,
         Command::PlayerAttacks => with_build_levels(Step::PlayerAttacks)?,
         Command::PlayerAbilities => with_build_levels(Step::PlayerAbilities)?,
         Command::DungeonScripts => with_build_levels(Step::DungeonScripts)?,
@@ -992,35 +969,25 @@ fn run(cli: Cli) -> Result<(), ToolError> {
 /// `content build`, `content status` and `content migrate`.
 fn run_content(action: ContentAction, context: &StepContext<'_>) -> Result<(), ToolError> {
     let layout = context.layout;
-    let options = |rebuild, derived_only, design: PathBuf, server_pak: PathBuf| BuildOptions {
+    let options = |rebuild, derived_only| BuildOptions {
         rebuild,
         derived_only,
         has_game_dir: context.game_dir.is_some(),
-        design_dir: design,
-        server_pak,
+        design_dir: context.design_dir.to_path_buf(),
+        server_pak: context.server_pak.to_path_buf(),
     };
     match action {
-        ContentAction::Build {
-            rebuild,
-            derived,
-            design,
-            server_pak,
-        } => {
-            let options = options(rebuild, derived, design, server_pak);
-            let context = StepContext {
-                design_dir: &options.design_dir,
-                server_pak: &options.server_pak,
-                ..*context
-            };
+        ContentAction::Build { rebuild, derived } => {
+            let options = options(rebuild, derived);
             build_content(
                 layout,
                 &options,
-                |spec| run_recorded(&context, spec.step, &build_levels(spec)),
+                |spec| run_recorded(context, spec.step, &build_levels(spec)),
                 |line| print_build_line(line, layout, &options.server_pak),
             )?;
         }
-        ContentAction::Status { design, server_pak } => {
-            let rows = content_status(layout, &options(false, false, design, server_pak))?;
+        ContentAction::Status => {
+            let rows = content_status(layout, &options(false, false))?;
             let key_width = rows.iter().map(|row| row.key.len()).max().unwrap_or(0);
             println!("{}:", layout.build_dir().display());
             for row in rows {
@@ -1673,4 +1640,63 @@ fn print_level_summary(
         "  unmatched ids: {} npcs, {} vitals, {} gatherables, {} lore",
         unmatched.npcs, unmatched.vitals, unmatched.gatherables, unmatched.lore
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    /// The argument `id` of the command line.
+    fn argument(id: &str) -> clap::Arg {
+        Cli::command()
+            .get_arguments()
+            .find(|argument| argument.get_id() == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no argument {id}"))
+    }
+
+    #[test]
+    fn the_content_folder_follows_nw_content_dir_with_the_layout_default() {
+        let content_dir = argument("content_dir");
+        assert_eq!(
+            content_dir.get_env(),
+            Some(std::ffi::OsStr::new(CONTENT_DIR_ENV))
+        );
+        assert_eq!(
+            content_dir.get_default_values(),
+            [std::ffi::OsStr::new(DEFAULT_CONTENT_DIR)]
+        );
+        let server_pak = argument("server_pak");
+        assert_eq!(
+            server_pak.get_env(),
+            Some(std::ffi::OsStr::new(SERVER_PAK_ENV))
+        );
+    }
+
+    #[test]
+    fn the_folders_are_options_of_the_tool_not_of_a_command() {
+        let cli = Cli::try_parse_from([
+            "content-tool",
+            "--content-dir",
+            "/srv/content",
+            "--design-dir",
+            "design",
+            "--server-pak",
+            "Server.pak",
+            "content",
+            "build",
+        ])
+        .expect("command line");
+        assert_eq!(
+            (cli.content_dir, cli.design_dir, cli.server_pak),
+            (
+                PathBuf::from("/srv/content"),
+                PathBuf::from("design"),
+                PathBuf::from("Server.pak")
+            )
+        );
+        assert!(Cli::try_parse_from(["content-tool", "ai-data", "--server-pak", "x"]).is_err());
+    }
 }

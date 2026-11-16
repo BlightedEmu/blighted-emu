@@ -11,7 +11,7 @@ use nw_common::config::ConfigError;
 use nw_common::logging::{LoggingError, init_logging};
 use nw_content::client_build::load_client_build;
 use nw_content::container::ContainerError;
-use nw_content::layout::{ContentLayout, LayoutError};
+use nw_content::layout::{ContentLayout, LayoutError, content_dir};
 use nw_content::war_forts::WarForts;
 use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 use nw_login::store::StoreError;
@@ -88,7 +88,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         .ok_or_else(|| RunError::MissingSecret(config.world_database_password_env.clone()))?;
     init_logging(&config.log_filter)?;
     let build = load_client_build(&config.client_build_config).map_err(RunError::ClientBuild)?;
-    let layout = ContentLayout::open(&config.content_dir, &build)?;
+    let layout = ContentLayout::open(content_dir(), &build)?;
     let world_file = WorldFile::load(&layout, &config.level)?;
     let settings = DirectorSettings {
         world_id: config.world_id,

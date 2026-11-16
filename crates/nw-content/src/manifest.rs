@@ -20,10 +20,10 @@ use crate::layout::{
 /// The manifest's file name in a build folder.
 pub const MANIFEST_FILE: &str = "manifest.json";
 /// The file name of the build folder's guide.
-pub const README_FILE: &str = "README.md";
+const README_FILE: &str = "README.md";
 /// The lock file of a manifest write, beside the manifest. A copy of the build folder to another
 /// machine leaves it out.
-pub const LOCK_FILE: &str = "manifest.lock";
+const LOCK_FILE: &str = "manifest.lock";
 /// `made_by` when the writer does not know its commit.
 pub const MADE_BY_UNKNOWN: &str = "unknown";
 
@@ -292,7 +292,7 @@ fn record_files(
 }
 
 /// The guide of a build folder: what each folder holds and which files are capture-made.
-pub fn build_readme(build: &str) -> String {
+fn build_readme(build: &str) -> String {
     let mut text = format!(
         "# Content of client build {build}\n\n\
          Written by `content-tool` from its file registry; do not edit. `content-tool content \
