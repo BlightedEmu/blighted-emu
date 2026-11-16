@@ -2161,7 +2161,11 @@
               "proof": "none"
             },
             {
-              "check": "The camp respawn distance: the client gives camp home points (kind 9) a `MaxRespawnDistance` from its `Javelin::PlayerDataManager` (slot 0x98, client `FUN_1434fe630`) and shows an out-of-range camp in red on the respawn screen. The value is not read from the client yet; the New World community wiki gives 500 m (a death within 500 m of the camp). The server checks no distance.",
+              "check": "A player respawns at its camp only when it died within 500 m of it; else at the nearest respawn point (2026-11-15, tests only). The 500 m is the New World community wiki's: the client gives camp home points (kind 9) a `MaxRespawnDistance` from its `Javelin::PlayerDataManager` (slot 0x98, client `FUN_1434fe630`), whose value is not read from the client yet, and shows an out-of-range camp in red on its respawn screen.",
+              "proof": "tests"
+            },
+            {
+              "check": "The PvP camp respawn cooldown (a flagged player's camp respawns get a longer cooldown each time, community wiki): how it grows is Unknown; not built.",
               "proof": "none"
             }
           ]
@@ -3731,5 +3735,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-15",
-  "lastCommit": "f53decb4"
+  "lastCommit": "2844f996"
 }
