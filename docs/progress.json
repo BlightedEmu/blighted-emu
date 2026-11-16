@@ -2133,6 +2133,10 @@
               "proof": "code"
             },
             {
+              "check": "A game master gets a system chat line with the reason of a refused camp (no rank, area, blueprint, skin, slice, dead); other players get none, as on retail (2026-11-15, tests only).",
+              "proof": "tests"
+            },
+            {
               "check": "Camp build as retail: the placed camp comes unbuilt (state 3, then 4), the owner's build interaction is accepted after its hold, one unit of each cost leaves the bag per 767 ms in the retail list forms, the builder state and interactor count follow the build, a cancel keeps what is in, and the built camp (state 5) fires BindCamp; the completion call (5361) goes once the camp's group is out.",
               "proof": "tests"
             },
@@ -3719,5 +3723,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-15",
-  "lastCommit": "0ff97d9d"
+  "lastCommit": "5b875ae6"
 }
