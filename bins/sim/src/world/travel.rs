@@ -1927,8 +1927,15 @@ impl SimWorld {
 
     /// Whether `player` stands where a camp may go: in no area that forbids camps (the points of
     /// interest: `CanPlaceCamp` false), and in an area or a zone that allows them, the zones of
-    /// its areas and its last known zone among them.
+    /// its areas and its last known zone among them. A player whose client named no area since
+    /// it came to this sim is where its client allows the camp: the client names an area only on
+    /// crossing into it (2297; live 2026-11-15: a player who logged in inside an area sent none,
+    /// and every camp was refused), and it checks the place itself before it asks (Inferred: its
+    /// own `ui_camping_error_*` texts, such as "Cannot camp in landmarks").
     fn camp_allowed_where(&self, player: &Player) -> bool {
+        if player.territories.is_empty() && player.last_zone.is_none() {
+            return true;
+        }
         let rules = &self.content.travel;
         let charting = &self.content.charting;
         let areas: Vec<u32> = player
@@ -3578,7 +3585,9 @@ mod tests {
             let player = world.world.get::<Player>(entity).expect("player");
             world.camp_allowed_where(player)
         };
-        assert!(!allowed(&mut world, Vec::new(), None), "no zone known");
+        // Live 2026-11-15: a client that logged in inside an area named none; it checks the
+        // place itself.
+        assert!(allowed(&mut world, Vec::new(), None), "no area named since the arrival");
         let zone = Some(u32::from(TERRITORY));
         assert!(allowed(&mut world, Vec::new(), zone), "the last known zone");
         assert!(
@@ -4204,6 +4213,18 @@ mod tests {
             let again = start_build(&mut world, entity, &camp, accept_ms + 2 * COMMIT_INTERVAL_MS);
             tick(&mut world, again + COMMIT_INTERVAL_MS);
             assert_eq!(bag(&world, entity, WOOD), 4, "the build takes the first unit");
+        }
+
+        #[test]
+        fn a_camp_is_placed_where_the_client_named_no_area_since_its_arrival() {
+            let (mut world, entity) = camp_world(true, 0);
+            {
+                let mut player = world.world.get_mut::<Player>(entity).expect("player");
+                player.territories.clear();
+                player.last_zone = None;
+            }
+            assert_eq!(place(&mut world, NOW), [placed(PLACEMENT_PLACED)]);
+            assert!(camp_of(&world, entity).is_some(), "the camp stands");
         }
 
         #[test]
