@@ -418,8 +418,9 @@ pub struct SimFight {
     pub retail: Vec<RetailEntry>,
     /// The sim mob's starts, in order.
     pub starts: Vec<SimStart>,
-    /// Its fastest move between two ticks.
-    pub top_speed_mps: f32,
+    /// Its fastest move between two ticks while each fragment showed (an attack's own motion,
+    /// such as the gore's lunge, is faster than the run).
+    pub top_speeds_mps: std::collections::BTreeMap<String, f32>,
 }
 
 /// The ground of the replay: the beach's heights are not read here (the mob keeps its height).
@@ -544,7 +545,10 @@ pub fn sim_replay(
         // A tick of 33 ms.
         #[allow(clippy::cast_precision_loss, reason = "a tick of 33 ms")]
         let speed = here.horizontal_distance(last) * MS_PER_S / TICK_MS as f32;
-        fight.top_speed_mps = fight.top_speed_mps.max(speed);
+        if let Some((_, _, fragment)) = mobs.shown(entity) {
+            let top = fight.top_speeds_mps.entry(fragment.to_owned()).or_default();
+            *top = top.max(speed);
+        }
         last = here;
         if let Some((shown, _, fragment)) = mobs.shown(entity)
             && serial != Some(shown.serial)
@@ -611,17 +615,24 @@ mod tests {
     const BOAR_FIGHT_STARTS: [&str; 1] = ["r_R2_F"];
     const DEATH_PREFIX: &str = "r_Death";
     const SEED: u64 = 1;
-    /// The retail boar fights (trace finding a: mob 23 at 625.3 s, mob 113 at 1,349.3 s).
-    const BOAR_FIGHTS: usize = 2;
+    /// The retail boar fights the trace holds: hit at 625.3 s, 1,299.3 s and 1,349.3 s. The one at
+    /// 1,299.3 s is a boar hit in its wallow that turned twice and died 3.7 s later; the trace
+    /// has it since the creature table names the hit reactions of the lying and wallowing poses.
+    const BOAR_FIGHTS: usize = 3;
     const SAILOR_SLICE: &str =
         "slices/characters/ftue_corrupted/corrupted_sailor_zone3_club.dynamicslice";
     /// The FTUE club sailors open their fight with their alert (trace finding b).
     const ALERT: &str = "Alert";
     const SAILOR_FIGHT_STARTS: [&str; 1] = [ALERT];
-    /// The FTUE club sailors fought in the capture (trace finding b: mobs 0, 1 and 2); the first
-    /// fight (77.6 to 87.6 s) began before the trace has the player's position (82.9 s), so two
-    /// can be replayed.
-    const SAILOR_FIGHTS: usize = 2;
+    /// The FTUE club sailors fought in the capture (trace finding b): three fights, all with the
+    /// player's position (the trace has it from 0.3 s).
+    const SAILOR_FIGHTS: usize = 3;
+    /// The `Alert` entries that open each retail sailor fight, in fight order: the first sailor's
+    /// first alert (44.1 s) went back to `Idle` and its fight opened with one alert (77.6 s); the
+    /// other two open with two (1,731 + 1,400 ms and 1,967 + 1,266 ms).
+    const SAILOR_RETAIL_ALERTS: [usize; SAILOR_FIGHTS] = [1, 2, 2];
+    /// The `Alert` entries the candidate tree plays before it moves on.
+    const CANDIDATE_ALERTS: usize = 1;
     /// The boar's close band: `Target_Dist <= 3` (boar_base `CloseRangeCombatBehavior`).
     const CLOSE_BAND_M: f32 = 3.0;
 
@@ -692,7 +703,7 @@ mod tests {
         assert_eq!(fights.len(), BOAR_FIGHTS);
         for (mob, start, end) in fights {
             let report = replay(&data, archetype, &trace, mob, start, end, SEED);
-            assert!(report.retail.len() >= 4, "{report:#?}");
+            assert!(!report.retail.is_empty(), "{report:#?}");
             assert!(
                 report.unmatched.is_empty(),
                 "boar {}: {:#?}",
@@ -773,7 +784,10 @@ mod tests {
                 }
             }
             assert!(
-                fight.top_speed_mps <= RUN_MAX_MPS + SPEED_SLACK_MPS,
+                fight
+                    .top_speeds_mps
+                    .get(RUN)
+                    .is_none_or(|top| *top <= RUN_MAX_MPS + SPEED_SLACK_MPS),
                 "{fight:#?}"
             );
         }
@@ -785,10 +799,9 @@ mod tests {
         "sharedassets/ai/behaviortrees/drowned/ftue/drowned_ftue_basebehavior.behaviortree";
 
     /// Evidence that the candidate tree is not the club sailor's (so the data gives the sailor
-    /// no tree): replayed with it, the sailor does not do what retail did. Retail opens each
-    /// replayable fight with two `Alert` entries (1,731 + 1,400 ms and 1,967 + 1,266 ms, trace
-    /// finding b); the candidate plays one `Alert` and moves on, and later starts drift from
-    /// retail.
+    /// no tree): replayed with it, the sailor does not do what retail did. Each fight opens with
+    /// the retail alerts of [`SAILOR_RETAIL_ALERTS`]; the candidate plays one `Alert` and moves on,
+    /// and in every fight some retail entries never come.
     #[test]
     fn the_candidate_tree_does_not_replay_the_retail_club_sailor_fights() {
         let (mut data, trace) = fixtures();
@@ -812,7 +825,7 @@ mod tests {
         data.archetypes[archetype].trees[0].tree = index.map(|index| index as u32);
         let fights = fights(&trace, SAILOR_SLICE, &SAILOR_FIGHT_STARTS);
         assert_eq!(fights.len(), SAILOR_FIGHTS);
-        for (mob, start, end) in fights {
+        for ((mob, start, end), retail_alerts) in fights.into_iter().zip(SAILOR_RETAIL_ALERTS) {
             let report = replay(&data, archetype as u32, &trace, mob, start, end, SEED);
             let alerts = |fragments: Vec<&str>| {
                 fragments
@@ -834,7 +847,12 @@ mod tests {
                     .map(|start| start.fragment.as_str())
                     .collect(),
             );
-            assert_eq!((retail, tree), (2, 1), "sailor {}", mob.interest);
+            assert_eq!(
+                (retail, tree),
+                (retail_alerts, CANDIDATE_ALERTS),
+                "sailor {}",
+                mob.interest
+            );
             assert!(!report.unmatched.is_empty(), "sailor {}", mob.interest);
         }
     }

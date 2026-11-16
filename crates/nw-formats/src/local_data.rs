@@ -54,8 +54,9 @@ pub const PINNED_OPEN_WORLD_REGIONS: usize = 49;
 pub const PINNED_OPEN_WORLD_NPCS: usize = 1_626;
 /// Open world creature spawn points.
 pub const PINNED_OPEN_WORLD_VITALS: usize = 115_965;
-/// Open world gatherable points.
-pub const PINNED_OPEN_WORLD_GATHERABLES: usize = 148_083;
+/// Open world gatherable points: the gatherable slices plus the plant nodes (trees, bushes and
+/// stones) of the region distribution files.
+pub const PINNED_OPEN_WORLD_GATHERABLES: usize = 2_599_072;
 /// Open world lore points.
 pub const PINNED_OPEN_WORLD_LORE: usize = 1_235;
 /// Open world landmarks.
