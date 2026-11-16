@@ -428,6 +428,10 @@
               "proof": "tests"
             },
             {
+              "check": "One setting names the content folder: the environment variable `NW_CONTENT_DIR` (default `local-data/content`; a relative value starts at the folder the program runs in). Every server, `content-tool`, the `just` recipes and the scripts read it, and no config file names the folder. `content-tool` takes the design folder and `Server.pak` (`NW_SERVER_PAK`) as options of the tool, so `content build` and each single command use the same files.",
+              "proof": "tests"
+            },
+            {
               "check": "Every content write goes to a new temporary file in the same folder, is synced and then renamed, so a reader never sees half a file and a left-over temporary file that is a hard link to a retail file is never written through.",
               "proof": "tests"
             },
@@ -3784,5 +3788,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-16",
-  "lastCommit": "0aaf7aff"
+  "lastCommit": "4e84f37c"
 }
