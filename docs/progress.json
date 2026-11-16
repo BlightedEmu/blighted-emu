@@ -2161,7 +2161,7 @@
               "proof": "none"
             },
             {
-              "check": "The camp respawn distance: the client gives camp home points (kind 9) a `MaxRespawnDistance` from its own settings and shows an out-of-range camp in red on the respawn screen (client `FUN_1434fe630`); the value is Unknown, and the server checks no distance.",
+              "check": "The camp respawn distance: the client gives camp home points (kind 9) a `MaxRespawnDistance` from its `Javelin::PlayerDataManager` (slot 0x98, client `FUN_1434fe630`) and shows an out-of-range camp in red on the respawn screen. The value is not read from the client yet; the New World community wiki gives 500 m (a death within 500 m of the camp). The server checks no distance.",
               "proof": "none"
             }
           ]
