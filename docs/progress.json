@@ -2125,6 +2125,14 @@
               "proof": "tests"
             },
             {
+              "check": "A camp is placed where the client named no area since the player came to the sim (2026-11-15, tests only): a client that logs in inside an area names none until it crosses a border, and every camp there was refused. The client checks the place itself.",
+              "proof": "tests"
+            },
+            {
+              "check": "A refused camp shows no reason in the game: the client's codes for the 441 answer are Unknown (the server sends 1).",
+              "proof": "none"
+            },
+            {
               "check": "Camp build as retail: the placed camp comes unbuilt (state 3, then 4), the owner's build interaction is accepted after its hold, one unit of each cost leaves the bag per 767 ms in the retail list forms, the builder state and interactor count follow the build, a cancel keeps what is in, and the built camp (state 5) fires BindCamp; the completion call (5361) goes once the camp's group is out.",
               "proof": "tests"
             },
@@ -3711,5 +3719,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-15",
-  "lastCommit": "94565910"
+  "lastCommit": "0ff97d9d"
 }
