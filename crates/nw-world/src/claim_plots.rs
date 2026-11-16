@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The claim plot slices (`claim-plots-<build>.json`, written by `content-tool claim-plots`,
+//! The claim plot slices (`open-world/claim-plots.json`, written by `content-tool claim-plots`,
 //! read by the open world sims): each `.dynamicslice` under [`CLAIM_PLOT_FOLDER`] with a land
 //! claim component, and the components of the spawn group of its land claim entity.
 //!
@@ -17,6 +17,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use nw_content::layout::{CLAIM_PLOTS, ContentLayout, write_atomic};
 use nw_formats::objectstream::{Element, lowercase_crc32};
 use serde::{Deserialize, Serialize};
 
@@ -28,10 +29,6 @@ use crate::stations::{
 };
 use crate::travel_slices::{UUID_LEN, descendants, uuid};
 
-/// The file name prefix; the client build and [`CLAIM_PLOTS_EXTENSION`] follow.
-pub const CLAIM_PLOTS_PREFIX: &str = "claim-plots-";
-/// The file extension.
-pub const CLAIM_PLOTS_EXTENSION: &str = ".json";
 /// The pak folder of the claim plot slices.
 pub const CLAIM_PLOT_FOLDER: &str = "slices/darkness/";
 /// The pak path's suffix of a dynamic slice.
@@ -143,13 +140,6 @@ pub enum ClaimPlotsError {
     },
 }
 
-/// The claim plot file of `client_build` in `dir`.
-pub fn claim_plots_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!(
-        "{CLAIM_PLOTS_PREFIX}{client_build}{CLAIM_PLOTS_EXTENSION}"
-    ))
-}
-
 impl ClaimPlots {
     /// The table of `slices`.
     pub fn of(slices: impl IntoIterator<Item = ClaimPlotSlice>) -> Self {
@@ -161,12 +151,13 @@ impl ClaimPlots {
         }
     }
 
-    /// Reads `path`; a missing file has no claim plots (content from before this file).
+    /// Reads the file of `layout`; a missing file has no claim plots (content from before this file).
     ///
     /// # Errors
     ///
     /// Returns [`ClaimPlotsError`] when the file cannot be read or is not claim plots.
-    pub fn load(path: &Path) -> Result<Self, ClaimPlotsError> {
+    pub fn load(layout: &ContentLayout) -> Result<Self, ClaimPlotsError> {
+        let path = &layout.file(CLAIM_PLOTS);
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|source| ClaimPlotsError::Json {
                 path: path.to_path_buf(),
@@ -190,7 +181,7 @@ impl ClaimPlots {
             path: path.to_path_buf(),
             source,
         })?;
-        std::fs::write(path, text).map_err(|source| ClaimPlotsError::Io {
+        write_atomic(path, text.as_bytes()).map_err(|source| ClaimPlotsError::Io {
             path: path.to_path_buf(),
             source,
         })
@@ -322,11 +313,11 @@ mod tests {
         assert_eq!(placed[0].id, WINDSWARD_SHORES_ID);
         assert_eq!(placed[0].slice, plot);
         let dir = tempfile::tempdir().expect("dir");
-        let path = claim_plots_path(dir.path(), "1");
-        table.write(&path).expect("write");
-        assert_eq!(ClaimPlots::load(&path).expect("read"), table);
+        let layout = ContentLayout::new(dir.path(), "1");
+        table.write(&layout.file(CLAIM_PLOTS)).expect("write");
+        assert_eq!(ClaimPlots::load(&layout).expect("read"), table);
         assert_eq!(
-            ClaimPlots::load(&dir.path().join("none.json")).expect("missing"),
+            ClaimPlots::load(&ContentLayout::new(dir.path(), "none")).expect("missing"),
             ClaimPlots::default()
         );
     }

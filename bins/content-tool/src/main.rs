@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `content-tool`: builds generated table code, the content bundle and the world files from a
-//! New World install, and checks capture ledgers.
+//! New World install, builds the content folder (`content build`), and checks capture ledgers.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -16,10 +16,7 @@ use content_tool::ai_trace::{
     AiTrace, DEFAULT_TRACE_PATH, read_creatures, trace_ledger, write_trace,
 };
 use content_tool::breach_tiers::build_breach_tiers;
-use content_tool::build::{
-    DEFAULT_CONTENT_DIR, DEFAULT_RETAIL_DIR, default_bundle_path, default_retail_bundle_path,
-    run_build,
-};
+use content_tool::build::{DEFAULT_CONTENT_DIR, run_build};
 use content_tool::camp_slices::build_camp_slices;
 use content_tool::capture::CaptureReport;
 use content_tool::catacomb_tiles::build_catacomb_tiles;
@@ -31,6 +28,10 @@ use content_tool::claim_plots::build_claim_plots;
 use content_tool::codegen::run_codegen;
 use content_tool::collision::{CollisionError, CollisionReport, PakIndex, build_level_collision};
 use content_tool::combat::{CombatCheck, DEFAULT_LEVEL, DEFAULT_NWDB_DIR, check, read_nwdb};
+use content_tool::content::{
+    BuildLine, BuildOptions, BuildOutcome, MADE_BY, MigratePlan, MoveKind, build_content,
+    content_status, made_from, migrate, plan_migration,
+};
 use content_tool::creature_animations::{CreatureAnimationsReport, build_rows};
 use content_tool::dungeon_gates::{DungeonGatesReport, build_dungeon_gates};
 use content_tool::dungeon_scripts::{DungeonScriptsReport, build_dungeon_scripts};
@@ -39,7 +40,7 @@ use content_tool::error::ToolError;
 use content_tool::ftue_entities::{FtueScan, Timeline, read_ledger, write_table};
 use content_tool::leaderboards::write_leaderboard_table;
 use content_tool::level_doors::{LevelDoorsReport, build_level_doors};
-use content_tool::map_tiles::{DEFAULT_MAP_DIR, MapTilesReport, YIndex, run_map_tiles};
+use content_tool::map_tiles::{MapTilesReport, YIndex, run_map_tiles};
 use content_tool::mob_prefabs::{
     DEFAULT_CAPTURE_ROOTS, LedgerSource, MobPrefabsError, PrefabTable, SourceList,
     find_ledger_sources, run_workers, scan_ledger, vitals_names, worker_process, write_entries,
@@ -50,39 +51,41 @@ use content_tool::player_attacks::{BundleRows, PlayerAttacksReport, build_stance
 use content_tool::quick_courses::build_quick_courses;
 use content_tool::realm_pack::install::{TableOutcome, install_pack};
 use content_tool::realm_pack::make::make_pack;
-use content_tool::roads::{RoadsError, RoadsReport, build_level_roads};
+use content_tool::roads::{RoadsReport, build_level_roads};
 use content_tool::source::GameSource;
 use content_tool::store::write_store_table;
-use content_tool::water::{WaterError, build_level_water};
+use content_tool::water::build_level_water;
 use content_tool::world::{LevelReport, UnmatchedIds, run_world, world_totals};
 use nw_capture::{CLIENT_TO_SERVER, CaptureError, SERVER_TO_CLIENT, TypeNames};
 use nw_content::ContentBundle;
 use nw_content::breach_tiers::BreachTiers;
 use nw_content::client_build::load_client_build;
 use nw_content::combat::{CombatData, CombatRows};
-use nw_content::creature_animations::{creature_animations_path, write_rows};
-use nw_content::ftue_entities::ftue_entities_path;
-use nw_content::mob_prefabs::{MobPrefabs, mob_prefabs_path};
-use nw_content::player_abilities::player_abilities_path;
-use nw_content::player_attacks::{player_attacks_path, write_stances};
+use nw_content::creature_animations::write_rows;
+use nw_content::layout::{
+    ABILITY_INSTANCES, AI_DATA, BREACH_TIERS, CAMP_SLICES, CATACOMB_LEVEL, CATACOMB_TILES,
+    CLAIM_PLOTS, COLLISION, COLLISION_LEVELS, CREATURE_ANIMATIONS, ContentLayout, DUNGEON_GATES,
+    DUNGEON_SCRIPTS, EFFECT_AREAS, FTUE_ENTITIES, FileRef, LEADERBOARDS, LEVEL_DOORS,
+    LEVEL_DOORS_LEVELS, LevelFile, MOB_PREFABS, MUSIC_CHARTS, OPEN_WORLD_LEVEL, PLAYER_ABILITIES,
+    PLAYER_ATTACKS, QUICK_COURSES, RETAIL_BUNDLE, RETAIL_WORLD, ROADS, ROADS_LEVELS, STEPS, STORE,
+    Step, StepLevels, StepSpec, WATER, WATER_LEVELS,
+};
+use nw_content::manifest::{record, record_made_from};
+use nw_content::mob_prefabs::MobPrefabs;
+use nw_content::player_attacks::write_stances;
 use nw_design::{DesignMode, DesignPaths, DesignReport, run_design};
 use nw_world::WorldFile;
 use nw_world::metadata::SkipCounts;
 use nw_world::records::RecordCounts;
-use nw_world::world_file::world_file_path;
 
 const DEFAULT_CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
 /// Where `realm-pack make` writes the pack.
 const DEFAULT_PACK_DIR: &str = "local-data/realm-pack";
-/// The level the `collision` command builds when none is named.
-const DEFAULT_COLLISION_LEVEL: &str = "ftue_v2";
-/// The level `roads` builds by default: the open world, whose tract maps hold the roads.
-const DEFAULT_ROADS_LEVEL: &str = "newworld_vitaeeterna";
 /// The levels whose effect areas `effect-areas` reads by default: the open world, the
 /// catacombs and the dungeon whose sulfur pools hold `Env_SulfurPool_DoT`.
 const DEFAULT_EFFECT_AREA_LEVELS: [&str; 3] = [
-    DEFAULT_ROADS_LEVEL,
-    "nw_catacomb_00",
+    OPEN_WORLD_LEVEL,
+    CATACOMB_LEVEL,
     "nw_dungeon_brimstonesands_00",
 ];
 /// The team's design files (admin studio spec section 5).
@@ -102,6 +105,8 @@ const SHOWN_CUT_CLASSES: usize = 10;
 const SHOWN_UNREAD_CARDS: usize = 20;
 /// Members without a reader left out of spawn groups, printed by `ftue-entities`.
 const SHOWN_SKIPPED_MEMBERS: usize = 20;
+/// What `content status` shows when the manifest has no time for a file.
+const NO_TIME: &str = "-";
 
 #[derive(Parser)]
 #[command(
@@ -115,6 +120,10 @@ struct Cli {
     /// File with the pinned client build.
     #[arg(long, default_value = DEFAULT_CLIENT_BUILD_CONFIG)]
     client_build_config: PathBuf,
+    /// The content folder: the files of the pinned build go into `<content-dir>/<build>/`
+    /// (README, "Content data").
+    #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+    content_dir: PathBuf,
     #[command(subcommand)]
     command: Command,
 }
@@ -127,51 +136,37 @@ enum Command {
         #[arg(long, default_value = DEFAULT_GENERATED_DIR)]
         out_dir: PathBuf,
     },
-    /// Writes the content bundle and checks it by reloading it.
-    Build {
-        /// Bundle file (default: `local-data/content/retail/bundle-<build>.bin`).
-        #[arg(long)]
-        out: Option<PathBuf>,
+    /// Builds, checks and migrates the whole content folder.
+    Content {
+        /// What to do.
+        #[command(subcommand)]
+        action: ContentAction,
     },
-    /// Writes one world file per level and checks each by reloading it.
-    World {
-        /// Output folder for `world-<build>-<level>.bin`.
-        #[arg(long, default_value = DEFAULT_RETAIL_DIR)]
-        out_dir: PathBuf,
-        /// Content bundle for the spawn ID check (default:
-        /// `local-data/content/retail/bundle-<build>.bin`).
-        #[arg(long)]
-        bundle: Option<PathBuf>,
-    },
+    /// Writes the retail content bundle (`retail/bundle.bin`) and checks it by reloading it.
+    Build,
+    /// Writes one retail world file per level (`retail/levels/<level>/world.bin`) and checks each
+    /// by reloading it.
+    World,
     /// Writes the collision file of each level (its solid shapes from the game paks) and checks
     /// it by reloading it.
     Collision {
         /// Levels to build.
-        #[arg(default_values = [DEFAULT_COLLISION_LEVEL])]
+        #[arg(default_values = COLLISION_LEVELS)]
         levels: Vec<String>,
-        /// Output folder for `collision-<build>-<level>.bin`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
     },
     /// Writes the road file of each level (the road cells of its tract maps from the game paks)
     /// and checks it by reloading it.
     Roads {
         /// Levels to build.
-        #[arg(default_values = [DEFAULT_ROADS_LEVEL])]
+        #[arg(default_values = ROADS_LEVELS)]
         levels: Vec<String>,
-        /// Output folder for `roads-<build>-<level>.bin`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
     },
     /// Writes the water file of each level (the water surfaces of its region water trees from
     /// the game paks) and checks it by reloading it.
     Water {
         /// Levels to build.
-        #[arg(default_values = [DEFAULT_COLLISION_LEVEL, DEFAULT_ROADS_LEVEL])]
+        #[arg(default_values = WATER_LEVELS)]
         levels: Vec<String>,
-        /// Output folder for `water-<build>-<level>.bin`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
     },
     /// Merges the design files over the retail files and writes the bundle and world files the
     /// servers read. Needs no game install.
@@ -179,12 +174,6 @@ enum Command {
         /// The design files.
         #[arg(long, default_value = DEFAULT_DESIGN_DIR)]
         design: PathBuf,
-        /// The retail bundle and world files from `build` and `world`.
-        #[arg(long, default_value = DEFAULT_RETAIL_DIR)]
-        retail_dir: PathBuf,
-        /// Where the merged files go.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
         /// Runs every check and writes nothing.
         #[arg(long)]
         check: bool,
@@ -198,14 +187,12 @@ enum Command {
         #[arg(long)]
         names: Option<PathBuf>,
     },
-    /// Writes the world map tiles of a level as PNG files with a `tiles.json` index.
+    /// Writes the world map tiles of a level as PNG files with a `tiles.json` index into the
+    /// map folder of the content folder (`<content-dir>/map/<level>/`).
     MapTiles {
         /// Level whose map tiles are written.
         #[arg(long, default_value = DEFAULT_LEVEL)]
         level: String,
-        /// Output folder; the level gets a folder in it.
-        #[arg(long, default_value = DEFAULT_MAP_DIR)]
-        out_dir: PathBuf,
         /// Which edge tile row 0 is (README, "Admin tools").
         #[arg(long, value_enum, default_value_t = YIndex::SouthUp)]
         y_index: YIndex,
@@ -218,9 +205,6 @@ enum Command {
         /// Level whose world file is checked.
         #[arg(long, default_value = DEFAULT_LEVEL)]
         level: String,
-        /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
-        #[arg(long)]
-        bundle: Option<PathBuf>,
         /// Folder of nwdb.info creature records.
         #[arg(long, default_value = DEFAULT_NWDB_DIR)]
         nwdb_dir: PathBuf,
@@ -231,12 +215,6 @@ enum Command {
         /// Folders searched for `ledger.bin` files and zip archives that hold them.
         #[arg(default_values = DEFAULT_CAPTURE_ROOTS)]
         roots: Vec<PathBuf>,
-        /// Output file (default: `local-data/content/mob-prefabs-<build>.json`).
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Content bundle for the vitals names (default: `local-data/content/bundle-<build>.bin`).
-        #[arg(long)]
-        bundle: Option<PathBuf>,
         /// Worker processes at a time (default: the number of CPU threads).
         #[arg(long)]
         jobs: Option<NonZeroUsize>,
@@ -247,20 +225,10 @@ enum Command {
     FtueEntities {
         /// The `ledger.bin` file.
         ledger: PathBuf,
-        /// Output file (default: `local-data/content/ftue-entities-<build>.json`).
-        #[arg(long)]
-        out: Option<PathBuf>,
     },
     /// Builds the creature animation table from the game paks, for the creatures of the mob
-    /// prefab table (`local-data/content/mob-prefabs-<build>.json`).
-    CreatureAnimations {
-        /// Output file (default: `local-data/content/creature-animations-<build>.json`).
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Content bundle for the weapon tags (default: `local-data/content/bundle-<build>.bin`).
-        #[arg(long)]
-        bundle: Option<PathBuf>,
-    },
+    /// prefab table.
+    CreatureAnimations,
     /// Builds the AI data file (every Server.pak behavior tree, the AI of every creature slice
     /// and the CAGE task resolution of their grids) from Server.pak and the game paks, for the
     /// creatures of the creature animation table.
@@ -268,9 +236,6 @@ enum Command {
         /// The Server.pak file.
         #[arg(long, default_value = DEFAULT_SERVER_PAK)]
         server_pak: PathBuf,
-        /// Output folder for `ai-data-<build>.bin`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
     },
     /// Writes what the retail mobs of a capture ledger did (ALC states, FullBody animations),
     /// the own player's positions and the hits on the player, as JSON (run it under a memory
@@ -283,27 +248,11 @@ enum Command {
         out: PathBuf,
     },
     /// Builds the player attack table (each weapon stance's basic attacks, dodge and item uses)
-    /// from the game paks.
-    PlayerAttacks {
-        /// Output file (default: `local-data/content/player-attacks-<build>.json`).
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Content bundle for the weapon, spell, ammo and consumable rows (default:
-        /// `local-data/content/bundle-<build>.bin`).
-        #[arg(long)]
-        bundle: Option<PathBuf>,
-    },
+    /// from the game paks and the merged content bundle.
+    PlayerAttacks,
     /// Builds the player ability table (each weapon ability list's active abilities: hit,
-    /// markers, cooldowns, mana cost, spells) from the game paks.
-    PlayerAbilities {
-        /// Output file (default: `local-data/content/player-abilities-<build>.json`).
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Content bundle for the weapon, item, cooldown, mana and spell rows (default:
-        /// `local-data/content/bundle-<build>.bin`).
-        #[arg(long)]
-        bundle: Option<PathBuf>,
-    },
+    /// markers, cooldowns, mana cost, spells) from the game paks and the merged content bundle.
+    PlayerAbilities,
     /// Makes the layouts of many runs of a generated game mode (the catacombs) and checks their
     /// tile slices against the paks; prints the counts and the first run's map.
     CatacombCheck {
@@ -313,126 +262,63 @@ enum Command {
         /// Runs to make (seeds 0 and up).
         #[arg(long, default_value_t = DEFAULT_CATACOMB_RUNS)]
         runs: u64,
-        /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
-        #[arg(long)]
-        bundle: Option<PathBuf>,
     },
     /// Writes the breach tiers file: the difficulty of each corrupted breach place, from the
     /// world map points of the retail ledgers (read by `dungeon-scripts`).
     BreachTiers {
-        /// Output folder for `breach-tiers-<build>.json`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
         /// Retail `ledger.bin` files.
         #[arg(required = true)]
         ledgers: Vec<PathBuf>,
     },
     /// Writes the dungeon script file: the encounters and loot containers of every instance
-    /// level's script slice, from the game paks and the content bundle.
-    DungeonScripts {
-        /// Output folder for `dungeon-scripts-<build>.json`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
-        /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
-        #[arg(long)]
-        bundle: Option<PathBuf>,
-    },
+    /// level's script slice, from the game paks and the merged content bundle.
+    DungeonScripts,
     /// Writes the gates file: the gates, doors, switches and arena blockers of every instance
     /// level's script slice, and the replicated entities of its encounter slices, from the game
-    /// paks and the content bundle.
-    DungeonGates {
-        /// Output folder for `dungeon-gates-<build>.json`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
-        /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
-        #[arg(long)]
-        bundle: Option<PathBuf>,
-    },
+    /// paks and the merged content bundle.
+    DungeonGates,
     /// Writes the effect areas file: the status effect areas of the levels' placed slices and
     /// of the spell slices whose effects change an affliction meter, from the game paks and the
-    /// content bundle.
+    /// merged content bundle.
     EffectAreas {
         /// Levels whose status effect areas are read.
         #[arg(default_values = DEFAULT_EFFECT_AREA_LEVELS)]
         levels: Vec<String>,
-        /// Output folder for `effect-areas-<build>.json`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
-        /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
-        #[arg(long)]
-        bundle: Option<PathBuf>,
     },
-    /// Writes the level doors file: every capital of a level whose slice has a door, with the
-    /// replicated components retail sends at its spawn, from the level's world file and the
-    /// game paks.
+    /// Writes the doors file of each level: every capital of the level whose slice has a door,
+    /// with the replicated components retail sends at its spawn, from the level's merged world
+    /// file and the game paks.
     LevelDoors {
-        /// Level whose world file is read.
-        #[arg(long, default_value = DEFAULT_LEVEL)]
-        level: String,
-        /// Folder of the world file and of the output `level-doors-<build>-<level>.json`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
+        /// Levels to build.
+        #[arg(default_values = LEVEL_DOORS_LEVELS)]
+        levels: Vec<String>,
     },
     /// Writes the music chart file: the notes of every music sheet, from the game paks.
-    MusicCharts {
-        /// Output folder for `music-charts-<build>.json`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
-    },
+    MusicCharts,
     /// Writes the camp slice file: the spawn group components, asset id and respawn point of
     /// every camp slice, from the game paks.
-    CampSlices {
-        /// Output folder for `camp-slices-<build>.json`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
-    },
+    CampSlices,
     /// Writes the catacombs tile file: the gameplay and art slice, the slots and the encounters
     /// of every tile variation of the catacombs generation rules, and the power-up slices, from
-    /// the game paks (reads the mob prefab file in the output folder).
-    CatacombTiles {
-        /// Output folder for `catacomb-tiles-<build>.json`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
-        /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
-        #[arg(long)]
-        bundle: Option<PathBuf>,
-    },
+    /// the game paks (reads the mob prefab table), and the catacombs level's collision file.
+    CatacombTiles,
     /// Writes the claim plot file: the spawn group components of every territory's land claim
     /// slice, from the game paks.
-    ClaimPlots {
-        /// Output folder for `claim-plots-<build>.json`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
-    },
+    ClaimPlots,
     /// Writes the ability instance file: the instance type of every slice with an ability
     /// instance component and the player's instance limits, from the game paks.
-    AbilityInstances {
-        /// Output folder for `ability-instances-<build>.json`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
-    },
+    AbilityInstances,
     /// Writes the quick course path file: the nodes of every mount race, rally, tour and time
     /// trial, from the game paks.
-    QuickCourses {
-        /// Output folder for `quick-courses-<build>.json`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        out_dir: PathBuf,
-    },
-    /// Writes the store table (`store-<build>.json`): the store mounts and the entitlements every
-    /// account holds, from the content bundle, for `edge-http`'s store. Needs no game install.
-    Store {
-        /// Folder of the content bundle and of the table.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        content_dir: PathBuf,
-    },
-    /// Writes the leaderboard table (`leaderboards-<build>.json`): every board of a world with its
-    /// English name and group, from the content bundle, for `status-reporter`. Needs no game
-    /// install.
-    Leaderboards {
-        /// Folder of the content bundle and of the table.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        content_dir: PathBuf,
-    },
+    QuickCourses,
+    /// Writes the store table (`services/store.json`): the store mounts and the entitlements
+    /// every account holds, from the merged content bundle, for `edge-http`'s store. Needs no
+    /// game install.
+    Store,
+    /// Writes the leaderboard table (`services/leaderboards.json`): every board of a world with
+    /// its English name and group, from the merged content bundle, for `status-reporter`. Needs
+    /// no game install.
+    Leaderboards,
     /// Makes or installs the realm data pack: the capture-made tables, scrubbed of player data
     /// (README, "Content data").
     RealmPack {
@@ -452,15 +338,64 @@ enum Command {
     },
 }
 
+impl Command {
+    /// False for the commands that read no content file (the map tiles go beside the build
+    /// folders).
+    const fn reads_content(&self) -> bool {
+        !matches!(
+            self,
+            Self::Codegen { .. }
+                | Self::CaptureCheck { .. }
+                | Self::MapTiles { .. }
+                | Self::MobPrefabsLedger { .. }
+        )
+    }
+}
+
+#[derive(Subcommand)]
+enum ContentAction {
+    /// Builds every content file in registry order. A file that exists, is in the manifest and
+    /// is newer than its inputs is kept. The capture-made files come from the realm data pack
+    /// only (`just realm-data`).
+    Build {
+        /// Builds every file again.
+        #[arg(long)]
+        rebuild: bool,
+        /// Builds only the tables made from the capture-made ones (`just realm-data`).
+        #[arg(long)]
+        derived: bool,
+        /// The design files.
+        #[arg(long, default_value = DEFAULT_DESIGN_DIR)]
+        design: PathBuf,
+        /// The Server.pak file.
+        #[arg(long, default_value = DEFAULT_SERVER_PAK)]
+        server_pak: PathBuf,
+    },
+    /// Prints every content file with its topic, source, state (ok, old, missing) and when it
+    /// was made.
+    Status {
+        /// The design files.
+        #[arg(long, default_value = DEFAULT_DESIGN_DIR)]
+        design: PathBuf,
+        /// The Server.pak file.
+        #[arg(long, default_value = DEFAULT_SERVER_PAK)]
+        server_pak: PathBuf,
+    },
+    /// Moves an old flat content folder (`<table>-<build>.json`, `retail/`) into the layout:
+    /// renames only, a merged file equal to its retail file becomes a hard link to it.
+    Migrate {
+        /// Prints the moves only.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum RealmPackAction {
     /// Scrubs and scans a copy of the pack tables of the content folder and writes
     /// `realm-data-<build>.zip`, `SHA256SUMS` and `scan-report.txt` (read the report before
     /// publishing). The content folder is only read.
     Make {
-        /// Folder of the tables and the merged content bundle.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        content_dir: PathBuf,
         /// Where the pack files go.
         #[arg(long, default_value = DEFAULT_PACK_DIR)]
         out_dir: PathBuf,
@@ -475,9 +410,6 @@ enum RealmPackAction {
     Install {
         /// The pack zip.
         zip: PathBuf,
-        /// The content folder.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
-        content_dir: PathBuf,
         /// Replace tables of the folder that differ from the pack's.
         #[arg(long)]
         replace: bool,
@@ -553,9 +485,9 @@ fn print_collision(report: &CollisionReport, took: std::time::Duration) {
     );
 }
 
-fn print_design(report: &DesignReport, out_dir: &Path) {
+fn print_design(report: &DesignReport, layout: &ContentLayout) {
     let target = if report.written {
-        out_dir.display().to_string()
+        layout.build_dir().display().to_string()
     } else {
         "nothing written".to_owned()
     };
@@ -575,8 +507,335 @@ fn game_dir(game_dir: Option<&Path>) -> Result<&Path, ToolError> {
     game_dir.ok_or(ToolError::MissingGameDir)
 }
 
+/// What the content steps read besides the content folder.
+#[derive(Clone, Copy)]
+struct StepContext<'a> {
+    /// The content folder.
+    layout: &'a ContentLayout,
+    /// The install folder, when given.
+    game_dir: Option<&'a Path>,
+    /// The design files.
+    design_dir: &'a Path,
+    /// The Server.pak file.
+    server_pak: &'a Path,
+}
+
+/// The registry entry of `step`.
+fn spec_of(step: Step) -> &'static StepSpec {
+    STEPS
+        .iter()
+        .find(|spec| spec.step == step)
+        .expect("every step is in the registry")
+}
+
+/// The levels `content build` runs `spec` at: its named levels, the levels `effect-areas`
+/// reads, else none (the world steps take every level of the install).
+fn build_levels(spec: &StepSpec) -> Vec<String> {
+    let levels: &[&str] = match (spec.step, spec.levels) {
+        (_, StepLevels::Named(levels)) => levels,
+        (Step::EffectAreas, _) => &DEFAULT_EFFECT_AREA_LEVELS,
+        _ => &[],
+    };
+    levels.iter().map(|&level| level.to_owned()).collect()
+}
+
+/// Runs `step` at `levels` and records the files it wrote in the manifest, with the other files
+/// they were made from.
+fn run_recorded(context: &StepContext<'_>, step: Step, levels: &[String]) -> Result<(), ToolError> {
+    let written = run_step(context, step, levels)?;
+    let others = made_from(spec_of(step), context.design_dir, context.server_pak);
+    if others.is_empty() {
+        record(context.layout, &written, MADE_BY)?;
+    } else {
+        record_made_from(context.layout, &written, MADE_BY, &others)?;
+    }
+    Ok(())
+}
+
+/// Runs one step of the registry at `levels` (the levels of its level files, or the levels
+/// `effect-areas` reads); prints its report and returns the files it wrote.
+fn run_step(
+    context: &StepContext<'_>,
+    step: Step,
+    levels: &[String],
+) -> Result<Vec<FileRef>, ToolError> {
+    let layout = context.layout;
+    let paks = || {
+        PakIndex::open(game_dir(context.game_dir)?)
+            .map_err(CollisionError::from)
+            .map_err(ToolError::from)
+    };
+    let source = || {
+        game_dir(context.game_dir).and_then(|dir| GameSource::open(dir).map_err(ToolError::from))
+    };
+    let at_levels = |file: LevelFile| -> Vec<FileRef> {
+        levels
+            .iter()
+            .map(|level| FileRef::level(file, level))
+            .collect()
+    };
+    Ok(match step {
+        Step::RetailBundle => {
+            let summary = run_build(&source()?, layout)?;
+            println!(
+                "build: {} datasheets, {} rows, {} text files, {} text entries, {} duplicate text keys, {} keyless text entries -> {}",
+                summary.datasheet_files,
+                summary.rows,
+                summary.text_files,
+                summary.text_entries,
+                summary.duplicate_text_keys,
+                summary.keyless_text_entries,
+                summary.path.display()
+            );
+            vec![FileRef::build(RETAIL_BUNDLE)]
+        }
+        Step::RetailWorld => {
+            let reports = run_world(&source()?, layout)?;
+            print_world(&reports);
+            reports
+                .iter()
+                .map(|report| FileRef::level(RETAIL_WORLD, &report.level))
+                .collect()
+        }
+        Step::Design => {
+            run_design_step(layout, context.design_dir, DesignMode::Write)?;
+            // `run_design` records the merged files itself.
+            Vec::new()
+        }
+        Step::Water => {
+            let index = paks()?;
+            for level in levels {
+                let report = build_level_water(&index, level, layout)?;
+                println!(
+                    "water {}: {} regions, {} nodes -> {}",
+                    report.level,
+                    report.regions,
+                    report.nodes,
+                    report.path.display()
+                );
+            }
+            at_levels(WATER)
+        }
+        Step::Collision => {
+            let index = paks()?;
+            for level in levels {
+                let started = std::time::Instant::now();
+                let report = build_level_collision(&index, level, layout)?;
+                print_collision(&report, started.elapsed());
+            }
+            at_levels(COLLISION)
+        }
+        Step::Roads => {
+            let index = paks()?;
+            for level in levels {
+                print_roads(&build_level_roads(&index, level, layout)?);
+            }
+            at_levels(ROADS)
+        }
+        Step::LevelDoors => {
+            let index = paks()?;
+            for level in levels {
+                let world = WorldFile::load(layout, level)?;
+                print_level_doors(&build_level_doors(&index, &world, level, layout)?);
+            }
+            at_levels(LEVEL_DOORS)
+        }
+        Step::PlayerAttacks => {
+            let out = layout.file(PLAYER_ATTACKS);
+            let rows = BundleRows::of(&ContentBundle::load(layout)?.tables);
+            let (stances, report) = build_stances(&read_sources(&source()?, &rows)?, &rows);
+            write_stances(&out, &stances)?;
+            print_player_attacks(&report, &out);
+            vec![FileRef::build(PLAYER_ATTACKS)]
+        }
+        Step::PlayerAbilities => {
+            let out = layout.file(PLAYER_ABILITIES);
+            let tables = ContentBundle::load(layout)?.tables;
+            let rows = BundleRows::of(&tables);
+            let (table, report) =
+                build_abilities(&read_sources(&source()?, &rows)?, &rows, &tables);
+            table.write(&out)?;
+            print_player_abilities(&report, &out);
+            vec![FileRef::build(PLAYER_ABILITIES)]
+        }
+        Step::DungeonGates => {
+            let tables = ContentBundle::load(layout)?.tables;
+            print_dungeon_gates(&build_dungeon_gates(&paks()?, &tables, layout)?);
+            vec![FileRef::build(DUNGEON_GATES)]
+        }
+        Step::AbilityInstances => {
+            let report = build_ability_instances(&source()?, layout)?;
+            println!(
+                "{}: {} typed slices of {} slices, {} limits",
+                report.path.display(),
+                report.typed,
+                report.slices,
+                report.limits
+            );
+            vec![FileRef::build(ABILITY_INSTANCES)]
+        }
+        Step::ClaimPlots => {
+            let report = build_claim_plots(&source()?, layout)?;
+            println!(
+                "{}: {} claim plots of {} claim plot folder slices",
+                report.path.display(),
+                report.plots,
+                report.slices
+            );
+            vec![FileRef::build(CLAIM_PLOTS)]
+        }
+        Step::MusicCharts => {
+            let report = build_music_charts(&source()?, layout)?;
+            println!(
+                "{}: {} charts, {} notes",
+                report.path.display(),
+                report.charts,
+                report.notes
+            );
+            vec![FileRef::build(MUSIC_CHARTS)]
+        }
+        Step::CampSlices => {
+            let report = build_camp_slices(&source()?, layout)?;
+            println!(
+                "{}: {} camps ({} PvP) of {} camp folder slices",
+                report.path.display(),
+                report.camps,
+                report.pvp_camps,
+                report.slices
+            );
+            vec![FileRef::build(CAMP_SLICES)]
+        }
+        Step::QuickCourses => {
+            let report = build_quick_courses(&source()?, layout)?;
+            println!(
+                "{}: {} courses of {} course folder slices",
+                report.path.display(),
+                report.courses,
+                report.slices
+            );
+            vec![FileRef::build(QUICK_COURSES)]
+        }
+        Step::Store => {
+            let report = write_store_table(layout)?;
+            println!(
+                "{}: {} store mounts, {} token packs, {} entitlements every account holds",
+                report.path.display(),
+                report.mounts,
+                report.tokens,
+                report.held_by_all
+            );
+            vec![FileRef::build(STORE)]
+        }
+        Step::Leaderboards => {
+            let report = write_leaderboard_table(layout)?;
+            println!("{}: {} leaderboards", report.path.display(), report.boards);
+            vec![FileRef::build(LEADERBOARDS)]
+        }
+        Step::CreatureAnimations => {
+            let out = layout.file(CREATURE_ANIMATIONS);
+            let tables = ContentBundle::load(layout)?.tables;
+            let prefabs = MobPrefabs::load(layout)
+                .map_err(content_tool::creature_animations::CreatureAnimationsError::from)?;
+            let dir = game_dir(context.game_dir)?;
+            let (rows, report) = build_rows(&GameSource::open(dir)?, dir, &prefabs, &tables)?;
+            write_rows(&out, &rows)
+                .map_err(content_tool::creature_animations::CreatureAnimationsError::from)?;
+            print_creature_animations(&report, &out);
+            vec![FileRef::build(CREATURE_ANIMATIONS)]
+        }
+        Step::CatacombTiles => {
+            let tables = ContentBundle::load(layout)?.tables;
+            let report = build_catacomb_tiles(&paks()?, &tables, layout)?;
+            println!(
+                "{}: {} tile variations, {} art tiles, {} plain slots, {} encounters, {} power-ups",
+                report.path.display(),
+                report.variations,
+                report.art_tiles,
+                report.props,
+                report.encounters,
+                report.power_ups
+            );
+            println!(
+                "{}: {} art tiles with solids, {} shapes",
+                report.collision_path.display(),
+                report.solid_art_tiles,
+                report.solid_bodies
+            );
+            vec![
+                FileRef::build(CATACOMB_TILES),
+                FileRef::level(COLLISION, CATACOMB_LEVEL),
+            ]
+        }
+        Step::DungeonScripts => {
+            let tables = ContentBundle::load(layout)?.tables;
+            print_dungeon_scripts(&build_dungeon_scripts(&paks()?, &tables, layout)?);
+            vec![FileRef::build(DUNGEON_SCRIPTS)]
+        }
+        Step::EffectAreas => {
+            let tables = ContentBundle::load(layout)?.tables;
+            print_effect_areas(&build_effect_areas(&paks()?, &tables, levels, layout)?);
+            vec![FileRef::build(EFFECT_AREAS)]
+        }
+        Step::AiData => {
+            let creatures = read_creatures(&layout.file(CREATURE_ANIMATIONS))?;
+            let dir = game_dir(context.game_dir)?;
+            let (data, report) =
+                build_ai_data(&GameSource::open(dir)?, dir, context.server_pak, &creatures)?;
+            let path = data.save(layout)?;
+            let reloaded = nw_ai::AiData::load(layout)?;
+            if reloaded != data {
+                return Err(ToolError::CountMismatch {
+                    what: "AI data nodes",
+                    expected: data.nodes.len(),
+                    found: reloaded.nodes.len(),
+                });
+            }
+            print_ai_data(&report, &path);
+            vec![FileRef::build(AI_DATA)]
+        }
+    })
+}
+
+/// Runs the design step on `layout` in `mode`; an error when a design file has a problem.
+fn run_design_step(
+    layout: &ContentLayout,
+    design_dir: &Path,
+    mode: DesignMode,
+) -> Result<(), ToolError> {
+    let paths = DesignPaths {
+        design_dir: design_dir.to_path_buf(),
+        layout: layout.clone(),
+    };
+    let report = run_design(&paths, mode, MADE_BY)?;
+    print_design(&report, layout);
+    if report.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ToolError::DesignErrors {
+            count: report.errors.len(),
+        })
+    }
+}
+
 fn run(cli: Cli) -> Result<(), ToolError> {
     let client_build = load_client_build(&cli.client_build_config)?;
+    // A command that reads no content file does not read the manifest either, so a bad one
+    // stops only the commands that need it.
+    let layout = if cli.command.reads_content() {
+        ContentLayout::open(&cli.content_dir, &client_build)?
+    } else {
+        ContentLayout::new(&cli.content_dir, &client_build)
+    };
+    let design_dir = Path::new(DEFAULT_DESIGN_DIR);
+    let server_pak = Path::new(DEFAULT_SERVER_PAK);
+    let context = StepContext {
+        layout: &layout,
+        game_dir: cli.game_dir.as_deref(),
+        design_dir,
+        server_pak,
+    };
+    let at_levels = |step: Step, levels: &[String]| run_recorded(&context, step, levels);
+    let with_build_levels = |step: Step| at_levels(step, &build_levels(spec_of(step)));
     match cli.command {
         Command::Codegen { out_dir } => {
             let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
@@ -589,80 +848,43 @@ fn run(cli: Cli) -> Result<(), ToolError> {
                 summary.stale_files_removed
             );
         }
-        Command::Build { out } => {
-            let out = out.unwrap_or_else(|| default_retail_bundle_path(&client_build));
-            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
-            let summary = run_build(&source, &client_build, &out)?;
-            println!(
-                "build: {} datasheets, {} rows, {} text files, {} text entries, {} duplicate text keys, {} keyless text entries -> {}",
-                summary.datasheet_files,
-                summary.rows,
-                summary.text_files,
-                summary.text_entries,
-                summary.duplicate_text_keys,
-                summary.keyless_text_entries,
-                summary.path.display()
-            );
-        }
-        Command::World { out_dir, bundle } => {
-            let bundle = bundle.unwrap_or_else(|| default_retail_bundle_path(&client_build));
-            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
-            print_world(&run_world(&source, &client_build, &bundle, &out_dir)?);
-        }
-        Command::Collision { levels, out_dir } => {
-            let index =
-                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
-            for level in &levels {
-                let started = std::time::Instant::now();
-                let report = build_level_collision(&index, level, &client_build, &out_dir)?;
-                print_collision(&report, started.elapsed());
-            }
-        }
-        Command::Roads { levels, out_dir } => {
-            let index =
-                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(RoadsError::from)?;
-            for level in &levels {
-                print_roads(&build_level_roads(&index, level, &client_build, &out_dir)?);
-            }
-        }
-        Command::Water { levels, out_dir } => {
-            let index =
-                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(WaterError::from)?;
-            for level in &levels {
-                let report = build_level_water(&index, level, &client_build, &out_dir)?;
-                println!(
-                    "water {}: {} regions, {} nodes -> {}",
-                    report.level,
-                    report.regions,
-                    report.nodes,
-                    report.path.display()
-                );
-            }
-        }
-        Command::Design {
-            design,
-            retail_dir,
-            out_dir,
-            check,
-        } => {
+        Command::Content { action } => run_content(action, &context)?,
+        Command::Build => with_build_levels(Step::RetailBundle)?,
+        Command::World => with_build_levels(Step::RetailWorld)?,
+        Command::Collision { levels } => at_levels(Step::Collision, &levels)?,
+        Command::Roads { levels } => at_levels(Step::Roads, &levels)?,
+        Command::Water { levels } => at_levels(Step::Water, &levels)?,
+        Command::LevelDoors { levels } => at_levels(Step::LevelDoors, &levels)?,
+        Command::EffectAreas { levels } => at_levels(Step::EffectAreas, &levels)?,
+        Command::Design { design, check } => {
             let mode = if check {
                 DesignMode::Check
             } else {
                 DesignMode::Write
             };
-            let paths = DesignPaths {
-                design_dir: design,
-                retail_dir,
-                out_dir,
-            };
-            let report = run_design(&paths, &client_build, mode)?;
-            print_design(&report, &paths.out_dir);
-            if !report.errors.is_empty() {
-                return Err(ToolError::DesignErrors {
-                    count: report.errors.len(),
-                });
-            }
+            run_design_step(&layout, &design, mode)?;
         }
+        Command::CreatureAnimations => with_build_levels(Step::CreatureAnimations)?,
+        Command::AiData { server_pak } => run_recorded(
+            &StepContext {
+                server_pak: &server_pak,
+                ..context
+            },
+            Step::AiData,
+            &[],
+        )?,
+        Command::PlayerAttacks => with_build_levels(Step::PlayerAttacks)?,
+        Command::PlayerAbilities => with_build_levels(Step::PlayerAbilities)?,
+        Command::DungeonScripts => with_build_levels(Step::DungeonScripts)?,
+        Command::DungeonGates => with_build_levels(Step::DungeonGates)?,
+        Command::MusicCharts => with_build_levels(Step::MusicCharts)?,
+        Command::CatacombTiles => with_build_levels(Step::CatacombTiles)?,
+        Command::CampSlices => with_build_levels(Step::CampSlices)?,
+        Command::ClaimPlots => with_build_levels(Step::ClaimPlots)?,
+        Command::AbilityInstances => with_build_levels(Step::AbilityInstances)?,
+        Command::QuickCourses => with_build_levels(Step::QuickCourses)?,
+        Command::Store => with_build_levels(Step::Store)?,
+        Command::Leaderboards => with_build_levels(Step::Leaderboards)?,
         Command::CaptureCheck { ledgers, names } => {
             let names = match names {
                 Some(names) => TypeNames::load(
@@ -681,7 +903,6 @@ fn run(cli: Cli) -> Result<(), ToolError> {
         }
         Command::MapTiles {
             level,
-            out_dir,
             y_index,
             formats_only,
         } => {
@@ -689,128 +910,47 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             print_map_tiles(&run_map_tiles(
                 &source,
                 &level,
-                &out_dir,
+                &layout.map_dir(),
                 y_index,
                 formats_only,
             )?);
         }
-        Command::CombatCheck {
-            level,
-            bundle,
-            nwdb_dir,
-        } => {
-            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
-            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
+        Command::CombatCheck { level, nwdb_dir } => {
+            let tables = ContentBundle::load(&layout)?.tables;
             let data = CombatData::from_tables(&tables, &CombatRows::default())?;
             drop(tables);
-            let world_path = world_file_path(Path::new(DEFAULT_CONTENT_DIR), &client_build, &level);
-            let world = WorldFile::load(&world_path, &client_build)?;
+            let world = WorldFile::load(&layout, &level)?;
             let nwdb = read_nwdb(&nwdb_dir)?;
             print_combat(
                 &check(&data, &world.vitals, &nwdb.creatures),
                 nwdb.unreadable,
             );
         }
-        Command::MobPrefabs {
-            roots,
-            out,
-            bundle,
-            jobs,
-        } => {
-            let out = out
-                .unwrap_or_else(|| mob_prefabs_path(Path::new(DEFAULT_CONTENT_DIR), &client_build));
-            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
+        Command::MobPrefabs { roots, jobs } => {
             let global_args = [
                 OsString::from("--game-dir"),
                 game_dir(cli.game_dir.as_deref())?.as_os_str().to_owned(),
                 OsString::from("--client-build-config"),
                 cli.client_build_config.into_os_string(),
             ];
-            run_mob_prefabs(&roots, &out, &bundle, &client_build, jobs, &global_args)?;
+            run_mob_prefabs(&roots, &layout, jobs, &global_args)?;
+            record(&layout, &[FileRef::build(MOB_PREFABS)], MADE_BY)?;
         }
-        Command::FtueEntities { ledger, out } => {
-            let out = out.unwrap_or_else(|| {
-                ftue_entities_path(Path::new(DEFAULT_CONTENT_DIR), &client_build)
-            });
+        Command::FtueEntities { ledger } => {
+            let out = layout.file(FTUE_ENTITIES);
             let scan = content_tool::ftue_entities::scan_ledger(&read_ledger(&ledger)?)?;
             write_table(&out, &scan.table)?;
+            record(&layout, &[FileRef::build(FTUE_ENTITIES)], MADE_BY)?;
             print_ftue_entities(&scan, &out);
         }
-        Command::CreatureAnimations { out, bundle } => {
-            let content_dir = Path::new(DEFAULT_CONTENT_DIR);
-            let out = out.unwrap_or_else(|| creature_animations_path(content_dir, &client_build));
-            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
-            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
-            let prefabs = MobPrefabs::load(content_dir, &client_build)
-                .map_err(content_tool::creature_animations::CreatureAnimationsError::from)?;
-            let dir = game_dir(cli.game_dir.as_deref())?;
-            let source = GameSource::open(dir)?;
-            let (rows, report) = build_rows(&source, dir, &prefabs, &tables)?;
-            write_rows(&out, &rows)
-                .map_err(content_tool::creature_animations::CreatureAnimationsError::from)?;
-            print_creature_animations(&report, &out);
-        }
-        Command::AiData {
-            server_pak,
-            out_dir,
-        } => {
-            let creatures = read_creatures(&creature_animations_path(
-                Path::new(DEFAULT_CONTENT_DIR),
-                &client_build,
-            ))?;
-            let dir = game_dir(cli.game_dir.as_deref())?;
-            let source = GameSource::open(dir)?;
-            let (data, report) = build_ai_data(&source, dir, &server_pak, &creatures)?;
-            let path = data.save(&out_dir, &client_build)?;
-            let reloaded = nw_ai::AiData::load(&out_dir, &client_build)?;
-            if reloaded != data {
-                return Err(ToolError::CountMismatch {
-                    what: "AI data nodes",
-                    expected: data.nodes.len(),
-                    found: reloaded.nodes.len(),
-                });
-            }
-            print_ai_data(&report, &path);
-        }
         Command::AiTrace { ledger, out } => {
-            let creatures = read_creatures(&creature_animations_path(
-                Path::new(DEFAULT_CONTENT_DIR),
-                &client_build,
-            ))?;
+            let creatures = read_creatures(&layout.file(CREATURE_ANIMATIONS))?;
             let trace = trace_ledger(&read_ledger(&ledger)?, &creatures);
             write_trace(&out, &trace)?;
             print_ai_trace(&trace, &out);
         }
-        Command::PlayerAttacks { out, bundle } => {
-            let out = out.unwrap_or_else(|| {
-                player_attacks_path(Path::new(DEFAULT_CONTENT_DIR), &client_build)
-            });
-            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
-            let rows = BundleRows::of(&ContentBundle::load(&bundle, &client_build)?.tables);
-            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
-            let (stances, report) = build_stances(&read_sources(&source, &rows)?, &rows);
-            write_stances(&out, &stances)?;
-            print_player_attacks(&report, &out);
-        }
-        Command::PlayerAbilities { out, bundle } => {
-            let out = out.unwrap_or_else(|| {
-                player_abilities_path(Path::new(DEFAULT_CONTENT_DIR), &client_build)
-            });
-            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
-            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
-            let rows = BundleRows::of(&tables);
-            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
-            let (table, report) = build_abilities(&read_sources(&source, &rows)?, &rows, &tables);
-            table.write(&out)?;
-            print_player_abilities(&report, &out);
-        }
-        Command::CatacombCheck {
-            game_mode,
-            runs,
-            bundle,
-        } => {
-            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
-            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
+        Command::CatacombCheck { game_mode, runs } => {
+            let tables = ContentBundle::load(&layout)?.tables;
             let index =
                 PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
             let report = catacomb_check(&tables, &game_mode, runs, |wanted| {
@@ -821,158 +961,15 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             })?;
             print_catacombs(&report);
         }
-        Command::BreachTiers { out_dir, ledgers } => {
+        Command::BreachTiers { ledgers } => {
             let tiers = BreachTiers {
                 tiers: build_breach_tiers(&ledgers)?,
             };
-            let path = tiers.write(&out_dir, &client_build)?;
+            let path = tiers.write(&layout)?;
+            record(&layout, &[FileRef::build(BREACH_TIERS)], MADE_BY)?;
             println!("{}: {} breach places", path.display(), tiers.tiers.len());
         }
-        Command::DungeonScripts { out_dir, bundle } => {
-            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
-            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
-            let index =
-                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
-            print_dungeon_scripts(&build_dungeon_scripts(
-                &index,
-                &tables,
-                &client_build,
-                &out_dir,
-            )?);
-        }
-        Command::DungeonGates { out_dir, bundle } => {
-            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
-            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
-            let index =
-                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
-            print_dungeon_gates(&build_dungeon_gates(
-                &index,
-                &tables,
-                &client_build,
-                &out_dir,
-            )?);
-        }
-        Command::EffectAreas {
-            levels,
-            out_dir,
-            bundle,
-        } => {
-            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
-            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
-            let index =
-                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
-            print_effect_areas(&build_effect_areas(
-                &index,
-                &tables,
-                &levels,
-                &client_build,
-                &out_dir,
-            )?);
-        }
-        Command::LevelDoors { level, out_dir } => {
-            let world = WorldFile::load(
-                &world_file_path(&out_dir, &client_build, &level),
-                &client_build,
-            )?;
-            let index =
-                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
-            print_level_doors(&build_level_doors(
-                &index,
-                &world,
-                &level,
-                &client_build,
-                &out_dir,
-            )?);
-        }
-        Command::MusicCharts { out_dir } => {
-            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
-            let report = build_music_charts(&source, &client_build, &out_dir)?;
-            println!(
-                "{}: {} charts, {} notes",
-                report.path.display(),
-                report.charts,
-                report.notes
-            );
-        }
-        Command::CatacombTiles { out_dir, bundle } => {
-            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
-            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
-            let index =
-                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
-            let report = build_catacomb_tiles(&index, &tables, &client_build, &out_dir)?;
-            println!(
-                "{}: {} tile variations, {} art tiles, {} plain slots, {} encounters, {} power-ups",
-                report.path.display(),
-                report.variations,
-                report.art_tiles,
-                report.props,
-                report.encounters,
-                report.power_ups
-            );
-            println!(
-                "{}: {} art tiles with solids, {} shapes",
-                report.collision_path.display(),
-                report.solid_art_tiles,
-                report.solid_bodies
-            );
-        }
-        Command::CampSlices { out_dir } => {
-            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
-            let report = build_camp_slices(&source, &client_build, &out_dir)?;
-            println!(
-                "{}: {} camps ({} PvP) of {} camp folder slices",
-                report.path.display(),
-                report.camps,
-                report.pvp_camps,
-                report.slices
-            );
-        }
-        Command::ClaimPlots { out_dir } => {
-            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
-            let report = build_claim_plots(&source, &client_build, &out_dir)?;
-            println!(
-                "{}: {} claim plots of {} claim plot folder slices",
-                report.path.display(),
-                report.plots,
-                report.slices
-            );
-        }
-        Command::AbilityInstances { out_dir } => {
-            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
-            let report = build_ability_instances(&source, &client_build, &out_dir)?;
-            println!(
-                "{}: {} typed slices of {} slices, {} limits",
-                report.path.display(),
-                report.typed,
-                report.slices,
-                report.limits
-            );
-        }
-        Command::QuickCourses { out_dir } => {
-            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
-            let report = build_quick_courses(&source, &client_build, &out_dir)?;
-            println!(
-                "{}: {} courses of {} course folder slices",
-                report.path.display(),
-                report.courses,
-                report.slices
-            );
-        }
-        Command::Store { content_dir } => {
-            let report = write_store_table(&content_dir, &client_build)?;
-            println!(
-                "{}: {} store mounts, {} token packs, {} entitlements every account holds",
-                report.path.display(),
-                report.mounts,
-                report.tokens,
-                report.held_by_all
-            );
-        }
-        Command::Leaderboards { content_dir } => {
-            let report = write_leaderboard_table(&content_dir, &client_build)?;
-            println!("{}: {} leaderboards", report.path.display(), report.boards);
-        }
-        Command::RealmPack { action } => run_realm_pack(action, &client_build)?,
+        Command::RealmPack { action } => run_realm_pack(action, &layout)?,
         Command::MobPrefabsLedger { ledger, entry } => {
             let tally = scan_ledger(
                 &LedgerSource {
@@ -990,6 +987,131 @@ fn run(cli: Cli) -> Result<(), ToolError> {
         }
     }
     Ok(())
+}
+
+/// `content build`, `content status` and `content migrate`.
+fn run_content(action: ContentAction, context: &StepContext<'_>) -> Result<(), ToolError> {
+    let layout = context.layout;
+    let options = |rebuild, derived_only, design: PathBuf, server_pak: PathBuf| BuildOptions {
+        rebuild,
+        derived_only,
+        has_game_dir: context.game_dir.is_some(),
+        design_dir: design,
+        server_pak,
+    };
+    match action {
+        ContentAction::Build {
+            rebuild,
+            derived,
+            design,
+            server_pak,
+        } => {
+            let options = options(rebuild, derived, design, server_pak);
+            let context = StepContext {
+                design_dir: &options.design_dir,
+                server_pak: &options.server_pak,
+                ..*context
+            };
+            build_content(
+                layout,
+                &options,
+                |spec| run_recorded(&context, spec.step, &build_levels(spec)),
+                |line| print_build_line(line, layout, &options.server_pak),
+            )?;
+        }
+        ContentAction::Status { design, server_pak } => {
+            let rows = content_status(layout, &options(false, false, design, server_pak))?;
+            let key_width = rows.iter().map(|row| row.key.len()).max().unwrap_or(0);
+            println!("{}:", layout.build_dir().display());
+            for row in rows {
+                println!(
+                    "  {:key_width$}  {:12}  {:8}  {:8}  {}",
+                    row.key,
+                    row.topic,
+                    row.source.label(),
+                    row.state.label(),
+                    row.made_at.as_deref().unwrap_or(NO_TIME)
+                );
+            }
+        }
+        ContentAction::Migrate { dry_run } => {
+            let plan = plan_migration(layout)?;
+            print_migration(&plan);
+            if dry_run {
+                println!("dry run: nothing was moved");
+            } else {
+                let retail_removed = migrate(layout, &plan)?;
+                println!(
+                    "{} files moved into {}{}",
+                    plan.moves.len(),
+                    layout.build_dir().display(),
+                    if retail_removed {
+                        "; the empty old retail folder is removed"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Prints what `content build` did with a step or found of a pack file.
+fn print_build_line(line: &BuildLine, layout: &ContentLayout, server_pak: &Path) {
+    let what = line.what;
+    match &line.outcome {
+        BuildOutcome::Built => println!("{what}: built"),
+        BuildOutcome::Fresh => println!(
+            "{what}: kept, its files are newer than their inputs (--rebuild builds it again)"
+        ),
+        BuildOutcome::NoGameDir => {
+            println!("{what}: kept, it reads the game install and NW_GAME_DIR is not set")
+        }
+        BuildOutcome::NoServerPak => println!(
+            "{what}: skipped: Server.pak not found: get it with a depot download of build {} into {}, then build again",
+            layout.client_build(),
+            server_pak.display()
+        ),
+        BuildOutcome::NoPack(files) => println!(
+            "{what}: skipped, it reads the capture-made {}: install the realm data pack (just realm-data <pack.zip>)",
+            files.join(", ")
+        ),
+        BuildOutcome::PackMissing => println!(
+            "{what}: missing; it is capture-made: install the realm data pack (just realm-data <pack.zip>)"
+        ),
+    }
+}
+
+/// Prints every move of `plan` and the entries it leaves in place.
+fn print_migration(plan: &MigratePlan) {
+    for done in &plan.moves {
+        match &done.kind {
+            MoveKind::Rename => {
+                println!("{} -> {}", done.from.display(), done.to.display());
+            }
+            MoveKind::RemoveDuplicate => println!(
+                "{} removed: {} holds the same bytes",
+                done.from.display(),
+                done.to.display()
+            ),
+            MoveKind::LinkToRetail(retail) => println!(
+                "{} -> {} (equal to its retail file: a hard link to {}; the old file is removed)",
+                done.from.display(),
+                done.to.display(),
+                retail.display()
+            ),
+        }
+    }
+    for path in &plan.left {
+        println!("left in place (no content file): {}", path.display());
+    }
+    for file in &plan.unrecorded {
+        println!(
+            "recorded in the manifest (already in place): {}",
+            file.key()
+        );
+    }
 }
 
 fn print_effect_areas(report: &EffectAreasReport) {
@@ -1215,12 +1337,11 @@ fn print_creature_animations(report: &CreatureAnimationsReport, out: &Path) {
 
 fn run_mob_prefabs(
     roots: &[PathBuf],
-    out: &Path,
-    bundle: &Path,
-    client_build: &str,
+    layout: &ContentLayout,
     jobs: Option<NonZeroUsize>,
     global_args: &[OsString],
 ) -> Result<(), ToolError> {
+    let out = layout.file(MOB_PREFABS);
     let list = find_ledger_sources(roots)?;
     let exe = std::env::current_exe().map_err(|source| MobPrefabsError::Io {
         path: PathBuf::from("content-tool"),
@@ -1240,9 +1361,9 @@ fn run_mob_prefabs(
             Err(error) => failures.push(error.to_string()),
         }
     }
-    let names = vitals_names(&ContentBundle::load(bundle, client_build)?.tables);
+    let names = vitals_names(&ContentBundle::load(layout)?.tables);
     let entries = table.entries(&names);
-    write_entries(out, &entries)?;
+    write_entries(&out, &entries)?;
     let assets: HashSet<&str> = entries.iter().map(|entry| entry.asset.as_str()).collect();
     print_mob_prefabs(&list, &table, &failures);
     println!(
@@ -1387,21 +1508,14 @@ fn print_combat(report: &CombatCheck, unreadable: usize) {
     }
 }
 
-fn run_realm_pack(action: RealmPackAction, client_build: &str) -> Result<(), ToolError> {
+fn run_realm_pack(action: RealmPackAction, layout: &ContentLayout) -> Result<(), ToolError> {
     match action {
         RealmPackAction::Make {
-            content_dir,
             out_dir,
             pack_version,
             source_commit,
         } => {
-            let report = make_pack(
-                &content_dir,
-                &out_dir,
-                client_build,
-                pack_version,
-                &source_commit,
-            )?;
+            let report = make_pack(layout, &out_dir, pack_version, &source_commit)?;
             println!(
                 "{}: {} owner, turret and roster states looked at and set to no one, {} player ids zeroed, {} words in the review report (read it before publishing)",
                 report.zip.display(),
@@ -1410,12 +1524,8 @@ fn run_realm_pack(action: RealmPackAction, client_build: &str) -> Result<(), Too
                 report.review_words
             );
         }
-        RealmPackAction::Install {
-            zip,
-            content_dir,
-            replace,
-        } => {
-            let report = install_pack(&zip, &content_dir, client_build, replace)?;
+        RealmPackAction::Install { zip, replace } => {
+            let report = install_pack(&zip, layout, replace, MADE_BY)?;
             for (table, outcome) in &report.tables {
                 println!("{table}: {outcome:?}");
             }

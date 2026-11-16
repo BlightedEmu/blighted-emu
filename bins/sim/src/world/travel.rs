@@ -4104,7 +4104,7 @@ mod tests {
         }
 
         /// The camp slice of the metalfest skin without PvP (`campskin_metalfest02_a`, its
-        /// members as `camp-slices-25810808.json` has them).
+        /// members as the build 25810808 `open-world/camp-slices.json` has them).
         fn skin_slice() -> CampSlice {
             let pvp = pvp_slice();
             CampSlice {

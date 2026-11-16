@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `creature-animations`: builds the creature animation table (`creature-animations-<build>.json`,
+//! `creature-animations`: builds the creature animation table (`mobs/creature-animations.json`,
 //! read by `nw_content::creature_animations`) from the game paks (creature-animation note,
 //! 2026-09-18).
 //!
@@ -886,8 +886,7 @@ mod capture_check {
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
-    use nw_content::client_build::load_client_build;
-    use nw_content::creature_animations::creature_animations_path;
+    use nw_content::layout::{CREATURE_ANIMATIONS, repo_layout};
     use nw_formats::local_data::game_dir;
     use nw_formats::mannequin::{Node, pak_path, parse_tree};
 
@@ -895,8 +894,6 @@ mod capture_check {
     use crate::ai_trace::{read_creatures, trace_ledger};
     use crate::ftue_entities::read_ledger;
 
-    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
-    const CONTENT_DIR: &str = "local-data/content";
     /// The retail capture of a new character's tutorial and beach (2026-09-18).
     const LEDGER: &str = "local-data/captures/own/newchar-retail-2026-09-18/ledger.bin";
     /// The creature slices with full-body scope entries in it (Observed: boar, aggressive
@@ -989,10 +986,8 @@ mod capture_check {
 
     #[test]
     fn every_retail_entry_names_an_action_that_plays_its_fragment() {
-        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let creatures =
-            read_creatures(&creature_animations_path(&repo().join(CONTENT_DIR), &build))
-                .expect("run `content-tool creature-animations` first");
+        let creatures = read_creatures(&repo_layout().file(CREATURE_ANIMATIONS))
+            .expect("run `content-tool creature-animations` first");
         let trace = trace_ledger(
             &read_ledger(&repo().join(LEDGER)).expect("ledger"),
             &creatures,

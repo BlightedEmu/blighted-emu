@@ -15,17 +15,11 @@
 //! as retail sent them (the most common set and body of its cards). An entrance slice that no
 //! capture shows has no row.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
-const FILE_PREFIX: &str = "dungeon-entrances-";
-const FILE_SUFFIX: &str = ".json";
-
-/// The table file of client build `client_build` in content directory `dir`.
-pub fn dungeon_entrances_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
+use crate::layout::{ContentLayout, DUNGEON_ENTRANCES};
 
 /// A bad table file.
 #[derive(Debug, thiserror::Error)]
@@ -81,13 +75,13 @@ pub struct DungeonEntrances {
 }
 
 impl DungeonEntrances {
-    /// The table of client build `client_build` in content directory `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`DungeonEntrancesError`] when the file cannot be read or is not the table.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, DungeonEntrancesError> {
-        let path = dungeon_entrances_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, DungeonEntrancesError> {
+        let path = layout.file(DUNGEON_ENTRANCES);
         let text = std::fs::read_to_string(&path)
             .map_err(|source| DungeonEntrancesError::Io { path, source })?;
         Self::parse(&text)

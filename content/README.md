@@ -206,8 +206,8 @@ offset = [0.0, 0.0, 0.0]   # optional: from the point the GM picks
 
 An event needs at least one wave. A wave takes `level` 1 to 65 and `count` 1 to 50.
 
-The scripts and events go into `design-<build>.json` beside the merged files. The sims read it
-at start.
+The scripts and events go into `game-data/design.json` of the build folder
+(`local-data/content/<build>/`), beside the merged bundle. The sims read it at start.
 
 ## Checks
 

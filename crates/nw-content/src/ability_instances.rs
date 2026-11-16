@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use nw_formats::objectstream::{Element, lowercase_crc32};
 use serde::{Deserialize, Serialize};
 
+use crate::layout::{ABILITY_INSTANCES, ContentLayout, write_atomic};
 use crate::town_props::ASSET_ID_LEN;
 
 /// `AbilityInstanceComponent` (`{F36CE16E-FFA3-441E-ABA6-0A5F20874347}`, `FUN_14259c500`).
@@ -40,13 +41,6 @@ pub const PLAYER_SLICE: &str = "slices/player.dynamicslice";
 const TYPE_FIELD: &str = "m_type";
 const LIMITS_FIELD: &str = "m_instanceLimits";
 const MAX_FIELD: &str = "m_maxNumInstances";
-const FILE_PREFIX: &str = "ability-instances-";
-const FILE_SUFFIX: &str = ".json";
-
-/// The table file of client build `client_build` in content directory `dir`.
-pub fn ability_instances_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// A slice with an ability instance type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,12 +116,14 @@ fn find<'a>(root: &'a Element, type_id: &[u8; ASSET_ID_LEN]) -> Option<&'a Eleme
 }
 
 impl AbilityInstanceTable {
-    /// Reads `path`; a missing file has no instance types (content from before this file).
+    /// Reads the table of `layout`; a missing file has no instance types (content from before
+    /// this file).
     ///
     /// # Errors
     ///
     /// Returns [`AbilityInstancesError`] when the file cannot be read or is not the table.
-    pub fn load(path: &Path) -> Result<Self, AbilityInstancesError> {
+    pub fn load(layout: &ContentLayout) -> Result<Self, AbilityInstancesError> {
+        let path = &layout.file(ABILITY_INSTANCES);
         match std::fs::read(path) {
             Ok(bytes) => {
                 serde_json::from_slice(&bytes).map_err(|source| AbilityInstancesError::Json {
@@ -154,7 +150,7 @@ impl AbilityInstanceTable {
                 path: path.to_path_buf(),
                 source,
             })?;
-        std::fs::write(path, text).map_err(|source| AbilityInstancesError::Io {
+        write_atomic(path, text.as_bytes()).map_err(|source| AbilityInstancesError::Io {
             path: path.to_path_buf(),
             source,
         })
@@ -272,9 +268,9 @@ mod tests {
 
     #[test]
     fn the_file_round_trips_and_a_missing_one_is_empty() {
-        let dir = std::env::temp_dir().join(format!("ability-instances-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
-        let path = ability_instances_path(&dir, "1");
+        let dir = tempfile::tempdir().expect("dir");
+        let layout = ContentLayout::new(dir.path(), "1");
+        let path = layout.file(ABILITY_INSTANCES);
         let asset = [0x09; ASSET_ID_LEN];
         let table = AbilityInstanceTable {
             limits: [(3, 1)].into_iter().collect(),
@@ -289,13 +285,13 @@ mod tests {
             .collect(),
         };
         table.write(&path).expect("write");
-        let read = AbilityInstanceTable::load(&path).expect("load");
+        let read = AbilityInstanceTable::load(&layout).expect("load");
         assert_eq!(read, table);
         assert_eq!(read.type_of(&asset), Some(3));
         assert_eq!(read.type_of(&[0; ASSET_ID_LEN]), None);
         std::fs::remove_file(&path).expect("remove");
         assert!(
-            AbilityInstanceTable::load(&path)
+            AbilityInstanceTable::load(&layout)
                 .expect("missing")
                 .is_empty()
         );

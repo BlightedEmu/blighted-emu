@@ -4087,19 +4087,12 @@ mod tests {
     #[cfg(feature = "local-data")]
     #[test]
     fn the_hallway_waves_room_spawns_its_retail_waves() {
-        use nw_content::client_build::load_client_build;
-        use nw_world::catacomb_tiles::{CatacombTiles, catacomb_tiles_path};
+        use nw_world::catacomb_tiles::CatacombTiles;
         const WAVES: &str =
             "slices/catacombs/gameplay/hallwaygameplay/dg_enc_catacombs_hallway_waves.dynamicslice";
         const TRANSITION_MS: u64 = 3_000;
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let build =
-            load_client_build(&repo.join("config/client-build.toml")).expect("client build");
-        let tiles = CatacombTiles::load(&catacomb_tiles_path(
-            &repo.join("local-data/content"),
-            &build,
-        ))
-        .expect("catacomb tile file");
+        let tiles =
+            CatacombTiles::load(&nw_content::layout::repo_layout()).expect("catacomb tile file");
         let encounter = tiles
             .by_variation
             .values()
@@ -4367,9 +4360,9 @@ mod tests {
     #[cfg(feature = "local-data")]
     #[test]
     fn the_trigger_chains_hold_their_retail_sources_in_the_content_files() {
-        use nw_content::client_build::load_client_build;
-        use nw_content::town_props::{TownProps, encounter_objects_path};
-        use nw_world::dungeon_scripts::{DungeonScripts, dungeon_scripts_path};
+        use nw_content::layout::{ENCOUNTER_OBJECTS, repo_layout};
+        use nw_content::town_props::TownProps;
+        use nw_world::dungeon_scripts::DungeonScripts;
         const CLOSET: &str = "/dungeon_reekwater_monster_closet_skeleton_randomizer.dynamicslice";
         const DEACTIVATOR: &str = "/dungeon_reekwater_deactivate_closet.dynamicslice";
         const SHIELD: &str = "/io_worldevent_1624_diskatumshield.dynamicslice";
@@ -4388,12 +4381,8 @@ mod tests {
             "slices/worldevents/reekwater/interact/powderkegb/io_worldevent_0511_powderkegb_01.dynamicslice",
             "slices/worldevents/brimstonesands/interact/io_worldevent_1624_diskatumshield.dynamicslice",
         ];
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let build =
-            load_client_build(&repo.join("config/client-build.toml")).expect("client build");
-        let content = repo.join("local-data/content");
-        let scripts = DungeonScripts::load(&dungeon_scripts_path(&content, &build))
-            .expect("dungeon scripts file");
+        let layout = repo_layout();
+        let scripts = DungeonScripts::load(&layout).expect("dungeon scripts file");
         let slices_of = |path: &str| -> Vec<TargetSlice> {
             scripts
                 .game_modes
@@ -4433,7 +4422,7 @@ mod tests {
             assert!((shield.gather_mobs[0].delay_s - FIRST_CLIP_S).abs() < 1e-3);
         }
         let objects = EncounterObjects::build(
-            &TownProps::load_file(encounter_objects_path(&content, &build)).expect("objects table"),
+            &TownProps::load(&layout, ENCOUNTER_OBJECTS).expect("objects table"),
         );
         for slice in START_OBJECTS {
             assert!(objects.is_kind(slice), "{slice} stands as a start object");
@@ -4450,8 +4439,7 @@ mod tests {
     #[cfg(feature = "local-data")]
     #[test]
     fn the_open_world_scripts_keep_the_retail_spawn_counts_and_comebacks() {
-        use nw_content::client_build::load_client_build;
-        use nw_world::dungeon_scripts::{DungeonScripts, dungeon_scripts_path};
+        use nw_world::dungeon_scripts::DungeonScripts;
         const OPEN_WORLD: &str = "newworld_vitaeeterna";
         const HIVE_SUSTAIN: &str = "/darkness_ai_minor_hive_sustain_00.dynamicslice";
         const GROVE_SUSTAIN: &str = "/darkness_ai_swarmers_sustain_00.dynamicslice";
@@ -4460,12 +4448,9 @@ mod tests {
         const HIVE_RESPAWN_S: f32 = 7.0;
         const GROVE_LIVE: u32 = 3;
         const HOLDOUT_LIVE: u32 = 3;
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let build =
-            load_client_build(&repo.join("config/client-build.toml")).expect("client build");
         let scripts =
-            DungeonScripts::load(&dungeon_scripts_path(&repo.join("local-data/content"), &build))
-                .expect("dungeon scripts file");
+            DungeonScripts::load(&nw_content::layout::repo_layout()).expect("dungeon scripts file");
+
         let slices_of = |level: Option<&str>, path: &str| -> Vec<TargetSlice> {
             scripts
                 .game_modes

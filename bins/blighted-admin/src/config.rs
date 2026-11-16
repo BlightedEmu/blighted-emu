@@ -168,10 +168,9 @@ impl AccessConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StudioConfig {
-    /// The design files (`content/`).
+    /// The design files (`content/`). The retail files and the merged files are those of the
+    /// content folder (`content_dir`).
     pub design_dir: PathBuf,
-    /// The retail bundle and world files from `content-tool build` and `world`.
-    pub retail_dir: PathBuf,
     /// The control FIFO of `scripts/live-stack.sh`.
     pub control_fifo: PathBuf,
     /// Longest wait for every sim to start again after Apply restarts them.
@@ -440,7 +439,6 @@ mod tests {
             load_admin_config(&repo_root().join("config/blighted-admin.toml")).expect("load");
         let studio = config.studio.expect("studio section");
         assert_eq!(studio.design_dir, Path::new("content"));
-        assert_eq!(studio.retail_dir, Path::new("local-data/content/retail"));
         assert_eq!(
             studio.control_fifo,
             Path::new("local-data/logs/live/control")

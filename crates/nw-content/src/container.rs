@@ -202,16 +202,13 @@ pub fn decode_value<T: DeserializeOwned>(
     Ok(value)
 }
 
-/// Writes `bytes` to `path`, creating parent folders.
+/// Writes `bytes` to `path` as one step ([`crate::layout::write_atomic`]), creating parent
+/// folders.
 pub fn write_file(path: &Path, bytes: &[u8]) -> Result<(), ContainerError> {
-    let io_error = |source| ContainerError::Io {
+    crate::layout::write_atomic(path, bytes).map_err(|source| ContainerError::Io {
         path: path.to_path_buf(),
         source,
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(io_error)?;
-    }
-    std::fs::write(path, bytes).map_err(io_error)
+    })
 }
 
 /// Reads the whole file at `path`.

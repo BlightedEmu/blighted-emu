@@ -393,14 +393,17 @@ mod tests {
             std::fs::create_dir_all(&design_dir).expect("dir");
             let config = StudioConfig {
                 design_dir,
-                retail_dir: root.path().join("retail"),
                 control_fifo: root.path().join("control"),
                 restart_timeout_s: 1,
                 github_api_url: GITHUB_API_URL.to_owned(),
                 github_token_env: None,
             };
-            let studio =
-                Studio::new(&config, root.path().join("out"), BUILD, None).expect("studio");
+            let studio = Studio::new(
+                &config,
+                nw_content::layout::ContentLayout::new(root.path().join("local-data"), BUILD),
+                None,
+            )
+            .expect("studio");
             Self { root, studio }
         }
 

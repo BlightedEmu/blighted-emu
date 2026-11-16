@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use nw_common::logging::{LoggingError, init_logging};
 use nw_content::client_build::load_client_build;
+use nw_content::layout::ContentLayout;
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
@@ -40,7 +41,6 @@ use crate::server::{AppState, router};
 use crate::shapes::LevelShapes;
 use crate::studio::{LoadWorld, Studio};
 use crate::world::{WorldLayer, WorldLayerError, map_dir};
-use nw_world::collision::collision_file_path;
 
 /// Environment variable that names the New World install folder (for `typeindex.json`).
 pub const GAME_DIR_ENV: &str = "NW_GAME_DIR";
@@ -63,6 +63,9 @@ pub enum RunError {
     /// The world layer cannot be loaded.
     #[error(transparent)]
     World(#[from] WorldLayerError),
+    /// The content folder does not open (its manifest names another build).
+    #[error(transparent)]
+    Content(#[from] nw_content::layout::LayoutError),
     /// The runtime, the listener or the server failed.
     #[error("server failed")]
     Io(#[source] std::io::Error),
@@ -111,9 +114,10 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         Front::Local(_) | Front::Https(..) => Captures::load(&config.captures, game_dir.as_deref()),
     };
     let origin = origin_of(front);
-    let map = map_dir(&config);
     let client_build =
         load_client_build(&config.client_build_config).map_err(RunError::ClientBuild)?;
+    let layout = ContentLayout::open(&config.content_dir, &client_build)?;
+    let map = map_dir(&layout, &config.level);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -123,23 +127,15 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
             let (close, closing) = watch::channel(false);
             let live = config.live.as_ref().map(|live| live::start(live, closing));
             let live_state = live.as_ref().map(|live| live.state().clone());
-            let state =
-                AppState::new(world, map, origin, captures, live).with_shapes(LevelShapes::new(
-                    collision_file_path(&config.content_dir, &client_build, &config.level),
-                    client_build.clone(),
-                ));
+            let state = AppState::new(world, map, origin, captures, live)
+                .with_shapes(LevelShapes::new(layout.clone(), config.level.clone()));
             let reload_config = Arc::new(config.clone());
             let load_world: LoadWorld = Arc::new(move || {
                 WorldLayer::load(&reload_config).map_err(|error| error.to_string())
             });
             let studio = config.studio.as_ref().map(|studio| {
-                Studio::new(
-                    studio,
-                    config.content_dir.clone(),
-                    &client_build,
-                    live_state,
-                )
-                .map(|studio| studio.with_world_reload(state.world.clone(), load_world))
+                Studio::new(studio, layout, live_state)
+                    .map(|studio| studio.with_world_reload(state.world.clone(), load_world))
             });
             let studio = studio.transpose().map_err(RunError::Studio)?;
             let state = match studio {

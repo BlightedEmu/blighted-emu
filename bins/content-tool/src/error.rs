@@ -158,6 +158,33 @@ pub enum ToolError {
     /// The command reads the game install, and none was given.
     #[error("this command reads the game install: set NW_GAME_DIR or pass --game-dir")]
     MissingGameDir,
+    /// A step of `content build` reads the game install, its files are missing, and no install
+    /// was given.
+    #[error(
+        "content build: `{step}` reads the game install and its files are missing: set NW_GAME_DIR or pass --game-dir"
+    )]
+    StepNeedsGameDir {
+        /// The step's command.
+        step: &'static str,
+    },
+    /// The content folder does not open, or its manifest cannot be read or written.
+    #[error(transparent)]
+    Layout(#[from] nw_content::layout::LayoutError),
+    /// A file of the content folder cannot be read, moved or linked.
+    #[error("{path}: {source}")]
+    ContentIo {
+        /// The file or folder.
+        path: std::path::PathBuf,
+        /// Why.
+        source: std::io::Error,
+    },
+    /// `content migrate` would move a file onto one that exists.
+    #[error("content migrate: {path} exists already; nothing was moved")]
+    MigrateTargetExists {
+        /// The layout path that is taken.
+        path: std::path::PathBuf,
+    },
+
     /// The capture check found decode failures.
     #[error("capture check found {count} decode failures")]
     CaptureFailures {

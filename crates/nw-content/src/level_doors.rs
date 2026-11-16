@@ -21,14 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-const FILE_PREFIX: &str = "level-doors-";
-const FILE_SUFFIX: &str = ".json";
-
-/// The level doors file of client build `client_build` and level `level` in content directory
-/// `dir`.
-pub fn level_doors_path(dir: &Path, client_build: &str, level: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}-{level}{FILE_SUFFIX}"))
-}
+use crate::layout::{ContentLayout, LEVEL_DOORS, write_atomic};
 
 /// A bad level doors file.
 #[derive(Debug, thiserror::Error)]
@@ -110,13 +103,13 @@ pub struct LevelDoors {
 }
 
 impl LevelDoors {
-    /// The file of client build `client_build` and level `level` in content directory `dir`.
+    /// The file of level `level` of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`LevelDoorsError`] when the file cannot be read or is not the table.
-    pub fn load(dir: &Path, client_build: &str, level: &str) -> Result<Self, LevelDoorsError> {
-        let path = level_doors_path(dir, client_build, level);
+    pub fn load(layout: &ContentLayout, level: &str) -> Result<Self, LevelDoorsError> {
+        let path = layout.level_file(LEVEL_DOORS, level);
         let text = std::fs::read_to_string(&path)
             .map_err(|source| LevelDoorsError::Io { path, source })?;
         Self::parse(&text)
@@ -137,7 +130,7 @@ impl LevelDoors {
     ///
     /// Returns [`LevelDoorsError`] when the file cannot be written.
     pub fn write(&self, path: &Path) -> Result<(), LevelDoorsError> {
-        std::fs::write(path, serde_json::to_string_pretty(self)?).map_err(|source| {
+        write_atomic(path, serde_json::to_string_pretty(self)?.as_bytes()).map_err(|source| {
             LevelDoorsError::Io {
                 path: path.to_owned(),
                 source,
@@ -199,12 +192,11 @@ mod tests {
     #[test]
     fn a_written_file_reads_back_the_same() {
         let doors = LevelDoors::parse(DOORS).expect("parse");
-        let dir = std::env::temp_dir().join(format!("nw-level-doors-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
-        let path = level_doors_path(&dir, "1", "newworld_vitaeeterna");
+        let dir = tempfile::tempdir().expect("dir");
+        let layout = ContentLayout::new(dir.path(), "1");
+        let path = layout.level_file(LEVEL_DOORS, "newworld_vitaeeterna");
         doors.write(&path).expect("write");
-        let read = LevelDoors::load(&dir, "1", "newworld_vitaeeterna").expect("load");
-        std::fs::remove_dir_all(&dir).expect("clean");
+        let read = LevelDoors::load(&layout, "newworld_vitaeeterna").expect("load");
         assert_eq!(read, doors);
     }
 
@@ -212,7 +204,7 @@ mod tests {
     fn a_missing_file_is_an_io_error() {
         let dir = std::env::temp_dir().join("nw-level-doors-none");
         assert!(matches!(
-            LevelDoors::load(&dir, "1", "nowhere"),
+            LevelDoors::load(&ContentLayout::new(dir, "1"), "nowhere"),
             Err(LevelDoorsError::Io { .. })
         ));
     }

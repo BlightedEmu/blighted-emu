@@ -4397,19 +4397,14 @@ mod tests {
         );
     }
 
-    /// The pinned client build of the content in `NW_CONTENT_DIR`.
-    const CONTENT_BUILD: &str = "25810808";
-
-    /// `data` with the attack and sequence tables of the content in `NW_CONTENT_DIR`.
+    /// `data` with the attack and sequence tables of the repository's content layout.
     fn with_built_tables(data: CombatData) -> CombatData {
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let dir = std::path::Path::new(&dir);
+        let layout = nw_content::layout::repo_layout();
         data.with_player_attacks(
-            nw_content::player_attacks::PlayerAttacks::load(dir, CONTENT_BUILD)
-                .expect("player attack table"),
+            nw_content::player_attacks::PlayerAttacks::load(&layout).expect("player attack table"),
         )
         .with_player_sequences(
-            nw_content::player_sequences::PlayerSequences::load(dir, CONTENT_BUILD)
+            nw_content::player_sequences::PlayerSequences::load(&layout)
                 .expect("player sequence table"),
         )
     }

@@ -236,8 +236,12 @@ pub struct RemoteConfigConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShopConfig {
-    /// The store table file; no file, or none set, gives an empty store.
-    pub store_table: Option<PathBuf>,
+    /// The content folder whose build folder holds the store table (`services/store.json`); no
+    /// table, or no folder set, gives an empty store.
+    pub content_dir: Option<PathBuf>,
+    /// The file with the pinned client build, which names the build folder of the store table.
+    #[serde(default = "default_client_build_config")]
+    pub client_build_config: PathBuf,
     /// Whether the store sells. Off, the catalog is empty and purchases are refused; the mounts an
     /// account got stay its own.
     #[serde(default = "switched_on")]
@@ -258,6 +262,12 @@ pub struct ShopConfig {
 
 /// The retail price of most store mounts, in Marks of Fortune.
 pub const DEFAULT_MOUNT_PRICE: u32 = 20_000;
+/// The file with the pinned client build, from the repository folder.
+pub const DEFAULT_CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
+
+fn default_client_build_config() -> PathBuf {
+    PathBuf::from(DEFAULT_CLIENT_BUILD_CONFIG)
+}
 
 const fn switched_on() -> bool {
     true
@@ -270,7 +280,8 @@ const fn default_mount_price() -> u32 {
 impl Default for ShopConfig {
     fn default() -> Self {
         Self {
-            store_table: None,
+            content_dir: None,
+            client_build_config: default_client_build_config(),
             enabled: switched_on(),
             free: switched_on(),
             mount_price: DEFAULT_MOUNT_PRICE,

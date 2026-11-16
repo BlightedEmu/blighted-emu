@@ -71,24 +71,40 @@ test-local:
 codegen:
     cargo run -p content-tool -- codegen
 
-# Build the retail content bundle into local-data/content/retail/ from your install.
+# Build every content file into local-data/content/<build>/ in order (README, "Content data"),
+# keeping the fresh ones: `just content --rebuild` builds all again. Set NW_GAME_DIR first.
+[positional-arguments]
+content *args:
+    cargo run --release -p content-tool -- content build "$@"
+
+# Print every content file with its topic, source, state (ok, old, missing) and when it was made.
+content-status:
+    cargo run --release -p content-tool -- content status
+
+# Move an old flat local-data/content folder into the layout (renames and hard links only):
+# `just content-migrate --dry-run` prints the moves only.
+[positional-arguments]
+content-migrate *args:
+    cargo run --release -p content-tool -- content migrate "$@"
+
+# Build the retail content bundle into local-data/content/<build>/retail/ from your install.
 bundle:
     cargo run -p content-tool -- build
 
-# Build one retail world file per level into local-data/content/retail/ from your install. Run
-# `just bundle` first.
+# Build one retail world file per level into local-data/content/<build>/retail/levels/ from your
+# install. Run `just bundle` first.
 world:
     cargo run -p content-tool -- world
 
 # Merge the design files of content/ over the retail files and write the bundle and world files
-# the servers read into local-data/content/. Run `just bundle` and `just world` first.
+# the servers read into local-data/content/<build>/. Run `just bundle` and `just world` first.
 design:
     cargo run --release -p content-tool -- design
 
 # Build the level collision files the sims read (the tutorial and the open world) into
-# local-data/content/ from your install.
+# local-data/content/<build>/levels/ from your install.
 collision:
-    cargo run --release -p content-tool -- collision ftue_v2 newworld_vitaeeterna
+    cargo run --release -p content-tool -- collision
 
 # Check the design files of content/ against the retail files; writes nothing.
 check-design:

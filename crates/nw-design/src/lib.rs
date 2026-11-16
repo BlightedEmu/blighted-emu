@@ -20,7 +20,7 @@ pub use edit::{
 };
 pub use error::{DesignError, Problem};
 pub use file::{Action, DesignFile, DesignSet, Kind, struct_fields};
-pub use load::{DESIGN_SCHEMA, TODO_FILE, file_version, load_dir, parse_file};
+pub use load::{DESIGN_SCHEMA, TODO_FILE, design_files, file_version, load_dir, parse_file};
 pub use points::apply_world;
 pub use records::{ClientRecord, client_records, record_field_names};
 pub use rows::{DESIGN_SOURCE_PREFIX, apply_tables};

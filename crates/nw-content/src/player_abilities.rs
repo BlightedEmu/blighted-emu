@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The player ability table (`player-abilities-<build>.json`, written by `content-tool
+//! The player ability table (`combat/player-abilities.json`, written by `content-tool
 //! player-abilities`, read here): for each ability list of the player grid, the weapon classes it
 //! is on for, every action of the list, the fragments they play, and the cooldown, mana and spell
 //! rows they name (abilities design note, 2026-10-31).
@@ -17,15 +17,8 @@ use nw_formats::mannequin::{AbilityUse, CageWorld, CastKind, ChargeTake, Conditi
 use serde::{Deserialize, Serialize};
 
 use crate::generated::SpellData;
+use crate::layout::{ContentLayout, PLAYER_ABILITIES, write_atomic};
 use crate::player_attacks::{BasicAttack, Flight};
-
-const FILE_PREFIX: &str = "player-abilities-";
-const FILE_SUFFIX: &str = ".json";
-
-/// The path of the table of `client_build` in `dir`.
-pub fn player_abilities_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// A bad table file.
 #[derive(Debug, thiserror::Error)]
@@ -376,13 +369,13 @@ pub struct PlayerAbilities {
 }
 
 impl PlayerAbilities {
-    /// Loads the table of `client_build` from `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`PlayerAbilitiesError`] when the file is missing or bad.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, PlayerAbilitiesError> {
-        let path = player_abilities_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, PlayerAbilitiesError> {
+        let path = layout.file(PLAYER_ABILITIES);
         let text = std::fs::read_to_string(&path)
             .map_err(|source| PlayerAbilitiesError::Io { path, source })?;
         Ok(serde_json::from_str(&text)?)
@@ -401,7 +394,7 @@ impl PlayerAbilities {
         if let Some(folder) = path.parent() {
             std::fs::create_dir_all(folder).map_err(io)?;
         }
-        std::fs::write(path, serde_json::to_vec_pretty(self)?).map_err(io)
+        write_atomic(path, &serde_json::to_vec_pretty(self)?).map_err(io)
     }
 
     /// The input action names whose numbers `on` holds.
@@ -616,11 +609,9 @@ mod tests {
         // Before `nw_formats::mannequin::AnimClip::chained_end` both lasted 0 ms, and every
         // marker and transition of them ended at 0. Retail length: Unknown (no capture tells
         // these fragments' ends apart from the ability's later states).
-        const BUILD: &str = "25810808";
         const CLAW_SHOT: (&str, u64) = ("Ability_Blunderbuss_ClawShot_Hit_Confirm", 333);
         const SANDWORM: (&str, u64) = ("Ability_Rune_Sandworm_Cast", 1_167);
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let table = PlayerAbilities::load(Path::new(&dir), BUILD).expect("table");
+        let table = PlayerAbilities::load(&crate::layout::repo_layout()).expect("table");
         for (name, length_ms) in [CLAW_SHOT, SANDWORM] {
             let fragment = table
                 .lists
@@ -654,7 +645,6 @@ mod tests {
         // (the tags `Musket_ShootersStance_Ready` sets) plays `rifle_crch_aim_idle` to an empty
         // clip at 0.8 s, sets `ForceReload` from 0.633 s and goes back to
         // `Ability_Musket_ShootersStance_Aim` from 0.667 s. Before, each was 0 ms long.
-        const BUILD: &str = "25810808";
         const LOOPS: [(&str, u64); 4] = [
             ("Bow_Aim_UpperBody", 0),
             ("Ability_VoidGauntlet_Harvest", 0),
@@ -670,8 +660,7 @@ mod tests {
         const FORCE_RELOAD: (&str, u64) = ("ForceReload", 633);
         // The action of the list that plays `Ability_Musket_ShootersStance_Aim`.
         const BACK_TO_AIM: (&str, u64) = ("Musket_ShootersStance_Aim_SubState", 667);
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let table = PlayerAbilities::load(Path::new(&dir), BUILD).expect("table");
+        let table = PlayerAbilities::load(&crate::layout::repo_layout()).expect("table");
         let fragment = |name: &str| {
             table
                 .lists

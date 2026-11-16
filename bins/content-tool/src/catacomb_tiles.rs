@@ -9,16 +9,17 @@
 //! its tile's frame ([`build_slices_collision`]), which the sim places with the run's tiles.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nw_content::Tables;
 use nw_content::catacombs::CatacombRules;
 use nw_content::instances::{CATACOMBS_GAME_MODE, InstanceCatalog};
+use nw_content::layout::{CATACOMB_LEVEL, CATACOMB_TILES, ContentLayout};
 use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, slice_assets_in};
 use nw_formats::objectstream::Element;
 use nw_world::catacomb_tiles::{
     CatacombTile, CatacombTiles, CatacombTilesError, POWER_UP_FOLDER, TileEncounter, TilePiece,
-    catacomb_tiles_path, root_position, tile_pictures, variation_slice,
+    root_position, tile_pictures, variation_slice,
 };
 use nw_world::dungeon_scripts::Encounter;
 use nw_world::level_script::{Transform, slice_script};
@@ -136,9 +137,9 @@ fn tile_pictures_of(tables: &Tables) -> Result<BTreeMap<String, u8>, CatacombTil
     )
 }
 
-/// Writes the catacombs tile file of `client_build` into `out_dir` from the paks of `index`,
+/// Writes the catacombs tile file of `layout` from the paks of `index`,
 /// for the tile variations of the catacombs rules of `tables`; the mobs of the encounters come
-/// from the tables and the mob prefab file in `out_dir`.
+/// from the tables and the mob prefab file of `layout`.
 ///
 /// # Errors
 ///
@@ -147,8 +148,7 @@ fn tile_pictures_of(tables: &Tables) -> Result<BTreeMap<String, u8>, CatacombTil
 pub fn build_catacomb_tiles(
     index: &PakIndex,
     tables: &Tables,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<CatacombTilesReport, ToolError> {
     let rules = CatacombRules::for_game_mode(tables, CATACOMBS_GAME_MODE)?;
     let variations: BTreeMap<String, String> = rules
@@ -170,7 +170,7 @@ pub fn build_catacomb_tiles(
     // `slices/interactobjects/checkpoint/interactobject_checkpoint_catacombs`).
     let assets = slice_assets_in(&catalog, SLICES_FOLDER).map_err(WorldBuildError::from)?;
     let asset_of = |path: &str| assets.get(path).map(|(guid, _)| *guid);
-    let tables_of_mobs = mob_tables(tables, out_dir, client_build);
+    let tables_of_mobs = mob_tables(tables, layout);
     let mobs = tables_of_mobs.sources();
     let mut slices = PakSlices::new(index);
     let mut report = DungeonScriptsReport::default();
@@ -251,14 +251,24 @@ pub fn build_catacomb_tiles(
         by_variation,
         power_ups,
     };
-    let path = catacomb_tiles_path(out_dir, client_build);
+    let path = layout.file(CATACOMB_TILES);
     table.write(&path)?;
-    let level = InstanceCatalog::from_tables(tables)
+    let map = InstanceCatalog::from_tables(tables)
         .by_id(CATACOMBS_GAME_MODE)
         .map(|mode| mode.map.folder.clone())
         .ok_or_else(|| CatacombTilesError::NoLevel {
             game_mode: CATACOMBS_GAME_MODE.to_owned(),
         })?;
+    // The collision file goes where the registry names it, so the manifest key and the sims
+    // agree with it.
+    if map != CATACOMB_LEVEL {
+        return Err(CatacombTilesError::OtherLevel {
+            game_mode: CATACOMBS_GAME_MODE.to_owned(),
+            map,
+            level: CATACOMB_LEVEL.to_owned(),
+        }
+        .into());
+    }
     let art_keys: Vec<AssetKey> = table
         .by_variation
         .values()
@@ -266,7 +276,7 @@ pub fn build_catacomb_tiles(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let collision = build_slices_collision(index, &level, &art_keys, client_build, out_dir)?;
+    let collision = build_slices_collision(index, CATACOMB_LEVEL, &art_keys, layout)?;
     Ok(CatacombTilesReport {
         path,
         variations: table.by_variation.len(),

@@ -58,11 +58,14 @@ just infra-test
 | `just test-infra` | Tests that need PostgreSQL, Valkey and NATS, with the login, gateway and world walk (run `just infra-up` first) |
 | `just test-local` | Tests that read your New World install (`NW_GAME_DIR`) |
 | `just codegen` | Regenerates the table structs in `crates/nw-content/src/generated` |
-| `just bundle` | Builds the retail content bundle into `local-data/content/retail/` |
-| `just world` | Builds one retail world file per level into `local-data/content/retail/` (run `just bundle` first) |
-| `just design` | Merges the design files of `content/` over the retail files into `local-data/content/` (run `just bundle` and `just world` first) |
+| `just content` | Builds every content file into `local-data/content/<build>/` in order and keeps the fresh ones (`--rebuild` builds all again; see "Content data") |
+| `just content-status` | Prints every content file with its topic, source, state and build time |
+| `just content-migrate` | Moves an old flat `local-data/content/` folder into the layout (`--dry-run` prints the moves only) |
+| `just bundle` | Builds the retail content bundle into `local-data/content/<build>/retail/` |
+| `just world` | Builds one retail world file per level into `local-data/content/<build>/retail/levels/` (run `just bundle` first) |
+| `just design` | Merges the design files of `content/` over the retail files into `local-data/content/<build>/` (run `just bundle` and `just world` first) |
 | `just check-design` | Checks the design files against the retail files; writes nothing |
-| `just collision` | Builds the collision files of the tutorial and the open world into `local-data/content/` |
+| `just collision` | Builds the collision files of the tutorial and the open world into `local-data/content/<build>/levels/` |
 | `just realm-data <pack.zip>` | Installs the realm data pack and builds the tables made from it (see "Realm data pack") |
 | `just live <sims>` | Starts a local test world and the live panel (see "Live panel") |
 | `just capture-check` | Decodes every capture ledger under `local-data/captures/` and prints counts |
@@ -74,58 +77,69 @@ The server reads game rules from your own New World install. Nothing from the ga
 
 ```bash
 export NW_GAME_DIR="/path/to/steamapps/common/New World"
-just bundle
-just world
-just design
-just collision
+just content
+just content-status
 ```
 
-`just bundle` writes the retail bundle `local-data/content/retail/bundle-<build>.bin`, then reloads it and checks every table and row. The pinned client build is in `config/client-build.toml`.
+`just content` runs every step of `content-tool` in order (`content-tool content build`). A file that exists, is in the manifest and is newer than all its inputs is kept, so a second run builds only what changed. `--rebuild` builds every file again. A step that reads the install is skipped with a line when `NW_GAME_DIR` is not set and its files exist, and stops the build when they are missing. The capture-made files are never built: when one is missing, the build names it and skips the steps that read it (install the realm data pack, below). `just content-status` (`content-tool content status`) prints every file with its topic, source, state (`ok`, `old` or `missing`) and build time.
 
-`just world` writes the retail world files `local-data/content/retail/world-<build>-<level>.bin` for each of the 41 levels (about 700 MB in all), reloads each file, and prints the record counts, the skipped metadata fields, and the spawn IDs that no datasheet row has. The gather points of a level come from its region metadata and from the trees, bushes and stones that its regions' plant files (`region.distribution`) place: each plant takes the gatherable that its variant names in the slice's variation table, or else the slice's own. The open world has about 2.5 million of these plant nodes.
+The content folder (`content_dir` in the configs, `--content-dir` of `content-tool`) holds one folder per client build: `local-data/content/<build>/`, the build of `config/client-build.toml`. In it, each file has a topic folder, and the file names hold no build number. `manifest.json` holds the build and, for each file, its source, the `content-tool` commit that made it (with `-dirty` for a build with changes that are not committed), when, the files it was made from, and its size and file time. A file that is written again with the same bytes keeps its time, so the files made from it stay fresh. A file whose size or file time differs from its manifest entry counts as changed (a copy back from a backup), and so do the design files of the design step when one is added, changed or removed. A program that opens the folder refuses a manifest of another build, and reads a manifest of a newer `content-tool`. `README.md` of the build folder lists the folders and the capture-made files. `manifest.lock` is the lock of the manifest: a copy of the build folder to another machine leaves it out (`rsync -a --exclude manifest.lock`); `rsync -t` and `cp -a` keep the file times, so the copy stays fresh. The admin map tiles stay in `local-data/content/map/`. Every file is written under a temporary name and renamed, so a reader never sees half a file. One list in `nw-content` (`nw_content::layout`) names every file, its folder, its source and the step that makes it; the table below and the build order come from it.
 
-`just design` reads the retail files, merges the team's design files from `content/` over them (see [content/README.md](content/README.md)), and writes `local-data/content/bundle-<build>.bin`, `local-data/content/world-<build>-<level>.bin` and `local-data/content/design-<build>.json`. The servers and the admin tools read these files. It does not read the game install. With no design files, the merged files are equal to the retail files. When a design file has a problem, it prints each one and writes nothing.
+`just bundle` (`content-tool build`) writes the retail bundle `retail/bundle.bin`, then reloads it and checks every table and row.
 
-`just collision` writes the level collision files `local-data/content/collision-<build>-<level>.bin` of the tutorial and the open world (about 145 MB in all). A collision file holds the solid shapes of the placed slices of a level, read from the game's physics assets (`.rnr`). It includes the variant capitals as their variation data shows them, and the slices that encounters spawn later. The sims stand the players and mobs on these shapes. A sim does not start without the collision file of its level. See `docs/re/2026-09-20-level-collision.md`.
+`just world` (`content-tool world`) writes the retail world files `retail/levels/<level>/world.bin` for each of the 41 levels (about 700 MB in all), reloads each file, and prints the record counts, the skipped metadata fields, and the spawn IDs that no datasheet row has. The gather points of a level come from its region metadata and from the trees, bushes and stones that its regions' plant files (`region.distribution`) place: each plant takes the gatherable that its variant names in the slice's variation table, or else the slice's own. The open world has about 2.5 million of these plant nodes.
 
-A sim needs only the bundle, the world file and the collision file of its level. It also reads the files below from `content_dir` when they exist. When one is missing, the sim logs a warning and runs without that part.
+`just design` reads the retail files, merges the team's design files from `content/` over them (see [content/README.md](content/README.md)), and writes `game-data/bundle.bin`, `levels/<level>/world.bin` and `game-data/design.json`. The servers and the admin tools read these files. It does not read the game install. A merged file that equals its retail file (a level that no design file changes, and the bundle when no design file changes a table) is a hard link to the retail file, so it takes no room twice. When a design file has a problem, it prints each one and writes nothing.
 
-| File | Made by | Without it |
-|---|---|---|
-| `roads-<build>-<level>.bin` | `cargo run --release -p content-tool -- roads [levels]` (default `newworld_vitaeeterna`) | No road sprint boost |
-| `water-<build>-<level>.bin` | `cargo run --release -p content-tool -- water [levels]` (default `ftue_v2` and `newworld_vitaeeterna`) | The sea level is the only water |
-| `player-attacks-<build>.json` | `cargo run --release -p content-tool -- player-attacks` | Players cannot attack |
-| `player-abilities-<build>.json` | `cargo run --release -p content-tool -- player-abilities` | Players cannot use abilities |
-| `player-sequences-<build>.json` | The realm data pack (`just realm-data`), or: No tool. It was mined from capture ledgers. A copy of the table of the pinned build is `bins/sim/src/world/testdata/player-sequences-25810808.json` | The server starts no attack, block, aim, dodge or jump |
-| `mob-prefabs-<build>.json` | The realm data pack (`just realm-data`), or: `cargo run --release -p content-tool -- mob-prefabs [folders]` (reads the ledgers in `local-data/captures` and `local-data/open world captures`) | Mobs are not shown to clients |
-| `creature-animations-<build>.json` | `cargo run --release -p content-tool -- creature-animations` (needs the mob prefab table) | Mobs move without animations |
-| `ai-data-<build>.bin` | `cargo run --release -p content-tool -- ai-data` (reads `local-data/server-pak/Server.pak`; needs the creature animation table) | Every mob stands at its spawn |
-| `ftue-entities-<build>.json` | The realm data pack (`just realm-data`), or: `cargo run --release -p content-tool -- ftue-entities <ledger.bin>` (a capture of a new character's tutorial) | The tutorial's level entities are not sent |
-| `dungeon-scripts-<build>.json` | `cargo run --release -p content-tool -- dungeon-scripts` (reads `breach-tiers-<build>.json` from `content-tool breach-tiers`) | Instances run without encounters |
-| `dungeon-gates-<build>.json` | `cargo run --release -p content-tool -- dungeon-gates` | An instance shows no gate or door |
-| `dungeon-gate-rules-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`gaterules.py` of the capture tools) | Every gate is open from the start |
-| `catacomb-tiles-<build>.json` | `cargo run --release -p content-tool -- catacomb-tiles` (needs the mob prefab table) | A catacombs run has no tile entities |
-| `level-doors-<build>-<level>.json` | `cargo run --release -p content-tool -- level-doors` (default `newworld_vitaeeterna`; reads the level's world file) | No door capital of the level is shown |
-| `effect-areas-<build>.json` | `cargo run --release -p content-tool -- effect-areas` (reads `dungeon-scripts-<build>.json`, so build that first) | No level area or spell gas gives an affliction |
-| `ability-instances-<build>.json` | `cargo run --release -p content-tool -- ability-instances` | No placed ability is tracked |
-| `claim-plots-<build>.json` | `cargo run --release -p content-tool -- claim-plots` | No land claim entity is shown |
-| `music-charts-<build>.json` | `cargo run --release -p content-tool -- music-charts` | Each played note counts as missed |
-| `town-props-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`cardsurvey` and `townprops.py` of the capture tools) | Station buildings, lights and house plots do not show |
-| `encounter-roots-<build>.json` | The realm data pack (`just realm-data`), or: Mined with `town-props` | The world events show no encounter states |
-| `encounter-objects-<build>.json` | The realm data pack (`just realm-data`), or: Mined with `town-props` | World events that wait for a start object do not go on |
-| `spell-slices-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`cardsurvey` and `spellslices.py` of the capture tools) | A cast spell shows nothing |
-| `shot-entities-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures with the capture tools | No player sees a shot fly |
-| `dungeon-entrances-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`entrancetable` of the capture tools) | No entrance shows its runs |
-| `invasion-forts-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`invasionforts` of the capture tools) | No invasion runs on this sim |
-| `war-forts-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`warforts` of the capture tools) | No war instance runs on this sim |
-| `outpost-structures-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`oprstructures/mine.py` of the capture tools) | Outpost Rush has no structures |
-| `town-stations-<build>.json` | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`townstations`, `stationslices`, `claimtiers` and `townstations.py` of the capture tools) | The settlements have no crafting or refining station |
-| `camp-slices-<build>.json` | `cargo run --release -p content-tool -- camp-slices` | No camp can be placed |
-| `quick-courses-<build>.json` | `cargo run --release -p content-tool -- quick-courses` | No course can be ridden |
-| `store-<build>.json` | `cargo run --release -p content-tool -- store` (reads the content bundle; for `edge-http`, `[shop] store_table`) | The game's store sells nothing (the sims build the same table from the bundle themselves) |
-| `design-<build>.json` | `just design` | No scripts or events |
+`just collision` writes the level collision files `levels/<level>/collision.bin` of the tutorial and the open world (about 145 MB in all). A collision file holds the solid shapes of the placed slices of a level, read from the game's physics assets (`.rnr`). It includes the variant capitals as their variation data shows them, and the slices that encounters spawn later. The sims stand the players and mobs on these shapes. A sim does not start without the collision file of its level. See `docs/re/2026-09-20-level-collision.md`.
 
-The tools that take a bundle read the merged bundle `local-data/content/bundle-<build>.bin`, so run `just design` first. The tools that read ledgers (`mob-prefabs`, `ftue-entities`) use a lot of memory. Run them under a limit, for example `ulimit -v 4000000`. `cargo run -p content-tool -- --help` lists every subcommand.
+A sim needs only the bundle, the world file and the collision file of its level. It also reads the other files below when they exist. When one is missing, the sim logs a warning and runs without that part. The paths are in the build folder; `<level>` is a level folder name. The sources: `retail` and `install` come from your install, `merged` from `just design`, `pack` from the realm data pack (capture-made), `derived` from other content files.
+
+| File | Source | Made by | Without it |
+|---|---|---|---|
+| `retail/bundle.bin` | retail | `content-tool build` (`just bundle`) | No design merge |
+| `retail/levels/<level>/world.bin` | retail | `content-tool world` (`just world`) | No design merge |
+| `game-data/bundle.bin` | merged | `content-tool design` (`just design`) | No sim starts |
+| `game-data/design.json` | merged | `content-tool design` (`just design`) | No scripts or events |
+| `levels/<level>/world.bin` | merged | `content-tool design` (`just design`) | No sim of the level starts |
+| `levels/<level>/water.bin` | install | `content-tool water [levels]` (default `ftue_v2` and `newworld_vitaeeterna`) | The sea level is the only water |
+| `levels/<level>/collision.bin` | install | `content-tool collision [levels]` (`just collision`; default `ftue_v2` and `newworld_vitaeeterna`; reads the level's world and water files). The catacombs file (`nw_catacomb_00`) comes from `content-tool catacomb-tiles` | No sim of the level starts |
+| `levels/<level>/roads.bin` | install | `content-tool roads [levels]` (default `newworld_vitaeeterna`) | No road sprint boost |
+| `levels/<level>/doors.json` | install | `content-tool level-doors [levels]` (default `newworld_vitaeeterna`; reads the level's world file) | No door capital of the level is shown |
+| `levels/ftue_v2/entities.json` | pack | The realm data pack (`just realm-data`), or: `content-tool ftue-entities <ledger.bin>` (a capture of a new character's tutorial) | The tutorial's level entities are not sent |
+| `combat/player-attacks.json` | install | `content-tool player-attacks` | Players cannot attack |
+| `combat/player-abilities.json` | install | `content-tool player-abilities` | Players cannot use abilities |
+| `combat/player-sequences.json` | pack | The realm data pack (`just realm-data`), or: No tool. It was mined from capture ledgers. A copy of the table of the pinned build is `bins/sim/src/world/testdata/player-sequences-25810808.json` | The server starts no attack, block, aim, dodge or jump |
+| `combat/ability-instances.json` | install | `content-tool ability-instances` | No placed ability is tracked |
+| `combat/spell-slices.json` | pack | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`cardsurvey` and `spellslices.py` of the capture tools) | A cast spell shows nothing |
+| `combat/shot-entities.json` | pack | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures with the capture tools | No player sees a shot fly |
+| `combat/effect-areas.json` | derived | `content-tool effect-areas` (reads the dungeon scripts) | No level area or spell gas gives an affliction |
+| `mobs/mob-prefabs.json` | pack | The realm data pack (`just realm-data`), or: `content-tool mob-prefabs [folders]` (reads the ledgers in `local-data/captures` and `local-data/open world captures`) | Mobs are not shown to clients |
+| `mobs/creature-animations.json` | derived | `content-tool creature-animations` (reads the mob prefab table) | Mobs move without animations |
+| `mobs/ai-data.bin` | derived | `content-tool ai-data` (reads `local-data/server-pak/Server.pak` and the creature animation table) | Every mob stands at its spawn |
+| `instances/dungeon-scripts.json` | derived | `content-tool dungeon-scripts` (reads the breach tiers and the mob prefab table) | Instances run without encounters |
+| `instances/dungeon-gates.json` | install | `content-tool dungeon-gates` | An instance shows no gate or door |
+| `instances/dungeon-gate-rules.json` | pack | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`gaterules.py` of the capture tools) | Every gate is open from the start |
+| `instances/dungeon-entrances.json` | pack | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`entrancetable` of the capture tools) | No entrance shows its runs |
+| `instances/breach-tiers.json` | pack | The realm data pack (`just realm-data`), or: `content-tool breach-tiers <ledger.bin>...` (the world map points of the retail ledgers) | `dungeon-scripts` gives the open world breaches no observed difficulty |
+| `instances/catacomb-tiles.json` | derived | `content-tool catacomb-tiles` (reads the mob prefab table; also writes the catacombs collision file) | A catacombs run has no tile entities |
+| `open-world/town-props.json` | pack | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`cardsurvey` and `townprops.py` of the capture tools) | Station buildings, lights and house plots do not show |
+| `open-world/town-stations.json` | pack | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`townstations`, `stationslices`, `claimtiers` and `townstations.py` of the capture tools) | The settlements have no crafting or refining station |
+| `open-world/encounter-roots.json` | pack | The realm data pack (`just realm-data`), or: Mined with `town-props` | The world events show no encounter states |
+| `open-world/encounter-objects.json` | pack | The realm data pack (`just realm-data`), or: Mined with `town-props` | World events that wait for a start object do not go on |
+| `open-world/claim-plots.json` | install | `content-tool claim-plots` | No land claim entity is shown |
+| `open-world/camp-slices.json` | install | `content-tool camp-slices` | No camp can be placed |
+| `wars/war-forts.json` | pack | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`warforts` of the capture tools) | No war instance runs on this sim |
+| `wars/invasion-forts.json` | pack | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`invasionforts` of the capture tools) | No invasion runs on this sim |
+| `wars/outpost-structures.json` | pack | The realm data pack (`just realm-data`), or: No tool here. It is mined from the retail captures (`oprstructures/mine.py` of the capture tools) | Outpost Rush has no structures |
+| `activities/music-charts.json` | install | `content-tool music-charts` | Each played note counts as missed |
+| `activities/quick-courses.json` | install | `content-tool quick-courses` | No course can be ridden |
+| `services/store.json` | derived | `content-tool store` (reads the merged bundle; for `edge-http`, `[shop] content_dir`) | The game's store sells nothing (the sims build the same table from the bundle themselves) |
+| `services/leaderboards.json` | derived | `content-tool leaderboards` (reads the merged bundle; for `status-reporter`) | `status-reporter` does not start |
+
+`content-tool` (`cargo run --release -p content-tool -- <command>`) writes each file at its path in the build folder and records it in the manifest; `just content` runs the commands of the table in this order. The tools that take a bundle read the merged bundle, so run `just design` first. The tools that read ledgers (`mob-prefabs`, `ftue-entities`) use a lot of memory. Run them under a limit, for example `ulimit -v 4000000`. `cargo run -p content-tool -- --help` lists every subcommand.
+
+An older checkout wrote one flat folder (`local-data/content/<table>-<build>.json`, `<kind>-<build>-<level>.bin`, `retail/`). `just content-migrate` moves it into the layout: renames only, and a merged file that equals its retail file becomes a hard link to it. It refuses when a target holds other bytes, prints every move, writes the manifest and removes the empty old `retail/` folder. It never deletes a file that has no equal copy. It can run again after a run that stopped half-way: an old file whose new path holds the same bytes is removed, a merged file still becomes a hard link to a retail file already moved, and every file in place that the manifest does not have is recorded. `just content-migrate --dry-run` prints the moves only.
 
 ### Realm data pack
 
@@ -135,7 +149,7 @@ A few tables come only from retail captures, so no game install can make them: t
 just realm-data realm-data-25810808.zip
 ```
 
-Build the install tables first (`just bundle`, `just world`, `just design`, `just collision` and the other commands of the table). The recipe checks the pack (client build, pack format, checksums, and that every table loads) and writes its tables into `local-data/content/`. Then it builds the tables made from them: `creature-animations`, `catacomb-tiles`, `dungeon-scripts`, `effect-areas`, and `ai-data` if `local-data/server-pak/Server.pak` exists (get it with a depot download of the pinned build). The recipe keeps the tables you already have: `--rebuild` builds the derived tables again, and `--replace` replaces pack tables that differ from yours.
+Build the install tables first (`just content`). The recipe checks the pack (client build, pack format, checksums, and that every table loads), writes its tables into the build folder of `local-data/content/` and records them in its manifest. Then it builds the derived tables (`content-tool content build --derived`, the `derived` rows of the table), `ai-data` only if `local-data/server-pak/Server.pak` exists (get it with a depot download of the pinned build). The recipe keeps the tables you already have: `--rebuild` builds the derived tables again, and `--replace` replaces pack tables that differ from yours. The zip names its tables `<table>-<build>.json`.
 
 You get the pack from the project's community; it is not on GitHub. The tables come from New World game data and belong to its owners (see "What our licence does not cover").
 
@@ -208,7 +222,7 @@ cargo run -p launcher
 
 `edge-http aws-mirror-certificate` makes the self-signed certificate of the `[aws_mirror]` hosts in `config/edge.toml`. It never replaces a file. When the host list changes, move the two old files away and make the certificate again. The launcher maps those Amazon host names to this server for the game process only (see [docs/client-patch.md](docs/client-patch.md)). The two news hosts serve the files in `config/cms/` (`[cms]` in `config/edge.toml`): the message of the day, the news stories and the menu tiles, and their images. The tracked files have no news. `ping_listen` (port 80, plain HTTP) answers the client's region ping on `dynamodb.us-east-1.amazonaws.com`; the `setcap` right covers it too.
 
-The game's store sells the store mounts of the game data. `[shop]` in `config/edge.toml` turns it on or off (`enabled`) and makes every mount free (`free`, as retail in its last weeks) or priced in Marks of Fortune (`mount_price`, `[shop.mount_prices]`), paid from the account's wallet. `blighted-admin give-marks <login name> <amount>` gives an account Marks of Fortune. `edge-http` serves the catalog, each account's unlocks and its wallet from the store table (`[shop] store_table`); a purchase in the game unlocks the mount for the account (global migration 0005; run `edge-http migrate` after this update). Each store call is logged (`store call`).
+The game's store sells the store mounts of the game data. `[shop]` in `config/edge.toml` turns it on or off (`enabled`) and makes every mount free (`free`, as retail in its last weeks) or priced in Marks of Fortune (`mount_price`, `[shop.mount_prices]`), paid from the account's wallet. `blighted-admin give-marks <login name> <amount>` gives an account Marks of Fortune. `edge-http` serves the catalog, each account's unlocks and its wallet from the store table (`services/store.json` of the build folder of `[shop] content_dir`); a purchase in the game unlocks the mount for the account (global migration 0005; run `edge-http migrate` after this update). Each store call is logged (`store call`).
 
 Experience is normal by default: 1.0 for every gain, as retail without an event. The `[experience]` section of `config/edge.toml` sets each kind on its own: `character`, `umbral_crystals`, one value per trade skill (`[experience.trade_skills]`), per weapon mastery (`[experience.weapon_masteries]`) and per territory's standing (`[experience.territory_standing]`). A comment above each setting says what it changes. The server sends these values to the game, and the sims use the same values. Restart `edge-http` and the sims after a change.
 
@@ -299,7 +313,7 @@ NATS carries the messages between the gateway, the director and the `sim` proces
 
 Set up once:
 
-1. Build the world files from your install: `just bundle`, then `just world`, then `just design`. The director reads the ground height for `start_positions`. Each `sim` reads it for the move checks.
+1. Build the content files from your install: `just content` (or `just bundle`, then `just world`, then `just design`). The director reads the ground height for `start_positions`. Each `sim` reads it for the move checks.
 2. `world_id` in `config/world-director.toml`, `config/sim.toml` and `config/rep-gateway.toml` must be the `[[world]] id` in `config/edge.toml` (the example files match).
 3. Run the world database migrations with `edge-http migrate` after an update (M5 adds the entity numbers).
 
@@ -400,7 +414,7 @@ Checks:
 
 ### World map tiles
 
-`content-tool map-tiles` reads the world map tiles of a level from your install (`lyshineui/worldtiles/<level>/map_l{L}_y{Y}_x{X}.dds`, default level `newworld_vitaeeterna`), decodes them (BC1 and BC3 in the pinned client), and writes `local-data/content/map/<level>/<L>/<row>_<column>.png` with an index `tiles.json`. Level 1 tiles are 256 m. Each level above halves the grid (8 levels). A tile row counts from the south edge (`--y-index south-up`, the default). Joined that way, the tiles of one level form the whole continent. The Oodle decoder cannot read 2 of the 3,031 tiles of the pinned client. The tool lists them and leaves them out. The tiles are game data. They stay in the git-ignored `local-data/`, and `scripts/no-game-data.sh` refuses `*.dds` files.
+`content-tool map-tiles` reads the world map tiles of a level from your install (`lyshineui/worldtiles/<level>/map_l{L}_y{Y}_x{X}.dds`, default level `newworld_vitaeeterna`), decodes them (BC1 and BC3 in the pinned client), and writes `local-data/content/map/<level>/<L>/<row>_<column>.png` (the map folder beside the build folders) with an index `tiles.json`. Level 1 tiles are 256 m. Each level above halves the grid (8 levels). A tile row counts from the south edge (`--y-index south-up`, the default). Joined that way, the tiles of one level form the whole continent. The Oodle decoder cannot read 2 of the 3,031 tiles of the pinned client. The tool lists them and leaves them out. The tiles are game data. They stay in the git-ignored `local-data/`, and `scripts/no-game-data.sh` refuses `*.dds` files.
 
 ```bash
 export NW_GAME_DIR="/path/to/steamapps/common/New World"
@@ -409,7 +423,7 @@ just map-tiles
 
 ### blighted-admin
 
-`blighted-admin serve` serves the admin pages on `http://127.0.0.1:9180/` (`config/blighted-admin.toml`, overrides `BLIGHTED_ADMIN_<KEY>`, nested keys joined by `__`). It reads the world file and the content bundle from `just world` and `just bundle`. It reads the map tiles from `just map-tiles` when they exist. Without them, the map shows only the height relief. In local mode it listens on a loopback address only, because the tools have no login there. A request other than `GET` needs the header `X-Blighted-Admin: 1`. When the browser sends an `Origin`, it must be the origin of the admin pages. So another web site in your browser cannot use the tools.
+`blighted-admin serve` serves the admin pages on `http://127.0.0.1:9180/` (`config/blighted-admin.toml`, overrides `BLIGHTED_ADMIN_<KEY>`, nested keys joined by `__`). It reads the merged world file and content bundle of the build folder of `content_dir` (`just content`). It reads the map tiles from `just map-tiles` when they exist. Without them, the map shows only the height relief. In local mode it listens on a loopback address only, because the tools have no login there. A request other than `GET` needs the header `X-Blighted-Admin: 1`. When the browser sends an `Origin`, it must be the origin of the admin pages. So another web site in your browser cannot use the tools.
 
 ```bash
 cargo run --release -p blighted-admin -- serve
@@ -450,7 +464,7 @@ Logs go to `local-data/logs/live/`. `LIVE_STACK_SNAPSHOT_MS=0 just live 8` runs 
 
 ### Studio
 
-The studio page (`/studio`) shows the team's design files in `content/` (see [content/README.md](content/README.md)) with their problems. **Check** runs the full check against the retail files and writes nothing. **Apply** does the check and writes the merged files into `content_dir`, as `just design` does. Then it restarts the world-director, the social service and the sims through the control FIFO of `just live` (`local-data/logs/live/control`, line `restart-world`). It waits until every sim sends a heartbeat with a new start time, for at most `[studio] restart_timeout_s` (600 s), because a spinning disk with a cold cache needs minutes. A design problem stops Apply before anything is written. Without `just live` (no FIFO), Apply writes the files and tells you to restart the sims yourself. The restart disconnects the players on the local world.
+The studio page (`/studio`) shows the team's design files in `content/` (see [content/README.md](content/README.md)) with their problems. **Check** runs the full check against the retail files and writes nothing. **Apply** does the check and writes the merged files into the build folder of `content_dir`, as `just design` does. Then it restarts the world-director, the social service and the sims through the control FIFO of `just live` (`local-data/logs/live/control`, line `restart-world`). It waits until every sim sends a heartbeat with a new start time, for at most `[studio] restart_timeout_s` (600 s), because a spinning disk with a cold cache needs minutes. A design problem stops Apply before anything is written. Without `just live` (no FIFO), Apply writes the files and tells you to restart the sims yourself. The restart disconnects the players on the local world.
 
 To find the design key of a mob spawn, turn on "Mob spawns" on the Map page and click a spawn.
 
@@ -605,7 +619,7 @@ website's.
 
 Set up:
 
-1. `content-tool leaderboards` writes the board table `local-data/content/leaderboards-<build>.json`
+1. `content-tool leaderboards` writes the board table `local-data/content/<build>/services/leaderboards.json`
    from the content bundle (run it again after a new bundle).
 2. Set `site_url`, `edge_config` (it gives the season end) and the `[parts]` pages in a copy of
    `config/status-reporter.toml`, and the

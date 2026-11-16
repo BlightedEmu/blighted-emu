@@ -1967,11 +1967,10 @@ mod tests {
     #[test]
     #[ignore = "needs the build 25810808 collision file in NW_CONTENT_DIR; a release timing"]
     fn walk_steps_on_the_beach_are_fast() {
-        const BUILD: &str = "25810808";
         const LEVEL: &str = "newworld_vitaeeterna";
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let path = crate::collision::collision_file_path(std::path::Path::new(&dir), BUILD, LEVEL);
-        let level = LevelCollision::load(&path, BUILD).expect("collision");
+        let level =
+            LevelCollision::load(&nw_content::layout::repo_layout(), LEVEL).expect("collision");
+
         let index = CollisionIndex::new(LevelCollision {
             deferred: Vec::new(),
             ..level

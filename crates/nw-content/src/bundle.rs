@@ -7,7 +7,7 @@
 //! [`ContainerError`]s.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +15,7 @@ use crate::container::{
     ContainerError, ContainerSpec, decode_value, encode_value, read_file, write_file,
 };
 use crate::generated::{SCHEMA_HASH, Tables};
+use crate::layout::{BUNDLE, BuildFile, ContentLayout, RETAIL_BUNDLE};
 
 /// First 4 bytes of every bundle.
 pub const BUNDLE_MAGIC: [u8; 4] = *b"NWCB";
@@ -58,9 +59,18 @@ impl ContentBundle {
         write_file(path, &self.to_bytes()?)
     }
 
-    /// Reads and checks the bundle at `path`.
-    pub fn load(path: &Path, expected_build: &str) -> Result<Self, ContainerError> {
-        Self::from_bytes(&read_file(path)?, expected_build)
+    /// Reads and checks the merged bundle of `layout`, the one the servers read.
+    pub fn load(layout: &ContentLayout) -> Result<Self, ContainerError> {
+        Self::load_file(layout, BUNDLE)
+    }
+
+    /// Reads and checks the retail bundle of `layout`, the input of the design merge.
+    pub fn load_retail(layout: &ContentLayout) -> Result<Self, ContainerError> {
+        Self::load_file(layout, RETAIL_BUNDLE)
+    }
+
+    fn load_file(layout: &ContentLayout, file: BuildFile) -> Result<Self, ContainerError> {
+        Self::from_bytes(&read_file(&layout.file(file))?, layout.client_build())
     }
 }
 
@@ -76,22 +86,9 @@ pub fn english<'a>(text: &'a BTreeMap<String, String>, key: &str) -> Option<&'a 
         .map(String::as_str)
 }
 
-/// The bundle path of a client build: `<dir>/bundle-<client_build>.bin`.
-pub fn bundle_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("bundle-{client_build}.bin"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_bundle_path_names_the_build() {
-        assert_eq!(
-            bundle_path(Path::new("content"), BUILD),
-            Path::new("content").join("bundle-22469132.bin")
-        );
-    }
     use crate::container::encode_container;
 
     const BUILD: &str = "22469132";
@@ -145,8 +142,10 @@ mod tests {
     #[test]
     fn save_creates_folders_and_load_reads_back() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("content/bundle.bin");
-        bundle().save(&path).unwrap();
-        assert_eq!(ContentBundle::load(&path, BUILD).unwrap(), bundle());
+        let layout = ContentLayout::new(dir.path(), BUILD);
+        bundle().save(&layout.file(BUNDLE)).unwrap();
+        bundle().save(&layout.file(RETAIL_BUNDLE)).unwrap();
+        assert_eq!(ContentBundle::load(&layout).unwrap(), bundle());
+        assert_eq!(ContentBundle::load_retail(&layout).unwrap(), bundle());
     }
 }

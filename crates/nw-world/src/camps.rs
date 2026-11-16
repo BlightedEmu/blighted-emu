@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The camp slices (`camp-slices-<build>.json`, written by `content-tool camp-slices`, read by
+//! The camp slices (`open-world/camp-slices.json`, written by `content-tool camp-slices`, read by
 //! the open world sims): per camp blueprint (`BlueprintItemDefinitions` row with `IsCamp`), the
 //! `.dynamicslice` under `slices/structures/camps/` whose buildable controller names it
 //! (`m_structureName`), its asset id (the asset catalog's), the components of its spawn group
@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use nw_content::layout::{CAMP_SLICES, ContentLayout, write_atomic};
 use nw_formats::objectstream::{Element, lowercase_crc32};
 use serde::{Deserialize, Serialize};
 
@@ -28,10 +29,6 @@ use crate::slice_data::GUID_LEN;
 use crate::stations::{DELAYED_EVENT, StationSlice, replication_index};
 use crate::travel_slices::{AXES, SliceEntities, TRANSLATION_AT, UUID_LEN, descendants, uuid};
 
-/// The file name prefix; the client build and [`CAMP_SLICES_EXTENSION`] follow.
-pub const CAMP_SLICES_PREFIX: &str = "camp-slices-";
-/// The file extension.
-pub const CAMP_SLICES_EXTENSION: &str = ".json";
 /// The pak folder of the camp slices.
 pub const CAMP_SLICE_FOLDER: &str = "slices/structures/camps/";
 
@@ -178,13 +175,6 @@ pub enum CampSlicesError {
     },
 }
 
-/// The camp slice file of `client_build` in `dir`.
-pub fn camp_slices_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!(
-        "{CAMP_SLICES_PREFIX}{client_build}{CAMP_SLICES_EXTENSION}"
-    ))
-}
-
 impl CampSlices {
     /// The table of `slices`.
     pub fn of(slices: impl IntoIterator<Item = CampSlice>) -> Self {
@@ -196,12 +186,13 @@ impl CampSlices {
         }
     }
 
-    /// Reads `path`; a missing file has no camps (content from before this file).
+    /// Reads the file of `layout`; a missing file has no camps (content from before this file).
     ///
     /// # Errors
     ///
     /// Returns [`CampSlicesError`] when the file cannot be read or is not camp slices.
-    pub fn load(path: &Path) -> Result<Self, CampSlicesError> {
+    pub fn load(layout: &ContentLayout) -> Result<Self, CampSlicesError> {
+        let path = &layout.file(CAMP_SLICES);
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|source| CampSlicesError::Json {
                 path: path.to_path_buf(),
@@ -225,7 +216,7 @@ impl CampSlices {
             path: path.to_path_buf(),
             source,
         })?;
-        std::fs::write(path, text).map_err(|source| CampSlicesError::Io {
+        write_atomic(path, text.as_bytes()).map_err(|source| CampSlicesError::Io {
             path: path.to_path_buf(),
             source,
         })
@@ -377,11 +368,11 @@ mod tests {
         assert!(table.get("campskin_metalfest02_a_pvp").is_some());
         assert_eq!(table.len(), 1);
         let dir = tempfile::tempdir().expect("dir");
-        let path = camp_slices_path(dir.path(), "1");
-        table.write(&path).expect("write");
-        assert_eq!(CampSlices::load(&path).expect("load"), table);
+        let layout = ContentLayout::new(dir.path(), "1");
+        table.write(&layout.file(CAMP_SLICES)).expect("write");
+        assert_eq!(CampSlices::load(&layout).expect("load"), table);
         assert!(
-            CampSlices::load(&dir.path().join("none"))
+            CampSlices::load(&ContentLayout::new(dir.path(), "none"))
                 .expect("missing")
                 .is_empty()
         );

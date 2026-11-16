@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nw_content::ContentBundle;
-use nw_content::bundle::bundle_path;
+use nw_content::layout::{ContentLayout, RETAIL_BUNDLE};
 use nw_design::DesignPaths;
 use tokio::sync::{Mutex as AsyncMutex, OnceCell, Semaphore};
 
@@ -31,7 +31,6 @@ const ONE_RUN: usize = 1;
 #[derive(Debug, Clone)]
 pub struct Studio {
     pub(crate) paths: Arc<DesignPaths>,
-    client_build: Arc<str>,
     control_fifo: Arc<PathBuf>,
     restart_timeout: Duration,
     live: Option<SharedState>,
@@ -68,16 +67,15 @@ impl std::fmt::Debug for WorldReload {
 }
 
 impl Studio {
-    /// A studio that merges into `out_dir` (the folder the servers read) for `client_build`, and
-    /// watches the sims of `live` after a restart.
+    /// A studio that merges the retail files of `layout` into its merged files (the ones the
+    /// servers read), and watches the sims of `live` after a restart.
     ///
     /// # Errors
     ///
     /// Returns the reason when the HTTP client of the GitHub import cannot be made.
     pub fn new(
         config: &StudioConfig,
-        out_dir: PathBuf,
-        client_build: &str,
+        layout: ContentLayout,
         live: Option<SharedState>,
     ) -> Result<Self, String> {
         let token = config
@@ -88,10 +86,8 @@ impl Studio {
         Ok(Self {
             paths: Arc::new(DesignPaths {
                 design_dir: config.design_dir.clone(),
-                retail_dir: config.retail_dir.clone(),
-                out_dir,
+                layout,
             }),
-            client_build: client_build.into(),
             control_fifo: Arc::new(config.control_fifo.clone()),
             restart_timeout: Duration::from_secs(config.restart_timeout_s),
             live,
@@ -142,8 +138,7 @@ impl Studio {
     ///
     /// Returns the reason when the retail bundle cannot be read.
     pub async fn catalog(&self) -> Result<Arc<Catalog>, String> {
-        let path = bundle_path(&self.paths.retail_dir, &self.client_build);
-        let build = Arc::clone(&self.client_build);
+        let paths = Arc::clone(&self.paths);
         let work = Arc::clone(&self.work);
         self.catalog
             .get_or_try_init(|| async move {
@@ -153,8 +148,9 @@ impl Studio {
                     .map_err(|error| error.to_string())?;
                 tokio::task::spawn_blocking(move || {
                     let _permit = permit;
-                    let bundle = ContentBundle::load(&path, &build)
-                        .map_err(|error| format!("{}: {error}", path.display()))?;
+                    let bundle = ContentBundle::load_retail(&paths.layout).map_err(|error| {
+                        format!("{}: {error}", paths.layout.file(RETAIL_BUNDLE).display())
+                    })?;
                     Ok(Arc::new(Catalog::of_bundle(&bundle)))
                 })
                 .await

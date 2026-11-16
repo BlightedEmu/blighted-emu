@@ -2,12 +2,12 @@
 //! `content-tool store`: the store table ([`nw_protocol::store_api`]) from the content bundle,
 //! for `edge-http`'s store catalog. It needs no game install.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nw_content::ContentBundle;
-use nw_content::bundle::bundle_path;
+use nw_content::layout::{ContentLayout, STORE, write_atomic};
 use nw_content::store::store_table;
-use nw_protocol::store_api::store_table_path;
+use nw_protocol::store_api::StoreTableError;
 
 use crate::error::ToolError;
 
@@ -24,16 +24,23 @@ pub struct StoreReport {
     pub held_by_all: usize,
 }
 
-/// Writes the store table of `client_build` into `content_dir`, from the bundle in it.
+/// Writes the store table of `layout`, from its merged bundle.
 ///
 /// # Errors
 ///
 /// Returns [`ToolError`] when the bundle cannot be read or the table cannot be written.
-pub fn write_store_table(content_dir: &Path, client_build: &str) -> Result<StoreReport, ToolError> {
-    let bundle = ContentBundle::load(&bundle_path(content_dir, client_build), client_build)?;
+pub fn write_store_table(layout: &ContentLayout) -> Result<StoreReport, ToolError> {
+    let bundle = ContentBundle::load(layout)?;
     let table = store_table(&bundle.tables, &bundle.text);
-    let path = store_table_path(content_dir, client_build);
-    table.write(&path)?;
+    let path = layout.file(STORE);
+    let bytes = table.to_json().map_err(|source| StoreTableError::Json {
+        path: path.clone(),
+        source,
+    })?;
+    write_atomic(&path, &bytes).map_err(|source| StoreTableError::Io {
+        path: path.clone(),
+        source,
+    })?;
     Ok(StoreReport {
         path,
         mounts: table.mounts.len(),

@@ -2787,15 +2787,12 @@ pub(crate) mod tests {
         forts().kind(asset).cloned().expect("kind")
     }
 
-    /// The client build of the content table the slice tests read (`NW_CONTENT_DIR`).
-    pub(crate) const CONTENT_BUILD: &str = "25810808";
-
     /// The test table with the cannon's kind replaced by the kind of the content table whose
     /// slice ends with `slice` (on the cannon's asset, so that the cannon of the test fort is of
     /// that kind).
     pub(crate) fn forts_with_cannon_of(slice: &str) -> WarForts {
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let path = nw_content::war_forts::war_forts_path(std::path::Path::new(&dir), CONTENT_BUILD);
+        let path = nw_content::layout::repo_layout().file(nw_content::layout::WAR_FORTS);
+
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).expect("content table"))
                 .expect("json");

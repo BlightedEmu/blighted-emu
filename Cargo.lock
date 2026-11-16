@@ -1474,6 +1474,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "nw-common",
+ "nw-content",
  "nw-db",
  "nw-login",
  "nw-protocol",

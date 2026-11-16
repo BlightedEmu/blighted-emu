@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The pack's table list and manifest (`manifest.json`), and the checksums.
+//! The pack's manifest (`manifest.json`), its entry names and the checksums. The tables the pack
+//! holds are the capture-made files of the content registry
+//! ([`nw_content::layout::pack_files`]); no game install can make them.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9,25 +11,6 @@ use super::PackError;
 /// The pack format this code makes and reads. Any change to how a pack table or its replicated
 /// states are read bumps it in the same change, and a new pack is published.
 pub const PACK_FORMAT: u32 = 1;
-
-/// The capture-made tables the pack holds: no game install can make them.
-pub const PACK_TABLES: [&str; 15] = [
-    "mob-prefabs",
-    "ftue-entities",
-    "breach-tiers",
-    "player-sequences",
-    "town-props",
-    "encounter-roots",
-    "encounter-objects",
-    "spell-slices",
-    "shot-entities",
-    "dungeon-gate-rules",
-    "dungeon-entrances",
-    "invasion-forts",
-    "war-forts",
-    "outpost-structures",
-    "town-stations",
-];
 
 /// The manifest's name in the zip.
 pub const MANIFEST_FILE: &str = "manifest.json";
@@ -61,7 +44,7 @@ pub struct Manifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackFile {
-    /// The file name (`<table>-<build>.json`).
+    /// The entry name (`<table>-<build>.json`, the table's registry name).
     pub name: String,
     /// The file size.
     pub bytes: u64,
@@ -69,7 +52,8 @@ pub struct PackFile {
     pub sha256: String,
 }
 
-/// The file name of `table` for `client_build`: `<table>-<build>.json`.
+/// The zip entry name of `table` for `client_build`: `<table>-<build>.json` (the name of the flat
+/// content folder the pack format was made with).
 pub fn table_file_name(table: &str, client_build: &str) -> String {
     format!("{table}-{client_build}{TABLE_EXTENSION}")
 }
@@ -168,9 +152,11 @@ mod tests {
     }
 
     #[test]
-    fn pack_tables_are_14_and_unique() {
-        let unique: BTreeSet<_> = PACK_TABLES.iter().collect();
-        assert_eq!(unique.len(), PACK_TABLES.len());
+    fn entry_names_are_unique_and_name_the_build() {
+        let unique: BTreeSet<_> = nw_content::layout::pack_files()
+            .map(|file| table_file_name(file.name, BUILD))
+            .collect();
+        assert_eq!(unique.len(), nw_content::layout::pack_files().count());
         assert_eq!(table_file_name("war-forts", BUILD), "war-forts-12345.json");
         assert_eq!(pack_zip_name(BUILD), "realm-data-12345.zip");
     }

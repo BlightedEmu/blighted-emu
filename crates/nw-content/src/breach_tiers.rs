@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The breach tiers file (`breach-tiers-<build>.json`): the difficulty of each corrupted breach
+//! The breach tiers file ([`BREACH_TIERS`]): the difficulty of each corrupted breach
 //! place. `content-tool breach-tiers` mines it from the world map points of the retail ledgers;
 //! `content-tool dungeon-scripts` and the realm data pack read it.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// The file name prefix and extension.
-const FILE_PREFIX: &str = "breach-tiers-";
-const FILE_EXTENSION: &str = ".json";
+use crate::layout::{BREACH_TIERS, ContentLayout, write_atomic};
 
 /// The difficulty of one breach place.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -40,11 +38,6 @@ pub enum BreachTiersError {
     Json(#[from] serde_json::Error),
 }
 
-/// The path of the file of `client_build` in `dir`.
-pub fn breach_tiers_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_EXTENSION}"))
-}
-
 /// The breach tiers table.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BreachTiers {
@@ -64,13 +57,13 @@ impl BreachTiers {
         })
     }
 
-    /// The table of `client_build` in `dir`; an empty table when there is no file.
+    /// The table of `layout`; an empty table when there is no file.
     ///
     /// # Errors
     ///
     /// Returns [`BreachTiersError`] when the file is there but cannot be read.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, BreachTiersError> {
-        let path = breach_tiers_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, BreachTiersError> {
+        let path = layout.file(BREACH_TIERS);
         match std::fs::read_to_string(&path) {
             Ok(text) => Self::parse(&text),
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
@@ -78,14 +71,14 @@ impl BreachTiers {
         }
     }
 
-    /// Writes the table as the file of `client_build` in `dir`; its path.
+    /// Writes the table as the file of `layout`; its path.
     ///
     /// # Errors
     ///
     /// Returns [`BreachTiersError`] when the file cannot be written.
-    pub fn write(&self, dir: &Path, client_build: &str) -> Result<PathBuf, BreachTiersError> {
-        let path = breach_tiers_path(dir, client_build);
-        std::fs::write(&path, serde_json::to_vec_pretty(&self.tiers)?).map_err(|source| {
+    pub fn write(&self, layout: &ContentLayout) -> Result<PathBuf, BreachTiersError> {
+        let path = layout.file(BREACH_TIERS);
+        write_atomic(&path, &serde_json::to_vec_pretty(&self.tiers)?).map_err(|source| {
             BreachTiersError::Io {
                 path: path.clone(),
                 source,
@@ -123,18 +116,19 @@ mod tests {
     #[test]
     fn parses_a_written_table() {
         let dir = tempfile::tempdir().unwrap();
-        let path = table().write(dir.path(), BUILD).unwrap();
-        assert_eq!(path, breach_tiers_path(dir.path(), BUILD));
+        let layout = ContentLayout::new(dir.path(), BUILD);
+        let path = table().write(&layout).unwrap();
+        assert_eq!(path, layout.file(BREACH_TIERS));
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(BreachTiers::parse(&text).unwrap(), table());
-        assert_eq!(BreachTiers::load(dir.path(), BUILD).unwrap(), table());
+        assert_eq!(BreachTiers::load(&layout).unwrap(), table());
     }
 
     #[test]
     fn no_file_is_an_empty_table() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            BreachTiers::load(dir.path(), BUILD).unwrap(),
+            BreachTiers::load(&ContentLayout::new(dir.path(), BUILD)).unwrap(),
             BreachTiers::default()
         );
     }

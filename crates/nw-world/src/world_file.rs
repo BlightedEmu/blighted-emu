@@ -2,11 +2,12 @@
 //! The world file (M1b spec section 3.3): the shared header of `nw_content::container` with
 //! magic `NWWF`, then a postcard body holding one [`WorldFile`]. Errors are [`ContainerError`]s.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use nw_content::container::{
     ContainerError, ContainerSpec, decode_value, encode_value, read_file, write_file,
 };
+use nw_content::layout::{ContentLayout, LevelFile, RETAIL_WORLD, WORLD};
 
 use crate::records::WorldFile;
 
@@ -24,11 +25,6 @@ pub const WORLD_CONTAINER: ContainerSpec = ContainerSpec {
     schema_hash: WORLD_SCHEMA_VERSION,
 };
 
-/// The world file path of one level: `<dir>/world-<client_build>-<level>.bin`.
-pub fn world_file_path(dir: &Path, client_build: &str, level: &str) -> PathBuf {
-    dir.join(format!("world-{client_build}-{level}.bin"))
-}
-
 impl WorldFile {
     /// Encodes the world with its header.
     pub fn to_bytes(&self, client_build: &str) -> Result<Vec<u8>, ContainerError> {
@@ -45,9 +41,26 @@ impl WorldFile {
         write_file(path, &self.to_bytes(client_build)?)
     }
 
-    /// Reads and checks the world file at `path`.
-    pub fn load(path: &Path, expected_build: &str) -> Result<Self, ContainerError> {
-        Self::from_bytes(&read_file(path)?, expected_build)
+    /// Reads and checks the merged world file of `level` of `layout`, the one the servers read.
+    pub fn load(layout: &ContentLayout, level: &str) -> Result<Self, ContainerError> {
+        Self::load_file(layout, WORLD, level)
+    }
+
+    /// Reads and checks the retail world file of `level` of `layout`, the input of the design
+    /// merge.
+    pub fn load_retail(layout: &ContentLayout, level: &str) -> Result<Self, ContainerError> {
+        Self::load_file(layout, RETAIL_WORLD, level)
+    }
+
+    fn load_file(
+        layout: &ContentLayout,
+        file: LevelFile,
+        level: &str,
+    ) -> Result<Self, ContainerError> {
+        Self::from_bytes(
+            &read_file(&layout.level_file(file, level))?,
+            layout.client_build(),
+        )
     }
 }
 
@@ -319,9 +332,14 @@ mod tests {
     #[test]
     fn save_and_load_use_the_level_path() {
         let dir = tempfile::tempdir().unwrap();
-        let path = world_file_path(dir.path(), BUILD, "lv");
-        assert!(path.ends_with("world-22469132-lv.bin"));
+        let layout = ContentLayout::new(dir.path(), BUILD);
+        let path = layout.level_file(WORLD, "lv");
+        assert!(path.ends_with("22469132/levels/lv/world.bin"));
         sample().save(&path, BUILD).unwrap();
-        assert_eq!(WorldFile::load(&path, BUILD).unwrap(), sample());
+        assert_eq!(WorldFile::load(&layout, "lv").unwrap(), sample());
+        sample()
+            .save(&layout.level_file(RETAIL_WORLD, "lv"), BUILD)
+            .unwrap();
+        assert_eq!(WorldFile::load_retail(&layout, "lv").unwrap(), sample());
     }
 }

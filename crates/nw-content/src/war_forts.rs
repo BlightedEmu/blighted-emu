@@ -44,14 +44,13 @@
 //! the war T1 slices); they are outpost structures, never a war build
 //! ([`StructureKind::is_war_siege`]).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
 use crate::Tables;
+use crate::layout::{ContentLayout, WAR_FORTS};
 
-const FILE_PREFIX: &str = "war-forts-";
-const FILE_SUFFIX: &str = ".json";
 /// The bytes of an asset id and of a `GdeRef`.
 pub const ID_LEN: usize = 16;
 /// The bytes of a capture point's key: the first part of its `GdeRef`.
@@ -63,11 +62,6 @@ pub const CLAIM_POINT_NUMBER: u32 = 4;
 pub const SIDE_ATTACKER: u8 = 1;
 /// The war side of a defender.
 pub const SIDE_DEFENDER: u8 = 2;
-
-/// The table file of client build `client_build` in content directory `dir`.
-pub fn war_forts_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// A bad table file.
 #[derive(Debug, thiserror::Error)]
@@ -1074,13 +1068,13 @@ pub struct WarForts {
 }
 
 impl WarForts {
-    /// The table of client build `client_build` in content directory `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`WarFortsError`] when the file cannot be read or is not the table.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, WarFortsError> {
-        let path = war_forts_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, WarFortsError> {
+        let path = layout.file(WAR_FORTS);
         let text =
             std::fs::read_to_string(&path).map_err(|source| WarFortsError::Io { path, source })?;
         Self::parse(&text)

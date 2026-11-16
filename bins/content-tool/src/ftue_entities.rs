@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `ftue-entities`: builds the tutorial entity table (`ftue-entities-<build>.json`, read by
+//! `ftue-entities`: builds the tutorial entity table (`levels/ftue_v2/entities.json`, read by
 //! `nw_content::ftue_entities`) from the capture of a new character's tutorial run (FTUE static
 //! entity note, FTUE level entity note).
 //!
@@ -1171,10 +1171,7 @@ pub fn write_table(path: &Path, table: &FtueTable) -> Result<(), FtueEntitiesErr
         path: path.to_path_buf(),
         source,
     };
-    if let Some(folder) = path.parent() {
-        std::fs::create_dir_all(folder).map_err(io)?;
-    }
-    std::fs::write(path, serde_json::to_vec_pretty(table)?).map_err(io)
+    nw_content::layout::write_atomic(path, &serde_json::to_vec_pretty(table)?).map_err(io)
 }
 
 /// Reads a ledger file.

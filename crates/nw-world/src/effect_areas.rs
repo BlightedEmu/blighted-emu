@@ -56,6 +56,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+use nw_content::layout::{ContentLayout, EFFECT_AREAS, write_atomic};
 use nw_formats::objectstream::{Element, ObjectStreamError, UUID_SIZE, lowercase_crc32};
 use nw_formats::rigid::Vec3;
 use serde::{Deserialize, Serialize};
@@ -65,10 +66,6 @@ use crate::collision_index::{Bounds, shape_bounds};
 use crate::dungeon_scripts::Detector;
 use crate::level_script::{AREA_STATUS_EFFECT_TYPE, FIELD_DEPTH, SHAPE_HEIGHT_NAME, find};
 
-/// The file name before the client build.
-const FILE_PREFIX: &str = "effect-areas-";
-/// The file name after the client build.
-const FILE_SUFFIX: &str = ".json";
 /// Milliseconds in a second.
 const MS_PER_S: f32 = 1_000.0;
 /// The column of an affine place that holds its translation.
@@ -90,11 +87,6 @@ const MIN_CORNERS: usize = 3;
 /// `enc_darkness_major_portal_sm_01`: `Configuration`, `PolygonPrism`, its base, then `Height`
 /// and `VertexContainer`'s `Vertices`, 4 and 5 levels down).
 const PRISM_DEPTH: usize = 5;
-
-/// The file of client build `client_build` in content directory `dir`.
-pub fn effect_areas_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// A bad effect areas file or slice.
 #[derive(Debug, thiserror::Error)]
@@ -211,13 +203,13 @@ pub struct EffectAreas {
 }
 
 impl EffectAreas {
-    /// The file of client build `client_build` in content directory `dir`.
+    /// The file of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`EffectAreasError`] when the file cannot be read or is not the table.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, EffectAreasError> {
-        let path = effect_areas_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, EffectAreasError> {
+        let path = layout.file(EFFECT_AREAS);
         let text = std::fs::read_to_string(&path)
             .map_err(|source| EffectAreasError::Io { path, source })?;
         Ok(serde_json::from_str(&text)?)
@@ -229,7 +221,7 @@ impl EffectAreas {
     ///
     /// Returns [`EffectAreasError`] when the file cannot be written.
     pub fn write(&self, path: &Path) -> Result<(), EffectAreasError> {
-        std::fs::write(path, serde_json::to_string_pretty(self)?).map_err(|source| {
+        write_atomic(path, serde_json::to_string_pretty(self)?.as_bytes()).map_err(|source| {
             EffectAreasError::Io {
                 path: path.to_owned(),
                 source,

@@ -66,6 +66,7 @@ max_sync_latency_ms = 100
 # The metrics listener of every sim.
 metrics_urls = ["http://127.0.0.1:9102/metrics"]
 client_build_config = "config/client-build.toml"
+# The content folder: the files of the pinned build are in <content_dir>/<build>/ (`just content`).
 content_dir = "local-data/content"
 level = "newworld_vitaeeterna"
 

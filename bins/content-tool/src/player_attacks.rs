@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `player-attacks`: builds the player attack table (`player-attacks-<build>.json`, read by
+//! `player-attacks`: builds the player attack table (`combat/player-attacks.json`, read by
 //! `nw_content::player_attacks`) from the game paks and the content bundle (combat audit,
 //! 2026-09-18).
 //!

@@ -4,20 +4,19 @@
 //! box queries.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use nw_common::config::ConfigError;
-use nw_content::bundle::bundle_path;
 use nw_content::client_build::load_client_build;
 use nw_content::ids::{gatherable_ids, vitals_ids};
+use nw_content::layout::{ContentLayout, LayoutError};
 use nw_content::progression::Progression;
 use nw_content::{ContainerError, ContentBundle, Tables};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_world::WorldFile;
 use nw_world::map_tiles::{TILES_FILE, TilesIndex};
-use nw_world::script::{DesignData, design_data_path};
-use nw_world::world_file::world_file_path;
+use nw_world::script::DesignData;
 use serde::Serialize;
 
 use crate::config::AdminConfig;
@@ -26,8 +25,6 @@ use crate::config::AdminConfig;
 pub const SPAWN_CELL_M: f32 = 256.0;
 /// Levels of the relief tile grid when no map tiles exist (as the client's map).
 pub const RELIEF_LEVELS: u8 = 8;
-/// Folder of the map tiles in `content_dir`.
-pub const MAP_DIR: &str = "map";
 const LIST_SEPARATOR: char = ',';
 
 /// Datasheet ids by the crc32 that world file records store.
@@ -170,6 +167,9 @@ pub enum WorldLayerError {
     /// The world file or the content bundle cannot be read.
     #[error(transparent)]
     Container(#[from] ContainerError),
+    /// The content folder does not open (its manifest names another build).
+    #[error(transparent)]
+    Content(#[from] LayoutError),
     /// `tiles.json` cannot be read.
     #[error("{path}: {reason}")]
     Tiles {
@@ -227,8 +227,9 @@ pub struct WorldLayer {
     map_tiles: bool,
     cells: HashMap<(i64, i64), Vec<PointRef>>,
     max_spawns: usize,
-    /// The merged design data file (scripts and events), when the layer came from files.
-    design_data: Option<PathBuf>,
+    /// The content folder of the merged design data (scripts and events), when the layer came
+    /// from files.
+    design_data: Option<ContentLayout>,
     /// The level table and the weapon masteries, for the GM page.
     progression: Progression,
 }
@@ -291,18 +292,16 @@ impl WorldLayer {
     pub fn load(config: &AdminConfig) -> Result<Self, WorldLayerError> {
         let build =
             load_client_build(&config.client_build_config).map_err(WorldLayerError::ClientBuild)?;
-        let world = WorldFile::load(
-            &world_file_path(&config.content_dir, &build, &config.level),
-            &build,
-        )?;
+        let layout = ContentLayout::open(&config.content_dir, &build)?;
+        let world = WorldFile::load(&layout, &config.level)?;
         let (names, progression) = {
-            let bundle = ContentBundle::load(&bundle_path(&config.content_dir, &build), &build)?;
+            let bundle = ContentBundle::load(&layout)?;
             (
                 SpawnNames::from_tables(&bundle.tables),
                 Progression::of_tables(&bundle.tables),
             )
         };
-        let path = map_dir(config).join(TILES_FILE);
+        let path = map_dir(&layout, &config.level).join(TILES_FILE);
         let tiles =
             match std::fs::read(&path) {
                 Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(|error| {
@@ -320,7 +319,7 @@ impl WorldLayer {
                 }
             };
         Ok(Self {
-            design_data: Some(design_data_path(&config.content_dir, &build)),
+            design_data: Some(layout),
             progression,
             ..Self::new(world, names, tiles, config.max_spawns_per_request)
         })
@@ -345,11 +344,11 @@ impl WorldLayer {
     /// The ids of this level's events in the merged design data, read now (Apply writes it while
     /// the admin runs) off the async threads; none without the file.
     pub async fn event_ids(&self) -> Vec<String> {
-        let Some(path) = self.design_data.clone() else {
+        let Some(layout) = self.design_data.clone() else {
             return Vec::new();
         };
         let level = self.world.level.name.clone();
-        tokio::task::spawn_blocking(move || level_event_ids(&path, &level))
+        tokio::task::spawn_blocking(move || level_event_ids(&layout, &level))
             .await
             .unwrap_or_default()
     }
@@ -479,9 +478,9 @@ impl WorldLayer {
     }
 }
 
-/// The map tile folder of `config`'s level.
-pub fn map_dir(config: &AdminConfig) -> PathBuf {
-    config.content_dir.join(MAP_DIR).join(&config.level)
+/// The map tile folder of `level` in the map folder of `layout`.
+pub fn map_dir(layout: &ContentLayout, level: &str) -> PathBuf {
+    layout.map_dir().join(level)
 }
 
 /// Edge of the square world: the region size times the larger grid side.
@@ -496,9 +495,9 @@ fn cell_of(metres: f32) -> i64 {
     (metres / SPAWN_CELL_M).floor() as i64
 }
 
-/// The event ids of `level` in the design data file `path`; none when it cannot be read.
-fn level_event_ids(path: &Path, level: &str) -> Vec<String> {
-    match DesignData::load(path) {
+/// The event ids of `level` in the design data of `layout`; none when it cannot be read.
+fn level_event_ids(layout: &ContentLayout, level: &str) -> Vec<String> {
+    match DesignData::load(layout) {
         Ok(mut data) => data
             .levels
             .remove(level)

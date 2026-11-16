@@ -4905,10 +4905,8 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
     fn the_real_task_rows_the_server_does_not_run_are_the_known_ones() {
-        const BUILD: &str = "25810808";
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let path = nw_content::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
-        let bundle = nw_content::ContentBundle::load(&path, BUILD).expect("bundle");
+        let bundle =
+            nw_content::ContentBundle::load(&nw_content::layout::repo_layout()).expect("bundle");
         let mut unsupported: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
         for row in task_rows(&bundle.tables) {
@@ -4942,16 +4940,14 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
     fn the_real_open_world_quest_starts_as_retail() {
-        const BUILD: &str = "25810808";
         /// The open-world start: the client spawns inside the start trigger.
         const SPAWN: Position = Position {
             x: 7280.49,
             y: 3141.49,
             z: 40.12,
         };
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let path = nw_content::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
-        let bundle = nw_content::ContentBundle::load(&path, BUILD).expect("bundle");
+        let bundle =
+            nw_content::ContentBundle::load(&nw_content::layout::repo_layout()).expect("bundle");
         let tree = Arc::new(
             ObjectiveTree::build(
                 &task_rows(&bundle.tables),
@@ -4979,7 +4975,6 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
     fn the_real_tutorial_quest_runs_to_its_end_on_the_retail_events() {
-        const BUILD: &str = "25810808";
         /// The achievement deltas of the live run, in order (live-tutorial note, section 1).
         const RETAIL_ACHIEVEMENTS: [&str; 27] = [
             "FTUE_Intro2_Cinematic_Unlock",
@@ -5010,9 +5005,8 @@ pub(crate) mod tests {
             "FTUE_Rez_Cinematic_Watched",
             "SoleSurvivor02_Check",
         ];
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let path = nw_content::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
-        let bundle = nw_content::ContentBundle::load(&path, BUILD).expect("bundle");
+        let bundle =
+            nw_content::ContentBundle::load(&nw_content::layout::repo_layout()).expect("bundle");
         let tree = Arc::new(
             ObjectiveTree::build(
                 &task_rows(&bundle.tables),
@@ -5183,7 +5177,6 @@ pub(crate) mod tests {
         // tablet broken by a weapon hit at 133.92 s and its rune shards in the bag, the task
         // tree done at 133.96 s.
         use crate::player_content::QuestObjects;
-        const BUILD: &str = "25810808";
         const LEVEL: &str = "newworld_vitaeeterna";
         const ROOT: &str = "12A_MSQ_08_DestroyRune_Container";
         const CANNON_EVENT: &str = "IO_Gimmick_BreakingWallsCannon_interact";
@@ -5201,17 +5194,11 @@ pub(crate) mod tests {
         const TABLET_REACH_M: f32 = 5.0;
         const TABLET_ID: u64 = 0x79cc_6e59_ed29_88c3;
         const TABLET_TAG: u32 = 0xb0be_7cc2;
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let dir = std::path::Path::new(&dir);
-        let bundle =
-            nw_content::ContentBundle::load(&nw_content::bundle::bundle_path(dir, BUILD), BUILD)
-                .expect("bundle");
+        let layout = nw_content::layout::repo_layout();
+        let bundle = nw_content::ContentBundle::load(&layout).expect("bundle");
         let rows = task_rows(&bundle.tables);
-        let world = nw_world::WorldFile::load(
-            &nw_world::world_file::world_file_path(dir, BUILD, LEVEL),
-            BUILD,
-        )
-        .expect("world file");
+        let world = nw_world::WorldFile::load(&layout, LEVEL).expect("world file");
+
         let objects = QuestObjects::with_drops(
             &world.gatherables,
             &nw_content::gathering::Gatherables::from_tables(&bundle.tables),
@@ -5270,7 +5257,6 @@ pub(crate) mod tests {
         // `9401_BefriendHorse` ("My Kingdom for a Horse", Jochi Khan in Everfall): the cave
         // trigger, the torch, the mural and its whisper, the azoth oats, then the talk with the
         // horse (`javelindata_c94_objectivetasks`).
-        const BUILD: &str = "25810808";
         const ROOT: &str = "9401_Befriend_Container";
         const STEP_MS: usize = 30_000;
         /// The `9401_Goto_Cave` trigger's place.
@@ -5279,9 +5265,8 @@ pub(crate) mod tests {
             y: 5147.67,
             z: 144.10,
         };
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let path = nw_content::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
-        let bundle = nw_content::ContentBundle::load(&path, BUILD).expect("bundle");
+        let bundle =
+            nw_content::ContentBundle::load(&nw_content::layout::repo_layout()).expect("bundle");
         let book = TaskBook::new(task_rows(&bundle.tables));
         let tree = Arc::new(book.tree(ROOT).expect("the mount quest"));
         let (mut run, mut effects) = ObjectiveRun::start(tree, NOW);
@@ -5350,16 +5335,14 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
     fn the_real_wreck_quests_run_to_their_end_on_the_retail_steps() {
-        const BUILD: &str = "25810808";
         /// The corrupted mariners of the second wreck (17 of the 21 spawns within 60 m of the
         /// crewmates' pin in the level's world file).
         const WRECK_MARINER: u32 = 2_756_893_354;
         /// Longer than every timer of the four trees (22.5 s).
         const STEP_MS: usize = 30_000;
         let at = |x, y| Event::Moved(Position { x, y, z: AREA.z });
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let path = nw_content::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
-        let bundle = nw_content::ContentBundle::load(&path, BUILD).expect("bundle");
+        let bundle =
+            nw_content::ContentBundle::load(&nw_content::layout::repo_layout()).expect("bundle");
         let book = TaskBook::new(task_rows(&bundle.tables));
         let kill_types = KillTypes::from_tables(&bundle.tables);
         let (mariner, categories) = kill_types.of(WRECK_MARINER).expect("the mariner");

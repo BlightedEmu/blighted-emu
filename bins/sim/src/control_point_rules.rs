@@ -323,17 +323,12 @@ mod tests {
 
 #[cfg(all(test, feature = "local-data"))]
 mod retail_tests {
-    use std::path::Path;
-
     use nw_content::ContentBundle;
-    use nw_content::bundle::bundle_path;
-    use nw_content::client_build::load_client_build;
+    use nw_content::layout::repo_layout;
     use nw_world::dungeon_scripts::OPEN_WORLD_LEVEL;
-    use nw_world::world_file::world_file_path;
 
     use super::*;
 
-    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
     /// The towers of the open world: three in each of 13 territories.
     const TOWERS: usize = 39;
     const TOWERS_PER_TERRITORY: usize = 3;
@@ -343,12 +338,10 @@ mod retail_tests {
 
     #[test]
     fn the_open_world_gives_each_tower_its_entry_in_its_territory() {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let build = load_client_build(&repo.join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let dir = repo.join("local-data/content");
-        let bundle = ContentBundle::load(&bundle_path(&dir, &build), &build).expect("bundle");
-        let level = WorldFile::load(&world_file_path(&dir, &build, OPEN_WORLD_LEVEL), &build)
-            .expect("world");
+        let layout = repo_layout();
+        let bundle = ContentBundle::load(&layout).expect("bundle");
+        let level = WorldFile::load(&layout, OPEN_WORLD_LEVEL).expect("world");
+
         let rules = ControlPointRules::of(&bundle.tables, &level);
         assert_eq!(rules.towers.len(), TOWERS);
         for tower in &rules.towers {

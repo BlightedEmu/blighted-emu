@@ -13,21 +13,16 @@ use std::path::{Path, PathBuf};
 use nw_formats::objectstream::lowercase_crc32;
 use serde::{Deserialize, Serialize};
 
+use crate::layout::{ContentLayout, MUSIC_CHARTS, write_atomic};
+
 /// The pak folder of the charts.
 pub const MUSIC_SHEET_FOLDER: &str = "sharedassets/musicsheets/";
 /// The file suffix of a chart; the sheet id is the file name before it.
 pub const MUSIC_SHEET_SUFFIX: &str = ".musicsheetc";
-const FILE_PREFIX: &str = "music-charts-";
-const FILE_SUFFIX: &str = ".json";
 /// Bytes before the first note: the version and the count.
 const HEADER_LEN: usize = 5;
 /// Bytes of one note: key, lane and time.
 const NOTE_LEN: usize = 6;
-
-/// The chart file of `client_build` in `dir`.
-pub fn music_charts_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// Why a chart or the chart file cannot be read.
 #[derive(Debug, thiserror::Error)]
@@ -155,20 +150,20 @@ impl MusicCharts {
             path: path.to_path_buf(),
             source,
         })?;
-        std::fs::write(path, text).map_err(|source| MusicChartError::Io {
+        write_atomic(path, text.as_bytes()).map_err(|source| MusicChartError::Io {
             path: path.to_path_buf(),
             source,
         })?;
         Ok(file.sheets.len())
     }
 
-    /// The chart file of `client_build` in `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`MusicChartError`] when the file cannot be read or is not the charts.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, MusicChartError> {
-        let path = music_charts_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, MusicChartError> {
+        let path = layout.file(MUSIC_CHARTS);
         let text = std::fs::read_to_string(&path).map_err(|source| MusicChartError::Io {
             path: path.clone(),
             source,
@@ -219,7 +214,8 @@ mod tests {
     #[test]
     fn the_charts_are_found_by_the_sheet_wire_id_after_a_round_trip() {
         let dir = tempfile::tempdir().expect("dir");
-        let path = music_charts_path(dir.path(), "1");
+        let layout = ContentLayout::new(dir.path(), "1");
+        let path = layout.file(MUSIC_CHARTS);
         let notes = parse_chart(&retail_head()).expect("chart");
         let written = MusicCharts::write(
             [("Set_AzothFlute_Part1_Easy".to_owned(), notes.clone())],
@@ -227,7 +223,8 @@ mod tests {
         )
         .expect("write");
         assert_eq!(written, 1);
-        let charts = MusicCharts::load(dir.path(), "1").expect("load");
+        let charts = MusicCharts::load(&layout).expect("load");
+
         assert_eq!(
             charts.chart(lowercase_crc32("set_azothflute_part1_easy")),
             Some(notes.as_slice())

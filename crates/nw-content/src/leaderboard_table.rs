@@ -17,12 +17,9 @@ use serde::{Deserialize, Serialize};
 use crate::Tables;
 use crate::bundle::english;
 use crate::generated::LeaderboardData;
+use crate::layout::{ContentLayout, LEADERBOARDS, write_atomic};
 use crate::leaderboards::{Rotation, board_name};
 
-/// File name start of the leaderboard table: `leaderboards-<client build>.json`.
-pub const LEADERBOARD_TABLE_PREFIX: &str = "leaderboards-";
-/// File name end of the leaderboard table.
-pub const LEADERBOARD_TABLE_EXTENSION: &str = ".json";
 /// A world id and a rotation name that fill a template, to check it.
 const PROBE_WORLD: &str = "world";
 const PROBE_ROTATION: &str = "w1";
@@ -130,13 +127,6 @@ pub enum LeaderboardTableError {
     },
 }
 
-/// The leaderboard table path of a client build: `<dir>/leaderboards-<client_build>.json`.
-pub fn leaderboard_table_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!(
-        "{LEADERBOARD_TABLE_PREFIX}{client_build}{LEADERBOARD_TABLE_EXTENSION}"
-    ))
-}
-
 /// `text` without UI markup tags, trimmed.
 fn plain_text(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
@@ -212,12 +202,13 @@ pub fn leaderboard_table(tables: &Tables, text: &BTreeMap<String, String>) -> Le
 }
 
 impl LeaderboardTable {
-    /// Reads the table at `path`.
+    /// Reads the table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`LeaderboardTableError`] when the file cannot be read or is no leaderboard table.
-    pub fn load(path: &Path) -> Result<Self, LeaderboardTableError> {
+    pub fn load(layout: &ContentLayout) -> Result<Self, LeaderboardTableError> {
+        let path = &layout.file(LEADERBOARDS);
         let bytes = std::fs::read(path).map_err(|source| LeaderboardTableError::Io {
             path: path.to_path_buf(),
             source,
@@ -234,19 +225,15 @@ impl LeaderboardTable {
     ///
     /// Returns [`LeaderboardTableError`] when the file cannot be written.
     pub fn write(&self, path: &Path) -> Result<(), LeaderboardTableError> {
-        let io = |source| LeaderboardTableError::Io {
-            path: path.to_path_buf(),
-            source,
-        };
-        if let Some(folder) = path.parent() {
-            std::fs::create_dir_all(folder).map_err(io)?;
-        }
         let bytes =
             serde_json::to_vec_pretty(self).map_err(|source| LeaderboardTableError::Json {
                 path: path.to_path_buf(),
                 source,
             })?;
-        std::fs::write(path, bytes).map_err(io)
+        write_atomic(path, &bytes).map_err(|source| LeaderboardTableError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
     }
 }
 
@@ -385,19 +372,20 @@ mod tests {
     #[test]
     fn the_table_round_trips_through_its_file() {
         let dir = tempfile::tempdir().expect("dir");
-        let path = leaderboard_table_path(dir.path(), BUILD);
-        assert!(path.ends_with("leaderboards-25810808.json"));
+        let layout = ContentLayout::new(dir.path(), BUILD);
+        let path = layout.file(LEADERBOARDS);
+        assert!(path.ends_with("25810808/services/leaderboards.json"));
         let rows = [row("MonthWarScore", MONTH_TEMPLATE, "Month")];
         let table = leaderboard_table_of(&rows, &text());
         table.write(&path).expect("write");
-        assert_eq!(LeaderboardTable::load(&path).expect("load"), table);
+        assert_eq!(LeaderboardTable::load(&layout).expect("load"), table);
     }
 
     #[test]
     fn a_missing_table_is_an_error() {
         let dir = tempfile::tempdir().expect("dir");
         assert!(matches!(
-            LeaderboardTable::load(&leaderboard_table_path(dir.path(), BUILD)),
+            LeaderboardTable::load(&ContentLayout::new(dir.path(), BUILD)),
             Err(LeaderboardTableError::Io { .. })
         ));
     }

@@ -2979,7 +2979,7 @@ mod tests {
     }
 
     /// The common slice vision (`undead_berserker`, `risen_right_arm`, wolves: 556 of the 922
-    /// archetypes of `ai-data-25810808.bin`): ambient 75 deg to each side and 12 m, combat 180
+    /// archetypes of the build 25810808 `mobs/ai-data.bin`): ambient 75 deg to each side and 12 m, combat 180
     /// deg and 30 m.
     const COMMON_AMBIENT: nw_ai::data::Vision = nw_ai::data::Vision {
         angle_deg: 75.0,
@@ -3652,11 +3652,9 @@ mod tests {
 /// `content-tool ai-data` first).
 #[cfg(all(test, feature = "local-data"))]
 mod retail_tests {
-    use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
     use nw_ai::AiData;
-    use nw_content::client_build::load_client_build;
     use nw_content::combat::{CombatRows, MobType};
     use nw_formats::objectstream::lowercase_crc32;
 
@@ -3666,7 +3664,6 @@ mod retail_tests {
     use crate::combat::tests::test_combat;
     use crate::mob_ai::{AiRates, LookAssets};
 
-    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
     /// The slice assets of the beach boar, the tutorial's swarmer and the risen (their
     /// creature animation rows).
     const BOAR: &str = "db96d765b50459d98c9e04adaa9c9485";
@@ -3678,10 +3675,6 @@ mod retail_tests {
             .expect("hex")
             .try_into()
             .expect("an asset id")
-    }
-
-    fn repo() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
     /// The retail bear slice has the stagger: its grit is its stamina, it spawns with
@@ -3752,9 +3745,8 @@ mod retail_tests {
     /// stagger's tracker (`AI_Staggered_Tracker` `OnEndStatusEffect`).
     #[test]
     fn the_retail_stagger_resist_halves_the_stagger_after_the_tracker() {
-        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let path = nw_content::bundle::bundle_path(&repo().join("local-data/content"), &build);
-        let bundle = nw_content::ContentBundle::load(&path, &build).expect("the content bundle");
+        let bundle = nw_content::ContentBundle::load(&nw_content::layout::repo_layout())
+            .expect("the content bundle");
         let rules = nw_content::status_effects::StatusEffectRules::from_tables(&bundle.tables);
         let resist = rules
             .by_id("AI_Staggered_StaggerDamageResist")
@@ -3765,9 +3757,7 @@ mod retail_tests {
     }
 
     fn retail_data() -> AiData {
-        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
-        AiData::load(&repo().join("local-data/content"), &build)
-            .expect("run `content-tool ai-data` first")
+        AiData::load(&nw_content::layout::repo_layout()).expect("run `content-tool ai-data` first")
     }
 
     /// Mobs of the vitals ids `kinds`, each shown with its slice asset, on the retail trees.
@@ -4477,18 +4467,9 @@ mod retail_tests {
         use nw_world::WorldFile;
         use nw_world::collision::LevelCollision;
         use nw_world::collision_index::CollisionIndex;
-        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let content = repo().join("local-data/content");
-        let world = WorldFile::load(
-            &nw_world::world_file::world_file_path(&content, &build, OPEN_WORLD_LEVEL),
-            &build,
-        )
-        .expect("world file");
-        let collision = LevelCollision::load(
-            &content.join(format!("collision-{build}-{OPEN_WORLD_LEVEL}.bin")),
-            &build,
-        )
-        .expect("collision file");
+        let layout = nw_content::layout::repo_layout();
+        let world = WorldFile::load(&layout, OPEN_WORLD_LEVEL).expect("world file");
+        let collision = LevelCollision::load(&layout, OPEN_WORLD_LEVEL).expect("collision file");
         // The mobs' ground of the live sim (`run::load_level`): the AI bodies of the level and
         // its navigation marks.
         let mob_bodies = collision.bodies_for(nw_world::collision::QueryFilter::Ai);
@@ -4589,13 +4570,9 @@ mod retail_tests {
         const HOLD_MS: u64 = 10_000;
         let (mut mobs, ground) = janszoon_on_real_ground();
         // His spawn's route of the real level: three points by his spawn, 41.9 to 42.5 m high.
-        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let content = repo().join("local-data/content");
-        let mut world = nw_world::WorldFile::load(
-            &nw_world::world_file::world_file_path(&content, &build, "newworld_vitaeeterna"),
-            &build,
-        )
-        .expect("world file");
+        let mut world =
+            nw_world::WorldFile::load(&nw_content::layout::repo_layout(), "newworld_vitaeeterna")
+                .expect("world file");
         let spawn = world
             .vitals
             .iter()
@@ -4685,13 +4662,9 @@ mod retail_tests {
         const HIT_EVERY_MS: u64 = 1_000;
         /// The slice's `CombatLeashDistance` (`corrupted_sailor_1h_sword`).
         const COMBAT_LEASH_M: f32 = 50.0;
-        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let content = repo().join("local-data/content");
-        let mut world = nw_world::WorldFile::load(
-            &nw_world::world_file::world_file_path(&content, &build, OPEN_WORLD_LEVEL),
-            &build,
-        )
-        .expect("world file");
+        let mut world =
+            nw_world::WorldFile::load(&nw_content::layout::repo_layout(), OPEN_WORLD_LEVEL)
+                .expect("world file");
         let spawn = world
             .vitals
             .iter()
@@ -4822,13 +4795,9 @@ mod retail_tests {
     /// where it stands.
     fn mob_at_spawn(id: &str, asset: &str, spawn_xy: [f32; 2]) -> (Mobs, RealGround, Position) {
         const SPAWN_MATCH_M: f32 = 1.0;
-        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let content = repo().join("local-data/content");
-        let mut world = nw_world::WorldFile::load(
-            &nw_world::world_file::world_file_path(&content, &build, OPEN_WORLD_LEVEL),
-            &build,
-        )
-        .expect("world file");
+        let mut world =
+            nw_world::WorldFile::load(&nw_content::layout::repo_layout(), OPEN_WORLD_LEVEL)
+                .expect("world file");
         let spawn = world
             .vitals
             .iter()

@@ -12,7 +12,7 @@ Commits 6394810..e98852b on main.
   `start_event`; flow `wait`. Graph checks: a trigger, known nodes and outputs, no link into a
   trigger, every other node linked into, typed values, no loop without a `wait`.
 - Design kinds `script` (`scripts/<map>/`) and `event` (`events/<map>/`). Apply writes them to
-  `design-<build>.json` beside the merged files, so the world files keep their schema.
+  `game-data/design.json` of the build folder, beside the merged bundle, so the world files keep their schema.
 - Sim: each script of the level compiled once; a trigger starts a run, conditions branch, a
   `wait` holds the run, several links from one output fork it, 1,000 steps per script per tick.
   A block that acts at a point (`spawn_mobs`, `start_event`) runs only on the sim that owns the

@@ -2,11 +2,11 @@
 //! `content-tool leaderboards`: the leaderboard table ([`nw_content::leaderboard_table`]) from the
 //! content bundle, for `status-reporter`. It needs no game install.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nw_content::ContentBundle;
-use nw_content::bundle::bundle_path;
-use nw_content::leaderboard_table::{leaderboard_table, leaderboard_table_path};
+use nw_content::layout::{ContentLayout, LEADERBOARDS};
+use nw_content::leaderboard_table::leaderboard_table;
 
 use crate::error::ToolError;
 
@@ -19,18 +19,15 @@ pub struct LeaderboardsReport {
     pub boards: usize,
 }
 
-/// Writes the leaderboard table of `client_build` into `content_dir`, from the bundle in it.
+/// Writes the leaderboard table of `layout`, from its merged bundle.
 ///
 /// # Errors
 ///
 /// Returns [`ToolError`] when the bundle cannot be read or the table cannot be written.
-pub fn write_leaderboard_table(
-    content_dir: &Path,
-    client_build: &str,
-) -> Result<LeaderboardsReport, ToolError> {
-    let bundle = ContentBundle::load(&bundle_path(content_dir, client_build), client_build)?;
+pub fn write_leaderboard_table(layout: &ContentLayout) -> Result<LeaderboardsReport, ToolError> {
+    let bundle = ContentBundle::load(layout)?;
     let table = leaderboard_table(&bundle.tables, &bundle.text);
-    let path = leaderboard_table_path(content_dir, client_build);
+    let path = layout.file(LEADERBOARDS);
     table.write(&path)?;
     Ok(LeaderboardsReport {
         path,
@@ -40,6 +37,7 @@ pub fn write_leaderboard_table(
 
 #[cfg(test)]
 mod tests {
+    use nw_content::layout::BUNDLE;
     use nw_content::leaderboard_table::LeaderboardTable;
     use nw_content::leaderboards::test_rows::board_row;
     use nw_content::table::Table;
@@ -63,12 +61,11 @@ mod tests {
                 ..board_row("SeasonWarScore", "top-war-score.{world}.{season}")
             }],
         });
-        bundle
-            .save(&bundle_path(dir.path(), BUILD))
-            .expect("bundle");
-        let report = write_leaderboard_table(dir.path(), BUILD).expect("table");
+        let layout = ContentLayout::new(dir.path(), BUILD);
+        bundle.save(&layout.file(BUNDLE)).expect("bundle");
+        let report = write_leaderboard_table(&layout).expect("table");
         assert_eq!(report.boards, 1);
-        let table = LeaderboardTable::load(&report.path).expect("load");
+        let table = LeaderboardTable::load(&layout).expect("load");
         assert_eq!(table.boards[0].board_id, "SeasonWarScore");
     }
 }

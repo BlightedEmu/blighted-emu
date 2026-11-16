@@ -49,8 +49,9 @@ An environment variable with the prefix `NW_REPORTER_` overrides a value of the 
 example `NW_REPORTER_SITE_URL=https://example.org`. Keep the live site address and the secret in
 the environment of the game machine, not in a file you copy from another machine.
 
-Run `content-tool leaderboards` once per client build. It writes the board table
-`local-data/content/leaderboards-<build>.json` that the reporter reads.
+Run `content-tool leaderboards` once per client build (`just content` runs it with the other
+steps). It writes the board table `local-data/content/<build>/services/leaderboards.json` that
+the reporter reads.
 
 ### edge-http
 

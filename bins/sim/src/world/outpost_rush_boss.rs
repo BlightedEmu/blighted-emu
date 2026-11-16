@@ -452,11 +452,9 @@ mod tests {
     #[test]
     #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
     fn her_level_gives_her_retail_health() {
-        const BUILD: &str = "25810808";
         const RETAIL_HEALTH: u32 = 330_960;
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let path = nw_content::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
-        let bundle = nw_content::ContentBundle::load(&path, BUILD).expect("bundle");
+        let bundle =
+            nw_content::ContentBundle::load(&nw_content::layout::repo_layout()).expect("bundle");
         let data = nw_content::combat::CombatData::from_tables(
             &bundle.tables,
             &nw_content::combat::CombatRows::default(),

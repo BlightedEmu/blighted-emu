@@ -3,13 +3,13 @@
 //! file that the sims read, loaded the first time a page asks for it, and its triangles around a
 //! point (`GET /api/world/shapes?x=&y=&half=`).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use nw_content::layout::{COLLISION, ContentLayout};
 use nw_world::collision::LevelCollision;
 use nw_world::collision_index::CollisionIndex;
 use serde::{Deserialize, Serialize};
@@ -27,17 +27,16 @@ pub const SHAPES_MAX_TRIANGLES: usize = 200_000;
 /// The level collision file, read once on first use.
 #[derive(Debug, Clone)]
 pub struct LevelShapes {
-    path: PathBuf,
-    client_build: String,
+    /// The content folder and the level of the collision file; `None` for an index already made.
+    source: Option<(ContentLayout, String)>,
     index: Arc<OnceCell<Option<CollisionIndex>>>,
 }
 
 impl LevelShapes {
-    /// The collision file at `path`, of `client_build`; nothing is read yet.
-    pub fn new(path: PathBuf, client_build: String) -> Self {
+    /// The collision file of `level` in `layout`; nothing is read yet.
+    pub fn new(layout: ContentLayout, level: String) -> Self {
         Self {
-            path,
-            client_build,
+            source: Some((layout, level)),
             index: Arc::new(OnceCell::new()),
         }
     }
@@ -45,8 +44,7 @@ impl LevelShapes {
     /// The same shapes from an index already made (tests).
     pub fn of_index(index: CollisionIndex) -> Self {
         Self {
-            path: PathBuf::new(),
-            client_build: String::new(),
+            source: None,
             index: Arc::new(OnceCell::new_with(Some(Some(index)))),
         }
     }
@@ -56,12 +54,16 @@ impl LevelShapes {
     async fn index(&self) -> Option<&CollisionIndex> {
         self.index
             .get_or_init(|| {
-                let (path, build) = (self.path.clone(), self.client_build.clone());
+                let source = self.source.clone();
                 async move {
                     let loaded = tokio::task::spawn_blocking(move || {
-                        LevelCollision::load(&path, &build)
+                        let (layout, level) = source.ok_or("no collision file")?;
+                        LevelCollision::load(&layout, &level)
                             .map(CollisionIndex::new)
-                            .map_err(|error| format!("{}: {error}", path.display()))
+                            .map_err(|error| {
+                                let path = layout.level_file(COLLISION, &level);
+                                format!("{}: {error}", path.display())
+                            })
                     })
                     .await
                     .map_err(|error| error.to_string())

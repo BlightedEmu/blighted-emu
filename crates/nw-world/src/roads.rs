@@ -10,11 +10,12 @@
 //! The file is the shared header of `nw_content::container` with magic `NWRD`, then a postcard
 //! body of one [`RoadMap`]. `content-tool roads` writes it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use nw_content::container::{
     ContainerError, ContainerSpec, decode_value, encode_value, read_file, write_file,
 };
+use nw_content::layout::{ContentLayout, ROADS};
 use serde::{Deserialize, Serialize};
 
 /// First 4 bytes of every road file.
@@ -37,11 +38,6 @@ pub const ROAD_TRACT_NAME: &str = "roads";
 const HALF: f64 = 0.5;
 /// Bits of one word of a region's cell set.
 const WORD_BITS: usize = u64::BITS as usize;
-
-/// The road file path of one level: `<dir>/roads-<client_build>-<level>.bin`.
-pub fn road_file_path(dir: &Path, client_build: &str, level: &str) -> PathBuf {
-    dir.join(format!("roads-{client_build}-{level}.bin"))
-}
 
 /// The road cells of one region.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,9 +173,12 @@ impl RoadMap {
         write_file(path, &self.to_bytes(client_build)?)
     }
 
-    /// Reads and checks the road file at `path`.
-    pub fn load(path: &Path, expected_build: &str) -> Result<Self, ContainerError> {
-        Self::from_bytes(&read_file(path)?, expected_build)
+    /// Reads and checks the road file of `level` of `layout`.
+    pub fn load(layout: &ContentLayout, level: &str) -> Result<Self, ContainerError> {
+        Self::from_bytes(
+            &read_file(&layout.level_file(ROADS, level))?,
+            layout.client_build(),
+        )
     }
 }
 
@@ -284,9 +283,5 @@ mod tests {
         assert_eq!(bytes[..ROADS_MAGIC.len()], ROADS_MAGIC);
         assert_eq!(RoadMap::from_bytes(&bytes, BUILD).expect("decode"), map);
         assert!(RoadMap::from_bytes(&bytes, "1").is_err());
-        assert_eq!(
-            road_file_path(Path::new("content"), BUILD, "ftue_v2"),
-            Path::new("content").join("roads-25810808-ftue_v2.bin")
-        );
     }
 }

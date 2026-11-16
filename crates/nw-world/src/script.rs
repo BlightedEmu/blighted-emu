@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use nw_content::layout::{ContentLayout, DESIGN};
 use serde::{Deserialize, Serialize};
 
 /// The output of a block that goes on.
@@ -16,9 +17,6 @@ pub const TRUE: &str = "true";
 pub const FALSE: &str = "false";
 const ONE_OUTPUT: &[&str] = &[NEXT];
 const CONDITION_OUTPUTS: &[&str] = &[TRUE, FALSE];
-/// The file name prefix of the design data.
-const DESIGN_DATA_PREFIX: &str = "design-";
-const DESIGN_DATA_EXTENSION: &str = ".json";
 
 /// What a block is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -583,20 +581,14 @@ pub enum DesignDataError {
     },
 }
 
-/// The design data file of `client_build` in `dir`.
-pub fn design_data_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!(
-        "{DESIGN_DATA_PREFIX}{client_build}{DESIGN_DATA_EXTENSION}"
-    ))
-}
-
 impl DesignData {
-    /// Reads `path`; a missing file is empty design data (content from before scripts).
+    /// Reads the file of `layout`; a missing file is empty design data (content from before scripts).
     ///
     /// # Errors
     ///
     /// Returns [`DesignDataError`] when the file cannot be read or is not design data.
-    pub fn load(path: &Path) -> Result<Self, DesignDataError> {
+    pub fn load(layout: &ContentLayout) -> Result<Self, DesignDataError> {
+        let path = &layout.file(DESIGN);
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|source| DesignDataError::Json {
                 path: path.to_path_buf(),
@@ -764,9 +756,10 @@ mod tests {
     #[test]
     fn design_data_reads_back_and_a_missing_file_is_empty() {
         let dir = tempfile::tempdir().expect("dir");
-        let path = design_data_path(dir.path(), "1");
+        let layout = ContentLayout::new(dir.path(), "1");
+        let path = layout.file(DESIGN);
         assert_eq!(
-            DesignData::load(&path).expect("load"),
+            DesignData::load(&layout).expect("load"),
             DesignData::default()
         );
         let data = DesignData {
@@ -791,7 +784,8 @@ mod tests {
                 },
             )]),
         };
-        std::fs::write(&path, data.to_json(&path).expect("json")).expect("write");
-        assert_eq!(DesignData::load(&path).expect("load"), data);
+        nw_content::layout::write_atomic(&path, data.to_json(&path).expect("json").as_bytes())
+            .expect("write");
+        assert_eq!(DesignData::load(&layout).expect("load"), data);
     }
 }

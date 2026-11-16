@@ -11,10 +11,11 @@
 //! and gatherable members of the 21 captured door capitals sit on exactly these numbers).
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use nw_content::layout::{ContentLayout, LEVEL_DOORS};
 use nw_content::level_doors::{
-    DoorComponent, DoorComponentKind, LevelDoor, LevelDoors, LevelDoorsError, level_doors_path,
+    DoorComponent, DoorComponentKind, LevelDoor, LevelDoors, LevelDoorsError,
 };
 use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, AssetCatalogError, AssetKey, paths_of};
 use nw_formats::objectstream::{Element, lowercase_crc32};
@@ -179,7 +180,7 @@ pub fn level_doors(
 }
 
 /// Builds the level doors file of level `level` (world file `world`) from the paks of `index`
-/// into `out_dir`.
+/// into `layout`.
 ///
 /// # Errors
 ///
@@ -189,8 +190,7 @@ pub fn build_level_doors(
     index: &PakIndex,
     world: &WorldFile,
     level: &str,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<LevelDoorsReport, LevelDoorsBuildError> {
     let wanted: HashSet<AssetKey> = world
         .capitals
@@ -229,9 +229,9 @@ pub fn build_level_doors(
         level: level.to_owned(),
         doors: level_doors(world, &slices, &components),
     };
-    let path = level_doors_path(out_dir, client_build, level);
+    let path = layout.level_file(LEVEL_DOORS, level);
     doors.write(&path)?;
-    if LevelDoors::load(out_dir, client_build, level)? != doors {
+    if LevelDoors::load(layout, level)? != doors {
         return Err(LevelDoorsBuildError::Reload(path));
     }
     Ok(LevelDoorsReport {

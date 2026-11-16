@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The AI data file (`ai-data-<build>.bin`, written by `content-tool ai-data`): every Server.pak
+//! The AI data file ([`AI_DATA`], written by `content-tool ai-data`): every Server.pak
 //! behavior tree as one shared node arena, the AI part of every creature slice, and the CAGE task
 //! resolution of every creature grid (behavior-tree study, section 5.1).
 //!
 //! The file is a content container (magic `NWAI`) with a postcard body, as the content bundle.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nw_content::container::{
     ContainerError, ContainerSpec, decode_value, encode_value, read_file, write_file,
 };
+use nw_content::layout::{AI_DATA, ContentLayout};
 use nw_content::player_attacks::Flight;
 use serde::{Deserialize, Serialize};
 
@@ -24,13 +25,6 @@ pub const AI_DATA_SPEC: ContainerSpec = ContainerSpec {
 };
 /// Raised when the body layout changes.
 const SCHEMA_VERSION: u32 = 8;
-const FILE_PREFIX: &str = "ai-data-";
-const FILE_SUFFIX: &str = ".bin";
-
-/// The path of the file of `client_build` in `dir`.
-pub fn ai_data_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// One `.behaviortree` file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -811,24 +805,27 @@ impl AiData {
             .map(|known| known.flight)
     }
 
-    /// Reads the file of `client_build` from `dir`.
+    /// Reads the file of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`ContainerError`] when the file is missing, from another build or bad.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, ContainerError> {
-        let bytes = read_file(&ai_data_path(dir, client_build))?;
-        decode_value(&AI_DATA_SPEC, &bytes, client_build)
+    pub fn load(layout: &ContentLayout) -> Result<Self, ContainerError> {
+        let bytes = read_file(&layout.file(AI_DATA))?;
+        decode_value(&AI_DATA_SPEC, &bytes, layout.client_build())
     }
 
-    /// Writes the file of `client_build` into `dir` and returns its path.
+    /// Writes the file of `layout` and returns its path.
     ///
     /// # Errors
     ///
     /// Returns [`ContainerError`] when the data cannot be encoded or the file written.
-    pub fn save(&self, dir: &Path, client_build: &str) -> Result<PathBuf, ContainerError> {
-        let path = ai_data_path(dir, client_build);
-        write_file(&path, &encode_value(&AI_DATA_SPEC, client_build, self)?)?;
+    pub fn save(&self, layout: &ContentLayout) -> Result<PathBuf, ContainerError> {
+        let path = layout.file(AI_DATA);
+        write_file(
+            &path,
+            &encode_value(&AI_DATA_SPEC, layout.client_build(), self)?,
+        )?;
         Ok(path)
     }
 }
@@ -1133,10 +1130,14 @@ mod tests {
             }],
             ..AiData::default()
         };
-        data.save(dir, "1").expect("save");
-        assert_eq!(AiData::load(dir, "1").expect("load"), data);
+        let layout = ContentLayout::new(dir, "1");
+        data.save(&layout).expect("save");
+        assert_eq!(AiData::load(&layout).expect("load"), data);
         assert_eq!(data.key("b"), Some(0));
         assert_eq!(data.key_name(0), "b");
-        assert!(AiData::load(dir, "2").is_err(), "other build");
+        let other = ContentLayout::new(dir, "2");
+        std::fs::create_dir_all(other.file(AI_DATA).parent().expect("folder")).expect("dir");
+        std::fs::copy(layout.file(AI_DATA), other.file(AI_DATA)).expect("copy");
+        assert!(AiData::load(&other).is_err(), "other build");
     }
 }

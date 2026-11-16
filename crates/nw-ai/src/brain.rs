@@ -2918,12 +2918,10 @@ mod tests {
 
 #[cfg(all(test, feature = "local-data"))]
 mod scale_tests {
-    use std::path::Path;
     use std::time::{Duration, Instant};
 
     use super::*;
 
-    const CLIENT_BUILD: &str = "25810808";
     /// Mobs ticked at once.
     const MOBS: usize = 100_000;
     /// Ticks before the measured one, so that every mob has a plan running.
@@ -3017,8 +3015,9 @@ mod scale_tests {
 
     #[test]
     fn a_hundred_thousand_mobs_tick_within_the_budget() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../local-data/content");
-        let data = AiData::load(&dir, CLIENT_BUILD).expect("run `content-tool ai-data` first");
+        let data = AiData::load(&nw_content::layout::repo_layout())
+            .expect("run `content-tool ai-data` first");
+
         let runtime = Runtime::new(data.clone());
         let with_tree: Vec<u32> = (0..data.archetypes.len() as u32)
             .filter(|index| {

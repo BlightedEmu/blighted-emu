@@ -16,11 +16,12 @@
 //! `nw_content::container` with magic `NWCO`, then a postcard body of one [`LevelCollision`].
 //! [`crate::collision_index::CollisionIndex`] answers the floor and ray queries.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use nw_content::container::{
     ContainerError, ContainerSpec, decode_value, encode_value, read_file, write_file,
 };
+use nw_content::layout::{COLLISION, ContentLayout};
 use nw_formats::rigid::{Vec3, cross, dot, sub};
 use serde::{Deserialize, Serialize};
 
@@ -44,11 +45,6 @@ pub const COLLISION_CONTAINER: ContainerSpec = ContainerSpec {
 const HULL_PLANE_TOLERANCE_M: f32 = 1e-4;
 /// Rows of an [`Affine`].
 const ROWS: usize = 3;
-
-/// The collision file path of one level: `<dir>/collision-<client_build>-<level>.bin`.
-pub fn collision_file_path(dir: &Path, client_build: &str, level: &str) -> PathBuf {
-    dir.join(format!("collision-{client_build}-{level}.bin"))
-}
 
 /// The solid shapes of one level.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -336,9 +332,12 @@ impl LevelCollision {
         write_file(path, &self.to_bytes(client_build)?)
     }
 
-    /// Reads and checks the collision file at `path`.
-    pub fn load(path: &Path, expected_build: &str) -> Result<Self, ContainerError> {
-        Self::from_bytes(&read_file(path)?, expected_build)
+    /// Reads and checks the collision file of `level` of `layout`.
+    pub fn load(layout: &ContentLayout, level: &str) -> Result<Self, ContainerError> {
+        Self::from_bytes(
+            &read_file(&layout.level_file(COLLISION, level))?,
+            layout.client_build(),
+        )
     }
 }
 
@@ -691,11 +690,17 @@ mod tests {
     #[test]
     fn a_saved_file_loads_the_same_and_another_build_is_refused() {
         let dir = tempfile::tempdir().expect("dir");
-        let path = collision_file_path(dir.path(), BUILD, "lv");
+        let layout = ContentLayout::new(dir.path(), BUILD);
+        let path = layout.level_file(COLLISION, "lv");
         sample().save(&path, BUILD).expect("save");
-        assert_eq!(LevelCollision::load(&path, BUILD).expect("load"), sample());
-        assert!(LevelCollision::load(&path, "1").is_err());
-        assert!(path.ends_with("collision-25810808-lv.bin"));
+        assert_eq!(LevelCollision::load(&layout, "lv").expect("load"), sample());
+        let other = ContentLayout::new(dir.path(), "1");
+        std::fs::create_dir_all(other.build_dir().parent().expect("content")).expect("dir");
+        sample()
+            .save(&other.level_file(COLLISION, "lv"), BUILD)
+            .expect("save");
+        assert!(LevelCollision::load(&other, "lv").is_err());
+        assert!(path.ends_with("25810808/levels/lv/collision.bin"));
     }
 
     fn near(a: Vec3, b: Vec3) -> bool {

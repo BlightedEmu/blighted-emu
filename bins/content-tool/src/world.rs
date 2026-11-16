@@ -5,10 +5,11 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nw_content::gathering::InstancedObject;
 use nw_content::ids::{gatherable_ids, lore_ids, npc_ids, vitals_ids};
+use nw_content::layout::{ContentLayout, RETAIL_WORLD};
 use nw_content::{ContainerError, ContentBundle};
 use nw_formats::asset_catalog::{
     ASSET_CATALOG_ENTRY, AssetCatalogError, DYNAMIC_SLICE_EXTENSION, paths_of,
@@ -31,7 +32,6 @@ use nw_world::time_of_day::{
     TimeOfDayPoints, TimedHolder, TimedSlice, TimedSlicePath, points_under,
 };
 use nw_world::travel_slices::{HousingPlot, TeleporterSlice, plot_house_type};
-use nw_world::world_file::world_file_path;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -503,19 +503,17 @@ pub fn build_level(
     Ok((world, skipped))
 }
 
-/// Builds, writes and reloads the world file of every level in `source`, and checks the spawn
-/// IDs against the content bundle at `bundle_path`. The crafting stations and house plots among
+/// Builds, writes and reloads the retail world file of every level in `source` into `layout`,
+/// and checks the spawn IDs against the retail content bundle of `layout`. The crafting stations and house plots among
 /// each level's spawned slices come from the slices' `.dynamicslice` files, and the teleporters
 /// among its capitals from the capitals' slices, found by their `sliceAssetId` in the asset
 /// catalog. The time of day of its spawns and gatherable points comes from the slices that its
 /// capitals and chunk lists place ([`time_of_day_points`]).
 pub fn run_world(
     source: &GameSource,
-    client_build: &str,
-    bundle_path: &Path,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<Vec<LevelReport>, ToolError> {
-    let bundle = ContentBundle::load(bundle_path, client_build)?;
+    let bundle = ContentBundle::load_retail(layout)?;
     let known = KnownIds::from_bundle(&bundle);
     let mut entries = BTreeMap::new();
     source.for_each_entry(is_world_input, |path, bytes| {
@@ -600,7 +598,7 @@ pub fn run_world(
     }
     let known = &known;
     let reports = in_parallel(&built, |(world, skipped)| {
-        write_level(world, skipped, client_build, out_dir, known)
+        write_level(world, skipped, layout, known)
     });
     Ok(reports.into_iter().collect::<Result<Vec<_>, _>>()?)
 }
@@ -924,15 +922,14 @@ pub(crate) fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R 
 fn write_level(
     world: &WorldFile,
     skipped: &SkipCounts,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
     known: &KnownIds,
 ) -> Result<LevelReport, WorldBuildError> {
     let level = &world.level.name;
-    let path = world_file_path(out_dir, client_build, level);
-    world.save(&path, client_build)?;
+    let path = layout.level_file(RETAIL_WORLD, level);
+    world.save(&path, layout.client_build())?;
     let expected = world.counts();
-    let found = WorldFile::load(&path, client_build)?.counts();
+    let found = WorldFile::load_retail(layout, level)?.counts();
     if found != expected {
         return Err(WorldBuildError::CountMismatch {
             level: level.clone(),

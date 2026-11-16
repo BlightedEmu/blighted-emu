@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The store table: what this server's store sells, for free, and the entitlements every account
-//! holds. `content-tool store` writes it from the game data (`nw_content::store`) for
-//! `edge-http`, which serves the catalog and the entitlement list from it; the sims build the same
-//! table from the content bundle and grant the purchases.
+//! holds. `content-tool store` writes it from the game data (`nw_content::store`) into the content
+//! folder (`services/store.json` of the build folder) for `edge-http`, which serves the catalog
+//! and the entitlement list from it; the sims build the same table from the content bundle and
+//! grant the purchases.
 //!
 //! Retail sold its store mounts for 0 in its last weeks (`mount-menu-buying-all-store-horses`,
 //! 2026-11-04: 35 mounts unlocked for 0 Marks of Fortune), and its barbershop tokens too
@@ -17,11 +18,6 @@ use serde::{Deserialize, Serialize};
 pub const STORE_CURRENCY: &str = "Marks of Fortune";
 /// The store currency's name (retail `currencyName`).
 pub const STORE_CURRENCY_NAME: &str = "New World - Marks of Fortune";
-
-/// File name start of the store table: `store-<client build>.json`.
-pub const STORE_TABLE_PREFIX: &str = "store-";
-/// File name end of the store table.
-pub const STORE_TABLE_EXTENSION: &str = ".json";
 
 /// An entitlement and its English name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,13 +95,6 @@ pub enum StoreTableError {
     },
 }
 
-/// The store table file of `client_build` in `dir`.
-pub fn store_table_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!(
-        "{STORE_TABLE_PREFIX}{client_build}{STORE_TABLE_EXTENSION}"
-    ))
-}
-
 impl StoreTable {
     /// Reads the table at `path`; an empty table when the file does not exist.
     ///
@@ -126,24 +115,13 @@ impl StoreTable {
         }
     }
 
-    /// Writes the table to `path`, creating its folder.
+    /// The table as the text of its file (pretty JSON); the content writer writes it.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreTableError::Io`] when the file cannot be written.
-    pub fn write(&self, path: &Path) -> Result<(), StoreTableError> {
-        let io = |source| StoreTableError::Io {
-            path: path.to_path_buf(),
-            source,
-        };
-        if let Some(folder) = path.parent() {
-            std::fs::create_dir_all(folder).map_err(io)?;
-        }
-        let bytes = serde_json::to_vec_pretty(self).map_err(|source| StoreTableError::Json {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        std::fs::write(path, bytes).map_err(io)
+    /// Returns the JSON error when the table cannot be encoded.
+    pub fn to_json(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec_pretty(self)
     }
 
     /// The mount that `entitlement` unlocks.
@@ -203,13 +181,13 @@ mod tests {
     fn a_table_is_written_and_read_back_and_finds_its_mounts() {
         let dir = std::env::temp_dir().join(format!("store-table-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("folder");
-        let path = store_table_path(&dir, "25810808");
-        assert!(path.ends_with("store-25810808.json"));
+        let path = dir.join("store.json");
         assert_eq!(
             StoreTable::load(&path).expect("absent"),
             StoreTable::default()
         );
-        table().write(&path).expect("write");
+        std::fs::write(&path, table().to_json().expect("json")).expect("write");
+
         let read = StoreTable::load(&path).expect("read");
         assert_eq!(read, table());
         assert_eq!(

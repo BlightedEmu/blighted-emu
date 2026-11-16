@@ -110,7 +110,7 @@ Reader: `crates/nw-formats/src/rnr.rs`; its local-data test is in `crates/nw-ood
 ## 4. The collision file
 
 `content-tool collision [levels]` (`just collision`) writes
-`local-data/content/collision-<build>-<level>.bin`: the shared container header with magic
+`local-data/content/<build>/levels/<level>/collision.bin`: the shared container header with magic
 `NWCO`, schema 2, then a postcard `LevelCollision` (`crates/nw-world/src/collision.rs`):
 shapes once (`Mesh`, `Box`, `Sphere`, `Capsule`, `Cylinder`, `Convex` with planes from the hull
 points), the bodies of the level as it loads (shape index + 3 x 4 place), and the **deferred

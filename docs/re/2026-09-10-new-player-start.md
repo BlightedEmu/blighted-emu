@@ -41,11 +41,11 @@ tutorial start; own-player-position note). The client's first input is 0, 0, 0 b
 
 ## Our data
 
-**Observed.** `local-data/content/world-25810808-ftue_v2.bin` (24,730 bytes) and
-`world-25810808-climaxftue_02.bin` exist. Each sim and director runs one level
+**Observed.** The world files of `ftue_v2` (24,730 bytes) and `climaxftue_02` exist (now
+`local-data/content/25810808/levels/<level>/world.bin`). Each sim and director runs one level
 (`level` in `config/sim.toml` and `local-data/world-director.toml`).
 
-**Later finding.** The current `local-data/content/world-25810808-ftue_v2.bin` is 2,122,178 bytes.
+**Later finding.** The current `ftue_v2` world file is 2,122,178 bytes.
 The map tool now reads the 1024 x 1024 FTUE heightmaps, so the tutorial world file has terrain
 ([tutorial quest](2026-09-12-tutorial-quest.md) §12).
 

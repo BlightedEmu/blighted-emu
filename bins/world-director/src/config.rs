@@ -34,7 +34,7 @@ pub struct DirectorConfig {
     pub global_database: Option<GlobalDatabase>,
     /// The pinned client build file.
     pub client_build_config: PathBuf,
-    /// Folder of the world files (`world-<build>-<level>.bin`).
+    /// The content folder: the world files are in its build folder (`levels/<level>/world.bin`).
     pub content_dir: PathBuf,
     /// The open map level.
     pub level: String,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The creature animation table (`creature-animations-<build>.json`, made by `content-tool
+//! The creature animation table (`mobs/creature-animations.json`, made by `content-tool
 //! creature-animations` from the game paks; creature-animation note, 2026-09-18).
 //!
 //! A mob's replicated animation names its fragment, its action and its tag state by numbers of
@@ -14,17 +14,11 @@ use std::path::{Path, PathBuf};
 use nw_formats::mannequin::{TAG_STATE_LEN, TagBits, TagDefinition};
 use serde::{Deserialize, Serialize};
 
+use crate::layout::{CREATURE_ANIMATIONS, ContentLayout, write_atomic};
 use crate::mob_prefabs::ASSET_ID_LEN;
 
-const FILE_PREFIX: &str = "creature-animations-";
-const FILE_SUFFIX: &str = ".json";
 /// Millimetres per metre.
 const MM_PER_M: f32 = 1_000.0;
-
-/// The path of the table of `client_build` in `dir`.
-pub fn creature_animations_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// A bad table file.
 #[derive(Debug, thiserror::Error)]
@@ -180,13 +174,13 @@ pub struct CreatureAnimations {
 }
 
 impl CreatureAnimations {
-    /// Loads the table of `client_build` from `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`CreatureAnimationsError`] when the file is missing or bad.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, CreatureAnimationsError> {
-        let path = creature_animations_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, CreatureAnimationsError> {
+        let path = layout.file(CREATURE_ANIMATIONS);
         let text = std::fs::read_to_string(&path)
             .map_err(|source| CreatureAnimationsError::Io { path, source })?;
         Self::parse(&text)
@@ -273,7 +267,7 @@ pub fn write_rows(path: &Path, rows: &[CreatureRow]) -> Result<(), CreatureAnima
     if let Some(folder) = path.parent() {
         std::fs::create_dir_all(folder).map_err(io)?;
     }
-    std::fs::write(path, serde_json::to_vec_pretty(rows)?).map_err(io)
+    write_atomic(path, &serde_json::to_vec_pretty(rows)?).map_err(io)
 }
 
 /// The row of a tag's bits.
@@ -504,9 +498,7 @@ mod tests {
         // Observed (the same sweep): a retail scope time stops at the fragment's last tick (the
         // spider's `Fidget` and the great axeman's `POI_Patrol_Fidget` stay at it while the
         // entry holds). A play the mob left early only bounds the length from below.
-        const BUILD: &str = "25810808";
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let table = CreatureAnimations::load(Path::new(&dir), BUILD).expect("table");
+        let table = CreatureAnimations::load(&crate::layout::repo_layout()).expect("table");
         for play in &RETAIL_PLAYS {
             let asset = <[u8; ASSET_ID_LEN]>::try_from(hex::decode(play.asset).expect("hex"))
                 .expect("len");

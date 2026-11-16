@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `ai-data`: builds the AI data file (`ai-data-<build>.bin`, read by `nw_ai::data::AiData`)
+//! `ai-data`: builds the AI data file (`mobs/ai-data.bin`, read by `nw_ai::data::AiData`)
 //! from Server.pak and the game paks (behavior-tree study 2026-09-18, sections 2.4, 3 and 5.1).
 //!
 //! - Every Server.pak `.behaviortree` goes into one shared node arena (`nw_ai::decode`).

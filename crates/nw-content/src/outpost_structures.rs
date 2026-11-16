@@ -18,14 +18,13 @@
 //! place and the ownership. A slice no capture showed has no template.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
 use crate::Tables;
+use crate::layout::{ContentLayout, OUTPOST_STRUCTURES};
 
-const FILE_PREFIX: &str = "outpost-structures-";
-const FILE_SUFFIX: &str = ".json";
 /// The bytes of an asset id.
 pub const ASSET_LEN: usize = 16;
 /// The outposts of a map: A, B and C.
@@ -44,11 +43,6 @@ const STORAGE_SLOT: u32 = 11;
 const AI_MANAGER_SLOT: u32 = 12;
 /// The most defensive structures and gates of an outpost (four status slots each).
 const MOST_NUMBERED: u8 = 4;
-
-/// The table file of client build `client_build` in content directory `dir`.
-pub fn outpost_structures_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// A bad table file.
 #[derive(Debug, thiserror::Error)]
@@ -247,13 +241,13 @@ fn template_of(row: TemplateRow) -> Result<Template, OutpostStructuresError> {
 }
 
 impl OutpostStructures {
-    /// Loads the table of client build `client_build` from content directory `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`OutpostStructuresError`] when the file cannot be read or is not the table.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, OutpostStructuresError> {
-        let path = outpost_structures_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, OutpostStructuresError> {
+        let path = layout.file(OUTPOST_STRUCTURES);
         let text = std::fs::read_to_string(&path)
             .map_err(|source| OutpostStructuresError::Io { path, source })?;
         Self::parse(&text)
@@ -480,8 +474,7 @@ mod tests {
     #[test]
     #[ignore = "needs local-data/content"]
     fn the_installed_table_holds_the_three_maps() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../local-data/content");
-        let table = OutpostStructures::load(&dir, "25810808").expect("table");
+        let table = OutpostStructures::load(&crate::layout::repo_layout()).expect("table");
         for folder in ["nw_opr_004_trench", "nw_opr_005_vertical", "newworld_vitaeeterna"] {
             let map = table.map(folder).expect("map");
             assert!(map.spawners.len() >= 30, "{folder}");
@@ -501,8 +494,7 @@ mod tests {
     #[test]
     #[ignore = "needs local-data/content"]
     fn every_upgrade_tier_of_the_installed_table_has_a_template() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../local-data/content");
-        let table = OutpostStructures::load(&dir, "25810808").expect("table");
+        let table = OutpostStructures::load(&crate::layout::repo_layout()).expect("table");
         let mut inferred = Vec::new();
         for slice in &table.slices {
             let Some(next) = table.next_tier(&slice.asset) else {

@@ -16,6 +16,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+nw-content = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 
 [lints]

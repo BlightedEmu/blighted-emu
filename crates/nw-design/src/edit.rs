@@ -7,7 +7,6 @@ use std::path::{Component, Path, PathBuf};
 use crate::error::DesignError;
 use crate::file::DesignSet;
 use crate::load::{DESIGN_EXTENSION, TODO_FILE, file_version, load_dir, parse_file, sort_files};
-use crate::run::temp_path;
 use crate::schema::check_schema;
 
 /// Why an edit through a symbolic link is refused.
@@ -89,17 +88,7 @@ pub fn read_file(dir: &Path, relative: &Path) -> std::io::Result<String> {
 /// Refuses a path through a symbolic link (see [`no_link`]); otherwise the write error.
 pub fn write_file(dir: &Path, relative: &Path, text: &str) -> std::io::Result<()> {
     no_link(dir, relative)?;
-    let target = dir.join(relative);
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let temp = temp_path(&target);
-    let written = std::fs::write(&temp, text).and_then(|()| std::fs::rename(&temp, &target));
-    if written.is_err() {
-        // A temporary file that was never made is not there.
-        let _ = std::fs::remove_file(&temp);
-    }
-    written
+    nw_content::layout::write_atomic(&dir.join(relative), text.as_bytes())
 }
 
 /// Removes `relative` under `dir`.
@@ -261,7 +250,13 @@ mod tests {
             std::fs::read_to_string(dir.path().join(PROFILE_PATH)).expect("read"),
             PROFILE
         );
-        assert!(!temp_path(&dir.path().join(PROFILE_PATH)).exists());
+        let folder = dir.path().join(PROFILE_PATH);
+        let folder = folder.parent().expect("folder");
+        assert!(
+            std::fs::read_dir(folder)
+                .unwrap()
+                .all(|entry| !nw_content::layout::is_temp_file(&entry.unwrap().path()))
+        );
         let (set, errors) = load_dir(dir.path());
         assert_eq!((set.files.len(), errors), (1, vec![]));
     }

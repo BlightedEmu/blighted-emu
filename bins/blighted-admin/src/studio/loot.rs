@@ -139,10 +139,9 @@ async fn simulate(State(state): State<AppState>, Json(request): Json<SimulateReq
         return (StatusCode::CONFLICT, BUSY).into_response();
     };
     let paths = std::sync::Arc::clone(&studio.paths);
-    let build = std::sync::Arc::clone(&studio.client_build);
     let simulated = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let merged = merged_bundle(&paths, &build).map_err(|error| error.to_string())?;
+        let merged = merged_bundle(&paths).map_err(|error| error.to_string())?;
         let tables = LootTables::from_tables(&merged.bundle.tables);
         Ok::<_, String>(simulate_rolls(&tables, &request, &mut Dice::new(unix_ms())))
     })

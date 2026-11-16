@@ -193,7 +193,8 @@ pub struct SimConfig {
     /// The server's daily and weekly resets (loot limits, recipe cooldowns, instance refreshes,
     /// gather locks).
     pub resets: ResetClock,
-    /// Folder of the world files (`world-<build>-<level>.bin`).
+    /// The content folder: the files of the pinned build are in its build folder
+    /// (`nw_content::layout`).
     pub content_dir: PathBuf,
     /// The open map level; the same as the director's.
     pub level: String,

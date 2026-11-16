@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The dungeon script file (`dungeon-scripts-<build>.json`, written by `content-tool
+//! The dungeon script file (`instances/dungeon-scripts.json`, written by `content-tool
 //! dungeon-scripts`, read by the instance sims): per instance game mode, its level's encounters (from the
 //! encounter slices that the game mode's level script slice spawns, [`crate::level_script`]) in
 //! world coordinates, with every spawn and tracked target resolved to the slices it may spawn
@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use nw_content::layout::{ContentLayout, DUNGEON_SCRIPTS, write_atomic};
 use nw_formats::objectstream::lowercase_crc32;
 
 use crate::collision::{Affine, Geometry, shape_contains};
@@ -21,13 +22,10 @@ use crate::level_script::{DifficultyRewards, SpawnerRules};
 use crate::records::PatrolPath;
 use crate::slice_data::GUID_LEN;
 
-/// The level folder of the open world. Its encounters are placed by capitals, not by a game
-/// mode's level script; the file holds them under the level's name, beside the game modes.
-pub const OPEN_WORLD_LEVEL: &str = "newworld_vitaeeterna";
-/// The file name prefix; the client build and [`DUNGEON_SCRIPTS_EXTENSION`] follow.
-pub const DUNGEON_SCRIPTS_PREFIX: &str = "dungeon-scripts-";
-/// The file extension.
-pub const DUNGEON_SCRIPTS_EXTENSION: &str = ".json";
+/// The level folder of the open world (the content registry's). Its encounters are placed by
+/// capitals, not by a game mode's level script; the file holds them under the level's name,
+/// beside the game modes.
+pub use nw_content::layout::OPEN_WORLD_LEVEL;
 /// The level script entity whose trigger area starts an expedition's clock (one of
 /// [`LevelScript::trigger_areas`]).
 pub const START_AREA_ENTITY: &str = "AreaMutatorStart";
@@ -665,20 +663,14 @@ pub enum DungeonScriptsError {
     },
 }
 
-/// The dungeon script file of `client_build` in `dir`.
-pub fn dungeon_scripts_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!(
-        "{DUNGEON_SCRIPTS_PREFIX}{client_build}{DUNGEON_SCRIPTS_EXTENSION}"
-    ))
-}
-
 impl DungeonScripts {
-    /// Reads `path`; a missing file has no scripts (content from before this file).
+    /// Reads the file of `layout`; a missing file has no scripts (content from before this file).
     ///
     /// # Errors
     ///
     /// Returns [`DungeonScriptsError`] when the file cannot be read or is not dungeon scripts.
-    pub fn load(path: &Path) -> Result<Self, DungeonScriptsError> {
+    pub fn load(layout: &ContentLayout) -> Result<Self, DungeonScriptsError> {
+        let path = &layout.file(DUNGEON_SCRIPTS);
         match std::fs::read(path) {
             Ok(bytes) => {
                 serde_json::from_slice(&bytes).map_err(|source| DungeonScriptsError::Json {
@@ -705,7 +697,7 @@ impl DungeonScripts {
                 path: path.to_path_buf(),
                 source,
             })?;
-        std::fs::write(path, text).map_err(|source| DungeonScriptsError::Io {
+        write_atomic(path, text.as_bytes()).map_err(|source| DungeonScriptsError::Io {
             path: path.to_path_buf(),
             source,
         })
@@ -861,11 +853,12 @@ mod tests {
     #[test]
     fn the_file_writes_and_reads_back() {
         let dir = tempfile::tempdir().expect("dir");
-        let path = dungeon_scripts_path(dir.path(), BUILD);
-        assert!(path.ends_with(format!("dungeon-scripts-{BUILD}.json")));
+        let layout = ContentLayout::new(dir.path(), BUILD);
+        let path = layout.file(DUNGEON_SCRIPTS);
+        assert!(path.ends_with(format!("{BUILD}/instances/dungeon-scripts.json")));
         let written = scripts();
         written.write(&path).expect("write");
-        let read = DungeonScripts::load(&path).expect("load");
+        let read = DungeonScripts::load(&layout).expect("load");
         assert_eq!(read, written);
         assert_eq!(
             read.game_mode(MODE).map(|script| script.encounters.len()),
@@ -1015,14 +1008,14 @@ mod tests {
     #[test]
     fn a_missing_file_has_no_scripts_and_a_bad_one_is_an_error() {
         let dir = tempfile::tempdir().expect("dir");
-        let path = dungeon_scripts_path(dir.path(), BUILD);
+        let layout = ContentLayout::new(dir.path(), BUILD);
         assert_eq!(
-            DungeonScripts::load(&path).expect("missing"),
+            DungeonScripts::load(&layout).expect("missing"),
             DungeonScripts::default()
         );
-        std::fs::write(&path, "not json").expect("write");
+        write_atomic(&layout.file(DUNGEON_SCRIPTS), b"not json").expect("write");
         assert!(matches!(
-            DungeonScripts::load(&path),
+            DungeonScripts::load(&layout),
             Err(DungeonScriptsError::Json { .. })
         ));
     }

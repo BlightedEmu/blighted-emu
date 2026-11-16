@@ -1,29 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `content-tool realm-pack install`: checks a pack zip in full, then writes its tables into a
-//! content folder. Nothing is written when a check fails, and a table of the folder that differs
-//! from the pack's is kept unless the caller asks to replace it.
+//! content folder (each at its layout path, as one step) and records them in the folder's
+//! manifest. Nothing is written when a check fails, and a table of the folder that differs from
+//! the pack's is kept unless the caller asks to replace it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
 
+use nw_content::layout::{ContentFile, ContentLayout, FileRef, pack_files, write_atomic};
+use nw_content::manifest::record;
+
 use super::make::parse_pack_table;
-use super::manifest::{
-    MANIFEST_FILE, Manifest, PACK_TABLES, check_manifest, sha256_hex, table_file_name,
-};
+use super::manifest::{MANIFEST_FILE, Manifest, check_manifest, sha256_hex, table_file_name};
 use super::owner::collect_identities;
 use super::{PackError, io_error};
-
-/// The temporary name of a table while it is written: `.<name>.part`.
-const PART_PREFIX: &str = ".";
-const PART_SUFFIX: &str = ".part";
 
 /// One checked table of a pack.
 struct PackTable {
     /// The table.
-    table: &'static str,
-    /// Its file name.
-    name: String,
+    table: &'static ContentFile,
     /// Its bytes, checked against the manifest.
     bytes: Vec<u8>,
 }
@@ -50,7 +46,8 @@ pub struct InstallReport {
     pub unknown_class_members: usize,
 }
 
-/// Installs the pack `zip` into `content_dir`.
+/// Installs the pack `zip` into `layout`; the tables written are recorded in its manifest as made
+/// by `made_by`.
 ///
 /// # Errors
 ///
@@ -59,10 +56,11 @@ pub struct InstallReport {
 /// ([`PackError::PackDoesNotFit`]). Nothing is written then.
 pub fn install_pack(
     zip: &Path,
-    content_dir: &Path,
-    client_build: &str,
+    layout: &ContentLayout,
     replace: bool,
+    made_by: &str,
 ) -> Result<InstallReport, PackError> {
+    let client_build = layout.client_build();
     let mut entries = read_entries(zip)?;
     let manifest_bytes = entries
         .remove(MANIFEST_FILE)
@@ -78,23 +76,35 @@ pub fn install_pack(
     let mut unknown_class_members = 0;
     for PackTable { table, bytes, .. } in &tables {
         unknown_class_members +=
-            check_table(table, bytes).map_err(|reason| PackError::PackDoesNotFit {
+            check_table(table.name, bytes).map_err(|reason| PackError::PackDoesNotFit {
                 pack_version: manifest.pack_version,
                 source_commit: manifest.source_commit.clone(),
                 reason: Box::new(reason),
             })?;
     }
-    let outcomes = plan_writes(content_dir, &tables, replace)?;
-    std::fs::create_dir_all(content_dir).map_err(io_error(content_dir))?;
-    for (PackTable { name, bytes, .. }, (_, outcome)) in tables.iter().zip(&outcomes) {
-        if matches!(outcome, TableOutcome::Same | TableOutcome::Kept) {
-            continue;
+    let outcomes = plan_writes(layout, &tables, replace)?;
+    let recorded = layout.read_manifest()?.map(|manifest| manifest.files);
+    let mut written = Vec::new();
+    for (PackTable { table, bytes, .. }, (_, outcome)) in tables.iter().zip(&outcomes) {
+        let file = FileRef {
+            file: table,
+            level: None,
+        };
+        let unrecorded = recorded
+            .as_ref()
+            .is_none_or(|files| !files.contains_key(&file.key()));
+        match outcome {
+            TableOutcome::Kept => continue,
+            TableOutcome::Same if !unrecorded => continue,
+            TableOutcome::Same => {}
+            TableOutcome::Written | TableOutcome::Replaced => {
+                let target = layout.path(&file);
+                write_atomic(&target, bytes).map_err(io_error(&target))?;
+            }
         }
-        let part = content_dir.join(format!("{PART_PREFIX}{name}{PART_SUFFIX}"));
-        std::fs::write(&part, bytes).map_err(io_error(&part))?;
-        let target = content_dir.join(name);
-        std::fs::rename(&part, &target).map_err(io_error(&target))?;
+        written.push(file);
     }
+    record(layout, &written, made_by)?;
     Ok(InstallReport {
         tables: outcomes,
         unknown_class_members,
@@ -142,19 +152,17 @@ fn checked_tables(
         .iter()
         .map(|file| (file.name.as_str(), file))
         .collect();
-    let expected: BTreeSet<String> = PACK_TABLES
-        .iter()
-        .map(|table| table_file_name(table, client_build))
+    let expected: BTreeSet<String> = pack_files()
+        .map(|table| table_file_name(table.name, client_build))
         .collect();
     if let Some(name) = listed.keys().find(|name| !expected.contains(**name)) {
         return Err(PackError::UnknownFile {
             file: (*name).to_owned(),
         });
     }
-    PACK_TABLES
-        .iter()
-        .map(|&table| {
-            let name = table_file_name(table, client_build);
+    pack_files()
+        .map(|table| {
+            let name = table_file_name(table.name, client_build);
             let file = listed
                 .get(name.as_str())
                 .ok_or_else(|| PackError::MissingFile { file: name.clone() })?;
@@ -164,20 +172,23 @@ fn checked_tables(
             if bytes.len() as u64 != file.bytes || sha256_hex(&bytes) != file.sha256 {
                 return Err(PackError::Checksum { file: name });
             }
-            Ok(PackTable { table, name, bytes })
+            Ok(PackTable { table, bytes })
         })
         .collect()
 }
 
 /// What will be done with each table: a table that differs is kept unless `replace`.
 fn plan_writes(
-    content_dir: &Path,
+    layout: &ContentLayout,
     tables: &[PackTable],
     replace: bool,
 ) -> Result<Vec<(String, TableOutcome)>, PackError> {
     let mut outcomes = Vec::new();
-    for PackTable { table, name, bytes } in tables {
-        let path = content_dir.join(name);
+    for PackTable { table, bytes, .. } in tables {
+        let path = layout.path(&FileRef {
+            file: table,
+            level: None,
+        });
         let outcome = match std::fs::read(&path) {
             Ok(existing) if existing == *bytes => TableOutcome::Same,
             Ok(_) if replace => TableOutcome::Replaced,
@@ -185,7 +196,7 @@ fn plan_writes(
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => TableOutcome::Written,
             Err(source) => return Err(PackError::Io { path, source }),
         };
-        outcomes.push(((*table).to_owned(), outcome));
+        outcomes.push((table.name.to_owned(), outcome));
     }
     Ok(outcomes)
 }
@@ -197,7 +208,9 @@ mod tests {
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
 
-    use super::super::make::tests::{BUILD, make_fixture_pack};
+    use nw_content::manifest::MADE_BY_UNKNOWN;
+
+    use super::super::make::tests::{BUILD, make_fixture_pack, table_path};
     use super::super::manifest::pack_zip_name;
     use super::*;
 
@@ -223,8 +236,12 @@ mod tests {
             self.out.path().join(pack_zip_name(BUILD))
         }
 
+        fn layout(&self) -> ContentLayout {
+            ContentLayout::new(self.target.path(), BUILD)
+        }
+
         fn install(&self, replace: bool) -> Result<InstallReport, PackError> {
-            install_pack(&self.zip(), self.target.path(), BUILD, replace)
+            install_pack(&self.zip(), &self.layout(), replace, MADE_BY_UNKNOWN)
         }
 
         /// Rewrites the pack zip with `change` applied to its entries.
@@ -239,13 +256,28 @@ mod tests {
             std::fs::write(self.zip(), zip.finish().unwrap().into_inner()).unwrap();
         }
 
+        /// The pack tables in the target folder.
         fn written(&self) -> usize {
-            std::fs::read_dir(self.target.path()).map_or(0, Iterator::count)
+            written_in(&self.layout())
         }
     }
 
+    /// The pack tables in `layout`, and no temporary file beside them.
+    fn written_in(layout: &ContentLayout) -> usize {
+        pack_files()
+            .map(|file| layout.path(&FileRef { file, level: None }))
+            .inspect(|path| {
+                let folder = std::fs::read_dir(path.parent().expect("folder"));
+                assert!(folder.into_iter().flatten().all(|entry| {
+                    !nw_content::layout::is_temp_file(&entry.expect("entry").path())
+                }));
+            })
+            .filter(|path| path.exists())
+            .count()
+    }
+
     fn all(report: &InstallReport, outcome: TableOutcome) -> bool {
-        report.tables.len() == PACK_TABLES.len()
+        report.tables.len() == pack_files().count()
             && report.tables.iter().all(|(_, done)| *done == outcome)
     }
 
@@ -253,18 +285,22 @@ mod tests {
     fn installs_into_an_empty_folder() {
         let fixture = Fixture::new();
         assert!(all(&fixture.install(false).unwrap(), TableOutcome::Written));
-        assert_eq!(fixture.written(), PACK_TABLES.len(), "no part file is left");
+        assert_eq!(
+            fixture.written(),
+            pack_files().count(),
+            "no part file is left"
+        );
+        let manifest = fixture.layout().read_manifest().unwrap().expect("manifest");
+        assert_eq!(manifest.files.len(), pack_files().count());
+        assert!(manifest.files.contains_key("ftue-entities"));
     }
 
     #[test]
     fn makes_a_missing_content_folder() {
         let fixture = Fixture::new();
-        let folder = fixture.target.path().join("local-data").join("content");
-        install_pack(&fixture.zip(), &folder, BUILD, false).unwrap();
-        assert_eq!(
-            std::fs::read_dir(folder).unwrap().count(),
-            PACK_TABLES.len()
-        );
+        let layout = ContentLayout::new(fixture.target.path().join("local-data/content"), BUILD);
+        install_pack(&fixture.zip(), &layout, false, MADE_BY_UNKNOWN).unwrap();
+        assert_eq!(written_in(&layout), pack_files().count());
     }
 
     #[test]
@@ -277,11 +313,8 @@ mod tests {
     #[test]
     fn keeps_different_tables_without_replace() {
         let fixture = Fixture::new();
-        let mine = fixture
-            .target
-            .path()
-            .join(table_file_name("war-forts", BUILD));
-        std::fs::write(&mine, b"{\"mine\": true}").unwrap();
+        let mine = table_path(&fixture.layout(), "war-forts");
+        write_atomic(&mine, b"{\"mine\": true}").unwrap();
         let report = fixture.install(false).unwrap();
         assert!(
             report
@@ -291,7 +324,7 @@ mod tests {
         assert_eq!(std::fs::read(&mine).unwrap(), b"{\"mine\": true}");
         assert_eq!(
             fixture.written(),
-            PACK_TABLES.len(),
+            pack_files().count(),
             "the other tables are written"
         );
     }
@@ -333,10 +366,7 @@ mod tests {
     fn replaces_with_replace() {
         let fixture = Fixture::new();
         fixture.install(false).unwrap();
-        let mine = fixture
-            .target
-            .path()
-            .join(table_file_name("war-forts", BUILD));
+        let mine = table_path(&fixture.layout(), "war-forts");
         std::fs::write(&mine, b"{}").unwrap();
         let report = fixture.install(true).unwrap();
         assert!(
@@ -391,7 +421,12 @@ mod tests {
     fn refuses_a_wrong_build() {
         let fixture = Fixture::new();
         assert!(matches!(
-            install_pack(&fixture.zip(), fixture.target.path(), "54321", false),
+            install_pack(
+                &fixture.zip(),
+                &ContentLayout::new(fixture.target.path(), "54321"),
+                false,
+                MADE_BY_UNKNOWN
+            ),
             Err(PackError::WrongBuild { .. })
         ));
         assert_eq!(fixture.written(), 0);

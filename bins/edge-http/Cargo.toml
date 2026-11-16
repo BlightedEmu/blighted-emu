@@ -14,6 +14,8 @@ clap.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 nw-common.workspace = true
+# The content layout: the store table of the content folder.
+nw-content.workspace = true
 nw-db.workspace = true
 nw-login.workspace = true
 nw-protocol.workspace = true

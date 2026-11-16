@@ -2,11 +2,10 @@
 //! `content-tool music-charts`: the music chart file ([`nw_content::music_charts`]) from the
 //! game paks: every `.musicsheetc` of the music sheet folder, by its sheet id.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use nw_content::music_charts::{
-    MUSIC_SHEET_FOLDER, MUSIC_SHEET_SUFFIX, MusicCharts, music_charts_path, parse_chart,
-};
+use nw_content::layout::{ContentLayout, MUSIC_CHARTS};
+use nw_content::music_charts::{MUSIC_SHEET_FOLDER, MUSIC_SHEET_SUFFIX, MusicCharts, parse_chart};
 
 use crate::error::ToolError;
 use crate::source::GameSource;
@@ -22,7 +21,7 @@ pub struct MusicChartsReport {
     pub notes: usize,
 }
 
-/// Writes the music chart file of `client_build` into `out_dir` from `source`.
+/// Writes the music chart file of `layout` from `source`.
 ///
 /// # Errors
 ///
@@ -30,8 +29,7 @@ pub struct MusicChartsReport {
 /// be written.
 pub fn build_music_charts(
     source: &GameSource,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<MusicChartsReport, ToolError> {
     let mut sheets = Vec::new();
     source.for_each_entry(
@@ -46,7 +44,7 @@ pub fn build_music_charts(
         },
     )?;
     let notes = sheets.iter().map(|(_, notes)| notes.len()).sum();
-    let path = music_charts_path(out_dir, client_build);
+    let path = layout.file(MUSIC_CHARTS);
     let charts = MusicCharts::write(sheets, &path)?;
     Ok(MusicChartsReport {
         path,

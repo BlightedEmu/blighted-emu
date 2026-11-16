@@ -5,12 +5,13 @@
 //! the instance limits of the player slice.
 
 use std::borrow::Cow;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nw_content::ability_instances::{
     AbilityInstanceTable, INSTANCE_COMPONENT, InstanceSlice, PLAYER_SLICE, TRACKING_COMPONENT,
-    ability_instances_path, instance_type_of, limits_of,
+    instance_type_of, limits_of,
 };
+use nw_content::layout::{ABILITY_INSTANCES, ContentLayout};
 use nw_content::town_props::ASSET_ID_LEN;
 use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, slice_assets_in};
 use nw_formats::azcs::{decode_azcs, is_azcs};
@@ -48,7 +49,7 @@ fn holds(bytes: &[u8], type_id: &[u8; ASSET_ID_LEN]) -> bool {
         .any(|window| window == type_id)
 }
 
-/// Writes the ability instance file of `client_build` into `out_dir` from `source`.
+/// Writes the ability instance file of `layout` from `source`.
 ///
 /// # Errors
 ///
@@ -56,8 +57,7 @@ fn holds(bytes: &[u8], type_id: &[u8; ASSET_ID_LEN]) -> bool {
 /// cannot be written.
 pub fn build_ability_instances(
     source: &GameSource,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<AbilityInstancesReport, ToolError> {
     let mut catalog = Vec::new();
     source.for_each_entry(
@@ -91,7 +91,7 @@ pub fn build_ability_instances(
             Ok(())
         },
     )?;
-    let path = ability_instances_path(out_dir, client_build);
+    let path = layout.file(ABILITY_INSTANCES);
     table.write(&path)?;
     Ok(AbilityInstancesReport {
         path,

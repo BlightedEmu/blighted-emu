@@ -22,11 +22,11 @@ pass_if() {
   fi
 }
 
-# A fresh folder with the client build file, an empty content folder and a stub content tool.
+# A fresh folder with the client build file and a stub content tool.
 # STUB_FAIL_INSTALL=1 makes the stub's install fail.
 setup() {
   rm -rf "$work_dir/root"
-  mkdir -p "$work_dir/root/config" "$work_dir/root/local-data/content"
+  mkdir -p "$work_dir/root/config"
   echo "steam_build_id = \"$BUILD\"" > "$work_dir/root/config/client-build.toml"
   cat > "$work_dir/stub.sh" <<'STUB'
 #!/usr/bin/env bash
@@ -53,34 +53,22 @@ not_logged() {
 }
 
 setup
-output="$(run_script pack.zip)"
-pass_if "installs_the_given_zip" logged "realm-pack install pack.zip"
-pass_if "builds_missing_derived_tables" logged "creature-animations"
-pass_if "builds_effect_areas_last_of_the_tables" \
-  test "$(sed -n '5p' "$work_dir/log")" = "effect-areas"
-pass_if "no_server_pak_skips_ai_data_and_exits_0" not_logged "ai-data"
-pass_if "no_server_pak_names_the_depot_download" \
-  test "${output##*Server.pak not found}" != "$output"
-
-setup
-touch "$work_dir/root/local-data/content/creature-animations-$BUILD.json"
 run_script pack.zip > /dev/null
-pass_if "skips_existing_derived_tables" not_logged "creature-animations"
+pass_if "installs_the_given_zip" logged "realm-pack install pack.zip"
+pass_if "builds_the_derived_tables_after_the_install" \
+  test "$(sed -n '2p' "$work_dir/log")" = "content build --derived"
+pass_if "runs_two_commands" test "$(wc -l < "$work_dir/log")" -eq 2
 
 setup
-touch "$work_dir/root/local-data/content/creature-animations-$BUILD.json"
-mkdir -p "$work_dir/root/local-data/server-pak"
-touch "$work_dir/root/local-data/server-pak/Server.pak"
 run_script --rebuild --replace pack.zip > /dev/null
-pass_if "rebuild_builds_them_again" logged "creature-animations"
+pass_if "rebuild_is_passed_to_the_build" logged "content build --derived --rebuild"
 pass_if "replace_is_passed_to_the_install" logged "realm-pack install --replace pack.zip"
-pass_if "server_pak_builds_ai_data" logged "ai-data"
 
 setup
 status=0
 STUB_FAIL_INSTALL=1 run_script pack.zip > /dev/null 2>&1 || status=$?
 pass_if "stops_when_install_fails" test "$status" -ne 0
-pass_if "stops_before_the_derived_tables" not_logged "creature-animations"
+pass_if "stops_before_the_derived_tables" not_logged "content build"
 
 setup
 status=0

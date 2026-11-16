@@ -4,12 +4,13 @@
 //! (`sharedassets/coatlicue/<level>/regions/r_+XX_+YY/region.waterqt`, binary ObjectStreams: a
 //! `regionSize` and a list of `element`s, each with a `height`, a `floorHeight` and `flags`).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use nw_content::layout::{ContentLayout, WATER};
 use nw_formats::azcs::AzcsError;
 use nw_formats::objectstream::{Element, ObjectStreamError, parse_object_stream};
 use nw_formats::pak::PakError;
-use nw_world::water::{WaterMap, WaterNode, WaterRegion, water_file_path};
+use nw_world::water::{WaterMap, WaterNode, WaterRegion};
 
 use crate::collision::PakIndex;
 use crate::roads::{region_file, without_azcs};
@@ -167,7 +168,7 @@ pub fn water_map(
     Ok(map)
 }
 
-/// Builds the water file of `level` from the paks of `index` into `out_dir` and checks it by
+/// Builds the water file of `level` from the paks of `index` into `layout` and checks it by
 /// reading it back.
 ///
 /// # Errors
@@ -176,8 +177,7 @@ pub fn water_map(
 pub fn build_level_water(
     index: &PakIndex,
     level: &str,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<WaterReport, WaterError> {
     let paths = index.paths(|path| region_file(path, level, WATERQT_FILE).is_some());
     let mut trees = Vec::with_capacity(paths.len());
@@ -190,9 +190,9 @@ pub fn build_level_water(
         trees.push((path, bytes??));
     }
     let map = water_map(level, trees)?;
-    let path = water_file_path(out_dir, client_build, level);
-    map.save(&path, client_build)?;
-    if WaterMap::load(&path, client_build)? != map {
+    let path = layout.level_file(WATER, level);
+    map.save(&path, layout.client_build())?;
+    if WaterMap::load(layout, level)? != map {
         return Err(WaterError::Reload(path));
     }
     Ok(WaterReport {

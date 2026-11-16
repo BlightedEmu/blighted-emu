@@ -267,10 +267,7 @@ mod tests {
     #[test]
     #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
     fn the_real_event_cuts_are_no_lasting_share() {
-        const BUILD: &str = "25810808";
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let path = crate::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
-        let bundle = crate::ContentBundle::load(&path, BUILD).expect("bundle");
+        let bundle = crate::ContentBundle::load(&crate::layout::repo_layout()).expect("bundle");
         let bonuses = AttributeBonuses::from_tables(&bundle.tables);
         assert!((bonuses.stats_of(["Foc_Bonus_25_1"]).cooldown + 0.03).abs() < 1e-9);
         for event_cut in [
@@ -302,11 +299,8 @@ mod tests {
     #[test]
     #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
     fn the_real_focus_50_bonus_holds_the_cast_distance_effect() {
-        const BUILD: &str = "25810808";
         const FOCUS_50: u32 = 50;
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let path = crate::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
-        let bundle = crate::ContentBundle::load(&path, BUILD).expect("bundle");
+        let bundle = crate::ContentBundle::load(&crate::layout::repo_layout()).expect("bundle");
         let bonuses = AttributeBonuses::from_tables(&bundle.tables);
         let abilities =
             bonuses.abilities(|attribute| if attribute == FOCUS { FOCUS_50 } else { 0 });

@@ -15,11 +15,12 @@
 //! The file is the shared header of `nw_content::container` with magic `NWWA`, then a postcard
 //! body of one [`WaterMap`]. `content-tool water` writes it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use nw_content::container::{
     ContainerError, ContainerSpec, decode_value, encode_value, read_file, write_file,
 };
+use nw_content::layout::{ContentLayout, WATER};
 use serde::{Deserialize, Serialize};
 
 /// First 4 bytes of every water file.
@@ -42,11 +43,6 @@ const CHILDREN: u32 = 4;
 const X_HALF: u32 = 1;
 /// The shift of a child's y half in its index.
 const Y_HALF_SHIFT: u32 = 1;
-
-/// The water file path of one level: `<dir>/water-<client_build>-<level>.bin`.
-pub fn water_file_path(dir: &Path, client_build: &str, level: &str) -> PathBuf {
-    dir.join(format!("water-{client_build}-{level}.bin"))
-}
 
 /// One node of a region's water tree.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -190,9 +186,12 @@ impl WaterMap {
         write_file(path, &self.to_bytes(client_build)?)
     }
 
-    /// Reads and checks the water file at `path`.
-    pub fn load(path: &Path, expected_build: &str) -> Result<Self, ContainerError> {
-        Self::from_bytes(&read_file(path)?, expected_build)
+    /// Reads and checks the water file of `level` of `layout`.
+    pub fn load(layout: &ContentLayout, level: &str) -> Result<Self, ContainerError> {
+        Self::from_bytes(
+            &read_file(&layout.level_file(WATER, level))?,
+            layout.client_build(),
+        )
     }
 }
 
@@ -280,9 +279,5 @@ mod tests {
         assert_eq!(bytes[..WATER_MAGIC.len()], WATER_MAGIC);
         assert_eq!(WaterMap::from_bytes(&bytes, BUILD).expect("decode"), map);
         assert!(WaterMap::from_bytes(&bytes, "1").is_err());
-        assert_eq!(
-            water_file_path(Path::new("content"), BUILD, "ftue_v2"),
-            Path::new("content").join("water-25810808-ftue_v2.bin")
-        );
     }
 }

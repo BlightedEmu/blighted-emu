@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nw_capture::{CLIENT_TO_SERVER, Decoder, ledger_records};
-use nw_content::client_build::load_client_build;
 use nw_content::creature_animations::CreatureAnimations;
+use nw_content::layout::ContentLayout;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_content::player_attacks::{AttackMotion, Stance};
 use nw_messages::{BodyCodec, ClientInputMsg, InputRecord, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX};
@@ -25,11 +25,10 @@ use nw_sim_core::{
     AmongCharacters, CharacterBody, Ground, LevelGround, MountPaces, Position, TrackedBody,
 };
 use nw_world::WorldFile;
-use nw_world::collision::{LevelCollision, collision_file_path};
+use nw_world::collision::LevelCollision;
 use nw_world::collision_index::CollisionIndex;
-use nw_world::roads::{RoadMap, road_file_path};
-use nw_world::water::{WaterMap, water_file_path};
-use nw_world::world_file::world_file_path;
+use nw_world::roads::RoadMap;
+use nw_world::water::WaterMap;
 
 use crate::ai_trace::{MobTrace, MountSample, PlayerSample, trace_ledger};
 use crate::ftue_entities::read_ledger;
@@ -674,31 +673,27 @@ pub fn summarize(compared: &[Compared], server_moves: usize) -> ReplaySummary {
     }
 }
 
-/// The ground of `level` of the content in `content` for client build config `build_config`:
-/// the terrain, the level collision and the water, as the sim builds it; and the sea level.
+/// The ground of `level` of the content of `layout`: the terrain, the level collision and the
+/// water, as the sim builds it; and the sea level.
 pub fn level_ground(
-    content: &Path,
-    build_config: &Path,
+    layout: &ContentLayout,
     level: &str,
 ) -> (LevelGround<std::sync::Arc<WorldFile>>, f32) {
     use std::sync::Arc;
-    let build = load_client_build(build_config).expect("client build");
-    let world =
-        Arc::new(WorldFile::load(&world_file_path(content, &build, level), &build).expect("world"));
-    let collision = LevelCollision::load(&collision_file_path(content, &build, level), &build)
-        .expect("run `just collision` first");
+    let world = Arc::new(WorldFile::load(layout, level).expect("world"));
+    let collision = LevelCollision::load(layout, level).expect("run `just collision` first");
     let collision = Arc::new(CollisionIndex::new(LevelCollision {
         deferred: Vec::new(),
         ..collision
     }));
     let sea = world.level.ocean_level;
     let ground = LevelGround::new(Arc::clone(&world), collision);
-    let ground = match WaterMap::load(&water_file_path(content, &build, level), &build) {
+    let ground = match WaterMap::load(layout, level) {
         Ok(water) => ground.with_water(Arc::new(water)),
         Err(_) => ground,
     };
     // The sim's ground holds the level's roads: a mount runs at its road speed on them.
-    let ground = match RoadMap::load(&road_file_path(content, &build, level), &build) {
+    let ground = match RoadMap::load(layout, level) {
         Ok(roads) => ground.with_roads(Arc::new(roads)),
         Err(_) => ground,
     };
@@ -712,11 +707,11 @@ pub fn repo() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use nw_content::layout::repo_layout;
     use nw_content::player_attacks::{PlayerAttacks, stance_key};
 
     use super::*;
 
-    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
     /// The weapon the tutorial gives (`1hSwordT2_FTUE`).
     const TUTORIAL_SWORD: &str = "1H_Melee,Sword";
     /// Until when each of [`LEDGERS`] holds the tutorial sword, ms from its first record
@@ -737,14 +732,12 @@ mod tests {
 
     /// The run of `ledger`, whose player holds the tutorial sword until `sword_until_ms`.
     fn run_of(ledger: &str, sword_until_ms: u64) -> Run {
-        let content = repo().join("local-data/content");
-        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let table =
-            PlayerAttacks::load(&content, &build).expect("run `content-tool player-attacks` first");
+        let layout = repo_layout();
+        let table = PlayerAttacks::load(&layout).expect("run `content-tool player-attacks` first");
         let sword = table
             .stance(stance_key(TUTORIAL_SWORD))
             .expect("the sword's stance");
-        let creatures = CreatureAnimations::load(&content, &build)
+        let creatures = CreatureAnimations::load(&layout)
             .expect("run `content-tool creature-animations` first");
         let bytes = read_ledger(&repo().join(ledger)).expect("ledger");
         let trace = trace_ledger(&bytes, &[]);
@@ -813,11 +806,7 @@ mod tests {
         /// One second of keys, after one second of warm-up: short enough that the camera is not
         /// needed, long enough to show speed, acceleration and turning.
         const WINDOW_MS: u64 = 1_000;
-        let (ground, sea) = level_ground(
-            &repo().join("local-data/content"),
-            &repo().join(CLIENT_BUILD_CONFIG),
-            TUTORIAL_LEVEL,
-        );
+        let (ground, sea) = level_ground(&repo_layout(), TUTORIAL_LEVEL);
         for ((ledger, _), sword_until_ms) in LEDGERS.into_iter().zip(SWORD_UNTIL_MS) {
             let Run {
                 retail,
@@ -882,11 +871,7 @@ mod tests {
 
     #[test]
     fn the_patched_client_is_not_pulled_by_the_own_places_in_a_closed_loop() {
-        let (ground, sea) = level_ground(
-            &repo().join("local-data/content"),
-            &repo().join(CLIENT_BUILD_CONFIG),
-            TUTORIAL_LEVEL,
-        );
+        let (ground, sea) = level_ground(&repo_layout(), TUTORIAL_LEVEL);
         for (ledger, _) in LEDGERS {
             let bytes = read_ledger(&repo().join(ledger)).expect("ledger");
             let retail = trace_ledger(&bytes, &[]).player;
@@ -911,7 +896,6 @@ mod tests {
     #[ignore = "needs the local captures, the build 25810808 content and the open world level files"]
     fn the_mounted_own_movement_replays_against_retail() {
         use nw_content::ContentBundle;
-        use nw_content::bundle::bundle_path;
         use nw_content::mounts::MountRules;
         use nw_content::progression::Progression;
         use nw_formats::objectstream::lowercase_crc32;
@@ -925,9 +909,8 @@ mod tests {
         /// The ride's errors with the rider's camera model: 1.11 m and 0.07 m (median).
         const RIDDEN_MEDIAN_M: f32 = 1.5;
         const RIDDEN_HEIGHT_MEDIAN_M: f32 = 0.2;
-        let content = repo().join("local-data/content");
-        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let bundle = ContentBundle::load(&bundle_path(&content, &build), &build).expect("bundle");
+        let layout = repo_layout();
+        let bundle = ContentBundle::load(&layout).expect("bundle");
         let mounts = MountRules::from_tables(&bundle.tables);
         let progression = Progression::of_tables(&bundle.tables);
         let mount_type = mounts
@@ -940,11 +923,7 @@ mod tests {
         let movement = mounts
             .movement(mount_type, rank)
             .expect("the horse's movement");
-        let (ground, sea) = level_ground(
-            &content,
-            &repo().join(CLIENT_BUILD_CONFIG),
-            OPEN_WORLD_LEVEL,
-        );
+        let (ground, sea) = level_ground(&layout, OPEN_WORLD_LEVEL);
         let bytes = read_ledger(&repo().join(LEDGER)).expect("ledger");
         let trace = trace_ledger(&bytes, &[]);
         let records = input_records(&bytes);
@@ -992,11 +971,7 @@ mod tests {
 
     #[test]
     fn the_tutorial_own_movement_replays_against_retail() {
-        let (ground, sea) = level_ground(
-            &repo().join("local-data/content"),
-            &repo().join(CLIENT_BUILD_CONFIG),
-            TUTORIAL_LEVEL,
-        );
+        let (ground, sea) = level_ground(&repo_layout(), TUTORIAL_LEVEL);
         for ((ledger, most_corrected), sword_until_ms) in LEDGERS.into_iter().zip(SWORD_UNTIL_MS) {
             let Run {
                 retail, records, ..

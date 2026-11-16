@@ -13,19 +13,12 @@
 //! capture shows has no entity here.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::layout::{ContentLayout, SHOT_ENTITIES};
 use crate::town_props::ASSET_ID_LEN;
-
-const FILE_PREFIX: &str = "shot-entities-";
-const FILE_SUFFIX: &str = ".json";
-
-/// The table file of client build `client_build` in content directory `dir`.
-pub fn shot_entities_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// A bad table file.
 #[derive(Debug, thiserror::Error)]
@@ -100,13 +93,13 @@ pub struct ShotEntities {
 }
 
 impl ShotEntities {
-    /// The table of client build `client_build` in content directory `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`ShotEntitiesError`] when the file cannot be read or is not the table.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, ShotEntitiesError> {
-        let path = shot_entities_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, ShotEntitiesError> {
+        let path = layout.file(SHOT_ENTITIES);
         let text = std::fs::read_to_string(&path)
             .map_err(|source| ShotEntitiesError::Io { path, source })?;
         Self::parse(&text)

@@ -11,13 +11,13 @@ use nw_common::config::ConfigError;
 use nw_common::logging::{LoggingError, init_logging};
 use nw_content::client_build::load_client_build;
 use nw_content::container::ContainerError;
+use nw_content::layout::{ContentLayout, LayoutError};
 use nw_content::war_forts::WarForts;
 use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 use nw_login::store::StoreError;
 use nw_login::valkey::Valkey;
 use nw_sim_core::{CellGrid, CellGridError};
 use nw_world::WorldFile;
-use nw_world::world_file::world_file_path;
 
 use crate::config::{DirectorConfig, DirectorConfigError, InstancesConfig, load_director_config};
 use crate::instances::{InstanceSettings, LaunchSettings};
@@ -36,6 +36,9 @@ pub enum RunError {
     /// The world file cannot be read.
     #[error("world file: {0}")]
     WorldFile(#[from] ContainerError),
+    /// The content folder does not open (its manifest names another build).
+    #[error(transparent)]
+    Content(#[from] LayoutError),
     /// The cell size does not fit the level.
     #[error("cell grid: {0}")]
     Grid(#[from] CellGridError),
@@ -85,8 +88,8 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         .ok_or_else(|| RunError::MissingSecret(config.world_database_password_env.clone()))?;
     init_logging(&config.log_filter)?;
     let build = load_client_build(&config.client_build_config).map_err(RunError::ClientBuild)?;
-    let path = world_file_path(&config.content_dir, &build, &config.level);
-    let world_file = WorldFile::load(&path, &build)?;
+    let layout = ContentLayout::open(&config.content_dir, &build)?;
+    let world_file = WorldFile::load(&layout, &config.level)?;
     let settings = DirectorSettings {
         world_id: config.world_id,
         level: config.level.clone(),
@@ -96,8 +99,8 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         heartbeat_interval: Duration::from_millis(config.heartbeat_interval_ms),
         heartbeat_misses: config.heartbeat_misses,
         instances: config.instances.as_ref().map(|instances| {
-            let mut settings = instance_settings(instances, war_forts(&config, &build));
-            settings.invasion_territories = invasion_territories(&config, &build);
+            let mut settings = instance_settings(instances, war_forts(&layout));
+            settings.invasion_territories = invasion_territories(&layout);
             settings
         }),
     };
@@ -110,10 +113,10 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         .block_on(serve_async(config, password, settings))
 }
 
-/// The forts of the territory wars of the content of `config` for client build `build`; none
-/// (and so no war instance) when the table is missing.
-fn war_forts(config: &DirectorConfig, build: &str) -> WarForts {
-    match WarForts::load(&config.content_dir, build) {
+/// The forts of the territory wars of the content of `layout`; none (and so no war instance)
+/// when the table is missing.
+fn war_forts(layout: &ContentLayout) -> WarForts {
+    match WarForts::load(layout) {
         Ok(forts) => {
             tracing::info!(forts = forts.len(), "war forts");
             forts
@@ -125,10 +128,10 @@ fn war_forts(config: &DirectorConfig, build: &str) -> WarForts {
     }
 }
 
-/// The territories whose fort has an invasion in the content of `config` for client build
-/// `build`; none (and so no darkness and no invasion) when the table is missing.
-fn invasion_territories(config: &DirectorConfig, build: &str) -> std::collections::BTreeSet<u16> {
-    match nw_content::invasion_forts::InvasionForts::load(&config.content_dir, build) {
+/// The territories whose fort has an invasion in the content of `layout`; none (and so no
+/// darkness and no invasion) when the table is missing.
+fn invasion_territories(layout: &ContentLayout) -> std::collections::BTreeSet<u16> {
+    match nw_content::invasion_forts::InvasionForts::load(layout) {
         Ok(forts) => {
             tracing::info!(forts = forts.len(), "invasion forts");
             forts.territories().collect()

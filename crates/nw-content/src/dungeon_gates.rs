@@ -26,26 +26,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::layout::{ContentLayout, DUNGEON_GATE_RULES, DUNGEON_GATES, write_atomic};
 use crate::town_props::ASSET_ID_LEN;
 
-const GATES_PREFIX: &str = "dungeon-gates-";
-const RULES_PREFIX: &str = "dungeon-gate-rules-";
-const FILE_SUFFIX: &str = ".json";
 /// The name parts of a gate's open and close timelines (Observed: `Timeline_Open` and
 /// `Timeline_Close` of the ancient gates, `TimelineToDepleted` and `TimelineToHealthy` of the
 /// Dynasty boss door; lower case).
 const OPEN_TIMELINE_PARTS: [&str; 2] = ["open", "todepleted"];
 const CLOSE_TIMELINE_PARTS: [&str; 2] = ["close", "tohealthy"];
-
-/// The gates file of client build `client_build` in content directory `dir`.
-pub fn dungeon_gates_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{GATES_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
-
-/// The gate rules file of client build `client_build` in content directory `dir`.
-pub fn dungeon_gate_rules_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{RULES_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// A bad gates or rules file.
 #[derive(Debug, thiserror::Error)]
@@ -262,13 +250,13 @@ impl DungeonGates {
         }
     }
 
-    /// The file of client build `client_build` in content directory `dir`.
+    /// The gates file of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`DungeonGatesError`] when the file cannot be read or is not the table.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, DungeonGatesError> {
-        Self::parse(&read(&dungeon_gates_path(dir, client_build))?)
+    pub fn load(layout: &ContentLayout) -> Result<Self, DungeonGatesError> {
+        Self::parse(&read(&layout.file(DUNGEON_GATES))?)
     }
 
     /// The file in `text`.
@@ -442,13 +430,13 @@ pub struct GateRules {
 }
 
 impl GateRules {
-    /// The file of client build `client_build` in content directory `dir`.
+    /// The gate rules file of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`DungeonGatesError`] when the file cannot be read or is not the table.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, DungeonGatesError> {
-        Self::parse(&read(&dungeon_gate_rules_path(dir, client_build))?)
+    pub fn load(layout: &ContentLayout) -> Result<Self, DungeonGatesError> {
+        Self::parse(&read(&layout.file(DUNGEON_GATE_RULES))?)
     }
 
     /// The file in `text`.
@@ -480,7 +468,7 @@ fn read(path: &Path) -> Result<String, DungeonGatesError> {
 }
 
 fn write(path: &Path, text: &str) -> Result<(), DungeonGatesError> {
-    std::fs::write(path, text).map_err(|source| DungeonGatesError::Io {
+    write_atomic(path, text.as_bytes()).map_err(|source| DungeonGatesError::Io {
         path: path.to_owned(),
         source,
     })
@@ -564,9 +552,9 @@ mod tests {
     fn the_gates_file_writes_and_reads_back() {
         let gates = DungeonGates::parse(GATES).expect("gates");
         let dir = tempfile::tempdir().expect("dir");
-        let path = dungeon_gates_path(dir.path(), "1");
-        gates.write(&path).expect("write");
-        assert_eq!(DungeonGates::load(dir.path(), "1").expect("load"), gates);
+        let layout = ContentLayout::new(dir.path(), "1");
+        gates.write(&layout.file(DUNGEON_GATES)).expect("write");
+        assert_eq!(DungeonGates::load(&layout).expect("load"), gates);
     }
 
     #[test]

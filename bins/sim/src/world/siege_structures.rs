@@ -1360,12 +1360,8 @@ pub(crate) mod tests {
     /// their slices give them a shell and its explosion: a T1 or T2 socket builds them.
     #[test]
     fn the_inferred_t1_and_t2_explosive_launchers_are_buildable_and_fire_their_shells() {
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let forts = WarForts::load(
-            std::path::Path::new(&dir),
-            crate::world::turrets::tests::CONTENT_BUILD,
-        )
-        .expect("content table");
+        let forts = WarForts::load(&nw_content::layout::repo_layout()).expect("content table");
+
         for tier in [1, 2] {
             let socket = forts
                 .structure_kinds()

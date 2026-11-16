@@ -1008,7 +1008,7 @@ pub struct PlayerContent {
     /// entity id (the facet entity of an `OpenDungeonMenu` or `EnterDungeon` interaction).
     pub entrances: HashMap<u64, String>,
     /// The encounters and loot containers of each instance game mode's level script
-    /// (`dungeon-scripts-<build>.json`).
+    /// (`instances/dungeon-scripts.json`).
     pub dungeon_scripts: DungeonScripts,
     /// What the level holds that the quests' steps need, for `!questplan` and the quest walk.
     pub quest_guide: crate::world::QuestGuide,
@@ -1840,10 +1840,8 @@ mod tests {
     #[test]
     #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
     fn the_real_phasing_areas_are_the_rows_with_a_phasing_margin() {
-        const BUILD: &str = "25810808";
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let path = nw_content::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
-        let bundle = nw_content::ContentBundle::load(&path, BUILD).expect("bundle");
+        let bundle =
+            nw_content::ContentBundle::load(&nw_content::layout::repo_layout()).expect("bundle");
         let mut areas = phasing_areas(&bundle.tables);
         areas.sort_unstable();
         assert_eq!(
@@ -1857,12 +1855,10 @@ mod tests {
     #[test]
     #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
     fn the_war_declaration_cost_and_the_pvp_mission_influence_are_the_bundle_values() {
-        const BUILD: &str = "25810808";
         /// The PvP faction mission influence grants (`FactionInfluenceAmount`).
         const GRANTS: [u64; 3] = [50, 100, 200];
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let path = nw_content::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
-        let bundle = nw_content::ContentBundle::load(&path, BUILD).expect("bundle");
+        let bundle =
+            nw_content::ContentBundle::load(&nw_content::layout::repo_layout()).expect("bundle");
         let tables = &bundle.tables;
         let modifiers: std::collections::HashMap<i64, f64> = tables
             .territory_definition

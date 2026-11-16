@@ -1096,7 +1096,7 @@ pub(super) mod tests {
     /// The largest difference from a retail float of the respawn point, metres.
     pub(in crate::world) const SPAWN_POINT_TOLERANCE_M: f32 = 0.01;
 
-    /// The camp slice `campskin_metalfest02_a_pvp` (`camp-slices-25810808.json`).
+    /// The camp slice `campskin_metalfest02_a_pvp` (the build 25810808 `open-world/camp-slices.json`).
     pub(in crate::world) fn pvp_slice() -> CampSlice {
         CampSlice {
             slice: "slices/structures/camps/campvariants/campskin_metalfest02_a_pvp.dynamicslice"
@@ -1328,19 +1328,15 @@ pub(super) mod tests {
 /// `content-tool camp-slices` first).
 #[cfg(all(test, feature = "local-data"))]
 mod retail_tests {
-    use std::path::{Path, PathBuf};
-
     use nw_content::ContentBundle;
-    use nw_content::bundle::bundle_path;
     use nw_content::camps::CampRules;
-    use nw_content::client_build::load_client_build;
     use nw_content::crafting::StructureCosts;
-    use nw_world::camps::{CampSlices, camp_slices_path};
+    use nw_content::layout::repo_layout;
+    use nw_world::camps::CampSlices;
 
     use super::tests::{RETAIL_AT, RETAIL_SPAWN_POINT, SPAWN_POINT_TOLERANCE_M, retail_rotation};
     use super::*;
 
-    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
     /// `campt1.dynamicslice` and `campskin_metalfest02_a_pvp.dynamicslice` in the asset catalog
     /// (the second is the card asset of the retail `Hivecamp` camp).
     const CAMP_T1_ASSET: &str = "1b66134908d75b12963ab8e320c3342a";
@@ -1349,16 +1345,10 @@ mod retail_tests {
     const CAMP_T1_HP: u32 = 300;
     const CAMP_T1_PVP_HP: u32 = 2_000;
 
-    fn content_dir() -> (PathBuf, String) {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let build = load_client_build(&repo.join(CLIENT_BUILD_CONFIG)).expect("client build");
-        (repo.join("local-data/content"), build)
-    }
-
     #[test]
     fn the_retail_camp_t1_row_and_slices_load() {
-        let (dir, build) = content_dir();
-        let bundle = ContentBundle::load(&bundle_path(&dir, &build), &build).expect("bundle");
+        let layout = repo_layout();
+        let bundle = ContentBundle::load(&layout).expect("bundle");
         let camps = CampRules::from_tables(&bundle.tables);
         let camp = camps.blueprint("CampT1").expect("CampT1");
         assert_eq!(
@@ -1386,7 +1376,8 @@ mod retail_tests {
                 .map(|skin| (skin.id.as_str(), skin.enabled)),
             Some(("CampSkin_MetalFest02_A", true))
         );
-        let slices = CampSlices::load(&camp_slices_path(&dir, &build)).expect("camp slices");
+        let slices = CampSlices::load(&layout).expect("camp slices");
+
         let t1 = slices.get("CampT1").expect("CampT1 slice");
         assert_eq!(hex::encode(t1.asset), CAMP_T1_ASSET);
         assert_eq!(t1.station.ownership, Some((7, 1)));

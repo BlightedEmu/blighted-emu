@@ -3,10 +3,11 @@
 //! every `.dynamicslice` under [`CAMP_SLICE_FOLDER`] that is a camp, with its asset id from the
 //! asset catalog.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use nw_content::layout::{CAMP_SLICES, ContentLayout};
 use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, slice_assets_in};
-use nw_world::camps::{CAMP_SLICE_FOLDER, CampSlice, CampSlices, camp_slices_path};
+use nw_world::camps::{CAMP_SLICE_FOLDER, CampSlice, CampSlices};
 
 use crate::error::ToolError;
 use crate::source::GameSource;
@@ -25,7 +26,7 @@ pub struct CampSlicesReport {
     pub pvp_camps: usize,
 }
 
-/// Writes the camp slice file of `client_build` into `out_dir` from `source`.
+/// Writes the camp slice file of `layout` from `source`.
 ///
 /// # Errors
 ///
@@ -33,8 +34,7 @@ pub struct CampSlicesReport {
 /// cannot be written.
 pub fn build_camp_slices(
     source: &GameSource,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<CampSlicesReport, ToolError> {
     let mut catalog = Vec::new();
     source.for_each_entry(
@@ -57,7 +57,7 @@ pub fn build_camp_slices(
     )?;
     let pvp_camps = camps.iter().filter(|camp| camp.vitals.is_some()).count();
     let table = CampSlices::of(camps);
-    let path = camp_slices_path(out_dir, client_build);
+    let path = layout.file(CAMP_SLICES);
     table.write(&path)?;
     Ok(CampSlicesReport {
         path,

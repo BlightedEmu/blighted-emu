@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Library part of `content-tool`: code generation, bundle building, world file building, the
 //! capture check, the mob prefab table, the creature animation table, the tutorial static
-//! entity table and the level collision files.
+//! entity table, the level collision files, and the content folder's build, status and
+//! migration (`content`).
 
 pub mod ability_instances;
 pub mod ai_data;
@@ -18,6 +19,7 @@ pub mod claim_plots;
 pub mod codegen;
 pub mod collision;
 pub mod combat;
+pub mod content;
 pub mod creature_animations;
 pub mod distribution;
 pub mod dungeon_gates;
@@ -59,7 +61,9 @@ mod local_data_tests {
     use nw_world::WorldFile;
     use nw_world::records::RecordCounts;
 
-    use crate::build::{default_bundle_path, run_build};
+    use nw_content::layout::{ContentLayout, RETAIL_BUNDLE, link_atomic, repo_layout};
+
+    use crate::build::run_build;
     use crate::codegen::run_codegen;
     use crate::map_tiles::{YIndex, parse_tile_name, run_map_tiles};
     use crate::source::{GameSource, SourceError};
@@ -184,7 +188,7 @@ mod local_data_tests {
         let source = GameSource::open(&game_dir()).unwrap();
         // run_build reloads the bundle and checks table, row and text counts itself.
         let summary =
-            run_build(&source, PINNED_STEAM_BUILD, &out.path().join("bundle.bin")).unwrap();
+            run_build(&source, &ContentLayout::new(out.path(), PINNED_STEAM_BUILD)).unwrap();
         assert_eq!(summary.datasheet_files, PINNED_DATASHEET_FILES);
         assert_eq!(summary.rows, PINNED_DATASHEET_ROWS);
         assert_eq!(summary.text_files, PINNED_EN_US_TEXT_FILES);
@@ -256,15 +260,17 @@ mod local_data_tests {
 
     #[test]
     fn world_builds_every_level_with_the_pinned_open_world_counts() {
-        let bundle = repo_root().join(default_bundle_path(PINNED_STEAM_BUILD));
+        let bundle = repo_layout().file(RETAIL_BUNDLE);
         assert!(
             bundle.exists(),
             "{} is missing; run `just bundle` first",
             bundle.display()
         );
         let out = tempfile::tempdir().unwrap();
+        let layout = ContentLayout::new(out.path(), PINNED_STEAM_BUILD);
+        link_atomic(&bundle, &layout.file(RETAIL_BUNDLE)).unwrap();
         let source = GameSource::open(&game_dir()).unwrap();
-        let reports = run_world(&source, PINNED_STEAM_BUILD, &bundle, out.path()).unwrap();
+        let reports = run_world(&source, &layout).unwrap();
         assert_eq!(reports.len(), PINNED_LEVELS);
         let open_world = reports
             .iter()
@@ -293,7 +299,7 @@ mod local_data_tests {
             open_world.unmatched.vitals,
             open_world.counts.vitals
         );
-        let world = WorldFile::load(&open_world.path, PINNED_STEAM_BUILD).unwrap();
+        let world = WorldFile::load_retail(&layout, PINNED_OPEN_WORLD_LEVEL).unwrap();
         let mut errors: Vec<f32> = world
             .capitals
             .iter()
@@ -313,8 +319,7 @@ mod local_data_tests {
 
     #[test]
     fn the_player_attack_table_of_the_paks_is_the_committed_one() {
-        let bundle = repo_root().join(default_bundle_path(PINNED_STEAM_BUILD));
-        let tables = nw_content::ContentBundle::load(&bundle, PINNED_STEAM_BUILD)
+        let tables = nw_content::ContentBundle::load(&repo_layout())
             .unwrap()
             .tables;
         let rows = crate::player_attacks::BundleRows::of(&tables);

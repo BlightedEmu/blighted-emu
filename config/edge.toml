@@ -133,9 +133,11 @@ private_key_pem_path = "local-data/edge-http/aws-mirror-key.pem"
 # edge-http and the sims after a change. Give an account Marks of Fortune with
 # `blighted-admin give-marks <login name> <amount>` (a negative amount takes them).
 [shop]
-# The store table that `content-tool store` writes from the content bundle: the mounts the store
-# sells (52 in build 25810808). Without the file the store sells nothing.
-store_table = "local-data/content/store-25810808.json"
+# The content folder: edge-http reads the store table that `content-tool store` writes from the
+# content bundle (`<build>/services/store.json`, the build of client_build_config): the mounts the
+# store sells (52 in build 25810808). Without the file the store sells nothing.
+content_dir = "local-data/content"
+client_build_config = "config/client-build.toml"
 # Whether the store sells. false: the catalog is empty and purchases are refused; the mounts an
 # account already got stay its own.
 enabled = true

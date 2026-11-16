@@ -2,9 +2,10 @@
 //! `content-tool claim-plots`: the claim plot file ([`nw_world::claim_plots`]) from the game
 //! paks: every `.dynamicslice` under [`CLAIM_PLOT_FOLDER`] that has a land claim component.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use nw_world::claim_plots::{CLAIM_PLOT_FOLDER, ClaimPlotSlice, ClaimPlots, claim_plots_path};
+use nw_content::layout::{CLAIM_PLOTS, ContentLayout};
+use nw_world::claim_plots::{CLAIM_PLOT_FOLDER, ClaimPlotSlice, ClaimPlots};
 
 use crate::error::ToolError;
 use crate::source::GameSource;
@@ -29,7 +30,7 @@ fn is_plot_folder_slice(path: &str) -> bool {
     path.starts_with(CLAIM_PLOT_FOLDER) && path.ends_with(DYNAMIC_SLICE_SUFFIX)
 }
 
-/// Writes the claim plot file of `client_build` into `out_dir` from `source`.
+/// Writes the claim plot file of `layout` from `source`.
 ///
 /// # Errors
 ///
@@ -37,8 +38,7 @@ fn is_plot_folder_slice(path: &str) -> bool {
 /// written.
 pub fn build_claim_plots(
     source: &GameSource,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<ClaimPlotsReport, ToolError> {
     let mut slices = 0;
     let mut plots = Vec::new();
@@ -49,7 +49,7 @@ pub fn build_claim_plots(
         Ok::<(), ToolError>(())
     })?;
     let table = ClaimPlots::of(plots);
-    let path = claim_plots_path(out_dir, client_build);
+    let path = layout.file(CLAIM_PLOTS);
     table.write(&path)?;
     Ok(ClaimPlotsReport {
         path,

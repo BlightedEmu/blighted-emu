@@ -377,10 +377,9 @@ mod tests {
     use nw_bus::{BusId, SimHeartbeat};
     use nw_common::time::unix_ms;
     use nw_content::ContentBundle;
-    use nw_content::bundle::bundle_path;
+    use nw_content::layout::{BUNDLE, ContentLayout, RETAIL_BUNDLE, RETAIL_WORLD};
     use nw_world::WorldFile;
     use nw_world::records::{LevelInfo, VitalsSpawn};
-    use nw_world::world_file::world_file_path;
     use serde_json::Value;
     use tower::ServiceExt;
 
@@ -439,7 +438,7 @@ mod tests {
         }
 
         fn merged_bundle(&self) -> PathBuf {
-            bundle_path(&self.path("out"), BUILD)
+            self.studio.paths.layout.file(BUNDLE)
         }
     }
 
@@ -470,15 +469,15 @@ mod tests {
 
     fn fixture(fifo: bool, restart_timeout_s: u64) -> Fixture {
         let root = tempfile::tempdir().expect("dir");
-        let retail = root.path().join("retail");
+        let layout = ContentLayout::new(root.path().join("local-data"), BUILD);
         ContentBundle {
             client_build: BUILD.to_owned(),
             ..catalog::tests::bundle()
         }
-        .save(&bundle_path(&retail, BUILD))
+        .save(&layout.file(RETAIL_BUNDLE))
         .expect("bundle");
         world()
-            .save(&world_file_path(&retail, BUILD, MAP), BUILD)
+            .save(&layout.level_file(RETAIL_WORLD, MAP), BUILD)
             .expect("world");
         let control_fifo = root.path().join("control");
         if fifo {
@@ -490,15 +489,13 @@ mod tests {
         }
         let config = StudioConfig {
             design_dir: root.path().join("content"),
-            retail_dir: retail,
             control_fifo,
             restart_timeout_s,
             github_api_url: crate::config::GITHUB_API_URL.to_owned(),
             github_token_env: None,
         };
         let live = shared();
-        let studio = Studio::new(&config, root.path().join("out"), BUILD, Some(live.clone()))
-            .expect("studio");
+        let studio = Studio::new(&config, layout, Some(live.clone())).expect("studio");
         Fixture { root, live, studio }
     }
 

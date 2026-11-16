@@ -39,14 +39,14 @@
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
 
-    use nw_content::town_props::{TownProps, encounter_objects_path, encounter_roots_path};
+    use nw_content::layout::{ContentLayout, ENCOUNTER_OBJECTS, ENCOUNTER_ROOTS, repo_layout};
+    use nw_content::town_props::TownProps;
     use nw_messages::position::{PositionInTheWorldReplicatedState, RotationComponent};
     use nw_messages::{BundleGroup, MemberState};
     use nw_sim_core::Position;
     use nw_world::dungeon_scripts::{
-        DungeonScripts, Encounter, LevelScript, OPEN_WORLD_LEVEL, TargetMob, dungeon_scripts_path,
+        DungeonScripts, Encounter, LevelScript, OPEN_WORLD_LEVEL, TargetMob,
     };
     use nw_world::records::PatrolPath;
 
@@ -59,7 +59,6 @@ mod tests {
     };
     use crate::world::slots::Slot;
 
-    const BUILD: &str = "25810808";
     /// The holdout's encounter slice.
     const HOLDOUT_SLICE: &str =
         "slices/pois/ancient/design/holdout/enc_worldevent_holdout_setup.dynamicslice";
@@ -224,13 +223,9 @@ mod tests {
         }
     }
 
-    fn content_dir() -> PathBuf {
-        PathBuf::from(std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR"))
-    }
-
     /// The open world encounter of slice `slice` whose root stands at `x`, `y`.
-    fn open_world_encounter(dir: &Path, slice: &str, x: f32, y: f32) -> Encounter {
-        let scripts = DungeonScripts::load(&dungeon_scripts_path(dir, BUILD)).expect("scripts");
+    fn open_world_encounter(layout: &ContentLayout, slice: &str, x: f32, y: f32) -> Encounter {
+        let scripts = DungeonScripts::load(layout).expect("scripts");
         scripts
             .game_mode(OPEN_WORLD_LEVEL)
             .expect("open world")
@@ -350,13 +345,11 @@ mod tests {
     #[test]
     #[ignore = "needs the build 25810808 content files in NW_CONTENT_DIR"]
     fn the_holdout_runs_its_stages_and_spawns_its_one_way_door_as_retail() {
-        let dir = content_dir();
-        let encounter = open_world_encounter(&dir, HOLDOUT_SLICE, ROOT_X, ROOT_Y);
+        let layout = repo_layout();
+        let encounter = open_world_encounter(&layout, HOLDOUT_SLICE, ROOT_X, ROOT_Y);
         assert_eq!(encounter.stages.len(), STAGES_INTERACT.len());
-        let roots_table =
-            TownProps::load_file(encounter_roots_path(&dir, BUILD)).expect("roots table");
-        let objects_table =
-            TownProps::load_file(encounter_objects_path(&dir, BUILD)).expect("objects table");
+        let roots_table = TownProps::load(&layout, ENCOUNTER_ROOTS).expect("roots table");
+        let objects_table = TownProps::load(&layout, ENCOUNTER_OBJECTS).expect("objects table");
         let mut roots = EncounterRoots::build(&roots_table, std::slice::from_ref(&encounter));
         assert_eq!(roots.len(), 1, "the root of the holdout's slice");
         let root = roots
@@ -524,7 +517,7 @@ mod tests {
         const CONTAINER_6: u32 = 0xa515_dbce;
         const ROOT_INDEX: u8 = 15;
         const OBJECTIVES_COMPONENT: u64 = 4;
-        let encounter = open_world_encounter(&content_dir(), SIREN_SLICE, SIREN_X, SIREN_Y);
+        let encounter = open_world_encounter(&repo_layout(), SIREN_SLICE, SIREN_X, SIREN_Y);
         assert_eq!(encounter.objectives_component, Some(OBJECTIVES_COMPONENT));
         let tree = encounter.objective_tasks().expect("tasks");
         assert_eq!(tree.root_index, ROOT_INDEX);
@@ -539,11 +532,10 @@ mod tests {
     #[test]
     #[ignore = "needs the build 25810808 content files in NW_CONTENT_DIR"]
     fn the_stronghold_siren_shows_its_root_with_its_two_closed_doors_as_retail() {
-        let dir = content_dir();
-        let encounter = open_world_encounter(&dir, SIREN_SLICE, SIREN_X, SIREN_Y);
+        let layout = repo_layout();
+        let encounter = open_world_encounter(&layout, SIREN_SLICE, SIREN_X, SIREN_Y);
         assert_eq!(encounter.stages.len(), SIREN_STAGES);
-        let roots_table =
-            TownProps::load_file(encounter_roots_path(&dir, BUILD)).expect("roots table");
+        let roots_table = TownProps::load(&layout, ENCOUNTER_ROOTS).expect("roots table");
         let mut roots = EncounterRoots::build(&roots_table, std::slice::from_ref(&encounter));
         assert_eq!(roots.len(), 1, "the root of the siren's slice");
         let script = LevelScript {

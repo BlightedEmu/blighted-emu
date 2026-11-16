@@ -13,11 +13,12 @@
 //! vitals row (`VitalsLevelVariantData`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nw_content::Tables;
 use nw_content::breach_tiers::{BreachTier, BreachTiers};
 use nw_content::instances::InstanceCatalog;
+use nw_content::layout::{ContentLayout, DUNGEON_SCRIPTS};
 use nw_content::mob_prefabs::{ASSET_ID_LEN, MobPrefabs};
 use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, AssetCatalogError, slice_assets_in};
 use nw_formats::azcs::AzcsError;
@@ -27,9 +28,9 @@ use nw_world::capitals::parse_capitals;
 use nw_world::collision::Affine;
 use nw_world::dungeon_scripts::{
     AliasMob, AreaRefill, Chest, Detector, DungeonScripts, DungeonScriptsError, EffectArea,
-    Encounter, HazardObject, LevelScript, OPEN_WORLD_LEVEL, ObjectiveSpec, RandomizerChoice,
-    Spawn, SpawnRandomizer, Stage, StageAction, StageObjective, Target, TargetMob, TargetSlice,
-    TimedMob, TriggerArea, dungeon_scripts_path,
+    Encounter, HazardObject, LevelScript, OPEN_WORLD_LEVEL, ObjectiveSpec, RandomizerChoice, Spawn,
+    SpawnRandomizer, Stage, StageAction, StageObjective, Target, TargetMob, TargetSlice, TimedMob,
+    TriggerArea,
 };
 use nw_world::level_script::{
     Action, AliasSlice, AssetRef, DYNAMIC_SLICE_SUFFIX, LevelScriptError, ObjectiveKind,
@@ -794,7 +795,7 @@ pub(crate) fn placed_scripts(
     Ok(placed)
 }
 
-/// Builds the dungeon script file of `tables` from the paks of `index` into `out_dir`.
+/// Builds the dungeon script file of `tables` from the paks of `index` into `layout`.
 ///
 /// # Errors
 ///
@@ -803,10 +804,9 @@ pub(crate) fn placed_scripts(
 pub fn build_dungeon_scripts(
     index: &PakIndex,
     tables: &Tables,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<DungeonScriptsReport, DungeonScriptsBuildError> {
-    let tables_of_mobs = mob_tables(tables, out_dir, client_build);
+    let tables_of_mobs = mob_tables(tables, layout);
     let levels = &tables_of_mobs.levels;
     let names = vitals_names(tables);
     let mobs = tables_of_mobs.sources();
@@ -871,15 +871,15 @@ pub fn build_dungeon_scripts(
             open_world.encounters.push(encounter);
         }
     }
-    let tiers = BreachTiers::load(out_dir, client_build)?.tiers;
+    let tiers = BreachTiers::load(layout)?.tiers;
     finish_grouped_encounters(&mut open_world.encounters, &tiers, levels, &mut report);
     report.open_world_encounters = open_world.encounters.len();
     scripts
         .game_modes
         .insert(OPEN_WORLD_LEVEL.to_owned(), open_world);
-    let path = dungeon_scripts_path(out_dir, client_build);
+    let path = layout.file(DUNGEON_SCRIPTS);
     scripts.write(&path)?;
-    if DungeonScripts::load(&path)? != scripts {
+    if DungeonScripts::load(layout)? != scripts {
         return Err(DungeonScriptsBuildError::Reload(path));
     }
     report.path = path;
@@ -912,11 +912,11 @@ impl MobTables {
     }
 }
 
-/// The mob tables of `tables` and of the mob prefab file in `out_dir` (empty prefab tables
+/// The mob tables of `tables` and of the mob prefab file of `layout` (empty prefab tables
 /// without the file).
-pub fn mob_tables(tables: &Tables, out_dir: &Path, client_build: &str) -> MobTables {
+pub fn mob_tables(tables: &Tables, layout: &ContentLayout) -> MobTables {
     let names = vitals_names(tables);
-    let table = MobPrefabs::load(out_dir, client_build).unwrap_or_default();
+    let table = MobPrefabs::load(layout).unwrap_or_default();
     MobTables {
         levels: vitals_levels(tables),
         families: vitals_families(tables),

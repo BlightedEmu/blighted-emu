@@ -343,12 +343,8 @@ mod tests {
     #[test]
     #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
     fn the_retail_capture_the_flag_events_give_the_ledgers_numbers() {
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let bundle = crate::bundle::ContentBundle::load(
-            &crate::bundle::bundle_path(std::path::Path::new(&dir), "25810808"),
-            "25810808",
-        )
-        .expect("bundle");
+        let bundle =
+            crate::bundle::ContentBundle::load(&crate::layout::repo_layout()).expect("bundle");
         let rewards = ModeRewards::from_tables(&bundle.tables);
         let win = rewards.get("CaptureTheFlag_T4").expect("win");
         assert_eq!(win.coins, 25_000);

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The tutorial static entity table (`ftue-entities-<build>.json`, made by
+//! The tutorial static entity table (`levels/ftue_v2/entities.json`, made by
 //! `content-tool ftue-entities` from a retail capture of a new character).
 //!
 //! The client has the static entities of the tutorial level (a satchel, a chest, trigger
@@ -25,15 +25,13 @@
 //! the mobs that some bodies name. Each group also names the nearest retail event before it
 //! ([`GroupCause`]), so a server can send it on the same event.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::layout::{ContentLayout, FTUE_ENTITIES};
 use crate::mob_prefabs::ASSET_ID_LEN;
 
-/// The file name prefix of the table; the client build and `.json` follow.
-const FILE_PREFIX: &str = "ftue-entities-";
-const FILE_SUFFIX: &str = ".json";
 /// Bytes of a `GdeRef`.
 pub const GDE_REF_LEN: usize = 16;
 /// Bytes of a facet entity id.
@@ -42,11 +40,6 @@ pub const FACET_LEN: usize = 8;
 pub const GDE_REF_PREFIX_LEN: usize = 8;
 /// Bytes of the phase id at the end of a static `GdeRef`.
 pub const PHASE_SUFFIX_LEN: usize = 8;
-
-/// The path of the table of `client_build` in `dir`.
-pub fn ftue_entities_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// The bytes that end the `GdeRef` of every static entity of a level instance with phase id
 /// `phase_id`: the id in byte-reversed order.
@@ -447,13 +440,13 @@ pub struct FtueEntities {
 }
 
 impl FtueEntities {
-    /// Loads the table of `client_build` from `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`FtueEntitiesError`] when the file is missing or bad.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, FtueEntitiesError> {
-        Self::parse(&read_table(dir, client_build)?)
+    pub fn load(layout: &ContentLayout) -> Result<Self, FtueEntitiesError> {
+        Self::parse(&read_table(layout)?)
     }
 
     /// The table in `text`.
@@ -488,13 +481,13 @@ pub struct FtueLevel {
 }
 
 impl FtueLevel {
-    /// Loads the table of `client_build` from `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`FtueEntitiesError`] when the file is missing or bad.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, FtueEntitiesError> {
-        Self::parse(&read_table(dir, client_build)?)
+    pub fn load(layout: &ContentLayout) -> Result<Self, FtueEntitiesError> {
+        Self::parse(&read_table(layout)?)
     }
 
     /// The table in `text`; a table without asset entities and mobs gives none.
@@ -535,8 +528,8 @@ impl FtueLevel {
     }
 }
 
-fn read_table(dir: &Path, client_build: &str) -> Result<String, FtueEntitiesError> {
-    let path = ftue_entities_path(dir, client_build);
+fn read_table(layout: &ContentLayout) -> Result<String, FtueEntitiesError> {
+    let path = layout.file(FTUE_ENTITIES);
     std::fs::read_to_string(&path).map_err(|source| FtueEntitiesError::Read { path, source })
 }
 
@@ -836,14 +829,6 @@ mod tests {
                 ..
             })
         ));
-    }
-
-    #[test]
-    fn the_path_names_the_build() {
-        assert_eq!(
-            ftue_entities_path(Path::new("content"), "123"),
-            Path::new("content").join("ftue-entities-123.json")
-        );
     }
 
     const ASSET: &str = "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1";

@@ -38,11 +38,7 @@ pub fn file_version(text: &str) -> String {
 /// id and path. A file that cannot be read gives an error and the others still load. A missing
 /// folder is an empty set.
 pub fn load_dir(dir: &Path) -> (DesignSet, Vec<DesignError>) {
-    let mut relative_paths = Vec::new();
-    let mut errors = Vec::new();
-    collect_paths(dir, Path::new(""), &mut relative_paths, &mut errors);
-    relative_paths.retain(|path| path != Path::new(TODO_FILE));
-    relative_paths.sort();
+    let (relative_paths, mut errors) = design_paths(dir);
     let mut files = Vec::new();
     for relative in relative_paths {
         match read_file(&dir.join(&relative), &relative) {
@@ -52,6 +48,27 @@ pub fn load_dir(dir: &Path) -> (DesignSet, Vec<DesignError>) {
     }
     sort_files(&mut files);
     (DesignSet { files }, errors)
+}
+
+/// The paths of the design files under `dir`: every `*.toml` file except [`TODO_FILE`] at the
+/// root (the files [`load_dir`] reads), sorted. A missing folder has none.
+pub fn design_files(dir: &Path) -> Vec<PathBuf> {
+    design_paths(dir)
+        .0
+        .into_iter()
+        .map(|relative| dir.join(relative))
+        .collect()
+}
+
+/// The design file paths under `dir`, relative to it and sorted, and the folders that do not
+/// read.
+fn design_paths(dir: &Path) -> (Vec<PathBuf>, Vec<DesignError>) {
+    let mut relative_paths = Vec::new();
+    let mut errors = Vec::new();
+    collect_paths(dir, Path::new(""), &mut relative_paths, &mut errors);
+    relative_paths.retain(|path| path != Path::new(TODO_FILE));
+    relative_paths.sort();
+    (relative_paths, errors)
 }
 
 /// Sorts design files by kind, id and path, the order every check and merge reads them in.

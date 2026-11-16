@@ -598,14 +598,13 @@ fn starts(data: &AiData, grid: &Grid, out: &[Command]) -> Vec<(Option<Slot>, Str
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use nw_content::client_build::load_client_build;
+    use nw_content::layout::{CREATURE_ANIMATIONS, repo_layout};
 
     use super::*;
     use crate::ai_trace::{read_creatures, trace_ledger};
     use crate::ftue_entities::read_ledger;
 
     /// The retail capture of a new character's tutorial and beach (2026-09-18).
-    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
     const LEDGER: &str = "local-data/captures/own/newchar-retail-2026-09-18/ledger.bin";
     const BOAR_SLICE: &str = "slices/characters/boar.dynamicslice";
     /// Fragments that open a fight: the boars were hit first (`r_R2_F`).
@@ -631,13 +630,9 @@ mod tests {
     }
 
     fn fixtures() -> (AiData, AiTrace) {
-        let content = repo().join("local-data/content");
-        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let data = AiData::load(&content, &build).expect("run `content-tool ai-data` first");
-        let creatures = read_creatures(&nw_content::creature_animations::creature_animations_path(
-            &content, &build,
-        ))
-        .expect("creature table");
+        let layout = repo_layout();
+        let data = AiData::load(&layout).expect("run `content-tool ai-data` first");
+        let creatures = read_creatures(&layout.file(CREATURE_ANIMATIONS)).expect("creature table");
         let ledger = read_ledger(&repo().join(LEDGER)).expect("ledger");
         (data, trace_ledger(&ledger, &creatures))
     }

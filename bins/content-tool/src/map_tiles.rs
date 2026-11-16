@@ -18,8 +18,6 @@ use nw_world::map_tiles::{LEVEL_1_TILE_M, TILES_FILE, TilesIndex, tile_file};
 use crate::error::ToolError;
 use crate::source::GameSource;
 
-/// Default output folder; each level gets a folder in it.
-pub const DEFAULT_MAP_DIR: &str = "local-data/content/map";
 /// Folder of the world map tiles in the paks.
 pub const WORLDTILES_PREFIX: &str = "lyshineui/worldtiles/";
 const NAME_START: &str = "map_l";
@@ -133,13 +131,8 @@ pub fn write_tile(
             path: path.clone(),
             source,
         })?;
-    if let Some(folder) = path.parent() {
-        std::fs::create_dir_all(folder).map_err(|source| MapTilesError::Io {
-            path: folder.to_path_buf(),
-            source,
-        })?;
-    }
-    std::fs::write(&path, bytes).map_err(|source| MapTilesError::Io { path, source })?;
+    nw_content::layout::write_atomic(&path, &bytes)
+        .map_err(|source| MapTilesError::Io { path, source })?;
     Ok(image.format)
 }
 
@@ -252,7 +245,8 @@ pub fn run_map_tiles(
             path: path.clone(),
             source: source.into(),
         })?;
-        std::fs::write(&path, json).map_err(|source| MapTilesError::Io { path, source })?;
+        nw_content::layout::write_atomic(&path, &json)
+            .map_err(|source| MapTilesError::Io { path, source })?;
     }
     Ok(report)
 }

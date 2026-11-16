@@ -4218,18 +4218,13 @@ pub(crate) mod tests {
 
 #[cfg(all(test, feature = "local-data"))]
 mod retail_tests {
-    use std::path::Path;
-
     use nw_content::ContentBundle;
-    use nw_content::bundle::bundle_path;
-    use nw_content::client_build::load_client_build;
     use nw_content::gathering::{CrateLoot, CrateVariant};
     use nw_content::loot::{LootContext, LootTables};
     use nw_formats::objectstream::lowercase_crc32;
 
     use super::gather_levels;
 
-    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
     /// The supply crate of the live play (2026-11-12, Cynefin Mine) and the name its gather
     /// request carries.
     const CRATE: &str = "LootMediumT1";
@@ -4242,10 +4237,7 @@ mod retail_tests {
 
     #[test]
     fn the_retail_supply_crate_gives_items_only_with_a_content_level() {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let build = load_client_build(&repo.join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let dir = repo.join("local-data/content");
-        let bundle = ContentBundle::load(&bundle_path(&dir, &build), &build).expect("bundle");
+        let bundle = ContentBundle::load(&nw_content::layout::repo_layout()).expect("bundle");
         let loot = LootTables::from_tables(&bundle.tables);
         let crates = CrateLoot::build(
             CrateVariant::from_tables(&bundle.tables),

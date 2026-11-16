@@ -2,12 +2,11 @@
 //! `content-tool quick-courses`: the quick course path file ([`nw_world::quick_courses`]) from
 //! the game paks: every `.dynamicslice` under the course folders of the asset catalog.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use nw_content::layout::{ContentLayout, QUICK_COURSES};
 use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, slice_assets_in};
-use nw_world::quick_courses::{
-    QUICK_COURSE_FOLDERS, QuickCoursePath, QuickCoursePaths, quick_courses_path,
-};
+use nw_world::quick_courses::{QUICK_COURSE_FOLDERS, QuickCoursePath, QuickCoursePaths};
 
 use crate::error::ToolError;
 use crate::source::GameSource;
@@ -24,7 +23,7 @@ pub struct QuickCoursesReport {
     pub courses: usize,
 }
 
-/// Writes the quick course path file of `client_build` into `out_dir` from `source`.
+/// Writes the quick course path file of `layout` from `source`.
 ///
 /// # Errors
 ///
@@ -32,8 +31,7 @@ pub struct QuickCoursesReport {
 /// cannot be written.
 pub fn build_quick_courses(
     source: &GameSource,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<QuickCoursesReport, ToolError> {
     let mut catalog = Vec::new();
     source.for_each_entry(
@@ -58,7 +56,7 @@ pub fn build_quick_courses(
         },
     )?;
     let table = QuickCoursePaths::of(paths);
-    let path = quick_courses_path(out_dir, client_build);
+    let path = layout.file(QUICK_COURSES);
     table.write(&path)?;
     Ok(QuickCoursesReport {
         path,

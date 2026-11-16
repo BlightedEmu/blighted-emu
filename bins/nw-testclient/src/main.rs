@@ -19,9 +19,10 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 
 use clap::{Parser, Subcommand};
-use nw_content::bundle::{ContentBundle, bundle_path};
+use nw_content::bundle::ContentBundle;
 use nw_content::client_build::load_client_build;
 use nw_content::gathering::{GatherRules, Gatherables};
+use nw_content::layout::ContentLayout;
 use nw_content::town_stations::TownStations;
 use nw_dtls::DtlsClientConfig;
 use nw_reflect::REGISTRATION_STATUS_AUTHORIZED;
@@ -41,7 +42,6 @@ use nw_testclient::udp::{Hold, run_rep};
 use nw_testclient::voice::{VoiceSettings, run_voice};
 use nw_testclient::walk::{CHARACTER_CREATION_PARAMS, WalkSettings, login_token, walk};
 use nw_world::WorldFile;
-use nw_world::world_file::world_file_path;
 
 /// The committed example configuration.
 const DEFAULT_CONFIG: &str = "config/nw-testclient.toml";
@@ -396,7 +396,7 @@ fn gather_nodes(
 ) -> Result<LevelNodes, Box<dyn std::error::Error>> {
     let swarm = &config.swarm;
     let build = load_client_build(&swarm.client_build_config)?;
-    let tables = ContentBundle::load(&bundle_path(&swarm.content_dir, &build), &build)?.tables;
+    let tables = ContentBundle::load(&ContentLayout::open(&swarm.content_dir, &build)?)?.tables;
     let gatherables = Gatherables::from_tables(&tables);
     let rules = GatherRules::from_tables(&tables);
     let tradeskills = &config.gather.tradeskills;
@@ -460,8 +460,8 @@ fn fleet_parts(
 ) -> Result<(Arc<WorldFile>, NewClient), Box<dyn std::error::Error>> {
     let swarm = &config.swarm;
     let build = load_client_build(&swarm.client_build_config)?;
-    let path = world_file_path(&swarm.content_dir, &build, &swarm.level);
-    let ground = Arc::new(WorldFile::load(&path, &build)?);
+    let layout = ContentLayout::open(&swarm.content_dir, &build)?;
+    let ground = Arc::new(WorldFile::load(&layout, &swarm.level)?);
     let mtu = config.mtu;
     let trusted = Arc::new(trusted);
     let new_client: NewClient = Arc::new(move |token| {
@@ -626,12 +626,10 @@ async fn play(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let swarm = &config.swarm;
     let build = load_client_build(&swarm.client_build_config)?;
-    let world = WorldFile::load(
-        &world_file_path(&swarm.content_dir, &build, &swarm.level),
-        &build,
-    )?;
-    let tables = ContentBundle::load(&bundle_path(&swarm.content_dir, &build), &build)?.tables;
-    let town_stations = TownStations::load(&swarm.content_dir, &build)?;
+    let layout = ContentLayout::open(&swarm.content_dir, &build)?;
+    let world = WorldFile::load(&layout, &swarm.level)?;
+    let tables = ContentBundle::load(&layout)?.tables;
+    let town_stations = TownStations::load(&layout)?;
     let data = ActivityData {
         world: &world,
         tables: &tables,

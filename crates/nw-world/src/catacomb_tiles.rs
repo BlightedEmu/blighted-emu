@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The catacombs tiles (`catacomb-tiles-<build>.json`, written by `content-tool
+//! The catacombs tiles (`instances/catacomb-tiles.json`, written by `content-tool
 //! catacomb-tiles`, read by the instance sim of the catacombs): for each tile variation of the
 //! `DungeonTileStaticData` rows (a `VariationAssetPaths` entry, lower case), the gameplay tile
 //! slice and the art tile slice that the gameplay slice's `PrefabSpawnerComponent` spawns, each
@@ -34,6 +34,7 @@ use std::sync::Arc;
 
 use nw_content::dungeon_gates::GateTimeline;
 use nw_content::instances::game_mode_indexes;
+use nw_content::layout::{CATACOMB_TILES, ContentLayout, write_atomic};
 use nw_formats::objectstream::{Element, lowercase_crc32};
 use serde::{Deserialize, Serialize};
 
@@ -45,10 +46,6 @@ use crate::level_script::{
 };
 use crate::slice_data::GUID_LEN;
 
-/// The file name prefix; the client build and [`CATACOMB_TILES_EXTENSION`] follow.
-pub const CATACOMB_TILES_PREFIX: &str = "catacomb-tiles-";
-/// The file extension.
-pub const CATACOMB_TILES_EXTENSION: &str = ".json";
 /// The pak folder of the art tile slices.
 pub const ART_TILE_FOLDER: &str = "slices/catacombs/arttiles/";
 /// The pak folder of the power-up slices (Observed: the 11 `catacombs_powerup_*` slices of
@@ -204,6 +201,16 @@ pub enum CatacombTilesError {
         /// The game mode.
         game_mode: String,
     },
+    /// The game mode's map is another level than the content registry's catacombs level.
+    #[error("game mode {game_mode}: map {map}, the content layout names {level}")]
+    OtherLevel {
+        /// The game mode.
+        game_mode: String,
+        /// Its map in the game data.
+        map: String,
+        /// The registry's catacombs level.
+        level: String,
+    },
     /// The catalog holds no asset id for a slice.
     #[error("{slice}: not in the asset catalog")]
     NoAsset {
@@ -246,13 +253,6 @@ pub enum CatacombTilesError {
         /// Why.
         source: serde_json::Error,
     },
-}
-
-/// The catacombs tile file of `client_build` in `dir`.
-pub fn catacomb_tiles_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!(
-        "{CATACOMB_TILES_PREFIX}{client_build}{CATACOMB_TILES_EXTENSION}"
-    ))
 }
 
 /// The pak path of the slice of variation `variation` (`Catacombs/Gameplay/Tiles/tile4_a_gameplay`
@@ -661,12 +661,13 @@ impl CatacombSolids {
 }
 
 impl CatacombTiles {
-    /// Reads `path`; a missing file has no tiles (content from before this file).
+    /// Reads the file of `layout`; a missing file has no tiles (content from before this file).
     ///
     /// # Errors
     ///
     /// Returns [`CatacombTilesError`] when the file cannot be read or is not catacombs tiles.
-    pub fn load(path: &Path) -> Result<Self, CatacombTilesError> {
+    pub fn load(layout: &ContentLayout) -> Result<Self, CatacombTilesError> {
+        let path = &layout.file(CATACOMB_TILES);
         match std::fs::read(path) {
             Ok(bytes) => {
                 serde_json::from_slice(&bytes).map_err(|source| CatacombTilesError::Json {
@@ -693,7 +694,7 @@ impl CatacombTiles {
                 path: path.to_path_buf(),
                 source,
             })?;
-        std::fs::write(path, text).map_err(|source| CatacombTilesError::Io {
+        write_atomic(path, text.as_bytes()).map_err(|source| CatacombTilesError::Io {
             path: path.to_path_buf(),
             source,
         })
@@ -953,10 +954,11 @@ mod tests {
     #[test]
     fn the_table_finds_a_tile_in_any_case_and_round_trips() {
         let dir = tempfile::tempdir().expect("dir");
-        let path = catacomb_tiles_path(dir.path(), "25810808");
-        assert!(path.ends_with("catacomb-tiles-25810808.json"));
+        let layout = ContentLayout::new(dir.path(), "25810808");
+        let path = layout.file(CATACOMB_TILES);
+        assert!(path.ends_with("25810808/instances/catacomb-tiles.json"));
         assert_eq!(
-            CatacombTiles::load(&path).expect("missing file"),
+            CatacombTiles::load(&layout).expect("missing file"),
             CatacombTiles::default()
         );
         let tiles = CatacombTiles {
@@ -993,7 +995,8 @@ mod tests {
             )],
         };
         tiles.write(&path).expect("write");
-        let read = CatacombTiles::load(&path).expect("read");
+        let read = CatacombTiles::load(&layout).expect("read");
+
         assert_eq!(read, tiles);
         assert!(
             read.get("Catacombs/Gameplay/Tiles/tile4_a_gameplay")

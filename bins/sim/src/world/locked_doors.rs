@@ -404,10 +404,8 @@ mod tests {
     #[test]
     #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
     fn the_game_tables_give_the_crown_plot_its_slice_and_achievement() {
-        const BUILD: &str = "25810808";
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let path = nw_content::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
-        let bundle = nw_content::ContentBundle::load(&path, BUILD).expect("bundle");
+        let bundle =
+            nw_content::ContentBundle::load(&nw_content::layout::repo_layout()).expect("bundle");
         let rows = locked_rows(&bundle.tables);
         let row = rows
             .iter()
@@ -420,31 +418,23 @@ mod tests {
 
 #[cfg(all(test, feature = "local-data"))]
 mod retail_tests {
-    use std::path::Path;
-
     use nw_content::ContentBundle;
-    use nw_content::bundle::bundle_path;
-    use nw_content::client_build::load_client_build;
+    use nw_content::layout::repo_layout;
     use nw_messages::position::RotationComponent;
     use nw_world::dungeon_scripts::OPEN_WORLD_LEVEL;
     use nw_world::records::WorldFile;
-    use nw_world::world_file::world_file_path;
 
     use super::*;
 
-    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
     /// The retail crown chamber door's rotation z (`12a_msq_20_collectcrown` 123.437 s).
     const RETAIL_ROTATION_Z: u16 = 9597;
 
     #[test]
     fn the_crown_door_takes_the_retail_turn_from_its_world_file_capital() {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let build = load_client_build(&repo.join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let dir = std::env::var("NW_CONTENT_DIR")
-            .map_or_else(|_| repo.join("local-data/content"), Into::into);
-        let bundle = ContentBundle::load(&bundle_path(&dir, &build), &build).expect("bundle");
-        let level = WorldFile::load(&world_file_path(&dir, &build, OPEN_WORLD_LEVEL), &build)
-            .expect("world");
+        let layout = repo_layout();
+        let bundle = ContentBundle::load(&layout).expect("bundle");
+        let level = WorldFile::load(&layout, OPEN_WORLD_LEVEL).expect("world");
+
         let doors = LockedDoors::build(&level.capitals, &locked_rows(&bundle.tables));
         let rotations: Vec<&Rotation> = doors
             .doors

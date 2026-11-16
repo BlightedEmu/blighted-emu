@@ -15,6 +15,7 @@ serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+nw-content = { workspace = true, features = ["test-util"] }
 nw-oodle.workspace = true
 tempfile.workspace = true
 

@@ -105,6 +105,9 @@ pub enum PackError {
     /// The content bundle cannot be read.
     #[error("content bundle: {0}")]
     Bundle(#[from] nw_content::ContainerError),
+    /// The manifest of the content folder cannot be read or written.
+    #[error(transparent)]
+    Layout(#[from] nw_content::layout::LayoutError),
 }
 
 /// A [`PackError::Io`] for `path`.

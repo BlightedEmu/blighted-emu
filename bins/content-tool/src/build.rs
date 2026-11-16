@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `content-tool build`: writes the content bundle, then reloads it and checks the counts.
+//! `content-tool build`: writes the retail content bundle, then reloads it and checks the counts.
 
 use std::collections::btree_map::Entry;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nw_content::ContentBundle;
-use nw_content::bundle::bundle_path;
+use nw_content::layout::{ContentLayout, RETAIL_BUNDLE};
 
 use crate::error::ToolError;
 use crate::source::GameSource;
 
-/// Folder for bundles and world files. It is inside `local-data/`, which git ignores.
+/// The content folder (README "Content data"). It is inside `local-data/`, which git ignores.
 pub const DEFAULT_CONTENT_DIR: &str = "local-data/content";
 
 /// Result of [`run_build`].
@@ -32,28 +32,11 @@ pub struct BuildSummary {
     pub keyless_text_entries: usize,
 }
 
-/// Folder for the client data as read from the install (the retail files), before the design
-/// files of `content/` are merged on top (`content-tool design`).
-pub const DEFAULT_RETAIL_DIR: &str = "local-data/content/retail";
-
-/// The default bundle path for a client build: the merged bundle that the servers read.
-pub fn default_bundle_path(client_build: &str) -> PathBuf {
-    bundle_path(Path::new(DEFAULT_CONTENT_DIR), client_build)
-}
-
-/// The default retail bundle path for a client build.
-pub fn default_retail_bundle_path(client_build: &str) -> PathBuf {
-    bundle_path(Path::new(DEFAULT_RETAIL_DIR), client_build)
-}
-
-/// Builds the bundle from `source`, writes it to `out`, reloads it and checks the counts.
-pub fn run_build(
-    source: &GameSource,
-    client_build: &str,
-    out: &Path,
-) -> Result<BuildSummary, ToolError> {
+/// Builds the retail bundle of `layout` from `source`, writes it, reloads it and checks the
+/// counts.
+pub fn run_build(source: &GameSource, layout: &ContentLayout) -> Result<BuildSummary, ToolError> {
     let mut bundle = ContentBundle {
-        client_build: client_build.to_owned(),
+        client_build: layout.client_build().to_owned(),
         ..ContentBundle::default()
     };
     let mut rows = 0;
@@ -76,14 +59,15 @@ pub fn run_build(
         }
         Ok::<(), ToolError>(())
     })?;
-    bundle.save(out)?;
-    let reloaded = ContentBundle::load(out, client_build)?;
+    let out = layout.file(RETAIL_BUNDLE);
+    bundle.save(&out)?;
+    let reloaded = ContentBundle::load_retail(layout)?;
     let counts = reloaded.tables.counts();
     check_count("tables", datasheet_files, counts.tables)?;
     check_count("rows", rows, counts.rows)?;
     check_count("text entries", bundle.text.len(), reloaded.text.len())?;
     Ok(BuildSummary {
-        path: out.to_path_buf(),
+        path: out,
         datasheet_files,
         rows,
         text_files,
@@ -108,22 +92,6 @@ fn check_count(what: &'static str, expected: usize, found: usize) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_bundle_path_is_in_local_data() {
-        assert_eq!(
-            default_bundle_path("22469132"),
-            PathBuf::from("local-data/content/bundle-22469132.bin")
-        );
-    }
-
-    #[test]
-    fn default_retail_bundle_path_is_in_the_retail_folder() {
-        assert_eq!(
-            default_retail_bundle_path("22469132"),
-            PathBuf::from("local-data/content/retail/bundle-22469132.bin")
-        );
-    }
 
     #[test]
     fn count_mismatch_is_an_error() {

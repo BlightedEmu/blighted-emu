@@ -14,13 +14,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use nw_content::layout::{ContentLayout, QUICK_COURSES, write_atomic};
 use nw_formats::objectstream::{Element, lowercase_crc32};
 use serde::{Deserialize, Serialize};
 
-/// The prefix of the file name.
-pub const QUICK_COURSES_PREFIX: &str = "quick-courses-";
-/// The extension of the file name.
-pub const QUICK_COURSES_EXTENSION: &str = ".json";
 /// The pak folders of the course slices (`slices/quickcourses/ef_races`,
 /// `slices/mountraces/dw_races`).
 pub const QUICK_COURSE_FOLDERS: [&str; 2] = ["slices/quickcourses/", "slices/mountraces/"];
@@ -116,13 +113,6 @@ pub enum QuickCoursesError {
     },
 }
 
-/// The course path file of `client_build` in `dir`.
-pub fn quick_courses_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!(
-        "{QUICK_COURSES_PREFIX}{client_build}{QUICK_COURSES_EXTENSION}"
-    ))
-}
-
 impl QuickCoursePaths {
     /// The table of `paths`; the first path of a course wins (`EF_Tour_0` is in two slices).
     pub fn of(paths: impl IntoIterator<Item = QuickCoursePath>) -> Self {
@@ -133,12 +123,13 @@ impl QuickCoursePaths {
         Self { by_course }
     }
 
-    /// Reads `path`; a missing file has no courses (content from before this file).
+    /// Reads the file of `layout`; a missing file has no courses (content from before this file).
     ///
     /// # Errors
     ///
     /// Returns [`QuickCoursesError`] when the file cannot be read or is not course paths.
-    pub fn load(path: &Path) -> Result<Self, QuickCoursesError> {
+    pub fn load(layout: &ContentLayout) -> Result<Self, QuickCoursesError> {
+        let path = &layout.file(QUICK_COURSES);
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|source| QuickCoursesError::Json {
                 path: path.to_path_buf(),
@@ -163,7 +154,7 @@ impl QuickCoursePaths {
                 path: path.to_path_buf(),
                 source,
             })?;
-        std::fs::write(path, text).map_err(|source| QuickCoursesError::Io {
+        write_atomic(path, text.as_bytes()).map_err(|source| QuickCoursesError::Io {
             path: path.to_path_buf(),
             source,
         })

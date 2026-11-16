@@ -3065,14 +3065,11 @@ pub(in crate::world) mod tests {
 #[cfg(all(test, feature = "local-data"))]
 mod retail_room_tests {
     use std::collections::BTreeMap;
-    use std::path::Path;
 
-    use nw_content::client_build::load_client_build;
-    use nw_world::catacomb_tiles::{CatacombTiles, catacomb_tiles_path};
+    use nw_content::layout::repo_layout;
+    use nw_world::catacomb_tiles::CatacombTiles;
     use nw_world::dungeon_scripts::Encounter;
 
-    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
-    const CONTENT_DIR: &str = "local-data/content";
     /// The folder of the room encounter slices.
     const ROOMS: &str = "slices/catacombs/gameplay/roomgameplay/";
     const EXTRACTION: &str =
@@ -3083,10 +3080,7 @@ mod retail_room_tests {
     type Spawned = BTreeMap<String, (u32, bool)>;
 
     fn tiles() -> CatacombTiles {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let build = load_client_build(&repo.join(CLIENT_BUILD_CONFIG)).expect("client build");
-        CatacombTiles::load(&catacomb_tiles_path(&repo.join(CONTENT_DIR), &build))
-            .expect("catacomb tile file")
+        CatacombTiles::load(&repo_layout()).expect("catacomb tile file")
     }
 
     /// The encounter of slice `slice` in any tile.
@@ -3276,7 +3270,6 @@ mod retail_room_tests {
     #[test]
     fn the_secret_lever_is_a_two_second_pull_of_its_retail_gatherable() {
         use nw_content::ContentBundle;
-        use nw_content::bundle::bundle_path;
         use nw_content::gathering::Gatherables;
         use nw_formats::objectstream::lowercase_crc32;
         const LEVER_GATHERABLE: &str = "Raid_CutlassKeys00_SplitSwitch";
@@ -3284,10 +3277,7 @@ mod retail_room_tests {
         const PULL_MS: u64 = 2_000;
         const LEVER_S: f32 = 3.325;
         const TIMELINE_TOLERANCE_S: f32 = 0.01;
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let build = load_client_build(&repo.join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let bundle = ContentBundle::load(&bundle_path(&repo.join(CONTENT_DIR), &build), &build)
-            .expect("bundle");
+        let bundle = ContentBundle::load(&repo_layout()).expect("bundle");
         assert_eq!(lowercase_crc32(LEVER_GATHERABLE), RETAIL_CRC);
         let gatherables = Gatherables::from_tables(&bundle.tables);
         let lever = gatherables.get(RETAIL_CRC).expect("the lever's gatherable");
@@ -3356,11 +3346,9 @@ mod retail_room_tests {
         assert_eq!(area.effects, ["Stunned_Afflict"]);
         assert!((area.radius_m - 1.2).abs() < 1e-3);
         assert!((area.on_s - 4.0).abs() < 1e-3 && (area.off_s - 4.6).abs() < 1e-3);
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let table = TownProps::load_file(
-            repo.join("local-data/content/encounter-objects-25810808.json"),
-        )
-        .expect("encounter objects");
+        let table = TownProps::load(&repo_layout(), nw_content::layout::ENCOUNTER_OBJECTS)
+            .expect("encounter objects");
+
         let mut objects = super::super::encounter_roots::EncounterObjects::build(&table);
         let number = objects
             .spawn(DEBRIS, [1.0, 2.0, 3.0], 0.0)

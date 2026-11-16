@@ -9,6 +9,7 @@ use std::sync::PoisonError;
 use std::time::Duration;
 
 use nw_common::time::unix_ms;
+use nw_content::manifest::MADE_BY_UNKNOWN;
 use nw_design::{DesignError, DesignMode, DesignReport, run_design};
 use serde::Serialize;
 
@@ -133,8 +134,7 @@ impl Studio {
     /// The design step in `mode`, off the runtime threads.
     async fn design(&self, mode: DesignMode) -> Result<DesignReport, String> {
         let paths = self.paths.clone();
-        let build = self.client_build.clone();
-        tokio::task::spawn_blocking(move || run_design(&paths, &build, mode))
+        tokio::task::spawn_blocking(move || run_design(&paths, mode, MADE_BY_UNKNOWN))
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())

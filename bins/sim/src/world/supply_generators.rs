@@ -563,10 +563,9 @@ mod tests {
     /// 400 and 500 (`javelindata_generatorrecipes`, `javelindata_encumbrancelimits`).
     #[test]
     fn the_bundle_gives_each_generator_tier_its_recipe_and_capacity() {
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let build = crate::world::turrets::tests::CONTENT_BUILD;
-        let path = nw_content::bundle::bundle_path(std::path::Path::new(&dir), build);
-        let bundle = nw_content::ContentBundle::load(&path, build).expect("bundle");
+        let bundle =
+            nw_content::ContentBundle::load(&nw_content::layout::repo_layout()).expect("bundle");
+
         let blueprints = SiegeBlueprints::from_tables(&bundle.tables);
         for (tier, quantity, capacity) in [(1, 5, 300), (2, 10, 400), (3, 15, 500)] {
             let recipe = blueprints.generator(tier).expect("a recipe");

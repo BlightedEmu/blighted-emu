@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The player attack table (`player-attacks-<build>.json`, made by `content-tool player-attacks`
+//! The player attack table (`combat/player-attacks.json`, made by `content-tool player-attacks`
 //! from the game paks; combat audit, 2026-09-18).
 //!
 //! A player's weapon puts its `MannequinTag` tags on the character (its stance). The stance picks
@@ -32,8 +32,8 @@ use nw_formats::objectstream::lowercase_crc32;
 use nw_formats::rigid::Rigid;
 use serde::{Deserialize, Serialize};
 
-const FILE_PREFIX: &str = "player-attacks-";
-const FILE_SUFFIX: &str = ".json";
+use crate::layout::{ContentLayout, PLAYER_ATTACKS, write_atomic};
+
 /// The separator of a weapon row's `MannequinTag` cell (`2H_Melee,GreatSword`).
 const MANNEQUIN_TAG_SEPARATOR: char = ',';
 /// The separator of a stance's tags in its key text.
@@ -42,11 +42,6 @@ const KEY_SEPARATOR: &str = "+";
 const MS_PER_SECOND: f32 = 1_000.0;
 /// Half, for the distance of a constant acceleration.
 const HALF: f32 = 0.5;
-
-/// The path of the table of `client_build` in `dir`.
-pub fn player_attacks_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// The tags of a weapon row's `MannequinTag` cell, trimmed, in order.
 pub fn stance_tags(mannequin_tag: &str) -> Vec<String> {
@@ -839,13 +834,13 @@ pub struct PlayerAttacks {
 }
 
 impl PlayerAttacks {
-    /// Loads the table of `client_build` from `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`PlayerAttacksError`] when the file is missing or bad.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, PlayerAttacksError> {
-        let path = player_attacks_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, PlayerAttacksError> {
+        let path = layout.file(PLAYER_ATTACKS);
         let text = std::fs::read_to_string(&path)
             .map_err(|source| PlayerAttacksError::Io { path, source })?;
         Self::parse(&text)
@@ -905,7 +900,7 @@ pub fn write_stances(path: &Path, stances: &[Stance]) -> Result<(), PlayerAttack
     if let Some(folder) = path.parent() {
         std::fs::create_dir_all(folder).map_err(io)?;
     }
-    std::fs::write(path, serde_json::to_vec_pretty(stances)?).map_err(io)
+    write_atomic(path, &serde_json::to_vec_pretty(stances)?).map_err(io)
 }
 
 #[cfg(test)]
@@ -1346,8 +1341,6 @@ mod tests {
         assert!(!attack.has_run_time_conditions());
     }
 
-    /// The pinned client build of the content in `NW_CONTENT_DIR`.
-    const CONTENT_BUILD: &str = "25810808";
     /// Retail input records (frames) per second.
     const RECORDS_PER_SECOND: u64 = 30;
     const MS_PER_SECOND_U64: u64 = 1_000;
@@ -1357,11 +1350,10 @@ mod tests {
         (ms * RECORDS_PER_SECOND + MS_PER_SECOND_U64 / 2) / MS_PER_SECOND_U64
     }
 
-    /// The stances of the player attack table in `NW_CONTENT_DIR`.
+    /// The stances of the player attack table of the repository's content layout.
     fn built_stances() -> Vec<Stance> {
-        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
-        let text = std::fs::read_to_string(player_attacks_path(Path::new(&dir), CONTENT_BUILD))
-            .expect("player attack table");
+        let path = crate::layout::repo_layout().file(PLAYER_ATTACKS);
+        let text = std::fs::read_to_string(path).expect("player attack table");
         serde_json::from_str(&text).expect("stances")
     }
 

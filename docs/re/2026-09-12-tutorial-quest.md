@@ -97,7 +97,7 @@ tutorial's gear. There is no item store yet: a new login starts from the kit aga
 
 ## 5. Static level entities, the bag and the chest
 
-**Observed** (ftue-static-entities session note; table `local-data/content/ftue-entities-25810808.json`
+**Observed** (ftue-static-entities session note; table `local-data/content/25810808/levels/ftue_v2/entities.json`
 made by `content-tool ftue-entities`). The retail server sends 20 static level entities of the
 tutorial a spawn card that names only a `GdeRef` (`01 02 <GdeRef>`), with recorded states of some
 components. A static `GdeRef` is 8 fixed level bytes and then the session's tutorial phase id,

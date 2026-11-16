@@ -11,9 +11,7 @@ use std::time::Duration;
 use nw_common::logging::{LoggingError, init_logging};
 use nw_common::shutdown::stop_signal;
 use nw_common::time::{unix_seconds, unix_seconds_of_date_time};
-use nw_content::leaderboard_table::{
-    LeaderboardTable, LeaderboardTableError, leaderboard_table_path,
-};
+use nw_content::leaderboard_table::{LeaderboardTable, LeaderboardTableError};
 use nw_db::connect_lazy;
 use nw_login::install_crypto_provider;
 use reqwest::{Client, StatusCode};
@@ -55,6 +53,9 @@ pub enum RunError {
     /// The leaderboard table cannot be read (`content-tool leaderboards` writes it).
     #[error(transparent)]
     LeaderboardTable(#[from] LeaderboardTableError),
+    /// The content folder does not open (its manifest names another build).
+    #[error(transparent)]
+    Content(#[from] nw_content::layout::LayoutError),
     /// The client's gameplay values (the season end) cannot be read.
     #[error(transparent)]
     Gameplay(#[from] sim::gameplay::GameplayError),
@@ -258,7 +259,10 @@ fn prepare(config: ReporterConfig) -> Result<Ready, RunError> {
     let world_password = secret(&config.world_database_password_env)?;
     let build = nw_content::client_build::load_client_build(&config.client_build_config)
         .map_err(RunError::ClientBuild)?;
-    let table = LeaderboardTable::load(&leaderboard_table_path(&config.content_dir, &build))?;
+    let table = LeaderboardTable::load(&nw_content::layout::ContentLayout::open(
+        &config.content_dir,
+        &build,
+    )?)?;
     let calendar = config
         .leaderboards
         .calendar()

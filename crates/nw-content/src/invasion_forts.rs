@@ -28,21 +28,14 @@
 //! The table file is mined from the captures (no tracked file holds capture data): a fort that
 //! no invasion capture shows has no entry, and gets no invasion.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
-/// The start of the table file name.
-const FILE_PREFIX: &str = "invasion-forts-";
-/// The end of the table file name.
-const FILE_SUFFIX: &str = ".json";
+use crate::layout::{ContentLayout, INVASION_FORTS};
+
 /// The length of a `GdeRef`.
 const ID_LEN: usize = 16;
-
-/// The table file of client build `client_build` in content directory `dir`.
-pub fn invasion_forts_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// A bad table file.
 #[derive(Debug, thiserror::Error)]
@@ -236,13 +229,13 @@ pub struct InvasionForts {
 }
 
 impl InvasionForts {
-    /// The table of client build `client_build` in content directory `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`InvasionFortsError`] when the file cannot be read or is not the table.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, InvasionFortsError> {
-        let path = invasion_forts_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, InvasionFortsError> {
+        let path = layout.file(INVASION_FORTS);
         let text = std::fs::read_to_string(&path)
             .map_err(|source| InvasionFortsError::Io { path, source })?;
         Self::parse(&text)

@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 
 use nw_content::ContentBundle;
 use nw_content::breach_tiers::BreachTiers;
-use nw_content::bundle::bundle_path;
 use nw_content::dungeon_entrances::DungeonEntrances;
 use nw_content::dungeon_gates::GateRules;
 use nw_content::ftue_entities::FtueEntities;
 use nw_content::invasion_forts::InvasionForts;
+use nw_content::layout::{ContentLayout, FileRef, pack_files};
 use nw_content::mob_prefabs::MobPrefabs;
 use nw_content::outpost_structures::OutpostStructures;
 use nw_content::player_sequences::PlayerSequences;
@@ -26,8 +26,8 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use super::manifest::{
-    MANIFEST_FILE, Manifest, PACK_FORMAT, PACK_TABLES, PackFile, REPORT_FILE, SUMS_FILE,
-    pack_zip_name, sha256_hex, table_file_name,
+    MANIFEST_FILE, Manifest, PACK_FORMAT, PackFile, REPORT_FILE, SUMS_FILE, pack_zip_name,
+    sha256_hex, table_file_name,
 };
 use super::scan::{ReviewRun, scan_table};
 use super::scrub::scrub_table;
@@ -86,31 +86,23 @@ pub fn parse_pack_table(table: &str, text: &str) -> Result<(), PackError> {
     }
 }
 
-/// Makes the pack of the tables in `content_dir` into `out_dir`. The game words come from the
-/// merged bundle of the content folder.
+/// Makes the pack of the tables of `layout` into `out_dir`. The game words come from the merged
+/// bundle of the content folder.
 ///
 /// # Errors
 ///
 /// Returns [`PackError`] when a table is missing or does not load, the scan finds a hit, or a
 /// file cannot be read or written.
 pub fn make_pack(
-    content_dir: &Path,
+    layout: &ContentLayout,
     out_dir: &Path,
-    client_build: &str,
     pack_version: u32,
     source_commit: &str,
 ) -> Result<MakeReport, PackError> {
-    let bundle = ContentBundle::load(&bundle_path(content_dir, client_build), client_build)?;
+    let bundle = ContentBundle::load(layout)?;
     let words = GameWords::from_bundle(&bundle);
     drop(bundle);
-    make_pack_with_words(
-        content_dir,
-        out_dir,
-        client_build,
-        pack_version,
-        source_commit,
-        &words,
-    )
+    make_pack_with_words(layout, out_dir, pack_version, source_commit, &words)
 }
 
 /// [`make_pack`] with the game words given.
@@ -119,9 +111,8 @@ pub fn make_pack(
 ///
 /// As [`make_pack`].
 pub(crate) fn make_pack_with_words(
-    content_dir: &Path,
+    layout: &ContentLayout,
     out_dir: &Path,
-    client_build: &str,
     pack_version: u32,
     source_commit: &str,
     words: &GameWords,
@@ -131,9 +122,11 @@ pub(crate) fn make_pack_with_words(
     let mut scrubbed_tables = Vec::new();
     let mut player_ids: Vec<Vec<u8>> = Vec::new();
     let mut identity_states = 0;
-    for table in PACK_TABLES {
+    let client_build = layout.client_build();
+    for file in pack_files() {
+        let table = file.name;
         let name = table_file_name(table, client_build);
-        let path = content_dir.join(&name);
+        let path = layout.path(&FileRef { file, level: None });
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
@@ -296,31 +289,41 @@ pub(crate) mod tests {
         GameWords::from_strings([String::from_utf8(STRUCTURE_NAME.to_vec()).unwrap()])
     }
 
-    /// Writes the fixture tables into `dir`.
-    pub(crate) fn write_fixture(dir: &Path) {
+    /// The path of pack table `table` in `layout`.
+    pub(crate) fn table_path(layout: &ContentLayout, table: &str) -> PathBuf {
+        let file = pack_files()
+            .find(|file| file.name == table)
+            .expect("a pack table");
+        layout.path(&FileRef { file, level: None })
+    }
+
+    /// Writes the fixture tables into `layout`.
+    pub(crate) fn write_fixture(layout: &ContentLayout) {
         for (table, value) in fixture_tables() {
-            std::fs::write(
-                dir.join(table_file_name(table, BUILD)),
-                serde_json::to_vec(&value).unwrap(),
+            nw_content::layout::write_atomic(
+                &table_path(layout, table),
+                &serde_json::to_vec(&value).unwrap(),
             )
             .unwrap();
         }
     }
 
-    /// Makes a pack of the fixture into `out`.
+    /// Makes a pack of the fixture of a content folder in `content` into `out`.
     pub(crate) fn make_fixture_pack(content: &Path, out: &Path) -> MakeReport {
-        write_fixture(content);
-        make_pack_with_words(content, out, BUILD, VERSION, COMMIT, &fixture_words()).unwrap()
+        let layout = ContentLayout::new(content, BUILD);
+        write_fixture(&layout);
+        make_pack_with_words(&layout, out, VERSION, COMMIT, &fixture_words()).unwrap()
     }
 
-    fn folder_sums(dir: &Path) -> Vec<(String, String)> {
-        let mut sums: Vec<_> = std::fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| {
-                let entry = entry.unwrap();
+    /// The sums of the files of a build folder, by their path.
+    fn folder_sums(layout: &ContentLayout) -> Vec<(String, String)> {
+        let mut sums: Vec<_> = fixture_tables()
+            .into_iter()
+            .map(|(table, _)| {
+                let path = table_path(layout, table);
                 (
-                    entry.file_name().to_string_lossy().into_owned(),
-                    sha256_hex(&std::fs::read(entry.path()).unwrap()),
+                    path.to_string_lossy().into_owned(),
+                    sha256_hex(&std::fs::read(&path).unwrap()),
                 )
             })
             .collect();
@@ -348,7 +351,7 @@ pub(crate) mod tests {
         let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
         let manifest: Manifest =
             serde_json::from_reader(archive.by_name(MANIFEST_FILE).unwrap()).unwrap();
-        assert_eq!(manifest.files.len(), PACK_TABLES.len());
+        assert_eq!(manifest.files.len(), pack_files().count());
         assert_eq!(
             (manifest.pack_version, manifest.source_commit.as_str()),
             (VERSION, COMMIT)
@@ -377,35 +380,24 @@ pub(crate) mod tests {
     fn make_leaves_the_content_folder_unchanged() {
         let content = tempfile::tempdir().unwrap();
         let out = tempfile::tempdir().unwrap();
-        write_fixture(content.path());
-        let before = folder_sums(content.path());
+        let layout = ContentLayout::new(content.path(), BUILD);
+        write_fixture(&layout);
+        let before = folder_sums(&layout);
         make_fixture_pack(content.path(), out.path());
-        assert_eq!(folder_sums(content.path()), before);
+        assert_eq!(folder_sums(&layout), before);
     }
 
     #[test]
     fn make_fails_on_a_two_word_hit_left_after_scrub() {
         let content = tempfile::tempdir().unwrap();
         let out = tempfile::tempdir().unwrap();
-        write_fixture(content.path());
+        let layout = ContentLayout::new(content.path(), BUILD);
+        write_fixture(&layout);
         let mut body = vec![0x01];
         body.extend_from_slice(MADE_UP_COMPANY);
         let props = json!({"props": [{"asset": ASSET, "members": [], "note": "Made Up Company", "body": hex::encode(body)}]});
-        std::fs::write(
-            content
-                .path()
-                .join(table_file_name("encounter-roots", BUILD)),
-            props.to_string(),
-        )
-        .unwrap();
-        match make_pack_with_words(
-            content.path(),
-            out.path(),
-            BUILD,
-            VERSION,
-            COMMIT,
-            &GameWords::default(),
-        ) {
+        std::fs::write(table_path(&layout, "encounter-roots"), props.to_string()).unwrap();
+        match make_pack_with_words(&layout, out.path(), VERSION, COMMIT, &GameWords::default()) {
             Err(PackError::PrivacyHits(hits)) => {
                 assert_eq!(hits.len(), 1, "the plain note is no hit: {hits:?}");
                 assert_eq!(hits[0].path, "/props/0/body");
@@ -419,17 +411,11 @@ pub(crate) mod tests {
     fn make_fails_on_a_missing_table() {
         let content = tempfile::tempdir().unwrap();
         let out = tempfile::tempdir().unwrap();
-        write_fixture(content.path());
-        std::fs::remove_file(content.path().join(table_file_name("war-forts", BUILD))).unwrap();
+        let layout = ContentLayout::new(content.path(), BUILD);
+        write_fixture(&layout);
+        std::fs::remove_file(table_path(&layout, "war-forts")).unwrap();
         assert!(matches!(
-            make_pack_with_words(
-                content.path(),
-                out.path(),
-                BUILD,
-                VERSION,
-                COMMIT,
-                &GameWords::default()
-            ),
+            make_pack_with_words(&layout, out.path(), VERSION, COMMIT, &GameWords::default()),
             Err(PackError::MissingFile { .. })
         ));
     }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `breach-tiers`: the difficulty of each corrupted breach place, from the world map points of
-//! the retail ledgers (`breach-tiers-<build>.json`, read by `content-tool dungeon-scripts`).
+//! the retail ledgers (`instances/breach-tiers.json`, read by `content-tool dungeon-scripts`).
 //!
 //! Observed (breaches note 2026-11-11): the world entity's map data state
 //! (`Javelin::GlobalMapDataManagerComponentReplicatedState`, class 3780) lists the world map

@@ -2,7 +2,7 @@
 //! Mob AI from the game's own data (behavior-tree study 2026-09-18, sections 3 and 5): each mob
 //! of a creature slice whose tree Server.pak has runs that tree (`nw_ai::Brain`), with the slice's
 //! config values, vision, navigation configs and CAGE grid from the AI data file
-//! (`ai-data-<build>.bin`, `content-tool ai-data`). This module holds the shared data, the design
+//! (`mobs/ai-data.bin`, `content-tool ai-data`). This module holds the shared data, the design
 //! files' overrides of a spawn, and one mob's mind: what it perceives, what the engine keys of
 //! its tree read, and how its tree's commands move and animate it.
 //!
@@ -39,7 +39,6 @@
 
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use nw_ai::brain::{Brain, Command, Destination, MotionOutcome, Runtime, Slot, World};
@@ -56,6 +55,7 @@ use nw_ai::rng::Rng48;
 use nw_ai::value::{Blackboard, KeyId, NameId, Param, Value};
 use nw_content::combat::MobGuard;
 use nw_content::container::ContainerError;
+use nw_content::layout::ContentLayout;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_content::status_effects::Control;
 use nw_sim_core::character::STEP_UP_M;
@@ -464,20 +464,19 @@ impl MobAi {
         self.slice_vitals.get(asset).copied()
     }
 
-    /// The AI data file of `client_build` in `dir` with the waypoint task names `tasks` (the
-    /// level's and the scripts': [`with_task_names`]), tick rates `rates` and the looks `looks`.
+    /// The AI data file of `layout` with the waypoint task names `tasks` (the level's and the
+    /// scripts': [`with_task_names`]), tick rates `rates` and the looks `looks`.
     ///
     /// # Errors
     ///
     /// Returns [`ContainerError`] when the file is missing, from another build or bad.
     pub fn load<'a>(
-        dir: &Path,
-        client_build: &str,
+        layout: &ContentLayout,
         tasks: impl IntoIterator<Item = &'a str>,
         rates: AiRates,
         looks: LookAssets,
     ) -> Result<Self, ContainerError> {
-        let data = with_task_names(AiData::load(dir, client_build)?, tasks);
+        let data = with_task_names(AiData::load(layout)?, tasks);
         Ok(Self::new(data, rates, looks))
     }
 

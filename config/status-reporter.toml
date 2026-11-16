@@ -27,13 +27,13 @@ leaderboards_interval_s = 300
 request_timeout_ms = 5000
 log_filter = "info"
 
-# The pinned client build: it names the leaderboard table.
+# The pinned client build: it names the build folder of the leaderboard table.
 client_build_config = "config/client-build.toml"
 # The edge-http config of this world: its remote config sets give the season end
 # (javelin.leaderboard-season-end-datetime), the time the season boards reset.
 edge_config = "config/edge.toml"
-# Folder of the leaderboard table leaderboards-<build>.json. Make it with
-# `content-tool leaderboards` (from the content bundle in the same folder).
+# The content folder: the leaderboard table is <build>/services/leaderboards.json in it. Make it
+# with `content-tool leaderboards` (from the content bundle of the same build folder).
 content_dir = "local-data/content"
 
 # The metrics pages (metrics_listen) of each part of the world. A part is up when every page of

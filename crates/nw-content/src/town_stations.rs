@@ -22,14 +22,13 @@
 //! most 5, 93 to 98 % per craft (its slices `_t2`, `_t3`, `_t5` are types 3, 4, 5). A slot whose
 //! territory is found by that fit: every settlement fits one territory at 100 %.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::layout::{ContentLayout, TOWN_STATIONS};
 use crate::town_props::ASSET_ID_LEN;
 
-const FILE_PREFIX: &str = "town-stations-";
-const FILE_SUFFIX: &str = ".json";
 /// The first refining upgrade (Carpentry 5 to Smelting 9).
 const FIRST_REFINING_UPGRADE: u8 = 5;
 /// A crafting station's type above its claim tier.
@@ -38,11 +37,6 @@ const CRAFTING_TYPE_ABOVE_TIER: u8 = 2;
 const REFINING_TYPE_ABOVE_TIER: u8 = 3;
 /// The highest station type of a settlement.
 const TOP_STATION_TYPE: u8 = 5;
-
-/// The table file of client build `client_build` in content directory `dir`.
-pub fn town_stations_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// The station type a slot of upgrade `upgrade` shows at the claim tier `tier` (module doc).
 pub fn station_tier(upgrade: u8, tier: u8) -> u8 {
@@ -160,13 +154,13 @@ pub struct TownStations {
 }
 
 impl TownStations {
-    /// The table of client build `client_build` in content directory `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`TownStationsError`] when the file cannot be read or is not the table.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, TownStationsError> {
-        let path = town_stations_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, TownStationsError> {
+        let path = layout.file(TOWN_STATIONS);
         let text = std::fs::read_to_string(&path)
             .map_err(|source| TownStationsError::Io { path, source })?;
         Self::parse(&text)

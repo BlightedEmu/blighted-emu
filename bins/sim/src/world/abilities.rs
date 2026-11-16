@@ -4102,15 +4102,12 @@ mod tests {
 #[cfg(all(test, feature = "local-data"))]
 mod retail_tests {
     use std::collections::BTreeSet;
-    use std::path::Path;
 
-    use nw_content::client_build::load_client_build;
     use nw_content::player_abilities::PlayerAbilities;
 
     use super::tests::{key_1, no_inputs, strikes};
     use super::*;
 
-    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
     const SACRED_GROUND: &str = "Ability_Lifestaff_SacredGround";
     const SACRED_GROUND_SPELL: &str = "Spell_LifeStaff_SacredGround";
     const SACRED_GROUND_UPGRADE: &str = "Upgrade_Lifestaff_SacredGround_Dmg";
@@ -4199,9 +4196,7 @@ mod retail_tests {
     ];
 
     fn table() -> PlayerAbilities {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let build = load_client_build(&repo.join(CLIENT_BUILD_CONFIG)).expect("client build");
-        PlayerAbilities::load(&repo.join("local-data/content"), &build).expect("ability table")
+        PlayerAbilities::load(&nw_content::layout::repo_layout()).expect("ability table")
     }
 
     #[test]

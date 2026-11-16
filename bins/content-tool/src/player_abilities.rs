@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `player-abilities`: builds the player ability table (`player-abilities-<build>.json`, read by
+//! `player-abilities`: builds the player ability table (`combat/player-abilities.json`, read by
 //! `nw_content::player_abilities`) from the game paks and the content bundle (abilities design
 //! note, 2026-10-31).
 //!

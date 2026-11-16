@@ -14,6 +14,9 @@ use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use nw_common::logging::{LoggingError, init_logging};
+use nw_content::client_build::load_client_build;
+use nw_content::layout::{ContentLayout, STORE};
+
 use nw_db::{
     DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, account_by_discord, characters_for_account,
     check_schema, link_discord_login, password_login,
@@ -93,6 +96,12 @@ pub enum RunError {
     /// The store table cannot be loaded.
     #[error(transparent)]
     StoreTable(#[from] StoreTableError),
+    /// The pinned client build of the store table cannot be read.
+    #[error("client build: {0}")]
+    ClientBuild(#[source] nw_common::config::ConfigError),
+    /// The content folder of the store table does not open.
+    #[error(transparent)]
+    Content(#[from] nw_content::layout::LayoutError),
     /// A listener failed.
     #[error("listener failed")]
     Listen(#[source] std::io::Error),
@@ -240,8 +249,12 @@ async fn serve_async(config: EdgeConfig, secrets: Secrets) -> Result<(), RunErro
         tokio::spawn(MotdPull::new(http, website, cms.documents()).run());
         tracing::info!(url = %website.motd_url(), "pulling the message of the day");
     }
-    let store = Arc::new(match &config.shop.store_table {
-        Some(path) => StoreTable::load(path)?,
+    let store = Arc::new(match &config.shop.content_dir {
+        Some(content_dir) => {
+            let build = load_client_build(&config.shop.client_build_config)
+                .map_err(RunError::ClientBuild)?;
+            StoreTable::load(&ContentLayout::open(content_dir, &build)?.file(STORE))?
+        }
         None => StoreTable::default(),
     });
     if store.mounts.is_empty() {

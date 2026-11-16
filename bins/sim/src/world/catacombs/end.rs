@@ -1373,18 +1373,14 @@ mod tests {
     fn the_extraction_core_and_the_chests_are_gatherable_start_objects_of_the_content() {
         use nw_world::dungeon_scripts::ObjectiveSpec;
 
-        const BUILD: &str = "25810808";
         const CORE_STAGE: &str = "Wave_01 - Objective: Activate core";
-        let dir = std::path::PathBuf::from(std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR"));
-        let table = nw_content::town_props::TownProps::load_file(
-            nw_content::town_props::encounter_objects_path(&dir, BUILD),
-        )
-        .expect("objects table");
+        let layout = nw_content::layout::repo_layout();
+        let table =
+            nw_content::town_props::TownProps::load(&layout, nw_content::layout::ENCOUNTER_OBJECTS)
+                .expect("objects table");
         let mut objects = super::super::super::encounter_roots::EncounterObjects::build(&table);
-        let tiles = nw_world::catacomb_tiles::CatacombTiles::load(
-            &nw_world::catacomb_tiles::catacomb_tiles_path(&dir, BUILD),
-        )
-        .expect("tiles");
+        let tiles = nw_world::catacomb_tiles::CatacombTiles::load(&layout).expect("tiles");
+
         let mut cores = Vec::new();
         for tile in 1..=5 {
             let variation = format!("catacombs/gameplay/tiles/tile{tile}_a_gameplay");

@@ -33,16 +33,13 @@ use std::path::PathBuf;
 
 use nw_content::Tables;
 use nw_content::afflictions::AfflictionRules;
+use nw_content::layout::{ContentLayout, EFFECT_AREAS};
 use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, AssetCatalogError, AssetKey, paths_of};
 use nw_formats::objectstream::{Element, lowercase_crc32};
 use nw_formats::pak::PakError;
 use nw_world::collision::{Affine, IDENTITY_AFFINE, compose};
-use nw_world::dungeon_scripts::{
-    Detector, DungeonScripts, DungeonScriptsError, dungeon_scripts_path,
-};
-use nw_world::effect_areas::{
-    EffectArea, EffectAreas, EffectAreasError, StageAreas, effect_areas_path, slice_areas,
-};
+use nw_world::dungeon_scripts::{Detector, DungeonScripts, DungeonScriptsError};
+use nw_world::effect_areas::{EffectArea, EffectAreas, EffectAreasError, StageAreas, slice_areas};
 use nw_world::level_script::{
     ENCOUNTER_STAGE_TYPE, LevelScriptError, SliceScript, pak_path, slice_script,
 };
@@ -318,7 +315,7 @@ fn spawned_areas(
 }
 
 /// Builds the effect areas file of `levels` and of the spells of `tables` from the paks of
-/// `index` into `out_dir`.
+/// `index` into `layout`.
 ///
 /// # Errors
 ///
@@ -328,8 +325,7 @@ pub fn build_effect_areas(
     index: &PakIndex,
     tables: &Tables,
     levels: &[String],
-    client_build: &str,
-    out_dir: &std::path::Path,
+    layout: &ContentLayout,
 ) -> Result<EffectAreasReport, EffectAreasBuildError> {
     let kept = affliction_effects(tables);
     let (catalog_path, catalog) = index
@@ -403,7 +399,7 @@ pub fn build_effect_areas(
         Ok(())
     })?;
     report.spells = file.spells.len();
-    let scripts = DungeonScripts::load(&dungeon_scripts_path(out_dir, client_build))?;
+    let scripts = DungeonScripts::load(layout)?;
     let wanted: BTreeSet<&str> = scripts
         .game_modes
         .values()
@@ -427,9 +423,9 @@ pub fn build_effect_areas(
         }
         Ok(())
     })?;
-    let path = effect_areas_path(out_dir, client_build);
+    let path = layout.file(EFFECT_AREAS);
     file.write(&path)?;
-    if EffectAreas::load(out_dir, client_build)? != file {
+    if EffectAreas::load(layout)? != file {
         return Err(EffectAreasBuildError::Reload(path));
     }
     report.path = path;

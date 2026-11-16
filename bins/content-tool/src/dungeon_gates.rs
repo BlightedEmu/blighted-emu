@@ -24,12 +24,13 @@
 //! Starstone and Dynasty gates).
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nw_content::Tables;
 use nw_content::dungeon_gates::{
-    DungeonGates, EntityComponent, Gate, GateLevel, GateTimeline, SliceEntity, dungeon_gates_path,
+    DungeonGates, EntityComponent, Gate, GateLevel, GateTimeline, SliceEntity,
 };
+use nw_content::layout::{ContentLayout, DUNGEON_GATES};
 use nw_formats::objectstream::Element;
 use nw_world::level_script::{ReplicatedKind, ScriptEntity, SliceScript, Spawner, Transform};
 
@@ -240,7 +241,7 @@ impl Reader<'_> {
     }
 }
 
-/// Builds the gates file of `tables` from the paks of `index` into `out_dir`.
+/// Builds the gates file of `tables` from the paks of `index` into `layout`.
 ///
 /// # Errors
 ///
@@ -249,8 +250,7 @@ impl Reader<'_> {
 pub fn build_dungeon_gates(
     index: &PakIndex,
     tables: &Tables,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<DungeonGatesReport, DungeonScriptsBuildError> {
     let mut reader = Reader {
         slices: PakSlices::new(index),
@@ -304,9 +304,9 @@ pub fn build_dungeon_gates(
         levels.push(level);
     }
     let gates = DungeonGates::new(SOURCE.to_owned(), levels, encounter_entities);
-    let path = dungeon_gates_path(out_dir, client_build);
+    let path = layout.file(DUNGEON_GATES);
     gates.write(&path)?;
-    if DungeonGates::load(out_dir, client_build)? != gates {
+    if DungeonGates::load(layout)? != gates {
         return Err(DungeonScriptsBuildError::Reload(path));
     }
     reader.report.path = path;

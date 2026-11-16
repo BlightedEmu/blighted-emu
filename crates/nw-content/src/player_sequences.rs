@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The player slayer sequence table (`player-sequences-<build>.json`; run-15 lock and aim study,
+//! The player slayer sequence table (`combat/player-sequences.json`; run-15 lock and aim study,
 //! 2026-09-22): which slayer states and sequences the server starts for a player, by weapon
 //! stance, the way the retail server did in the capture ledgers of the pinned client build.
 //!
@@ -35,21 +35,14 @@
 //! staff's abilities).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use nw_formats::objectstream::lowercase_crc32;
 
+use crate::layout::{ContentLayout, PLAYER_SEQUENCES};
 use crate::player_attacks::stance_key;
-
-const FILE_PREFIX: &str = "player-sequences-";
-const FILE_SUFFIX: &str = ".json";
-
-/// The path of the table of `client_build` in `dir`.
-pub fn player_sequences_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// A bad table file.
 #[derive(Debug, thiserror::Error)]
@@ -420,13 +413,13 @@ pub struct PlayerSequences {
 }
 
 impl PlayerSequences {
-    /// Reads the table of `client_build` in `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`PlayerSequencesError`] when the file cannot be read or is not the table.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, PlayerSequencesError> {
-        let path = player_sequences_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, PlayerSequencesError> {
+        let path = layout.file(PLAYER_SEQUENCES);
         let text = std::fs::read_to_string(&path)
             .map_err(|source| PlayerSequencesError::Io { path, source })?;
         Self::parse(&text)
@@ -664,7 +657,8 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_an_io_error() {
-        let missing = PlayerSequences::load(Path::new("/nonexistent"), "0");
+        let missing = PlayerSequences::load(&ContentLayout::new("/nonexistent", "0"));
+
         assert!(matches!(missing, Err(PlayerSequencesError::Io { .. })));
     }
 

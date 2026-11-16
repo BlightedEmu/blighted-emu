@@ -11,7 +11,6 @@ use nw_bus::{Bus, BusError};
 use nw_common::config::ConfigError;
 use nw_common::logging::{LoggingError, init_logging};
 use nw_content::ContentBundle;
-use nw_content::bundle::bundle_path;
 use nw_content::client_build::load_client_build;
 use nw_content::combat::{CombatData, CombatDataError};
 use nw_content::container::ContainerError;
@@ -19,6 +18,7 @@ use nw_content::creature_animations::CreatureAnimations;
 use nw_content::datatable_overrides::{self, DatatableOverrideError};
 use nw_content::ftue_entities::FtueLevel;
 use nw_content::gameplay_config::GameplayConfig;
+use nw_content::layout::{ContentLayout, LayoutError};
 use nw_content::mob_prefabs::MobPrefabs;
 use nw_content::music_charts::MusicCharts;
 use nw_content::player_abilities::PlayerAbilities;
@@ -28,17 +28,16 @@ use nw_content::store::store_table;
 use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 use nw_sim_core::{LevelGround, level_bounds};
 use nw_world::WorldFile;
-use nw_world::camps::{CampSlices, camp_slices_path};
-use nw_world::catacomb_tiles::{CatacombSolids, CatacombTiles, catacomb_tiles_path};
-use nw_world::claim_plots::{ClaimPlots, claim_plots_path};
-use nw_world::collision::{LevelCollision, QueryFilter, collision_file_path};
+use nw_world::camps::CampSlices;
+use nw_world::catacomb_tiles::{CatacombSolids, CatacombTiles};
+use nw_world::claim_plots::ClaimPlots;
+use nw_world::collision::{LevelCollision, QueryFilter};
 use nw_world::collision_index::{CollisionIndex, NavMarkIndex};
-use nw_world::dungeon_scripts::{DungeonScripts, dungeon_scripts_path};
-use nw_world::quick_courses::{QuickCoursePaths, quick_courses_path};
-use nw_world::roads::{RoadMap, road_file_path};
-use nw_world::script::{DesignData, LevelDesign, design_data_path};
-use nw_world::water::{WaterMap, water_file_path};
-use nw_world::world_file::world_file_path;
+use nw_world::dungeon_scripts::DungeonScripts;
+use nw_world::quick_courses::QuickCoursePaths;
+use nw_world::roads::RoadMap;
+use nw_world::script::{DesignData, LevelDesign};
+use nw_world::water::WaterMap;
 
 use crate::asset_solids::AssetSolids;
 use crate::combat::CombatSettings;
@@ -63,6 +62,9 @@ pub enum RunError {
     /// The client build file cannot be read.
     #[error("client build file: {0}")]
     ClientBuild(#[source] ConfigError),
+    /// The content folder does not open (its manifest names another build).
+    #[error(transparent)]
+    Content(#[from] LayoutError),
     /// The world file cannot be read.
     #[error("world file: {0}")]
     WorldFile(#[from] ContainerError),
@@ -162,11 +164,10 @@ pub struct LoadedLevel {
 /// gameplay values, the bundle or a combat row is missing or not valid.
 pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
     let build = load_client_build(&config.client_build_config).map_err(RunError::ClientBuild)?;
-    let path = world_file_path(&config.content_dir, &build, &config.level);
-    let world_file = Arc::new(WorldFile::load(&path, &build)?);
-    let collision_path = collision_file_path(&config.content_dir, &build, &config.level);
+    let layout = ContentLayout::open(&config.content_dir, &build)?;
+    let world_file = Arc::new(WorldFile::load(&layout, &config.level)?);
     let level_collision =
-        LevelCollision::load(&collision_path, &build).map_err(RunError::Collision)?;
+        LevelCollision::load(&layout, &config.level).map_err(RunError::Collision)?;
     let deferred = level_collision.deferred.clone();
     let quest_volumes = level_collision.volumes.clone();
     let mob_bodies = level_collision.bodies_for(QueryFilter::Ai);
@@ -193,9 +194,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
         bytes = collision.memory_bytes(),
         "level collision"
     );
-    let roads_path = road_file_path(&config.content_dir, &build, &config.level);
-    let water_path = water_file_path(&config.content_dir, &build, &config.level);
-    let water = match WaterMap::load(&water_path, &build) {
+    let water = match WaterMap::load(&layout, &config.level) {
         Ok(water) => {
             tracing::info!(regions = water.regions.len(), "level water");
             Some(Arc::new(water))
@@ -205,7 +204,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             None
         }
     };
-    let roads = match RoadMap::load(&roads_path, &build) {
+    let roads = match RoadMap::load(&layout, &config.level) {
         Ok(roads) => {
             tracing::info!(regions = roads.regions.len(), "level roads");
             Some(Arc::new(roads))
@@ -229,11 +228,10 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
     let ground = ground_over(Arc::clone(&collision));
     let mob_ground = ground_over(mob_collision).with_marks(marks);
     let gameplay = load_gameplay(&config.edge_config, config.world_id)?;
-    let mut bundle = ContentBundle::load(&bundle_path(&config.content_dir, &build), &build)
-        .map_err(RunError::Bundle)?;
+    let mut bundle = ContentBundle::load(&layout).map_err(RunError::Bundle)?;
     datatable_overrides::apply(&mut bundle.tables, &gameplay.datatable_overrides)?;
     log_gameplay(&gameplay);
-    let player_attacks = match PlayerAttacks::load(&config.content_dir, &build) {
+    let player_attacks = match PlayerAttacks::load(&layout) {
         Ok(table) => {
             tracing::info!(stances = table.len(), "player attack table");
             table
@@ -243,7 +241,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             PlayerAttacks::default()
         }
     };
-    let player_abilities = match PlayerAbilities::load(&config.content_dir, &build) {
+    let player_abilities = match PlayerAbilities::load(&layout) {
         Ok(table) => {
             tracing::info!(lists = table.lists.len(), "player ability table");
             table
@@ -253,7 +251,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             PlayerAbilities::default()
         }
     };
-    let player_sequences = match PlayerSequences::load(&config.content_dir, &build) {
+    let player_sequences = match PlayerSequences::load(&layout) {
         Ok(table) => {
             tracing::info!(
                 stances = table.len(),
@@ -278,8 +276,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             .with_player_abilities(player_abilities)
             .with_player_sequences(player_sequences),
     );
-    let (mob_looks, look_assets, slice_vitals) = match MobPrefabs::load(&config.content_dir, &build)
-    {
+    let (mob_looks, look_assets, slice_vitals) = match MobPrefabs::load(&layout) {
         Ok(prefabs) => {
             let (looks, skipped) = MobLooks::of(&prefabs);
             tracing::info!(prefabs = looks.len(), skipped, "mob prefab table");
@@ -297,20 +294,18 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             (MobLooks::default(), LookAssets::new(), SliceVitals::new())
         }
     };
-    let dungeon_scripts =
-        match DungeonScripts::load(&dungeon_scripts_path(&config.content_dir, &build)) {
-            Ok(scripts) => {
-                tracing::info!(game_modes = scripts.game_modes.len(), "dungeon scripts");
-                scripts
-            }
-            Err(error) => {
-                tracing::warn!(%error, "no dungeon scripts: instances run without encounters");
-                DungeonScripts::default()
-            }
-        };
+    let dungeon_scripts = match DungeonScripts::load(&layout) {
+        Ok(scripts) => {
+            tracing::info!(game_modes = scripts.game_modes.len(), "dungeon scripts");
+            scripts
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no dungeon scripts: instances run without encounters");
+            DungeonScripts::default()
+        }
+    };
     let mob_ai = match MobAi::load(
-        &config.content_dir,
-        &build,
+        &layout,
         world_file
             .waypoint_tasks()
             .chain(dungeon_scripts.waypoint_tasks()),
@@ -333,7 +328,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
         }
     }
     .with_slice_vitals(slice_vitals);
-    let creature_animations = match CreatureAnimations::load(&config.content_dir, &build) {
+    let creature_animations = match CreatureAnimations::load(&layout) {
         Ok(table) => {
             tracing::info!(creatures = table.len(), "creature animation table");
             table
@@ -343,7 +338,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             CreatureAnimations::default()
         }
     };
-    let tutorial_level = match FtueLevel::load(&config.content_dir, &build) {
+    let tutorial_level = match FtueLevel::load(&layout) {
         Ok(level) => {
             tracing::info!(
                 statics = level.statics.entities.len(),
@@ -386,17 +381,16 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
         }
     }
     content.dungeon_scripts = dungeon_scripts;
-    content.catacomb_tiles =
-        match CatacombTiles::load(&catacomb_tiles_path(&config.content_dir, &build)) {
-            Ok(tiles) => {
-                tracing::info!(variations = tiles.by_variation.len(), "catacombs tiles");
-                tiles
-            }
-            Err(error) => {
-                tracing::warn!(%error, "no catacombs tiles: a catacombs run has no tile entities");
-                CatacombTiles::default()
-            }
-        };
+    content.catacomb_tiles = match CatacombTiles::load(&layout) {
+        Ok(tiles) => {
+            tracing::info!(variations = tiles.by_variation.len(), "catacombs tiles");
+            tiles
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no catacombs tiles: a catacombs run has no tile entities");
+            CatacombTiles::default()
+        }
+    };
     content.catacomb_solids =
         CatacombSolids::of(&deferred_level, &collision, &content.catacomb_tiles);
     if !content.catacomb_tiles.by_variation.is_empty() {
@@ -405,7 +399,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             "catacombs tile solids"
         );
     }
-    content.camp_slices = match CampSlices::load(&camp_slices_path(&config.content_dir, &build)) {
+    content.camp_slices = match CampSlices::load(&layout) {
         Ok(slices) => {
             tracing::info!(
                 slices = slices.len(),
@@ -419,7 +413,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             CampSlices::default()
         }
     };
-    content.claim_plots = match ClaimPlots::load(&claim_plots_path(&config.content_dir, &build)) {
+    content.claim_plots = match ClaimPlots::load(&layout) {
         Ok(plots) => {
             let placed = plots.placed(&world_file.capitals);
             tracing::info!(slices = plots.len(), placed = placed.len(), "claim plots");
@@ -430,7 +424,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             Vec::new()
         }
     };
-    content.music_charts = match MusicCharts::load(&config.content_dir, &build) {
+    content.music_charts = match MusicCharts::load(&layout) {
         Ok(charts) => {
             tracing::info!(charts = charts.len(), "music charts");
             charts
@@ -440,62 +434,61 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             MusicCharts::default()
         }
     };
-    content.quick_course_paths =
-        match QuickCoursePaths::load(&quick_courses_path(&config.content_dir, &build)) {
-            Ok(paths) => {
-                tracing::info!(courses = paths.len(), "quick course paths");
-                paths
-            }
-            Err(error) => {
-                tracing::warn!(%error, "no quick course paths: no course can be ridden");
-                QuickCoursePaths::default()
-            }
-        };
-    content.town_props = match nw_content::town_props::TownProps::load(&config.content_dir, &build)
-    {
-        Ok(props) => {
-            tracing::info!(props = props.len(), "town props");
-            props
+    content.quick_course_paths = match QuickCoursePaths::load(&layout) {
+        Ok(paths) => {
+            tracing::info!(courses = paths.len(), "quick course paths");
+            paths
         }
         Err(error) => {
-            tracing::warn!(
-                %error,
-                "no town props: station buildings, lights and house plots do not show"
-            );
-            nw_content::town_props::TownProps::default()
+            tracing::warn!(%error, "no quick course paths: no course can be ridden");
+            QuickCoursePaths::default()
         }
     };
-    content.town_stations =
-        match nw_content::town_stations::TownStations::load(&config.content_dir, &build) {
-            Ok(stations) => {
-                tracing::info!(slots = stations.slots().len(), "town stations");
-                stations
+    content.town_props =
+        match nw_content::town_props::TownProps::load(&layout, nw_content::layout::TOWN_PROPS) {
+            Ok(props) => {
+                tracing::info!(props = props.len(), "town props");
+                props
             }
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    "no town stations: the settlements have no crafting or refining station"
+                    "no town props: station buildings, lights and house plots do not show"
                 );
-                nw_content::town_stations::TownStations::default()
+                nw_content::town_props::TownProps::default()
             }
         };
-    content.encounter_roots = match nw_content::town_props::TownProps::load_file(
-        nw_content::town_props::encounter_roots_path(&config.content_dir, &build),
-    ) {
-        Ok(roots) => {
-            tracing::info!(slices = roots.len(), "encounter roots");
-            roots
+    content.town_stations = match nw_content::town_stations::TownStations::load(&layout) {
+        Ok(stations) => {
+            tracing::info!(slots = stations.slots().len(), "town stations");
+            stations
         }
         Err(error) => {
             tracing::warn!(
                 %error,
-                "no encounter roots: the world events show no encounter states"
+                "no town stations: the settlements have no crafting or refining station"
             );
-            nw_content::town_props::TownProps::default()
+            nw_content::town_stations::TownStations::default()
         }
     };
-    content.encounter_objects = match nw_content::town_props::TownProps::load_file(
-        nw_content::town_props::encounter_objects_path(&config.content_dir, &build),
+    content.encounter_roots =
+        match nw_content::town_props::TownProps::load(&layout, nw_content::layout::ENCOUNTER_ROOTS)
+        {
+            Ok(roots) => {
+                tracing::info!(slices = roots.len(), "encounter roots");
+                roots
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "no encounter roots: the world events show no encounter states"
+                );
+                nw_content::town_props::TownProps::default()
+            }
+        };
+    content.encounter_objects = match nw_content::town_props::TownProps::load(
+        &layout,
+        nw_content::layout::ENCOUNTER_OBJECTS,
     ) {
         Ok(objects) => {
             tracing::info!(slices = objects.len(), "encounter start objects");
@@ -509,22 +502,22 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             nw_content::town_props::TownProps::default()
         }
     };
-    content.entrance_entities =
-        match nw_content::dungeon_entrances::DungeonEntrances::load(&config.content_dir, &build) {
-            Ok(table) => {
-                let entities = crate::player_content::entrance_entities(&world_file, &table);
-                tracing::info!(
-                    slices = table.len(),
-                    entities = entities.len(),
-                    "dungeon entrances"
-                );
-                entities
-            }
-            Err(error) => {
-                tracing::warn!(%error, "no dungeon entrances: no entrance shows its runs");
-                Vec::new()
-            }
-        };
+    content.entrance_entities = match nw_content::dungeon_entrances::DungeonEntrances::load(&layout)
+    {
+        Ok(table) => {
+            let entities = crate::player_content::entrance_entities(&world_file, &table);
+            tracing::info!(
+                slices = table.len(),
+                entities = entities.len(),
+                "dungeon entrances"
+            );
+            entities
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no dungeon entrances: no entrance shows its runs");
+            Vec::new()
+        }
+    };
     content.war_boards =
         crate::player_content::sign_boards(&world_file, crate::player_content::WAR_BOARD_SLICE);
     content.town_boards =
@@ -534,11 +527,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
         town = content.town_boards.len(),
         "sign boards"
     );
-    content.level_doors = match nw_content::level_doors::LevelDoors::load(
-        &config.content_dir,
-        &build,
-        &config.level,
-    ) {
+    content.level_doors = match nw_content::level_doors::LevelDoors::load(&layout, &config.level) {
         Ok(doors) => {
             tracing::info!(doors = doors.len(), "level doors");
             doors
@@ -548,7 +537,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             nw_content::level_doors::LevelDoors::default()
         }
     };
-    content.war_forts = match nw_content::war_forts::WarForts::load(&config.content_dir, &build) {
+    content.war_forts = match nw_content::war_forts::WarForts::load(&layout) {
         Ok(forts) => {
             tracing::info!(forts = forts.len(), "war forts");
             forts
@@ -559,8 +548,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
         }
     };
     content.outpost_structures = match nw_content::outpost_structures::OutpostStructures::load(
-        &config.content_dir,
-        &build,
+        &layout,
     ) {
         Ok(structures) => {
             tracing::info!(slices = structures.len(), "outpost structures");
@@ -571,44 +559,42 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
             nw_content::outpost_structures::OutpostStructures::default()
         }
     };
-    content.invasion_forts =
-        match nw_content::invasion_forts::InvasionForts::load(&config.content_dir, &build) {
-            Ok(forts) => {
-                tracing::info!(forts = forts.len(), "invasion forts");
-                forts
-            }
-            Err(error) => {
-                tracing::warn!(%error, "no invasion forts table: no invasion runs on this sim");
-                nw_content::invasion_forts::InvasionForts::default()
-            }
-        };
-    content.spell_slices =
-        match nw_content::spell_slices::SpellSlices::load(&config.content_dir, &build) {
-            Ok(slices) => {
-                tracing::info!(spells = slices.len(), "spell slices");
-                slices
-            }
-            Err(error) => {
-                tracing::warn!(%error, "no spell slices: a cast spell shows nothing");
-                nw_content::spell_slices::SpellSlices::default()
-            }
-        };
-    content.effect_areas =
-        match nw_world::effect_areas::EffectAreas::load(&config.content_dir, &build) {
-            Ok(mut areas) => {
-                areas.levels.retain(|level, _| *level == config.level);
-                tracing::info!(areas = areas.len(), "status effect areas of the level and spells");
-                areas
-            }
-            Err(error) => {
-                tracing::warn!(%error, "no status effect areas: no level area or spell gas afflicts");
-                nw_world::effect_areas::EffectAreas::default()
-            }
-        };
-    let instances_path =
-        nw_content::ability_instances::ability_instances_path(&config.content_dir, &build);
+    content.invasion_forts = match nw_content::invasion_forts::InvasionForts::load(&layout) {
+        Ok(forts) => {
+            tracing::info!(forts = forts.len(), "invasion forts");
+            forts
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no invasion forts table: no invasion runs on this sim");
+            nw_content::invasion_forts::InvasionForts::default()
+        }
+    };
+    content.spell_slices = match nw_content::spell_slices::SpellSlices::load(&layout) {
+        Ok(slices) => {
+            tracing::info!(spells = slices.len(), "spell slices");
+            slices
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no spell slices: a cast spell shows nothing");
+            nw_content::spell_slices::SpellSlices::default()
+        }
+    };
+    content.effect_areas = match nw_world::effect_areas::EffectAreas::load(&layout) {
+        Ok(mut areas) => {
+            areas.levels.retain(|level, _| *level == config.level);
+            tracing::info!(
+                areas = areas.len(),
+                "status effect areas of the level and spells"
+            );
+            areas
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no status effect areas: no level area or spell gas afflicts");
+            nw_world::effect_areas::EffectAreas::default()
+        }
+    };
     content.ability_instances =
-        match nw_content::ability_instances::AbilityInstanceTable::load(&instances_path) {
+        match nw_content::ability_instances::AbilityInstanceTable::load(&layout) {
             Ok(table) => {
                 tracing::info!(slices = table.len(), "ability instance types");
                 table
@@ -618,39 +604,36 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
                 nw_content::ability_instances::AbilityInstanceTable::default()
             }
         };
-    content.shot_entities =
-        match nw_content::shot_entities::ShotEntities::load(&config.content_dir, &build) {
-            Ok(shots) => {
-                tracing::info!(damage_rows = shots.len(), "shot entities");
-                shots
-            }
-            Err(error) => {
-                tracing::warn!(%error, "no shot entities: no player sees a shot fly");
-                nw_content::shot_entities::ShotEntities::default()
-            }
-        };
-    content.dungeon_gates =
-        match nw_content::dungeon_gates::DungeonGates::load(&config.content_dir, &build) {
-            Ok(gates) => {
-                tracing::info!(gates = gates.gate_count(), "dungeon gates");
-                gates
-            }
-            Err(error) => {
-                tracing::warn!(%error, "no dungeon gates: an instance shows no gate or door");
-                nw_content::dungeon_gates::DungeonGates::default()
-            }
-        };
-    content.dungeon_gate_rules =
-        match nw_content::dungeon_gates::GateRules::load(&config.content_dir, &build) {
-            Ok(rules) => {
-                tracing::info!(levels = rules.levels.len(), "dungeon gate rules");
-                rules
-            }
-            Err(error) => {
-                tracing::warn!(%error, "no dungeon gate rules: every gate is open from the start");
-                nw_content::dungeon_gates::GateRules::default()
-            }
-        };
+    content.shot_entities = match nw_content::shot_entities::ShotEntities::load(&layout) {
+        Ok(shots) => {
+            tracing::info!(damage_rows = shots.len(), "shot entities");
+            shots
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no shot entities: no player sees a shot fly");
+            nw_content::shot_entities::ShotEntities::default()
+        }
+    };
+    content.dungeon_gates = match nw_content::dungeon_gates::DungeonGates::load(&layout) {
+        Ok(gates) => {
+            tracing::info!(gates = gates.gate_count(), "dungeon gates");
+            gates
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no dungeon gates: an instance shows no gate or door");
+            nw_content::dungeon_gates::DungeonGates::default()
+        }
+    };
+    content.dungeon_gate_rules = match nw_content::dungeon_gates::GateRules::load(&layout) {
+        Ok(rules) => {
+            tracing::info!(levels = rules.levels.len(), "dungeon gate rules");
+            rules
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no dungeon gate rules: every gate is open from the start");
+            nw_content::dungeon_gates::GateRules::default()
+        }
+    };
     tracing::info!(
         tradable_items = content.trading.len(),
         trading_tax = content.trading_post.trading_tax,
@@ -688,7 +671,7 @@ pub fn load_level(config: &SimConfig) -> Result<LoadedLevel, RunError> {
         Some(quest) => tracing::info!(tasks = quest.len(), "tutorial quest"),
         None => tracing::warn!("no tutorial quest: the tutorial ends at its exit"),
     }
-    let design = match DesignData::load(&design_data_path(&config.content_dir, &build)) {
+    let design = match DesignData::load(&layout) {
         Ok(mut data) => data.levels.remove(&config.level).unwrap_or_default(),
         Err(error) => {
             tracing::warn!(%error, "no design data: no scripts or events");

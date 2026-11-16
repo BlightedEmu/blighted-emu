@@ -48,8 +48,8 @@ pub struct ReporterConfig {
     /// The `edge-http` config of the world: its remote config sets give the season end
     /// (`javelin.leaderboard-season-end-datetime`), as the client gets it.
     pub edge_config: PathBuf,
-    /// Folder of the leaderboard table (`leaderboards-<build>.json` of
-    /// `content-tool leaderboards`).
+    /// The content folder: its build folder holds the leaderboard table
+    /// (`services/leaderboards.json` of `content-tool leaderboards`).
     pub content_dir: PathBuf,
     /// The rotations: the same values as `[leaderboards]` of `config/sim.toml`.
     pub leaderboards: RotationSettings,

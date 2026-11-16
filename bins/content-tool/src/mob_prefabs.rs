@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `mob-prefabs`: builds the mob prefab table (`mob-prefabs-<build>.json`, read by
+//! `mob-prefabs`: builds the mob prefab table (`mobs/mob-prefabs.json`, read by
 //! `nw_content::mob_prefabs`) from the retail capture ledgers (mob-cards note, sections 1 and 2).
 //!
 //! A retail mob comes into view as one bundle group: its spawn card (component 0, with the asset
@@ -1071,10 +1071,7 @@ pub fn write_entries(path: &Path, entries: &[PrefabEntry]) -> Result<(), MobPref
         path: path.to_path_buf(),
         source,
     };
-    if let Some(folder) = path.parent() {
-        std::fs::create_dir_all(folder).map_err(io)?;
-    }
-    std::fs::write(path, serde_json::to_vec_pretty(entries)?).map_err(io)
+    nw_content::layout::write_atomic(path, &serde_json::to_vec_pretty(entries)?).map_err(io)
 }
 
 /// Runs `worker` on every source, at most `jobs` at a time, and returns the results in the

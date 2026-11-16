@@ -23,7 +23,8 @@ thiserror.workspace = true
 tempfile.workspace = true
 
 [features]
-# `leaderboards::test_rows`: table rows for other crates' tests.
+# `leaderboards::test_rows`: table rows for other crates' tests; `layout::repo_layout`: the
+# repository's live content layout for tests that read it.
 test-util = []
 
 [lints]

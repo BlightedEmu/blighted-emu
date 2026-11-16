@@ -5,12 +5,13 @@
 //! tract maps (`sharedassets/coatlicue/<level>/regions/r_+XX_+YY/region.tractmap.tif`). A level
 //! whose list has no [`ROAD_TRACT_NAME`] tract gets a road file without regions.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use nw_content::layout::{ContentLayout, ROADS};
 use nw_formats::azcs::{AzcsError, decode_azcs, is_azcs};
 use nw_formats::heightmap::{HeightmapError, parse_tractmap};
 use nw_formats::pak::PakError;
-use nw_world::roads::{ROAD_TRACT_NAME, RoadMap, RoadRegion, road_file_path};
+use nw_world::roads::{ROAD_TRACT_NAME, RoadMap, RoadRegion};
 use serde::Deserialize;
 
 use crate::collision::PakIndex;
@@ -196,7 +197,7 @@ pub fn road_map(
     Ok(map)
 }
 
-/// Builds the road file of `level` from the paks of `index` into `out_dir` and checks it by
+/// Builds the road file of `level` from the paks of `index` into `layout` and checks it by
 /// reading it back.
 ///
 /// # Errors
@@ -205,8 +206,7 @@ pub fn road_map(
 pub fn build_level_roads(
     index: &PakIndex,
     level: &str,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<RoadsReport, RoadsError> {
     let tracts = tracts_path(level);
     let mut read = index.read_each(std::slice::from_ref(&tracts), |path, bytes| {
@@ -223,9 +223,9 @@ pub fn build_level_roads(
     }
     let count = tractmaps.len();
     let map = road_map(level, &tracts, &tracts_json, tractmaps)?;
-    let path = road_file_path(out_dir, client_build, level);
-    map.save(&path, client_build)?;
-    if RoadMap::load(&path, client_build)? != map {
+    let path = layout.level_file(ROADS, level);
+    map.save(&path, layout.client_build())?;
+    if RoadMap::load(layout, level)? != map {
         return Err(RoadsError::Reload(path));
     }
     Ok(RoadsReport {

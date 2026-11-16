@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The mob prefab table (`mob-prefabs-<build>.json`, made by `content-tool mob-prefabs` from the
+//! The mob prefab table (`mobs/mob-prefabs.json`, made by `content-tool mob-prefabs` from the
 //! retail captures; mob-cards note, sections 1 and 2).
 //!
 //! A mob shows on the client only when its spawn card names the asset of its creature slice; the
@@ -10,20 +10,14 @@
 //! one seen most often is the vitals id's default.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
-/// The file name prefix of the table; the client build and `.json` follow.
-const FILE_PREFIX: &str = "mob-prefabs-";
-const FILE_SUFFIX: &str = ".json";
+use crate::layout::{ContentLayout, MOB_PREFABS};
+
 /// Bytes of a slice asset GUID.
 pub const ASSET_ID_LEN: usize = 16;
-
-/// The path of the table of `client_build` in `dir`.
-pub fn mob_prefabs_path(dir: &Path, client_build: &str) -> PathBuf {
-    dir.join(format!("{FILE_PREFIX}{client_build}{FILE_SUFFIX}"))
-}
 
 /// One state of a prefab: its component, class and body bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,13 +107,13 @@ pub struct MobPrefabs {
 }
 
 impl MobPrefabs {
-    /// Loads the table of `client_build` from `dir`.
+    /// The table of `layout`.
     ///
     /// # Errors
     ///
     /// Returns [`MobPrefabsError`] when the file is missing or bad.
-    pub fn load(dir: &Path, client_build: &str) -> Result<Self, MobPrefabsError> {
-        let path = mob_prefabs_path(dir, client_build);
+    pub fn load(layout: &ContentLayout) -> Result<Self, MobPrefabsError> {
+        let path = layout.file(MOB_PREFABS);
         let text = std::fs::read_to_string(&path)
             .map_err(|source| MobPrefabsError::Read { path, source })?;
         Self::parse(&text)

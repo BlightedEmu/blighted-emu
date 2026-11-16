@@ -15,8 +15,9 @@ http://127.0.0.1:9180. On this PC there is no login (local mode). On a server, `
 the login (Discord when `[access.discord]` is set), and `[access.relay]` serves the site through a
 relay on another machine.
 
-The pages read the files that `just bundle`, `just world`, `just map-tiles` and
-`content-tool collision` write into `local-data/content`. Live, Live 3D and GM need the game
+The pages read the files that `just content` (or `just bundle`, `just world`, `just design` and
+`just collision`) writes into the build folder `local-data/content/<build>/`, and the map tiles
+that `just map-tiles` writes into `local-data/content/map/`. Live, Live 3D and GM need the game
 servers running (`[live]` in the configuration).
 
 ## The pages

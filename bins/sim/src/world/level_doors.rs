@@ -267,13 +267,9 @@ mod tests {
 #[cfg(all(test, feature = "local-data"))]
 mod retail_tests {
     use std::collections::BTreeMap;
-    use std::path::Path;
-
-    use nw_content::client_build::load_client_build;
 
     use super::*;
 
-    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
     const OPEN_WORLD: &str = "newworld_vitaeeterna";
 
     /// The first 8 `GdeRef` bytes of the 21 door capitals of the retail captures (big-endian
@@ -330,11 +326,9 @@ mod retail_tests {
 
     #[test]
     fn every_retail_door_capital_spawns_with_its_retail_members() {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let build = load_client_build(&repo.join(CLIENT_BUILD_CONFIG)).expect("client build");
-        let dir = std::env::var("NW_CONTENT_DIR")
-            .map_or_else(|_| repo.join("local-data/content"), Into::into);
-        let doors = LevelDoors::load(&dir, &build, OPEN_WORLD).expect("level doors file");
+        let doors = LevelDoors::load(&nw_content::layout::repo_layout(), OPEN_WORLD)
+            .expect("level doors file");
+
         let mut stations = Stations::default();
         add_to(&mut stations, &doors);
         let by_prefix: BTreeMap<String, Vec<String>> = doors

@@ -51,6 +51,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use nw_content::layout::{COLLISION, ContentLayout};
 use nw_formats::asset_catalog::{
     ASSET_CATALOG_ENTRY, AssetCatalogError, DYNAMIC_SLICE_EXTENSION, GUID_LEN, paths_of,
     slice_assets_in,
@@ -66,14 +67,13 @@ use nw_oodle::KrakenDecompressor;
 use nw_world::capitals::{capital_id, parse_capitals};
 use nw_world::collision::{
     Affine, Body, BodyEntity, DeferredSlice, Geometry, IDENTITY_AFFINE, LevelCollision, NavMark,
-    NavMarkKind, QuestVolume, SolidFor, collision_file_path, compose, hull_planes, place_of,
+    NavMarkKind, QuestVolume, SolidFor, compose, hull_planes, place_of,
 };
 use nw_world::collision_index::CollisionIndex;
 use nw_world::level_script::DETECTION_OFFSET_NAME;
 use nw_world::records::WorldFile;
 use nw_world::slice_data::spawned_gde_id;
-use nw_world::water::{WaterMap, water_file_path};
-use nw_world::world_file::world_file_path;
+use nw_world::water::WaterMap;
 
 use crate::distribution::{
     DISTRIBUTION_FILE, DistributionError, parse_distribution, region_origin,
@@ -1515,8 +1515,7 @@ fn spawned_entity(place: &Affine, slice: &AssetKey) -> u64 {
 pub fn build_level_collision(
     index: &PakIndex,
     level: &str,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<CollisionReport, CollisionError> {
     let catalog = index.read(ASSET_CATALOG_ENTRY)?;
     let mut placements = level_placements(index, level)?;
@@ -1524,11 +1523,11 @@ pub fn build_level_collision(
         level: level.to_owned(),
         ..CollisionReport::default()
     };
-    let rows = distribution_placements(index, level, &catalog, client_build, out_dir, &mut report)?;
+    let rows = distribution_placements(index, level, &catalog, layout, &mut report)?;
     placements.total += rows.len();
     placements.pending.extend(rows);
     let collision = collide(index, &catalog, level, placements, Vec::new(), &mut report)?;
-    save_collision(&collision, client_build, out_dir, report)
+    save_collision(&collision, layout, report)
 }
 
 /// Builds, writes and reloads the collision file of `level` whose solids are those of the
@@ -1544,8 +1543,7 @@ pub fn build_slices_collision(
     index: &PakIndex,
     level: &str,
     slices: &[AssetKey],
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
 ) -> Result<CollisionReport, CollisionError> {
     let catalog = index.read(ASSET_CATALOG_ENTRY)?;
     let pending: Vec<Pending> = slices
@@ -1571,7 +1569,7 @@ pub fn build_slices_collision(
         ..CollisionReport::default()
     };
     let collision = collide(index, &catalog, level, placements, origins, &mut report)?;
-    save_collision(&collision, client_build, out_dir, report)
+    save_collision(&collision, layout, report)
 }
 
 /// The solids of `placements` and of the slices they spawn, with the deferred slices
@@ -1772,13 +1770,12 @@ fn collide(
 /// file holds.
 fn save_collision(
     collision: &LevelCollision,
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
     mut report: CollisionReport,
 ) -> Result<CollisionReport, CollisionError> {
-    let path = collision_file_path(out_dir, client_build, &collision.level);
-    collision.save(&path, client_build)?;
-    let reloaded = LevelCollision::load(&path, client_build)?;
+    let path = layout.level_file(COLLISION, &collision.level);
+    collision.save(&path, layout.client_build())?;
+    let reloaded = LevelCollision::load(layout, &collision.level)?;
     report.file_bytes = std::fs::metadata(&path)
         .map_err(|source| PakError::Io {
             path: path.clone(),
@@ -2008,7 +2005,7 @@ fn level_placements(index: &PakIndex, level: &str) -> Result<Placements, Collisi
 
 /// The placements of the trees and stones of `level`'s regions (their `region.distribution`
 /// files): each row's slice (by its path among the catalog's slices) and variant, on the terrain
-/// of the level's world file or on its water (the world and water files in `out_dir`, which the
+/// of the level's world file or on its water (the world and water files of `layout`, which the
 /// `world` and `water` builds write first; a level without a water file has only its terrain).
 ///
 /// # Errors
@@ -2019,8 +2016,7 @@ fn distribution_placements(
     index: &PakIndex,
     level: &str,
     catalog: &[u8],
-    client_build: &str,
-    out_dir: &Path,
+    layout: &ContentLayout,
     report: &mut CollisionReport,
 ) -> Result<Vec<Pending>, CollisionError> {
     let folder = format!("{LEVELS_PREFIX}{level}{PATH_SEPARATOR}{REGIONS_DIR}");
@@ -2041,8 +2037,8 @@ fn distribution_placements(
     if files_with_rows.is_empty() {
         return Ok(Vec::new());
     }
-    let world = WorldFile::load(&world_file_path(out_dir, client_build, level), client_build)?;
-    let water = WaterMap::load(&water_file_path(out_dir, client_build, level), client_build).ok();
+    let world = WorldFile::load(layout, level)?;
+    let water = WaterMap::load(layout, level).ok();
     let slices = slice_assets_in(catalog, "")?;
     let region_of = |path: &str| {
         path.strip_prefix(&folder)

@@ -94,8 +94,8 @@ From the retail captures under `local-data/captures` (folders `catalog` and `ent
   `OnRequestSuccess` (0.24 s), both with the request id and a transaction number; 1285 lists the
   bought entitlement (`Ent_Mount_MTX_7_bear_Ronin`, its instance UUID, the time) and the wallet.
   Layout: `crates/nw-messages/src/store.rs`, tested on the retail bytes.
-- The store table (`content-tool store` -> `local-data/content/store-<build>.json`,
-  `[shop] store_table`): every enabled `javelindata_entitlements` row with `RewardType` `Mount`
+- The store table (`content-tool store` -> `local-data/content/<build>/services/store.json`,
+  `[shop] content_dir`): every enabled `javelindata_entitlements` row with `RewardType` `Mount`
   and `SourceType` `Store` (52), and the entitlements they require
   (`Ent_Xpack_RiseOfTheAngryEarth_Owner`), which every account holds (Inferred).
 - An offer's id and its entitlement's id are the entitlement's `UniqueTagID` (Inferred: the
