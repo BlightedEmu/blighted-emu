@@ -2300,6 +2300,7 @@ impl Loop {
     /// Tells every client that the world closes (1630), sends what waits, saves every player
     /// once more, and waits at most [`SHUTDOWN_SAVE_WAIT`] for every save.
     async fn finish(&mut self) {
+        self.world.camps_left_server();
         let departures = self.world.departures();
         // Retail took its players out so at a maintenance (`MSQ5-lv25`).
         let closing = [ServerMessage::PlayerManagerRejected(

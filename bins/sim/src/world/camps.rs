@@ -39,10 +39,11 @@
 //! at the placement and built the camp 3.2 to 4.2 s later with no interaction: that older form
 //! is not run here.
 //!
-//! The camp is an entity of its owner's sim while the owner is in it (Inferred: no capture shows
-//! a camp after its owner left). A save keeps its place and tier, not its rotation or blueprint:
-//! a camp that comes back with its owner stands unturned, of the owner's camp skin or the default
-//! camp of its tier (Inferred).
+//! The camp is an entity of its owner's sim while the owner is in it. It goes when its owner leaves
+//! the server (a logout, a kick, a lost connection, the server's stop), and it moves with its
+//! owner into another sim. Observed: retail `Playthrough_Part_01` placed a camp at 3,290.8 s, and
+//! the camping states (1292) of `Playthrough_Part_02` and `_03`, the same player's later
+//! sessions, name no camp; players say the same of retail.
 
 use bevy_ecs::entity::Entity;
 use nw_bus::ConnectionRef;
@@ -434,6 +435,22 @@ impl SimWorld {
         });
         if let Some(camp) = camp {
             self.stations.remove_camp(camp.number);
+        }
+    }
+
+    /// The camp of player `entity` goes as it leaves the server ([`super::camps`]): a save after
+    /// this keeps no camp.
+    pub(super) fn camp_left_server(&mut self, entity: Entity) {
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            player.travel.forget_camp();
+        }
+    }
+
+    /// The camps of every player go as the server stops ([`Self::camp_left_server`]).
+    pub fn camps_left_server(&mut self) {
+        let players: Vec<Entity> = self.by_connection.values().copied().collect();
+        for entity in players {
+            self.camp_left_server(entity);
         }
     }
 

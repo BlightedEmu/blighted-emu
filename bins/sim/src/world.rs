@@ -2246,6 +2246,7 @@ impl SimWorld {
         self.arena_left_sim(entity);
         // An expedition keeps the player's place offline until it comes again.
         self.expedition_went_offline(entity);
+        self.camp_left_server(entity);
         let departure = self.departure(entity);
         self.remove_player(connection, entity);
         departure

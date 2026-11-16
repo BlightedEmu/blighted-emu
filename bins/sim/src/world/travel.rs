@@ -326,6 +326,11 @@ impl TravelState {
         carried
     }
 
+    /// Its camp goes: a save after this keeps none ([`super::camps`]).
+    pub(super) fn forget_camp(&mut self) {
+        self.saved.placed_camp = None;
+    }
+
     /// The builder state changes by `change`: its set slots go out with the next travel states.
     pub(super) fn builder_changed(&mut self, change: BuilderState) {
         let due = self.due.builder.get_or_insert_default();
@@ -4920,15 +4925,43 @@ mod tests {
         }
 
         #[test]
-        fn a_saved_camp_stands_again_when_its_owner_comes_back() {
+        fn a_camp_goes_when_its_owner_leaves_the_server() {
+            let (mut world, entity) = camp_world(true, 0);
+            place(&mut world, NOW);
+            build_whole_camp(&mut world, entity);
+            let camp = camp_of(&world, entity).expect("camp");
+            let departure = world.leave(&connection(CAMPER)).expect("departure");
+            assert!(!shown(&world, &camp), "the camp leaves with its owner");
+            let travel = departure.progression.expect("saved").travel;
+            assert_eq!(travel.placed_camp, None, "no camp is saved");
+        }
+
+        #[test]
+        fn a_camp_goes_when_the_server_stops() {
+            let (mut world, entity) = camp_world(true, 0);
+            place(&mut world, NOW);
+            build_whole_camp(&mut world, entity);
+            world.camps_left_server();
+            let saved = world.departures()[0].progression.clone().expect("saved");
+            assert_eq!(saved.travel.placed_camp, None, "no camp is saved");
+        }
+
+        #[test]
+        fn a_camp_comes_with_its_owner_into_another_sim() {
             let (mut world, entity) = camp_world(true, 0);
             place(&mut world, NOW);
             let built_ms = build_whole_camp(&mut world, entity);
             let first = camp_of(&world, entity).expect("camp");
-            let departure = world.leave(&connection(CAMPER)).expect("departure");
+            // What a handoff carries (`TravelState::carried`).
+            let travel = world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .travel
+                .carried();
+            world.leave(&connection(CAMPER)).expect("departure");
             assert!(!shown(&world, &first), "the camp leaves with its owner");
-            let travel = departure.progression.expect("saved").travel;
-            let saved = travel.placed_camp.expect("a saved camp");
+            let saved = travel.placed_camp.expect("a carried camp");
             assert_eq!(
                 saved.rotation,
                 retail_rotation().map(f32::to_bits),
