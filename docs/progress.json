@@ -3784,9 +3784,10 @@
     "Tracker ranges of broken quest objects and the tutorial chest, proximity quest object locks and shared whole gathers (2026-11-13, tests only).",
     "Turret use ownership as retail in wars and Outpost Rush, the raid change of a new outpost owner, and turret shots that stop at war capture points (2026-11-13, tests only).",
     "The expedition objective panel, start and end times, score, death's door status, mutation context and the Desiccated explosion (2026-11-13, tests only).",
-    "Content folder layout built, reviewed and tested; the PC and game VM content folders moved into it (all files ok, equal merged files now hard links) and the game VM servers run on it (2026-11-16)."
+    "Content folder layout built, reviewed and tested; the PC and game VM content folders moved into it (all files ok, equal merged files now hard links) and the game VM servers run on it (2026-11-16).",
+    "The five failing install and capture tests pass again (2026-11-16): the open world gather count and the player attack test table follow the gather node and hit reaction work, the boar and club sailor replays count the fights the capture really holds, and the boar's run speed check leaves out the gore's lunge (retail lunges too)."
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-16",
-  "lastCommit": "4e84f37c"
+  "lastCommit": "be2838fe"
 }
