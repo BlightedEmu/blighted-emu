@@ -14,7 +14,7 @@ use nw_content::layout::{
     RETAIL_BUNDLE, RETAIL_WORLD, STEPS, Scope, Source, Step, StepFile, StepSpec, Topic, WORLD,
     link_atomic, pack_files,
 };
-use nw_content::manifest::{FileStamp, MadeFrom, Manifest, ManifestEntry, record};
+use nw_content::manifest::{FileStamp, MadeFrom, Manifest, ManifestEntry, record_at_file_times};
 
 use crate::error::ToolError;
 
@@ -232,7 +232,7 @@ fn file_state(
     let Some(entry) = entry_of(file) else {
         return FileState::Old;
     };
-    let Some(made) = entry.made_at_time() else {
+    let Some(made) = entry.checked_at_time() else {
         return FileState::Old;
     };
     if entry.stamp.is_some_and(|recorded| recorded != stamp) {
@@ -557,7 +557,7 @@ pub fn migrate(layout: &ContentLayout, plan: &MigratePlan) -> Result<bool, ToolE
         .cloned()
         .collect();
     files.extend(unrecorded);
-    record(layout, &files, MADE_BY_MIGRATED)?;
+    record_at_file_times(layout, &files, MADE_BY_MIGRATED)?;
     let retail_dir = layout.content_dir().join(LEGACY_RETAIL_FOLDER);
     match std::fs::remove_dir(&retail_dir) {
         Ok(()) => Ok(true),
@@ -682,6 +682,7 @@ mod tests {
         AI_DATA, COLLISION, CREATURE_ANIMATIONS, FTUE_ENTITIES, MOB_PREFABS, OPEN_WORLD_LEVEL,
         TUTORIAL_LEVEL, write_atomic,
     };
+    use nw_content::manifest::record;
 
     use super::*;
 
@@ -790,6 +791,10 @@ mod tests {
         let (ran, _) = build(&layout, &options).unwrap();
         assert!(ran.contains(&"store") && ran.contains(&"leaderboards"));
         assert!(!ran.contains(&"water"), "{ran:?}");
+        // The steps wrote the same bytes again: they are fresh now, not old for ever.
+        let (ran, lines) = build(&layout, &options).unwrap();
+        assert!(ran.is_empty(), "{ran:?}");
+        assert_eq!(outcome_of(&lines, "store"), &BuildOutcome::Fresh);
     }
 
     #[test]
@@ -881,8 +886,26 @@ mod tests {
             (dir.join(format!("ftue-entities-{BUILD}.json")), b"{}"),
             (dir.join("notes.txt"), b"mine"),
         ] {
-            std::fs::write(path, bytes).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+            set_file_time(&path, flat_folder_time());
         }
+    }
+
+    /// The file time of every file of [`flat_folder`], in seconds after 1970: one time, so no
+    /// file is older than another by the few milliseconds between their writes.
+    const FLAT_FOLDER_SECONDS: u64 = 1_700_000_000;
+
+    fn flat_folder_time() -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(FLAT_FOLDER_SECONDS)
+    }
+
+    fn set_file_time(path: &Path, time: SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
     }
 
     #[test]
@@ -937,6 +960,37 @@ mod tests {
                 .unwrap_or_else(|| panic!("no row {key}"));
             assert_eq!(row.state, FileState::Ok, "{key}");
         }
+    }
+
+    #[test]
+    fn a_file_older_than_its_input_stays_old_after_migrate() {
+        /// How long before its input the old collision file was made.
+        const EARLIER: std::time::Duration = std::time::Duration::from_secs(3600);
+        let dir = tempfile::tempdir().unwrap();
+        flat_folder(dir.path());
+        let collision = dir
+            .path()
+            .join(format!("collision-{BUILD}-{OPEN_WORLD_LEVEL}.bin"));
+        std::fs::write(&collision, b"old solids").unwrap();
+        set_file_time(&collision, flat_folder_time() - EARLIER);
+        let layout = ContentLayout::new(dir.path(), BUILD);
+        let plan = plan_migration(&layout).unwrap();
+        migrate(&layout, &plan).unwrap();
+        let rows = content_status(&layout, &options(dir.path())).unwrap();
+        let state_of = |key: &str| {
+            rows.iter()
+                .find(|row| row.key == key)
+                .unwrap_or_else(|| panic!("no row {key}"))
+                .state
+        };
+        assert_eq!(
+            state_of(&format!("collision/{OPEN_WORLD_LEVEL}")),
+            FileState::Old
+        );
+        assert_eq!(
+            state_of(&format!("collision/{TUTORIAL_LEVEL}")),
+            FileState::Ok
+        );
     }
 
     #[test]

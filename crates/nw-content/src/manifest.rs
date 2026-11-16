@@ -43,8 +43,14 @@ pub struct ManifestEntry {
     pub source: Source,
     /// The commit of the program that wrote it, `migrated`, or `unknown`.
     pub made_by: String,
-    /// When it was written (UTC, RFC 3339).
+    /// When its bytes were written (UTC, RFC 3339); the files made from it compare with this.
     pub made_at: String,
+    /// When its step last made it from its inputs and wrote the same bytes again (UTC, RFC
+    /// 3339): `made_at` keeps the time its bytes changed, and the file's own state compares its
+    /// inputs with this time. `None` when the last record changed its bytes (then `made_at` is
+    /// that time), and in an entry from before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<String>,
     /// The keys of the content files it was made from.
     pub inputs: Vec<String>,
     /// Its size and file time when it was recorded; `None` in an entry from before this field.
@@ -87,7 +93,9 @@ impl FileStamp {
 /// One file a content file was made from that is no content file, with its stamp.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MadeFrom {
-    /// The path as the writer named it (`content/spawns/lv/x.toml`).
+    /// The path from the folder the writer ran in (`content/spawns/lv/x.toml`) with no `.` or
+    /// `..` parts, or the full path of a file outside that folder; one file named in two ways
+    /// (`content/x`, `./content/x`, the full path) has one path.
     pub path: String,
     /// Its size and file time.
     pub stamp: FileStamp,
@@ -96,11 +104,12 @@ pub struct MadeFrom {
 impl MadeFrom {
     /// The files `paths` as they are now, sorted by path; a file that is gone is left out.
     pub fn list(paths: &[PathBuf]) -> Vec<Self> {
+        let here = std::env::current_dir().ok();
         let mut list: Vec<Self> = paths
             .iter()
             .filter_map(|path| {
                 Some(Self {
-                    path: path.to_string_lossy().into_owned(),
+                    path: one_name(path, here.as_deref()),
                     stamp: FileStamp::of(path)?,
                 })
             })
@@ -108,6 +117,34 @@ impl MadeFrom {
         list.sort_by(|left, right| left.path.cmp(&right.path));
         list
     }
+}
+
+/// The one name of `path` ([`MadeFrom::path`]) from the folder `here`: the full path without
+/// `.` and `..` parts, then the part below `here` when it is below it. With no `here`, the
+/// path without those parts.
+fn one_name(path: &Path, here: Option<&Path>) -> String {
+    let full = match here {
+        Some(here) if path.is_relative() => here.join(path),
+        _ => path.to_path_buf(),
+    };
+    let mut plain = PathBuf::new();
+    for part in full.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if plain.file_name().is_some() {
+                    plain.pop();
+                } else if !plain.has_root() {
+                    plain.push(std::path::Component::ParentDir);
+                }
+            }
+            other => plain.push(other),
+        }
+    }
+    let shown = here
+        .and_then(|here| plain.strip_prefix(here).ok())
+        .unwrap_or(&plain);
+    shown.to_string_lossy().into_owned()
 }
 
 impl Manifest {
@@ -163,7 +200,8 @@ impl Manifest {
     /// `inputs` and the other files `made_from` it was made from, and its stamp. Its time is
     /// `made_at`, unless the entry before has the file as it is now (same stamp; for an entry
     /// without a stamp, a file time not after its time): then the file did not change and keeps
-    /// its time and maker, so the files made from it stay fresh.
+    /// its time and maker, so the files made from it stay fresh, and `made_at` becomes its
+    /// `checked_at`, so the file itself is not older than the inputs it was made from again.
     pub fn set(
         &mut self,
         file: &FileRef,
@@ -188,9 +226,15 @@ impl Manifest {
                         }),
                 }
         });
-        let (made_by, made_at) = unchanged.map_or_else(
-            || (made_by.to_owned(), made_at.to_owned()),
-            |before| (before.made_by.clone(), before.made_at.clone()),
+        let (made_by, checked_at, made_at) = unchanged.map_or_else(
+            || (made_by.to_owned(), None, made_at.to_owned()),
+            |before| {
+                (
+                    before.made_by.clone(),
+                    Some(made_at.to_owned()),
+                    before.made_at.clone(),
+                )
+            },
         );
         self.files.insert(
             key,
@@ -198,6 +242,7 @@ impl Manifest {
                 source: file.file.source,
                 made_by,
                 made_at,
+                checked_at,
                 inputs,
                 stamp,
                 made_from,
@@ -207,16 +252,36 @@ impl Manifest {
 }
 
 impl ManifestEntry {
-    /// When the file was recorded; `None` when `made_at` is no time.
+    /// When its bytes were written; `None` when `made_at` is no time.
     pub fn made_at_time(&self) -> Option<SystemTime> {
-        let nanoseconds = self
-            .made_at
-            .parse::<jiff::Timestamp>()
-            .ok()?
-            .as_nanosecond();
-        let nanoseconds = u64::try_from(nanoseconds).ok()?;
-        SystemTime::UNIX_EPOCH.checked_add(Duration::from_nanos(nanoseconds))
+        time_of(&self.made_at)
     }
+
+    /// When its step last made it: `checked_at`, or else `made_at`; `None` when that is no time.
+    pub fn checked_at_time(&self) -> Option<SystemTime> {
+        self.checked_at
+            .as_deref()
+            .map_or_else(|| self.made_at_time(), time_of)
+    }
+}
+
+/// The time of the RFC 3339 text `text`; `None` when it is no time or before 1970.
+fn time_of(text: &str) -> Option<SystemTime> {
+    let nanoseconds = text.parse::<jiff::Timestamp>().ok()?.as_nanosecond();
+    let nanoseconds = u64::try_from(nanoseconds).ok()?;
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_nanos(nanoseconds))
+}
+
+/// `time` as RFC 3339 text in UTC, to the nanosecond (the form of [`utc_now`]); `None` before
+/// 1970 or past the range of a timestamp.
+fn utc_text(time: SystemTime) -> Option<String> {
+    let since = time.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    let nanoseconds = i128::try_from(since.as_nanos()).ok()?;
+    Some(
+        jiff::Timestamp::from_nanosecond(nanoseconds)
+            .ok()?
+            .to_string(),
+    )
 }
 
 /// The time now in UTC (RFC 3339, to the nanosecond). A file is recorded after it is written,
@@ -234,7 +299,31 @@ fn utc_now() -> String {
 ///
 /// Returns [`LayoutError`] when the manifest or the guide cannot be read or written.
 pub fn record(layout: &ContentLayout, files: &[FileRef], made_by: &str) -> Result<(), LayoutError> {
-    record_files(layout, files, made_by, None)
+    record_files(layout, files, made_by, None, RecordTime::Now)
+}
+
+/// [`record`] with each file's own file time as its time (now for a file without one): for files
+/// that were made before they were recorded (moved from the flat folder), so a file older than
+/// its inputs stays older than them.
+///
+/// # Errors
+///
+/// Returns [`LayoutError`] when the manifest or the guide cannot be read or written.
+pub fn record_at_file_times(
+    layout: &ContentLayout,
+    files: &[FileRef],
+    made_by: &str,
+) -> Result<(), LayoutError> {
+    record_files(layout, files, made_by, None, RecordTime::FileTime)
+}
+
+/// Which time a record gives its files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordTime {
+    /// One time, now, for all of them.
+    Now,
+    /// Each file's own file time.
+    FileTime,
 }
 
 /// [`record`] for files made from the other files `made_from` too (the design files,
@@ -249,7 +338,13 @@ pub fn record_made_from(
     made_by: &str,
     made_from: &[PathBuf],
 ) -> Result<(), LayoutError> {
-    record_files(layout, files, made_by, Some(MadeFrom::list(made_from)))
+    record_files(
+        layout,
+        files,
+        made_by,
+        Some(MadeFrom::list(made_from)),
+        RecordTime::Now,
+    )
 }
 
 fn record_files(
@@ -257,6 +352,7 @@ fn record_files(
     files: &[FileRef],
     made_by: &str,
     made_from: Option<Vec<MadeFrom>>,
+    time: RecordTime,
 ) -> Result<(), LayoutError> {
     let build_dir = layout.build_dir();
     let io = |path: &Path| {
@@ -275,13 +371,21 @@ fn record_files(
     let path = layout.manifest_path();
     let mut manifest =
         Manifest::read(&path)?.unwrap_or_else(|| Manifest::new(layout.client_build()));
-    let made_at = utc_now();
+    let now = utc_now();
     for file in files {
+        let path = layout.path(file);
+        let made_at = match time {
+            RecordTime::Now => None,
+            RecordTime::FileTime => std::fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(utc_text),
+        };
         manifest.set(
             file,
-            &layout.path(file),
+            &path,
             made_by,
-            &made_at,
+            made_at.as_deref().unwrap_or(&now),
             file.input_keys(layout)?,
             made_from.clone(),
         );
@@ -401,12 +505,51 @@ mod tests {
         let first = prefab_entry(&layout);
         assert!(first.stamp.is_some());
         record(&layout, std::slice::from_ref(&file), "later").unwrap();
-        assert_eq!(prefab_entry(&layout), first);
+        let again = prefab_entry(&layout);
+        assert_eq!(
+            (&again.made_by, &again.made_at, again.stamp),
+            (&first.made_by, &first.made_at, first.stamp)
+        );
+        let checked = again.checked_at_time().expect("checked time");
+        assert!(checked >= first.made_at_time().unwrap());
         crate::layout::write_atomic(&layout.path(&file), b"[1]").unwrap();
         record(&layout, std::slice::from_ref(&file), "later").unwrap();
         let changed = prefab_entry(&layout);
         assert_eq!(changed.made_by, "later");
         assert_ne!(changed.stamp, first.stamp);
+        assert_eq!(changed.checked_at, None, "a new record of new bytes");
+    }
+
+    #[test]
+    fn a_record_at_file_times_takes_each_file_time() {
+        /// A file time well before now.
+        const EARLIER: Duration = Duration::from_secs(3600);
+        let dir = tempfile::tempdir().unwrap();
+        let layout = ContentLayout::new(dir.path(), BUILD);
+        let file = FileRef::build(MOB_PREFABS);
+        let path = layout.path(&file);
+        crate::layout::write_atomic(&path, b"[]").unwrap();
+        let earlier = SystemTime::now() - EARLIER;
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(earlier)
+            .unwrap();
+        record_at_file_times(&layout, std::slice::from_ref(&file), MADE_BY).unwrap();
+        assert_eq!(prefab_entry(&layout).made_at_time(), Some(earlier));
+    }
+
+    #[test]
+    fn one_file_named_in_two_ways_has_one_name() {
+        let here = Path::new("/repo");
+        let name = |path: &str| one_name(Path::new(path), Some(here));
+        assert_eq!(name("content/x.toml"), "content/x.toml");
+        assert_eq!(name("./content/x.toml"), "content/x.toml");
+        assert_eq!(name("/repo/content/x.toml"), "content/x.toml");
+        assert_eq!(name("bins/../content/x.toml"), "content/x.toml");
+        assert_eq!(name("/other/x.toml"), "/other/x.toml");
+        assert_eq!(one_name(Path::new("../x.toml"), None), "../x.toml");
     }
 
     #[test]
@@ -424,6 +567,7 @@ mod tests {
                 source: Source::Pack,
                 made_by: "migrated".to_owned(),
                 made_at: FUTURE.to_owned(),
+                checked_at: None,
                 inputs: Vec::new(),
                 stamp: None,
                 made_from: None,
