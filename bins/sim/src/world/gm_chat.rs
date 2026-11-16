@@ -1125,7 +1125,7 @@ fn event_line(event: &RunningEvent) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::sync::Arc;
 
     use nw_content::progression::Progression;
@@ -1184,8 +1184,8 @@ mod tests {
         )
     }
 
-    /// The system lines queued for the player `number`.
-    fn answers(world: &mut SimWorld, number: u64) -> Vec<ChatMessage> {
+    /// The system chat lines queued for the player `number`; its other messages are left out.
+    pub(in crate::world) fn answers(world: &mut SimWorld, number: u64) -> Vec<ChatMessage> {
         world
             .take_messages()
             .into_iter()
@@ -1194,8 +1194,10 @@ mod tests {
             .flat_map(|bytes| {
                 let envelope = Envelope::decode(&bytes).expect("envelope");
                 let index = envelope.type_index().expect("type");
-                match SocialPush::decode_args(index, &envelope.body[HEADER_LEN..]) {
+                let args = envelope.body.get(HEADER_LEN..).unwrap_or_default();
+                match SocialPush::decode_args(index, args) {
                     Some(Ok(SocialPush::Chat(ChatPush::Batch(lines)))) => lines,
+                    None => Vec::new(),
                     other => panic!("not a chat batch: {other:?}"),
                 }
             })

@@ -192,6 +192,21 @@ enum CampRefusal {
     Slice,
 }
 
+impl CampRefusal {
+    /// The system chat line a game master gets for this refusal: the client shows none
+    /// ([`PLACEMENT_REFUSED`]), so a game master learns why a camp did not go up.
+    const fn gm_line(self) -> &'static str {
+        match self {
+            Self::Dead => "Camp refused: you are dead.",
+            Self::Rank => "Camp refused: no Camping rank (camp tier 0; tier 1 opens at level 10).",
+            Self::Territory => "Camp refused: camps are not allowed in this area.",
+            Self::Blueprint => "Camp refused: no camp blueprint for this tier or skin.",
+            Self::Skin => "Camp refused: this camp skin is off or its achievement is missing.",
+            Self::Slice => "Camp refused: the content has no slice for this camp.",
+        }
+    }
+}
+
 /// What a channel is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Purpose {
@@ -1976,6 +1991,15 @@ impl SimWorld {
         let unix_ms = self.unix_ms();
         let placed = self.camp_placement(entity, placement);
         tracing::info!(player = number, ?placed, "camp placement");
+        if let Err(refusal) = placed
+            && let Some(connection) = self
+                .world
+                .get::<Player>(entity)
+                .filter(|player| player.game_master)
+                .map(|player| player.connection.clone())
+        {
+            self.answer_gm_chat(&connection, vec![refusal.gm_line().to_owned()]);
+        }
         let had_camp = self.world.get::<Player>(entity).is_some_and(|player| {
             player.travel.camp.is_some() || player.travel.saved.placed_camp.is_some()
         });
@@ -4228,6 +4252,52 @@ mod tests {
             }
             assert_eq!(place(&mut world, NOW), [placed(PLACEMENT_PLACED)]);
             assert!(camp_of(&world, entity).is_some(), "the camp stands");
+        }
+
+        #[test]
+        fn a_game_master_is_told_why_a_camp_is_refused_and_a_player_is_not() {
+            for game_master in [true, false] {
+                let (mut world, entity) = camp_world(true, 0);
+                {
+                    let content = Arc::clone(&world.content);
+                    let mut player = world.world.get_mut::<Player>(entity).expect("player");
+                    player.game_master = game_master;
+                    let camping = content
+                        .progression
+                        .categorical(CAMPING_PROGRESSION)
+                        .expect("camping");
+                    player.masteries.set(camping, 0);
+                }
+                world.take_messages();
+                world.travel_call(
+                    &connection(CAMPER),
+                    TravelClientMsg::PlaceStructure {
+                        header: header(BUILDER_COMPONENT, CAMPER),
+                        placement: StructurePlacement {
+                            position: [RETAIL_AT.x, RETAIL_AT.y, RETAIL_AT.z],
+                            rotation: retail_rotation(),
+                            skin: PVP_CAMP_CRC,
+                            structure: [5; RAW_ID_LEN],
+                            owner: [6; RAW_ID_LEN],
+                            socket: u32::MAX,
+                            value: 50,
+                            flag: true,
+                        },
+                    },
+                    NOW,
+                );
+                let lines: Vec<String> = crate::world::gm_chat::tests::answers(&mut world, CAMPER)
+                    .into_iter()
+                    .map(|line| line.body)
+                    .collect();
+                let expected: Vec<String> = if game_master {
+                    vec![CampRefusal::Rank.gm_line().to_owned()]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(lines, expected, "game master {game_master}");
+                assert_eq!(camp_of(&world, entity), None, "nothing placed");
+            }
         }
 
         #[test]
