@@ -2117,7 +2117,11 @@
           "proof": "live",
           "checks": [
             {
-              "check": "Place a camp for its costs, the retail camp entity group, respawn at its SpawnPoint, Camp crafting station, BindCamp event, the camp stands again at login.",
+              "check": "Place a camp for its costs, the retail camp entity group, respawn at its SpawnPoint, Camp crafting station, BindCamp event, the camp moves with its owner into another sim.",
+              "proof": "tests"
+            },
+            {
+              "check": "A camp goes when its owner leaves the server (a logout, a kick, a lost connection, the server's stop), as on retail: retail `Playthrough_Part_01` placed a camp, and the same player's later sessions (`_02`, `_03`) name no camp (2026-11-15, tests only). Before, the camp stood again at the next login.",
               "proof": "tests"
             },
             {
@@ -2154,6 +2158,10 @@
             },
             {
               "check": "PvP destruction, guild and faction.",
+              "proof": "none"
+            },
+            {
+              "check": "The camp respawn distance: the client gives camp home points (kind 9) a `MaxRespawnDistance` from its own settings and shows an out-of-range camp in red on the respawn screen (client `FUN_1434fe630`); the value is Unknown, and the server checks no distance.",
               "proof": "none"
             }
           ]
@@ -3723,5 +3731,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-15",
-  "lastCommit": "5b875ae6"
+  "lastCommit": "f53decb4"
 }
