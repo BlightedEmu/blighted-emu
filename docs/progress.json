@@ -408,6 +408,14 @@
             {
               "check": "The first pack (version 1, 15 tables) is shared with the community, with its `SHA256SUMS` (2026-11-14).",
               "proof": "live"
+            },
+            {
+              "check": "Pack version 2 carries the newer war forts table with the siege weapon list (8 fort structure kinds); it is made from the current tables and installs all 15 tables into an empty folder (2026-11-15). A server with version 1 takes it with `just realm-data --replace <zip>`.",
+              "proof": "tests"
+            },
+            {
+              "check": "Pack version 2 is shared with the community.",
+              "proof": "none"
             }
           ]
         }
@@ -3431,6 +3439,7 @@
     }
   ],
   "nextSteps": [
+    "**Realm data pack version 2:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v2/` with the community, with a note that version 1 users add `--replace`.",
     "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
     "**Camps (2026-11-15): the rest of the live check.**\n\n- Respawn at the camp after a death.\n- Craft at the camp's station.\n- Place a camp with no wood: it stands unbuilt; gather the wood and build it.\n- A game master gets the reason line of a refused camp in chat.",
     "**One busy sim (2026-11-15): the bundle stops of the 110-bot run.**\n\n- The run: `nw-testclient hunt`, `gather` and `swarm` together on the real-client stack (30, 30 and 50 bots).\n- The ticks keep time now; the hunt and gather bots still report a stop in their bundles. Find the cause.",
