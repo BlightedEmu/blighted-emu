@@ -1853,7 +1853,7 @@ impl SimWorld {
                 .and_then(|point| {
                     respawn_point(point)
                         .or_else(|| self.content.travel.spawn_point(point))
-                        .or_else(|| self.own_spawn_point(entity, point))
+                        .or_else(|| self.own_spawn_point(entity, point, died_at))
                 })
                 .unwrap_or_else(|| nearest_respawn_point([died_at.x, died_at.y, died_at.z]));
             let at = Position {

@@ -44,6 +44,12 @@ impl Position {
         // slower (live 2026-11-01: 5 % of the main thread of a sim of 366 players).
         (east * east + north * north).sqrt()
     }
+
+    /// Straight-line distance.
+    pub fn distance(self, other: Self) -> f32 {
+        let (east, north, up) = (self.x - other.x, self.y - other.y, self.z - other.z);
+        (east * east + north * north + up * up).sqrt()
+    }
 }
 
 /// Ground height of a level.

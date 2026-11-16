@@ -158,6 +158,11 @@ const INTERACTION_REFUSED: u8 = 2;
 /// How long after a camp's placement its owner may not bind to it (Observed: retail `Hivecamp`
 /// 1292 with the camp at 1781367544.712, `campBindCooldownEndTime` 60 s after the placement).
 const CAMP_BIND_COOLDOWN_MS: u64 = 60_000;
+/// The farthest a player may die from its camp and respawn there, m (Inferred: the New World
+/// community wiki gives 500 m; the client takes the value of a camp point from its
+/// `PlayerDataManager`, client `FUN_1434fe630`, and its respawn screen shows a camp farther than
+/// it as out of range, `@ui_deathrecap_respawn_out_of_range`).
+const CAMP_RESPAWN_RANGE_M: f32 = 500.0;
 /// The cooldown of a camp home point (1 s in all 14 retail camp elements).
 const CAMP_COOLDOWN_NS: u64 = 1_000_000_000;
 /// The name of a house home point (all 1,042 retail ones).
@@ -2046,13 +2051,19 @@ impl SimWorld {
         self.send_travel(entity, &answers);
     }
 
-    /// Where player `entity` respawns at its own home point `point`: its camp's respawn point or
-    /// one of its houses.
-    pub(super) fn own_spawn_point(&self, entity: Entity, point: u64) -> Option<[f32; 3]> {
+    /// Where player `entity`, dead at `died_at`, respawns at its own home point `point`: its
+    /// camp's respawn point, when it died within [`CAMP_RESPAWN_RANGE_M`] of it, or one of its
+    /// houses.
+    pub(super) fn own_spawn_point(
+        &self,
+        entity: Entity,
+        point: u64,
+        died_at: Position,
+    ) -> Option<[f32; 3]> {
         let travel = &self.world.get::<Player>(entity)?.travel;
         if let Some(camp) = travel.camp.filter(|camp| camp.facet() == point) {
             let Position { x, y, z } = camp.spawn_point;
-            return Some([x, y, z]);
+            return (camp.spawn_point.distance(died_at) <= CAMP_RESPAWN_RANGE_M).then_some([x, y, z]);
         }
         travel
             .saved
@@ -4533,6 +4544,8 @@ mod tests {
             let (mut world, entity) = camp_world(true, 0);
             place(&mut world, NOW);
             let camp = camp_of(&world, entity).expect("camp");
+            // It dies at its camp ([`CAMP_RESPAWN_RANGE_M`]).
+            world.place_player(entity, RETAIL_AT, None, Placement::Drop, NOW);
             {
                 let mut vitals = world.world.get_mut::<Vitals>(entity).expect("vitals");
                 let max = vitals.health.max();
@@ -4551,6 +4564,37 @@ mod tests {
             let retail = RETAIL_SPAWN_POINT.map(f32::from_bits);
             assert!((at.x - retail[0]).abs() <= SPAWN_POINT_TOLERANCE_M);
             assert!((at.y - retail[1]).abs() <= SPAWN_POINT_TOLERANCE_M);
+        }
+
+        #[test]
+        fn a_death_farther_than_the_camp_range_does_not_respawn_at_the_camp() {
+            /// Just past [`CAMP_RESPAWN_RANGE_M`].
+            const FAR_M: f32 = CAMP_RESPAWN_RANGE_M + 1.0;
+            let (mut world, entity) = camp_world(true, 0);
+            place(&mut world, NOW);
+            let camp = camp_of(&world, entity).expect("camp");
+            let died_at = Position {
+                x: camp.spawn_point.x + FAR_M,
+                ..camp.spawn_point
+            };
+            world.place_player(entity, died_at, None, Placement::Drop, NOW);
+            {
+                let mut vitals = world.world.get_mut::<Vitals>(entity).expect("vitals");
+                let max = vitals.health.max();
+                vitals.health.take(max);
+                vitals.dead_since_ms = Some(NOW);
+            }
+            assert_eq!(world.own_spawn_point(entity, camp.facet(), died_at), None);
+            let near = Position {
+                x: camp.spawn_point.x + CAMP_RESPAWN_RANGE_M - 1.0,
+                ..camp.spawn_point
+            };
+            assert!(world.own_spawn_point(entity, camp.facet(), near).is_some(), "within range");
+            let later = NOW + world.combat.min_respawn_ms;
+            let at = world
+                .request_respawn(&connection(CAMPER), Some(camp.facet()), later)
+                .expect("respawn");
+            assert_ne!(at, camp.spawn_point, "the nearest respawn point instead");
         }
 
         #[test]
