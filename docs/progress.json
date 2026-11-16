@@ -2114,7 +2114,7 @@
         },
         {
           "name": "Player camps",
-          "proof": "tests",
+          "proof": "live",
           "checks": [
             {
               "check": "Place a camp for its costs, the retail camp entity group, respawn at its SpawnPoint, Camp crafting station, BindCamp event, the camp stands again at login.",
@@ -2126,7 +2126,7 @@
             },
             {
               "check": "A camp is placed where the client named no area since the player came to the sim (2026-11-15, tests only): a client that logs in inside an area names none until it crosses a border, and every camp there was refused. The client checks the place itself.",
-              "proof": "tests"
+              "proof": "live"
             },
             {
               "check": "A refused camp shows no reason in the game, as on retail: the client takes any 441 code but 0 as refused and only writes it to its log (client function `SyncPlacementRequestResults`); its own checks before the request show its camp messages.",
@@ -2138,15 +2138,15 @@
             },
             {
               "check": "Camp build as retail: the placed camp comes unbuilt (state 3, then 4), the owner's build interaction is accepted after its hold, one unit of each cost leaves the bag per 767 ms in the retail list forms, the builder state and interactor count follow the build, a cancel keeps what is in, and the built camp (state 5) fires BindCamp; the completion call (5361) goes once the camp's group is out.",
-              "proof": "tests"
+              "proof": "live"
             },
             {
               "check": "The camp tier (the `Camping` rank) rises with the character level as retail: tier 1 at level 10, then 15, 25, 40 and 55 (the `CampingT1` to `CampingT5` rows of `RewardMilestones`), sent with the level up; a character already past a tier gets it at its next login. Before, no character got a tier, so the client let no one place a camp (a player reported it, 2026-11-15).",
-              "proof": "tests"
+              "proof": "live"
             },
             {
-              "check": "Live check.",
-              "proof": "none"
+              "check": "Live 2026-11-15 on the game VM: a level 16 character placed a camp (tier 2, `CampT2`) right after a login, built it, and its `BindCamp` event fired. Not seen yet: the respawn at the camp, the camp crafting station, a camp placed without its materials.",
+              "proof": "live"
             },
             {
               "check": "One retail new character had camp tier 1 at level 1 (new character capture of 2026-09-18); two others had none until level 10. The cause is Unknown.",
@@ -3420,7 +3420,7 @@
   ],
   "nextSteps": [
     "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
-    "**Camp tiers (2026-11-15): live check (tests only).**\n\n- A character of level 10 or more logs in: the camp can be placed (tier 1 at 10, tier 2 at 15).\n- A character reaches level 10: the camp can be placed right after the level up.\n- Place and build the camp of the Monarch's Bluffs camp quest (Knight in the North): the quest goes on.\n- Place a camp with no wood: it stands unbuilt; gather the wood and build it.",
+    "**Camps (2026-11-15): the rest of the live check.**\n\n- Respawn at the camp after a death.\n- Craft at the camp's station.\n- Place a camp with no wood: it stands unbuilt; gather the wood and build it.\n- A game master gets the reason line of a refused camp in chat.",
     "**One busy sim (2026-11-15): the bundle stops of the 110-bot run.**\n\n- The run: `nw-testclient hunt`, `gather` and `swarm` together on the real-client stack (30, 30 and 50 bots).\n- The ticks keep time now; the hunt and gather bots still report a stop in their bundles. Find the cause.",
     "**Company and town ownership for tests (2026-11-14): live check.**\n\n- `!faction syndicate`, `!company <name>`, `!owner 12 <name>`, then the Monarch's Bluffs town project board and war board.",
     "**Town board and war board (2026-11-14): live check (tests only).**\n\n- Monarch's Bluffs town project board: the projects show, missions are listed, one can be taken.\n- Monarch's Bluffs war board: it can be used and opens the war window.",
