@@ -440,7 +440,7 @@
               "proof": "live"
             },
             {
-              "check": "A file is old when it, one of its inputs or its design files changed: a changed size or file time (a copy back from a backup too), or a design file added, changed or removed. Admin to-do edits and files written with the same bytes start no rebuild. A newer manifest with more fields still opens in an older program.",
+              "check": "A file is old when it, one of its inputs or its design files changed: a changed size or file time (a copy back from a backup too), or a design file added, changed or removed. Admin to-do edits and files written with the same bytes start no rebuild. A newer manifest with more fields still opens in an older program. A step that writes the same bytes again is fresh at the next build (its `checked_at` time), not old for ever.",
               "proof": "tests"
             },
             {
@@ -448,15 +448,23 @@
               "proof": "tests"
             },
             {
-              "check": "`content-tool content migrate` moves an old flat folder: renames only, a merged file equal to its retail file becomes a hard link, and a run after a half-done run finishes the job. On the PC and the game VM all 123 files moved and `content status` shows all of them ok; the PC folder went from 3.0 GB to 2.3 GB (2026-11-16).",
+              "check": "`content-tool content migrate` moves an old flat folder: renames only, a merged file equal to its retail file becomes a hard link, and a run after a half-done run finishes the job. On the PC and the game VM all 123 files moved and `content status` shows all of them ok; the PC folder went from 3.0 GB to 2.3 GB (2026-11-16). Each moved file keeps its own file time, so a file older than its inputs stays old after the move (tests).",
               "proof": "live"
             },
             {
-              "check": "On the game VM the servers, the admin site agent and the status reporter start with the new layout with no new warning or error, and the reporter's status and leaderboards reports are accepted by the website (2026-11-16).",
+              "check": "On the game VM the servers, the admin site agent and the status reporter start with the new layout with no new warning or error, and the reporter's status and leaderboards reports are accepted by the website (2026-11-16). A VM-only director config kept the removed `content_dir` key until 2026-11-16, so the director did not start and logins waited in the queue; the key is gone and the director runs.",
               "proof": "live"
             },
             {
               "check": "A player logs in and plays on the game VM after the change, and an admin site Apply with a design file merges into the new layout.",
+              "proof": "none"
+            },
+            {
+              "check": "The live stack fails at start, and its service shows failed, when one program stops during the start (a refused config key, a missing file).",
+              "proof": "tests"
+            },
+            {
+              "check": "The live stack notices a program that stops after the start.",
               "proof": "none"
             }
           ]
@@ -3563,6 +3571,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Content folder review: the VM director config still had the removed `content_dir` key, so the director stopped at start and logins waited in a queue; fixed on the PC and the VM. A rebuilt step with the same bytes is fresh at the next build, migrate keeps each file's own time, a design file named in two ways has one name, and the live stack fails when a program stops at start (2026-11-16).",
     "Realm data pack version 1 is shared with the community: 15 capture-made tables, scrubbed and scanned (the scan report holds random bytes and one game word only), checked on a fresh clone with the README steps (2026-11-14).",
     "Batch E built and tested: war gates, war raid numbers (migration 0049), cow launcher areas, Hedet fire droppers, the Isle of Night ballista, Myrkgard darkness events, expedition gatherable score and task triggers, shots that stop at level walls, collision entity ids; deployed to the PC and the game VM (2026-11-13, tests only).",
     "The far move of the `nw-testclient pair` check is 400 m, past the 104 m move budget of the sim, as in the gateway end-to-end test; at 50 m the sim accepted it and the check could not pass (2026-11-13, config tests only).",
@@ -3789,5 +3798,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-16",
-  "lastCommit": "be2838fe"
+  "lastCommit": "eb9ccc9c"
 }
