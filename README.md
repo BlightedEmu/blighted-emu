@@ -63,6 +63,7 @@ just infra-test
 | `just design` | Merges the design files of `content/` over the retail files into `local-data/content/` (run `just bundle` and `just world` first) |
 | `just check-design` | Checks the design files against the retail files; writes nothing |
 | `just collision` | Builds the collision files of the tutorial and the open world into `local-data/content/` |
+| `just realm-data <pack.zip>` | Installs the realm data pack and builds the tables made from it (see "Realm data pack") |
 | `just live <sims>` | Starts a local test world and the live panel (see "Live panel") |
 | `just capture-check` | Decodes every capture ledger under `local-data/captures/` and prints counts |
 | `just map-tiles` | Writes the open world map tiles into `local-data/content/map/` from your install |
@@ -81,7 +82,7 @@ just collision
 
 `just bundle` writes the retail bundle `local-data/content/retail/bundle-<build>.bin`, then reloads it and checks every table and row. The pinned client build is in `config/client-build.toml`.
 
-`just world` writes the retail world files `local-data/content/retail/world-<build>-<level>.bin` for each of the 41 levels (about 620 MB in all), reloads each file, and prints the record counts, the skipped metadata fields, and the spawn IDs that no datasheet row has.
+`just world` writes the retail world files `local-data/content/retail/world-<build>-<level>.bin` for each of the 41 levels (about 700 MB in all), reloads each file, and prints the record counts, the skipped metadata fields, and the spawn IDs that no datasheet row has. The gather points of a level come from its region metadata and from the trees, bushes and stones that its regions' plant files (`region.distribution`) place: each plant takes the gatherable that its variant names in the slice's variation table, or else the slice's own. The open world has about 2.5 million of these plant nodes.
 
 `just design` reads the retail files, merges the team's design files from `content/` over them (see [content/README.md](content/README.md)), and writes `local-data/content/bundle-<build>.bin`, `local-data/content/world-<build>-<level>.bin` and `local-data/content/design-<build>.json`. The servers and the admin tools read these files. It does not read the game install. With no design files, the merged files are equal to the retail files. When a design file has a problem, it prints each one and writes nothing.
 
@@ -292,7 +293,7 @@ A client moves by sending its input (type 1589). The `sim` checks the position. 
 
 A player who walks `handoff_margin_m` into a cell of another `sim` moves to that `sim` (handoff). The player keeps its entity number and does not notice. The gateway sends the player's input to the new `sim` from then on. When a `sim` stops, the director gives its cells to the others. Its players stay connected and continue on another `sim` at their last saved position. The gateway tells a `sim` to drop a player when that `sim` keeps sending for the connection for more than 2 s after the gateway routes it to another `sim`. Each `sim` saves every player every `save_interval_ms` and when the player leaves. Each save carries the time of the player's last accepted move, and the database keeps only the newest.
 
-When no `sim` heartbeat reaches the director for a whole silence window, the director most likely lost its own NATS link. It keeps its table, and the players continue. Thus a world whose every `sim` stops at one time waits until a `sim` comes back.
+When no `sim` heartbeat reaches the director for a whole silence window, the director most likely lost its own NATS link. It keeps its table, and the players continue. So a world whose every `sim` stops at the same time waits until a `sim` comes back.
 
 NATS carries the messages between the gateway, the director and the `sim` processes. NATS has no login in this setup, so keep it on an internal address.
 
@@ -391,6 +392,8 @@ Checks:
 - `content-tool combat-check` (local data, see "Capture check") checks that every spawn finds its rows, and compares our mob health with nwdb.info.
 - The fight stress test is `cargo test --release -p sim fight_stress -- --ignored --nocapture`. It runs 1,000 players in one `sim`, each fighting one mob, and the tick p99 must be under 33 ms.
 - `nw-testclient chat` logs in the first account (`account`) and waits until it knows its own entity. Then it says one line in area chat (`--line`, default `!help`) and stays for `hold_seconds`. It checks that the session registered, that the line went out, and that an answer came back after it. For a GM command of an account with the `game_master` rank, the answer is system chat lines. For any other line, the answer is the line itself as area chat, through `social`. It prints each system line.
+- `nw-testclient gather` runs `[gather] bots` bots with accounts of their own (`account_prefix`) and the sockets of `[swarm]`. Each bot wears the start tools of `tradeskills`, looks for nodes of those tradeskills within `search_m`, walks within `reach_m` of the nearest and gathers it. It checks that every bot found nodes near it, gathered, and got an answer to each gather, and it prints how many nodes of each kind the bots gathered and how many gathers the server refused.
+- `nw-testclient voice` logs in the first account and sets up its voice chat as the client does: the voice service, a login token, the positional channels and a join token for the first channel.
 - `nw-testclient hunt` runs `[hunt] bots` bots (`--bots <n>` sets another count) with their own accounts and with the sockets, walking speed and ground of `[swarm]`. Each bot walks to the nearest mob it sees, stops within `reach_m`, and attacks every `attack_interval_ms`. With no mob in view, bot `n` walks to its own point on an 8 m ring around entry `n` modulo the count of `starts_m`. Use at most 30 bots per start, because each player sees its 47 nearest entities, bots and mobs together. After a 4299, a bot waits `respawn_wait_ms`, sends a 1938, and steps 1 m to show that it lives again. The hunt checks that every bot began near a hunt start, registered, was not closed, hit a mob (a 2071), and lived again after each request. It checks that every bot got its bundles with no gap above `max_bundle_gap_ms`, and that every server message was read. From the metrics of every `sim` in `metrics_urls`, it checks that at least one mob died per 10 bots and that no move of a living player was refused. A move that arrives after a death, before the bot has its 4299, is counted apart. It also checks that 99 % of the ticks took at most one tick, and that every metrics page was read.
 
 ## Admin tools
@@ -406,7 +409,7 @@ just map-tiles
 
 ### blighted-admin
 
-`blighted-admin serve` serves the admin pages on `http://127.0.0.1:9180/` (`config/blighted-admin.toml`, overrides `BLIGHTED_ADMIN_<KEY>`, nested keys joined by `__`). It reads the world file and the content bundle from `just world` and `just bundle`. It reads the map tiles from `just map-tiles` when they exist. Without them, the map shows only the height relief. In local mode it listens on a loopback address only, because the tools have no login there. A request other than `GET` needs the header `X-Blighted-Admin: 1`. When the browser sends an `Origin`, it must be the origin of the admin pages. Thus another web site in your browser cannot use the tools.
+`blighted-admin serve` serves the admin pages on `http://127.0.0.1:9180/` (`config/blighted-admin.toml`, overrides `BLIGHTED_ADMIN_<KEY>`, nested keys joined by `__`). It reads the world file and the content bundle from `just world` and `just bundle`. It reads the map tiles from `just map-tiles` when they exist. Without them, the map shows only the height relief. In local mode it listens on a loopback address only, because the tools have no login there. A request other than `GET` needs the header `X-Blighted-Admin: 1`. When the browser sends an `Origin`, it must be the origin of the admin pages. So another web site in your browser cannot use the tools.
 
 ```bash
 cargo run --release -p blighted-admin -- serve
@@ -426,7 +429,7 @@ The capture viewer page (`/web/captures.html`) opens a session and shows these i
 
 Capture data stays on this PC. The pages run on a loopback address and keep nothing.
 
-`nw-testclient --ledger <file> <command>` writes the plain carrier datagrams of its first client as a capture ledger. Received datagrams are written after DTLS decryption, and sent datagrams before DTLS encryption. Put the ledger under `local-data/captures/`, and the capture viewer opens it like a recorded session. Thus you can compare a session with our servers to a session with the real game. The ledger holds the login token of the registration of the test account, so keep it in `local-data/`. `.gitignore` ignores every `ledger.bin`, and `scripts/no-game-data.sh` refuses any tracked file named `ledger.bin` or that starts with `NWDL`.
+`nw-testclient --ledger <file> <command>` writes the plain carrier datagrams of its first client as a capture ledger. Received datagrams are written after DTLS decryption, and sent datagrams before DTLS encryption. Put the ledger under `local-data/captures/`, and the capture viewer opens it like a recorded session. So you can compare a session with our servers to a session with the real game. The ledger holds the login token of the registration of the test account, so keep it in `local-data/`. `.gitignore` ignores every `ledger.bin`, and `scripts/no-game-data.sh` refuses any tracked file named `ledger.bin` or that starts with `NWDL`.
 
 The world map page (`/web/map.html`) shows the map tiles, the relief, or the relief over the tiles at half strength (the check that both line up). Closer than 4 m per pixel, it also shows the mob spawns, gatherables and landmarks of the world file. The page code is plain JavaScript modules built into the program. `just test-web` runs their tests with the built-in test runner of Node.
 
@@ -517,6 +520,7 @@ GM commands go to the sim that owns the target, which the site finds from the si
 - Heal, Kill, and God on/off.
 - Kick.
 - Give/Take an item.
+- Start a quest.
 - Set level, and Give XP.
 - Weapon mastery. It sets the rank of one weapon or of all weapons, or gives one weapon mastery experience. Levels and ranks are the ones that the game shows.
 - Set coins.
@@ -554,12 +558,16 @@ The client has no menu or console command for its GM calls, so a game master typ
 | `!spawn <vitals id> <level> <count>` | Spawns GM mobs around the sender (at most 50) |
 | `!despawn` | Removes every GM mob of the sim |
 | `!event <start\|stop> <event id>` / `!events` | Starts an event at the sender, stops one, or lists the running ones |
+| `!faction <syndicate\|marauder\|covenant> [player]` | Joins a faction by the rules of the game's own faction pick, and says when they refuse it |
+| `!company <company name>` | Makes a company with the sender as its governor (the sender needs a faction and no company) |
 | `!owner <territory id> <company name\|clear>` | Gives the land claim of a territory to a company, or clears its owner |
 | `!war <territory id> <minutes to start> <company name>` / `!war <territory id> win <attacker\|defender>` / `!war <territory id> cancel` | Lets the named company declare a war on the territory's owner, sets the war's result, or takes the war back |
 | `!invasion <territory id> <minutes to start>` / `!invasion <territory id> lose` / `!invasion <territory id> darkness <0-3>` / `!invasion <territory id> upgrade <upgrade id> <0-3>` | Schedules an invasion, loses the running one now, sets the territory's darkness level, or sets the tier of one of its upgrades |
 | `!time [<hour>:<minute>]` | Says the world's time of day, or sets it for every sim |
 
-`!owner`, `!war`, `!invasion` and `!time` change the world, not a player, so they take no player name. `!owner`, `!war` and a set `!time` answer once the world database has the change.
+`!owner`, `!war`, `!invasion` and `!time` change the world, not a player, so they take no player name. `!company` acts on the sender only. `!company`, `!owner`, `!war` and a set `!time` answer once the world database or the social service has the change.
+
+When the server refuses a camp, the game client shows no reason (it only logs a code). A game master gets a System line with the reason instead, for example "Camp refused: camps are not allowed in this area."
 
 Chat commands skip the admin site's audit log. The sim logs each line and its answer (`GM chat command`, `GM chat answer`).
 
@@ -567,7 +575,7 @@ Chat commands skip the admin site's audit log. The sim logs each line and its an
 
 `sim --config config/sim.toml quest-walk --report <file.md> [--only <id prefix>]` plays every quest of the sim's level with a test character in a world of its own (no database, no bus) and writes which quests end and, for each other one, the step it stops at and why. Talks, accepts, territory entries, topics, cinematics and turn-ins go through the client's calls; kills, gathers, crafts and catches go in as the server's game events, after a check that the level has the mob, the item source, the recipe or the place.
 
-`nw-testclient play --account <name> --backstory <Archetype_X> --quests <ids> --activities <kinds> --report <file.md>` runs one bot on running servers through the client's calls. Its account needs the `game_master` rank (`blighted-admin grant-rank`). It leaves the tutorial, plays the quests in the order their requirements allow (it plays the quest that gives a missing achievement first), and then the activities: `level`, `pvp`, `harvest`, `craft`, `inn`, `shrine`, `dungeon`, `board`, `mount` (after the mount quest), `group`, `music`. Each step waits for the server's proof. It gathers a quest object or a gatherable for a step's item, and fights the placed mobs when a step counts only one spawn group; else a game master line spawns the mobs or gives the item. The bot logs in with a password, so it needs an edge in `password` mode.
+`nw-testclient play --account <name> --backstory <Archetype_X> --quests <ids> --activities <kinds> --report <file.md>` runs one bot on running servers through the client's calls. Its account needs the `game_master` rank (`blighted-admin grant-rank`). It leaves the tutorial, plays the quests in the order their requirements allow (it plays the quest that gives a missing achievement first), and then the activities: `level`, `pvp`, `harvest`, `craft`, `town-craft` (at a settlement station), `inn`, `shrine`, `dungeon`, `board`, `group`, `mount` (after the mount quest), `music`, `company` (a game master's company owns a town and the bot opens its war board), `enemy-company` (the bot makes a company of another faction, the attacker of a war test), `war-signup` and `invasion-signup` (the bot signs up at a war board for a game master's war or invasion, which ends with the run). Each step waits for the server's proof. It gathers a quest object or a gatherable for a step's item, and fights the placed mobs when a step counts only one spawn group; else a game master line spawns the mobs or gives the item. The bot logs in with a password, so it needs an edge in `password` mode.
 
 `LIVE_STACK_INSTANCE=2 just live` starts a second test world next to the first. Every port moves up by 100 (the admin site is on 9280). The second world has its own world id, bot names and log folder (`local-data/logs/live-2/`).
 
