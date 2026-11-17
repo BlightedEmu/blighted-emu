@@ -1319,6 +1319,10 @@
             {
               "check": "A mob ranged attack with no projectile slice flies straight at its clip speed",
               "proof": "tests"
+            },
+            {
+              "check": "A creature without a main hand fights with the weapon in its mouth slot (340 creature slices hold their weapon only there): the shipwreck ghosts cast their `LightningBolt` from `Ghost_Shipwrecked_Weapon`'s `AI_Ghost` profile (bots, 2026-11-17: the server fired the bolts in `12A_MSQ_22_DestroyShrine`, and the quest completed). That weapon also gives a blocked bite its stamina cost and its stagger.",
+              "proof": "bots"
             }
           ]
         },
@@ -1529,6 +1533,10 @@
             {
               "check": "A quest object's detection sphere grows with its capital's scale (2026-11-13, tests only): it explains the retail entries beyond the plain sphere (scale 1.5 torches, scale 2 paw print trails).",
               "proof": "tests"
+            },
+            {
+              "check": "A reward item that its game event names in another letter case than its item row is given (2026-11-16, tests only): 12 game events do this, as the amulet of the Lochnir's Notes turn-in (`amuletmonarchsblufft3` for `AmuletMonarchsBluffT3`). Before the fix the player got nothing.",
+              "proof": "tests"
             }
           ]
         },
@@ -1559,8 +1567,8 @@
               "proof": "tests"
             },
             {
-              "check": "Nobody played them live.",
-              "proof": "none"
+              "check": "A player played the Monarch's Bluffs main story live up to the cannons and the tablet (A Most Mysterious Tablet). Nothing after it was played live.",
+              "proof": "live"
             },
             {
               "check": "The faction join works. A faction board offers its missions as retail (tests only, 2026-11-11): three PvE missions and the PvP missions of the player's faction and the board's territory, drawn by the game's mission weights, kept for 300 s; a take sends the taken element and starts the mission. A mission with a task the server does not run (most PvP missions) is not offered.",
@@ -1605,6 +1613,10 @@
             {
               "check": "The level object of One Tribune at a Time (Brimstone Sands) shows the cooldown of its last use in its first state, as retail: not done.",
               "proof": "none"
+            },
+            {
+              "check": "A player bot plays the Monarch's Bluffs main story from Fragments of Truth to its end (`12A_MSQ_09` to `12A_MSQ_26`), and each quest completes (bots on the PC stack, 2026-11-16). In Lost Legacy the bot enters the Gawain trial, fights the trial's own Gawain, takes the crown and turns in; the server gives the main story's meta achievement. In A Pirate's Plan and Broken Oath the bot kills the named mobs and takes the quest items from their loot bags (bots, 2026-11-17).",
+              "proof": "bots"
             }
           ]
         },
@@ -1742,6 +1754,10 @@
             {
               "check": "Live check outside the tutorial.",
               "proof": "none"
+            },
+            {
+              "check": "A quest item that a named mob drops is in the loot bag of its kill, and the loot interaction (kind 28) on the bag gives it (bots, 2026-11-17: A Pirate's Plan's blunderbuss, Broken Oath's three seals).",
+              "proof": "bots"
             }
           ]
         },
@@ -1946,6 +1962,10 @@
             {
               "check": "A player crafts and refines at the town stations live.",
               "proof": "none"
+            },
+            {
+              "check": "A quest's cook step is played as on retail (bots, 2026-11-17, Boar Feast): the player opens the nearest level campfire, crafts `Procedural_HealthRecoveryT1` with the pork it skinned, closes the craft screen and the station, and the quest counts the craft (retail capture `12-3_boarfeast-Campfire-Feast`).",
+              "proof": "bots"
             }
           ]
         },
@@ -2541,6 +2561,10 @@
             {
               "check": "Three more expedition objective steps end with an encounter stage's success, as retail: Amrine boss stage 3 (task 11), Lazarus naga stage 5 (task 9), Tempest's Heart gate monolith stage 5 (task 0) (Observed in 2 to 3 runs each; tests only).",
               "proof": "tests"
+            },
+            {
+              "check": "A player enters a solo trial from afar and comes back (bots, 2026-11-16): the bot sends 5039, 5037 and 946, the director starts a trial sim, the trial's script spawns its boss where the player fights it, and after the win the player is back in the open world. On a stack that just started, the director starts a trial sim for the first request and holds the request until that sim is ready (`start_wait_ms`, 60 s); the first entry then works (bots, 2026-11-17).",
+              "proof": "bots"
             }
           ]
         },
@@ -3485,6 +3509,7 @@
     }
   ],
   "nextSteps": [
+    "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
     "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
     "**Camps (2026-11-15): the rest of the live check.**\n\n- Respawn at the camp after a death.\n- Craft at the camp's station.\n- Place a camp with no wood: it stands unbuilt; gather the wood and build it.\n- A game master gets the reason line of a refused camp in chat.",
@@ -3567,6 +3592,8 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Quest bots (2026-11-17): the four open items of the main story run are fixed and proven by bots. Creatures fight with the weapon in their mouth slot, so the shipwreck ghosts cast `LightningBolt`. The director holds a trial request while it starts a trial sim, so the first entry on a new stack works. The bot kills named mobs and opens their loot bags for quest items (A Pirate's Plan, Broken Oath). The bot cooks at a level campfire with the meat it skinned (Boar Feast).",
+    "Quest bots (2026-11-16): bots end the Monarch's Bluffs main story from Fragments of Truth to its end. Fixes: a reward item named in another letter case is given; the bot acknowledges each gather end as the client does; the quest plan in a trial names the trial's own boss; the bot enters and leaves trials.",
     "Content folder review: the VM director config still had the removed `content_dir` key, so the director stopped at start and logins waited in a queue; fixed on the PC and the VM. A rebuilt step with the same bytes is fresh at the next build, migrate keeps each file's own time, a design file named in two ways has one name, and the live stack fails when a program stops at start (2026-11-16).",
     "A first test pack was shared on 2026-11-14 and taken back; the pack numbering starts again at version 1 with the content layout (2026-11-16).",
     "Batch E built and tested: war gates, war raid numbers (migration 0049), cow launcher areas, Hedet fire droppers, the Isle of Night ballista, Myrkgard darkness events, expedition gatherable score and task triggers, shots that stop at level walls, collision entity ids; deployed to the PC and the game VM (2026-11-13, tests only).",
@@ -3793,6 +3820,6 @@
     "The five failing install and capture tests pass again (2026-11-16): the open world gather count and the player attack test table follow the gather node and hit reaction work, the boar and club sailor replays count the fights the capture really holds, and the boar's run speed check leaves out the gore's lunge (retail lunges too)."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-16",
+  "updated": "2026-11-17",
   "lastCommit": "eb9ccc9c"
 }
