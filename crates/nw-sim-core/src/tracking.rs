@@ -34,8 +34,9 @@
 //! [`CAMERA_FLOOR_SPREAD_M`] above the highest floor the level knows there while it sinks no
 //! faster than a walk down the steepest walkable slope: it stands on a floor the level lacks (the
 //! steps of the tutorial cave, run 17: the level collision has no surface between 23.13 m and
-//! 33 m there, and the body stayed at the foot while the client climbed); in an action it keeps
-//! its own height there, as the camera's height is off in an action. A body the server dropped
+//! 33 m there, and the body stayed at the foot while the client climbed); in an action, a dodge
+//! or a jump it keeps its own height there and finds no such floor, as the camera's height is
+//! off in them ([`CAMERA_SETTLE_RECORDS`]). A body the server dropped
 //! (a move into the air) falls by the physics until it lands.
 //!
 //! The camera does not carry the body through a wall ([`wall_between`]) from close by: the
@@ -123,8 +124,15 @@ pub const ACTION_RECORDS: u8 = 52;
 pub const RECOVER_AFTER_RECORDS: u16 = 30;
 /// How far above the highest known floor the camera's body may stand and still stand on it, m
 /// (Observed: on the retail tutorial deck the camera's body stood 0.48 m below to 0.73 m above the
-/// retail own place while moving, 5% to 95%).
-pub const CAMERA_FLOOR_SPREAD_M: f32 = 1.0;
+/// retail own place while moving, 5% to 95%; live 2026-11-17, on flat open ground with no
+/// structure, the camera's bodies of two players at rest stood 0.9 m and 1.07 m above it for
+/// seconds, and with 1.0 m the body of the second one stood on a floor 1 m up in the air).
+pub const CAMERA_FLOOR_SPREAD_M: f32 = 1.5;
+/// Records after a dodge or a jump in which the camera's height still shows that move, not a
+/// floor (live 2026-11-17: in a controller player's dodge the camera's body rose
+/// 1.9 m over 8 records on flat ground; after a standing jump it came down to its resting height
+/// 6 records after the landing; our choice: 10 records, a third of a second).
+pub const CAMERA_SETTLE_RECORDS: u8 = 10;
 
 /// The records a body remembers, to take them again with the motion of an attack that started
 /// in them (our choice: an input message holds three records, a resent one up to six).
@@ -205,6 +213,8 @@ pub struct TrackedBody {
     last_seen: Option<Position>,
     /// Records left while an action the client started may move the body.
     acting_records: u8,
+    /// Records left while the camera still shows a dodge or a jump ([`CAMERA_SETTLE_RECORDS`]).
+    camera_settle_records: u8,
     /// The server dropped it and it has not landed yet.
     dropping: bool,
     /// The last record stood it on a floor the level lacks, at its camera's height: the physics
@@ -224,6 +234,7 @@ impl TrackedBody {
             taken: VecDeque::with_capacity(ATTACK_REWIND_RECORDS),
             last_seen: None,
             acting_records: 0,
+            camera_settle_records: 0,
             dropping: false,
             on_lacking_floor: false,
             unfit_records: 0,
@@ -520,6 +531,16 @@ impl TrackedBody {
         let resting = self.is_resting();
         let acting = self.acting_records > 0;
         self.acting_records = self.acting_records.saturating_sub(1);
+        // The camera's height shows a dodge or a jump and its landing: in them it picks no floor
+        // the level lacks, as in an action.
+        let dodging_or_jumping = self.character.is_dodging() || self.character.is_jumping();
+        if dodging_or_jumping {
+            self.camera_settle_records = CAMERA_SETTLE_RECORDS;
+        }
+        let camera_moved = acting || self.camera_settle_records > 0;
+        if !dodging_or_jumping {
+            self.camera_settle_records = self.camera_settle_records.saturating_sub(1);
+        }
         let seen = input.view.and_then(|view| {
             // A rider's camera trails its mount farther than a walker's.
             let view = if self.character.is_mounted() {
@@ -649,7 +670,7 @@ impl TrackedBody {
             // the deck to the sea). The floor is searched from the higher of the two bodies'
             // feet, and a body on a floor the level lacks keeps its own height in an action.
             let was_on_lacking_floor = std::mem::take(&mut self.on_lacking_floor);
-            let held = was_on_lacking_floor && acting;
+            let held = was_on_lacking_floor && camera_moved;
             let height = if held { position.z } else { seen.at.z };
             // A rider's camera sits on the saddle, about 2 m above a walker's: its height picks
             // no floor and gives the body none (replay of retail Hermit's Rally: with it the
@@ -672,7 +693,7 @@ impl TrackedBody {
                     if !self.dropping
                         && !self.is_swimming()
                         && !mounted
-                        && (held || (walking_height && !acting))
+                        && (held || (walking_height && !camera_moved))
                         && height - floor > CAMERA_FLOOR_SPREAD_M =>
                 {
                     self.character.land_at(Position {
@@ -1279,6 +1300,131 @@ mod tests {
             "the body stays on the floor: {:?}",
             body.position()
         );
+    }
+
+    /// The view of a client whose camera's body stands `rise_m` above the tracked body.
+    fn raised_view(body: &TrackedBody, rise_m: f32) -> CameraView {
+        let at = body.position();
+        view_of(
+            Position {
+                z: at.z + rise_m,
+                ..at
+            },
+            BOOM,
+            body.velocity(),
+        )
+    }
+
+    /// A body that stood on flat ground with its camera at rest.
+    fn settled() -> TrackedBody {
+        let mut body = TrackedBody::new(start());
+        for _ in 0..10 {
+            body.record(input(0, view_of(start(), BOOM, [0.0; 2])), &Flat, SEA);
+        }
+        body
+    }
+
+    fn assert_on_the_ground(body: &TrackedBody, what: &str) {
+        assert!(
+            (body.position().z - GROUND_Z).abs() < 1e-3,
+            "{what}: {:?}",
+            body.position()
+        );
+    }
+
+    #[test]
+    fn a_resting_camera_1_07_m_up_keeps_the_body_on_open_ground() {
+        // Live 2026-11-17: a controller player's camera's body stood 1.07 m above flat ground
+        // with no structure; with a 1.0 m spread her body stood 1 m up in the air.
+        const REST_RISE_M: f32 = 1.07;
+        const REST_RECORDS: usize = 60;
+        let mut body = settled();
+        for _ in 0..REST_RECORDS {
+            let view = raised_view(&body, REST_RISE_M);
+            body.record(input(0, view), &Flat, SEA);
+        }
+        assert_on_the_ground(&body, "the body stays on the ground");
+    }
+
+    #[test]
+    fn a_dodge_s_camera_rise_does_not_lift_the_body() {
+        // Live 2026-11-17: in a controller player's dodge the camera's body rose 1.9 m over 8
+        // records on flat ground; the body went up with it and the others saw a fall, no roll.
+        const DODGE_RECORDS: u8 = 8;
+        const RISE_PER_RECORD_M: f32 = 0.24;
+        const HIGH_RECORDS: usize = 3;
+        const AFTER_RECORDS: usize = 20;
+        let mut body = settled();
+        let dodge = |view| TrackInput {
+            character: CharacterInput {
+                intent: Intent {
+                    forward: 1,
+                    dodge: true,
+                    ..Intent::default()
+                },
+                yaw: 0.0,
+                dt_s: DT,
+            },
+            ..input(0, view)
+        };
+        for record in 1..=DODGE_RECORDS {
+            let view = raised_view(&body, RISE_PER_RECORD_M * f32::from(record));
+            body.record(dodge(view), &Flat, SEA);
+            assert_on_the_ground(&body, "in the dodge");
+        }
+        let top_m = RISE_PER_RECORD_M * f32::from(DODGE_RECORDS);
+        for _ in 0..HIGH_RECORDS {
+            let view = raised_view(&body, top_m);
+            body.record(input(0, view), &Flat, SEA);
+            assert_on_the_ground(&body, "after the dodge");
+        }
+        for _ in 0..AFTER_RECORDS {
+            let view = raised_view(&body, 0.0);
+            body.record(input(0, view), &Flat, SEA);
+        }
+        assert_on_the_ground(&body, "at rest again");
+    }
+
+    #[test]
+    fn a_jump_s_landing_with_its_camera_still_up_stays_on_the_ground() {
+        // Live 2026-11-17: at a standing jump's landing the camera's body still stood 1.4 m up
+        // and came down over 6 records; the body went up onto it, fell again and landed twice.
+        const LANDING_RISE_M: f32 = 1.8;
+        const SETTLE_RECORDS: usize = 6;
+        const AFTER_RECORDS: usize = 20;
+        const AIR_RECORDS_MAX: usize = 120;
+        let mut body = settled();
+        let jump = TrackInput {
+            character: CharacterInput {
+                intent: Intent {
+                    jump: true,
+                    ..Intent::default()
+                },
+                yaw: 0.0,
+                dt_s: DT,
+            },
+            ..input(0, raised_view(&body, 0.0))
+        };
+        body.record(jump, &Flat, SEA);
+        let mut records = 0;
+        while !body.is_grounded() {
+            records += 1;
+            assert!(records < AIR_RECORDS_MAX, "the jump lands");
+            let view = raised_view(&body, 0.0);
+            body.record(input(0, view), &Flat, SEA);
+        }
+        for record in 0..SETTLE_RECORDS {
+            let share = 1.0 - record as f32 / SETTLE_RECORDS as f32;
+            let view = raised_view(&body, LANDING_RISE_M * share);
+            body.record(input(0, view), &Flat, SEA);
+            assert_on_the_ground(&body, "after the landing");
+            assert!(body.is_grounded(), "no second fall");
+        }
+        for _ in 0..AFTER_RECORDS {
+            let view = raised_view(&body, 0.0);
+            body.record(input(0, view), &Flat, SEA);
+        }
+        assert_on_the_ground(&body, "at rest again");
     }
 
     /// A ledge: a floor [`LEDGE_M`] above the flat ground south of [`start`]'s y plus 1 m.

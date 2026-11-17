@@ -999,6 +999,11 @@ impl Character {
         )
     }
 
+    /// Whether it is in a land dodge.
+    pub const fn is_dodging(&self) -> bool {
+        self.dodge.is_some()
+    }
+
     /// Whether it comes down in a jump: past the top of it.
     pub fn is_past_jump_top(&self) -> bool {
         matches!(self.vertical, Vertical::Jumping(rise) if rise < 0.0)
