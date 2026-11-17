@@ -1,28 +1,27 @@
 {
- "hold_records": 19,
  "stances": [
   {
    "tags": "",
-   "light": 4510,
-   "light_moving": 458,
-   "charge": 57,
    "alt_start": {
-    "second_sequence": 2351
+    "second_state": 37,
+    "second_sequence": 2225,
+    "third_state": 46,
+    "third_sequence": 421,
+    "marker": 40
    },
    "alt_end": {
-    "second_sequence": 2958,
-    "third_state": 0,
-    "third_sequence": 0,
+    "second_state": 45,
+    "second_sequence": 0,
     "marker": 1
    },
    "alt_moves": {
     "moving": {
      "state": 27,
-     "sequence": 1246
+     "sequence": 1251
     },
     "idle": {
      "state": 31,
-     "sequence": 4008
+     "sequence": 1673
     }
    },
    "drawn_moves": {
@@ -45,19 +44,19 @@
     },
     "back": {
      "state": 7,
-     "sequence": 4820
+     "sequence": 4822
     },
     "left": {
      "state": 7,
-     "sequence": 4232
+     "sequence": 2149
     },
     "right": {
      "state": 7,
-     "sequence": 3673
+     "sequence": 2314
     },
     "none": {
      "state": 7,
-     "sequence": 4821
+     "sequence": 4822
     }
    },
    "jump": {
@@ -67,25 +66,36 @@
     },
     "none": {
      "state": 14,
-     "sequence": 1208
+     "sequence": 686
     }
    },
    "draw": {
     "state": 44,
     "sequence": 2310
+   },
+   "air": {
+    "fall": 1675,
+    "land_after_jump": {
+     "still": 2376,
+     "moving": 789
+    },
+    "land_after_fall": {
+     "still": 1355,
+     "moving": 1355
+    }
    }
   },
   {
    "tags": "1H_Melee,Axe,Throwable",
-   "light": 458,
-   "light_moving": 458,
-   "charge": 594,
    "alt_start": {
-    "second_sequence": 1049,
-    "third_sequence": 389,
+    "second_state": 36,
+    "second_sequence": 2918,
+    "third_state": 46,
+    "third_sequence": 388,
     "marker": 40
    },
    "alt_end": {
+    "second_sequence": 0,
     "third_state": 0,
     "third_sequence": 0,
     "marker": 2
@@ -101,34 +111,34 @@
     }
    },
    "drawn_moves": {
-    "idle": 4079,
-    "restart": 2554,
-    "stop": 2794,
+    "idle": 4078,
+    "restart": 1394,
+    "stop": 2506,
     "start": {
      "state": 26,
      "sequence": 2554
     },
     "back_start": {
      "state": 27,
-     "sequence": 2279
+     "sequence": 1394
     }
    },
    "dodge": {
     "forward": {
      "state": 7,
-     "sequence": 3520
+     "sequence": 1998
     },
     "back": {
      "state": 7,
-     "sequence": 4487
+     "sequence": 3605
     },
     "left": {
      "state": 7,
-     "sequence": 835
+     "sequence": 4838
     },
     "right": {
      "state": 7,
-     "sequence": 4006
+     "sequence": 1143
     },
     "none": {
      "state": 7,
@@ -148,23 +158,107 @@
    "draw": {
     "state": 44,
     "sequence": 3250
-   }
+   },
+   "press": {
+    "slot": "first",
+    "sequence": 599,
+    "state": 10,
+    "marker": 1
+   },
+   "releases": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 599
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 458
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5033
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 497
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 1128
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 479
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 458
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 458
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5039
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 801
+     }
+    }
+   ],
+   "holds": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 599
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 581
+     },
+     "records": 19
+    }
+   ],
+   "air": {
+    "fall": 4128,
+    "land_after_jump": {
+     "still": 1770,
+     "moving": 4069
+    },
+    "land_after_fall": {
+     "still": 4553,
+     "moving": 4553
+    }
+   },
+   "draw_end_ms": 542,
+   "sheathe": 2699,
+   "sheathe_end_ms": 399
   },
   {
    "tags": "1H_Melee,Rapier",
    "alt_start": {
-    "second_sequence": 2563,
-    "fourth_state": 32,
-    "fourth_sequence": 3317
+    "second_state": 37,
+    "second_sequence": 5008
    },
    "alt_end": {
-    "fourth_state": 0,
-    "fourth_sequence": 0
+    "second_state": 45,
+    "second_sequence": 0
    },
    "alt_moves": {
     "moving": {
      "state": 27,
-     "sequence": 1109
+     "sequence": 1038
     },
     "idle": {
      "state": 31,
@@ -172,55 +266,145 @@
     }
    },
    "drawn_moves": {
-    "idle": 1458,
-    "restart": 1865,
-    "stop": 1387,
+    "idle": 4067,
+    "restart": 1048,
+    "stop": 1380,
     "start": {
-     "state": 27,
-     "sequence": 1522
+     "state": 26,
+     "sequence": 2554
     },
     "back_start": {
      "state": 27,
-     "sequence": 1522
+     "sequence": 1048
     }
    },
    "dodge": {
     "forward": {
      "state": 7,
-     "sequence": 4845
+     "sequence": 1998
     },
     "back": {
      "state": 7,
-     "sequence": 4822
+     "sequence": 3605
     },
     "left": {
      "state": 7,
-     "sequence": 2149
+     "sequence": 4838
     },
     "none": {
      "state": 7,
      "sequence": 4822
+    },
+    "right": {
+     "state": 7,
+     "sequence": 1143
     }
    },
    "draw": {
     "state": 44,
-    "sequence": 2574
-   }
+    "sequence": 3225
+   },
+   "press": {
+    "slot": "first",
+    "sequence": 5057,
+    "state": 10,
+    "marker": 1
+   },
+   "releases": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 855
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 491
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5057
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 2590
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 766
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 483
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 2590
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 2590
+     }
+    }
+   ],
+   "holds": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5057
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 584
+     },
+     "records": 27
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 766
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 584
+     },
+     "records": 22
+    }
+   ],
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 3675
+    }
+   },
+   "air": {
+    "fall": 4128,
+    "land_after_jump": {
+     "still": 3716,
+     "moving": 4069
+    },
+    "land_after_fall": {
+     "still": 3274,
+     "moving": 3274
+    }
+   },
+   "draw_end_ms": 998,
+   "sheathe": 2699
   },
   {
    "tags": "1H_Melee,Sword",
-   "light": 495,
-   "light_moving": 473,
-   "charge": 594,
    "alt_start": {
-    "second_sequence": 4380,
-    "fourth_state": 32,
-    "fourth_sequence": 3317
+    "second_state": 37,
+    "second_sequence": 5005
    },
    "alt_end": {
-    "second_sequence": 4380,
-    "fourth_state": 0,
-    "fourth_sequence": 0
+    "second_state": 45,
+    "second_sequence": 0
    },
    "alt_moves": {
     "moving": {
@@ -229,34 +413,34 @@
     },
     "idle": {
      "state": 31,
-     "sequence": 1673
+     "sequence": 3956
     }
    },
    "drawn_moves": {
     "idle": 612,
-    "restart": 1894,
-    "stop": 2794,
+    "restart": 1129,
+    "stop": 1398,
     "start": {
      "state": 26,
      "sequence": 1894
     },
     "back_start": {
      "state": 27,
-     "sequence": 1304
+     "sequence": 1129
     }
    },
    "dodge": {
     "forward": {
      "state": 7,
-     "sequence": 4841
+     "sequence": 4809
     },
     "back": {
      "state": 7,
-     "sequence": 4881
+     "sequence": 1259
     },
     "left": {
      "state": 7,
-     "sequence": 1402
+     "sequence": 4861
     },
     "right": {
      "state": 7,
@@ -270,7 +454,7 @@
    "jump": {
     "forward": {
      "state": 14,
-     "sequence": 1208
+     "sequence": 796
     },
     "none": {
      "state": 14,
@@ -279,54 +463,175 @@
    },
    "draw": {
     "state": 44,
-    "sequence": 2310
-   }
+    "sequence": 3082
+   },
+   "press": {
+    "slot": "first",
+    "sequence": 1595,
+    "state": 10,
+    "marker": 1
+   },
+   "releases": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 1595
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 473
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 473
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 473
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 3728
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 3226
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5034
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 495
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 1221
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 463
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 3120
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 2030
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5051
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 484
+     }
+    }
+   ],
+   "holds": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5034
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 594
+     },
+     "records": 25
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 1595
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 594
+     },
+     "records": 19
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 3728
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 594
+     },
+     "records": 29
+    }
+   ],
+   "air": {
+    "fall": 2151,
+    "land_after_jump": {
+     "still": 4334,
+     "moving": 4334
+    },
+    "land_after_fall": {
+     "still": 4090,
+     "moving": 4090
+    }
+   },
+   "draw_end_ms": 819
   },
   {
    "tags": "2H_Melee,GreatAxe",
-   "light_moving": 2685,
-   "charge": 586,
    "alt_start": {
-    "second_sequence": 4380,
-    "third_sequence": 422
+    "second_state": 37,
+    "second_sequence": 3044
    },
    "alt_end": {
-    "second_sequence": 2958,
-    "third_state": 0,
-    "third_sequence": 0,
-    "marker": 0
+    "second_state": 45,
+    "second_sequence": 0
    },
    "alt_moves": {
     "moving": {
      "state": 27,
-     "sequence": 1246
+     "sequence": 1061
     },
     "idle": {
      "state": 31,
-     "sequence": 4008
+     "sequence": 636
     }
    },
    "drawn_moves": {
-    "idle": 4009,
-    "restart": 2086,
-    "stop": 1386,
+    "idle": 4042,
+    "restart": 1063,
+    "stop": 1381,
     "start": {
      "state": 26,
-     "sequence": 2086
+     "sequence": 2090
     },
     "back_start": {
      "state": 27,
-     "sequence": 2747
+     "sequence": 1063
     }
    },
    "dodge": {
     "forward": {
      "state": 7,
-     "sequence": 3520
+     "sequence": 4834
     },
     "back": {
      "state": 7,
-     "sequence": 4487
+     "sequence": 4833
     },
     "left": {
      "state": 7,
@@ -344,7 +649,7 @@
    "jump": {
     "forward": {
      "state": 14,
-     "sequence": 2340
+     "sequence": 808
     },
     "none": {
      "state": 14,
@@ -353,21 +658,82 @@
    },
    "draw": {
     "state": 44,
-    "sequence": 3250
-   }
+    "sequence": 3190
+   },
+   "press": {
+    "slot": "first",
+    "sequence": 5056,
+    "state": 10,
+    "marker": 1
+   },
+   "releases": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5056
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 468
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5050
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 485
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 468
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 468
+     }
+    }
+   ],
+   "holds": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5056
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 1336
+     },
+     "records": 19
+    }
+   ],
+   "air": {
+    "fall": 4588,
+    "land_after_jump": {
+     "still": 4385,
+     "moving": 4385
+    },
+    "land_after_fall": {
+     "still": 3687,
+     "moving": 1562
+    }
+   },
+   "draw_end_ms": 987,
+   "sheathe": 1574
   },
   {
    "tags": "2H_Melee,GreatSword",
-   "light": 4510,
-   "light_moving": 4510,
-   "charge": 57,
    "alt_start": {
-    "second_sequence": 2351
+    "second_state": 37,
+    "second_sequence": 2869
    },
    "alt_end": {
-    "second_sequence": 2351,
-    "fourth_state": 0,
-    "fourth_sequence": 0
+    "second_state": 45,
+    "second_sequence": 0
    },
    "alt_moves": {
     "moving": {
@@ -381,7 +747,7 @@
    },
    "drawn_moves": {
     "idle": 1136,
-    "restart": 2205,
+    "restart": 1065,
     "stop": 2254,
     "start": {
      "state": 26,
@@ -421,66 +787,245 @@
     },
     "none": {
      "state": 14,
-     "sequence": 1561
+     "sequence": 1587
     }
    },
    "draw": {
     "state": 44,
     "sequence": 2467
-   }
+   },
+   "press": {
+    "slot": "first",
+    "sequence": 4120,
+    "state": 10,
+    "marker": 1
+   },
+   "releases": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 4120
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 4510
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 1659
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 486
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 56
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 486
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 1122
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 494
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 55
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 4510
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 3047
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 494
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 4510
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 4510
+     }
+    }
+   ],
+   "holds": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 4120
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 57
+     },
+     "records": 19
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 1659
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 3995
+     },
+     "records": 60
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 55
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 57
+     },
+     "records": 14
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 56
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 3995
+     },
+     "records": 51
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 4091
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 57
+     },
+     "records": 26
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5048
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 3995
+     },
+     "records": 67
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 1122
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 3492
+     },
+     "records": 81
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 3047
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 3492
+     },
+     "records": 60
+    }
+   ],
+   "air": {
+    "fall": 4586,
+    "land_after_jump": {
+     "still": 2488,
+     "moving": 2488
+    },
+    "land_after_fall": {
+     "still": 2789,
+     "moving": 2789
+    }
+   },
+   "draw_end_ms": 1096,
+   "sheathe": 2011,
+   "sheathe_end_ms": 799
   },
   {
    "tags": "2H_Melee,Spear,Throwable",
-   "light": 4510,
-   "light_moving": 4510,
-   "charge": 57,
    "alt_start": {
-    "second_sequence": 2351
+    "second_state": 37,
+    "second_sequence": 3044
    },
    "alt_end": {
-    "second_sequence": 2958,
-    "third_sequence": 0,
-    "marker": 0
+    "second_state": 45,
+    "second_sequence": 0
    },
    "alt_moves": {
     "moving": {
      "state": 27,
-     "sequence": 1246
+     "sequence": 1061
     },
     "idle": {
      "state": 31,
-     "sequence": 4008
+     "sequence": 636
     }
    },
    "drawn_moves": {
-    "idle": 1136,
-    "restart": 2205,
-    "stop": 1386,
+    "idle": 4036,
+    "restart": 1068,
+    "stop": 3247,
     "start": {
      "state": 26,
-     "sequence": 2205
+     "sequence": 2090
     },
     "back_start": {
      "state": 27,
-     "sequence": 1065
+     "sequence": 1068
     }
    },
    "dodge": {
     "forward": {
      "state": 7,
-     "sequence": 4876
+     "sequence": 4834
     },
     "back": {
      "state": 7,
-     "sequence": 2100
+     "sequence": 4833
     },
     "left": {
      "state": 7,
-     "sequence": 4832
+     "sequence": 4826
     },
     "right": {
      "state": 7,
-     "sequence": 3487
+     "sequence": 917
     },
     "none": {
      "state": 7,
@@ -490,7 +1035,7 @@
    "jump": {
     "forward": {
      "state": 14,
-     "sequence": 1208
+     "sequence": 808
     },
     "none": {
      "state": 14,
@@ -499,22 +1044,96 @@
    },
    "draw": {
     "state": 44,
-    "sequence": 2011
-   }
+    "sequence": 3181
+   },
+   "press": {
+    "slot": "first",
+    "sequence": 3931,
+    "state": 10,
+    "marker": 1
+   },
+   "releases": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 3931
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 4294
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 1680
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 2670
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 4294
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 4294
+     }
+    }
+   ],
+   "holds": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 3931
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 586
+     },
+     "records": 20
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 1680
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 586
+     },
+     "records": 32
+    }
+   ],
+   "air": {
+    "fall": 4588,
+    "land_after_jump": {
+     "still": 4385,
+     "moving": 4385
+    },
+    "land_after_fall": {
+     "still": 3572,
+     "moving": 1562
+    }
+   },
+   "draw_end_ms": 651,
+   "sheathe": 3330
   },
   {
    "tags": "2H_Ranged,Blunderbuss",
-   "light": 461,
-   "light_moving": 461,
-   "charge": 587,
    "alt_start": {
-    "second_sequence": 4248,
+    "second_state": 36,
+    "second_sequence": 4225,
     "third_state": 46,
     "third_sequence": 407,
     "marker": 40
    },
    "alt_end": {
-    "second_sequence": 4241,
+    "second_state": 45,
+    "second_sequence": 0,
     "third_state": 0,
     "third_sequence": 0,
     "marker": 0
@@ -531,222 +1150,7 @@
    },
    "drawn_moves": {
     "idle": 2350,
-    "restart": 2558,
-    "stop": 1829,
-    "start": {
-     "state": 26,
-     "sequence": 2558
-    },
-    "back_start": {
-     "state": 27,
-     "sequence": 1304
-    }
-   },
-   "dodge": {
-    "forward": {
-     "state": 7,
-     "sequence": 4825
-    },
-    "back": {
-     "state": 7,
-     "sequence": 4825
-    },
-    "left": {
-     "state": 7,
-     "sequence": 682
-    },
-    "right": {
-     "state": 7,
-     "sequence": 4834
-    },
-    "none": {
-     "state": 7,
-     "sequence": 4825
-    }
-   },
-   "jump": {
-    "none": {
-     "state": 14,
-     "sequence": 842
-    }
-   },
-   "draw": {
-    "state": 44,
-    "sequence": 3250
-   },
-   "alt_fire": {
-    "second_sequence": 94,
-    "marker": 41
-   },
-   "reload": {
-    "second_state": 36,
-    "second_sequence": 4225
-   }
-  },
-  {
-   "tags": "2H_Ranged,Rifle",
-   "alt_start": {
-    "second_sequence": 4249,
-    "marker": 44
-   },
-   "alt_end": {
-    "third_state": 0,
-    "third_sequence": 0,
-    "marker": 4
-   },
-   "alt_moves": {
-    "moving": {
-     "state": 27,
-     "sequence": 2097
-    },
-    "idle": {
-     "state": 31,
-     "sequence": 4029
-    }
-   },
-   "drawn_moves": {
-    "idle": 605,
-    "restart": 1855,
-    "stop": 1467,
-    "start": {
-     "state": 26,
-     "sequence": 1855
-    },
-    "back_start": {
-     "state": 27,
-     "sequence": 1570
-    }
-   },
-   "dodge": {
-    "forward": {
-     "state": 7,
-     "sequence": 4685
-    },
-    "back": {
-     "state": 7,
-     "sequence": 4508
-    },
-    "left": {
-     "state": 7,
-     "sequence": 4879
-    },
-    "right": {
-     "state": 7,
-     "sequence": 1073
-    },
-    "none": {
-     "state": 7,
-     "sequence": 4508
-    }
-   },
-   "draw": {
-    "state": 44,
-    "sequence": 3082
-   },
-   "alt_fire": {
-    "second_sequence": 1535,
-    "marker": 41
-   }
-  },
-  {
-   "tags": "MagicStaff,Fire",
-   "light": 1514,
-   "light_moving": 67,
-   "alt_start": {
-    "second_sequence": 4450
-   },
-   "alt_end": {
-    "second_state": 44,
-    "second_sequence": 2310,
-    "marker": 1
-   },
-   "alt_moves": {
-    "moving": {
-     "state": 27,
-     "sequence": 1038
-    },
-    "idle": {
-     "state": 31,
-     "sequence": 1249
-    }
-   },
-   "drawn_moves": {
-    "idle": 1019,
-    "restart": 2554,
-    "stop": 2646,
-    "start": {
-     "state": 26,
-     "sequence": 2554
-    },
-    "back_start": {
-     "state": 27,
-     "sequence": 2646
-    }
-   },
-   "dodge": {
-    "forward": {
-     "state": 7,
-     "sequence": 1998
-    },
-    "back": {
-     "state": 7,
-     "sequence": 4820
-    },
-    "left": {
-     "state": 7,
-     "sequence": 4232
-    },
-    "right": {
-     "state": 7,
-     "sequence": 3673
-    },
-    "none": {
-     "state": 7,
-     "sequence": 4845
-    }
-   },
-   "jump": {
-    "forward": {
-     "state": 14,
-     "sequence": 1723
-    },
-    "none": {
-     "state": 14,
-     "sequence": 1135
-    }
-   },
-   "draw": {
-    "state": 44,
-    "sequence": 1864
-   }
-  },
-  {
-   "tags": "MagicStaff,Heal",
-   "alt_start": {
-    "second_sequence": 4248,
-    "third_state": 46,
-    "third_sequence": 407,
-    "marker": 41
-   },
-   "alt_end": {
-    "second_sequence": 4241,
-    "third_state": 0,
-    "third_sequence": 0,
-    "marker": 0
-   },
-   "alt_moves": {
-    "moving": {
-     "state": 27,
-     "sequence": 1071
-    },
-    "idle": {
-     "state": 31,
-     "sequence": 4027
-    }
-   },
-   "drawn_moves": {
-    "idle": 2350,
-    "restart": 2558,
+    "restart": 1304,
     "stop": 1829,
     "start": {
      "state": 26,
@@ -780,9 +1184,300 @@
     }
    },
    "jump": {
+    "none": {
+     "state": 14,
+     "sequence": 842
+    },
     "forward": {
      "state": 14,
-     "sequence": 1208
+     "sequence": 842
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 1864
+   },
+   "alt_fire": {
+    "second_sequence": 94,
+    "marker": 41
+   },
+   "reload": {
+    "second_state": 36,
+    "second_sequence": 4225
+   },
+   "air": {
+    "fall": 813,
+    "land_after_jump": {
+     "still": 4365,
+     "moving": 4365
+    },
+    "land_after_fall": {
+     "still": 2065,
+     "moving": 2065
+    }
+   },
+   "draw_end_ms": 666,
+   "sheathe": 3190
+  },
+  {
+   "tags": "2H_Ranged,Rifle",
+   "alt_start": {
+    "second_state": 36,
+    "second_sequence": 3544,
+    "third_state": 46,
+    "third_sequence": 405,
+    "marker": 40
+   },
+   "alt_end": {
+    "second_sequence": 888,
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 4
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 2097
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 4029
+    }
+   },
+   "drawn_moves": {
+    "idle": 605,
+    "restart": 1570,
+    "stop": 1467,
+    "start": {
+     "state": 26,
+     "sequence": 1855
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 1570
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 3239
+    },
+    "back": {
+     "state": 7,
+     "sequence": 3586
+    },
+    "left": {
+     "state": 7,
+     "sequence": 743
+    },
+    "right": {
+     "state": 7,
+     "sequence": 4823
+    },
+    "none": {
+     "state": 7,
+     "sequence": 4508
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 3173
+   },
+   "alt_fire": {
+    "second_sequence": 1535,
+    "marker": 41
+   },
+   "air": {
+    "fall": 4584,
+    "land_after_jump": {
+     "still": 4365,
+     "moving": 4365
+    },
+    "land_after_fall": {
+     "still": 4523,
+     "moving": 4524
+    }
+   },
+   "draw_end_ms": 666,
+   "sheathe": 3332
+  },
+  {
+   "tags": "MagicStaff,Fire",
+   "alt_start": {
+    "second_sequence": 214
+   },
+   "alt_end": {
+    "second_state": 37,
+    "second_sequence": 806,
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 0
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 3345
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 918
+    }
+   },
+   "drawn_moves": {
+    "idle": 918,
+    "restart": 3345,
+    "stop": 1530,
+    "start": {
+     "state": 26,
+     "sequence": 1873
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 3345
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4821
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4820
+    },
+    "left": {
+     "state": 7,
+     "sequence": 4232
+    },
+    "right": {
+     "state": 7,
+     "sequence": 3673
+    },
+    "none": {
+     "state": 7,
+     "sequence": 4845
+    }
+   },
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 867
+    },
+    "none": {
+     "state": 14,
+     "sequence": 1135
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 2574
+   },
+   "press": {
+    "slot": "second",
+    "sequence": 132,
+    "state": 33,
+    "marker": 3
+   },
+   "releases": [
+    {
+     "after": {
+      "slot": "second",
+      "sequence": 132
+     },
+     "start": {
+      "slot": "second",
+      "sequence": 3950
+     }
+    }
+   ],
+   "holds": [
+    {
+     "after": {
+      "slot": "second",
+      "sequence": 132
+     },
+     "start": {
+      "slot": "second",
+      "sequence": 3576
+     },
+     "records": 19
+    }
+   ],
+   "cast_end_records": 35,
+   "air": {
+    "fall": 4568,
+    "land_after_jump": {
+     "still": 2029,
+     "moving": 2029
+    },
+    "land_after_fall": {
+     "still": 4506,
+     "moving": 4506
+    }
+   },
+   "draw_end_ms": 499,
+   "sheathe": 2147
+  },
+  {
+   "tags": "MagicStaff,Heal",
+   "alt_start": {
+    "second_state": 37,
+    "second_sequence": 806
+   },
+   "alt_end": {
+    "second_state": 45,
+    "second_sequence": 0,
+    "marker": 0
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 1115
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 3981
+    }
+   },
+   "drawn_moves": {
+    "idle": 1015,
+    "restart": 2980,
+    "stop": 2403,
+    "start": {
+     "state": 26,
+     "sequence": 1883
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 2980
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4821
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4820
+    },
+    "left": {
+     "state": 7,
+     "sequence": 4232
+    },
+    "right": {
+     "state": 7,
+     "sequence": 3673
+    },
+    "none": {
+     "state": 7,
+     "sequence": 4825
+    }
+   },
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 867
     },
     "none": {
      "state": 14,
@@ -791,8 +1486,53 @@
    },
    "draw": {
     "state": 44,
-    "sequence": 1864
-   }
+    "sequence": 3126
+   },
+   "press": {
+    "slot": "second",
+    "sequence": 934,
+    "state": 33,
+    "marker": 3
+   },
+   "releases": [
+    {
+     "after": {
+      "slot": "second",
+      "sequence": 934
+     },
+     "start": {
+      "slot": "second",
+      "sequence": 140
+     }
+    }
+   ],
+   "holds": [
+    {
+     "after": {
+      "slot": "second",
+      "sequence": 934
+     },
+     "start": {
+      "slot": "second",
+      "sequence": 141
+     },
+     "records": 19
+    }
+   ],
+   "cast_end_records": 35,
+   "air": {
+    "fall": 2596,
+    "land_after_jump": {
+     "still": 3479,
+     "moving": 3479
+    },
+    "land_after_fall": {
+     "still": 747,
+     "moving": 747
+    }
+   },
+   "draw_end_ms": 485,
+   "sheathe": 2031
   },
   {
    "tags": "1H_Melee,Dagger",
@@ -827,24 +1567,116 @@
   {
    "tags": "1H_Melee,Flail",
    "drawn_moves": {
-    "idle": 49,
-    "restart": 2554,
-    "stop": 1370,
+    "idle": 3122,
+    "restart": 3201,
+    "stop": 1396,
     "start": {
      "state": 26,
-     "sequence": 1880
+     "sequence": 1878
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 3201
     }
    },
    "dodge": {
     "forward": {
      "state": 7,
-     "sequence": 4728
+     "sequence": 3414
     }
    },
    "draw": {
     "state": 44,
     "sequence": 3099
-   }
+   },
+   "press": {
+    "slot": "first",
+    "sequence": 1319,
+    "state": 10,
+    "marker": 1
+   },
+   "releases": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 1319
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 461
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5046
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 481
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 461
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 461
+     }
+    }
+   ],
+   "holds": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 1319
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 583
+     },
+     "records": 14
+    }
+   ],
+   "alt_start": {
+    "second_state": 37,
+    "second_sequence": 731
+   },
+   "alt_end": {
+    "second_state": 45,
+    "second_sequence": 0
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 3314
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 2663
+    }
+   },
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 796
+    }
+   },
+   "air": {
+    "fall": 4564,
+    "land_after_jump": {
+     "still": 4334,
+     "moving": 4334
+    },
+    "land_after_fall": {
+     "still": 4461,
+     "moving": 4498
+    }
+   },
+   "draw_end_ms": 866,
+   "sheathe": 3310
   },
   {
    "tags": "1H_Melee,Sickle,Tool",
@@ -905,9 +1737,11 @@
   {
    "tags": "Bow,LongBow",
    "alt_start": {
-    "second_sequence": 4249,
-    "third_sequence": 406,
-    "marker": 44
+    "second_state": 36,
+    "second_sequence": 2225,
+    "third_state": 46,
+    "third_sequence": 421,
+    "marker": 40
    },
    "alt_end": {
     "second_sequence": 2958,
@@ -926,12 +1760,12 @@
     }
    },
    "drawn_moves": {
-    "idle": 4008,
-    "restart": 2086,
+    "idle": 4009,
+    "restart": 2747,
     "stop": 1386,
     "start": {
-     "state": 27,
-     "sequence": 1246
+     "state": 26,
+     "sequence": 2086
     },
     "back_start": {
      "state": 27,
@@ -941,11 +1775,11 @@
    "dodge": {
     "forward": {
      "state": 7,
-     "sequence": 4876
+     "sequence": 3520
     },
     "back": {
      "state": 7,
-     "sequence": 4780
+     "sequence": 4487
     },
     "left": {
      "state": 7,
@@ -953,7 +1787,7 @@
     },
     "right": {
      "state": 7,
-     "sequence": 3817
+     "sequence": 4006
     },
     "none": {
      "state": 7,
@@ -972,7 +1806,7 @@
    },
    "draw": {
     "state": 44,
-    "sequence": 3250
+    "sequence": 2310
    },
    "alt_fire": {
     "second_sequence": 35,
@@ -981,70 +1815,158 @@
    "reload": {
     "second_state": 36,
     "second_sequence": 2225
-   }
+   },
+   "air": {
+    "fall": 4583,
+    "land_after_jump": {
+     "still": 4208,
+     "moving": 3615
+    },
+    "land_after_fall": {
+     "still": 4521,
+     "moving": 4521
+    }
+   },
+   "draw_end_ms": 532,
+   "sheathe": 3018,
+   "sheathe_end_ms": 967
   },
   {
    "tags": "MagicGauntlet,Ice",
    "alt_start": {
-    "second_sequence": 4450
+    "second_state": 37,
+    "second_sequence": 4516,
+    "fourth_state": 32,
+    "fourth_sequence": 3317
    },
    "alt_end": {
-    "second_sequence": 35,
-    "third_state": 0,
-    "third_sequence": 0,
-    "marker": 1
+    "second_state": 45,
+    "second_sequence": 0
    },
    "alt_moves": {
     "moving": {
      "state": 27,
-     "sequence": 1246
+     "sequence": 1109
     },
     "idle": {
      "state": 31,
-     "sequence": 4008
+     "sequence": 3987
     }
    },
    "drawn_moves": {
-    "idle": 4078,
-    "restart": 1867,
-    "stop": 2506,
+    "idle": 1458,
+    "restart": 1522,
+    "stop": 1289,
     "start": {
-     "state": 26,
-     "sequence": 2554
+     "state": 27,
+     "sequence": 1103
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 1522
     }
    },
    "dodge": {
     "forward": {
      "state": 7,
-     "sequence": 2655
+     "sequence": 4845
     },
     "back": {
      "state": 7,
-     "sequence": 4487
+     "sequence": 4822
     },
     "none": {
      "state": 7,
      "sequence": 2655
+    },
+    "left": {
+     "state": 7,
+     "sequence": 2149
+    },
+    "right": {
+     "state": 7,
+     "sequence": 2314
     }
    },
    "draw": {
     "state": 44,
-    "sequence": 2310
-   }
+    "sequence": 3134
+   },
+   "press": {
+    "slot": "second",
+    "sequence": 3624,
+    "state": 33,
+    "marker": 3
+   },
+   "releases": [
+    {
+     "after": {
+      "slot": "second",
+      "sequence": 3624
+     },
+     "start": {
+      "slot": "second",
+      "sequence": 104
+     }
+    },
+    {
+     "after": {
+      "slot": "second",
+      "sequence": 104
+     },
+     "start": {
+      "slot": "second",
+      "sequence": 104
+     }
+    }
+   ],
+   "holds": [
+    {
+     "after": {
+      "slot": "second",
+      "sequence": 3624
+     },
+     "start": {
+      "slot": "second",
+      "sequence": 2618
+     },
+     "records": 19
+    }
+   ],
+   "cast_end_records": 47,
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 1208
+    }
+   },
+   "air": {
+    "fall": 1675,
+    "land_after_jump": {
+     "still": 789,
+     "moving": 789
+    },
+    "land_after_fall": {
+     "still": 3851,
+     "moving": 3851
+    }
+   },
+   "draw_end_ms": 999,
+   "sheathe": 2364
   },
   {
    "tags": "MagicGauntlet,VoidGauntlet",
    "drawn_moves": {
     "idle": 1019,
-    "restart": 2594,
-    "stop": 1395,
+    "restart": 2646,
+    "stop": 1295,
     "start": {
-     "state": 27,
-     "sequence": 2646
+     "state": 26,
+     "sequence": 1867
     },
     "back_start": {
-     "state": 26,
-     "sequence": 1664
+     "state": 27,
+     "sequence": 2646
     }
    },
    "dodge": {
@@ -1055,12 +1977,177 @@
     "left": {
      "state": 7,
      "sequence": 4834
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4822
     }
    },
    "draw": {
     "state": 44,
-    "sequence": 3126
-   }
+    "sequence": 2364
+   },
+   "press": {
+    "slot": "second",
+    "sequence": 116,
+    "state": 33,
+    "marker": 3
+   },
+   "releases": [
+    {
+     "after": {
+      "slot": "second",
+      "sequence": 116
+     },
+     "start": {
+      "slot": "second",
+      "sequence": 119
+     }
+    },
+    {
+     "after": {
+      "slot": "second",
+      "sequence": 118
+     },
+     "start": {
+      "slot": "second",
+      "sequence": 120
+     }
+    }
+   ],
+   "cast_end_records": 28,
+   "air": {
+    "fall": 1675,
+    "land_after_jump": {
+     "still": 789,
+     "moving": 789
+    },
+    "land_after_fall": {
+     "still": 4513,
+     "moving": 4513
+    }
+   },
+   "draw_end_ms": 724,
+   "sheathe": 3134
+  },
+  {
+   "tags": "2H_Melee,Warhammer",
+   "press": {
+    "slot": "first",
+    "sequence": 5055,
+    "state": 10,
+    "marker": 1
+   },
+   "releases": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5055
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 4603
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5047
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 487
+     }
+    },
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 4603
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 4603
+     }
+    }
+   ],
+   "holds": [
+    {
+     "after": {
+      "slot": "first",
+      "sequence": 5055
+     },
+     "start": {
+      "slot": "first",
+      "sequence": 587
+     },
+     "records": 19
+    }
+   ],
+   "alt_start": {
+    "second_state": 37,
+    "second_sequence": 4998
+   },
+   "alt_end": {
+    "second_state": 45,
+    "second_sequence": 0,
+    "marker": 1
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 1061
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 636
+    }
+   },
+   "drawn_moves": {
+    "idle": 4032,
+    "restart": 2476,
+    "stop": 2415,
+    "start": {
+     "state": 26,
+     "sequence": 2090
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 2476
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4834
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4881
+    }
+   },
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 808
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 2103
+   },
+   "air": {
+    "fall": 4588,
+    "land_after_jump": {
+     "still": 4385,
+     "moving": 4385
+    },
+    "land_after_fall": {
+     "still": 2525,
+     "moving": 2525
+    }
+   },
+   "draw_end_ms": 984,
+   "sheathe": 1574
   }
  ],
  "follow_ups": [
@@ -1369,6 +2456,1321 @@
    "server": 468,
    "at_release": true,
    "seen": 5
+  }
+ ],
+ "abilities": [
+  {
+   "ability": "Ability_Blunderbuss_AzothShrapnelBlast",
+   "first": {
+    "state": 8,
+    "sequence": 98
+   },
+   "slots": {
+    "second_state": 0,
+    "second_sequence": 0,
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 1
+   },
+   "seen": 764
+  },
+  {
+   "ability": "Ability_Blunderbuss_ClawShot",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 4083,
+    "marker": 3
+   },
+   "seen": 52
+  },
+  {
+   "ability": "Ability_Blunderbuss_NetShot",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 103,
+    "third_sequence": 387,
+    "marker": 1
+   },
+   "seen": 465
+  },
+  {
+   "ability": "Ability_Blunderbuss_SplittingGrenade",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 862,
+    "third_state": 0,
+    "third_sequence": 387,
+    "marker": 43
+   },
+   "seen": 377
+  },
+  {
+   "ability": "Ability_Blunderbuss_VortexShot",
+   "first": {
+    "state": 8,
+    "sequence": 4371
+   },
+   "slots": {
+    "second_state": 45,
+    "second_sequence": 0,
+    "marker": 1
+   },
+   "seen": 134
+  },
+  {
+   "ability": "Ability_Bow_EvadeShot",
+   "first": {
+    "state": 8,
+    "sequence": 42
+   },
+   "slots": {
+    "second_state": 45,
+    "second_sequence": 0,
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 1
+   },
+   "seen": 80
+  },
+  {
+   "ability": "Ability_Bow_PenetratingShot",
+   "slots": {
+    "second_state": 36,
+    "second_sequence": 1389,
+    "third_sequence": 2343,
+    "marker": 521
+   },
+   "seen": 656
+  },
+  {
+   "ability": "Ability_Bow_PoisonShot",
+   "slots": {
+    "second_state": 36,
+    "second_sequence": 555,
+    "third_state": 46,
+    "third_sequence": 3564,
+    "marker": 265
+   },
+   "seen": 17
+  },
+  {
+   "ability": "Ability_Bow_RainofArrows",
+   "slots": {
+    "second_state": 36,
+    "second_sequence": 1453,
+    "third_state": 46,
+    "third_sequence": 431,
+    "marker": 129
+   },
+   "cast": {
+    "marker": 43,
+    "second_sequence": 571,
+    "second_state": 33
+   },
+   "seen": 26
+  },
+  {
+   "ability": "Ability_Bow_RapidShot",
+   "first": {
+    "state": 8,
+    "sequence": 41
+   },
+   "slots": {
+    "second_state": 0,
+    "second_sequence": 0,
+    "third_sequence": 387,
+    "marker": 9
+   },
+   "seen": 1540
+  },
+  {
+   "ability": "Ability_Bow_SplinterShot",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 571,
+    "third_sequence": 421,
+    "marker": 43
+   },
+   "seen": 821
+  },
+  {
+   "ability": "Ability_Dagger_Ambush",
+   "first": {
+    "state": 8,
+    "sequence": 4114
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 2
+  },
+  {
+   "ability": "Ability_Dagger_DashSlice",
+   "slots": {
+    "marker": 1
+   },
+   "seen": 3
+  },
+  {
+   "ability": "Ability_Dagger_DoubleStab",
+   "first": {
+    "state": 8,
+    "sequence": 2317
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 2
+  },
+  {
+   "ability": "Ability_Dagger_Flurry",
+   "first": {
+    "state": 8,
+    "sequence": 1588
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 2
+  },
+  {
+   "ability": "Ability_Dagger_Stealth",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 354,
+    "marker": 3
+   },
+   "seen": 2
+  },
+  {
+   "ability": "Ability_Dagger_Throw",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 3669,
+    "marker": 3
+   },
+   "seen": 2
+  },
+  {
+   "ability": "Ability_Firestaff_BurnOut",
+   "first": {
+    "state": 8,
+    "sequence": 4543
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 14
+  },
+  {
+   "ability": "Ability_Firestaff_Fireball",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 133,
+    "marker": 1
+   },
+   "seen": 107
+  },
+  {
+   "ability": "Ability_Firestaff_FlameThrower",
+   "slots": {
+    "second_state": 36,
+    "second_sequence": 464,
+    "third_state": 46,
+    "third_sequence": 451,
+    "marker": 129
+   },
+   "seen": 31
+  },
+  {
+   "ability": "Ability_Firestaff_Incinerate",
+   "first": {
+    "state": 8,
+    "sequence": 465
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 25
+  },
+  {
+   "ability": "Ability_Firestaff_MeteorShower",
+   "slots": {
+    "second_state": 36,
+    "second_sequence": 1935,
+    "third_state": 46,
+    "third_sequence": 448,
+    "marker": 33
+   },
+   "cast": {
+    "marker": 33,
+    "second_sequence": 137,
+    "second_state": 36,
+    "third_sequence": 1177,
+    "third_state": 46
+   },
+   "seen": 37
+  },
+  {
+   "ability": "Ability_Firestaff_PillarofFire",
+   "slots": {
+    "second_state": 36,
+    "second_sequence": 678,
+    "third_state": 46,
+    "third_sequence": 448,
+    "marker": 33
+   },
+   "cast": {
+    "marker": 1,
+    "second_sequence": 136,
+    "second_state": 33,
+    "third_sequence": 0,
+    "third_state": 0
+   },
+   "seen": 43
+  },
+  {
+   "ability": "Ability_Flail_Blast",
+   "first": {
+    "state": 8,
+    "sequence": 1299
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 81
+  },
+  {
+   "ability": "Ability_Flail_Burst",
+   "first": {
+    "state": 8,
+    "sequence": 44
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 72
+  },
+  {
+   "ability": "Ability_Flail_Charge",
+   "first": {
+    "state": 8,
+    "sequence": 3712
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 8
+  },
+  {
+   "ability": "Ability_Flail_DefensiveStrike",
+   "first": {
+    "state": 8,
+    "sequence": 2425
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 5
+  },
+  {
+   "ability": "Ability_Flail_Slam",
+   "first": {
+    "state": 8,
+    "sequence": 99
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 86
+  },
+  {
+   "ability": "Ability_Flail_Trip",
+   "first": {
+    "state": 8,
+    "sequence": 2344
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 31
+  },
+  {
+   "ability": "Ability_Greataxe_Charge",
+   "first": {
+    "state": 8,
+    "sequence": 60
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 136
+  },
+  {
+   "ability": "Ability_Greataxe_Executioner",
+   "first": {
+    "state": 8,
+    "sequence": 63
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 20
+  },
+  {
+   "ability": "Ability_Greataxe_GravityWell",
+   "first": {
+    "state": 8,
+    "sequence": 67
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 223
+  },
+  {
+   "ability": "Ability_Greataxe_Maelstorm",
+   "first": {
+    "state": 8,
+    "sequence": 66
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 261
+  },
+  {
+   "ability": "Ability_Greataxe_Reap",
+   "first": {
+    "state": 8,
+    "sequence": 2965
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 14
+  },
+  {
+   "ability": "Ability_Greataxe_Whirlwind",
+   "first": {
+    "state": 8,
+    "sequence": 4900
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 132
+  },
+  {
+   "ability": "Ability_Greatsword_Burst",
+   "first": {
+    "state": 8,
+    "sequence": 3431
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 137
+  },
+  {
+   "ability": "Ability_Greatsword_Combo",
+   "first": {
+    "state": 8,
+    "sequence": 3960
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 354
+  },
+  {
+   "ability": "Ability_Greatsword_Counter",
+   "first": {
+    "state": 8,
+    "sequence": 2862
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 292
+  },
+  {
+   "ability": "Ability_Greatsword_DashAttack",
+   "first": {
+    "state": 8,
+    "sequence": 2730
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 1030
+  },
+  {
+   "ability": "Ability_Greatsword_DefenseBreak",
+   "first": {
+    "state": 8,
+    "sequence": 4384
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 343
+  },
+  {
+   "ability": "Ability_Greatsword_DrainAttack",
+   "first": {
+    "state": 8,
+    "sequence": 3878
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 5
+  },
+  {
+   "ability": "Ability_Hatchet_Berserk",
+   "first": {
+    "state": 8,
+    "sequence": 7
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 464
+  },
+  {
+   "ability": "Ability_Hatchet_FeralRush",
+   "first": {
+    "state": 8,
+    "sequence": 4768
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 367
+  },
+  {
+   "ability": "Ability_Hatchet_InfectedThrow",
+   "first": {
+    "state": 8,
+    "sequence": 929
+   },
+   "slots": {
+    "second_state": 45,
+    "second_sequence": 0,
+    "marker": 1
+   },
+   "seen": 295
+  },
+  {
+   "ability": "Ability_Hatchet_RagingTorrent",
+   "first": {
+    "state": 8,
+    "sequence": 3383
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 737
+  },
+  {
+   "ability": "Ability_Hatchet_RendingThrow",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 4798,
+    "marker": 3
+   },
+   "seen": 1158
+  },
+  {
+   "ability": "Ability_Hatchet_SocialDistancing",
+   "first": {
+    "state": 8,
+    "sequence": 2235
+   },
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 11,
+    "marker": 1
+   },
+   "seen": 228
+  },
+  {
+   "ability": "Ability_Lifestaff_Beacon",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 154,
+    "marker": 3
+   },
+   "seen": 277
+  },
+  {
+   "ability": "Ability_Lifestaff_DivineEmbrace",
+   "slots": {
+    "second_state": 36,
+    "second_sequence": 4304,
+    "third_state": 46,
+    "third_sequence": 449,
+    "marker": 33
+   },
+   "cast": {
+    "marker": 3,
+    "second_sequence": 2277,
+    "second_state": 33,
+    "third_sequence": 0,
+    "third_state": 0
+   },
+   "seen": 88
+  },
+  {
+   "ability": "Ability_Lifestaff_LightsEmbrace",
+   "slots": {
+    "second_state": 36,
+    "second_sequence": 150,
+    "third_state": 46,
+    "third_sequence": 449,
+    "marker": 33
+   },
+   "cast": {
+    "marker": 3,
+    "second_sequence": 152,
+    "second_state": 33,
+    "third_sequence": 0,
+    "third_state": 0
+   },
+   "seen": 21
+  },
+  {
+   "ability": "Ability_Lifestaff_OrbofProtection",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 3039,
+    "marker": 3
+   },
+   "seen": 702
+  },
+  {
+   "ability": "Ability_Lifestaff_SacredGround",
+   "slots": {
+    "second_state": 36,
+    "second_sequence": 142,
+    "third_state": 46,
+    "third_sequence": 449,
+    "marker": 33
+   },
+   "cast": {
+    "marker": 3,
+    "second_sequence": 993,
+    "second_state": 33,
+    "third_sequence": 0,
+    "third_state": 0
+   },
+   "seen": 643
+  },
+  {
+   "ability": "Ability_Lifestaff_SplashofLight",
+   "first": {
+    "state": 8,
+    "sequence": 146
+   },
+   "slots": {
+    "second_state": 0,
+    "second_sequence": 0,
+    "marker": 1
+   },
+   "seen": 478
+  },
+  {
+   "ability": "Ability_Musket_PowderBurn",
+   "first": {
+    "state": 31,
+    "sequence": 4029
+   },
+   "slots": {
+    "second_state": 39,
+    "second_sequence": 888,
+    "third_sequence": 406,
+    "marker": 4140
+   },
+   "seen": 9
+  },
+  {
+   "ability": "Ability_Musket_PowerShot",
+   "first": {
+    "state": 27,
+    "sequence": 1570
+   },
+   "slots": {
+    "second_state": 39,
+    "second_sequence": 888,
+    "third_state": 46,
+    "third_sequence": 405,
+    "marker": 1024
+   },
+   "cast": {
+    "marker": 40,
+    "second_sequence": 3544,
+    "second_state": 36
+   },
+   "seen": 6
+  },
+  {
+   "ability": "Ability_Musket_ShootersStance",
+   "slots": {
+    "second_state": 36,
+    "second_sequence": 88,
+    "third_state": 46,
+    "third_sequence": 1166,
+    "marker": 137
+   },
+   "cast": {
+    "marker": 40,
+    "second_sequence": 3544,
+    "second_state": 36,
+    "third_sequence": 405,
+    "third_state": 46
+   },
+   "seen": 21
+  },
+  {
+   "ability": "Ability_Musket_StickyBomb",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 93,
+    "third_state": 46,
+    "third_sequence": 419,
+    "marker": 259
+   },
+   "seen": 21
+  },
+  {
+   "ability": "Ability_Musket_StoppingPower",
+   "first": {
+    "state": 8,
+    "sequence": 3550
+   },
+   "slots": {
+    "second_state": 0,
+    "second_sequence": 0,
+    "third_state": 46,
+    "third_sequence": 405,
+    "marker": 33
+   },
+   "cast": {
+    "marker": 40,
+    "second_sequence": 3544,
+    "second_state": 36
+   },
+   "seen": 17
+  },
+  {
+   "ability": "Ability_Musket_Traps",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 2620,
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 7
+   },
+   "seen": 44
+  },
+  {
+   "ability": "Ability_Rapier_Aerial_Lunge_Intro",
+   "first": {
+    "state": 8,
+    "sequence": 459
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 3
+  },
+  {
+   "ability": "Ability_Rapier_Evasion",
+   "first": {
+    "state": 8,
+    "sequence": 24
+   },
+   "slots": {
+    "marker": 0
+   },
+   "seen": 34
+  },
+  {
+   "ability": "Ability_Rapier_Flourish",
+   "first": {
+    "state": 8,
+    "sequence": 428
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 76
+  },
+  {
+   "ability": "Ability_Rapier_Flurry",
+   "first": {
+    "state": 8,
+    "sequence": 19
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 15
+  },
+  {
+   "ability": "Ability_Rapier_Riposte",
+   "first": {
+    "state": 8,
+    "sequence": 3325
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 55
+  },
+  {
+   "ability": "Ability_Rapier_Slash",
+   "first": {
+    "state": 8,
+    "sequence": 18
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 161
+  },
+  {
+   "ability": "Ability_Spear_Cyclone",
+   "first": {
+    "state": 8,
+    "sequence": 3848
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 153
+  },
+  {
+   "ability": "Ability_Spear_Javelin",
+   "slots": {
+    "second_state": 36,
+    "second_sequence": 167,
+    "third_state": 46,
+    "third_sequence": 401,
+    "marker": 40
+   },
+   "seen": 21
+  },
+  {
+   "ability": "Ability_Spear_Perforate",
+   "first": {
+    "state": 8,
+    "sequence": 169
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 256
+  },
+  {
+   "ability": "Ability_Spear_Skewer",
+   "first": {
+    "state": 8,
+    "sequence": 4776
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 292
+  },
+  {
+   "ability": "Ability_Spear_Sweep",
+   "first": {
+    "state": 8,
+    "sequence": 2095
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 15
+  },
+  {
+   "ability": "Ability_Spear_VaultKick",
+   "first": {
+    "state": 8,
+    "sequence": 831
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 23
+  },
+  {
+   "ability": "Ability_Sword_Bash",
+   "first": {
+    "state": 8,
+    "sequence": 145
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 180
+  },
+  {
+   "ability": "Ability_Sword_FinalStand",
+   "first": {
+    "state": 8,
+    "sequence": 13
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 94
+  },
+  {
+   "ability": "Ability_Sword_LeapingStrike",
+   "first": {
+    "state": 8,
+    "sequence": 356
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 25
+  },
+  {
+   "ability": "Ability_Sword_ReverseStab",
+   "first": {
+    "state": 8,
+    "sequence": 362
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 66
+  },
+  {
+   "ability": "Ability_Sword_Rush",
+   "first": {
+    "state": 8,
+    "sequence": 286
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 82
+  },
+  {
+   "ability": "Ability_Sword_WhirlingBlade",
+   "first": {
+    "state": 8,
+    "sequence": 4958
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 234
+  },
+  {
+   "ability": "Ability_VoidGauntlet_DecayingOrb",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 123,
+    "marker": 3
+   },
+   "seen": 248
+  },
+  {
+   "ability": "Ability_VoidGauntlet_DrainingTether",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 124,
+    "marker": 3
+   },
+   "seen": 30
+  },
+  {
+   "ability": "Ability_VoidGauntlet_EssenceRupture",
+   "first": {
+    "state": 31,
+    "sequence": 1019
+   },
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 3809,
+    "marker": 3
+   },
+   "seen": 86
+  },
+  {
+   "ability": "Ability_VoidGauntlet_NullChamber",
+   "first": {
+    "state": 8,
+    "sequence": 122
+   },
+   "slots": {
+    "second_state": 45,
+    "second_sequence": 0,
+    "marker": 1
+   },
+   "seen": 127
+  },
+  {
+   "ability": "Ability_VoidGauntlet_Scream",
+   "first": {
+    "state": 8,
+    "sequence": 1385
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 27
+  },
+  {
+   "ability": "Ability_VoidGauntlet_VoidBlade",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 126,
+    "marker": 3
+   },
+   "seen": 46
+  },
+  {
+   "ability": "Ability_WarHammer_ArmorBreaker",
+   "first": {
+    "state": 8,
+    "sequence": 68
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 214
+  },
+  {
+   "ability": "Ability_WarHammer_ClearOut",
+   "first": {
+    "state": 8,
+    "sequence": 1279
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 80
+  },
+  {
+   "ability": "Ability_WarHammer_MightyGavel",
+   "first": {
+    "state": 8,
+    "sequence": 69
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 35
+  },
+  {
+   "ability": "Ability_WarHammer_PathOfDestiny",
+   "first": {
+    "state": 8,
+    "sequence": 2371
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 168
+  },
+  {
+   "ability": "Ability_WarHammer_Shockwave",
+   "first": {
+    "state": 8,
+    "sequence": 70
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 341
+  },
+  {
+   "ability": "Ability_WarHammer_WreckingBall",
+   "first": {
+    "state": 8,
+    "sequence": 349
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 25
+  },
+  {
+   "ability": "IceMagic_Entombed",
+   "first": {
+    "state": 8,
+    "sequence": 110
+   },
+   "slots": {
+    "second_state": 45,
+    "second_sequence": 0,
+    "marker": 1
+   },
+   "seen": 19
+  },
+  {
+   "ability": "IceMagic_IcePylon",
+   "first": {
+    "state": 8,
+    "sequence": 2641
+   },
+   "slots": {
+    "marker": 1
+   },
+   "seen": 5
+  },
+  {
+   "ability": "IceMagic_IceShower",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 115,
+    "marker": 3
+   },
+   "seen": 5
+  },
+  {
+   "ability": "IceMagic_IceStorm",
+   "slots": {
+    "second_state": 36,
+    "second_sequence": 262,
+    "third_state": 46,
+    "third_sequence": 439,
+    "marker": 33
+   },
+   "cast": {
+    "second_sequence": 3134,
+    "second_state": 44
+   },
+   "seen": 110
+  },
+  {
+   "ability": "IceMagic_Spikes",
+   "first": {
+    "state": 8,
+    "sequence": 3756
+   },
+   "slots": {
+    "second_state": 0,
+    "second_sequence": 0,
+    "marker": 1
+   },
+   "seen": 36
+  },
+  {
+   "ability": "IceMagic_WindChill",
+   "slots": {
+    "second_state": 33,
+    "second_sequence": 938,
+    "third_state": 46,
+    "third_sequence": 446,
+    "marker": 131
+   },
+   "seen": 93
+  }
+ ],
+ "reactions": [
+  {
+   "animations": "cmbt_idle_1h_r1_b+rapier_pose_add",
+   "sequence": 3663
+  },
+  {
+   "animations": "cmbt_idle_1h_r1_f+rapier_pose_add",
+   "sequence": 2833
+  },
+  {
+   "animations": "cmbt_idle_1h_r1_l+rapier_pose_add",
+   "sequence": 1802
+  },
+  {
+   "animations": "cmbt_idle_1h_r2_b+rswrd_pose_add",
+   "sequence": 3175
+  },
+  {
+   "animations": "cmbt_idle_2h_r1_b+spear_pose_add",
+   "sequence": 2953
+  },
+  {
+   "animations": "cmbt_idle_2h_r1_f+spear_pose_add",
+   "sequence": 3446
+  },
+  {
+   "animations": "grtswrd_block_break",
+   "sequence": 2125
+  },
+  {
+   "animations": "unarmed_r1_b+grtswrd_r1_b",
+   "sequence": 2953
+  },
+  {
+   "animations": "unarmed_r1_b+unarmed_r1_b",
+   "sequence": 3663
+  },
+  {
+   "animations": "unarmed_r1_f+axe2h_r1_f+rifle_idle_lefthand+rifle_idle_righthand",
+   "sequence": 2567
+  },
+  {
+   "animations": "unarmed_r1_f+bow_r1_f",
+   "sequence": 3000
+  },
+  {
+   "animations": "unarmed_r1_f+grtswrd_r1_f",
+   "sequence": 3446
+  },
+  {
+   "animations": "unarmed_r1_f+rswrd_r1_f",
+   "sequence": 3068
+  },
+  {
+   "animations": "unarmed_r1_l+grtswrd_r1_l",
+   "sequence": 3421
+  },
+  {
+   "animations": "unarmed_r1_r",
+   "sequence": 1669
+  },
+  {
+   "animations": "unarmed_r1_r+axe2h_r1_r+rifle_idle_lefthand+rifle_idle_righthand",
+   "sequence": 1710
+  },
+  {
+   "animations": "unarmed_r1_r+bow_r1_r",
+   "sequence": 3503
+  },
+  {
+   "animations": "unarmed_r2_b",
+   "sequence": 3276
+  },
+  {
+   "animations": "unarmed_r2_b+grtswrd_r2_b",
+   "sequence": 3613
+  },
+  {
+   "animations": "unarmed_r2_f",
+   "sequence": 3587
+  },
+  {
+   "animations": "unarmed_r2_f+axe2h_r2_f",
+   "sequence": 2960
+  },
+  {
+   "animations": "unarmed_r2_f+axe2h_r2_f+rifle_idle_lefthand+rifle_idle_righthand",
+   "sequence": 3552
+  },
+  {
+   "animations": "unarmed_r2_f+bow_r2_f",
+   "sequence": 3590
+  },
+  {
+   "animations": "unarmed_r2_f+grtswrd_r2_f",
+   "sequence": 2960
+  },
+  {
+   "animations": "unarmed_r2_l",
+   "sequence": 3425
+  },
+  {
+   "animations": "unarmed_r2_l+axe2h_r2_l+rifle_idle_lefthand+rifle_idle_righthand",
+   "sequence": 3517
+  },
+  {
+   "animations": "unarmed_r2_l+grtswrd_r2_l",
+   "sequence": 3571
+  },
+  {
+   "animations": "unarmed_r2_l+rswrd_r2_l",
+   "sequence": 3575
+  },
+  {
+   "animations": "unarmed_r2_r",
+   "sequence": 3046
+  },
+  {
+   "animations": "unarmed_r2_r+axe2h_r2_r+rifle_idle_lefthand+rifle_idle_righthand",
+   "sequence": 2510
+  },
+  {
+   "animations": "unarmed_r2_r+bow_r2_r",
+   "sequence": 3551
+  },
+  {
+   "animations": "unarmed_r2_r+grtswrd_r2_r",
+   "sequence": 3035
+  },
+  {
+   "animations": "unarmed_r3_b",
+   "sequence": 3532
+  },
+  {
+   "animations": "unarmed_r3_b+grtswrd_r3_b",
+   "sequence": 1816
+  },
+  {
+   "animations": "unarmed_r3_f+axe2h_r3_f",
+   "sequence": 3528
+  },
+  {
+   "animations": "unarmed_r3_f+bow_r3_f",
+   "sequence": 3530
+  },
+  {
+   "animations": "unarmed_r3_f+grtswrd_r3_f",
+   "sequence": 3528
+  },
+  {
+   "animations": "unarmed_r3_l+bow_r3_l",
+   "sequence": 1755
+  },
+  {
+   "animations": "unarmed_r3_l+grtswrd_r3_l",
+   "sequence": 1945
+  },
+  {
+   "animations": "unarmed_r3_l+rswrd_r3_l",
+   "sequence": 3513
+  },
+  {
+   "animations": "unarmed_r3_r+grtswrd_r3_r",
+   "sequence": 2540
+  },
+  {
+   "animations": "unarmed_r3_r+rswrd_r3_r",
+   "sequence": 3501
+  },
+  {
+   "animations": "unarmed_r4_b+unarmed_prn_idle_to_idle",
+   "sequence": 2519
+  },
+  {
+   "animations": "unarmed_r4_f+unarmed_prn_idle_to_idle",
+   "sequence": 3486
+  },
+  {
+   "animations": "unarmed_r4_f_overhead+unarmed_prn_idle_to_idle",
+   "sequence": 3463
+  },
+  {
+   "animations": "unarmed_r4_l+unarmed_prn_idle_to_idle",
+   "sequence": 3451
+  },
+  {
+   "animations": "unarmed_r4_r+unarmed_prn_idle_to_idle",
+   "sequence": 2865
+  },
+  {
+   "animations": "unarmed_r0_f",
+   "sequence": 3317
+  },
+  {
+   "animations": "grtswrd_b0_f",
+   "sequence": 1898
   }
  ]
 }
