@@ -383,10 +383,11 @@ impl MoveSet {
             if let Some(moving) = walk.moving.map(pair) {
                 set.start = moving;
                 set.back_start = moving;
-                set.stop = moving;
                 set.restart = moving;
             }
             set.idle = walk.idle.map_or(set.idle, pair);
+            // The block or aim walk stops into its stand ([`Locomotion::step`]).
+            set.stop = set.idle;
         }
         set.moving = set.restart.1;
         set
@@ -419,6 +420,10 @@ impl Locomotion {
                 };
                 (Self::Moving, Some(start))
             }
+            // A set whose stop is its stand (the block or aim walk) stands at once (Observed: in
+            // 398 retail ledgers 2,127 of 2,759 stops of a block walk started the block's stand
+            // within 100 ms, 1,693 within 50 ms; ours held the walk 39 records, live 2026-11-17).
+            (Self::Moving, false) if set.stop == set.idle => (Self::Idle, Some(set.idle)),
             (Self::Moving, false) => (Self::Stopping(set.stop_records), Some(set.stop)),
             (Self::Stopping(_), true) => (Self::Moving, Some(set.restart)),
             (Self::Stopping(left), false) => match left.saturating_sub(1) {
@@ -873,6 +878,10 @@ impl SlayerTrack {
         // 2026-11-14).
         let ability_holds = self.ability.is_some_and(|on| on.first);
         let air = moves_stance.and_then(|stance| stance.air);
+        // A body that was in the air before this record starts no jump and no dodge (live
+        // 2026-11-17: a controller player's jump presses in the air each started a new jump,
+        // five in 0.8 s, and the others saw the jump twitch).
+        let in_air = self.air.is_some();
         let landing = self.air_step(&record, air);
         let movement = if entered_air {
             let fall = air.and_then(|air| air.fall).unwrap_or(swim::FALL_SEQUENCE);
@@ -916,7 +925,7 @@ impl SlayerTrack {
         if let Some(Shot::Reload(slots) | Shot::Aimed(slots)) = shot {
             self.upper = Some(merge(self.upper.unwrap_or_default(), slots));
         }
-        let server = self.server_start(&record, stance, moves_stance);
+        let server = self.server_start(&record, stance, moves_stance, in_air);
         if matches!(shot, Some(Shot::Reload(_))) {
             // The reload's press is no tap: its release starts no attack.
             self.press = None;
@@ -1047,10 +1056,11 @@ impl SlayerTrack {
         record: &SlayerRecord,
         stance: Option<&StanceSequences>,
         moves_stance: Option<&StanceSequences>,
+        in_air: bool,
     ) -> Option<Pending> {
         let intent = record.intent?;
-        let dodge = intent.dodge && !self.dodge_held;
-        let jump = intent.jump && !self.jump_held;
+        let dodge = intent.dodge && !self.dodge_held && !in_air;
+        let jump = intent.jump && !self.jump_held && !in_air;
         self.dodge_held = intent.dodge;
         self.jump_held = intent.jump;
         if jump {
@@ -2852,6 +2862,70 @@ pub(crate) mod tests {
             Some(&(Some(MoveSet::SHEATHED.idle.0), MoveSet::SHEATHED.idle.1)),
             "the stand follows the landing {LAND_MOVE_RECORDS} records later: {after:?}"
         );
+    }
+
+    /// Live 2026-11-17: a controller player's jump presses in the air each started a new jump.
+    #[test]
+    fn a_jump_press_in_the_air_starts_no_jump() {
+        const AIR_RECORDS: u16 = 12;
+        const PRESS_EVERY: u16 = 3;
+        let table = air_table();
+        let still = Intent::default();
+        let jump = Intent {
+            jump: true,
+            ..still
+        };
+        let sheathed = |counter, intent, airborne| SlayerRecord {
+            weapon: weapon(GREATSWORD, false),
+            airborne,
+            ..quiet_record(counter, intent)
+        };
+        let mut track = spawned();
+        let mut jump_starts = std::collections::BTreeSet::new();
+        let mut step = |track: &mut SlayerTrack, record: SlayerRecord| {
+            let counter = record.counter;
+            track.record(record, &table);
+            while let Some(state) = own_state(track, counter).state {
+                if state.state == Some(14) {
+                    jump_starts.insert(state.started);
+                }
+            }
+        };
+        step(&mut track, sheathed(10, jump, false));
+        for counter in 11..11 + AIR_RECORDS {
+            let intent = if counter % PRESS_EVERY == 0 {
+                jump
+            } else {
+                still
+            };
+            step(&mut track, sheathed(counter, intent, true));
+        }
+        assert_eq!(jump_starts.len(), 1, "one jump: {jump_starts:?}");
+    }
+
+    /// Retail: a block walk stops into the block's stand at once (2,127 of 2,759 stops within
+    /// 100 ms); ours held the walk 39 records, live 2026-11-17.
+    #[test]
+    fn a_block_walk_stops_into_the_block_stand_at_once() {
+        let table = table();
+        let block = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let walking = Intent {
+            forward: 1,
+            ..block
+        };
+        let stance = table.stance(stance_key(GREATSWORD));
+        let stand = MoveSet::of(stance, true, true, Posture::Stand).idle;
+        let mut track = spawned();
+        track.record(keyed(100, walking, HELD, GREATSWORD), &table);
+        while own_state(&mut track, 100).state.is_some() {}
+        track.record(keyed(101, walking, HELD, GREATSWORD), &table);
+        while own_state(&mut track, 101).state.is_some() {}
+        track.record(keyed(102, block, HELD, GREATSWORD), &table);
+        let stopped = own_state(&mut track, 102).state.expect("the stop");
+        assert_eq!((stopped.state, stopped.sequence), (Some(stand.0), stand.1));
     }
 
     #[test]
