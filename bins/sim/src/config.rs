@@ -340,9 +340,9 @@ pub enum SimRole {
     Instance,
 }
 
-/// The wait for an instance answer when the file names none: the director's admit timeout of
-/// `config/world-director.toml`, above its group and opening waits.
-const DEFAULT_INSTANCE_REQUEST_TIMEOUT_MS: u64 = 3000;
+/// The wait for an instance answer when the file names none: above the director's group and
+/// opening waits and its start wait for an instance sim it starts (`start_wait_ms`, 60 s).
+const DEFAULT_INSTANCE_REQUEST_TIMEOUT_MS: u64 = 65_000;
 
 const fn default_instance_request_timeout_ms() -> u64 {
     DEFAULT_INSTANCE_REQUEST_TIMEOUT_MS

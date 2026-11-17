@@ -195,6 +195,19 @@ pub struct LaunchConfig {
     pub id_prefix: String,
     /// A level nobody asked for in this long keeps no spare sim.
     pub forget_after_ms: u64,
+    /// Longest wait of a request that found no free instance sim for a sim the director starts
+    /// for it; below the sims' `instance_request_timeout_ms`.
+    #[serde(default = "default_start_wait_ms")]
+    pub start_wait_ms: u64,
+}
+
+/// The start wait when the file names none. Inferred: a cold instance sim of the open world
+/// level took 29 s from its start to its first instance on the PC stack (2026-11-17), and the
+/// expedition levels are smaller.
+const DEFAULT_START_WAIT_MS: u64 = 60_000;
+
+const fn default_start_wait_ms() -> u64 {
+    DEFAULT_START_WAIT_MS
 }
 
 /// A start position, in metres. The height comes from the ground of the level.
@@ -302,11 +315,12 @@ impl DirectorConfig {
                 && (launch.program.is_empty()
                     || launch.id_prefix.is_empty()
                     || launch.max_sims == 0
-                    || launch.forget_after_ms == 0)
+                    || launch.forget_after_ms == 0
+                    || launch.start_wait_ms == 0)
             {
                 return invalid(
                     "instances.launch",
-                    "needs a program, an id prefix, max_sims and forget_after_ms above 0",
+                    "needs a program, an id prefix, max_sims, forget_after_ms and start_wait_ms above 0",
                 );
             }
         }
@@ -429,6 +443,7 @@ mod tests {
                 max_sims: 1,
                 id_prefix: "inst".to_owned(),
                 forget_after_ms: 1,
+                start_wait_ms: 1,
             });
         }
         assert!(bad.validate().is_err());

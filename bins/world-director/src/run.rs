@@ -156,6 +156,7 @@ fn instance_settings(config: &InstancesConfig, war_forts: WarForts) -> InstanceS
             max_sims: launch.max_sims,
             id_prefix: launch.id_prefix.clone(),
             forget_after: Duration::from_millis(launch.forget_after_ms),
+            start_wait: Duration::from_millis(launch.start_wait_ms),
         }),
         queues: QueueRules {
             arena: MatchSettings::arena(

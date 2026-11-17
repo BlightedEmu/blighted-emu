@@ -58,6 +58,8 @@ pub struct LaunchSettings {
     pub id_prefix: String,
     /// A level nobody asked for in this long keeps no spare sim.
     pub forget_after: Duration,
+    /// Longest wait of a request for a sim started for it.
+    pub start_wait: Duration,
 }
 
 /// One open instance.
@@ -490,6 +492,14 @@ impl Launches {
     /// A player asked for an instance of `level` at `now`.
     pub fn wanted(&mut self, level: &str, now: Instant) {
         self.wanted.insert(level.to_owned(), now);
+    }
+
+    /// Whether a sim this director started for `level` does not beat yet (`live`: whether a sim
+    /// beats).
+    pub fn starting(&self, level: &str, live: impl Fn(&BusId) -> bool) -> bool {
+        self.started
+            .iter()
+            .any(|(id, started)| started == level && !live(id))
     }
 
     /// The sims to start: for each wanted level, as many as it lacks of its spare count, within
@@ -1051,6 +1061,7 @@ mod tests {
             max_sims: 3,
             id_prefix: "inst".to_owned(),
             forget_after: FORGET_AFTER,
+            start_wait: Duration::from_secs(60),
         }
     }
 
@@ -1067,9 +1078,16 @@ mod tests {
                 .is_empty()
         );
         launches.wanted(LEVEL, start);
+        assert!(!launches.starting(LEVEL, |_| false), "nothing started yet");
         let started = launches.to_start(&launch_settings(), |_| 0, |_| false);
         assert_eq!(started.len(), 2);
         assert!(started.iter().all(|launch| launch.level == LEVEL));
+        assert!(
+            launches.starting(LEVEL, |_| false),
+            "started, not beating yet"
+        );
+        assert!(!launches.starting(LEVEL, |_| true), "beating");
+        assert!(!launches.starting("nw_dungeon_everfall_00", |_| false));
         // Not beating yet: they count as ready, so nothing more starts.
         assert!(
             launches

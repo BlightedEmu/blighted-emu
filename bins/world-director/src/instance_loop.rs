@@ -121,6 +121,14 @@ pub enum InstanceEvent {
 /// A request that waits for the opening of its group's instance, with its group.
 type Waiting = (Incoming<InstanceRequest>, GroupAnswer);
 
+/// A request that found no free instance sim and waits for one the director started, with its
+/// group, until its deadline.
+struct Held {
+    request: Incoming<InstanceRequest>,
+    group: GroupAnswer,
+    until: Instant,
+}
+
 /// The instances of the loop with their bus and processes.
 pub struct InstanceLoop {
     settings: Option<InstanceSettings>,
@@ -132,6 +140,8 @@ pub struct InstanceLoop {
     events: mpsc::Sender<InstanceEvent>,
     /// The requests that wait for an instance's opening, by instance.
     waiting: HashMap<Uuid, Vec<Waiting>>,
+    /// The requests that wait for a starting instance sim.
+    held: Vec<Held>,
     /// The matchmaking queue of the arena.
     matchmaker: Matchmaker,
     /// The territory wars' instances; `None` when the loop reads no war.
@@ -171,6 +181,7 @@ impl InstanceLoop {
             children: HashMap::new(),
             events,
             waiting: HashMap::new(),
+            held: Vec::new(),
             matchmaker: Matchmaker::default(),
             wars: None,
         }
@@ -221,7 +232,7 @@ impl InstanceLoop {
         };
         self.launches.wanted(&request.message.level, Instant::now());
         if request.message.capacity <= 1 {
-            self.decide(request, Ok(GroupAnswer::Alone), sims);
+            self.decide(request, Ok(GroupAnswer::Alone), sims, None);
             return;
         }
         let (bus, events) = (self.bus.clone(), self.events.clone());
@@ -245,7 +256,7 @@ impl InstanceLoop {
     /// A result of a bus call.
     pub fn event(&mut self, event: InstanceEvent, sims: &SimRegistry) {
         match event {
-            InstanceEvent::Grouped { request, group } => self.decide(request, group, sims),
+            InstanceEvent::Grouped { request, group } => self.decide(request, group, sims, None),
             InstanceEvent::Opened { instance, ok } => {
                 self.instances.opened(instance, ok);
                 metrics::gauge!(METRIC_INSTANCES).set(self.instances.len() as f64);
@@ -253,7 +264,7 @@ impl InstanceLoop {
                 // confirmed instance, or the same refusal.
                 for (request, group) in self.waiting.remove(&instance).unwrap_or_default() {
                     if ok {
-                        self.decide(request, Ok(group), sims);
+                        self.decide(request, Ok(group), sims, None);
                     } else {
                         self.reply(
                             request,
@@ -510,11 +521,15 @@ impl InstanceLoop {
         });
     }
 
+    /// Decides `request` with its group `group`; a request that finds no free instance sim
+    /// waits for one the director starts until `held_until` (a new one from the launch
+    /// settings when `None`).
     fn decide(
         &mut self,
         request: Incoming<InstanceRequest>,
         group: Result<GroupAnswer, InstanceRefusal>,
         sims: &SimRegistry,
+        held_until: Option<Instant>,
     ) {
         let group = match group {
             Ok(group) => group,
@@ -529,6 +544,9 @@ impl InstanceLoop {
             .instances
             .decide(&request.message, &group, &free, ids, unix_ms())
         {
+            Decision::Reply(InstanceReply::Refused {
+                reason: InstanceRefusal::NoInstanceSim,
+            }) => self.hold(request, group, sims, held_until),
             Decision::Reply(reply) => self.reply(request, reply),
             Decision::Wait { instance } => self
                 .waiting
@@ -615,6 +633,65 @@ impl InstanceLoop {
         }
     }
 
+    /// `request` (group `group`) found no free instance sim: the director starts the sims its
+    /// level lacks at once, and the request waits until `held_until` (or the launch settings'
+    /// start wait from now) while one of them starts; else it is refused.
+    fn hold(
+        &mut self,
+        request: Incoming<InstanceRequest>,
+        group: GroupAnswer,
+        sims: &SimRegistry,
+        held_until: Option<Instant>,
+    ) {
+        let now = Instant::now();
+        let launch = self
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.launch.clone());
+        let until = launch.as_ref().and_then(|launch| {
+            self.launch(launch, sims);
+            held_until.or_else(|| now.checked_add(launch.start_wait))
+        });
+        let level = &request.message.level;
+        let starting = self
+            .launches
+            .starting(level, |id| sims.level_of(id).is_some());
+        match until {
+            Some(until) if starting && now < until => {
+                if held_until.is_none() {
+                    tracing::info!(%level, game_mode = %request.message.game_mode, "instance request waits for a starting sim");
+                }
+                self.held.push(Held {
+                    request,
+                    group,
+                    until,
+                });
+            }
+            _ => self.reply(
+                request,
+                InstanceReply::Refused {
+                    reason: InstanceRefusal::NoInstanceSim,
+                },
+            ),
+        }
+    }
+
+    /// Decides again the held requests whose level has a free instance sim now; the ones whose
+    /// sim did not come in time are refused.
+    fn release_held(&mut self, sims: &SimRegistry) {
+        for held in std::mem::take(&mut self.held) {
+            if sims
+                .free_instance_sims(&held.request.message.level)
+                .is_empty()
+                && Instant::now() < held.until
+            {
+                self.held.push(held);
+                continue;
+            }
+            self.decide(held.request, Ok(held.group), sims, Some(held.until));
+        }
+    }
+
     fn reply(&self, request: Incoming<InstanceRequest>, reply: InstanceReply) {
         let bus = self.bus.clone();
         tokio::spawn(async move { answer(&bus, &request, &reply).await });
@@ -648,6 +725,7 @@ impl InstanceLoop {
         if let Some(launch) = &settings.launch {
             self.launch(launch, sims);
         }
+        self.release_held(sims);
     }
 
     /// Tells every sim that the run of `instance` ended: its entrance drops it.
