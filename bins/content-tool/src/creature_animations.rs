@@ -51,6 +51,11 @@ const MAIN_HAND_SLOT: u32 = 24;
 /// on `Shield_OH` with `Alerted`, and no other source gives `Shield_OH`; retail
 /// `Dryad_Soldier_32` raised its block 90 times, all-capture sweep 2026-11-09).
 const OFF_HAND_SLOT: u32 = 27;
+/// The paperdoll slot of a creature's natural weapon (Observed: all 340 creature slices that
+/// hold an item there hold none in the main hand; the shipwrecked ghost's `Ghost_Shipwrecked_Weapon`
+/// is `EquippableMouth` with the `AI_Ghost` ranged profile its `LightningBolt` clip fires,
+/// game data sweep 2026-11-17; wolves hold `Wolf_Teeth` there).
+const MOUTH_SLOT: u32 = 21;
 /// The separator of a `MannequinTag` cell (retail `1H_Melee,Club`).
 const MANNEQUIN_TAG_SEPARATOR: char = ',';
 /// A creature's body collider component's fields: the filter and the radius by name (their CRCs
@@ -298,11 +303,12 @@ fn fragment_ticks(
         .collect()
 }
 
-/// The item of the main hand of the creature slice `root`'s paperdoll.
-pub fn main_hand_item(root: &Element) -> Option<String> {
+/// The weapon item of the creature slice `root`'s paperdoll: its main hand, else its mouth slot
+/// ([`MOUTH_SLOT`]).
+pub fn weapon_item(root: &Element) -> Option<String> {
     let mut all = Vec::new();
     descendants(root, &mut all);
-    hand_item_in(&all, MAIN_HAND_SLOT)
+    hand_item_in(&all, MAIN_HAND_SLOT).or_else(|| hand_item_in(&all, MOUTH_SLOT))
 }
 
 /// The item of paperdoll slot `hand` among the elements `all` of a slice.
@@ -782,6 +788,44 @@ mod tests {
         assert_eq!(
             hand_item_in(&all, OFF_HAND_SLOT).as_deref(),
             Some("Npc_Dryad_Kite_Shield")
+        );
+    }
+
+    /// The shipwrecked ghost's paperdoll: its weapon in the mouth slot and its ammo in slot 13.
+    #[test]
+    fn a_creature_without_a_main_hand_fights_with_its_mouth_weapon() {
+        let slot = |slot: u32, item: &str| {
+            Element::with_children(
+                0,
+                vec![
+                    Element::with_value(ITEM_SLOT_FIELD_CRC, slot.to_be_bytes().to_vec()),
+                    text(ITEM_NAME_FIELD, item),
+                ],
+            )
+        };
+        const AMMO_SLOT: u32 = 13;
+        let ghost = Element::with_children(
+            0,
+            vec![
+                slot(MOUTH_SLOT, "Ghost_Shipwrecked_Weapon"),
+                slot(AMMO_SLOT, "ShotT2"),
+            ],
+        );
+        assert_eq!(
+            weapon_item(&ghost).as_deref(),
+            Some("Ghost_Shipwrecked_Weapon")
+        );
+        let soldier = Element::with_children(
+            0,
+            vec![
+                slot(MOUTH_SLOT, "Wolf_Teeth"),
+                slot(MAIN_HAND_SLOT, "Weapon_AI_Dryad_Soldier"),
+            ],
+        );
+        assert_eq!(
+            weapon_item(&soldier).as_deref(),
+            Some("Weapon_AI_Dryad_Soldier"),
+            "the main hand first"
         );
     }
 

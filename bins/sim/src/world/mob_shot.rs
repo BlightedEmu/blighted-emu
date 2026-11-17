@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The projectiles mobs fire. A `CAGE-RangedAttack` clip of the action a mob plays
 //! ([`crate::mob_ai::RangedClip`]) fires the attack its `RangedAttackName` names in the ranged
-//! profile of the mob's main-hand weapon: the ranged attack database gives its range and radius,
-//! the clip's projectile slice its flight. The mob aims at its target, ahead of it when the clip
-//! leads (`AILeadTarget`, by at most `AILeadTargetMaxAngle`). The shot lands where it aimed once
-//! it flew there, and hits the target when the target's body is then within the projectile's
-//! radius of that point.
+//! profile of the mob's weapon (main hand, else mouth slot): the ranged attack database gives
+//! its range and radius, the clip's projectile slice its flight. The mob aims at its target,
+//! ahead of it when the clip leads (`AILeadTarget`, by at most `AILeadTargetMaxAngle`). The shot
+//! lands where it aimed once it flew there, and hits the target when the target's body is then
+//! within the projectile's radius of that point.
 //!
 //! Observed: retail Janszoon threw his anchor (`Officer_AnchorToss`, newchar-retail 1246273 ms,
 //! the player 8.7 m away) and the player lost 40 health 1.53 s later, his table's `Anchor_Toss`
@@ -290,7 +290,7 @@ mod tests {
         world
     }
 
-    /// The test mob's ranged clip at player 1, from the main-hand item `weapon`, with the
+    /// The test mob's ranged clip at player 1, from the weapon item `weapon`, with the
     /// projectile slice `slice`.
     fn shot_from(weapon: Option<&str>, slice: Option<&str>) -> MobAttackIntent {
         MobAttackIntent {

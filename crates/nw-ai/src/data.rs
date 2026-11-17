@@ -130,9 +130,10 @@ pub struct Archetype {
     /// The unique id of that damage table's datasheet (its `#DamageData` header, for example
     /// `BoarDamageTable`): the name the combat rows know the table by.
     pub damage_table_id: Option<NameId>,
-    /// The item of the slice paperdoll's main hand (`MAIN_HAND_OPTION_1`), whose weapon row
-    /// gives a blocked hit's `BlockStaminaDamage`.
-    pub main_hand_item: Option<NameId>,
+    /// The weapon item of the slice paperdoll: its main hand (`MAIN_HAND_OPTION_1`), else its
+    /// mouth slot (a creature's natural weapon). Its weapon row gives a blocked hit's
+    /// `BlockStaminaDamage` and the ranged profile its `CAGE-RangedAttack` clips fire from.
+    pub weapon_item: Option<NameId>,
     /// The Mannequin tags the creature always has (slice default tags and main-hand weapon
     /// tags, as the creature animation table).
     pub default_tags: Vec<NameId>,
@@ -617,9 +618,10 @@ impl Grid {
 }
 
 /// One attack of the ranged attack database (`rangedattackdatabase.radb`): a `CAGE-RangedAttack`
-/// clip's `RangedAttackName` in the ranged profile of the mob's main-hand weapon
-/// (`RangedAttackProfile`; Observed: `Corrupted_First_Mate_2hAnchor` is `AI_Undead`, whose
-/// `Officer_Anchor` Janszoon's toss names).
+/// clip's `RangedAttackName` in the ranged profile of the mob's weapon
+/// ([`Archetype::weapon_item`]'s `RangedAttackProfile`; Observed: `Corrupted_First_Mate_2hAnchor`
+/// is `AI_Undead`, whose `Officer_Anchor` Janszoon's toss names; `Ghost_Shipwrecked_Weapon` is
+/// `AI_Ghost`, whose `LightningBolt` is a 16 m hit scan).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RangedAttack {
     /// The profile.
@@ -1079,7 +1081,7 @@ mod tests {
                 animation_database: None,
                 damage_table: None,
                 damage_table_id: None,
-                main_hand_item: None,
+                weapon_item: None,
                 default_tags: Vec::new(),
                 triggers: Vec::new(),
                 initial_effects: Vec::new(),

@@ -405,7 +405,7 @@ impl Build {
             animation_database: None,
             damage_table: None,
             damage_table_id: None,
-            main_hand_item: None,
+            weapon_item: None,
             default_tags: Vec::new(),
             triggers: Vec::new(),
             initial_effects: Vec::new(),

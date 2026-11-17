@@ -1194,7 +1194,8 @@ pub struct Strike {
     pub table: String,
     /// The `DamageTableRow` of the window.
     pub row: String,
-    /// The item of the creature's main hand, whose weapon row a block's stamina comes from.
+    /// The creature's weapon item (main hand, else mouth slot), whose weapon row a block's
+    /// stamina and a ranged clip's profile come from.
     pub weapon: Option<String>,
     /// How the swing reaches its target (a ranged strike lands by its projectile instead).
     pub reach: MobReach,
@@ -2058,7 +2059,7 @@ impl MindState {
                         strike: Strike {
                             table: table.clone(),
                             row: ai.name(row).to_owned(),
-                            weapon: arch.main_hand_item.map(|item| ai.name(item).to_owned()),
+                            weapon: arch.weapon_item.map(|item| ai.name(item).to_owned()),
                             reach,
                             ranged: ranged.map(|ranged| RangedClip {
                                 attack: ai.name(ranged.attack).to_owned(),

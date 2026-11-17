@@ -45,7 +45,7 @@ use nw_formats::pak::{PakArchive, PakError, find_paks};
 use nw_oodle::KrakenDecompressor;
 use nw_world::slice_triggers::slice_triggers;
 
-use crate::creature_animations::{main_hand_item, read_databases, read_entries, text_of};
+use crate::creature_animations::{read_databases, read_entries, text_of, weapon_item};
 use crate::error::ToolError;
 use crate::player_attacks::{RANGED_ATTACK_DATABASE, RANGED_CLIP, ranged_attacks, slice_flight};
 use crate::source::GameSource;
@@ -250,7 +250,7 @@ struct SliceAi {
     grid: Option<String>,
     animation_database: Option<String>,
     damage_table: Option<String>,
-    main_hand: Option<String>,
+    weapon: Option<String>,
     /// The slice's `TriggerEntityComponent`s: name, child (main `Id` XOR owner `Id`), component.
     triggers: Vec<(String, u64, u64)>,
     /// `m_initialStatusEffects`, in stream order.
@@ -1207,7 +1207,7 @@ pub fn build_ai_data(
         match slice_root(bytes) {
             Ok(root) => {
                 let mut slice = SliceAi::read(&root, &mut decoder, path)?;
-                slice.main_hand = main_hand_item(&root);
+                slice.weapon = weapon_item(&root);
                 // A slice without triggers, or with an unreadable one, runs none.
                 slice.triggers = slice_triggers(&root)
                     .map(|triggers| {
@@ -1416,7 +1416,7 @@ pub fn build_ai_data(
                 .as_ref()
                 .and_then(|table| table_ids.get(table))
                 .map(|id| decoder.intern(id)),
-            main_hand_item: slice.main_hand.as_ref().map(|item| decoder.intern(item)),
+            weapon_item: slice.weapon.as_ref().map(|item| decoder.intern(item)),
             default_tags: row_tags
                 .into_iter()
                 .map(|tag| decoder.intern(tag))
