@@ -555,7 +555,23 @@
               "proof": "tests"
             },
             {
-              "check": "The player sequence table (realm data pack) is not complete for this build: the rapier, dagger, flail, sickle, gauntlets, rifle and warhammer have no jump (retail rapier jumps: 3675), so other players see the body rise with no jump animation. Some move and dodge numbers may also differ from the retail captures (Unknown until the table is mined again from the captures of this build).",
+              "check": "The player sequence table is mined again for this build (tests only, 2026-11-17): 391 retail ledgers whose weapon items were checked against the attacks only one weapon sends. The old table took its weapon from item numbers of other builds in many ledgers (the spear had the great sword's values, the rapier's block was the ice gauntlet's). The new one adds jumps, falls, landings, draw and sheathe ends and the block's second-slot state. Not settled: the dagger and the sickle (no checked data), side and back jumps, a second dodge set per equip load. The realm data pack still holds the old table.",
+              "proof": "tests"
+            },
+            {
+              "check": "Other players see jumps land, falls end and draws end (tests only, 2026-11-17): a landing (state 12) per stance after a jump or a fall, then the move or stand four records later; a fall per stance; a draw or sheathe ends in the second slot after the stance's time; a sheathed weapon dodges and jumps as no weapon. Live before: a jump floated and then fell for ever, and the draw pose hid attacks.",
+              "proof": "tests"
+            },
+            {
+              "check": "Each upper-body slot start carries its sequence time (tests only, 2026-11-17; ALC children 4, 6 and 8, names from the Azoth catalog): retail sent it with 99.9 % of 74,666 second-slot starts and every third- and fourth-slot start. Ours never sent it after a player's first state.",
+              "proof": "tests"
+            },
+            {
+              "check": "A held heavy attack keeps the body on its floor, and a weapon draw keeps the first press start (tests only, 2026-11-17). Live before: the body went a body length up for up to 7 s, and the first light attack of a sheathed spear did not show.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not checked against retail: the full place (child 27) goes in 0.5 % of our states to other players, against about 10 % in retail; Unknown whether that matters.",
               "proof": "none"
             }
           ]
@@ -3549,7 +3565,7 @@
     }
   ],
   "nextSteps": [
-    "**Game pad and other players live check (2026-11-17).** Block pose end deployed; mine the player sequence table again (jumps, dodges, moves per weapon) from the captures of this build.\n\n- Each player in turn: run, jump three times, dodge three times, three light attacks, one held heavy attack; the other watches and notes the time of what looks wrong.\n- Read the sim's `input record` lines of that time against the states sent to the other player.\n- A pad player's held heavy attack on a boar: check the hit and its reach against retail.\n- Check the other pad keys (abilities) and a mount ridden with the stick.",
+    "**Other players live check (2026-11-17, tests only).** After the deploy: each player blocks and lets go, swings light and heavy, dodges, jumps and sheathes; the other watches. Read the sim's `input record` lines of what looks wrong.\n\n- A new realm data pack version with the re-mined player sequence table (the pack still holds the old one).\n- A pad player's held heavy attack on a boar: the hit and its reach against retail.\n- The other pad keys (abilities) and a mount ridden with the stick.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
     "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
@@ -3861,9 +3877,10 @@
     "The five failing install and capture tests pass again (2026-11-16): the open world gather count and the player attack test table follow the gather node and hit reaction work, the boar and club sailor replays count the fights the capture really holds, and the boar's run speed check leaves out the gore's lunge (retail lunges too).",
     "Game pad movement (2026-11-17, tests only): the server reads the left stick from the input record's scaled bytes, so a pad player's server body walks with the client. Before, the body stayed behind, swings were tested at the wrong place and other players saw the pad player at a stale spot.",
     "Controller attacks for other players (2026-11-17, tests only): the server's own attack starts for other players read a pad's held trigger as its press, as the hits do; the sim logs each input record to find where the server's body and the client part.",
-    "Block end for other players (2026-11-17, tests only): the right-click's release ends the second slot (state 45, sequence 0) as retail; other players saw a rapier's block pose for the rest of the session."
+    "Block end for other players (2026-11-17, tests only): the right-click's release ends the second slot (state 45, sequence 0) as retail; other players saw a rapier's block pose for the rest of the session.",
+    "Other players' animations (2026-11-17, tests only): block pose end, upper slot times, landings and falls, draw ends, sheathed dodges, the re-mined player sequence table, the heavy attack lift and the press start kept at a draw."
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-17",
-  "lastCommit": "3f387a6d"
+  "lastCommit": "28b8abb7"
 }
