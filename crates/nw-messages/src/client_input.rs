@@ -890,6 +890,13 @@ impl InputRecord {
         }
     }
 
+    /// The attack key's bits in this record after a record that held block (`was_blocking`) or
+    /// not ([`AttackKeyBits::at_block_start`]).
+    pub fn attack_key_after(&self, was_blocking: bool) -> AttackKeyBits {
+        self.attack_key()
+            .at_block_start(self.blocking() && !was_blocking)
+    }
+
     /// Whether the player pressed the fishing key in this record.
     pub fn fishing_toggle_pressed(&self) -> bool {
         self.slot_bit(FISHING_TOGGLE_KEY.0, FISHING_TOGGLE_KEY.1)
@@ -1017,6 +1024,18 @@ impl AttackKeyBits {
     /// after its press or hold.
     pub const fn down_after(self, down: bool) -> bool {
         !self.released && (self.pressed || self.held || down)
+    }
+
+    /// The bits of a record that starts the block (`starts`) or not: a press there is no attack
+    /// press (live 2026-11-17: a controller player's block button set the press bit in each of
+    /// its 6 block starts and in no other record, and none of its 248 held attack records; in 250
+    /// retail ledgers 113 of 103,876 presses fell in a block start, 31,011 in a held block).
+    pub const fn at_block_start(self, starts: bool) -> Self {
+        Self {
+            pressed: self.pressed && !starts,
+            held: self.held,
+            released: self.released,
+        }
     }
 }
 

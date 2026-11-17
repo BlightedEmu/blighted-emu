@@ -677,6 +677,8 @@ pub(super) struct SlayerTrack {
     press: Option<u16>,
     /// The attack key is down.
     attack_down: bool,
+    /// The last record held block.
+    block_down: bool,
     /// The attack that plays (the server's last start or the client's last action), and the
     /// record that started it.
     running: Option<(RunningAttack, u16)>,
@@ -804,11 +806,15 @@ impl SlayerTrack {
         self.newest_counter = record.counter;
         self.sequence_s += record.frame_s;
         // The key goes down at its press or at a controller's first held record, as the
-        // attacks read it ([`AttackKeyBits::goes_down`]); it stays down through a hit reaction.
+        // attacks read it ([`AttackKeyBits::goes_down`]; a block start presses none,
+        // [`AttackKeyBits::at_block_start`]); it stays down through a hit reaction.
+        let blocking = record.intent.is_some_and(|intent| intent.block);
+        let attack = record.attack.at_block_start(blocking && !self.block_down);
+        self.block_down = blocking;
         let record = SlayerRecord {
             attack: AttackKeyBits {
-                pressed: record.attack.goes_down(self.attack_down),
-                ..record.attack
+                pressed: attack.goes_down(self.attack_down),
+                ..attack
             },
             ..record
         };
@@ -2644,6 +2650,34 @@ pub(crate) mod tests {
             .state
             .expect("the charge");
         assert_eq!(charge.sequence, CHARGE);
+    }
+
+    /// Live 2026-11-17: a controller player's block button set the attack press bit in its block
+    /// start; read as a press, it held the attack key down, and the trigger's next hold was no
+    /// new press.
+    #[test]
+    fn a_press_bit_in_the_block_start_leaves_the_attack_key_up() {
+        let table = table();
+        let mut track = spawned();
+        let block = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let still = Intent::default();
+        let press_starts = |track: &mut SlayerTrack, counter| {
+            std::iter::from_fn(|| own_state(track, counter).state)
+                .take(usize::from(ECHO_STATES) + 2)
+                .any(|due| due.sequence == PRESS_START)
+        };
+        track.record(keyed(100, block, PRESS, GREATSWORD), &table);
+        assert!(!press_starts(&mut track, 100), "the block button's own bit");
+        track.record(keyed(101, still, HELD, GREATSWORD), &table);
+        while own_state(&mut track, 101).state.is_some() {}
+        track.record(keyed(102, still, PAD_HOLD, GREATSWORD), &table);
+        assert!(
+            press_starts(&mut track, 102),
+            "the trigger's next hold attacks"
+        );
     }
 
     #[test]

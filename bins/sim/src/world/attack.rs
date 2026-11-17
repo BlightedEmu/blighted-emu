@@ -276,6 +276,7 @@ impl Vitals {
     pub(super) const fn drop_attack_keys(&mut self) {
         self.keys = AttackKeys {
             down: self.keys.down,
+            blocking: self.keys.blocking,
             ..AttackKeys::NONE
         };
         self.dodge_waiting = false;
@@ -342,6 +343,8 @@ pub struct AttackKeys {
     queued: Option<(KeyAttack, bool)>,
     /// The attack key is down: pressed or held since its last release.
     down: bool,
+    /// The last record held block.
+    blocking: bool,
 }
 
 impl AttackKeys {
@@ -351,16 +354,19 @@ impl AttackKeys {
         combo: None,
         queued: None,
         down: false,
+        blocking: false,
     };
 
-    /// Whether `record` presses the attack key ([`nw_messages::AttackKeyBits::goes_down`]).
+    /// Whether `record` presses the attack key ([`nw_messages::AttackKeyBits::goes_down`]; a
+    /// block start presses none, [`InputRecord::attack_key_after`]).
     pub fn pressed_in(&self, record: &InputRecord) -> bool {
-        record.attack_key().goes_down(self.down)
+        record.attack_key_after(self.blocking).goes_down(self.down)
     }
 
     /// Notes the key's state after `record` ([`nw_messages::AttackKeyBits::down_after`]).
     fn note_down(&mut self, record: &InputRecord) {
-        self.down = record.attack_key().down_after(self.down);
+        self.down = record.attack_key_after(self.blocking).down_after(self.down);
+        self.blocking = record.blocking();
     }
 
     /// The buffered step that starts in `record` at `record_ms`: at its start when the key is
@@ -4105,6 +4111,22 @@ mod tests {
         );
     }
 
+    /// Live 2026-11-17: a controller player's block button set the attack press bit in its block
+    /// start and the server started a charged heavy attack in the block.
+    #[test]
+    fn a_press_bit_in_the_block_start_is_no_press_and_one_in_a_held_block_is() {
+        let mut keys = AttackKeys::NONE;
+        let start = aimed_key(1, Key::Press);
+        assert!(!keys.pressed_in(&start), "the block button's own bit");
+        keys.note_down(&start);
+        let release = aimed_key(2, Key::Release);
+        keys.note_down(&release);
+        assert!(
+            keys.pressed_in(&aimed_key(3, Key::Press)),
+            "an attack from the held block"
+        );
+    }
+
     /// Right-click held: input slot value 1, bit 62.
     const AIM_VALUE: usize = 1;
     const AIM_BIT: u32 = 62;
@@ -4128,6 +4150,8 @@ mod tests {
         stance.aimed = sword().attack(AttackKind::Light).cloned();
         let mut keys = AttackKeys::NONE;
         let ms = |counter: u16| NOW + u64::from(counter.saturating_mul(INPUT_RECORD_MS));
+        // The aim is held from the record before the press.
+        keys.note_down(&aimed_key(0, Key::Hold));
         assert_eq!(
             keys.record(Some(&stance), &aimed_key(1, Key::Press), ms(1), true),
             None,
@@ -6014,7 +6038,8 @@ mod tests {
         };
         /// Long enough for the musket bolt to reach a mob 15 m away.
         const PROJECTILE_FLIGHT_MS: u64 = 1_000;
-        let mut aimed = message(1, &[Key::Press, Key::Release]);
+        // The aim is held from the record before the press.
+        let mut aimed = message(0, &[Key::Hold, Key::Press, Key::Release]);
         for record in &mut aimed {
             record.slots.values[AIM_VALUE] |= 1 << AIM_BIT;
         }
