@@ -447,7 +447,7 @@ impl Intent {
     }
 
     /// Whether a direction key is held or the stick is tilted.
-    pub(crate) const fn moves(self) -> bool {
+    pub const fn moves(self) -> bool {
         self.forward != 0 || self.right != 0 || self.stick.is_some()
     }
 

@@ -2123,6 +2123,7 @@ impl SimWorld {
             }
             let swimming = player.tracked.is_swimming();
             let falling = player.tracked.is_falling();
+            let airborne = !player.tracked.is_grounded() && !swimming;
             let posture = player.tracked.posture();
             player.slayer.record(
                 slayer::SlayerRecord {
@@ -2138,6 +2139,7 @@ impl SimWorld {
                     weapon,
                     swimming,
                     falling,
+                    airborne,
                     posture,
                 },
                 combat.player_sequences(),

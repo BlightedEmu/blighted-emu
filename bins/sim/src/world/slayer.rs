@@ -19,8 +19,8 @@
 //! the state, that record's own included ([`SequenceClock`] has the wire form).
 
 use nw_content::player_sequences::{
-    AbilityPlay, AttackPress, AttackSlot, Direction, FirstPlay, PlayerSequences, RunningAttack,
-    SlotsChange, StanceSequences, StatePlay,
+    AbilityPlay, AirSequences, AttackPress, AttackSlot, Direction, FirstPlay, PlayerSequences,
+    RunningAttack, SlotsChange, StanceSequences, StatePlay,
 };
 use nw_messages::{
     AttackKeyBits, RemoteUpper, SecondSlayerState, SequenceClock, SequenceTime, SlayerInput,
@@ -44,6 +44,23 @@ const ATTACK_RUN_RECORDS: u16 = 34;
 /// Input records from the last start of a first-slot chain to its end (Observed: retail's
 /// `48=0` came 932 ms, 28 records, after the last attack start at the median).
 const CHAIN_END_RECORDS: u16 = 28;
+/// The landing's slayer state (`13=0c`; Observed, 2026-11-17 study: the land followed 91 % of
+/// 13,882 retail falls and 79 % of 23,473 jumps).
+const LAND_STATE: u64 = 0x0c;
+/// Input records from a landing to the move or stand it lands into (Observed: retail sent a move
+/// or a stand a median 132 ms after the land, four records at 30 Hz, in 30,655 of 31,668 lands).
+const LAND_MOVE_RECORDS: u16 = 4;
+/// Input records from a jump's press within which a body that leaves the floor jumped, else it
+/// fell (Inferred: the body leaves the floor in the record after the press, and the slayer
+/// reads the body one record late).
+const JUMP_LIFT_RECORDS: u16 = 3;
+/// Milliseconds from a draw or sheathe in the second slot to that slot's end when the stance
+/// names none (Observed: retail ended a `16=44` start with `16=45 18=0` a median 534 ms later,
+/// 29,150 ends in 1,196 ledgers).
+const SECOND_END_MS: u64 = 534;
+/// The second slot's state of a draw or sheathe (`16=2c`).
+const DRAW_STATE: u64 = sheathe::STATE;
+
 /// The second slot's state at the end of a cast (Observed: `16=45 18=0 48=0`), of a hit
 /// reaction ([`reaction`]) and of the right-click's block or aim ([`alt_end`]).
 const CAST_END_STATE: u64 = 45;
@@ -590,6 +607,24 @@ enum Shot {
     Aimed(UpperSlots),
 }
 
+/// How a body went into the air: its landing differs ([`AirSequences`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AirWay {
+    Jumped,
+    Fell,
+}
+
+/// A draw or sheathe in the second slot and the end that follows it ([`SECOND_END_MS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SecondEnd {
+    /// Its sequence.
+    sequence: u64,
+    /// Milliseconds from its first state to the end.
+    after_ms: u64,
+    /// When the end is due, once its first state went out.
+    at_ms: Option<u64>,
+}
+
 /// One input record for the slayer state.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct SlayerRecord {
@@ -610,6 +645,9 @@ pub(super) struct SlayerRecord {
     pub(super) swimming: bool,
     /// The body falls and is not in a jump ([`nw_sim_core::TrackedBody::is_falling`]).
     pub(super) falling: bool,
+    /// The body is off the floor, in a jump or a fall, and does not swim
+    /// ([`nw_sim_core::TrackedBody::is_grounded`]).
+    pub(super) airborne: bool,
     /// How the body holds itself ([`nw_sim_core::TrackedBody::posture`]).
     pub(super) posture: Posture,
 }
@@ -683,6 +721,14 @@ pub(super) struct SlayerTrack {
     posture_settle: Option<u16>,
     /// The last record was a fall the server already started.
     in_air: bool,
+    /// How the body went into the air, while it is off the floor.
+    air: Option<AirWay>,
+    /// The record of the last jump press.
+    jumped_at: Option<u16>,
+    /// Input records left until the landing's move or stand goes out ([`LAND_MOVE_RECORDS`]).
+    land_settle: Option<u16>,
+    /// The draw or sheathe in the second slot whose end is due.
+    second_end: Option<SecondEnd>,
     /// The player's swim.
     swim: Swim,
     /// The inventory's second slayer slot.
@@ -782,6 +828,9 @@ impl SlayerTrack {
         };
         let stance = record.weapon.and_then(|weapon| table.stance(weapon.stance));
         let drawn = record.weapon.is_some_and(|weapon| weapon.drawn);
+        // The moves, dodges, jumps, falls and landings play the weapon's stance while it is
+        // drawn, else the stance of no weapon ([`PlayerSequences::sheathed`]).
+        let moves_stance = if drawn { stance } else { table.sheathed() };
         let upper = self.upper_slots(&record, stance, drawn);
         let alt = drawn && record.intent.is_some_and(|intent| intent.block);
         let posture_change =
@@ -817,18 +866,26 @@ impl SlayerTrack {
         // Trip, Slam and Blast, and played all three a minute later with no cut (live
         // 2026-11-14).
         let ability_holds = self.ability.is_some_and(|on| on.first);
+        let air = moves_stance.and_then(|stance| stance.air);
+        let landing = self.air_step(&record, air);
         let movement = if entered_air {
-            Some((swim::FALL_STATE, swim::FALL_SEQUENCE))
+            let fall = air.and_then(|air| air.fall).unwrap_or(swim::FALL_SEQUENCE);
+            Some((swim::FALL_STATE, fall))
         } else if entered_water {
             Some((swim::STATE, swim::IDLE_SEQUENCE))
         } else if record.swimming {
             None
         } else {
-            record.intent.filter(|_| !held_start).and_then(|intent| {
+            let stepped = record.intent.filter(|_| !held_start).and_then(|intent| {
                 let (next, started) = self.locomotion.step(intent, set);
                 self.locomotion = next;
                 started
-            })
+            });
+            // A landing goes first; the move or stand it lands into follows
+            // ([`LAND_MOVE_RECORDS`]).
+            landing
+                .or_else(|| self.settled_landing(stepped.is_some(), set))
+                .or(stepped)
         };
         let mut movement = movement.filter(|_| !ability_holds);
         let stroke = stroke.filter(|_| !ability_holds);
@@ -845,7 +902,7 @@ impl SlayerTrack {
         if let Some(Shot::Reload(slots) | Shot::Aimed(slots)) = shot {
             self.upper = Some(merge(self.upper.unwrap_or_default(), slots));
         }
-        let server = self.server_start(&record, stance);
+        let server = self.server_start(&record, stance, moves_stance);
         if matches!(shot, Some(Shot::Reload(_))) {
             // The reload's press is no tap: its release starts no attack.
             self.press = None;
@@ -923,6 +980,51 @@ impl SlayerTrack {
         self.release_follow_up = None;
     }
 
+    /// Notes how the body of `record` is in the air, and gives the landing it starts when it is
+    /// back on a floor: state [`LAND_STATE`] with the stance's landing (`air`) after a jump or a
+    /// fall, by the move key (Observed, 2026-11-17 study: after a jump the sheathed landing was
+    /// 789 with a move key, 2376 without; after a fall 1355). No landing without the stance's
+    /// sequence; its move or stand still follows ([`SlayerTrack::settled_landing`]).
+    fn air_step(&mut self, record: &SlayerRecord, air: Option<AirSequences>) -> Option<(u64, u64)> {
+        if record.swimming {
+            self.air = None;
+            return None;
+        }
+        if record.airborne {
+            if self.air.is_none() {
+                let jumped = self
+                    .jumped_at
+                    .is_some_and(|at| record.counter.wrapping_sub(at) <= JUMP_LIFT_RECORDS);
+                self.air = Some(if jumped { AirWay::Jumped } else { AirWay::Fell });
+            }
+            return None;
+        }
+        let way = self.air.take()?;
+        self.land_settle = Some(LAND_MOVE_RECORDS);
+        let moving = record.intent.is_some_and(Intent::moves);
+        let landing = match way {
+            AirWay::Jumped => air?.land_after_jump,
+            AirWay::Fell => air?.land_after_fall,
+        };
+        landing.of(moving).map(|sequence| (LAND_STATE, sequence))
+    }
+
+    /// The move or stand a landing lands into, once its records passed ([`LAND_MOVE_RECORDS`]);
+    /// none when a move `started` in this record already, which ends the wait.
+    fn settled_landing(&mut self, started: bool, set: MoveSet) -> Option<(u64, u64)> {
+        let left = self.land_settle?;
+        if started {
+            self.land_settle = None;
+            return None;
+        }
+        if left > 1 {
+            self.land_settle = Some(left - 1);
+            return None;
+        }
+        self.land_settle = None;
+        Some(self.locomotion.current(set))
+    }
+
     /// The state the server starts for the keys of `record` with the sequences of `stance`:
     /// a dodge or a jump at its key's press (state 07 and 0e, by direction), else an attack
     /// ([`SlayerTrack::attack_start`]).
@@ -930,12 +1032,16 @@ impl SlayerTrack {
         &mut self,
         record: &SlayerRecord,
         stance: Option<&StanceSequences>,
+        moves_stance: Option<&StanceSequences>,
     ) -> Option<Pending> {
         let intent = record.intent?;
         let dodge = intent.dodge && !self.dodge_held;
         let jump = intent.jump && !self.jump_held;
         self.dodge_held = intent.dodge;
         self.jump_held = intent.jump;
+        if jump {
+            self.jumped_at = Some(record.counter);
+        }
         let direction = Direction::of_keys(
             intent.forward > 0,
             intent.forward < 0,
@@ -944,11 +1050,11 @@ impl SlayerTrack {
         );
         let state = |play: StatePlay| Pending::State(play.state, play.sequence);
         let keyed = if dodge {
-            stance
+            moves_stance
                 .and_then(|stance| stance.dodge?.of(direction))
                 .map(state)
         } else if jump {
-            stance
+            moves_stance
                 .and_then(|stance| stance.jump?.of(direction))
                 .map(state)
         } else {
@@ -1128,7 +1234,13 @@ impl SlayerTrack {
             ..Default::default()
         };
         if was_drawn && !drawn {
-            return slots_of(second(sheathe::STATE, sheathe::SEQUENCE), record.counter);
+            // The sheathe of the weapon put away, ended after its time ([`SecondEnd`]).
+            let sequence = stance
+                .and_then(|stance| stance.sheathe)
+                .unwrap_or(sheathe::SEQUENCE);
+            let after_ms = stance.and_then(|stance| stance.sheathe_end_ms);
+            self.end_second_later(sequence, after_ms);
+            return slots_of(second(DRAW_STATE, sequence), record.counter);
         }
         let stance = stance?;
         let change = (if alt && !was_alt {
@@ -1140,11 +1252,26 @@ impl SlayerTrack {
             // weapon's draw at every weapon key (351 presses: `16=2c 18=<draw>` with the new
             // stance's sequence in the first slot). Ours started it from no weapon only, and
             // the other players kept the old weapon's pose (live 2026-11-09).
-            stance.draw.map(|draw| second(draw.state, draw.sequence))
+            stance.draw.map(|draw| {
+                self.end_second_later(draw.sequence, stance.draw_end_ms);
+                second(draw.state, draw.sequence)
+            })
         } else {
             None
         })?;
         slots_of(change, record.counter)
+    }
+
+    /// Ends the second slot's draw or sheathe `sequence` `after_ms` after its first state (else
+    /// [`SECOND_END_MS`]), unless another second-slot change comes first. Live 2026-11-17: the
+    /// server never ended a draw, and its pose hid the upper body's attacks from the other
+    /// players.
+    fn end_second_later(&mut self, sequence: u64, after_ms: Option<u64>) {
+        self.second_end = Some(SecondEnd {
+            sequence,
+            after_ms: after_ms.unwrap_or(SECOND_END_MS),
+            at_ms: None,
+        });
     }
 
     /// The upper slot change of an attack key press with the weapon drawn ([`Shot`]): the
@@ -1515,6 +1642,22 @@ impl SlayerTrack {
             };
             self.upper = Some(merge(self.upper.unwrap_or_default(), start));
         }
+        if self
+            .second_end
+            .and_then(|end| end.at_ms)
+            .is_some_and(|at_ms| state_ms >= at_ms)
+        {
+            self.second_end = None;
+            let end = UpperSlots {
+                second: SlotChange {
+                    state: Some(CAST_END_STATE),
+                    started: Some(number),
+                    sequence: Some(CLEARED_SLOT),
+                },
+                ..UpperSlots::default()
+            };
+            self.upper = Some(merge(self.upper.unwrap_or_default(), end));
+        }
         if self.pull_ends_ms.is_some_and(|ends_ms| state_ms >= ends_ms) {
             self.pull_ends_ms = None;
             self.locomotion = Locomotion::Idle;
@@ -1539,12 +1682,29 @@ impl SlayerTrack {
         let slots = slots.map(|slots| self.timed(slots, number));
         if let Some(slots) = slots {
             self.slots_on = self.slots_on.after(slots);
+            self.track_second_end(slots.second, state_ms);
         }
         self.remote = slots.map(|slots| RemoteUpper {
             slots,
             after_state: self.upper_after_state,
         });
         self.due = SlayerDue { state, time, slots };
+    }
+
+    /// Starts the clock of the due second-slot end when its draw or sheathe goes out in a state
+    /// at `state_ms`; another change of the second slot drops it.
+    fn track_second_end(&mut self, second: SlotChange, state_ms: u64) {
+        let Some(end) = self.second_end else {
+            return;
+        };
+        if second == SlotChange::default() {
+            return;
+        }
+        let ours = second.state == Some(DRAW_STATE) && second.sequence == Some(end.sequence);
+        self.second_end = ours.then(|| SecondEnd {
+            at_ms: end.at_ms.or(Some(state_ms.saturating_add(end.after_ms))),
+            ..end
+        });
     }
 
     /// `slots` as own state `number` sends them, with the time since the state that sent the
@@ -1889,7 +2049,7 @@ fn merge(older: UpperSlots, newer: UpperSlots) -> UpperSlots {
 pub(crate) mod tests {
     use nw_content::player_attacks::stance_key;
     use nw_content::player_sequences::{
-        AltMoves, AttackHold, AttackStep, Directional, DrawnMoves, FollowUp, SlotsChange,
+        AltMoves, AttackHold, AttackStep, Directional, DrawnMoves, FollowUp, Landing, SlotsChange,
     };
 
     use super::*;
@@ -2081,6 +2241,7 @@ pub(crate) mod tests {
             weapon: None,
             swimming: false,
             falling: false,
+            airborne: false,
             posture: Posture::Stand,
         }
     }
@@ -2501,6 +2662,204 @@ pub(crate) mod tests {
         track.record(keyed(12, still, RELEASE, GREATSWORD), &table);
         let due = own_state(&mut track, 12).state.expect("the client's");
         assert_eq!(due.sequence, 5055);
+    }
+
+    /// Retail sequences of the 2026-11-17 study: no weapon (dodge 4845, jump 1208, fall 1675,
+    /// landings 789 / 2376 / 1355) and the great sword drawn (dodge 4834, jump 1561, landing 2488,
+    /// draw 2467 ended after 1,096 ms).
+    mod air {
+        pub(super) const SHEATHED_DODGE: u64 = 4845;
+        pub(super) const SHEATHED_JUMP: u64 = 1208;
+        pub(super) const SHEATHED_FALL: u64 = 1675;
+        pub(super) const LAND_MOVING_AFTER_JUMP: u64 = 789;
+        pub(super) const LAND_STILL_AFTER_JUMP: u64 = 2376;
+        pub(super) const LAND_AFTER_FALL: u64 = 1355;
+        pub(super) const DRAWN_DODGE: u64 = 4834;
+        pub(super) const DRAWN_JUMP: u64 = 1561;
+        pub(super) const DRAWN_LAND: u64 = 2488;
+        pub(super) const DRAW: u64 = 2467;
+        pub(super) const DRAW_END_MS: u64 = 1096;
+    }
+
+    fn air_table() -> PlayerSequences {
+        let play = |state: u64, sequence: u64| StatePlay { state, sequence };
+        let all = |play: StatePlay| Directional {
+            forward: Some(play),
+            none: Some(play),
+            ..Directional::default()
+        };
+        PlayerSequences::of_parts(
+            vec![
+                StanceSequences {
+                    tags: String::new(),
+                    dodge: Some(all(play(7, air::SHEATHED_DODGE))),
+                    jump: Some(all(play(14, air::SHEATHED_JUMP))),
+                    air: Some(AirSequences {
+                        fall: Some(air::SHEATHED_FALL),
+                        land_after_jump: Landing {
+                            still: Some(air::LAND_STILL_AFTER_JUMP),
+                            moving: Some(air::LAND_MOVING_AFTER_JUMP),
+                        },
+                        land_after_fall: Landing {
+                            still: Some(air::LAND_AFTER_FALL),
+                            moving: None,
+                        },
+                    }),
+                    ..StanceSequences::default()
+                },
+                StanceSequences {
+                    dodge: Some(all(play(7, air::DRAWN_DODGE))),
+                    jump: Some(all(play(14, air::DRAWN_JUMP))),
+                    air: Some(AirSequences {
+                        land_after_jump: Landing {
+                            still: Some(air::DRAWN_LAND),
+                            moving: None,
+                        },
+                        ..AirSequences::default()
+                    }),
+                    draw: Some(play(DRAW_STATE, air::DRAW)),
+                    draw_end_ms: Some(air::DRAW_END_MS),
+                    ..greatsword_attacks()
+                },
+            ],
+            vec![],
+        )
+    }
+
+    /// The first slot's state and sequence of the own states `from..=to`, of those that start one.
+    fn starts(track: &mut SlayerTrack, from: u16, to: u16) -> Vec<(Option<u64>, u64)> {
+        (from..=to)
+            .filter_map(|number| own_state(track, number).state)
+            .map(|state| (state.state, state.sequence))
+            .collect()
+    }
+
+    #[test]
+    fn a_jump_lands_with_the_stance_s_landing_then_its_move() {
+        // Retail: `13=0e` at the jump, `13=0c` at the landing, a move or stand 132 ms later.
+        let table = air_table();
+        let still = Intent::default();
+        let jump = Intent {
+            jump: true,
+            ..still
+        };
+        let sheathed = |counter, intent, airborne| SlayerRecord {
+            weapon: weapon(GREATSWORD, false),
+            airborne,
+            ..quiet_record(counter, intent)
+        };
+        let mut track = spawned();
+        track.record(sheathed(10, jump, false), &table);
+        let jumped = own_state(&mut track, 10).state.expect("the jump");
+        assert_eq!(
+            (jumped.state, jumped.sequence),
+            (Some(14), air::SHEATHED_JUMP),
+            "a sheathed weapon jumps as no weapon"
+        );
+        for counter in 11..20 {
+            track.record(sheathed(counter, still, true), &table);
+            own_state(&mut track, counter);
+        }
+        track.record(sheathed(20, still, false), &table);
+        let landed = own_state(&mut track, 20).state.expect("the landing");
+        assert_eq!(
+            (landed.state, landed.sequence),
+            (Some(LAND_STATE), air::LAND_STILL_AFTER_JUMP)
+        );
+        let mut after = Vec::new();
+        for counter in 21..=20 + LAND_MOVE_RECORDS {
+            track.record(sheathed(counter, still, false), &table);
+            after.extend(starts(&mut track, counter, counter));
+        }
+        assert_eq!(
+            after.last(),
+            Some(&(Some(MoveSet::SHEATHED.idle.0), MoveSet::SHEATHED.idle.1)),
+            "the stand follows the landing {LAND_MOVE_RECORDS} records later: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_fall_plays_the_stance_s_fall_and_its_own_landing() {
+        let table = air_table();
+        let still = Intent::default();
+        let sheathed = |counter, airborne, falling| SlayerRecord {
+            weapon: weapon(GREATSWORD, false),
+            airborne,
+            falling,
+            ..quiet_record(counter, still)
+        };
+        let mut track = spawned();
+        track.record(sheathed(10, true, true), &table);
+        let fall = own_state(&mut track, 10).state.expect("the fall");
+        assert_eq!(fall.sequence, air::SHEATHED_FALL);
+        track.record(sheathed(11, false, false), &table);
+        let landed = own_state(&mut track, 11).state.expect("the landing");
+        assert_eq!(
+            (landed.state, landed.sequence),
+            (Some(LAND_STATE), air::LAND_AFTER_FALL)
+        );
+    }
+
+    #[test]
+    fn the_dodge_and_jump_play_the_drawn_weapon_s_and_else_no_weapon_s() {
+        let table = air_table();
+        let dodge = Intent {
+            dodge: true,
+            ..Intent::default()
+        };
+        let mut drawn = spawned();
+        drawn.record(keyed(10, dodge, HELD, GREATSWORD), &table);
+        assert_eq!(
+            starts(&mut drawn, 10, 11).last().map(|start| start.1),
+            Some(air::DRAWN_DODGE)
+        );
+        let mut sheathed = spawned();
+        sheathed.record(
+            SlayerRecord {
+                weapon: weapon(GREATSWORD, false),
+                ..quiet_record(10, dodge)
+            },
+            &table,
+        );
+        assert_eq!(
+            starts(&mut sheathed, 10, 11).last().map(|start| start.1),
+            Some(air::SHEATHED_DODGE)
+        );
+    }
+
+    #[test]
+    fn a_draw_s_second_slot_ends_after_the_stance_s_time() {
+        // Retail: `16=2c 18=<draw>`, then `16=2d 18=0` the stance's time later.
+        let table = air_table();
+        let still = Intent::default();
+        let mut track = spawned();
+        track.record(
+            SlayerRecord {
+                weapon: weapon(GREATSWORD, false),
+                ..quiet_record(10, still)
+            },
+            &table,
+        );
+        own_state(&mut track, 10);
+        track.record(keyed(11, still, HELD, GREATSWORD), &table);
+        let draw = own_state(&mut track, 11).slots.expect("the draw");
+        assert_eq!(draw.second.sequence, Some(air::DRAW));
+        let end_number = 11 + u16::try_from(air::DRAW_END_MS.div_ceil(TICK_MS)).expect("states");
+        let mut ends = Vec::new();
+        for number in 12..=end_number + 1 {
+            track.record(keyed(number, still, HELD, GREATSWORD), &table);
+            if let Some(slots) = own_state(&mut track, number).slots
+                && slots.second.state == Some(CAST_END_STATE)
+            {
+                ends.push((number, slots.second.sequence));
+            }
+        }
+        assert_eq!(
+            ends.first(),
+            Some(&(end_number, Some(CLEARED_SLOT))),
+            "the end after {} ms",
+            air::DRAW_END_MS
+        );
     }
 
     #[test]
