@@ -27,6 +27,7 @@ use nw_bus::{
     PlayerQuests, Point, QuestRun, ScriptLogLine, SimSlot, SnapMob, SnapPlayer,
 };
 use nw_content::mutations::MutationCatalog;
+use nw_content::player_sequences::DodgeLoad;
 use nw_content::recipe_cooldowns::{CooldownCount, RecipeCooldownCounts};
 use nw_messages::client_input::{
     CRAFTING_STATION_KIND, GATHER_KIND, LOOT_KIND, LORE_KIND, REVIVE_PLAYER_KIND, TALK_KIND,
@@ -2130,6 +2131,13 @@ impl SimWorld {
             let falling = player.tracked.is_falling();
             let airborne = !player.tracked.is_grounded() && !swimming;
             let posture = player.tracked.posture();
+            let load = match player.tracked.equip_load() {
+                nw_sim_core::EquipLoad::Fast => DodgeLoad::Fast,
+                nw_sim_core::EquipLoad::Normal => DodgeLoad::Normal,
+                nw_sim_core::EquipLoad::Slow | nw_sim_core::EquipLoad::Overburdened => {
+                    DodgeLoad::Slow
+                }
+            };
             player.slayer.record(
                 slayer::SlayerRecord {
                     counter: own_state_counter(counter),
@@ -2146,6 +2154,7 @@ impl SimWorld {
                     falling,
                     airborne,
                     posture,
+                    load,
                 },
                 combat.player_sequences(),
             );

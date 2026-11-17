@@ -59,6 +59,24 @@
      "sequence": 4822
     }
    },
+   "dodge_loads": {
+    "Normal": {
+     "forward": {
+      "state": 7,
+      "sequence": 4841
+     },
+     "back": {
+      "state": 7,
+      "sequence": 4877
+     }
+    },
+    "Slow": {
+     "forward": {
+      "state": 7,
+      "sequence": 709
+     }
+    }
+   },
    "jump": {
     "forward": {
      "state": 14,
@@ -143,6 +161,28 @@
     "none": {
      "state": 7,
      "sequence": 3520
+    }
+   },
+   "dodge_loads": {
+    "Normal": {
+     "forward": {
+      "state": 7,
+      "sequence": 2655
+     }
+    },
+    "Slow": {
+     "forward": {
+      "state": 7,
+      "sequence": 4785
+     },
+     "back": {
+      "state": 7,
+      "sequence": 1054
+     },
+     "right": {
+      "state": 7,
+      "sequence": 3076
+     }
     }
    },
    "jump": {
@@ -646,6 +686,18 @@
      "sequence": 3520
     }
    },
+   "dodge_loads": {
+    "Normal": {
+     "forward": {
+      "state": 7,
+      "sequence": 4889
+     },
+     "back": {
+      "state": 7,
+      "sequence": 4222
+     }
+    }
+   },
    "jump": {
     "forward": {
      "state": 14,
@@ -778,6 +830,24 @@
     "none": {
      "state": 7,
      "sequence": 2100
+    }
+   },
+   "dodge_loads": {
+    "Normal": {
+     "forward": {
+      "state": 7,
+      "sequence": 1790
+     }
+    },
+    "Slow": {
+     "forward": {
+      "state": 7,
+      "sequence": 2040
+     },
+     "back": {
+      "state": 7,
+      "sequence": 4756
+     }
     }
    },
    "jump": {
@@ -1032,6 +1102,14 @@
      "sequence": 4876
     }
    },
+   "dodge_loads": {
+    "Normal": {
+     "forward": {
+      "state": 7,
+      "sequence": 3355
+     }
+    }
+   },
    "jump": {
     "forward": {
      "state": 14,
@@ -1183,6 +1261,26 @@
      "sequence": 4825
     }
    },
+   "dodge_loads": {
+    "Normal": {
+     "forward": {
+      "state": 7,
+      "sequence": 4685
+     },
+     "back": {
+      "state": 7,
+      "sequence": 4508
+     },
+     "left": {
+      "state": 7,
+      "sequence": 4879
+     },
+     "right": {
+      "state": 7,
+      "sequence": 1073
+     }
+    }
+   },
    "jump": {
     "none": {
      "state": 14,
@@ -1277,6 +1375,22 @@
     "none": {
      "state": 7,
      "sequence": 4508
+    }
+   },
+   "dodge_loads": {
+    "Normal": {
+     "forward": {
+      "state": 7,
+      "sequence": 4685
+     },
+     "back": {
+      "state": 7,
+      "sequence": 4508
+     },
+     "left": {
+      "state": 7,
+      "sequence": 4879
+     }
     }
    },
    "draw": {
@@ -1794,6 +1908,40 @@
      "sequence": 4743
     }
    },
+   "dodge_loads": {
+    "Normal": {
+     "forward": {
+      "state": 7,
+      "sequence": 4876
+     },
+     "back": {
+      "state": 7,
+      "sequence": 4780
+     },
+     "left": {
+      "state": 7,
+      "sequence": 2680
+     },
+     "right": {
+      "state": 7,
+      "sequence": 3817
+     }
+    },
+    "Slow": {
+     "forward": {
+      "state": 7,
+      "sequence": 4743
+     },
+     "back": {
+      "state": 7,
+      "sequence": 3994
+     },
+     "left": {
+      "state": 7,
+      "sequence": 4742
+     }
+    }
+   },
    "jump": {
     "forward": {
      "state": 14,
@@ -2123,6 +2271,18 @@
     "back": {
      "state": 7,
      "sequence": 4881
+    }
+   },
+   "dodge_loads": {
+    "Normal": {
+     "forward": {
+      "state": 7,
+      "sequence": 4286
+     },
+     "back": {
+      "state": 7,
+      "sequence": 4881
+     }
     }
    },
    "jump": {

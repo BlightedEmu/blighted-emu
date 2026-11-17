@@ -192,14 +192,55 @@ impl Directional {
     /// The state of `direction`, else of no key, else of forward (best guess: a direction the
     /// ledgers did not show plays the stance's default one).
     pub fn of(&self, direction: Direction) -> Option<StatePlay> {
-        let exact = match direction {
+        self.exact(direction).or(self.none).or(self.forward)
+    }
+
+    /// The state of `direction` alone.
+    pub const fn exact(&self, direction: Direction) -> Option<StatePlay> {
+        match direction {
             Direction::Forward => self.forward,
             Direction::Back => self.back,
             Direction::Left => self.left,
             Direction::Right => self.right,
             Direction::None => self.none,
-        };
-        exact.or(self.none).or(self.forward)
+        }
+    }
+}
+
+/// How heavy a player's equipped gear is, for its dodge: the light roll, the medium hop or the
+/// heavy step (the client's `EquipLoad` categories Fast, Normal and Slow).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DodgeLoad {
+    /// Light gear: the roll of [`StanceSequences::dodge`].
+    #[default]
+    Fast,
+    /// Medium gear.
+    Normal,
+    /// Heavy gear.
+    Slow,
+}
+
+/// The dodges of the medium and heavy loads (Observed, 2026-11-17 study: retail sends the own
+/// player's load as its `EquipLoad_*_<Light|Medium|Heavy>` effects, and the dodge sequence of each
+/// load differs; [`StanceSequences::dodge`] is the light one, the most common in the ledgers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DodgeLoads {
+    /// Medium gear.
+    #[serde(rename = "Normal", default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<Directional>,
+    /// Heavy gear.
+    #[serde(rename = "Slow", default, skip_serializing_if = "Option::is_none")]
+    pub slow: Option<Directional>,
+}
+
+impl DodgeLoads {
+    /// The dodges of `load`; none for the light load (that is the stance's own dodge).
+    pub const fn of(&self, load: DodgeLoad) -> Option<Directional> {
+        match load {
+            DodgeLoad::Fast => None,
+            DodgeLoad::Normal => self.normal,
+            DodgeLoad::Slow => self.slow,
+        }
     }
 }
 
@@ -272,9 +313,12 @@ pub struct StanceSequences {
     /// The movement sequences of the weapon drawn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drawn_moves: Option<DrawnMoves>,
-    /// The dodge.
+    /// The dodge (of the light load).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dodge: Option<Directional>,
+    /// The dodges of the medium and heavy loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dodge_loads: Option<DodgeLoads>,
     /// The jump.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jump: Option<Directional>,
@@ -546,6 +590,30 @@ impl PlayerSequences {
         self.stance(stance_key(""))
     }
 
+    /// The dodge of a player whose moves play `stance` (the drawn weapon's, else no weapon's)
+    /// with gear `load`, toward `direction`: the load's own of the stance in that direction, else
+    /// of no weapon in that direction, else the stance's or no weapon's load dodge of another
+    /// direction, else the stance's light dodge. The ledgers hold few medium and heavy dodges per
+    /// weapon (2026-11-17 study), so a missing one plays the load's dodge of no weapon (Inferred:
+    /// the load sets the kind of dodge, the roll, hop or step).
+    pub fn dodge(
+        &self,
+        stance: Option<&StanceSequences>,
+        load: DodgeLoad,
+        direction: Direction,
+    ) -> Option<StatePlay> {
+        let of_load = |stance: Option<&StanceSequences>| {
+            stance.and_then(|stance| stance.dodge_loads?.of(load))
+        };
+        let own = of_load(stance);
+        let bare = of_load(self.sheathed());
+        own.and_then(|dodge| dodge.exact(direction))
+            .or_else(|| bare.and_then(|dodge| dodge.exact(direction)))
+            .or_else(|| own.and_then(|dodge| dodge.of(direction)))
+            .or_else(|| bare.and_then(|dodge| dodge.of(direction)))
+            .or_else(|| stance?.dodge?.of(direction))
+    }
+
     /// The server's follow-up of the client's sequence `client`.
     pub fn follow_up(&self, client: u64) -> Option<FollowUp> {
         self.follow_ups.get(&client).copied()
@@ -665,6 +733,50 @@ mod tests {
             (Some(1096), Some(2011), Some(799))
         );
         assert_eq!(sword.air, None);
+    }
+
+    /// Live 2026-11-17: a medium-gear player's hop showed as the light roll to the others.
+    #[test]
+    fn a_dodge_plays_the_gear_load_s_own_then_no_weapon_s_of_that_load() {
+        let table = PlayerSequences::parse(
+            r#"{"stances": [
+                {"tags": "",
+                 "dodge": {"back": {"state": 7, "sequence": 4822}},
+                 "dodge_loads": {"Normal": {"forward": {"state": 7, "sequence": 4841},
+                                            "back": {"state": 7, "sequence": 4877}}}},
+                {"tags": "2H_Melee,Spear,Throwable",
+                 "dodge": {"forward": {"state": 7, "sequence": 4834},
+                           "back": {"state": 7, "sequence": 4833}},
+                 "dodge_loads": {"Normal": {"forward": {"state": 7, "sequence": 3355}}}}
+            ], "follow_ups": []}"#,
+        )
+        .expect("table");
+        let spear = table.stance(stance_key("2H_Melee,Spear,Throwable"));
+        let sequence = |load, direction| {
+            table
+                .dodge(spear, load, direction)
+                .map(|play| play.sequence)
+        };
+        assert_eq!(
+            sequence(DodgeLoad::Fast, Direction::Back),
+            Some(4833),
+            "light"
+        );
+        assert_eq!(
+            sequence(DodgeLoad::Normal, Direction::Forward),
+            Some(3355),
+            "the spear's medium hop"
+        );
+        assert_eq!(
+            sequence(DodgeLoad::Normal, Direction::Back),
+            Some(4877),
+            "no spear medium back: no weapon's medium back"
+        );
+        assert_eq!(
+            sequence(DodgeLoad::Slow, Direction::Back),
+            Some(4833),
+            "no heavy dodge at all: the light one"
+        );
     }
 
     #[test]

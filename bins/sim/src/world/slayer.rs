@@ -19,8 +19,8 @@
 //! the state, that record's own included ([`SequenceClock`] has the wire form).
 
 use nw_content::player_sequences::{
-    AbilityPlay, AirSequences, AttackPress, AttackSlot, Direction, FirstPlay, PlayerSequences,
-    RunningAttack, SlotsChange, StanceSequences, StatePlay,
+    AbilityPlay, AirSequences, AttackPress, AttackSlot, Direction, DodgeLoad, FirstPlay,
+    PlayerSequences, RunningAttack, SlotsChange, StanceSequences, StatePlay,
 };
 use nw_messages::{
     AttackKeyBits, RemoteUpper, SecondSlayerState, SequenceClock, SequenceTime, SlayerInput,
@@ -655,6 +655,8 @@ pub(super) struct SlayerRecord {
     pub(super) airborne: bool,
     /// How the body holds itself ([`nw_sim_core::TrackedBody::posture`]).
     pub(super) posture: Posture,
+    /// How heavy its gear is: the kind of its dodge ([`PlayerSequences::dodge`]).
+    pub(super) load: DodgeLoad,
 }
 
 /// What one own state carries of the slayer state.
@@ -925,7 +927,7 @@ impl SlayerTrack {
         if let Some(Shot::Reload(slots) | Shot::Aimed(slots)) = shot {
             self.upper = Some(merge(self.upper.unwrap_or_default(), slots));
         }
-        let server = self.server_start(&record, stance, moves_stance, in_air);
+        let server = self.server_start(&record, table, stance, moves_stance, in_air);
         if matches!(shot, Some(Shot::Reload(_))) {
             // The reload's press is no tap: its release starts no attack.
             self.press = None;
@@ -1054,6 +1056,7 @@ impl SlayerTrack {
     fn server_start(
         &mut self,
         record: &SlayerRecord,
+        table: &PlayerSequences,
         stance: Option<&StanceSequences>,
         moves_stance: Option<&StanceSequences>,
         in_air: bool,
@@ -1074,9 +1077,7 @@ impl SlayerTrack {
         );
         let state = |play: StatePlay| Pending::State(play.state, play.sequence);
         let keyed = if dodge {
-            moves_stance
-                .and_then(|stance| stance.dodge?.of(direction))
-                .map(state)
+            table.dodge(moves_stance, record.load, direction).map(state)
         } else if jump {
             moves_stance
                 .and_then(|stance| stance.jump?.of(direction))
@@ -2267,6 +2268,7 @@ pub(crate) mod tests {
             falling: false,
             airborne: false,
             posture: Posture::Stand,
+            load: DodgeLoad::Fast,
         }
     }
 
@@ -2862,6 +2864,34 @@ pub(crate) mod tests {
             Some(&(Some(MoveSet::SHEATHED.idle.0), MoveSet::SHEATHED.idle.1)),
             "the stand follows the landing {LAND_MOVE_RECORDS} records later: {after:?}"
         );
+    }
+
+    /// Live 2026-11-17: a medium-gear spear player's hop showed as the light roll to the others.
+    #[test]
+    fn a_dodge_plays_the_player_s_gear_load() {
+        const SPEAR: &str = "2H_Melee,Spear,Throwable";
+        /// The mined table's spear dodges forward: the light roll and the medium hop.
+        const LIGHT_FORWARD: u64 = 4834;
+        const MEDIUM_FORWARD: u64 = 3355;
+        let table = crate::combat::test_support::test_player_sequences();
+        let dodge = Intent {
+            forward: 1,
+            dodge: true,
+            ..Intent::default()
+        };
+        let sequence = |load| {
+            let mut track = spawned();
+            track.record(
+                SlayerRecord {
+                    load,
+                    ..keyed(100, dodge, HELD, SPEAR)
+                },
+                &table,
+            );
+            own_state(&mut track, 100).state.map(|state| state.sequence)
+        };
+        assert_eq!(sequence(DodgeLoad::Fast), Some(LIGHT_FORWARD));
+        assert_eq!(sequence(DodgeLoad::Normal), Some(MEDIUM_FORWARD));
     }
 
     /// Live 2026-11-17: a controller player's jump presses in the air each started a new jump.
