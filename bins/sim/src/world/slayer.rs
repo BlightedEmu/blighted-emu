@@ -44,8 +44,8 @@ const ATTACK_RUN_RECORDS: u16 = 34;
 /// Input records from the last start of a first-slot chain to its end (Observed: retail's
 /// `48=0` came 932 ms, 28 records, after the last attack start at the median).
 const CHAIN_END_RECORDS: u16 = 28;
-/// The second slot's state at the end of a cast (Observed: `16=45 18=0 48=0`) and of a hit
-/// reaction ([`reaction`]).
+/// The second slot's state at the end of a cast (Observed: `16=45 18=0 48=0`), of a hit
+/// reaction ([`reaction`]) and of the right-click's block or aim ([`alt_end`]).
 const CAST_END_STATE: u64 = 45;
 
 /// The slayer states the server starts for the player's own movement with the weapon sheathed,
@@ -1131,7 +1131,7 @@ impl SlayerTrack {
         let change = (if alt && !was_alt {
             stance.alt_start
         } else if !alt && was_alt && record.intent.is_some() {
-            stance.alt_end
+            alt_end(stance)
         } else if drawn && (!was_drawn || was_stance != self.drawn_stance) {
             // A draw, and a swap to the other weapon while one is out: retail starts the new
             // weapon's draw at every weapon key (351 presses: `16=2c 18=<draw>` with the new
@@ -1793,6 +1793,33 @@ const fn stand_state(started: u16) -> SlayerState {
     }
 }
 
+/// What the right-click's release sends for `stance`: its end (`alt_end`) for the slots past
+/// the second, and, when its press started the second slot, that slot's end: state
+/// [`CAST_END_STATE`], sequence cleared.
+///
+/// Observed (attack sequence study of 1,196 retail ledgers, 2026-11-17): the second slot ended
+/// in state 45 in about nine of ten ends of every stance (own and other players' states), with
+/// sequence 0 in four of five of those; an own end came a median 34 ms after the right-click's
+/// release (193 ends). The table's second-slot ends were mined from the own states only, where
+/// the client ends its own block itself: some name no second slot, some the press's sequence
+/// again, and the others (the spear's 2958, the blunderbuss's 4241) are in no retail end.
+/// Live 2026-11-17: the other players saw a rapier's block pose (`18=2563`) for the rest of
+/// the session, over its attacks and dodges.
+fn alt_end(stance: &StanceSequences) -> Option<SlotsChange> {
+    if stance
+        .alt_start
+        .and_then(|start| start.second_sequence)
+        .is_none()
+    {
+        return stance.alt_end;
+    }
+    Some(SlotsChange {
+        second_state: Some(CAST_END_STATE),
+        second_sequence: Some(CLEARED_SLOT),
+        ..stance.alt_end.unwrap_or_default()
+    })
+}
+
 /// The upper slots that `change` sends, started in record `counter`: a slot whose state or
 /// sequence goes out starts there, except the second slot without a state (retail's block sends
 /// child 18 alone). `None` when it sends nothing.
@@ -2395,6 +2422,68 @@ pub(crate) mod tests {
         track.record(keyed(12, still, RELEASE, GREATSWORD), &table);
         let due = own_state(&mut track, 12).state.expect("the client's");
         assert_eq!(due.sequence, 5055);
+    }
+
+    #[test]
+    fn the_block_s_release_ends_its_second_slot_for_the_other_players() {
+        // Live 2026-11-17: the other players saw the block pose for the rest of the session.
+        let table = table();
+        let block = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let mut track = spawned();
+        track.record(keyed(20, block, HELD, GREATSWORD), &table);
+        while own_state(&mut track, 20).slots.is_some() {}
+        track.record(keyed(30, Intent::default(), HELD, GREATSWORD), &table);
+        let end = own_state(&mut track, 30).slots.expect("the block's end");
+        assert_eq!(
+            end.second,
+            SlotChange {
+                state: Some(CAST_END_STATE),
+                started: Some(30),
+                sequence: Some(CLEARED_SLOT),
+            }
+        );
+    }
+
+    #[test]
+    fn a_block_end_clears_the_second_slot_and_keeps_the_table_s_other_slots() {
+        const PRESSED: u64 = 2351;
+        const TABLE_END: u64 = 2958;
+        let stance = |end: Option<u64>| StanceSequences {
+            alt_start: Some(SlotsChange {
+                second_sequence: Some(PRESSED),
+                ..SlotsChange::default()
+            }),
+            alt_end: Some(SlotsChange {
+                second_sequence: end,
+                fourth_state: Some(CLEARED_SLOT),
+                ..SlotsChange::default()
+            }),
+            ..StanceSequences::default()
+        };
+        let ends = |end: Option<u64>| {
+            alt_end(&stance(end)).map(|change| {
+                (
+                    change.second_state,
+                    change.second_sequence,
+                    change.fourth_state,
+                )
+            })
+        };
+        let cleared = Some((Some(CAST_END_STATE), Some(CLEARED_SLOT), Some(CLEARED_SLOT)));
+        assert_eq!(ends(Some(PRESSED)), cleared);
+        assert_eq!(ends(None), cleared);
+        assert_eq!(ends(Some(TABLE_END)), cleared);
+        let aim = StanceSequences {
+            alt_end: Some(SlotsChange {
+                third_state: Some(CLEARED_SLOT),
+                ..SlotsChange::default()
+            }),
+            ..StanceSequences::default()
+        };
+        assert_eq!(alt_end(&aim), aim.alt_end, "no second slot to end");
     }
 
     #[test]
