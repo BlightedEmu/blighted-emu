@@ -585,6 +585,22 @@
             {
               "check": "The end of a stop no longer replaces a running attack for other players (tests only, 2026-11-17): a player who stopped walking and held the heavy attack showed the stand two records after the charge, and the others saw no heavy attack.",
               "proof": "tests"
+            },
+            {
+              "check": "A controller player's run faces where its stick points for the other players (tests only, 2026-11-17): a tilted stick with no block or aim is a forward run toward the stick, turned by the camera, and the facing the others get follows it. Before, a stick pulled back was read as a back key: the others saw a walk backwards facing the camera, and the server's body moved at the backpedal speed.",
+              "proof": "tests"
+            },
+            {
+              "check": "A block walk stops into the block's stand at once (tests only, 2026-11-17): in 398 retail ledgers 2,127 of 2,759 stops of a block walk started the block's stand within 100 ms. Ours held the walk for 39 records, and the others saw the legs walk in place.",
+              "proof": "tests"
+            },
+            {
+              "check": "A jump press in the air starts no new jump (tests only, 2026-11-17): a controller player's quick jump presses each started a new jump in the air, five in 0.8 s, and the others saw the jump twitch.",
+              "proof": "tests"
+            },
+            {
+              "check": "A dodge plays the player's gear load (tests only, 2026-11-17): the light roll, the medium hop or the heavy step, mined per load from the own player's load effects in the retail ledgers. Few medium and heavy dodges were captured per weapon: a missing one plays no weapon's dodge of the same load (Inferred), and a load with no data at all still plays the light roll (rapier, sword, flail, magic: Unknown).",
+              "proof": "tests"
             }
           ]
         },
@@ -3662,6 +3678,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Other players, third live round (2026-11-17, tests only): a pad run faces its stick, a block walk stops into its stand at once, jump presses in the air start nothing, and the dodge follows the gear load. The game gateway logs the address of each cookie it sends and of each wrong cookie it refuses.",
     "Account link pop-up (2026-11-17, tests only): the client patch now turns off the shadow account check that the pop-up needs, in place of the switch's default, which did not stop it.",
     "Other players (2026-11-17, second live test): a pad's block no longer starts a heavy attack in it, a dodge or a jump no longer lifts the body into the air for the others, and the end of a stop no longer hides a held heavy attack. Tests only until the next live check.",
     "Quest bots (2026-11-17): the four open items of the main story run are fixed and proven by bots. Creatures fight with the weapon in their mouth slot, so the shipwreck ghosts cast `LightningBolt`. The director holds a trial request while it starts a trial sim, so the first entry on a new stack works. The bot kills named mobs and opens their loot bags for quest items (A Pirate's Plan, Broken Oath). The bot cooks at a level campfire with the meat it skinned (Boar Feast).",
@@ -3897,5 +3914,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-17",
-  "lastCommit": "b5a335ab"
+  "lastCommit": "3fdfaf55"
 }
