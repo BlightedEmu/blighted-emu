@@ -240,6 +240,9 @@ struct Kit {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StarterKits {
     kits: HashMap<String, Kit>,
+    /// Every item by lowercase id: data cells name an item in any case (`GameEventData` gives
+    /// `amuletmonarchsblufft3` for the row `AmuletMonarchsBluffT3`), and no two item ids differ
+    /// in case only.
     items: HashMap<String, KitItem>,
     /// The wire perk index of each lowercase perk id.
     perk_indexes: HashMap<String, u32>,
@@ -265,7 +268,7 @@ impl StarterKits {
             .unwrap_or_default()
             .saturating_add(1);
         for (item_index, (item_id, max_stack)) in (first..).zip(rows) {
-            self.items.entry(item_id.clone()).or_insert(KitItem {
+            self.items.entry(item_id.to_lowercase()).or_insert(KitItem {
                 item_id,
                 item_index,
                 slot: None,
@@ -316,7 +319,7 @@ impl StarterKits {
                         .as_deref()
                         .and_then(ArtifactKind::of_item_class),
                 };
-                (row.item_id.clone(), item)
+                (row.item_id.to_lowercase(), item)
             })
             .collect();
         let kits = source
@@ -325,7 +328,10 @@ impl StarterKits {
             .map(|(backstory, inventory)| {
                 let mut kit = Kit::default();
                 for (item_id, quantity) in kit_pairs(inventory) {
-                    let Some(item) = items.get(item_id).filter(|item| item.slot.is_some()) else {
+                    let Some(item) = items
+                        .get(&item_id.to_lowercase())
+                        .filter(|item| item.slot.is_some())
+                    else {
                         continue;
                     };
                     if quantity >= EQUIPPED_AT_LOGIN {
@@ -358,9 +364,9 @@ impl StarterKits {
             .map_or(&[], |kit| kit.bag.as_slice())
     }
 
-    /// The item `item_id`.
+    /// The item `item_id` (any case).
     pub fn item(&self, item_id: &str) -> Option<&KitItem> {
-        self.items.get(item_id)
+        self.items.get(&item_id.to_lowercase())
     }
 
     /// The wire slots of `perk_ids` (in slot order; unknown perks left out).
@@ -490,6 +496,11 @@ mod tests {
         assert!(kits.bag("Archetype_Nobody").is_empty());
         let potion = kits.item("PotionHealthT1").expect("potion");
         assert_eq!((potion.item_index, potion.slot), (1, None));
+        assert_eq!(
+            kits.item("potionhealtht1")
+                .map(|item| item.item_id.as_str()),
+            Some("PotionHealthT1")
+        );
         let sword = &kit[4];
         assert_eq!(
             (sword.gear_score, sword.durability, sword.bound),
@@ -544,6 +555,10 @@ mod tests {
         assert_eq!(
             kits.item("PotionHealthT1").map(|item| item.item_index),
             Some(1)
+        );
+        assert_eq!(
+            kits.item(&BED.to_uppercase()).map(|item| item.item_index),
+            Some(last + 2)
         );
     }
 }

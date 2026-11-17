@@ -95,6 +95,9 @@ impl SimWorld {
                     unknown = true;
                     continue;
                 };
+                // A data cell can name the item in another case: the item row's id is the one
+                // given and counted.
+                let item_id = item.item_id.clone();
                 let added = player.gear.as_mut().is_some_and(|gear| {
                     gear.put_moved(&content.kits, item, quantity, values.as_ref(), reason)
                 });
