@@ -498,8 +498,9 @@ const fn point(x: f32, y: f32, z: f32) -> Position {
 }
 
 /// The floor heights of the tutorial fights (height note, retail ALC z from the second state on;
-/// the cards carried 0.4 to 1.0 m more and the creatures dropped within 100 ms). Each creature
-/// keeps its floor: the ship's deck and the ruins are not in the height map.
+/// the cards carried 0.4 to 1.0 m more and the creatures dropped within 100 ms): the spawn
+/// places. A creature lands on the level's floor under its place and follows it as it moves
+/// ([`crate::mobs`]): the deck and the ruins are in the level collision.
 ///
 /// The ship's deck: the three sailors' medians 89.38 to 89.45, the player 89.42.
 const SHIP_DECK_Z: f32 = 89.42;

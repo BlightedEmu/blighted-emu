@@ -154,6 +154,15 @@ pub struct Mob {
 }
 
 impl Mob {
+    /// Puts it on the floor of `ground` under its spawn place once ([`Mob::grounded`]).
+    fn land(&mut self, ground: &dyn Ground) {
+        if !self.grounded {
+            let at = self.position;
+            self.position.z = ground.floor_at(at.x, at.y, at.z).unwrap_or(at.z);
+            self.grounded = true;
+        }
+    }
+
     /// Its state for the snapshot.
     pub fn state(&self, ai: &MobAi) -> MobState {
         if self.dead_since_ms.is_some() || self.health.is_dead() {
@@ -668,6 +677,9 @@ impl TickView<'_> {
         if !step.sleeps {
             mob.near_ms = self.now_ms;
         }
+        if matches!(mob.mind, Mind::Tree(_)) {
+            mob.land(self.ground);
+        }
         let Mind::Tree(mind) = &mut mob.mind else {
             return step;
         };
@@ -686,11 +698,6 @@ impl TickView<'_> {
             held: self.held.get(&mob_entity(index)),
             paths: self.paths,
         };
-        if !mob.grounded {
-            let at = mob.position;
-            mob.position.z = self.ground.floor_at(at.x, at.y, at.z).unwrap_or(at.z);
-            mob.grounded = true;
-        }
         let thought = mind.step(self.ai, &mut mob.position, &around);
         step.sleeps &= mind.target().is_none();
         if thought.healed {
@@ -1174,7 +1181,6 @@ impl Mobs {
     /// Mob `entity` lunges as [`Self::lunge`] over `ground`: its feet follow the floor and a wall
     /// or a step too high stops the lunge where it started (live 2026-10-29: Janszoon's charge
     /// up the slope at La Roussette ran half under the ground, the lunge kept his start height).
-    /// A paced mob keeps its height, as its chase does.
     pub fn lunge_over(
         &mut self,
         entity: u64,
@@ -1185,13 +1191,6 @@ impl Mobs {
         let index = spawn_index(entity)?;
         let from = self.live.get(&index)?.position;
         let end = self.lunge(entity, to, max_m)?;
-        if self
-            .personal
-            .get(&index)
-            .is_some_and(|personal| personal.pace.is_some())
-        {
-            return Some(end);
-        }
         let landed = floor_line(ground, from, end, None).map_or(from, |on_floor| Position {
             z: height_after_move(ground, on_floor),
             ..on_floor
@@ -1613,7 +1612,7 @@ impl Mobs {
         }
         self.share_aggro(&acquired, now_ms);
         for index in chasers {
-            intents.extend(self.chase(index, &player_grid, wake_m, now_ms));
+            intents.extend(self.chase(index, &player_grid, wake_m, now_ms, ground));
         }
         intents
     }
@@ -1854,13 +1853,14 @@ impl Mobs {
         }
     }
 
-    /// One step of the paced mob `index`: its swings.
+    /// One step of the paced mob `index` over `ground`: its swings.
     fn chase(
         &mut self,
         index: u32,
         players: &SpatialGrid<u64>,
         wake_m: f32,
         now_ms: u64,
+        ground: &dyn Ground,
     ) -> Option<MobAttackIntent> {
         let personal = self.personal.get(&index)?;
         let pace = personal.pace?;
@@ -1871,6 +1871,7 @@ impl Mobs {
             gait: pace.gait,
         };
         let mob = self.live.get_mut(&index)?;
+        mob.land(ground);
         let at = mob.position;
         let seen: Vec<Seen> = players
             .near(at)
@@ -1882,10 +1883,17 @@ impl Mobs {
             return None;
         };
         match brain.step(at, &seen, now_ms, &settings) {
-            // A paced mob keeps the floor height of its spawn: the retail tutorial creatures
-            // stayed on one floor per fight, a ruin or a deck that the height map does not
-            // hold (height note: 0.3 to 6 m above it, Thorpe's arena with no terrain).
-            BrainAction::MoveTo(to) => mob.position = Position { z: at.z, ..to },
+            // A paced mob's feet follow the level's floor, as a tree mob's: the tutorial's decks
+            // and ruins are in the level collision. Kept at its spawn floor's height, the second
+            // legionnaire walked inside the courtyard's hill and Thorpe stood 0.27 m into his
+            // arena's floor (live 2026-11-17; the deck under the player measured 89.39 here and
+            // 89.39 in its own place).
+            BrainAction::MoveTo(to) => {
+                mob.position = Position {
+                    z: height_after_move(ground, Position { z: at.z, ..to }),
+                    ..to
+                };
+            }
             BrainAction::Home => {
                 mob.position = position_of(&personal.spawn);
                 mob.health.refill();
@@ -3533,6 +3541,60 @@ mod tests {
         run_beyond_m: 3.0,
         walk_speed_mps: 5.5,
     };
+
+    /// Live 2026-11-17: the tutorial's second legionnaire, kept at its spawn floor's height,
+    /// walked inside the hill of its courtyard after the player.
+    #[test]
+    fn a_paced_mob_lands_on_the_floor_and_follows_it_up_a_slope() {
+        const PACE: Pace = Pace {
+            attack_factor: 1.0,
+            swing_gap_ms: (6_000, 7_000),
+            speed_mps: 5.5,
+            hit_delay_ms: 456,
+            attack: TEST_ATTACK,
+            gait: GAIT,
+            sight_m: 20.0,
+            hit_scale: 1.0,
+            capsule: DEFAULT_MOB_CAPSULE,
+            reach: None,
+            moves: &[],
+            phase_two: None,
+        };
+        // Its spawn place lies 0.6 m under the slope.
+        const SPAWN_UP_M: f32 = 2.0;
+        const PLAYER_UP_M: f32 = 12.0;
+        const CHASE_TICKS: u64 = 60;
+        let mut mobs = mobs(Vec::new());
+        let mob = mobs
+            .spawn_personal(
+                spawn_at(SPAWN_X + SPAWN_UP_M, TEST_MOB, TEST_LEVEL),
+                PLAYER,
+                false,
+                Some(PACE),
+                None,
+                0,
+            )
+            .expect("rows");
+        let player = Seen {
+            position: Position {
+                z: Slope
+                    .height_at(SPAWN_X + PLAYER_UP_M, ROW_Y)
+                    .expect("ground"),
+                ..player_at(SPAWN_X + PLAYER_UP_M).position
+            },
+            ..player_at(SPAWN_X + PLAYER_UP_M)
+        };
+        let start_x = SPAWN_X + SPAWN_UP_M;
+        let mut moved = false;
+        for tick_number in 0..CHASE_TICKS {
+            mobs.tick(&[player], tick_number * TICK_MS, &Slope, 1);
+            let at = mobs.get_mut(mob).expect("mob").position;
+            let floor = Slope.height_at(at.x, at.y).expect("ground");
+            assert!((at.z - floor).abs() < 1e-3, "tick {tick_number}: {at:?}");
+            moved |= at.x > start_x + 1.0;
+        }
+        assert!(moved, "it chased up the slope");
+    }
 
     #[test]
     fn a_paced_mob_waits_one_interval_after_its_fight_starts_and_between_hits() {
