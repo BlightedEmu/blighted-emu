@@ -135,7 +135,10 @@ pub enum FirstDatagram {
     /// A ClientHello with this address's cookie. No session exists yet: the caller checks its
     /// limits, then calls [`VerifiedHello::start`].
     Verified(VerifiedHello),
-    /// Anything else, or a cookie for another address: ignore it.
+    /// A ClientHello whose cookie is not this address's (made for another address, or older
+    /// than the last [`COOKIE_PERIOD`]): ignore it.
+    WrongCookie,
+    /// Not a ClientHello: ignore it.
     Ignore,
 }
 
@@ -207,7 +210,10 @@ impl DtlsServerConfig {
             hello.cookie(),
             current_period(),
         );
-        let Some(earlier) = hello.without_cookie().filter(|_| valid) else {
+        if !valid {
+            return Ok(FirstDatagram::WrongCookie);
+        }
+        let Some(earlier) = hello.without_cookie() else {
             return Ok(FirstDatagram::Ignore);
         };
         Ok(FirstDatagram::Verified(VerifiedHello {
@@ -593,7 +599,7 @@ mod tests {
                     FirstDatagram::Verified(hello) => {
                         return Some(hello.start(server_config, MTU).expect("start"));
                     }
-                    FirstDatagram::Ignore => return None,
+                    FirstDatagram::WrongCookie | FirstDatagram::Ignore => return None,
                 }
             }
         }
@@ -673,7 +679,21 @@ mod tests {
     }
 
     #[test]
-    fn a_cookie_made_for_another_address_is_ignored() {
+    fn a_datagram_that_is_no_client_hello_is_ignored_and_not_a_wrong_cookie() {
+        // The gateway logs a wrong cookie; a scanner's junk must not fill that log.
+        const JUNK: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
+        let (certificate, key) = &*REP;
+        let server_config = DtlsServerConfig::new(certificate, key, SECRET).expect("server config");
+        assert!(matches!(
+            server_config
+                .first_datagram(PEER.parse().expect("peer"), MTU, &JUNK)
+                .expect("junk"),
+            FirstDatagram::Ignore
+        ));
+    }
+
+    #[test]
+    fn a_cookie_made_for_another_address_is_a_wrong_cookie() {
         let (certificate, key) = &*REP;
         let server_config = DtlsServerConfig::new(certificate, key, SECRET).expect("server config");
         let client_config = DtlsClientConfig::new(certificate).expect("client config");
@@ -693,7 +713,7 @@ mod tests {
             server_config
                 .first_datagram(OTHER_PEER.parse().expect("peer"), MTU, &second[0])
                 .expect("second"),
-            FirstDatagram::Ignore
+            FirstDatagram::WrongCookie
         ));
     }
 

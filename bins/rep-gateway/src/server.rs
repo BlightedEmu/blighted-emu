@@ -91,8 +91,10 @@ const REASON_LABEL: &str = "reason";
 /// Label of the per-worker gauges.
 const WORKER_LABEL: &str = "worker";
 const ACCEPTED: &str = "accepted";
-/// Drop reason: a first datagram that is not a ClientHello, or has a cookie for another address.
+/// Drop reason: a ClientHello with a cookie that is not its address's.
 const NO_COOKIE: &str = "no_cookie";
+/// Drop reason: a first datagram that is not a ClientHello.
+const NOT_HELLO: &str = "not_hello";
 /// Drop reason: receiving one datagram failed.
 const RECEIVE: &str = "receive";
 /// Drop reason: OpenSSL refused a first ClientHello.
@@ -232,14 +234,23 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
         let mtu = self.gateway.peer_settings.mtu;
         let hello = match self.gateway.dtls.first_datagram(address, mtu, bytes) {
             Ok(FirstDatagram::Reply(datagrams)) => {
+                // With the line of a wrong cookie, it shows a client whose address changed in
+                // its handshake (live 2026-11-17: a client's connect timed out after four
+                // ClientHellos with a wrong cookie, and nothing said from where).
+                tracing::info!(%address, "cookie sent");
                 for datagram in datagrams {
                     send(&self.socket, address, &datagram).await;
                 }
                 return;
             }
             Ok(FirstDatagram::Verified(hello)) => hello,
-            Ok(FirstDatagram::Ignore) => {
+            Ok(FirstDatagram::WrongCookie) => {
+                tracing::warn!(%address, "ClientHello with a wrong cookie refused");
                 metrics::counter!(METRIC_DROPPED, REASON_LABEL => NO_COOKIE).increment(1);
+                return;
+            }
+            Ok(FirstDatagram::Ignore) => {
+                metrics::counter!(METRIC_DROPPED, REASON_LABEL => NOT_HELLO).increment(1);
                 return;
             }
             Err(error) => {
