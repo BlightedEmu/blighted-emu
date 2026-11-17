@@ -1687,9 +1687,15 @@ mod tests {
     #[test]
     fn a_full_stick_moves_it_along_the_camera_yaw_as_the_keys_do() {
         let [x, y] = run_stick(Some([0.0, 1.0]));
-        assert!(x.abs() < CLOSE && (y - SPRINT_SPEED_MPS).abs() < CLOSE, "{x} {y}");
+        assert!(
+            x.abs() < CLOSE && (y - SPRINT_SPEED_MPS).abs() < CLOSE,
+            "{x} {y}"
+        );
         let [x, y] = run_stick(Some([1.0, 0.0]));
-        assert!((x - SPRINT_SPEED_MPS).abs() < CLOSE && y.abs() < CLOSE, "{x} {y}");
+        assert!(
+            (x - SPRINT_SPEED_MPS).abs() < CLOSE && y.abs() < CLOSE,
+            "{x} {y}"
+        );
         // Half right, half forward: the stick's own angle, not a key diagonal.
         let [x, y] = run_stick(Some([0.5, 0.866]));
         assert!((y / x - 0.866 / 0.5).abs() < 1e-3, "{x} {y}");
@@ -1698,10 +1704,13 @@ mod tests {
     #[test]
     fn a_small_tilt_goes_slower_and_a_stick_at_rest_stays() {
         let slow = run_stick(Some([0.0, STICK_SLOW_TILT]));
-        assert!((slow[1] - STICK_STAND_MIN_SPEED_MPS).abs() < CLOSE, "{slow:?}");
+        assert!(
+            (slow[1] - STICK_STAND_MIN_SPEED_MPS).abs() < CLOSE,
+            "{slow:?}"
+        );
         let middle = run_stick(Some([0.0, 0.5]));
-        let halfway = STICK_STAND_MIN_SPEED_MPS
-            + (SPRINT_SPEED_MPS - STICK_STAND_MIN_SPEED_MPS) * 0.5;
+        let halfway =
+            STICK_STAND_MIN_SPEED_MPS + (SPRINT_SPEED_MPS - STICK_STAND_MIN_SPEED_MPS) * 0.5;
         assert!((middle[1] - halfway).abs() < 1e-3, "{middle:?}");
         assert_eq!(run_stick(None), [0.0, 0.0]);
     }
