@@ -664,12 +664,15 @@ impl TrackedBody {
                 ..position
             };
             match floor_under(ground, search_at, sea_level_m) {
-                // A floor the level lacks.
+                // A floor the level lacks. An action does not find one: its camera's body rises
+                // with the animation (live 2026-11-17: a held heavy attack put the camera's body
+                // 1.0 and 1.3 m above the flat floor, the body went up there and hung in the air
+                // for the other players for up to 7 s).
                 Some(floor)
                     if !self.dropping
                         && !self.is_swimming()
                         && !mounted
-                        && (held || walking_height)
+                        && (held || (walking_height && !acting))
                         && height - floor > CAMERA_FLOOR_SPREAD_M =>
                 {
                     self.character.land_at(Position {
@@ -1248,6 +1251,33 @@ mod tests {
         assert!(
             (at.z - client.z).abs() < CAMERA_FLOOR_SPREAD_M,
             "the body climbed with the client: {at:?} {client:?}"
+        );
+    }
+
+    #[test]
+    fn an_action_s_camera_rise_does_not_lift_the_body_onto_a_floor_the_level_lacks() {
+        // Live 2026-11-17: a held heavy attack raised the camera's body 1.2 m over flat ground.
+        const ACTION_RISE_M: f32 = 1.2;
+        let mut body = TrackedBody::new(start());
+        for _ in 0..10 {
+            body.record(input(0, view_of(start(), BOOM, [0.0; 2])), &Flat, SEA);
+        }
+        let raised = Position {
+            z: GROUND_Z + ACTION_RISE_M,
+            ..start()
+        };
+        let attack = TrackInput {
+            action_started: true,
+            ..input(0, view_of(raised, BOOM, [0.0; 2]))
+        };
+        body.record(attack, &Flat, SEA);
+        for _ in 0..20 {
+            body.record(input(0, view_of(raised, BOOM, [0.0; 2])), &Flat, SEA);
+        }
+        assert!(
+            (body.position().z - GROUND_Z).abs() < 1e-3,
+            "the body stays on the floor: {:?}",
+            body.position()
         );
     }
 
