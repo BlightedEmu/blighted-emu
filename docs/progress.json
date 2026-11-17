@@ -549,6 +549,14 @@
             {
               "check": "A controller player's attacks show to other players (tests only, 2026-11-17): the server's own attack starts, combo steps and charges for other players read the trigger's first held record as its press, as the hits do. Live before the fix, the trigger's attacks hit but other players saw none of the server's starts for them. Still open live: other players see each other's moves, jumps, dodges and attacks wrong; the server now logs each input record (keys, stick, actions, the server's body and the camera's body) to find where they part.",
               "proof": "tests"
+            },
+            {
+              "check": "A block's or aim's release ends its upper-body pose for other players (tests only, 2026-11-17): the second slot ends in state 45 with its sequence cleared, as in about nine of ten second-slot ends of 1,196 retail ledgers. Live before the fix, other players saw a rapier player's block pose for the rest of the session, over her attacks and dodges (only the weapon tip effects showed).",
+              "proof": "tests"
+            },
+            {
+              "check": "The player sequence table (realm data pack) is not complete for this build: the rapier, dagger, flail, sickle, gauntlets, rifle and warhammer have no jump (retail rapier jumps: 3675), so other players see the body rise with no jump animation. Some move and dodge numbers may also differ from the retail captures (Unknown until the table is mined again from the captures of this build).",
+              "proof": "none"
             }
           ]
         },
@@ -3541,7 +3549,7 @@
     }
   ],
   "nextSteps": [
-    "**Game pad and other players live check (2026-11-17).**\n\n- Each player in turn: run, jump three times, dodge three times, three light attacks, one held heavy attack; the other watches and notes the time of what looks wrong.\n- Read the sim's `input record` lines of that time against the states sent to the other player.\n- A pad player's held heavy attack on a boar: check the hit and its reach against retail.\n- Check the other pad keys (abilities) and a mount ridden with the stick.",
+    "**Game pad and other players live check (2026-11-17).** Block pose end deployed; mine the player sequence table again (jumps, dodges, moves per weapon) from the captures of this build.\n\n- Each player in turn: run, jump three times, dodge three times, three light attacks, one held heavy attack; the other watches and notes the time of what looks wrong.\n- Read the sim's `input record` lines of that time against the states sent to the other player.\n- A pad player's held heavy attack on a boar: check the hit and its reach against retail.\n- Check the other pad keys (abilities) and a mount ridden with the stick.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
     "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
@@ -3852,9 +3860,10 @@
     "Content folder layout built, reviewed and tested; the PC and game VM content folders moved into it (all files ok, equal merged files now hard links) and the game VM servers run on it (2026-11-16).",
     "The five failing install and capture tests pass again (2026-11-16): the open world gather count and the player attack test table follow the gather node and hit reaction work, the boar and club sailor replays count the fights the capture really holds, and the boar's run speed check leaves out the gore's lunge (retail lunges too).",
     "Game pad movement (2026-11-17, tests only): the server reads the left stick from the input record's scaled bytes, so a pad player's server body walks with the client. Before, the body stayed behind, swings were tested at the wrong place and other players saw the pad player at a stale spot.",
-    "Controller attacks for other players (2026-11-17, tests only): the server's own attack starts for other players read a pad's held trigger as its press, as the hits do; the sim logs each input record to find where the server's body and the client part."
+    "Controller attacks for other players (2026-11-17, tests only): the server's own attack starts for other players read a pad's held trigger as its press, as the hits do; the sim logs each input record to find where the server's body and the client part.",
+    "Block end for other players (2026-11-17, tests only): the right-click's release ends the second slot (state 45, sequence 0) as retail; other players saw a rapier's block pose for the rest of the session."
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-17",
-  "lastCommit": "eb36890f"
+  "lastCommit": "3f387a6d"
 }
