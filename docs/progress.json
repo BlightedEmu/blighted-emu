@@ -138,8 +138,8 @@
               "proof": "live"
             },
             {
-              "check": "The Amazon account link pop-up is off (tests only, 2026-11-11): the served remote config sets `enable-agid-account-linking` to false.",
-              "proof": "tests"
+              "check": "The Amazon account link pop-up is not off yet (live 2026-11-17): the client takes no remote config value for `enable-agid-account-linking`, and the client patch that turns its default off still showed the pop-up once at character select. Unknown: what else turns it on (the script also needs a shadow account and checks a suppression flag).",
+              "proof": "none"
             },
             {
               "check": "New launcher window (tests only, 2026-11-12): the window is a web page in the website's look (Tauri), with the same login, Play, saved servers, options and news as before. The settings file stays where it was, so saved servers and logins carry over. Not seen on Windows yet.",
@@ -573,6 +573,18 @@
             {
               "check": "Not checked against retail: the full place (child 27) goes in 0.5 % of our states to other players, against about 10 % in retail; Unknown whether that matters.",
               "proof": "none"
+            },
+            {
+              "check": "A controller player's block shows to other players with no attack in it (tests only, 2026-11-17): the block button of a pad sets the attack press bit in the block's first record (6 of 6 block starts live; 113 of 103,876 retail presses), and that bit is no press there. Before, the server started a charged heavy attack in the block and the block jerked.",
+              "proof": "tests"
+            },
+            {
+              "check": "A dodge or a jump no longer lifts the body other players see (tests only, 2026-11-17): in a dodge, a jump and the third of a second after them the camera's height picks no floor the level lacks, and at rest the camera may stand up to 1.5 m above the known floor (live on open ground: 0.9 m and 1.07 m). Before, a dodge lifted the body 2.9 m, the others saw a fall and no roll, and a jump landed twice.",
+              "proof": "tests"
+            },
+            {
+              "check": "The end of a stop no longer replaces a running attack for other players (tests only, 2026-11-17): a player who stopped walking and held the heavy attack showed the stand two records after the charge, and the others saw no heavy attack.",
+              "proof": "tests"
             }
           ]
         },
@@ -3565,7 +3577,8 @@
     }
   ],
   "nextSteps": [
-    "**Other players live check (2026-11-17, tests only).** After the deploy: each player blocks and lets go, swings light and heavy, dodges, jumps and sheathes; the other watches. Read the sim's `input record` lines of what looks wrong.\n\n- A new realm data pack version with the re-mined player sequence table (the pack still holds the old one).\n- A pad player's held heavy attack on a boar: the hit and its reach against retail.\n- The other pad keys (abilities) and a mount ridden with the stick.",
+    "**Other players live check (2026-11-17, second round, tests only).** After the deploy: each player blocks and lets go, swings light and heavy, dodges, jumps and sheathes; the other watches. Read the sim's `input record` lines of what looks wrong.\n\n- A new realm data pack version with the re-mined player sequence table (the pack still holds the old one).\n- A pad player's held heavy attack on a boar: the hit and its reach against retail.\n- The other pad keys (abilities) and a mount ridden with the stick.",
+    "**Account link pop-up (2026-11-17).** The patched client still showed it once at character select. Find what turns it on besides the variable's default: the shadow account flag, the suppression flag, or the remote config.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
     "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
@@ -3649,6 +3662,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Other players (2026-11-17, second live test): a pad's block no longer starts a heavy attack in it, a dodge or a jump no longer lifts the body into the air for the others, and the end of a stop no longer hides a held heavy attack. Tests only until the next live check.",
     "Quest bots (2026-11-17): the four open items of the main story run are fixed and proven by bots. Creatures fight with the weapon in their mouth slot, so the shipwreck ghosts cast `LightningBolt`. The director holds a trial request while it starts a trial sim, so the first entry on a new stack works. The bot kills named mobs and opens their loot bags for quest items (A Pirate's Plan, Broken Oath). The bot cooks at a level campfire with the meat it skinned (Boar Feast).",
     "Quest bots (2026-11-16): bots end the Monarch's Bluffs main story from Fragments of Truth to its end. Fixes: a reward item named in another letter case is given; the bot acknowledges each gather end as the client does; the quest plan in a trial names the trial's own boss; the bot enters and leaves trials.",
     "Content folder review: the VM director config still had the removed `content_dir` key, so the director stopped at start and logins waited in a queue; fixed on the PC and the VM. A rebuilt step with the same bytes is fresh at the next build, migrate keeps each file's own time, a design file named in two ways has one name, and the live stack fails when a program stops at start (2026-11-16).",
@@ -3882,5 +3896,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-17",
-  "lastCommit": "28b8abb7"
+  "lastCommit": "a839203e"
 }
