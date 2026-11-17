@@ -2130,9 +2130,10 @@ impl SimWorld {
                     frame_s: input.character.dt_s,
                     action: record.slayer_input(),
                     intent: (!held).then_some(input.character.intent),
-                    attack: slayer::AttackKey {
-                        pressed: !held && record.attack_pressed(),
-                        released: !held && record.attack_released(),
+                    attack: if held {
+                        nw_messages::AttackKeyBits::default()
+                    } else {
+                        record.attack_key()
                     },
                     weapon,
                     swimming,

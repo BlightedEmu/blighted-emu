@@ -148,7 +148,7 @@ pub use categorical::{
 };
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use client_input::{
-    Bit8, ClientInputMsg, HeadStep9, INPUT_Z_MAX, INPUT_Z_MIN, InputHead, InputPosition,
+    AttackKeyBits, Bit8, ClientInputMsg, HeadStep9, INPUT_Z_MAX, INPUT_Z_MIN, InputHead, InputPosition,
     InputRecord, InputSlots, InteractionAction, InteractionRequest, MoveKeys, QUICK_SLOT_KEYS,
     RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, SlayerInput,
 };

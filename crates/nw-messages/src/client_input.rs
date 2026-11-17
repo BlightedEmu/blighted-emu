@@ -881,6 +881,15 @@ impl InputRecord {
         self.slot_bit(ATTACK_HELD_KEY.0, ATTACK_HELD_KEY.1)
     }
 
+    /// The attack key's press, hold and release bits in this record.
+    pub fn attack_key(&self) -> AttackKeyBits {
+        AttackKeyBits {
+            pressed: self.attack_pressed(),
+            held: self.attack_held(),
+            released: self.attack_released(),
+        }
+    }
+
     /// Whether the player pressed the fishing key in this record.
     pub fn fishing_toggle_pressed(&self) -> bool {
         self.slot_bit(FISHING_TOGGLE_KEY.0, FISHING_TOGGLE_KEY.1)
@@ -979,6 +988,35 @@ impl InputRecord {
         BOOM_KEYS
             .iter()
             .any(|&(value, bit)| self.slot_bit(value, bit))
+    }
+}
+
+/// The attack key's bits in one input record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AttackKeyBits {
+    /// The key's press.
+    pub pressed: bool,
+    /// The key is held.
+    pub held: bool,
+    /// The key's release.
+    pub released: bool,
+}
+
+impl AttackKeyBits {
+    /// Whether the key goes down in this record, `down` before it: its press, or the first
+    /// record that holds it since its last release. A controller's right trigger shows no press
+    /// (live 2026-11-17: 94 releases and 5 presses of one controller player, no attack started;
+    /// the mouse of the same laptop hit), and the profile binds that trigger (`az_triggerr_btn`)
+    /// to `attack_primary_hold` as to the press and the release (`defaultprofile.xml`); the held
+    /// record (Azoth catalog input 191) is the press then, one record late (Inferred).
+    pub const fn goes_down(self, down: bool) -> bool {
+        self.pressed || (self.held && !down)
+    }
+
+    /// Whether the key is down after this record, `down` before it: up after its release, down
+    /// after its press or hold.
+    pub const fn down_after(self, down: bool) -> bool {
+        !self.released && (self.pressed || self.held || down)
     }
 }
 
@@ -2762,6 +2800,32 @@ mod tests {
 
     /// Live 2026-11-17: a pad player's body did not walk on the server; the client sends a
     /// pad's move as the left stick's scaled bytes, which the keys' default leaves at rest.
+    #[test]
+    fn the_attack_key_goes_down_at_its_press_or_its_first_hold() {
+        const PRESS: AttackKeyBits = AttackKeyBits {
+            pressed: true,
+            held: false,
+            released: false,
+        };
+        const HOLD: AttackKeyBits = AttackKeyBits {
+            pressed: false,
+            held: true,
+            released: false,
+        };
+        const RELEASE: AttackKeyBits = AttackKeyBits {
+            pressed: false,
+            held: false,
+            released: true,
+        };
+        assert!(PRESS.goes_down(false) && PRESS.goes_down(true));
+        assert!(HOLD.goes_down(false), "a controller's trigger");
+        assert!(!HOLD.goes_down(true), "a key held since its press");
+        assert!(PRESS.down_after(false) && HOLD.down_after(false));
+        assert!(!RELEASE.down_after(true));
+        assert!(AttackKeyBits::default().down_after(true));
+        assert!(!AttackKeyBits::default().down_after(false));
+    }
+
     #[test]
     fn the_left_stick_reads_its_scaled_bytes_and_rest_is_none() {
         const FULL_FORWARD: u8 = 255;

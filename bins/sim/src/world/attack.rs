@@ -353,24 +353,14 @@ impl AttackKeys {
         down: false,
     };
 
-    /// Whether `record` presses the attack key: its press, or the first record that holds the key
-    /// since its last release. A controller's right trigger shows no press (live 2026-11-17: 94
-    /// releases and 5 presses of one controller player, no attack started; the mouse of the
-    /// same laptop hit), and the profile binds that trigger (`az_triggerr_btn`) to
-    /// `attack_primary_hold` as to the press and the release (`defaultprofile.xml`); the held
-    /// record (Azoth catalog input 191) is the press then, one record late (Inferred).
+    /// Whether `record` presses the attack key ([`nw_messages::AttackKeyBits::goes_down`]).
     pub fn pressed_in(&self, record: &InputRecord) -> bool {
-        record.attack_pressed() || (record.attack_held() && !self.down)
+        record.attack_key().goes_down(self.down)
     }
 
-    /// Notes the key's state after `record`: down after its press or hold, up after its
-    /// release.
+    /// Notes the key's state after `record` ([`nw_messages::AttackKeyBits::down_after`]).
     fn note_down(&mut self, record: &InputRecord) {
-        if record.attack_released() {
-            self.down = false;
-        } else if record.attack_pressed() || record.attack_held() {
-            self.down = true;
-        }
+        self.down = record.attack_key().down_after(self.down);
     }
 
     /// The buffered step that starts in `record` at `record_ms`: at its start when the key is

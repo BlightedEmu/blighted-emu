@@ -23,8 +23,8 @@ use nw_content::player_sequences::{
     SlotsChange, StanceSequences, StatePlay,
 };
 use nw_messages::{
-    RemoteUpper, SecondSlayerState, SequenceClock, SequenceTime, SlayerInput, SlayerState,
-    SlotChange, UpperSlots,
+    AttackKeyBits, RemoteUpper, SecondSlayerState, SequenceClock, SequenceTime, SlayerInput,
+    SlayerState, SlotChange, UpperSlots,
 };
 use nw_sim_core::{Intent, Posture};
 
@@ -590,15 +590,6 @@ enum Shot {
     Aimed(UpperSlots),
 }
 
-/// The attack key in one input record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) struct AttackKey {
-    /// It went down in this record.
-    pub(super) pressed: bool,
-    /// It came up in this record.
-    pub(super) released: bool,
-}
-
 /// One input record for the slayer state.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct SlayerRecord {
@@ -612,7 +603,7 @@ pub(super) struct SlayerRecord {
     /// right-click keys.
     pub(super) intent: Option<Intent>,
     /// Its attack key.
-    pub(super) attack: AttackKey,
+    pub(super) attack: AttackKeyBits,
     /// The weapon in the hand.
     pub(super) weapon: Option<HeldWeapon>,
     /// The body swims ([`nw_sim_core::TrackedBody::is_swimming`]).
@@ -763,11 +754,20 @@ impl SlayerTrack {
         self.newest_frame_s = record.frame_s;
         self.newest_counter = record.counter;
         self.sequence_s += record.frame_s;
+        // The key goes down at its press or at a controller's first held record, as the
+        // attacks read it ([`AttackKeyBits::goes_down`]); it stays down through a hit reaction.
+        let record = SlayerRecord {
+            attack: AttackKeyBits {
+                pressed: record.attack.goes_down(self.attack_down),
+                ..record.attack
+            },
+            ..record
+        };
+        self.attack_down = record.attack.down_after(self.attack_down);
         if self.reaction_due.is_some() || self.reaction_free_ms.is_some() {
             // A hit reaction holds the player: its records start nothing, and the client's row
             // 1 names the reaction itself, which is not echoed ([`reaction`]).
             self.press = None;
-            self.attack_down = false;
             return;
         }
         // A row 1 that names the reaction state is the client's copy of the server's own start.
@@ -974,14 +974,12 @@ impl SlayerTrack {
         let counter = record.counter;
         if record.attack.pressed {
             self.press = Some(counter);
-            self.attack_down = true;
         }
         self.end_attack(counter, stance);
         let running = self
             .running
             .filter(|(_, started)| counter.wrapping_sub(*started) < ATTACK_RUN_RECORDS);
         if record.attack.released {
-            self.attack_down = false;
             let tapped = self.press.take().filter(|_| !aiming);
             if let Some(sequence) = self.release_follow_up.take() {
                 return self.start_attack(first_slot(sequence), counter, None);
@@ -2024,7 +2022,7 @@ pub(crate) mod tests {
             frame_s: FRAME_S,
             action: None,
             intent: Some(intent),
-            attack: AttackKey::default(),
+            attack: AttackKeyBits::default(),
             weapon: None,
             swimming: false,
             falling: false,
@@ -2032,7 +2030,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn keyed(counter: u16, intent: Intent, attack: AttackKey, tags: &str) -> SlayerRecord {
+    fn keyed(counter: u16, intent: Intent, attack: AttackKeyBits, tags: &str) -> SlayerRecord {
         SlayerRecord {
             attack,
             weapon: weapon(tags, true),
@@ -2052,16 +2050,26 @@ pub(crate) mod tests {
         track
     }
 
-    const PRESS: AttackKey = AttackKey {
+    const PRESS: AttackKeyBits = AttackKeyBits {
         pressed: true,
+        held: false,
         released: false,
     };
-    const RELEASE: AttackKey = AttackKey {
+    const RELEASE: AttackKeyBits = AttackKeyBits {
         pressed: false,
+        held: false,
         released: true,
     };
-    const HELD: AttackKey = AttackKey {
+    /// A record with no attack key bit: the key stays as it was.
+    const HELD: AttackKeyBits = AttackKeyBits {
         pressed: false,
+        held: false,
+        released: false,
+    };
+    /// A controller's right trigger held: the held bit and no press.
+    const PAD_HOLD: AttackKeyBits = AttackKeyBits {
+        pressed: false,
+        held: true,
         released: false,
     };
 
@@ -2351,6 +2359,26 @@ pub(crate) mod tests {
         );
     }
 
+    /// Live 2026-11-17: other players saw none of a controller player's server attacks; the
+    /// trigger sends the held bit and no press.
+    #[test]
+    fn a_controller_trigger_held_without_a_press_starts_the_press_start_and_the_charge() {
+        let table = table();
+        let mut track = spawned();
+        let still = Intent::default();
+        track.record(keyed(100, still, PAD_HOLD, GREATSWORD), &table);
+        let press = own_state(&mut track, 100).state.expect("the press start");
+        assert_eq!(press.sequence, PRESS_START);
+        while own_state(&mut track, 100).state.is_some() {}
+        for counter in 101..=100 + HOLD_RECORDS {
+            track.record(keyed(counter, still, PAD_HOLD, GREATSWORD), &table);
+        }
+        let charge = own_state(&mut track, 100 + HOLD_RECORDS)
+            .state
+            .expect("the charge");
+        assert_eq!(charge.sequence, CHARGE);
+    }
+
     #[test]
     fn a_tap_the_client_answered_gets_no_light_attack() {
         let table = table();
@@ -2462,7 +2490,7 @@ pub(crate) mod tests {
             block: true,
             ..Intent::default()
         };
-        let gun = |counter: u16, attack: AttackKey, empty: bool| SlayerRecord {
+        let gun = |counter: u16, attack: AttackKeyBits, empty: bool| SlayerRecord {
             weapon: Some(HeldWeapon {
                 empty,
                 ..weapon(BLUNDERBUSS, true).expect("a gun")
