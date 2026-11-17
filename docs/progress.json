@@ -394,7 +394,7 @@
               "proof": "tests"
             },
             {
-              "check": "`just realm-data <zip>` installs a pack zip, then builds the creature animations, catacomb tiles, dungeon scripts, effect areas and (with `Server.pak`) the AI data when they are missing, or again with `--rebuild`. With no zip it stops and names the zip of the build.",
+              "check": "`just realm-data <zip>` installs a pack zip into the topic folders of the content folder (`NW_CONTENT_DIR`) and records each table in the folder's manifest, then builds the derived tables (`content build --derived`: creature animations, catacomb tiles, dungeon scripts, effect areas and, with `Server.pak`, the AI data) when they are not fresh, or again with `--rebuild`. A relative zip path starts at the folder the command runs in. With no zip it stops and names the zip of the build.",
               "proof": "tests"
             },
             {
@@ -414,7 +414,7 @@
               "proof": "tests"
             },
             {
-              "check": "Pack version 2 is shared with the community.",
+              "check": "The next pack (version 3, made from the content layout code; version 2 was never shared) is shared with the community.",
               "proof": "none"
             }
           ]
@@ -3489,7 +3489,7 @@
     }
   ],
   "nextSteps": [
-    "**Realm data pack version 2:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v2/` with the community, with a note that version 1 users add `--replace`.",
+    "**Realm data pack version 3:** make it from the content layout code (`--out-dir local-data/realm-pack/v3`), then share the zip and `SHA256SUMS` with the community, with a note that version 1 users add `--replace`.",
     "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
     "**Camps (2026-11-15): the rest of the live check.**\n\n- Respawn at the camp after a death.\n- Craft at the camp's station.\n- Place a camp with no wood: it stands unbuilt; gather the wood and build it.\n- A game master gets the reason line of a refused camp in chat.",
     "**One busy sim (2026-11-15): the bundle stops of the 110-bot run.**\n\n- The run: `nw-testclient hunt`, `gather` and `swarm` together on the real-client stack (30, 30 and 50 bots).\n- The ticks keep time now; the hunt and gather bots still report a stop in their bundles. Find the cause.",
