@@ -164,17 +164,36 @@ The landing screen script opens it in one place only (`lyshineui/main menu/landi
 needs the character select screen, no news pop-up, an authorized login and a shadow account
 (`GameRequestsBus.GetIsShadowAccount`).
 
-The account link set-up (build 25810808: `FUN_145a7fce0`) creates that variable with the default
-on: `LEA RAX,[name]` / `MOV [RSP+0x20],RAX` / `LEA RAX,[""]` / `MOV [RSP+0x28],RAX` /
-`MOVAPS` / `MOVDQA` / `MOV R8B,1` / `LEA RDX,[RSP+0x20]` / `CALL`. The server's remote config
-names the variable off in the public `ProductId` layer, and the client does not take that
-value. Live 2026-11-12: the client fetched that layer (237 bytes, with the key off) at
-15:00:56 and still opened the pop-up at character select. Unknown: why the remote value does
-not reach this variable.
+The switch is not the way to turn it off. The account link set-up (build 25810808:
+`FUN_145a7fce0`) creates the variable with the default on. Two earlier fixes did not stop the
+pop-up:
 
-The tool finds the one creation whose first `LEA` points at the name of the variable and whose
-default is 1. It changes the default to 0 (build 25810808: file offset `0x5A7F620`, VA
-`0x145A80020`).
+- The server's remote config named the variable off in the public `ProductId` layer. Live
+  2026-11-12: the client fetched that layer (237 bytes, with the key off) at 15:00:56 and still
+  opened the pop-up at character select.
+- This tool made the variable's default 0 (2026-11-12). Live 2026-11-17: a client with that
+  patch still opened the pop-up at its first character select.
+
+Unknown: why neither value reaches the script's `GetBool`.
+
+The shadow account check is the way. The script asks `GameRequestsBus.GetIsShadowAccount`, the
+Omni auth backend's vtable slot `0x90` (build 25810808: `FUN_145a8ef00`). It answers 1 when the
+Omni session check (`FUN_1479b7820`) returns 0 and the backend's account type (`+0x25C`) is 0.
+The backend logs that type as `Shadow` (0) or `Full` (1) (`FUN_145a8d5a0`); it is the AGS account
+data of the Omni session (`FUN_1479b6860`, session `+0xB4`). The session comes from Amazon's
+token service (`tokenservice.amazongames.com/games/<alias>/tokens`), which neither the hosts file
+nor the server answers. So a platform account with no Amazon Games iD gets a valid Shadow session
+and the pop-up (Inferred from the code path; the traffic to that host was not captured).
+
+The script also shows the pop-up once per game session only (`hasShownAGIDLinkThisSession`), and
+after one is closed it waits `javelin.agid-link-modal-cooldown-secs` times
+`javelin.agid-link-modal-cooldown-multiplier` to the power of the times shown. So a client can go
+some days with no pop-up and then show it again.
+
+The tool finds the check by its byte signature (`SHADOW_ACCOUNT_CHECK`) and changes its
+`MOV AL,1` to `MOV AL,0` (build 25810808: file offset `0x5A8E51B`, VA `0x145A8EF1B`). No account
+is a shadow account then, and the pop-up does not open. The only code reference to the check is
+its vtable slot; Unknown: which other scripts ask `GetIsShadowAccount`.
 
 ## Sixth change: AWS proxy (`--aws-proxy`)
 
@@ -345,9 +364,11 @@ For the typed chat patch, find the settings function that creates
 `javelin.social.enable-vpc-restrictions` (build 25810808: `FUN_14616d7b0`). If the shape of a
 variable creation changed, update `VARIABLE_CREATION` in `scripts/patch-client.py`.
 
-For the account link patch, find the function that creates
-`javelin.enable-agid-account-linking` (build 25810808: `FUN_145a7fce0`, the only code that names
-it). If the shape of its creation changed, update `CONFIG_VARIABLE_CREATION` in
+For the account link patch, find the Omni auth backend's shadow account check again: the
+function whose only work is the Omni session check, then `CMP [RBX+<account type>],EAX` and
+`MOV AL,1` (build 25810808: `FUN_145a8ef00`, the 0x90 slot of the backend vtable at
+`0x14844be00`; the account type is the field that `FUN_145a8d5a0` writes after its log line
+`Get ags account type result: %s`). If its shape changed, update `SHADOW_ACCOUNT_CHECK` in
 `scripts/patch-client.py`.
 
 For the AWS proxy patch, find the `ClientConfiguration` constructor again (`FUN_147467a40`: it
