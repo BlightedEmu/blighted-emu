@@ -163,6 +163,8 @@ pub struct Tracked {
     pub consistent: bool,
     /// The body stands on a floor: not in a jump or a fall.
     pub on_floor: bool,
+    /// Where the camera check put the body in this record, when the camera looked at it.
+    pub camera_body: Option<Position>,
 }
 
 /// An attack whose animation moves the body.
@@ -559,6 +561,7 @@ impl TrackedBody {
                 resynced: false,
                 consistent: false,
                 on_floor: self.character.is_grounded(),
+                camera_body: None,
             };
         };
         // The wall is the one at the higher of the two bodies' feet: a client that climbed onto
@@ -700,6 +703,7 @@ impl TrackedBody {
             resynced,
             consistent: true,
             on_floor: self.character.is_grounded(),
+            camera_body: Some(seen.at),
         }
     }
 }

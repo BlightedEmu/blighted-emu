@@ -2161,9 +2161,29 @@ impl SimWorld {
                 };
                 player.aim = Some((at, now_ms));
             }
+            let intent = input.character.intent;
             let tracked = player
                 .tracked
                 .record(input, &ground, self.settings.ocean_level_m);
+            // One line per record: the client's keys and actions against the server's body
+            // and the camera's body, to find where the two part (live 2026-11-17: other
+            // players saw each other at the wrong place and with the wrong animations).
+            tracing::debug!(
+                player = player.number,
+                counter,
+                forward = intent.forward,
+                right = intent.right,
+                stick = ?intent.stick,
+                jump = intent.jump,
+                dodge = intent.dodge,
+                block = intent.block,
+                attack = ?record.attack_key(),
+                action = ?record.slayer_input(),
+                body = ?tracked.position,
+                camera_body = ?tracked.camera_body,
+                resynced = tracked.resynced,
+                "input record"
+            );
             if tracked.consistent && tracked.on_floor {
                 walked.push(tracked.position);
             }
