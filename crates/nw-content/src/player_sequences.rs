@@ -203,6 +203,45 @@ impl Directional {
     }
 }
 
+/// The landing sequence (slayer state 12) of one way into the air, by whether a move key is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Landing {
+    /// No move key held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub still: Option<u64>,
+    /// A move key held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moving: Option<u64>,
+}
+
+impl Landing {
+    /// The landing of a body that holds a move key (`moving`) or not, else the other one (best
+    /// guess: a case the ledgers did not show lands as the other).
+    pub fn of(&self, moving: bool) -> Option<u64> {
+        if moving {
+            self.moving.or(self.still)
+        } else {
+            self.still.or(self.moving)
+        }
+    }
+}
+
+/// A stance's fall (slayer state 13) and landings (Observed, 2026-11-17 study of 391 retail
+/// ledgers: the land followed 91 % of falls and 79 % of jumps, and its sequence depends more on
+/// a jump against a fall than on a move key; the jump's direction showed no difference).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AirSequences {
+    /// The fall's sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fall: Option<u64>,
+    /// The landing after a jump.
+    #[serde(default)]
+    pub land_after_jump: Landing,
+    /// The landing after a fall.
+    #[serde(default)]
+    pub land_after_fall: Landing,
+}
+
 /// The server's sequences of one weapon stance.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StanceSequences {
@@ -242,6 +281,18 @@ pub struct StanceSequences {
     /// The draw: the second slot's state (wire value) and sequence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draw: Option<StatePlay>,
+    /// Milliseconds from the draw's start to the end of its second slot (`16=45 18=0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draw_end_ms: Option<u64>,
+    /// The sheathe's second-slot sequence, in the draw's state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheathe: Option<u64>,
+    /// Milliseconds from the sheathe's start to the end of its second slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheathe_end_ms: Option<u64>,
+    /// The fall and the landings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub air: Option<AirSequences>,
     /// What an attack key press with the right-click held sends while a shot is loaded: the
     /// aimed shot (retail blunderbuss `18=5e 48=29`, 30 to 80 ms after the press).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -488,6 +539,13 @@ impl PlayerSequences {
         self.by_key.get(&key)
     }
 
+    /// The sequences of no weapon in the hand: the stance of the empty `MannequinTag` cell, which
+    /// a sheathed weapon plays too (Observed, 2026-11-17 study: with the weapon sheathed, retail
+    /// sent the sheathed dodge 4845 and jump 1208 whatever the weapon).
+    pub fn sheathed(&self) -> Option<&StanceSequences> {
+        self.stance(stance_key(""))
+    }
+
     /// The server's follow-up of the client's sequence `client`.
     pub fn follow_up(&self, client: u64) -> Option<FollowUp> {
         self.follow_ups.get(&client).copied()
@@ -574,6 +632,39 @@ mod tests {
             .expect("a table without abilities");
         assert_eq!(old.ability(lowercase_crc32("Ability_Flail_Trip")), None);
         assert_eq!(old.abilities_len(), 0);
+    }
+
+    #[test]
+    fn a_stance_reads_its_air_and_second_slot_ends_and_no_weapon_has_its_own() {
+        let table = PlayerSequences::parse(
+            r#"{"stances": [
+                {"tags": "",
+                 "air": {"fall": 1675,
+                         "land_after_jump": {"still": 2376, "moving": 789},
+                         "land_after_fall": {"still": 1355}}},
+                {"tags": "2H_Melee,GreatSword",
+                 "draw": {"state": 44, "sequence": 2467}, "draw_end_ms": 1096,
+                 "sheathe": 2011, "sheathe_end_ms": 799}
+            ], "follow_ups": []}"#,
+        )
+        .expect("table");
+        let air = table.sheathed().and_then(|stance| stance.air).expect("air");
+        assert_eq!(air.fall, Some(1675));
+        assert_eq!(air.land_after_jump.of(true), Some(789));
+        assert_eq!(air.land_after_jump.of(false), Some(2376));
+        assert_eq!(
+            air.land_after_fall.of(true),
+            Some(1355),
+            "the other landing"
+        );
+        let sword = table
+            .stance(stance_key("2H_Melee,GreatSword"))
+            .expect("greatsword");
+        assert_eq!(
+            (sword.draw_end_ms, sword.sheathe, sword.sheathe_end_ms),
+            (Some(1096), Some(2011), Some(799))
+        );
+        assert_eq!(sword.air, None);
     }
 
     #[test]
