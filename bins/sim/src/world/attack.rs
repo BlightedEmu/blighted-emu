@@ -6245,7 +6245,7 @@ mod tests {
             slots: nw_messages::InputSlots {
                 count: 19,
                 values: vec![0, 1 << 62],
-                bytes: [0; 4],
+                ..nw_messages::InputSlots::default()
             },
             ..InputRecord::default()
         }
@@ -6746,7 +6746,7 @@ mod tests {
             slots: nw_messages::InputSlots {
                 count: 19,
                 values: vec![0, 1 << 62],
-                bytes: [0; 4],
+                ..nw_messages::InputSlots::default()
             },
             ..InputRecord::default()
         };
@@ -7064,7 +7064,7 @@ mod tests {
             slots: nw_messages::InputSlots {
                 count: 19,
                 values: vec![0, 1 << 3],
-                bytes: [0; 4],
+                ..nw_messages::InputSlots::default()
             },
             ..InputRecord::default()
         };
@@ -7113,7 +7113,7 @@ mod tests {
             slots: nw_messages::InputSlots {
                 count: 19,
                 values: vec![0, u64::from(held) << 3],
-                bytes: [0; 4],
+                ..nw_messages::InputSlots::default()
             },
             ..InputRecord::default()
         }
@@ -7550,7 +7550,7 @@ mod tests {
             slots: nw_messages::InputSlots {
                 count: 19,
                 values: vec![0, 1 << 62],
-                bytes: [0; 4],
+                ..nw_messages::InputSlots::default()
             },
             ..InputRecord::default()
         };

@@ -8047,7 +8047,7 @@ mod tests {
             slots: nw_messages::InputSlots {
                 count: 19,
                 values: vec![0, 1 << BLOCK_BIT],
-                bytes: [0; 4],
+                ..nw_messages::InputSlots::default()
             },
             ..nw_messages::InputRecord::default()
         };

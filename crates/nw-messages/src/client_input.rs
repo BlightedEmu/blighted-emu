@@ -150,14 +150,26 @@ pub struct InputHead {
 }
 
 /// The slots after mask bit 4 (`FUN_142a2ea20`): a count, the packed values, four scaled bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Its default holds no slot and both sticks at rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputSlots {
     /// Slots.
     pub count: u8,
     /// One wide integer per two slots, then one narrow integer for an odd last slot.
     pub values: Vec<u64>,
-    /// The four scaled bytes.
+    /// The four scaled bytes: the left stick's right and forward, then the right stick's
+    /// ([`InputRecord::left_stick`]).
     pub bytes: [u8; SLOT_BYTES],
+}
+
+impl Default for InputSlots {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            values: Vec::new(),
+            bytes: NEUTRAL_SLOT_BYTES,
+        }
+    }
 }
 
 /// Mask bit 8 (`FUN_1435ebc30`).
@@ -799,8 +811,17 @@ const WALK_KEY: (usize, u32) = (4, 57);
 const BOOM_KEYS: [(usize, u32); 3] = [(2, 35), (5, 57), (5, 51)];
 /// Slots of a client record (19 words of the action set, as 10 values).
 const ACTION_SLOTS: u8 = 19;
-/// The neutral scaled bytes of a record.
-const NEUTRAL_SLOT_BYTES: [u8; SLOT_BYTES] = [128; SLOT_BYTES];
+/// A stick axis at rest in a scaled byte: the axis value 0 (Observed, every one of the
+/// 52,552,599 retail input records of 1,194 ledgers, keyboard players all).
+const STICK_AT_REST: u8 = 128;
+/// The scale of a stick axis in its byte: the client writes `clamp((value + 1) x 128, 0, 255)`
+/// (`FUN_142a29250`) and reads `byte / 128 - 1` (`FUN_142a16a80`).
+const STICK_SCALE: f32 = 128.0;
+/// The scaled bytes of the left stick: its right and its forward axis (the client's input
+/// state +0xa8 and +0xac, the axis set `LeftAnalog` of `AnalogStickInput`, `FUN_142a25ab0`).
+const LEFT_STICK_BYTES: [usize; 2] = [0, 1];
+/// The neutral scaled bytes of a record: both sticks at rest.
+const NEUTRAL_SLOT_BYTES: [u8; SLOT_BYTES] = [STICK_AT_REST; SLOT_BYTES];
 /// Input bits in one slot value: an input number is its value x 64 + its bit.
 const INPUT_BITS_PER_VALUE: u32 = u64::BITS;
 
@@ -898,6 +919,16 @@ impl InputRecord {
             .zip(WEAPON_KEYS)
             .find(|(_, (value, bit))| self.slot_bit(*value, *bit))
             .map(|(key, _)| key)
+    }
+
+    /// The left stick of a game pad in this record: right and forward, each -1 to 1 (the
+    /// client gives a pad's move as the stick, not as the move keys, and the stick's move
+    /// replaces the keys' then: `FUN_142565c50`, the action lists' `AnalogInputOverride=
+    /// "LeftAnalog"`); `None` at rest.
+    pub fn left_stick(&self) -> Option<[f32; 2]> {
+        let [right, forward] = LEFT_STICK_BYTES.map(|index| self.slots.bytes[index]);
+        let axis = |byte: u8| f32::from(byte) / STICK_SCALE - 1.0;
+        (right != STICK_AT_REST || forward != STICK_AT_REST).then(|| [axis(right), axis(forward)])
     }
 
     /// The movement keys the player holds in this record.
@@ -2727,6 +2758,37 @@ mod tests {
             ClientInputMsg::decode(&longer),
             Err(MessageError::TrailingBytes { left: 1 })
         ));
+    }
+
+    /// Live 2026-11-17: a pad player's body did not walk on the server; the client sends a
+    /// pad's move as the left stick's scaled bytes, which the keys' default leaves at rest.
+    #[test]
+    fn the_left_stick_reads_its_scaled_bytes_and_rest_is_none() {
+        const FULL_FORWARD: u8 = 255;
+        const HALF_LEFT: u8 = 64;
+        let with_bytes = |bytes: [u8; 4]| InputRecord {
+            slots: InputSlots {
+                bytes,
+                ..InputSlots::default()
+            },
+            ..InputRecord::default()
+        };
+        assert_eq!(InputRecord::default().left_stick(), None, "keys only");
+        assert_eq!(
+            with_bytes([STICK_AT_REST, STICK_AT_REST, 0, FULL_FORWARD]).left_stick(),
+            None,
+            "the right stick turns the camera"
+        );
+        let [right, forward] = with_bytes([HALF_LEFT, FULL_FORWARD, STICK_AT_REST, STICK_AT_REST])
+            .left_stick()
+            .expect("moved");
+        assert!((right + 0.5).abs() < f32::EPSILON, "{right}");
+        assert!((forward - 0.992_187_5).abs() < f32::EPSILON, "{forward}");
+        assert_eq!(
+            ClientInputMsg::position(position()).records[0].left_stick(),
+            None,
+            "the test client's keys leave the sticks at rest"
+        );
     }
 
     proptest! {

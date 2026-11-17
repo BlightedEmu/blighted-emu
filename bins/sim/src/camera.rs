@@ -68,7 +68,8 @@ pub fn track_input(record: &InputRecord, seen: RecordView) -> Option<TrackInput>
         prone_toggle: record.prone_toggle_pressed(),
         walk: record.walk_held(),
         ..Intent::of_keys(keys.forward, keys.back, keys.left, keys.right)
-    };
+    }
+    .with_stick(record.left_stick());
     Some(TrackInput {
         character: CharacterInput {
             intent,
@@ -228,5 +229,31 @@ mod tests {
             intent.crouch_toggle && intent.prone_toggle && intent.walk,
             "{intent:?}"
         );
+    }
+
+    #[test]
+    fn the_left_stick_moves_the_character_without_a_key() {
+        // A game pad sends no direction key bit: scaled byte 1 is the left stick forward.
+        const STICK_FORWARD: [u8; 4] = [128, 255, 128, 128];
+        let record = InputRecord {
+            slots: InputSlots {
+                count: 19,
+                values: vec![0],
+                bytes: STICK_FORWARD,
+            },
+            ..InputRecord::default()
+        };
+        let seen = RecordView {
+            frame_s: None,
+            view: Some(LookDir {
+                yaw: 0.0,
+                pitch: 0.0,
+            }),
+            camera: None,
+        };
+        let intent = track_input(&record, seen).expect("a view").character.intent;
+        let [right, forward] = intent.stick.expect("a tilted stick");
+        assert!(right.abs() < CLOSE && forward > 0.99, "{intent:?}");
+        assert_eq!((intent.forward, intent.right), (1, 0));
     }
 }

@@ -906,7 +906,12 @@ impl SimWorld {
         };
         let moving = records.iter().any(|record| {
             let keys = record.move_keys();
-            keys.forward || keys.back || keys.left || keys.right || keys.jump
+            keys.forward
+                || keys.back
+                || keys.left
+                || keys.right
+                || keys.jump
+                || record.left_stick().is_some()
         });
         if channeling && moving {
             self.cancel_channel(entity, number);

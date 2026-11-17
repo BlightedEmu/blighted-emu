@@ -371,8 +371,24 @@ const SLOW_DODGE_BACK_ROOT: [(u8, f32); 30] = [
     (38, 3.0),
 ];
 
+/// The stick's tilt below which a stick move goes at its row's `MinSpeed`, and above which at
+/// the row's full speed; between, the speed goes from one to the other
+/// (`playeractions_nav.actionlist`, `playeractions_sprint.actionlist`: the move rows'
+/// `AnalogInputOverride="LeftAnalog"`, `UseAnalogInputToModulateSpeed="true"`, Min 0.2 and
+/// Max 0.8).
+const STICK_SLOW_TILT: f32 = 0.2;
+const STICK_FULL_TILT: f32 = 0.8;
+/// The move rows' `MinSpeed` (m/s) for a stick barely tilted: standing, crouched and prone.
+const STICK_STAND_MIN_SPEED_MPS: f32 = 1.40;
+const STICK_CROUCH_MIN_SPEED_MPS: f32 = 0.80;
+/// See [`STICK_STAND_MIN_SPEED_MPS`].
+const STICK_PRONE_MIN_SPEED_MPS: f32 = 0.18;
+/// The share of the stick's tilt an axis needs to count as that direction's key: the sine of
+/// 22.5°, half of the action lists' 45° direction sectors (Inferred).
+const STICK_AXIS_SHARE: f32 = 0.383;
+
 /// What the keys of one input record ask for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Intent {
     /// Forward (1), back (-1) or neither (0).
     pub forward: i8,
@@ -392,9 +408,35 @@ pub struct Intent {
     pub prone_toggle: bool,
     /// The walk key is held.
     pub walk: bool,
+    /// A game pad's left stick: right and forward, each -1 to 1; its move replaces the keys'
+    /// ([`Intent::with_stick`]).
+    pub stick: Option<[f32; 2]>,
 }
 
 impl Intent {
+    /// This intent with the left stick `stick` (`None` at rest): its move replaces the keys',
+    /// and its axes stand in for the direction keys where the rules ask for a key (back,
+    /// block, dodge): an axis with at least [`STICK_AXIS_SHARE`] of the tilt.
+    pub fn with_stick(self, stick: Option<[f32; 2]>) -> Self {
+        let Some([right, forward]) = stick else {
+            return self;
+        };
+        let tilt = right.hypot(forward);
+        let key = |axis: f32| {
+            if axis.abs() >= STICK_AXIS_SHARE * tilt {
+                if axis > 0.0 { 1 } else { -1 }
+            } else {
+                0
+            }
+        };
+        Self {
+            forward: key(forward),
+            right: key(right),
+            stick,
+            ..self
+        }
+    }
+
     /// The intent of the held direction keys, without a jump or a walk toggle.
     pub fn of_keys(forward: bool, back: bool, left: bool, right: bool) -> Self {
         Self {
@@ -404,9 +446,9 @@ impl Intent {
         }
     }
 
-    /// Whether a direction key is held.
+    /// Whether a direction key is held or the stick is tilted.
     pub(crate) const fn moves(self) -> bool {
-        self.forward != 0 || self.right != 0
+        self.forward != 0 || self.right != 0 || self.stick.is_some()
     }
 
     /// The intent of a rider: the posture toggles, the walk toggle, the block and the dodge do
@@ -484,6 +526,28 @@ impl Pace {
             speed_mps,
             acceleration_mps2: rate_mps2,
             deceleration_mps2: rate_mps2,
+        }
+    }
+
+    /// This pace of a move row for a stick tilted to `stick` (`None`: the keys) in `posture`:
+    /// [`STICK_SLOW_TILT`] or less goes at the posture's `MinSpeed`, [`STICK_FULL_TILT`] or more
+    /// at the row's speed, and between them the speed goes from one to the other.
+    fn tilted(self, stick: Option<[f32; 2]>, posture: Posture) -> Self {
+        let Some([right, forward]) = stick else {
+            return self;
+        };
+        let min_speed_mps = match posture {
+            Posture::Stand => STICK_STAND_MIN_SPEED_MPS,
+            Posture::Crouch => STICK_CROUCH_MIN_SPEED_MPS,
+            Posture::Prone => STICK_PRONE_MIN_SPEED_MPS,
+        };
+        let share = ((right.hypot(forward) - STICK_SLOW_TILT)
+            / (STICK_FULL_TILT - STICK_SLOW_TILT))
+            .clamp(0.0, 1.0);
+        let slowest = min_speed_mps.min(self.speed_mps);
+        Self {
+            speed_mps: slowest + (self.speed_mps - slowest) * share,
+            ..self
         }
     }
 }
@@ -804,14 +868,21 @@ pub fn stop_at_walls(ground: &(impl Ground + ?Sized), from: Position, to: Positi
 }
 
 /// The unit vector in the ground plane of the keys of `intent` with camera yaw `yaw`, when they
-/// ask for a direction.
+/// ask for a direction; the tilted stick's direction instead of the keys' (the client turns the
+/// stick by the camera as it turns the keys, `CamRelMotion`).
 pub(crate) fn key_direction(intent: Intent, yaw: f32) -> Option<[f32; 2]> {
     if !intent.moves() {
         return None;
     }
     let (forward, right) = yaw_axes(yaw);
-    let (along, side) = (f32::from(intent.forward), f32::from(intent.right));
+    let (along, side) = intent.stick.map_or_else(
+        || (f32::from(intent.forward), f32::from(intent.right)),
+        |[side, along]| (along, side),
+    );
     let length = along.hypot(side);
+    if length <= f32::EPSILON {
+        return None;
+    }
     Some([
         (along * forward[0] + side * right[0]) / length,
         (along * forward[1] + side * right[1]) / length,
@@ -1339,6 +1410,7 @@ impl Character {
             Posture::Crouch => Pace::even(CROUCH_SPEED_MPS, ACCELERATION_MPS2),
             Posture::Prone => Pace::even(PRONE_SPEED_MPS, ACCELERATION_MPS2),
         }
+        .tilted(intent.stick, self.posture)
     }
 
     /// The sprint speed's factor: 1 plus the road boost's `SprintSpeedMod` while it lasts.
@@ -1593,6 +1665,54 @@ mod tests {
             );
         }
         assert!(west.position().x < -4.0 && west.position().y.abs() < CLOSE);
+    }
+
+    /// A second of the left stick at `stick`; gives the velocity.
+    fn run_stick(stick: Option<[f32; 2]>) -> [f32; 2] {
+        let mut character = Character::new(origin());
+        for _ in 0..30 {
+            character.step(
+                CharacterInput {
+                    intent: Intent::default().with_stick(stick),
+                    yaw: 0.0,
+                    dt_s: DT,
+                },
+                &Flat,
+                SEA,
+            );
+        }
+        character.velocity()
+    }
+
+    #[test]
+    fn a_full_stick_moves_it_along_the_camera_yaw_as_the_keys_do() {
+        let [x, y] = run_stick(Some([0.0, 1.0]));
+        assert!(x.abs() < CLOSE && (y - SPRINT_SPEED_MPS).abs() < CLOSE, "{x} {y}");
+        let [x, y] = run_stick(Some([1.0, 0.0]));
+        assert!((x - SPRINT_SPEED_MPS).abs() < CLOSE && y.abs() < CLOSE, "{x} {y}");
+        // Half right, half forward: the stick's own angle, not a key diagonal.
+        let [x, y] = run_stick(Some([0.5, 0.866]));
+        assert!((y / x - 0.866 / 0.5).abs() < 1e-3, "{x} {y}");
+    }
+
+    #[test]
+    fn a_small_tilt_goes_slower_and_a_stick_at_rest_stays() {
+        let slow = run_stick(Some([0.0, STICK_SLOW_TILT]));
+        assert!((slow[1] - STICK_STAND_MIN_SPEED_MPS).abs() < CLOSE, "{slow:?}");
+        let middle = run_stick(Some([0.0, 0.5]));
+        let halfway = STICK_STAND_MIN_SPEED_MPS
+            + (SPRINT_SPEED_MPS - STICK_STAND_MIN_SPEED_MPS) * 0.5;
+        assert!((middle[1] - halfway).abs() < 1e-3, "{middle:?}");
+        assert_eq!(run_stick(None), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_tilted_stick_stands_in_for_the_direction_keys() {
+        let back = Intent::default().with_stick(Some([0.1, -0.9]));
+        assert_eq!((back.forward, back.right), (-1, 0));
+        let diagonal = Intent::default().with_stick(Some([0.7, 0.7]));
+        assert_eq!((diagonal.forward, diagonal.right), (1, 1));
+        assert!(Intent::default().with_stick(None).stick.is_none());
     }
 
     #[test]
