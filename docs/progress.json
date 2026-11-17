@@ -664,6 +664,14 @@
             {
               "check": "Not seen with a real client: the hit reactions, the shake, the PvP reactions and the dodge out of a stun lock.",
               "proof": "none"
+            },
+            {
+              "check": "A melee swing reaches as far as its lunge (tests only, 2026-11-17): each tick tests the swing on the server's body and on the place the attack's own motion carried the body to from the swing's start, stopped at the homing target's body, and a mob whose body overlaps the player's is hit whatever the facing. Retail sword light hits landed a median 1.14 m from the mob after a lunge from up to 4.6 m; live, light swings missed mobs 2.2 to 3.7 m straight ahead.",
+              "proof": "tests"
+            },
+            {
+              "check": "A controller's attack (the right trigger of any pad) starts an attack (tests only, 2026-11-17): the trigger shows the attack key held but no press, so the first held record since the key's release is the press. Live before the fix, a controller player's attacks started nothing (94 releases, 5 presses); the mouse of the same laptop hit. Whether the other pad keys (heavy attack, dodge, block, abilities) arrive is not checked.",
+              "proof": "tests"
             }
           ]
         },
@@ -896,6 +904,14 @@
             {
               "check": "A player's shot stops at a wall of the level before a body behind it (2026-11-13, tests only): the shot names the wall's level entity and no hit volume.",
               "proof": "tests"
+            },
+            {
+              "check": "An aimed bow shot draws on the press and shoots on the release, never on a hold, and a release within 530 ms of the last shot shoots when they end (tests only, 2026-11-17; retail: 4,885 bow shots of 42 ledgers). Live before the fix, the hold shot 0.23 s after the press and the next presses were dropped for 1.8 s.",
+              "proof": "tests"
+            },
+            {
+              "check": "The drawn bow shot of a long hold (retail: 125 m/s after about 700 ms, its own damage row) is not built: our data gives the aim's charged shot the plain shot's row.",
+              "proof": "none"
             }
           ]
         },
@@ -1323,6 +1339,10 @@
             {
               "check": "A creature without a main hand fights with the weapon in its mouth slot (340 creature slices hold their weapon only there): the shipwreck ghosts cast their `LightningBolt` from `Ghost_Shipwrecked_Weapon`'s `AI_Ghost` profile (bots, 2026-11-17: the server fired the bolts in `12A_MSQ_22_DestroyShrine`, and the quest completed). That weapon also gives a blocked bite its stamina cost and its stagger.",
               "proof": "bots"
+            },
+            {
+              "check": "The tutorial's scripted mobs stand on the level's floor and follow it as they move (tests only, 2026-11-17): before, each kept one fixed height per fight, so the second legionnaire walked inside the courtyard's hill and Thorpe stood 0.27 m into his arena's floor.",
+              "proof": "tests"
             }
           ]
         },
@@ -1391,6 +1411,10 @@
             },
             {
               "check": "The weapon pick after the beach bag completes when the bag was taken before its trigger",
+              "proof": "tests"
+            },
+            {
+              "check": "The seven tutorial trigger boxes that retail completed a quarter turn off also count in that quarter-turned box (tests only, 2026-11-17): the captain's cutscene starts at the foot of the cave's slope as on retail (three retail runs), not halfway to the pool.",
               "proof": "tests"
             }
           ]
