@@ -1547,10 +1547,17 @@ impl SlayerTrack {
         std::mem::take(&mut self.due)
     }
 
-    /// An attack the server started is still this state's action: a pending start, or the echo
-    /// of one (`state` empty and the second slot started with it, retail's attack form).
+    /// An attack is still this state's action: a pending start, a first-slot attack that runs
+    /// ([`ATTACK_RUN_RECORDS`]), or the echo of one (`state` empty and the second slot started
+    /// with it, retail's attack form). Live 2026-11-17: the draw of a sheathed spear came one
+    /// record after its press start, and the stand that replaced the start hid the attack from
+    /// the other players.
     fn keeps_attack(&self) -> bool {
         matches!(self.pending, Some((Pending::Attack(_), _, _)))
+            || self.running.is_some_and(|(attack, started)| {
+                attack.slot == AttackSlot::First
+                    && self.newest_counter.wrapping_sub(started) < ATTACK_RUN_RECORDS
+            })
             || (self.repeats > 0
                 && self
                     .current
@@ -2351,6 +2358,57 @@ pub(crate) mod tests {
             .state
             .expect("the attack stays");
         assert_eq!(after.sequence, LIGHT, "a draw after the tap is not a walk");
+    }
+
+    #[test]
+    fn a_draw_right_after_the_press_start_does_not_replace_it() {
+        // Live 2026-11-17: a sheathed spear's press start went out, and the stand sent with the
+        // draw one record later hid it from the other players.
+        const DRAW_STATE: u64 = 44;
+        const DRAW_SEQUENCE: u64 = 2011;
+        let table = PlayerSequences::of_parts(
+            vec![StanceSequences {
+                draw: Some(StatePlay {
+                    state: DRAW_STATE,
+                    sequence: DRAW_SEQUENCE,
+                }),
+                ..greatsword_attacks()
+            }],
+            vec![],
+        );
+        let mut track = spawned();
+        let still = Intent::default();
+        track.record(
+            SlayerRecord {
+                weapon: weapon(GREATSWORD, false),
+                ..keyed(0x6ba, still, PRESS, GREATSWORD)
+            },
+            &table,
+        );
+        let press = own_state(&mut track, 0x6ba).state.expect("the press start");
+        assert_eq!(press.sequence, PRESS_START);
+        track.record(
+            SlayerRecord {
+                weapon: weapon(GREATSWORD, true),
+                ..keyed(0x6bb, still, HELD, GREATSWORD)
+            },
+            &table,
+        );
+        let after = [own_state(&mut track, 0x6bb), own_state(&mut track, 0x6bc)];
+        assert!(
+            after.iter().any(
+                |due| due.slots.map(|slots| slots.second.sequence) == Some(Some(DRAW_SEQUENCE))
+            ),
+            "the draw goes out"
+        );
+        for due in after {
+            if let Some(state) = due.state {
+                assert_eq!(
+                    state.sequence, PRESS_START,
+                    "no stand or walk replaces the press start: {state:?}"
+                );
+            }
+        }
     }
 
     #[test]
