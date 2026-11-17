@@ -882,10 +882,18 @@ impl SlayerTrack {
         } else if record.swimming {
             None
         } else {
+            // The end of a stop is no key: it does not replace the attack that runs (live
+            // 2026-11-17: a spear player stopped and held the heavy attack; the stand started
+            // two records after the charge and the others saw no heavy attack).
+            let keeps_attack = self.keeps_attack();
             let stepped = record.intent.filter(|_| !held_start).and_then(|intent| {
                 let (next, started) = self.locomotion.step(intent, set);
+                let stop_ended = matches!(
+                    (self.locomotion, next),
+                    (Locomotion::Stopping(_), Locomotion::Idle)
+                );
                 self.locomotion = next;
-                started
+                started.filter(|_| !(stop_ended && keeps_attack))
             });
             // A landing goes first; the move or stand it lands into follows
             // ([`LAND_MOVE_RECORDS`]).
@@ -2677,6 +2685,40 @@ pub(crate) mod tests {
         assert!(
             press_starts(&mut track, 102),
             "the trigger's next hold attacks"
+        );
+    }
+
+    /// Live 2026-11-17: a spear player stopped walking and held the heavy attack; the stop's
+    /// end started the stand two records after the charge, and the others saw no heavy attack.
+    #[test]
+    fn the_end_of_a_stop_does_not_replace_the_attack_that_runs() {
+        const AFTER_RECORDS: u16 = 5;
+        let table = table();
+        let mut track = spawned();
+        let forward = Intent::of_keys(true, false, false, false);
+        let still = Intent::default();
+        let mut counter = 100;
+        let mut states = Vec::new();
+        let mut step = |track: &mut SlayerTrack, intent, attack| {
+            counter += 1;
+            track.record(keyed(counter, intent, attack, GREATSWORD), &table);
+            states.extend(std::iter::from_fn(|| own_state(track, counter).state));
+        };
+        step(&mut track, forward, HELD);
+        step(&mut track, still, HELD);
+        step(&mut track, still, PRESS);
+        for _ in 0..movement::STOP_RECORDS + HOLD_RECORDS + AFTER_RECORDS {
+            step(&mut track, still, HELD);
+        }
+        assert!(
+            states.iter().any(|state| state.sequence == CHARGE),
+            "the charge: {states:?}"
+        );
+        assert!(
+            !states
+                .iter()
+                .any(|state| state.state == Some(movement::IDLE_STATE)),
+            "no stand in the attack: {states:?}"
         );
     }
 
