@@ -203,17 +203,27 @@ const NO_TRACKED_TAG: u32 = 0;
 /// `MINING_SLOT` at 36, before `FISHING_SLOT` 37). A gatherable that needs its tool is gathered
 /// only with an item in that slot.
 const TOOL_SLOTS: [(&str, u32); 4] = [
-    ("Skinning", 35),
+    (SKINNING_TRADESKILL, 35),
     ("Mining", 36),
     ("Logging", 33),
     ("Harvesting", 34),
 ];
+/// The tradeskill of a corpse's gatherable (`GatherableData` `Tradeskill`: `Boar` is skinned,
+/// loot table `BoarSkinning`).
+pub(super) const SKINNING_TRADESKILL: &str = "Skinning";
+
 /// The paperdoll slot of the tool of `gatherable`'s tradeskill; `None` for a tradeskill
 /// without a tool slot.
 pub(super) fn tool_slot(gatherable: &Gatherable) -> Option<u32> {
+    tradeskill_tool_slot(gatherable.tradeskill.as_deref()?)
+}
+
+/// The paperdoll slot of the tool of tradeskill `tradeskill` ([`TOOL_SLOTS`]); `None` for a
+/// tradeskill without a tool slot.
+pub(super) fn tradeskill_tool_slot(tradeskill: &str) -> Option<u32> {
     TOOL_SLOTS
         .iter()
-        .find(|(tradeskill, _)| gatherable.tradeskill.as_deref() == Some(*tradeskill))
+        .find(|(known, _)| *known == tradeskill)
         .map(|(_, slot)| *slot)
 }
 
@@ -3278,6 +3288,22 @@ pub(crate) mod tests {
         assert!(
             !world.give_loot(NUMBER, vec![("NoSuchItem".to_owned(), 1)], NOW),
             "an unknown item is never given"
+        );
+    }
+
+    #[test]
+    fn an_item_named_in_another_case_is_given_as_its_item_row() {
+        let (mut world, entity) = admitted();
+        assert!(
+            world.give_loot(NUMBER, vec![(KEY.to_lowercase(), 1)], NOW),
+            "a reward cell in lowercase names the item row"
+        );
+        let player = world.world.get::<Player>(entity).expect("player");
+        let gear = player.gear.as_ref().expect("gear");
+        assert_eq!(gear.bag_count(KEY), 1);
+        assert!(
+            gear.held_item_ids().any(|item_id| item_id == KEY),
+            "the bag stack has the row's own id"
         );
     }
 

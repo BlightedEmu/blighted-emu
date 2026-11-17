@@ -46,7 +46,7 @@ use crate::Tables;
 /// The categorical progression of fishing.
 pub const FISHING_TRADESKILL: &str = "Fishing";
 /// The item class of a fishing pole (`EquippableTool+FishingPole`).
-const FISHING_POLE_CLASS: &str = "FishingPole";
+pub const FISHING_POLE_CLASS: &str = "FishingPole";
 /// Separates the classes of an `ItemClass` cell.
 const CLASS_SEPARATOR: char = '+';
 /// Separates the ends of a range cell (`5-12`, `1-1.5`).

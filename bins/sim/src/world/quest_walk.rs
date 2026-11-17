@@ -81,7 +81,21 @@ const PLAN_NODE: &str = "node";
 const PLAN_ACHIEVEMENTS: &str = "achievements";
 const PLAN_PROGRESSION: &str = "progression";
 const PLAN_EVENT: &str = "event";
+const PLAN_USE: &str = "use";
+const PLAN_EQUIP: &str = "equip";
+const PLAN_SKIN: &str = "skin";
+const PLAN_GATHER: &str = "gather";
+const PLAN_CAMP: &str = "camp";
+const PLAN_LORE: &str = "lore";
+const PLAN_TRIAL: &str = "trial";
+const PLAN_LOOT: &str = "loot";
+const PLAN_CRAFT: &str = "craft";
 const PLAN_NOT_RUNNING: &str = "not running";
+
+/// `bytes` as lowercase hex, as a plan line writes an id.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 /// What the level holds that a quest's steps need: the places of its NPCs, territories and
 /// mobs, who offers each quest, who holds each topic and what gives each achievement. The walk
@@ -822,6 +836,88 @@ pub(crate) enum StepPlan {
     },
     /// Play the flow this many times.
     Event(FlowEvent, u32),
+    /// Use the level object `object` (its facet entity key) at `at` this many times: open it,
+    /// then end the interaction, as a client does (the tag counts at the end of the
+    /// interaction, [`SimWorld::interaction_ended`]); the nearest object with the step's tag.
+    Use {
+        tag: String,
+        count: u32,
+        object: u64,
+        at: Position,
+    },
+    /// Equip item `item` from bag slot `bag_slot` (its stack's instance `instance`) into
+    /// paperdoll slot `slot`, as the client's equip call names them ([`super::gear::Gear::equip_place`]); a
+    /// `!questplan` answer gives it for an equip step whose item is in the player's bag.
+    Equip {
+        item: String,
+        bag_slot: u32,
+        instance: [u8; nw_messages::wire::RAW_ID_LEN],
+        slot: u32,
+    },
+    /// Skin `count` corpses of gatherable `gatherable` (its `Skinning` row, named as the step's
+    /// drop enemy) after `kill`, the kill of one: a gather step whose item is that enemy's quest
+    /// drop gets it from the skin, not the kill ([`SimWorld::quest_drops`]). A `!questplan`
+    /// answer gives it in place of `item`, the plan the walk plays.
+    Skin {
+        gatherable: String,
+        count: u32,
+        kill: Box<StepPlan>,
+        item: Box<StepPlan>,
+    },
+    /// Open the loot bags of `kill`'s kills: an item step whose item is the quest drop of an
+    /// enemy gets it from the loot bag of a kill of one
+    /// ([`crate::objectives::ObjectiveRun::kill_drops`]; `12A_MSQ_15_DefeatNavigator_CollectGun`,
+    /// the three seals of `12A_MSQ_20_CollectCrown`). A `!questplan` answer gives it in place of
+    /// `item`, the plan the walk plays.
+    Loot {
+        kill: Box<StepPlan>,
+        item: Box<StepPlan>,
+    },
+    /// Craft recipe `recipe` once at the station of `GdeRef` `station` at `at`, from the bag's
+    /// `ingredients` (item, quantity): the retail cook of `12_boarfeast_05_01` opens the level
+    /// campfire `@ui_watcherscampfire` (3743), crafts with the pork it carries (2997), and closes
+    /// the screen (2999) and the interaction (2473) after the progress (2993). A `!questplan`
+    /// answer gives it in place of `event`, the plan the walk plays.
+    Craft {
+        recipe: String,
+        station: [u8; nw_messages::wire::RAW_ID_LEN],
+        at: Position,
+        ingredients: Vec<(String, u32)>,
+        event: Box<StepPlan>,
+    },
+    /// Gather `count` nodes of gatherable `gatherable`, whose gather fires the step's game event
+    /// (the rescue gathers `MB_MSQ2_RescueMiner_Rescue01` of `12A_MSQ_07_FreeMiners`). A
+    /// `!questplan` answer gives it in place of `event`, the plan the walk plays.
+    Gather {
+        gatherable: String,
+        count: u32,
+        event: Box<StepPlan>,
+    },
+    /// Place a camp at `at` and build it (its `BindCamp` event, the camp tutorial of
+    /// `12A_MSQ_12_CampTutorial`): the placement's skin, the camp's slice asset and its costs.
+    /// A `!questplan` answer gives it in place of `event`, the plan the walk plays.
+    Camp {
+        at: Position,
+        camp: super::travel::CampPlan,
+        event: Box<StepPlan>,
+    },
+    /// Read the lore note of title `title` at its lore point `at`, whose read sets the step's
+    /// `Lore_unlock_` achievement ([`SimWorld::read_lore`]; `12A_MSQ_17_LochnirsNotes`). A
+    /// `!questplan` answer gives it in place of `achievements`, the plan the walk plays.
+    Lore {
+        title: String,
+        at: Position,
+        achievements: Box<StepPlan>,
+    },
+    /// Enter an instance of game mode `mode` (`crc`, the CRC-32 of its lowercase id) from afar:
+    /// 5039, 5037, then 946 ([`SimWorld::arena_call`]; a game mode of `remote_entry`, as the
+    /// `QuestGawain` trial of `12A_MSQ_24_DefeatGawain`). The step counts at the arrival in
+    /// the instance. A `!questplan` answer gives it in place of `stop`, the plan the walk plays.
+    Trial {
+        mode: String,
+        crc: u32,
+        stop: Box<StepPlan>,
+    },
 }
 
 /// Where a player gets an item: the source in words, and the gatherable whose nodes give it
@@ -1045,7 +1141,17 @@ impl SimWorld {
                 let board_turn_in = super::missions::TURN_IN_TAGS
                     .iter()
                     .any(|turn_in| turn_in.eq_ignore_ascii_case(tag));
-                if content.interact_tags.knows(tag) || board_turn_in {
+                let nearest = (!board_turn_in)
+                    .then(|| content.interact_tags.nearest_with(tag, [at.x, at.y, at.z]))
+                    .flatten();
+                if let Some((object, place)) = nearest {
+                    StepPlan::Use {
+                        tag: tag.clone(),
+                        count: remaining(*count),
+                        object,
+                        at: position_of(place),
+                    }
+                } else if content.interact_tags.knows(tag) || board_turn_in {
                     event(FlowEvent::Interacted(tag.clone()), *count)
                 } else {
                     broken(format!("no object of the level has interact tag {tag}"))
@@ -1293,9 +1399,56 @@ impl SimWorld {
             .map(|encounter| encounter.slice.clone())
     }
 
-    /// `count` kills of mobs that count as `enemy` (in POI `place` when it names one): a spawn
-    /// of such a mob that the open map runs, else one that an open world encounter it runs
-    /// spawns ([`Self::spawning_encounter`]).
+    /// The spawn of a mob that counts as `enemy` in an encounter of the instance this sim runs,
+    /// with its encounter's slice: the place where that encounter's stage spawns it, or the
+    /// encounter's own place (the `QuestGawain` trial spawns `Lost_Monarch` in its
+    /// `EncounterBoss`, not where the open map's spawn of that mob stands). `None` outside an
+    /// instance.
+    fn instance_encounter_spawn(&self, enemy: &str) -> Option<(VitalsSpawn, String)> {
+        let script = self.dungeon_run.as_ref()?.script();
+        script.encounters.iter().find_map(|encounter| {
+            encounter
+                .stages
+                .iter()
+                .flat_map(|stage| &stage.spawns)
+                .find_map(|stage_spawn| {
+                    let mob = encounter
+                        .targets
+                        .get(stage_spawn.target)?
+                        .slices
+                        .iter()
+                        .filter_map(|slice| slice.mob.as_ref())
+                        .find(|mob| {
+                            self.content
+                                .kill_types
+                                .of(lowercase_crc32(&mob.vitals_id))
+                                .is_some_and(|(vitals_id, categories)| {
+                                    kills_count(enemy, vitals_id, categories, &[])
+                                })
+                        })?;
+                    Some((
+                        VitalsSpawn {
+                            vitals_id: lowercase_crc32(&mob.vitals_id),
+                            category_id: lowercase_crc32(&mob.category_id),
+                            level: mob.level,
+                            position: stage_spawn
+                                .locations
+                                .first()
+                                .copied()
+                                .unwrap_or(encounter.position),
+                            is_encounter: true,
+                            territory_ids: Vec::new(),
+                        },
+                        encounter.slice.clone(),
+                    ))
+                })
+        })
+    }
+
+    /// `count` kills of mobs that count as `enemy` (in POI `place` when it names one): a mob
+    /// of an encounter of the instance this sim runs ([`Self::instance_encounter_spawn`]), else
+    /// a spawn of such a mob that the open map runs, else one that an open world encounter it
+    /// runs spawns ([`Self::spawning_encounter`]).
     fn walk_kill(
         &self,
         level: &QuestGuide,
@@ -1314,6 +1467,17 @@ impl SimWorld {
             })
         };
         let counts = |spawn: &VitalsSpawn| self.walk_counts(spawn, enemy) && in_place(spawn);
+        // The instance's encounter spawns its mob when the player comes: the player fights
+        // that mob where it stands.
+        if let Some((spawn, encounter)) = self.instance_encounter_spawn(enemy) {
+            return StepPlan::Kill {
+                spawn,
+                count,
+                territory: None,
+                spawned: false,
+                encounter: Some(encounter),
+            };
+        }
         let found = self
             .combat
             .spawns
@@ -1601,6 +1765,28 @@ impl SimWorld {
                 let note = self.walk_flow(number, &flow, count, now_ms);
                 Play::Done(Some(format!("{note}, by event")))
             }
+            StepPlan::Use {
+                tag, count, object, ..
+            } => {
+                let note = self.walk_flow(number, &FlowEvent::Interacted(tag), count, now_ms);
+                Play::Done(Some(format!("{note}, by event (object {object:016x})")))
+            }
+            StepPlan::Equip { item, slot, .. } => {
+                let note = self.walk_flow(number, &FlowEvent::Equipped(item), 1, now_ms);
+                Play::Done(Some(format!("{note}, by event (slot {slot})")))
+            }
+            StepPlan::Skin { item, .. } | StepPlan::Loot { item, .. } => {
+                self.walk_act(level, number, connection, *item, now_ms)
+            }
+            StepPlan::Gather { event, .. }
+            | StepPlan::Camp { event, .. }
+            | StepPlan::Craft { event, .. } => {
+                self.walk_act(level, number, connection, *event, now_ms)
+            }
+            StepPlan::Lore { achievements, .. } => {
+                self.walk_act(level, number, connection, *achievements, now_ms)
+            }
+            StepPlan::Trial { stop, .. } => self.walk_act(level, number, connection, *stop, now_ms),
         }
     }
 
@@ -1664,8 +1850,8 @@ impl SimWorld {
     /// per waiting step, with what the player does next ([`Self::plan_line`]); `not running`
     /// when the player does not run it.
     pub(crate) fn quest_plan_lines(&mut self, number: u64, objective: &str) -> Vec<String> {
-        let at = self
-            .player_by_number(number)
+        let entity = self.player_by_number(number);
+        let at = entity
             .and_then(|entity| self.world.get::<super::Body>(entity))
             .map(|body| body.motion.position());
         let content = std::sync::Arc::clone(&self.content);
@@ -1679,6 +1865,14 @@ impl SimWorld {
                 .iter()
                 .map(|step| {
                     let plan = self.walk_plan(&content.quest_guide, step, at);
+                    let plan = self.equip_from_bag(entity, plan);
+                    let plan = self.skin_from_drop(&content.quest_guide, step, plan);
+                    let plan = self.loot_from_drop(&content.quest_guide, step, plan);
+                    let plan = self.gather_for_event(plan);
+                    let plan = self.camp_for_event(entity, at, plan);
+                    let plan = self.craft_for_event(entity, at, plan);
+                    let plan = self.lore_for_achievement(plan);
+                    let plan = self.trial_for_game_mode(step, plan);
                     self.plan_line(&step.task, &plan)
                 })
                 .collect(),
@@ -1686,16 +1880,254 @@ impl SimWorld {
         }
     }
 
+    /// `plan`, with an equip step whose item is in the bag of player `entity` as the equip call
+    /// that puts it on ([`StepPlan::Equip`]); any other plan as it is. The walk plays the equip
+    /// as its event; a bot sends the call.
+    fn equip_from_bag(&self, entity: Option<bevy_ecs::entity::Entity>, plan: StepPlan) -> StepPlan {
+        let StepPlan::Event(FlowEvent::Equipped(item), count) = plan else {
+            return plan;
+        };
+        let classes = self
+            .content
+            .item_rolls
+            .item(&item)
+            .map_or(&[][..], |row| row.classes.as_slice());
+        let place = entity
+            .and_then(|entity| self.world.get::<super::Player>(entity))
+            .and_then(|player| player.gear.as_ref()?.equip_place(&item, classes));
+        match place {
+            Some((bag_slot, instance, slot)) => StepPlan::Equip {
+                item,
+                bag_slot,
+                instance,
+                slot,
+            },
+            None => StepPlan::Event(FlowEvent::Equipped(item), count),
+        }
+    }
+
+    /// `plan`, with a gather step whose item is the quest drop of an enemy that has a skinning
+    /// gatherable of its name as that skin after a kill of one ([`StepPlan::Skin`]); any other
+    /// plan as it is.
+    fn skin_from_drop(&self, level: &QuestGuide, step: &WaitingStep, plan: StepPlan) -> StepPlan {
+        let (
+            StepPlan::Item {
+                count,
+                gathered: true,
+                node: None,
+                ..
+            },
+            TaskKind::GatherItems {
+                drop: Some(drop), ..
+            },
+        ) = (&plan, &step.kind)
+        else {
+            return plan;
+        };
+        let count = *count;
+        let skinned = drop.sources.iter().find_map(|enemy| {
+            let gatherable = self.content.gatherables.get(lowercase_crc32(enemy))?;
+            let skinning =
+                gatherable.tradeskill.as_deref() == Some(super::gathering::SKINNING_TRADESKILL);
+            let kill = self.walk_kill(level, enemy, 1, drop.place.as_deref());
+            (skinning && matches!(kill, StepPlan::Kill { .. }))
+                .then(|| (gatherable.id.clone(), kill))
+        });
+        match skinned {
+            Some((gatherable, kill)) => StepPlan::Skin {
+                gatherable,
+                count,
+                kill: Box::new(kill),
+                item: Box::new(plan),
+            },
+            None => plan,
+        }
+    }
+
+    /// `plan`, with an item step whose item is the quest drop of an enemy that the level spawns
+    /// as the loot of a kill of one ([`StepPlan::Loot`]); any other plan as it is.
+    fn loot_from_drop(&self, level: &QuestGuide, step: &WaitingStep, plan: StepPlan) -> StepPlan {
+        let (
+            StepPlan::Item {
+                gathered: false,
+                node: None,
+                ..
+            },
+            TaskKind::HaveItems {
+                drop: Some(drop), ..
+            },
+        ) = (&plan, &step.kind)
+        else {
+            return plan;
+        };
+        let kill = drop.sources.iter().find_map(|enemy| {
+            let kill = self.walk_kill(level, enemy, 1, drop.place.as_deref());
+            matches!(kill, StepPlan::Kill { .. }).then_some(kill)
+        });
+        match kill {
+            Some(kill) => StepPlan::Loot {
+                kill: Box::new(kill),
+                item: Box::new(plan),
+            },
+            None => plan,
+        }
+    }
+
+    /// `plan`, with a game mode step of a mode that a player enters from afar (`remote_entry`,
+    /// never a matched kind) as that entry ([`StepPlan::Trial`]), outside an instance of that
+    /// mode; any other plan as it is.
+    fn trial_for_game_mode(&self, step: &WaitingStep, plan: StepPlan) -> StepPlan {
+        let TaskKind::GameMode(mode) = &step.kind else {
+            return plan;
+        };
+        let inside = self
+            .instance_run
+            .as_ref()
+            .is_some_and(|run| run.game_mode().eq_ignore_ascii_case(mode));
+        match self.content.instances.by_id(mode) {
+            Some(found) if found.remote_entry && !found.kind.is_matched() && !inside => {
+                StepPlan::Trial {
+                    mode: found.id.clone(),
+                    crc: found.crc,
+                    stop: Box::new(plan),
+                }
+            }
+            _ => plan,
+        }
+    }
+
+    /// `plan`, with a step that waits for a lore note's achievement as the read of that note at
+    /// its lore point ([`StepPlan::Lore`]); any other plan as it is.
+    fn lore_for_achievement(&self, plan: StepPlan) -> StepPlan {
+        let StepPlan::Achievements(given) = &plan else {
+            return plan;
+        };
+        let note = given.iter().find_map(|(name, _)| {
+            let title = name
+                .get(..LORE_PREFIX.len())
+                .filter(|prefix| prefix.eq_ignore_ascii_case(LORE_PREFIX))
+                .and_then(|_| name.get(LORE_PREFIX.len()..))?;
+            let lore = self.content.lore_by_title.get(&title.to_lowercase())?;
+            Some((title.to_owned(), self.content.lore_points.first(*lore)?))
+        });
+        match note {
+            Some((title, at)) => StepPlan::Lore {
+                title,
+                at,
+                achievements: Box::new(plan),
+            },
+            None => plan,
+        }
+    }
+
+    /// `plan`, with the camp step (`BindCamp`) as the camp player `entity` places at `at` and
+    /// builds ([`StepPlan::Camp`]), or as the reason the server would refuse that camp; any
+    /// other plan as it is.
+    fn camp_for_event(
+        &self,
+        entity: Option<bevy_ecs::entity::Entity>,
+        at: Position,
+        plan: StepPlan,
+    ) -> StepPlan {
+        let StepPlan::Event(FlowEvent::GameEvent(fired), _) = &plan else {
+            return plan;
+        };
+        if !fired.eq_ignore_ascii_case(super::travel::BIND_CAMP_EVENT) {
+            return plan;
+        }
+        let Some(entity) = entity else {
+            return plan;
+        };
+        match self.camp_for_plan(entity, at) {
+            Ok(camp) => StepPlan::Camp {
+                at,
+                camp,
+                event: Box::new(plan),
+            },
+            Err(refusal) => StepPlan::Stop(Outcome::NeedsLook, format!("a camp here: {refusal}")),
+        }
+    }
+
+    /// `plan`, with a craft step of one recipe as that craft at the station nearest to `at` that
+    /// makes it, from the bag of player `entity` ([`StepPlan::Craft`]); any other plan as it is.
+    fn craft_for_event(
+        &self,
+        entity: Option<bevy_ecs::entity::Entity>,
+        at: Position,
+        plan: StepPlan,
+    ) -> StepPlan {
+        let StepPlan::Event(FlowEvent::Crafted(recipe_id), _) = &plan else {
+            return plan;
+        };
+        let recipes = &self.content.recipes;
+        let Some(recipe) = recipes.get(lowercase_crc32(recipe_id)) else {
+            return plan;
+        };
+        let Some(station) = self
+            .stations
+            .nearest(at, |station_type| recipe.made_at(station_type))
+        else {
+            return plan;
+        };
+        let ingredients = entity
+            .and_then(|entity| self.world.get::<super::Player>(entity))
+            .and_then(|player| player.gear.as_ref())
+            .and_then(|gear| super::crafting::bag_stacks(gear, recipes, recipe, 1, &[]))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(item, quantity, _)| (item, quantity))
+            .collect();
+        StepPlan::Craft {
+            recipe: recipe.id.clone(),
+            station: station.gde_ref,
+            at: station.position,
+            ingredients,
+            event: Box::new(plan),
+        }
+    }
+
+    /// `plan`, with a game event step that the gather of a placed gatherable fires as gathers of
+    /// it ([`StepPlan::Gather`]); any other plan as it is.
+    fn gather_for_event(&self, plan: StepPlan) -> StepPlan {
+        let StepPlan::Event(FlowEvent::GameEvent(fired), count) = &plan else {
+            return plan;
+        };
+        let gatherable = self.content.gatherables.iter().find(|gatherable| {
+            gatherable
+                .game_event
+                .as_deref()
+                .is_some_and(|known| known.eq_ignore_ascii_case(fired))
+                && self
+                    .content
+                    .gather_points
+                    .first(lowercase_crc32(&gatherable.id))
+                    .is_some()
+        });
+        match gatherable {
+            Some(gatherable) => StepPlan::Gather {
+                gatherable: gatherable.id.clone(),
+                count: *count,
+                event: Box::new(plan),
+            },
+            None => plan,
+        }
+    }
+
     /// The `!questplan` line of `plan` for task `task`: what a player does next, with the
     /// places it goes to.
     pub(crate) fn plan_line(&self, task: &str, plan: &StepPlan) -> String {
+        format!("{PLAN_LINE} {task} {}", self.plan_what(plan))
+    }
+
+    /// What `plan` asks a player to do, in the words of a `!questplan` line after its task.
+    fn plan_what(&self, plan: &StepPlan) -> String {
         let at = |at: &Position| format!("{:.1} {:.1} {:.1}", at.x, at.y, at.z);
         let territory = |territory: &Option<u16>| {
             territory
                 .map(|territory| format!(" territory {territory}"))
                 .unwrap_or_default()
         };
-        let what = match plan {
+        match plan {
             StepPlan::Wait | StepPlan::Pin => PLAN_WAIT.to_owned(),
             StepPlan::Stop(outcome, reason) => format!("{PLAN_STOP} {outcome:?}: {reason}"),
             StepPlan::Client(step) => format!("{PLAN_CLIENT} {}", step.words()),
@@ -1771,8 +2203,66 @@ impl SimWorld {
                 if *points { " points" } else { "" }
             ),
             StepPlan::Event(flow, count) => format!("{PLAN_EVENT} {count} {flow:?}"),
-        };
-        format!("{PLAN_LINE} {task} {what}")
+            StepPlan::Use {
+                tag,
+                count,
+                object,
+                at: place,
+            } => format!("{PLAN_USE} {tag} {object:016x} {count} at {}", at(place)),
+            StepPlan::Equip {
+                item,
+                bag_slot,
+                instance,
+                slot,
+            } => format!(
+                "{PLAN_EQUIP} {item} bag {bag_slot} instance {} slot {slot}",
+                hex(instance)
+            ),
+            StepPlan::Skin {
+                gatherable,
+                count,
+                kill,
+                ..
+            } => format!("{PLAN_SKIN} {gatherable} {count} {}", self.plan_what(kill)),
+            StepPlan::Gather {
+                gatherable, count, ..
+            } => format!("{PLAN_GATHER} {gatherable} {count}"),
+            StepPlan::Lore {
+                title, at: place, ..
+            } => format!("{PLAN_LORE} {title} at {}", at(place)),
+            StepPlan::Trial { mode, crc, .. } => format!("{PLAN_TRIAL} {mode} {crc:08x}"),
+            StepPlan::Loot { kill, .. } => format!("{PLAN_LOOT} {}", self.plan_what(kill)),
+            StepPlan::Craft {
+                recipe,
+                station,
+                at: place,
+                ingredients,
+                ..
+            } => format!(
+                "{PLAN_CRAFT} {recipe} at {} station {}{}",
+                at(place),
+                hex(station),
+                ingredients
+                    .iter()
+                    .map(|(item, quantity)| format!(" with {item} {quantity}"))
+                    .collect::<String>()
+            ),
+            StepPlan::Camp {
+                at: place, camp, ..
+            } => format!(
+                "{PLAN_CAMP} at {} skin {:08x} asset {}{}",
+                at(place),
+                camp.skin,
+                camp.asset
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>(),
+                camp.costs
+                    .iter()
+                    .map(|(item, quantity)| format!(" cost {item} {quantity}"))
+                    .collect::<String>()
+            ),
+        }
     }
 
     /// Walk character `number`'s client tells it entered (or left) territory `territory`.
@@ -1839,6 +2329,25 @@ mod tests {
     const PIN_BESIDE: &str = "walk_pin_beside";
     const PIN_ALONE: &str = "walk_pin_alone";
     const DEN_GROUP: &str = "Walk_DenBoars";
+    /// A quest whose gather step's item is the boar's quest drop (retail `12_boarfeast` pork):
+    /// a player skins a boar for it, the `Boar` skinning gatherable.
+    const SKIN: &str = "walk_skin";
+    const BOAR_GATHERABLE: &str = "Boar";
+    /// A quest whose game event step fires at the gather of a placed gatherable (retail
+    /// `12A_MSQ_07_FreeMiners`: the rescue is a gather by hand of `MB_MSQ2_RescueMiner_Rescue01`).
+    const RESCUE: &str = "walk_rescue";
+    const RESCUE_EVENT: &str = "Walk_Rescue_interact";
+    const RESCUE_GATHERABLE: &str = "Walk_Miner";
+    /// A quest whose step waits for a built camp (retail `12A_MSQ_12_CampTutorial`).
+    const CAMP_QUEST: &str = "walk_camp";
+    /// A quest whose step waits for a lore note's achievement (retail
+    /// `12A_MSQ_17_LochnirsNotes`: `Lore_unlock_12_MonarchsBluffs_Title_20_01`).
+    const LORE_QUEST: &str = "walk_lore";
+    /// A quest whose step waits for the entry into a solo trial (retail
+    /// `12A_MSQ_24_DefeatGawain_Enter_GawainTrial`: `QuestGawain`, entered from afar).
+    const TRIAL_QUEST: &str = "walk_trial";
+    const LOOT_QUEST: &str = "walk_loot";
+    const LORE_TITLE: &str = "Walk_Note";
 
     fn gateway() -> BusId {
         BusId::try_from("gw-walk".to_owned()).expect("id")
@@ -1884,6 +2393,12 @@ mod tests {
                 objective(DEN, "w_root", None),
                 objective(PIN_BESIDE, "q_root", None),
                 objective(PIN_ALONE, "a_root", None),
+                objective(SKIN, "s_root", None),
+                objective(RESCUE, "r_root", None),
+                objective(CAMP_QUEST, "c_root", None),
+                objective(LORE_QUEST, "l_root", None),
+                objective(TRIAL_QUEST, "t_root", None),
+                objective(LOOT_QUEST, "k_root", None),
             ],
             TaskBook::new(vec![
                 task(
@@ -1945,6 +2460,38 @@ mod tests {
                 },
                 task("a_root", "ConsecutiveTaskContainer", &["a_pin"]),
                 task("a_pin", "TaskGameEvent", &[]),
+                task("l_root", "ConsecutiveTaskContainer", &["l_read"]),
+                TaskRow {
+                    item_name: Some(format!("{LORE_PREFIX}{LORE_TITLE}")),
+                    ..task("l_read", "TaskAchievement", &[])
+                },
+                task("t_root", "ConsecutiveTaskContainer", &["t_enter"]),
+                TaskRow {
+                    game_mode_id: Some(super::super::instances::tests::trial().id),
+                    ..task("t_enter", "TaskGameMode", &[])
+                },
+                task("c_root", "ConsecutiveTaskContainer", &["c_bind"]),
+                TaskRow {
+                    kill_enemy_type: Some(super::super::travel::BIND_CAMP_EVENT.to_owned()),
+                    ..task("c_bind", "TaskGameEvent", &[])
+                },
+                task("r_root", "ConsecutiveTaskContainer", &["r_free"]),
+                TaskRow {
+                    kill_enemy_type: Some(RESCUE_EVENT.to_owned()),
+                    ..task("r_free", "TaskGameEvent", &[])
+                },
+                task("k_root", "ConsecutiveTaskContainer", &["k_get"]),
+                TaskRow {
+                    item_name: Some("Walk_Gun".to_owned()),
+                    item_drop_vc: Some("Boar".to_owned()),
+                    ..task("k_get", "TaskHaveAndReturnItems", &[])
+                },
+                task("s_root", "ConsecutiveTaskContainer", &["s_get"]),
+                TaskRow {
+                    item_name: Some("Walk_Pork".to_owned()),
+                    item_drop_vc: Some(BOAR_GATHERABLE.to_owned()),
+                    ..task("s_get", "TaskGatherItems", &[])
+                },
                 task("w_root", "ConsecutiveTaskContainer", &["w_kill"]),
                 TaskRow {
                     kill_enemy_type: Some(DEN_GROUP.to_owned()),
@@ -1982,11 +2529,46 @@ mod tests {
                 quests,
                 kill_types: KillTypes::build([(TEST_MOB.to_owned(), "Boar,Hostile".to_owned())]),
                 poi_tags: PoiTags::build([(u32::from(CAMP_TERRITORY), CAMP.to_owned())]),
-                gather_points: PlacedPoints::of([(
-                    lowercase_crc32(ORB_OBJECT),
-                    at(CELL_M / 2.0 + 20.0),
-                )]),
+                gather_points: PlacedPoints::of([
+                    (lowercase_crc32(ORB_OBJECT), at(CELL_M / 2.0 + 20.0)),
+                    (lowercase_crc32(RESCUE_GATHERABLE), at(CELL_M / 2.0 + 25.0)),
+                ]),
                 quest_guide: level.clone(),
+                instances: nw_content::instances::InstanceCatalog::build([
+                    super::super::instances::tests::trial(),
+                ]),
+                lore_by_title: HashMap::from([(
+                    LORE_TITLE.to_lowercase(),
+                    lowercase_crc32(LORE_TITLE),
+                )]),
+                lore_points: PlacedPoints::of([(
+                    lowercase_crc32(LORE_TITLE),
+                    at(CELL_M / 2.0 + 35.0),
+                )]),
+                gatherables: nw_content::gathering::Gatherables::build([
+                    nw_content::gathering::Gatherable {
+                        id: BOAR_GATHERABLE.to_owned(),
+                        gather_ms: 0,
+                        respawn_ms: (0, 0),
+                        loot_table: None,
+                        loot_container: false,
+                        tradeskill: Some(super::super::gathering::SKINNING_TRADESKILL.to_owned()),
+                        tool_required: false,
+                        by_hand: false,
+                        game_event: None,
+                    },
+                    nw_content::gathering::Gatherable {
+                        id: RESCUE_GATHERABLE.to_owned(),
+                        gather_ms: 0,
+                        respawn_ms: (0, 0),
+                        loot_table: None,
+                        loot_container: false,
+                        tradeskill: None,
+                        tool_required: false,
+                        by_hand: true,
+                        game_event: Some(RESCUE_EVENT.to_owned()),
+                    },
+                ]),
                 ..PlayerContent::default()
             }),
         );
@@ -2100,6 +2682,45 @@ mod tests {
             world.quest_plan_lines(1, DEN),
             ["plan w_kill kill Test_Boar 3 at 1064.0 10.0 50.0 placed"],
             "a boar made from its vitals is in no spawn group: only the placed ones count"
+        );
+        world.start_quest(1, SKIN, NOW).expect("start");
+        assert_eq!(
+            world.quest_plan_lines(1, SKIN),
+            ["plan s_get skin Boar 1 kill Test_Boar 1 at 1054.0 10.0 50.0"],
+            "a player kills a boar and skins it for the quest's pork"
+        );
+        world.start_quest(1, LOOT_QUEST, NOW).expect("start");
+        assert_eq!(
+            world.quest_plan_lines(1, LOOT_QUEST),
+            ["plan k_get loot kill Test_Boar 1 at 1054.0 10.0 50.0"],
+            "a player kills a boar and opens its loot bag for the quest's gun"
+        );
+        world.start_quest(1, RESCUE, NOW).expect("start");
+        assert_eq!(
+            world.quest_plan_lines(1, RESCUE),
+            ["plan r_free gather Walk_Miner 1"],
+            "a player gathers the node whose gather fires the step's event"
+        );
+        world.start_quest(1, CAMP_QUEST, NOW).expect("start");
+        assert_eq!(
+            world.quest_plan_lines(1, CAMP_QUEST),
+            [
+                "plan c_bind stop NeedsLook: a camp here: Camp refused: no Camping rank (camp tier 0; tier 1 opens at level 10)."
+            ],
+            "the plan names why the server would refuse the camp a player places here"
+        );
+        world.start_quest(1, LORE_QUEST, NOW).expect("start");
+        assert_eq!(
+            world.quest_plan_lines(1, LORE_QUEST),
+            ["plan l_read lore Walk_Note at 1059.0 10.0 50.0"],
+            "a player reads the note at its lore point"
+        );
+        world.start_quest(1, TRIAL_QUEST, NOW).expect("start");
+        let trial = super::super::instances::tests::trial();
+        assert_eq!(
+            world.quest_plan_lines(1, TRIAL_QUEST),
+            [format!("plan t_enter trial {} {:08x}", trial.id, trial.crc)],
+            "a player enters the trial from afar"
         );
         assert_eq!(
             ClientStep::Cutscene(0x1a2b_3c4d).words(),
@@ -2225,6 +2846,73 @@ mod tests {
         }
     }
 
+    /// Retail `12A_MSQ_24_DefeatGawain_Defeat_Gawain` in the `QuestGawain` trial: the trial's
+    /// `EncounterBoss` spawns `Lost_Monarch` at its own place, not where the open map's spawn
+    /// of that mob stands.
+    #[test]
+    fn a_kill_step_in_an_instance_is_the_fight_of_its_encounter_mob_where_it_spawns() {
+        use nw_world::dungeon_scripts::{
+            Encounter, LevelScript, Spawn, Stage, Target, TargetMob, TargetSlice,
+        };
+        const BOSS_AT: [f32; 3] = [6854.0, 2930.0, 77.0];
+        const BOSS_SLICE: &str = "slices/encounters/walk_boss.dynamicslice";
+        const BOSS_LEVEL: u32 = 17;
+        let (mut world, _) = walk_world();
+        world
+            .admit(
+                &super::super::tests::admit_at(1, CELL_M / 2.0, true),
+                NOW,
+                NOW,
+            )
+            .expect("admit");
+        world.start_quest(1, NO_MOB, NOW).expect("start");
+        let open_world = world.quest_plan_lines(1, NO_MOB);
+        world.dungeon_run = Some(super::super::dungeon_script::DungeonRun::new(
+            uuid::Uuid::from_u128(1),
+            LevelScript {
+                encounters: vec![Encounter {
+                    slice: BOSS_SLICE.to_owned(),
+                    stages: vec![Stage {
+                        spawns: vec![Spawn {
+                            target: 0,
+                            count: 1,
+                            locations: vec![BOSS_AT],
+                            ..Spawn::default()
+                        }],
+                        ..Stage::default()
+                    }],
+                    targets: vec![Target {
+                        slices: vec![TargetSlice {
+                            mob: Some(TargetMob {
+                                vitals_id: TEST_MOB.to_owned(),
+                                level: BOSS_LEVEL,
+                                ..TargetMob::default()
+                            }),
+                            ..TargetSlice::default()
+                        }],
+                        ..Target::default()
+                    }],
+                    ..Encounter::default()
+                }],
+                ..LevelScript::default()
+            },
+        ));
+        world.start_quest(1, GOOD, NOW).expect("start");
+        world.quest_event(1, Event::Talked(NPC), NOW);
+        assert_eq!(
+            world.quest_plan_lines(1, GOOD),
+            [format!(
+                "plan g_kill kill {TEST_MOB} 2 at 6854.0 2930.0 77.0 placed"
+            )],
+            "the player fights the boss its encounter spawns"
+        );
+        assert_eq!(
+            world.quest_plan_lines(1, NO_MOB),
+            open_world,
+            "a mob that no encounter of the instance spawns is planned as before"
+        );
+    }
+
     #[test]
     fn an_encounter_that_starts_by_itself_near_the_spawn_spawns_its_mob() {
         let world = encounter_world(true, true, SPAWN_X);
@@ -2264,6 +2952,77 @@ mod tests {
             encounter_world(true, false, SPAWN_X).spawning_encounter(&encounter_spawn()),
             None,
             "the encounter waits for a script to start it"
+        );
+    }
+
+    /// `12_boarfeast_05_01_TaskGameEvent_1_Craft_CookingT1`: retail cooked at the level campfire
+    /// with the pork the player carried (`12-3_boarfeast-Campfire-Feast`, 97.0 to 106.7 s).
+    #[test]
+    fn a_craft_step_is_the_craft_at_the_nearest_station_that_makes_it_from_the_bag() {
+        use nw_content::crafting::{Ingredient, IngredientKind, Recipe, Recipes};
+        const RECIPE: &str = "Procedural_HealthRecoveryT1";
+        const PORK: &str = "PorkT1";
+        const MEAT: &str = "FoodIngredientT1";
+        const CAMPFIRE: &str = "campfire1";
+        const FAR_M: f32 = 500.0;
+        const NEAR_M: f32 = 20.0;
+        const NEAREST_M: f32 = 5.0;
+        let (mut world, _) = walk_world();
+        let mut content = (*world.content).clone();
+        content.kits = super::super::gear::tests::kits_with(&[(PORK, "Resource+Food")]);
+        content.recipes = Recipes::build(
+            [Recipe {
+                id: RECIPE.to_owned(),
+                item: "FoodHealthRecoveryT1".to_owned(),
+                quantity: 1,
+                ingredients: vec![Ingredient {
+                    kind: IngredientKind::Category(MEAT.to_owned()),
+                    quantity: 1,
+                }],
+                stations: vec![CAMPFIRE.to_owned()],
+            }],
+            [(PORK.to_owned(), MEAT.to_owned())],
+        );
+        world.content = Arc::new(content);
+        let mut admit = super::super::tests::admit_at(1, CELL_M / 2.0, true);
+        admit.backstory = Some(super::super::gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, NOW).expect("admit");
+        let station = |dx: f32, station_type: &str, id: u8| super::super::crafting::Station {
+            gde_ref: [id; nw_messages::wire::RAW_ID_LEN],
+            position: at(CELL_M / 2.0 + dx),
+            station_type: station_type.to_owned(),
+            name: Vec::new(),
+            members: Vec::new(),
+        };
+        const NEAR_ID: u8 = 2;
+        world.stations.add_level_entity(station(FAR_M, CAMPFIRE, 1));
+        world
+            .stations
+            .add_level_entity(station(NEAR_M, CAMPFIRE, NEAR_ID));
+        world
+            .stations
+            .add_level_entity(station(NEAREST_M, "smelting1", 3));
+        let entity = world.player_by_number(1).expect("player");
+        let pork = world.content.kits.item(PORK).cloned().expect("pork");
+        world
+            .world
+            .get_mut::<super::super::Player>(entity)
+            .and_then(|mut player| player.gear.as_mut().map(|gear| gear.add(&pork, 1)))
+            .expect("gear");
+        let crafted = || StepPlan::Event(FlowEvent::Crafted(RECIPE.to_owned()), 1);
+        let plan = world.craft_for_event(Some(entity), at(CELL_M / 2.0), crafted());
+        assert_eq!(
+            world.plan_what(&plan),
+            format!(
+                "craft {RECIPE} at {:.1} 10.0 50.0 station {} with {PORK} 1",
+                CELL_M / 2.0 + NEAR_M,
+                hex(&[NEAR_ID; nw_messages::wire::RAW_ID_LEN])
+            ),
+            "the nearest campfire, not the nearer smelter, with the carried pork"
+        );
+        assert_eq!(
+            world.craft_for_event(Some(entity), at(CELL_M / 2.0), StepPlan::Wait),
+            StepPlan::Wait
         );
     }
 

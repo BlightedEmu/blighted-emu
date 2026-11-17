@@ -143,6 +143,22 @@ const DECORATION_ITEM_ID_EXCEEDED: u8 = 6;
 const INN_RESPAWN_LANDMARK: u8 = 20;
 /// The game event of a placed camp.
 pub(super) const BIND_CAMP_EVENT: &str = "BindCamp";
+/// The camp a `!questplan` names for a camp step ([`SimWorld::camp_for_plan`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CampPlan {
+    /// The skin of the placement to send.
+    pub(crate) skin: u32,
+    /// The slice asset of the camp, whose card the build interacts with.
+    pub(crate) asset: [u8; nw_world::slice_data::GUID_LEN],
+    /// Its costs (item, quantity), which its build takes from the bag.
+    pub(crate) costs: Vec<(String, u32)>,
+}
+
+/// The rotation of the camp a `!questplan` checks: none (x, y, z 0, w 1).
+const NO_ROTATION: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+/// A placement skin that names no blueprint: the server builds the player's default camp of its
+/// tier ([`SimWorld::camp_placement`]).
+const NO_CAMP_SKIN: u32 = 0;
 /// The 441 result of a placed structure (0 in all 5 retail answers).
 const PLACEMENT_PLACED: u8 = 0;
 /// The 441 result of a refused structure. Observed (client `FUN_1447d2b20`,
@@ -1950,6 +1966,40 @@ impl SimWorld {
             position: Position { x, y, z },
             rotation: placement.rotation,
             tier,
+        })
+    }
+
+    /// What player `entity` needs to place and build a camp at `at`, as a `!questplan` names it
+    /// ([`SimWorld::camp_placement`] of a placement with no skin there): the skin to send, the
+    /// slice asset and the costs of the camp the server would build, else the refusal's game
+    /// master line.
+    pub(super) fn camp_for_plan(
+        &self,
+        entity: Entity,
+        at: Position,
+    ) -> Result<CampPlan, &'static str> {
+        let placement = StructurePlacement {
+            position: [at.x, at.y, at.z],
+            rotation: NO_ROTATION,
+            skin: NO_CAMP_SKIN,
+            structure: [0; RAW_ID_LEN],
+            owner: [0; RAW_ID_LEN],
+            socket: 0,
+            value: 0,
+            flag: false,
+        };
+        let camp = self
+            .camp_placement(entity, &placement)
+            .map_err(CampRefusal::gm_line)?;
+        let slice = self
+            .content
+            .camp_slices
+            .get(&camp.blueprint)
+            .ok_or_else(|| CampRefusal::Slice.gm_line())?;
+        Ok(CampPlan {
+            skin: NO_CAMP_SKIN,
+            asset: slice.asset,
+            costs: self.content.structure_costs.of(&camp.blueprint).to_vec(),
         })
     }
 

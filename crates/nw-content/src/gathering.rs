@@ -537,7 +537,7 @@ impl ToolEfficiencies {
 /// The low bits of a crate's facet entity that its capital's GUID does not give (loot note
 /// 2026-09-18: retail requests differ from the GUID key in them by 0 to 7; their meaning is
 /// Unknown).
-pub(crate) const FACET_FREE_BITS: u64 = 0b111;
+pub const FACET_FREE_BITS: u64 = 0b111;
 /// Hex digits of a GUID.
 const GUID_HEX_DIGITS: usize = 32;
 /// The GUID text's separator.

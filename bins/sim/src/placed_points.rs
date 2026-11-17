@@ -19,6 +19,10 @@ pub struct PlacedPoints {
     points: Vec<(u32, Position)>,
     /// The points of each cell, by index.
     cells: HashMap<(i32, i32), Vec<usize>>,
+    /// The index of the first point of each kind: [`PlacedPoints::first`] scans none of the
+    /// level's millions of plant points (a `!questplan` that asked for a few kinds scanned
+    /// them all and stalled the tick for 630 ms, PC stack 2026-11-17).
+    first_of_kind: HashMap<u32, usize>,
 }
 
 /// The grid cell of `position`.
@@ -43,6 +47,10 @@ impl PlacedPoints {
                 .entry(cell_of(position))
                 .or_default()
                 .push(index.points.len());
+            index
+                .first_of_kind
+                .entry(kind)
+                .or_insert(index.points.len());
             index.points.push((kind, position));
         }
         index
@@ -55,9 +63,9 @@ impl PlacedPoints {
 
     /// The first point of kind `kind`, anywhere on the level.
     pub fn first(&self, kind: u32) -> Option<Position> {
-        self.points
-            .iter()
-            .find(|(point_kind, _)| *point_kind == kind)
+        self.first_of_kind
+            .get(&kind)
+            .and_then(|index| self.points.get(*index))
             .map(|(_, position)| *position)
     }
 

@@ -12531,6 +12531,29 @@ mod tests {
     }
 
     #[test]
+    fn the_plan_of_a_storage_step_names_the_storage_and_its_place() {
+        use nw_content::gathering::FACET_FREE_BITS;
+        let storage = [STORAGE_TAG.to_owned()];
+        let tags = nw_content::interact_tags::InteractTags::build(
+            &HashMap::new(),
+            [(SETTLEMENT_GUID, None, storage.as_slice())],
+            [],
+        )
+        .with_places([(SETTLEMENT_GUID, [9024.0, 4102.0, 101.0])], []);
+        let mut world =
+            quest_world_of(nw_content::gameplay_config::GameplayConfig::default(), tags);
+        world.start_quest(1, VAULT_QUEST, NOW).expect("start");
+        assert_eq!(
+            world.quest_plan_lines(1, VAULT_QUEST),
+            [format!(
+                "plan q_vault use {STORAGE_TAG} {:016x} 1 at 9024.0 4102.0 101.0",
+                SETTLEMENT_FACET & !FACET_FREE_BITS
+            )],
+            "a player opens the nearest storage and closes it"
+        );
+    }
+
+    #[test]
     fn a_town_board_mission_runs_its_template_and_ends_at_its_turn_in() {
         use nw_messages::{FacetHeader, ObjectiveInteractorClientMsg};
         let mut world = quest_world();

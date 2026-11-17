@@ -23,7 +23,7 @@ use std::time::Duration;
 use nw_carrier::MESSAGE_CHANNEL;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::client_input::TALK_KIND;
-use nw_messages::entity_ids::facet_of_raw_id;
+use nw_messages::entity_ids::{facet_of_raw_id, raw_id_of_entity};
 use nw_messages::social::SocialFacet;
 use nw_messages::social::chat::{ChatCall, ChatChannel};
 use nw_messages::{
@@ -34,7 +34,11 @@ use nw_reflect::LoginToken;
 use nw_sim_core::{Position, yaw_toward};
 use reqwest::Client;
 
-use crate::activity::{Act, Activity, ActivityKind, Proof, Step, gather_steps};
+use crate::activity::{
+    Act, Activity, ActivityKind, OPEN_STORAGE_KIND, OPEN_STORAGE_NAME, Proof, STORAGE_TAG, Step,
+    arena_verdict, camp_steps, gather_steps, leave_trial_steps, loot_steps, lore_steps,
+    quest_craft_steps, skin_steps, trial_steps, use_steps,
+};
 use crate::chat::{chat_lines, is_system};
 use crate::gather::GatherNode;
 use crate::hunt::{planar, send_input};
@@ -50,6 +54,18 @@ use crate::walk::{WalkSettings, login_token, walk};
 /// its top gear score, so its level and gear never limit a kill (a starter sword hit a level 34
 /// bear of 8,776 health for 42).
 const SETUP_LINES: [&str; 4] = ["!god on", "!heal", "!level 65", "!gearup"];
+/// The game master lines the bot sends at its setup: [`SETUP_LINES`], then a start of each
+/// quest of `gm_start` ([`PlaySettings::gm_start`]).
+fn setup_lines(gm_start: &[String]) -> Vec<String> {
+    SETUP_LINES
+        .iter()
+        .map(|line| (*line).to_owned())
+        .chain(gm_start.iter().map(|quest| format!("{GM_QUEST} {quest}")))
+        .collect()
+}
+
+/// The game master line that starts a quest (`!quest <objective id>`).
+const GM_QUEST: &str = "!quest";
 /// The byte of the client's leave of the tutorial (0 in the capture).
 const LEAVE_FLAG: u8 = 0;
 /// Time a new character takes from the tutorial's leave into the open world (the leave, the
@@ -133,6 +149,21 @@ const POINTS: &str = "points";
 const PLACED: &str = "placed";
 /// The word of an item plan before the gatherable whose nodes give the item.
 const NODE: &str = "node";
+/// The word of an item plan whose step counts gathers only.
+const GATHERED: &str = "gathered";
+/// The words of a camp plan before its skin, its slice asset and each of its costs.
+const CAMP_SKIN: &str = "skin";
+const CAMP_ASSET: &str = "asset";
+const CAMP_COST: &str = "cost";
+/// The words of a skin plan before its kill: `skin`, the gatherable and the count.
+const SKIN_HEAD_WORDS: usize = 3;
+/// The words of an equip plan before its bag slot, its stack's instance and its paperdoll slot.
+const EQUIP_BAG: &str = "bag";
+const EQUIP_INSTANCE: &str = "instance";
+const EQUIP_SLOT: &str = "slot";
+/// The words of a craft plan line before its station and each ingredient.
+const CRAFT_STATION: &str = "station";
+const CRAFT_WITH: &str = "with";
 const STOP_BROKEN: &str = "Broken:";
 /// The marks before the quest that gives an achievement in an `achievements` plan line.
 const QUEST_SOURCE_MARKS: [&str; 2] = ["a step of quest ", "the end of quest "];
@@ -146,6 +177,10 @@ pub struct PlaySettings {
     pub account: WalkSettings,
     /// The quests to play, in order (a chain in its order).
     pub quests: Vec<String>,
+    /// The quests a game master line starts at the setup (`!quest`), past their requirements:
+    /// the first quests of a test whose earlier chain a player already played live, so the run
+    /// tests the quests after it.
+    pub gm_start: Vec<String>,
     /// Longest time in the world.
     pub hold: Duration,
     /// Longest wait for a registration response.
@@ -287,10 +322,13 @@ enum PlanStep {
         territory: Option<u16>,
         placed: bool,
     },
+    /// Get `count` of `item` from `source`; `gathered`: the step counts gathers only; `node`:
+    /// the gatherable whose nodes give it.
     Item {
         item: String,
         count: u32,
         source: String,
+        gathered: bool,
         node: Option<String>,
     },
     Progression {
@@ -303,6 +341,85 @@ enum PlanStep {
         needs: String,
         sources: Vec<String>,
     },
+    /// Use the level object of facet entity `object` at `at` (`count` times), which carries the
+    /// interact tag `tag`.
+    Use {
+        tag: String,
+        object: u64,
+        count: u32,
+        at: Position,
+    },
+    /// Equip `item` from bag slot `bag_slot` (instance `instance`) into paperdoll slot `slot`.
+    Equip {
+        item: String,
+        bag_slot: u32,
+        instance: [u8; nw_messages::wire::RAW_ID_LEN],
+        slot: u32,
+    },
+    /// Read the lore note of title `title` at `at`.
+    Lore {
+        title: String,
+        at: Position,
+    },
+    /// Enter an instance of game mode `mode` (`crc`, the CRC-32 of its lowercase id) from afar.
+    Trial {
+        mode: String,
+        crc: u32,
+    },
+    /// Place a camp at `at` (skin `skin`, slice asset `asset`) and build it with `costs`.
+    Camp {
+        at: Position,
+        skin: u32,
+        asset: [u8; nw_content::town_props::ASSET_ID_LEN],
+        costs: Vec<(String, u32)>,
+    },
+    /// Skin `count` corpses of gatherable `gatherable`, each after `kill` (a [`PlanStep::Kill`]
+    /// of one).
+    Skin {
+        gatherable: String,
+        count: u32,
+        kill: Box<PlanStep>,
+    },
+    /// Open the loot bags of the kills of `kill` (a kill step): the step's item is a quest drop
+    /// in a kill's bag.
+    Loot {
+        kill: Box<PlanStep>,
+    },
+    /// Craft `recipe` once at the station of raw id `station` at `at` from the bag's
+    /// `ingredients` (item, quantity).
+    Craft {
+        recipe: String,
+        at: Position,
+        station: [u8; nw_messages::wire::RAW_ID_LEN],
+        ingredients: Vec<(String, u32)>,
+    },
+}
+
+impl PlanStep {
+    /// The order in which the bot picks among the waiting steps of a quest, lowest first: a step
+    /// it can play now (a player does what is in front of it), then one that waits for
+    /// achievements (that step ends by itself once they are set; when it alone is left, the bot
+    /// plays the quests that give them), then one it cannot play, then a wait. Retail
+    /// `12_getoffbeach` waits for either intro achievement or for the intro cutscene's end; the
+    /// achievements come only from the other beach's quest, so a new player ends the cutscene.
+    const fn pick_order(&self) -> u8 {
+        match self {
+            Self::Achievements { .. } => 1,
+            Self::Broken(_) | Self::NotPlayed(_) => 2,
+            Self::Wait => 3,
+            _ => 0,
+        }
+    }
+}
+
+/// The waiting step the bot plays next among `steps` ([`PlanStep::pick_order`]; the first of
+/// equal ones, in the plan's order).
+fn picked_step(steps: &[(String, PlanStep)]) -> Option<&(String, PlanStep)> {
+    steps
+        .iter()
+        .enumerate()
+        .min_by_key(|(index, (_, step))| (step.pick_order(), *index))
+        .map(|(_, picked)| picked)
 }
 
 /// The place in words `x y z`.
@@ -317,12 +434,24 @@ fn place_of(words: &[&str]) -> Option<Position> {
     }
 }
 
+/// The word after the word `word` in `words`.
+fn word_after<'a>(words: &[&'a str], word: &str) -> Option<&'a str> {
+    let index = words.iter().position(|known| *known == word)?;
+    words.get(index + 1).copied()
+}
+
 /// The territory after the word [`TERRITORY`] in `words`.
 fn territory_of(words: &[&str]) -> Option<u16> {
-    words
-        .iter()
-        .position(|word| *word == TERRITORY)
-        .and_then(|index| words.get(index + 1)?.parse().ok())
+    word_after(words, TERRITORY)?.parse().ok()
+}
+
+/// A raw id written as lowercase hexadecimal (a plan line's item instance or station).
+fn raw_id_of(word: &str) -> Option<[u8; nw_messages::wire::RAW_ID_LEN]> {
+    data_encoding::HEXLOWER
+        .decode(word.as_bytes())
+        .ok()?
+        .try_into()
+        .ok()
 }
 
 /// The place after the word [`AT`] in `words`.
@@ -385,6 +514,12 @@ fn quest_sources(text: &str) -> Vec<String> {
 fn plan_step(line: &str, header: FacetHeader) -> Option<(String, PlanStep)> {
     let rest = line.strip_prefix(PLAN_LINE)?;
     let (task, what) = rest.split_once(' ')?;
+    Some((task.to_owned(), what_step(what, header)?))
+}
+
+/// The step of `what`, the words of a plan line after its task, with the bot's facet header
+/// `header`: `None` for words that do not read.
+fn what_step(what: &str, header: FacetHeader) -> Option<PlanStep> {
     let words: Vec<&str> = what.split_whitespace().collect();
     let step = match *words.first()? {
         "wait" => PlanStep::Wait,
@@ -435,6 +570,7 @@ fn plan_step(line: &str, header: FacetHeader) -> Option<(String, PlanStep)> {
                 item: (*words.get(1)?).to_owned(),
                 count: words.get(2)?.parse().ok()?,
                 source: source.to_owned(),
+                gathered: said.contains(&GATHERED),
                 node: said
                     .iter()
                     .position(|word| *word == NODE)
@@ -454,13 +590,118 @@ fn plan_step(line: &str, header: FacetHeader) -> Option<(String, PlanStep)> {
                 needs,
             }
         }
+        "equip" => PlanStep::Equip {
+            item: (*words.get(1)?).to_owned(),
+            bag_slot: word_after(&words, EQUIP_BAG)?.parse().ok()?,
+            instance: raw_id_of(word_after(&words, EQUIP_INSTANCE)?)?,
+            slot: word_after(&words, EQUIP_SLOT)?.parse().ok()?,
+        },
+        "craft" => {
+            // `craft <recipe> at <x> <y> <z> station <id> [with <item> <quantity>]...`.
+            let ingredients = words
+                .iter()
+                .enumerate()
+                .filter(|(_, word)| **word == CRAFT_WITH)
+                .map(|(index, _)| {
+                    Some((
+                        (*words.get(index + 1)?).to_owned(),
+                        words.get(index + 2)?.parse().ok()?,
+                    ))
+                })
+                .collect::<Option<Vec<(String, u32)>>>()?;
+            PlanStep::Craft {
+                recipe: (*words.get(1)?).to_owned(),
+                at: place_after_at(&words)?,
+                station: raw_id_of(word_after(&words, CRAFT_STATION)?)?,
+                ingredients,
+            }
+        }
+        "use" => PlanStep::Use {
+            tag: (*words.get(1)?).to_owned(),
+            object: u64::from_str_radix(words.get(2)?, 16).ok()?,
+            count: words.get(3)?.parse().ok()?,
+            at: place_after_at(&words)?,
+        },
+        "lore" => PlanStep::Lore {
+            title: (*words.get(1)?).to_owned(),
+            at: place_after_at(&words)?,
+        },
+        "trial" => PlanStep::Trial {
+            mode: (*words.get(1)?).to_owned(),
+            crc: hex_of(words.get(2)?)?,
+        },
+        // `camp at x y z skin <hex> asset <hex> [cost <item> <count>]...`.
+        "camp" => {
+            let after = |word: &str| {
+                words
+                    .iter()
+                    .position(|known| *known == word)
+                    .and_then(|index| words.get(index + 1).copied())
+            };
+            let costs = words
+                .iter()
+                .enumerate()
+                .filter(|(_, word)| **word == CAMP_COST)
+                .map(|(index, _)| {
+                    Some((
+                        (*words.get(index + 1)?).to_owned(),
+                        words.get(index + 2)?.parse().ok()?,
+                    ))
+                })
+                .collect::<Option<Vec<(String, u32)>>>()?;
+            PlanStep::Camp {
+                at: place_after_at(&words)?,
+                skin: u32::from_str_radix(after(CAMP_SKIN)?, 16).ok()?,
+                asset: data_encoding::HEXLOWER
+                    .decode(after(CAMP_ASSET)?.as_bytes())
+                    .ok()?
+                    .try_into()
+                    .ok()?,
+                costs,
+            }
+        }
+        // `gather <gatherable> <count>`: the gather of a node fires the step's game event, so the
+        // bot gathers nodes of the gatherable as for an item of its nodes.
+        "gather" => {
+            let gatherable = (*words.get(1)?).to_owned();
+            PlanStep::Item {
+                item: gatherable.clone(),
+                count: words.get(2)?.parse().ok()?,
+                source: format!("the gather of {gatherable}"),
+                gathered: true,
+                node: Some(gatherable),
+            }
+        }
+        "skin" => {
+            // `skin <gatherable> <count> <kill words>`.
+            let kill_words = what.splitn(SKIN_HEAD_WORDS + 1, ' ').nth(SKIN_HEAD_WORDS)?;
+            let kill = what_step(kill_words, header)?;
+            if !matches!(kill, PlanStep::Kill { .. }) {
+                return None;
+            }
+            PlanStep::Skin {
+                gatherable: (*words.get(1)?).to_owned(),
+                count: words.get(2)?.parse().ok()?,
+                kill: Box::new(kill),
+            }
+        }
+        "loot" => {
+            // `loot <kill words>`.
+            let kill = what_step(what.split_once(' ')?.1, header)?;
+            if !matches!(kill, PlanStep::Kill { .. }) {
+                return None;
+            }
+            PlanStep::Loot {
+                kill: Box::new(kill),
+            }
+        }
         "event" => PlanStep::NotPlayed(format!(
             "needs a flow the bot does not play yet: {}",
             what.trim_start_matches("event").trim()
         )),
         _ => return None,
     };
-    Some((task.to_owned(), step))
+    Some(step)
 }
 
 /// What the bot waits for.
@@ -586,10 +827,23 @@ struct Player {
     running: Option<(ActivityKind, RunningSteps)>,
     /// Every gather node of the level, in world file order.
     nodes: Arc<[GatherNode]>,
+    /// The game master lines of the setup ([`setup_lines`]).
+    setup_lines: Vec<String>,
     /// The nodes the bot gathered or tried to gather.
     tried_nodes: HashSet<usize>,
+    /// The corpses the bot skinned or tried to skin.
+    skinned: HashSet<u64>,
+    /// Where the bags the bot has not opened start in the view's list of loot bags
+    /// ([`CombatView::bags`]): the ones before were opened or tried.
+    loot_from: usize,
     /// The gather of a quest step's node the bot plays now, with what it is for.
     gather: Option<(String, RunningSteps)>,
+    /// The game mode of the instance the bot entered for a quest step; `None` in the open
+    /// world.
+    in_trial: Option<String>,
+    /// The game mode of the instance the running gather enters; the bot is in it once that
+    /// gather ends well.
+    entering_trial: Option<String>,
     activity_plays: Vec<QuestPlay>,
     /// Every interaction answer so far.
     answers: Vec<InteractionAnswer>,
@@ -610,6 +864,10 @@ struct Fight {
     /// The view's hits dealt and mob deaths when the fight started.
     hits_before: u64,
     mob_deaths_before: u64,
+    /// The view's bundles and mob cards read when the fight started: a fight that saw no mob
+    /// tells by them whether the server sent the bot its surroundings.
+    bundles_before: u64,
+    mob_cards_before: u64,
 }
 
 /// The fights for one kill step so far: the hits the bot landed and the mobs that died in view.
@@ -651,13 +909,20 @@ impl Fought {
 }
 
 impl Fight {
-    /// The verdict of a fight that says nothing of its quest: the bot saw no mob to fight.
-    fn not_played(&self) -> Option<Verdict> {
+    /// The verdict of a fight that says nothing of its quest: the bot saw no mob to fight, with
+    /// where it stood (`at`) and what `view` read in the fight.
+    fn not_played(&self, view: &CombatView, at: Option<Position>) -> Option<Verdict> {
         (!self.saw_mobs).then(|| {
             Verdict::NotPlayed(format!(
-                "{}: the bot saw no mob there in {} s",
+                "{}: the bot saw no mob there in {} s (it stood at {}; in the fight it read {} world bundles and {} mob cards)",
                 self.task,
-                FIGHT_TIME.as_secs()
+                FIGHT_TIME.as_secs(),
+                at.map_or_else(
+                    || "an unknown place".to_owned(),
+                    |at| format!("{:.1} {:.1} {:.1}", at.x, at.y, at.z)
+                ),
+                view.bundles().saturating_sub(self.bundles_before),
+                view.mob_cards().saturating_sub(self.mob_cards_before)
             ))
         })
     }
@@ -716,9 +981,9 @@ impl Player {
                 Ok(())
             }
             Phase::Leaving { .. } => Ok(()),
-            Phase::Setup(index) => match SETUP_LINES.get(index) {
+            Phase::Setup(index) => match self.setup_lines.get(index).cloned() {
                 Some(line) => {
-                    self.say(client, own, line)?;
+                    self.say(client, own, &line)?;
                     self.phase = Phase::Setup(index + 1);
                     Ok(())
                 }
@@ -943,17 +1208,22 @@ impl Player {
             .iter()
             .filter_map(|line| plan_step(line, header))
             .collect();
-        let Some((task, step)) = steps
-            .iter()
-            .find(|(_, step)| !matches!(step, PlanStep::Wait))
-            .or_else(|| steps.first())
-            .cloned()
-        else {
+        let Some((task, step)) = picked_step(&steps).cloned() else {
             self.end_quest(Verdict::Broken(format!(
                 "a plan the bot does not read: {}",
                 answer.join(" / ")
             )));
             return self.next_quest(client, own, since);
+        };
+        // A skin step without a corpse to skin kills one first, as a player does, and so does a
+        // loot step without a bag of a kill to open.
+        let step = match step {
+            PlanStep::Skin { kill, .. } if self.fresh_corpse().is_none() => *kill,
+            PlanStep::Loot { kill } if self.combat.bags().len() <= self.loot_from => {
+                self.loot_from = self.combat.bags().len();
+                *kill
+            }
+            other => other,
         };
         let line = answer
             .iter()
@@ -984,6 +1254,18 @@ impl Player {
             };
             self.end_quest(verdict);
             return self.next_quest(client, own, since);
+        }
+        // A step the instance's sim cannot place lies outside the instance: the bot leaves it
+        // first, as a player walks out after the trial's own steps.
+        if matches!(step, PlanStep::Broken(_) | PlanStep::NotPlayed(_))
+            && let Some(mode) = self.in_trial.take()
+        {
+            self.gather = Some((
+                format!("{task}: left the instance of {mode}"),
+                RunningSteps::of(leave_trial_steps()),
+            ));
+            self.phase = Phase::Gather;
+            return Ok(());
         }
         match step {
             PlanStep::Wait => self.pause(since, WAIT_PAUSE, Ask::State),
@@ -1075,6 +1357,8 @@ impl Player {
                     swings: 0,
                     hits_before: self.combat.hits_dealt(),
                     mob_deaths_before: self.combat.mob_deaths(),
+                    bundles_before: self.combat.bundles(),
+                    mob_cards_before: self.combat.mob_cards(),
                 });
                 self.phase = Phase::Fight {
                     until: since + FIGHT_TIME,
@@ -1099,13 +1383,145 @@ impl Player {
             }
             PlanStep::Item {
                 item,
+                source,
+                gathered: true,
+                node: None,
+                ..
+            } => {
+                // A game master's give is no gather: the step would never count it.
+                self.end_quest(Verdict::NotPlayed(format!(
+                    "{task}: the step counts gathers of {item} ({source}), and the bot has no gather for it"
+                )));
+                return self.next_quest(client, own, since);
+            }
+            PlanStep::Item {
+                item,
                 count,
                 source,
                 node: None,
+                ..
             } => {
                 self.say(client, own, &format!("!give {item} {count}"))?;
                 self.actions.push(format!(
                     "{task}: given {count} {item} by a game master ({source})"
+                ));
+                self.pause(since, ACTION_PAUSE, Ask::State);
+            }
+            PlanStep::Use {
+                tag,
+                object,
+                count,
+                at,
+            } => {
+                if !tag.eq_ignore_ascii_case(STORAGE_TAG) {
+                    self.end_quest(Verdict::NotPlayed(format!(
+                        "{task}: the interaction kind of an object with interact tag {tag} is Unknown"
+                    )));
+                    return self.next_quest(client, own, since);
+                }
+                let steps = use_steps(
+                    object,
+                    [at.x, at.y, at.z],
+                    OPEN_STORAGE_KIND,
+                    OPEN_STORAGE_NAME,
+                );
+                self.gather = Some((
+                    format!("{task}: opened and closed storage {object:016x} ({count} left)"),
+                    RunningSteps::of(steps),
+                ));
+                self.phase = Phase::Gather;
+            }
+            PlanStep::Lore { title, at } => {
+                self.gather = Some((
+                    format!("{task}: read the lore note {title}"),
+                    RunningSteps::of(lore_steps(&title, [at.x, at.y, at.z])),
+                ));
+                self.phase = Phase::Gather;
+            }
+            PlanStep::Trial { mode, crc } => {
+                self.gather = Some((
+                    format!("{task}: entered the instance of {mode}"),
+                    RunningSteps::of(trial_steps(&mode, crc)),
+                ));
+                self.entering_trial = Some(mode);
+                self.phase = Phase::Gather;
+            }
+            PlanStep::Camp {
+                at,
+                skin,
+                asset,
+                costs,
+            } => {
+                self.gather = Some((
+                    format!("{task}: placed and built a camp"),
+                    RunningSteps::of(camp_steps([at.x, at.y, at.z], skin, asset, &costs)),
+                ));
+                self.phase = Phase::Gather;
+            }
+            PlanStep::Skin {
+                gatherable, count, ..
+            } => {
+                let Some((corpse, _)) = self.fresh_corpse() else {
+                    return self.ask(client, own, Ask::State, since);
+                };
+                self.skinned.insert(corpse);
+                let steps = skin_steps(raw_id_of_entity(corpse), lowercase_crc32(&gatherable));
+                self.gather = Some((
+                    format!("{task}: skinned the {gatherable} corpse ({count} left)"),
+                    RunningSteps::of(steps),
+                ));
+                self.phase = Phase::Gather;
+            }
+            PlanStep::Craft {
+                recipe,
+                at,
+                station,
+                ingredients,
+            } => {
+                self.gather = Some((
+                    format!("{task}: crafted {recipe} at its station"),
+                    RunningSteps::of(quest_craft_steps(
+                        &recipe,
+                        station,
+                        [at.x, at.y, at.z],
+                        ingredients,
+                    )),
+                ));
+                self.phase = Phase::Gather;
+            }
+            PlanStep::Loot { .. } => {
+                let bags: Vec<[u8; nw_messages::wire::RAW_ID_LEN]> = self.combat.bags()
+                    [self.loot_from..]
+                    .iter()
+                    .rev()
+                    .copied()
+                    .collect();
+                self.loot_from = self.combat.bags().len();
+                self.gather = Some((
+                    format!("{task}: opened {} loot bags of its kills", bags.len()),
+                    RunningSteps::of(loot_steps(&bags)),
+                ));
+                self.phase = Phase::Gather;
+            }
+            PlanStep::Equip {
+                item,
+                bag_slot,
+                instance,
+                slot,
+            } => {
+                Self::call(
+                    client,
+                    &ClientFacetMsg::EquipItem {
+                        header,
+                        bag_slot,
+                        equip_slot: slot,
+                        quantity: 1,
+                        instance,
+                        flag: 0,
+                    },
+                )?;
+                self.actions.push(format!(
+                    "{task}: equipped {item} from bag slot {bag_slot} into slot {slot}"
                 ));
                 self.pause(since, ACTION_PAUSE, Ask::State);
             }
@@ -1199,8 +1615,14 @@ impl Player {
             return self.ask(client, own, Ask::State, since);
         };
         match self.steps_tick(client, outcome, own, since, &mut running)? {
-            Some(Verdict::Completed) => self.actions.push(what),
+            Some(Verdict::Completed) => {
+                if let Some(mode) = self.entering_trial.take() {
+                    self.in_trial = Some(mode);
+                }
+                self.actions.push(what);
+            }
             Some(Verdict::Broken(why) | Verdict::NotPlayed(why)) => {
+                self.entering_trial = None;
                 self.actions.push(format!("{what}: {why}"));
             }
             None => {
@@ -1209,6 +1631,13 @@ impl Player {
             }
         }
         self.ask(client, own, Ask::State, since)
+    }
+
+    /// The last mob that died in view, while its corpse is shown and the bot has not skinned it.
+    fn fresh_corpse(&self) -> Option<(u64, nw_messages::WorldPosition)> {
+        self.combat
+            .last_death()
+            .filter(|(corpse, _)| !self.skinned.contains(corpse))
     }
 
     /// The nearest node of gatherable `gatherable` to the bot that it has not tried yet.
@@ -1317,6 +1746,19 @@ impl Player {
                     };
                     running.interaction = Some(self.interact(client, own, request, &[])?);
                 }
+                Act::EndInteraction { target_entity } => {
+                    if let Some(interaction) = running.interaction {
+                        Self::call(
+                            client,
+                            &ClientFacetMsg::CancelInteraction {
+                                header: FacetHeader::of(CALL_COMPONENT, own),
+                                target: [0; nw_messages::wire::RAW_ID_LEN],
+                                target_entity: *target_entity,
+                                interaction,
+                            },
+                        )?;
+                    }
+                }
             }
             running.act += 1;
             running.last_act = Some(since);
@@ -1334,6 +1776,13 @@ impl Player {
                 .iter()
                 .any(|received| received.envelope.type_index() == Some(*type_index))
                 .then_some(Ok(())),
+            Proof::ArenaYes(type_index) => outcome.messages[running.messages_before..]
+                .iter()
+                .find(|received| received.envelope.type_index() == Some(*type_index))
+                .map(|received| {
+                    arena_verdict(*type_index, &received.envelope.body)
+                        .map_err(|why| format!("{}: {why}", step.what))
+                }),
             Proof::Accepted => new_answers.iter().find_map(|answer| match answer {
                 InteractionAnswer::Validated {
                     interaction,
@@ -1348,6 +1797,13 @@ impl Player {
             Proof::Ended => new_answers
                 .contains(&InteractionAnswer::Ended)
                 .then_some(Ok(())),
+            Proof::Answered => new_answers
+                .iter()
+                .any(|answer| {
+                    matches!(answer, InteractionAnswer::Validated { interaction, .. }
+                        if Some(*interaction) == running.interaction)
+                })
+                .then_some(Ok(())),
         };
         match proof {
             Some(Ok(())) => {
@@ -1361,8 +1817,10 @@ impl Player {
                 let wanted = match &step.proof {
                     Proof::Line(_, described) => format!("an answer line: {described}"),
                     Proof::Message(type_index) => format!("a {type_index} message"),
+                    Proof::ArenaYes(type_index) => format!("a {type_index} answer that says yes"),
                     Proof::Accepted => "the interaction's answer".to_owned(),
                     Proof::Ended => "the interaction's end".to_owned(),
+                    Proof::Answered => "an answer to the interaction".to_owned(),
                     Proof::Sent => String::new(),
                 };
                 let answered = self.lines[running.lines_before..].join(" / ");
@@ -1448,7 +1906,7 @@ impl Player {
         let Some(fight) = self.fight.take() else {
             return self.ask(client, own, Ask::State, since);
         };
-        if let Some(verdict) = fight.not_played() {
+        if let Some(verdict) = fight.not_played(&self.combat, self.own_place()) {
             self.end_quest(verdict);
             return self.next_quest(client, own, since);
         }
@@ -1646,6 +2104,7 @@ pub async fn run_play(
         own_since: None,
         lines: Vec::new(),
         phase: Phase::LeaveTutorial,
+        setup_lines: setup_lines(&settings.gm_start),
         queue: settings.quests.iter().skip(1).cloned().collect(),
         current: settings.quests.first().cloned(),
         deferred: Vec::new(),
@@ -1671,7 +2130,11 @@ pub async fn run_play(
         running: None,
         nodes,
         tried_nodes: HashSet::new(),
+        skinned: HashSet::new(),
+        loot_from: 0,
         gather: None,
+        in_trial: None,
+        entering_trial: None,
         activity_plays: Vec::new(),
         answers: Vec::new(),
         teleported_to: None,
@@ -1717,6 +2180,357 @@ mod tests {
 
     fn header() -> FacetHeader {
         FacetHeader::of(CALL_COMPONENT, OWN)
+    }
+
+    #[test]
+    fn the_setup_starts_each_gm_started_quest_after_the_bot_s_own_lines() {
+        let lines = setup_lines(&["12A_MSQ_09_ReturnRegent".to_owned()]);
+        assert_eq!(&lines[..SETUP_LINES.len()], SETUP_LINES);
+        assert_eq!(
+            lines[SETUP_LINES.len()..],
+            ["!quest 12A_MSQ_09_ReturnRegent"]
+        );
+        assert_eq!(setup_lines(&[]).len(), SETUP_LINES.len());
+    }
+
+    #[test]
+    fn a_lore_line_reads_its_title_and_place() {
+        assert_eq!(
+            plan_step(
+                "plan n lore 12_MonarchsBluffs_Title_20_01 at 8120.5 3050.0 112.0",
+                header()
+            )
+            .map(|(_, step)| step),
+            Some(PlanStep::Lore {
+                title: "12_MonarchsBluffs_Title_20_01".to_owned(),
+                at: Position {
+                    x: 8120.5,
+                    y: 3050.0,
+                    z: 112.0
+                }
+            })
+        );
+        let steps = lore_steps("12_MonarchsBluffs_Title_20_01", [0.0, 0.0, 0.0]);
+        assert!(matches!(
+            steps[0].acts.last(),
+            Some(Act::Interact { name, .. }) if name == b"@12_MonarchsBluffs_Title_20_01"
+        ));
+    }
+
+    #[test]
+    fn a_trial_line_reads_its_game_mode_and_enters_then_leaves_by_the_arena_calls() {
+        const MODE: &str = "QuestGawain";
+        const CRC: u32 = 0x782b_a83f;
+        assert_eq!(
+            plan_step(&format!("plan t trial {MODE} {CRC:08x}"), header()).map(|(_, step)| step),
+            Some(PlanStep::Trial {
+                mode: MODE.to_owned(),
+                crc: CRC,
+            })
+        );
+        assert_eq!(
+            plan_step(&format!("plan t trial {MODE}"), header()),
+            None,
+            "a trial line without its game mode's CRC does not read"
+        );
+        let proofs: Vec<u64> = trial_steps(MODE, CRC)
+            .into_iter()
+            .filter_map(|step| match step.proof {
+                Proof::Message(type_index) | Proof::ArenaYes(type_index) => Some(type_index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            proofs,
+            [
+                nw_messages::arena::REMOTE_INTERACT_RESULT_TYPE_INDEX,
+                nw_messages::arena::DUNGEON_ACTIVATE_RESULT_TYPE_INDEX,
+                nw_messages::LEVEL_INFO_CHANGED_MSG_TYPE_INDEX,
+            ]
+        );
+        let leave = leave_trial_steps();
+        assert!(matches!(
+            leave[0].proof,
+            Proof::Message(nw_messages::LEVEL_INFO_CHANGED_MSG_TYPE_INDEX)
+        ));
+        let Some(Act::Call(call)) = leave[0].acts.first() else {
+            panic!("a call");
+        };
+        let (type_index, _) = call(1).expect("encodes");
+        assert_eq!(
+            type_index,
+            nw_messages::arena::ArenaClientMsg::ForfeitArena {
+                header: header(),
+                flag: 0
+            }
+            .type_index()
+        );
+    }
+
+    #[test]
+    fn a_camp_line_reads_its_place_skin_asset_and_costs() {
+        const ASSET: &str = "3c4895410000000000000000019d4900";
+        let step = plan_step(
+            &format!(
+                "plan c camp at 7598.0 4149.0 70.5 skin 00000000 asset {ASSET} cost WoodT1 5 cost FlintT1 1"
+            ),
+            header(),
+        )
+        .map(|(_, step)| step);
+        assert_eq!(
+            step,
+            Some(PlanStep::Camp {
+                at: Position {
+                    x: 7598.0,
+                    y: 4149.0,
+                    z: 70.5
+                },
+                skin: 0,
+                asset: data_encoding::HEXLOWER
+                    .decode(ASSET.as_bytes())
+                    .expect("hex")
+                    .try_into()
+                    .expect("16 bytes"),
+                costs: vec![("WoodT1".to_owned(), 5), ("FlintT1".to_owned(), 1)]
+            })
+        );
+    }
+
+    #[test]
+    fn a_gather_line_gathers_the_nodes_of_its_gatherable() {
+        assert!(matches!(
+            plan_step("plan r gather MB_MSQ2_RescueMiner_Rescue01 1", header()),
+            Some((_, PlanStep::Item { node: Some(node), gathered: true, count: 1, .. }))
+                if node == "MB_MSQ2_RescueMiner_Rescue01"
+        ));
+    }
+
+    #[test]
+    fn a_skin_line_reads_its_gatherable_and_its_kill() {
+        let step = plan_step(
+            "plan s skin Boar 1 kill CK_Boar_10WS10 1 at 6088.6 834.6 129.3",
+            header(),
+        )
+        .map(|(_, step)| step);
+        assert_eq!(
+            step,
+            Some(PlanStep::Skin {
+                gatherable: "Boar".to_owned(),
+                count: 1,
+                kill: Box::new(PlanStep::Kill {
+                    vitals: "CK_Boar_10WS10".to_owned(),
+                    count: 1,
+                    at: Position {
+                        x: 6088.6,
+                        y: 834.6,
+                        z: 129.3
+                    },
+                    territory: None,
+                    placed: false
+                })
+            })
+        );
+        assert_eq!(
+            plan_step("plan s skin Boar 1 go 1.0 2.0 3.0", header()),
+            None,
+            "a skin comes after a kill"
+        );
+    }
+
+    /// `12A_MSQ_15_DefeatNavigator_CollectGun`: the blunderbuss is in the loot bag of the named
+    /// navigator.
+    #[test]
+    fn a_loot_line_reads_its_kill_and_opens_each_bag_with_the_loot_interaction() {
+        let step = plan_step(
+            "plan g loot kill Undead_Navigator_Named_12MB01d 1 at 7822.0 4209.0 30.0 placed",
+            header(),
+        )
+        .map(|(_, step)| step);
+        assert_eq!(
+            step,
+            Some(PlanStep::Loot {
+                kill: Box::new(PlanStep::Kill {
+                    vitals: "Undead_Navigator_Named_12MB01d".to_owned(),
+                    count: 1,
+                    at: Position {
+                        x: 7822.0,
+                        y: 4209.0,
+                        z: 30.0
+                    },
+                    territory: None,
+                    placed: true
+                })
+            })
+        );
+        assert_eq!(
+            plan_step("plan g loot go 1.0 2.0 3.0", header()),
+            None,
+            "a loot comes after a kill"
+        );
+        const NEWER: u8 = 2;
+        let bags = [[1; nw_messages::wire::RAW_ID_LEN], [NEWER; nw_messages::wire::RAW_ID_LEN]];
+        let steps = loot_steps(&[bags[1], bags[0]]);
+        assert_eq!(steps.len(), bags.len());
+        let Some(Act::Interact { request, .. }) = steps[0].acts.first() else {
+            panic!("an interaction");
+        };
+        assert_eq!(request.kind, nw_messages::client_input::LOOT_KIND);
+        assert_eq!(request.target, bags[1]);
+        assert_eq!(request.target_entity, facet_of_raw_id(&bags[1]));
+        assert!(matches!(steps[0].proof, Proof::Answered));
+    }
+
+    /// The cook of `12_boarfeast_05_01` at the watchers' campfire with the skinned pork.
+    #[test]
+    fn a_craft_line_reads_its_station_and_ingredients_and_opens_crafts_and_closes() {
+        const STATION: &str = "ff21e7138c5a804d0000000000000000";
+        let step = plan_step(
+            &format!(
+                "plan c craft Procedural_HealthRecoveryT1 at 7000.0 3000.0 40.0 station {STATION} with PorkT1 1"
+            ),
+            header(),
+        )
+        .map(|(_, step)| step);
+        let station = raw_id_of(STATION).expect("hex");
+        assert_eq!(
+            step,
+            Some(PlanStep::Craft {
+                recipe: "Procedural_HealthRecoveryT1".to_owned(),
+                at: Position {
+                    x: 7000.0,
+                    y: 3000.0,
+                    z: 40.0
+                },
+                station,
+                ingredients: vec![("PorkT1".to_owned(), 1)],
+            })
+        );
+        assert_eq!(
+            plan_step(
+                "plan c craft Procedural_HealthRecoveryT1 at 7000.0 3000.0 40.0",
+                header()
+            ),
+            None,
+            "a craft names its station"
+        );
+        let steps = quest_craft_steps(
+            "Procedural_HealthRecoveryT1",
+            station,
+            [7000.0, 3000.0, 40.0],
+            vec![("PorkT1".to_owned(), 1)],
+        );
+        let proofs: Vec<bool> = steps
+            .iter()
+            .map(|step| matches!(step.proof, Proof::Accepted))
+            .collect();
+        assert_eq!(proofs, [true, false, false], "the station opens first");
+        assert!(matches!(
+            steps[1].proof,
+            Proof::Message(nw_messages::facet::CRAFTING_PROGRESS_TYPE_INDEX)
+        ));
+        assert!(matches!(
+            steps[2].acts.last(),
+            Some(Act::EndInteraction { target_entity }) if *target_entity == facet_of_raw_id(&station)
+        ));
+    }
+
+    #[test]
+    fn an_equip_line_reads_the_client_s_equip_call() {
+        const INSTANCE: &str = "4b6024e9e030411699fc899e15fb70ce";
+        let step = plan_step(
+            &format!("plan e equip 1hSkinningKnifeT1 bag 3 instance {INSTANCE} slot 35"),
+            header(),
+        )
+        .map(|(_, step)| step);
+        assert_eq!(
+            step,
+            Some(PlanStep::Equip {
+                item: "1hSkinningKnifeT1".to_owned(),
+                bag_slot: 3,
+                instance: data_encoding::HEXLOWER
+                    .decode(INSTANCE.as_bytes())
+                    .expect("hex")
+                    .try_into()
+                    .expect("16 bytes"),
+                slot: 35
+            })
+        );
+        assert_eq!(
+            plan_step(
+                "plan e equip 1hSkinningKnifeT1 bag 3 instance 00 slot 35",
+                header()
+            ),
+            None,
+            "an instance of another length does not read"
+        );
+    }
+
+    #[test]
+    fn a_use_line_reads_its_object_and_place() {
+        assert_eq!(
+            plan_step(
+                "plan v use SettlementStorage e0f2606175430000 1 at 9024.5 4102.0 101.3",
+                header()
+            ),
+            Some((
+                "v".to_owned(),
+                PlanStep::Use {
+                    tag: "SettlementStorage".to_owned(),
+                    object: 0xe0f2_6061_7543_0000,
+                    count: 1,
+                    at: Position {
+                        x: 9024.5,
+                        y: 4102.0,
+                        z: 101.3
+                    }
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn the_bot_plays_a_step_it_can_play_before_one_that_waits_for_achievements() {
+        // The live `!questplan` answer of `12_getoffbeach` for a new character (2026-11-17).
+        let plan = [
+            "plan 12_getoffbeach_01_Watched_OtherBeachIntro achievements Watched_IGC_Aelstrom_WW (from a step of quest 06_getoffbeach)",
+            "plan 12_getoffbeach_01_Watched_IntroWatched achievements Watched_IGC_Aelstrom_MB (from a step of quest 12_getoffbeach)",
+            "plan 12_getoffbeach_01_Aelstrom_Beach_cinematic_timer client cutscene af4c01c8",
+        ];
+        let steps: Vec<(String, PlanStep)> = plan
+            .iter()
+            .filter_map(|line| plan_step(line, header()))
+            .collect();
+        let (task, step) = picked_step(&steps).expect("a step");
+        assert_eq!(task, "12_getoffbeach_01_Aelstrom_Beach_cinematic_timer");
+        assert!(matches!(step, PlanStep::Client(_)));
+        let waits: Vec<(String, PlanStep)> = [
+            ("wait".to_owned(), PlanStep::Wait),
+            (
+                "cannot".to_owned(),
+                PlanStep::NotPlayed("a flow".to_owned()),
+            ),
+            (
+                "needs".to_owned(),
+                PlanStep::Achievements {
+                    needs: String::new(),
+                    sources: Vec::new(),
+                },
+            ),
+        ]
+        .into();
+        assert_eq!(
+            picked_step(&waits).map(|(task, _)| task.as_str()),
+            Some("needs")
+        );
+        assert_eq!(
+            picked_step(&waits[..2]).map(|(task, _)| task.as_str()),
+            Some("cannot"),
+            "a step the bot cannot play before a wait"
+        );
+        assert_eq!(
+            picked_step(&waits[..1]).map(|(task, _)| task.as_str()),
+            Some("wait")
+        );
     }
 
     #[test]
@@ -1774,6 +2588,7 @@ mod tests {
                 item: "12A_Key".to_owned(),
                 count: 1,
                 source: "the drop of quest object Box".to_owned(),
+                gathered: false,
                 node: None
             })
         );
@@ -1783,6 +2598,7 @@ mod tests {
                 item: "Orb".to_owned(),
                 count: 2,
                 source: "the drop of quest object Walk_Orb".to_owned(),
+                gathered: true,
                 node: Some("Walk_Orb".to_owned())
             }),
             "the bot gathers the nodes of Walk_Orb"
@@ -1875,15 +2691,27 @@ mod tests {
             swings: 0,
             hits_before: 0,
             mob_deaths_before: 0,
+            bundles_before: 0,
+            mob_cards_before: 0,
         };
+        let view = CombatView::default();
+        let at = Some(Position {
+            x: 6088.6,
+            y: 834.6,
+            z: 129.3,
+        });
         assert_eq!(
-            fight.not_played(),
+            fight.not_played(&view, at),
             Some(Verdict::NotPlayed(
-                "w_kill: the bot saw no mob there in 45 s".to_owned()
+                "w_kill: the bot saw no mob there in 45 s (it stood at 6088.6 834.6 129.3; in the fight it read 0 world bundles and 0 mob cards)".to_owned()
             ))
         );
         fight.saw_mobs = true;
-        assert_eq!(fight.not_played(), None, "the quest's state decides");
+        assert_eq!(
+            fight.not_played(&view, at),
+            None,
+            "the quest's state decides"
+        );
     }
 
     #[test]

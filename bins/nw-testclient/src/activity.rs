@@ -17,27 +17,30 @@ use nw_content::town_props::ASSET_ID_LEN;
 use nw_content::town_stations::TownStations;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::arena::{
-    ArenaClientMsg, PLAYER_ARENA_COMPONENT, REMOTE_INTERACT_RESULT_TYPE_INDEX,
+    ActivateResponse, ArenaClientMsg, ArenaServerMsg, DUNGEON_ACTIVATE_RESULT_TYPE_INDEX,
+    PLAYER_ARENA_COMPONENT, REMOTE_INTERACT_RESULT_TYPE_INDEX,
 };
 use nw_messages::client_input::{
-    CRAFTING_STATION_KIND, GATHER_KIND, TOWN_BOARD_KIND, TOWN_BOARD_NAME, WAR_BOARD_KIND,
-    WAR_BOARD_NAME,
+    APPLY_ALL_RESOURCES_KIND, CRAFTING_STATION_KIND, GATHER_KIND, LOOT_KIND, LORE_KIND,
+    TOWN_BOARD_KIND, TOWN_BOARD_NAME, WAR_BOARD_KIND, WAR_BOARD_NAME,
 };
 use nw_messages::conversation_client::ObjectiveInteractorClientMsg;
 use nw_messages::facet::{
     CRAFTING_PROGRESS_TYPE_INDEX, INGREDIENT_ITEM, TELEPORT_WITH_LOADING_SCREEN_TYPE_INDEX,
 };
 use nw_messages::mount::{MOUNT_FACET, MountClientMsg, SUMMON_PENDING_TYPE_INDEX};
-use nw_messages::travel::{LandmarkRef, TravelClientMsg, component};
+use nw_messages::travel::{
+    LandmarkRef, PLACEMENT_RESULTS_TYPE_INDEX, StructurePlacement, TravelClientMsg, component,
+};
 use nw_messages::war_signup::{
     SET_ROSTER_RESPONSE_RECEIVED_TYPE_INDEX, SIDE_ATTACKER, SIDE_DEFENDER,
     SIGNUP_LIST_RECEIVED_TYPE_INDEX, SIGNUP_RESPONSE_RECEIVED_TYPE_INDEX,
 };
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    BundleMember, ClientFacetMsg, CraftIngredient, FacetHeader, InteractionRequest, MemberState,
-    MessageError, TERRITORY_FACET_READY_TYPE_INDEX, TERRITORY_INTERACTOR_COMPONENT,
-    WarSignupClientMsg,
+    BundleMember, ClientFacetMsg, CraftIngredient, FacetHeader, InteractionRequest,
+    LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, MemberState, MessageError, TERRITORY_FACET_READY_TYPE_INDEX,
+    TERRITORY_INTERACTOR_COMPONENT, WarSignupClientMsg,
 };
 use nw_world::WorldFile;
 use nw_world::capitals::capital_id;
@@ -51,6 +54,13 @@ use crate::gather::{GatherNode, node_id};
 const OPEN_INN_KIND: u8 = 70;
 /// The kind of an inn check in on the same interaction (`travel::kind::SET_SPAWN_POINT`).
 const SET_SPAWN_POINT_KIND: u8 = 18;
+/// The interact tag of a settlement storage (`TaskInteract` of the vault and market steps).
+pub const STORAGE_TAG: &str = "SettlementStorage";
+/// The kind of a storage open (`item_calls::OPEN_STORAGE_KIND` of the sim; retail vault capture
+/// 2026-09-27).
+pub const OPEN_STORAGE_KIND: u8 = 26;
+/// The name a storage open carries (retail vault capture 2026-09-27).
+pub const OPEN_STORAGE_NAME: &[u8] = b"@ui_global_storage";
 /// The landmark type of an inn recall (`INN_RESPAWN_LANDMARK` of the sim).
 const INN_RECALL_LANDMARK: u8 = 20;
 /// The slice folder of the settlement inns (Inferred: the world file's inn structures).
@@ -172,6 +182,12 @@ pub enum Act {
         /// The name the interaction carries (an NPC's, a board's); empty for none.
         name: Vec<u8>,
     },
+    /// The client ends the step's interaction with the object of facet entity `target_entity`,
+    /// as a player who closes its screen (the server counts the object's interact tags then).
+    EndInteraction {
+        /// The object's facet entity.
+        target_entity: u64,
+    },
 }
 
 /// What proves that a step worked.
@@ -180,10 +196,16 @@ pub enum Proof {
     Line(Box<dyn Fn(&str) -> bool>, String),
     /// A server message of this type index.
     Message(u64),
+    /// An arena answer of this type index that says yes ([`arena_verdict`]); one that says no
+    /// fails the step.
+    ArenaYes(u64),
     /// The server took the step's interaction (3743 status 1).
     Accepted,
     /// The interaction ended (3746).
     Ended,
+    /// The server answered the step's interaction (3743), taken or refused: a later step proves
+    /// what it gave.
+    Answered,
     /// Nothing: the server answers the call with no message (a toggle, a territory entry, a
     /// board take); a later step proves it.
     Sent,
@@ -263,6 +285,72 @@ fn facet(make: impl Fn(FacetHeader) -> ClientFacetMsg + 'static, component: u64)
         let call = make(FacetHeader::of(component, own));
         Ok((call.type_index(), call.encode()?))
     }))
+}
+
+/// The retail placement's numbers (all 5 retail placements, camp tutorial capture): the socket
+/// `0xffffffff`, the value 50 and the flag on; their meaning is Unknown.
+const CAMP_SOCKET: u32 = 0xffff_ffff;
+const CAMP_VALUE: u32 = 50;
+const CAMP_FLAG: bool = true;
+/// The rotation of a camp the bot places: none (x, y, z 0, w 1).
+const CAMP_ROTATION: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// The steps of a camp the bot places at `at` and builds, as the camp tutorial
+/// (`12A_MSQ_12_CampTutorial`, retail capture `12a_msq_12_camptutorial`): the game master gives
+/// its `costs` (a build takes them from the bag), the placement (2236, skin `skin`) is answered
+/// by 441, and the "apply all resources" interaction on the camp's card (slice asset `asset`)
+/// builds it; the build takes its build time (about 7 s, live 2026-11-17), and the server ends
+/// the interaction (3746) when the camp is built. A quest check before that end finds the step
+/// open, and a second placement would replace the camp and start its build over.
+pub fn camp_steps(
+    at: [f32; 3],
+    skin: u32,
+    asset: [u8; ASSET_ID_LEN],
+    costs: &[(String, u32)],
+) -> Vec<Step> {
+    let mut steps: Vec<Step> = costs
+        .iter()
+        .map(|(item, quantity)| gm_done(format!("!give {item} {quantity}")))
+        .collect();
+    steps.push(step(
+        "place a camp where the bot stands",
+        vec![Act::Call(Box::new(move |own| {
+            let header = FacetHeader::of(component::CAMPING, own);
+            // The owner is the header's halves swapped (every retail placement).
+            let mut owner = [0; RAW_ID_LEN];
+            let (entity, target) = owner.split_at_mut(size_of::<u64>());
+            entity.copy_from_slice(&header.entity.to_be_bytes());
+            target.copy_from_slice(&header.target.to_be_bytes());
+            let call = TravelClientMsg::PlaceStructure {
+                header,
+                placement: StructurePlacement {
+                    position: at,
+                    rotation: CAMP_ROTATION,
+                    skin,
+                    // The same 16 bytes in every retail placement; their value is Unknown.
+                    structure: [0; RAW_ID_LEN],
+                    owner,
+                    socket: CAMP_SOCKET,
+                    value: CAMP_VALUE,
+                    flag: CAMP_FLAG,
+                },
+            };
+            Ok((call.type_index(), call.encode()))
+        }))],
+        Proof::Message(PLACEMENT_RESULTS_TYPE_INDEX),
+        STEP_WAIT,
+    ));
+    steps.push(step(
+        "build the camp",
+        vec![Act::InteractCard {
+            assets: vec![asset],
+            kind: APPLY_ALL_RESOURCES_KIND,
+        }],
+        Proof::Accepted,
+        LONG_WAIT,
+    ));
+    steps.push(step("the build ends", Vec::new(), Proof::Ended, LONG_WAIT));
+    steps
 }
 
 /// A fast travel to `landmark` (3713).
@@ -428,27 +516,146 @@ fn harvest(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
 /// client's node id does) of gatherable `name`, gathers it and waits for the gather's end.
 pub fn gather_steps(name: &str, node: GatherNode, index: usize) -> Vec<Step> {
     let (target, target_entity) = node_id(index);
-    let request = InteractionRequest {
+    gather_of(
+        format!("go to a {name} node and gather it"),
+        vec![teleport(node.at)],
         target,
         target_entity,
+        node.gatherable,
+    )
+}
+
+/// The steps of a skin of the corpse of raw id `corpse` as gatherable `gatherable` (the
+/// CRC-32 of its lowercase id): the gather request of retail's skin (beach capture `12-3`:
+/// kind 14, the corpse's raw id and facet entity, gatherable `Boar`), then its end. The bot
+/// stands at the corpse after its fight.
+pub fn skin_steps(corpse: [u8; RAW_ID_LEN], gatherable: u32) -> Vec<Step> {
+    gather_of(
+        "skin the corpse".to_owned(),
+        Vec::new(),
+        corpse,
+        nw_messages::facet_of_raw_id(&corpse),
+        gatherable,
+    )
+}
+
+/// The steps that open the loot bags `bags` (ids from their cards, newest first) with the loot
+/// interaction (kind 28), as a player takes the loot of its kills: the server gives the items of
+/// its own bags and refuses the others (an empty roll, another player's bag).
+pub fn loot_steps(bags: &[[u8; RAW_ID_LEN]]) -> Vec<Step> {
+    bags.iter()
+        .map(|bag| {
+            step(
+                "open a loot bag".to_owned(),
+                vec![Act::Interact {
+                    request: InteractionRequest {
+                        target: *bag,
+                        target_entity: nw_messages::facet_of_raw_id(bag),
+                        interaction: 0,
+                        kind: LOOT_KIND,
+                        gatherable: None,
+                    },
+                    name: Vec::new(),
+                }],
+                Proof::Answered,
+                STEP_WAIT,
+            )
+        })
+        .collect()
+}
+
+/// The step of a read of the lore note of title `title` at its lore point `at`: the lore
+/// interaction (kind 47) names the note by its localized title, `@` and the title (the
+/// server's `read_lore`), and the server takes it within reach of the note.
+pub fn lore_steps(title: &str, at: [f32; 3]) -> Vec<Step> {
+    vec![step(
+        format!("go to the lore note {title} and read it"),
+        vec![
+            teleport(at),
+            Act::Interact {
+                request: InteractionRequest {
+                    target: [0; RAW_ID_LEN],
+                    target_entity: 0,
+                    interaction: 0,
+                    kind: LORE_KIND,
+                    gatherable: None,
+                },
+                name: format!("{LOCALIZED_MARK}{title}").into_bytes(),
+            },
+        ],
+        Proof::Accepted,
+        STEP_WAIT,
+    )]
+}
+
+/// Starts a localized name (a lore note's title as the client names it).
+const LOCALIZED_MARK: char = '@';
+
+/// A gather of gatherable `gatherable` at the object of raw id `target` (facet entity
+/// `target_entity`) after `before`, then its end and the client's acknowledgement of that end
+/// (2473, 15 to 25 ms after each 3746 on retail): the server counts the object's interact tags
+/// then (the crown of `12A_MSQ_24_DefeatGawain_CollectCrownItem`).
+fn gather_of(
+    what: String,
+    mut before: Vec<Act>,
+    target: [u8; RAW_ID_LEN],
+    target_entity: u64,
+    gatherable: u32,
+) -> Vec<Step> {
+    before.push(Act::Interact {
+        request: InteractionRequest {
+            target,
+            target_entity,
+            interaction: 0,
+            kind: GATHER_KIND,
+            gatherable: Some(gatherable),
+        },
+        name: Vec::new(),
+    });
+    vec![
+        step(what, before, Proof::Accepted, STEP_WAIT),
+        step("the gather ends", Vec::new(), Proof::Ended, LONG_WAIT),
+        step(
+            "acknowledge the end of the gather",
+            vec![Act::EndInteraction { target_entity }],
+            Proof::Sent,
+            STEP_WAIT,
+        ),
+    ]
+}
+
+/// The steps of a use of the level object of facet entity `object` at `at`: go there, open it
+/// with an interaction of kind `kind` and name `name`, and close it once the server took the
+/// open (an end sent before it would end no interaction).
+pub fn use_steps(object: u64, at: [f32; 3], kind: u8, name: &[u8]) -> Vec<Step> {
+    let request = InteractionRequest {
+        target: [0; RAW_ID_LEN],
+        target_entity: object,
         interaction: 0,
-        kind: GATHER_KIND,
-        gatherable: Some(node.gatherable),
+        kind,
+        gatherable: None,
     };
     vec![
         step(
-            format!("go to a {name} node and gather it"),
+            format!("go to object {object:016x} and open it"),
             vec![
-                teleport(node.at),
+                teleport(at),
                 Act::Interact {
                     request,
-                    name: Vec::new(),
+                    name: name.to_vec(),
                 },
             ],
             Proof::Accepted,
             STEP_WAIT,
         ),
-        step("the gather ends", Vec::new(), Proof::Ended, LONG_WAIT),
+        step(
+            format!("close object {object:016x}"),
+            vec![Act::EndInteraction {
+                target_entity: object,
+            }],
+            Proof::Sent,
+            STEP_WAIT,
+        ),
     ]
 }
 
@@ -571,34 +778,97 @@ fn craft_steps(
             .map(|(item, quantity)| gm_done(format!("!give {item} {quantity}"))),
     );
     steps.push(step(what, open, Proof::Accepted, STEP_WAIT));
-    let recipe_crc = lowercase_crc32(&recipe.id);
-    let fee = details.fee;
     steps.push(step(
         format!("craft {}", recipe.id),
-        vec![facet(
-            move |header| ClientFacetMsg::SetCraftingDetails {
-                header,
-                recipe: recipe_crc,
-                quantity: 1,
-                fee,
-                gear_score: 0,
-                perk_items: Vec::new(),
-                unknown: 0,
-                ingredients: ingredients
-                    .iter()
-                    .map(|(item, quantity)| CraftIngredient {
-                        kind: INGREDIENT_ITEM,
-                        quantity: *quantity,
-                        item: lowercase_crc32(item),
-                    })
-                    .collect(),
-            },
-            0,
-        )],
+        vec![craft_call(&recipe.id, details.fee, ingredients)],
         Proof::Message(CRAFTING_PROGRESS_TYPE_INDEX),
         STEP_WAIT,
     ));
     Ok(steps)
+}
+
+/// The craft call (2997) of one craft of recipe `recipe` for the fee `fee` the client shows,
+/// with the bag items `ingredients` (item, quantity).
+fn craft_call(recipe: &str, fee: u32, ingredients: Vec<(String, u32)>) -> Act {
+    let recipe = lowercase_crc32(recipe);
+    facet(
+        move |header| ClientFacetMsg::SetCraftingDetails {
+            header,
+            recipe,
+            quantity: 1,
+            fee,
+            gear_score: 0,
+            perk_items: Vec::new(),
+            unknown: 0,
+            ingredients: ingredients
+                .iter()
+                .map(|(item, quantity)| CraftIngredient {
+                    kind: INGREDIENT_ITEM,
+                    quantity: *quantity,
+                    item: lowercase_crc32(item),
+                })
+                .collect(),
+        },
+        CRAFT_COMPONENT,
+    )
+}
+
+/// The component of the craft calls: the one the craft activity's calls name, which the
+/// server takes.
+const CRAFT_COMPONENT: u64 = 0;
+/// The fee a quest's craft shows (retail cook of `12_boarfeast`: 0).
+const QUEST_CRAFT_FEE: u32 = 0;
+
+/// The steps of a quest's craft of `recipe` at the station of `GdeRef` `station` at `at`, from
+/// the bag's `ingredients`, as retail cooked for `12_boarfeast_05_01`
+/// (`12-3_boarfeast-Campfire-Feast` 97.0 to 106.7 s): the station opened (3743), the craft
+/// (2997) proved by its progress (2993), then the craft screen closed (2999) and the
+/// interaction ended (2473).
+pub fn quest_craft_steps(
+    recipe: &str,
+    station: [u8; RAW_ID_LEN],
+    at: [f32; 3],
+    ingredients: Vec<(String, u32)>,
+) -> Vec<Step> {
+    let target_entity = nw_messages::facet_of_raw_id(&station);
+    vec![
+        step(
+            format!("go to the station and open it for {recipe}"),
+            vec![
+                teleport(at),
+                Act::Interact {
+                    request: InteractionRequest {
+                        target: station,
+                        target_entity,
+                        interaction: 0,
+                        kind: CRAFTING_STATION_KIND,
+                        gatherable: None,
+                    },
+                    name: Vec::new(),
+                },
+            ],
+            Proof::Accepted,
+            STEP_WAIT,
+        ),
+        step(
+            format!("craft {recipe}"),
+            vec![craft_call(recipe, QUEST_CRAFT_FEE, ingredients)],
+            Proof::Message(CRAFTING_PROGRESS_TYPE_INDEX),
+            STEP_WAIT,
+        ),
+        step(
+            "close the craft screen and the station".to_owned(),
+            vec![
+                facet(
+                    |header| ClientFacetMsg::CancelCrafting { header },
+                    CRAFT_COMPONENT,
+                ),
+                Act::EndInteraction { target_entity },
+            ],
+            Proof::Sent,
+            STEP_WAIT,
+        ),
+    ]
 }
 
 /// A settlement inn of the level: a check in, then a recall to it.
@@ -720,19 +990,102 @@ fn dungeon(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
     if let Some(level) = mode.required_level {
         steps.push(gm_done(format!("!level {level}")));
     }
-    steps.push(step(
+    steps.push(ask_remote_entry(
         format!("ask to enter expedition {}", mode.id),
-        vec![Act::Call(Box::new(move |own| {
-            let call = ArenaClientMsg::RequestRemoteInteract {
-                header: FacetHeader::of(PLAYER_ARENA_COMPONENT, own),
-                game_mode,
-            };
-            Ok((call.type_index(), call.encode()))
-        }))],
-        Proof::Message(REMOTE_INTERACT_RESULT_TYPE_INDEX),
-        STEP_WAIT,
+        game_mode,
     ));
     Ok(steps)
+}
+
+/// Asks whether the bot may use game mode `game_mode` (the CRC-32 of its lowercase id) from
+/// afar (5039); the 5038 answer proves it.
+fn ask_remote_entry(what: String, game_mode: u32) -> Step {
+    step(
+        what,
+        vec![arena_call(move |header| {
+            ArenaClientMsg::RequestRemoteInteract { header, game_mode }
+        })],
+        Proof::ArenaYes(REMOTE_INTERACT_RESULT_TYPE_INDEX),
+        STEP_WAIT,
+    )
+}
+
+/// Whether the arena answer `body` of type `type_index` says yes: a 5038 that allows the game
+/// mode, a 6776 with `Success`. `Err` names the answer that says no, or why it does not read.
+///
+/// # Errors
+///
+/// Returns the refusal or the decode error, described.
+pub fn arena_verdict(type_index: u64, body: &[u8]) -> Result<(), String> {
+    match ArenaServerMsg::decode(type_index, body) {
+        Ok(
+            ArenaServerMsg::RemoteInteractResult { allowed: true, .. }
+            | ArenaServerMsg::ActivateResult {
+                response: ActivateResponse::Success,
+                ..
+            },
+        ) => Ok(()),
+        Ok(ArenaServerMsg::RemoteInteractResult { .. }) => {
+            Err("the game mode is not allowed".to_owned())
+        }
+        Ok(ArenaServerMsg::ActivateResult { response, .. }) => {
+            Err(format!("the activation answered {response:?}"))
+        }
+        Err(error) => Err(format!("the arena answer does not read: {error}")),
+    }
+}
+
+/// The arena call `call` makes with the bot's arena facet header.
+fn arena_call(call: impl Fn(FacetHeader) -> ArenaClientMsg + 'static) -> Act {
+    Act::Call(Box::new(move |own| {
+        let call = call(FacetHeader::of(PLAYER_ARENA_COMPONENT, own));
+        Ok((call.type_index(), call.encode()))
+    }))
+}
+
+/// The one byte of a 5037 and a 926 (0 in every capture).
+const ARENA_CALL_FLAG: u8 = 0;
+
+/// Enters an instance of game mode `game_mode` (the CRC-32 of its lowercase id) from afar, as
+/// the client does (run 15 instances study): 5039, 5037 (the 6776 answer), then 946, after
+/// which the handoff to the instance sim sends the instance level (1635).
+pub fn trial_steps(mode: &str, game_mode: u32) -> Vec<Step> {
+    vec![
+        ask_remote_entry(format!("ask to enter game mode {mode}"), game_mode),
+        step(
+            format!("activate game mode {mode}"),
+            vec![arena_call(|header| {
+                ArenaClientMsg::RequestRemoteEnterDungeon {
+                    header,
+                    flag: ARENA_CALL_FLAG,
+                }
+            })],
+            Proof::ArenaYes(DUNGEON_ACTIVATE_RESULT_TYPE_INDEX),
+            LONG_WAIT,
+        ),
+        step(
+            format!("teleport into game mode {mode}"),
+            vec![arena_call(|header| ArenaClientMsg::TeleportIntoDungeon {
+                header,
+            })],
+            Proof::Message(LEVEL_INFO_CHANGED_MSG_TYPE_INDEX),
+            LONG_WAIT,
+        ),
+    ]
+}
+
+/// Leaves the instance the bot is in (926), after which the handoff back to the open world
+/// sends the open world level (1635).
+pub fn leave_trial_steps() -> Vec<Step> {
+    vec![step(
+        "leave the instance".to_owned(),
+        vec![arena_call(|header| ArenaClientMsg::ForfeitArena {
+            header,
+            flag: ARENA_CALL_FLAG,
+        })],
+        Proof::Message(LEVEL_INFO_CHANGED_MSG_TYPE_INDEX),
+        LONG_WAIT,
+    )]
 }
 
 /// The made-up company of the company activity.
@@ -1028,6 +1381,84 @@ fn board(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cold-stack refusal (6776 `EntranceActivationFailure`) fails the activation step
+    /// instead of letting the teleport go out.
+    #[test]
+    fn an_arena_answer_says_yes_only_when_it_allows_or_succeeds() {
+        const OWN: u64 = 7;
+        const GAME_MODE: u32 = 0x782c_103f;
+        let header = FacetHeader::of(PLAYER_ARENA_COMPONENT, OWN);
+        let verdict = |answer: ArenaServerMsg| arena_verdict(answer.type_index(), &answer.encode());
+        assert!(
+            verdict(ArenaServerMsg::ActivateResult {
+                header,
+                response: ActivateResponse::Success,
+            })
+            .is_ok()
+        );
+        assert!(
+            verdict(ArenaServerMsg::ActivateResult {
+                header,
+                response: ActivateResponse::EntranceActivationFailure,
+            })
+            .is_err()
+        );
+        assert!(
+            verdict(ArenaServerMsg::RemoteInteractResult {
+                header,
+                game_mode: GAME_MODE,
+                allowed: true,
+            })
+            .is_ok()
+        );
+        assert!(
+            verdict(ArenaServerMsg::RemoteInteractResult {
+                header,
+                game_mode: GAME_MODE,
+                allowed: false,
+            })
+            .is_err()
+        );
+        assert!(arena_verdict(DUNGEON_ACTIVATE_RESULT_TYPE_INDEX, &[]).is_err());
+    }
+
+    #[test]
+    fn a_camp_placement_has_the_retail_shape_with_the_owner_as_the_swapped_header() {
+        const OWN: u64 = 7;
+        const AT: [f32; 3] = [7_598.0, 4_149.0, 70.5];
+        let steps = camp_steps(AT, 0, [3; ASSET_ID_LEN], &[("WoodT1".to_owned(), 5)]);
+        assert_eq!(
+            steps.len(),
+            4,
+            "the give, the placement, the build and its end"
+        );
+        assert!(matches!(steps[3].proof, Proof::Ended));
+        let Some(Act::Call(make)) = steps[1].acts.first() else {
+            panic!("a call");
+        };
+        let (type_index, body) = make(OWN).expect("encodes");
+        let Some(Ok(TravelClientMsg::PlaceStructure { header, placement })) =
+            TravelClientMsg::decode(type_index, &body)
+        else {
+            panic!("a placement");
+        };
+        assert_eq!(placement.position, AT);
+        assert_eq!(
+            (placement.socket, placement.value, placement.flag),
+            (CAMP_SOCKET, CAMP_VALUE, CAMP_FLAG)
+        );
+        let mut swapped = header.entity.to_be_bytes().to_vec();
+        swapped.extend(header.target.to_be_bytes());
+        assert_eq!(placement.owner.to_vec(), swapped);
+        assert!(matches!(
+            steps[2].acts.first(),
+            Some(Act::InteractCard {
+                kind: APPLY_ALL_RESOURCES_KIND,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn a_state_line_gives_its_level() {

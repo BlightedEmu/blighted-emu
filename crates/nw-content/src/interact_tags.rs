@@ -35,10 +35,15 @@ pub struct VariantTag {
     pub only_on_quest: bool,
 }
 
+/// A world position: x, y and z in metres.
+pub type Place = [f32; 3];
+
 /// The interact tags of the level objects, by object key.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct InteractTags {
     by_key: HashMap<u64, Vec<String>>,
+    /// The place of each tagged object, by object key ([`Self::with_places`]).
+    places: HashMap<u64, Place>,
     /// The tag an object's interact waits for, by object key: its variant's when the variant is
     /// only on quest.
     quest_gates: HashMap<u64, String>,
@@ -148,6 +153,49 @@ impl InteractTags {
         self
     }
 
+    /// The same tags, and the places of the tagged objects among the capitals (GUID text,
+    /// place) and the spawned slices (GDE id, place), for [`Self::nearest_with`].
+    #[must_use]
+    pub fn with_places<'a>(
+        mut self,
+        capitals: impl IntoIterator<Item = (&'a str, Place)>,
+        spawned: impl IntoIterator<Item = (u64, Place)>,
+    ) -> Self {
+        let capitals = capitals
+            .into_iter()
+            .filter_map(|(guid, place)| Some((capital_key(guid)?, place)));
+        let spawned = spawned
+            .into_iter()
+            .map(|(id, place)| (id & !FACET_FREE_BITS, place));
+        for (key, place) in capitals.chain(spawned) {
+            if self.by_key.contains_key(&key) {
+                self.places.insert(key, place);
+            }
+        }
+        self
+    }
+
+    /// The object key and place of the object with tag `tag` (any case) nearest to `to`, among
+    /// the objects with a known place; on a tie, the lowest key.
+    pub fn nearest_with(&self, tag: &str, to: Place) -> Option<(u64, Place)> {
+        let distance = |place: &Place| {
+            place
+                .iter()
+                .zip(to)
+                .map(|(axis, from)| (axis - from).powi(2))
+                .sum::<f32>()
+        };
+        self.by_key
+            .iter()
+            .filter(|(_, tags)| tags.iter().any(|known| known.eq_ignore_ascii_case(tag)))
+            .filter_map(|(key, _)| Some((*key, *self.places.get(key)?)))
+            .min_by(|(left_key, left), (right_key, right)| {
+                distance(left)
+                    .total_cmp(&distance(right))
+                    .then(left_key.cmp(right_key))
+            })
+    }
+
     /// The interact tags of an interaction with the object of facet entity `facet`: its own,
     /// else those of the gatherable it gathers, if any.
     pub fn of_interaction(&self, facet: u64, gatherable: Option<u32>) -> &[String] {
@@ -228,6 +276,40 @@ mod tests {
         assert!(tags.of(1).is_empty());
         assert!(tags.knows("settlementstorage"), "an object's tag, any case");
         assert!(!tags.knows("NoSuchTag"));
+    }
+
+    #[test]
+    fn the_nearest_object_with_a_tag_is_found_by_its_place() {
+        /// A second storage, a spawned slice, near the player.
+        const NEAR_STORAGE: u64 = 0x0000_0000_0000_7700;
+        const SETTLEMENT_PLACE: Place = [9000.0, 4000.0, 100.0];
+        const NEAR_PLACE: Place = [100.0, 100.0, 10.0];
+        const UNPLACED: u64 = 0x0000_0000_0000_8800;
+        /// A placed object with no tag.
+        const UNTAGGED: u64 = 0x0000_0000_0000_9900;
+        let storage = ["SettlementStorage".to_owned()];
+        let tags = InteractTags::build(
+            &HashMap::new(),
+            [(SETTLEMENT_GUID, None, storage.as_slice())],
+            [
+                (NEAR_STORAGE, "", storage.as_slice()),
+                (UNPLACED, "", storage.as_slice()),
+            ],
+        )
+        .with_places(
+            [(SETTLEMENT_GUID, SETTLEMENT_PLACE)],
+            [(NEAR_STORAGE, NEAR_PLACE), (UNTAGGED, NEAR_PLACE)],
+        );
+        assert_eq!(
+            tags.nearest_with("settlementstorage", [0.0, 0.0, 0.0]),
+            Some((NEAR_STORAGE, NEAR_PLACE)),
+            "the nearer one, any case; an object without a place is left out"
+        );
+        assert_eq!(
+            tags.nearest_with("SettlementStorage", [8990.0, 4000.0, 100.0]),
+            Some((SETTLEMENT_FACET & !FACET_FREE_BITS, SETTLEMENT_PLACE))
+        );
+        assert_eq!(tags.nearest_with("NoSuchTag", [0.0, 0.0, 0.0]), None);
     }
 
     #[test]

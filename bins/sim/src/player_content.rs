@@ -1255,6 +1255,13 @@ pub(crate) fn level_interact_tags(tables: &Tables, level: &WorldFile) -> Interac
         }),
     )
     .with_gatherables(gatherable_tags(tables))
+    .with_places(
+        level
+            .capitals
+            .iter()
+            .map(|capital| (capital.id.as_str(), capital.position)),
+        level.spawned.iter().map(|slice| (slice.id, slice.position)),
+    )
 }
 
 /// The objects of `level` whose gathers are instanced, with their slices' values.

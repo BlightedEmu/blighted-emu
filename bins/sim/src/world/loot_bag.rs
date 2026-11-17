@@ -24,7 +24,7 @@ use nw_content::loot_limits::{LimitCount, LootLimitCounts, LootLimitRules};
 use nw_content::perks::{chance_hit, rarity};
 use nw_content::resets::{ResetClock, ResetCycle};
 use nw_content::starter::KitItem;
-use nw_messages::gde::AssetId;
+use nw_messages::gde::LOOT_BAG_ASSET;
 use nw_messages::items::{ITEM_BOUND, SYNC_MOVED, SYNC_OWNED};
 use nw_messages::loot::{
     GLOBAL_STORAGE_COMPONENT, GlobalStorageState, LOOT_CREATURE, LOOT_DROPPED, LOOT_POI,
@@ -55,14 +55,6 @@ const SURE_CHANCE: f64 = 1.0;
 /// Names the bag ids this server makes.
 const BAG_ID_NAMESPACE: u64 = 0x6c6f_6f74_6261_6773;
 
-/// The loot bag's slice asset (retail card at the kill).
-const BAG_ASSET: AssetId = AssetId {
-    id: [
-        0x98, 0x44, 0xf2, 0xde, 0xc3, 0xb1, 0x5b, 0xd3, 0x98, 0xfa, 0x87, 0x68, 0xb5, 0x44, 0x59,
-        0x06,
-    ],
-    sub_id: 2,
-};
 /// The components of a bag's group: its card, position, three delayed events and interact
 /// state (retail spawn: c2, c3, c4, c0, c1; c5 at the take).
 const CARD_COMPONENT: u64 = 0;
@@ -185,7 +177,7 @@ impl LootBag {
             BundleMember {
                 component: CARD_COMPONENT,
                 state: MemberState::GdeMetadata(GdeMetadataReplicatedState {
-                    asset: Some(BAG_ASSET),
+                    asset: Some(LOOT_BAG_ASSET),
                     gde_ref: Some(self.id),
                 }),
             },

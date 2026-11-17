@@ -118,6 +118,30 @@ const fn first_slot(kind: EquipSlot) -> u32 {
     }
 }
 
+/// The tool classes (an `ItemClass` part) and the tradeskill whose tool slot each goes into
+/// (retail beach captures `12-1` and `12-2`: the knife, the pick and the hatchet went to 35, 36
+/// and 33; `EquippableTool+Axe+SkinningKnife`, `+Sickle`, `+PickAxe`, `+LoggingAxe`).
+const TOOL_CLASSES: [(&str, &str); 4] = [
+    ("LoggingAxe", "Logging"),
+    ("Sickle", "Harvesting"),
+    ("SkinningKnife", super::gathering::SKINNING_TRADESKILL),
+    ("PickAxe", "Mining"),
+];
+
+/// The tool slot of an item whose `ItemClass` parts are `classes`: a fishing pole's, or the
+/// slot of the tradeskill of its tool class; `None` for an item that is no tool.
+fn tool_slot_of(classes: &[String]) -> Option<u32> {
+    classes.iter().find_map(|class| {
+        if class.eq_ignore_ascii_case(nw_content::fishing::FISHING_POLE_CLASS) {
+            return Some(super::fishing::FISHING_SLOT);
+        }
+        TOOL_CLASSES
+            .iter()
+            .find(|(tool, _)| class.eq_ignore_ascii_case(tool))
+            .and_then(|(_, tradeskill)| super::gathering::tradeskill_tool_slot(tradeskill))
+    })
+}
+
 /// One item stack of a player.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Stack {
@@ -1173,6 +1197,28 @@ impl Gear {
         !converted.is_empty()
     }
 
+    /// Where a client equips item `item_id` (any case; its `ItemClass` parts `classes`) from the
+    /// bag: the bag slot and instance of its first stack and the paperdoll slot it goes into
+    /// (the first slot of its worn kind, else its tool slot); `None` when the bag holds none or
+    /// the item has no slot.
+    pub(super) fn equip_place(
+        &self,
+        item_id: &str,
+        classes: &[String],
+    ) -> Option<(u32, [u8; RAW_ID_LEN], u32)> {
+        let (index, stack) = self.bag.iter().enumerate().find_map(|(index, stack)| {
+            stack
+                .as_ref()
+                .filter(|stack| stack.item_id.eq_ignore_ascii_case(item_id))
+                .map(|stack| (index, stack))
+        })?;
+        let slot_id = stack
+            .kind
+            .map(first_slot)
+            .or_else(|| tool_slot_of(classes))?;
+        Some((u32::try_from(index).ok()?, stack.item.instance, slot_id))
+    }
+
     /// Equips `quantity` of the item of instance `instance` in bag slot `bag_slot` into paperdoll
     /// slot `slot_id`; an item worn there goes back to the bag. An item that `disabled` names
     /// (by item id) stays in the bag. The id of the equipped item.
@@ -1319,6 +1365,36 @@ pub(crate) mod tests {
     /// A kit of [`BACKSTORY`]: a chest and the sword at login, the staff in the bag.
     pub(crate) fn kits() -> StarterKits {
         kits_with(&[])
+    }
+
+    #[test]
+    fn a_tool_in_the_bag_is_equipped_into_its_tool_slot() {
+        const KNIFE: &str = "1hSkinningKnifeT1";
+        /// The skinning tool slot (retail beach capture `12-2`).
+        const SKINNING_SLOT: u32 = 35;
+        let kits = kits_with(&[(KNIFE, "EquippableTool+Axe+SkinningKnife")]);
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("kit");
+        let classes: Vec<String> = ["EquippableTool", "Axe", "SkinningKnife"]
+            .map(str::to_owned)
+            .into();
+        assert_eq!(gear.equip_place(KNIFE, &classes), None, "not in the bag");
+        assert!(gear.add(kits.item(KNIFE).expect("knife"), 1));
+        let (bag_slot, instance, slot_id) = gear
+            .equip_place("1hskinningknifet1", &classes)
+            .expect("in the bag");
+        assert_eq!(slot_id, SKINNING_SLOT);
+        assert_eq!(
+            gear.equip(bag_slot, slot_id, 1, instance, none_disabled),
+            Ok(KNIFE.to_owned()),
+            "the server takes the place the plan names"
+        );
+        assert_eq!(gear.worn_item(SKINNING_SLOT), Some(KNIFE));
+        let fishing: Vec<String> = ["EquippableTool", "FishingPole"].map(str::to_owned).into();
+        assert_eq!(
+            tool_slot_of(&fishing),
+            Some(super::super::fishing::FISHING_SLOT)
+        );
+        assert_eq!(tool_slot_of(&["Resource".to_owned()]), None);
     }
 
     /// The kit of [`BACKSTORY`] with its bag's staff worn in the second main-hand option: two

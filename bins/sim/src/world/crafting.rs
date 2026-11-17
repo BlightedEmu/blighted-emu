@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
 use nw_content::crafting::{
-    IngredientGearScore, IngredientKind, Recipe, RecipeDetails, StructureCosts,
+    IngredientGearScore, IngredientKind, Recipe, RecipeDetails, Recipes, StructureCosts,
 };
 use nw_content::perks::PERK_SLOTS;
 use nw_content::recipe_cooldowns::RecipeCooldown;
@@ -50,7 +50,7 @@ use nw_sim_core::Position;
 use nw_world::stations::CraftingStation;
 use uuid::Uuid;
 
-use super::gear::unix_ns;
+use super::gear::{Gear, unix_ns};
 use super::land_claims::station_fee;
 use super::loot_bag::LimitsSent;
 use super::rolled_loot::rolled_values;
@@ -424,6 +424,23 @@ impl Stations {
             None => self.stations.get(Self::level_index(number)?)?,
         };
         Some(&station.members)
+    }
+
+    /// The level station or camp nearest to `position` whose station type `makes` takes.
+    pub(super) fn nearest(
+        &self,
+        position: Position,
+        makes: impl Fn(&str) -> bool,
+    ) -> Option<&Station> {
+        self.stations
+            .iter()
+            .chain(self.camps.values())
+            .filter(|station| makes(&station.station_type))
+            .min_by(|left, right| {
+                left.position
+                    .horizontal_distance(position)
+                    .total_cmp(&right.position.horizontal_distance(position))
+            })
     }
 
     /// The station whose `GdeRef` is `gde_ref`.
@@ -831,28 +848,8 @@ impl SimWorld {
         let Some(gear) = player.gear.as_ref() else {
             return Err(CraftRefusal::Ingredient);
         };
-        let carried: Vec<String> = gear
-            .carried()
-            .into_iter()
-            .map(|item| item.item_id)
-            .collect();
-        let mut takes = Vec::new();
-        for ingredient in &recipe.ingredients {
-            let needed = ingredient.quantity.saturating_mul(crafts);
-            let fits = |item: &&String| recipes.fits(ingredient, item);
-            let chosen = carried
-                .iter()
-                .filter(fits)
-                .find(|item| picked.iter().any(|pick| pick.item == lowercase_crc32(item)))
-                .or_else(|| carried.iter().find(fits));
-            let category = matches!(ingredient.kind, IngredientKind::Category(_));
-            match chosen {
-                Some(item) if gear.bag_count(item) >= needed => {
-                    takes.push((item.clone(), needed, category));
-                }
-                _ => return Err(CraftRefusal::Ingredient),
-            }
-        }
+        let mut takes =
+            bag_stacks(gear, recipes, recipe, crafts, picked).ok_or(CraftRefusal::Ingredient)?;
         for perk_item in perk_items {
             let needed = takes
                 .iter()
@@ -1066,6 +1063,38 @@ impl SimWorld {
 /// Queues the crafting state of `player` with its recipe cooldown counts when `sent` calls for
 /// it: after a change, or at a spawn with counts (retail's login state lists them; with none it
 /// sends no `m_cooldowns`).
+/// The stacks of `gear`'s bag that `crafts` of `recipe` (of `recipes`) take: for each
+/// ingredient, the item of `picked` that fits it, else the first carried one that fits; `None`
+/// when the bag lacks one.
+pub(super) fn bag_stacks(
+    gear: &Gear,
+    recipes: &Recipes,
+    recipe: &Recipe,
+    crafts: u32,
+    picked: &[CraftIngredient],
+) -> Option<Vec<Taken>> {
+    let carried: Vec<String> = gear
+        .carried()
+        .into_iter()
+        .map(|item| item.item_id)
+        .collect();
+    recipe
+        .ingredients
+        .iter()
+        .map(|ingredient| {
+            let needed = ingredient.quantity.saturating_mul(crafts);
+            let fits = |item: &&String| recipes.fits(ingredient, item);
+            let chosen = carried
+                .iter()
+                .filter(fits)
+                .find(|item| picked.iter().any(|pick| pick.item == lowercase_crc32(item)))
+                .or_else(|| carried.iter().find(fits))?;
+            let category = matches!(ingredient.kind, IngredientKind::Category(_));
+            (gear.bag_count(chosen) >= needed).then(|| (chosen.clone(), needed, category))
+        })
+        .collect()
+}
+
 fn send_recipe_cooldowns(player: &mut Player, sent: LimitsSent) {
     let changed = player.recipe_cooldowns.take_changed();
     let shown = player.recipe_cooldowns.shown();

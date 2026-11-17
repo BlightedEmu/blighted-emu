@@ -171,6 +171,8 @@ pub enum Bit8 {
 
 /// The interaction kind of a gather.
 pub const GATHER_KIND: u8 = 14;
+/// The interaction kind of a camp build (`InteractionUIActions` `ApplyAllResources`).
+pub const APPLY_ALL_RESOURCES_KIND: u8 = 16;
 /// The interaction kind of a water gather (`InteractionUIActions` `GatherWaterResource`; retail
 /// `Hive_Dye`: two requests, their gatherable CRC 0).
 pub const WATER_GATHER_KIND: u8 = 15;

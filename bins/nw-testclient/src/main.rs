@@ -139,6 +139,10 @@ enum Command {
         /// kit and has a bag.
         #[arg(long)]
         backstory: Option<String>,
+        /// Quests a game master line starts at the setup, past their requirements, comma-
+        /// separated: the start of a test after a chain a player already played live.
+        #[arg(long, value_delimiter = ',')]
+        gm_start: Vec<String>,
     },
 }
 
@@ -230,6 +234,7 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
             minutes,
             account,
             backstory,
+            gm_start,
         } => {
             let mut bot = own(&config)?;
             if let Some(account) = account {
@@ -243,6 +248,7 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
             let settings = PlaySettings {
                 account: bot,
                 quests,
+                gm_start,
                 hold: Duration::from_secs(minutes * SECONDS_PER_MINUTE),
                 registration_timeout: Duration::from_secs(config.registration_timeout_seconds),
             };

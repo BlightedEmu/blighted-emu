@@ -42,6 +42,16 @@ pub struct AssetId {
     pub sub_id: u32,
 }
 
+/// The slice asset of a loot bag: the card of the bag a kill drops, whose `GdeRef` is the bag
+/// id (retail kill at ledger `newchar-retail-2026-09-18` 1792696951908).
+pub const LOOT_BAG_ASSET: AssetId = AssetId {
+    id: [
+        0x98, 0x44, 0xf2, 0xde, 0xc3, 0xb1, 0x5b, 0xd3, 0x98, 0xfa, 0x87, 0x68, 0xb5, 0x44, 0x59,
+        0x06,
+    ],
+    sub_id: 2,
+};
+
 /// The spawn card of an entity.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GdeMetadataReplicatedState {

@@ -94,8 +94,7 @@ const COMPLETION_FREE: u8 = 0;
 /// `12a_msq_12_camptutorial` 287.054 s, and the built camp that came back into view,
 /// `12a_msq_16_fasttravel` 67.55 s).
 const COMMITTED_CHECK_FOUNDATION_EVENTS: bool = true;
-/// The interaction kind of a camp build (`InteractionUIActions` `ApplyAllResources`).
-pub(super) const APPLY_ALL_RESOURCES_KIND: u8 = 16;
+pub(super) use nw_messages::client_input::APPLY_ALL_RESOURCES_KIND;
 /// How long after the first build request the build starts (Inferred: within the retail 527
 /// to 560 ms of three ledgers).
 pub(super) const BUILD_ACCEPT_DELAY_MS: u64 = 530;

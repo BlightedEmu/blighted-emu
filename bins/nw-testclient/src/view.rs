@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use nw_content::town_props::ASSET_ID_LEN;
 use nw_messages::entity_ids::IdHolder;
+use nw_messages::gde::LOOT_BAG_ASSET;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     EntitySlots, LOGIN_MESSAGE_TYPES, MemberState, MessageError, PLAYER_VITALS_ID, ServerMessage,
@@ -182,7 +183,12 @@ impl OwnView {
                 bundle.local_player_position()
             }
             Read::Entry { own, .. } => {
+                // A level change sends the entry again (the end of the tutorial, `login.rs` of
+                // the sim): the new level holds every other entity until the client's time sync
+                // request after its own new card, as a client sends one after each level load.
                 self.own = *own;
+                self.own_card_seen = false;
+                self.time_sync_given = false;
                 None
             }
             Read::Skipped | Read::Combat { .. } | Read::Interaction { .. } | Read::Other { .. } => {
@@ -201,10 +207,10 @@ impl OwnView {
         self.own
     }
 
-    /// The own entity number, once, when the first time sync request is due: the own spawn card
-    /// came. The client sends that request when it is in the game, and the sim holds every other
-    /// entity until then (`SimWorld::heard_from`; with the local player card on, as the
-    /// real-client stack runs). Before the card the sim ignores the request.
+    /// The own entity number, once per level entry, when the first time sync request is due: the
+    /// own spawn card came. The client sends that request when it is in the game, and the sim
+    /// holds every other entity until then (`SimWorld::heard_from`; with the local player card
+    /// on, as the real-client stack runs). Before the card the sim ignores the request.
     pub fn time_sync_due(&mut self) -> Option<u64> {
         let own = self
             .own
@@ -301,10 +307,14 @@ pub struct CombatView {
     deaths: u64,
     /// Mobs in view whose vitals said they died.
     mob_deaths: u64,
+    /// The last mob in view that died, with its last place: the corpse a skin step gathers.
+    last_death: Option<(u64, WorldPosition)>,
     /// The answers to the bot's interactions since the last [`CombatView::take_interactions`].
     interactions: Vec<InteractionAnswer>,
     /// The id of the newest card seen of each slice asset.
     cards: BTreeMap<[u8; ASSET_ID_LEN], [u8; RAW_ID_LEN]>,
+    /// The ids of the loot bags seen ([`LOOT_BAG_ASSET`] cards), oldest first.
+    bags: Vec<[u8; RAW_ID_LEN]>,
 }
 
 impl CombatView {
@@ -321,6 +331,10 @@ impl CombatView {
                 self.bundles += 1;
                 for gone in self.slots.resolve(&mut bundle) {
                     self.mobs.remove(&gone);
+                    if self.last_death.is_some_and(|(dead, _)| dead == gone) {
+                        // The corpse went: no skin is left.
+                        self.last_death = None;
+                    }
                     release_raw_id(self.own.holder, gone);
                 }
                 for update in bundle
@@ -333,6 +347,9 @@ impl CombatView {
                         .and_then(|card| card.asset.zip(card.gde_ref))
                     {
                         self.cards.insert(asset.id, gde_ref);
+                        if asset == LOOT_BAG_ASSET {
+                            self.bags.push(gde_ref);
+                        }
                     }
                     let Some(entity) = update.entity else {
                         continue;
@@ -343,8 +360,9 @@ impl CombatView {
                         self.mob_cards += 1;
                     }
                     if died(update) {
-                        if self.mobs.remove(&entity).is_some() {
+                        if let Some(place) = self.mobs.remove(&entity) {
                             self.mob_deaths += 1;
+                            self.last_death = place.or(update.position).map(|at| (entity, at));
                         }
                     } else if let Some(mob) = self.mobs.get_mut(&entity)
                         && update.position.is_some()
@@ -364,9 +382,23 @@ impl CombatView {
                 }
             }
             Read::Interaction { answer, .. } => self.interactions.push(answer),
-            Read::Skipped | Read::Entry { .. } | Read::Other { .. } => {}
+            Read::Entry { .. } => {
+                // A new level: the client unloads the old level's entities and their slots.
+                for gone in std::mem::take(&mut self.mobs).into_keys() {
+                    release_raw_id(self.own.holder, gone);
+                }
+                self.slots = EntitySlots::default();
+                self.cards.clear();
+                self.last_death = None;
+            }
+            Read::Skipped | Read::Other { .. } => {}
         }
         Ok(own_position)
+    }
+
+    /// The ids of the loot bags seen, oldest first.
+    pub fn bags(&self) -> &[[u8; RAW_ID_LEN]] {
+        &self.bags
     }
 
     /// The id of the newest card seen of one of the slice assets `assets`.
@@ -419,6 +451,11 @@ impl CombatView {
     /// The mobs in view that died.
     pub const fn mob_deaths(&self) -> u64 {
         self.mob_deaths
+    }
+
+    /// The last mob in view that died and its last place, while its slot has not stopped.
+    pub const fn last_death(&self) -> Option<(u64, WorldPosition)> {
+        self.last_death
     }
 }
 
@@ -682,6 +719,28 @@ mod tests {
     }
 
     #[test]
+    fn a_level_change_makes_the_time_sync_due_again_after_the_new_own_card() {
+        let mut view = CombatView::default();
+        for message in login() {
+            view.read(&message).expect("read");
+        }
+        view.read(&bundle(0, &[(OWN, at(1.0))])).expect("read");
+        assert_eq!(view.time_sync_due(), Some(OWN));
+        // The end of the tutorial sends the entry again, then the new level's bundles.
+        for message in login() {
+            view.read(&message).expect("read");
+        }
+        assert_eq!(view.time_sync_due(), None, "not before the new own card");
+        view.read(&bundle(0, &[(OWN, at(2.0))])).expect("read");
+        assert_eq!(
+            view.time_sync_due(),
+            Some(OWN),
+            "the new level waits for it"
+        );
+        assert_eq!(view.time_sync_due(), None);
+    }
+
+    #[test]
     fn messages_can_be_read_one_by_one() {
         let mut messages = login();
         messages.push(bundle(0, &[(OWN, at(1.0))]));
@@ -720,6 +779,9 @@ mod tests {
     /// The mob of the slot stop test: the stop releases its raw id from the process registry,
     /// which the other tests, running at the same time, must not lose for [`MOB`].
     const STOPPED_MOB: u64 = (1 << 34) + 6;
+    /// The mobs of the level change and corpse tests, which release their raw ids too.
+    const LEVEL_MOB: u64 = (1 << 34) + 7;
+    const CORPSE_MOB: u64 = (1 << 34) + 8;
     const HIT: f32 = 42.0;
     /// Bundles in the still-mob test: far more than a tick or two.
     const STILL_BUNDLES: u64 = 30;
@@ -780,6 +842,33 @@ mod tests {
     }
 
     #[test]
+    fn a_level_change_forgets_the_old_level_s_mobs() {
+        let mut view = combat_view();
+        view.read(&mob_bundle(
+            0,
+            Vec::new(),
+            vec![mob_at(LEVEL_MOB, 2.0, true)],
+        ))
+        .expect("read");
+        assert_eq!(view.mobs().count(), 1);
+        for message in login() {
+            view.read(&message).expect("read");
+        }
+        assert_eq!(
+            view.mobs().count(),
+            0,
+            "the new level's mobs come with new cards"
+        );
+        view.read(&mob_bundle(
+            0,
+            Vec::new(),
+            vec![mob_at(LEVEL_MOB, 5.0, true)],
+        ))
+        .expect("read");
+        assert_eq!(view.mobs().collect::<Vec<_>>(), vec![(LEVEL_MOB, at(5.0))]);
+    }
+
+    #[test]
     fn the_view_keeps_a_mob_until_its_slot_stops() {
         let mut view = combat_view();
         let other = entity_group(
@@ -821,6 +910,18 @@ mod tests {
     }
 
     #[test]
+    fn the_view_lists_the_loot_bags_of_their_cards_and_no_other_card() {
+        const BAG: u64 = 1 << 41;
+        let mut view = combat_view();
+        let bag = entity_group(OTHER_SLOT, BAG, Some(LOOT_BAG_ASSET), Some(at(2.5)));
+        let rock = entity_group(ROCK_SLOT, ROCK, Some(STATIC_ASSET), Some(at(1.5)));
+        view.read(&mob_bundle(0, Vec::new(), vec![bag, rock]))
+            .expect("read");
+        assert_eq!(view.bags(), [nw_messages::raw_id_of_entity(BAG)]);
+        assert_eq!(view.mobs().count(), 0, "a bag is no mob");
+    }
+
+    #[test]
     fn a_creature_card_with_its_vitals_is_a_mob() {
         let mut view = combat_view();
         let mut creature = entity_group(MOB_SLOT, MOB, Some(CREATURE_ASSET), Some(at(2.0)));
@@ -853,6 +954,11 @@ mod tests {
             .expect("read");
         assert_eq!(view.mobs().count(), 0, "dead");
         assert_eq!(view.mob_deaths(), 1);
+        assert_eq!(
+            view.last_death(),
+            Some((MOB, at(2.0))),
+            "its corpse to skin"
+        );
         view.read(&mob_bundle(2, Vec::new(), vec![mob_at(MOB, 3.0, false)]))
             .expect("read");
         assert_eq!(view.mobs().count(), 0, "no card yet");
@@ -874,6 +980,28 @@ mod tests {
         view.read(&mob_bundle(1, vec![MOB_SLOT], Vec::new()))
             .expect("read");
         assert_eq!(view.mobs().count(), 0);
+    }
+
+    #[test]
+    fn a_corpse_goes_with_its_stopped_slot() {
+        let mut view = combat_view();
+        view.read(&mob_bundle(
+            0,
+            Vec::new(),
+            vec![mob_at(CORPSE_MOB, 2.0, true)],
+        ))
+        .expect("read");
+        let mut dead = entity_group(MOB_SLOT, CORPSE_MOB, None, None);
+        dead.members.push(BundleMember {
+            component: MOB_VITALS_COMPONENT,
+            state: MemberState::Vitals(VitalsState::creature(0, MOB_HEALTH, 1, 1, 1)),
+        });
+        view.read(&mob_bundle(1, Vec::new(), vec![dead]))
+            .expect("read");
+        assert!(view.last_death().is_some());
+        view.read(&mob_bundle(2, vec![MOB_SLOT], Vec::new()))
+            .expect("read");
+        assert_eq!(view.last_death(), None, "the corpse went");
     }
 
     #[test]
