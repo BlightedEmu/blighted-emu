@@ -33,6 +33,11 @@ for arg in "$@"; do
   esac
 done
 
+# A relative zip path starts at the caller's folder; the commands below run in the repo folder.
+if [[ -n "$zip" && "$zip" != /* ]]; then
+  zip="$PWD/$zip"
+fi
+
 cd "$root"
 build="$(sed -n 's/^steam_build_id = "\([0-9]*\)"$/\1/p' "$CLIENT_BUILD_FILE")"
 if [[ -z "$build" ]]; then

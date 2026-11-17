@@ -54,7 +54,7 @@ not_logged() {
 
 setup
 run_script pack.zip > /dev/null
-pass_if "installs_the_given_zip" logged "realm-pack install pack.zip"
+pass_if "installs_the_given_zip" logged "realm-pack install $PWD/pack.zip"
 pass_if "builds_the_derived_tables_after_the_install" \
   test "$(sed -n '2p' "$work_dir/log")" = "content build --derived"
 pass_if "runs_two_commands" test "$(wc -l < "$work_dir/log")" -eq 2
@@ -62,7 +62,17 @@ pass_if "runs_two_commands" test "$(wc -l < "$work_dir/log")" -eq 2
 setup
 run_script --rebuild --replace pack.zip > /dev/null
 pass_if "rebuild_is_passed_to_the_build" logged "content build --derived --rebuild"
-pass_if "replace_is_passed_to_the_install" logged "realm-pack install --replace pack.zip"
+pass_if "replace_is_passed_to_the_install" logged "realm-pack install --replace $PWD/pack.zip"
+
+setup
+mkdir -p "$work_dir/caller"
+(cd "$work_dir/caller" && run_script packs/pack.zip > /dev/null)
+pass_if "a_relative_zip_starts_at_the_callers_folder" \
+  logged "realm-pack install $work_dir/caller/packs/pack.zip"
+
+setup
+run_script /somewhere/pack.zip > /dev/null
+pass_if "an_absolute_zip_is_kept" logged "realm-pack install /somewhere/pack.zip"
 
 setup
 status=0
