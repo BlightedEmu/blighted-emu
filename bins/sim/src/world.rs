@@ -708,8 +708,13 @@ struct Player {
     input_counter: Option<u16>,
     /// The number of its ALC states from that counter ([`StateNumber`]).
     state_number: Option<StateNumber>,
-    /// The view angles of its newest input: where other players see it face and look.
+    /// The view angles of its newest input: where other players see it look.
     view: Option<LookDir>,
+    /// Where other players see it face: the camera yaw, or a game pad's run direction while the
+    /// stick last moved it ([`nw_sim_core::Intent::toward_stick`]).
+    facing: Option<f32>,
+    /// [`Self::facing`] is a pad run's: it stays while the stick is at rest.
+    facing_from_stick: bool,
     /// The camera point of its newest input.
     camera: Option<Position>,
     /// The newest aim point its input carried (row 3), and when it came: where the client aims
@@ -2154,6 +2159,16 @@ impl SimWorld {
                 continue;
             }
             player.view = seen.view;
+            // A pad's run faces its stick, and a still pad keeps that facing; a key's move, a
+            // block or aim, and a still body that last moved by keys face the camera.
+            let intent = input.character.intent;
+            if intent.stick.is_some() && !intent.block {
+                player.facing = Some(input.character.yaw);
+                player.facing_from_stick = true;
+            } else if intent.moves() || intent.block || !player.facing_from_stick {
+                player.facing = seen.view.map(|view| view.yaw);
+                player.facing_from_stick = false;
+            }
             player.camera = seen.camera;
             if let Some(aim) = record.row_3_position {
                 let at = Position {
@@ -4517,6 +4532,7 @@ impl SimWorld {
             health: vitals.health.current(),
             max_health: vitals.health.max(),
             view: player.view,
+            facing: player.facing,
             number: player.state_number,
             action: player.slayer.remote_action(),
             upper: player.slayer.remote_upper(),
@@ -4983,6 +4999,8 @@ impl SimWorld {
                     input_counter: None,
                     state_number: None,
                     view: None,
+                    facing: None,
+                    facing_from_stick: false,
                     camera: None,
                     aim: None,
                     view_sent: None,
@@ -10484,6 +10502,54 @@ mod tests {
                 MemberState::DamageReceiver(receiver) if receiver.is_block_active == Some(true)
             )),
             "the block: {seen:?}"
+        );
+    }
+
+    /// Live 2026-11-17: a controller player turned round on its own screen and ran; the others
+    /// saw it walk backwards, facing the camera.
+    #[test]
+    fn another_player_sees_a_pad_run_face_the_stick_and_start_forward() {
+        const FACING: usize = 11;
+        const SLAYER_STATE: usize = 13;
+        /// The slayer state of a forward start from standing still (a back start is `1b`).
+        const START_STATE: u8 = 0x1a;
+        /// The left stick pulled back: right at rest, forward 0.
+        const STICK_BACK: [u8; 4] = [128, 0, 128, 128];
+        const VIEW: LookDir = LookDir {
+            yaw: 1.0,
+            pitch: 0.3,
+        };
+        let mut world = two_players();
+        let (a, b) = (connection(1), connection(2));
+        let input_at = NOW + 33;
+        let entity = world.by_connection[&a];
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let mut record = camera_record(1, at, VIEW, [0.0; 2], STANDING_SLOTS);
+        record.slots.bytes = STICK_BACK;
+        let _ = world.move_from_input(&a, &[record], input_at);
+        let outgoing = tick(&mut world, input_at);
+        let alc = alc_children(&states_of(&world, &outgoing.messages, &b, 1));
+        let child = |index| {
+            alc.iter()
+                .find(|(c, _)| *c == index)
+                .map(|(_, b)| b.clone())
+        };
+        assert_eq!(
+            child(SLAYER_STATE),
+            Some(vec![START_STATE]),
+            "a forward start"
+        );
+        assert_eq!(
+            child(FACING),
+            Some(nw_messages::alc::rotation_bytes(
+                VIEW.yaw - std::f32::consts::PI
+            )),
+            "facing the camera's back"
         );
     }
 

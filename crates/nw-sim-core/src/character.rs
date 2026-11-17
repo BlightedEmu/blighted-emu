@@ -437,6 +437,28 @@ impl Intent {
         }
     }
 
+    /// The intent of a game pad's move that runs where its stick points, and the yaw it faces
+    /// there, from the camera yaw `camera_yaw`: a tilted stick with no block or aim becomes a
+    /// forward run with the stick's tilt, facing the camera yaw turned by the stick (the client
+    /// turns the stick by the camera, [`key_direction`]). Live 2026-11-17: a controller player
+    /// who pulled the stick back turned round and ran on its own screen; the server read a back
+    /// key, and the others saw it walk backwards facing the camera. Any other intent keeps the
+    /// camera yaw.
+    pub fn toward_stick(self, camera_yaw: f32) -> (Self, f32) {
+        match self.stick {
+            Some([right, forward]) if !self.block => (
+                Self {
+                    forward: 1,
+                    right: 0,
+                    stick: Some([0.0, right.hypot(forward)]),
+                    ..self
+                },
+                camera_yaw - right.atan2(forward),
+            ),
+            _ => (self, camera_yaw),
+        }
+    }
+
     /// The intent of the held direction keys, without a jump or a walk toggle.
     pub fn of_keys(forward: bool, back: bool, left: bool, right: bool) -> Self {
         Self {
@@ -1727,6 +1749,32 @@ mod tests {
         let diagonal = Intent::default().with_stick(Some([0.7, 0.7]));
         assert_eq!((diagonal.forward, diagonal.right), (1, 1));
         assert!(Intent::default().with_stick(None).stick.is_none());
+    }
+
+    #[test]
+    fn a_pad_move_runs_where_its_stick_points_and_a_block_strafes() {
+        const CAMERA_YAW: f32 = 0.5;
+        const CLOSE: f32 = 1e-5;
+        let pad = |stick| Intent::default().with_stick(Some(stick));
+        let (right, yaw) = pad([1.0, 0.0]).toward_stick(CAMERA_YAW);
+        assert_eq!((right.forward, right.right), (1, 0));
+        assert!(
+            (yaw - (CAMERA_YAW - std::f32::consts::FRAC_PI_2)).abs() < CLOSE,
+            "{yaw}"
+        );
+        let (back, yaw) = pad([0.0, -0.5]).toward_stick(CAMERA_YAW);
+        assert_eq!(back.stick, Some([0.0, 0.5]), "the tilt stays");
+        assert!(
+            (yaw - (CAMERA_YAW - std::f32::consts::PI)).abs() < CLOSE,
+            "{yaw}"
+        );
+        let blocking = Intent {
+            block: true,
+            ..pad([0.0, -1.0])
+        };
+        assert_eq!(blocking.toward_stick(CAMERA_YAW), (blocking, CAMERA_YAW));
+        let keys = Intent::of_keys(false, true, false, false);
+        assert_eq!(keys.toward_stick(CAMERA_YAW), (keys, CAMERA_YAW));
     }
 
     #[test]

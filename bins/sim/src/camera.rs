@@ -70,10 +70,11 @@ pub fn track_input(record: &InputRecord, seen: RecordView) -> Option<TrackInput>
         ..Intent::of_keys(keys.forward, keys.back, keys.left, keys.right)
     }
     .with_stick(record.left_stick());
+    let (intent, yaw) = intent.toward_stick(look.yaw);
     Some(TrackInput {
         character: CharacterInput {
             intent,
-            yaw: look.yaw,
+            yaw,
             dt_s: seen.frame_s.unwrap_or(DEFAULT_FRAME_S),
         },
         view: seen
@@ -255,5 +256,35 @@ mod tests {
         let [right, forward] = intent.stick.expect("a tilted stick");
         assert!(right.abs() < CLOSE && forward > 0.99, "{intent:?}");
         assert_eq!((intent.forward, intent.right), (1, 0));
+    }
+
+    #[test]
+    fn a_stick_pulled_back_runs_forward_facing_the_camera_s_back() {
+        // Live 2026-11-17: a controller player turned round on its own screen; the others saw
+        // it walk backwards.
+        const STICK_BACK: [u8; 4] = [128, 0, 128, 128];
+        let record = InputRecord {
+            slots: InputSlots {
+                count: 19,
+                values: vec![0],
+                bytes: STICK_BACK,
+            },
+            ..InputRecord::default()
+        };
+        let seen = RecordView {
+            frame_s: None,
+            view: Some(LookDir {
+                yaw: 0.0,
+                pitch: 0.0,
+            }),
+            camera: None,
+        };
+        let character = track_input(&record, seen).expect("a view").character;
+        assert_eq!((character.intent.forward, character.intent.right), (1, 0));
+        assert!(
+            (character.yaw.abs() - std::f32::consts::PI).abs() < CLOSE,
+            "faces the camera's back: {}",
+            character.yaw
+        );
     }
 }

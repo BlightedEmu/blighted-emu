@@ -81,6 +81,8 @@ pub(super) struct ReplicaSource {
     pub(super) health: u32,
     pub(super) max_health: u32,
     pub(super) view: Option<LookDir>,
+    /// Where it faces ([`super::Player::facing`]).
+    pub(super) facing: Option<f32>,
     /// The number of its ALC states from its client's input ([`StateNumber`]).
     pub(super) number: Option<StateNumber>,
     /// Its slayer state: the action it plays, from its client or the server's follow-up, or its
@@ -134,7 +136,7 @@ impl ReplicaSource {
             look: self.look.map(|look| look.choices()),
             health: self.health,
             max_health: self.max_health,
-            facing: self.view.map(|view| view.yaw),
+            facing: self.facing,
             pitch: self.view.map(|view| view.pitch),
             target: self.target,
             state_number: self.number.map(|number| (number.number, number.since_ms)),
@@ -189,6 +191,7 @@ impl ReplicaSource {
                 yaw,
                 pitch: ghost.pitch.unwrap_or_default(),
             }),
+            facing: ghost.facing,
             number: ghost
                 .state_number
                 .map(|(number, since_ms)| StateNumber { number, since_ms }),
@@ -628,7 +631,7 @@ impl Replica {
                 stamp: self.stamp,
                 known: sight.stamp,
                 position: self.place,
-                facing: source.view.map(|view| view.yaw),
+                facing: source.facing,
                 look: source.view,
                 slayer,
                 sequence_time: source.sequence.map(|seconds| sight.sequence.time(seconds)),
@@ -818,6 +821,7 @@ pub(super) mod tests {
                 yaw: 1.0,
                 pitch: 0.25,
             }),
+            facing: Some(1.0),
             number: Some(StateNumber {
                 number: 0x28c5,
                 since_ms: SPAWNED_MS + 10,
