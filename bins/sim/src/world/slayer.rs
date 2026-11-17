@@ -655,6 +655,9 @@ pub(super) struct SlayerTrack {
     /// The upper slots of the newest tick's own state, for the players who see this one; kept
     /// after the own state took them, until the next tick.
     remote: Option<RemoteUpper>,
+    /// The last upper slot change sent, untimed, and the own state that sent it first
+    /// ([`SlayerTrack::timed`]).
+    upper_first: Option<(UpperSlots, u16)>,
     /// The previous record's weapon had shots and none loaded.
     was_empty: bool,
     /// The weapon was loaded again after it emptied and no reload played since.
@@ -1355,6 +1358,7 @@ impl SlayerTrack {
             third: cleared(self.slots_on.third),
             fourth: cleared(self.slots_on.fourth),
             marker: self.chain_marked.then_some(CLEARED_SLOT),
+            time: None,
         }
     }
 
@@ -1532,6 +1536,7 @@ impl SlayerTrack {
             (None, None) => None,
         };
         self.consume_loadout_echo();
+        let slots = slots.map(|slots| self.timed(slots, number));
         if let Some(slots) = slots {
             self.slots_on = self.slots_on.after(slots);
         }
@@ -1540,6 +1545,20 @@ impl SlayerTrack {
             after_state: self.upper_after_state,
         });
         self.due = SlayerDue { state, time, slots };
+    }
+
+    /// `slots` as own state `number` sends them, with the time since the state that sent the
+    /// same change first: the echoes of a change count on from its start (retail: `7f`, `81`,
+    /// `83` over a start and its echoes; [`UpperSlots::time`]).
+    fn timed(&mut self, slots: UpperSlots, number: u16) -> UpperSlots {
+        let first = match self.upper_first {
+            Some((sent, first)) if sent == slots => first,
+            _ => {
+                self.upper_first = Some((slots, number));
+                number
+            }
+        };
+        slots.at_seconds(f32::from(number.wrapping_sub(first)) * self.newest_frame_s)
     }
 
     /// What this tick's own state carries, once.
@@ -1845,6 +1864,7 @@ fn slots_of(change: SlotsChange, counter: u16) -> Option<UpperSlots> {
         third: slot(change.third_state, change.third_sequence, true),
         fourth: slot(change.fourth_state, change.fourth_sequence, true),
         marker: change.marker,
+        time: None,
     };
     (slots != UpperSlots::default()).then_some(slots)
 }
@@ -1861,6 +1881,7 @@ fn merge(older: UpperSlots, newer: UpperSlots) -> UpperSlots {
         third: slot(older.third, newer.third),
         fourth: slot(older.fourth, newer.fourth),
         marker: newer.marker.or(older.marker),
+        time: None,
     }
 }
 
@@ -2480,6 +2501,31 @@ pub(crate) mod tests {
         track.record(keyed(12, still, RELEASE, GREATSWORD), &table);
         let due = own_state(&mut track, 12).state.expect("the client's");
         assert_eq!(due.sequence, 5055);
+    }
+
+    #[test]
+    fn an_upper_slot_change_and_its_echo_carry_the_time_since_its_start() {
+        // Retail: `4=7f`, then `4=81` in the echo one state later.
+        const STEPS_A_STATE: u8 = 2;
+        let table = table();
+        let block = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let mut track = spawned();
+        track.record(keyed(20, block, HELD, GREATSWORD), &table);
+        let start = own_state(&mut track, 20).slots.expect("the block");
+        let echo = own_state(&mut track, 21).slots.expect("its echo");
+        assert_eq!(start.time, Some(nw_messages::SEQUENCE_TIME_REL_ZERO));
+        assert_eq!(
+            echo.time,
+            Some(nw_messages::SEQUENCE_TIME_REL_ZERO + STEPS_A_STATE)
+        );
+        assert_eq!(
+            track.remote_upper().map(|upper| upper.slots.time),
+            Some(echo.time),
+            "the other players get the same time"
+        );
     }
 
     #[test]

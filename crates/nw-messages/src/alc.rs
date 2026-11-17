@@ -687,6 +687,13 @@ const FOURTH_SLAYER_STATE_CHILD: usize = 22;
 const FOURTH_SLAYER_STARTED_CHILD: usize = 23;
 const FOURTH_SLAYER_SEQUENCE_CHILD: usize = 24;
 const SLAYER_MARKER_CHILD: usize = 48;
+/// Slot 0 children of the `slayerSeqTimeRel` byte of the second, third and fourth slayer slots
+/// (`slayerSeqTimeRel1` to `3`). Observed (150 retail ledgers, 2026-11-17): a state that starts
+/// a sequence in one of those slots carries its time byte in 74,606 of 74,666 starts of the
+/// second slot and in all 27,628 and 14,112 of the third and fourth; at a start the byte was
+/// `7f`, `81` or `83` (0, 2 and 4 steps from the slot's absolute part, which the first state
+/// sets to 0) in nine of ten, and the state's echoes carry it on, about three states a start.
+const UPPER_SEQUENCE_TIME_REL_CHILDREN: [usize; 3] = [4, 6, 8];
 
 /// A change of one slayer slot past the first: any of its state, start and sequence children.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -700,6 +707,11 @@ pub struct SlotChange {
 }
 
 impl SlotChange {
+    /// Whether it sends any child.
+    const fn is_sent(self) -> bool {
+        self.state.is_some() || self.started.is_some() || self.sequence.is_some()
+    }
+
     fn children(
         self,
         [state_child, started_child, sequence_child]: [usize; 3],
@@ -730,9 +742,29 @@ pub struct UpperSlots {
     pub fourth: SlotChange,
     /// The slayer marker.
     pub marker: Option<u64>,
+    /// The `slayerSeqTimeRel` byte of every slot this change sends
+    /// ([`UPPER_SEQUENCE_TIME_REL_CHILDREN`]): the time since the change's first state, in
+    /// [`SEQUENCE_TIME_STEP_S`] steps from [`SEQUENCE_TIME_REL_ZERO`].
+    pub time: Option<u8>,
 }
 
 impl UpperSlots {
+    /// This change with the time byte of `seconds` since its first state, at most the steps one
+    /// byte holds.
+    #[must_use]
+    pub fn at_seconds(self, seconds: f32) -> Self {
+        let steps = (seconds / SEQUENCE_TIME_STEP_S)
+            .round()
+            .clamp(0.0, SEQUENCE_TIME_MAX_STEPS);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "clamped to 0..=127 steps"
+        )]
+        let time = Some(SEQUENCE_TIME_REL_ZERO + steps as u8);
+        Self { time, ..self }
+    }
+
     fn children(self) -> Result<Vec<(usize, Vec<u8>)>, MessageError> {
         let mut children = self.second.children([
             SECOND_SLAYER_STATE_CHILD,
@@ -751,6 +783,16 @@ impl UpperSlots {
         ])?);
         if let Some(marker) = self.marker {
             children.push((SLAYER_MARKER_CHILD, prefixed_bytes(marker)?));
+        }
+        if let Some(time) = self.time {
+            for (slot, child) in [self.second, self.third, self.fourth]
+                .into_iter()
+                .zip(UPPER_SEQUENCE_TIME_REL_CHILDREN)
+            {
+                if slot.is_sent() {
+                    children.push((child, vec![time]));
+                }
+            }
         }
         Ok(children)
     }
@@ -2276,6 +2318,50 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![vec![0]],
             "a child takes the place of the same one"
+        );
+    }
+
+    #[test]
+    fn an_upper_slot_change_carries_the_time_of_each_slot_it_sends() {
+        // Retail: a second-slot start `16=2c 17=<n> 18=<draw>` with `4=7f`; no time child for
+        // the slots it leaves alone.
+        const STEPS_TWO_S: f32 = 2.0 * SEQUENCE_TIME_STEP_S;
+        let slots = UpperSlots {
+            second: SlotChange {
+                state: Some(0x2c),
+                started: Some(0x0d00),
+                sequence: Some(3099),
+            },
+            fourth: SlotChange {
+                state: Some(0),
+                ..SlotChange::default()
+            },
+            ..UpperSlots::default()
+        };
+        let time_children = |slots: UpperSlots| {
+            slots
+                .children()
+                .expect("children")
+                .into_iter()
+                .filter(|(child, _)| UPPER_SEQUENCE_TIME_REL_CHILDREN.contains(child))
+                .collect::<Vec<_>>()
+        };
+        assert!(time_children(slots).is_empty(), "untimed");
+        assert_eq!(
+            time_children(slots.at_seconds(0.0)),
+            [
+                (4, vec![SEQUENCE_TIME_REL_ZERO]),
+                (8, vec![SEQUENCE_TIME_REL_ZERO])
+            ]
+        );
+        assert_eq!(
+            time_children(slots.at_seconds(STEPS_TWO_S))[0],
+            (4, vec![SEQUENCE_TIME_REL_ZERO + 2])
+        );
+        assert_eq!(
+            slots.at_seconds(60.0).time,
+            Some(u8::MAX - 1),
+            "at most the byte's reach"
         );
     }
 

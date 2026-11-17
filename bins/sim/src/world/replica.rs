@@ -208,6 +208,9 @@ impl ReplicaSource {
                     third: slot_of_ghost(upper.third),
                     fourth: slot_of_ghost(upper.fourth),
                     marker: upper.marker,
+                    // A ghost keeps what the viewers were sent, not when: its slots go again
+                    // with no time.
+                    time: None,
                 },
                 after_state: upper.after_state,
             }),
