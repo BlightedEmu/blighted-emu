@@ -54,8 +54,28 @@ pub(crate) struct TriggerVolume {
     shape: VolumeShape,
 }
 
+/// The boxes whose tasks retail completed in the box turned a quarter more than its capital
+/// (length and width swapped). Observed (retail tutorial runs newchar 2026-09-18, newchar
+/// 2026-09-12 and a community playthrough, 2026-11-17): each task completed while the player
+/// stood in the quarter-turned box, before it reached the box as read; `FTUE_TF_Trigger` at the
+/// foot of the cave's slope, 14 m before the box as read (live: the captain's cutscene started
+/// halfway to the pool), the others 0.3 to 6 s before it. Other boxes completed as read:
+/// `FTUE_EnterRuins_00_Trigger` at its edge (5.92 m of its 6 m half length), the unturned
+/// `FTUE_Vista_Trigger` on its 3 m side. Why these boxes are a quarter off is Unknown.
+const QUARTER_TURNED_BOXES: [&str; 7] = [
+    "FTUE_TF_Trigger",
+    "FTUE_Cave_Trigger",
+    "FTUE_Stairs_Trigger",
+    "FTUE_Cave_Midpoint_Trigger",
+    "FTUE_Second_Fight_Trigger_Failsafe",
+    "FTUE_Dash_Trigger",
+    "FTUE_Skill_Trigger_Failsafe",
+];
+
 impl TriggerVolume {
-    /// Whether `position` is in the volume.
+    /// Whether `position` is in the volume. A box of [`QUARTER_TURNED_BOXES`] also holds the
+    /// places of its quarter-turned box: both readings count (Inferred), so a player off the
+    /// retail path, who may miss the narrow quarter-turned box, still meets the box as read.
     fn contains(&self, position: Position) -> bool {
         let (dx, dy, dz) = (
             position.x - self.at.x,
@@ -73,9 +93,11 @@ impl TriggerVolume {
                 let (sin, cos) = (QUATERNION_HALF_ANGLES * z.atan2(w)).sin_cos();
                 let along = dx.mul_add(cos, dy * sin);
                 let across = dy.mul_add(cos, -dx * sin);
-                along.abs() <= length * HALF
-                    && across.abs() <= width * HALF
-                    && dz.abs() <= height * HALF
+                let within =
+                    |long: f32, wide: f32| along.abs() <= long * HALF && across.abs() <= wide * HALF;
+                let quarter_too = QUARTER_TURNED_BOXES.contains(&self.tag);
+                dz.abs() <= height * HALF
+                    && (within(length, width) || (quarter_too && within(width, length)))
             }
         }
     }
@@ -4735,8 +4757,30 @@ pub(crate) mod tests {
         };
         assert!(tf.contains(at(14.9, 1.4, 8.9)), "inside a corner");
         assert!(!tf.contains(at(15.1, 0.0, 0.0)), "past its length");
-        assert!(!tf.contains(at(0.0, 1.6, 0.0)), "past its width");
+        assert!(!tf.contains(at(1.6, 1.6, 0.0)), "past its width");
         assert!(!tf.contains(at(0.0, 0.0, 9.1)), "above it");
+        assert!(
+            tf.contains(at(1.4, 14.9, 0.0)),
+            "the quarter-turned box of a turned one"
+        );
+        // Retail: the task completed at the foot of the slope (three runs within 0.1 m; the own
+        // place reported 0.8 m short of the box, 0.1 s on along the path), not earlier where a
+        // player stood still 2 s, nor 0.5 s before.
+        let place = |x: f32, y: f32, z: f32| Position { x, y, z };
+        assert!(tf.contains(place(471.4, 245.9, 26.9)));
+        assert!(!tf.contains(place(466.8, 251.0, 28.7)), "the standstill");
+        assert!(!tf.contains(place(469.9, 249.3, 27.4)), "0.5 s before");
+        let vista = TRIGGER_VOLUMES
+            .iter()
+            .find(|volume| volume.tag == "FTUE_Vista_Trigger")
+            .expect("volume");
+        let ahead = |dx: f32, dy: f32| Position {
+            x: vista.at.x + dx,
+            y: vista.at.y + dy,
+            ..vista.at
+        };
+        assert!(vista.contains(ahead(1.4, 9.9)));
+        assert!(!vista.contains(ahead(9.9, 1.4)), "a box of no evidence is only as read");
         let fight = TRIGGER_VOLUMES
             .iter()
             .find(|volume| volume.tag == "FTUE_First_Fight_Trigger")
