@@ -519,6 +519,10 @@
             {
               "check": "A player that stands still gets the retail AFK warning with the seconds left (the rule of its game mode, or the 24 hour default of the open world), the warning ends at a move, and the server removes a player that stays still with the rejection 1630 reason 13, the client's \"kicked for being away too long\" error (was the anti-cheat kick 271 reason 5).",
               "proof": "tests"
+            },
+            {
+              "check": "A game pad's left stick moves the server's body (tests only, 2026-11-17): the client sends a pad's move in the input record's scaled bytes (left stick right and forward, 128 at rest), not as key bits. The body goes along the stick's own angle from the camera yaw, and a small tilt goes slower (the posture's `MinSpeed` at a tilt of 0.2 or less, the full speed at 0.8 or more). Live before the fix, a pad player's server body stayed 10 to 20 m from the client's place: swings missed, mobs near the player did not wake, and other players saw the body at the old place. Not built: the stick's speed for a mount (Unknown).",
+              "proof": "tests"
             }
           ]
         },
@@ -670,7 +674,7 @@
               "proof": "tests"
             },
             {
-              "check": "A controller's attack (the right trigger of any pad) starts an attack (tests only, 2026-11-17): the trigger shows the attack key held but no press, so the first held record since the key's release is the press. Live before the fix, a controller player's attacks started nothing (94 releases, 5 presses); the mouse of the same laptop hit. Whether the other pad keys (heavy attack, dodge, block, abilities) arrive is not checked.",
+              "check": "A controller's attack (the right trigger of any pad) starts an attack (tests only, 2026-11-17): the trigger shows the attack key held but no press, so the first held record since the key's release is the press. Live before the fix, a controller player's attacks started nothing (94 releases, 5 presses); the mouse of the same laptop hit. Live after that deploy, a controller player's swings still hit no mob: the server's body of a pad player did not walk (see Own movement). Whether the other pad keys (heavy attack, dodge, block, abilities) arrive is not checked.",
               "proof": "tests"
             }
           ]
@@ -906,8 +910,8 @@
               "proof": "tests"
             },
             {
-              "check": "An aimed bow shot draws on the press and shoots on the release, never on a hold, and a release within 530 ms of the last shot shoots when they end (tests only, 2026-11-17; retail: 4,885 bow shots of 42 ledgers). Live before the fix, the hold shot 0.23 s after the press and the next presses were dropped for 1.8 s.",
-              "proof": "tests"
+              "check": "An aimed bow shot draws on the press and shoots on the release, never on a hold, and a release within 530 ms of the last shot shoots when they end (live 2026-11-17: all 7 bow shots after the deploy hit the boar; retail: 4,885 bow shots of 42 ledgers). Live before the fix, the hold shot 0.23 s after the press and the next presses were dropped for 1.8 s.",
+              "proof": "live"
             },
             {
               "check": "The drawn bow shot of a long hold (retail: 125 m/s after about 700 ms, its own damage row) is not built: our data gives the aim's charged shot the plain shot's row.",
@@ -3533,6 +3537,7 @@
     }
   ],
   "nextSteps": [
+    "**Game pad live check (2026-11-17, tests only).**\n\n- A pad player walks to a boar: the boar wakes, and light and heavy swings hit it.\n- A second player sees the pad player at the right place, with the run and attack animations.\n- Check the other pad keys (heavy attack, abilities) and a mount ridden with the stick.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
     "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
@@ -3841,9 +3846,10 @@
     "Turret use ownership as retail in wars and Outpost Rush, the raid change of a new outpost owner, and turret shots that stop at war capture points (2026-11-13, tests only).",
     "The expedition objective panel, start and end times, score, death's door status, mutation context and the Desiccated explosion (2026-11-13, tests only).",
     "Content folder layout built, reviewed and tested; the PC and game VM content folders moved into it (all files ok, equal merged files now hard links) and the game VM servers run on it (2026-11-16).",
-    "The five failing install and capture tests pass again (2026-11-16): the open world gather count and the player attack test table follow the gather node and hit reaction work, the boar and club sailor replays count the fights the capture really holds, and the boar's run speed check leaves out the gore's lunge (retail lunges too)."
+    "The five failing install and capture tests pass again (2026-11-16): the open world gather count and the player attack test table follow the gather node and hit reaction work, the boar and club sailor replays count the fights the capture really holds, and the boar's run speed check leaves out the gore's lunge (retail lunges too).",
+    "Game pad movement (2026-11-17, tests only): the server reads the left stick from the input record's scaled bytes, so a pad player's server body walks with the client. Before, the body stayed behind, swings were tested at the wrong place and other players saw the pad player at a stale spot."
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-17",
-  "lastCommit": "eb9ccc9c"
+  "lastCommit": "f19e9d85"
 }
