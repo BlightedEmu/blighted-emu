@@ -313,6 +313,20 @@ pub(super) struct Wedge {
     pub(super) half_arc_rad: f32,
 }
 
+/// Whether the capsule `a_body` standing at `a` and the capsule `b_body` standing at `b` overlap
+/// in height, within [`STEP_SLACK_M`].
+fn heights_overlap(a: Position, a_body: Capsule, b: Position, b_body: Capsule) -> bool {
+    b.z < a.z + a_body.height_m + STEP_SLACK_M && a.z < b.z + b_body.height_m + STEP_SLACK_M
+}
+
+/// Whether the capsule `a_body` standing at `a` and the capsule `b_body` standing at `b` overlap:
+/// within their radii on the ground plane, and in height. So near, a swing touches whatever the
+/// facing: the yaw toward the other body says nothing.
+pub(super) fn bodies_overlap(a: Position, a_body: Capsule, b: Position, b_body: Capsule) -> bool {
+    a.horizontal_distance(b) <= a_body.radius_m + b_body.radius_m
+        && heights_overlap(a, a_body, b, b_body)
+}
+
 impl Wedge {
     /// Whether a body of capsule `body` at `at` reaches into it: the body's edge is within the
     /// reach, the arc widens by the angle the body's radius takes at its distance, and the two
@@ -322,9 +336,7 @@ impl Wedge {
         if distance > self.reach_m + body.radius_m {
             return false;
         }
-        let overlaps = at.z < self.from.z + self.own.height_m + STEP_SLACK_M
-            && self.from.z < at.z + body.height_m + STEP_SLACK_M;
-        if !overlaps {
+        if !heights_overlap(self.from, self.own, at, body) {
             return false;
         }
         // Bodies that overlap touch whatever the facing: so near, the yaw toward the other body

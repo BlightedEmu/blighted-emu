@@ -32,7 +32,7 @@ use nw_content::combat::{
 };
 use nw_content::passive_abilities::Trigger;
 use nw_content::player_attacks::{
-    AttackHit, AttackKind, BasicAttack, GritWindow, Homing, MeleeShape, Stance,
+    AttackHit, AttackKind, AttackMotion, BasicAttack, GritWindow, Homing, MeleeShape, Stance,
 };
 use nw_content::respawn_points::{nearest_respawn_point, respawn_point};
 use nw_content::status_effects::{Control, RowKey};
@@ -54,7 +54,8 @@ use super::encounter::Tutorial;
 use super::gear::{Gear, unix_ns};
 use super::hit_reaction::{Grit, PlayerReaction, ReactionCount};
 use super::hit_shape::{
-    MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, SweptShape, Wedge, body_frame, homing_score, turn,
+    MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, SweptShape, Wedge, bodies_overlap, body_frame,
+    homing_score, turn,
 };
 use super::mob_timeline::{HitSide, yaw_toward};
 use super::passives::{HitAim, HitMods};
@@ -270,9 +271,13 @@ impl Vitals {
     }
 
     /// A hit reaction cleared its inputs (`ClearInput`): the attack key's charge, its combo and
-    /// its buffered step are dropped, a waiting dodge too.
+    /// its buffered step are dropped, a waiting dodge too; whether the key is down stays, so a key
+    /// held through the reaction is no new press after it.
     pub(super) const fn drop_attack_keys(&mut self) {
-        self.keys = AttackKeys::NONE;
+        self.keys = AttackKeys {
+            down: self.keys.down,
+            ..AttackKeys::NONE
+        };
         self.dodge_waiting = false;
     }
 
@@ -335,6 +340,8 @@ pub struct AttackKeys {
     /// combo: it starts at its start, or at the key's next release when a new press holds the
     /// key down then ([`AttackKeys::queued_due`]).
     queued: Option<(KeyAttack, bool)>,
+    /// The attack key is down: pressed or held since its last release.
+    down: bool,
 }
 
 impl AttackKeys {
@@ -343,7 +350,28 @@ impl AttackKeys {
         charge: None,
         combo: None,
         queued: None,
+        down: false,
     };
+
+    /// Whether `record` presses the attack key: its press, or the first record that holds the key
+    /// since its last release. A controller's right trigger shows no press (live 2026-11-17: 94
+    /// releases and 5 presses of one controller player, no attack started; the mouse of the
+    /// same laptop hit), and the profile binds that trigger (`az_triggerr_btn`) to
+    /// `attack_primary_hold` as to the press and the release (`defaultprofile.xml`); the held
+    /// record (Azoth catalog input 191) is the press then, one record late (Inferred).
+    pub fn pressed_in(&self, record: &InputRecord) -> bool {
+        record.attack_pressed() || (record.attack_held() && !self.down)
+    }
+
+    /// Notes the key's state after `record`: down after its press or hold, up after its
+    /// release.
+    fn note_down(&mut self, record: &InputRecord) {
+        if record.attack_released() {
+            self.down = false;
+        } else if record.attack_pressed() || record.attack_held() {
+            self.down = true;
+        }
+    }
 
     /// The buffered step that starts in `record` at `record_ms`: at its start when the key is
     /// up, else at the release of the press that holds it down (Observed, retail newchar
@@ -383,7 +411,8 @@ impl AttackKeys {
     /// (`None`: no attack): a press starts its step's charge ([`next_charge`]), a release picks
     /// the light or heavy attack by the hold, a hold to the charge starts the charged attack
     /// ([`Stance::released`]); a buffered light whose press was let go waits for the record of its
-    /// start ([`AttackKeys::queued_due`]). Gives the attack it starts; that attack continues the
+    /// start ([`AttackKeys::queued_due`]); a stance that aims, aimed in `record`, draws and shoots
+    /// ([`AttackKeys::aimed_record`]). Gives the attack it starts; that attack continues the
     /// combo when `continues_combo` (the first attack of an input message: the others of it
     /// cannot hit).
     pub fn record(
@@ -393,6 +422,8 @@ impl AttackKeys {
         record_ms: u64,
         continues_combo: bool,
     ) -> Option<KeyAttack> {
+        let pressed = self.pressed_in(record);
+        self.note_down(record);
         let counter = record.u16_after_mask;
         let Some(stance) = stance else {
             if record.attack_released() {
@@ -401,11 +432,14 @@ impl AttackKeys {
             self.queued = None;
             return None;
         };
+        if stance.aimed.is_some() && record.blocking() {
+            return self.aimed_record(pressed, record, record_ms, continues_combo);
+        }
         if self.queued.is_some() {
             // A press while a buffered step waits for its start joins that step.
             return self.queued_due(record, record_ms);
         }
-        if record.attack_pressed() {
+        if pressed {
             self.charge = next_charge(stance, self.combo, counter, record_ms);
         }
         let charge = self.charge?;
@@ -466,7 +500,69 @@ impl AttackKeys {
         }
         Some(attack)
     }
+
+    /// Reads `record` at `record_ms` for a stance that aims, aimed in it (the bow with the
+    /// right-click held): a press (`pressed`, [`AttackKeys::pressed_in`]) draws, and the release
+    /// shoots the aimed shot at once, or when [`AIMED_SHOT_GAP_MS`] after the last shot ends;
+    /// holding the key shoots nothing.
+    ///
+    /// Observed (4,885 retail bow shots of 42 ledgers, 2026-11-17): the arrow spawned a median
+    /// 77 ms after the key's release (p10 27, p90 152 ms), a tap of 50 ms fired too, and no
+    /// arrow came on a hold without a release. Live 2026-11-17: the hold's charged attack shot
+    /// 0.23 s after the press with the aim then, and its 1.8 s `Bow_Gunbutt` held off the next
+    /// presses, so the arrows the client showed at its releases did not exist or missed. The
+    /// drawn shot of a long hold (retail: 125 m/s after 700 ms, its own damage row) is not built:
+    /// the aim's charged shot reads as its plain one here (Unknown: its damage).
+    fn aimed_record(
+        &mut self,
+        pressed: bool,
+        record: &InputRecord,
+        record_ms: u64,
+        continues_combo: bool,
+    ) -> Option<KeyAttack> {
+        let counter = record.u16_after_mask;
+        if pressed {
+            self.charge = Some(Charge {
+                step: 0,
+                pressed_at: counter,
+                from_ms: 0,
+                charged: false,
+            });
+        }
+        self.queued = None;
+        if !record.attack_released() {
+            return None;
+        }
+        let charge = self.charge.take()?;
+        let since_press_ms = u64::from(
+            counter
+                .wrapping_sub(charge.pressed_at)
+                .saturating_mul(INPUT_RECORD_MS),
+        );
+        let ready_ms = self
+            .combo
+            .map_or(0, |last| last.started_ms.saturating_add(AIMED_SHOT_GAP_MS));
+        let attack = KeyAttack {
+            step: 0,
+            kind: AttackKind::Light,
+            started_ms: record_ms.max(ready_ms),
+            pressed_ms: record_ms.saturating_sub(since_press_ms),
+        };
+        if continues_combo {
+            self.combo = Some(ComboState {
+                step: attack.step,
+                kind: attack.kind,
+                started_ms: attack.started_ms,
+            });
+        }
+        Some(attack)
+    }
 }
+
+/// The least time between two aimed shots: a release before it shoots when it ends (Observed,
+/// retail bow shots of 42 ledgers: shot to shot p5 531 ms, a sharp peak at 520 to 540 ms; 498
+/// arrows came 250 to 700 ms after their release and about 532 ms after the shot before).
+const AIMED_SHOT_GAP_MS: u64 = 530;
 
 /// A buffered combo step starts this long after its link's instant clip: in the input record
 /// after the one that reaches it (Observed, retail newchar 2026-09-18, the own slayer starts by
@@ -533,6 +629,33 @@ pub(super) const fn amount_of(amount: u32) -> f32 {
 /// mobs in the player on screen, live 2026-09-18; this gap lands a sailor at 1.2 m and Thorpe at
 /// 1.5 m, inside every creature's reach).
 const LUNGE_GAP_M: f32 = 0.4;
+
+/// Where the motion `motion` of an attack carries a player's body that started it at `start`,
+/// `since_ms` after its start, facing `facing`: its offset (right and forward) turned to that
+/// facing, the forward travel stopped where the body would touch the homing target's (`target`,
+/// its place and body), as the client's capsule stops at a mob's.
+fn lunge_place(
+    motion: &AttackMotion,
+    start: Position,
+    facing: f32,
+    since_ms: u64,
+    target: Option<(Position, Capsule)>,
+) -> Position {
+    // An attack of a few seconds.
+    #[allow(clippy::cast_precision_loss, reason = "an attack of a few seconds")]
+    let [right, forward] = motion.offset_at(since_ms as f32);
+    let forward = target.map_or(forward, |(at, body)| {
+        let stop_m = PLAYER_CAPSULE.radius_m + body.radius_m;
+        forward.min((start.horizontal_distance(at) - stop_m).max(0.0))
+    });
+    // Yaw 0 faces +y; yaw grows toward -x (see `yaw_toward`).
+    let (sin, cos) = facing.sin_cos();
+    Position {
+        x: start.x - sin * forward + cos * right,
+        y: start.y + cos * forward + sin * right,
+        z: start.z,
+    }
+}
 
 /// The fewest input records between two spread shots of the shot attack `attack`: its next
 /// attack's start ([`BasicAttack::next_attack_from_ms`]: the blunderbuss hip fire's
@@ -712,6 +835,9 @@ pub(super) struct PlayerSwing {
     hits: Vec<u64>,
     /// When its shapes were last swept.
     swept_ms: Option<u64>,
+    /// Where the attacker's body stood when it started: the attack's own motion carries the
+    /// swing from there ([`lunge_place`]); `None` when the body was not known.
+    start: Option<Position>,
 }
 
 impl PlayerSwing {
@@ -1910,6 +2036,9 @@ impl SimWorld {
                 // lets the keys go (Observed, newchar 2026-09-18: the presses of records 7688
                 // and 7693 in the great sword's `2960` started nothing; the press in its end
                 // record 7699 started the press start).
+                for record in records.iter().rev() {
+                    vitals.keys.note_down(record);
+                }
                 vitals.input_counter = records
                     .first()
                     .map(|newest| newest.u16_after_mask)
@@ -1979,7 +2108,8 @@ impl SimWorld {
             }
             vitals.input_counter = Some(counter);
             weapon_key = record.weapon_key_pressed().or(weapon_key);
-            attack_pressed |= record.attack_pressed();
+            let pressed = vitals.keys.pressed_in(record);
+            attack_pressed |= pressed;
             sheathe_pressed |= record.sheathe_pressed();
             swap_pressed |= record.weapon_swap_pressed();
             let behind = newest_counter.map_or(0, |newest| newest.wrapping_sub(counter));
@@ -1993,10 +2123,10 @@ impl SimWorld {
                 // A press or release that starts nothing: a press before the links of the attack
                 // that plays, or a release with no charge (live 2026-11-12: light attacks of some
                 // players started no swing, and the log could not show why).
-                None if record.attack_pressed() || record.attack_released() => tracing::debug!(
+                None if pressed || record.attack_released() => tracing::debug!(
                     player = number,
                     counter,
-                    pressed = record.attack_pressed(),
+                    pressed,
                     released = record.attack_released(),
                     stance = stance.is_some(),
                     keys = ?vitals.keys,
@@ -2116,6 +2246,10 @@ impl SimWorld {
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             player.attack_playing = Some(PlayingAttack::of(&attack, started_ms));
         }
+        let start = self
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position());
         self.player_swings.push(PlayerSwing {
             attacker: connection.clone(),
             aim: Aim {
@@ -2140,6 +2274,7 @@ impl SimWorld {
             },
             hits: Vec::new(),
             swept_ms: None,
+            start,
         });
         attacks[1..]
             .iter()
@@ -2203,6 +2338,10 @@ impl SimWorld {
             .world
             .get::<Vitals>(entity)
             .and_then(Vitals::lock_target);
+        let start = self
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position());
         let Some(player) = self.world.get::<Player>(entity) else {
             return;
         };
@@ -2222,6 +2361,7 @@ impl SimWorld {
             not_before_ms: now_ms,
             hits: Vec::new(),
             swept_ms: None,
+            start,
         };
         tracing::debug!(
             player = player.number,
@@ -2617,25 +2757,37 @@ impl SimWorld {
 
     /// The yaw a player at `from` faces in a melee attack with `aim`: toward the target of the
     /// attack's homing when one is in its reach (the clip turns the attacker,
-    /// `ApplyRotationDuringCameraLock` toward a locked one), else the aim's.
+    /// `ApplyRotationDuringCameraLock` toward a locked one), else the aim's; with the homing
+    /// target's place and body.
     fn melee_facing(
         homing: Option<&Homing>,
         from: Position,
         aim: Aim,
         places: &[(u64, Position, Capsule)],
-    ) -> Option<f32> {
-        homing
+    ) -> Option<(f32, Option<(Position, Capsule)>)> {
+        let target = homing
             .and_then(|homing| Self::homing_target(homing, from, aim, places))
             .and_then(|target| places.iter().find(|(mob, _, _)| *mob == target))
-            .map(|(_, at, _)| yaw_toward(from, *at))
+            .map(|(_, at, body)| (*at, *body));
+        target
+            .map(|(at, _)| yaw_toward(from, at))
             .or(aim.facing)
+            .map(|facing| (facing, target))
     }
 
     /// Sweeps the shapes of `swing` (a melee attack of homing `homing`) at `now_ms`: each shape
     /// whose window meets the time since the last sweep goes from its pose then to its pose now,
-    /// on the body at `position` facing [`SimWorld::melee_facing`], and hits every target of
-    /// `places` it touches that it has not hit yet. The first hit of a swing keeps the attack
-    /// interval; the others of the same swing do not.
+    /// facing [`SimWorld::melee_facing`], on the body at `position` and at the place the attack's
+    /// own motion carried the body to from its start ([`lunge_place`]), and hits every target of
+    /// `places` it touches that it has not hit yet; while a window is open, a target whose body
+    /// overlaps the attacker's at either place is touched whatever the facing. The first hit of a
+    /// swing keeps the attack interval; the others of the same swing do not.
+    ///
+    /// Observed (retail melee hits of 1,195 ledgers, 2026-11-17): sword light hits landed a
+    /// median 1.14 m from the mob, after the lunge moved the body 1.5 to 2.9 m in from up to
+    /// 4.6 m; 38 of 539 sword light hits within 1 m had the mob more than 90° off the server's
+    /// facing. The server's body here does not play the attack's root motion: a swing on it
+    /// alone missed mobs 2.2 to 3.7 m straight ahead (live 2026-11-17).
     fn sweep(
         &mut self,
         swing: &mut PlayerSwing,
@@ -2650,7 +2802,7 @@ impl SimWorld {
             .swept_ms
             .map_or(0, |swept| swept.saturating_sub(swing.started_ms));
         swing.swept_ms = Some(now_ms);
-        let Some(facing) = Self::melee_facing(homing, position, swing.aim, places) else {
+        let Some((facing, target)) = Self::melee_facing(homing, position, swing.aim, places) else {
             tracing::debug!(
                 attacker = ?swing.attacker,
                 action = swing.attack.action,
@@ -2659,7 +2811,11 @@ impl SimWorld {
             );
             return Vec::new();
         };
-        let frame = body_frame(position, facing);
+        let lunged = swing
+            .start
+            .zip(swing.attack.motion.as_ref())
+            .map(|(start, motion)| lunge_place(motion, start, facing, to_ms, target));
+        let bodies: Vec<Position> = std::iter::once(position).chain(lunged).collect();
         // Each mob touched, with the damage row of the first shape that touched it: a clip's own
         // row, else the attack's.
         let mut touched: Vec<(u64, &str)> = Vec::new();
@@ -2674,21 +2830,25 @@ impl SimWorld {
             ) else {
                 continue;
             };
-            let swept = SweptShape {
-                shape: shape.shape,
-                from: frame.then_local(&from),
-                to: frame.then_local(&to),
-            };
             let row = shape
                 .damage_row
                 .as_deref()
                 .unwrap_or(&swing.attack.damage_row);
-            for (mob, at, body) in places {
-                if !swing.hits.contains(mob)
-                    && !touched.iter().any(|(hit, _)| hit == mob)
-                    && swept.touches(*at, *body)
-                {
-                    touched.push((*mob, row));
+            for own in &bodies {
+                let frame = body_frame(*own, facing);
+                let swept = SweptShape {
+                    shape: shape.shape,
+                    from: frame.then_local(&from),
+                    to: frame.then_local(&to),
+                };
+                for (mob, at, body) in places {
+                    if !swing.hits.contains(mob)
+                        && !touched.iter().any(|(hit, _)| hit == mob)
+                        && (bodies_overlap(*own, PLAYER_CAPSULE, *at, *body)
+                            || swept.touches(*at, *body))
+                    {
+                        touched.push((*mob, row));
+                    }
                 }
             }
         }
@@ -2697,6 +2857,7 @@ impl SimWorld {
             x = position.x,
             y = position.y,
             z = position.z,
+            lunged = ?lunged.map(|at| (at.x, at.y)),
             facing,
             kind = ?swing.kind,
             action = swing.attack.action,
@@ -3920,6 +4081,115 @@ mod tests {
         Press,
         Hold,
         Release,
+        /// A controller's trigger held: the attack key's held bit (value 2 bit 63) with no press.
+        PadHold,
+    }
+
+    /// Live 2026-11-17: a controller's attacks started nothing (94 releases, 5 presses); its
+    /// trigger's held record is its press.
+    #[test]
+    fn a_controller_trigger_held_without_a_press_attacks() {
+        const HELD_RECORDS: u16 = 3;
+        let stance = sword();
+        let mut keys = AttackKeys::NONE;
+        let ms = |counter: u16| NOW + u64::from(counter.saturating_mul(INPUT_RECORD_MS));
+        let mut started = Vec::new();
+        for counter in 1..=HELD_RECORDS {
+            let record = message(counter, &[Key::PadHold]).remove(0);
+            started.extend(keys.record(Some(&stance), &record, ms(counter), true));
+        }
+        let release = message(HELD_RECORDS + 1, &[Key::Release]).remove(0);
+        started.extend(keys.record(Some(&stance), &release, ms(HELD_RECORDS + 1), true));
+        assert_eq!(
+            started.iter().map(|attack| attack.kind).collect::<Vec<_>>(),
+            [AttackKind::Light],
+            "one tap of the trigger: one light attack"
+        );
+        let mouse = |counter: u16, key: Key| message(counter, &[key]).remove(0);
+        let mut mouse_keys = AttackKeys::NONE;
+        assert!(mouse_keys.pressed_in(&mouse(1, Key::Press)));
+        mouse_keys.note_down(&mouse(1, Key::Press));
+        assert!(
+            !mouse_keys.pressed_in(&mouse(2, Key::PadHold)),
+            "a key already down is no new press"
+        );
+    }
+
+    /// Right-click held: input slot value 1, bit 62.
+    const AIM_VALUE: usize = 1;
+    const AIM_BIT: u32 = 62;
+
+    /// The record of `key` in the message of counter `counter`, with the right-click held.
+    fn aimed_key(counter: u16, key: Key) -> InputRecord {
+        let mut record = message(counter, &[key]).remove(0);
+        record.slots.values[AIM_VALUE] |= 1 << AIM_BIT;
+        record
+    }
+
+    /// Retail bow shots (4,885 of 42 ledgers): the arrow came after the release, never on a
+    /// hold, and a release before the 530 ms after a shot shot when they ended. Live
+    /// 2026-11-17: the hold shot 0.23 s after the press and the next presses were dropped.
+    #[test]
+    fn an_aimed_shot_draws_on_the_press_and_shoots_on_the_release() {
+        const HOLD_RECORDS: u16 = 30;
+        const SECOND_PRESS_MS: u64 = 200;
+        const SECOND_RELEASE_MS: u64 = 300;
+        let mut stance = sword();
+        stance.aimed = sword().attack(AttackKind::Light).cloned();
+        let mut keys = AttackKeys::NONE;
+        let ms = |counter: u16| NOW + u64::from(counter.saturating_mul(INPUT_RECORD_MS));
+        assert_eq!(
+            keys.record(Some(&stance), &aimed_key(1, Key::Press), ms(1), true),
+            None,
+            "the press draws"
+        );
+        for counter in 2..HOLD_RECORDS {
+            assert_eq!(
+                keys.record(
+                    Some(&stance),
+                    &aimed_key(counter, Key::Hold),
+                    ms(counter),
+                    true
+                ),
+                None,
+                "a hold shoots nothing"
+            );
+        }
+        let released_ms = ms(HOLD_RECORDS);
+        let shot = keys
+            .record(
+                Some(&stance),
+                &aimed_key(HOLD_RECORDS, Key::Release),
+                released_ms,
+                true,
+            )
+            .expect("the release shoots");
+        assert_eq!(
+            (shot.kind, shot.started_ms),
+            (AttackKind::Light, released_ms)
+        );
+        assert_eq!(
+            keys.record(
+                Some(&stance),
+                &aimed_key(HOLD_RECORDS + 1, Key::Press),
+                released_ms + SECOND_PRESS_MS,
+                true,
+            ),
+            None
+        );
+        let second = keys
+            .record(
+                Some(&stance),
+                &aimed_key(HOLD_RECORDS + 2, Key::Release),
+                released_ms + SECOND_RELEASE_MS,
+                true,
+            )
+            .expect("an early release shoots too");
+        assert_eq!(
+            second.started_ms,
+            released_ms + AIMED_SHOT_GAP_MS,
+            "when the last shot's time ends"
+        );
     }
 
     /// The records of one message in the client's order, newest first, from `keys` oldest first,
@@ -3936,6 +4206,7 @@ mod tests {
                     Key::Press => 1 << 40,
                     Key::Hold => 0,
                     Key::Release => 1 << 31,
+                    Key::PadHold => 1 << 63,
                 };
                 InputRecord {
                     u16_after_mask: counter,
@@ -4030,6 +4301,7 @@ mod tests {
             not_before_ms: now,
             hits: Vec::new(),
             swept_ms: None,
+            start: None,
         });
         let [open, close] = window(kind);
         through(world, now + open, now + close)
@@ -4747,6 +5019,73 @@ mod tests {
         );
     }
 
+    /// Live 2026-11-17: light swings missed mobs 2.2 to 3.7 m straight ahead; retail's lunge
+    /// moved the body 1.5 to 2.9 m in and the hits landed a median 1.14 m from the mob.
+    #[test]
+    fn a_swing_lunges_by_its_attack_motion_from_where_it_started() {
+        const START_M: f32 = 3.0;
+        const LUNGE_M: f32 = 2.0;
+        const LUNGE_STEP_MS: f32 = 100.0;
+        let swing_with = |motion: Option<AttackMotion>| {
+            let mut world = fight_at(MOB_X + START_M);
+            tick(&mut world, NOW);
+            let mut attack = sword().attack(AttackKind::Light).cloned().expect("attack");
+            attack.motion = motion;
+            let start = world
+                .player_by_number(1)
+                .and_then(|entity| world.world.get::<Body>(entity))
+                .map(|body| body.motion.position());
+            world.player_swings.push(PlayerSwing {
+                attacker: connection(1),
+                aim: facing(FACING_WEST),
+                kind: Some(AttackKind::Light),
+                attack,
+                started_ms: NOW,
+                pressed_ms: NOW,
+                hand: None,
+                not_before_ms: NOW,
+                hits: Vec::new(),
+                swept_ms: None,
+                start,
+            });
+            light_through(&mut world, NOW)
+        };
+        assert_eq!(
+            swing_with(None),
+            vec![Ok(AttackOutcome::Missed)],
+            "the body alone stands out of reach"
+        );
+        let lunge = AttackMotion {
+            step_ms: LUNGE_STEP_MS,
+            offsets: vec![[0.0, 0.0], [0.0, LUNGE_M]],
+            inherit_velocity: false,
+            inherit_max_mps: None,
+            decel_mps2: [0.0; 2],
+        };
+        assert!(
+            matches!(
+                swing_with(Some(lunge)).as_slice(),
+                [Ok(AttackOutcome::Hit { .. })]
+            ),
+            "the lunge carries the swing in"
+        );
+    }
+
+    /// Retail: 38 of 539 sword light hits within 1 m had the mob more than 90° off the server's
+    /// facing (live 2026-11-17: swings at mobs 0.4 to 0.8 m away missed with the mob behind).
+    #[test]
+    fn a_mob_overlapping_the_player_is_hit_whatever_the_facing() {
+        const OVERLAP_M: f32 = 0.3;
+        let mut world = fight_at(MOB_X + OVERLAP_M);
+        tick(&mut world, NOW);
+        let away = swing(&mut world, 1, facing(-FACING_WEST), AttackKind::Light, NOW);
+        assert!(
+            away.iter()
+                .any(|result| matches!(result, Ok(AttackOutcome::Hit { .. }))),
+            "{away:?}"
+        );
+    }
+
     /// A shape whose clip names its own `DamageTableRow` hits with that row, not the attack's
     /// (Observed: the flail slam's `1H_Flail_Ability_Slam_Stagger` clip,
     /// `playermaleanims_1h_meleeattach.adb`).
@@ -4789,6 +5128,7 @@ mod tests {
             not_before_ms: NOW,
             hits: Vec::new(),
             swept_ms: None,
+            start: None,
         });
         assert_eq!(
             light_through(&mut world, NOW),
@@ -5623,9 +5963,6 @@ mod tests {
         const LOADS: u8 = 1;
         const RELOAD_MS: u64 = 1_000;
         const AWAY_M: f32 = 15.0;
-        /// Right-click held: input slot value 1, bit 62.
-        const AIM_VALUE: usize = 1;
-        const AIM_BIT: u32 = 62;
         let mut stances: Vec<Stance> =
             serde_json::from_str(crate::combat::test_support::TEST_PLAYER_ATTACKS)
                 .expect("player attack table");
