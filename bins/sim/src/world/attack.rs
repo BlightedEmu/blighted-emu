@@ -2484,7 +2484,12 @@ impl SimWorld {
         let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) else {
             return;
         };
-        let block_key = newest.blocking() && control.may_fight();
+        // The right-click of a weapon that aims (a bow, a gun) is its aim, no block (Observed: in
+        // 398 retail ledgers other players' aim starts came with the block flag in 380 of 20,372,
+        // their block starts in 14,914 of 21,959; live 2026-11-17 a bow's aim sent the block and
+        // the other player saw no aim).
+        let aims = stance.as_ref().is_some_and(|stance| stance.aimed.is_some());
+        let block_key = newest.blocking() && control.may_fight() && !aims;
         let block_released = vitals.block_key && !block_key;
         if block_key != vitals.block_key {
             tracing::debug!(player = number, block_key, "block key");
@@ -6048,6 +6053,15 @@ mod tests {
             amount(world.player_swings_due(fired_ms + PROJECTILE_FLIGHT_MS))
         };
         world.attack_input(&connection(1), &aimed, NOW);
+        // Retail: an aim start came with the block flag in 380 of 20,372 cases.
+        assert!(
+            !world
+                .world
+                .get::<Vitals>(entity)
+                .expect("vitals")
+                .blocking(),
+            "the gun's aim is no block"
+        );
         let aimed_hit = shot(&mut world, NOW + LONG_AFTER_MS);
         world.attack_input(
             &connection(1),
