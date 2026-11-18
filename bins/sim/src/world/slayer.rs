@@ -3129,6 +3129,32 @@ pub(crate) mod tests {
         assert_eq!(alt_end(&aim), aim.alt_end, "no second slot to end");
     }
 
+    /// Live 2026-11-18: a block press with the weapon sheathed showed the other players nothing.
+    /// The press draws the weapon (`SimWorld::attack_input`); the next record holds it drawn and
+    /// starts the block.
+    #[test]
+    fn a_block_held_from_a_sheath_blocks_once_the_press_drew_the_weapon() {
+        let table = table();
+        let block = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let mut track = spawned();
+        let sheathed = SlayerRecord {
+            weapon: weapon(GREATSWORD, false),
+            ..keyed(20, block, HELD, GREATSWORD)
+        };
+        track.record(sheathed, &table);
+        assert_eq!(
+            own_state(&mut track, 20).slots,
+            None,
+            "no block while sheathed"
+        );
+        track.record(keyed(21, block, HELD, GREATSWORD), &table);
+        let slots = own_state(&mut track, 21).slots.expect("the block");
+        assert_eq!(slots.second.sequence, Some(BLOCK_SEQUENCE));
+    }
+
     #[test]
     fn the_right_click_blocks_and_aims_and_ends_at_the_release() {
         let table = table();
