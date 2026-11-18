@@ -629,6 +629,30 @@
             {
               "check": "A still body climbs onto no floor the level lacks (tests only, 2026-11-18): a controller player stopped with its camera 2.1 m and 2.7 m above flat ground and the body went up there; a body climbs onto such a floor only while its keys move it.",
               "proof": "tests"
+            },
+            {
+              "check": "A block press with the weapon sheathed draws it and blocks (tests only, 2026-11-18): in 400 retail ledgers 487 of 1,052 such presses started the weapon's block or aim within 0.8 s (median 36 ms); ours started nothing and the other player saw no block. Keyboard and controller tested.",
+              "proof": "tests"
+            },
+            {
+              "check": "A dodge, a jump or an attack ends a held block in the same state (tests only, 2026-11-18): retail did so in 986 of 986 dodges, 7 of 7 jumps and 119 of 123 attacks; ours kept the block pose over a back roll and the roll did not show. A block still held starts again with the next move.",
+              "proof": "tests"
+            },
+            {
+              "check": "An aiming body moves by its keys alone (tests only, 2026-11-18): a bow's or a gun's aim moves the camera to a 1 m boom, and the server read that as body motion (2.46 m off, median, in a replay of the retail tutorial); with the keys alone during the aim and 0.7 s after, 0.41 m.",
+              "proof": "tests"
+            },
+            {
+              "check": "A player's new state goes to the players who see it as its input comes, and once more 16 ms later (tests only, 2026-11-18), as retail's 16 ms cadence; only players' states go between ticks, within the same budget.",
+              "proof": "tests"
+            },
+            {
+              "check": "A drawn block that shakes for the other player: the body does not move and the block states do not flip in the log; cause Unknown. A trace of what the viewer's client plays is ready, not run.",
+              "proof": "none"
+            },
+            {
+              "check": "Melee swings that miss a mob the player stands close to on its own screen: the body comes from the camera and can be 1.3 to 1.7 m off while swinging (90th percentile, retail replay); cause of the live boar misses Inferred, not fixed.",
+              "proof": "none"
             }
           ]
         },
@@ -3621,7 +3645,7 @@
     }
   ],
   "nextSteps": [
-    "**Other players: live check of the fifth round (2026-11-18, tests only).** Both players watch each other: dodges, blocks, light and heavy attacks, held heavy charges, a crouch, a controller run and stop, a bow's draw and shots, a rifle's aim and shots (the bullet and the muzzle).\n\nStill open from the timing study (2026-11-18, 398 retail ledgers against the live log): retail sends another player's state every 16 ms, each number 2 to 4 times, ours every 32 ms; retail sends children 41 to 44 for other players, ours never (Unknown effect); the cause of the 1 s late crouch is Unknown (a capture of what the viewer gets from our server would show it). A bow's draw, a rifle's aim and shot, a block and the attacks go out in retail's form; if they still show late or wrong, the cause is on the viewer's timeline. Also open: a new realm data pack version with the re-mined player sequence table and its gear-load dodges; the medium and heavy dodges of most weapons (Unknown); a pad player's held heavy attack on a boar against retail; the other pad keys (abilities) and a mount ridden with the stick.",
+    "**Other players: live check of the sixth round (2026-11-18, tests only).** Both players, keyboard and controller: a block with the weapon sheathed, a dodge out of a held block (back roll), a musket and a bow aim (the body must stay in place), and how fast moves, jumps and dodges show.\n\nStill open: the drawn block shake (cause Unknown; run the viewer trace on the PC); melee misses from the camera body (1.3 to 1.7 m at the 90th percentile while swinging); children 41 to 44 for other players (Unknown effect); the 1 s late crouch (Unknown). Also open: a new realm data pack version with the re-mined player sequence table and its gear-load dodges; the medium and heavy dodges of most weapons (Unknown); the other pad keys (abilities) and a mount ridden with the stick.",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
@@ -3944,5 +3968,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-18",
-  "lastCommit": "d0e0fa66"
+  "lastCommit": "396ca4bd"
 }
