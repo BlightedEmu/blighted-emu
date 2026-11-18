@@ -613,6 +613,22 @@
             {
               "check": "A controller player's body follows its camera smoothly and does not float (tests only, 2026-11-17): a pad's camera body is noisy while it moves (back and forth in 7.3 % of its moving records against 1.4 % with keys, and once 3.9 m above flat ground). The body now takes a quarter of the way to the camera in a record, and a pad's move finds no floor the level lacks.",
               "proof": "tests"
+            },
+            {
+              "check": "Another player's states carry its client's time (tests only, 2026-11-18): retail stamps them exactly 33.3 or 50.0 ms apart, by the client's frame times; ours stamped the time each input record came, and a controller's records in bursts left stamps up to 1,132 ms old, then a jump. The stamp now steps by the records' frame times, at most 100 ms behind the sim's clock.",
+              "proof": "tests"
+            },
+            {
+              "check": "Another player's anchor and the high bytes of its number and time go again in the 4 states after a change (tests only, 2026-11-18): retail repeats them in 3 to 6 states; ours sent them once on the unreliable channel, and one lost state left the viewer's clock 256 ms off.",
+              "proof": "tests"
+            },
+            {
+              "check": "A held heavy charge does not lift the body (tests only, 2026-11-18): a press or hold of the attack key now acts for the camera; before, the charge's camera rise stood the body 1.8 m up for the other players.",
+              "proof": "tests"
+            },
+            {
+              "check": "A still body climbs onto no floor the level lacks (tests only, 2026-11-18): a controller player stopped with its camera 2.1 m and 2.7 m above flat ground and the body went up there; a body climbs onto such a floor only while its keys move it.",
+              "proof": "tests"
             }
           ]
         },
@@ -3605,7 +3621,7 @@
     }
   ],
   "nextSteps": [
-    "**Other players: live check of the fourth round fixes (2026-11-17, tests only).** The keyboard player and the controller player each watch the other:\n\n- Dodges: a light-armor roll and a medium-armor hop (the gear load now counts the armor and the shield, not the main-hand weapons).\n- A controller run: smooth, and never in the air.\n- A bow's and a rifle's aim (right-click).\n- A block, and light attacks (Unknown why they looked late: the server's first attack state came about 0.1 s after the press for both players, median).\n\nAlso open: a new realm data pack version with the re-mined player sequence table and its gear-load dodges; the medium and heavy dodges of most weapons (Unknown); a pad player's held heavy attack on a boar against retail; the other pad keys (abilities) and a mount ridden with the stick.",
+    "**Other players: live check of the fifth round (2026-11-18, tests only).** Both players watch each other: dodges, blocks, light and heavy attacks, held heavy charges, a crouch, a controller run and stop, a bow's draw and shots, a rifle's aim and shots (the bullet and the muzzle).\n\nStill open from the timing study (2026-11-18, 398 retail ledgers against the live log): retail sends another player's state every 16 ms, each number 2 to 4 times, ours every 32 ms; retail sends children 41 to 44 for other players, ours never (Unknown effect); the cause of the 1 s late crouch is Unknown (a capture of what the viewer gets from our server would show it). A bow's draw, a rifle's aim and shot, a block and the attacks go out in retail's form; if they still show late or wrong, the cause is on the viewer's timeline. Also open: a new realm data pack version with the re-mined player sequence table and its gear-load dodges; the medium and heavy dodges of most weapons (Unknown); a pad player's held heavy attack on a boar against retail; the other pad keys (abilities) and a mount ridden with the stick.",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
@@ -3690,6 +3706,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Other players, fifth live round (2026-11-18, tests only): another player's states now carry its client's time and repeat their clock after a change, a held heavy charge and a still controller player no longer float.",
     "Other players, fourth live round (2026-11-17, tests only): the gear load no longer counts the main-hand weapons (light and medium armor dodged as medium and heavy), an aim no longer sends a block, and a controller player's body is smoothed and no longer floats.",
     "Other players, third live round (2026-11-17, tests only): a pad run faces its stick, a block walk stops into its stand at once, jump presses in the air start nothing, and the dodge follows the gear load. The game gateway logs the address of each cookie it sends and of each wrong cookie it refuses.",
     "Account link pop-up (2026-11-17, tests only): the client patch now turns off the shadow account check that the pop-up needs, in place of the switch's default, which did not stop it.",
@@ -3926,6 +3943,6 @@
     "Other players' animations (2026-11-17, tests only): block pose end, upper slot times, landings and falls, draw ends, sheathed dodges, the re-mined player sequence table, the heavy attack lift and the press start kept at a draw."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-17",
-  "lastCommit": "d84f74f6"
+  "updated": "2026-11-18",
+  "lastCommit": "d0e0fa66"
 }
