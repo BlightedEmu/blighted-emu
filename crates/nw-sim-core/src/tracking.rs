@@ -133,6 +133,12 @@ pub const CAMERA_FLOOR_SPREAD_M: f32 = 1.5;
 /// 1.9 m over 8 records on flat ground; after a standing jump it came down to its resting height
 /// 6 records after the landing; our choice: 10 records, a third of a second).
 pub const CAMERA_SETTLE_RECORDS: u8 = 10;
+/// The share of the way to the camera's body a game pad's move takes in one record (our choice:
+/// a quarter). A pad's camera body is noisy while it moves (live 2026-11-17: a controller player's
+/// body went back and forth in 7.3 % of its moving records against 1.4 % with keys, and the
+/// camera put it 3.9 m above flat ground); the share smooths that noise, and a steady speed
+/// error of 1 m/s still leaves the body only 0.13 m behind.
+pub const PAD_FOLLOW_SHARE: f32 = 0.25;
 
 /// The records a body remembers, to take them again with the motion of an attack that started
 /// in them (our choice: an input message holds three records, a resent one up to six).
@@ -634,9 +640,11 @@ impl TrackedBody {
                 .map_or(FOLLOW_STEP_M, |top_mps| {
                     FOLLOW_STEP_M.max(top_mps * input.character.dt_s)
                 });
-            // A recovery goes the whole way at once.
+            // A recovery goes the whole way at once; a pad's move a share of it.
             let share = if recovering {
                 1.0
+            } else if intent.stick.is_some() {
+                (step_m / dx.hypot(dy)).min(PAD_FOLLOW_SHARE)
             } else {
                 (step_m / dx.hypot(dy)).min(1.0)
             };
@@ -689,10 +697,13 @@ impl TrackedBody {
                 // with the animation (live 2026-11-17: a held heavy attack put the camera's body
                 // 1.0 and 1.3 m above the flat floor, the body went up there and hung in the air
                 // for the other players for up to 7 s).
+                // A pad's move does not find one either: its camera's height is off while it moves
+                // ([`PAD_FOLLOW_SHARE`]).
                 Some(floor)
                     if !self.dropping
                         && !self.is_swimming()
                         && !mounted
+                        && intent.stick.is_none()
                         && (held || (walking_height && !camera_moved))
                         && height - floor > CAMERA_FLOOR_SPREAD_M =>
                 {
@@ -1425,6 +1436,69 @@ mod tests {
             body.record(input(0, view), &Flat, SEA);
         }
         assert_on_the_ground(&body, "at rest again");
+    }
+
+    /// The input of a game pad tilted fully forward, with camera `view`.
+    fn pad(view: CameraView) -> TrackInput {
+        TrackInput {
+            character: CharacterInput {
+                intent: Intent {
+                    forward: 1,
+                    stick: Some([0.0, 1.0]),
+                    ..Intent::default()
+                },
+                yaw: 0.0,
+                dt_s: DT,
+            },
+            ..input(0, view)
+        }
+    }
+
+    #[test]
+    fn a_pad_run_under_a_camera_too_high_stays_on_the_ground() {
+        // Live 2026-11-17: a controller player's camera put its running body 3.9 m above flat
+        // ground, and the others saw it float.
+        const RISE_M: f32 = 3.9;
+        const RECORDS: usize = 40;
+        let mut body = settled();
+        for _ in 0..RECORDS {
+            let view = raised_view(&body, RISE_M);
+            body.record(pad(view), &Flat, SEA);
+            assert_on_the_ground(&body, "in the run");
+        }
+    }
+
+    #[test]
+    fn a_pad_run_smooths_a_noisy_camera() {
+        // Live 2026-11-17: the body followed the pad's noisy camera and went back and forth.
+        const NOISE_M: f32 = 0.3;
+        const RECORDS: usize = 60;
+        const MOST_REVERSES: usize = 3;
+        let mut body = settled();
+        let mut client = start();
+        let mut last = body.position();
+        let mut last_step: Option<f32> = None;
+        let mut reverses = 0;
+        for record in 0..RECORDS {
+            client.y += SPRINT_SPEED_MPS * DT;
+            let noise = if record % 2 == 0 { NOISE_M } else { -NOISE_M };
+            let seen = Position {
+                y: client.y + noise,
+                ..client
+            };
+            body.record(
+                pad(view_of(seen, BOOM, [0.0, SPRINT_SPEED_MPS])),
+                &Flat,
+                SEA,
+            );
+            let step = body.position().y - last.y;
+            if last_step.is_some_and(|last| last * step < 0.0) {
+                reverses += 1;
+            }
+            last_step = Some(step);
+            last = body.position();
+        }
+        assert!(reverses <= MOST_REVERSES, "{reverses} reverses");
     }
 
     /// A ledge: a floor [`LEDGE_M`] above the flat ground south of [`start`]'s y plus 1 m.
