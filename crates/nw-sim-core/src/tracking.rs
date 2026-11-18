@@ -161,8 +161,8 @@ pub struct TrackInput {
     pub view: Option<CameraView>,
     /// The record pressed a key that changes the camera's boom.
     pub boom_key: bool,
-    /// The client starts an action in this record (an attack or an ability: combat, which ends
-    /// the road boost).
+    /// The client starts an action in this record, or presses or holds the attack key (an
+    /// attack, a charge or an ability: combat, which ends the road boost).
     pub action_started: bool,
 }
 
@@ -699,11 +699,16 @@ impl TrackedBody {
                 // for the other players for up to 7 s).
                 // A pad's move does not find one either: its camera's height is off while it moves
                 // ([`PAD_FOLLOW_SHARE`]).
+                // A body that is not on one yet climbs onto one only while its keys move it (the
+                // cave steps were a walk); a still camera's height says nothing (live 2026-11-18:
+                // a controller player stopped with its camera 2.1 m and 2.7 m above flat ground,
+                // and the body went up there).
                 Some(floor)
                     if !self.dropping
                         && !self.is_swimming()
                         && !mounted
                         && intent.stick.is_none()
+                        && (was_on_lacking_floor || intent.forward != 0 || intent.right != 0)
                         && (held || (walking_height && !camera_moved))
                         && height - floor > CAMERA_FLOOR_SPREAD_M =>
                 {
@@ -1358,6 +1363,20 @@ mod tests {
     }
 
     #[test]
+    fn a_still_body_climbs_onto_no_floor_the_level_lacks() {
+        // Live 2026-11-18: a controller player stopped with its camera's body 2.1 m and 2.7 m
+        // above flat ground, and the body went up there.
+        const RISE_M: f32 = 2.7;
+        const RECORDS: usize = 60;
+        let mut body = settled();
+        for _ in 0..RECORDS {
+            let view = raised_view(&body, RISE_M);
+            body.record(input(0, view), &Flat, SEA);
+            assert_on_the_ground(&body, "standing");
+        }
+    }
+
+    #[test]
     fn a_dodge_s_camera_rise_does_not_lift_the_body() {
         // Live 2026-11-17: in a controller player's dodge the camera's body rose 1.9 m over 8
         // records on flat ground; the body went up with it and the others saw a fall, no roll.
@@ -1610,8 +1629,11 @@ mod tests {
             z: GROUND_Z + LEDGE_M,
             ..start()
         };
-        let keys = |jump: bool| CharacterInput {
+        /// The client walks onto the floor first: a still body climbs onto none.
+        const WALK_RECORDS: usize = 5;
+        let keys = |record: usize, jump: bool| CharacterInput {
             intent: Intent {
+                forward: i8::from(record < WALK_RECORDS),
                 jump,
                 ..Intent::default()
             },
@@ -1630,10 +1652,10 @@ mod tests {
         let mut lowest = top.z;
         for record in 0..80 {
             let jump = record == 10;
-            client.step(keys(jump), &Wall, SEA);
+            client.step(keys(record, jump), &Wall, SEA);
             let tracked = body.record(
                 TrackInput {
-                    character: keys(jump),
+                    character: keys(record, jump),
                     ..input(0, view_of(client.position(), BOOM, client.velocity()))
                 },
                 &Flat,

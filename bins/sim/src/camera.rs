@@ -81,7 +81,13 @@ pub fn track_input(record: &InputRecord, seen: RecordView) -> Option<TrackInput>
             .camera
             .map(|camera| CameraView::new(camera, look.yaw, look.pitch)),
         boom_key: record.boom_key_pressed(),
-        action_started: record.slayer_input().is_some(),
+        // A press or hold of the attack key acts too: the server starts the press start and the
+        // charge from it, and the camera rises with the pose (live 2026-11-18: a held heavy
+        // charge lifted the camera's body 1.8 m and the body stood up there for the others).
+        action_started: record.slayer_input().is_some() || {
+            let attack = record.attack_key();
+            attack.pressed || attack.held
+        },
     })
 }
 
@@ -201,6 +207,36 @@ mod tests {
         };
         let intent = track_input(&record, seen).expect("a view").character.intent;
         assert!(intent.block && intent.dodge, "{intent:?}");
+    }
+
+    #[test]
+    fn a_held_attack_key_acts_for_the_camera() {
+        // Live 2026-11-18: a held heavy charge lifted the camera's body 1.8 m, and with no action
+        // the body took that height. Slot value 2: bit 63 the attack key held, bit 40 its press.
+        const HELD: u64 = 1 << 63;
+        const PRESS: u64 = 1 << 40;
+        let seen = RecordView {
+            frame_s: None,
+            view: Some(LookDir {
+                yaw: 0.0,
+                pitch: 0.0,
+            }),
+            camera: None,
+        };
+        let acts = |attack: u64| {
+            let record = InputRecord {
+                slots: InputSlots {
+                    count: 19,
+                    values: vec![0, 0, attack],
+                    bytes: [128; 4],
+                },
+                ..InputRecord::default()
+            };
+            track_input(&record, seen).expect("a view").action_started
+        };
+        assert!(acts(HELD), "a held key");
+        assert!(acts(PRESS), "a press");
+        assert!(!acts(0), "no key");
     }
 
     #[test]
