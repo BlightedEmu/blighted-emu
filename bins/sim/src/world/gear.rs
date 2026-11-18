@@ -654,8 +654,8 @@ impl Gear {
     /// state attached it (newchar 2026-09-12 and 2026-09-18: 32 and 35 ms after the first press
     /// of the ship fight, no weapon key); 341 stamped only the other option. Without it the
     /// client showed no weapon in the hand (live run 14). An empty selected option draws nothing
-    /// (no retail case: in no ledger was option 1 empty while option 2 held a weapon). Whether
-    /// it drew one.
+    /// (no retail case: in no ledger was option 1 empty while option 2 held a weapon). A press
+    /// of the block key draws the same way (`SimWorld::attack_input`). Whether it drew one.
     pub(super) fn draw_to_attack(&mut self, time_ns: u64) -> bool {
         if self.drawn.is_some() {
             return false;

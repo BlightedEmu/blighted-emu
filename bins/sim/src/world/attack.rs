@@ -2089,6 +2089,12 @@ impl SimWorld {
         let mut weapon_key = None;
         // A new press of the attack key, which draws a sheathed weapon (`Gear::draw_to_attack`).
         let mut attack_pressed = false;
+        // A new press of the block key (the right-click: a block or an aim), which draws a
+        // sheathed weapon as the attack key does. Observed in 400 retail ledgers: of 1,052 block
+        // presses with every main-hand option sheathed, 487 started the weapon's block or aim
+        // within 0.8 s (median 36 ms), and the aims drew the weapon (median 34 ms). Ours started
+        // nothing, and the other players saw no block (live 2026-11-18).
+        let mut block_pressed = false;
         // A new press of the sheathe key ([`Gear::draw_selected`]).
         let mut sheathe_pressed = false;
         // A press of the swap weapon key ([`Gear::swap_key`]).
@@ -2106,6 +2112,7 @@ impl SimWorld {
             weapon_key = record.weapon_key_pressed().or(weapon_key);
             let pressed = vitals.keys.pressed_in(record);
             attack_pressed |= pressed;
+            block_pressed |= record.blocking() && !vitals.keys.blocking;
             sheathe_pressed |= record.sheathe_pressed();
             swap_pressed |= record.weapon_swap_pressed();
             let behind = newest_counter.map_or(0, |newest| newest.wrapping_sub(counter));
@@ -2160,6 +2167,8 @@ impl SimWorld {
                         tracing::debug!(player = number, "weapon drawn by the sheathe key");
                     } else if attack_pressed && gear.draw_to_attack(time_ns) {
                         tracing::debug!(player = number, "weapon drawn to attack");
+                    } else if block_pressed && gear.draw_to_attack(time_ns) {
+                        tracing::debug!(player = number, "weapon drawn to block or aim");
                     }
                 }
             }
@@ -7751,6 +7760,60 @@ mod tests {
         let mut records = message(1, &[Key::Hold]);
         records[0].slots.values[SHEATHE_VALUE] = 1 << SHEATHE_BIT;
         records
+    }
+
+    /// A record of counter `counter` that holds the block key; `pad` adds the attack press bit
+    /// that a controller's block button sets in its block start (live 2026-11-17).
+    fn block_press(counter: u16, pad: bool) -> InputRecord {
+        const BLOCK_VALUE: usize = 1;
+        const BLOCK_BIT: u32 = 62;
+        let key = if pad { Key::Press } else { Key::Hold };
+        let mut records = message(counter, &[key]);
+        records[0].slots.values[BLOCK_VALUE] = 1 << BLOCK_BIT;
+        records.remove(0)
+    }
+
+    /// Live 2026-11-18: the other player saw no block when a keyboard player blocked with the
+    /// spear on his back; retail starts the weapon's block from a sheath
+    /// ([`SimWorld::attack_input`]).
+    #[test]
+    fn a_block_press_draws_the_selected_weapon_for_keys_and_pads() {
+        for (device, pad) in [("keys", false), ("pad", true)] {
+            let mut world = caster_at(
+                MOB_X + SWORD_REACH_M,
+                crate::combat::test_support::TEST_SWORD_STANCE,
+            );
+            world.attack_input(&connection(1), &[block_press(1, pad)], NOW);
+            assert_eq!(drawn(&world), Some(slot::MAIN_HAND_OPTION_1), "{device}");
+            assert!(
+                world.player_swings.is_empty(),
+                "{device}: a block, no swing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_held_block_draws_nothing_after_the_weapon_is_put_away() {
+        let mut world = caster_at(
+            MOB_X + SWORD_REACH_M,
+            crate::combat::test_support::TEST_SWORD_STANCE,
+        );
+        let entity = world.by_connection[&connection(1)];
+        world.attack_input(&connection(1), &[block_press(1, false)], NOW);
+        assert_eq!(
+            drawn(&world),
+            Some(slot::MAIN_HAND_OPTION_1),
+            "the press drew"
+        );
+        let put_away = world
+            .world
+            .get_mut::<Player>(entity)
+            .and_then(|mut player| player.gear.as_mut().map(|gear| gear.sheathe(NOW, 0)));
+        assert_eq!(put_away, Some(true));
+        world.tick_hands(NOW, SERVER_TIME);
+        assert_eq!(drawn(&world), None, "put away");
+        world.attack_input(&connection(1), &[block_press(2, false)], NOW);
+        assert_eq!(drawn(&world), None, "the block was held: no new press");
     }
 
     #[test]
