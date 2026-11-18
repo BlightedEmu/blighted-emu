@@ -2275,12 +2275,15 @@ impl SimWorld {
                 player.aim = Some((at, now_ms));
             }
             let intent = input.character.intent;
+            let view = input.view;
             let tracked = player
                 .tracked
                 .record(input, &ground, self.settings.ocean_level_m);
             // One line per record: the client's keys and actions against the server's body
             // and the camera's body, to find where the two part (live 2026-11-17: other
-            // players saw each other at the wrong place and with the wrong animations).
+            // players saw each other at the wrong place and with the wrong animations), with the
+            // camera and the boom the check holds (live 2026-11-18: swings missed a boar the
+            // player stood behind; the camera body's error along the view needs both).
             tracing::debug!(
                 player = player.number,
                 counter,
@@ -2295,6 +2298,10 @@ impl SimWorld {
                 body = ?tracked.position,
                 camera_body = ?tracked.camera_body,
                 resynced = tracked.resynced,
+                camera = ?view.map(|view| view.camera),
+                view_yaw = view.map(|view| view.yaw),
+                view_pitch = view.map(|view| view.pitch),
+                boom_m = player.tracked.camera_boom_m(),
                 "input record"
             );
             if tracked.consistent && tracked.on_floor {

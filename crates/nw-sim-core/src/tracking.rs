@@ -257,6 +257,11 @@ impl TrackedBody {
         self.character.velocity()
     }
 
+    /// The boom the camera check holds, once a camera fitted ([`CameraCheck::boom_m`]).
+    pub const fn camera_boom_m(&self) -> Option<f32> {
+        self.camera.boom_m()
+    }
+
     /// Whether it stands still: no speed on the ground plane, not in a jump, and no action of
     /// the client moving it.
     pub fn is_resting(&self) -> bool {
