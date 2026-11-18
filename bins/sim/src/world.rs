@@ -248,6 +248,21 @@ const EQUIP_LOAD_SLOTS: [u32; 7] = [
     OFF_HAND_OPTION_3,
 ];
 
+/// How long a bow's or a gun's camera glides back out to its boom after the aim's release, ms
+/// (Observed in the retail tutorial musket aims: from 1 m back to 5 m in about 0.6 s; the
+/// 2026-11-18 replay chose 0.7 s).
+const AIM_CAMERA_OUT_MS: u64 = 700;
+
+/// Until when (input clock, ms) the camera of a record at `clock_ms` is on or gliding off an aim's
+/// boom, after a hold until `until_ms`: from a record that holds the aim (`aiming`) to
+/// [`AIM_CAMERA_OUT_MS`] after the last one; `None` once the camera carries the body again.
+fn aim_camera_hold(until_ms: Option<u64>, aiming: bool, clock_ms: u64) -> Option<u64> {
+    if aiming {
+        return Some(clock_ms.saturating_add(AIM_CAMERA_OUT_MS));
+    }
+    until_ms.filter(|until| clock_ms < *until)
+}
+
 /// How far a player's input clock may fall behind the sim's clock, ms (our choice, near retail's
 /// stamp age: in the 2026-11-18 timing study of 398 ledgers retail stamped another player's
 /// states 4 to 28 ms before it first sent them).
@@ -736,6 +751,9 @@ struct Player {
     input_counter: Option<u16>,
     /// The client's time of that record on the sim's clock ([`input_clock_after`]).
     input_clock_ms: Option<u64>,
+    /// Until when (its input clock, ms) its camera is on or gliding off the short boom of a bow's
+    /// or a gun's aim, and carries no body ([`Self::move_from_input`]).
+    aim_camera_until_ms: Option<u64>,
     /// The number of its ALC states from that counter ([`StateNumber`]).
     state_number: Option<StateNumber>,
     /// The view angles of its newest input: where other players see it look.
@@ -2108,6 +2126,13 @@ impl SimWorld {
                 empty: gear.held_empty(),
             })
         });
+        // A drawn bow or gun aims at the right-click; its camera moves to its own boom.
+        let aims = weapon.is_some_and(|weapon| {
+            weapon.drawn
+                && combat
+                    .stance(weapon.stance)
+                    .is_some_and(|stance| stance.aimed.is_some())
+        });
         if let Some(load) = player.gear.as_ref().and_then(|gear| {
             self.content.equip_load(
                 EQUIP_LOAD_SLOTS
@@ -2157,6 +2182,23 @@ impl SimWorld {
                 now_ms,
             ));
             read_any = true;
+            // The aim of a bow or a gun moves the camera in to a 1 m boom and back out at its
+            // release with no zoom key (Observed, retail tutorial musket aims: boom 1.00 m,
+            // quartiles 0.99 to 1.08, in over about 0.3 s and out over about 0.6 s). The camera
+            // check read the glide as body motion along the view: while the aim is held and for
+            // [`AIM_CAMERA_OUT_MS`] after, the keys alone move the body (camera body study
+            // 2026-11-18, retail tutorial replay: aim standing 2.46/3.99 m off, median/90th
+            // percentile, to 0.41/1.39 m; aim moving 3.61/3.99 to 1.38/1.40 m; freeing the boom
+            // as a zoom key does gave 2.38/7.30 and 2.50/7.26 m).
+            let clock_ms = player.input_clock_ms.unwrap_or(now_ms);
+            player.aim_camera_until_ms = aim_camera_hold(
+                player.aim_camera_until_ms,
+                aims && record.blocking(),
+                clock_ms,
+            );
+            if player.aim_camera_until_ms.is_some() {
+                input.view = None;
+            }
             // A cutscene's or a video's camera shows the scene, not the player: it carries nothing.
             if player.flow.camera_in_scene() {
                 input.view = None;
@@ -5045,6 +5087,7 @@ impl SimWorld {
                     tracked: TrackedBody::new(motion.position()),
                     input_counter: None,
                     input_clock_ms: None,
+                    aim_camera_until_ms: None,
                     state_number: None,
                     view: None,
                     facing: None,
@@ -10446,6 +10489,40 @@ mod tests {
         join(&mut world, 2, 5.0);
         tick(&mut world, NOW);
         world
+    }
+
+    /// Camera body study 2026-11-18: a bow's or a gun's aim moves the camera to a 1 m boom and
+    /// back; while it is held and for [`AIM_CAMERA_OUT_MS`] after, the keys alone move the body.
+    /// The right-click and a controller's block button set the same block bit.
+    #[test]
+    fn an_aim_holds_the_camera_off_the_body_until_its_glide_out_ends() {
+        const AIM_AT_MS: u64 = 1_000;
+        const RELEASE_AT_MS: u64 = 1_500;
+        let pad_block = InputRecord {
+            slots: nw_messages::client_input::InputSlots {
+                count: 19,
+                values: vec![0, 1 << 62, 1 << 40],
+                bytes: [128; 4],
+            },
+            ..InputRecord::default()
+        };
+        for (device, record) in [("keys", block_record(1)), ("pad", pad_block)] {
+            let held = aim_camera_hold(None, record.blocking(), AIM_AT_MS);
+            assert_eq!(
+                held,
+                Some(AIM_AT_MS + AIM_CAMERA_OUT_MS),
+                "{device}: the aim holds it"
+            );
+        }
+        let held = aim_camera_hold(None, true, RELEASE_AT_MS);
+        let gliding = aim_camera_hold(held, false, RELEASE_AT_MS + AIM_CAMERA_OUT_MS - 1);
+        assert!(gliding.is_some(), "the glide out");
+        assert_eq!(
+            aim_camera_hold(gliding, false, RELEASE_AT_MS + AIM_CAMERA_OUT_MS),
+            None,
+            "the camera carries the body again"
+        );
+        assert_eq!(aim_camera_hold(None, false, AIM_AT_MS), None, "no aim");
     }
 
     /// An input record with block held.
