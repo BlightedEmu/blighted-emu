@@ -248,6 +248,34 @@ const EQUIP_LOAD_SLOTS: [u32; 7] = [
     OFF_HAND_OPTION_3,
 ];
 
+/// How far a player's input clock may fall behind the sim's clock, ms (our choice, near retail's
+/// stamp age: in the 2026-11-18 timing study of 398 ledgers retail stamped another player's
+/// states 4 to 28 ms before it first sent them).
+const MAX_INPUT_CLOCK_LAG_MS: u64 = 100;
+/// Milliseconds per second, for the input clock.
+const INPUT_CLOCK_MS_PER_S: f32 = 1_000.0;
+
+/// The client's time of its next input record on the sim's clock: the time of the record before
+/// (`clock`) plus the record's frame time (`frame_s`), at most `now_ms` and at least
+/// [`MAX_INPUT_CLOCK_LAG_MS`] before it; `now_ms` for the first record. Retail stamps a player's
+/// states by its client's frame times (Observed, 2026-11-18 timing study: exactly 33.3 or 50.0 ms
+/// per state number); ours stamped the server time each record came at, and when a controller's
+/// records came in bursts its states carried stamps up to 1,132 ms old, then jumped (live
+/// 2026-11-18: other players saw it late and jerky).
+fn input_clock_after(clock: Option<u64>, frame_s: f32, now_ms: u64) -> u64 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a frame time of a fraction of a second"
+    )]
+    let frame_ms = (frame_s.max(0.0) * INPUT_CLOCK_MS_PER_S).round() as u64;
+    clock.map_or(now_ms, |clock| {
+        (clock + frame_ms)
+            .min(now_ms)
+            .max(now_ms.saturating_sub(MAX_INPUT_CLOCK_LAG_MS))
+    })
+}
+
 /// Carrier channel of the login messages and the time messages.
 pub const MESSAGE_CHANNEL: u8 = 0;
 /// Carrier channel of the replication bundles.
@@ -706,6 +734,8 @@ struct Player {
     tracked: TrackedBody,
     /// The counter of the newest input record its body moved by.
     input_counter: Option<u16>,
+    /// The client's time of that record on the sim's clock ([`input_clock_after`]).
+    input_clock_ms: Option<u64>,
     /// The number of its ALC states from that counter ([`StateNumber`]).
     state_number: Option<StateNumber>,
     /// The view angles of its newest input: where other players see it look.
@@ -2121,6 +2151,11 @@ impl SimWorld {
                 continue;
             }
             player.input_counter = Some(counter);
+            player.input_clock_ms = Some(input_clock_after(
+                player.input_clock_ms,
+                input.character.dt_s,
+                now_ms,
+            ));
             read_any = true;
             // A cutscene's or a video's camera shows the scene, not the player: it carries nothing.
             if player.flow.camera_in_scene() {
@@ -4621,10 +4656,14 @@ impl SimWorld {
         // who see it get the same.
         for mut player in self.world.query::<&mut Player>().iter_mut(&mut self.world) {
             if let Some(counter) = player.input_counter {
+                // The state's time is its record's on the client's clock, as retail stamps it.
+                let record_time = player.input_clock_ms.map_or(server_time, |clock| {
+                    server_time.saturating_sub(now_ms.saturating_sub(clock))
+                });
                 player.state_number = Some(StateNumber::after(
                     player.state_number,
                     own_state_counter(counter),
-                    server_time,
+                    record_time,
                 ));
             }
             let clock = Self::alc_clock(&player, server_time);
@@ -5005,6 +5044,7 @@ impl SimWorld {
                     push: None,
                     tracked: TrackedBody::new(motion.position()),
                     input_counter: None,
+                    input_clock_ms: None,
                     state_number: None,
                     view: None,
                     facing: None,
@@ -13027,6 +13067,31 @@ mod tests {
             },
             ..InputRecord::default()
         }
+    }
+
+    #[test]
+    fn the_input_clock_steps_by_the_client_frame_times() {
+        // Retail: 33.3 or 50.0 ms per state number. Live 2026-11-18: records in bursts left
+        // stamps up to 1,132 ms old.
+        const FRAME_S: f32 = 1.0 / 30.0;
+        const FRAME_MS: u64 = 33;
+        const ARRIVED_MS: u64 = 10_000;
+        const BURST_MS: u64 = 1_200;
+        let first = input_clock_after(None, FRAME_S, ARRIVED_MS);
+        assert_eq!(first, ARRIVED_MS);
+        // Three records arrive together: they keep the client's spacing, not the arrival time.
+        let second = input_clock_after(Some(first - 3 * FRAME_MS), FRAME_S, ARRIVED_MS);
+        assert_eq!(second, ARRIVED_MS - 2 * FRAME_MS);
+        // The clock never runs ahead of the sim's.
+        assert_eq!(
+            input_clock_after(Some(first), FRAME_S, ARRIVED_MS),
+            ARRIVED_MS
+        );
+        // After a long gap it catches up to within the lag.
+        assert_eq!(
+            input_clock_after(Some(first), FRAME_S, ARRIVED_MS + BURST_MS),
+            ARRIVED_MS + BURST_MS - MAX_INPUT_CLOCK_LAG_MS
+        );
     }
 
     #[test]

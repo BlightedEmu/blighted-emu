@@ -988,7 +988,16 @@ pub struct KnownStamp {
     pub id_high: Option<u8>,
     /// The high byte of the state time it has.
     pub time_high: Option<u8>,
+    /// States left that send the anchor and the high bytes again after a change
+    /// ([`STAMP_REPEAT_STATES`]).
+    pub repeats: u8,
 }
+
+/// The states after a change of another player's anchor or high bytes that send them again
+/// (Observed, 2026-11-18 timing study of 398 retail ledgers: retail sends children 25, 26 and 40
+/// again in 3 to 6 states after a change; ours sent them once on the unreliable channel, and one
+/// lost state left the viewer's clock 256 ms off). Our choice: 4.
+pub const STAMP_REPEAT_STATES: u8 = 4;
 
 impl KnownStamp {
     /// What a client has after a state with `stamp` whole.
@@ -997,6 +1006,24 @@ impl KnownStamp {
             anchor_us: Some(stamp.anchor_us),
             id_high: Some(AlcStamp::high(stamp.id)),
             time_high: Some(AlcStamp::high(stamp.offset_ms)),
+            repeats: 0,
+        }
+    }
+
+    /// What a client has after a state with `stamp` went to it: the next
+    /// [`STAMP_REPEAT_STATES`] states send the clock again when this one changed it.
+    #[must_use]
+    pub fn after(self, stamp: AlcStamp) -> Self {
+        let now = Self::of(stamp);
+        let changed = (self.anchor_us, self.id_high, self.time_high)
+            != (now.anchor_us, now.id_high, now.time_high);
+        Self {
+            repeats: if changed {
+                STAMP_REPEAT_STATES
+            } else {
+                self.repeats.saturating_sub(1)
+            },
+            ..now
         }
     }
 }
@@ -1449,12 +1476,12 @@ impl AlcState {
         let mut children: Vec<(usize, Vec<u8>)> = stamp_children(stamp)
             .into_iter()
             .filter(|(child, value)| match *child {
-                ID_ABS_CHILD => known.id_high != value.first().copied(),
-                TIME_ABS_CHILD => known.time_high != value.first().copied(),
+                ID_ABS_CHILD => known.repeats > 0 || known.id_high != value.first().copied(),
+                TIME_ABS_CHILD => known.repeats > 0 || known.time_high != value.first().copied(),
                 _ => true,
             })
             .collect();
-        if known.anchor_us != Some(stamp.anchor_us) {
+        if known.repeats > 0 || known.anchor_us != Some(stamp.anchor_us) {
             children.push((TIME_ANCHOR_CHILD, stamp.anchor_us.to_be_bytes().to_vec()));
         }
         if let Some(place) = step.position {
@@ -3915,6 +3942,35 @@ mod tests {
         .expect("step");
         let present: Vec<usize> = children_of(&later).into_iter().map(|(c, _)| c).collect();
         assert_eq!(present, [0, 1, 26], "a new high byte of the time goes");
+        let changed = KnownStamp::default().after(step.stamp);
+        for left in (1..=STAMP_REPEAT_STATES).rev() {
+            assert_eq!(changed.repeats, STAMP_REPEAT_STATES);
+            let repeated = KnownStamp {
+                repeats: left,
+                ..changed
+            };
+            let present: Vec<usize> = children_of(
+                &AlcState::remote_step(&RemoteStep {
+                    known: repeated,
+                    position: None,
+                    facing: None,
+                    look: None,
+                    slayer: None,
+                    sequence_time: None,
+                    ..step
+                })
+                .expect("step"),
+            )
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+            assert_eq!(
+                present,
+                [0, 1, 25, 26, 40],
+                "after a change the clock goes again (retail: 3 to 6 states)"
+            );
+        }
+        assert_eq!(changed.after(step.stamp).repeats, STAMP_REPEAT_STATES - 1);
     }
 
     /// The retail newchar sequence started at record 0x2aa (20 Hz records of 0.05 s): the

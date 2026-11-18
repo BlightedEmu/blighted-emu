@@ -611,7 +611,7 @@ impl Replica {
             // viewer's client has them from there.
             *sight = ViewerSight {
                 sequence: RemoteSequenceClock::after_spawn(),
-                stamp: KnownStamp::of(self.stamp),
+                stamp: KnownStamp::default().after(self.stamp),
             };
             return Ok(Some(group));
         }
@@ -638,7 +638,7 @@ impl Replica {
                 upper: source.upper,
             })?),
         }];
-        sight.stamp = KnownStamp::of(self.stamp);
+        sight.stamp = sight.stamp.after(self.stamp);
         if let Some(change) = self.health_change {
             members.push(BundleMember {
                 component: VITALS_COMPONENT,
