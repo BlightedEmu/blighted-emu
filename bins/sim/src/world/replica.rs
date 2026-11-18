@@ -15,7 +15,8 @@
 //! Each viewer gets the remote players by priority ([`RemotePlan`]): one in combat or near every
 //! tick, farther ones less often, at most [`REMOTE_GROUPS_PER_TICK`] per tick, the longest waiting
 //! first; a new player's card and a change always go. The card goes once, when the player comes
-//! into view, as on retail.
+//! into view, as on retail. A player's new state from its input also goes between ticks
+//! ([`super::remote_now`]); those states take their place in the next tick's budget.
 
 use std::collections::HashMap;
 
@@ -56,8 +57,9 @@ const NEAR_M: f32 = 30.0;
 const MID_M: f32 = 60.0;
 const MID_PERIOD_TICKS: u64 = 2;
 const FAR_PERIOD_TICKS: u64 = 4;
-/// Most remote players one viewer gets in one tick besides cards and changes (our choice: about
-/// 1 KB of 40-byte remote states, retail's p99 datagram of 1,028 bytes).
+/// Most remote players one viewer gets in one tick besides cards and changes, with the states it
+/// got since the tick before ([`RemotePlan::send_now`]) (our choice: about 1 KB of 40-byte remote
+/// states, retail's p99 datagram of 1,028 bytes).
 pub(super) const REMOTE_GROUPS_PER_TICK: usize = 24;
 /// The states of another player that carry its slayer state once it started (Observed: retail
 /// sent other players' slayer state in runs of 1 to 8 states, 1 to 3 in 14 of the 22 runs, and
@@ -615,7 +617,7 @@ impl Replica {
             };
             return Ok(Some(group));
         }
-        let slayer = source.action.filter(|_| self.sends_action);
+        let slayer = self.sent_action();
         if slayer.is_some() || self.upper_due {
             tracing::debug!(
                 player = entity,
@@ -625,20 +627,7 @@ impl Replica {
                 "remote slayer state to a viewer"
             );
         }
-        let mut members = vec![BundleMember {
-            component: PLAYER_ALC_COMPONENT,
-            state: MemberState::Alc(AlcState::remote_step(&RemoteStep {
-                stamp: self.stamp,
-                known: sight.stamp,
-                position: self.place,
-                facing: source.facing,
-                look: source.view,
-                slayer,
-                sequence_time: source.sequence.map(|seconds| sight.sequence.time(seconds)),
-                upper: source.upper,
-            })?),
-        }];
-        sight.stamp = sight.stamp.after(self.stamp);
+        let mut members = vec![self.step_member(sight)?];
         if let Some(change) = self.health_change {
             members.push(BundleMember {
                 component: VITALS_COMPONENT,
@@ -687,6 +676,51 @@ impl Replica {
             members,
         }))
     }
+
+    /// Its state once more in slot `interest` for a viewer whose client has `sight` of it: the
+    /// ALC state alone, as [`Self::group`] sent it; the changes went with that one. Retail sent
+    /// each state of another player 2 to 4 times, 44 % of them with the id of the state before
+    /// (Observed, 2026-11-18 timing study of 398 ledgers), and a new slayer start in 2 to 3
+    /// states in a row (Inferred from the same study: its repeats carried the start).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the state cannot be encoded.
+    pub(super) fn repeat_group(
+        &self,
+        interest: u16,
+        sight: &mut ViewerSight,
+    ) -> Result<BundleGroup, MessageError> {
+        Ok(BundleGroup {
+            interest: u64::from(interest),
+            members: vec![self.step_member(sight)?],
+        })
+    }
+
+    /// Its slayer state, when its states of this tick carry it ([`REMOTE_ACTION_ECHO_STATES`]).
+    fn sent_action(&self) -> Option<SlayerState> {
+        self.source.action.filter(|_| self.sends_action)
+    }
+
+    /// Its ALC state for a viewer whose client has `sight` of it, which then has its clock.
+    fn step_member(&self, sight: &mut ViewerSight) -> Result<BundleMember, MessageError> {
+        let source = &self.source;
+        let member = BundleMember {
+            component: PLAYER_ALC_COMPONENT,
+            state: MemberState::Alc(AlcState::remote_step(&RemoteStep {
+                stamp: self.stamp,
+                known: sight.stamp,
+                position: self.place,
+                facing: source.facing,
+                look: source.view,
+                slayer: self.sent_action(),
+                sequence_time: source.sequence.map(|seconds| sight.sequence.time(seconds)),
+                upper: source.upper,
+            })?),
+        };
+        sight.stamp = sight.stamp.after(self.stamp);
+        Ok(member)
+    }
 }
 
 /// How long a viewer may wait for a remote player `distance_m` away (in ticks): every tick near
@@ -718,6 +752,10 @@ pub(super) struct RemotePlan {
     last_sent: HashMap<u64, u64>,
     /// What this viewer's client has of each remote player's clocks.
     sights: HashMap<u64, ViewerSight>,
+    /// The remote states without a change it got between ticks since the last pick
+    /// ([`Self::send_now`], [`Self::repeat_now`]): they count against the next tick's
+    /// [`REMOTE_GROUPS_PER_TICK`].
+    between_ticks: usize,
 }
 
 /// What one viewer's client has of one remote player's clocks: its sequence time and its state
@@ -768,16 +806,38 @@ impl RemotePlan {
                 .then(a.2.total_cmp(&b.2))
                 .then(a.3.cmp(&b.3))
         });
-        picked.extend(
-            waiting
-                .into_iter()
-                .take(REMOTE_GROUPS_PER_TICK)
-                .map(|(.., number)| number),
-        );
+        let budget = REMOTE_GROUPS_PER_TICK.saturating_sub(std::mem::take(&mut self.between_ticks));
+        picked.extend(waiting.into_iter().take(budget).map(|(.., number)| number));
         for number in &picked {
             self.last_sent.insert(*number, step);
         }
         picked
+    }
+
+    /// Whether the viewer gets the new state of `candidate`, whose slot it has, now between
+    /// ticks: a change always, as in a tick; else one it would get every tick (near or in
+    /// combat) while the tick's budget lasts.
+    pub(super) fn send_now(&mut self, candidate: &RemoteCandidate<'_>) -> bool {
+        let replica = candidate.replica;
+        if replica.changed() {
+            return true;
+        }
+        period_ticks(candidate.distance_m, replica.in_combat()) == 1 && self.spend_between_ticks()
+    }
+
+    /// Whether the viewer gets a state it got between ticks once more, while the tick's budget
+    /// lasts.
+    pub(super) fn repeat_now(&mut self) -> bool {
+        self.spend_between_ticks()
+    }
+
+    /// Takes one remote state of the next tick's budget, when one is left.
+    fn spend_between_ticks(&mut self) -> bool {
+        let left = self.between_ticks < REMOTE_GROUPS_PER_TICK;
+        if left {
+            self.between_ticks += 1;
+        }
+        left
     }
 
     /// What this viewer's client has of remote player `number`'s clocks.
@@ -863,6 +923,51 @@ pub(super) mod tests {
                 .visible_slots
                 .and_then(|slots| slots.full().map(|list| list.elements.clone())),
             Some(vec![nw_messages::paperdoll::slot::MAIN_HAND_OPTION_1])
+        );
+    }
+
+    #[test]
+    fn states_between_ticks_take_the_next_ticks_budget() {
+        const CROWD: u64 = 30;
+        const NEAR: f32 = 5.0;
+        const FAR: f32 = 100.0;
+        let (_, memory) = Replica::new(source(), AT, None, SPAWNED_MS);
+        let (still, _) = Replica::new(source(), AT, Some(memory), SPAWNED_MS);
+        let hurt = ReplicaSource {
+            health: MAX_HEALTH - 1,
+            ..source()
+        };
+        let (changed, _) = Replica::new(hurt, AT, Some(memory), SPAWNED_MS);
+        assert!(!still.changed() && changed.changed());
+        let candidate = |number, distance_m, replica| RemoteCandidate {
+            number,
+            distance_m,
+            replica,
+            new: false,
+        };
+        let crowd: Vec<RemoteCandidate<'_>> = (1..=CROWD)
+            .map(|number| candidate(number, NEAR, &still))
+            .collect();
+        let mut plan = RemotePlan::default();
+        assert!(
+            !plan.send_now(&candidate(CROWD + 1, FAR, &still)),
+            "a far player waits for its tick"
+        );
+        let sent = crowd.iter().filter(|near| plan.send_now(near)).count();
+        assert_eq!(sent, REMOTE_GROUPS_PER_TICK, "at most the tick's budget");
+        assert!(!plan.repeat_now(), "no repeat past it");
+        assert!(
+            plan.send_now(&candidate(CROWD + 2, FAR, &changed)),
+            "a change always goes"
+        );
+        assert!(
+            plan.pick(1, &crowd).is_empty(),
+            "the tick's budget went between ticks"
+        );
+        assert_eq!(
+            plan.pick(2, &crowd).len(),
+            REMOTE_GROUPS_PER_TICK,
+            "the next tick has the whole budget"
         );
     }
 

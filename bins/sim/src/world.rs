@@ -144,6 +144,7 @@ mod quest_walk;
 mod queue;
 mod quick_course;
 mod raids;
+mod remote_now;
 mod repair;
 mod replica;
 mod rested;
@@ -710,6 +711,9 @@ struct Player {
     item_changes: storage_search::ItemChanges,
     number: u64,
     bundles_sent: u64,
+    /// The ticks that built its bundle: the steps of [`Self::remote_plan`] and of the mob card
+    /// refresh, which the bundles sent between ticks ([`remote_now`]) do not move on.
+    bundled_ticks: u64,
     last_time_synch_ms: u64,
     /// The client's time component and the day phase it has ([`day_night`]): from its time
     /// request (4248) at a login; from its number at a handoff, whose client asks no more and
@@ -756,6 +760,9 @@ struct Player {
     aim_camera_until_ms: Option<u64>,
     /// The number of its ALC states from that counter ([`StateNumber`]).
     state_number: Option<StateNumber>,
+    /// Its state moved on to a new number between ticks ([`remote_now`]): the next tick's own
+    /// state carries that step, and the tick steps it no more.
+    state_stepped: bool,
     /// The view angles of its newest input: where other players see it look.
     view: Option<LookDir>,
     /// Where other players see it face: the camera yaw, or a game pad's run direction while the
@@ -1145,6 +1152,9 @@ pub struct SimWorld {
     walked_floor: walked_floor::WalkedFloor,
     /// What the viewers were last sent of each player ([`replica`]).
     replica_memory: HashMap<u64, replica::ReplicaMemory>,
+    /// The players' new states sent between ticks that their viewers get once more, by player
+    /// number ([`remote_now`]).
+    state_repeats: HashMap<u64, remote_now::StateRepeat>,
     /// Where the mobs stood in the last moments: where a swing may find them.
     mob_trails: mob_trail::MobTrails,
     me: SimSlot,
@@ -1488,6 +1498,7 @@ impl SimWorld {
             deaths: Vec::new(),
             walked_floor: walked_floor::WalkedFloor::default(),
             replica_memory: HashMap::new(),
+            state_repeats: HashMap::new(),
             mob_trails: mob_trail::MobTrails::default(),
             combat_messages: Vec::new(),
             afk_removals: Vec::new(),
@@ -4684,6 +4695,26 @@ impl SimWorld {
         lists.into_iter().collect()
     }
 
+    /// Moves the player's state on to its client's newest record at `now_ms` (server time
+    /// `server_time`), and its slayer state with it: one step for each own state.
+    fn step_state(player: &mut Player, now_ms: u64, server_time: u64) {
+        if let Some(counter) = player.input_counter {
+            // The state's time is its record's on the client's clock, as retail stamps it.
+            let record_time = player.input_clock_ms.map_or(server_time, |clock| {
+                server_time.saturating_sub(now_ms.saturating_sub(clock))
+            });
+            player.state_number = Some(StateNumber::after(
+                player.state_number,
+                own_state_counter(counter),
+                record_time,
+            ));
+        }
+        let clock = Self::alc_clock(player, server_time);
+        player
+            .slayer
+            .advance(clock.stamp().id, clock.since_spawn_ms);
+    }
+
     /// A bundle for every player that is not frozen, on `tick_threads` threads for a large world.
     fn bundles(&mut self, now_ms: u64, server_time: u64) -> Result<Bundled, MessageError> {
         let started = Instant::now();
@@ -4695,23 +4726,13 @@ impl SimWorld {
         let own: HashSet<u64> = everyone.iter().map(|(number, _)| *number).collect();
         let mut cards: HashMap<u64, MobCard> = HashMap::new();
         // The state numbers and the actions move on to this tick: the own state and the players
-        // who see it get the same.
+        // who see it get the same. A state that moved on between ticks is this tick's: its
+        // own state goes now, and its repeat waits no more (this tick sends it again).
+        self.state_repeats.clear();
         for mut player in self.world.query::<&mut Player>().iter_mut(&mut self.world) {
-            if let Some(counter) = player.input_counter {
-                // The state's time is its record's on the client's clock, as retail stamps it.
-                let record_time = player.input_clock_ms.map_or(server_time, |clock| {
-                    server_time.saturating_sub(now_ms.saturating_sub(clock))
-                });
-                player.state_number = Some(StateNumber::after(
-                    player.state_number,
-                    own_state_counter(counter),
-                    record_time,
-                ));
+            if !std::mem::take(&mut player.state_stepped) {
+                Self::step_state(&mut player, now_ms, server_time);
             }
-            let clock = Self::alc_clock(&player, server_time);
-            player
-                .slayer
-                .advance(clock.stamp().id, clock.since_spawn_ms);
         }
         // Every player as the players who see it get it this tick: ours, then the ghosts'.
         let mut sources: Vec<(u64, ReplicaSource)> = self
@@ -5056,6 +5077,7 @@ impl SimWorld {
                     backstory: arrival.backstory,
                     number: arrival.number,
                     bundles_sent: replication.bundles_sent,
+                    bundled_ticks: 0,
                     last_time_synch_ms,
                     day_phase: arrival.spawned.then(|| {
                         (
@@ -5089,6 +5111,7 @@ impl SimWorld {
                     input_clock_ms: None,
                     aim_camera_until_ms: None,
                     state_number: None,
+                    state_stepped: false,
                     view: None,
                     facing: None,
                     facing_from_stick: false,
@@ -5644,10 +5667,12 @@ impl Neighbourhood<'_> {
             if just_in_game {
                 player.others_due_ms = Some(self.now_ms.saturating_add(OTHER_ENTITY_SETTLE_MS));
             }
-            let settling = player
-                .others_due_ms
-                .is_some_and(|due| due > 0 && self.now_ms < due);
-            let hold_others = self.local_player_card && (!vitals.spawned || settling);
+            let hold_others = others_held(
+                self.local_player_card,
+                vitals.spawned,
+                player.others_due_ms,
+                self.now_ms,
+            );
             // The first InGame bundle stays own-only. Live 2026-09-24 dumped
             // statics and nodes 33 ms after InGame and failed StateReplication
             // 6077. Bags and nodes go on later ticks; mobs wait the settle.
@@ -5726,7 +5751,8 @@ impl Neighbourhood<'_> {
                     })
                 })
                 .collect();
-            let step = player.bundles_sent;
+            player.bundled_ticks = player.bundled_ticks.saturating_add(1);
+            let step = player.bundled_ticks;
             let shown_players: HashSet<u64> =
                 player.remote_plan.pick(step, &remote).into_iter().collect();
             // Until its client spawned the player, the client keeps the own states in its
@@ -6350,7 +6376,8 @@ impl Neighbourhood<'_> {
                         // cards of a crowd do not all come in one bundle.
                         let carded = slot.new
                             || (look.is_none()
-                                && player.bundles_sent.wrapping_add(number) % CARD_REFRESH_BUNDLES
+                                && player.bundled_ticks.wrapping_add(number)
+                                    % CARD_REFRESH_BUNDLES
                                     == 0);
                         let group = mob_group(slot.interest, card, look, carded)?;
                         if let Some(group) = &group {
@@ -6398,16 +6425,7 @@ impl Neighbourhood<'_> {
                 .iter()
                 .map(|group| group.members.len() as u64)
                 .sum::<u64>();
-            let mut envelopes = Vec::new();
-            for bundle in bundles(
-                player.bundles_sent,
-                player.client_context,
-                &mut player.slots,
-                groups,
-            )? {
-                player.bundles_sent = player.bundles_sent.saturating_add(1);
-                envelopes.push(bundle);
-            }
+            let envelopes = sequenced_bundles(player, groups)?;
             // The own spawn card goes reliably, as retail's first bundle does, and is
             // kept: until the client spawns, the same bundle goes out again every
             // [`OWN_CARD_RESEND_MS`], because the client drops the bundles that reach
@@ -6417,14 +6435,11 @@ impl Neighbourhood<'_> {
                 player.own_card_sent_ms = self.now_ms;
             }
             let reliable = reliable_bundles() || first_card;
-            for bundle in envelopes {
-                outgoing.push(Outgoing {
-                    connection: player.connection.clone(),
-                    channel: REPLICATION_CHANNEL,
-                    reliable,
-                    envelopes: vec![bundle],
-                });
-            }
+            outgoing.extend(replication_outgoing(
+                &player.connection,
+                reliable,
+                envelopes,
+            ));
             let resend_due = player.login
                 && !vitals.spawned
                 && player.own_card_bundle.is_some()
@@ -6432,14 +6447,7 @@ impl Neighbourhood<'_> {
             if resend_due {
                 player.own_card_sent_ms = self.now_ms;
                 let card = player.own_card_bundle.clone().unwrap_or_default();
-                for bundle in card {
-                    outgoing.push(Outgoing {
-                        connection: player.connection.clone(),
-                        channel: REPLICATION_CHANNEL,
-                        reliable: true,
-                        envelopes: vec![bundle],
-                    });
-                }
+                outgoing.extend(replication_outgoing(&player.connection, true, card));
             }
             if self.now_ms.saturating_sub(player.last_time_synch_ms) >= TIME_SYNCH_INTERVAL_MS {
                 player.last_time_synch_ms = self.now_ms;
@@ -6460,6 +6468,49 @@ impl Neighbourhood<'_> {
             ..Bundled::default()
         })
     }
+}
+
+/// Whether a player's client gets no other entities yet: with the own spawn card
+/// (`local_player_card`), until its client spawned (`spawned`) and for the settle after
+/// ([`Player::others_due_ms`]) at `now_ms`.
+fn others_held(
+    local_player_card: bool,
+    spawned: bool,
+    others_due_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    let settling = others_due_ms.is_some_and(|due| due > 0 && now_ms < due);
+    local_player_card && (!spawned || settling)
+}
+
+/// The bundle envelopes of `groups` for `player`, numbered on from its last bundle
+/// ([`members::bundles`]).
+fn sequenced_bundles(
+    player: &mut Player,
+    groups: Vec<BundleGroup>,
+) -> Result<Vec<Vec<u8>>, MessageError> {
+    let envelopes = bundles(
+        player.bundles_sent,
+        player.client_context,
+        &mut player.slots,
+        groups,
+    )?;
+    player.bundles_sent = player.bundles_sent.saturating_add(envelopes.len() as u64);
+    Ok(envelopes)
+}
+
+/// One replication message to `connection` for each bundle of `envelopes`.
+fn replication_outgoing(
+    connection: &ConnectionRef,
+    reliable: bool,
+    envelopes: Vec<Vec<u8>>,
+) -> impl Iterator<Item = Outgoing> + '_ {
+    envelopes.into_iter().map(move |bundle| Outgoing {
+        connection: connection.clone(),
+        channel: REPLICATION_CHANNEL,
+        reliable,
+        envelopes: vec![bundle],
+    })
 }
 
 /// The offer that hands `player` to another sim, with its run of its open-world `quest`.
@@ -10676,6 +10727,223 @@ mod tests {
             )),
             "facing the camera's back"
         );
+    }
+
+    /// Player 1 of `world` sends input record `counter` at `input_at`, between two ticks, and its
+    /// viewers get its new state at once ([`SimWorld::states_now`]).
+    fn input_between_ticks(world: &mut SimWorld, counter: u16, input_at: u64) -> Vec<Outgoing> {
+        const VIEW: LookDir = LookDir {
+            yaw: 0.5,
+            pitch: 0.2,
+        };
+        let a = connection(1);
+        let entity = world.by_connection[&a];
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let record = camera_record(counter, at, VIEW, [0.0; 2], STANDING_SLOTS);
+        let _ = world.move_from_input(&a, &[record], input_at);
+        world.states_now(input_at, SERVER_TIME).expect("states")
+    }
+
+    /// The low byte of the state numbers of player 1 that `who` got among `outgoing`.
+    fn remote_ids(world: &SimWorld, outgoing: &[Outgoing], who: &ConnectionRef) -> Vec<u8> {
+        /// The ALC child of the low byte of the state number.
+        const ID_REL: usize = 0;
+        alc_children(&states_of(world, outgoing, who, 1))
+            .into_iter()
+            .filter(|(child, _)| *child == ID_REL)
+            .map(|(_, bytes)| bytes[0])
+            .collect()
+    }
+
+    /// The entity of every group that `who` got among `outgoing`.
+    fn entities_in_groups(
+        world: &SimWorld,
+        outgoing: &[Outgoing],
+        who: &ConnectionRef,
+    ) -> Vec<u64> {
+        outgoing
+            .iter()
+            .filter(|out| out.connection == *who && out.channel == REPLICATION_CHANNEL)
+            .flat_map(|out| &out.envelopes)
+            .flat_map(|bytes| groups_in(world, who, &bundle_in(bytes)))
+            .map(|(number, _)| number)
+            .collect()
+    }
+
+    /// Retail timing study 2026-11-18: the first state of a new number reached a viewer 12 ms
+    /// (median) after the player's own record; ours waited for the next tick.
+    #[test]
+    fn a_new_state_goes_to_the_viewers_as_its_input_comes() {
+        const COUNTER: u16 = 40;
+        let mut world = two_players();
+        tick(&mut world, NOW + 33);
+        let outgoing = input_between_ticks(&mut world, COUNTER, NOW + 40);
+        let [_, low] = own_state_counter(COUNTER).to_be_bytes();
+        assert_eq!(
+            remote_ids(&world, &outgoing, &connection(2)),
+            vec![low],
+            "the new state, before the tick"
+        );
+        assert!(
+            states_of(&world, &outgoing, &connection(1), 1).is_empty(),
+            "the own state waits for the tick"
+        );
+        // The own state of the tick carries the same number, and the tick steps it no more.
+        let next = tick(&mut world, NOW + 66);
+        let own: Vec<u8> = alc_children(&states_of(&world, &next.messages, &connection(1), 1))
+            .into_iter()
+            .filter(|(child, _)| *child == 0)
+            .map(|(_, bytes)| bytes[0])
+            .collect();
+        assert_eq!(own, vec![low], "the own state's number");
+        assert_eq!(
+            remote_ids(&world, &next.messages, &connection(2)),
+            vec![low],
+            "the tick sends it again"
+        );
+        assert!(
+            input_between_ticks(&mut world, COUNTER, NOW + 70).is_empty(),
+            "an old record is no new state"
+        );
+    }
+
+    #[test]
+    fn a_new_state_goes_once_more_after_the_repeat_time() {
+        const COUNTER: u16 = 41;
+        const INPUT_AT: u64 = NOW + 40;
+        let mut world = two_players();
+        tick(&mut world, NOW + 33);
+        let first = input_between_ticks(&mut world, COUNTER, INPUT_AT);
+        let ids = remote_ids(&world, &first, &connection(2));
+        assert_eq!(ids.len(), 1);
+        assert!(
+            world
+                .repeat_states(INPUT_AT + remote_now::STATE_REPEAT_MS - 1)
+                .expect("repeat")
+                .is_empty(),
+            "not yet"
+        );
+        let again = world
+            .repeat_states(INPUT_AT + remote_now::STATE_REPEAT_MS)
+            .expect("repeat");
+        assert_eq!(
+            remote_ids(&world, &again, &connection(2)),
+            ids,
+            "the same state once more"
+        );
+        assert!(
+            world
+                .repeat_states(INPUT_AT + 2 * remote_now::STATE_REPEAT_MS)
+                .expect("repeat")
+                .is_empty(),
+            "once"
+        );
+        // A tick before the repeat time sends the state again itself.
+        let _ = input_between_ticks(&mut world, COUNTER + 1, NOW + 60);
+        tick(&mut world, NOW + 66);
+        assert!(
+            world
+                .repeat_states(NOW + 60 + remote_now::STATE_REPEAT_MS)
+                .expect("repeat")
+                .is_empty(),
+            "the tick sent it"
+        );
+    }
+
+    #[test]
+    fn between_ticks_only_the_players_states_go() {
+        const MOB_X: f32 = CELL_M / 2.0;
+        const COUNTER: u16 = 42;
+        const INPUT_AT: u64 = NOW + 40;
+        let mob = crate::mobs::mob_entity(0);
+        let b = connection(2);
+        let mut world = world_with_spawns(vec![test_spawn(MOB_X)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, MOB_X + 2.0);
+        join(&mut world, 2, MOB_X + 4.0);
+        tick(&mut world, NOW);
+        let ticked = tick(&mut world, NOW + 33);
+        assert!(
+            entities_in_groups(&world, &ticked.messages, &b).contains(&mob),
+            "the tick sends the mob"
+        );
+        let first = input_between_ticks(&mut world, COUNTER, INPUT_AT);
+        let again = world
+            .repeat_states(INPUT_AT + remote_now::STATE_REPEAT_MS)
+            .expect("repeat");
+        for outgoing in [&first, &again] {
+            assert!(!outgoing.is_empty(), "the player's state goes");
+            let seen = entities_in_groups(&world, outgoing, &b);
+            assert!(
+                outgoing.iter().all(|out| out.connection == b)
+                    && !seen.is_empty()
+                    && seen.iter().all(|number| *number == 1),
+                "the player alone: {seen:?}"
+            );
+        }
+    }
+
+    /// The per-tick budget of remote states ([`replica::REMOTE_GROUPS_PER_TICK`]) holds for the
+    /// states sent between ticks and the tick together.
+    #[test]
+    fn states_between_ticks_and_the_tick_share_the_budget() {
+        const CROWD: u64 = 40;
+        let mut world = world_of("sim-a", settings(MANY, CROWD as u32));
+        for number in 1..=CROWD {
+            #[allow(clippy::cast_precision_loss, reason = "a small crowd")]
+            join(&mut world, number, number as f32 * 0.2);
+        }
+        tick(&mut world, NOW);
+        tick(&mut world, NOW + 33);
+        let viewer = connection(1);
+        let others_of = |world: &SimWorld, outgoing: &[Outgoing]| {
+            entities_in_groups(world, outgoing, &viewer)
+                .into_iter()
+                .filter(|number| *number != 1)
+                .count()
+        };
+        // Each of the crowd moves on to a new state between two ticks, twice: the first time
+        // its slayer state starts (a change, which always goes), the second time nothing
+        // changes.
+        for (round, input_at) in [(1_u16, NOW + 40), (2, NOW + 73)] {
+            let mut between = Vec::new();
+            for number in 2..=CROWD {
+                let who = connection(number);
+                let entity = world.by_connection[&who];
+                let at = world
+                    .world
+                    .get::<Body>(entity)
+                    .expect("body")
+                    .motion
+                    .position();
+                let view = LookDir {
+                    yaw: 0.0,
+                    pitch: 0.0,
+                };
+                let record = camera_record(round, at, view, [0.0; 2], STANDING_SLOTS);
+                let _ = world.move_from_input(&who, &[record], input_at);
+            }
+            between.extend(world.states_now(input_at, SERVER_TIME).expect("states"));
+            between.extend(
+                world
+                    .repeat_states(input_at + remote_now::STATE_REPEAT_MS)
+                    .expect("repeat"),
+            );
+            let ticked = tick(&mut world, input_at + 26).messages;
+            if round == 2 {
+                let sent = others_of(&world, &between) + others_of(&world, &ticked);
+                assert!(
+                    sent <= replica::REMOTE_GROUPS_PER_TICK,
+                    "{sent} remote states in one tick"
+                );
+                assert!(others_of(&world, &between) > 0, "some went between ticks");
+            }
+        }
     }
 
     #[test]

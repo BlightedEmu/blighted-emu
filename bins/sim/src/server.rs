@@ -753,6 +753,24 @@ impl Loop {
             }
             self.input(input);
         }
+        // The players' new states go to the players who see them now, not with the next tick.
+        let states = self.world.states_now(self.now_ms(), server_time());
+        self.send_between_ticks(states);
+    }
+
+    /// Sends the players' states made between ticks ([`SimWorld::states_now`],
+    /// [`SimWorld::repeat_states`]) with the gateway outputs that wait, at once.
+    fn send_between_ticks(&mut self, states: Result<Vec<Outgoing>, nw_messages::MessageError>) {
+        match states {
+            Ok(states) if states.is_empty() => {}
+            Ok(states) => {
+                for message in states {
+                    self.send(message);
+                }
+                self.flush_outputs();
+            }
+            Err(error) => tracing::error!(%error, "states between ticks failed"),
+        }
     }
 
     /// A client message or a departure. Those of a handed-off connection go on to its new sim.
@@ -1675,6 +1693,8 @@ impl Loop {
         let now_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
         let due = clock.due(now_us);
         if due.count == 0 {
+            let repeats = self.world.repeat_states(now_ms);
+            self.send_between_ticks(repeats);
             return;
         }
         let missed = due.count - 1;
@@ -1955,8 +1975,8 @@ impl Loop {
             .push(message);
     }
 
-    /// Sends the waiting gateway outputs and forwarded inputs, one batch per receiver.
-    fn flush(&mut self) {
+    /// Sends the waiting gateway outputs, one batch per gateway.
+    fn flush_outputs(&mut self) {
         for (gateway, outputs) in std::mem::take(&mut self.pending_outputs) {
             let subject = subject::gateway_output(self.settings.world_id, &gateway);
             for outputs in split_batches(outputs, GatewayOutput::size_bytes) {
@@ -1969,6 +1989,11 @@ impl Loop {
                 }
             }
         }
+    }
+
+    /// Sends the waiting gateway outputs and forwarded inputs, one batch per receiver.
+    fn flush(&mut self) {
+        self.flush_outputs();
         let vitals = self.world.social_vitals();
         self.pending_social.extend(vitals);
         let inputs = self.world.take_social_inputs();
