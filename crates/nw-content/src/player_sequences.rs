@@ -104,6 +104,41 @@ impl SlotsChange {
     }
 }
 
+/// The upper-body sequences of the right-click's block or aim on one kind of legs: the
+/// second-slot sequence it starts with, and the one it holds after its start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AltLegs {
+    /// The second-slot sequence of a block or aim that starts on these legs (`16=37` or `16=36`
+    /// with `18=<start>`).
+    pub start: u64,
+    /// The second-slot sequence it holds after its start, and that a change to these legs
+    /// sends while it is held (`18=<hold>` alone).
+    pub hold: u64,
+}
+
+/// The upper body of the right-click's block or aim by legs: retail plays a start then a hold,
+/// and for most blocks one pair while it walks and another while it stands (Observed in 1,195
+/// retail ledgers, block sequence study 2026-11-18: the spear blocks walking with 3044 then
+/// 4380 and standing with 4998 then 5016, a leg change sending the new legs' hold; the rifle
+/// aims with 3544 then 4249 on both legs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AltHold {
+    /// While it walks (the walk of [`AltMoves::moving`]).
+    pub walk: AltLegs,
+    /// While it stands (the stand of [`AltMoves::idle`]).
+    pub stand: AltLegs,
+    /// Milliseconds from its start to its hold (the median of the retail starts that kept
+    /// their legs).
+    pub hold_after_ms: u64,
+}
+
+impl AltHold {
+    /// The upper body on walking (`walking`) or standing legs.
+    pub const fn legs(&self, walking: bool) -> AltLegs {
+        if walking { self.walk } else { self.stand }
+    }
+}
+
 /// The first-slot movement states while the right-click is held (block or aim walk).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AltMoves {
@@ -310,6 +345,9 @@ pub struct StanceSequences {
     /// The movement states while it is held.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_moves: Option<AltMoves>,
+    /// The upper body of the right-click's block or aim by legs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_hold: Option<AltHold>,
     /// The movement sequences of the weapon drawn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drawn_moves: Option<DrawnMoves>,

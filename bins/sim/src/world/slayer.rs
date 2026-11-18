@@ -69,6 +69,8 @@ const CAST_END_STATE: u64 = 45;
 const DODGE_STATE: u64 = 7;
 const JUMP_STATE: u64 = 14;
 const ATTACK_PRESS_STATE: u64 = 10;
+/// Milliseconds per second.
+const MS_PER_S: f32 = 1_000.0;
 
 /// The slayer states the server starts for the player's own movement with the weapon sheathed,
 /// with the sequence each transition took most often in the retail newchar capture (the server's
@@ -399,6 +401,20 @@ impl MoveSet {
     }
 }
 
+/// A block or aim that plays its upper body by legs
+/// ([`AltHold`](nw_content::player_sequences::AltHold)).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AltPlay {
+    /// It plays on walking legs.
+    walking: bool,
+    /// Seconds of input records since its start or its last start of new legs.
+    since_s: f32,
+    /// It reached its hold.
+    holding: bool,
+    /// The second-slot sequence it plays.
+    sequence: u64,
+}
+
 /// Where the player's own movement is, for its movement slayer states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Locomotion {
@@ -719,6 +735,8 @@ pub(super) struct SlayerTrack {
     /// A dodge, a jump or an attack ended the block while the right-click stayed held:
     /// it starts again with the next move ([`SlayerTrack::break_alt`]).
     alt_broken: bool,
+    /// The block or aim that plays its upper body by legs, when one does.
+    alt_play: Option<AltPlay>,
     dodge_held: bool,
     jump_held: bool,
     drawn: bool,
@@ -954,6 +972,7 @@ impl SlayerTrack {
                 .map(Pending::Sequence)
         });
         self.break_alt(started, stance, alt, record.counter);
+        self.alt_hold_step(stance, record.frame_s, record.counter);
         if let Some(input) = record.action {
             // The attack the client named runs now: a release or a hold follows it.
             self.running = Some((first_slot(input.sequence), record.counter));
@@ -975,6 +994,77 @@ impl SlayerTrack {
             if !matches!(started, Pending::Client(_)) {
                 self.follow_up = None;
             }
+        }
+    }
+
+    /// The right-click's start of `stance`: for a block or aim with its upper body by legs
+    /// ([`AltHold`]), the start of the legs it plays on now, whose hold follows
+    /// ([`SlayerTrack::alt_hold_step`]).
+    ///
+    /// [`AltHold`]: nw_content::player_sequences::AltHold
+    fn start_alt(&mut self, stance: &StanceSequences) -> Option<SlotsChange> {
+        let start = stance.alt_start?;
+        let Some(hold) = stance.alt_hold else {
+            return Some(start);
+        };
+        let walking = self.locomotion == Locomotion::Moving;
+        let sequence = hold.legs(walking).start;
+        self.alt_play = Some(AltPlay {
+            walking,
+            since_s: 0.0,
+            holding: false,
+            sequence,
+        });
+        Some(SlotsChange {
+            second_sequence: Some(sequence),
+            ..start
+        })
+    }
+
+    /// The upper body of the block or aim that plays, after record `counter` of `frame_s`: its
+    /// hold [`AltHold::hold_after_ms`] after its start, and at a change between walking and
+    /// standing the new legs' hold (their start while the first has not reached its hold:
+    /// retail went to the new legs' start in 78 and 110 of such early changes of the spear's
+    /// block, to their hold in 63 and 79). Each sends child 18 alone, and only a sequence the
+    /// second slot does not play already (the rifle's aim is the same on both legs).
+    ///
+    /// [`AltHold::hold_after_ms`]: nw_content::player_sequences::AltHold::hold_after_ms
+    fn alt_hold_step(&mut self, stance: Option<&StanceSequences>, frame_s: f32, counter: u16) {
+        let Some(hold) = stance.and_then(|stance| stance.alt_hold) else {
+            return;
+        };
+        let walking = self.locomotion == Locomotion::Moving;
+        let Some(play) = self.alt_play.as_mut() else {
+            return;
+        };
+        let legs = hold.legs(walking);
+        let wanted = if walking == play.walking {
+            play.since_s += frame_s;
+            #[allow(clippy::cast_precision_loss, reason = "a hold time of milliseconds")]
+            let hold_after_s = hold.hold_after_ms as f32 / MS_PER_S;
+            if play.since_s >= hold_after_s {
+                play.holding = true;
+            }
+            if play.holding { legs.hold } else { legs.start }
+        } else {
+            play.walking = walking;
+            if play.holding {
+                legs.hold
+            } else {
+                play.since_s = 0.0;
+                legs.start
+            }
+        };
+        if wanted == play.sequence {
+            return;
+        }
+        play.sequence = wanted;
+        let change = SlotsChange {
+            second_sequence: Some(wanted),
+            ..SlotsChange::default()
+        };
+        if let Some(slots) = slots_of(change, counter) {
+            self.upper = Some(merge(self.upper.unwrap_or_default(), slots));
         }
     }
 
@@ -1015,12 +1105,15 @@ impl SlayerTrack {
             Some(started) if blocks && self.alt_held && breaks(started) => {
                 self.alt_held = false;
                 self.alt_broken = true;
+                self.alt_play = None;
                 stance.and_then(alt_end)
             }
             Some(started) if self.alt_broken && moves(started) => {
                 self.alt_broken = false;
                 self.alt_held = alt;
-                stance.and_then(|stance| stance.alt_start).filter(|_| alt)
+                stance
+                    .filter(|_| alt)
+                    .and_then(|stance| self.start_alt(stance))
             }
             _ => None,
         };
@@ -1333,8 +1426,11 @@ impl SlayerTrack {
             return slots_of(second(DRAW_STATE, sequence), record.counter);
         }
         let stance = stance?;
+        if !alt && record.intent.is_some() {
+            self.alt_play = None;
+        }
         let change = (if alt && !was_alt {
-            stance.alt_start
+            self.start_alt(stance)
         } else if !alt && was_alt && record.intent.is_some() {
             alt_end(stance)
         } else if drawn && (!was_drawn || was_stance != self.drawn_stance) {
@@ -2139,7 +2235,8 @@ fn merge(older: UpperSlots, newer: UpperSlots) -> UpperSlots {
 pub(crate) mod tests {
     use nw_content::player_attacks::stance_key;
     use nw_content::player_sequences::{
-        AltMoves, AttackHold, AttackStep, Directional, DrawnMoves, FollowUp, Landing, SlotsChange,
+        AltHold, AltLegs, AltMoves, AttackHold, AttackStep, Directional, DrawnMoves, FollowUp,
+        Landing, SlotsChange,
     };
 
     use super::*;
@@ -2931,6 +3028,34 @@ pub(crate) mod tests {
         );
     }
 
+    /// Live 2026-11-18: a rapier's block stood on the ice gauntlet's stand (31/3987, never sent
+    /// with a rapier in 1,195 retail ledgers; others stood on 31/1249 in 1,185 cases) and a
+    /// spear's standing block played the walking block's start.
+    #[test]
+    fn the_mined_table_blocks_the_rapier_and_the_spear_as_retail() {
+        const RAPIER: &str = "1H_Melee,Rapier";
+        const SPEAR: &str = "2H_Melee,Spear,Throwable";
+        const RAPIER_STAND: StatePlay = StatePlay {
+            state: 31,
+            sequence: 1249,
+        };
+        let table = crate::combat::test_support::test_player_sequences();
+        let stance = |tags: &str| table.stance(stance_key(tags)).expect("stance");
+        let rapier = stance(RAPIER);
+        assert_eq!(
+            rapier.alt_moves.and_then(|moves| moves.idle),
+            Some(RAPIER_STAND)
+        );
+        let rapier_hold = rapier.alt_hold.expect("the rapier's block hold");
+        assert_eq!(
+            (rapier_hold.stand.start, rapier_hold.stand.hold),
+            (4099, 1049)
+        );
+        let spear_hold = stance(SPEAR).alt_hold.expect("the spear's block hold");
+        assert_eq!(spear_hold.walk, WALK_BLOCK);
+        assert_eq!(spear_hold.stand, STAND_BLOCK);
+    }
+
     /// Live 2026-11-17: a medium-gear spear player's hop showed as the light roll to the others.
     #[test]
     fn a_dodge_plays_the_player_s_gear_load() {
@@ -3192,6 +3317,161 @@ pub(crate) mod tests {
             ..StanceSequences::default()
         };
         assert_eq!(alt_end(&aim), aim.alt_end, "no second slot to end");
+    }
+
+    /// The spear's block upper body by legs (block sequence study 2026-11-18).
+    const WALK_BLOCK: AltLegs = AltLegs {
+        start: 3044,
+        hold: 4380,
+    };
+    const STAND_BLOCK: AltLegs = AltLegs {
+        start: 4998,
+        hold: 5016,
+    };
+    const BLOCK_HOLD_AFTER_MS: u64 = 83;
+    /// The block's second-slot state (`16=37`).
+    const BLOCK_STATE: u64 = 37;
+    const BLOCK_STAND: StatePlay = StatePlay {
+        state: 31,
+        sequence: 636,
+    };
+
+    /// The great sword stance of [`table`] with the spear's block upper body by legs.
+    fn alt_hold_table() -> PlayerSequences {
+        PlayerSequences::of_parts(
+            vec![StanceSequences {
+                alt_start: Some(SlotsChange {
+                    second_state: Some(BLOCK_STATE),
+                    second_sequence: Some(BLOCK_SEQUENCE),
+                    ..SlotsChange::default()
+                }),
+                alt_moves: Some(AltMoves {
+                    moving: Some(BLOCK_WALK),
+                    idle: Some(BLOCK_STAND),
+                }),
+                alt_hold: Some(AltHold {
+                    walk: WALK_BLOCK,
+                    stand: STAND_BLOCK,
+                    hold_after_ms: BLOCK_HOLD_AFTER_MS,
+                }),
+                ..greatsword_attacks()
+            }],
+            Vec::new(),
+        )
+    }
+
+    /// The second-slot sequences the own states carry while `track` reads `records` (counter and
+    /// keys, the weapon of `tags` drawn), one own state after each record, without repeats.
+    fn alt_sequences(
+        track: &mut SlayerTrack,
+        table: &PlayerSequences,
+        tags: &str,
+        records: &[(u16, Intent)],
+    ) -> Vec<u64> {
+        let mut seen: Vec<u64> = Vec::new();
+        for (counter, intent) in records {
+            track.record(keyed(*counter, *intent, HELD, tags), table);
+            let sequence = own_state(track, *counter)
+                .slots
+                .and_then(|slots| slots.second.sequence);
+            if let Some(sequence) = sequence.filter(|sequence| seen.last() != Some(sequence)) {
+                seen.push(sequence);
+            }
+        }
+        seen
+    }
+
+    /// Retail (1,195 ledgers): the spear's block standing starts with 4998 and holds 5016 from
+    /// about 83 ms on; walking it starts with 3044 and holds 4380. Live 2026-11-18: ours sent
+    /// the walk's start for every block, and the other player saw a standing block shake. A
+    /// controller's stick reaches the track as forward keys ([`Intent::toward_stick`]).
+    #[test]
+    fn a_block_plays_its_start_then_its_hold_for_the_legs_it_stands_or_walks_on() {
+        let table = alt_hold_table();
+        let block = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let mut standing = spawned();
+        let records: Vec<(u16, Intent)> = (20..=24).map(|counter| (counter, block)).collect();
+        assert_eq!(
+            alt_sequences(&mut standing, &table, GREATSWORD, &records),
+            [STAND_BLOCK.start, STAND_BLOCK.hold],
+            "standing"
+        );
+        let walk = Intent {
+            forward: 1,
+            ..Intent::default()
+        };
+        let mut walking = spawned();
+        let walk_block = Intent {
+            block: true,
+            ..walk
+        };
+        let records: Vec<(u16, Intent)> = std::iter::once((10, walk))
+            .chain((11..=15).map(|counter| (counter, walk_block)))
+            .collect();
+        assert_eq!(
+            alt_sequences(&mut walking, &table, GREATSWORD, &records),
+            [WALK_BLOCK.start, WALK_BLOCK.hold],
+            "walking"
+        );
+    }
+
+    /// Retail: a leg change in a held block sends the new legs' hold (spear: 4380 to 5016 at
+    /// a stop, 877 cases; 5016 to 4380 at a move, 1,076).
+    #[test]
+    fn a_held_block_takes_the_new_legs_hold_when_it_stops_or_walks() {
+        let table = alt_hold_table();
+        let block = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let walk_block = Intent {
+            forward: 1,
+            ..block
+        };
+        let mut track = spawned();
+        let records: Vec<(u16, Intent)> = (20..=30)
+            .map(|counter| {
+                let stopped = (25..=27).contains(&counter);
+                (counter, if stopped { block } else { walk_block })
+            })
+            .collect();
+        let seen = alt_sequences(&mut track, &table, GREATSWORD, &records);
+        assert_eq!(
+            seen.iter().rev().take(2).copied().collect::<Vec<_>>(),
+            [WALK_BLOCK.hold, STAND_BLOCK.hold],
+            "stand hold, then walk hold: {seen:?}"
+        );
+    }
+
+    /// Retail (1,195 ledgers): the rifle's aim raises with 3544 and holds 4249 from about 215 ms
+    /// on, on walking and standing legs alike. Live 2026-11-18: ours sent the raise alone, and
+    /// the other player saw no aim. A stop in the aim sends nothing new.
+    #[test]
+    fn a_rifle_aim_raises_then_holds_and_a_stop_restarts_nothing() {
+        const RIFLE: &str = "2H_Ranged,Rifle";
+        const RAISE: u64 = 3544;
+        const AIM_HOLD: u64 = 4249;
+        let table = crate::combat::test_support::test_player_sequences();
+        let aim_walk = Intent {
+            block: true,
+            forward: 1,
+            ..Intent::default()
+        };
+        let aim_still = Intent {
+            forward: 0,
+            ..aim_walk
+        };
+        let mut track = spawned();
+        let records: Vec<(u16, Intent)> = (40..=60)
+            .map(|counter| (counter, if counter < 52 { aim_walk } else { aim_still }))
+            .collect();
+        assert_eq!(
+            alt_sequences(&mut track, &table, RIFLE, &records),
+            [RAISE, AIM_HOLD]
+        );
     }
 
     /// Retail: a dodge during a held block carries the block's end (`16=45 18=00`) in its own
