@@ -64,6 +64,11 @@ const DRAW_STATE: u64 = sheathe::STATE;
 /// The second slot's state at the end of a cast (Observed: `16=45 18=0 48=0`), of a hit
 /// reaction ([`reaction`]) and of the right-click's block or aim ([`alt_end`]).
 const CAST_END_STATE: u64 = 45;
+/// The first-slot states of a dodge, a jump and an attack's press start (the table's `dodge`,
+/// `jump` and `press` plays).
+const DODGE_STATE: u64 = 7;
+const JUMP_STATE: u64 = 14;
+const ATTACK_PRESS_STATE: u64 = 10;
 
 /// The slayer states the server starts for the player's own movement with the weapon sheathed,
 /// with the sequence each transition took most often in the retail newchar capture (the server's
@@ -711,6 +716,9 @@ pub(super) struct SlayerTrack {
     reload_due: bool,
     /// The previous record's keys: right-click, dodge, jump; and whether the weapon was drawn.
     alt_held: bool,
+    /// A dodge, a jump or an attack ended the block while the right-click stayed held:
+    /// it starts again with the next move ([`SlayerTrack::break_alt`]).
+    alt_broken: bool,
     dodge_held: bool,
     jump_held: bool,
     drawn: bool,
@@ -945,6 +953,7 @@ impl SlayerTrack {
                 .filter(|_| !ability_holds)
                 .map(Pending::Sequence)
         });
+        self.break_alt(started, stance, alt, record.counter);
         if let Some(input) = record.action {
             // The attack the client named runs now: a release or a hold follows it.
             self.running = Some((first_slot(input.sequence), record.counter));
@@ -966,6 +975,57 @@ impl SlayerTrack {
             if !matches!(started, Pending::Client(_)) {
                 self.follow_up = None;
             }
+        }
+    }
+
+    /// Ends the block that plays when `started` (in record `counter`) is a dodge, a jump or an
+    /// attack, in the same state; with the right-click still held (`alt`), starts it again
+    /// with the next move or stand. Observed in 400 retail ledgers: 986 of 986 dodges, 7 of 7
+    /// jumps and 119 of 123 attacks that started during a held block carried the block's end
+    /// (`16=45 18=00`); with the block still held it started again with the move after the
+    /// dodge (12 cases, 0.45 to 0.63 s after the dodge's start). Ours kept the block, and the
+    /// other players saw no roll under its pose (live 2026-11-18).
+    fn break_alt(
+        &mut self,
+        started: Option<Pending>,
+        stance: Option<&StanceSequences>,
+        alt: bool,
+        counter: u16,
+    ) {
+        let breaks = |started: Pending| match started {
+            Pending::State(state, _) => state == DODGE_STATE || state == JUMP_STATE,
+            Pending::Client(input) => {
+                [DODGE_STATE, JUMP_STATE, ATTACK_PRESS_STATE].contains(&u64::from(input.state))
+            }
+            Pending::Attack(_) | Pending::Press(..) => true,
+            Pending::Sequence(_) | Pending::Ability(_) => false,
+        };
+        let moves = |started: Pending| {
+            matches!(started, Pending::State(state, _) if [
+                movement::START_STATE,
+                movement::MOVE_STATE,
+                movement::IDLE_STATE,
+            ]
+            .contains(&state))
+        };
+        // Only a block: the retail counts were of block starts (`16=37`); an aim's shots and
+        // dodges were not counted, and an aimed shot plays inside its aim.
+        let blocks = stance.is_some_and(|stance| stance.alt_fire.is_none());
+        let change = match started {
+            Some(started) if blocks && self.alt_held && breaks(started) => {
+                self.alt_held = false;
+                self.alt_broken = true;
+                stance.and_then(alt_end)
+            }
+            Some(started) if self.alt_broken && moves(started) => {
+                self.alt_broken = false;
+                self.alt_held = alt;
+                stance.and_then(|stance| stance.alt_start).filter(|_| alt)
+            }
+            _ => None,
+        };
+        if let Some(slots) = change.and_then(|change| slots_of(change, counter)) {
+            self.upper = Some(merge(self.upper.unwrap_or_default(), slots));
         }
     }
 
@@ -1241,7 +1301,12 @@ impl SlayerTrack {
         stance: Option<&StanceSequences>,
         drawn: bool,
     ) -> Option<UpperSlots> {
-        let alt = drawn && record.intent.is_some_and(|intent| intent.block);
+        let held = drawn && record.intent.is_some_and(|intent| intent.block);
+        if !held {
+            // Let go during the action that ended it: nothing to start again.
+            self.alt_broken = false;
+        }
+        let alt = held && !self.alt_broken;
         let was_alt = self.alt_held;
         let was_drawn = self.drawn;
         let was_stance = self.drawn_stance;
@@ -3127,6 +3192,88 @@ pub(crate) mod tests {
             ..StanceSequences::default()
         };
         assert_eq!(alt_end(&aim), aim.alt_end, "no second slot to end");
+    }
+
+    /// Retail: a dodge during a held block carries the block's end (`16=45 18=00`) in its own
+    /// state (986 of 986), and the block starts again with the move after it while the
+    /// right-click stays held. Live 2026-11-18: ours kept the block over a back roll, and the
+    /// other player saw no roll.
+    #[test]
+    fn a_dodge_ends_the_block_and_the_held_block_starts_again_with_the_next_move() {
+        let table = table();
+        let block = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let dodge_back = Intent {
+            dodge: true,
+            forward: -1,
+            ..block
+        };
+        let mut track = spawned();
+        track.record(keyed(20, block, HELD, GREATSWORD), &table);
+        let start = own_state(&mut track, 20).slots.expect("the block");
+        assert_eq!(start.second.sequence, Some(BLOCK_SEQUENCE));
+        own_state(&mut track, 20);
+        track.record(keyed(21, dodge_back, HELD, GREATSWORD), &table);
+        let due = own_state(&mut track, 21);
+        assert_eq!(
+            due.state.map(|state| (state.state, state.sequence)),
+            Some((Some(DODGE_BACK.state), DODGE_BACK.sequence)),
+            "the roll"
+        );
+        let end = due.slots.expect("the block's end with the roll");
+        assert_eq!(end.second.state, Some(CAST_END_STATE));
+        assert_eq!(end.second.sequence, Some(CLEARED_SLOT));
+        own_state(&mut track, 21);
+        let held_still = Intent {
+            forward: -1,
+            ..block
+        };
+        track.record(keyed(22, held_still, HELD, GREATSWORD), &table);
+        assert_eq!(
+            own_state(&mut track, 22).slots,
+            None,
+            "no block over the roll"
+        );
+        own_state(&mut track, 22);
+        track.record(keyed(23, block, HELD, GREATSWORD), &table);
+        let again = own_state(&mut track, 23).slots.expect("the block again");
+        assert_eq!(again.second.sequence, Some(BLOCK_SEQUENCE));
+    }
+
+    #[test]
+    fn a_block_let_go_during_its_dodge_does_not_start_again() {
+        let table = table();
+        let block = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let mut track = spawned();
+        track.record(keyed(20, block, HELD, GREATSWORD), &table);
+        own_state(&mut track, 20);
+        own_state(&mut track, 20);
+        let dodge_back = Intent {
+            dodge: true,
+            forward: -1,
+            ..block
+        };
+        track.record(keyed(21, dodge_back, HELD, GREATSWORD), &table);
+        own_state(&mut track, 21);
+        own_state(&mut track, 21);
+        let back = Intent {
+            forward: -1,
+            ..Intent::default()
+        };
+        track.record(keyed(22, back, HELD, GREATSWORD), &table);
+        own_state(&mut track, 22);
+        own_state(&mut track, 22);
+        track.record(keyed(23, Intent::default(), HELD, GREATSWORD), &table);
+        let after = own_state(&mut track, 23).slots;
+        assert!(
+            after.is_none_or(|slots| slots.second.sequence != Some(BLOCK_SEQUENCE)),
+            "no block: {after:?}"
+        );
     }
 
     /// Live 2026-11-18: a block press with the weapon sheathed showed the other players nothing.
