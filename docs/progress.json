@@ -643,15 +643,19 @@
               "proof": "tests"
             },
             {
-              "check": "A player's new state goes to the players who see it as its input comes, and once more 16 ms later (tests only, 2026-11-18), as retail's 16 ms cadence; only players' states go between ticks, within the same budget.",
+              "check": "Other players' states go on a steady beat (tests only, 2026-11-18): at each tick and half a tick later, about 16.7 ms apart, as retail's 12 to 16 ms. The viewer's client sets its delay for another player from the gaps between arrivals; sending at each input put a third of the gaps under 8 ms.",
               "proof": "tests"
             },
             {
-              "check": "A drawn block that shakes for the other player: the body does not move and the block states do not flip in the log; cause Unknown. A trace of what the viewer's client plays is ready, not run.",
-              "proof": "none"
+              "check": "A block and an aim play their upper body as retail (tests only, 2026-11-18): a start then a hold, and for most melee blocks one pair walking and another standing (spear 3044 then 4380 walking, 4998 then 5016 standing; rifle aim 3544 then 4249), mined from 1,195 retail ledgers. Ours sent the walking block's start for every block and the rifle's raise alone. The rapier's block stand is 31/1249, not the ice gauntlet's 31/3987.",
+              "proof": "tests"
             },
             {
               "check": "Melee swings that miss a mob the player stands close to on its own screen: the body comes from the camera and can be 1.3 to 1.7 m off while swinging (90th percentile, retail replay); cause of the live boar misses Inferred, not fixed.",
+              "proof": "none"
+            },
+            {
+              "check": "After a shot, a gun or a bow goes back to its aim in retail with its own marker (blunderbuss 4248 with marker 40 about 0.7 s after the shot); ours sends nothing after the shot. Not built.",
               "proof": "none"
             }
           ]
@@ -3645,7 +3649,7 @@
     }
   ],
   "nextSteps": [
-    "**Other players: live check of the sixth round (2026-11-18, tests only).** Both players, keyboard and controller: a block with the weapon sheathed, a dodge out of a held block (back roll), a musket and a bow aim (the body must stay in place), and how fast moves, jumps and dodges show.\n\nStill open: the drawn block shake (cause Unknown; run the viewer trace on the PC); melee misses from the camera body (1.3 to 1.7 m at the 90th percentile while swinging); children 41 to 44 for other players (Unknown effect); the 1 s late crouch (Unknown). Also open: a new realm data pack version with the re-mined player sequence table and its gear-load dodges; the medium and heavy dodges of most weapons (Unknown); the other pad keys (abilities) and a mount ridden with the stick.",
+    "**Other players: live check of the seventh round (2026-11-18, tests only).** Both players, keyboard and controller: blocks standing and walking (spear and rapier), a rifle's and a bow's aim, a run and a stop, and a melee fight with a boar (the log now holds the camera and its boom, to find why swings missed a boar the player stood behind).\n\nStill open: the boar misses (cause not proven: the server had the body 4.5 m from the boar's middle; the boar's place sent was right); a gun's or bow's return to its aim after a shot; children 41 to 44 for other players (Unknown effect); the 1 s late crouch (Unknown); a controller stick that goes to rest for one to six records shows a stop and a new start, as retail does for the same input. Also open: a new realm data pack version with the re-mined player sequence table, its gear-load dodges and the block and aim holds; the medium and heavy dodges of most weapons (Unknown); the other pad keys (abilities) and a mount ridden with the stick.",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
@@ -3968,5 +3972,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-18",
-  "lastCommit": "396ca4bd"
+  "lastCommit": "6c5c9b45"
 }
