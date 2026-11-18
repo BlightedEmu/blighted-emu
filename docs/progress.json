@@ -601,6 +601,18 @@
             {
               "check": "A dodge plays the player's gear load (tests only, 2026-11-17): the light roll, the medium hop or the heavy step, mined per load from the own player's load effects in the retail ledgers. Few medium and heavy dodges were captured per weapon: a missing one plays no weapon's dodge of the same load (Inferred), and a load with no data at all still plays the light roll (rapier, sword, flail, magic: Unknown).",
               "proof": "tests"
+            },
+            {
+              "check": "The gear load counts the armor and the shield, not the main-hand weapons (tests only, 2026-11-17): the Musketeer kit's light armor weighs 100.6 and its rapier and musket 95, the Ranger kit's medium armor 178.4 and its spear and bow 120. With the weapons the server played the medium dodge for a light-armor player and the heavy one for a medium-armor player; both clients dodged as their armor.",
+              "proof": "tests"
+            },
+            {
+              "check": "A bow's or a gun's aim sends no block (tests only, 2026-11-17): in 398 retail ledgers other players' aim starts came with the block flag in 380 of 20,372 cases, their block starts in 14,914 of 21,959. The aim itself already went out as retail's (the bow's 2225, 46/421, marker 40), but with the block flag the other player saw no aim.",
+              "proof": "tests"
+            },
+            {
+              "check": "A controller player's body follows its camera smoothly and does not float (tests only, 2026-11-17): a pad's camera body is noisy while it moves (back and forth in 7.3 % of its moving records against 1.4 % with keys, and once 3.9 m above flat ground). The body now takes a quarter of the way to the camera in a record, and a pad's move finds no floor the level lacks.",
+              "proof": "tests"
             }
           ]
         },
@@ -3593,7 +3605,7 @@
     }
   ],
   "nextSteps": [
-    "**Other players live check (2026-11-17, second round, tests only).** After the deploy: each player blocks and lets go, swings light and heavy, dodges, jumps and sheathes; the other watches. Read the sim's `input record` lines of what looks wrong.\n\n- A new realm data pack version with the re-mined player sequence table (the pack still holds the old one).\n- A pad player's held heavy attack on a boar: the hit and its reach against retail.\n- The other pad keys (abilities) and a mount ridden with the stick.",
+    "**Other players: live check of the fourth round fixes (2026-11-17, tests only).** The keyboard player and the controller player each watch the other:\n\n- Dodges: a light-armor roll and a medium-armor hop (the gear load now counts the armor and the shield, not the main-hand weapons).\n- A controller run: smooth, and never in the air.\n- A bow's and a rifle's aim (right-click).\n- A block, and light attacks (Unknown why they looked late: the server's first attack state came about 0.1 s after the press for both players, median).\n\nAlso open: a new realm data pack version with the re-mined player sequence table and its gear-load dodges; the medium and heavy dodges of most weapons (Unknown); a pad player's held heavy attack on a boar against retail; the other pad keys (abilities) and a mount ridden with the stick.",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
@@ -3678,6 +3690,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Other players, fourth live round (2026-11-17, tests only): the gear load no longer counts the main-hand weapons (light and medium armor dodged as medium and heavy), an aim no longer sends a block, and a controller player's body is smoothed and no longer floats.",
     "Other players, third live round (2026-11-17, tests only): a pad run faces its stick, a block walk stops into its stand at once, jump presses in the air start nothing, and the dodge follows the gear load. The game gateway logs the address of each cookie it sends and of each wrong cookie it refuses.",
     "Account link pop-up (2026-11-17, tests only): the client patch now turns off the shadow account check that the pop-up needs, in place of the switch's default, which did not stop it.",
     "Other players (2026-11-17, second live test): a pad's block no longer starts a heavy attack in it, a dodge or a jump no longer lifts the body into the air for the others, and the end of a stop no longer hides a held heavy attack. Tests only until the next live check.",
@@ -3914,5 +3927,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-17",
-  "lastCommit": "3fdfaf55"
+  "lastCommit": "d84f74f6"
 }
