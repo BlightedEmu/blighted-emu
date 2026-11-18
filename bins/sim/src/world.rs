@@ -36,8 +36,7 @@ use nw_messages::client_input::{
 use nw_messages::entity_ids::IdHolder;
 use nw_messages::items::{FIRST_VERSION, FullList};
 use nw_messages::paperdoll::slot::{
-    CHEST, FEET, HANDS, HEAD, LEGS, MAIN_HAND_OPTION_1, MAIN_HAND_OPTION_2, MAIN_HAND_OPTION_3,
-    OFF_HAND_OPTION_1, OFF_HAND_OPTION_3, QUICK_SLOT_1,
+    CHEST, FEET, HANDS, HEAD, LEGS, OFF_HAND_OPTION_1, OFF_HAND_OPTION_3, QUICK_SLOT_1,
 };
 use nw_messages::{
     ABILITY_COMPONENT, ATTRIBUTE_COMPONENT, Adopted, BundleGroup, BundleMember, ClientFacetMsg,
@@ -233,18 +232,18 @@ use nw_content::progression::Progression;
 use nw_messages::FRAG_TAGS_LEN;
 use nw_messages::raw_id_of_entity;
 
-/// The paperdoll slots whose items count toward the equip load: the armor and the weapons
-/// (dodge study 2026-09-20: retail's new character's dodges fit the slow class of its armor and
-/// weapons).
-const EQUIP_LOAD_SLOTS: [u32; 10] = [
+/// The paperdoll slots whose items count toward the equip load: the armor and the off hand (a
+/// shield; Inferred, no capture shows its weight counted or not). The main-hand weapons do not
+/// count (live 2026-11-17: the Musketeer kit's light armor weighs 100.6 and its rapier and musket
+/// 95, the Ranger kit's medium armor 178.4 and its spear and bow 120; both clients dodged as
+/// their armor, light and medium, and with the weapons the server played the medium and heavy
+/// dodges. The tutorial swordsman's heavy armor alone, 268.5, is slow as retail's dodges were).
+const EQUIP_LOAD_SLOTS: [u32; 7] = [
     HEAD,
     CHEST,
     HANDS,
     LEGS,
     FEET,
-    MAIN_HAND_OPTION_1,
-    MAIN_HAND_OPTION_2,
-    MAIN_HAND_OPTION_3,
     OFF_HAND_OPTION_1,
     OFF_HAND_OPTION_3,
 ];
@@ -13027,6 +13026,19 @@ mod tests {
                 bytes: [128; 4],
             },
             ..InputRecord::default()
+        }
+    }
+
+    #[test]
+    fn the_main_hand_weapons_weigh_nothing_in_the_equip_load() {
+        use nw_messages::paperdoll::slot::{
+            MAIN_HAND_OPTION_1, MAIN_HAND_OPTION_2, MAIN_HAND_OPTION_3,
+        };
+        for slot in [MAIN_HAND_OPTION_1, MAIN_HAND_OPTION_2, MAIN_HAND_OPTION_3] {
+            assert!(!EQUIP_LOAD_SLOTS.contains(&slot), "slot {slot}");
+        }
+        for slot in [HEAD, CHEST, HANDS, LEGS, FEET] {
+            assert!(EQUIP_LOAD_SLOTS.contains(&slot), "armor slot {slot}");
         }
     }
 

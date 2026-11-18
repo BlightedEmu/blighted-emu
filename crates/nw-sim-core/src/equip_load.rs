@@ -77,11 +77,22 @@ mod tests {
     }
 
     #[test]
+    fn the_live_starter_kits_armor_is_light_and_medium() {
+        // Live 2026-11-17, `WeightOverride` of the armor: the Musketeer kit's light set
+        // (15.09, 35.20, 15.09, 20.11, 15.09) and the Ranger kit's medium set (26.76, 62.44,
+        // 26.76, 35.68, 26.76). With their weapons (rapier 25 and musket 70, spear 60 and bow 60)
+        // they would be medium and heavy, which their clients did not dodge as.
+        const LIGHT_SET: f32 = 15.09 + 35.20 + 15.09 + 20.11 + 15.09;
+        const MEDIUM_SET: f32 = 26.76 + 62.44 + 26.76 + 35.68 + 26.76;
+        assert_eq!(PLAYER.category(LIGHT_SET), EquipLoad::Fast);
+        assert_eq!(PLAYER.category(MEDIUM_SET), EquipLoad::Normal);
+    }
+
+    #[test]
     fn the_tutorial_swordsman_is_slow() {
         // The Swordsman kit's heavy chest, hands, legs and feet (`WeightOverride` 110.56, 47.38,
-        // 63.17, 47.38) and the tutorial sword (`Weight` 36): 304.5, 60.9 %; retail's newchar
-        // dodges fit the slow clips.
-        const TUTORIAL_LOAD: f32 = 110.56 + 47.38 + 63.17 + 47.38 + 36.0;
+        // 63.17, 47.38): 268.5, 53.7 %; retail's newchar dodges fit the slow clips.
+        const TUTORIAL_LOAD: f32 = 110.56 + 47.38 + 63.17 + 47.38;
         assert_eq!(PLAYER.category(TUTORIAL_LOAD), EquipLoad::Slow);
     }
 }
