@@ -1152,9 +1152,6 @@ pub struct SimWorld {
     walked_floor: walked_floor::WalkedFloor,
     /// What the viewers were last sent of each player ([`replica`]).
     replica_memory: HashMap<u64, replica::ReplicaMemory>,
-    /// The players' new states sent between ticks that their viewers get once more, by player
-    /// number ([`remote_now`]).
-    state_repeats: HashMap<u64, remote_now::StateRepeat>,
     /// Where the mobs stood in the last moments: where a swing may find them.
     mob_trails: mob_trail::MobTrails,
     me: SimSlot,
@@ -1498,7 +1495,6 @@ impl SimWorld {
             deaths: Vec::new(),
             walked_floor: walked_floor::WalkedFloor::default(),
             replica_memory: HashMap::new(),
-            state_repeats: HashMap::new(),
             mob_trails: mob_trail::MobTrails::default(),
             combat_messages: Vec::new(),
             afk_removals: Vec::new(),
@@ -4733,9 +4729,8 @@ impl SimWorld {
         let own: HashSet<u64> = everyone.iter().map(|(number, _)| *number).collect();
         let mut cards: HashMap<u64, MobCard> = HashMap::new();
         // The state numbers and the actions move on to this tick: the own state and the players
-        // who see it get the same. A state that moved on between ticks is this tick's: its
-        // own state goes now, and its repeat waits no more (this tick sends it again).
-        self.state_repeats.clear();
+        // who see it get the same. A state that moved on at the half tick is this tick's: its
+        // own state goes now.
         for mut player in self.world.query::<&mut Player>().iter_mut(&mut self.world) {
             if !std::mem::take(&mut player.state_stepped) {
                 Self::step_state(&mut player, now_ms, server_time);
@@ -10736,8 +10731,8 @@ mod tests {
         );
     }
 
-    /// Player 1 of `world` sends input record `counter` at `input_at`, between two ticks, and its
-    /// viewers get its new state at once ([`SimWorld::states_now`]).
+    /// Player 1 of `world` sends input record `counter` at `input_at`, between two ticks, and the
+    /// half tick then sends its new state to its viewers ([`SimWorld::states_now`]).
     fn input_between_ticks(world: &mut SimWorld, counter: u16, input_at: u64) -> Vec<Outgoing> {
         const VIEW: LookDir = LookDir {
             yaw: 0.5,
@@ -10782,10 +10777,10 @@ mod tests {
             .collect()
     }
 
-    /// Retail timing study 2026-11-18: the first state of a new number reached a viewer 12 ms
-    /// (median) after the player's own record; ours waited for the next tick.
+    /// Retail timing study 2026-11-18: states of another player came on a 16 ms beat; ours came
+    /// once a tick.
     #[test]
-    fn a_new_state_goes_to_the_viewers_as_its_input_comes() {
+    fn a_new_state_goes_to_the_viewers_at_the_half_tick() {
         const COUNTER: u16 = 40;
         let mut world = two_players();
         tick(&mut world, NOW + 33);
@@ -10794,7 +10789,7 @@ mod tests {
         assert_eq!(
             remote_ids(&world, &outgoing, &connection(2)),
             vec![low],
-            "the new state, before the tick"
+            "the new state, at the half tick"
         );
         assert!(
             states_of(&world, &outgoing, &connection(1), 1).is_empty(),
@@ -10820,50 +10815,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_state_goes_once_more_after_the_repeat_time() {
-        const COUNTER: u16 = 41;
-        const INPUT_AT: u64 = NOW + 40;
-        let mut world = two_players();
-        tick(&mut world, NOW + 33);
-        let first = input_between_ticks(&mut world, COUNTER, INPUT_AT);
-        let ids = remote_ids(&world, &first, &connection(2));
-        assert_eq!(ids.len(), 1);
-        assert!(
-            world
-                .repeat_states(INPUT_AT + remote_now::STATE_REPEAT_MS - 1)
-                .expect("repeat")
-                .is_empty(),
-            "not yet"
-        );
-        let again = world
-            .repeat_states(INPUT_AT + remote_now::STATE_REPEAT_MS)
-            .expect("repeat");
-        assert_eq!(
-            remote_ids(&world, &again, &connection(2)),
-            ids,
-            "the same state once more"
-        );
-        assert!(
-            world
-                .repeat_states(INPUT_AT + 2 * remote_now::STATE_REPEAT_MS)
-                .expect("repeat")
-                .is_empty(),
-            "once"
-        );
-        // A tick before the repeat time sends the state again itself.
-        let _ = input_between_ticks(&mut world, COUNTER + 1, NOW + 60);
-        tick(&mut world, NOW + 66);
-        assert!(
-            world
-                .repeat_states(NOW + 60 + remote_now::STATE_REPEAT_MS)
-                .expect("repeat")
-                .is_empty(),
-            "the tick sent it"
-        );
-    }
-
-    #[test]
-    fn between_ticks_only_the_players_states_go() {
+    fn at_the_half_tick_only_the_players_states_go() {
         const MOB_X: f32 = CELL_M / 2.0;
         const COUNTER: u16 = 42;
         const INPUT_AT: u64 = NOW + 40;
@@ -10879,26 +10831,21 @@ mod tests {
             entities_in_groups(&world, &ticked.messages, &b).contains(&mob),
             "the tick sends the mob"
         );
-        let first = input_between_ticks(&mut world, COUNTER, INPUT_AT);
-        let again = world
-            .repeat_states(INPUT_AT + remote_now::STATE_REPEAT_MS)
-            .expect("repeat");
-        for outgoing in [&first, &again] {
-            assert!(!outgoing.is_empty(), "the player's state goes");
-            let seen = entities_in_groups(&world, outgoing, &b);
-            assert!(
-                outgoing.iter().all(|out| out.connection == b)
-                    && !seen.is_empty()
-                    && seen.iter().all(|number| *number == 1),
-                "the player alone: {seen:?}"
-            );
-        }
+        let half = input_between_ticks(&mut world, COUNTER, INPUT_AT);
+        assert!(!half.is_empty(), "the player's state goes");
+        let seen = entities_in_groups(&world, &half, &b);
+        assert!(
+            half.iter().all(|out| out.connection == b)
+                && !seen.is_empty()
+                && seen.iter().all(|number| *number == 1),
+            "the player alone: {seen:?}"
+        );
     }
 
     /// The per-tick budget of remote states ([`replica::REMOTE_GROUPS_PER_TICK`]) holds for the
-    /// states sent between ticks and the tick together.
+    /// states sent at the half tick and the tick together.
     #[test]
-    fn states_between_ticks_and_the_tick_share_the_budget() {
+    fn states_at_the_half_tick_and_the_tick_share_the_budget() {
         const CROWD: u64 = 40;
         let mut world = world_of("sim-a", settings(MANY, CROWD as u32));
         for number in 1..=CROWD {
@@ -10936,11 +10883,6 @@ mod tests {
                 let _ = world.move_from_input(&who, &[record], input_at);
             }
             between.extend(world.states_now(input_at, SERVER_TIME).expect("states"));
-            between.extend(
-                world
-                    .repeat_states(input_at + remote_now::STATE_REPEAT_MS)
-                    .expect("repeat"),
-            );
             let ticked = tick(&mut world, input_at + 26).messages;
             if round == 2 {
                 let sent = others_of(&world, &between) + others_of(&world, &ticked);
@@ -10948,7 +10890,10 @@ mod tests {
                     sent <= replica::REMOTE_GROUPS_PER_TICK,
                     "{sent} remote states in one tick"
                 );
-                assert!(others_of(&world, &between) > 0, "some went between ticks");
+                assert!(
+                    others_of(&world, &between) > 0,
+                    "some went at the half tick"
+                );
             }
         }
     }

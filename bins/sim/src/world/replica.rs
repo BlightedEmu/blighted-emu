@@ -677,26 +677,6 @@ impl Replica {
         }))
     }
 
-    /// Its state once more in slot `interest` for a viewer whose client has `sight` of it: the
-    /// ALC state alone, as [`Self::group`] sent it; the changes went with that one. Retail sent
-    /// each state of another player 2 to 4 times, 44 % of them with the id of the state before
-    /// (Observed, 2026-11-18 timing study of 398 ledgers), and a new slayer start in 2 to 3
-    /// states in a row (Inferred from the same study: its repeats carried the start).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MessageError`] when the state cannot be encoded.
-    pub(super) fn repeat_group(
-        &self,
-        interest: u16,
-        sight: &mut ViewerSight,
-    ) -> Result<BundleGroup, MessageError> {
-        Ok(BundleGroup {
-            interest: u64::from(interest),
-            members: vec![self.step_member(sight)?],
-        })
-    }
-
     /// Its slayer state, when its states of this tick carry it ([`REMOTE_ACTION_ECHO_STATES`]).
     fn sent_action(&self) -> Option<SlayerState> {
         self.source.action.filter(|_| self.sends_action)
@@ -825,12 +805,6 @@ impl RemotePlan {
         period_ticks(candidate.distance_m, replica.in_combat()) == 1 && self.spend_between_ticks()
     }
 
-    /// Whether the viewer gets a state it got between ticks once more, while the tick's budget
-    /// lasts.
-    pub(super) fn repeat_now(&mut self) -> bool {
-        self.spend_between_ticks()
-    }
-
     /// Takes one remote state of the next tick's budget, when one is left.
     fn spend_between_ticks(&mut self) -> bool {
         let left = self.between_ticks < REMOTE_GROUPS_PER_TICK;
@@ -955,7 +929,6 @@ pub(super) mod tests {
         );
         let sent = crowd.iter().filter(|near| plan.send_now(near)).count();
         assert_eq!(sent, REMOTE_GROUPS_PER_TICK, "at most the tick's budget");
-        assert!(!plan.repeat_now(), "no repeat past it");
         assert!(
             plan.send_now(&candidate(CROWD + 2, FAR, &changed)),
             "a change always goes"

@@ -46,6 +46,14 @@ impl TickClock {
         self.deadline_us(self.next_tick)
     }
 
+    /// The half tick: the middle between the deadline of the last tick that ran and the next
+    /// one (16.7 ms after a tick); `None` before the first tick.
+    pub fn half_deadline_us(&self) -> Option<u64> {
+        let last = self.next_tick.checked_sub(1)?;
+        let (from, to) = (self.deadline_us(last), self.deadline_us(self.next_tick));
+        Some(from + (to - from) / 2)
+    }
+
     /// The ticks due at `now_us`; they count as run.
     pub fn due(&mut self, now_us: u64) -> DueTicks {
         let first = self.next_deadline_us();
@@ -114,6 +122,18 @@ mod tests {
         let due = clock.due(far);
         assert!(due.count > TICKS_PER_SECOND * ONE_DAY_SECONDS);
         assert!(clock.next_deadline_us() > far);
+    }
+
+    #[test]
+    fn the_half_tick_lies_between_the_last_tick_and_the_next() {
+        const HALF_TICK_US: u64 = 16_666;
+        let mut clock = TickClock::new(START);
+        assert_eq!(clock.half_deadline_us(), None, "before the first tick");
+        clock.due(START);
+        assert_eq!(clock.half_deadline_us(), Some(START + HALF_TICK_US));
+        clock.due(START + LATE);
+        let next = clock.next_deadline_us();
+        assert_eq!(clock.half_deadline_us(), Some(next - HALF_TICK_US - 1));
     }
 
     #[test]

@@ -392,6 +392,8 @@ struct Loop {
     sims: Publisher<InputBatch>,
     /// Gateway outputs of this tick, per gateway, in order.
     pending_outputs: BTreeMap<BusId, Vec<GatewayOutput>>,
+    /// The half tick ([`TickClock::half_deadline_us`]) whose players' states went last.
+    half_tick_sent_us: Option<u64>,
     /// Inputs to send on, per sim, in order.
     pending_forwards: BTreeMap<BusId, Vec<SimInput>>,
     /// Connections with a direct input since they came here.
@@ -499,6 +501,7 @@ pub async fn serve(
         outputs: Publisher::start(bus.clone(), OUTPUT_QUEUE),
         sims: Publisher::start(bus.clone(), SIM_QUEUE),
         pending_outputs: BTreeMap::new(),
+        half_tick_sent_us: None,
         pending_forwards: BTreeMap::new(),
         direct: HashSet::new(),
         ghosts: Publisher::start(bus.clone(), SIM_QUEUE),
@@ -753,13 +756,10 @@ impl Loop {
             }
             self.input(input);
         }
-        // The players' new states go to the players who see them now, not with the next tick.
-        let states = self.world.states_now(self.now_ms(), server_time());
-        self.send_between_ticks(states);
     }
 
-    /// Sends the players' states made between ticks ([`SimWorld::states_now`],
-    /// [`SimWorld::repeat_states`]) with the gateway outputs that wait, at once.
+    /// Sends the players' states of the half tick ([`SimWorld::states_now`]) with the gateway
+    /// outputs that wait, at once.
     fn send_between_ticks(&mut self, states: Result<Vec<Outgoing>, nw_messages::MessageError>) {
         match states {
             Ok(states) if states.is_empty() => {}
@@ -1693,8 +1693,16 @@ impl Loop {
         let now_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
         let due = clock.due(now_us);
         if due.count == 0 {
-            let repeats = self.world.repeat_states(now_ms);
-            self.send_between_ticks(repeats);
+            // Half a tick after a tick, the players' new states go: with the ticks, a steady
+            // beat of about 16.7 ms (`world/remote_now.rs`).
+            let half = clock
+                .half_deadline_us()
+                .filter(|half| now_us >= *half && self.half_tick_sent_us != Some(*half));
+            if let Some(half) = half {
+                self.half_tick_sent_us = Some(half);
+                let states = self.world.states_now(now_ms, server_time());
+                self.send_between_ticks(states);
+            }
             return;
         }
         let missed = due.count - 1;

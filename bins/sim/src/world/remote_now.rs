@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Other players' states between the ticks. Retail sent a player's states to the players who
-//! see it every 16 ms: a new state number came with each input record of its client (33 or
-//! 50 ms), the first state of a new number reached a viewer 12 ms (median) after the player's
-//! own record, and each state went 2 to 4 times (Observed, 2026-11-18 timing study of 398
-//! ledgers). Ours built a player's state once per tick and sent it once, so a viewer saw it
-//! up to a tick late.
+//! Other players' states at the half tick. Retail sent a player's states to the players who
+//! see it on a steady 16 ms beat: a new state number came with each input record of its client
+//! (33 or 50 ms), the first state of a new number reached a viewer 12 ms (median) after the
+//! player's own record, and the gaps between states were 12 to 16 ms in 66 % of them, under
+//! 8 ms in under 1 % (Observed, 2026-11-18 timing study of 398 ledgers). The viewer's client
+//! sets its delay for another player from the gaps between that player's arrivals
+//! (`FUN_144873bf0`, `FUN_144872440`, RTT study 2026-11-18). Ours built a player's state once per
+//! tick, and then sent each new state at its input and once more 16 ms later: a third of the
+//! gaps fell under 8 ms (live 2026-11-18).
 //!
-//! When an input gives a player a new state number, its viewers get that state at once
-//! ([`SimWorld::states_now`]), and once more [`STATE_REPEAT_MS`] later
-//! ([`SimWorld::repeat_states`]), or with the next tick when that comes first. Only players'
-//! states go between ticks: no mob, card or other entity, and no mob work. The states without
-//! a change count against the next tick's budget of remote states ([`super::replica`]).
-
-use std::collections::HashMap;
+//! Half a tick after each tick, the players whose input gave them a new state number since
+//! that tick send it to their viewers ([`SimWorld::states_now`]); the next tick sends the next
+//! one. Only players' states go at the half tick: no mob, card or other entity, and no mob work.
+//! The states without a change count against the next tick's budget of remote states
+//! ([`super::replica`]).
 
 use nw_messages::{BundleGroup, MessageError};
 use nw_sim_core::Position;
@@ -24,27 +25,11 @@ use super::{
     replication_outgoing, sequenced_bundles,
 };
 
-/// How long after a player's new state its viewers get it once more, ms (Observed, 2026-11-18
-/// timing study of 398 retail ledgers: other players' states came a median 16 ms apart, and 44 %
-/// of them repeated the state before).
-pub(super) const STATE_REPEAT_MS: u64 = 16;
-
-/// A player's new state sent between ticks, which its viewers get once more.
-#[derive(Debug)]
-pub(super) struct StateRepeat {
-    replica: Replica,
-    /// When it goes once more (sim clock, ms).
-    due_ms: u64,
-    /// The players who got it.
-    viewers: Vec<u64>,
-}
-
 impl SimWorld {
-    /// The states of the players whose input since the last call gave them a new state number,
-    /// at `now_ms` (server time `server_time`), for the players who see them: each viewer gets
-    /// them now in one bundle, and once more [`STATE_REPEAT_MS`] later. A player whose state
-    /// already moved on since its last own state waits for the tick, so each own state carries
-    /// one step of its slayer state.
+    /// The states of the players whose input since the last tick gave them a new state number,
+    /// at the half tick `now_ms` (server time `server_time`), for the players who see them:
+    /// each viewer gets them in one bundle. A player whose state already moved on since its last
+    /// own state waits for the tick, so each own state carries one step of its slayer state.
     ///
     /// # Errors
     ///
@@ -80,7 +65,6 @@ impl SimWorld {
         }
         let local_player_card = self.settings.local_player_card;
         let home_world = *self.settings.world_id.as_bytes();
-        let mut viewers: HashMap<u64, Vec<u64>> = HashMap::new();
         let mut outgoing = Vec::new();
         let mut query = self.world.query::<(&mut Player, &Body, &Vitals)>();
         for (mut viewer, body, vitals) in query.iter_mut(&mut self.world) {
@@ -118,67 +102,6 @@ impl SimWorld {
                 else {
                     continue;
                 };
-                log_player_state(own, *number, &group);
-                groups.push(group);
-                viewers.entry(*number).or_default().push(own);
-            }
-            outgoing.extend(Self::remote_bundles(&mut viewer, groups)?);
-        }
-        let due_ms = now_ms.saturating_add(STATE_REPEAT_MS);
-        for (number, _, replica) in sources {
-            if let Some(viewers) = viewers.remove(&number) {
-                self.state_repeats.insert(
-                    number,
-                    StateRepeat {
-                        replica,
-                        due_ms,
-                        viewers,
-                    },
-                );
-            }
-        }
-        Ok(outgoing)
-    }
-
-    /// The states sent between ticks whose repeat is due at `now_ms`, once more to the players
-    /// who got them and still have their slots ([`Replica::repeat_group`]).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MessageError`] when a state cannot be encoded.
-    pub fn repeat_states(&mut self, now_ms: u64) -> Result<Vec<Outgoing>, MessageError> {
-        let due: Vec<u64> = self
-            .state_repeats
-            .iter()
-            .filter(|(_, repeat)| repeat.due_ms <= now_ms)
-            .map(|(number, _)| *number)
-            .collect();
-        let repeats: Vec<(u64, StateRepeat)> = due
-            .into_iter()
-            .filter_map(|number| Some((number, self.state_repeats.remove(&number)?)))
-            .collect();
-        if repeats.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut outgoing = Vec::new();
-        for mut viewer in self.world.query::<&mut Player>().iter_mut(&mut self.world) {
-            if viewer.frozen {
-                continue;
-            }
-            let own = viewer.number;
-            let mut groups: Vec<BundleGroup> = Vec::new();
-            for (number, repeat) in &repeats {
-                if !repeat.viewers.contains(&own) {
-                    continue;
-                }
-                let Some(&interest) = viewer.slots.assigned().get(number) else {
-                    continue;
-                };
-                if !viewer.remote_plan.repeat_now() {
-                    continue;
-                }
-                let sight = viewer.remote_plan.sight(*number);
-                let group = repeat.replica.repeat_group(interest, sight)?;
                 log_player_state(own, *number, &group);
                 groups.push(group);
             }
