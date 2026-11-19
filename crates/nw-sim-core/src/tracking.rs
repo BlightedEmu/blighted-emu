@@ -2374,4 +2374,96 @@ mod tests {
         let median = errors[errors.len() / 2];
         assert!(median < MEDIAN_M, "median {median} m");
     }
+
+    /// A dodge far from the level's origin with a free boom (live 2026-11-18, a controller
+    /// player at (7305, 3083) on the 7 m zoom, its camera's height unchanged: its block presses
+    /// freed the boom, the check's boom fell to 0.0, in the roll the body went back and forth and
+    /// snapped 1.1 m back after it). The client rolls as the server's own dodge does (`intent` of
+    /// each record by whether the dodge key is held); its camera follows it on the boom. Gives
+    /// the largest gap between the body and the client's body over the records, and the gap at
+    /// rest after the roll.
+    fn free_boom_dodge_far_away(intent: impl Fn(bool) -> Intent) -> (f32, f32) {
+        const FAR: Position = Position {
+            x: 7305.69,
+            y: 3083.31,
+            z: GROUND_Z,
+        };
+        const LIVE_BOOM_M: f32 = 7.0;
+        const REST_RECORDS: usize = 10;
+        const BLOCK_RECORDS: usize = 3;
+        const DODGE_KEY_RECORDS: usize = 4;
+        const RUN_RECORDS: usize = 25;
+        const STOP_RECORDS: usize = 30;
+        let mut body = TrackedBody::new(FAR);
+        body.set_equip_load(EquipLoad::Fast);
+        let mut client = Character::new(FAR);
+        client.set_equip_load(EquipLoad::Fast);
+        let mut worst_m: f32 = 0.0;
+        let records = (0..REST_RECORDS)
+            .map(|_| None)
+            .chain((0..BLOCK_RECORDS).map(|_| Some(false)))
+            .chain((0..DODGE_KEY_RECORDS).map(|_| Some(true)))
+            .chain((0..RUN_RECORDS).map(|_| Some(false)))
+            .chain((0..STOP_RECORDS).map(|_| None));
+        let mut blocking = false;
+        for dodge in records {
+            let character = CharacterInput {
+                intent: dodge.map_or_else(Intent::default, &intent),
+                yaw: 0.0,
+                dt_s: DT,
+            };
+            client.step(character, &Flat, SEA);
+            let tracked = body.record(
+                TrackInput {
+                    character,
+                    view: Some(view_of(client.position(), LIVE_BOOM_M, client.velocity())),
+                    // The block press frees the boom, as the controller's did.
+                    boom_key: dodge.is_some() && !blocking,
+                    action_started: false,
+                },
+                &Flat,
+                SEA,
+            );
+            blocking = dodge.is_some();
+            worst_m = worst_m.max(tracked.position.horizontal_distance(client.position()));
+        }
+        (
+            worst_m,
+            body.position().horizontal_distance(client.position()),
+        )
+    }
+
+    /// The most a free-boom dodge's body may stand from its client's, m (our choice: the error of
+    /// a retail walk, 90th percentile ~1 m, at most half of it).
+    const FREE_BOOM_DODGE_GAP_M: f32 = 0.5;
+    /// The most it may stand from its client's at rest after the roll, m (our choice).
+    const FREE_BOOM_REST_GAP_M: f32 = 0.1;
+
+    #[test]
+    fn a_keyboard_dodge_far_from_the_origin_with_a_free_boom_stays_with_its_client() {
+        let (worst_m, rest_m) = free_boom_dodge_far_away(|dodge| Intent {
+            forward: 1,
+            block: true,
+            dodge,
+            ..Intent::default()
+        });
+        assert!(worst_m < FREE_BOOM_DODGE_GAP_M, "in the roll {worst_m} m");
+        assert!(rest_m < FREE_BOOM_REST_GAP_M, "at rest {rest_m} m");
+    }
+
+    #[test]
+    fn a_controller_dodge_far_from_the_origin_with_a_free_boom_stays_with_its_client() {
+        // The live stick: right -0.156, forward 0.984, with the block held.
+        const LIVE_STICK: [f32; 2] = [-0.156, 0.984];
+        let (worst_m, rest_m) = free_boom_dodge_far_away(|dodge| {
+            Intent {
+                block: true,
+                dodge,
+                ..Intent::default()
+            }
+            .with_stick(Some(LIVE_STICK))
+        });
+        assert!(worst_m < FREE_BOOM_DODGE_GAP_M, "in the roll {worst_m} m");
+        assert!(rest_m < FREE_BOOM_REST_GAP_M, "at rest {rest_m} m");
+    }
 }

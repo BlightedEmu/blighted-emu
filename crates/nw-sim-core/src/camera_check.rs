@@ -164,6 +164,16 @@ struct Seen {
     moved: [f32; 2],
 }
 
+impl Seen {
+    /// Where the body would be now with no boom, from `origin` ([`Normal`]).
+    fn placed(&self, origin: [f32; 2]) -> [f32; 2] {
+        [
+            self.base[0] + self.moved[0] - origin[0],
+            self.base[1] + self.moved[1] - origin[1],
+        ]
+    }
+}
+
 /// The body and the boom the camera gives.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CameraBody {
@@ -198,7 +208,15 @@ impl Default for CameraCheck {
     }
 }
 
-/// Weighted normal equations of the solve: `matrix × [x, y, boom] = rhs`.
+/// Weighted normal equations of the solve: `matrix × [x, y, boom] = rhs`, with `x` and `y`
+/// from a point by the body (the server's body, or the newest camera's base), not from the
+/// level's origin. In `f32`, Cramer's rule over level coordinates loses the boom (Observed: live
+/// 2026-11-18, a controller player at (7305, 3083) on the 7 m zoom, its camera's height
+/// unchanged, whose block presses freed the boom: the check's boom took only steps of 0.907 m,
+/// 6.35, 5.44, 4.54, 2.72, 0.91 and 0.0 m; in a dodge it fell to 0.0 and the body snapped 1.1 m
+/// back after the roll, 6.3 m from where its camera put the client. A replay of that log with
+/// the solve about the body held 6.8 to 7.0 m and stood at most 0.41 m from the client, 0.22 m
+/// at the end).
 #[derive(Debug, Clone, Copy, Default)]
 struct Normal {
     matrix: [[f32; 3]; 3],
@@ -348,9 +366,9 @@ impl CameraCheck {
         }
         let mut normal = Normal::default();
         let camera = weight(CAMERA_SIGMA_M);
-        let placed = |seen: &Seen| [seen.base[0] + seen.moved[0], seen.base[1] + seen.moved[1]];
+        let origin = newest.base;
         for seen in &self.seen {
-            let [x, y] = placed(seen);
+            let [x, y] = seen.placed(origin);
             normal.add([1.0, 0.0, -seen.ray[0]], x, camera);
             normal.add([0.0, 1.0, -seen.ray[1]], y, camera);
         }
@@ -359,7 +377,7 @@ impl CameraCheck {
         }
         let [x, y, boom] = normal.solve()?;
         let fits = self.seen.iter().all(|seen| {
-            let [seen_x, seen_y] = placed(seen);
+            let [seen_x, seen_y] = seen.placed(origin);
             (x - boom * seen.ray[0] - seen_x).hypot(y - boom * seen.ray[1] - seen_y) < CAMERA_FIT_M
         });
         fits.then(|| CameraBody {
@@ -393,9 +411,9 @@ impl CameraCheck {
         let boom_prior = self.boom_m.unwrap_or_else(|| view.boom_to(body, velocity));
         let mut normal = Normal::default();
         let camera = weight(CAMERA_SIGMA_M);
+        let origin = [body.x, body.y];
         for seen in &self.seen {
-            let x = seen.base[0] + seen.moved[0];
-            let y = seen.base[1] + seen.moved[1];
+            let [x, y] = seen.placed(origin);
             normal.add([1.0, 0.0, -seen.ray[0]], x, camera);
             normal.add([0.0, 1.0, -seen.ray[1]], y, camera);
         }
@@ -406,11 +424,13 @@ impl CameraCheck {
         };
         normal.add([0.0, 0.0, 1.0], boom_prior, weight(boom_sigma));
         let body_weight = weight(BODY_MOVING_SIGMA_M);
-        normal.add([1.0, 0.0, 0.0], body.x, body_weight);
-        normal.add([0.0, 1.0, 0.0], body.y, body_weight);
+        // The server's body is the origin.
+        normal.add([1.0, 0.0, 0.0], 0.0, body_weight);
+        normal.add([0.0, 1.0, 0.0], 0.0, body_weight);
         let [x, y, boom] = normal.solve()?;
         let at = view.body(boom, velocity);
-        ((x - at.x).hypot(y - at.y) < CAMERA_FIT_M).then_some(CameraBody { at, boom_m: boom })
+        ((origin[0] + x - at.x).hypot(origin[1] + y - at.y) < CAMERA_FIT_M)
+            .then_some(CameraBody { at, boom_m: boom })
     }
 }
 
@@ -605,6 +625,53 @@ mod tests {
             "{seen:?} vs {body:?}"
         );
         assert!((seen.boom_m - BOOM).abs() < 0.15, "{seen:?}");
+    }
+
+    #[test]
+    fn a_free_boom_far_from_the_level_origin_keeps_its_length_on_a_straight_view() {
+        // Live 2026-11-18: at (7305, 3083), with the boom free after a key, the check's boom
+        // took steps of 0.907 m down to 0.0 while the camera followed the body on the 7 m zoom.
+        const FAR_BOOM: f32 = 7.0;
+        const YAW: f32 = 0.815;
+        const STEP_M: f32 = 0.3;
+        const RECORDS: u8 = 25;
+        const HELD_WITHIN_M: f32 = 0.05;
+        let mut body = at(7305.69, 3083.31);
+        let (forward, _) = yaw_axes(YAW);
+        let mut check = CameraCheck::default();
+        check.observe(
+            camera_of(body, YAW, FAR_BOOM, [0.0; 2]),
+            body,
+            [0.0; 2],
+            [0.0; 2],
+            true,
+            false,
+        );
+        let velocity = [forward[0] * STEP_M * 30.0, forward[1] * STEP_M * 30.0];
+        let lag = [CAMERA_LAG_S * velocity[0], CAMERA_LAG_S * velocity[1]];
+        for record in 0..RECORDS {
+            let moved = [forward[0] * STEP_M, forward[1] * STEP_M];
+            body.x += moved[0];
+            body.y += moved[1];
+            let seen = check
+                .observe(
+                    camera_of(body, YAW, FAR_BOOM, lag),
+                    body,
+                    moved,
+                    velocity,
+                    false,
+                    record == 0,
+                )
+                .expect("fits");
+            assert!(
+                (seen.boom_m - FAR_BOOM).abs() < HELD_WITHIN_M,
+                "record {record}: {seen:?}"
+            );
+            assert!(
+                seen.at.horizontal_distance(body) < HELD_WITHIN_M,
+                "{seen:?}"
+            );
+        }
     }
 
     #[test]
