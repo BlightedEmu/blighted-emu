@@ -332,6 +332,10 @@
             {
               "check": "Game master `!faction <syndicate|marauder|covenant> [player]` sets a faction, and the social service hears it at once (before, only at the next save round); `!company <name>` makes a company of the game master's faction with the game master as governor, and the answer says if it was made, the name is taken, the game master is in a company or has no faction (bots, 2026-11-14: a bot set its faction, made a company, gave it Monarch's Bluffs with `!owner` and used the war board).",
               "proof": "bots"
+            },
+            {
+              "check": "GM teleport on the admin site: a list of every settlement, outpost, fort, spirit shrine and dungeon entrance by region (names from the game data), one click sends the picked player there; bring another player here, go to another player, bring everyone here.",
+              "proof": "tests"
             }
           ]
         },
@@ -3770,6 +3774,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Admin teleport (2026-11-19, tests only): the GM page and the Live page's GM tools list every settlement, outpost, fort, spirit shrine, expedition, raid and trial entrance of the world by region, with names from the game data; a click sends the picked player there. Each other player has Bring here and Go to, and Bring everyone here moves every other player (not bots) to the picked one.",
     "Other players (2026-11-19, tests only): a controller player's body no longer falls behind its client while it moves, so its camera boom holds and a still block stands with the client (0.98 m off before in the replay).",
     "Other players (2026-11-19, tests only): a controller player's dodge no longer counts as a camera zoom key, so the server keeps that player's body with the client in and after rolls; the VM sends other players' states unreliable as retail.",
     "Admin site (2026-11-19, live): picking a player on the Live page no longer crashes the Brave tab; the Selected drawer opens when the row's press ends.",
@@ -4013,5 +4018,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-19",
-  "lastCommit": "53c388b2"
+  "lastCommit": "7788ff67"
 }
