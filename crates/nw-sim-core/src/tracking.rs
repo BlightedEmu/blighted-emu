@@ -2484,6 +2484,148 @@ mod tests {
         assert!(rest_m < FREE_BOOM_REST_GAP_M, "at rest {rest_m} m");
     }
 
+    /// One input record of the live pad roll: the camera (x, y, z), the stick, the dodge key and
+    /// the block key.
+    type LiveRecord = (f32, f32, f32, Option<[f32; 2]>, bool, bool);
+
+    /// A controller player's roll with the block held, far from the level origin on an 8 m
+    /// boom (live 2026-11-19, 11:38:01.234 to 02.054, records 2466 to 2490; the view held yaw
+    /// 0.6155 and pitch 0.3903; the camera went 4.25 m along the view and its height changed
+    /// by 0.07 m, so the boom stayed). The sim took the pad's dodge press as a boom key: the
+    /// check's boom fell from 7.93 to 4.85 m, the body went 2.3 m instead of 4.3 m and snapped
+    /// 1.1 m back after the roll.
+    #[rustfmt::skip]
+    const LIVE_PAD_ROLL: [LiveRecord; 25] = [
+        (7306.9546, 3083.848, 49.704727, Some([0.0, 0.0625]), false, true),
+        (7306.9546, 3083.848, 49.704727, Some([0.046875, 0.8046875]), false, true),
+        (7306.9463, 3083.861, 49.704727, Some([0.046875, 0.9921875]), false, true),
+        (7306.9204, 3083.9023, 49.704727, Some([-0.0078125, 0.9921875]), true, true),
+        (7306.82, 3084.0435, 49.704727, Some([-0.0546875, 0.9921875]), true, true),
+        (7306.633, 3084.3018, 49.704727, Some([-0.1328125, 0.984375]), true, true),
+        (7306.4175, 3084.6013, 49.704727, Some([-0.1484375, 0.984375]), true, true),
+        (7306.317, 3084.7407, 49.704727, Some([-0.1484375, 0.984375]), true, true),
+        (7306.097, 3085.0461, 49.704727, Some([-0.15625, 0.984375]), false, true),
+        (7305.8804, 3085.3408, 49.704727, Some([-0.1640625, 0.984375]), false, true),
+        (7305.7603, 3085.4988, 49.704727, Some([-0.1640625, 0.984375]), false, true),
+        (7305.533, 3085.7905, 49.704727, Some([-0.171875, 0.984375]), false, true),
+        (7305.4224, 3085.9287, 49.704727, Some([-0.171875, 0.984375]), false, true),
+        (7305.189, 3086.2148, 49.687943, Some([-0.1953125, 0.9765625]), false, true),
+        (7304.949, 3086.5007, 49.687943, Some([-0.0625, 0.5859375]), false, true),
+        (7304.821, 3086.6516, 49.687943, Some([0.0, 0.2578125]), false, true),
+        (7304.5796, 3086.9392, 49.687943, None, false, true),
+        (7304.4683, 3087.0747, 49.671158, None, false, true),
+        (7304.355, 3087.213, 49.671158, None, false, false),
+        (7304.355, 3087.213, 49.671158, None, false, false),
+        (7304.355, 3087.213, 49.671158, None, false, false),
+        (7304.355, 3087.213, 49.654373, None, false, true),
+        (7304.355, 3087.213, 49.654373, None, false, true),
+        (7304.355, 3087.213, 49.654373, None, false, true),
+        (7304.355, 3087.213, 49.63759, None, false, true),
+    ];
+
+    /// The live pad roll of [`LIVE_PAD_ROLL`], after `REST_RECORDS` records at rest under its
+    /// first camera, with the stick (`pad`) or with the forward key where the stick was tilted.
+    /// Gives the largest gap between the body and where the cameras put the client on the held
+    /// boom, the gap at the end, and the largest step back toward the camera after the roll.
+    fn live_pad_roll(pad: bool) -> (f32, f32, f32) {
+        const START: Position = Position {
+            x: 7302.314,
+            y: 3089.5442,
+            z: LIVE_FLOOR_M,
+        };
+        const LIVE_FLOOR_M: f32 = 44.95;
+        const YAW: f32 = 0.615_543_1;
+        const PITCH_LIVE: f32 = 0.390_333_6;
+        /// The resting boom the check held before the roll (live record 2465).
+        const HELD_BOOM_M: f32 = 7.926_7;
+        const REST_RECORDS: usize = 10;
+        struct LiveFloor;
+        impl Ground for LiveFloor {
+            fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+                Some(LIVE_FLOOR_M)
+            }
+        }
+        let (forward, right) = yaw_axes(YAW);
+        let client_of = |camera: Position| Position {
+            x: camera.x - SHOULDER_RIGHT_M * right[0] + HELD_BOOM_M * PITCH_LIVE.cos() * forward[0],
+            y: camera.y - SHOULDER_RIGHT_M * right[1] + HELD_BOOM_M * PITCH_LIVE.cos() * forward[1],
+            z: LIVE_FLOOR_M,
+        };
+        let mut body = TrackedBody::new(START);
+        body.set_equip_load(EquipLoad::Fast);
+        let (first_x, first_y, first_z, ..) = LIVE_PAD_ROLL[0];
+        let rest: LiveRecord = (first_x, first_y, first_z, None, false, true);
+        let (mut worst_m, mut back_m): (f32, f32) = (0.0, 0.0);
+        let mut gap_m = 0.0;
+        let mut rolled = false;
+        for (index, (x, y, z, stick, dodge, block)) in std::iter::repeat_n(rest, REST_RECORDS)
+            .chain(LIVE_PAD_ROLL)
+            .enumerate()
+        {
+            let camera = Position { x, y, z };
+            let keys = Intent {
+                forward: i8::from(!pad && stick.is_some()),
+                dodge,
+                block,
+                ..Intent::default()
+            };
+            let intent = if pad { keys.with_stick(stick) } else { keys };
+            let (intent, yaw) = intent.toward_stick(YAW);
+            let before = body.position();
+            let tracked = body.record(
+                TrackInput {
+                    character: CharacterInput {
+                        intent,
+                        yaw,
+                        dt_s: DT,
+                    },
+                    view: Some(CameraView::new(camera, YAW, PITCH_LIVE)),
+                    boom_key: false,
+                    action_started: false,
+                },
+                &LiveFloor,
+                SEA,
+            );
+            let client = client_of(camera);
+            gap_m = tracked.position.horizontal_distance(client);
+            if index >= REST_RECORDS {
+                worst_m = worst_m.max(gap_m);
+            }
+            rolled |= dodge;
+            if rolled && stick.is_none() {
+                let step = [tracked.position.x - before.x, tracked.position.y - before.y];
+                back_m = back_m.max(-(step[0] * forward[0] + step[1] * forward[1]));
+            }
+        }
+        (worst_m, gap_m, back_m)
+    }
+
+    /// The most the live pad roll's body may stand from its client's, m (our choice: the
+    /// camera's trail of the roll, `CAMERA_LAG_S` × 8.5 m/s = 0.5 m, with a quarter step of
+    /// [`PAD_FOLLOW_SHARE`] behind it, rounded up).
+    const LIVE_ROLL_GAP_M: f32 = 1.0;
+    /// The most its body may step back toward the camera after the roll, m (our choice: the
+    /// trail's own stop, a tenth of the live snap-back of 1.1 m).
+    const LIVE_ROLL_BACK_M: f32 = 0.1;
+
+    #[test]
+    fn a_controller_s_live_roll_on_a_long_boom_stays_with_its_client() {
+        let (worst_m, end_m, back_m) = live_pad_roll(true);
+        assert!(worst_m < LIVE_ROLL_GAP_M, "in the roll {worst_m} m");
+        assert!(end_m < FREE_BOOM_REST_GAP_M, "at the end {end_m} m");
+        assert!(back_m < LIVE_ROLL_BACK_M, "back {back_m} m");
+    }
+
+    #[test]
+    fn a_keyboard_roll_under_the_live_pad_cameras_stays_with_its_client() {
+        // The keys' body steps back by one follow step when the roll stops: its camera's body
+        // stood ahead by the trail of the server's speed, which still slowed (not the snap-back
+        // of a shrunk boom).
+        let (worst_m, end_m, _) = live_pad_roll(false);
+        assert!(worst_m < LIVE_ROLL_GAP_M, "in the roll {worst_m} m");
+        assert!(end_m < FREE_BOOM_REST_GAP_M, "at the end {end_m} m");
+    }
+
     /// A player on the Monarch's Bluffs beach, far from the level origin, walks up to a target
     /// with `approach`, lets go of its keys or stick and attacks; the attack's lunge carries the
     /// client 2.5 m along the view in 0.2 s with no key or stick held (retail `12-4_crewmates`

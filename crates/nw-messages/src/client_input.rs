@@ -808,7 +808,11 @@ const WALK_KEY: (usize, u32) = (4, 57);
 /// the newchar capture: value 2 bit 35 lengthened the resting boom by 1 m in 9 of 11 presses,
 /// value 5 bit 57 shortened it by 1 m or ended the short boom in 28 of 35, value 5 bit 51 set
 /// the short 2.75 m boom in all 5).
-const BOOM_KEYS: [(usize, u32); 3] = [(2, 35), (5, 57), (5, 51)];
+const BOOM_KEYS: [(usize, u32); 3] = [(2, 35), UI_CANCEL_KEY, (5, 51)];
+/// The slot value and bit of `ui_cancel` (input 377), one of [`BOOM_KEYS`]: the keyboard binds
+/// it to Escape, the pad to `az_b` on its press, the button that also dodges
+/// (`defaultprofile.xml`: `ui_cancel`, `dodge` and `dodge_depressed` on `az_b`).
+const UI_CANCEL_KEY: (usize, u32) = (5, 57);
 /// Slots of a client record (19 words of the action set, as 10 values).
 const ACTION_SLOTS: u8 = 19;
 /// A stick axis at rest in a scaled byte: the axis value 0 (Observed, every one of the
@@ -990,11 +994,19 @@ impl InputRecord {
         self.slot_bit(SUMMON_MOUNT_KEY.0, SUMMON_MOUNT_KEY.1)
     }
 
-    /// Whether the player presses a key that changes the camera's boom in this record.
+    /// Whether the player presses a key that changes the camera's boom in this record. A
+    /// `ui_cancel` with the dodge key held is a pad's dodge press ([`UI_CANCEL_KEY`]), not one
+    /// (Observed, live 2026-11-19, 11:38:01.334: a replay of a controller player's records with
+    /// a boom key in the dodge press record gave the sim's boom, 7.93 down to 4.85 m in the
+    /// roll, and its body to 0.00 m; the camera's height did not change by more than 0.05 m, so
+    /// the client's boom stayed at 8.0 m. Each of that player's four dodge presses in 4 s
+    /// matched a boom key, each of a keyboard player's three none; the four freed booms fell
+    /// from 8.0 to 1.5 m and the body stood about 6 m short of the client along the view for two
+    /// minutes).
     pub fn boom_key_pressed(&self) -> bool {
-        BOOM_KEYS
-            .iter()
-            .any(|&(value, bit)| self.slot_bit(value, bit))
+        BOOM_KEYS.iter().any(|&(value, bit)| {
+            self.slot_bit(value, bit) && ((value, bit) != UI_CANCEL_KEY || !self.dodging())
+        })
     }
 }
 
@@ -2015,6 +2027,19 @@ mod tests {
             assert!(!standing_with(boom).walk_toggle_pressed());
         }
         assert!(!with_slots(STANDING).boom_key_pressed());
+    }
+
+    #[test]
+    fn a_pads_dodge_press_is_not_a_boom_key() {
+        // The pad's B press: `dodge_depressed` (value 1 bit 3), `dodge` (value 5 bit 2) and
+        // `ui_cancel` (value 5 bit 57), all bound to `az_b` (live 2026-11-19, 11:38:01.334).
+        const PAD_DODGE: [u64; 10] = [0, 0x8, 0, 0, 0, 0x0200_0000_0000_0004, 0, 0, 0, 0];
+        // Escape alone: `ui_cancel` with no dodge.
+        const ESCAPE: [u64; 10] = [0, 0, 0, 0, 0, 0x0200_0000_0000_0000, 0, 0, 0, 0];
+        let dodge = standing_with(PAD_DODGE);
+        assert!(dodge.dodging());
+        assert!(!dodge.boom_key_pressed());
+        assert!(standing_with(ESCAPE).boom_key_pressed());
     }
 
     #[test]
