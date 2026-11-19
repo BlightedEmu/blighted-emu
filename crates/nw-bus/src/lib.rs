@@ -31,16 +31,16 @@ pub use matchmaking::{MatchPlace, QueueCall, QueueJoin, QueueNews, QueueNewsKind
 pub use message::{
     Admit, AdmitReply, CarriedItem, CarriedMount, CellTable, ConnectionRef, DYE_CHANNELS,
     EffectRepeat, GHOST_VISIBLE_ITEMS, GatewayOutput, Ghost, GhostItem, GhostMount, GhostName,
-    GhostPvpFlags, GhostSlayer, GhostSlotChange, GhostUpperSlots, Ghosts, HandoffMessage,
-    HandoffOffer, HandoffReply, Heartbeat, Hit, HomeRecord, HousingItem, InputBatch, ItemLookState,
-    ItemPlace, ItemState, Join, JoinReply, LootLimitCount, MAX_BATCH_BYTES, MAX_BUS_MESSAGE_BYTES,
-    MAX_GHOST_BYTES, MISSION_BOARD_ID_LEN, MOB_ENTITY_BASE, MOUNT_DYE_LEN, MissionTake, MobGhost,
-    OutputBatch, OwnedHome, PlacedCamp, PlayerAbilityCooldown, PlayerActivityCard,
-    PlayerConsumableCooldown, PlayerFaction, PlayerGhost, PlayerInventory, PlayerMounts,
-    PlayerMusic, PlayerProgression, PlayerQuests, PlayerSeason, PlayerStatusEffect, PlayerTravel,
-    Point, QuestRun, QuestTask, RecipeCooldownCount, ResumeOf, SavedLoadout, SimHeartbeat,
-    SimInput, SimSlot, StoredItem, StoredPoint, VitalsAtSave, decode, encode, heartbeat_silence,
-    split_batches,
+    GhostPosture, GhostPvpFlags, GhostSlayer, GhostSlotChange, GhostUpperSlots, Ghosts,
+    HandoffMessage, HandoffOffer, HandoffReply, Heartbeat, Hit, HomeRecord, HousingItem,
+    InputBatch, ItemLookState, ItemPlace, ItemState, Join, JoinReply, LootLimitCount,
+    MAX_BATCH_BYTES, MAX_BUS_MESSAGE_BYTES, MAX_GHOST_BYTES, MISSION_BOARD_ID_LEN, MOB_ENTITY_BASE,
+    MOUNT_DYE_LEN, MissionTake, MobGhost, OutputBatch, OwnedHome, PlacedCamp,
+    PlayerAbilityCooldown, PlayerActivityCard, PlayerConsumableCooldown, PlayerFaction,
+    PlayerGhost, PlayerInventory, PlayerMounts, PlayerMusic, PlayerProgression, PlayerQuests,
+    PlayerSeason, PlayerStatusEffect, PlayerTravel, Point, QuestRun, QuestTask,
+    RecipeCooldownCount, ResumeOf, SavedLoadout, SimHeartbeat, SimInput, SimSlot, StoredItem,
+    StoredPoint, VitalsAtSave, decode, encode, heartbeat_silence, split_batches,
 };
 pub use publisher::Publisher;
 pub use snapshot::{

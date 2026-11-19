@@ -21,8 +21,8 @@
 use std::collections::HashMap;
 
 use nw_bus::{
-    GHOST_VISIBLE_ITEMS, GhostItem, GhostMount, GhostName, GhostPvpFlags, GhostSlayer,
-    GhostSlotChange, GhostUpperSlots, ItemLookState, PlayerGhost,
+    GHOST_VISIBLE_ITEMS, GhostItem, GhostMount, GhostName, GhostPosture, GhostPvpFlags,
+    GhostSlayer, GhostSlotChange, GhostUpperSlots, ItemLookState, PlayerGhost,
 };
 use nw_messages::appearance::{
     LOOK_UNCHANGED, PLAYER_APPEARANCE_COMPONENT, PlayerAppearanceState, next_change_flag,
@@ -31,8 +31,8 @@ use nw_messages::faction_state::{FactionStateChange, PublicFaction};
 use nw_messages::mount::riding_active_map;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    AlcStamp, AlcState, BundleGroup, BundleMember, CardPlace, DamageReceiverState, Hands,
-    HealthChange, InputPosition, ItemLook, KnownStamp, LookDir, MemberState, MessageError,
+    AlcPosture, AlcStamp, AlcState, BundleGroup, BundleMember, CardPlace, DamageReceiverState,
+    Hands, HealthChange, InputPosition, ItemLook, KnownStamp, LookDir, MemberState, MessageError,
     PaperdollPublic, PaperdollState, PlayerGear, PlayerIdentity, PlayerLook, PlayerStates,
     ProgressionState, RemoteSequenceClock, RemoteStep, RemoteUpper, SOCIAL_COMPONENT,
     SPAWN_MOVEMENT, SecondSlayerState, ShownItem, ShownSocial, SlayerState, SlotChange, StepPlace,
@@ -63,7 +63,9 @@ const FAR_PERIOD_TICKS: u64 = 4;
 pub(super) const REMOTE_GROUPS_PER_TICK: usize = 24;
 /// The states of another player that carry its slayer state once it started (Observed: retail
 /// sent other players' slayer state in runs of 1 to 8 states, 1 to 3 in 14 of the 22 runs, and
-/// left it out of the 1,683 other states of general-other-01 and newchar-retail).
+/// left it out of the 1,683 other states of general-other-01 and newchar-retail). A change of
+/// its posture (child 43) goes in as many (our choice: retail sent it with the posture's
+/// sequence, in the same states).
 const REMOTE_ACTION_ECHO_STATES: u8 = 3;
 
 /// What a player is now, for the players who see it: from its own sim, or from a ghost.
@@ -94,6 +96,8 @@ pub(super) struct ReplicaSource {
     /// them ([`super::slayer::SlayerTrack::remote_upper`]): its block, aim, aimed shot, reload
     /// and draw.
     pub(super) upper: Option<RemoteUpper>,
+    /// How its body holds itself ([`super::slayer::SlayerTrack::remote_posture`]).
+    pub(super) posture: AlcPosture,
     pub(super) blocking: bool,
     pub(super) spawned_ms: u64,
     pub(super) gear_version: u64,
@@ -175,6 +179,7 @@ impl ReplicaSource {
                 marker: upper.slots.marker,
                 after_state: upper.after_state,
             }),
+            posture: ghost_posture(self.posture),
         }
     }
 
@@ -219,6 +224,7 @@ impl ReplicaSource {
                 },
                 after_state: upper.after_state,
             }),
+            posture: posture_of_ghost(ghost.posture),
             blocking: ghost.blocking,
             spawned_ms: ghost.spawned_ms,
             gear_version: ghost.gear_version,
@@ -293,6 +299,24 @@ const fn ghost_slot(slot: SlotChange) -> GhostSlotChange {
     }
 }
 
+/// The posture of a player for its ghost.
+const fn ghost_posture(posture: AlcPosture) -> GhostPosture {
+    match posture {
+        AlcPosture::Stand => GhostPosture::Stand,
+        AlcPosture::Crouch => GhostPosture::Crouch,
+        AlcPosture::Prone => GhostPosture::Prone,
+    }
+}
+
+/// The posture of a ghost's player.
+const fn posture_of_ghost(posture: GhostPosture) -> AlcPosture {
+    match posture {
+        GhostPosture::Stand => AlcPosture::Stand,
+        GhostPosture::Crouch => AlcPosture::Crouch,
+        GhostPosture::Prone => AlcPosture::Prone,
+    }
+}
+
 /// One upper slayer slot of a ghost's player.
 const fn slot_of_ghost(slot: GhostSlotChange) -> SlotChange {
     SlotChange {
@@ -323,6 +347,9 @@ pub(super) struct ReplicaMemory {
     action: Option<(Option<u16>, u64)>,
     /// How many more states carry its action.
     action_echoes: u8,
+    /// Its posture, and how many more states carry it.
+    posture: AlcPosture,
+    posture_echoes: u8,
     /// The server time of its last new life (ms since 2000-01-01).
     life_ms: u64,
     /// The `pos10` every viewer places it from: its states move it by offsets from it (Observed:
@@ -357,6 +384,10 @@ pub(super) struct Replica {
     action_changed: bool,
     /// Its state of this tick carries its action ([`REMOTE_ACTION_ECHO_STATES`]).
     sends_action: bool,
+    /// Its posture changed: the others see it now.
+    posture_changed: bool,
+    /// Its state of this tick carries its posture ([`REMOTE_ACTION_ECHO_STATES`]).
+    sends_posture: bool,
     /// Its own state echoes a change of its upper slots: the others see it now.
     upper_due: bool,
     /// Where its state of this tick puts it: an offset from its anchor, or a new anchor.
@@ -399,6 +430,13 @@ impl Replica {
         let action_echoes_left = match seen {
             Some(seen) if !action_changed => seen.action_echoes,
             _ => REMOTE_ACTION_ECHO_STATES,
+        };
+        // Its posture goes from its change on, as its slayer state; the card carries it.
+        let posture_changed = seen.is_some_and(|seen| seen.posture != source.posture);
+        let posture_echoes_left = match seen {
+            Some(seen) if !posture_changed => seen.posture_echoes,
+            Some(_) => REMOTE_ACTION_ECHO_STATES,
+            None => 0,
         };
         let upper_due = seen.is_some() && source.upper.is_some();
         let gear = source.gear();
@@ -475,6 +513,8 @@ impl Replica {
             } else {
                 action_echoes_left
             },
+            posture: source.posture,
+            posture_echoes: posture_echoes_left.saturating_sub(1),
             life_ms,
             anchor,
         };
@@ -492,6 +532,8 @@ impl Replica {
             block_changed,
             action_changed,
             sends_action: action_echoes_left > 0,
+            posture_changed,
+            sends_posture: posture_echoes_left > 0,
             upper_due,
             place,
             anchor,
@@ -512,6 +554,7 @@ impl Replica {
             || self.faction_change.is_some()
             || self.block_changed
             || self.action_changed
+            || self.posture_changed
             || self.anchor_moved
             || self.upper_due
     }
@@ -606,8 +649,12 @@ impl Replica {
                     anchor: self.anchor,
                     at: pos,
                 };
-                alc.state =
-                    MemberState::Alc(AlcState::remote_spawn(place, self.stamp, source.movement)?);
+                alc.state = MemberState::Alc(AlcState::remote_spawn(
+                    place,
+                    self.stamp,
+                    source.movement,
+                    source.posture,
+                )?);
             }
             // The first state carries the own spawn's sequence time and the whole clock: the
             // viewer's client has them from there.
@@ -618,12 +665,14 @@ impl Replica {
             return Ok(Some(group));
         }
         let slayer = self.sent_action();
-        if slayer.is_some() || self.upper_due {
+        let posture = self.sent_posture();
+        if slayer.is_some() || self.upper_due || posture.is_some() {
             tracing::debug!(
                 player = entity,
                 interest,
                 ?slayer,
                 upper = ?source.upper.filter(|_| self.upper_due),
+                ?posture,
                 "remote slayer state to a viewer"
             );
         }
@@ -682,6 +731,11 @@ impl Replica {
         self.source.action.filter(|_| self.sends_action)
     }
 
+    /// Its posture, when its states of this tick carry it ([`REMOTE_ACTION_ECHO_STATES`]).
+    fn sent_posture(&self) -> Option<AlcPosture> {
+        Some(self.source.posture).filter(|_| self.sends_posture)
+    }
+
     /// Its ALC state for a viewer whose client has `sight` of it, which then has its clock.
     fn step_member(&self, sight: &mut ViewerSight) -> Result<BundleMember, MessageError> {
         let source = &self.source;
@@ -696,6 +750,7 @@ impl Replica {
                 slayer: self.sent_action(),
                 sequence_time: source.sequence.map(|seconds| sight.sequence.time(seconds)),
                 upper: source.upper,
+                posture: self.sent_posture(),
             })?),
         };
         sight.stamp = sight.stamp.after(self.stamp);
@@ -862,6 +917,7 @@ pub(super) mod tests {
             }),
             action: None,
             upper: None,
+            posture: AlcPosture::Stand,
             blocking: false,
             spawned_ms: SPAWNED_MS,
             gear_version: 3,

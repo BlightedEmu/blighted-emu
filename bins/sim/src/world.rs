@@ -4635,6 +4635,7 @@ impl SimWorld {
             number: player.state_number,
             action: player.slayer.remote_action(),
             upper: player.slayer.remote_upper(),
+            posture: player.slayer.remote_posture(),
             blocking: vitals.blocking(),
             spawned_ms: clock.spawn_ms,
             gear_version,
@@ -10729,6 +10730,89 @@ mod tests {
             )),
             "facing the camera's back"
         );
+    }
+
+    /// Live 2026-11-18: a keyboard player crouched and the other player saw it about a second
+    /// later. Retail (the four posture captures, 16 toggles): the state of the change's sequence
+    /// carries the posture in child 43, 28 to 68 ms after the toggle (`43=40` at a crouch,
+    /// `43=00` at the stand-up), and other players get it with that sequence. The keys and a
+    /// pad press the same crouch toggle (input 277, slot value 4 bit 21; Inferred for the pad:
+    /// its record names input actions, as its block button sets the keys' block bit).
+    #[test]
+    fn another_player_sees_a_crouch_and_its_stand_up_one_record_after_the_toggle() {
+        const POSTURE: usize = 43;
+        const SEQUENCE: usize = 15;
+        const CROUCH_TOGGLE_VALUE: usize = 4;
+        const CROUCH_TOGGLE: u64 = 1 << 21;
+        const CROUCH_BYTE: u8 = 0x40;
+        const STAND_BYTE: u8 = 0x00;
+        /// The left stick pushed forward: right at rest, forward 1.
+        const STICK_FORWARD: [u8; 4] = [128, 255, 128, 128];
+        /// The records of each toggle: the crouch, then the stand-up after the crouch's 0.433 s
+        /// hold (`Crouch+FromStand`).
+        const TOGGLES: [(u16, u8); 2] = [(4, CROUCH_BYTE), (24, STAND_BYTE)];
+        const LAST_RECORD: u16 = 30;
+        const VIEW: LookDir = LookDir {
+            yaw: 1.0,
+            pitch: 0.3,
+        };
+        /// No stick: both at rest.
+        const STICKS_AT_REST: [u8; 4] = [128; 4];
+        for (device, slots, stick) in [
+            ("keys standing", STANDING_SLOTS, STICKS_AT_REST),
+            ("keys moving", FORWARD_SLOTS, STICKS_AT_REST),
+            ("pad moving", STANDING_SLOTS, STICK_FORWARD),
+        ] {
+            let mut world = two_players();
+            let (a, b) = (connection(1), connection(2));
+            let entity = world.by_connection[&a];
+            let mut shown = Vec::new();
+            for counter in 1..=LAST_RECORD {
+                let input_at = NOW + u64::from(counter) * u64::from(attack::INPUT_RECORD_MS);
+                let at = world
+                    .world
+                    .get::<Body>(entity)
+                    .expect("body")
+                    .motion
+                    .position();
+                let mut values = slots;
+                if TOGGLES.iter().any(|(toggle, _)| *toggle == counter) {
+                    values[CROUCH_TOGGLE_VALUE] |= CROUCH_TOGGLE;
+                }
+                let mut record = camera_record(counter, at, VIEW, [0.0; 2], values);
+                record.slots.bytes = stick;
+                let _ = world.move_from_input(&a, &[record], input_at);
+                let outgoing = tick(&mut world, input_at);
+                let alc = alc_children(&states_of(&world, &outgoing.messages, &b, 1));
+                let child = |index| alc.iter().find(|(c, _)| *c == index).map(|(_, v)| v);
+                if let Some(posture) = child(POSTURE) {
+                    shown.push((counter, posture[0], child(SEQUENCE).is_some()));
+                }
+            }
+            let firsts: Vec<(u16, u8, bool)> = TOGGLES
+                .iter()
+                .filter_map(|(toggle, byte)| {
+                    shown
+                        .iter()
+                        .find(|(counter, shown, _)| *counter > *toggle && shown == byte)
+                        .copied()
+                })
+                .collect();
+            assert_eq!(
+                firsts,
+                TOGGLES
+                    .map(|(toggle, byte)| (toggle + 1, byte, true))
+                    .to_vec(),
+                "{device}: the posture with the change's sequence, one record after each toggle: \
+                 {shown:?}"
+            );
+            assert!(
+                shown.iter().all(|(counter, _, _)| TOGGLES
+                    .iter()
+                    .any(|(toggle, _)| (toggle + 1..=toggle + 3).contains(counter))),
+                "{device}: three states carry each change, then no more: {shown:?}"
+            );
+        }
     }
 
     /// Player 1 of `world` sends input record `counter` at `input_at`, between two ticks, and the

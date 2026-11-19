@@ -17,8 +17,8 @@ use nw_bus::MobGhost;
 use nw_content::combat::MobGuard;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::{
-    AlcStamp, AlcState, AssetId, BOSS_PHASE_TYPE_INDEX, BundleGroup, BundleMember, BundlePayload,
-    CardPlace, DAMAGE_RECEIVER_TYPE_INDEX, DATA_BITS_ACTIVE, DEPLETED_GATHERABLE,
+    AlcPosture, AlcStamp, AlcState, AssetId, BOSS_PHASE_TYPE_INDEX, BundleGroup, BundleMember,
+    BundlePayload, CardPlace, DAMAGE_RECEIVER_TYPE_INDEX, DATA_BITS_ACTIVE, DEPLETED_GATHERABLE,
     DYNAMIC_SLICE_SUB_ID, DamageReceiverState, EffectMap, GATHERABLE_CONTROLLER_TYPE_INDEX,
     GDE_METADATA_COMPONENT, GatherableControllerState, GdeMetadataReplicatedState, InputPosition,
     LOCAL_PLAYER_INTEREST, LookDir, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState,
@@ -326,7 +326,7 @@ pub(super) fn remote_group(
     };
     if carded {
         full_first_position(&mut group, position, NO_CLOCK_STAMP, |place, stamp| {
-            AlcState::remote_spawn(place, stamp, SPAWN_MOVEMENT)
+            AlcState::remote_spawn(place, stamp, SPAWN_MOVEMENT, AlcPosture::Stand)
         })?;
     }
     Ok(Some(group))

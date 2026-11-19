@@ -592,6 +592,48 @@ pub fn stamina_segments(stamina: f32, max: f32) -> u8 {
     whole
 }
 
+/// Slot 0 child of the posture byte ([`AlcPosture`]).
+const POSTURE_CHILD: usize = 43;
+/// The bit of [`POSTURE_CHILD`] where the posture starts: its top two bits.
+const POSTURE_SHIFT: u8 = 6;
+
+/// How a player's body holds itself, in the top two bits of slot 0 child 43: 0 standing, 1
+/// crouching, 2 prone. Observed: each of the 16 crouch and prone toggles of the four retail
+/// `walk_running_crouch_prone` and `equip_and_prone` captures changed them in the own state that
+/// carried the change's sequence, 28 to 68 ms after the toggle (`43=40` with `15=8913` at a
+/// crouch, `43=00` with `15=a13c` at the stand-up, `43=80` with `15=912f` at prone). Other
+/// players get them too: 10,563 of the 10,969 changes of these bits in other players' states
+/// of 1,195 ledgers came in a state with a new sequence (child 15). Ours never sent them, and
+/// the other players saw a crouch about a second late (live 2026-11-18). The low six bits
+/// change on their own (meaning Unknown); ours stay 0, as in every state before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AlcPosture {
+    /// Standing.
+    #[default]
+    Stand,
+    /// Crouching.
+    Crouch,
+    /// Lying prone.
+    Prone,
+}
+
+impl AlcPosture {
+    /// The byte of child 43 with this posture.
+    pub const fn byte(self) -> u8 {
+        let bits = match self {
+            Self::Stand => 0,
+            Self::Crouch => 1,
+            Self::Prone => 2,
+        };
+        bits << POSTURE_SHIFT
+    }
+
+    /// Child 43 with this posture.
+    fn child(self) -> (usize, Vec<u8>) {
+        (POSTURE_CHILD, vec![self.byte()])
+    }
+}
+
 /// The slayer state of a character (children 13 to 18): the slayer script state it is in, the
 /// ALC state number in which that state started and the sequence of the state, and its second
 /// slot (slayer note).
@@ -972,6 +1014,8 @@ pub struct RemoteStep {
     pub sequence_time: Option<SequenceTime>,
     /// Its slayer slots past the first and its slayer marker, when they go with the state.
     pub upper: Option<RemoteUpper>,
+    /// Its posture, when it goes with the state ([`AlcPosture`]).
+    pub posture: Option<AlcPosture>,
 }
 
 /// What a viewer's client has of another player's clock: its anchor and the high bytes of its
@@ -1502,6 +1546,9 @@ impl AlcState {
         if let Some(time) = step.sequence_time {
             children.extend(time.children());
         }
+        if let Some(posture) = step.posture {
+            children.push(posture.child());
+        }
         Ok(Self::of_slot0(
             children,
             step.position.and_then(StepPlace::pos10),
@@ -1703,6 +1750,7 @@ impl AlcState {
             stamp,
             FirstStateSlots::OwnerAndPublic,
             SPAWN_MOVEMENT,
+            AlcPosture::Stand,
         )
     }
 
@@ -1719,13 +1767,16 @@ impl AlcState {
     /// `movement` is the slayer state and sequence the entity plays now (children 13 and 15):
     /// retail's first cards of other players carry what the player does then (general-other-01:
     /// states `1f`, `1a`, `1b`, `0a`, `09` and `08` over 18 first cards), not the stand of a
-    /// spawn.
+    /// spawn. `posture` is how its body holds itself now (child 43, [`AlcPosture`]; Inferred:
+    /// every first state carries child 43, and a viewer that comes to a crouching player must
+    /// see it crouch).
     pub fn remote_spawn(
         place: CardPlace,
         stamp: AlcStamp,
         movement: (u64, u64),
+        posture: AlcPosture,
     ) -> Result<Self, MessageError> {
-        Self::first_state(place, stamp, FirstStateSlots::Public, movement)
+        Self::first_state(place, stamp, FirstStateSlots::Public, movement, posture)
     }
 
     fn first_state(
@@ -1733,6 +1784,7 @@ impl AlcState {
         stamp: AlcStamp,
         slots: FirstStateSlots,
         (slayer_state, slayer_sequence): (u64, u64),
+        posture: AlcPosture,
     ) -> Result<Self, MessageError> {
         let (pos10, offset) = place.resolved();
         let at = SpawnPlace {
@@ -1747,6 +1799,7 @@ impl AlcState {
                     data_bits_high: OWN_DATA_BITS_HIGH,
                     slayer_state,
                     slayer_sequence,
+                    posture,
                 };
                 write_children(&mut writer, &SPAWN_SLOT0, at, stamp, values)?;
                 write_children(&mut writer, &SPAWN_SLOT1, at, stamp, values)?;
@@ -1757,6 +1810,7 @@ impl AlcState {
                     data_bits_high: REMOTE_DATA_BITS_HIGH,
                     slayer_state,
                     slayer_sequence,
+                    posture,
                 };
                 write_children(&mut writer, &SPAWN_SLOT0, at, stamp, values)?;
             }
@@ -1864,6 +1918,8 @@ enum SpawnValue {
     /// The slayer state and sequence the entity plays ([`FirstValues`]).
     FirstSlayerState,
     FirstSlayerSequence,
+    /// The posture byte of the entity ([`FirstValues`]).
+    FirstPosture,
 }
 
 /// The values of a first state that differ by the entity it is for.
@@ -1872,6 +1928,7 @@ struct FirstValues {
     data_bits_high: u8,
     slayer_state: u64,
     slayer_sequence: u64,
+    posture: AlcPosture,
 }
 
 /// The slayer state and sequence of a spawn: standing still, the weapon away (`13=1f 15=b910`,
@@ -1879,9 +1936,9 @@ struct FirstValues {
 pub const SPAWN_MOVEMENT: (u64, u64) = (31, 1081);
 
 use SpawnValue::{
-    Anchor, Byte, DataBitsHigh, FirstSlayerSequence, FirstSlayerState, Float, IdHigh, IdLow,
-    Position as SpawnPosition, PositionOffset, Prefixed, Raw, StartedBefore, TimeHigh, TimeLow,
-    Word,
+    Anchor, Byte, DataBitsHigh, FirstPosture, FirstSlayerSequence, FirstSlayerState, Float, IdHigh,
+    IdLow, Position as SpawnPosition, PositionOffset, Prefixed, Raw, StartedBefore, TimeHigh,
+    TimeLow, Word,
 };
 
 /// The slots of a first state: both for the client's own player, slot 0 alone for an entity it
@@ -1996,7 +2053,7 @@ const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
     (TIME_ANCHOR_CHILD, Anchor),
     (DATA_BITS_CHILD, Byte(243)),
     (DATA_BITS_HIGH_CHILD, DataBitsHigh),
-    (43, Byte(0)),
+    (POSTURE_CHILD, FirstPosture),
     (STAMINA_SEGMENTS_CHILD, Byte(PLAYER_STAMINA_SEGMENTS)),
     (45, Byte(0)),
     (46, Prefixed(PLAYER_SHAPE_CAST_FILTER)),
@@ -2075,6 +2132,9 @@ fn write_children(
             }
             FirstSlayerSequence => {
                 writer.prefixed(values.slayer_sequence)?;
+            }
+            FirstPosture => {
+                writer.u8(values.posture.byte());
             }
         }
     }
@@ -2437,6 +2497,7 @@ mod tests {
             slayer: Some(attack),
             sequence_time: None,
             upper: Some(RemoteUpper { slots, after_state }),
+            posture: None,
         };
         let child_of = |state: &AlcState, index: usize| {
             state
@@ -2829,7 +2890,8 @@ mod tests {
             offset_ms: SPAWN_STATE_MS,
         };
         let own = AlcState::spawn(place, stamp).expect("spawn");
-        let seen = AlcState::remote_spawn(place, stamp, SPAWN_MOVEMENT).expect("remote spawn");
+        let seen = AlcState::remote_spawn(place, stamp, SPAWN_MOVEMENT, AlcPosture::Stand)
+            .expect("remote spawn");
         assert_eq!(
             seen.bytes[0], SLOT_BITS[0],
             "slot 0 alone, as in all 40 retail first cards of another player"
@@ -2905,9 +2967,20 @@ mod tests {
         );
     }
 
+    /// Retail, the four posture captures: `43=00` standing, `43=40` crouching, `43=80` prone.
+    #[test]
+    fn the_posture_goes_in_the_top_bits_of_child_43() {
+        assert_eq!(
+            [AlcPosture::Stand, AlcPosture::Crouch, AlcPosture::Prone].map(AlcPosture::byte),
+            [0x00, 0x40, 0x80]
+        );
+    }
+
     #[test]
     fn a_seen_entitys_first_state_carries_its_movement() {
         const MOVING: (u64, u64) = (0x1b, 1405);
+        /// Child 43 of a crouching player (retail `43=40` with `15=8913`).
+        const CROUCH_BYTE: u8 = 0x40;
         let place = CardPlace {
             anchor: None,
             at: InputPosition {
@@ -2921,11 +2994,17 @@ mod tests {
             anchor_us: 0,
             offset_ms: SPAWN_STATE_MS,
         };
-        let seen = AlcState::remote_spawn(place, stamp, MOVING).expect("remote spawn");
+        let seen =
+            AlcState::remote_spawn(place, stamp, MOVING, AlcPosture::Crouch).expect("remote spawn");
         assert_eq!(child(&seen, SLAYER_STATE_CHILD), Some(vec![0x1b]));
         assert_eq!(
             child(&seen, SLAYER_SEQUENCE_CHILD),
             Some(prefixed_bytes(MOVING.1).expect("prefix"))
+        );
+        assert_eq!(
+            child(&seen, POSTURE_CHILD),
+            Some(vec![CROUCH_BYTE]),
+            "the card shows the crouch"
         );
     }
 
@@ -3859,8 +3938,20 @@ mod tests {
                 abs: None,
             }),
             upper: None,
+            posture: None,
         };
         let ours = AlcState::remote_step(&step).expect("step");
+        assert_eq!(child(&ours, POSTURE_CHILD), None, "no posture change");
+        let crouched = AlcState::remote_step(&RemoteStep {
+            posture: Some(AlcPosture::Crouch),
+            ..step
+        })
+        .expect("step");
+        assert_eq!(
+            child(&crouched, POSTURE_CHILD),
+            Some(vec![AlcPosture::Crouch.byte()]),
+            "a posture change goes with the state"
+        );
         for index in [
             ID_REL_CHILD,
             TIME_REL_CHILD,

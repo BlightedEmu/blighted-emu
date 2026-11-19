@@ -23,8 +23,8 @@ use nw_content::player_sequences::{
     PlayerSequences, RunningAttack, SlotsChange, StanceSequences, StatePlay, TimedSlots,
 };
 use nw_messages::{
-    AttackKeyBits, RemoteUpper, SecondSlayerState, SequenceClock, SequenceTime, SlayerInput,
-    SlayerState, SlotChange, UpperSlots,
+    AlcPosture, AttackKeyBits, RemoteUpper, SecondSlayerState, SequenceClock, SequenceTime,
+    SlayerInput, SlayerState, SlotChange, UpperSlots,
 };
 use nw_sim_core::{Intent, Posture};
 
@@ -106,11 +106,13 @@ mod movement {
 /// Inferred for a drawn weapon, which no capture has in these postures).
 ///
 /// A change of posture is a new sequence of the state that goes on (child 15 alone), 33 to 54 ms
-/// after the toggle. The sequence of the new posture's stand or move follows it, alone too, unless
-/// a move started or stopped in between. Other players got no state for these postures before:
-/// they saw a crouching or prone player stand (live 2026-11-09).
+/// after the toggle, with the new posture in child 43 ([`AlcPosture`]). The sequence of the new
+/// posture's stand or move follows it, alone too, unless a move started or stopped in between.
+/// Other players got no state for these postures before: they saw a crouching or prone player
+/// stand (live 2026-11-09). With the sequences alone and no child 43 they saw the crouch about
+/// a second late (live 2026-11-18).
 mod posture {
-    use super::{MoveSet, Posture, movement};
+    use super::{AlcPosture, MoveSet, Posture, movement};
 
     /// Crouching: a start `13=1a 15=b61c` (forward 2 of 2, back 1 of 1), a stop `13=1b 15=ac30`
     /// (3 of 3), a key during the stop `15=8511` (1 of 1), still `13=1f 15=9e3e` 10 records
@@ -169,6 +171,15 @@ mod posture {
     /// body takes the toggle after the slayer state read the record.
     pub(super) const SEEN_AFTER_RECORDS: u16 = 1;
 
+    /// How the clients show `posture` (child 43).
+    pub(super) const fn shown(posture: Posture) -> AlcPosture {
+        match posture {
+            Posture::Stand => AlcPosture::Stand,
+            Posture::Crouch => AlcPosture::Crouch,
+            Posture::Prone => AlcPosture::Prone,
+        }
+    }
+
     /// The movement of a crouching or prone player; `None` for a standing one.
     pub(super) const fn moves(posture: Posture) -> Option<MoveSet> {
         match posture {
@@ -180,10 +191,12 @@ mod posture {
 
     /// The sequence that starts at a change from posture `from` to `to` of a player that is
     /// `moving` or not, and the input records from the toggle to the sequence of the new
-    /// posture's stand or move. No sequence: retail sent none when a moving player stood up
-    /// from a crouch (1 of 1), and the others must still see it stand, so the stand's move
-    /// goes at once (Inferred). Without a sample of its own, a moving change takes the still
-    /// one's sequence (Inferred), and a crouch to prone settles when its hold ends (Inferred).
+    /// posture's stand or move. No sequence for a moving player that stands up from a crouch:
+    /// the stand's move goes at once (our choice: retail's own stand-up with the back key held
+    /// sent `aa2f`, 1 of 1; of the other players' states in 1,195 ledgers whose child 43 went
+    /// from crouch to stand, 165 carried the run's `b625` and 97 `aa2f`, by a rule that is
+    /// Unknown). Without a sample of its own, a moving change takes the still one's sequence
+    /// (Inferred), and a crouch to prone settles when its hold ends (Inferred).
     pub(super) const fn change(from: Posture, to: Posture, moving: bool) -> (Option<u64>, u16) {
         match (from, to, moving) {
             (Posture::Stand, Posture::Crouch, false) => (Some(STAND_TO_CROUCH), SETTLE_RECORDS),
@@ -2323,6 +2336,12 @@ impl SlayerTrack {
             .current(self.set.unwrap_or(MoveSet::SHEATHED))
     }
 
+    /// How its body holds itself now, for the players who see this one: the newest record's
+    /// posture, which the change's sequence goes out with ([`posture`]).
+    pub(super) const fn remote_posture(&self) -> AlcPosture {
+        posture::shown(self.posture)
+    }
+
     /// The upper slots of this tick's own state, for the players who see this one: retail's
     /// remote states echoed them as the own ones (arena capture 2026-09-13, a remote aim
     /// `16=24 18=9837 19=2e 21=9606 48=28` in 3 to 4 states, then without them).
@@ -4375,6 +4394,47 @@ pub(crate) mod tests {
             up.map(|state| sequence_bytes(state.sequence)),
             Some(vec![0xa0, 0x3c])
         );
+    }
+
+    /// Retail, the four posture captures: each of the 16 toggles changed child 43 in the own
+    /// state of the change's sequence, and other players' states carried it with theirs. The
+    /// keys and a pad's stick crouch alike: the posture comes with the change's sequence.
+    #[test]
+    fn the_others_get_the_posture_with_its_change() {
+        const TOGGLE: u16 = 0x386;
+        /// Records past each change: longer than its longest settle (prone to a crouch, 26).
+        const HELD_RECORDS: u16 = 30;
+        const STICK_FORWARD: [f32; 2] = [0.0, 1.0];
+        let still = Intent::default();
+        let keys = Intent::of_keys(true, false, false, false);
+        let pad = Intent::default().with_stick(Some(STICK_FORWARD));
+        for (device, intent) in [("still", still), ("keys", keys), ("pad", pad)] {
+            let mut track = spawned();
+            let mut counter = TOGGLE - 1;
+            posture_step(&mut track, &mut counter, intent, Posture::Stand);
+            assert_eq!(track.remote_posture(), AlcPosture::Stand, "{device}");
+            for (to, shown) in [
+                (Posture::Crouch, AlcPosture::Crouch),
+                (Posture::Stand, AlcPosture::Stand),
+                (Posture::Prone, AlcPosture::Prone),
+                (Posture::Stand, AlcPosture::Stand),
+            ] {
+                let (_, change) = posture_step(&mut track, &mut counter, intent, to);
+                assert!(
+                    change.is_some(),
+                    "{device}: a state with the change to {to:?}"
+                );
+                assert_eq!(
+                    (track.remote_posture(), track.remote_action()),
+                    (shown, change),
+                    "{device}: the others get the posture with it"
+                );
+                for _ in 0..HELD_RECORDS {
+                    posture_step(&mut track, &mut counter, intent, to);
+                    assert_eq!(track.remote_posture(), shown, "{device}: it holds");
+                }
+            }
+        }
     }
 
     #[test]

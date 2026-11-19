@@ -1157,6 +1157,21 @@ pub struct PlayerGhost {
     /// reload and draw), when it has a change of them.
     #[serde(default)]
     pub upper: Option<GhostUpperSlots>,
+    /// How its body holds itself (ALC child 43, `nw_messages::AlcPosture`).
+    #[serde(default)]
+    pub posture: GhostPosture,
+}
+
+/// How the body of a player ghost holds itself (ALC child 43).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GhostPosture {
+    /// Standing.
+    #[default]
+    Stand,
+    /// Crouching.
+    Crouch,
+    /// Lying prone.
+    Prone,
 }
 
 /// A change of one slayer slot past the first of a player ghost (ALC children 16 to 24).
@@ -2085,6 +2100,7 @@ mod tests {
                     marker: Some(u64::MAX),
                     after_state: true,
                 }),
+                posture: GhostPosture::Prone,
             }),
             ..ghost
         };
