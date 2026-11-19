@@ -667,12 +667,20 @@
               "proof": "tests"
             },
             {
-              "check": "Other players' states go unreliable on channel 1 as retail's (not done): the stack scripts still start the sims with NW_RELIABLE_BUNDLES=1, so a lost datagram holds every later state about 230 ms until its resend (34 holds in a 2.5 min client trace, the viewer's delay then up to 350 ms). A live check with the real client is needed before the switch goes off.",
+              "check": "Other players' states go unreliable on channel 1 as retail's (on the VM since 2026-11-19, not checked live yet): before, the stack scripts started the sims with NW_RELIABLE_BUNDLES=1, so a lost datagram held every later state about 230 ms until its resend (34 holds in a 2.5 min client trace).",
               "proof": "none"
             },
             {
               "check": "Another player leaves the floor in a jump or fall and lands on the viewer's screen (tests only, 2026-11-19): bit 4 of ALC child 41 says \"on a floor\"; retail clears it 167 to 333 ms into a jump and at a fall's start and sets it at the landing; ours sent it set in every state, so the client held the other player on the floor (likely cause of the floating). Tests with keys and a controller.",
               "proof": "tests"
+            },
+            {
+              "check": "A controller player's dodge roll keeps the server's body with its client (tests only, 2026-11-19): the pad's B button sends `ui_cancel` with the dodge, and the server took it for a camera zoom key, so each controller roll freed the boom and shrank it (live: 8.0 to 1.5 m over four rolls); the body then stood about 6 m short of the client along the view, and the others saw the player meters away and snapping back. Retail replay in pad mode: dodges 1.09/2.71 to 0.56/1.01 m off (median/90th percentile).",
+              "proof": "tests"
+            },
+            {
+              "check": "Not fixed: a still block in pad mode stands about 1 m off in the tutorial replay (0.01 m with keys); a keyboard roll's stop steps back about 0.36 m in one record.",
+              "proof": "none"
             }
           ]
         },
@@ -3758,6 +3766,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Other players (2026-11-19, tests only): a controller player's dodge no longer counts as a camera zoom key, so the server keeps that player's body with the client in and after rolls; the VM sends other players' states unreliable as retail.",
     "Admin site (2026-11-19, live): picking a player on the Live page no longer crashes the Brave tab; the Selected drawer opens when the row's press ends.",
     "Mob hit reactions (2026-11-19, tests only): a mob's reaction now lasts the stun of the hit that made it and its clip plays at the speed that ends it then, as retail; an attack's lunge with no key or stick moves the player's body on the server at once.",
     "Other players, ninth round (2026-11-19, tests only): the floor bit goes off in jumps and falls, the blunderbuss fires again and reloads as retail, the aim and the bow's full draw show their walk and stand forms, a basic mob reels from four hits in a row, and the two-bot pair test passes again.",
@@ -3999,5 +4008,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-19",
-  "lastCommit": "b94e4707"
+  "lastCommit": "d8836a1e"
 }
