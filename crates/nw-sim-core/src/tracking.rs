@@ -143,11 +143,18 @@ pub const CAMERA_FLOOR_SPREAD_M: f32 = 1.5;
 /// 1.9 m over 8 records on flat ground; after a standing jump it came down to its resting height
 /// 6 records after the landing; our choice: 10 records, a third of a second).
 pub const CAMERA_SETTLE_RECORDS: u8 = 10;
-/// The share of the way to the camera's body a game pad's move takes in one record (our choice:
-/// a quarter). A pad's camera body is noisy while it moves (live 2026-11-17: a controller player's
-/// body went back and forth in 7.3 % of its moving records against 1.4 % with keys, and the
-/// camera put it 3.9 m above flat ground); the share smooths that noise, and a steady speed
-/// error of 1 m/s still leaves the body only 0.13 m behind.
+/// The share of the way to the camera's body a game pad's move takes in one record, past its
+/// stick's own step (our choice: a quarter). A pad's camera body is noisy while it moves (live
+/// 2026-11-17: a controller player's body went back and forth in 7.3 % of its moving records
+/// against 1.4 % with keys, and the camera put it 3.9 m above flat ground); the share smooths
+/// that noise, and a steady speed error of 1 m/s still leaves the body only 0.13 m behind.
+/// The share starts from where the stick took the body, not from where the record began: from
+/// there the body lagged its client by three records of its own speed, and the camera check,
+/// which weighs the server's body, shortened its held boom toward it (replay of the retail
+/// tutorial with the moves as a pad's stick: the boom fell from 4.0 to 2.75 m in 10 s of moves,
+/// and a still block stood 0.98 m behind retail's place, median, against 0.01 m with keys; from
+/// the stick's step, 0.01 m, and the pad's walk erred by 0.27 m instead of 0.40 m in the tutorial
+/// and 0.26 m instead of 0.52 m in 11 open-world ledgers, as with keys).
 pub const PAD_FOLLOW_SHARE: f32 = 0.25;
 
 /// The records a body remembers, to take them again with the motion of an attack that started
@@ -662,16 +669,23 @@ impl TrackedBody {
                 .map_or(FOLLOW_STEP_M, |top_mps| {
                     FOLLOW_STEP_M.max(top_mps * input.character.dt_s)
                 });
-            // A recovery goes the whole way at once; a pad's move a share of it.
+            // A recovery goes the whole way at once. A pad's move keeps its stick's step and goes
+            // a share of the rest of the way, then the record's whole step is held to the limit.
+            let toward = if recovering || intent.stick.is_none() {
+                [dx, dy]
+            } else {
+                [
+                    position.x - before.x + (seen.at.x - position.x) * PAD_FOLLOW_SHARE,
+                    position.y - before.y + (seen.at.y - position.y) * PAD_FOLLOW_SHARE,
+                ]
+            };
             let share = if recovering {
                 1.0
-            } else if intent.stick.is_some() {
-                (step_m / dx.hypot(dy)).min(PAD_FOLLOW_SHARE)
             } else {
-                (step_m / dx.hypot(dy)).min(1.0)
+                (step_m / toward[0].hypot(toward[1])).min(1.0)
             };
-            position.x = before.x + dx * share;
-            position.y = before.y + dy * share;
+            position.x = before.x + toward[0] * share;
+            position.y = before.y + toward[1] * share;
         }
         let seen_at = Position {
             z: seen.at.z,
@@ -1540,6 +1554,51 @@ mod tests {
             last = body.position();
         }
         assert!(reverses <= MOST_REVERSES, "{reverses} reverses");
+    }
+
+    #[test]
+    fn a_pad_run_then_a_still_block_keeps_the_boom_and_stands_with_its_client() {
+        // Replay of the retail tutorial with the moves as a pad's stick: the body lagged its
+        // client, the held boom fell from 4.0 to 2.75 m, and a still block stood 0.98 m behind.
+        // A 20 s run: the old rule lost 0.04 m of boom a second, past half a zoom step.
+        const RUN_RECORDS: usize = 600;
+        const STILL_RECORDS: usize = 30;
+        /// The most the boom may leave its zoom length, m (our choice: a tenth of a zoom step).
+        const BOOM_KEPT_M: f32 = 0.1;
+        /// The most the still body may stand from its client, m (our choice).
+        const STILL_GAP_M: f32 = 0.1;
+        let mut body = settled();
+        let mut client = start();
+        for _ in 0..RUN_RECORDS {
+            client.y += SPRINT_SPEED_MPS * DT;
+            body.record(
+                pad(view_of(client, BOOM, [0.0, SPRINT_SPEED_MPS])),
+                &Flat,
+                SEA,
+            );
+        }
+        let block = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        for _ in 0..STILL_RECORDS {
+            body.record(
+                TrackInput {
+                    character: CharacterInput {
+                        intent: block,
+                        yaw: 0.0,
+                        dt_s: DT,
+                    },
+                    ..input(0, view_of(client, BOOM, [0.0; 2]))
+                },
+                &Flat,
+                SEA,
+            );
+        }
+        let boom = body.boom_m().expect("a held boom");
+        assert!((boom - BOOM).abs() < BOOM_KEPT_M, "boom {boom} m");
+        let gap = body.position().horizontal_distance(client);
+        assert!(gap < STILL_GAP_M, "still block {gap} m from its client");
     }
 
     /// A ledge: a floor [`LEDGE_M`] above the flat ground south of [`start`]'s y plus 1 m.
@@ -2526,8 +2585,8 @@ mod tests {
     /// The live pad roll of [`LIVE_PAD_ROLL`], after `REST_RECORDS` records at rest under its
     /// first camera, with the stick (`pad`) or with the forward key where the stick was tilted.
     /// Gives the largest gap between the body and where the cameras put the client on the held
-    /// boom, the gap at the end, and the largest step back toward the camera after the roll.
-    fn live_pad_roll(pad: bool) -> (f32, f32, f32) {
+    /// boom, and the gap at the end.
+    fn live_pad_roll(pad: bool) -> (f32, f32) {
         const START: Position = Position {
             x: 7302.314,
             y: 3089.5442,
@@ -2555,9 +2614,8 @@ mod tests {
         body.set_equip_load(EquipLoad::Fast);
         let (first_x, first_y, first_z, ..) = LIVE_PAD_ROLL[0];
         let rest: LiveRecord = (first_x, first_y, first_z, None, false, true);
-        let (mut worst_m, mut back_m): (f32, f32) = (0.0, 0.0);
+        let mut worst_m: f32 = 0.0;
         let mut gap_m = 0.0;
-        let mut rolled = false;
         for (index, (x, y, z, stick, dodge, block)) in std::iter::repeat_n(rest, REST_RECORDS)
             .chain(LIVE_PAD_ROLL)
             .enumerate()
@@ -2571,7 +2629,6 @@ mod tests {
             };
             let intent = if pad { keys.with_stick(stick) } else { keys };
             let (intent, yaw) = intent.toward_stick(YAW);
-            let before = body.position();
             let tracked = body.record(
                 TrackInput {
                     character: CharacterInput {
@@ -2591,37 +2648,31 @@ mod tests {
             if index >= REST_RECORDS {
                 worst_m = worst_m.max(gap_m);
             }
-            rolled |= dodge;
-            if rolled && stick.is_none() {
-                let step = [tracked.position.x - before.x, tracked.position.y - before.y];
-                back_m = back_m.max(-(step[0] * forward[0] + step[1] * forward[1]));
-            }
         }
-        (worst_m, gap_m, back_m)
+        (worst_m, gap_m)
     }
 
     /// The most the live pad roll's body may stand from its client's, m (our choice: the
     /// camera's trail of the roll, `CAMERA_LAG_S` × 8.5 m/s = 0.5 m, with a quarter step of
     /// [`PAD_FOLLOW_SHARE`] behind it, rounded up).
     const LIVE_ROLL_GAP_M: f32 = 1.0;
-    /// The most its body may step back toward the camera after the roll, m (our choice: the
-    /// trail's own stop, a tenth of the live snap-back of 1.1 m).
-    const LIVE_ROLL_BACK_M: f32 = 0.1;
+
+    // Both bodies step back by one follow step, 0.36 m, when the roll stops: the camera's body
+    // stood ahead by the trail of the server's roll speed, which went on for two records after
+    // the client's camera stopped (not the snap-back of a shrunk boom). This is still open: a
+    // trail that fades over the camera's lag, or one from the camera's own motion, cut the back
+    // steps but made the error of other moves larger in the retail replays.
 
     #[test]
     fn a_controller_s_live_roll_on_a_long_boom_stays_with_its_client() {
-        let (worst_m, end_m, back_m) = live_pad_roll(true);
+        let (worst_m, end_m) = live_pad_roll(true);
         assert!(worst_m < LIVE_ROLL_GAP_M, "in the roll {worst_m} m");
         assert!(end_m < FREE_BOOM_REST_GAP_M, "at the end {end_m} m");
-        assert!(back_m < LIVE_ROLL_BACK_M, "back {back_m} m");
     }
 
     #[test]
     fn a_keyboard_roll_under_the_live_pad_cameras_stays_with_its_client() {
-        // The keys' body steps back by one follow step when the roll stops: its camera's body
-        // stood ahead by the trail of the server's speed, which still slowed (not the snap-back
-        // of a shrunk boom).
-        let (worst_m, end_m, _) = live_pad_roll(false);
+        let (worst_m, end_m) = live_pad_roll(false);
         assert!(worst_m < LIVE_ROLL_GAP_M, "in the roll {worst_m} m");
         assert!(end_m < FREE_BOOM_REST_GAP_M, "at the end {end_m} m");
     }
