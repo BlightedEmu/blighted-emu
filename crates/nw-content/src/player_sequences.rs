@@ -22,9 +22,12 @@
 //! records ([`AttackHold`]). A sequence names an attack, not a stance: one sequence per stance
 //! did not fit retail. A dodge, a jump, a weapon draw, the block and the aim (right-click) and
 //! every movement state are the server's too. The client starts the later attacks of a combo
-//! itself (input row 1), and the server follows some of them ([`FollowUp`]). Unknown (no retail
-//! data on the pinned build): the dagger, and the releases of the bow, the musket and the
-//! blunderbuss.
+//! itself (input row 1), and the server follows some of them ([`FollowUp`]). The bow, the musket
+//! and the blunderbuss send no row 1 for their shots either: the server sends the aimed shot
+//! ([`StanceSequences::alt_fire`], the bow's at the release), the hip shot ([`HipShot`]) and
+//! what follows them ([`TimedSlots`]; ranged shot study 2026-11-18,
+//! `local-data/scratch-work/ranged-shots-2026-11-18/findings.md`). Unknown (no retail data on the
+//! pinned build): the dagger.
 //!
 //! The client sends no slayer state for a weapon ability either (input row 1 is empty at every
 //! ability key press): the server starts the ability's animation in the own state after the
@@ -384,6 +387,70 @@ pub struct StanceSequences {
     /// that press fires nothing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reload: Option<SlotsChange>,
+    /// The aimed shot goes out at the attack key's release, not at its press: the press draws
+    /// (Observed, ranged shot study 2026-11-18 on the own bow of 1,195 retail ledgers: 401 of 401
+    /// plain and drawn shots of 718 aimed press and release pairs came after the release, a
+    /// median 51 ms after it, none at the press; the musket fired 400 of 433 and the blunderbuss
+    /// 241 of 249 shots before the release).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub alt_fire_at_release: bool,
+    /// What follows the aimed shot ([`StanceSequences::alt_fire`]), by milliseconds from the own
+    /// state that sent it: the draw of the next shot and the aim's hold again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alt_fire_after: Vec<TimedSlots>,
+    /// The aimed shot of a key held to its full draw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_charge: Option<AltCharge>,
+    /// The shot of an attack key press without the right-click (from the hip).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hip: Option<HipShot>,
+}
+
+/// An upper slot change that follows a shot, `after_ms` after the own state that sent the shot
+/// (or the start before it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TimedSlots {
+    /// Milliseconds from the shot's own state.
+    pub after_ms: u64,
+    /// The children it sends.
+    #[serde(flatten)]
+    pub slots: SlotsChange,
+}
+
+/// The full draw of an aimed shot that goes out at the release
+/// ([`StanceSequences::alt_fire_at_release`]): after the key was held `after_ms` from its press,
+/// `drawn` goes out, and the release then sends `fire` instead of the plain shot (Observed, bow:
+/// 137 of 157 drawn shots `18=38 48=25` came after `48=24`, and 0 of 244 plain shots `18=35
+/// 48=41`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AltCharge {
+    /// Milliseconds of input records from the press to the full draw.
+    pub after_ms: u64,
+    /// What the full draw sends while the key is held.
+    pub drawn: SlotsChange,
+    /// What the release sends after the full draw.
+    pub fire: SlotsChange,
+    /// What follows `fire`, by milliseconds from its own state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fire_after: Vec<TimedSlots>,
+}
+
+/// The shot of an attack key press from the hip: the server's, the client names none in row 1
+/// (Observed, ranged shot study 2026-11-18: 4 of 362 own bow hip presses had a row 1).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct HipShot {
+    /// What the press sends, started in its record.
+    pub start: SlotsChange,
+    /// What follows `start`, by milliseconds from its own state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<TimedSlots>,
+    /// The shot's end, by milliseconds from the start's own state.
+    pub end: TimedSlots,
+    /// A shot again from a press while the shot plays: the end's own state sends this in place
+    /// of the end, and `after` and `end` count again from there. `None`: such a press starts
+    /// nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refire: Option<SlotsChange>,
 }
 
 impl StanceSequences {
@@ -869,6 +936,55 @@ mod tests {
             })
         );
         assert_eq!(table.follow_up(1), None);
+    }
+
+    #[test]
+    fn a_stance_reads_its_release_shot_full_draw_and_hip_shot() {
+        let table = PlayerSequences::parse(
+            r#"{"stances": [
+                {"tags": "Bow,LongBow",
+                 "alt_fire": {"second_sequence": 35, "marker": 41},
+                 "alt_fire_at_release": true,
+                 "alt_fire_after": [{"after_ms": 433, "second_state": 39,
+                                     "second_sequence": 2206, "marker": 40}],
+                 "alt_charge": {"after_ms": 587, "drawn": {"marker": 24},
+                                "fire": {"second_sequence": 38, "marker": 25}},
+                 "hip": {"start": {"second_state": 33, "second_sequence": 4720, "marker": 3},
+                         "after": [{"after_ms": 33, "third_state": 46,
+                                    "third_sequence": 4170, "marker": 67}],
+                         "end": {"after_ms": 1000, "second_state": 45, "second_sequence": 0},
+                         "refire": {"third_state": 0, "third_sequence": 0, "marker": 3}}},
+                {"tags": "2H_Ranged,Blunderbuss",
+                 "alt_fire": {"second_sequence": 94, "marker": 41}}
+            ], "follow_ups": []}"#,
+        )
+        .expect("table");
+        let bow = table.stance(stance_key("Bow,LongBow")).expect("bow");
+        assert!(bow.alt_fire_at_release);
+        let nock = bow.alt_fire_after.first().expect("the next draw");
+        assert_eq!(
+            (nock.after_ms, nock.slots.second_state, nock.slots.marker),
+            (433, Some(39), Some(40))
+        );
+        let charge = bow.alt_charge.as_ref().expect("the full draw");
+        assert_eq!(
+            (charge.after_ms, charge.drawn.marker, charge.fire.marker),
+            (587, Some(24), Some(25))
+        );
+        assert!(charge.fire_after.is_empty());
+        let hip = bow.hip.as_ref().expect("the hip shot");
+        assert_eq!(hip.start.second_sequence, Some(4720));
+        assert_eq!(hip.after.first().map(|step| step.after_ms), Some(33));
+        assert_eq!(
+            (hip.end.after_ms, hip.end.slots.second_state),
+            (1000, Some(45))
+        );
+        assert_eq!(hip.refire.and_then(|refire| refire.marker), Some(3));
+        let gun = table
+            .stance(stance_key("2H_Ranged,Blunderbuss"))
+            .expect("blunderbuss");
+        assert!(!gun.alt_fire_at_release, "it shoots at the press");
+        assert_eq!((gun.alt_charge.as_ref(), gun.hip.as_ref()), (None, None));
     }
 
     #[test]

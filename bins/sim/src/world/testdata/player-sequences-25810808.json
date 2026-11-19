@@ -1392,7 +1392,37 @@
     }
    },
    "draw_end_ms": 666,
-   "sheathe": 3190
+   "sheathe": 3190,
+   "alt_fire_after": [
+    {
+     "after_ms": 733,
+     "second_sequence": 4248,
+     "marker": 40
+    }
+   ],
+   "hip": {
+    "start": {
+     "second_state": 33,
+     "second_sequence": 97,
+     "third_state": 46,
+     "third_sequence": 416,
+     "marker": 67
+    },
+    "after": [
+     {
+      "after_ms": 733,
+      "marker": 66
+     }
+    ],
+    "end": {
+     "after_ms": 898,
+     "second_state": 45,
+     "second_sequence": 0,
+     "third_state": 0,
+     "third_sequence": 0,
+     "marker": 0
+    }
+   }
   },
   {
    "tags": "2H_Ranged,Rifle",
@@ -1501,7 +1531,66 @@
     }
    },
    "draw_end_ms": 666,
-   "sheathe": 3332
+   "sheathe": 3332,
+   "alt_fire_after": [
+    {
+     "after_ms": 33,
+     "second_sequence": 1535,
+     "marker": 45
+    },
+    {
+     "after_ms": 267,
+     "second_state": 39,
+     "second_sequence": 888,
+     "marker": 44
+    },
+    {
+     "after_ms": 867,
+     "second_sequence": 1716
+    },
+    {
+     "after_ms": 1467,
+     "second_state": 36,
+     "second_sequence": 3544,
+     "marker": 40
+    }
+   ],
+   "hip": {
+    "start": {
+     "second_state": 33,
+     "second_sequence": 74,
+     "marker": 3
+    },
+    "after": [
+     {
+      "after_ms": 67,
+      "third_state": 46,
+      "third_sequence": 416,
+      "marker": 67
+     },
+     {
+      "after_ms": 267,
+      "marker": 71
+     },
+     {
+      "after_ms": 1067,
+      "second_state": 39,
+      "second_sequence": 888,
+      "third_state": 0,
+      "third_sequence": 0,
+      "marker": 4
+     },
+     {
+      "after_ms": 1667,
+      "second_sequence": 1716
+     }
+    ],
+    "end": {
+     "after_ms": 2566,
+     "second_state": 45,
+     "second_sequence": 0
+    }
+   }
   },
   {
    "tags": "MagicStaff,Fire",
@@ -2098,7 +2187,81 @@
    },
    "draw_end_ms": 532,
    "sheathe": 3018,
-   "sheathe_end_ms": 967
+   "sheathe_end_ms": 967,
+   "alt_fire_at_release": true,
+   "alt_fire_after": [
+    {
+     "after_ms": 33,
+     "second_state": 36,
+     "second_sequence": 35,
+     "marker": 40
+    },
+    {
+     "after_ms": 433,
+     "second_state": 39,
+     "second_sequence": 2206,
+     "marker": 40
+    },
+    {
+     "after_ms": 1133,
+     "second_sequence": 29
+    }
+   ],
+   "alt_charge": {
+    "after_ms": 587,
+    "drawn": {
+     "marker": 24
+    },
+    "fire": {
+     "second_sequence": 38,
+     "marker": 25
+    },
+    "fire_after": [
+     {
+      "after_ms": 100,
+      "third_sequence": 421,
+      "marker": 41
+     },
+     {
+      "after_ms": 433,
+      "second_state": 39,
+      "second_sequence": 2206,
+      "marker": 40
+     },
+     {
+      "after_ms": 1133,
+      "second_sequence": 29
+     }
+    ]
+   },
+   "hip": {
+    "start": {
+     "second_state": 33,
+     "second_sequence": 4720,
+     "marker": 3
+    },
+    "after": [
+     {
+      "after_ms": 33,
+      "third_state": 46,
+      "third_sequence": 4170,
+      "marker": 67
+     }
+    ],
+    "end": {
+     "after_ms": 1000,
+     "second_state": 45,
+     "second_sequence": 0,
+     "third_state": 0,
+     "third_sequence": 0,
+     "marker": 0
+    },
+    "refire": {
+     "third_state": 0,
+     "third_sequence": 0,
+     "marker": 3
+    }
+   }
   },
   {
    "tags": "MagicGauntlet,Ice",
