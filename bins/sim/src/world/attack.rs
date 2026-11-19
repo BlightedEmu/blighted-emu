@@ -2345,7 +2345,9 @@ impl SimWorld {
     /// `now_ms` ([`super::abilities::AbilityEvent::Strike`]) lands as a basic attack's does
     /// ([`SimWorld::player_swings_due`]): its shapes sweep through its damage window on the
     /// player's body, turned by its homing toward a target in reach, else along the player's
-    /// view; a shot fires along the view at its fire time.
+    /// view; a shot fires along the view at its fire time. The fragment's root motion moves the
+    /// player's body from the next input record on (an ability's dash or leap carried the client
+    /// metres with no movement key, and a body of the keys alone stayed behind).
     pub(super) fn start_ability_strike(
         &mut self,
         entity: Entity,
@@ -2388,7 +2390,17 @@ impl SimWorld {
             damage_row = swing.attack.damage_row,
             "ability strike"
         );
+        let motion = swing.attack.motion.clone().map(Arc::new);
+        // An attack's time is a few seconds of milliseconds.
+        #[allow(clippy::cast_precision_loss)]
+        let keys_from_ms = swing.attack.next_attack_from_ms() as f32;
         self.player_swings.push(swing);
+        // The fragment's root motion moves the body ([`nw_sim_core::TrackedBody::start_motion`]).
+        if let Some(motion) = motion
+            && let Some(mut player) = self.world.get_mut::<Player>(entity)
+        {
+            player.tracked.start_motion(motion, keys_from_ms);
+        }
     }
 
     /// Whether `swing`, made while the server held a spread-shot weapon, was a swing of the melee
@@ -4415,6 +4427,61 @@ mod tests {
         assert!(
             matches!(landed.as_slice(), [Ok(AttackOutcome::Hit { target, .. })] if *target == mob()),
             "the strike hits: {landed:?}"
+        );
+    }
+
+    /// Retail `12a_msq_15_defeatnavigator` from 182.13 s: the great sword's Dash Attack
+    /// (`Ability_Greatsword_DashAttack`, ability key 1, no movement key) carried the own place
+    /// 6.2 m along the camera's forward in about a second, where the fragment's root motion goes
+    /// 6.1 m; the server's body of the keys alone stood still (key physics study 2026-11-19:
+    /// 6 m off in the fresh-start replay).
+    #[test]
+    fn an_ability_s_root_motion_carries_the_body_with_no_movement_key() {
+        /// The Dash Attack's root motion, cut to its start-up and its dash: still to 550 ms,
+        /// 6.1 m forward at 1,100 ms (the table's dash is still to 400 ms, 6.1 m at 1,100 ms).
+        const STEP_MS: f32 = 550.0;
+        const DASH_M: f32 = 6.1;
+        /// No mob within the character search of the body on its way.
+        const CLEAR_OF_MOB_M: f32 = 30.0;
+        /// Input records past the dash's 1.1 s, in messages of three.
+        const MESSAGES: u16 = 14;
+        const RECORDS_PER_MESSAGE: u16 = 3;
+        /// How far the body may end from the dash's end, m: one record's step.
+        const ENDS_WITHIN_M: f32 = 0.4;
+        /// How far it may go off the dash's line, m.
+        const CLOSE_M: f32 = 0.01;
+        let mut world = fight_at(MOB_X + CLEAR_OF_MOB_M);
+        tick(&mut world, NOW);
+        let entity = world.player_by_number(1).expect("player");
+        let body_at = |world: &SimWorld| {
+            world
+                .world
+                .get::<Body>(entity)
+                .expect("body")
+                .motion
+                .position()
+        };
+        let start = body_at(&world);
+        let mut attack = sword().attack(AttackKind::Light).cloned().expect("attack");
+        attack.motion = Some(AttackMotion {
+            step_ms: STEP_MS,
+            offsets: vec![[0.0, 0.0], [0.0, 0.0], [0.0, DASH_M]],
+            inherit_velocity: false,
+            inherit_max_mps: None,
+            decel_mps2: [0.0; 2],
+        });
+        world.start_ability_strike(entity, attack, NOW);
+        for index in 0..MESSAGES {
+            let first = 1 + index * RECORDS_PER_MESSAGE;
+            let records = message(first, &[Key::Hold; RECORDS_PER_MESSAGE as usize]);
+            let at = NOW + u64::from(first + RECORDS_PER_MESSAGE) * u64::from(INPUT_RECORD_MS);
+            let _ = world.move_from_input(&connection(1), &records, at);
+        }
+        let end = body_at(&world);
+        // The records face west (-x): the dash goes along the camera's forward.
+        assert!(
+            (start.x - end.x - DASH_M).abs() < ENDS_WITHIN_M && (end.y - start.y).abs() < CLOSE_M,
+            "the dash carries the body {DASH_M} m west: from {start:?} to {end:?}"
         );
     }
 

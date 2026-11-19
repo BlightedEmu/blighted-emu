@@ -76,7 +76,9 @@
 //! against 3.5 to 5 m/s free), with the velocity it keeps, until a movement key ends it from its
 //! `CanTransition` marker on, a dodge or a block ends it, or its motion is over. The sim learns
 //! of an attack after the records of its message moved the body: those records are taken again
-//! with the attack's motion ([`TrackedBody::start_attack`]).
+//! with the attack's motion ([`TrackedBody::start_attack`]). An ability's fragment with an
+//! animation-driven motion moves the body so too, from the record after the message that
+//! pressed its key ([`TrackedBody::start_motion`]).
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -215,6 +217,21 @@ struct AttackPlay {
     held: bool,
 }
 
+impl AttackPlay {
+    /// An action of motion `motion` that starts `at_ms` from now (below 0: later), whose
+    /// movement keys may end it from `keys_from_ms` after its start; `held` for a hit reaction.
+    const fn new(motion: Arc<AttackMotion>, keys_from_ms: f32, at_ms: f32, held: bool) -> Self {
+        Self {
+            motion,
+            forward: None,
+            at_ms,
+            keys_from_ms,
+            kept_mps: [0.0; 2],
+            held,
+        }
+    }
+}
+
 /// One record the body took: where it stood before it, the record's input and its velocity then.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TakenRecord {
@@ -307,14 +324,12 @@ impl TrackedBody {
             rewind += 1;
         }
         let again: Vec<TakenRecord> = self.taken.drain(self.taken.len() - rewind..).collect();
-        self.attack = Some(AttackPlay {
+        self.attack = Some(AttackPlay::new(
             motion,
-            forward: None,
-            at_ms: since_ms - rewound_ms,
             keys_from_ms,
-            kept_mps: [0.0; 2],
-            held: false,
-        });
+            since_ms - rewound_ms,
+            false,
+        ));
         let Some(first) = again.first() else {
             return;
         };
@@ -339,14 +354,21 @@ impl TrackedBody {
     /// animation moves the body along its facing, and its keys, its dodge and its block move it
     /// no more until `keys_from_ms` after the start, when a movement key ends it.
     pub fn start_reaction(&mut self, motion: Arc<AttackMotion>, keys_from_ms: f32) {
-        self.attack = Some(AttackPlay {
-            motion,
-            forward: None,
-            at_ms: 0.0,
-            keys_from_ms,
-            kept_mps: [0.0; 2],
-            held: true,
-        });
+        self.attack = Some(AttackPlay::new(motion, keys_from_ms, 0.0, true));
+    }
+
+    /// An ability's fragment of motion `motion` starts with the next record (the sim's ability
+    /// run starts it in the tick after the input message that pressed its key, whose records
+    /// moved the body already; Inferred: the client starts it with the press, one message
+    /// earlier): its animation moves the body as an attack's does, from the keys of that record
+    /// or else the camera's forward, until a movement key ends it from `keys_from_ms` after its
+    /// start on, a dodge or a block ends it, or its motion is over. Observed, retail
+    /// `12a_msq_15_defeatnavigator` from 182.13 s (`Ability_Greatsword_DashAttack`, ability key
+    /// 1, no movement key): the own place went 6.2 m along the camera's forward (3 to 8 degrees
+    /// off) within 1.0 s of the press and stopped, where the fragment's root motion goes 6.1 m
+    /// in 1.1 s; the keys alone left the body standing.
+    pub fn start_motion(&mut self, motion: Arc<AttackMotion>, keys_from_ms: f32) {
+        self.attack = Some(AttackPlay::new(motion, keys_from_ms, 0.0, false));
     }
 
     /// A dodge breaks the hit reaction out (`playeractions_dodge.actionlist`,
@@ -960,6 +982,32 @@ mod tests {
         body.stand_at(start());
         body.record(keys(0, yaw), &Flat, SEA);
         assert_eq!(body.position(), start(), "a server move ends the attack");
+    }
+
+    /// An ability's fragment starts with the record after the message that pressed its key
+    /// ([`TrackedBody::start_motion`]): the records taken before stay as they were, and its
+    /// motion carries the body on from there along the camera's forward, with no movement key.
+    #[test]
+    fn an_ability_s_motion_starts_with_the_next_record_along_the_camera() {
+        // A quarter turn: the camera looks along -x.
+        let yaw = std::f32::consts::FRAC_PI_2;
+        let mut body = TrackedBody::new(start());
+        body.record(keys(1, yaw), &Flat, SEA);
+        let pressed_at = body.position();
+        body.start_motion(lunge(), NO_KEYS_MS);
+        assert_eq!(
+            body.position(),
+            pressed_at,
+            "the press's record is not taken again"
+        );
+        for _ in 0..LUNGE_RECORDS {
+            body.record(keys(0, yaw), &Flat, SEA);
+        }
+        let at = body.position();
+        assert!(
+            (at.x - (pressed_at.x - 1.0)).abs() < CLOSE && (at.y - pressed_at.y).abs() < CLOSE,
+            "{at:?}"
+        );
     }
 
     #[test]
