@@ -655,7 +655,7 @@
               "proof": "none"
             },
             {
-              "check": "Bow, musket and blunderbuss shots show to the other players (tests only, 2026-11-19): the bow's aimed shot at the release (244 of 244 retail) and its full draw (157 of 157), the hip shots of all three with their steps and end, a bow press during its hip shot fires again, and the musket's steps after an aimed shot (reload, aim again). Open: the guns' second hip shot during the first, the blunderbuss automatic reload.",
+              "check": "Bow, musket and blunderbuss shots show to the other players (tests only, 2026-11-19): the bow's aimed shot at the release (244 of 244 retail), its full draw mark (157 of 157) and the drawn pose `18=928` about 133 ms after it with its walk and stand forms, the hip shots of all three with their steps and end, a bow press during its hip shot fires again, a blunderbuss press from 733 ms after its hip shot fires again (20 of 20), the blunderbuss reloads on a timer after its second shot, the aim's third slot has its walk and stand forms, the next aimed bow shot waits 1,066 ms, and the musket's steps after an aimed shot (reload, aim again). The musket never fires again from the hip, as retail (0 of 94).",
               "proof": "tests"
             },
             {
@@ -669,6 +669,10 @@
             {
               "check": "Other players' states go unreliable on channel 1 as retail's (not done): the stack scripts still start the sims with NW_RELIABLE_BUNDLES=1, so a lost datagram holds every later state about 230 ms until its resend (34 holds in a 2.5 min client trace, the viewer's delay then up to 350 ms). A live check with the real client is needed before the switch goes off.",
               "proof": "none"
+            },
+            {
+              "check": "Another player leaves the floor in a jump or fall and lands on the viewer's screen (tests only, 2026-11-19): bit 4 of ALC child 41 says \"on a floor\"; retail clears it 167 to 333 ms into a jump and at a fall's start and sets it at the landing; ours sent it set in every state, so the client held the other player on the floor (likely cause of the floating). Tests with keys and a controller.",
+              "proof": "tests"
             }
           ]
         },
@@ -1471,6 +1475,14 @@
             {
               "check": "The tutorial's scripted mobs stand on the level's floor and follow it as they move (tests only, 2026-11-17): before, each kept one fixed height per fight, so the second legionnaire walked inside the courtyard's hill and Thorpe stood 0.27 m into his arena's floor.",
               "proof": "tests"
+            },
+            {
+              "check": "A basic mob reels from up to four hits in a row, an elite or mini boss from two (tests only, 2026-11-19): the reaction limit starts on the 4th reaction for the `Solo` types and the 2nd for the others, and lasts 2 s from the last hit (retail boar chains: 1 to 6 reactions, median 4). Ours started it on the 2nd for every mob, so a boar stopped reeling from the third spear hit.",
+              "proof": "tests"
+            },
+            {
+              "check": "A boar's hit reaction lasts 775 ms in ours and about 635 ms in retail (not proven, not changed).",
+              "proof": "none"
             }
           ]
         },
@@ -3661,7 +3673,7 @@
     }
   ],
   "nextSteps": [
-    "**Other players: live check of the eighth round (2026-11-19, tests only), then the unreliable bundles.** First play as now: dodge rolls (keyboard and controller), crouch and prone, bow and gun shots aimed and from the hip, blocks. Then turn the reliable bundles off on the VM (NW_RELIABLE_BUNDLES in the stack script) and check with the real client that the other player stays visible and moves without the 230 ms holds; the client trace (`blighted-emu-tools`, delay trace) measures the viewer's delay.\n\nStill open: the admin site's Live page crashes the browser tab when a player is picked (not reproduced off-line); the two-bot `pair` test fails on the current stack (the bots never see each other); the drawn block shake and the boar swing feel (no measured fault left); children 41, 42 and 44 for other players (Unknown effect).",
+    "**Other players: live check of the ninth round (2026-11-19, tests only), then the unreliable bundles.** First play as now: dodge rolls (keyboard and controller), jumps and falls (no floating), crouch and prone, bow and gun shots aimed and from the hip, the bow's full draw, blunderbuss re-fire and reload, blocks, and a spear chain on a boar. Then turn the reliable bundles off on the VM (NW_RELIABLE_BUNDLES in the stack script) and check with the real client that the other player stays visible and moves without the 230 ms holds; the client trace (`blighted-emu-tools`, delay trace) measures the viewer's delay. The two-bot `pair` test passes with and without reliable bundles on the PC.\n\nStill open: the admin site's Live page crashes the browser tab when a player is picked (not reproduced off-line); the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
@@ -3746,6 +3758,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Other players, ninth round (2026-11-19, tests only): the floor bit goes off in jumps and falls, the blunderbuss fires again and reloads as retail, the aim and the bow's full draw show their walk and stand forms, a basic mob reels from four hits in a row, and the two-bot pair test passes again.",
     "Other players, fifth live round (2026-11-18, tests only): another player's states now carry its client's time and repeat their clock after a change, a held heavy charge and a still controller player no longer float.",
     "Other players, fourth live round (2026-11-17, tests only): the gear load no longer counts the main-hand weapons (light and medium armor dodged as medium and heavy), an aim no longer sends a block, and a controller player's body is smoothed and no longer floats.",
     "Other players, third live round (2026-11-17, tests only): a pad run faces its stick, a block walk stops into its stand at once, jump presses in the air start nothing, and the dodge follows the gear load. The game gateway logs the address of each cookie it sends and of each wrong cookie it refuses.",
@@ -3984,5 +3997,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-19",
-  "lastCommit": "f1c8211d"
+  "lastCommit": "6890b436"
 }
