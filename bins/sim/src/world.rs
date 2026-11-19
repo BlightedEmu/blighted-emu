@@ -264,6 +264,13 @@ fn aim_camera_hold(until_ms: Option<u64>, aiming: bool, clock_ms: u64) -> Option
     until_ms.filter(|until| clock_ms < *until)
 }
 
+/// Whether the camera of `record` is on an aim's own boom: a drawn bow or gun (`weapon_aims`)
+/// held at the right-click (the block bit), or in an ability's aim view (`ability_aims`,
+/// [`abilities::AbilityRun::aims`]).
+fn camera_aims(weapon_aims: bool, record: &InputRecord, ability_aims: bool) -> bool {
+    weapon_aims && (record.blocking() || ability_aims)
+}
+
 /// How far a player's input clock may fall behind the sim's clock, ms (our choice, near retail's
 /// stamp age: in the 2026-11-18 timing study of 398 ledgers retail stamped another player's
 /// states 4 to 28 ms before it first sent them).
@@ -2140,6 +2147,9 @@ impl SimWorld {
                     .stance(weapon.stance)
                     .is_some_and(|stance| stance.aimed.is_some())
         });
+        // An ability's aim view (Penetrating Shot's aim, Rain of Arrows' targeting) moves the
+        // camera to its own boom with no right-click ([`abilities::AbilityRun::aims`]).
+        let ability_aims = player.abilities.aims();
         if let Some(load) = player.gear.as_ref().and_then(|gear| {
             self.content.equip_load(
                 EQUIP_LOAD_SLOTS
@@ -2196,11 +2206,15 @@ impl SimWorld {
             // [`AIM_CAMERA_OUT_MS`] after, the keys alone move the body (camera body study
             // 2026-11-18, retail tutorial replay: aim standing 2.46/3.99 m off, median/90th
             // percentile, to 0.41/1.39 m; aim moving 3.61/3.99 to 1.38/1.40 m; freeing the boom
-            // as a zoom key does gave 2.38/7.30 and 2.50/7.26 m).
+            // as a zoom key does gave 2.38/7.30 and 2.50/7.26 m). An ability's aim view holds the
+            // camera so too (live 2026-11-19, client trace: Penetrating Shot's aim moved the
+            // camera from 7.0 to 1.03 m and back, Rain of Arrows' targeting to 4.4 m, with no
+            // right-click; the camera check moved the body instead, up to 5.9 m from the still
+            // client, and the next shots flew from there).
             let clock_ms = player.input_clock_ms.unwrap_or(now_ms);
             player.aim_camera_until_ms = aim_camera_hold(
                 player.aim_camera_until_ms,
-                aims && record.blocking(),
+                camera_aims(aims, record, ability_aims),
                 clock_ms,
             );
             if player.aim_camera_until_ms.is_some() {
@@ -10583,6 +10597,21 @@ mod tests {
             "the camera carries the body again"
         );
         assert_eq!(aim_camera_hold(None, false, AIM_AT_MS), None, "no aim");
+    }
+
+    /// Live 2026-11-19, client trace: Penetrating Shot's aim and Rain of Arrows' targeting moved
+    /// the camera to their own booms with no right-click, and the body slid up to 5.9 m from the
+    /// still client. An ability's aim view holds the camera as the right-click does.
+    #[test]
+    fn an_ability_aim_holds_the_camera_as_the_right_click_does() {
+        let plain = InputRecord::default();
+        assert!(camera_aims(true, &block_record(1), false), "the right-click");
+        assert!(camera_aims(true, &plain, true), "an ability's aim view");
+        assert!(!camera_aims(true, &plain, false), "no aim");
+        assert!(
+            !camera_aims(false, &block_record(1), true),
+            "no drawn bow or gun: a block, not an aim"
+        );
     }
 
     /// An input record with block held.
