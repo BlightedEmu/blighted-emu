@@ -84,7 +84,12 @@ pub fn track_input(record: &InputRecord, seen: RecordView) -> Option<TrackInput>
         // A press or hold of the attack key acts too: the server starts the press start and the
         // charge from it, and the camera rises with the pose (live 2026-11-18: a held heavy
         // charge lifted the camera's body 1.8 m and the body stood up there for the others).
-        action_started: record.slayer_input().is_some() || {
+        // So does a held ability key: its ability's camera leaves the boom (live 2026-11-19,
+        // log live-2026-11-19e, a spear ability held from counter 8469: the camera came in from
+        // a 7.0 m boom to 1.13 m at the same height, its body stood 2.6 m above the floor, and
+        // from the first movement key at 8472 the body took that height for minutes, as a floor
+        // the level lacks; the slayer input came only at 8479).
+        action_started: record.slayer_input().is_some() || record.ability_key().is_some() || {
             let attack = record.attack_key();
             attack.pressed || attack.held
         },
@@ -237,6 +242,39 @@ mod tests {
         assert!(acts(HELD), "a held key");
         assert!(acts(PRESS), "a press");
         assert!(!acts(0), "no key");
+    }
+
+    #[test]
+    fn a_held_ability_key_acts_for_the_camera() {
+        // Live 2026-11-19 (live-2026-11-19e, counters 8469 to 8479): a held ability key brought
+        // the camera in to 1.13 m with no action, and the body took the camera's height.
+        let seen = RecordView {
+            frame_s: None,
+            view: Some(LookDir {
+                yaw: 0.0,
+                pitch: 0.0,
+            }),
+            camera: None,
+        };
+        // The slot values that hold every ability key (the highest, input 402, is in value 6).
+        const SLOT_VALUES: usize = 7;
+        for number in nw_messages::ABILITY_KEYS {
+            let mut values = vec![0; SLOT_VALUES];
+            values[(number / u64::BITS) as usize] = 1 << (number % u64::BITS);
+            let record = InputRecord {
+                slots: InputSlots {
+                    count: 19,
+                    values,
+                    bytes: [128; 4],
+                },
+                ..InputRecord::default()
+            };
+            assert!(record.ability_key().is_some(), "key {number}");
+            assert!(
+                track_input(&record, seen).expect("a view").action_started,
+                "key {number}"
+            );
+        }
     }
 
     #[test]

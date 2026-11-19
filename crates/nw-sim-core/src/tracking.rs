@@ -36,7 +36,10 @@
 //! steps of the tutorial cave, run 17: the level collision has no surface between 23.13 m and
 //! 33 m there, and the body stayed at the foot while the client climbed); in an action, a dodge
 //! or a jump it keeps its own height there and finds no such floor, as the camera's height is
-//! off in them ([`CAMERA_SETTLE_RECORDS`]). A body the server dropped
+//! off in them ([`CAMERA_SETTLE_RECORDS`]). A resting body's still camera that stands it more than
+//! [`BOOM_SHORT_GAP_M`] above the floor under it, where a longer boom stands it on a floor the
+//! level knows, held a boom shorter than the client's: the body goes onto that floor with that
+//! boom and does not take a floor the level lacks. A body the server dropped
 //! (a move into the air) falls by the physics until it lands.
 //!
 //! The camera does not carry the body through a wall ([`wall_between`]) from close by: the
@@ -85,7 +88,7 @@ use std::sync::Arc;
 
 use nw_content::player_attacks::AttackMotion;
 
-use crate::camera_check::{CameraCheck, CameraView, MOUNTED_CAMERA_LAG_S};
+use crate::camera_check::{CameraBody, CameraCheck, CameraView, MAX_BOOM_M, MOUNTED_CAMERA_LAG_S};
 use crate::character::{
     Character, CharacterInput, MountPaces, Posture, SPRINT_SPEED_MPS, key_direction, swim_floor_at,
     wall_between, yaw_axes,
@@ -140,6 +143,54 @@ pub const RECOVER_AFTER_RECORDS: u16 = 30;
 /// structure, the camera's bodies of two players at rest stood 0.9 m and 1.07 m above it for
 /// seconds, and with 1.0 m the body of the second one stood on a floor 1 m up in the air).
 pub const CAMERA_FLOOR_SPREAD_M: f32 = 1.5;
+/// How far above the floor under it the camera's body of a resting body under a still camera
+/// ([`STILL_CAMERA_M`]) may stand before a longer boom that stands it on a floor the level knows
+/// is the client's, m.
+///
+/// The boom is never sent, and a camera that met the level (`CameraCollides`) shortens it and
+/// glides back out with no boom key, while the check holds the short one: the camera's body then
+/// stands too near the camera and too high by the missing boom × sin(pitch). Observed, retail
+/// towns session 2026-11-19 with the client's own trace: on stairs at 21:08:32 the client's boom
+/// went from 2.4 to 7.5 m in 0.4 s, the check held 2.17 m, and the body stood on its camera's
+/// height 1.3 to 1.5 m above the client (the floor the level lacks, [`CAMERA_FLOOR_SPREAD_M`]);
+/// over the session 75% of the records off by more than 0.3 m in height held a boom more than
+/// 1 m off the client's, mostly too short. The first longer boom whose body meets a known floor
+/// came within 0.49 m of the client's boom (median), against 4.39 m for the held one. A moving
+/// camera's height lags the body on slopes and stairs (the client's camera stood 0.9 to 2.0 m
+/// above its body, not 1.685 m), and the search then lengthened right booms in the old
+/// open-world ledgers, so only a resting body's camera counts. Our choice from the replays
+/// against retail's own places (records more than 0.3 m off in height, towns / 11 open-world
+/// ledgers / tutorial): before 7.06 % / 2.69 % / 15.17 %; at rest with no pitch limits and a
+/// moving camera, 1.5 m gave 7.03 % / 2.68 % / 15.17 %, 1.0 m 6.96 % / 2.74 % / 15.17 % and
+/// 0.5 m 4.57 % / 2.57 % / 15.11 %; 0.5 m with the pitch limits and a still camera 5.18 % /
+/// 2.49 % / 15.16 %, and the place error over 0.5 m 30.5 / 30.7 / 28.0 % before, 26.5 / 30.1 /
+/// 26.9 % after.
+pub const BOOM_SHORT_GAP_M: f32 = 0.5;
+/// The flattest look down whose camera's height may show a short boom, radians: below it a
+/// metre of boom moves the camera's body less than 0.2 m in height, and the line along the view
+/// meets the rising floor ahead, not the floor under the client (Observed, retail newchar
+/// tutorial at 232.7 s, pitch 0.047 rad: a boom 1.7 m longer than retail's took the body 1.2 m
+/// off; with 0.2 rad the tutorial replay lost none of its improved records and kept no worse
+/// one).
+const FLOOR_BOOM_MIN_PITCH_RAD: f32 = 0.2;
+/// How far the camera may move in one record and still be still, m, on each axis (our choice:
+/// the camera's own spread about the boom model is 0.05 m). A resting body's camera that moves
+/// (a zoom, a camera that met the level, its rise after a landing) does not show its boom by its
+/// height (Observed, retail `13a_sq_18_killboar` at 93.6 s: at rest the camera rose 0.6 m in
+/// 0.1 s and the check's boom went 4.5, 3.2, 3.1 m against retail's 3.75 m, and the longer boom
+/// the floor met was 6.1 m; 0.01 m left 41 records of that ledger worse by more than 0.5 m
+/// against 280 with no limit, and 0.05 m 40).
+const STILL_CAMERA_M: f32 = 0.01;
+/// The steepest look down whose camera's height may show a short boom, radians. Observed, retail
+/// `12-9_demonstorm2` from 174.7 s (pitch 1.12 rad, at rest): the client stood on a floor the
+/// level lacks 2.1 to 2.6 m above the known one, and a boom 2 m longer met that floor 1 m ahead;
+/// the camera's body at steep pitches stands over the floor below a ledge for a small boom
+/// error. Our choice: 0.8 rad kept that ledger as before; 0.6 rad dropped 6 % of the towns
+/// session's improved records.
+const FLOOR_BOOM_MAX_PITCH_RAD: f32 = 0.8;
+/// The boom step of the search for that boom, m (our choice: 0.07 m of height at a pitch of
+/// 0.35 rad, and the meeting point is interpolated between the steps).
+const FLOOR_BOOM_STEP_M: f32 = 0.2;
 /// Records after a dodge or a jump in which the camera's height still shows that move, not a
 /// floor (live 2026-11-17: in a controller player's dodge the camera's body rose
 /// 1.9 m over 8 records on flat ground; after a standing jump it came down to its resting height
@@ -262,6 +313,8 @@ pub struct TrackedBody {
     on_lacking_floor: bool,
     /// Records in a row whose camera did not look at it.
     unfit_records: u16,
+    /// The camera of the record before, when it had one.
+    last_camera: Option<Position>,
 }
 
 impl TrackedBody {
@@ -278,6 +331,7 @@ impl TrackedBody {
             dropping: false,
             on_lacking_floor: false,
             unfit_records: 0,
+            last_camera: None,
         }
     }
 
@@ -547,6 +601,7 @@ impl TrackedBody {
         self.last_seen = None;
         self.dropping = false;
         self.on_lacking_floor = false;
+        self.last_camera = None;
     }
 
     /// The server puts it at `at` in the air (a teleport, a respawn): it falls from there to the
@@ -559,6 +614,7 @@ impl TrackedBody {
         self.last_seen = None;
         self.dropping = true;
         self.on_lacking_floor = false;
+        self.last_camera = None;
     }
 
     /// Moves it by one input record over `ground`, with the sea at `sea_level_m`.
@@ -596,13 +652,24 @@ impl TrackedBody {
         if !dodging_or_jumping {
             self.camera_settle_records = self.camera_settle_records.saturating_sub(1);
         }
-        let seen = input.view.and_then(|view| {
-            // A rider's camera trails its mount farther than a walker's.
-            let view = if self.character.is_mounted() {
+        // A rider's camera trails its mount farther than a walker's.
+        let view = input.view.map(|view| {
+            if self.character.is_mounted() {
                 view.trailing(MOUNTED_CAMERA_LAG_S)
             } else {
                 view
-            };
+            }
+        });
+        let last_camera = std::mem::replace(&mut self.last_camera, view.map(|view| view.camera));
+        let camera_still = view.zip(last_camera).is_some_and(|(view, last)| {
+            let moved = [
+                view.camera.x - last.x,
+                view.camera.y - last.y,
+                view.camera.z - last.z,
+            ];
+            moved.iter().all(|axis| axis.abs() <= STILL_CAMERA_M)
+        });
+        let seen = view.and_then(|view| {
             self.camera.observe(
                 view,
                 position,
@@ -642,6 +709,28 @@ impl TrackedBody {
                 camera_body: None,
             };
         };
+        // A resting body's camera body high above the floor under it shows a boom shorter than
+        // the client's when a longer one puts it on a floor the level knows
+        // ([`BOOM_SHORT_GAP_M`]): the body goes there, and the check holds that boom.
+        let floor_boom = view
+            .filter(|_| {
+                resting
+                    && camera_still
+                    && !self.dropping
+                    && !self.is_swimming()
+                    && !self.character.is_mounted()
+                    && !self.character.is_jumping()
+                    && !self.is_falling()
+                    && !camera_moved
+            })
+            .and_then(|view| {
+                boom_to_known_floor(view, seen, self.character.velocity(), ground, sea_level_m)
+            });
+        if let Some(found) = floor_boom {
+            self.camera.hold_boom(found.boom_m);
+            self.last_seen = Some(found.at);
+        }
+        let seen = floor_boom.unwrap_or(seen);
         // The wall is the one at the higher of the two bodies' feet: a client that climbed onto
         // a ledge (a mantle, a vault) shows its body on top, and the line passes over the ledge.
         let over = Position {
@@ -691,9 +780,13 @@ impl TrackedBody {
                 .map_or(FOLLOW_STEP_M, |top_mps| {
                     FOLLOW_STEP_M.max(top_mps * input.character.dt_s)
                 });
-            // A recovery goes the whole way at once. A pad's move keeps its stick's step and goes
-            // a share of the rest of the way, then the record's whole step is held to the limit.
-            let toward = if recovering || intent.stick.is_none() {
+            // A recovery goes the whole way at once, and so does a resting body to the floor its
+            // camera's longer boom meets: in steps, the resting check would take the boom from
+            // the body on the way and lose it short of the client. A pad's move keeps its stick's
+            // step and goes a share of the rest of the way, then the record's whole step is held
+            // to the limit.
+            let whole_way = recovering || floor_boom.is_some();
+            let toward = if whole_way || intent.stick.is_none() {
                 [dx, dy]
             } else {
                 [
@@ -701,7 +794,7 @@ impl TrackedBody {
                     position.y - before.y + (seen.at.y - position.y) * PAD_FOLLOW_SHARE,
                 ]
             };
-            let share = if recovering {
+            let share = if whole_way {
                 1.0
             } else {
                 (step_m / toward[0].hypot(toward[1])).min(1.0)
@@ -763,6 +856,7 @@ impl TrackedBody {
                 // and the body went up there).
                 Some(floor)
                     if !self.dropping
+                        && floor_boom.is_none()
                         && !self.is_swimming()
                         && !mounted
                         && intent.stick.is_none()
@@ -804,6 +898,48 @@ impl TrackedBody {
             camera_body: Some(seen.at),
         }
     }
+}
+
+/// The camera's body `seen` of `view` again, at the shortest longer boom that stands it on a
+/// floor of `ground` (the sea at `sea_level_m`), for a body moving at `velocity`: `None` when
+/// `seen` stands at most [`BOOM_SHORT_GAP_M`] above the floor under it, or no boom up to
+/// [`MAX_BOOM_M`] meets a floor.
+fn boom_to_known_floor(
+    view: CameraView,
+    seen: CameraBody,
+    velocity: [f32; 2],
+    ground: &(impl Ground + ?Sized),
+    sea_level_m: f32,
+) -> Option<CameraBody> {
+    let gap_m = |at: Position| floor_under(ground, at, sea_level_m).map(|floor| at.z - floor);
+    if !(FLOOR_BOOM_MIN_PITCH_RAD..=FLOOR_BOOM_MAX_PITCH_RAD).contains(&view.pitch)
+        || gap_m(seen.at).is_none_or(|gap| gap <= BOOM_SHORT_GAP_M)
+    {
+        return None;
+    }
+    let mut last: Option<(f32, f32)> = None;
+    let mut boom_m = seen.boom_m;
+    while boom_m < MAX_BOOM_M {
+        boom_m = (boom_m + FLOOR_BOOM_STEP_M).min(MAX_BOOM_M);
+        let Some(gap) = gap_m(view.body(boom_m, velocity)) else {
+            last = None;
+            continue;
+        };
+        if gap <= 0.0 {
+            // Between the last boom above the floor and this one, where the line meets it.
+            let met_m = last.map_or(boom_m, |(above_m, above_gap)| {
+                above_m + (boom_m - above_m) * above_gap / (above_gap - gap)
+            });
+            let at = view.body(met_m, velocity);
+            let floor = floor_under(ground, at, sea_level_m)?;
+            return Some(CameraBody {
+                at: Position { z: floor, ..at },
+                boom_m: met_m,
+            });
+        }
+        last = Some((boom_m, gap));
+    }
+    None
 }
 
 /// The floor under the feet of a body at `at`: the floor of `ground` there, or the swim floor of
@@ -2807,5 +2943,74 @@ mod tests {
         const STICK: [f32; 2] = [-0.156, 0.984];
         let worst_m = keyless_lunge_far_away(Intent::default().with_stick(Some(STICK)));
         assert!(worst_m < KEYLESS_LUNGE_GAP_M, "{worst_m} m");
+    }
+
+    /// The live float of 2026-11-19 (live-2026-11-19e, counters 8469 to 8472): the client stood
+    /// at rest with its 7.0 m zoom and a pitch of 0.445 rad, the check held a boom of 1.13 m, and
+    /// the camera put the body 2.6 m above the floor. Gives the client's body, the body the check
+    /// placed (1.13 m along the view from the camera's base) and the client's camera.
+    fn short_boom_at_rest() -> (Position, Position, CameraView) {
+        const PITCH: f32 = 0.445;
+        const CLIENT_BOOM_M: f32 = 7.0;
+        const HELD_BOOM_M: f32 = 1.13;
+        let client = start();
+        let (forward, right) = yaw_axes(0.0);
+        let level = |boom: f32| boom * PITCH.cos();
+        let base = [
+            client.x - level(CLIENT_BOOM_M) * forward[0],
+            client.y - level(CLIENT_BOOM_M) * forward[1],
+        ];
+        let camera = Position {
+            x: base[0] + SHOULDER_RIGHT_M * right[0],
+            y: base[1] + SHOULDER_RIGHT_M * right[1],
+            z: client.z + CAMERA_RISE_M + CLIENT_BOOM_M * PITCH.sin(),
+        };
+        let held = Position {
+            x: base[0] + level(HELD_BOOM_M) * forward[0],
+            y: base[1] + level(HELD_BOOM_M) * forward[1],
+            z: GROUND_Z,
+        };
+        (client, held, CameraView::new(camera, 0.0, PITCH))
+    }
+
+    #[test]
+    fn a_resting_camera_too_high_over_the_floor_lengthens_the_boom_to_it() {
+        /// Records at rest.
+        const RECORDS: usize = 3;
+        const WITHIN_M: f32 = 0.05;
+        let (client, held, view) = short_boom_at_rest();
+        let mut body = TrackedBody::new(held);
+        for _ in 0..RECORDS {
+            body.record(input(0, view), &Flat, SEA);
+        }
+        let at = body.position();
+        assert!(at.horizontal_distance(client) < WITHIN_M, "{at:?}");
+        assert!((at.z - GROUND_Z).abs() < WITHIN_M, "{at:?}");
+        let boom = body.boom_m().expect("a boom");
+        assert!((boom - 7.0).abs() < WITHIN_M, "{boom}");
+    }
+
+    #[test]
+    fn a_short_boom_from_rest_does_not_lift_the_walking_body() {
+        // Live: from the first movement key the body took its camera's height, 2.6 m up, as a
+        // floor the level lacks, and stood there for minutes.
+        const RESTING_RECORDS: usize = 3;
+        const WALKING_RECORDS: usize = 30;
+        const FLOOR_WITHIN_M: f32 = 0.1;
+        let (_, held, view) = short_boom_at_rest();
+        let mut body = TrackedBody::new(held);
+        for _ in 0..RESTING_RECORDS {
+            body.record(input(0, view), &Flat, SEA);
+        }
+        let mut walk = input(0, view);
+        walk.character.intent.right = 1;
+        for _ in 0..WALKING_RECORDS {
+            let tracked = body.record(walk, &Flat, SEA);
+            assert!(
+                (tracked.position.z - GROUND_Z).abs() < FLOOR_WITHIN_M,
+                "{:?}",
+                tracked.position
+            );
+        }
     }
 }

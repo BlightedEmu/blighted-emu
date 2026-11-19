@@ -84,9 +84,11 @@ const CAMERA_FIT_M: f32 = 1.0;
 /// 0.24/1.35 to 0.25/1.38 m), the Linux newchar 0.53/3.84 to 0.43/3.50 m; 0.6 rad pulled the
 /// retail beach past its bound.
 const ORBIT_TURN_RAD: f32 = 0.3;
-/// The boom of a camera that follows the body, m (Observed: retail resting booms from 0.1 m,
-/// against a wall, to 7.0 m, the longest zoom; moving booms up to 8.4 m with the trail).
-const BOOM_RANGE_M: std::ops::Range<f32> = 0.0..9.0;
+/// The longest boom of a camera that follows the body, m (Observed: retail resting booms from
+/// 0.1 m, against a wall, to 7.0 m, the longest zoom; moving booms up to 8.4 m with the trail).
+pub const MAX_BOOM_M: f32 = 9.0;
+/// The boom of a camera that follows the body, m.
+const BOOM_RANGE_M: std::ops::Range<f32> = 0.0..MAX_BOOM_M;
 
 /// The client's camera of one input record.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -144,7 +146,7 @@ impl CameraView {
     }
 
     /// The body under this camera with boom `boom`, moving at `velocity`.
-    fn body(&self, boom: f32, velocity: [f32; 2]) -> Position {
+    pub fn body(&self, boom: f32, velocity: [f32; 2]) -> Position {
         let ray = self.ray();
         let base = self.base(velocity);
         Position {
@@ -326,6 +328,14 @@ impl CameraCheck {
         self.boom_m = Some(found.boom_m);
         self.last_boom_m = Some(found.boom_m);
         Some(found)
+    }
+
+    /// Holds the boom `boom_m` that the level's floor under the camera shows: the boom of a
+    /// camera that met the level grows back out without a boom key
+    /// ([`crate::tracking::TrackedBody::record`]).
+    pub fn hold_boom(&mut self, boom_m: f32) {
+        self.boom_m = Some(boom_m);
+        self.last_boom_m = Some(boom_m);
     }
 
     /// Where the camera `view` puts the body at the boom the camera last had; `None` before it
