@@ -57,7 +57,7 @@ use super::hit_shape::{
     MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, SweptShape, Wedge, bodies_overlap, body_frame,
     homing_score, turn,
 };
-use super::mob_timeline::{HitSide, yaw_toward};
+use super::mob_timeline::{HitSide, limiter_chain_count, yaw_toward};
 use super::passives::{HitAim, HitMods};
 use super::projectile::{AimLine, Shot, ShotHit};
 use super::stamina::{Dodge, Guard};
@@ -1575,7 +1575,12 @@ impl SimWorld {
                 .get::<Body>(entity)
                 .map(|body| body.motion.position())
             {
-                self.mob_timelines.hurt(target, from);
+                let creature_type = self
+                    .mobs
+                    .vitals_of(target)
+                    .and_then(|vitals| self.content.kill_rewards.creature_type(vitals));
+                self.mob_timelines
+                    .hurt(target, from, limiter_chain_count(creature_type));
             }
             if view.owner.is_none() && block.is_none() {
                 self.player_hit_effects(target, number, row_key, hit.amount);

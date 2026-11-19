@@ -66,9 +66,37 @@ const ATTACK_MS: u64 = 1500;
 const CREATURE_REACTION_MS: (u64, u64) = (775, 835);
 /// Thorpe's reactions: `r_R2_F` 850-903 ms, `r_R3_F` 1296-1303 ms (boss note).
 const THORPE_REACTION_MS: (u64, u64) = (870, 1_300);
-/// After the second reaction of a chain, hits do not make a mob reel until this long after the
-/// last hit (retail `ReactionLimiter_Active`, off 2.0-2.08 s after the last hit; section 0.4).
+/// After the reaction that starts the limiter ([`limiter_chain_count`]), hits do not make a mob
+/// reel until this long after the last hit (retail `ReactionLimiter_Active`, off 2.0-2.08 s
+/// after the last hit; section 0.4; `AI_Reaction_Limiter` `BaseDuration` 2,
+/// `RefreshDuration` 1 in `javelindata_statuseffects_ai`).
 const REACTION_LIMIT_MS: u64 = 2_000;
+/// The `CreatureType`s whose reaction with `Chained_Reaction_Count` of
+/// [`SOLO_LIMITER_CHAIN_COUNT`] or more starts the limiter for any hit (the `Reaction` action of
+/// the creature reaction action lists, such as `predator/cage/boar/boar_reaction.actionlist`).
+const SOLO_CREATURE_TYPES: [&str; 4] = ["Solo", "Solo-", "Solo_StarterBeach", "Solo-_StarterBeach"];
+/// Observed (the same action lists): a reaction of a solo creature starts the limiter once
+/// three reactions came before it in the chain. Retail plain boars (`Boar` and its level rows
+/// are `Solo` or `Solo-`): 32 hit chains in the open world ledgers reeled 1, 2, 3, 4, 5 and 6
+/// times before the first hit that made them reel no more (and found them not swinging): 1, 3,
+/// 9, 4, 14 and 1 chains, median 4.
+const SOLO_LIMITER_CHAIN_COUNT: u8 = 3;
+/// The limiter count of the other creatures: their second reaction starts it (the action lists'
+/// count of 1 for `DungeonMiniBoss`, `Dungeon+`, `Elite+`, `EliteMiniBoss` and
+/// `CatacombsMiniBoss`; for the others, such as `Solo+` and named mobs, the lists start it at a
+/// count of 3 for heavy attacks only, and light attacks start no full reaction: Unknown here,
+/// they keep this count).
+const OTHER_LIMITER_CHAIN_COUNT: u8 = 1;
+
+/// The `Chained_Reaction_Count` at which a reaction of a mob of vitals `CreatureType`
+/// `creature_type` starts the reaction limiter.
+pub(super) fn limiter_chain_count(creature_type: Option<&str>) -> u8 {
+    if creature_type.is_some_and(|kind| SOLO_CREATURE_TYPES.contains(&kind)) {
+        SOLO_LIMITER_CHAIN_COUNT
+    } else {
+        OTHER_LIMITER_CHAIN_COUNT
+    }
+}
 /// A mob that moved within this many ms is moving: the brain does not move a mob every tick.
 const MOVE_HOLD_MS: u64 = IDLE_STATE_MS;
 /// A smaller move is no move.
@@ -909,14 +937,17 @@ impl MobTimeline {
     }
 
     /// A hit at `now_ms` on a creature that can reel: the first hit of a chain plays the light
-    /// reaction, the second the heavy one and starts the limit; while the limit runs, a hit only
-    /// makes it longer (retail plays an additive reaction then; not sent here). How long the
-    /// reaction plays, when one plays.
+    /// reaction, the later ones the heavy one (Inferred), and the reaction with
+    /// `limiter_count` reactions before it in the chain starts the limit
+    /// ([`limiter_chain_count`]); while the limit runs, a hit only makes it longer (retail
+    /// plays an additive reaction then; not sent here). How long the reaction plays, when one
+    /// plays.
     fn hurt(
         &mut self,
         now_ms: u64,
         (light_ms, heavy_ms): (u64, u64),
         side: HitSide,
+        limiter_count: u8,
     ) -> Option<u64> {
         if now_ms.saturating_sub(self.last_hurt_ms) >= REACTION_LIMIT_MS {
             self.reactions_in_chain = 0;
@@ -926,15 +957,18 @@ impl MobTimeline {
             self.reaction_limit_until_ms = now_ms + REACTION_LIMIT_MS;
             return None;
         }
-        self.reactions_in_chain += 1;
+        let chained = self.reactions_in_chain;
+        self.reactions_in_chain = chained.saturating_add(1);
         self.reacted = true;
-        let (fragment, length_ms) = if self.reactions_in_chain == 1 {
+        let (fragment, length_ms) = if chained == 0 {
             (Fragment::ReactLight(side), light_ms)
         } else {
-            self.reactions_in_chain = 0;
-            self.reaction_limit_until_ms = now_ms + REACTION_LIMIT_MS;
             (Fragment::ReactHeavy(side), heavy_ms)
         };
+        if chained >= limiter_count {
+            self.reactions_in_chain = 0;
+            self.reaction_limit_until_ms = now_ms + REACTION_LIMIT_MS;
+        }
         self.reaction = Some((fragment, now_ms + length_ms));
         Some(length_ms)
     }
@@ -1132,8 +1166,9 @@ pub(super) struct MobTimelines {
     by_mob: HashMap<u64, MobTimeline>,
     /// Mobs that swung since the last frame.
     attacked: HashSet<u64>,
-    /// Mobs that a player hit since the last frame, and where the player stood.
-    hurt: HashMap<u64, Position>,
+    /// Mobs that a player hit since the last frame, where the player stood and the mob's
+    /// limiter count ([`limiter_chain_count`]).
+    hurt: HashMap<u64, (Position, u8)>,
     /// Mobs that started a move since the last frame: its fragment and length.
     played: HashMap<u64, (MoveFragment, u64)>,
     /// When each mob last started a reaction (server ms).
@@ -1153,9 +1188,10 @@ impl MobTimelines {
         self.played.insert(mob, (fragment, length_ms));
     }
 
-    /// A player at `from` hit mob `mob`.
-    pub(super) fn hurt(&mut self, mob: u64, from: Position) {
-        self.hurt.insert(mob, from);
+    /// A player at `from` hit mob `mob`, whose reaction limiter starts at `limiter_count`
+    /// ([`limiter_chain_count`]).
+    pub(super) fn hurt(&mut self, mob: u64, from: Position, limiter_count: u8) {
+        self.hurt.insert(mob, (from, limiter_count));
     }
 
     /// The frame of mob `mob` in `pose` at server time `now_ms` (ms since 2000-01-01); its first
@@ -1181,13 +1217,14 @@ impl MobTimelines {
             .filter(|animations| animations.reactions.is_some())
             .map(|animations| animations.reaction_ms);
         let facing = pose.tree.and_then(|tree| tree.facing).or(timeline.yaw);
-        if let Some(from) = self.hurt.remove(&mob)
+        if let Some((from, limiter_count)) = self.hurt.remove(&mob)
             && let Some(reaction_ms) = reaction_ms
             && !pose.dead
             && let Some(length_ms) = timeline.hurt(
                 now_ms,
                 reaction_ms,
                 HitSide::of(timeline.position, facing, from),
+                limiter_count,
             )
         {
             self.reeled_ms.insert(mob, now_ms);
@@ -1597,7 +1634,7 @@ mod tests {
         assert_eq!(stab.entry.fragment, STAB.fragment);
         assert_eq!(stab.tags, thorpe.calm_tags, "no reaction yet");
         now += STAB_MS;
-        timelines.hurt(MOB, at(0.0));
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
         let reaction = changed(&mut timelines, now, &fighting);
         assert_eq!(reaction.tags, thorpe.alert_tags);
         now += THORPE_REACTION_MS.0;
@@ -1895,7 +1932,7 @@ mod tests {
         timelines.advance(MOB, START, &fighting, Some(&sailor));
         let swing_started = START + SPAWN_MS;
         assert!(!timelines.reeled_since(MOB, swing_started));
-        timelines.hurt(MOB, at(0.0));
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
         let reeled = swing_started + TICK_MS;
         timelines.advance(MOB, reeled, &fighting, Some(&sailor));
         assert!(timelines.reeled_since(MOB, swing_started));
@@ -1916,14 +1953,14 @@ mod tests {
             _ => None,
         };
         let mut now = START + SPAWN_MS;
-        timelines.hurt(MOB, at(0.0));
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
         let light = timelines.advance(MOB, now, &fighting, Some(&sailor)).step;
         assert_eq!(
             fragment_of(light),
             Some(sailor.reactions.expect("known").0.front.fragment)
         );
         now += TICK_MS;
-        timelines.hurt(MOB, at(0.0));
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
         let heavy = timelines.advance(MOB, now, &fighting, Some(&sailor)).step;
         assert_eq!(
             fragment_of(heavy),
@@ -1932,7 +1969,7 @@ mod tests {
         // While the limit runs, a hit does not start another reaction.
         now += CREATURE_REACTION_MS.1;
         timelines.advance(MOB, now, &fighting, Some(&sailor));
-        timelines.hurt(MOB, at(0.0));
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
         now += TICK_MS;
         let limited = timelines.advance(MOB, now, &fighting, Some(&sailor)).step;
         assert_ne!(
@@ -1943,11 +1980,51 @@ mod tests {
         let plain = without_reactions();
         let mut plains = MobTimelines::default();
         plains.advance(MOB, START, &fighting, Some(&plain));
-        plains.hurt(MOB, at(0.0));
+        plains.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
         let step = plains
             .advance(MOB, START + SPAWN_MS, &fighting, Some(&plain))
             .step;
         assert_eq!(fragment_of(step), Some(plain.combat_idle.fragment));
+    }
+
+    /// The reactions that a chain of `hits` hits `gap_ms` apart starts on a mob of creature
+    /// type `creature_type`, as true (it reeled) or false, per hit.
+    fn reels(creature_type: Option<&str>, hits: usize, gap_ms: u64) -> Vec<bool> {
+        let sailor = sailor();
+        let mut timelines = MobTimelines::default();
+        let fighting = pose(1.0, true);
+        timelines.advance(MOB, START, &fighting, Some(&sailor));
+        let limiter_count = limiter_chain_count(creature_type);
+        let mut now = START + SPAWN_MS;
+        (0..hits)
+            .map(|_| {
+                timelines.hurt(MOB, at(0.0), limiter_count);
+                timelines.advance(MOB, now, &fighting, Some(&sailor));
+                now += gap_ms;
+                timelines.take_reaction(MOB).is_some()
+            })
+            .collect()
+    }
+
+    /// Retail (creature reaction action lists; 32 retail plain boar hit chains, median 4
+    /// reactions): a solo creature reels from four hits of a chain, then the limiter holds; an
+    /// elite or a mini boss reels from two.
+    #[test]
+    fn the_creature_type_sets_how_many_hits_of_a_chain_make_a_mob_reel() {
+        const HITS: usize = 6;
+        // A spear's light attacks, about 0.6 s apart (live 2026-11-18).
+        const GAP_MS: u64 = 600;
+        let four = vec![true, true, true, true, false, false];
+        assert_eq!(reels(Some("Solo-"), HITS, GAP_MS), four, "a plain boar");
+        assert_eq!(reels(Some("Solo"), HITS, GAP_MS), four);
+        assert_eq!(reels(Some("Solo-_StarterBeach"), HITS, GAP_MS), four);
+        let two = vec![true, true, false, false, false, false];
+        assert_eq!(reels(Some("Elite+"), HITS, GAP_MS), two);
+        assert_eq!(reels(Some("DungeonMiniBoss"), HITS, GAP_MS), two);
+        assert_eq!(reels(None, HITS, GAP_MS), two, "an unknown type keeps two");
+        // The limiter ends 2 s after the last hit: the next chain reels again.
+        let rested = reels(Some("Solo-"), HITS, REACTION_LIMIT_MS);
+        assert_eq!(rested, vec![true; HITS], "hits 2 s apart start a new chain");
     }
 
     #[test]
@@ -2128,7 +2205,7 @@ mod tests {
         let mut timelines = MobTimelines::default();
         timelines.advance(MOB, START, &tree_pose(None, calm, None), Some(&risen));
         let now = START + SPAWN_MS;
-        timelines.hurt(MOB, at(0.0));
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
         let frame = timelines.advance(MOB, now, &tree_pose(None, calm, None), Some(&risen));
         let entry = frame
             .step
