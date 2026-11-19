@@ -115,11 +115,12 @@ pub use afflictions::{
 pub use alc::{
     ALC_TYPE_INDEX, AlcChild, AlcPosture, AlcStamp, AlcState, CardPlace, DATA_BITS_ACTIVE,
     FRAG_TAGS_LEN, KnownStamp, LayerEntry, LookDir, MAX_STAMINA_SEGMENTS, MobAnimation, MobStep,
-    POS_REL_CHILD, POS_REL_STEP_M, POS3_LEN, POS10_CHILD, RemoteMoveFlags, RemoteSequenceClock,
-    RemoteStep, RemoteUpper, SEQUENCE_TIME_REL_ZERO, SLOT0_CHILDREN, SLOT1_CHILDREN,
-    SPAWN_MOVEMENT, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, STAMINA_SEGMENT_POINTS,
-    ScopeEntry, SecondSlayerState, SequenceClock, SequenceTime, SlayerState, SlotChange, StepPlace,
-    StepScope, TeleportStep, UpperSlots, offset_from, offset_metres, stamina_segments,
+    OWN_SPEED, POS_REL_CHILD, POS_REL_STEP_M, POS3_LEN, POS10_CHILD, RemoteMoveFlags,
+    RemoteSequenceClock, RemoteStep, RemoteUpper, SEQUENCE_TIME_REL_ZERO, SLOT0_CHILDREN,
+    SLOT1_CHILDREN, SPAWN_MOVEMENT, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT,
+    STAMINA_SEGMENT_POINTS, ScopeEntry, SecondSlayerState, SequenceClock, SequenceTime,
+    SlayerState, SlotChange, StepPlace, StepScope, TeleportStep, UpperSlots, offset_from,
+    offset_metres, stamina_segments,
 };
 pub use appearance::{
     LOOK_CHOICES, PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState, PlayerIconData, PlayerLook,

@@ -1579,8 +1579,12 @@ impl SimWorld {
                     .mobs
                     .vitals_of(target)
                     .and_then(|vitals| self.content.kill_rewards.creature_type(vitals));
-                self.mob_timelines
-                    .hurt(target, from, limiter_chain_count(creature_type));
+                self.mob_timelines.hurt(
+                    target,
+                    from,
+                    limiter_chain_count(creature_type),
+                    row.creature_hit_stun,
+                );
             }
             if view.owner.is_none() && block.is_none() {
                 self.player_hit_effects(target, number, row_key, hit.amount);
@@ -7405,6 +7409,7 @@ mod tests {
                 rune_charge: nw_content::combat::RuneChargeRow::default(),
                 power_level: 0,
                 hit_stun: 0,
+                creature_hit_stun: 0,
                 stagger_mod: 0.0,
                 stun_breakout: 0.0,
             });

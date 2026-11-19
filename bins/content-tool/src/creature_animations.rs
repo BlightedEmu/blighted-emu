@@ -14,11 +14,11 @@ use std::path::Path;
 
 use nw_ai::data::FragmentLength;
 use nw_content::Tables;
-use nw_content::creature_animations::{CreatureRow, tag_row};
+use nw_content::creature_animations::{CreatureRow, ReactionPace, tag_row};
 use nw_content::mob_prefabs::{ASSET_ID_LEN, MobPrefabs};
 use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, SLICE_SUB_ID, paths_of};
 use nw_formats::mannequin::{
-    ActionList, AnimDatabase, CageGrid, ControllerDef, GridList, TagDefinition,
+    ActionList, AnimDatabase, CageGrid, ControllerDef, Fragment, GridList, TagDefinition,
 };
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
 
@@ -81,6 +81,12 @@ const GATHERABLE_REMAINS_TYPE: [u8; 16] = [
 ];
 /// Scope time ticks per second (`DAT_14807f948` = 1/30 s).
 const SCOPE_TICKS_PER_SECOND: f64 = 30.0;
+/// The `Procedural` type of the clip at whose start a reaction takes the speed that ends it with
+/// the hit's stun (`HitStunContext`; Observed: the boar's `r_R2_F` has it at 0.18714666 s and
+/// retail switched the boar's speed at 5.61 frames of the reaction).
+const HIT_STUN_CLIP: &str = "HitStun";
+/// Microseconds per second.
+const US_PER_SECOND: f64 = 1_000_000.0;
 
 /// A failure of the creature animation build.
 #[derive(Debug, thiserror::Error)]
@@ -286,19 +292,71 @@ fn fragment_ticks(
     tags: &[String],
     lengths: &ClipLengths,
 ) -> BTreeMap<String, Vec<Option<u32>>> {
+    option_values(database, fragments, tags, |option| {
+        whole_ticks(fragment_length(option, lengths).ok()?)
+    })
+}
+
+/// The pace of each option of each fragment of `fragments` in `database` for `tags` that has a
+/// [`HIT_STUN_CLIP`] and a length by `lengths` ([`CreatureRow::reaction_paces`]); a fragment
+/// without such an option is left out.
+fn reaction_paces(
+    database: &AnimDatabase,
+    fragments: &[String],
+    tags: &[String],
+    lengths: &ClipLengths,
+) -> BTreeMap<String, Vec<Option<ReactionPace>>> {
+    option_values(database, fragments, tags, |option| {
+        let clip = option
+            .clips
+            .iter()
+            .find(|clip| clip.kind == HIT_STUN_CLIP)?;
+        let FragmentLength::Seconds(length_s) = fragment_length(option, lengths).ok()? else {
+            return None;
+        };
+        Some(ReactionPace {
+            length_us: micros(f64::from(length_s))?,
+            hit_stun_us: micros(clip.start_s)?,
+        })
+    })
+}
+
+/// `seconds` in whole microseconds (rounded); `None` below 0 or beyond `u32`.
+fn micros(seconds: f64) -> Option<u32> {
+    let micros = (seconds * US_PER_SECOND).round();
+    if !(0.0..=f64::from(u32::MAX)).contains(&micros) {
+        return None;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "checked to be within u32 above"
+    )]
+    let whole = micros as u32;
+    Some(whole)
+}
+
+/// `value` of each option (Mannequin's options, [`AnimDatabase::options`]) of each fragment of
+/// `fragments` in `database` for `tags`; a fragment without an option of a value is left out.
+fn option_values<T>(
+    database: &AnimDatabase,
+    fragments: &[String],
+    tags: &[String],
+    value: impl Fn(&Fragment) -> Option<T>,
+) -> BTreeMap<String, Vec<Option<T>>> {
     let tags: Vec<&str> = tags.iter().map(String::as_str).collect();
     fragments
         .iter()
         .filter_map(|name| {
-            let ticks: Vec<Option<u32>> = database
+            let values: Vec<Option<T>> = database
                 .options(name, &tags)
                 .into_iter()
-                .map(|option| whole_ticks(fragment_length(option, lengths).ok()?))
+                .map(&value)
                 .collect();
-            ticks
+            values
                 .iter()
                 .any(Option::is_some)
-                .then(|| (name.clone(), ticks))
+                .then(|| (name.clone(), values))
         })
         .collect()
 }
@@ -616,12 +674,18 @@ pub fn build_rows(
         for hand in [weapon, off_hand].into_iter().flatten() {
             default_tags.extend(hand.tags.iter().cloned());
         }
-        let fragment_ticks = mannequin
+        let database = mannequin
             .animation_database
             .as_ref()
-            .and_then(|path| databases.get(path))
+            .and_then(|path| databases.get(path));
+        let fragment_ticks = database
             .map(|database| {
                 fragment_ticks(database, &controller.fragments, &default_tags, &lengths)
+            })
+            .unwrap_or_default();
+        let reaction_paces = database
+            .map(|database| {
+                reaction_paces(database, &controller.fragments, &default_tags, &lengths)
             })
             .unwrap_or_default();
         rows.push(CreatureRow {
@@ -636,6 +700,7 @@ pub fn build_rows(
                 .collect::<BTreeMap<_, _>>(),
             default_tags,
             fragment_ticks,
+            reaction_paces,
             collider_radius_mm: mannequin.collider_radius_mm,
             skinnable: mannequin.skinnable,
             weapon_animation_database: weapon.and_then(|weapon| weapon.animation_database.clone()),
@@ -903,6 +968,36 @@ mod tests {
             &lengths,
         );
         assert_eq!(ticks["r_Death"], [Some(56), Some(0x49)]);
+    }
+
+    /// `npc_boar_anims.adb` build 25810808: the plain `r_R2_F` plays `boar_r_r2_f` (25 frames)
+    /// and has its `HitStun` clip at 0.18714666 s; the death has no such clip.
+    #[test]
+    fn a_reaction_option_with_a_hit_stun_clip_has_its_pace() {
+        let parsed = parsed_database(
+            r#"<AnimDB><FragmentList><r_R2_F>
+ <Fragment BlendOutDuration="0.2" Tags="Armadillo+CurledBall"><AnimLayer><Blend ExitTime="0"/><Animation name="boar_r_r2_f"/></AnimLayer></Fragment>
+ <Fragment BlendOutDuration="0.2" Tags=""><AnimLayer><Blend ExitTime="0" StartTime="0" Duration="0.2"/><Animation name="boar_r_r2_f"/></AnimLayer>
+  <ProcLayer><Blend ExitTime="0"/><Procedural type="Audio" contextType="AudioContext"/></ProcLayer>
+  <ProcLayer><Blend ExitTime="0.18714666"/><Procedural type="HitStun" contextType="HitStunContext"/></ProcLayer>
+ </Fragment>
+</r_R2_F>
+ <r_Death><Fragment Tags=""><AnimLayer><Blend ExitTime="0"/><Animation name="boar_death"/></AnimLayer></Fragment></r_Death>
+</FragmentList></AnimDB>"#,
+        )
+        .expect("database");
+        let lengths =
+            ClipLengths::of(&[("boar_r_r2_f", Ok(0.833_333_3)), ("boar_death", Ok(2.963))]);
+        let fragments = ["r_R2_F".to_owned(), "r_Death".to_owned()];
+        let paces = reaction_paces(&parsed, &fragments, &["Boar".to_owned()], &lengths);
+        let pace = ReactionPace {
+            length_us: 833_333,
+            hit_stun_us: 187_147,
+        };
+        assert_eq!(
+            paces,
+            BTreeMap::from([("r_R2_F".to_owned(), vec![Some(pace)])])
+        );
     }
 
     #[test]

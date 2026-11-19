@@ -543,6 +543,14 @@ pub struct AttackRow {
     /// ([`crate::player_attacks::ReactionEntry::stun_ms`]); 0 for an empty cell. A creature's
     /// hit takes the base column, as the power level.
     pub hit_stun: u32,
+    /// How long its hit stuns a creature it shakes, in frames of 1/30 s
+    /// ([`creature_hit_stun`]). Observed (plain boar ALC states of 7 retail ledgers, 121
+    /// reactions with no hit during them): after 5 to 6 scope ticks at its own speed, the
+    /// `r_R2_F` entry (25 ticks) takes a speed that ends it 15, 18, 20, 22, 25 or 28 frames
+    /// after it started (14, 55, 30, 11, 9 and 2 times), the `HitStun_AI` cells of the player
+    /// table; the same attacker sequence (own ALC child 15) gave the same length in every
+    /// ledger.
+    pub creature_hit_stun: u32,
     /// `StaggerDmgModifier`: multiplies the attacker weapon's `BaseStaggerDamage` when it hits a
     /// target whose grit is on; 0 without a number (Observed cells: `0` to `40`, one bad
     /// `0.0.5`).
@@ -552,6 +560,19 @@ pub struct AttackRow {
     /// 0.25, 0.5 and 1); 0 for an empty cell. A creature's hit takes the base column, as the
     /// power level.
     pub stun_breakout: f64,
+}
+
+/// The stun in frames that a hit of a damage row of `HitStun_AI` cell `ai_cell` and `HitStun`
+/// cell `base_cell` gives a creature: the `_AI` cell, else (an empty cell) the base cell, else
+/// 0. The fallback is Inferred from the pair rule of [`AttackRow::power_level`] and the retail
+/// boar reactions of 15 frames (14 of 121): the only melee rows of `HitStun_AI` 15 are the
+/// rapier's light attack and two unarmed ones of `NoReaction`, while the spear's, hatchet's and
+/// club's light attacks have no `HitStun_AI` and a `HitStun` of 15.
+fn creature_hit_stun(ai_cell: Option<i64>, base_cell: Option<i64>) -> u32 {
+    ai_cell
+        .or(base_cell)
+        .and_then(|frames| u32::try_from(frames).ok())
+        .unwrap_or(0)
 }
 
 /// A `LevelDisparityData` row that changes the power level of a hit: an attacker this many
@@ -923,6 +944,7 @@ impl CombatSource {
                         .hit_stun
                         .and_then(|frames| u32::try_from(frames).ok())
                         .unwrap_or(0),
+                    creature_hit_stun: creature_hit_stun(row.hit_stun_ai, row.hit_stun),
                     stun_breakout: row.stun_breakout_increment.unwrap_or(0.0),
                     stagger_mod: row
                         .stagger_dmg_modifier
@@ -1705,6 +1727,23 @@ mod tests {
         );
     }
 
+    /// Build 25810808 player table: `2H_Spear_PrimaryAttack_End` has `HitStun_AI` 20 and
+    /// `HitStun` 15; `2H_Spear_PrimaryAttack` has no `HitStun_AI` and `HitStun` 15.
+    #[test]
+    fn a_creature_takes_the_ai_stun_of_a_row_else_its_base_stun() {
+        assert_eq!(
+            creature_hit_stun(Some(20), Some(15)),
+            20,
+            "the spear's third light"
+        );
+        assert_eq!(
+            creature_hit_stun(None, Some(15)),
+            15,
+            "the spear's first light"
+        );
+        assert_eq!(creature_hit_stun(None, None), 0, "no stun");
+    }
+
     #[test]
     fn a_hit_takes_its_weapons_stagger_damage_times_its_rows_modifier() {
         let row = AttackRow {
@@ -2224,6 +2263,7 @@ mod tests {
                     rune_charge: RuneChargeRow::default(),
                     power_level: 0,
                     hit_stun: 0,
+                    creature_hit_stun: 0,
                     stagger_mod: 0.0,
                     stun_breakout: 0.0,
                 })

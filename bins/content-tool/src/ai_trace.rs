@@ -502,12 +502,13 @@ fn scope_entries(blob: &[u8]) -> Option<Vec<ScopeEntry>> {
         let start_id = body.u16().ok()?;
         let fragment = u16::try_from(body.prefixed().ok()?).ok()?;
         let action = u16::try_from(body.prefixed().ok()?).ok()?;
-        body.u16().ok()?;
+        let speed = body.u16().ok()?;
         let tail = body.u8().ok()?;
         entries.push(ScopeEntry {
             start_id,
             fragment,
             action,
+            speed,
             tail,
         });
     }
@@ -946,7 +947,7 @@ mod tests {
     use nw_messages::alc::rotation_bytes;
     use nw_messages::{
         AlcStamp, AssetId, BundleGroup, FRAG_TAGS_LEN, GDE_METADATA_COMPONENT, MeleeDamage,
-        MobAnimation, MobStep, StepPlace, StepScope, VitalsState,
+        MobAnimation, MobStep, OWN_SPEED, StepPlace, StepScope, VitalsState,
     };
     use nw_reflect::{TypeId, encode_type_id};
 
@@ -1017,6 +1018,7 @@ mod tests {
             tags: BTreeMap::new(),
             default_tags: Vec::new(),
             fragment_ticks: BTreeMap::new(),
+            reaction_paces: BTreeMap::new(),
             collider_radius_mm: None,
             skinnable: false,
             weapon_animation_database: None,
@@ -1033,6 +1035,7 @@ mod tests {
                 start_id,
                 fragment,
                 action,
+                speed: OWN_SPEED,
                 tail: 0,
             },
             ticks: 0,
@@ -1298,6 +1301,7 @@ mod tests {
             start_id: FIRST_ID,
             fragment: IDLE.0,
             action: IDLE.1,
+            speed: OWN_SPEED,
             tail: 0,
         };
         let second = ScopeEntry {

@@ -42,6 +42,16 @@ pub enum CreatureAnimationsError {
 /// One tag's bits: byte, shift, value.
 type TagRow = [u8; 3];
 
+/// The pace of one reaction fragment option that has a `HitStun` procedural clip
+/// ([`CreatureRow::reaction_paces`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactionPace {
+    /// The option's length at its own speed, µs.
+    pub length_us: u32,
+    /// The start of its `HitStun` procedural clip, µs after the option starts.
+    pub hit_stun_us: u32,
+}
+
 /// One row of the file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatureRow {
@@ -65,6 +75,11 @@ pub struct CreatureRow {
     /// without an option of known length is left out; a table from before this field has none.
     #[serde(default)]
     pub fragment_ticks: BTreeMap<String, Vec<Option<u32>>>,
+    /// The pace of each option of each fragment (the options of [`Self::fragment_ticks`]) that
+    /// has a `HitStun` procedural clip and a known length; `None` for an option without one. A
+    /// fragment without such an option is left out; a table from before this field has none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reaction_paces: BTreeMap<String, Vec<Option<ReactionPace>>>,
     /// The radius of its body's capsule, mm: the query shape of its slice's component whose
     /// filter is an `AICharacterCollider` one (a filter that blocks the player's,
     /// `default.collisionfilters`); `None` when its slice has none, or the table is older.
@@ -83,6 +98,13 @@ pub struct CreatureRow {
     pub weapon_animation_database: Option<String>,
 }
 
+/// The value of the option of `options` that an entry of last byte `tail` plays: option `tail`
+/// modulo the option count ([`CreatureAnimation::fragment_ticks`]).
+fn option_of<T: Copy>(options: &[Option<T>], tail: u8) -> Option<T> {
+    let option = usize::from(tail).checked_rem(options.len())?;
+    options.get(option).copied().flatten()
+}
+
 /// One creature's animation names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatureAnimation {
@@ -94,6 +116,7 @@ pub struct CreatureAnimation {
     tags: TagDefinition,
     default_tags: Vec<String>,
     fragment_ticks: BTreeMap<String, Vec<Option<u32>>>,
+    reaction_paces: BTreeMap<String, Vec<Option<ReactionPace>>>,
     collider_radius_mm: Option<u32>,
     skinnable: bool,
 }
@@ -144,9 +167,13 @@ impl CreatureAnimation {
     /// options played option 0, 56 ticks, its last tick 0x38; the risen's `r_Death` tail 0x8f of
     /// 2 options played option 1, 73 ticks, 0x49).
     pub fn fragment_ticks(&self, name: &str, tail: u8) -> Option<u32> {
-        let options = self.fragment_ticks.get(name)?;
-        let option = usize::from(tail).checked_rem(options.len())?;
-        options.get(option).copied().flatten()
+        option_of(self.fragment_ticks.get(name)?, tail)
+    }
+
+    /// The pace of fragment `name` ([`CreatureRow::reaction_paces`]) in the option that an entry
+    /// of last byte `tail` plays (the option rule of [`Self::fragment_ticks`]).
+    pub fn reaction_pace(&self, name: &str, tail: u8) -> Option<ReactionPace> {
+        option_of(self.reaction_paces.get(name)?, tail)
     }
 
     /// Whether the creature has tag `name`.
@@ -224,6 +251,7 @@ impl CreatureAnimations {
                         tags,
                         default_tags: row.default_tags,
                         fragment_ticks: row.fragment_ticks,
+                        reaction_paces: row.reaction_paces,
                         collider_radius_mm: row.collider_radius_mm,
                         skinnable: row.skinnable,
                     },
@@ -280,6 +308,11 @@ mod tests {
     use super::*;
 
     const BOAR: &str = "db96d765b50459d98c9e04adaa9c9485";
+    /// The boar's `r_R2_F`: 25 frames, its `HitStun` clip at 0.18714666 s.
+    const BOAR_R2_PACE: ReactionPace = ReactionPace {
+        length_us: 833_333,
+        hit_stun_us: 187_147,
+    };
 
     fn boar_row() -> CreatureRow {
         CreatureRow {
@@ -301,6 +334,7 @@ mod tests {
                 ("r_Death".to_owned(), vec![Some(88)]),
                 ("Alert".to_owned(), vec![Some(56), Some(73), None]),
             ]),
+            reaction_paces: BTreeMap::from([("r_R2_F".to_owned(), vec![Some(BOAR_R2_PACE)])]),
             collider_radius_mm: Some(500),
             skinnable: true,
             weapon_animation_database: None,
@@ -330,6 +364,8 @@ mod tests {
         assert_eq!(boar.fragment_ticks("Alert", 4), Some(73));
         assert_eq!(boar.fragment_ticks("Alert", 0x8f), None, "a looping option");
         assert_eq!(boar.collider_radius_m(), Some(0.5));
+        assert_eq!(boar.reaction_pace("r_R2_F", 0x20), Some(BOAR_R2_PACE));
+        assert_eq!(boar.reaction_pace("Alert", 0), None, "no stun clip");
     }
 
     #[test]

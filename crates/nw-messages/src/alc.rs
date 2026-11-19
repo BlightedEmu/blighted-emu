@@ -166,8 +166,8 @@ const POS_REL_SPAN_STEPS: f32 = 255.0;
 pub const POS_REL_STEP_M: f32 = POS_REL_SPAN_M / POS_REL_SPAN_STEPS;
 /// `scopeData` with only the FullBody scope (bit 0).
 const FULL_BODY_SCOPE: u64 = 1;
-/// The playback speed of a scope entry that plays at its own speed.
-const DEFAULT_SPEED: u16 = 0;
+/// The playback speed of a scope entry that plays at its own speed ([`ScopeEntry::speed`]).
+pub const OWN_SPEED: u16 = 0;
 /// Bytes of the Mannequin tag state (child 34).
 pub const FRAG_TAGS_LEN: usize = FRAG_LEN;
 
@@ -231,17 +231,30 @@ pub struct ScopeEntry {
     pub fragment: u16,
     /// The action's index + 1 in the creature's CAGE grid.
     pub action: u16,
+    /// Its playback speed as `half` bits ([`Self::at_speed`]); [`OWN_SPEED`] plays it at its
+    /// own speed (Observed: retail boar `r_R2_F` entries sent `0000`, then `3e43`, 1.5654, for
+    /// the rest of the reaction).
+    pub speed: u16,
     /// The last byte of a retail entry of this fragment (**Unknown** meaning).
     pub tail: u8,
 }
 
 impl ScopeEntry {
+    /// The same entry played `speed` times as fast as its own speed.
+    #[must_use]
+    pub fn at_speed(self, speed: f32) -> Self {
+        Self {
+            speed: half_bits(speed),
+            ..self
+        }
+    }
+
     /// Writes the entry: the start, the fragment, the action, the speed and the tail.
     fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
         writer.u16(self.start_id);
         writer.prefixed(u64::from(self.fragment))?;
         writer.prefixed(u64::from(self.action))?;
-        writer.u16(DEFAULT_SPEED).u8(self.tail);
+        writer.u16(self.speed).u8(self.tail);
         Ok(())
     }
 }
@@ -3280,6 +3293,7 @@ mod tests {
         start_id: 0x0393,
         fragment: 182,
         action: 26,
+        speed: OWN_SPEED,
         tail: 0xeb,
     };
     const MOVE_ENTRY_BLOB: [u8; 9] = [8, 0x03, 0x93, 0xb6, 0x02, 0x1a, 0x00, 0x00, 0xeb];
@@ -3522,6 +3536,7 @@ mod tests {
                 start_id: START,
                 fragment: 7,
                 action: 12,
+                speed: OWN_SPEED,
                 tail: 0x53,
             },
             ticks: 0,
@@ -3532,6 +3547,7 @@ mod tests {
                     start_id: START,
                     fragment: 45,
                     action: 25,
+                    speed: OWN_SPEED,
                     tail: 0xe9,
                 },
                 seconds: 0.3335,

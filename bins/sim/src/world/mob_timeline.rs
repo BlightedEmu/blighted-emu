@@ -18,11 +18,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nw_content::creature_animations::{CreatureAnimation, CreatureAnimations};
+use nw_content::creature_animations::{CreatureAnimation, CreatureAnimations, ReactionPace};
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::{
-    AlcStamp, FRAG_TAGS_LEN, InputPosition, LayerEntry, MobAnimation, MobStep, ScopeEntry,
-    StepPlace, StepScope,
+    AlcStamp, FRAG_TAGS_LEN, InputPosition, LayerEntry, MobAnimation, MobStep, OWN_SPEED,
+    ScopeEntry, StepPlace, StepScope,
 };
 pub(super) use nw_sim_core::yaw_toward;
 use nw_sim_core::{Position, yaw_gap};
@@ -61,11 +61,20 @@ const SPAWN_MS: u64 = 1350;
 /// How long an attack fragment plays (retail: the next full-body fragment 1.5 s after
 /// `Attack_Close_1H_Sword_01` starts).
 const ATTACK_MS: u64 = 1500;
-/// How long a reaction plays: `r_R2_F` 769-784 ms, `r_R3_F` 831-836 ms (legion and risen;
-/// creature-animation note, section 5.2).
+/// How long a reaction to a hit without a stun plays ([`Animations::reaction_timing`]): `r_R2_F`
+/// 769-784 ms, `r_R3_F` 831-836 ms (legion and risen; creature-animation note, section 5.2).
 const CREATURE_REACTION_MS: (u64, u64) = (775, 835);
 /// Thorpe's reactions: `r_R2_F` 850-903 ms, `r_R3_F` 1296-1303 ms (boss note).
 const THORPE_REACTION_MS: (u64, u64) = (870, 1_300);
+/// Frames of a damage row's stun per second.
+const STUN_FRAMES_PER_SECOND: u64 = 30;
+/// Microseconds per millisecond, as a float.
+const US_PER_MS_F64: f64 = 1_000.0;
+/// The most a reaction speeds up to end with the hit's stun ([`Animations::reaction_timing`]).
+/// Observed: `4200` (3.0), the largest of the 415 retail speed switches, in 8 damned axeman
+/// `r_R1` entries that no stun of the player table explains; Inferred to be the cap for a stun
+/// that ends before or just after the `HitStun` clip.
+const MAX_REACTION_SPEED: f64 = 3.0;
 /// After the reaction that starts the limiter ([`limiter_chain_count`]), hits do not make a mob
 /// reel until this long after the last hit (retail `ReactionLimiter_Active`, off 2.0-2.08 s
 /// after the last hit; section 0.4; `AI_Reaction_Limiter` `BaseDuration` 2,
@@ -130,6 +139,9 @@ const SIDE_ENDS: [(HitSide, &str); 3] = [
     (HitSide::Left, "_L"),
     (HitSide::Right, "_R"),
 ];
+/// The sides a hit comes from.
+const HIT_SIDES: usize = 4;
+const SIDES: [HitSide; HIT_SIDES] = [HitSide::Front, HitSide::Back, HitSide::Left, HitSide::Right];
 
 /// Where a hit on a mob comes from, by its facing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +180,9 @@ struct SideReactions {
     back: FragmentEntry,
     left: FragmentEntry,
     right: FragmentEntry,
+    /// The pace of each side's fragment, front, back, left and right
+    /// ([`CreatureAnimation::reaction_pace`]).
+    paces: [Option<ReactionPace>; HIT_SIDES],
 }
 
 impl SideReactions {
@@ -183,12 +198,21 @@ impl SideReactions {
             let fragment = creature.fragment(&format!("{}{end}", name?))?;
             Some(entry(fragment, front.action, DEFAULT_ENTRY_TAIL))
         };
-        Self {
+        let mut reactions = Self {
             front,
             back: side(HitSide::Back).unwrap_or(front),
             left: side(HitSide::Left).unwrap_or(front),
             right: side(HitSide::Right).unwrap_or(front),
-        }
+            paces: [None; HIT_SIDES],
+        };
+        let pace = |entry: FragmentEntry| {
+            let name = creature
+                .fragments()
+                .get(usize::from(entry.fragment).checked_sub(1)?)?;
+            creature.reaction_pace(name, entry.tail)
+        };
+        reactions.paces = SIDES.map(|side| pace(reactions.of_side(side)));
+        reactions
     }
 
     fn of_side(&self, side: HitSide) -> FragmentEntry {
@@ -199,6 +223,31 @@ impl SideReactions {
             HitSide::Right => self.right,
         }
     }
+
+    fn pace_of_side(&self, side: HitSide) -> Option<ReactionPace> {
+        let index = SIDES.iter().position(|known| *known == side)?;
+        self.paces[index]
+    }
+}
+
+/// How one reaction plays ([`Animations::reaction_timing`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ReactionTiming {
+    /// How long it plays.
+    length_ms: u64,
+    /// When it takes another speed (ms after its start), and that speed.
+    switch: Option<(u64, f32)>,
+}
+
+/// The speed a playing reaction takes ([`ReactionTiming::switch`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SpeedSwitch {
+    /// When (server ms).
+    at_ms: u64,
+    /// The speed from then on.
+    speed: f32,
+    /// A state sent it.
+    sent: bool,
 }
 
 /// What a mob does, as one full-body fragment.
@@ -301,7 +350,8 @@ pub(super) struct Animations {
     alert_after_hurt: bool,
     /// Its fighting tags in a boss's second phase (retail Thorpe from 503682: `08 81 13`).
     phase_two_tags: Option<[u8; FRAG_TAGS_LEN]>,
-    /// How long its light and heavy reactions play.
+    /// How long its light and heavy reactions play when they do not follow the hit's stun
+    /// ([`Self::reaction_timing`]).
     reaction_ms: (u64, u64),
     /// The last scope tick of its death fragment: the length of the option its entry's tail
     /// picks, in whole ticks (`CreatureAnimation::fragment_ticks`). Its dead states carry the
@@ -330,6 +380,67 @@ impl Animations {
                 self.tail_of(played.fragment),
             ),
         })
+    }
+
+    /// How reaction `fragment` (light or heavy, `heavy`) to a hit that stuns a creature
+    /// `hit_stun` frames (`AttackRow::creature_hit_stun`) plays. Observed (retail ALC states of
+    /// the plain boar, the damned axeman, the risen, the grey wolf, the spider, the zone-3
+    /// sailor and the tutorial legionnaire and signifier: 350 of 415 speed switches fit a stun of
+    /// the player table with the table's paces): the entry plays at
+    /// its own speed until the start `t` of its `HitStun` procedural clip, then the state at or
+    /// after `t` sends it again with the speed `(length - t) / (stun - t)`, which ends it the
+    /// stun after its start (the boar's `r_R2_F`, 25 frames, `t` 0.18714666 s: `4022`, `3e43`,
+    /// `3d64`, `3cbb`, `3c00` and `3aee` for 15, 18, 20, 22, 25 and 28 frames, all 127). A
+    /// fragment without a `HitStun` clip keeps its own speed and length (Thorpe's fragments
+    /// have none: all 8 of his reactions in the newchar capture; nor the spider's `r_R1_F`:
+    /// none of its 93), as does a hit without a stun.
+    fn reaction_timing(&self, fragment: Fragment, heavy: bool, hit_stun: u32) -> ReactionTiming {
+        let own = ReactionTiming {
+            length_ms: if heavy {
+                self.reaction_ms.1
+            } else {
+                self.reaction_ms.0
+            },
+            switch: None,
+        };
+        let Some(pace) = self.reaction_pace(fragment).filter(|_| hit_stun > 0) else {
+            return own;
+        };
+        let stun_us = u64::from(hit_stun) * US_PER_MS * MS_PER_SECOND / STUN_FRAMES_PER_SECOND;
+        let start_us = u64::from(pace.hit_stun_us);
+        let rest_us = u64::from(pace.length_us).saturating_sub(start_us);
+        // Lengths of about a second in µs: exact in an f64.
+        #[allow(clippy::cast_precision_loss)]
+        let speed = if stun_us > start_us {
+            (rest_us as f64 / (stun_us - start_us) as f64).min(MAX_REACTION_SPEED)
+        } else {
+            MAX_REACTION_SPEED
+        };
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "a reaction of about a second, in ms"
+        )]
+        let ms = |us: f64| (us / US_PER_MS_F64).round() as u64;
+        #[allow(clippy::cast_precision_loss, reason = "µs of about a second")]
+        let (start, rest) = (start_us as f64, rest_us as f64);
+        #[allow(clippy::cast_possible_truncation, reason = "a speed of 0 to 3")]
+        let switch_speed = speed as f32;
+        ReactionTiming {
+            length_ms: ms(start + rest / speed),
+            switch: Some((ms(start), switch_speed)),
+        }
+    }
+
+    /// The pace of reaction `fragment` ([`SideReactions::pace_of_side`]).
+    fn reaction_pace(&self, fragment: Fragment) -> Option<ReactionPace> {
+        let (light, heavy) = self.reactions?;
+        match fragment {
+            Fragment::ReactLight(side) => light.pace_of_side(side),
+            Fragment::ReactHeavy(side) => heavy.pace_of_side(side),
+            _ => None,
+        }
     }
 
     /// The last byte of a retail entry of fragment `fragment`, when retail showed one; else
@@ -490,7 +601,7 @@ struct RetailCreature {
     choices: &'static [(Role, &'static str, &'static str)],
     /// The last byte of its retail entries.
     tails: &'static [(Role, u8)],
-    /// How long its light and heavy reactions play.
+    /// How long its light and heavy reactions play when they do not follow the hit's stun.
     reaction_ms: (u64, u64),
     /// See [`Animations::alert_after_hurt`].
     alert_after_hurt: bool,
@@ -770,6 +881,11 @@ struct MobTimeline {
     phase_two: bool,
     /// The reaction it plays, and until when.
     reaction: Option<(Fragment, u64)>,
+    /// The speed its reaction takes, while one plays.
+    speed_switch: Option<SpeedSwitch>,
+    /// A reaction started since its last state: its next state starts a new entry, also when
+    /// the reaction before it had the same fragment (retail: a new start id per reaction).
+    new_reaction: bool,
     /// Full reactions since the chain started.
     reactions_in_chain: u8,
     /// When the last hit came.
@@ -817,6 +933,8 @@ impl MobTimeline {
             reacted: false,
             phase_two: false,
             reaction: None,
+            speed_switch: None,
+            new_reaction: false,
             reactions_in_chain: 0,
             last_hurt_ms: now_ms,
             reaction_limit_until_ms: now_ms,
@@ -841,8 +959,28 @@ impl MobTimeline {
         }
     }
 
+    /// The time in its entry at `now_ms` in ticks: after a speed switch, its time then plus the
+    /// time since at the new speed (retail: the scope ticks of the boar's sped-up `r_R2_F` went
+    /// on 1.5 to 2 per 33 ms state).
     fn ticks_at(&self, now_ms: u64) -> u32 {
-        let ticks = now_ms.saturating_sub(self.entry_start_ms) * TICKS_PER_SECOND / MS_PER_SECOND;
+        let elapsed_ms = |until_ms: u64| until_ms.saturating_sub(self.entry_start_ms);
+        let ticks = match self.speed_switch.filter(|switch| now_ms >= switch.at_ms) {
+            Some(switch) => {
+                // Times of about a second.
+                #[allow(clippy::cast_precision_loss)]
+                let sped_ms = (now_ms - switch.at_ms) as f64 * f64::from(switch.speed);
+                #[allow(
+                    clippy::cast_precision_loss,
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "a reaction's ticks"
+                )]
+                let ticks = ((elapsed_ms(switch.at_ms) as f64 + sped_ms) * TICKS_PER_SECOND as f64
+                    / MS_PER_SECOND as f64) as u64;
+                ticks
+            }
+            None => elapsed_ms(now_ms) * TICKS_PER_SECOND / MS_PER_SECOND,
+        };
         u32::try_from(ticks).unwrap_or(u32::MAX)
     }
 
@@ -870,21 +1008,27 @@ impl MobTimeline {
                     start_id,
                     fragment: layer.fragment,
                     action: layer.action,
+                    speed: OWN_SPEED,
                     tail: layer.tail,
                 },
                 seconds: self.look_pose_seconds(now_ms).unwrap_or(LOOK_POSE_START_S),
             }),
             _ => None,
         };
+        let entry = ScopeEntry {
+            start_id: self.entry_start_id,
+            fragment: entry.fragment,
+            action: entry.action,
+            speed: OWN_SPEED,
+            tail: entry.tail,
+        };
         MobAnimation {
             look_pose,
             facing_gap,
-            entry: ScopeEntry {
-                start_id: self.entry_start_id,
-                fragment: entry.fragment,
-                action: entry.action,
-                tail: entry.tail,
-            },
+            entry: self
+                .speed_switch
+                .filter(|switch| now_ms >= switch.at_ms)
+                .map_or(entry, |switch| entry.at_speed(switch.speed)),
             ticks: self.ticks_at(now_ms),
             tags: match (self.tree_tags, self.alert, self.phase_two) {
                 (Some(tags), _, _) => tags,
@@ -940,13 +1084,14 @@ impl MobTimeline {
     /// reaction, the later ones the heavy one (Inferred), and the reaction with
     /// `limiter_count` reactions before it in the chain starts the limit
     /// ([`limiter_chain_count`]); while the limit runs, a hit only makes it longer (retail
-    /// plays an additive reaction then; not sent here). How long the reaction plays, when one
-    /// plays.
+    /// plays an additive reaction then; not sent here). The reaction of `animations` plays as a
+    /// hit of `hit_stun` frames makes it ([`Animations::reaction_timing`]). How long the reaction
+    /// plays, when one plays.
     fn hurt(
         &mut self,
         now_ms: u64,
-        (light_ms, heavy_ms): (u64, u64),
-        side: HitSide,
+        animations: &Animations,
+        (side, hit_stun): (HitSide, u32),
         limiter_count: u8,
     ) -> Option<u64> {
         if now_ms.saturating_sub(self.last_hurt_ms) >= REACTION_LIMIT_MS {
@@ -960,17 +1105,25 @@ impl MobTimeline {
         let chained = self.reactions_in_chain;
         self.reactions_in_chain = chained.saturating_add(1);
         self.reacted = true;
-        let (fragment, length_ms) = if chained == 0 {
-            (Fragment::ReactLight(side), light_ms)
+        let heavy = chained > 0;
+        let fragment = if heavy {
+            Fragment::ReactHeavy(side)
         } else {
-            (Fragment::ReactHeavy(side), heavy_ms)
+            Fragment::ReactLight(side)
         };
         if chained >= limiter_count {
             self.reactions_in_chain = 0;
             self.reaction_limit_until_ms = now_ms + REACTION_LIMIT_MS;
         }
-        self.reaction = Some((fragment, now_ms + length_ms));
-        Some(length_ms)
+        let timing = animations.reaction_timing(fragment, heavy, hit_stun);
+        self.reaction = Some((fragment, now_ms + timing.length_ms));
+        self.speed_switch = timing.switch.map(|(after_ms, speed)| SpeedSwitch {
+            at_ms: now_ms + after_ms,
+            speed,
+            sent: false,
+        });
+        self.new_reaction = true;
+        Some(timing.length_ms)
     }
 
     /// The frame of `now_ms` (a server clock that may step back a little: differences saturate
@@ -999,7 +1152,8 @@ impl MobTimeline {
         }
         let turn = self.turn(pose, moved);
         let fragment = self.fragment_at(pose, now_ms);
-        let changed = fragment != self.fragment;
+        let changed = fragment != self.fragment || self.new_reaction;
+        let switching = self.switch_due(now_ms);
         let period_ms = if !self.started {
             FIRST_STATE_DELAY_MS
         } else if self.states < DRAW_STATES {
@@ -1012,6 +1166,7 @@ impl MobTimeline {
         let due = moved
             || turn.is_some()
             || changed
+            || switching
             || now_ms.saturating_sub(self.last_state_ms) >= period_ms;
         let step = due.then(|| self.next_state(now_ms, pose, fragment, moved, turn, animations));
         let drawing = step.is_some() && self.states <= DRAW_STATES;
@@ -1027,6 +1182,12 @@ impl MobTimeline {
             fresh: !self.started,
             drawing,
         }
+    }
+
+    /// Its reaction's speed switch is due at `now_ms` and no state sent it yet.
+    fn switch_due(&self, now_ms: u64) -> bool {
+        self.speed_switch
+            .is_some_and(|switch| !switch.sent && now_ms >= switch.at_ms)
     }
 
     /// The facing of the next state when the mob turns: toward where it walks, else toward its
@@ -1082,9 +1243,13 @@ impl MobTimeline {
         if anchored {
             self.anchor_ms = now_ms;
         }
-        let changed = first || fragment != self.fragment;
+        let changed = first || fragment != self.fragment || self.new_reaction;
+        let reaction_started = std::mem::take(&mut self.new_reaction);
         let mut facing_gap = None;
         if changed {
+            if !reaction_started {
+                self.speed_switch = None;
+            }
             self.fragment = fragment;
             self.entry_start_id = self.id;
             self.entry_start_ms = now_ms;
@@ -1105,13 +1270,18 @@ impl MobTimeline {
             };
             self.facing_gap_sent = facing_gap.is_some_and(|gap| gap != 0.0);
         }
+        // The state at or after the switch sends the entry again at its new speed.
+        let switching = self.switch_due(now_ms);
+        if let Some(switch) = self.speed_switch.as_mut().filter(|_| switching) {
+            switch.sent = true;
+        }
         let ticks = self.ticks_at(now_ms);
         let high_changed = ticks >> u8::BITS != self.ticks >> u8::BITS;
         // A dead mob's states carry the ticks until its death fragment ends, then only the number
         // and time (retail sailor to tick 0x38, legionnaire 0x32; without them the client played
         // the death again at each state, live 2026-09-18).
         let scope = animations.and_then(|animations| {
-            if changed {
+            if changed || switching {
                 Some(StepScope::Changed(
                     self.animation(animations, now_ms, facing_gap),
                 ))
@@ -1166,9 +1336,10 @@ pub(super) struct MobTimelines {
     by_mob: HashMap<u64, MobTimeline>,
     /// Mobs that swung since the last frame.
     attacked: HashSet<u64>,
-    /// Mobs that a player hit since the last frame, where the player stood and the mob's
-    /// limiter count ([`limiter_chain_count`]).
-    hurt: HashMap<u64, (Position, u8)>,
+    /// Mobs that a player hit since the last frame, where the player stood, the mob's limiter
+    /// count ([`limiter_chain_count`]) and the hit's stun in frames
+    /// ([`Animations::reaction_timing`]).
+    hurt: HashMap<u64, (Position, u8, u32)>,
     /// Mobs that started a move since the last frame: its fragment and length.
     played: HashMap<u64, (MoveFragment, u64)>,
     /// When each mob last started a reaction (server ms).
@@ -1189,9 +1360,10 @@ impl MobTimelines {
     }
 
     /// A player at `from` hit mob `mob`, whose reaction limiter starts at `limiter_count`
-    /// ([`limiter_chain_count`]).
-    pub(super) fn hurt(&mut self, mob: u64, from: Position, limiter_count: u8) {
-        self.hurt.insert(mob, (from, limiter_count));
+    /// ([`limiter_chain_count`]), with a hit that stuns a creature `hit_stun` frames
+    /// ([`Animations::reaction_timing`]).
+    pub(super) fn hurt(&mut self, mob: u64, from: Position, limiter_count: u8, hit_stun: u32) {
+        self.hurt.insert(mob, (from, limiter_count, hit_stun));
     }
 
     /// The frame of mob `mob` in `pose` at server time `now_ms` (ms since 2000-01-01); its first
@@ -1213,17 +1385,14 @@ impl MobTimelines {
         if let Some((fragment, length_ms)) = self.played.remove(&mob) {
             timeline.play = Some((fragment, now_ms + length_ms));
         }
-        let reaction_ms = animations
-            .filter(|animations| animations.reactions.is_some())
-            .map(|animations| animations.reaction_ms);
         let facing = pose.tree.and_then(|tree| tree.facing).or(timeline.yaw);
-        if let Some((from, limiter_count)) = self.hurt.remove(&mob)
-            && let Some(reaction_ms) = reaction_ms
+        if let Some((from, limiter_count, hit_stun)) = self.hurt.remove(&mob)
+            && let Some(reeling) = animations.filter(|animations| animations.reactions.is_some())
             && !pose.dead
             && let Some(length_ms) = timeline.hurt(
                 now_ms,
-                reaction_ms,
-                HitSide::of(timeline.position, facing, from),
+                reeling,
+                (HitSide::of(timeline.position, facing, from), hit_stun),
                 limiter_count,
             )
         {
@@ -1286,6 +1455,8 @@ mod tests {
     const RISEN_DEATH_TICKS: u32 = 0x49;
     const THORPE_DEATH_TICKS: u32 = 0x64;
     const BOAR_DEATH_TICKS: u32 = 0x58;
+    /// A hit without a stun: the creature's own reaction lengths.
+    const NO_STUN: u32 = 0;
 
     fn at(x: f32) -> Position {
         Position {
@@ -1372,6 +1543,7 @@ mod tests {
             tags: std::collections::BTreeMap::new(),
             default_tags: Vec::new(),
             fragment_ticks: std::collections::BTreeMap::new(),
+            reaction_paces: std::collections::BTreeMap::new(),
             collider_radius_mm: None,
             skinnable: false,
             weapon_animation_database: None,
@@ -1634,7 +1806,7 @@ mod tests {
         assert_eq!(stab.entry.fragment, STAB.fragment);
         assert_eq!(stab.tags, thorpe.calm_tags, "no reaction yet");
         now += STAB_MS;
-        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT, NO_STUN);
         let reaction = changed(&mut timelines, now, &fighting);
         assert_eq!(reaction.tags, thorpe.alert_tags);
         now += THORPE_REACTION_MS.0;
@@ -1932,7 +2104,7 @@ mod tests {
         timelines.advance(MOB, START, &fighting, Some(&sailor));
         let swing_started = START + SPAWN_MS;
         assert!(!timelines.reeled_since(MOB, swing_started));
-        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT, NO_STUN);
         let reeled = swing_started + TICK_MS;
         timelines.advance(MOB, reeled, &fighting, Some(&sailor));
         assert!(timelines.reeled_since(MOB, swing_started));
@@ -1953,14 +2125,14 @@ mod tests {
             _ => None,
         };
         let mut now = START + SPAWN_MS;
-        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT, NO_STUN);
         let light = timelines.advance(MOB, now, &fighting, Some(&sailor)).step;
         assert_eq!(
             fragment_of(light),
             Some(sailor.reactions.expect("known").0.front.fragment)
         );
         now += TICK_MS;
-        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT, NO_STUN);
         let heavy = timelines.advance(MOB, now, &fighting, Some(&sailor)).step;
         assert_eq!(
             fragment_of(heavy),
@@ -1969,7 +2141,7 @@ mod tests {
         // While the limit runs, a hit does not start another reaction.
         now += CREATURE_REACTION_MS.1;
         timelines.advance(MOB, now, &fighting, Some(&sailor));
-        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT, NO_STUN);
         now += TICK_MS;
         let limited = timelines.advance(MOB, now, &fighting, Some(&sailor)).step;
         assert_ne!(
@@ -1980,7 +2152,7 @@ mod tests {
         let plain = without_reactions();
         let mut plains = MobTimelines::default();
         plains.advance(MOB, START, &fighting, Some(&plain));
-        plains.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
+        plains.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT, NO_STUN);
         let step = plains
             .advance(MOB, START + SPAWN_MS, &fighting, Some(&plain))
             .step;
@@ -1998,7 +2170,7 @@ mod tests {
         let mut now = START + SPAWN_MS;
         (0..hits)
             .map(|_| {
-                timelines.hurt(MOB, at(0.0), limiter_count);
+                timelines.hurt(MOB, at(0.0), limiter_count, NO_STUN);
                 timelines.advance(MOB, now, &fighting, Some(&sailor));
                 now += gap_ms;
                 timelines.take_reaction(MOB).is_some()
@@ -2205,7 +2377,7 @@ mod tests {
         let mut timelines = MobTimelines::default();
         timelines.advance(MOB, START, &tree_pose(None, calm, None), Some(&risen));
         let now = START + SPAWN_MS;
-        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT);
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT, NO_STUN);
         let frame = timelines.advance(MOB, now, &tree_pose(None, calm, None), Some(&risen));
         let entry = frame
             .step
@@ -2233,5 +2405,158 @@ mod tests {
             .and_then(scope_entry)
             .expect("its death");
         assert_eq!(entry.fragment, risen.death.fragment);
+    }
+
+    /// The boar's reaction from a hit of `stun` frames at [`SPAWN_MS`]: the length its tree
+    /// learns and each scope entry its states sent, by ms after the hit.
+    fn boar_reaction(stun: u32) -> (Option<u64>, Vec<(u64, ScopeEntry)>) {
+        let boar = creature(&BOAR);
+        let fighting = pose(1.0, true);
+        let mut timelines = MobTimelines::default();
+        timelines.advance(MOB, START, &fighting, Some(&boar));
+        let hit = START + SPAWN_MS;
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT, stun);
+        let mut entries = Vec::new();
+        let mut length_ms = None;
+        for after in 0..=CREATURE_REACTION_MS.1 {
+            let frame = timelines.advance(MOB, hit + after, &fighting, Some(&boar));
+            if let Some(entry) = frame.step.as_ref().and_then(scope_entry) {
+                entries.push((after, entry));
+            }
+            length_ms = length_ms.or_else(|| timelines.take_reaction(MOB));
+        }
+        (length_ms, entries)
+    }
+
+    /// Retail (the boar's `r_R2_F` in 7 ledgers, 127 speed switches): the reaction plays at its
+    /// own speed until its `HitStun` clip (0.18714666 s), then the next state sends it again at
+    /// the speed that ends it the attack's stun after its start.
+    #[test]
+    fn a_reaction_takes_the_speed_that_ends_it_with_the_stun() {
+        // Stun frames and the retail speed of each.
+        const RETAIL: [(u32, u16); 6] = [
+            (15, 0x4022),
+            (18, 0x3e43),
+            (20, 0x3d64),
+            (22, 0x3cbb),
+            (25, 0x3c00),
+            (28, 0x3aee),
+        ];
+        const SWITCH_MS: u64 = 187;
+        let boar = creature(&BOAR);
+        for (stun, speed) in RETAIL {
+            let timing = boar.reaction_timing(Fragment::ReactLight(HitSide::Front), false, stun);
+            let (switch_ms, switch_speed) = timing.switch.expect("a switch");
+            assert_eq!(switch_ms, SWITCH_MS, "{stun} frames");
+            assert_eq!(
+                ScopeEntry {
+                    start_id: 0,
+                    fragment: 0,
+                    action: 0,
+                    speed: OWN_SPEED,
+                    tail: 0,
+                }
+                .at_speed(switch_speed)
+                .speed,
+                speed,
+                "{stun} frames"
+            );
+            let stun_ms = u64::from(stun) * MS_PER_SECOND / STUN_FRAMES_PER_SECOND;
+            assert!(timing.length_ms.abs_diff(stun_ms) <= 1, "{stun} frames");
+        }
+    }
+
+    /// The states of a reaction of the spear's third light attack (`HitStun_AI` 18): a new
+    /// entry at its own speed, the same entry at 1.5654 at 187 ms, then its combat idle at the
+    /// stun's end.
+    #[test]
+    fn a_reactions_states_send_its_speed_switch_and_its_end() {
+        const SPEAR_STUN: u32 = 18;
+        const STUN_MS: u64 = 600;
+        let boar = creature(&BOAR);
+        let reaction = boar.reactions.expect("reactions").0.front.fragment;
+        let (length_ms, entries) = boar_reaction(SPEAR_STUN);
+        assert_eq!(length_ms, Some(STUN_MS), "its tree learns the stun");
+        let sent: Vec<(u64, u16, u16)> = entries
+            .iter()
+            .map(|(after, entry)| (*after, entry.fragment, entry.speed))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                (0, reaction, OWN_SPEED),
+                (187, reaction, 0x3e43),
+                (STUN_MS, boar.combat_idle.fragment, OWN_SPEED),
+            ]
+        );
+        assert_eq!(
+            entries[1].1.start_id, entries[0].1.start_id,
+            "the same entry"
+        );
+    }
+
+    #[test]
+    fn a_reactions_ticks_go_on_at_its_new_speed() {
+        // 187 ms at speed 1, then 100 ms at 1.5654: 0.343 s of the clip, tick 10.
+        const SPEAR_STUN: u32 = 18;
+        const AFTER_SWITCH_MS: u64 = 100;
+        const SWITCH_MS: u64 = 187;
+        let boar = creature(&BOAR);
+        let fighting = pose(1.0, true);
+        let mut timelines = MobTimelines::default();
+        timelines.advance(MOB, START, &fighting, Some(&boar));
+        let hit = START + SPAWN_MS;
+        timelines.hurt(MOB, at(0.0), OTHER_LIMITER_CHAIN_COUNT, SPEAR_STUN);
+        timelines.advance(MOB, hit, &fighting, Some(&boar));
+        let timeline = &timelines.by_mob[&MOB];
+        let later = hit + SWITCH_MS + AFTER_SWITCH_MS;
+        assert_eq!(
+            timeline.ticks_at(hit + SWITCH_MS),
+            5,
+            "its own speed until the switch"
+        );
+        assert_eq!(timeline.ticks_at(later), 10);
+    }
+
+    /// Thorpe's fragments have no `HitStun` clip: his reactions keep their own length and speed;
+    /// a hit without a stun keeps the creature's own length too.
+    #[test]
+    fn a_reaction_without_a_hit_stun_clip_keeps_its_own_pace() {
+        const STUN: u32 = 18;
+        let light = Fragment::ReactLight(HitSide::Front);
+        let thorpe = thorpe().reaction_timing(light, false, STUN);
+        assert_eq!(
+            (thorpe.length_ms, thorpe.switch),
+            (THORPE_REACTION_MS.0, None)
+        );
+        let boar = creature(&BOAR).reaction_timing(light, false, NO_STUN);
+        assert_eq!(
+            (boar.length_ms, boar.switch),
+            (CREATURE_REACTION_MS.0, None)
+        );
+    }
+
+    /// Retail sent a new entry (start id) for each reaction, also two of the same fragment.
+    #[test]
+    fn each_reaction_starts_a_new_entry() {
+        let sailor = sailor();
+        let fighting = pose(1.0, true);
+        let mut timelines = MobTimelines::default();
+        timelines.advance(MOB, START, &fighting, Some(&sailor));
+        let mut now = START + SPAWN_MS;
+        let starts: Vec<Option<u16>> = (0..3)
+            .map(|_| {
+                timelines.hurt(MOB, at(0.0), SOLO_LIMITER_CHAIN_COUNT, NO_STUN);
+                let frame = timelines.advance(MOB, now, &fighting, Some(&sailor));
+                now += TICK_MS;
+                frame
+                    .step
+                    .as_ref()
+                    .and_then(scope_entry)
+                    .map(|entry| entry.start_id)
+            })
+            .collect();
+        assert!(starts.iter().all(Option::is_some), "{starts:?}");
+        assert!(starts[1] != starts[2], "two heavy reactions: two entries");
     }
 }

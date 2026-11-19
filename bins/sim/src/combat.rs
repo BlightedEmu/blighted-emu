@@ -295,6 +295,7 @@ pub mod test_support {
             rune_charge: nw_content::combat::RuneChargeRow::default(),
             power_level: 0,
             hit_stun: 0,
+            creature_hit_stun: 0,
             stagger_mod: 0.0,
             stun_breakout: 0.0,
         }
@@ -333,6 +334,7 @@ pub mod test_support {
                 rune_charge: nw_content::combat::RuneChargeRow::default(),
                 power_level: 0,
                 hit_stun: 0,
+                creature_hit_stun: 0,
                 stagger_mod: 0.0,
                 stun_breakout: 0.0,
             })
