@@ -18,20 +18,39 @@
 //! shot's way to the solid is the straight line from its muzzle to where it ends (the body it
 //! meets, else the end of its reach with its fall), and a splash meets the bodies around the
 //! solid's point.
+//!
+//! **Crosshair.** A shot flies from the shooter toward the point under the crosshair: the first
+//! body or solid of the level that the camera's look meets, else the end of the shot's range on
+//! that look ([`SimWorld::crosshair_point`]). Observed (`bowaim`, 1,195 retail ledgers, own
+//! arrows of `Bow/Basic` to `Bow/Basic_Plus_Heavy`): of 2,673 arrows that hit a mob 3 m or more
+//! away, the spawn velocity was 0.42 degrees (median) off the line to the point of the camera's
+//! look nearest the mob, and 1.80 degrees off the camera's own angles; the arrow flew straight
+//! at that point (0.06 to 0.29 degrees, median per 10 m of distance, with no climb to make up
+//! for its fall). An example: `20261004-175416-488` 601,916 ms, the camera looked down 0.125 rad
+//! and the arrow flew down 0.091 rad to the mob it hit 5.5 m away. No retail input carried an
+//! aim point (row 3) with an own arrow (0 of 9,770). Before, a shot without an aim point flew
+//! along the camera's angles from the middle of the body, 1.6 to 1.8 m under the camera: aimed
+//! at a boar 30 m away, it passed 1.2 to 1.4 m under its feet (live 2026-11-19, two shots at
+//! 17:35:43 and 17:35:46 with the camera's look 0.03 to 0.14 m beside the boar), and the old
+//! rule met 2,245 of 2,876 of those retail hits, the new one 2,568.
 
 use nw_bus::ConnectionRef;
 use nw_content::player_attacks::Flight;
 use nw_sim_core::Position;
 
 use super::SimWorld;
-use super::attack::Pace;
+use super::attack::{Aim, Pace};
 use super::hit_shape::PLAYER_CAPSULE;
 use super::mob_timeline::yaw_toward;
+use super::turrets::{body_on_line, point_on};
 use crate::combat::{AttackOutcome, AttackRefusal};
 use crate::mobs::{Capsule, spawn_index};
 
 /// Milliseconds per second.
 const MS_PER_SECOND: f32 = 1_000.0;
+/// The radius of the crosshair's look: a line (Inferred: the client's camera ray; no retail
+/// value).
+const CROSSHAIR_RAY_RADIUS_M: f32 = 0.0;
 /// The top share of a body's height that is its head (Inferred: a 1.8 m body's head is about
 /// 0.27 m; the retail head volumes hang on the skeleton's head joint, which the server does not
 /// animate).
@@ -483,6 +502,59 @@ impl SimWorld {
                 .map(|(effects, source)| (effects.to_vec(), source)),
             headshot: hit.headshot,
         });
+    }
+
+    /// The line of `shot` that a player standing at `from` fires with `aim` (`bodies`: the mobs
+    /// and foes it can meet): along the yaw of a lock and the camera's pitch; else to the aim
+    /// point of the input; else to the point under the crosshair of the input's camera
+    /// ([`SimWorld::crosshair_point`], module doc **Crosshair**); else along the camera's
+    /// angles. `None` without a yaw or a pitch.
+    pub(super) fn shot_aim(
+        &self,
+        shot: &Shot,
+        (from, aim): (Position, Aim),
+        bodies: &[(u64, Position, Capsule)],
+    ) -> Option<AimLine> {
+        let yaw = Self::aim_yaw(aim.lock_target, aim.facing, from, bodies);
+        let unlocked = aim.lock_target.is_none();
+        let point = aim.point.filter(|_| unlocked).or_else(|| {
+            let camera = aim.camera.filter(|_| unlocked)?;
+            let look = AimLine {
+                yaw: aim.facing?,
+                pitch: aim.pitch?,
+            };
+            Some(self.crosshair_point(shot, from, (camera, look), bodies))
+        });
+        AimLine::of(from, point, yaw, aim.pitch)
+    }
+
+    /// The point under the crosshair of a camera at `camera` that looks along `look`, for `shot`
+    /// of a shooter standing at `from`: where the look meets the first body of `bodies` (the
+    /// point of the look nearest the body's middle, [`body_on_line`]) or, before it, a solid of
+    /// the level; else the end of the shot's range on the look. The look counts from the
+    /// shooter's own depth on it (Inferred: a body between the camera and the shooter is not
+    /// under the crosshair), and the range counts from there (Inferred: `m_maxRange` is the
+    /// shot's reach from its shooter).
+    pub(super) fn crosshair_point(
+        &self,
+        shot: &Shot,
+        from: Position,
+        (camera, look): (Position, AimLine),
+        bodies: &[(u64, Position, Capsule)],
+    ) -> Position {
+        let ahead = point_on(camera, look, 1.0);
+        let muzzle = muzzle_of(from);
+        let depth_m = ((muzzle.x - camera.x) * (ahead.x - camera.x)
+            + (muzzle.y - camera.y) * (ahead.y - camera.y)
+            + (muzzle.z - camera.z) * (ahead.z - camera.z))
+            .max(0.0);
+        let start = point_on(camera, look, depth_m);
+        let reach_m = body_on_line(start, look, (shot.range_m, CROSSHAIR_RAY_RADIUS_M), bodies)
+            .map_or(shot.range_m, |(_, along_m)| along_m);
+        let end = point_on(start, look, reach_m);
+        self.ground
+            .first_solid(start, end)
+            .map_or(end, |(at, _)| at)
     }
 
     /// The yaw of an attack from `from` with the aim of a lock on `lock_target` (toward it when it
@@ -951,6 +1023,175 @@ mod tests {
             "no body stands in the splash"
         );
         assert!(world.projectile_flights.is_empty());
+    }
+
+    /// The boar of the live 2026-11-19 shots (mob 17179883780 at 17:35:59, the server's default
+    /// body).
+    const LIVE_BOAR: (u64, Position, Capsule) = (
+        17_179_883_780,
+        Position {
+            x: 7_316.661_6,
+            y: 3_117.923_3,
+            z: 45.786_087,
+        },
+        crate::mobs::DEFAULT_MOB_CAPSULE,
+    );
+
+    /// The aim of a live input: the camera's look and point, no lock, no aim point.
+    fn live_aim(yaw: f32, pitch: f32, camera: Position) -> Aim {
+        Aim {
+            facing: Some(yaw),
+            pitch: Some(pitch),
+            lock_target: None,
+            point: None,
+            camera: Some(camera),
+        }
+    }
+
+    #[test]
+    fn a_shot_at_the_boar_under_the_crosshair_meets_it() {
+        // Live 2026-11-19 17:35:43.74 (input 5467 of player 183, `BowAttack1`): the camera
+        // 2.6 m over the feet looked 0.057 rad down at the boar 30 m away, 0.14 m beside its
+        // middle and 0.05 m over its feet. Along the camera's angles from the middle of the body
+        // the arrow passed 1.4 m under its feet and met nothing (`end=Free`).
+        let world = wall_world();
+        let body = Position {
+            x: 7_302.975,
+            y: 3_096.334_2,
+            z: 44.907_288,
+        };
+        let camera = Position {
+            x: 7_301.08,
+            y: 3_092.295,
+            z: 47.539_474,
+        };
+        let (yaw, pitch) = (-0.550_917_3, 0.056_706_02);
+        let boar = [LIVE_BOAR];
+        assert_eq!(
+            first_on_line(&ARROW, body, AimLine { yaw, pitch }, &boar),
+            None,
+            "the camera's angles from the body pass under the boar"
+        );
+        let aim = world
+            .shot_aim(&ARROW, (body, live_aim(yaw, pitch, camera)), &boar)
+            .expect("aim");
+        let met = first_on_line(&ARROW, body, aim, &boar);
+        assert_eq!(met.map(|(mob, _)| mob), Some(LIVE_BOAR.0), "{aim:?}");
+        assert!(matches!(
+            world.shot_stop(&ARROW, (body, aim), met, &boar),
+            ShotEnd::Body { target, .. } if target == LIVE_BOAR.0
+        ));
+        // 17:35:57.17: the look 1 m over the boar's feet; that shot met it before and still does.
+        let body = Position {
+            x: 7_302.792_5,
+            y: 3_096.244_4,
+            z: 44.914_318,
+        };
+        let camera = Position {
+            x: 7_302.531,
+            y: 3_094.860_8,
+            z: 46.599_518,
+        };
+        let aim = world
+            .shot_aim(
+                &ARROW,
+                (body, live_aim(-0.549_958_2, -0.006_171_383, camera)),
+                &boar,
+            )
+            .expect("aim");
+        assert_eq!(
+            first_on_line(&ARROW, body, aim, &boar).map(|(mob, _)| mob),
+            Some(LIVE_BOAR.0)
+        );
+    }
+
+    #[test]
+    fn the_crosshair_meets_the_first_body_or_solid_ahead_of_the_shooter() {
+        let world = wall_world();
+        // The camera 4 m behind and 1.7 m over the shooter's feet, looking level north.
+        let camera = Position {
+            z: FROM.z + 1.7,
+            ..at(0.0, -4.0)
+        };
+        let look = NORTH;
+        let ahead = (1, at(0.0, 6.0), BODY);
+        let point = world.crosshair_point(&ARROW, FROM, (camera, look), &[ahead]);
+        assert!((point.y - (FROM.y + 6.0)).abs() < 1e-3, "{point:?}");
+        assert!((point.z - camera.z).abs() < 1e-3, "on the look: {point:?}");
+        let behind = (2, at(0.0, -2.0), BODY);
+        let point = world.crosshair_point(&ARROW, FROM, (camera, look), &[behind]);
+        assert!(
+            (point.y - (FROM.y + WALL_M)).abs() < 1e-3,
+            "a body between the camera and the shooter is not under the crosshair; the wall is: \
+             {point:?}"
+        );
+        let beyond = (3, at(0.0, WALL_M + 5.0), BODY);
+        let point = world.crosshair_point(&ARROW, FROM, (camera, look), &[beyond]);
+        assert!(
+            (point.y - (FROM.y + WALL_M)).abs() < 1e-3,
+            "the wall first: {point:?}"
+        );
+        let south = AimLine {
+            yaw: std::f32::consts::PI,
+            pitch: 0.0,
+        };
+        let camera = Position {
+            z: FROM.z + 1.7,
+            ..at(0.0, 4.0)
+        };
+        let point = world.crosshair_point(&BOLT, FROM, (camera, south), &[]);
+        assert!(
+            (point.y - (FROM.y - BOLT.range_m)).abs() < 1e-3,
+            "nothing under it: the end of the range from the shooter: {point:?}"
+        );
+    }
+
+    #[test]
+    fn an_aim_without_a_camera_or_with_a_lock_keeps_its_line() {
+        let world = wall_world();
+        let camera = Position {
+            z: FROM.z + 1.7,
+            ..at(0.0, -4.0)
+        };
+        let bodies = [(1, at(0.0, 6.0), BODY)];
+        let angles = Aim {
+            camera: None,
+            ..live_aim(0.0, 0.1, camera)
+        };
+        assert_eq!(
+            world.shot_aim(&ARROW, (FROM, angles), &bodies),
+            Some(AimLine {
+                yaw: 0.0,
+                pitch: 0.1
+            })
+        );
+        let locked = Aim {
+            lock_target: Some(1),
+            ..live_aim(1.0, 0.1, camera)
+        };
+        assert_eq!(
+            world.shot_aim(&ARROW, (FROM, locked), &bodies),
+            Some(AimLine {
+                yaw: 0.0,
+                pitch: 0.1
+            }),
+            "toward the lock with the camera's pitch"
+        );
+        let pointed = Aim {
+            point: Some(at(3.0, 6.0)),
+            ..live_aim(0.0, 0.1, camera)
+        };
+        let line = world
+            .shot_aim(&ARROW, (FROM, pointed), &bodies)
+            .expect("aim");
+        assert!(
+            (line.yaw - yaw_toward(FROM, at(3.0, 6.0))).abs() < 1e-6,
+            "the input's aim point first"
+        );
+        assert_eq!(
+            world.shot_aim(&ARROW, (FROM, Aim::default()), &bodies),
+            None
+        );
     }
 
     #[test]

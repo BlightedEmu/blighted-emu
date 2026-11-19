@@ -59,7 +59,7 @@ use super::hit_shape::{
 };
 use super::mob_timeline::{HitSide, limiter_chain_count, yaw_toward};
 use super::passives::{HitAim, HitMods};
-use super::projectile::{AimLine, Shot, ShotHit};
+use super::projectile::{Shot, ShotHit};
 use super::stamina::{Dodge, Guard};
 use super::{Body, MESSAGE_CHANNEL, Outgoing, Placement, Player, Position, SimWorld};
 use crate::combat::{AttackOutcome, AttackRefusal, RemoteHit, RespawnRefusal};
@@ -805,6 +805,9 @@ pub struct Aim {
     pub lock_target: Option<u64>,
     /// The point under the crosshair (the input's aim point), when one came with the attack.
     pub point: Option<Position>,
+    /// The camera point of that input: a shot flies to what its look meets
+    /// ([`SimWorld::crosshair_point`]).
+    pub camera: Option<Position>,
 }
 
 /// A player's basic attack, or the hit of an ability's fragment, that has not landed yet.
@@ -2248,11 +2251,11 @@ impl SimWorld {
                 return Vec::new();
             }
         }
-        let (view, point) = self
+        let (view, point, camera) = self
             .world
             .get::<Player>(entity)
-            .map_or((None, None), |player| {
-                (player.view, fresh_aim(player.aim, now_ms))
+            .map_or((None, None, None), |player| {
+                (player.view, fresh_aim(player.aim, now_ms), player.camera)
             });
         let newest_view = records.first().and_then(|newest| newest.bit_6);
         let mut attack = attack;
@@ -2275,6 +2278,7 @@ impl SimWorld {
                     .or(view.map(|view| view.pitch)),
                 lock_target,
                 point,
+                camera,
             },
             kind: Some(kind),
             attack,
@@ -2366,6 +2370,7 @@ impl SimWorld {
                 pitch: player.view.map(|view| view.pitch),
                 lock_target,
                 point: fresh_aim(player.aim, now_ms),
+                camera: player.camera,
             },
             kind: None,
             attack,
@@ -2910,7 +2915,8 @@ impl SimWorld {
             .collect()
     }
 
-    /// Fires `shot` of `swing` from `position` along its aim at `now_ms`.
+    /// Fires `shot` of `swing` from `position` along its aim ([`SimWorld::shot_aim`]) at
+    /// `now_ms`.
     fn fire(
         &mut self,
         swing: &PlayerSwing,
@@ -2919,9 +2925,7 @@ impl SimWorld {
         places: &[(u64, Position, Capsule)],
         now_ms: u64,
     ) -> Landing {
-        let yaw = Self::aim_yaw(swing.aim.lock_target, swing.aim.facing, position, places);
-        let point = swing.aim.point.filter(|_| swing.aim.lock_target.is_none());
-        let Some(line) = AimLine::of(position, point, yaw, swing.aim.pitch) else {
+        let Some(line) = self.shot_aim(&shot, (position, swing.aim), places) else {
             return Landing::Done(vec![Err(AttackRefusal::NoAim)]);
         };
         Landing::Done(self.cast(
@@ -4350,6 +4354,7 @@ mod tests {
             pitch: Some(0.0),
             lock_target: None,
             point: None,
+            camera: None,
         }
     }
 

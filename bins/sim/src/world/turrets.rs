@@ -797,7 +797,7 @@ fn direction(line: AimLine) -> [f32; 3] {
 }
 
 /// The point `along_m` metres from `from` on `line`.
-fn point_on(from: Position, line: AimLine, along_m: f32) -> Position {
+pub(super) fn point_on(from: Position, line: AimLine, along_m: f32) -> Position {
     let [east, north, up] = direction(line);
     Position {
         x: from.x + east * along_m,
