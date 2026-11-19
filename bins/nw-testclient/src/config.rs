@@ -57,7 +57,8 @@ pub struct TestClientConfig {
     pub hold_seconds: u64,
     /// Seconds to wait for the registration response.
     pub registration_timeout_seconds: u64,
-    /// Largest distance between the saved position and the next login, in metres (`pair`).
+    /// Largest distance in the ground plane between the saved position and the next login, in
+    /// metres (`pair`).
     pub position_tolerance_m: f32,
     /// The walk of `pair`: points east and north of where the first client stands, in metres.
     pub route_m: Vec<[f32; 2]>,

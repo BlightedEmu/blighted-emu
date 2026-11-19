@@ -109,6 +109,22 @@ const LEVEL_PITCH: f32 = 0.0;
 /// The facet component of the bot's calls (Inferred: the sim reads the body only).
 pub(crate) const CALL_COMPONENT: u64 = 0;
 
+/// Says `line` in area chat as the own player `own`: a game master line (`!tp`) is one.
+///
+/// # Errors
+///
+/// Returns [`RepError`] when the call cannot be encoded or sent.
+pub(crate) fn say_in_area(client: &mut RepClient, own: u64, line: &str) -> Result<(), RepError> {
+    let call = ChatCall::Send {
+        channel: ChatChannel::Area.wire(),
+        body: line.to_owned(),
+        recipient_name: String::new(),
+        links: Vec::new(),
+    };
+    let body = call.encode(SocialFacet::Chat.header(own))?;
+    client.send_message(MESSAGE_CHANNEL, true, call.type_index(), body)
+}
+
 /// Sends the first time sync request of the own player `own`, as the client does when it is in
 /// the game ([`crate::view::OwnView::time_sync_due`]).
 ///
@@ -1073,14 +1089,7 @@ impl Player {
 
     /// Says `line` in area chat.
     fn say(&mut self, client: &mut RepClient, own: u64, line: &str) -> Result<(), RepError> {
-        let call = ChatCall::Send {
-            channel: ChatChannel::Area.wire(),
-            body: line.to_owned(),
-            recipient_name: String::new(),
-            links: Vec::new(),
-        };
-        let body = call.encode(SocialFacet::Chat.header(own))?;
-        client.send_message(MESSAGE_CHANNEL, true, call.type_index(), body)
+        say_in_area(client, own, line)
     }
 
     /// Sends client call `call`.

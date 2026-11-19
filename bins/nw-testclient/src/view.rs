@@ -500,12 +500,11 @@ pub struct WorldView {
     login: Vec<u64>,
     /// How many of them came before the first bundle.
     login_before_first_bundle: Option<usize>,
-    own: Option<u64>,
+    /// The own number and the first time sync. Its hold on the ids it numbered: a world view
+    /// keeps every track of its run, so it holds them for its life (it reads one short run).
+    own: OwnView,
     slots: EntitySlots,
     tracks: BTreeMap<u64, Vec<WorldPosition>>,
-    /// Its hold on the ids it numbered; a world view keeps every track of its run, so it holds
-    /// them for its life (it reads one short run).
-    holder: IdHolder,
 }
 
 /// Two views are equal when they saw the same; their id holders differ.
@@ -513,7 +512,7 @@ impl PartialEq for WorldView {
     fn eq(&self, other: &Self) -> bool {
         self.login == other.login
             && self.login_before_first_bundle == other.login_before_first_bundle
-            && self.own == other.own
+            && self.own.own_number() == other.own.own_number()
             && self.slots == other.slots
             && self.tracks == other.tracks
     }
@@ -539,29 +538,29 @@ impl WorldView {
     ///
     /// Returns [`ViewError`] for a world message or a bundle payload that does not decode.
     pub fn read(&mut self, received: &Received) -> Result<(), ViewError> {
-        match decode(received, self.holder, Cards::Numbered)? {
+        let mut read = decode(received, self.own.holder, Cards::Numbered)?;
+        self.own.apply(&read);
+        let own = self.own.own_number();
+        match &mut read {
             Read::Skipped => {}
-            Read::Bundle(mut bundle) => {
+            Read::Bundle(bundle) => {
                 self.login_before_first_bundle
                     .get_or_insert(self.login.len());
-                self.slots.resolve(&mut bundle);
-                for update in bundle.updates {
+                self.slots.resolve(bundle);
+                for update in &bundle.updates {
                     let entity = update
                         .entity
-                        .or_else(|| update.is_local_player().then_some(self.own).flatten());
+                        .or_else(|| update.is_local_player().then_some(own).flatten());
                     if let (Some(entity), Some(position)) = (entity, update.position) {
                         self.tracks.entry(entity).or_default().push(position);
                     }
                 }
             }
-            Read::Entry { type_index, own } => {
-                self.own = own;
-                self.login.push(type_index);
-            }
-            Read::Combat { type_index, .. }
+            Read::Entry { type_index, .. }
+            | Read::Combat { type_index, .. }
             | Read::Interaction { type_index, .. }
             | Read::Other { type_index } => {
-                self.login.push(type_index);
+                self.login.push(*type_index);
             }
         }
         Ok(())
@@ -577,7 +576,12 @@ impl WorldView {
 
     /// The client's own entity number.
     pub const fn own_number(&self) -> Option<u64> {
-        self.own
+        self.own.own_number()
+    }
+
+    /// The own number when the first time sync request is due ([`OwnView::time_sync_due`]).
+    pub fn time_sync_due(&mut self) -> Option<u64> {
+        self.own.time_sync_due()
     }
 
     /// The last position of entity `number`.
@@ -592,7 +596,7 @@ impl WorldView {
 
     /// The client's own last position.
     pub fn own_position(&self) -> Option<WorldPosition> {
-        self.position(self.own?)
+        self.position(self.own_number()?)
     }
 
     /// Every other entity number the client saw, in ascending order.
@@ -600,7 +604,7 @@ impl WorldView {
         self.tracks
             .keys()
             .copied()
-            .filter(|number| Some(*number) != self.own)
+            .filter(|number| Some(*number) != self.own_number())
             .collect()
     }
 }

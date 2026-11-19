@@ -25,6 +25,7 @@ use nw_content::gathering::{GatherRules, Gatherables};
 use nw_content::layout::{ContentLayout, content_dir};
 use nw_content::town_stations::TownStations;
 use nw_dtls::DtlsClientConfig;
+use nw_messages::WorldPosition;
 use nw_reflect::REGISTRATION_STATUS_AUTHORIZED;
 use nw_testclient::activity::{Activity, ActivityData, ActivityKind};
 use nw_testclient::chat::{ChatSettings, run_chat};
@@ -34,7 +35,7 @@ use nw_testclient::config::{
 use nw_testclient::fleet::{NewClient, udp_receive_errors};
 use nw_testclient::gather::{GatherNode, run_gather};
 use nw_testclient::hunt::run_hunt;
-use nw_testclient::pair::{Check, PairSettings, run_pair};
+use nw_testclient::pair::{Check, LATE_STATE_GAP, PairReport, PairSettings, run_pair};
 use nw_testclient::play::{PlaySettings, run_play};
 use nw_testclient::rep::{LedgerSlot, RepClient};
 use nw_testclient::swarm::run_swarm;
@@ -559,8 +560,51 @@ async fn pair(
         |line| println!("{line}"),
     )
     .await?;
+    print_walk_states(&report);
+    print_saved_position(&report);
     let tolerances = (config.path_tolerance_m, config.position_tolerance_m);
     Ok(print_checks(&report.checks(tolerances.0, tolerances.1)))
+}
+
+/// Prints where the first session of the first client ended (as it saw itself and as the second
+/// client saw it) and where its next login started.
+fn print_saved_position(report: &PairReport) {
+    let place = |position: Option<WorldPosition>| {
+        position.map_or_else(
+            || "none".to_owned(),
+            |at| format!("{:.2} {:.2} {:.2}", at.x, at.y, at.z()),
+        )
+    };
+    let seen = report
+        .first
+        .view
+        .own_number()
+        .and_then(|number| report.second.view.position(number));
+    println!(
+        "first session ended at: {} (seen by the second client at: {}); next login at: {}",
+        place(report.first.view.own_position()),
+        place(seen),
+        place(report.again.view.own_position()),
+    );
+}
+
+/// Prints how often the second client got the first one's state during the walk.
+fn print_walk_states(report: &PairReport) {
+    let gaps = report.walk_state_gaps();
+    let Some(largest) = gaps.iter().max() else {
+        println!("walker states seen during the walk: fewer than two");
+        return;
+    };
+    let total: Duration = gaps.iter().sum();
+    let late = gaps.iter().filter(|gap| **gap > LATE_STATE_GAP).count();
+    let count = u32::try_from(gaps.len()).unwrap_or(u32::MAX);
+    println!(
+        "walker states seen during the walk: {}, mean gap {} ms, largest gap {} ms, gaps over {} ms: {late}",
+        gaps.len() + 1,
+        (total / count).as_millis(),
+        largest.as_millis(),
+        LATE_STATE_GAP.as_millis(),
+    );
 }
 
 async fn chat(

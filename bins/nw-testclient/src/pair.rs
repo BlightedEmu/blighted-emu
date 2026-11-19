@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The two-client world check (M4 spec section 9, criteria 3.1 to 3.5 of section 1.2): two
-//! clients are in the world together and see each other. The first walks a route while the
-//! second watches, then sends one move that is far too long, which the world must refuse. Then
-//! the first logs in again at the position the world saved.
+//! clients are in the world together and see each other. Each client sends its first time sync
+//! request after its own spawn card, as the game client does: the sim holds every other entity
+//! until then. The characters keep their saved places, which can be far apart, so the first
+//! client goes to the second with a game master teleport (`!tp`). Then it walks a route while
+//! the second watches, then sends one move that is far too long, which the world must refuse.
+//! Then the first logs in again at the position the world saved.
 
+use std::cell::Cell;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nw_messages::{
     BodyCodec, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, WorldPosition,
@@ -14,6 +18,7 @@ use nw_reflect::{LoginToken, REGISTRATION_STATUS_AUTHORIZED};
 use reqwest::Client;
 use thiserror::Error;
 
+use crate::play::{say_in_area, send_time_sync};
 use crate::rep::{RepClient, RepError};
 use crate::route::Route;
 use crate::udp::{Hold, RepOutcome, RunError, run_rep_with};
@@ -31,7 +36,9 @@ pub const FOLLOWED_ROUTE: &str = "the walk was seen on the route";
 /// Check: the far move never showed, and the first client stayed at the end of the route
 /// (criterion 3.4).
 pub const SNAPPED_BACK: &str = "the far move was refused";
-/// Check: the second login of the first client is where its first session ended.
+/// Check: the second login of the first client is where its first session ended, in the ground
+/// plane: the client walks at the height it landed at, and the server keeps the saved body on its
+/// ground (live 2026-11-19: 1.2 m lower at the end of the route than the walk's height).
 pub const KEPT_POSITION: &str = "the next login is at the saved position";
 /// Carrier channel of client movement (type 1589): channel 1, unreliable, as in the captures.
 pub const INPUT_CHANNEL: u8 = 1;
@@ -41,6 +48,12 @@ pub const SEND_INTERVAL: Duration = Duration::from_millis(33);
 pub const SETTLE: Duration = Duration::from_millis(500);
 /// Time the far move is sent: every message in it, so one lost datagram cannot hide the move.
 pub const JUMP_WINDOW: Duration = Duration::from_millis(500);
+/// Largest distance in the ground plane, in metres, from the meeting point at which the first
+/// client counts as there after its teleport (the play bot's teleport check uses the same).
+pub const MEETING_REACHED_M: f32 = 3.0;
+/// A gap between two states of a walking player, as another client gets them, longer than this
+/// is late: three sim ticks of 33 ms.
+pub const LATE_STATE_GAP: Duration = Duration::from_millis(100);
 
 /// The two accounts, the walk and the timers.
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +81,18 @@ pub struct Session {
     pub view: WorldView,
 }
 
+/// Where and when the first client started its walk.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WalkStart {
+    /// Its own position then: the start of the route.
+    pub origin: WorldPosition,
+    /// The index of that position in its own track; the positions before it are the way to the
+    /// meeting point.
+    pub track_index: usize,
+    /// When the walk started.
+    pub at: Instant,
+}
+
 /// The three sessions of a pair run, and the route the first client walked.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PairReport {
@@ -79,6 +104,10 @@ pub struct PairReport {
     pub again: Session,
     /// The route of the first client.
     pub route: Route,
+    /// The start of the walk; `None` when the first client never reached the meeting point.
+    pub walk: Option<WalkStart>,
+    /// When the second client got each new state of the first one, in order.
+    pub walker_states: Vec<Instant>,
 }
 
 /// One named check and its result.
@@ -117,17 +146,24 @@ impl PairReport {
                 .own_number()
                 .is_some_and(|number| viewer.view.others().contains(&number))
         };
-        let own_track = self
-            .first
-            .view
-            .own_number()
-            .map_or(&[][..], |number| self.first.view.track(number));
+        let own_track =
+            self.first
+                .view
+                .own_number()
+                .zip(self.walk)
+                .map_or(&[][..], |(number, walk)| {
+                    self.first
+                        .view
+                        .track(number)
+                        .get(walk.track_index..)
+                        .unwrap_or_default()
+                });
         let seen_track = self
             .first
             .view
             .own_number()
             .map_or(&[][..], |number| self.second.view.track(number));
-        let origin = own_track.first().copied();
+        let origin = self.walk.map(|walk| walk.origin);
         let on_route = |position: &WorldPosition| {
             origin.is_some_and(|origin| {
                 self.route.distance_to(offset(origin, *position)) <= path_tolerance_m
@@ -144,7 +180,9 @@ impl PairReport {
             self.first.view.own_position(),
             self.again.view.own_position(),
         ) {
-            (Some(before), Some(after)) => distance(before, after) <= position_tolerance_m,
+            (Some(before), Some(after)) => {
+                horizontal_distance(before, after) <= position_tolerance_m
+            }
             _ => false,
         };
         vec![
@@ -172,7 +210,9 @@ impl PairReport {
             },
             Check {
                 name: SNAPPED_BACK,
-                passed: own_track.iter().all(on_route) && own_track.last().is_some_and(at_end),
+                passed: !own_track.is_empty()
+                    && own_track.iter().all(on_route)
+                    && own_track.last().is_some_and(at_end),
             },
             Check {
                 name: KEPT_POSITION,
@@ -187,6 +227,25 @@ impl PairReport {
             .iter()
             .all(|check| check.passed)
     }
+
+    /// The times between two states of the first client that the second got while the route
+    /// was walked, in order: how often a watcher gets a walking player's state.
+    pub fn walk_state_gaps(&self) -> Vec<Duration> {
+        let Some(walk) = self.walk else {
+            return Vec::new();
+        };
+        let end = walk.at + self.route.duration();
+        let during: Vec<Instant> = self
+            .walker_states
+            .iter()
+            .copied()
+            .filter(|at| (walk.at..=end).contains(at))
+            .collect();
+        during
+            .windows(2)
+            .map(|pair| pair[1].duration_since(pair[0]))
+            .collect()
+    }
 }
 
 /// East and north of `position` from `origin`, in metres.
@@ -194,13 +253,13 @@ fn offset(origin: WorldPosition, position: WorldPosition) -> [f32; 2] {
     [position.x - origin.x, position.y - origin.y]
 }
 
-/// Distance between two positions, in metres.
-pub fn distance(a: WorldPosition, b: WorldPosition) -> f32 {
-    let (dx, dy, dz) = (a.x - b.x, a.y - b.y, a.z() - b.z());
-    (dx * dx + dy * dy + dz * dz).sqrt()
+/// Distance between two positions in the ground plane, in metres.
+fn horizontal_distance(a: WorldPosition, b: WorldPosition) -> f32 {
+    (a.x - b.x).hypot(a.y - b.y)
 }
 
-/// Registers with `token` at `gateway`, stays `hold`, and reads the world messages.
+/// Registers with `token` at `gateway`, stays `hold` in the game (it sends the first time sync
+/// request, [`InGame`]), and reads the world messages.
 ///
 /// # Errors
 ///
@@ -211,12 +270,13 @@ pub async fn session(
     hold: Duration,
     registration_timeout: Duration,
 ) -> Result<Session, PairError> {
+    let mut in_game = InGame::default();
     session_with(
         gateway,
         client,
         hold,
         registration_timeout,
-        |_, _, _| Ok(()),
+        |client, outcome, _| in_game.tick(client, outcome),
     )
     .await
 }
@@ -245,15 +305,78 @@ pub async fn session_with(
     Ok(Session { outcome, view })
 }
 
-/// The first client during its walk: it follows its own position in the bundles and sends
-/// [`walk_offset`] from where it first stood, every [`SEND_INTERVAL`].
+/// What a client of the pair has read so far in its session. It sends the first time sync
+/// request when it is due ([`WorldView::time_sync_due`]), as the game client does once it is in
+/// the game.
+#[derive(Default)]
+struct InGame {
+    view: WorldView,
+    read: usize,
+    /// Whether it sent the time sync request.
+    in_game: bool,
+}
+
+impl InGame {
+    fn tick(&mut self, client: &mut RepClient, outcome: &RepOutcome) -> Result<(), RepError> {
+        for received in &outcome.messages[self.read..] {
+            // A message that does not decode fails the run later, when the session is read.
+            let _ = self.view.read(received);
+        }
+        self.read = outcome.messages.len();
+        if let Some(own) = self.view.time_sync_due() {
+            send_time_sync(client, own)?;
+            self.in_game = true;
+        }
+        Ok(())
+    }
+}
+
+/// What the two sessions of a pair run tell each other while they run.
+#[derive(Default)]
+struct Meeting {
+    /// Where the second client stands once it is in the game.
+    place: Cell<Option<WorldPosition>>,
+    /// The entity number of the first client.
+    walker: Cell<Option<u64>>,
+}
+
+/// The first client during its walk: once in the game it goes to the second client with a
+/// teleport, then it follows its own position in the bundles and sends [`walk_offset`] from
+/// where it landed, every [`SEND_INTERVAL`].
 struct Walker<'a> {
     route: &'a Route,
     jump_m: f32,
-    view: WorldView,
-    read: usize,
-    origin: Option<(WorldPosition, Duration)>,
+    meeting: &'a Meeting,
+    in_game: InGame,
+    teleported: bool,
+    /// The start of the walk, and its time since the registration.
+    start: Option<(WalkStart, Duration)>,
     last_sent: Option<Duration>,
+}
+
+/// The second client: once in the game it gives its place as the meeting point, and it notes
+/// when each new state of the first client comes.
+struct Watcher<'a> {
+    meeting: &'a Meeting,
+    in_game: InGame,
+    walker_states: Vec<Instant>,
+}
+
+impl Watcher<'_> {
+    fn tick(&mut self, client: &mut RepClient, outcome: &RepOutcome) -> Result<(), RepError> {
+        self.in_game.tick(client, outcome)?;
+        let view = &self.in_game.view;
+        if self.in_game.in_game && self.meeting.place.get().is_none() {
+            self.meeting.place.set(view.own_position());
+        }
+        if let Some(walker) = self.meeting.walker.get() {
+            let now = Instant::now();
+            let seen = view.track(walker).len();
+            let new = seen.saturating_sub(self.walker_states.len());
+            self.walker_states.extend(std::iter::repeat_n(now, new));
+        }
+        Ok(())
+    }
 }
 
 /// Where the first client is `walked` after it started: on the route, then [`SETTLE`] at its
@@ -277,15 +400,35 @@ impl Walker<'_> {
         outcome: &mut RepOutcome,
         since_registration: Duration,
     ) -> Result<(), RepError> {
-        for received in &outcome.messages[self.read..] {
-            // A message that does not decode fails the run later, when the session is read.
-            let _ = self.view.read(received);
-        }
-        self.read = outcome.messages.len();
-        let Some(own) = self.view.own_position() else {
+        self.in_game.tick(client, outcome)?;
+        let view = &self.in_game.view;
+        let (Some(number), Some(own)) = (view.own_number(), view.own_position()) else {
             return Ok(());
         };
-        let (origin, started) = *self.origin.get_or_insert((own, since_registration));
+        self.meeting.walker.set(Some(number));
+        let (start, started) = match self.start {
+            Some(start) => start,
+            None => {
+                let Some(place) = self.meeting.place.get().filter(|_| self.in_game.in_game) else {
+                    return Ok(());
+                };
+                if horizontal_distance(own, place) > MEETING_REACHED_M {
+                    if !self.teleported {
+                        self.teleported = true;
+                        let line = format!("!tp {} {} {}", place.x, place.y, place.z());
+                        say_in_area(client, number, &line)?;
+                    }
+                    return Ok(());
+                }
+                let start = WalkStart {
+                    origin: own,
+                    track_index: view.track(number).len().saturating_sub(1),
+                    at: Instant::now(),
+                };
+                *self.start.insert((start, since_registration))
+            }
+        };
+        let origin = start.origin;
         if self
             .last_sent
             .is_some_and(|sent| since_registration.saturating_sub(sent) < SEND_INTERVAL)
@@ -324,13 +467,20 @@ pub async fn run_pair(
 ) -> Result<PairReport, PairError> {
     let first = walk(http, &settings.first, &mut report).await?;
     let second = walk(http, &settings.second, &mut report).await?;
+    let meeting = Meeting::default();
     let mut walker = Walker {
         route: &settings.route,
         jump_m: settings.jump_m,
-        view: WorldView::default(),
-        read: 0,
-        origin: None,
+        meeting: &meeting,
+        in_game: InGame::default(),
+        teleported: false,
+        start: None,
         last_sent: None,
+    };
+    let mut watcher = Watcher {
+        meeting: &meeting,
+        in_game: InGame::default(),
+        walker_states: Vec::new(),
     };
     let walking = session_with(
         first.rep_address,
@@ -339,16 +489,16 @@ pub async fn run_pair(
         settings.registration_timeout,
         |client, outcome, since| walker.tick(client, outcome, since),
     );
-    let (first, second) = tokio::join!(
-        walking,
-        session(
-            second.rep_address,
-            new_client(login_token(&second.token))?,
-            settings.hold,
-            settings.registration_timeout,
-        ),
+    let watching = session_with(
+        second.rep_address,
+        new_client(login_token(&second.token))?,
+        settings.hold,
+        settings.registration_timeout,
+        |client, outcome, _| watcher.tick(client, outcome),
     );
+    let (first, second) = tokio::join!(walking, watching);
     let (first, second) = (first?, second?);
+    let walk_start = walker.start.map(|(start, _)| start);
     let again = walk(http, &settings.first, &mut report).await?;
     let again = session(
         again.rep_address,
@@ -362,6 +512,8 @@ pub async fn run_pair(
         second,
         again,
         route: settings.route.clone(),
+        walk: walk_start,
+        walker_states: watcher.walker_states,
     })
 }
 
@@ -446,6 +598,16 @@ mod tests {
         }
     }
 
+    /// A walk that started at the first position of `first_track`, `track_index` positions
+    /// into it.
+    fn walk_start(first_track: &[WorldPosition], track_index: usize) -> Option<WalkStart> {
+        first_track.get(track_index).map(|origin| WalkStart {
+            origin: *origin,
+            track_index,
+            at: Instant::now(),
+        })
+    }
+
     fn pair_report(
         first_track: &[WorldPosition],
         second_sees_first: &[WorldPosition],
@@ -456,6 +618,8 @@ mod tests {
             second: session(SECOND, &[at(0.0, 0.0)], FIRST, second_sees_first),
             again: session(FIRST, &[again_at], SECOND, &[]),
             route: route(),
+            walk: walk_start(first_track, 0),
+            walker_states: Vec::new(),
         }
     }
 
@@ -509,6 +673,50 @@ mod tests {
             walk_offset(&route, JUMP_M, end + JUMP_WINDOW),
             [ROUTE_END_M, 0.0]
         );
+    }
+
+    #[test]
+    fn the_next_login_may_stand_lower_on_the_ground() {
+        const GROUND_DROP_M: f32 = 1.2;
+        let end = at(ROUTE_END_M, 0.0);
+        let lower =
+            WorldPosition::from_metres(end.x, end.y, end.z() - GROUND_DROP_M).expect("finite");
+        let report = pair_report(&walked(), &walked(), lower);
+        assert!(failed(&report).is_empty(), "{:?}", failed(&report));
+    }
+
+    #[test]
+    fn the_way_to_the_meeting_point_is_not_part_of_the_walk() {
+        const FAR_M: f32 = 9000.0;
+        let mut track = vec![at(-FAR_M, FAR_M)];
+        track.extend(walked());
+        let mut report = pair_report(&track, &walked(), at(ROUTE_END_M, 0.0));
+        report.walk = walk_start(&track, 1);
+        assert!(failed(&report).is_empty(), "{:?}", failed(&report));
+        report.walk = None;
+        assert_eq!(
+            failed(&report),
+            vec![FOLLOWED_ROUTE, SNAPPED_BACK],
+            "no meeting, no walk"
+        );
+    }
+
+    #[test]
+    fn the_state_gaps_are_those_of_the_walk_only() {
+        const GAP: Duration = Duration::from_millis(33);
+        let mut report = pair_report(&walked(), &walked(), at(ROUTE_END_M, 0.0));
+        let start = report.walk.expect("walk").at;
+        let end = start + report.route.duration();
+        report.walker_states = vec![
+            start.checked_sub(GAP).expect("before"),
+            start,
+            start + GAP,
+            start + GAP * 3,
+            end + GAP,
+        ];
+        assert_eq!(report.walk_state_gaps(), vec![GAP, GAP * 2]);
+        report.walk = None;
+        assert!(report.walk_state_gaps().is_empty());
     }
 
     #[test]

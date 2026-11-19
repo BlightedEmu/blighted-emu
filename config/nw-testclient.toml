@@ -25,7 +25,8 @@ mtu = 1200
 hold_seconds = 60
 # Seconds to wait for the registration response.
 registration_timeout_seconds = 30
-# pair: largest distance between the saved position and the next login, in metres.
+# pair: largest distance in the ground plane between the saved position and the next login, in
+# metres.
 position_tolerance_m = 0.1
 # pair: the first client walks these points (east, north of where it stands, in metres) at the
 # walking speed of the datasheets, then sends one move this far east, which sim must refuse.
