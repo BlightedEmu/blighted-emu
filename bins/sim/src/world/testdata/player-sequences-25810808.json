@@ -1295,11 +1295,13 @@
    "alt_hold": {
     "walk": {
      "start": 4225,
-     "hold": 4248
+     "hold": 4248,
+     "third": 407
     },
     "stand": {
      "start": 4225,
-     "hold": 4248
+     "hold": 4248,
+     "third": 408
     },
     "hold_after_ms": 83
    },
@@ -1376,10 +1378,6 @@
     "second_sequence": 94,
     "marker": 41
    },
-   "reload": {
-    "second_state": 36,
-    "second_sequence": 4225
-   },
    "air": {
     "fall": 813,
     "land_after_jump": {
@@ -1421,8 +1419,52 @@
      "third_state": 0,
      "third_sequence": 0,
      "marker": 0
+    },
+    "refire": {
+     "marker": 67
+    },
+    "refire_window": {
+     "from_ms": 733,
+     "until_ms": 833
+    },
+    "empty_after": [
+     {
+      "after_ms": 733,
+      "marker": 66
+     },
+     {
+      "after_ms": 766,
+      "second_state": 39,
+      "second_sequence": 96,
+      "third_state": 0,
+      "third_sequence": 0,
+      "marker": 0
+     },
+     {
+      "after_ms": 1332,
+      "second_state": 45,
+      "second_sequence": 0
+     }
+    ]
+   },
+   "alt_fire_empty_after": [
+    {
+     "after_ms": 733,
+     "second_sequence": 4248,
+     "marker": 40
+    },
+    {
+     "after_ms": 766,
+     "second_state": 39,
+     "second_sequence": 96,
+     "marker": 40
+    },
+    {
+     "after_ms": 1298,
+     "second_state": 36,
+     "second_sequence": 4225
     }
-   }
+   ]
   },
   {
    "tags": "2H_Ranged,Rifle",
@@ -1452,11 +1494,13 @@
    "alt_hold": {
     "walk": {
      "start": 3544,
-     "hold": 4249
+     "hold": 4249,
+     "third": 405
     },
     "stand": {
      "start": 3544,
-     "hold": 4249
+     "hold": 4249,
+     "third": 406
     },
     "hold_after_ms": 215
    },
@@ -2075,11 +2119,13 @@
    "alt_hold": {
     "walk": {
      "start": 2225,
-     "hold": 29
+     "hold": 29,
+     "third": 421
     },
     "stand": {
      "start": 2225,
-     "hold": 29
+     "hold": 29,
+     "third": 422
     },
     "hold_after_ms": 349
    },
@@ -2261,7 +2307,8 @@
      "third_sequence": 0,
      "marker": 3
     }
-   }
+   },
+   "alt_fire_gap_ms": 1066
   },
   {
    "tags": "MagicGauntlet,Ice",

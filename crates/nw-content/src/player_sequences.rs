@@ -26,8 +26,9 @@
 //! and the blunderbuss send no row 1 for their shots either: the server sends the aimed shot
 //! ([`StanceSequences::alt_fire`], the bow's at the release), the hip shot ([`HipShot`]) and
 //! what follows them ([`TimedSlots`]; ranged shot study 2026-11-18,
-//! `local-data/scratch-work/ranged-shots-2026-11-18/findings.md`). Unknown (no retail data on the
-//! pinned build): the dagger.
+//! `local-data/scratch-work/ranged-shots-2026-11-18/findings.md`; the re-fires, reloads, aim legs
+//! and shot gap of 2026-11-19: the miners in `local-data/scratch-work/ranged-shots-2026-11-19/`).
+//! Unknown (no retail data on the pinned build): the dagger.
 //!
 //! The client sends no slayer state for a weapon ability either (input row 1 is empty at every
 //! ability key press): the server starts the ability's animation in the own state after the
@@ -117,6 +118,18 @@ pub struct AltLegs {
     /// The second-slot sequence it holds after its start, and that a change to these legs
     /// sends while it is held (`18=<hold>` alone).
     pub hold: u64,
+    /// The third-slot sequence (child 21) of an aim on these legs: sent with its start, in the
+    /// state of a change between walking and standing, and in place of the other legs' one in
+    /// a shot's step. Observed (ranged shot study 2026-11-19, 1,195 retail ledgers, other
+    /// players' streams): the bow's 422, the musket's 406 and the blunderbuss's 408 went with
+    /// the aim's stand (first slot `13=31`) in 15,032 of 15,050, 2,574 of 2,578 and 1,533 of
+    /// 1,534 states, their 421, 405 and 407 with the walk and its start; a change of the first
+    /// slot between them sent the other one in its own state (bow 10,645 of 10,791 and 9,945 of
+    /// 10,061, musket 2,095 of 2,096 and 1,782 of 1,788, blunderbuss 1,219 of 1,224 and 1,372 of
+    /// 1,375); the bow's step after a drawn shot sent 422 standing (1,292) and 421 walking
+    /// (2,544). `None`: the third slot does not change with the legs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub third: Option<u64>,
 }
 
 /// The upper body of the right-click's block or aim by legs: retail plays a start then a hold,
@@ -384,7 +397,9 @@ pub struct StanceSequences {
     pub alt_fire: Option<SlotsChange>,
     /// What the first attack key press sends after the weapon emptied and was loaded again: the
     /// reload (retail blunderbuss `16=24 17=<record> 18=8142`, 1.5 to 1.9 s after the last shot;
-    /// that press fires nothing).
+    /// that press fires nothing). The pinned build's blunderbuss has none: it reloads by the
+    /// steps of the shot that empties it ([`StanceSequences::alt_fire_empty_after`],
+    /// [`HipShot::empty_after`]), and its first press after them shoots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reload: Option<SlotsChange>,
     /// The aimed shot goes out at the attack key's release, not at its press: the press draws
@@ -398,6 +413,24 @@ pub struct StanceSequences {
     /// state that sent it: the draw of the next shot and the aim's hold again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alt_fire_after: Vec<TimedSlots>,
+    /// What follows the aimed shot that empties the weapon, in place of
+    /// [`StanceSequences::alt_fire_after`]: its reload, then the aim again. Observed, blunderbuss
+    /// (ranged shot study 2026-11-19, aimed shots that only their hold step `18=4248 48=40`
+    /// parted from the reload): `16=39 18=96 48=40` 766 ms after the shot (137 seen by other
+    /// players, p10 749, p90 784; own 159, median 767), then the aim again `16=36 18=4225` a
+    /// median 532 ms after the reload (84 of 137; own 94 of 159, 117 of them with no press
+    /// between). Runs of plain shots between two reloads held 2 shots (326 of 443 seen by
+    /// other players).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alt_fire_empty_after: Vec<TimedSlots>,
+    /// The shortest time from an aimed shot's own state to the next aimed shot's: a release
+    /// before it holds the next shot until then. Observed, bow (ranged shot study 2026-11-19):
+    /// 159 own releases with one press and one release under 1,000 ms after the shot before
+    /// sent their plain shot 1,066 ms after it (p10 1,048, p90 1,083), a median 267 ms after the
+    /// release; 345 later releases shot a median 36 ms after the release; of 11,807 plain shots
+    /// seen by other players, 122 came 100 to 1,000 ms after the shot before (median 1,068 ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_fire_gap_ms: Option<u64>,
     /// The aimed shot of a key held to its full draw.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_charge: Option<AltCharge>,
@@ -447,10 +480,45 @@ pub struct HipShot {
     /// The shot's end, by milliseconds from the start's own state.
     pub end: TimedSlots,
     /// A shot again from a press while the shot plays: the end's own state sends this in place
-    /// of the end, and `after` and `end` count again from there. `None`: such a press starts
-    /// nothing.
+    /// of the end, and `after` and `end` count again from there (the bow); with
+    /// [`HipShot::refire_window`], the press's own state sends it. `None`: such a press starts
+    /// nothing. Observed (ranged shot study 2026-11-19): the musket's 19 own hip shots with a
+    /// press while they played (94 presses) sent nothing of their own, and none of its 28 hip
+    /// shots seen by other players carried a second fire marker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refire: Option<SlotsChange>,
+    /// When a press re-fires, by milliseconds from the shot's own state (or its re-fire's):
+    /// only a press then sends [`HipShot::refire`], at once. Observed, blunderbuss (ranged shot
+    /// study 2026-11-19, own hip shots with a shot still loaded): a first press from 20 ms
+    /// before the `48=66` step to 100 ms after it re-fired `48=67` (20 of 20), 37 ms after the
+    /// press (p10 29, p90 50); 100 to 120 ms after it, 1 re-fire and 1 end; a press only later,
+    /// or none, ended the shot (34 of 34; 7 re-fires in stretches with no input records left
+    /// out). Other players saw 82 re-fires, 77 ends and 83 reloads after 251 such steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refire_window: Option<PressWindow>,
+    /// What follows the start of the shot that empties the weapon, in place of `after` and
+    /// `end` (its last step is its end): the reload. Observed, blunderbuss (ranged shot study
+    /// 2026-11-19): `16=39 18=96 19=0 21=0 48=0` 766 ms after the hip shot or its re-fire (148
+    /// seen by other players, p10 745, p90 784; own 72, median 767), 33 ms after its `48=66`
+    /// step, then `16=45 18=0` a median 566 ms after the reload (98 of 148).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub empty_after: Vec<TimedSlots>,
+}
+
+/// A span of milliseconds from a shot's own state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PressWindow {
+    /// Its first millisecond.
+    pub from_ms: u64,
+    /// Its last millisecond.
+    pub until_ms: u64,
+}
+
+impl PressWindow {
+    /// Whether `elapsed_ms` falls in it.
+    pub const fn holds(&self, elapsed_ms: u64) -> bool {
+        elapsed_ms >= self.from_ms && elapsed_ms <= self.until_ms
+    }
 }
 
 impl StanceSequences {
@@ -945,6 +1013,7 @@ mod tests {
                 {"tags": "Bow,LongBow",
                  "alt_fire": {"second_sequence": 35, "marker": 41},
                  "alt_fire_at_release": true,
+                 "alt_fire_gap_ms": 1066,
                  "alt_fire_after": [{"after_ms": 433, "second_state": 39,
                                      "second_sequence": 2206, "marker": 40}],
                  "alt_charge": {"after_ms": 587, "drawn": {"marker": 24},
@@ -955,7 +1024,17 @@ mod tests {
                          "end": {"after_ms": 1000, "second_state": 45, "second_sequence": 0},
                          "refire": {"third_state": 0, "third_sequence": 0, "marker": 3}}},
                 {"tags": "2H_Ranged,Blunderbuss",
-                 "alt_fire": {"second_sequence": 94, "marker": 41}}
+                 "alt_hold": {"walk": {"start": 4225, "hold": 4248, "third": 407},
+                              "stand": {"start": 4225, "hold": 4248, "third": 408},
+                              "hold_after_ms": 83},
+                 "alt_fire": {"second_sequence": 94, "marker": 41},
+                 "alt_fire_empty_after": [{"after_ms": 766, "second_state": 39,
+                                           "second_sequence": 96}],
+                 "hip": {"start": {"second_state": 33, "second_sequence": 97, "marker": 67},
+                         "end": {"after_ms": 898, "second_state": 45},
+                         "refire": {"marker": 67},
+                         "refire_window": {"from_ms": 733, "until_ms": 833},
+                         "empty_after": [{"after_ms": 1332, "second_state": 45}]}}
             ], "follow_ups": []}"#,
         )
         .expect("table");
@@ -984,7 +1063,27 @@ mod tests {
             .stance(stance_key("2H_Ranged,Blunderbuss"))
             .expect("blunderbuss");
         assert!(!gun.alt_fire_at_release, "it shoots at the press");
-        assert_eq!((gun.alt_charge.as_ref(), gun.hip.as_ref()), (None, None));
+        assert_eq!(gun.alt_charge, None);
+        let legs = gun.alt_hold.expect("the aim by legs");
+        assert_eq!((legs.walk.third, legs.stand.third), (Some(407), Some(408)));
+        assert_eq!(
+            gun.alt_fire_empty_after.first().map(|step| step.after_ms),
+            Some(766)
+        );
+        assert_eq!(
+            (bow.alt_fire_gap_ms, gun.alt_fire_gap_ms),
+            (Some(1066), None)
+        );
+        let hip = gun.hip.as_ref().expect("the hip shot");
+        let window = hip.refire_window.expect("the re-fire window");
+        assert!(window.holds(733) && window.holds(833) && !window.holds(834));
+        assert!(!window.holds(732));
+        assert_eq!(hip.empty_after.last().map(|step| step.after_ms), Some(1332));
+        assert!(
+            bow.hip
+                .as_ref()
+                .is_some_and(|hip| hip.refire_window.is_none())
+        );
     }
 
     #[test]
