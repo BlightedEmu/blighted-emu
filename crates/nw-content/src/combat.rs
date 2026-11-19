@@ -2618,6 +2618,7 @@ mod tests {
             fragments: Vec::new(),
             cooldowns_ms: std::collections::BTreeMap::new(),
             mana_costs: std::collections::BTreeMap::new(),
+            tag_groups: Vec::new(),
         };
         let data = CombatData::build(source(), &rows())
             .expect("data")

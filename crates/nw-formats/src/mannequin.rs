@@ -138,6 +138,10 @@ const TAKE_VALUE: &str = "Take";
 /// `<ClearActiveAbilityMoveInput><Default AbilityName OnEnter OnExit>`: the action clears an
 /// ability key press ([`MoveClear`]).
 const CLEAR_MOVE_ELEMENT: &str = "ClearActiveAbilityMoveInput";
+/// `<ClearMannequinTagGroup><Default TagGroupName OnEnter OnExit>`: the action clears every tag
+/// of a Mannequin tag group ([`GroupClear`]).
+const CLEAR_TAG_GROUP_ELEMENT: &str = "ClearMannequinTagGroup";
+const TAG_GROUP_NAME_ATTRIBUTE: &str = "TagGroupName";
 const CLEAR_VALUE: &str = "Clear";
 const COST_ID_ATTRIBUTE: &str = "CostID";
 const COOLDOWN_TEST_ELEMENT: &str = "IfCooldownTimer";
@@ -532,10 +536,21 @@ pub struct TagBits {
     pub value: u8,
 }
 
-/// A Mannequin tag definition: the bits of each tag.
+/// A group of a Mannequin tag definition (`<Group name>`): its tags share the bits of one value
+/// in the tag state, so at most one of them is on at a time.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TagGroup {
+    /// `name`.
+    pub name: String,
+    /// The names of its tags, in file order.
+    pub tags: Vec<String>,
+}
+
+/// A Mannequin tag definition: the bits of each tag, and its groups.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TagDefinition {
     tags: HashMap<String, TagBits>,
+    groups: Vec<TagGroup>,
 }
 
 impl TagDefinition {
@@ -555,18 +570,22 @@ impl TagDefinition {
         }
         let entries = &root.child(TAGS_ELEMENT)?.children;
         let name_of = |node: &Node| node.attribute(NAME_ATTRIBUTE).map(str::to_owned);
-        let groups: Vec<Vec<String>> = entries
+        let named_groups: Vec<TagGroup> = entries
             .iter()
             .filter(|node| node.name == GROUP_ELEMENT)
-            .map(|group| group.children.iter().filter_map(name_of).collect())
+            .map(|group| TagGroup {
+                name: name_of(group).unwrap_or_default(),
+                tags: group.children.iter().filter_map(name_of).collect(),
+            })
             .collect();
+        let groups: Vec<&Vec<String>> = named_groups.iter().map(|group| &group.tags).collect();
         let singles: Vec<String> = entries
             .iter()
             .filter(|node| node.name == TAG_ELEMENT)
             .filter_map(name_of)
             .collect();
         let mut tags = HashMap::new();
-        let mut groups_left: Vec<&Vec<String>> = groups.iter().collect();
+        let mut groups_left: Vec<&Vec<String>> = groups;
         let mut singles_left = singles.iter();
         let mut byte: u8 = 0;
         while !groups_left.is_empty() || singles_left.len() > 0 {
@@ -611,7 +630,15 @@ impl TagDefinition {
             }
             byte += 1;
         }
-        Ok(Self { tags })
+        Ok(Self {
+            tags,
+            groups: named_groups,
+        })
+    }
+
+    /// Its groups, in file order.
+    pub fn groups(&self) -> &[TagGroup] {
+        &self.groups
     }
 
     /// Every tag with its bits.
@@ -639,6 +666,7 @@ impl FromIterator<(String, TagBits)> for TagDefinition {
     fn from_iter<T: IntoIterator<Item = (String, TagBits)>>(tags: T) -> Self {
         Self {
             tags: tags.into_iter().collect(),
+            groups: Vec::new(),
         }
     }
 }
@@ -1836,6 +1864,8 @@ pub struct Action {
     pub charge_take: Option<ChargeTake>,
     /// Its `ClearActiveAbilityMoveInput` activities, in file order, in any branch.
     pub move_clears: Vec<MoveClear>,
+    /// Its `ClearMannequinTagGroup` activities, in file order, in any branch.
+    pub group_clears: Vec<GroupClear>,
     /// The `<Conditional>` cases of its `ChangeActionFragment` activities that play another
     /// fragment in its place (`UseDefaultFragment="false"` with a `FragmentName`), in file
     /// order: the first whose condition holds plays (`baseai_stagger.actionlist`:
@@ -1875,6 +1905,22 @@ pub struct ChargeTake {
 pub struct MoveClear {
     /// `AbilityName`.
     pub ability: String,
+    /// `OnEnter="Clear"`.
+    pub on_enter: bool,
+    /// `OnExit="Clear"`.
+    pub on_exit: bool,
+}
+
+/// A `ClearMannequinTagGroup` activity: every tag of the Mannequin tag group `group`
+/// ([`TagGroup`]) goes off as the action starts (`OnEnter="Clear"`) or as it stops
+/// (`OnExit="Clear"`). Observed (`playeractions_ability_bow.actionlist`, build 25810808):
+/// `Bow_Penetrating_Aim_SubState`, `Bow_Smoke_Aim_SubState` and `Bow_RainOfArrows_AimSubState`
+/// clear the `Aiming` group (`PenetratingAim`, `SmokeAim`, `HeavyAim`, `Aim`, ...) as they stop:
+/// an aim that another ability ends leaves no aim tag behind.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GroupClear {
+    /// `TagGroupName`.
+    pub group: String,
     /// `OnEnter="Clear"`.
     pub on_enter: bool,
     /// `OnExit="Clear"`.
@@ -2403,6 +2449,31 @@ fn move_clears(action: &Node) -> Vec<MoveClear> {
     found
 }
 
+/// The `ClearMannequinTagGroup` activities of `action`, in file order, in any branch.
+fn group_clears(action: &Node) -> Vec<GroupClear> {
+    let mut found = Vec::new();
+    walk_activities(action, &mut |activity, _| {
+        if activity.name != CLEAR_TAG_GROUP_ELEMENT {
+            return false;
+        }
+        found.extend(
+            activity
+                .children
+                .iter()
+                .filter(|entry| entry.name == DEFAULT_ELEMENT)
+                .filter_map(|entry| {
+                    Some(GroupClear {
+                        group: entry.attribute(TAG_GROUP_NAME_ATTRIBUTE)?.to_owned(),
+                        on_enter: entry.attribute(ON_ENTER_ATTRIBUTE) == Some(CLEAR_VALUE),
+                        on_exit: entry.attribute(ON_EXIT_ATTRIBUTE) == Some(CLEAR_VALUE),
+                    })
+                }),
+        );
+        true
+    });
+    found
+}
+
 /// The stamina activities of `action` (the first of each kind).
 fn stamina_activities(action: &Node) -> StaminaActivities {
     let mut found = StaminaActivities::default();
@@ -2598,6 +2669,7 @@ impl ActionList {
                             ..take
                         }),
                         move_clears: move_clears(action),
+                        group_clears: group_clears(action),
                         stamina: {
                             let found = stamina_activities(action);
                             StaminaActivities {
@@ -3414,6 +3486,51 @@ mod tests {
             [clear(false, true)],
             "in a branch too"
         );
+    }
+
+    #[test]
+    fn an_action_clears_a_tag_group_as_it_stops() {
+        // `playeractions_ability_bow.actionlist`, build 25810808, trimmed.
+        let text = r#"<ActionList><Actions>
+ <Action Name="Bow_Penetrating_Aim_SubState" FragmentName="Bow_Aim_UpperBody"><Activities>
+  <ClearMannequinTagGroup ResetWhenReinstalled="false">
+   <Default TagGroupName="Aiming" OnEnter="NoEffect" OnExit="Clear"/>
+  </ClearMannequinTagGroup>
+ </Activities></Action>
+</Actions></ActionList>"#;
+        let list = ActionList::parse(text).expect("list");
+        let action = list.action("Bow_Penetrating_Aim_SubState").expect("action");
+        assert_eq!(
+            action.group_clears,
+            [GroupClear {
+                group: "Aiming".to_owned(),
+                on_enter: false,
+                on_exit: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_tag_definition_names_its_groups_and_their_tags() {
+        // `playermaletags.xml`, build 25810808, trimmed.
+        let text = r#"<TagDefinition version="2"><Tags>
+ <Group name="Aiming"><Tag name="ChargedAim" priority="1"/><Tag name="Aim" priority="1"/>
+  <Tag name="PenetratingAim"/></Group>
+ <Tag name="Idle"/>
+</Tags></TagDefinition>"#;
+        let tags = TagDefinition::parse(text).expect("tags");
+        assert_eq!(
+            tags.groups(),
+            [TagGroup {
+                name: "Aiming".to_owned(),
+                tags: vec![
+                    "ChargedAim".to_owned(),
+                    "Aim".to_owned(),
+                    "PenetratingAim".to_owned()
+                ],
+            }]
+        );
+        assert!(tags.has("Idle"), "a single tag is in no group");
     }
 
     #[test]

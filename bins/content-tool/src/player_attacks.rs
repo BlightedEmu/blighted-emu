@@ -37,8 +37,8 @@ use nw_formats::azcs::{decode_azcs, is_azcs};
 use nw_formats::caf::Caf;
 use nw_formats::character::CharacterDefinition;
 use nw_formats::mannequin::{
-    Action, ActionList, AnimClip, AnimDatabase, AnimationList, CageGrid, Condition, ControllerDef, DrivenMotion,
-    Fragment, GridList, ProcClip, ReactionRow, reaction_table,
+    Action, ActionList, AnimClip, AnimDatabase, AnimationList, CageGrid, Condition, ControllerDef,
+    DrivenMotion, Fragment, GridList, ProcClip, ReactionRow, TagDefinition, reaction_table,
 };
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
 use nw_formats::skeleton::Skeleton;
@@ -66,6 +66,9 @@ const ITEM_CLASS_SEPARATOR: char = '+';
 const PLAYER_GRID: &str = "sharedassets/springboardentitites/playerdata/cage/player.grid";
 /// The player's Mannequin controller definitions: the scopes each fragment plays on.
 const PLAYER_CONTROLLER: &str = "animations/mannequin/adb/player/playermalecontrollerdefs.xml";
+/// The player's Mannequin tag definition: the `<Tags filename>` of [`PLAYER_CONTROLLER`]
+/// (`Animations/Mannequin/ADB/Player/PlayerMaleTags.xml`, build 25810808), as the paks name it.
+const PLAYER_TAGS: &str = "animations/mannequin/adb/player/playermaletags.xml";
 /// The folder of the client's input profiles ([`nw_formats::input_profile`]).
 const INPUT_PROFILE_FOLDER: &str = "libs/config/";
 /// The suffix of an input profile file.
@@ -204,6 +207,8 @@ pub struct AnimationSources {
     pub grid: Vec<GridList>,
     /// The player's controller definitions.
     pub controller: ControllerDef,
+    /// The player's tag definition ([`PLAYER_TAGS`]).
+    pub tags: TagDefinition,
     /// The sheathe action of the action lists.
     pub sheathe: Option<SheatheAction>,
     /// The rows of the player reaction table, in file order.
@@ -1468,6 +1473,7 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
         action_paths: Vec::new(),
         grid: Vec::new(),
         controller: ControllerDef::default(),
+        tags: TagDefinition::default(),
         sheathe: None,
         reactions: Vec::new(),
         ranged: HashMap::new(),
@@ -1483,6 +1489,7 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
                 || (path.starts_with(PLAYER_ACTIONS_PREFIX) && path.ends_with(ACTION_LIST_SUFFIX))
                 || path == PLAYER_GRID
                 || path == PLAYER_CONTROLLER
+                || path == PLAYER_TAGS
                 || (path.starts_with(INPUT_PROFILE_FOLDER) && path.ends_with(INPUT_PROFILE_SUFFIX))
                 || path == RANGED_ATTACK_DATABASE
                 || prefab_slices.contains_key(path)
@@ -1535,6 +1542,10 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
             } else if path == PLAYER_CONTROLLER {
                 if let Some(controller) = text().and_then(|text| ControllerDef::parse(text).ok()) {
                     sources.controller = controller;
+                }
+            } else if path == PLAYER_TAGS {
+                if let Some(tags) = text().and_then(|text| TagDefinition::parse(text).ok()) {
+                    sources.tags = tags;
                 }
             } else if path == PLAYER_REACTION_TABLE {
                 if let Some(rows) = text().and_then(|text| reaction_table(text).ok()) {
@@ -1759,6 +1770,7 @@ mod tests {
             action_paths: vec![String::new()],
             grid: Vec::new(),
             controller: ControllerDef::default(),
+            tags: TagDefinition::default(),
             sheathe: SheatheAction::parse(ACTIONS, SHEATHE_ACTION).expect("actions"),
             reactions: reaction_table(REACTIONS).expect("reactions"),
             ranged: HashMap::new(),
@@ -2052,6 +2064,7 @@ mod tests {
             action_paths: vec![String::new()],
             grid: Vec::new(),
             controller: ControllerDef::default(),
+            tags: TagDefinition::default(),
             sheathe: None,
             reactions: Vec::new(),
             ranged: HashMap::from([

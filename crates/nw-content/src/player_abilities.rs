@@ -14,7 +14,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use nw_formats::mannequin::{
-    AbilityUse, CageWorld, CastKind, ChargeTake, Condition, MoveClear, TagActivity,
+    AbilityUse, CageWorld, CastKind, ChargeTake, Condition, GroupClear, MoveClear, TagActivity,
+    TagGroup,
 };
 use serde::{Deserialize, Serialize};
 
@@ -308,6 +309,9 @@ pub struct ListAction {
     /// The ability key presses it clears as it starts or stops (`ClearActiveAbilityMoveInput`).
     #[serde(default)]
     pub move_clears: Vec<MoveClear>,
+    /// The tag groups it clears as it starts or stops (`ClearMannequinTagGroup`).
+    #[serde(default)]
+    pub group_clears: Vec<GroupClear>,
 }
 
 impl ListAction {
@@ -339,9 +343,28 @@ pub struct AbilityList {
     pub cooldowns_ms: BTreeMap<String, u64>,
     /// The `ManaCosts_Player` costs its actions test, by cost id.
     pub mana_costs: BTreeMap<String, f32>,
+    /// The groups of the player's tag definition (`playermaletags.xml`) that hold a tag its
+    /// actions set or a group they clear: a tag that goes on takes the place of the other tags
+    /// of its group, and a [`GroupClear`] takes all of them off.
+    #[serde(default)]
+    pub tag_groups: Vec<TagGroup>,
 }
 
 impl AbilityList {
+    /// The tag group (any case) named `name`.
+    pub fn tag_group(&self, name: &str) -> Option<&TagGroup> {
+        self.tag_groups
+            .iter()
+            .find(|group| group.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The tag group that holds tag `tag` (any case).
+    pub fn group_of_tag(&self, tag: &str) -> Option<&TagGroup> {
+        self.tag_groups
+            .iter()
+            .find(|group| group.tags.iter().any(|own| own.eq_ignore_ascii_case(tag)))
+    }
+
     /// An entry of the fragment `name` (any case): the first the table holds. Its name, scopes
     /// and presence are those of every entry; [`AbilityList::fragment_for`] gives the entry that
     /// plays.
@@ -485,6 +508,7 @@ mod tests {
             actions: vec![ListAction {
                 charge_take: None,
                 move_clears: Vec::new(),
+                group_clears: Vec::new(),
                 name: "Smite".to_owned(),
                 fragment: "Smite".to_owned(),
                 activation: Some(Condition::True),
@@ -531,6 +555,7 @@ mod tests {
             }],
             cooldowns_ms: BTreeMap::from([(COOLDOWN.to_owned(), COOLDOWN_MS)]),
             mana_costs: BTreeMap::from([("LifeStaff_Smite".to_owned(), 16.0)]),
+            tag_groups: Vec::new(),
         }
     }
 

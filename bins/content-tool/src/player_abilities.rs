@@ -22,7 +22,9 @@ use nw_content::player_abilities::{
 };
 use nw_content::player_attacks::stance_tags;
 use nw_formats::input_profile::input_actions;
-use nw_formats::mannequin::{ActionList, Condition, Fragment, GridList, ProcClip, TagChange};
+use nw_formats::mannequin::{
+    ActionList, Condition, Fragment, GridList, ProcClip, TagChange, TagDefinition, TagGroup,
+};
 
 use crate::melee_shapes::{WeaponBody, ends_in_loop, ms};
 use crate::player_attacks::{
@@ -547,6 +549,7 @@ fn list_of(
                 ability: action.ability.clone(),
                 charge_take: action.charge_take.clone(),
                 move_clears: action.move_clears.clone(),
+                group_clears: action.group_clears.clone(),
                 casts: action
                     .casts
                     .iter()
@@ -581,13 +584,49 @@ fn list_of(
         .iter()
         .filter_map(|id| data.mana.get(&id.to_lowercase()).cloned())
         .collect();
+    let tag_groups = groups_of(&sources.tags, &list_actions);
     AbilityList {
         weapon_classes: list.weapon_classes.clone(),
         actions: list_actions,
         fragments,
         cooldowns_ms,
         mana_costs,
+        tag_groups,
     }
+}
+
+/// The groups of the tag definition `tags` that hold a tag the tag activities of `actions` name
+/// or that their `ClearMannequinTagGroup` activities clear, in file order.
+fn groups_of(tags: &TagDefinition, actions: &[ListAction]) -> Vec<TagGroup> {
+    let named: Vec<&str> = actions
+        .iter()
+        .flat_map(|action| &action.tag_activities)
+        .flat_map(|activity| {
+            activity
+                .default
+                .iter()
+                .chain(activity.cases.iter().map(|(_, case)| case))
+        })
+        .map(|case| case.tag.as_str())
+        .collect();
+    let cleared: Vec<&str> = actions
+        .iter()
+        .flat_map(|action| &action.group_clears)
+        .map(|clear| clear.group.as_str())
+        .collect();
+    tags.groups()
+        .iter()
+        .filter(|group| {
+            cleared
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&group.name))
+                || group
+                    .tags
+                    .iter()
+                    .any(|tag| named.iter().any(|own| own.eq_ignore_ascii_case(tag)))
+        })
+        .cloned()
+        .collect()
 }
 
 /// The ability table of `sources` and the data `tables`, with what it left out.
@@ -684,6 +723,7 @@ mod tests {
             action_paths: Vec::new(),
             grid: Vec::new(),
             controller: nw_formats::mannequin::ControllerDef::default(),
+            tags: nw_formats::mannequin::TagDefinition::default(),
             sheathe: None,
             reactions: Vec::new(),
             ranged: HashMap::from([
@@ -874,6 +914,57 @@ mod tests {
 </Actions></ActionList>"#;
         let list = ActionList::parse(ACTIONS).expect("actions");
         assert_eq!(tags_set_in(&list), ["Crouch", "HeavyAim", "Prone", "Stand"]);
+    }
+
+    /// The bow's Penetrating Shot aim, cut (`playeractions_ability_bow.actionlist` and
+    /// `playermaletags.xml`, build 25810808): it sets `PenetratingAim` and clears the `Aiming`
+    /// group as it stops, and sets `AimDownSights`, in no group. The list keeps the `Aiming`
+    /// group and the `Magic` group that one of its actions names a tag of, not the `Posture`
+    /// group that none names.
+    #[test]
+    fn a_list_keeps_the_tag_groups_its_actions_set_or_clear() {
+        const ACTIONS: &str = r#"<ActionList><Actions>
+ <Action Name="Bow_Penetrating_Aim_SubState" FragmentName="Bow_Aim_UpperBody"><Activities>
+  <SetMannequinTag><Default TagName="PenetratingAim" OnEnter="Set" OnExit="NoEffect"/>
+  </SetMannequinTag>
+  <SetMannequinTag><Default TagName="AimDownSights" OnEnter="Set" OnExit="Unset"/>
+  </SetMannequinTag>
+  <ClearMannequinTagGroup><Default TagGroupName="Aiming" OnEnter="NoEffect" OnExit="Clear"/>
+  </ClearMannequinTagGroup>
+ </Activities></Action>
+ <Action Name="Other" FragmentName="Other"><Activities>
+  <SetMannequinTag><Default TagName="Fire" OnEnter="Set" OnExit="Unset"/></SetMannequinTag>
+ </Activities></Action>
+</Actions></ActionList>"#;
+        const TAGS: &str = r#"<TagDefinition version="2"><Tags>
+ <Group name="Posture"><Tag name="Stand"/><Tag name="Crouch"/></Group>
+ <Group name="Aiming"><Tag name="Aim"/><Tag name="HeavyAim"/><Tag name="PenetratingAim"/></Group>
+ <Group name="Magic"><Tag name="Heal"/><Tag name="Fire"/></Group>
+ <Tag name="AimDownSights"/>
+</Tags></TagDefinition>"#;
+        let list = ActionList::parse(ACTIONS).expect("actions");
+        let actions: Vec<ListAction> = list
+            .actions
+            .iter()
+            .map(|action| ListAction {
+                name: action.name.clone(),
+                fragment: action.fragment.clone(),
+                activation: None,
+                deactivation: None,
+                tag_activities: action.tag_activities.clone(),
+                ability: None,
+                casts: Vec::new(),
+                charge_take: None,
+                move_clears: Vec::new(),
+                group_clears: action.group_clears.clone(),
+            })
+            .collect();
+        let tags = TagDefinition::parse(TAGS).expect("tags");
+        let groups: Vec<String> = groups_of(&tags, &actions)
+            .into_iter()
+            .map(|group| group.name)
+            .collect();
+        assert_eq!(groups, ["Aiming", "Magic"]);
     }
 
     /// The bow's aim fragment, cut (`player_bow.adb`, build 25810808): a `Bow` entry, a

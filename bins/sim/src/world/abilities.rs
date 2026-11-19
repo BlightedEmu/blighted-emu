@@ -28,7 +28,8 @@ use nw_content::player_abilities::{
 use nw_content::player_attacks::{AttackHit, BasicAttack, stance_tags};
 use nw_content::status_effects::StatusEffectRules;
 use nw_formats::mannequin::{
-    CageWorld, CastKind, Condition, ManaCompare, MoveClear, TagCase, TagChange,
+    CageWorld, CastKind, Condition, GroupClear, ManaCompare, MoveClear, TagCase, TagChange,
+    TagGroup,
 };
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::paperdoll::slot;
@@ -489,6 +490,8 @@ pub(super) struct AbilityRun {
     /// staff readies, `CastSpellRaycast` once it is ready, and its loop action), and retail
     /// spends the mana and spawns the spell once per press (ability-use-wire note).
     chain_cast: Vec<String>,
+    /// A raycast cast of the current chain placed its spell ([`SPELL_PLACED_TEST`]).
+    chain_placed: bool,
     /// The running cooldowns.
     cooldowns: Vec<Cooldown>,
     /// The cooldowns started since the last send, with the key of their press.
@@ -715,8 +718,8 @@ impl CageWorld for RunWorld<'_> {
 
     fn other(&self, test: &str) -> bool {
         if test == SPELL_PLACED_TEST {
-            // The raycast of the aim found the spell's place: a cast of this chain.
-            return !self.run.chain_cast.is_empty();
+            // The raycast of the aim found the spell's place: a raycast cast of this chain.
+            return self.run.chain_placed;
         }
         PASSING_TESTS.contains(&test)
     }
@@ -997,8 +1000,7 @@ impl AbilityRun {
                     }
                     self.leave(list, &[from]);
                     if starts_chain {
-                        self.chain += 1;
-                        self.chain_cast.clear();
+                        self.begin_chain(self.chain + 1);
                         if kept.is_some() {
                             self.press = kept;
                         }
@@ -1018,6 +1020,7 @@ impl AbilityRun {
                     if starts_chain {
                         self.own_press(target, to, events);
                     }
+                    self.update_tags(lists, target, holder, &tags, now_ms);
                     self.strike(
                         (lists, target),
                         to,
@@ -1084,8 +1087,7 @@ impl AbilityRun {
                 continue;
             }
             if starts_chain {
-                self.chain = chain;
-                self.chain_cast.clear();
+                self.begin_chain(chain);
             }
             self.start(
                 (lists, &tags),
@@ -1100,6 +1102,7 @@ impl AbilityRun {
                 press.used = true;
                 self.own_press(list, index, events);
             }
+            self.update_tags(lists, list, holder, &tags, now_ms);
             self.strike(
                 (lists, list),
                 index,
@@ -1162,6 +1165,7 @@ impl AbilityRun {
                 continue;
             }
             self.mana.current -= cost;
+            self.chain_placed |= cast.kind == CastKind::Raycast;
             if let Some(owner) = self
                 .owner
                 .as_mut()
@@ -1244,6 +1248,16 @@ impl AbilityRun {
     /// `Ability_Life_Staff_HealingWave` on `UpperBody`, whose own end test is only the
     /// `Magic_AimExit` marker of a left aim; live 2026-11-10: that aim ran on after the cast, and
     /// no press cast again). A fragment without known scopes takes none.
+    ///
+    /// An action of the ability's own steps (it starts no chain, and performs the ability or
+    /// starts its cooldown) that takes the scope of the action that plays the press's ability
+    /// plays that ability on: the ability does not end there ([`AbilityOwner`]). Observed
+    /// (`playeractions_ability_bow`, build 25810808): `Bow_RainOfArrows_Shoot` starts by its
+    /// activation on the aim of `Bow_RainOfArrows_AimSubState`, performs
+    /// `Ability_Bow_RainofArrows` and starts its cooldown. Inferred: the client's ability plays
+    /// on through the shot, since the shot is a step of the ability. Before, live 2026-11-19
+    /// 20:35:11.246: the shot's start ended the ability, and the own state closed the second
+    /// slot (state 45, sequence 0, marker 0) as the shot began.
     #[allow(
         clippy::too_many_arguments,
         reason = "the arguments of `enter` and the lists"
@@ -1277,6 +1291,24 @@ impl AbilityRun {
                 (*other, actions)
             })
             .collect();
+        let steps_of = |owner: &AbilityOwner| {
+            list.actions[index].ability.as_ref().is_some_and(|ability| {
+                ability.move_name.is_none()
+                    && ability
+                        .performs
+                        .iter()
+                        .chain(&ability.starts_cooldowns)
+                        .any(|id| lowercase_crc32(id) == owner.ability)
+            })
+        };
+        if let Some(owner) = self.owner.as_mut().filter(|owner| steps_of(owner))
+            && taken.iter().any(|(other, actions)| {
+                list_key(other) == owner.list && actions.contains(&owner.action)
+            })
+        {
+            owner.list = list_key(list);
+            owner.action = index;
+        }
         for (other, actions) in taken {
             self.leave(other, &actions);
         }
@@ -1306,6 +1338,7 @@ impl AbilityRun {
             buffered: Vec::new(),
         });
         self.clear_presses(&list.actions[index], |clear| clear.on_enter);
+        self.clear_groups(list, &list.actions[index], |clear| clear.on_enter);
         if let Some(ability) = &list.actions[index].ability {
             for id in &ability.starts_cooldowns {
                 self.start_cooldown(list, id, stats, (now_ms, server_ms));
@@ -1317,7 +1350,8 @@ impl AbilityRun {
     }
 
     /// Actions `actions` of list `list` stop: they clear the presses they clear as they stop,
-    /// and their tag activities that are on end.
+    /// their tag activities that are on end, then they clear the tag groups they clear as they
+    /// stop (the activities' file order in the bow's aims).
     fn leave(&mut self, list: &AbilityList, actions: &[usize]) {
         let key = list_key(list);
         let stopping: Vec<usize> = self
@@ -1325,10 +1359,41 @@ impl AbilityRun {
             .map(|running| running.action)
             .filter(|action| actions.contains(action))
             .collect();
-        for action in stopping {
-            self.clear_presses(&list.actions[action], |clear| clear.on_exit);
+        for action in &stopping {
+            self.clear_presses(&list.actions[*action], |clear| clear.on_exit);
         }
-        self.leave_where(|running| running.list == key && actions.contains(&running.action));
+        self.leave_where(Some(list), |running| {
+            running.list == key && actions.contains(&running.action)
+        });
+        for action in stopping {
+            self.clear_groups(list, &list.actions[action], |clear| clear.on_exit);
+        }
+    }
+
+    /// The tags of each group of list `list` that `action` clears at the step `at` picks (its
+    /// start or its stop, [`GroupClear`]) go off.
+    fn clear_groups(
+        &mut self,
+        list: &AbilityList,
+        action: &ListAction,
+        at: impl Fn(&GroupClear) -> bool,
+    ) {
+        for group in action
+            .group_clears
+            .iter()
+            .filter(|clear| at(clear))
+            .filter_map(|clear| list.tag_group(&clear.group))
+        {
+            self.tags_on
+                .retain(|own| !group.tags.iter().any(|tag| tag.eq_ignore_ascii_case(own)));
+        }
+    }
+
+    /// The current chain becomes `chain`: no spell of it is cast or placed yet.
+    fn begin_chain(&mut self, chain: u64) {
+        self.chain = chain;
+        self.chain_cast.clear();
+        self.chain_placed = false;
     }
 
     /// The newest press stops naming its ability to the tests when `action` clears that
@@ -1351,12 +1416,13 @@ impl AbilityRun {
     /// staff let the aim end.
     fn leave_lists_not_in(&mut self, lists: &[&AbilityList]) {
         let held: Vec<usize> = lists.iter().map(|list| list_key(list)).collect();
-        self.leave_where(|running| !held.contains(&running.list));
+        self.leave_where(None, |running| !held.contains(&running.list));
     }
 
     /// The running actions that `stops` picks stop: the press owner among them ends its ability,
-    /// and their tag activities that are on end.
-    fn leave_where(&mut self, stops: impl Fn(&Running) -> bool) {
+    /// and their tag activities that are on end (a tag set as one ends takes the place of the
+    /// tags of its group in `list`, when given).
+    fn leave_where(&mut self, list: Option<&AbilityList>, stops: impl Fn(&Running) -> bool) {
         let (left, kept): (Vec<Running>, Vec<Running>) = std::mem::take(&mut self.running)
             .into_iter()
             .partition(|running| stops(running));
@@ -1374,7 +1440,8 @@ impl AbilityRun {
             .flatten()
             .flatten()
         {
-            self.change_tag(&case.tag, case.on_exit);
+            let group = list.and_then(|list| list.group_of_tag(&case.tag));
+            self.change_tag(&case.tag, case.on_exit, group);
         }
     }
 
@@ -1415,16 +1482,33 @@ impl AbilityRun {
                 &mut self.running[position].tag_activities[index],
                 now.clone(),
             );
-            match (before, now) {
-                (None, Some(Some(case))) => self.change_tag(&case.tag, case.on_enter),
-                (Some(Some(case)), None) => self.change_tag(&case.tag, case.on_exit),
-                _ => {}
+            let change = match (before, now) {
+                (None, Some(Some(case))) => Some((case.on_enter, case.tag)),
+                (Some(Some(case)), None) => Some((case.on_exit, case.tag)),
+                _ => None,
+            };
+            if let Some((change, tag)) = change {
+                self.change_tag(&tag, change, list.group_of_tag(&tag));
             }
         }
     }
 
-    /// Sets or unsets tag `tag` as `change` says.
-    fn change_tag(&mut self, tag: &str, change: TagChange) {
+    /// Sets or unsets tag `tag` of group `group` (`None`: of no group) as `change` says: a tag
+    /// set takes the place of the other tags of its group, as one value of the tag state holds
+    /// the group (`playermaletags.xml`, build 25810808: `PenetratingAim`, `HeavyAim`,
+    /// `SmokeAim`, `Aim`, `HipAim` and `ChargedAim` are the `Aiming` group).
+    fn change_tag(&mut self, tag: &str, change: TagChange, group: Option<&TagGroup>) {
+        if change == TagChange::Set
+            && let Some(group) = group
+        {
+            self.tags_on.retain(|own| {
+                own.eq_ignore_ascii_case(tag)
+                    || !group
+                        .tags
+                        .iter()
+                        .any(|other| other.eq_ignore_ascii_case(own))
+            });
+        }
         let on = self
             .tags_on
             .iter()
@@ -2667,6 +2751,7 @@ mod tests {
         let start = ListAction {
             charge_take: None,
             move_clears: Vec::new(),
+            group_clears: Vec::new(),
             name: SMITE.to_owned(),
             fragment: SMITE.to_owned(),
             activation: Some(Condition::All(vec![
@@ -2705,6 +2790,7 @@ mod tests {
         let follow_up = ListAction {
             charge_take: None,
             move_clears: Vec::new(),
+            group_clears: Vec::new(),
             name: FOLLOW_UP.to_owned(),
             fragment: String::new(),
             activation: Some(Condition::All(vec![
@@ -2741,6 +2827,7 @@ mod tests {
             }],
             cooldowns_ms: BTreeMap::from([(SMITE.to_owned(), COOLDOWN_MS)]),
             mana_costs: BTreeMap::from([("LifeStaff_Smite".to_owned(), COST)]),
+            tag_groups: Vec::new(),
         }
     }
 
@@ -2774,6 +2861,40 @@ mod tests {
     }
 
     /// A pressed ability's action ends: its animation ends with it, once.
+    /// `playermaletags.xml` (build 25810808): one value of the tag state holds the `Aiming`
+    /// group, so a tag of it that goes on takes the other's place; the bow's aims clear the
+    /// group as they stop (`ClearMannequinTagGroup`), and a tag of no group stays.
+    #[test]
+    fn a_tag_takes_the_place_of_its_group_and_a_group_clear_takes_the_group_off() {
+        const AIMING: &str = "Aiming";
+        const AIM: &str = "Aim";
+        const PENETRATING_AIM: &str = "PenetratingAim";
+        const DOWN_SIGHTS: &str = "AimDownSights";
+        let group = TagGroup {
+            name: AIMING.to_owned(),
+            tags: vec![AIM.to_owned(), PENETRATING_AIM.to_owned()],
+        };
+        let mut run = AbilityRun::default();
+        run.change_tag(PENETRATING_AIM, TagChange::Set, Some(&group));
+        run.change_tag(DOWN_SIGHTS, TagChange::Set, None);
+        run.change_tag(AIM, TagChange::Set, Some(&group));
+        assert_eq!(run.tags_on, [DOWN_SIGHTS, AIM]);
+        let mut aiming = list();
+        aiming.tag_groups = vec![group];
+        let aim = ListAction {
+            group_clears: vec![GroupClear {
+                group: AIMING.to_owned(),
+                on_enter: false,
+                on_exit: true,
+            }],
+            ..aiming.actions[0].clone()
+        };
+        run.clear_groups(&aiming, &aim, |clear| clear.on_enter);
+        assert_eq!(run.tags_on, [DOWN_SIGHTS, AIM], "no clear as it starts");
+        run.clear_groups(&aiming, &aim, |clear| clear.on_exit);
+        assert_eq!(run.tags_on, [DOWN_SIGHTS]);
+    }
+
     #[test]
     fn an_ability_ends_when_its_action_stops() {
         let list = list();
@@ -2821,6 +2942,7 @@ mod tests {
         list.actions.push(ListAction {
             charge_take: None,
             move_clears: Vec::new(),
+            group_clears: Vec::new(),
             name: STOP.to_owned(),
             fragment: STOP.to_owned(),
             activation: None,
@@ -2910,6 +3032,7 @@ mod tests {
             list.actions.push(ListAction {
                 charge_take: None,
                 move_clears: Vec::new(),
+                group_clears: Vec::new(),
                 name: name.to_owned(),
                 fragment: name.to_owned(),
                 activation: None,
@@ -3274,6 +3397,7 @@ mod tests {
             actions: vec![ListAction {
                 charge_take: None,
                 move_clears: Vec::new(),
+                group_clears: Vec::new(),
                 name: LOOP.to_owned(),
                 fragment: LOOP.to_owned(),
                 activation: None,
@@ -3297,6 +3421,7 @@ mod tests {
             }],
             cooldowns_ms: BTreeMap::from([(LOOP.to_owned(), LOOP_COOLDOWN_MS)]),
             mana_costs: BTreeMap::new(),
+            tag_groups: Vec::new(),
         };
         let lists = [&first, &second];
         let mut run = AbilityRun::default();
@@ -3340,6 +3465,7 @@ mod tests {
         chained.actions.push(ListAction {
             charge_take: None,
             move_clears: Vec::new(),
+            group_clears: Vec::new(),
             name: CHAINED.to_owned(),
             fragment: CHAINED.to_owned(),
             activation: None,
@@ -4942,5 +5068,266 @@ mod retail_tests {
             SACRED_GROUND_COOLDOWN_MS * US_PER_MS
         );
         assert!(run.mana.current < MANA_MAX, "the cast spent mana");
+    }
+
+    /// The player's input messages of the live bow test (VM, 2026-11-19), in sections.
+    const LIVE_BOW_KEYS: &str = include_str!("testdata/bow-live-keys-2026-11-19.txt");
+    /// The ids of the abilities on the keys Q, R and F in the live test (its `ability keys`
+    /// lines: `mapped=[Some(3511089424), Some(1088631440), Some(813723660)]`).
+    const LIVE_MAPPED: [&str; 3] = [PENETRATING_SHOT, SPLINTER_SHOT, RAIN_OF_ARROWS];
+    const PENETRATING_SHOT: &str = "Ability_Bow_PenetratingShot";
+    const SPLINTER_SHOT: &str = "Ability_Bow_SplinterShot";
+    const RAIN_OF_ARROWS: &str = "Ability_Bow_RainofArrows";
+    const RAIN_SPELL: &str = "Spell_Bow_Spell_RainOfArrows";
+    const RAIN_SHOT_FRAGMENT: &str = "Bow_Shoot_RainOfArrows";
+    /// The passive the live player held: its action ran all the time and cast its spell in each
+    /// chain (live log: `ability spell cast ... Passive_Bow_Skirmish_HasteWhenFoesNear` 13 ms
+    /// after each press).
+    const HASTE_PASSIVE: &str = "Passive_Bow_Skirmish_HasteWhenFoesNear";
+    /// The input words of a record: the input numbers 0 to 595 of build 25810808.
+    const INPUT_VALUES: usize = 10;
+    /// Ticks run after a section's last message.
+    const TAIL_MS: u64 = 3_000;
+
+    /// What the live messages of a section did, each with the time (ms after the section's first
+    /// message) of the tick that gave it.
+    struct LiveRun {
+        events: Vec<(u64, AbilityEvent)>,
+        /// The started cooldowns: when, and the ability's CRC-32.
+        cooldowns: Vec<(u64, u32)>,
+        /// The length of the rain's shot fragment ([`RAIN_SHOT_FRAGMENT`]), ms.
+        rain_shot_ms: u64,
+    }
+
+    impl LiveRun {
+        fn strikes(&self) -> Vec<(u64, String)> {
+            self.events
+                .iter()
+                .filter_map(|(at, event)| match event {
+                    AbilityEvent::Strike(attack) => Some((*at, attack.damage_row.clone())),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn casts_of(&self, spell: &str) -> Vec<(u64, CastKind)> {
+            self.events
+                .iter()
+                .filter_map(|(at, event)| match event {
+                    AbilityEvent::Cast {
+                        spell: own, kind, ..
+                    } if own.id == spell => Some((*at, *kind)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn cooldowns_of(&self, ability: &str) -> Vec<u64> {
+            let crc = lowercase_crc32(ability);
+            self.cooldowns
+                .iter()
+                .filter(|(_, own)| *own == crc)
+                .map(|(at, _)| *at)
+                .collect()
+        }
+
+        fn ends_of(&self, ability: &str) -> Vec<u64> {
+            let crc = lowercase_crc32(ability);
+            self.events
+                .iter()
+                .filter_map(|(at, event)| {
+                    matches!(event, AbilityEvent::Ended { ability } if *ability == crc)
+                        .then_some(*at)
+                })
+                .collect()
+        }
+    }
+
+    /// Runs the messages of section `name` of [`LIVE_BOW_KEYS`] through the bow's lists for the
+    /// live player (a bow, the [`LIVE_MAPPED`] abilities and the [`HASTE_PASSIVE`]): each
+    /// message is read before the first tick at or after its time.
+    fn live_run(name: &str) -> LiveRun {
+        let table = table();
+        let lists = table.lists_for(&["Bow"]);
+        let number = |input: &str| {
+            let at = table.inputs.iter().position(|own| own == input);
+            u32::try_from(at.expect(input)).expect("input number")
+        };
+        let header = format!("@ {name} ");
+        let messages: Vec<(u64, Vec<InputRecord>)> = LIVE_BOW_KEYS
+            .lines()
+            .skip_while(|line| !line.starts_with(&header))
+            .skip(1)
+            .take_while(|line| !line.starts_with('@'))
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| {
+                let mut fields = line.split(' ');
+                let at_ms = fields.next().and_then(|ms| ms.parse().ok()).expect("time");
+                let records = fields
+                    .map(|record| {
+                        let (counter, inputs) = record.split_once(':').expect("counter:inputs");
+                        let mut values = vec![0_u64; INPUT_VALUES];
+                        for input in inputs.split(',').filter(|input| !input.is_empty()) {
+                            let bit = number(input);
+                            values[(bit / u64::BITS) as usize] |= 1 << (bit % u64::BITS);
+                        }
+                        InputRecord {
+                            u16_after_mask: counter.parse().expect("counter"),
+                            slots: nw_messages::InputSlots {
+                                values,
+                                ..nw_messages::InputSlots::default()
+                            },
+                            ..InputRecord::default()
+                        }
+                    })
+                    .collect();
+                (at_ms, records)
+            })
+            .collect();
+        assert!(!messages.is_empty(), "section {name}");
+        let crcs = LIVE_MAPPED.map(lowercase_crc32);
+        let mapped = |key: usize| crcs.get(key).copied();
+        let inputs_of = |record: &InputRecord| {
+            (0_u32..)
+                .zip(&table.inputs)
+                .filter(|(at, _)| record.input_on(*at))
+                .map(|(_, input)| input.clone())
+                .collect()
+        };
+        let mut holder = Armed {
+            tags: BOW_TAGS,
+            active: LIVE_MAPPED
+                .iter()
+                .chain(&[HASTE_PASSIVE])
+                .map(|ability| (*ability).to_owned())
+                .collect(),
+            effects: Vec::new(),
+        };
+        let mut run = AbilityRun::default();
+        let mut done = LiveRun {
+            events: Vec::new(),
+            cooldowns: Vec::new(),
+            rain_shot_ms: lists
+                .iter()
+                .find_map(|list| list.fragment(RAIN_SHOT_FRAGMENT))
+                .expect("the rain shot")
+                .length_ms,
+        };
+        let last_ms = messages.last().map_or(0, |(at_ms, _)| *at_ms) + TAIL_MS;
+        let mut next = messages.iter().peekable();
+        for now in (0..=last_ms).step_by(usize::try_from(TICK_MS).expect("tick")) {
+            while let Some((_, records)) = next.next_if(|(at_ms, _)| *at_ms <= now) {
+                run.press(records, mapped, inputs_of);
+            }
+            for event in run.tick(&lists, &holder, now, SERVER_MS) {
+                if let AbilityEvent::Effects(effects) = &event {
+                    holder.effects.extend(effects.iter().cloned());
+                }
+                done.events.push((now, event));
+            }
+            done.cooldowns.extend(
+                run.take_cooldown_changes()
+                    .into_iter()
+                    .map(|(_, cooldown)| (now, cooldown.ability)),
+            );
+        }
+        done
+    }
+
+    /// Live 2026-11-19 20:35:01 to 20:35:15, the player's own messages (ms after 20:35:01.004):
+    /// Q at 1,100 readied Penetrating Shot, R at 3,270 shot Splinter Shot from its aim; Q at
+    /// 6,660 and the click at 7,200 must shoot Penetrating Shot with its 18 s cooldown, and F at
+    /// 9,810 must aim Rain of Arrows until the click at 10,640 places it, its shot playing the
+    /// ability to its end. Before: Splinter Shot left the aim's `PenetratingAim` tag on (the aim's
+    /// `ClearMannequinTagGroup Aiming` and the tag group were not in the table), so every later Q
+    /// was refused (`its activation does not hold`, `tags_on=["PenetratingAim"]`) and the click
+    /// shot a plain `BowAttack1`; the passive's spell counted as Rain of Arrows' placed spell, so
+    /// its shot fired 400 ms after F with no click (cooldown 20:35:11.246, area 11.516), and the
+    /// shot's start ended the ability.
+    #[test]
+    fn the_live_bow_keys_shoot_penetrating_shot_after_splinter_shot_and_place_the_rain() {
+        const SECOND_Q_MS: u64 = 6_660;
+        const Q_CLICK_MS: u64 = 7_200;
+        const F_CLICK_MS: u64 = 10_640;
+        /// A click is read in the tick after its message, and a transition takes one more.
+        const CLICK_TICKS_MS: u64 = 3 * TICK_MS;
+        let live = live_run("q-r-q-f");
+        let strikes = live.strikes();
+        let splinter: Vec<&(u64, String)> = strikes
+            .iter()
+            .filter(|(_, row)| row == "Bow_ExplosionShot_Projectile")
+            .collect();
+        assert_eq!(splinter.len(), 1, "{strikes:?}");
+        assert_eq!(live.cooldowns_of(SPLINTER_SHOT).len(), 1);
+        let penetrating: Vec<u64> = strikes
+            .iter()
+            .filter(|(_, row)| row == "Bow_Penetrating_Attack")
+            .map(|(at, _)| *at)
+            .collect();
+        assert_eq!(penetrating.len(), 1, "{strikes:?}");
+        assert!(
+            (Q_CLICK_MS..=Q_CLICK_MS + CLICK_TICKS_MS).contains(&penetrating[0]),
+            "shot at the click: {penetrating:?}"
+        );
+        let cooldowns = live.cooldowns_of(PENETRATING_SHOT);
+        assert_eq!(
+            cooldowns,
+            [penetrating[0]],
+            "its cooldown starts with the shot"
+        );
+        assert!(cooldowns[0] > SECOND_Q_MS);
+        let rain = live.casts_of(RAIN_SPELL);
+        assert_eq!(rain.len(), 1, "one rain: {rain:?}");
+        let (placed_ms, kind) = rain[0];
+        assert_eq!(
+            kind,
+            CastKind::Raycast,
+            "placed where the aim meets the ground"
+        );
+        assert!(
+            (F_CLICK_MS..=F_CLICK_MS + CLICK_TICKS_MS).contains(&placed_ms),
+            "placed at the click: {placed_ms}"
+        );
+        let rain_cooldowns = live.cooldowns_of(RAIN_OF_ARROWS);
+        assert_eq!(rain_cooldowns.len(), 1);
+        assert!(
+            rain_cooldowns[0] >= placed_ms,
+            "the shot starts after the place"
+        );
+        let ends = live.ends_of(RAIN_OF_ARROWS);
+        assert_eq!(ends.len(), 1, "{ends:?}");
+        assert!(
+            ends[0] + TICK_MS >= rain_cooldowns[0] + live.rain_shot_ms,
+            "the ability plays to the shot's end: {ends:?}"
+        );
+    }
+
+    /// Live 2026-11-19 20:36:50 to 20:37:15 (ms after 20:36:50.044): F at 959 and again at
+    /// 1,229, then F at 22,690 and again at 23,190; each pair places one Rain of Arrows by a
+    /// raycast within 15 frames of its second press, as the aim starts or in it
+    /// (`Bow_RainOfArrows_AimSubState`'s `CastSpellRaycast`: `HeavyAim` and the key again within
+    /// 15 frames, or a click; live: 20:36:51.417, 143 ms after the second press). Before, the
+    /// second pair's shot fired at 23,137 from the passive's spell, before the second press
+    /// (live cooldown 20:37:13.181, a plain cast).
+    #[test]
+    fn each_live_rain_of_arrows_press_pair_places_one_rain_at_its_second_press() {
+        const SECOND_PRESSES_MS: [u64; 2] = [1_229, 23_190];
+        /// The aim's raycast test counts a press for 15 client frames (`BackTicks="15"`); the aim
+        /// starts 400 ms after the first press, inside that.
+        const PRESS_COUNTS_MS: u64 = 15 * CLIENT_FRAME_MS;
+        let live = live_run("f-twice");
+        let rain = live.casts_of(RAIN_SPELL);
+        assert_eq!(rain.len(), SECOND_PRESSES_MS.len(), "{rain:?}");
+        for ((placed_ms, kind), press_ms) in rain.into_iter().zip(SECOND_PRESSES_MS) {
+            assert_eq!(kind, CastKind::Raycast);
+            assert!(
+                (press_ms..=press_ms + PRESS_COUNTS_MS).contains(&placed_ms),
+                "placed at {placed_ms}, the press at {press_ms}"
+            );
+        }
+        assert_eq!(
+            live.cooldowns_of(RAIN_OF_ARROWS).len(),
+            SECOND_PRESSES_MS.len()
+        );
     }
 }

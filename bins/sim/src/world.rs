@@ -2293,7 +2293,10 @@ impl SimWorld {
             // and the camera's body, to find where the two part (live 2026-11-17: other
             // players saw each other at the wrong place and with the wrong animations), with the
             // camera and the boom the check holds (live 2026-11-18: swings missed a boar the
-            // player stood behind; the camera body's error along the view needs both).
+            // player stood behind; the camera body's error along the view needs both), and the
+            // record's input words, so a test can replay a live run's inputs as they came (live
+            // 2026-11-19: the bow abilities' replay had to rebuild most input bits from the
+            // other fields).
             tracing::debug!(
                 player = player.number,
                 counter,
@@ -2312,6 +2315,7 @@ impl SimWorld {
                 view_yaw = view.map(|view| view.yaw),
                 view_pitch = view.map(|view| view.pitch),
                 boom_m = player.tracked.camera_boom_m(),
+                inputs = ?record.slots.values,
                 "input record"
             );
             if tracked.consistent && tracked.on_floor {
