@@ -689,6 +689,10 @@
             {
               "check": "Not fixed: a roll's stop steps back about 0.36 m in one record, with keys and now with a pad: the camera's trail uses the server's roll speed, which goes on for two records after the client's camera stops. Three trail models cut the back steps but made other moves' error larger in the retail replays.",
               "proof": "none"
+            },
+            {
+              "check": "An ability's aim view holds the camera as the right-click aim does (tests only, 2026-11-19): Penetrating Shot's aim and Rain of Arrows' targeting changed the camera boom with no key, and the server body slid up to 5.9 m from a still client (proven with a client trace).",
+              "proof": "tests"
             }
           ]
         },
@@ -966,8 +970,16 @@
               "proof": "code"
             },
             {
-              "check": "Open: the bow's Penetrating, Poison and Rain of Arrows shots, Meteor Shower and Ice Storm (their shot actions are reached by no parsed fragment transition; fragment options by tag: Unknown) and the Ice Pylon (needs its placed pylon).",
+              "check": "Open: Meteor Shower and Ice Storm (their shot actions are reached by no parsed fragment transition) and the Ice Pylon (needs its placed pylon). The bow's Penetrating Shot hits only the first mob (retail pierces; the data field that turns piercing on is Unknown), and Splinter Shot's splinters are not built (source Unknown).",
               "proof": "none"
+            },
+            {
+              "check": "The bow's ability shots start and fire (tests only, 2026-11-19): Penetrating Shot, Splinter Shot, Rain of Arrows and Poison Shot. Each bow fragment has one entry per tag state (`Bow+PenetratingAim`, `Bow+HeavyAim`, `Bow+SmokeAim`), and the server kept only the plain `Bow` entry, so every ready step went to the plain aim; in a live test Penetrating Shot and Rain of Arrows started nothing and Splinter Shot fired no shot.",
+              "proof": "tests"
+            },
+            {
+              "check": "An arrow flies to the point under the crosshair (tests only, 2026-11-19): it flew along the camera's angles from the body, 1.6 to 1.8 m under the camera, and passed under a boar 30 m away. In 1,195 retail ledgers arrows that hit a mob flew 0.42 degrees (median) from the line to the crosshair point.",
+              "proof": "tests"
             },
             {
               "check": "Part of the retail cooldown cut: Unknown.",
@@ -3689,6 +3701,7 @@
     }
   ],
   "nextSteps": [
+    "**Player body: key physics first (2026-11-19 study).** The server guesses each body from the client camera, and the camera boom changes with no key the server sees. A test with camera corrections across the view only made the live error larger (90th percentile 2.9 to 17 m), so the key physics must improve first, measured cause by cause with the fresh-start replay: attack and ability motion and the move lock in attacks, the dodge distance from the gear's equip load, slope speed, walls our collision has and the game does not, and ledge climbs. Then the camera's correction along the view can go, and the own states can carry the input counter as retail's do.\n\nLive check of this round: the bow abilities and the crosshair aim on a boar, with the client trace on.",
     "**Other players: live check of the ninth round (2026-11-19, tests only), then the unreliable bundles.** First play as now: dodge rolls (keyboard and controller), jumps and falls (no floating), crouch and prone, bow and gun shots aimed and from the hip, the bow's full draw, blunderbuss re-fire and reload, blocks, a spear chain on a boar (the swings must hit from about 2 m, and the boar must reel shorter for light hits than for heavy ones). Then turn the reliable bundles off on the VM (NW_RELIABLE_BUNDLES in the stack script) and check with the real client that the other player stays visible and moves without the 230 ms holds; the client trace (`blighted-emu-tools`, delay trace) measures the viewer's delay. The two-bot `pair` test passes with and without reliable bundles on the PC.\n\nStill open: the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
@@ -3774,6 +3787,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Bow (2026-11-19, tests only): Penetrating Shot, Splinter Shot, Rain of Arrows and Poison Shot fire; arrows aim at the crosshair point; an ability's aim no longer slides the body.",
     "Admin teleport (2026-11-19, tests only): the GM page and the Live page's GM tools list every settlement, outpost, fort, spirit shrine, expedition, raid and trial entrance of the world by region, with names from the game data; a click sends the picked player there. Each other player has Bring here and Go to, and Bring everyone here moves every other player (not bots) to the picked one.",
     "Other players (2026-11-19, tests only): a controller player's body no longer falls behind its client while it moves, so its camera boom holds and a still block stands with the client (0.98 m off before in the replay).",
     "Other players (2026-11-19, tests only): a controller player's dodge no longer counts as a camera zoom key, so the server keeps that player's body with the client in and after rolls; the VM sends other players' states unreliable as retail.",
@@ -4018,5 +4032,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-19",
-  "lastCommit": "7788ff67"
+  "lastCommit": "b127b0bd"
 }
