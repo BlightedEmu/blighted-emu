@@ -29,8 +29,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use nw_content::Tables;
 use nw_content::player_attacks::{
-    AttackHit, AttackMotion, BasicAttack, ChargeStep, ComboLink, Flight, GritWindow, HitReaction,
-    Homing, ItemUse, MeleeShape, ReactionEntry, Stance, StanceVariant, stance_tags,
+    AttackHit, AttackMotion, BasicAttack, ChargeStep, ComboLink, Flight, GritWindow, HitCase,
+    HitReaction, Homing, ItemUse, MeleeShape, ReactionEntry, Stance, StanceVariant, stance_tags,
 };
 use nw_content::sheathe::SheatheAction;
 use nw_formats::azcs::{decode_azcs, is_azcs};
@@ -714,6 +714,7 @@ pub(crate) fn fragment_attack(
         block_disabled_ms: block_disabled_ms.clone(),
         motion: motion.clone(),
         grit: grit.clone(),
+        hit_cases: Vec::new(),
     };
     // A damage clip whose condition reads the character's state at run time stays, with the
     // condition (Observed: `Ability_Flail_Slam`'s `Slam_Upgrade_Standard_Damage` tests
@@ -848,13 +849,46 @@ pub(crate) fn fragment_attack(
                 })
             })
         });
-    if let Some((start_s, spell)) = cast {
+    let spell_hit = |start_s: f64, spell: &str| -> Result<(String, AttackHit), String> {
         let (damage_row, profile, name, prefab) = rows
             .spells
             .get(spell)
             .ok_or_else(|| format!("{fragment_name}: no projectile spell {spell}"))?;
         let hit = ranged_hit(ms(start_s), ranged_attack(profile, name)?, Some(prefab))?;
-        return Ok(attack(damage_row, hit));
+        Ok((damage_row.clone(), hit))
+    };
+    if let Some((start_s, spell)) = cast {
+        let (damage_row, hit) = spell_hit(start_s, spell)?;
+        return Ok(attack(&damage_row, hit));
+    }
+    // Cast clips whose conditions hold only at run time: the attack keeps each as a case
+    // ([`BasicAttack::hit_cases`]).
+    let cases = fragments
+        .iter()
+        .map(|(fragment, _)| {
+            fragment
+                .clips_of(CAST_CLIP)
+                .filter_map(|clip| match sources.clip_play(clip, tags) {
+                    ClipPlay::When(condition) => Some((clip, condition)),
+                    ClipPlay::Always | ClipPlay::Never => None,
+                })
+                .map(|(clip, condition)| {
+                    let (damage_row, hit) =
+                        spell_hit(clip.start_s, clip.param(SPELL_NAME).unwrap_or_default())?;
+                    Ok(HitCase {
+                        condition,
+                        damage_row,
+                        hit,
+                    })
+                })
+                .collect::<Result<Vec<HitCase>, String>>()
+        })
+        .find(|cases| cases.as_ref().map_or(true, |cases| !cases.is_empty()))
+        .transpose()?;
+    if let Some(cases) = cases {
+        let mut cased = attack(&cases[0].damage_row, cases[0].hit.clone());
+        cased.hit_cases = cases;
+        return Ok(cased);
     }
     if fragments.is_empty() {
         return Err(format!("{fragment_name}: no entry for the stance"));

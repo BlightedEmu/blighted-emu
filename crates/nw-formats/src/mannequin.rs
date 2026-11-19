@@ -135,6 +135,10 @@ const COMPARISON_VALUE_ATTRIBUTE: &str = "ComparisonValue";
 const CONSUME_CHARGE_ELEMENT: &str = "ConsumeCharge";
 const CHARGE_TO_CONSUME_ATTRIBUTE: &str = "ChargeToConsume";
 const TAKE_VALUE: &str = "Take";
+/// `<ClearActiveAbilityMoveInput><Default AbilityName OnEnter OnExit>`: the action clears an
+/// ability key press ([`MoveClear`]).
+const CLEAR_MOVE_ELEMENT: &str = "ClearActiveAbilityMoveInput";
+const CLEAR_VALUE: &str = "Clear";
 const COST_ID_ATTRIBUTE: &str = "CostID";
 const COOLDOWN_TEST_ELEMENT: &str = "IfCooldownTimer";
 const ABILITY_ID_ATTRIBUTE: &str = "AbilityID";
@@ -1830,6 +1834,8 @@ pub struct Action {
     pub stamina: StaminaActivities,
     /// The heart rune charge it takes when it starts.
     pub charge_take: Option<ChargeTake>,
+    /// Its `ClearActiveAbilityMoveInput` activities, in file order, in any branch.
+    pub move_clears: Vec<MoveClear>,
     /// The `<Conditional>` cases of its `ChangeActionFragment` activities that play another
     /// fragment in its place (`UseDefaultFragment="false"` with a `FragmentName`), in file
     /// order: the first whose condition holds plays (`baseai_stagger.actionlist`:
@@ -1856,6 +1862,23 @@ pub struct ChargeTake {
     pub amount: u32,
     /// The condition of its `IfThenElse` branch.
     pub condition: Condition,
+}
+
+/// A `ClearActiveAbilityMoveInput` activity: the newest key press of the mapped ability
+/// `ability` stops counting for the `IfActiveAbilityMoveName` tests as the action starts
+/// (`OnEnter="Clear"`) or as it stops (`OnExit="Clear"`). Observed
+/// (`playeractions_ability_bow.actionlist`, build 25810808): `Bow_Penetrating_Ready` clears
+/// `Ability_Bow_PenetratingShot` as it starts and `Bow_Penetrating_Aim_SubState` as it stops, so
+/// the press that readied the shot does not fire it through the aim's `Shoot_Bow_PenetratingShot`
+/// test (`IfActiveAbilityMoveName BackTicks="15"`, or a click).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MoveClear {
+    /// `AbilityName`.
+    pub ability: String,
+    /// `OnEnter="Clear"`.
+    pub on_enter: bool,
+    /// `OnExit="Clear"`.
+    pub on_exit: bool,
 }
 
 /// How a cast activity aims its spell.
@@ -2355,6 +2378,31 @@ fn charge_take(action: &Node) -> Option<ChargeTake> {
     found
 }
 
+/// The `ClearActiveAbilityMoveInput` activities of `action`, in file order, in any branch.
+fn move_clears(action: &Node) -> Vec<MoveClear> {
+    let mut found = Vec::new();
+    walk_activities(action, &mut |activity, _| {
+        if activity.name != CLEAR_MOVE_ELEMENT {
+            return false;
+        }
+        found.extend(
+            activity
+                .children
+                .iter()
+                .filter(|entry| entry.name == DEFAULT_ELEMENT)
+                .filter_map(|entry| {
+                    Some(MoveClear {
+                        ability: entry.attribute(ABILITY_NAME_ATTRIBUTE)?.to_owned(),
+                        on_enter: entry.attribute(ON_ENTER_ATTRIBUTE) == Some(CLEAR_VALUE),
+                        on_exit: entry.attribute(ON_EXIT_ATTRIBUTE) == Some(CLEAR_VALUE),
+                    })
+                }),
+        );
+        true
+    });
+    found
+}
+
 /// The stamina activities of `action` (the first of each kind).
 fn stamina_activities(action: &Node) -> StaminaActivities {
     let mut found = StaminaActivities::default();
@@ -2549,6 +2597,7 @@ impl ActionList {
                             condition: take.condition.resolved(&conditions, 0),
                             ..take
                         }),
+                        move_clears: move_clears(action),
                         stamina: {
                             let found = stamina_activities(action);
                             StaminaActivities {
@@ -3333,6 +3382,38 @@ mod tests {
             "the rest: the weapon's tag"
         );
         assert!(!rest.holds(&["1H_Melee"], &[]));
+    }
+
+    #[test]
+    fn an_action_clears_an_ability_press_as_it_starts_or_stops() {
+        // `playeractions_ability_bow.actionlist`, build 25810808, trimmed.
+        let text = r#"<ActionList><Actions>
+ <Action Name="Bow_Penetrating_Ready" FragmentName="Bow_ReadyWeapon_UpperBody"><Activities>
+  <ClearActiveAbilityMoveInput>
+   <Default AbilityName="Ability_Bow_PenetratingShot" OnEnter="Clear" OnExit="NoEffect"/>
+  </ClearActiveAbilityMoveInput>
+ </Activities></Action>
+ <Action Name="Bow_Penetrating_Aim_SubState" FragmentName="Bow_Aim_UpperBody"><Activities>
+  <IfThenElse><IfCondition><IfMannequinTag TagName="Aim"/></IfCondition><ThenActivity>
+   <ClearActiveAbilityMoveInput>
+    <Default AbilityName="Ability_Bow_PenetratingShot" OnEnter="NoEffect" OnExit="Clear"/>
+   </ClearActiveAbilityMoveInput>
+  </ThenActivity></IfThenElse>
+ </Activities></Action>
+</Actions></ActionList>"#;
+        let list = ActionList::parse(text).expect("list");
+        let clears = |action: &str| list.action(action).expect("action").move_clears.clone();
+        let clear = |on_enter, on_exit| MoveClear {
+            ability: "Ability_Bow_PenetratingShot".to_owned(),
+            on_enter,
+            on_exit,
+        };
+        assert_eq!(clears("Bow_Penetrating_Ready"), [clear(true, false)]);
+        assert_eq!(
+            clears("Bow_Penetrating_Aim_SubState"),
+            [clear(false, true)],
+            "in a branch too"
+        );
     }
 
     #[test]

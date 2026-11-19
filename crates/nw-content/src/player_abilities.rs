@@ -13,7 +13,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use nw_formats::mannequin::{AbilityUse, CageWorld, CastKind, ChargeTake, Condition, TagActivity};
+use nw_formats::mannequin::{
+    AbilityUse, CageWorld, CastKind, ChargeTake, Condition, MoveClear, TagActivity,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::generated::SpellData;
@@ -107,11 +109,20 @@ pub enum TransitionTo {
     Fragment(String),
 }
 
-/// A fragment the actions of a list play.
+/// One entry (option) of a fragment the actions of a list play. A fragment has an entry for each
+/// tag state its animation database names, and Mannequin plays the entry of the character's tag
+/// state ([`AbilityList::fragment_for`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FragmentRow {
     /// Its name.
     pub name: String,
+    /// The Mannequin tags of the entry (its `Tags`, split at `+`): it plays for a tag state that
+    /// holds all of them. Empty for the default entry. Observed (`player_bow.adb`, build
+    /// 25810808): `Bow_ReadyWeapon_UpperBody` goes on to `Bow_Penetrating_Aim_SubState` in its
+    /// `Bow+PenetratingAim` entry, to `Bow_RainOfArrows_AimSubState` in its `Bow+HeavyAim` one
+    /// and to the archery list's `Bow_AimChargeShoot_SubState` in its `Bow` one.
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// The Mannequin scopes it plays on for the list's stance (`UpperBody`, `Weapon`): a
     /// fragment that starts on a scope takes it from the one that played there. Empty when the
     /// controller definitions do not name the fragment.
@@ -294,6 +305,9 @@ pub struct ListAction {
     /// The heart rune charge it takes as it starts (`ConsumeCharge`).
     #[serde(default)]
     pub charge_take: Option<ChargeTake>,
+    /// The ability key presses it clears as it starts or stops (`ClearActiveAbilityMoveInput`).
+    #[serde(default)]
+    pub move_clears: Vec<MoveClear>,
 }
 
 impl ListAction {
@@ -328,11 +342,41 @@ pub struct AbilityList {
 }
 
 impl AbilityList {
-    /// The fragment `name` (any case).
+    /// An entry of the fragment `name` (any case): the first the table holds. Its name, scopes
+    /// and presence are those of every entry; [`AbilityList::fragment_for`] gives the entry that
+    /// plays.
     pub fn fragment(&self, name: &str) -> Option<&FragmentRow> {
+        self.fragment_entries(name).next()
+    }
+
+    /// The entries of the fragment `name` (any case), in table order.
+    pub fn fragment_entries<'a, 'b>(
+        &'a self,
+        name: &'b str,
+    ) -> impl Iterator<Item = &'a FragmentRow> + use<'a, 'b> {
         self.fragments
             .iter()
-            .find(|fragment| fragment.name.eq_ignore_ascii_case(name))
+            .filter(move |fragment| fragment.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The entry of the fragment `name` (any case) that Mannequin plays for the tag state
+    /// `tags`: of the entries whose every tag is in `tags` (any case), the first with the most
+    /// tags (as [`nw_formats::mannequin::AnimDatabase::options`] picks); `None` when no entry
+    /// fits.
+    pub fn fragment_for(&self, name: &str, tags: &[&str]) -> Option<&FragmentRow> {
+        let fits = |fragment: &&FragmentRow| {
+            fragment
+                .tags
+                .iter()
+                .all(|tag| tags.iter().any(|own| own.eq_ignore_ascii_case(tag)))
+        };
+        self.fragment_entries(name).filter(fits).fold(
+            None,
+            |best: Option<&FragmentRow>, fragment| match best {
+                Some(best) if best.tags.len() >= fragment.tags.len() => Some(best),
+                _ => Some(fragment),
+            },
+        )
     }
 
     /// The action `name`.
@@ -440,6 +484,7 @@ mod tests {
             weapon_classes: vec!["LifeStaff".to_owned()],
             actions: vec![ListAction {
                 charge_take: None,
+                move_clears: Vec::new(),
                 name: "Smite".to_owned(),
                 fragment: "Smite".to_owned(),
                 activation: Some(Condition::True),
@@ -472,6 +517,7 @@ mod tests {
             }],
             fragments: vec![FragmentRow {
                 name: "Smite".to_owned(),
+                tags: Vec::new(),
                 scopes: Vec::new(),
                 length_ms: 1_000,
                 loops: false,
@@ -513,6 +559,35 @@ mod tests {
         assert_eq!(list.mana_cost("lifestaff_smite"), Some(16.0));
     }
 
+    /// The bow's aim fragment (`player_bow.adb`, build 25810808) has a `Bow` entry and a
+    /// `Bow+PenetratingAim` one: a tag state with `PenetratingAim` plays the second, any other
+    /// bow state the first, and a state without `Bow` none.
+    #[test]
+    fn the_entry_of_the_tag_state_plays() {
+        const AIM: &str = "Bow_Aim_UpperBody";
+        let entry = |tags: &[&str], length_ms| FragmentRow {
+            name: AIM.to_owned(),
+            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            scopes: Vec::new(),
+            length_ms,
+            loops: true,
+            markers: Vec::new(),
+            transitions: Vec::new(),
+            hit: None,
+        };
+        let mut list = smite_list();
+        list.fragments = vec![entry(&["Bow"], 1), entry(&["Bow", "PenetratingAim"], 2)];
+        let length = |tags: &[&str]| {
+            list.fragment_for("bow_aim_upperbody", tags)
+                .map(|row| row.length_ms)
+        };
+        assert_eq!(length(&["Bow", "LongBow"]), Some(1));
+        assert_eq!(length(&["bow", "LongBow", "penetratingaim"]), Some(2));
+        assert_eq!(length(&["Sword"]), None);
+        assert_eq!(list.fragment(AIM).map(|row| row.length_ms), Some(1));
+        assert_eq!(list.fragment_entries(AIM).count(), 2);
+    }
+
     /// The fire staff's `Ability_Fire_Staff_Speed_Loop` (build 25810808): its animation loops
     /// from 0 s, `BlockDisabled` has no end, and its transition to `Ability_Fire_Staff_Speed_Stop`
     /// is on from 0.867 s with no end.
@@ -523,6 +598,7 @@ mod tests {
         const LONG_AFTER_MS: u64 = 60_000;
         let mut fragment = FragmentRow {
             name: "Ability_Fire_Staff_Speed_Loop".to_owned(),
+            tags: Vec::new(),
             scopes: Vec::new(),
             length_ms: 0,
             loops: true,
@@ -688,8 +764,8 @@ mod tests {
             .iter()
             .filter(|list| list.weapon_classes.iter().any(|class| class == "Musket"))
             .find_map(|list| {
-                list.fragment(DRY_FIRE)
-                    .filter(|row| row.transitions.iter().any(back_to_aim))
+                list.fragment_entries(DRY_FIRE)
+                    .find(|row| row.transitions.iter().any(back_to_aim))
             })
             .expect(DRY_FIRE);
         assert_eq!((musket.length_ms, musket.loops), (DRY_FIRE_MS, false));

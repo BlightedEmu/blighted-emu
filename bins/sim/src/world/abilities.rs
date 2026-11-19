@@ -27,7 +27,9 @@ use nw_content::player_abilities::{
 };
 use nw_content::player_attacks::{AttackHit, BasicAttack, stance_tags};
 use nw_content::status_effects::StatusEffectRules;
-use nw_formats::mannequin::{CageWorld, CastKind, Condition, ManaCompare, TagCase, TagChange};
+use nw_formats::mannequin::{
+    CageWorld, CastKind, Condition, ManaCompare, MoveClear, TagCase, TagChange,
+};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::paperdoll::slot;
 use nw_messages::player_components::{CHARGE_COMPONENT, CHARGE_TYPE_INDEX};
@@ -158,6 +160,9 @@ struct Press {
     /// It started a chain: it still names its ability to the chain's tests within the frames
     /// each test counts back (`BackTicks`), but starts no other chain.
     used: bool,
+    /// An action cleared it (`ClearActiveAbilityMoveInput`, [`MoveClear`]): it names its ability
+    /// to no test any more.
+    cleared: bool,
 }
 
 /// An action that runs.
@@ -199,13 +204,17 @@ struct Cooldown {
 }
 
 impl Running {
-    /// The fragment it plays now, of its list `list`.
-    fn fragment_in<'a>(&'a self, list: &'a AbilityList) -> Option<&'a FragmentRow> {
+    /// The entry of the fragment it plays now, of its list `list`, for the tag state `tags`
+    /// ([`AbilityList::fragment_for`]). The entry follows the tag state while the fragment plays
+    /// (Inferred: Mannequin picks the entry when the fragment starts, after the tags its action
+    /// sets as it starts, which the server sets in the same tick; the bow's ability shots pick
+    /// theirs by the `PenetratingAim`, `HeavyAim` and `SmokeAim` tags of their ready actions).
+    fn fragment_in<'a>(&'a self, list: &'a AbilityList, tags: &[&str]) -> Option<&'a FragmentRow> {
         let name = self
             .fragment
             .as_deref()
             .or_else(|| Some(list.actions.get(self.action)?.fragment.as_str()))?;
-        list.fragment(name)
+        list.fragment_for(name, tags)
     }
 }
 
@@ -488,6 +497,9 @@ pub(super) struct AbilityRun {
     owner: Option<AbilityOwner>,
     /// The abilities whose action stopped since the last tick's events.
     ended: Vec<u32>,
+    /// After the last tick: a running action's fragment shows the ability's aim view
+    /// ([`AbilityRun::aims`]).
+    aiming: bool,
     /// The mana.
     pub mana: Mana,
     /// The heart rune charge.
@@ -531,7 +543,7 @@ impl RunWorld<'_> {
                 .run
                 .running_in(self.list)
                 .filter(|running| Some(running.action) == self.current)
-                .map(|running| (running.fragment_in(self.list), elapsed(running)))
+                .map(|running| (running.fragment_in(self.list, &self.tags), elapsed(running)))
                 .collect(),
             Some(name) => self
                 .all_running()
@@ -543,7 +555,7 @@ impl RunWorld<'_> {
                         .eq_ignore_ascii_case(name)
                         && list.fragment(name).is_some()
                 })
-                .map(|(running, list, _)| (running.fragment_in(list), elapsed(running)))
+                .map(|(running, list, _)| (running.fragment_in(list, &self.tags), elapsed(running)))
                 .collect(),
         }
     }
@@ -604,11 +616,13 @@ impl CageWorld for RunWorld<'_> {
 
     fn marker(&self, marker: &str) -> bool {
         self.all_running().any(|(running, list, _)| {
-            running.fragment_in(list).is_some_and(|fragment| {
-                fragment
-                    .markers_at(self.now_ms.saturating_sub(running.started_ms))
-                    .contains(&marker)
-            })
+            running
+                .fragment_in(list, &self.tags)
+                .is_some_and(|fragment| {
+                    fragment
+                        .markers_at(self.now_ms.saturating_sub(running.started_ms))
+                        .contains(&marker)
+                })
         })
     }
 
@@ -641,7 +655,8 @@ impl CageWorld for RunWorld<'_> {
 
     fn ability_move(&self, ability: &str, back_ticks: u32) -> bool {
         self.run.press.is_some_and(|press| {
-            press.ability == lowercase_crc32(ability)
+            !press.cleared
+                && press.ability == lowercase_crc32(ability)
                 && press
                     .read_ms
                     .map_or(0, |read_ms| self.now_ms.saturating_sub(read_ms))
@@ -743,6 +758,7 @@ impl AbilityRun {
                     ability,
                     read_ms: None,
                     used: false,
+                    cleared: false,
                 });
             }
         }
@@ -774,7 +790,28 @@ impl AbilityRun {
                 .into_iter()
                 .map(|ability| AbilityEvent::Ended { ability }),
         );
+        let tags = holder.tags();
+        self.aiming = lists.first().is_some_and(|list| {
+            self.world(lists, list, holder, &tags, None, now_ms)
+                .marker(ABILITY_AIM_MARKER)
+        });
         events
+    }
+
+    /// Whether, after the last tick, the entry of a running action's fragment sets the
+    /// [`ABILITY_AIM_MARKER`]: the client shows the ability's aim view, whose camera boom is
+    /// shorter, and the boom's change is no body motion. Observed (client trace of a live run,
+    /// 2026-11-19, `local-data/scratch-work/live-2026-11-19c/trace.log`): Penetrating Shot's
+    /// press moved the camera in to a 1.03 m boom (17:35:31.27 to 31.64) until about 0.3 s after
+    /// the shot (out to 7.0 m from 33.46 to 34.03); Rain of Arrows' press moved it from 7.0 m to
+    /// 4.4 to 4.7 m (17:35:36.1 to 36.3) while its targeting ran; Splinter Shot did not move it.
+    /// The bow's fragments set the marker so (`player_bow.adb`, build 25810808): from 0 s in the
+    /// `PenetratingAim`, `HeavyAim` and `SmokeAim` entries of `Bow_ReadyWeapon_UpperBody` and
+    /// `Bow_Aim_UpperBody`, in the `PenetratingAim` entry of `Bow_Shoot_UpperBody` and from 0 to
+    /// 0.567 s of `Bow_Shoot_RainOfArrows`; never in `Ability_Bow_ExplosiveArrow` or the plain
+    /// `Bow` aim.
+    pub fn aims(&self) -> bool {
+        self.aiming
     }
 
     /// The chain of the press just used starts with action `index` of list `list`: it owns the
@@ -803,7 +840,9 @@ impl AbilityRun {
     /// `CAGE-CastSpell` clip and the action's cast name the same spell). A shape whose clip has a
     /// run-time condition strikes only when its condition holds for `holder` at `now_ms`
     /// (Observed: the flail slam's standard sphere needs `Ability_Flail_Slam` on and no kite
-    /// shield with its second upgrade, its stagger sphere the kite shield).
+    /// shield with its second upgrade, its stagger sphere the kite shield), and a hit of cases
+    /// strikes as its first case that holds ([`BasicAttack::pick_case`]: Splinter Shot's base or
+    /// upgraded spell).
     fn strike(
         &self,
         (lists, list): (&[&AbilityList], &AbilityList),
@@ -815,8 +854,10 @@ impl AbilityRun {
         let owned = self
             .owner
             .is_some_and(|owner| owner.list == list_key(list) && owner.action == index);
+        let tags = holder.tags();
+        let world = self.world(lists, list, holder, &tags, Some(index), now_ms);
         let Some(hit) = list
-            .fragment(fragment)
+            .fragment_for(fragment, &world.tags)
             .and_then(|row| row.hit.as_ref())
             .filter(|_| owned)
         else {
@@ -826,11 +867,11 @@ impl AbilityRun {
         if shot && !list.actions[index].casts.is_empty() {
             return;
         }
-        let tags = holder.tags();
-        let world = self.world(lists, list, holder, &tags, Some(index), now_ms);
         let mut hit = hit.clone();
         hit.keep_held(|condition| condition.holds_in(&world));
-        events.push(AbilityEvent::Strike(Box::new(hit)));
+        if hit.pick_case(|condition| condition.holds_in(&world)) {
+            events.push(AbilityEvent::Strike(Box::new(hit)));
+        }
     }
 
     /// One tick of list `list` of `lists` at `now_ms` (`server_ms` on the server clock): a
@@ -863,9 +904,9 @@ impl AbilityRun {
         let kept: Vec<(usize, usize)> = self
             .running_in(list)
             .filter_map(|running| {
-                let fragment = running.fragment_in(list)?;
-                let since_ms = now_ms.saturating_sub(running.started_ms);
                 let world = self.world(lists, list, holder, &tags, Some(running.action), now_ms);
+                let fragment = running.fragment_in(list, &world.tags)?;
+                let since_ms = now_ms.saturating_sub(running.started_ms);
                 Some(
                     fragment
                         .transitions
@@ -895,9 +936,9 @@ impl AbilityRun {
         let steps: Vec<(usize, Step<'_>)> = self
             .running_in(list)
             .filter_map(|running| {
-                let fragment = running.fragment_in(list)?;
-                let since_ms = now_ms.saturating_sub(running.started_ms);
                 let world = self.world(lists, list, holder, &tags, Some(running.action), now_ms);
+                let fragment = running.fragment_in(list, &world.tags)?;
+                let since_ms = now_ms.saturating_sub(running.started_ms);
                 fragment
                     .transitions
                     .iter()
@@ -966,7 +1007,7 @@ impl AbilityRun {
                         }
                     }
                     self.start(
-                        lists,
+                        (lists, &tags),
                         target,
                         to,
                         self.chain,
@@ -1047,7 +1088,7 @@ impl AbilityRun {
                 self.chain_cast.clear();
             }
             self.start(
-                lists,
+                (lists, &tags),
                 list,
                 index,
                 chain,
@@ -1209,7 +1250,7 @@ impl AbilityRun {
     )]
     fn start(
         &mut self,
-        lists: &[&AbilityList],
+        (lists, tags): (&[&AbilityList], &[&str]),
         list: &AbilityList,
         index: usize,
         chain: u64,
@@ -1217,20 +1258,27 @@ impl AbilityRun {
         times: (u64, u64),
         events: &mut Vec<AbilityEvent>,
     ) {
+        let state = self.tag_state(tags);
         let scopes: &[String] = list
-            .fragment(&list.actions[index].fragment)
+            .fragment_for(&list.actions[index].fragment, &state)
             .map_or(&[], |fragment| &fragment.scopes);
-        for other in lists {
-            let taken: Vec<usize> = self
-                .running_in(other)
-                .filter(|running| {
-                    running.fragment_in(other).is_some_and(|fragment| {
-                        fragment.scopes.iter().any(|scope| scopes.contains(scope))
+        let taken: Vec<(&AbilityList, Vec<usize>)> = lists
+            .iter()
+            .map(|other| {
+                let actions = self
+                    .running_in(other)
+                    .filter(|running| {
+                        running.fragment_in(other, &state).is_some_and(|fragment| {
+                            fragment.scopes.iter().any(|scope| scopes.contains(scope))
+                        })
                     })
-                })
-                .map(|running| running.action)
-                .collect();
-            self.leave(other, &taken);
+                    .map(|running| running.action)
+                    .collect();
+                (*other, actions)
+            })
+            .collect();
+        for (other, actions) in taken {
+            self.leave(other, &actions);
         }
         self.enter(list, index, chain, stats, times, events);
     }
@@ -1257,6 +1305,7 @@ impl AbilityRun {
             charge_taken: false,
             buffered: Vec::new(),
         });
+        self.clear_presses(&list.actions[index], |clear| clear.on_enter);
         if let Some(ability) = &list.actions[index].ability {
             for id in &ability.starts_cooldowns {
                 self.start_cooldown(list, id, stats, (now_ms, server_ms));
@@ -1267,10 +1316,32 @@ impl AbilityRun {
         }
     }
 
-    /// Actions `actions` of list `list` stop: their tag activities that are on end.
+    /// Actions `actions` of list `list` stop: they clear the presses they clear as they stop,
+    /// and their tag activities that are on end.
     fn leave(&mut self, list: &AbilityList, actions: &[usize]) {
         let key = list_key(list);
+        let stopping: Vec<usize> = self
+            .running_in(list)
+            .map(|running| running.action)
+            .filter(|action| actions.contains(action))
+            .collect();
+        for action in stopping {
+            self.clear_presses(&list.actions[action], |clear| clear.on_exit);
+        }
         self.leave_where(|running| running.list == key && actions.contains(&running.action));
+    }
+
+    /// The newest press stops naming its ability to the tests when `action` clears that
+    /// ability's presses at the step `at` picks (its start or its stop, [`MoveClear`]).
+    fn clear_presses(&mut self, action: &ListAction, at: impl Fn(&MoveClear) -> bool) {
+        if let Some(press) = self.press.as_mut()
+            && action
+                .move_clears
+                .iter()
+                .any(|clear| at(clear) && lowercase_crc32(&clear.ability) == press.ability)
+        {
+            press.cleared = true;
+        }
     }
 
     /// The running actions of the lists not in `lists` stop: the weapon whose lists they are left
@@ -1375,6 +1446,14 @@ impl AbilityRun {
             .filter(move |running| running.list == key)
     }
 
+    /// The tag state of a player whose weapon's stance has the tags `tags`: those and the tags
+    /// its actions set ([`AbilityRun::tags_on`]).
+    fn tag_state<'a>(&'a self, tags: &[&'a str]) -> Vec<&'a str> {
+        let mut state = tags.to_vec();
+        state.extend(self.tags_on.iter().map(String::as_str));
+        state
+    }
+
     fn world<'a>(
         &'a self,
         lists: &'a [&'a AbilityList],
@@ -1384,14 +1463,12 @@ impl AbilityRun {
         current: Option<usize>,
         now_ms: u64,
     ) -> RunWorld<'a> {
-        let mut all_tags = tags.to_vec();
-        all_tags.extend(self.tags_on.iter().map(String::as_str));
         RunWorld {
             run: self,
             lists,
             list,
             holder,
-            tags: all_tags,
+            tags: self.tag_state(tags),
             current,
             now_ms,
         }
@@ -1831,6 +1908,8 @@ pub(super) struct EffectFlight {
     land_ms: u64,
 }
 
+/// The marker of a fragment entry that shows an ability's aim view ([`AbilityRun::aims`]).
+const ABILITY_AIM_MARKER: &str = "AimDownSightsAbility";
 /// The CAGE input names of the ability keys (`ability1` to `ability3`).
 const ABILITY_INPUT_PREFIX: &str = "ability";
 
@@ -2587,6 +2666,7 @@ mod tests {
     fn list() -> AbilityList {
         let start = ListAction {
             charge_take: None,
+            move_clears: Vec::new(),
             name: SMITE.to_owned(),
             fragment: SMITE.to_owned(),
             activation: Some(Condition::All(vec![
@@ -2624,6 +2704,7 @@ mod tests {
         };
         let follow_up = ListAction {
             charge_take: None,
+            move_clears: Vec::new(),
             name: FOLLOW_UP.to_owned(),
             fragment: String::new(),
             activation: Some(Condition::All(vec![
@@ -2646,6 +2727,7 @@ mod tests {
             actions: vec![start, follow_up],
             fragments: vec![FragmentRow {
                 name: SMITE.to_owned(),
+                tags: Vec::new(),
                 scopes: Vec::new(),
                 length_ms: FRAGMENT_MS,
                 loops: false,
@@ -2738,6 +2820,7 @@ mod tests {
         }];
         list.actions.push(ListAction {
             charge_take: None,
+            move_clears: Vec::new(),
             name: STOP.to_owned(),
             fragment: STOP.to_owned(),
             activation: None,
@@ -2748,6 +2831,7 @@ mod tests {
         });
         list.fragments.push(FragmentRow {
             name: STOP.to_owned(),
+            tags: Vec::new(),
             scopes: Vec::new(),
             length_ms: FRAGMENT_MS,
             loops: false,
@@ -2791,6 +2875,141 @@ mod tests {
             ended(&run.tick(&[&list], &Staff, released_ms + FRAGMENT_MS, SERVER_MS)),
             "the ability ends with the action it moved on to"
         );
+    }
+
+    /// The Smite list whose start fragment has two entries, as the bow's ready fragment has
+    /// (`player_bow.adb`, build 25810808: `Bow_ReadyWeapon_UpperBody` goes on to the plain aim in
+    /// its `Bow` entry and to Penetrating Shot's aim in its `Bow+PenetratingAim` one): the
+    /// default entry goes on to `PLAIN_AIM` at 100 ms, the `AttackAction` entry (the tag the
+    /// start action sets) to `ABILITY_AIM` and shows the ability's aim view. The default entry is
+    /// the first of the table.
+    fn list_with_entries() -> (AbilityList, usize, usize) {
+        const PLAIN_AIM: &str = "Smite_PlainAim";
+        const ABILITY_AIM: &str = "Smite_AbilityAim";
+        const TRANSITION_MS: u64 = 100;
+        let mut list = list();
+        let to = |action: &str| FragmentTransition {
+            to: TransitionTo::Action(action.to_owned()),
+            input: None,
+            condition: None,
+            start_ms: TRANSITION_MS,
+            end_ms: None,
+            buffer_start_ms: None,
+        };
+        list.fragments[0].transitions = vec![to(PLAIN_AIM)];
+        let mut tagged = list.fragments[0].clone();
+        tagged.tags = vec!["AttackAction".to_owned()];
+        tagged.transitions = vec![to(ABILITY_AIM)];
+        tagged.markers.push(FragmentMarker {
+            name: ABILITY_AIM_MARKER.to_owned(),
+            start_ms: 0,
+            end_ms: None,
+        });
+        list.fragments.push(tagged);
+        for name in [PLAIN_AIM, ABILITY_AIM] {
+            list.actions.push(ListAction {
+                charge_take: None,
+                move_clears: Vec::new(),
+                name: name.to_owned(),
+                fragment: name.to_owned(),
+                activation: None,
+                deactivation: None,
+                tag_activities: Vec::new(),
+                ability: None,
+                casts: Vec::new(),
+            });
+            list.fragments.push(FragmentRow {
+                name: name.to_owned(),
+                tags: Vec::new(),
+                scopes: Vec::new(),
+                length_ms: FRAGMENT_MS,
+                loops: false,
+                markers: Vec::new(),
+                transitions: Vec::new(),
+                hit: None,
+            });
+        }
+        let plain = list.actions.len() - 2;
+        (list, plain, plain + 1)
+    }
+
+    /// The running action of `run` moved on by the start fragment's entry: `plain` or `ability`.
+    fn moved_on_to(run: &AbilityRun, (plain, ability): (usize, usize)) -> Option<usize> {
+        run.running
+            .iter()
+            .map(|running| running.action)
+            .find(|action| *action == plain || *action == ability)
+    }
+
+    /// A fragment plays the entry of the tag state: the start action sets `AttackAction`, so its
+    /// fragment goes on as its `AttackAction` entry says, and without the tag as its default
+    /// entry says. Before, the table held one entry per fragment and the server read the first,
+    /// so the bow's ready step went on to the plain aim and no ability shot was fired (live
+    /// 2026-11-19).
+    #[test]
+    fn a_fragment_plays_the_entry_of_the_tag_state() {
+        let (list, plain, ability) = list_with_entries();
+        let run_to = |list: &AbilityList| {
+            let mut run = AbilityRun::default();
+            run.press(&[key_1(10)], mapped, no_inputs);
+            for now_ms in (0..=4).map(|tick| tick * TICK_MS) {
+                run.tick(&[list], &Staff, now_ms, SERVER_MS);
+            }
+            moved_on_to(&run, (plain, ability))
+        };
+        assert_eq!(run_to(&list), Some(ability));
+        let mut untagged = list.clone();
+        untagged.actions[0].tag_activities.clear();
+        assert_eq!(run_to(&untagged), Some(plain), "the default entry");
+    }
+
+    /// The run aims while the entry of a running action's fragment sets the ability's aim
+    /// marker, and stops aiming when the action moves on to a fragment without it.
+    #[test]
+    fn the_run_aims_while_a_fragment_entry_shows_the_ability_aim() {
+        let (list, plain, ability) = list_with_entries();
+        let mut run = AbilityRun::default();
+        assert!(!run.aims(), "no tick yet");
+        run.press(&[key_1(10)], mapped, no_inputs);
+        run.tick(&[&list], &Staff, 0, SERVER_MS);
+        assert!(run.aims(), "the start's tagged entry shows the aim");
+        for now_ms in (1..=4).map(|tick| tick * TICK_MS) {
+            run.tick(&[&list], &Staff, now_ms, SERVER_MS);
+        }
+        assert_eq!(moved_on_to(&run, (plain, ability)), Some(ability));
+        assert!(!run.aims(), "the aim action's fragment has no aim marker");
+    }
+
+    /// An action that clears its ability's press as it starts (`Bow_Penetrating_Ready`:
+    /// `ClearActiveAbilityMoveInput` of `Ability_Bow_PenetratingShot`, `OnEnter="Clear"`) leaves
+    /// the press naming its ability to no test, so the aim that follows waits for a click or a
+    /// new press; a new press names it again. Before, the press that readied Penetrating Shot
+    /// still held the aim's `IfActiveAbilityMoveName BackTicks="15"` when the aim started.
+    #[test]
+    fn a_cleared_press_names_its_ability_to_no_test() {
+        const BACK_TICKS: u32 = 20;
+        let pressed_after = |list: &AbilityList, frames: &[u16]| {
+            let mut run = AbilityRun::default();
+            for (step, frame) in frames.iter().enumerate() {
+                run.press(&[key_1(*frame)], mapped, no_inputs);
+                let now_ms = u64::try_from(step).expect("steps") * TICK_MS;
+                run.tick(&[list], &Staff, now_ms, SERVER_MS);
+            }
+            let tags = Staff.tags();
+            let lists = [list];
+            let world = run.world(&lists, list, &Staff, &tags, None, TICK_MS);
+            world.ability_move(SMITE, BACK_TICKS)
+        };
+        let plain = list();
+        assert!(pressed_after(&plain, &[10]), "a press counts");
+        let mut clearing = list();
+        clearing.actions[0].move_clears = vec![MoveClear {
+            ability: SMITE.to_owned(),
+            on_enter: true,
+            on_exit: false,
+        }];
+        assert!(!pressed_after(&clearing, &[10]), "the start cleared it");
+        assert!(pressed_after(&clearing, &[10, 11]), "a new press counts");
     }
 
     /// The test sword's light attack, as the hit of an ability fragment.
@@ -3054,6 +3273,7 @@ mod tests {
             weapon_classes: vec!["LifeStaff".to_owned()],
             actions: vec![ListAction {
                 charge_take: None,
+                move_clears: Vec::new(),
                 name: LOOP.to_owned(),
                 fragment: LOOP.to_owned(),
                 activation: None,
@@ -3067,6 +3287,7 @@ mod tests {
             }],
             fragments: vec![FragmentRow {
                 name: LOOP.to_owned(),
+                tags: Vec::new(),
                 scopes: Vec::new(),
                 length_ms: FRAGMENT_MS,
                 loops: false,
@@ -3118,6 +3339,7 @@ mod tests {
         }];
         chained.actions.push(ListAction {
             charge_take: None,
+            move_clears: Vec::new(),
             name: CHAINED.to_owned(),
             fragment: CHAINED.to_owned(),
             activation: None,
@@ -3132,6 +3354,7 @@ mod tests {
         });
         chained.fragments.push(FragmentRow {
             name: CHAINED.to_owned(),
+            tags: Vec::new(),
             scopes: Vec::new(),
             length_ms: FRAGMENT_MS,
             loops: false,
@@ -4144,10 +4367,11 @@ mod retail_tests {
         }
     }
 
-    /// A player with a weapon of stance `tags`, no inputs, effects or upgrades.
-    /// A player with a weapon of stance `tags` and the status effects its abilities gave it.
+    /// A player with a weapon of stance `tags`, the abilities `active` (the mastery abilities
+    /// it spent points in) and the status effects its abilities gave it.
     struct Armed {
         tags: &'static [&'static str],
+        active: Vec<String>,
         effects: Vec<String>,
     }
 
@@ -4166,14 +4390,20 @@ mod retail_tests {
             true
         }
 
-        fn ability_active(&self, _: &str) -> bool {
-            false
+        fn ability_active(&self, ability: &str) -> bool {
+            self.active
+                .iter()
+                .any(|own| own.eq_ignore_ascii_case(ability))
         }
 
         fn stats(&self) -> AbilityStats {
             AbilityStats::default()
         }
     }
+
+    /// The stance tags of the player bows (`WeaponItemDefinitions` of build 25810808:
+    /// `MannequinTag` `Bow,LongBow` for `BowT1` to `BowT5`).
+    const BOW_TAGS: &[&str] = &["Bow", "LongBow"];
 
     /// Each weapon's ability list class and the stance tags of its weapons (the
     /// `MannequinTag` cells of the player attack table).
@@ -4186,7 +4416,7 @@ mod retail_tests {
         ("2HAxe", &["2H_Melee", "GreatAxe"]),
         ("2hhammer", &["2H_Melee", "Warhammer"]),
         ("GreatSword", &["2H_Melee", "GreatSword"]),
-        ("Bow", &["Bow"]),
+        ("Bow", BOW_TAGS),
         ("Musket", &["2H_Ranged", "Rifle"]),
         ("Blunderbuss", &["2H_Ranged", "Blunderbuss"]),
         ("FireStaff", &["MagicStaff", "Fire"]),
@@ -4238,16 +4468,74 @@ mod retail_tests {
         }
     }
 
-    /// The abilities whose fire step the [`STEPS`] do not make: the bow's ability shots and the
-    /// two storms fire through an action that no transition of the parsed fragments leads to
-    /// (`Bow_Penetrating_Shoot_A1`, `Ability_Fire_Staff_Storm_Loop`, `IceMagic_IceStorm_Cast`;
-    /// Unknown: the server reads one option per fragment name, and the client may pick a
-    /// fragment option by tags), and the ice pylon starts its cooldown when its placed pylon's
-    /// ownership message comes (`IfOwnershipMessageReceived`; the server places no pylon).
-    const HELD_AIM_OR_PLACED: [&str; 6] = [
-        "Ability_Bow_PenetratingShot",
-        "Ability_Bow_PoisonShot",
-        "Ability_Bow_RainofArrows",
+    /// What the [`STEPS`] of one ability did.
+    struct Stepped {
+        /// The events of every tick, in order.
+        events: Vec<AbilityEvent>,
+        /// Whether the run aimed after each tick ([`AbilityRun::aims`]).
+        aims: Vec<bool>,
+        /// The ability's cooldown started.
+        cooldown: bool,
+    }
+
+    /// The [`STEPS`] of ability `ability` (its id, mapped to the first key) on the lists `lists`,
+    /// for a player with a weapon of stance `tags` that holds the ability (it spent the mastery
+    /// point) and takes the status effects its abilities give it, over [`RUN_MS`].
+    fn stepped(lists: &[&AbilityList], tags: &'static [&'static str], ability: &str) -> Stepped {
+        let crc = lowercase_crc32(ability);
+        let mapped = |key: usize| (key == 0).then_some(crc);
+        let mut run = AbilityRun::default();
+        let mut holder = Armed {
+            tags,
+            active: vec![ability.to_owned()],
+            effects: Vec::new(),
+        };
+        let mut done = Stepped {
+            events: Vec::new(),
+            aims: Vec::new(),
+            cooldown: false,
+        };
+        let mut frame = 10;
+        for tick in 0..=RUN_MS / TICK_MS {
+            let now = tick * TICK_MS;
+            for (at, key, click) in STEPS {
+                if tick != at && tick != at + STEP_TICKS {
+                    continue;
+                }
+                let down = tick == at;
+                let inputs = |_: &InputRecord| {
+                    CLICK_INPUTS
+                        .iter()
+                        .filter(|_| click && down)
+                        .map(|input| (*input).to_owned())
+                        .collect()
+                };
+                frame += 1;
+                run.press(&[record(frame, key && down)], mapped, inputs);
+            }
+            for event in run.tick(lists, &holder, now, SERVER_MS) {
+                if let AbilityEvent::Effects(effects) = &event {
+                    holder.effects.extend(effects.iter().cloned());
+                }
+                done.events.push(event);
+            }
+            done.aims.push(run.aims());
+        }
+        done.cooldown = run
+            .take_cooldown_changes()
+            .iter()
+            .any(|(_, cooldown)| cooldown.ability == crc);
+        done
+    }
+
+    /// The abilities whose fire step the [`STEPS`] do not make: the two storms fire through an
+    /// action that no transition of the parsed fragments leads to
+    /// (`Ability_Fire_Staff_Storm_Loop`, `IceMagic_IceStorm_Cast`; Unknown: the cause), and the
+    /// ice pylon starts its cooldown when its placed pylon's ownership message comes
+    /// (`IfOwnershipMessageReceived`; the server places no pylon). The bow's aimed shots start
+    /// since the table keeps every fragment entry of the tag states: their ready actions set
+    /// `PenetratingAim`, `HeavyAim` and `SmokeAim`, whose entries go on to their aims.
+    const HELD_AIM_OR_PLACED: [&str; 3] = [
         "Ability_Firestaff_MeteorShower",
         "IceMagic_IcePylon",
         "IceMagic_IceStorm",
@@ -4277,42 +4565,7 @@ mod retail_tests {
                 .collect();
             assert!(!abilities.is_empty(), "{class} has abilities");
             for ability in abilities {
-                let crc = lowercase_crc32(ability);
-                let mapped = |key: usize| (key == 0).then_some(crc);
-                let mut run = AbilityRun::default();
-                let mut holder = Armed {
-                    tags,
-                    effects: Vec::new(),
-                };
-                let mut frame = 10;
-                for tick in 0..=RUN_MS / TICK_MS {
-                    let now = tick * TICK_MS;
-                    for (at, key, click) in STEPS {
-                        if tick != at && tick != at + STEP_TICKS {
-                            continue;
-                        }
-                        let down = tick == at;
-                        let inputs = |_: &InputRecord| {
-                            CLICK_INPUTS
-                                .iter()
-                                .filter(|_| click && down)
-                                .map(|input| (*input).to_owned())
-                                .collect()
-                        };
-                        frame += 1;
-                        run.press(&[record(frame, key && down)], mapped, inputs);
-                    }
-                    for event in run.tick(&lists, &holder, now, SERVER_MS) {
-                        if let AbilityEvent::Effects(effects) = event {
-                            holder.effects.extend(effects);
-                        }
-                    }
-                }
-                if run
-                    .take_cooldown_changes()
-                    .iter()
-                    .any(|(_, cooldown)| cooldown.ability == crc)
-                {
+                if stepped(&lists, tags, ability).cooldown {
                     started += 1;
                 } else if !HELD_AIM_OR_PLACED.contains(&ability.as_str()) {
                     refused.push(format!("{class} {ability}"));
@@ -4323,6 +4576,69 @@ mod retail_tests {
             refused.is_empty(),
             "{started} started; refused: {refused:#?}"
         );
+    }
+
+    /// The bow's ability lists for a player bow.
+    fn bow_run(ability: &str) -> Stepped {
+        let table = table();
+        let lists = table.lists_for(&["Bow"]);
+        stepped(&lists, BOW_TAGS, ability)
+    }
+
+    /// The spells `events` cast, with how they aim.
+    fn casts(events: &[AbilityEvent]) -> Vec<(String, CastKind)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AbilityEvent::Cast { spell, kind, .. } => Some((spell.id.clone(), *kind)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The bow's ability shots fire from their key and a click, as the client data says
+    /// (`player_bow.adb` and `playeractions_ability_bow.actionlist`, build 25810808):
+    /// Penetrating Shot readies (`Bow+PenetratingAim` entry), aims and shoots its
+    /// `PenetratingShot` arrow of `Bow_Penetrating_Attack`; Splinter Shot shoots the
+    /// `Spell_Ability_Bow_Explosive_Base` arrow of `Bow_ExplosionShot_Projectile` from its
+    /// `Bow+LongBow` entry; Rain of Arrows readies (`Bow+HeavyAim`), aims and on the click places
+    /// `Spell_Bow_Spell_RainOfArrows` where the aim ray meets the ground; Poison Shot readies
+    /// (`Bow+SmokeAim`), aims and shoots `Spell_Ability_Bow_PoisonShot_Projectile`. Each starts
+    /// its cooldown. Before, live 2026-11-19: Penetrating Shot and Rain of Arrows started no
+    /// cooldown, Splinter Shot fired no shot.
+    #[test]
+    fn the_bow_ability_shots_fire_from_their_key_and_click() {
+        let penetrating = bow_run("Ability_Bow_PenetratingShot");
+        assert!(penetrating.cooldown);
+        assert_eq!(strikes(&penetrating.events), ["Bow_Penetrating_Attack"]);
+        let splinter = bow_run("Ability_Bow_SplinterShot");
+        assert!(splinter.cooldown);
+        assert_eq!(strikes(&splinter.events), ["Bow_ExplosionShot_Projectile"]);
+        let rain = bow_run("Ability_Bow_RainofArrows");
+        assert!(rain.cooldown);
+        assert_eq!(
+            casts(&rain.events),
+            [("Spell_Bow_Spell_RainOfArrows".to_owned(), CastKind::Raycast)]
+        );
+        let poison = bow_run("Ability_Bow_PoisonShot");
+        assert!(poison.cooldown);
+        assert_eq!(
+            casts(&poison.events),
+            [(
+                "Spell_Ability_Bow_PoisonShot_Projectile".to_owned(),
+                CastKind::Plain
+            )]
+        );
+    }
+
+    /// Penetrating Shot and Rain of Arrows show the ability's aim view ([`AbilityRun::aims`]),
+    /// Splinter Shot does not (client trace of the live run of 2026-11-19: the boom moved in
+    /// for the first two only).
+    #[test]
+    fn the_bow_ability_aims_show_the_aim_view() {
+        assert!(bow_run("Ability_Bow_PenetratingShot").aims.contains(&true));
+        assert!(bow_run("Ability_Bow_RainofArrows").aims.contains(&true));
+        assert!(!bow_run("Ability_Bow_SplinterShot").aims.contains(&true));
     }
 
     /// The flail's abilities strike their fragments' hits (`player_flail.adb`: the `CAGE-Damage`
@@ -4342,6 +4658,7 @@ mod retail_tests {
             let mut run = AbilityRun::default();
             let holder = Armed {
                 tags: FLAIL_TAGS,
+                active: Vec::new(),
                 effects: Vec::new(),
             };
             run.press(&[key_1(10)], mapped, no_inputs);
@@ -4382,6 +4699,7 @@ mod retail_tests {
         let mut run = AbilityRun::default();
         let holder = Armed {
             tags: &["2H_Ranged", "Rifle"],
+            active: Vec::new(),
             effects: Vec::new(),
         };
         let mut frame = 10;
@@ -4517,6 +4835,7 @@ mod retail_tests {
         let trip = |key: usize| (key == 0).then(|| lowercase_crc32(TRIP));
         let flail_holder = Armed {
             tags: &["1H_Melee", "Flail"],
+            active: Vec::new(),
             effects: Vec::new(),
         };
         let mut run = AbilityRun::default();

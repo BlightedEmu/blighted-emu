@@ -5,8 +5,9 @@
 //!
 //! Each ability list of the player grid with `WeaponRequirements` goes with the first weapon
 //! stance (by `MannequinTag` cell) whose items have one of those item classes. The table keeps
-//! every action of the list, each fragment they play for that stance (its length, its
-//! `CAGE-Named` markers and its hit, as a basic attack's, [`crate::player_attacks`]), the
+//! every action of the list, each entry of each fragment they play that the weapon's tag states
+//! can pick ([`possible_tags`]; its tags, length, `CAGE-Named` markers, transitions and hit, as a
+//! basic attack's, [`crate::player_attacks`]), the
 //! `Cooldowns_Player` times and `ManaCosts_Player` costs the actions name, and the `SpellData`
 //! row of each cast.
 
@@ -23,9 +24,10 @@ use nw_content::player_attacks::stance_tags;
 use nw_formats::input_profile::input_actions;
 use nw_formats::mannequin::{ActionList, Condition, Fragment, GridList, ProcClip, TagChange};
 
-use crate::melee_shapes::{ends_in_loop, ms};
+use crate::melee_shapes::{WeaponBody, ends_in_loop, ms};
 use crate::player_attacks::{
-    AnimationSources, BundleRows, NAMED_CLIP, NAMED_CLIP_NAME, fragment_attack, weapon_body,
+    AnimationSources, BundleRows, NAMED_CLIP, NAMED_CLIP_NAME, WeaponStance, fragment_attack,
+    weapon_body,
 };
 
 /// Milliseconds per second.
@@ -299,28 +301,87 @@ fn buffer_start_of(fragment: &Fragment, instant: &ProcClip) -> Option<u64> {
         .max()
 }
 
-/// The Mannequin tags action `action` of `list` sets as it starts or in a branch (an `OnEnter`
-/// of `Set`, in its default or a named case). A fragment of the action that has no entry for
-/// the stance's tags plays the entry of the stance's tags and these (Inferred: the musket's
-/// `Firearm_Shoot_DryFire_UpperBody` has entries only for tag states with `Aim` or `HeavyAim`,
-/// which the aim actions set; `Musket_ShootersStance_Ready`, which switches to it, sets
-/// `Crouch` and `HeavyAim`, and the entry for `2H_Ranged+Crouch+HeavyAim` goes back to
-/// `Ability_Musket_ShootersStance_Aim` after 0.667 s).
-fn tags_set_by(list: &ActionList, action: &str) -> Vec<String> {
+/// The Mannequin tags that an action of `list` sets: as it starts, as it stops or in a branch
+/// (an `OnEnter` or `OnExit` of `Set`, in its default or a named case). A fragment entry that
+/// needs a tag no stance and no action of the weapon's lists gives never plays for the weapon.
+fn tags_set_in(list: &ActionList) -> Vec<String> {
     let mut tags: Vec<String> = list
         .actions
         .iter()
-        .filter(|own| own.name == action)
-        .flat_map(|own| &own.tag_activities)
+        .flat_map(|action| &action.tag_activities)
         .flat_map(|activity| {
             activity
                 .default
                 .iter()
                 .chain(activity.cases.iter().map(|(_, case)| case))
         })
-        .filter(|case| case.on_enter == TagChange::Set)
+        .filter(|case| case.on_enter == TagChange::Set || case.on_exit == TagChange::Set)
         .map(|case| case.tag.clone())
         .collect();
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
+/// The tag sets of the entries of fragment `name` (any case) of the player databases that a
+/// character whose tags are among `possible` can play, each once, in database and file order:
+/// the entries without fragment tags whose every tag is in `possible` (any case).
+fn entry_tags_of(sources: &AnimationSources, name: &str, possible: &[String]) -> Vec<Vec<String>> {
+    let has = |tag: &String| possible.iter().any(|own| own.eq_ignore_ascii_case(tag));
+    let mut found: Vec<Vec<String>> = Vec::new();
+    for entry in sources
+        .player
+        .iter()
+        .flat_map(|adb| &adb.fragments)
+        .filter(|entry| entry.name.eq_ignore_ascii_case(name) && entry.frag_tags.is_empty())
+        .filter(|entry| entry.tags.iter().all(has))
+    {
+        let same = |own: &Vec<String>| {
+            own.len() == entry.tags.len()
+                && own.iter().all(|tag| {
+                    entry
+                        .tags
+                        .iter()
+                        .any(|other| other.eq_ignore_ascii_case(tag))
+                })
+        };
+        if !found.iter().any(same) {
+            found.push(entry.tags.clone());
+        }
+    }
+    found
+}
+
+/// The tags a character can hold while the lists of the grid list `list` run: the stance tags
+/// of every weapon stance whose tags or items name one of its weapon classes (the bow's `Bow` and
+/// `Bow,LongBow`: Observed, `WeaponItemDefinitions` of build 25810808 gives `Bow,LongBow` to the
+/// player bows `BowT1` to `BowT5` and `Bow` to the tutorial and mob bows), and the tags that an
+/// action of a grid list on for one of those classes sets ([`tags_set_in`]: the lists of a weapon
+/// run as one).
+fn possible_tags(sources: &AnimationSources, rows: &BundleRows, list: &GridList) -> Vec<String> {
+    let names = |class: &String| {
+        list.weapon_classes
+            .iter()
+            .any(|own| own.eq_ignore_ascii_case(class))
+    };
+    let mut tags: Vec<String> = rows
+        .weapon_classes
+        .iter()
+        .filter(|(cell, classes)| stance_tags(cell).iter().any(names) || classes.iter().any(names))
+        .flat_map(|(cell, _)| stance_tags(cell))
+        .collect();
+    let own_path = list.pak_path();
+    for path in sources
+        .grid
+        .iter()
+        .filter(|grid| grid.weapon_classes.iter().any(names))
+        .map(GridList::pak_path)
+        .chain(std::iter::once(own_path))
+    {
+        if let Some(index) = sources.action_paths.iter().position(|own| *own == path) {
+            tags.extend(tags_set_in(&sources.actions[index]));
+        }
+    }
     tags.sort();
     tags.dedup();
     tags
@@ -341,13 +402,74 @@ fn tested_ids(condition: &Condition, cooldowns: &mut Vec<String>, costs: &mut Ve
     }
 }
 
+/// The row of the entry of fragment `fragment_name` for the tag state `entry` (the entry's own
+/// tags), which action `action_name` of `action_list` plays with the weapon stance `weapon` and
+/// its `body`: its player and attach database entries for those tags, length, scopes, markers,
+/// transitions and hit. `None` when neither database has an entry for them.
+fn fragment_row(
+    (sources, rows, action_list): (&AnimationSources, &BundleRows, &ActionList),
+    (weapon, body): (
+        Option<&WeaponStance>,
+        Option<&Result<Option<WeaponBody<'_>>, String>>,
+    ),
+    action_name: &str,
+    fragment_name: &str,
+    entry: &[&str],
+) -> Option<FragmentRow> {
+    let player = sources.player_fragment_any_case(fragment_name, entry);
+    let attach = weapon
+        .and_then(|weapon| weapon.attach.as_ref())
+        .and_then(|path| sources.attach.get(path))
+        .and_then(|adb| {
+            let found = adb
+                .fragments
+                .iter()
+                .find(|own| own.name.eq_ignore_ascii_case(fragment_name))?;
+            adb.best(&found.name, entry)
+        });
+    let found: Vec<&Fragment> = attach.into_iter().chain(player).collect();
+    if found.is_empty() {
+        return None;
+    }
+    let hit = match (weapon, body) {
+        (Some(weapon), Some(body)) => fragment_attack(
+            sources,
+            rows,
+            weapon,
+            body.as_ref(),
+            entry,
+            action_name,
+            fragment_name,
+        )
+        .ok(),
+        _ => None,
+    };
+    let length_ms = hit.as_ref().map_or_else(
+        || {
+            player
+                .and_then(|fragment| sources.bodies.fragment_length_s(fragment))
+                .map_or(0, ms)
+        },
+        |hit| hit.length_ms,
+    );
+    Some(FragmentRow {
+        name: fragment_name.to_owned(),
+        tags: entry.iter().map(|tag| (*tag).to_owned()).collect(),
+        scopes: sources.controller.scopes_of(fragment_name, entry).to_vec(),
+        length_ms,
+        loops: found.iter().any(|fragment| ends_in_loop(fragment)),
+        markers: markers_of(&found),
+        transitions: transitions_of(&found, action_list, &sources.actions),
+        hit,
+    })
+}
+
 /// The ability list of the grid list `list`, whose action list is `action_list`.
 fn list_of(
-    sources: &AnimationSources,
-    rows: &BundleRows,
-    data: &AbilityRows<'_>,
+    (sources, rows, data): (&AnimationSources, &BundleRows, &AbilityRows<'_>),
     list: &GridList,
     action_list: &ActionList,
+    possible: &[String],
     skipped: &mut Vec<(String, String)>,
 ) -> AbilityList {
     let actions = &action_list.actions;
@@ -357,8 +479,6 @@ fn list_of(
         skipped.push((label, "no weapon stance has these item classes".to_owned()));
     }
     let weapon = cell.and_then(|cell| rows.weapons.get(cell));
-    let owned_tags = cell.map(|cell| stance_tags(cell)).unwrap_or_default();
-    let tags: Vec<&str> = owned_tags.iter().map(String::as_str).collect();
     let body = weapon.map(|weapon| weapon_body(&sources.bodies, weapon));
     let mut fragments: Vec<FragmentRow> = Vec::new();
     // Each fragment an action plays, then each one a transition switches a running action to,
@@ -377,72 +497,30 @@ fn list_of(
         {
             continue;
         }
-        let player = sources
-            .player_fragment_any_case(&fragment_name, &tags)
-            .or_else(|| {
-                let set = tags_set_by(action_list, &action_name);
-                let with_set: Vec<&str> = tags
-                    .iter()
-                    .copied()
-                    .chain(set.iter().map(String::as_str))
-                    .collect();
-                sources.player_fragment_any_case(&fragment_name, &with_set)
-            });
-        let attach = weapon
-            .and_then(|weapon| weapon.attach.as_ref())
-            .and_then(|path| sources.attach.get(path))
-            .and_then(|adb| {
-                let entry = adb
-                    .fragments
-                    .iter()
-                    .find(|entry| entry.name.eq_ignore_ascii_case(&fragment_name))?;
-                adb.best(&entry.name, &tags)
-            });
-        let found: Vec<&Fragment> = attach.into_iter().chain(player).collect();
-        if found.is_empty() {
-            continue;
-        }
-        let hit = match (weapon, &body) {
-            (Some(weapon), Some(body)) => fragment_attack(
-                sources,
-                rows,
-                weapon,
-                body.as_ref(),
-                &tags,
+        for entry_tags in entry_tags_of(sources, &fragment_name, possible) {
+            let entry: Vec<&str> = entry_tags.iter().map(String::as_str).collect();
+            let row = fragment_row(
+                (sources, rows, action_list),
+                (weapon, body.as_ref()),
                 &action_name,
                 &fragment_name,
-            )
-            .ok(),
-            _ => None,
-        };
-        let length_ms = hit.as_ref().map_or_else(
-            || {
-                player
-                    .and_then(|fragment| sources.bodies.fragment_length_s(fragment))
-                    .map_or(0, ms)
-            },
-            |hit| hit.length_ms,
-        );
-        let transitions = transitions_of(&found, action_list, &sources.actions);
-        wanted.extend(
-            transitions
-                .iter()
-                .filter_map(|transition| match &transition.to {
-                    TransitionTo::Fragment(fragment) => {
-                        Some((action_name.clone(), fragment.clone()))
-                    }
-                    TransitionTo::Action(_) => None,
-                }),
-        );
-        fragments.push(FragmentRow {
-            name: fragment_name.clone(),
-            scopes: sources.controller.scopes_of(&fragment_name, &tags).to_vec(),
-            length_ms,
-            loops: found.iter().any(|fragment| ends_in_loop(fragment)),
-            markers: markers_of(&found),
-            transitions,
-            hit,
-        });
+                &entry,
+            );
+            let Some(row) = row else {
+                continue;
+            };
+            wanted.extend(
+                row.transitions
+                    .iter()
+                    .filter_map(|transition| match &transition.to {
+                        TransitionTo::Fragment(fragment) => {
+                            Some((action_name.clone(), fragment.clone()))
+                        }
+                        TransitionTo::Action(_) => None,
+                    }),
+            );
+            fragments.push(row);
+        }
     }
     let mut cooldown_ids = Vec::new();
     let mut cost_ids = Vec::new();
@@ -468,6 +546,7 @@ fn list_of(
                 tag_activities: action.tag_activities.clone(),
                 ability: action.ability.clone(),
                 charge_take: action.charge_take.clone(),
+                move_clears: action.move_clears.clone(),
                 casts: action
                     .casts
                     .iter()
@@ -533,11 +612,10 @@ pub fn build_abilities(
                 return None;
             };
             Some(list_of(
-                sources,
-                rows,
-                &data,
+                (sources, rows, &data),
                 list,
                 &sources.actions[index],
+                &possible_tags(sources, rows, list),
                 &mut report.skipped,
             ))
         })
@@ -776,9 +854,9 @@ mod tests {
 
     /// The musket's Shooter's Stance ready action, cut (`playeractions_ability_musket.actionlist`,
     /// build 25810808): it sets `Crouch` and `HeavyAim` (one in a branch), unsets `Aim` and
-    /// leaves `Stand` as it is; another action's tags are not its.
+    /// sets `Stand` as it stops; another action of the list sets `Prone`.
     #[test]
-    fn an_action_sets_the_tags_of_its_set_cases() {
+    fn an_action_list_sets_the_tags_of_its_set_cases() {
         const ACTIONS: &str = r#"<ActionList><Actions>
  <Action Name="Musket_ShootersStance_Ready" FragmentName="Ability_Musket_ShootersStance_Ready">
   <Activities>
@@ -795,11 +873,77 @@ mod tests {
  </Action>
 </Actions></ActionList>"#;
         let list = ActionList::parse(ACTIONS).expect("actions");
+        assert_eq!(tags_set_in(&list), ["Crouch", "HeavyAim", "Prone", "Stand"]);
+    }
+
+    /// The bow's aim fragment, cut (`player_bow.adb`, build 25810808): a `Bow` entry, a
+    /// `Bow+PenetratingAim` one, a crouched one and an oil one. A bow holder whose lists set
+    /// `PenetratingAim` but never `Crouch` can play the first two; an entry with fragment tags is
+    /// no option of a tag state.
+    #[test]
+    fn a_fragment_keeps_the_entries_its_weapon_can_play() {
+        use nw_formats::mannequin::AnimDatabase;
+
+        const ADB: &str = r#"<AnimDB><FragmentList>
+ <Bow_Aim_UpperBody>
+  <Fragment Tags="Bow+Crouch+PenetratingAim"/>
+  <Fragment Tags="Bow+PenetratingAim"/>
+  <Fragment Tags="Bow"/>
+  <Fragment Tags="Oil+Bow" FragTags="FireOil"/>
+ </Bow_Aim_UpperBody>
+</FragmentList></AnimDB>"#;
+        let mut sources = sources();
+        sources.player = vec![AnimDatabase::parse(ADB).expect("adb")];
+        let possible: Vec<String> = ["Bow", "LongBow", "PenetratingAim", "Oil"]
+            .map(str::to_owned)
+            .to_vec();
         assert_eq!(
-            tags_set_by(&list, "Musket_ShootersStance_Ready"),
-            ["Crouch", "HeavyAim"]
+            entry_tags_of(&sources, "bow_aim_upperbody", &possible),
+            [vec!["Bow", "PenetratingAim"], vec!["Bow"]]
         );
-        assert!(tags_set_by(&list, "Missing").is_empty());
+    }
+
+    /// A bow list can hold the tags of both bow stances (`Bow` for the tutorial and mob bows,
+    /// `Bow,LongBow` for the player bows `BowT1` to `BowT5`), those its own and the archery
+    /// list's actions set, and no tag of another weapon's stance or list.
+    #[test]
+    fn a_list_can_hold_its_stances_and_its_weapons_list_tags() {
+        const ARCHERY: &str = "archery.actionlist";
+        const ABILITY: &str = "ability_bow.actionlist";
+        const SWORD: &str = "sword.actionlist";
+        let classes = |list: &[&str]| -> BTreeSet<String> {
+            list.iter().map(|class| (*class).to_owned()).collect()
+        };
+        let rows = BundleRows::with_weapon_classes(BTreeMap::from([
+            ("Bow".to_owned(), classes(&["Bow"])),
+            ("Bow,LongBow".to_owned(), classes(&["Bow"])),
+            ("1H_Melee,Sword".to_owned(), classes(&["Sword"])),
+        ]));
+        let setting = |tag: &str| {
+            ActionList::parse(&format!(
+                r#"<ActionList><Actions><Action Name="A" FragmentName="A"><Activities>
+<SetMannequinTag><Default TagName="{tag}" OnEnter="Set" OnExit="Unset"/></SetMannequinTag>
+</Activities></Action></Actions></ActionList>"#
+            ))
+            .expect("actions")
+        };
+        let grid = |path: &str, class: &str| GridList {
+            path: path.to_owned(),
+            aliased: Vec::new(),
+            weapon_classes: vec![class.to_owned()],
+        };
+        let mut sources = sources();
+        sources.grid = vec![
+            grid(ARCHERY, "Bow"),
+            grid(ABILITY, "Bow"),
+            grid(SWORD, "Sword"),
+        ];
+        sources.actions = vec![setting("Aim"), setting("PenetratingAim"), setting("Block")];
+        sources.action_paths = [ARCHERY, ABILITY, SWORD].map(str::to_owned).to_vec();
+        assert_eq!(
+            possible_tags(&sources, &rows, &sources.grid[1]),
+            ["Aim", "Bow", "LongBow", "PenetratingAim"]
+        );
     }
 
     #[test]

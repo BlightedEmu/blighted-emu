@@ -231,6 +231,28 @@ pub struct BasicAttack {
     /// holds one to 433 ms on `GRIT_On_Basic_Attacks` (`player_greatsword.adb`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grit: Vec<GritWindow>,
+    /// The cast clips of its fragment when one has a named `Condition` that holds only at run
+    /// time, in file order: it hits as the first whose condition holds as it starts, and not at
+    /// all when none holds ([`BasicAttack::pick_case`]); its own row and hit are the first
+    /// case's. Empty: it always hits as its row and hit say. Observed (`player_bow.adb`, build
+    /// 25810808): `Ability_Bow_ExplosiveArrow` casts `Spell_Ability_Bow_Explosive_Base` on
+    /// `Bow_ExplosiveArrow_NoUpgrade` (`Ability_Bow_SplinterShot` active, not
+    /// `Upgrade_Bow_SplinterShot_FiveA`) and `Spell_Ability_Bow_Explosive_Upgrade` on
+    /// `Bow_ExplosiveArrow_Upgraded`; read with tags alone neither held, and Splinter Shot fired
+    /// no shot (live 2026-11-19).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hit_cases: Vec<HitCase>,
+}
+
+/// One cast clip of an attack's fragment with a run-time condition ([`BasicAttack::hit_cases`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HitCase {
+    /// The clip's named `Condition`, resolved; `True` for a clip without one.
+    pub condition: Condition,
+    /// The `DamageData` row of its spell.
+    pub damage_row: String,
+    /// When and how its spell hits.
+    pub hit: AttackHit,
 }
 
 /// One `ActivateGrit` clip of an attack's fragment (`OptionOnEnter` `Activate`, `OptionOnExit`
@@ -326,9 +348,24 @@ impl BasicAttack {
             .retain(|grit| grit.condition.as_ref().is_none_or(&holds));
     }
 
-    /// Whether a melee shape or a grit window of it has a run-time condition.
+    /// Takes the hit of its first case whose condition `holds` ([`BasicAttack::hit_cases`]);
+    /// gives whether it hits: always for an attack without cases, never when no case holds.
+    pub fn pick_case(&mut self, holds: impl Fn(&Condition) -> bool) -> bool {
+        if self.hit_cases.is_empty() {
+            return true;
+        }
+        let Some(case) = self.hit_cases.iter().find(|case| holds(&case.condition)) else {
+            return false;
+        };
+        self.damage_row = case.damage_row.clone();
+        self.hit = case.hit.clone();
+        true
+    }
+
+    /// Whether a melee shape, a grit window or a hit case of it has a run-time condition.
     pub fn has_run_time_conditions(&self) -> bool {
-        self.grit.iter().any(|grit| grit.condition.is_some())
+        !self.hit_cases.is_empty()
+            || self.grit.iter().any(|grit| grit.condition.is_some())
             || matches!(&self.hit, AttackHit::Melee { shapes, .. }
             if shapes.iter().any(|shape| shape.condition.is_some()))
     }
@@ -935,7 +972,60 @@ mod tests {
             block_disabled_ms: Vec::new(),
             motion: None,
             grit: Vec::new(),
+            hit_cases: Vec::new(),
         }
+    }
+
+    /// Splinter Shot's two cast clips (`Ability_Bow_ExplosiveArrow`): a holder without the
+    /// upgrade shoots the base spell, one with it the upgrade's, one without the ability
+    /// nothing; an attack without cases always hits.
+    #[test]
+    fn an_attack_hits_as_its_first_case_that_holds() {
+        const ABILITY: &str = "Ability_Bow_SplinterShot";
+        const UPGRADE: &str = "Upgrade_Bow_SplinterShot_FiveA";
+        const SHOT: AttackHit = AttackHit::HitScan {
+            fire_ms: 467,
+            range_m: 100.0,
+        };
+        let active = |ability: &str| Condition::AbilityActive(ability.to_owned());
+        let case = |condition, row: &str| HitCase {
+            condition,
+            damage_row: row.to_owned(),
+            hit: SHOT,
+        };
+        let mut attack = melee("Bow_SpreadShot");
+        assert!(attack.clone().pick_case(|_| false), "no cases: it hits");
+        attack.hit_cases = vec![
+            case(
+                Condition::All(vec![
+                    active(ABILITY),
+                    Condition::Not(Box::new(active(UPGRADE))),
+                ]),
+                "Base",
+            ),
+            case(
+                Condition::All(vec![active(ABILITY), active(UPGRADE)]),
+                "Upgrade",
+            ),
+        ];
+        assert!(attack.has_run_time_conditions());
+        fn holds(condition: &Condition, on: &[&str]) -> bool {
+            match condition {
+                Condition::All(parts) => parts.iter().all(|part| holds(part, on)),
+                Condition::Not(part) => !holds(part, on),
+                Condition::AbilityActive(ability) => on.contains(&ability.as_str()),
+                _ => false,
+            }
+        }
+        let picked = |on: &'static [&'static str]| {
+            let mut own = attack.clone();
+            own.pick_case(|condition| holds(condition, on))
+                .then_some(own.damage_row)
+        };
+        assert_eq!(picked(&[ABILITY]).as_deref(), Some("Base"));
+        assert_eq!(picked(&[ABILITY, UPGRADE]).as_deref(), Some("Upgrade"));
+        assert_eq!(picked(&[]), None, "without the ability, no shot");
+        assert_eq!(attack.hit, melee("x").hit, "picking works on a copy");
     }
 
     /// An attack whose press from 433 ms (buffered to 700 ms) starts combo step `step`, as the
