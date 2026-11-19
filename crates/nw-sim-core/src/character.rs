@@ -1036,6 +1036,11 @@ impl Character {
         matches!(self.vertical, Vertical::Grounded)
     }
 
+    /// Whether it is off its floor: lifted in a jump (past a standing jump's wind-up) or falling.
+    pub const fn is_lifted(&self) -> bool {
+        matches!(self.vertical, Vertical::Jumping(_) | Vertical::Falling(_))
+    }
+
     /// Its equip load category changes to `load` (the server weighed its equipped items).
     pub const fn set_equip_load(&mut self, load: EquipLoad) {
         self.equip_load = load;
@@ -1885,14 +1890,19 @@ mod tests {
             ..input(0, 0)
         };
         for _ in 0..STANDING_JUMP_WIND_UP {
+            assert!(!character.is_lifted(), "the wind-up is on the floor");
             character.step(jump, &Flat, SEA);
             assert!(character.position().z.abs() < CLOSE, "wind-up");
         }
         let mut peak: f32 = 0.0;
+        let mut lifted = 0;
         for _ in 0..40 {
             character.step(jump, &Flat, SEA);
             peak = peak.max(character.position().z);
+            lifted += usize::from(character.is_lifted());
         }
+        assert!(lifted > 0, "lifted after the wind-up");
+        assert!(!character.is_lifted(), "on the floor again");
         // The retail standing jump peaked at 1.01 m.
         assert!((peak - 1.0).abs() < 0.05, "{peak}");
         assert!(

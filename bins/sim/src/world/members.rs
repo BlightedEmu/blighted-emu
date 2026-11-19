@@ -23,10 +23,10 @@ use nw_messages::{
     GDE_METADATA_COMPONENT, GatherableControllerState, GdeMetadataReplicatedState, InputPosition,
     LOCAL_PLAYER_INTEREST, LookDir, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState,
     MessageError, MobStep, PLAYER_SLICE_ASSET, POS3_LEN, PlayerStates, RemoteEffect,
-    ReplicatedStateBundle, SPAWN_MOVEMENT, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT,
-    STATUS_EFFECTS_TYPE_INDEX, ServerMessage, StatusEffectsState, StepPlace, TeleportStep,
-    VitalsData, VitalsState, boss_phase_change, change_members, offset_from, player_members,
-    raw_id_of_entity, remote_player_members,
+    RemoteMoveFlags, ReplicatedStateBundle, SPAWN_MOVEMENT, SPAWN_STATE_ID, SPAWN_STATE_MS,
+    SPAWN_TELEPORT, STATUS_EFFECTS_TYPE_INDEX, ServerMessage, StatusEffectsState, StepPlace,
+    TeleportStep, VitalsData, VitalsState, boss_phase_change, change_members, offset_from,
+    player_members, raw_id_of_entity, remote_player_members,
 };
 use nw_messages::items::FullList;
 use nw_messages::list_delta::ReplicatedList;
@@ -326,7 +326,13 @@ pub(super) fn remote_group(
     };
     if carded {
         full_first_position(&mut group, position, NO_CLOCK_STAMP, |place, stamp| {
-            AlcState::remote_spawn(place, stamp, SPAWN_MOVEMENT, AlcPosture::Stand)
+            AlcState::remote_spawn(
+                place,
+                stamp,
+                SPAWN_MOVEMENT,
+                AlcPosture::Stand,
+                RemoteMoveFlags::default(),
+            )
         })?;
     }
     Ok(Some(group))

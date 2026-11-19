@@ -44,10 +44,10 @@ use nw_messages::{
     DisableCollisionMsg, GatheringInterruptedMsg, Hands, HealthChange, InputRecord,
     InteractionEndedMsg, InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT,
     LevelSpec, LookDir, LookupRequest, MeleeHitMsg, MemberState, MessageError, PlayerIdentity,
-    PlayerLook, PlayerSeenByAiMsg, PlayerStates, ProgressionState, SelectedAsTargetMsg,
-    ServerMessage, ShownItem, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg,
-    UnselectedAsTargetMsg, VitalsData, WorldPosition, facet_entity, put_looking_through_loadout,
-    put_member,
+    PlayerLook, PlayerSeenByAiMsg, PlayerStates, ProgressionState, RemoteMoveFlags,
+    SelectedAsTargetMsg, ServerMessage, ShownItem, TUTORIAL_LEVEL, TargetMsg, TeleportStep,
+    TimeSynchMsg, UnselectedAsTargetMsg, VitalsData, WorldPosition, facet_entity,
+    put_looking_through_loadout, put_member,
 };
 use nw_messages::{SyncExecuteEntitiesMsg, TriggerAddress};
 use nw_sim_core::{
@@ -4636,6 +4636,12 @@ impl SimWorld {
             action: player.slayer.remote_action(),
             upper: player.slayer.remote_upper(),
             posture: player.slayer.remote_posture(),
+            // Off the floor from the lift on: retail cleared another player's floor bit 167 to
+            // 333 ms after its jump started (13,586 of 19,012 clears in the jump), past the
+            // standing jump's wind-up.
+            flags: RemoteMoveFlags {
+                grounded: !player.tracked.is_lifted() && !player.tracked.is_swimming(),
+            },
             blocking: vitals.blocking(),
             spawned_ms: clock.spawn_ms,
             gear_version,
@@ -10811,6 +10817,120 @@ mod tests {
                     .iter()
                     .any(|(toggle, _)| (toggle + 1..=toggle + 3).contains(counter))),
                 "{device}: three states carry each change, then no more: {shown:?}"
+            );
+        }
+    }
+
+    /// Live 2026-11-18: other players floated after jumps and dodges. Retail other players
+    /// (1,195 ledgers): child 41 clears its floor bit (`0x10`, `f3` to `e3`) in the jump and the
+    /// fall and sets it at the landing, in the state of the change and 1 to 3 more; ours sent
+    /// `f3` in the first state only. The client here moves its own body as the server does and
+    /// shows it to its camera; a pad runs by its left stick and jumps by the same input action
+    /// as the keys (input record slot value 1 bit 9; Inferred for the pad, as for its crouch).
+    #[test]
+    fn another_player_sees_a_jump_leave_the_floor_and_land() {
+        use nw_sim_core::{CharacterInput, Intent};
+        const DATA_BITS: usize = 41;
+        const JUMP_VALUE: usize = 1;
+        const JUMP_KEY: u64 = 1 << 9;
+        const AIRBORNE_BITS: u8 = 0xe3;
+        const GROUNDED_BITS: u8 = 0xf3;
+        const JUMP_RECORD: u16 = 4;
+        const LAST_RECORD: u16 = 60;
+        /// The floor of the test world, at the test players' height.
+        const GROUND_M: f32 = 50.0;
+        const VIEW: LookDir = LookDir {
+            yaw: 0.0,
+            pitch: 0.3,
+        };
+        /// The left stick pushed forward: right at rest, forward 1.
+        const STICK_FORWARD: [u8; 4] = [128, 255, 128, 128];
+        const STICKS_AT_REST: [u8; 4] = [128; 4];
+        let still = Intent::default();
+        let keys_run = Intent::of_keys(true, false, false, false);
+        let pad_run = Intent::default().with_stick(Some([0.0, 1.0]));
+        for (device, slots, stick, intent) in [
+            ("keys standing", STANDING_SLOTS, STICKS_AT_REST, still),
+            ("keys running", FORWARD_SLOTS, STICKS_AT_REST, keys_run),
+            ("pad running", STANDING_SLOTS, STICK_FORWARD, pad_run),
+        ] {
+            let mut world = SimWorld::new(
+                settings(MANY, MAX_PLAYERS),
+                WorldIds::random(0).expect("ids"),
+                Arc::new(FlatGround(GROUND_M)),
+                slot("sim-a"),
+                test_combat(),
+                Arc::default(),
+            );
+            join(&mut world, 1, 0.0);
+            join(&mut world, 2, 5.0);
+            tick(&mut world, NOW);
+            let (a, b) = (connection(1), connection(2));
+            let entity = world.by_connection[&a];
+            let start = world
+                .world
+                .get::<Body>(entity)
+                .expect("body")
+                .motion
+                .position();
+            let mut client = nw_sim_core::Character::new(start);
+            let mut shown = Vec::new();
+            for counter in 1..=LAST_RECORD {
+                let input_at = NOW + u64::from(counter) * u64::from(attack::INPUT_RECORD_MS);
+                let jumps = counter == JUMP_RECORD;
+                client.step(
+                    CharacterInput {
+                        intent: Intent {
+                            jump: jumps,
+                            ..intent
+                        },
+                        yaw: VIEW.yaw,
+                        dt_s: f32::from(attack::INPUT_RECORD_MS) / 1_000.0,
+                    },
+                    &FlatGround(GROUND_M),
+                    OCEAN_LEVEL_M,
+                );
+                let mut values = slots;
+                if jumps {
+                    values[JUMP_VALUE] |= JUMP_KEY;
+                }
+                let mut record =
+                    camera_record(counter, client.position(), VIEW, client.velocity(), values);
+                record.slots.bytes = stick;
+                let _ = world.move_from_input(&a, &[record], input_at);
+                let outgoing = tick(&mut world, input_at);
+                let alc = alc_children(&states_of(&world, &outgoing.messages, &b, 1));
+                if let Some((_, bits)) = alc.iter().find(|(child, _)| *child == DATA_BITS) {
+                    shown.push((counter, bits[0]));
+                }
+            }
+            let mut runs: Vec<(u8, usize)> = Vec::new();
+            for (_, bits) in &shown {
+                match runs.last_mut() {
+                    Some((last, count)) if last == bits => *count += 1,
+                    _ => runs.push((*bits, 1)),
+                }
+            }
+            assert_eq!(
+                runs,
+                [
+                    (
+                        AIRBORNE_BITS,
+                        usize::from(replica::REMOTE_ACTION_ECHO_STATES)
+                    ),
+                    (
+                        GROUNDED_BITS,
+                        usize::from(replica::REMOTE_ACTION_ECHO_STATES)
+                    ),
+                ],
+                "{device}: off the floor after the jump, on it at the landing, each in three \
+                 states: {shown:?}"
+            );
+            assert!(
+                shown
+                    .first()
+                    .is_some_and(|(counter, _)| *counter >= JUMP_RECORD),
+                "{device}: from the jump key on (a running jump lifts at once): {shown:?}"
             );
         }
     }

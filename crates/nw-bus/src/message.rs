@@ -1160,6 +1160,10 @@ pub struct PlayerGhost {
     /// How its body holds itself (ALC child 43, `nw_messages::AlcPosture`).
     #[serde(default)]
     pub posture: GhostPosture,
+    /// Its body is off the floor: in a jump or a fall, or swimming (ALC child 41,
+    /// `nw_messages::RemoteMoveFlags`).
+    #[serde(default)]
+    pub airborne: bool,
 }
 
 /// How the body of a player ghost holds itself (ALC child 43).
@@ -2101,6 +2105,7 @@ mod tests {
                     after_state: true,
                 }),
                 posture: GhostPosture::Prone,
+                airborne: true,
             }),
             ..ghost
         };

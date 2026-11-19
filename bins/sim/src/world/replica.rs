@@ -34,9 +34,9 @@ use nw_messages::{
     AlcPosture, AlcStamp, AlcState, BundleGroup, BundleMember, CardPlace, DamageReceiverState,
     Hands, HealthChange, InputPosition, ItemLook, KnownStamp, LookDir, MemberState, MessageError,
     PaperdollPublic, PaperdollState, PlayerGear, PlayerIdentity, PlayerLook, PlayerStates,
-    ProgressionState, RemoteSequenceClock, RemoteStep, RemoteUpper, SOCIAL_COMPONENT,
-    SPAWN_MOVEMENT, SecondSlayerState, ShownItem, ShownSocial, SlayerState, SlotChange, StepPlace,
-    UpperSlots, VitalsData, put_looking_through_loadout, put_member,
+    ProgressionState, RemoteMoveFlags, RemoteSequenceClock, RemoteStep, RemoteUpper,
+    SOCIAL_COMPONENT, SPAWN_MOVEMENT, SecondSlayerState, ShownItem, ShownSocial, SlayerState,
+    SlotChange, StepPlace, UpperSlots, VitalsData, put_looking_through_loadout, put_member,
 };
 use nw_sim_core::Position;
 
@@ -65,8 +65,10 @@ pub(super) const REMOTE_GROUPS_PER_TICK: usize = 24;
 /// sent other players' slayer state in runs of 1 to 8 states, 1 to 3 in 14 of the 22 runs, and
 /// left it out of the 1,683 other states of general-other-01 and newchar-retail). A change of
 /// its posture (child 43) goes in as many (our choice: retail sent it with the posture's
-/// sequence, in the same states).
-const REMOTE_ACTION_ECHO_STATES: u8 = 3;
+/// sequence, in the same states), and a change of its movement flags (child 41) too (Observed,
+/// 1,195 ledgers: retail sent a change of another player's child 41 in its state and 1 to 3
+/// more in 658,929 runs, alone in 52,382; 2 more is the median).
+pub(super) const REMOTE_ACTION_ECHO_STATES: u8 = 3;
 
 /// What a player is now, for the players who see it: from its own sim, or from a ghost.
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +100,8 @@ pub(super) struct ReplicaSource {
     pub(super) upper: Option<RemoteUpper>,
     /// How its body holds itself ([`super::slayer::SlayerTrack::remote_posture`]).
     pub(super) posture: AlcPosture,
+    /// Its movement flags: whether its body stands on a floor ([`RemoteMoveFlags`]).
+    pub(super) flags: RemoteMoveFlags,
     pub(super) blocking: bool,
     pub(super) spawned_ms: u64,
     pub(super) gear_version: u64,
@@ -180,6 +184,7 @@ impl ReplicaSource {
                 after_state: upper.after_state,
             }),
             posture: ghost_posture(self.posture),
+            airborne: !self.flags.grounded,
         }
     }
 
@@ -225,6 +230,9 @@ impl ReplicaSource {
                 after_state: upper.after_state,
             }),
             posture: posture_of_ghost(ghost.posture),
+            flags: RemoteMoveFlags {
+                grounded: !ghost.airborne,
+            },
             blocking: ghost.blocking,
             spawned_ms: ghost.spawned_ms,
             gear_version: ghost.gear_version,
@@ -350,6 +358,9 @@ pub(super) struct ReplicaMemory {
     /// Its posture, and how many more states carry it.
     posture: AlcPosture,
     posture_echoes: u8,
+    /// Its movement flags, and how many more states carry them.
+    flags: RemoteMoveFlags,
+    flags_echoes: u8,
     /// The server time of its last new life (ms since 2000-01-01).
     life_ms: u64,
     /// The `pos10` every viewer places it from: its states move it by offsets from it (Observed:
@@ -388,6 +399,10 @@ pub(super) struct Replica {
     posture_changed: bool,
     /// Its state of this tick carries its posture ([`REMOTE_ACTION_ECHO_STATES`]).
     sends_posture: bool,
+    /// Its movement flags changed: the others see it now.
+    flags_changed: bool,
+    /// Its state of this tick carries its movement flags ([`REMOTE_ACTION_ECHO_STATES`]).
+    sends_flags: bool,
     /// Its own state echoes a change of its upper slots: the others see it now.
     upper_due: bool,
     /// Where its state of this tick puts it: an offset from its anchor, or a new anchor.
@@ -431,13 +446,16 @@ impl Replica {
             Some(seen) if !action_changed => seen.action_echoes,
             _ => REMOTE_ACTION_ECHO_STATES,
         };
-        // Its posture goes from its change on, as its slayer state; the card carries it.
-        let posture_changed = seen.is_some_and(|seen| seen.posture != source.posture);
-        let posture_echoes_left = match seen {
-            Some(seen) if !posture_changed => seen.posture_echoes,
-            Some(_) => REMOTE_ACTION_ECHO_STATES,
-            None => 0,
-        };
+        // Its posture and its movement flags go from their change on, as its slayer state; the
+        // card carries them.
+        let (posture_changed, posture_echoes_left) = echoes_from(
+            seen.map(|seen| (seen.posture, seen.posture_echoes)),
+            source.posture,
+        );
+        let (flags_changed, flags_echoes_left) = echoes_from(
+            seen.map(|seen| (seen.flags, seen.flags_echoes)),
+            source.flags,
+        );
         let upper_due = seen.is_some() && source.upper.is_some();
         let gear = source.gear();
         let paperdoll_change = seen.and_then(|seen| {
@@ -515,6 +533,8 @@ impl Replica {
             },
             posture: source.posture,
             posture_echoes: posture_echoes_left.saturating_sub(1),
+            flags: source.flags,
+            flags_echoes: flags_echoes_left.saturating_sub(1),
             life_ms,
             anchor,
         };
@@ -534,6 +554,8 @@ impl Replica {
             sends_action: action_echoes_left > 0,
             posture_changed,
             sends_posture: posture_echoes_left > 0,
+            flags_changed,
+            sends_flags: flags_echoes_left > 0,
             upper_due,
             place,
             anchor,
@@ -555,6 +577,7 @@ impl Replica {
             || self.block_changed
             || self.action_changed
             || self.posture_changed
+            || self.flags_changed
             || self.anchor_moved
             || self.upper_due
     }
@@ -654,6 +677,7 @@ impl Replica {
                     self.stamp,
                     source.movement,
                     source.posture,
+                    source.flags,
                 )?);
             }
             // The first state carries the own spawn's sequence time and the whole clock: the
@@ -666,13 +690,15 @@ impl Replica {
         }
         let slayer = self.sent_action();
         let posture = self.sent_posture();
-        if slayer.is_some() || self.upper_due || posture.is_some() {
+        let flags = self.sent_flags();
+        if slayer.is_some() || self.upper_due || posture.is_some() || flags.is_some() {
             tracing::debug!(
                 player = entity,
                 interest,
                 ?slayer,
                 upper = ?source.upper.filter(|_| self.upper_due),
                 ?posture,
+                ?flags,
                 "remote slayer state to a viewer"
             );
         }
@@ -736,6 +762,12 @@ impl Replica {
         Some(self.source.posture).filter(|_| self.sends_posture)
     }
 
+    /// Its movement flags, when its states of this tick carry them
+    /// ([`REMOTE_ACTION_ECHO_STATES`]).
+    fn sent_flags(&self) -> Option<RemoteMoveFlags> {
+        Some(self.source.flags).filter(|_| self.sends_flags)
+    }
+
     /// Its ALC state for a viewer whose client has `sight` of it, which then has its clock.
     fn step_member(&self, sight: &mut ViewerSight) -> Result<BundleMember, MessageError> {
         let source = &self.source;
@@ -751,10 +783,22 @@ impl Replica {
                 sequence_time: source.sequence.map(|seconds| sight.sequence.time(seconds)),
                 upper: source.upper,
                 posture: self.sent_posture(),
+                flags: self.sent_flags(),
             })?),
         };
         sight.stamp = sight.stamp.after(self.stamp);
         Ok(member)
+    }
+}
+
+/// Whether a value the viewers last had as `seen` (with the states left that carry it) changed to
+/// `now`, and how many states carry it from this tick on: [`REMOTE_ACTION_ECHO_STATES`] from a
+/// change, none for a player first seen (its card carries the value).
+fn echoes_from<T: PartialEq>(seen: Option<(T, u8)>, now: T) -> (bool, u8) {
+    match seen {
+        Some((before, _)) if before != now => (true, REMOTE_ACTION_ECHO_STATES),
+        Some((_, left)) => (false, left),
+        None => (false, 0),
     }
 }
 
@@ -918,6 +962,7 @@ pub(super) mod tests {
             action: None,
             upper: None,
             posture: AlcPosture::Stand,
+            flags: RemoteMoveFlags::default(),
             blocking: false,
             spawned_ms: SPAWNED_MS,
             gear_version: 3,
@@ -1060,7 +1105,11 @@ pub(super) mod tests {
 
     #[test]
     fn a_ghost_carries_the_whole_replica() {
-        for source in [source(), aiming()] {
+        let jumping = ReplicaSource {
+            flags: RemoteMoveFlags { grounded: false },
+            ..source()
+        };
+        for source in [source(), aiming(), jumping] {
             let back = ReplicaSource::of_ghost(&source.ghost());
             assert_eq!(back, source);
         }
@@ -1186,6 +1235,71 @@ pub(super) mod tests {
                 .and_then(|change| change.life)
                 .is_some_and(|life| !life.is_dead()),
             "a new life"
+        );
+    }
+
+    /// Retail other players (1,195 ledgers): child 41 goes in the state of a change and in 1 to
+    /// 3 more (658,929 runs); a jump clears its floor bit (`f3` to `e3`), the landing sets it.
+    #[test]
+    fn others_get_a_change_of_the_floor_bit_in_its_first_states_only() {
+        /// The `dataBits` byte of a player in the air (retail `e3`).
+        const AIRBORNE_BITS: u8 = 0xe3;
+        /// The `dataBits` byte of a player on a floor (retail `f3`).
+        const GROUNDED_BITS: u8 = 0xf3;
+        let data_bits = |replica: &Replica| {
+            let group = replica
+                .group(9, 1, AT, false, HOME_WORLD, &mut ViewerSight::default())
+                .expect("group")
+                .expect("state");
+            let MemberState::Alc(alc) = &group.members[0].state else {
+                panic!("the ALC first");
+            };
+            alc.slot0_children()
+                .expect("children")
+                .into_iter()
+                .find(|(child, _)| *child == 41)
+                .map(|(_, bytes)| bytes)
+        };
+        let jumping = ReplicaSource {
+            flags: RemoteMoveFlags { grounded: false },
+            ..source()
+        };
+        let (card, mut seen) = Replica::new(source(), AT, None, SPAWNED_MS);
+        assert_eq!(data_bits(&card), None, "the card carries the flags itself");
+        let mut sent = Vec::new();
+        for (tick, now) in [
+            jumping.clone(),
+            jumping.clone(),
+            jumping.clone(),
+            jumping,
+            source(),
+            source(),
+            source(),
+            source(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let at_ms = SPAWNED_MS + (u64::try_from(tick).expect("tick") + 1) * 33;
+            let (replica, now_seen) = Replica::new(now, AT, Some(seen), at_ms);
+            sent.push((replica.changed(), data_bits(&replica)));
+            seen = now_seen;
+        }
+        let air = Some(vec![AIRBORNE_BITS]);
+        let floor = Some(vec![GROUNDED_BITS]);
+        assert_eq!(
+            sent,
+            [
+                (true, air.clone()),
+                (false, air.clone()),
+                (false, air),
+                (false, None),
+                (true, floor.clone()),
+                (false, floor.clone()),
+                (false, floor),
+                (false, None),
+            ],
+            "each change at once to every viewer, in {REMOTE_ACTION_ECHO_STATES} states"
         );
     }
 

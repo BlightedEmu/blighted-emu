@@ -634,6 +634,59 @@ impl AlcPosture {
     }
 }
 
+/// The `dataBits` bit (bit 4 of the client's state flag word `+0x450`) of a body that stands on
+/// a floor. Client code (build 25810808): the actor state update `FUN_142a256a0` sets it from its
+/// own floor probe (`FUN_141714b40`, with the floor normal and distance), and the remote playback
+/// `FUN_144871ad0` marks a remote body as on the floor (state `+0x612` bit `0x20`, no probe) when
+/// both states it blends between have it. Retail other players (1,195 ledgers): it goes off in
+/// the jump (`13=0e`, 13,586 of 19,012 clears 167 to 333 ms after the jump started) and at the
+/// fall (`13=0d`, 884 of 996 in the fall's first state), and on at the landing (`13=0c`, 9,299
+/// of 14,991 sets in the landing's first state); it is on in 99.8 % of the states that stand
+/// still (`13=1f`), 4 % of the falls and 9 % of the swims (`13=06`).
+const DATA_BITS_GROUNDED: u8 = 0x10;
+/// `dataBits` of another player's first state on a floor: `f3` on 5,230 of the 11,709 first
+/// states of other players that carry it (`d3` on 4,432; 1,195 ledgers). Bit 5 (`0x20`) is the
+/// own client's input throttle; for another player its meaning is Unknown, so ours keeps it.
+const REMOTE_DATA_BITS: u8 = 0xf3;
+/// `dataBits` of the client's own first state (the most common retail first own ALC).
+const OWN_SPAWN_DATA_BITS: u8 = 0xf3;
+
+/// The movement flags of another player in `dataBits` (child 41) that the server knows: whether
+/// it stands on a floor ([`DATA_BITS_GROUNDED`]). Retail sends child 41 in another player's
+/// state when a bit changes and in the next states (Observed, 1,195 ledgers: 903,807 changes;
+/// a change or first value went on in 1 to 3 more states in 658,929 runs and alone in 52,382);
+/// ours sent it in the first state only,
+/// so the viewer's client kept every jump, fall and swim of another player on the floor. The
+/// other bits keep the first state's values: their rules are Unknown (findings
+/// `local-data/scratch-work/remote-flags-2026-11-19/findings.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteMoveFlags {
+    /// The body stands on a floor: not in a jump or a fall, and not swimming.
+    pub grounded: bool,
+}
+
+impl Default for RemoteMoveFlags {
+    fn default() -> Self {
+        Self { grounded: true }
+    }
+}
+
+impl RemoteMoveFlags {
+    /// The `dataBits` byte of these flags.
+    pub const fn data_bits(self) -> u8 {
+        if self.grounded {
+            REMOTE_DATA_BITS
+        } else {
+            REMOTE_DATA_BITS & !DATA_BITS_GROUNDED
+        }
+    }
+
+    /// Child 41 with these flags.
+    fn child(self) -> (usize, Vec<u8>) {
+        (DATA_BITS_CHILD, vec![self.data_bits()])
+    }
+}
+
 /// The slayer state of a character (children 13 to 18): the slayer script state it is in, the
 /// ALC state number in which that state started and the sequence of the state, and its second
 /// slot (slayer note).
@@ -1016,6 +1069,8 @@ pub struct RemoteStep {
     pub upper: Option<RemoteUpper>,
     /// Its posture, when it goes with the state ([`AlcPosture`]).
     pub posture: Option<AlcPosture>,
+    /// Its movement flags, when they go with the state ([`RemoteMoveFlags`]).
+    pub flags: Option<RemoteMoveFlags>,
 }
 
 /// What a viewer's client has of another player's clock: its anchor and the high bytes of its
@@ -1549,6 +1604,9 @@ impl AlcState {
         if let Some(posture) = step.posture {
             children.push(posture.child());
         }
+        if let Some(flags) = step.flags {
+            children.push(flags.child());
+        }
         Ok(Self::of_slot0(
             children,
             step.position.and_then(StepPlace::pos10),
@@ -1751,6 +1809,7 @@ impl AlcState {
             FirstStateSlots::OwnerAndPublic,
             SPAWN_MOVEMENT,
             AlcPosture::Stand,
+            OWN_SPAWN_DATA_BITS,
         )
     }
 
@@ -1769,14 +1828,23 @@ impl AlcState {
     /// states `1f`, `1a`, `1b`, `0a`, `09` and `08` over 18 first cards), not the stand of a
     /// spawn. `posture` is how its body holds itself now (child 43, [`AlcPosture`]; Inferred:
     /// every first state carries child 43, and a viewer that comes to a crouching player must
-    /// see it crouch).
+    /// see it crouch). `flags` are its movement flags now (child 41, [`RemoteMoveFlags`]; Observed:
+    /// 133 first states of other players carried `e3`, the first state's `f3` off the floor).
     pub fn remote_spawn(
         place: CardPlace,
         stamp: AlcStamp,
         movement: (u64, u64),
         posture: AlcPosture,
+        flags: RemoteMoveFlags,
     ) -> Result<Self, MessageError> {
-        Self::first_state(place, stamp, FirstStateSlots::Public, movement, posture)
+        Self::first_state(
+            place,
+            stamp,
+            FirstStateSlots::Public,
+            movement,
+            posture,
+            flags.data_bits(),
+        )
     }
 
     fn first_state(
@@ -1785,6 +1853,7 @@ impl AlcState {
         slots: FirstStateSlots,
         (slayer_state, slayer_sequence): (u64, u64),
         posture: AlcPosture,
+        data_bits: u8,
     ) -> Result<Self, MessageError> {
         let (pos10, offset) = place.resolved();
         let at = SpawnPlace {
@@ -1796,6 +1865,7 @@ impl AlcState {
             FirstStateSlots::OwnerAndPublic => {
                 writer.u8(SLOT_BITS[0] | SLOT_BITS[1]);
                 let values = FirstValues {
+                    data_bits,
                     data_bits_high: OWN_DATA_BITS_HIGH,
                     slayer_state,
                     slayer_sequence,
@@ -1807,6 +1877,7 @@ impl AlcState {
             FirstStateSlots::Public => {
                 writer.u8(SLOT_BITS[0]);
                 let values = FirstValues {
+                    data_bits,
                     data_bits_high: REMOTE_DATA_BITS_HIGH,
                     slayer_state,
                     slayer_sequence,
@@ -1912,6 +1983,8 @@ enum SpawnValue {
     TimeHigh,
     /// The number of the state before: where the slayer slots started.
     StartedBefore,
+    /// The flag byte (`dataBits`) of the entity ([`FirstValues`]).
+    DataBits,
     /// The high flag byte: the own player's or another player's ([`OWN_DATA_BITS_HIGH`],
     /// [`REMOTE_DATA_BITS_HIGH`]).
     DataBitsHigh,
@@ -1925,6 +1998,7 @@ enum SpawnValue {
 /// The values of a first state that differ by the entity it is for.
 #[derive(Debug, Clone, Copy)]
 struct FirstValues {
+    data_bits: u8,
     data_bits_high: u8,
     slayer_state: u64,
     slayer_sequence: u64,
@@ -1936,9 +2010,9 @@ struct FirstValues {
 pub const SPAWN_MOVEMENT: (u64, u64) = (31, 1081);
 
 use SpawnValue::{
-    Anchor, Byte, DataBitsHigh, FirstPosture, FirstSlayerSequence, FirstSlayerState, Float, IdHigh,
-    IdLow, Position as SpawnPosition, PositionOffset, Prefixed, Raw, StartedBefore, TimeHigh,
-    TimeLow, Word,
+    Anchor, Byte, DataBits, DataBitsHigh, FirstPosture, FirstSlayerSequence, FirstSlayerState,
+    Float, IdHigh, IdLow, Position as SpawnPosition, PositionOffset, Prefixed, Raw, StartedBefore,
+    TimeHigh, TimeLow, Word,
 };
 
 /// The slots of a first state: both for the client's own player, slot 0 alone for an entity it
@@ -2051,7 +2125,7 @@ const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
     (36, Word(0x4a20)),
     (37, Word(0)),
     (TIME_ANCHOR_CHILD, Anchor),
-    (DATA_BITS_CHILD, Byte(243)),
+    (DATA_BITS_CHILD, DataBits),
     (DATA_BITS_HIGH_CHILD, DataBitsHigh),
     (POSTURE_CHILD, FirstPosture),
     (STAMINA_SEGMENTS_CHILD, Byte(PLAYER_STAMINA_SEGMENTS)),
@@ -2123,6 +2197,9 @@ fn write_children(
             }
             StartedBefore => {
                 writer.u16(stamp.id.wrapping_sub(SPAWN_STARTED_BEFORE));
+            }
+            DataBits => {
+                writer.u8(values.data_bits);
             }
             DataBitsHigh => {
                 writer.u8(values.data_bits_high);
@@ -2498,6 +2575,7 @@ mod tests {
             sequence_time: None,
             upper: Some(RemoteUpper { slots, after_state }),
             posture: None,
+            flags: None,
         };
         let child_of = |state: &AlcState, index: usize| {
             state
@@ -2890,8 +2968,14 @@ mod tests {
             offset_ms: SPAWN_STATE_MS,
         };
         let own = AlcState::spawn(place, stamp).expect("spawn");
-        let seen = AlcState::remote_spawn(place, stamp, SPAWN_MOVEMENT, AlcPosture::Stand)
-            .expect("remote spawn");
+        let seen = AlcState::remote_spawn(
+            place,
+            stamp,
+            SPAWN_MOVEMENT,
+            AlcPosture::Stand,
+            RemoteMoveFlags::default(),
+        )
+        .expect("remote spawn");
         assert_eq!(
             seen.bytes[0], SLOT_BITS[0],
             "slot 0 alone, as in all 40 retail first cards of another player"
@@ -2976,6 +3060,55 @@ mod tests {
         );
     }
 
+    /// Retail other players (1,195 ledgers): `f3` in 5,230 first states on a floor, `e3` in 133
+    /// off it; a jump, a fall or a swim clears bit 4 (`0x10`), the landing sets it again.
+    #[test]
+    fn another_players_floor_bit_is_bit_4_of_data_bits() {
+        let on_floor = RemoteMoveFlags::default();
+        let off_floor = RemoteMoveFlags { grounded: false };
+        assert_eq!(on_floor.data_bits(), 0xf3);
+        assert_eq!(off_floor.data_bits(), 0xe3);
+        assert_eq!(
+            on_floor.data_bits() ^ off_floor.data_bits(),
+            DATA_BITS_GROUNDED,
+            "only the floor bit differs"
+        );
+    }
+
+    #[test]
+    fn another_players_first_state_carries_its_floor_bit() {
+        let place = CardPlace {
+            anchor: None,
+            at: InputPosition {
+                x: POS10_X,
+                y: POS10_Y,
+                z_raw: POS10_Z_RAW,
+            },
+        };
+        let stamp = AlcStamp {
+            id: SPAWN_STATE_ID,
+            anchor_us: 0,
+            offset_ms: SPAWN_STATE_MS,
+        };
+        let card = |flags| {
+            AlcState::remote_spawn(place, stamp, SPAWN_MOVEMENT, AlcPosture::Stand, flags)
+                .expect("remote spawn")
+        };
+        let own = AlcState::spawn(place, stamp).expect("spawn");
+        assert_eq!(
+            child(&card(RemoteMoveFlags::default()), DATA_BITS_CHILD),
+            child(&own, DATA_BITS_CHILD),
+            "on a floor, the first state's `f3`"
+        );
+        let jumping = card(RemoteMoveFlags { grounded: false });
+        assert_eq!(child(&jumping, DATA_BITS_CHILD), Some(vec![0xe3]));
+        assert_eq!(
+            child(&jumping, DATA_BITS_HIGH_CHILD),
+            Some(vec![REMOTE_DATA_BITS_HIGH]),
+            "the high byte stays"
+        );
+    }
+
     #[test]
     fn a_seen_entitys_first_state_carries_its_movement() {
         const MOVING: (u64, u64) = (0x1b, 1405);
@@ -2994,8 +3127,14 @@ mod tests {
             anchor_us: 0,
             offset_ms: SPAWN_STATE_MS,
         };
-        let seen =
-            AlcState::remote_spawn(place, stamp, MOVING, AlcPosture::Crouch).expect("remote spawn");
+        let seen = AlcState::remote_spawn(
+            place,
+            stamp,
+            MOVING,
+            AlcPosture::Crouch,
+            RemoteMoveFlags::default(),
+        )
+        .expect("remote spawn");
         assert_eq!(child(&seen, SLAYER_STATE_CHILD), Some(vec![0x1b]));
         assert_eq!(
             child(&seen, SLAYER_SEQUENCE_CHILD),
@@ -3939,6 +4078,7 @@ mod tests {
             }),
             upper: None,
             posture: None,
+            flags: None,
         };
         let ours = AlcState::remote_step(&step).expect("step");
         assert_eq!(child(&ours, POSTURE_CHILD), None, "no posture change");
@@ -3951,6 +4091,23 @@ mod tests {
             child(&crouched, POSTURE_CHILD),
             Some(vec![AlcPosture::Crouch.byte()]),
             "a posture change goes with the state"
+        );
+        assert_eq!(child(&ours, DATA_BITS_CHILD), None, "no flag change");
+        let jumped = AlcState::remote_step(&RemoteStep {
+            flags: Some(RemoteMoveFlags { grounded: false }),
+            ..step
+        })
+        .expect("step");
+        assert_eq!(
+            child(&jumped, DATA_BITS_CHILD),
+            Some(vec![0xe3]),
+            "a flag change goes with the state"
+        );
+        assert_eq!(
+            child(&jumped, DATA_BITS_HIGH_CHILD),
+            None,
+            "the high byte did not change (retail other players, 1,195 ledgers: child 42 in \
+             213,243 states, child 41 in 3,272,616)"
         );
         for index in [
             ID_REL_CHILD,

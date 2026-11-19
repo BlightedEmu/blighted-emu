@@ -471,6 +471,11 @@ impl TrackedBody {
         self.character.is_grounded()
     }
 
+    /// Whether it is off its floor: lifted in a jump or falling ([`Character::is_lifted`]).
+    pub const fn is_lifted(&self) -> bool {
+        self.character.is_lifted()
+    }
+
     /// Whether it swims.
     pub const fn is_swimming(&self) -> bool {
         self.character.is_swimming()
