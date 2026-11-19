@@ -985,11 +985,12 @@ pub const MOB_ENTITY_BASE: u64 = 1 << 34;
 /// option tags, and the larger of a mob's state (five 5-byte numbers and a 1-byte flag) and a
 /// player's ([`PlayerGhost`]: about 246 bytes with all its visible items, its view, target,
 /// action and mount, and 13 more bytes per visible item for its look: a 5-byte skin and two
-/// 4-byte dyes), its upper slayer slots ([`GHOST_UPPER_SLOTS_BYTES`]) and its public profile
-/// ([`GHOST_PROFILE_BYTES`]).
+/// 4-byte dyes), its upper slayer slots ([`GHOST_UPPER_SLOTS_BYTES`]) and their sequence times
+/// (an optional float each), and its public profile ([`GHOST_PROFILE_BYTES`]).
 pub const MAX_GHOST_BYTES: usize = 288
     + GHOST_VISIBLE_ITEMS * GHOST_ITEM_LOOK_BYTES
     + GHOST_UPPER_SLOTS_BYTES
+    + nw_messages::UPPER_SLOTS * OPTION_F32_BYTES
     + GHOST_NAME_POSTCARD_BYTES
     + U32_BYTES
     + OPTION_F32_BYTES
@@ -1101,6 +1102,10 @@ pub struct PlayerGhost {
     /// Seconds into its slayer state's sequence, once its client took its first own state.
     #[serde(default)]
     pub sequence_s: Option<f32>,
+    /// Seconds into the sequence of each of its slayer slots past the first that plays, second
+    /// slot first.
+    #[serde(default)]
+    pub upper_sequence_s: [Option<f32>; nw_messages::UPPER_SLOTS],
     /// The slayer state and sequence of its movement now, which its card shows.
     #[serde(default)]
     pub movement: Option<(u64, u64)>,
@@ -2059,6 +2064,7 @@ mod tests {
                 name: GhostName::of(&"Z".repeat(GHOST_NAME_BYTES)),
                 level: u32::MAX,
                 sequence_s: Some(f32::MAX),
+                upper_sequence_s: [Some(f32::MAX); nw_messages::UPPER_SLOTS],
                 movement: Some((u64::MAX, u64::MAX)),
                 look: Some([u8::MAX; LOOK_CHOICES]),
                 health: u32::MAX,

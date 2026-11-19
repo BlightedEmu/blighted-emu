@@ -275,16 +275,29 @@ fn camera_aims(weapon_aims: bool, record: &InputRecord, ability_aims: bool) -> b
 /// stamp age: in the 2026-11-18 timing study of 398 ledgers retail stamped another player's
 /// states 4 to 28 ms before it first sent them).
 const MAX_INPUT_CLOCK_LAG_MS: u64 = 100;
+/// The share of its lag behind a record's arrival that a player's input clock closes at each
+/// record: one part in this many (our choice, Inferred: it closes a lag to a third in about 9
+/// records, 0.3 s at 30 Hz, and moves a stamp 1 to 3 ms for the 10 to 20 ms arrival jitter of
+/// the live 2026-11-19c records). Without it a clock that fell behind stayed behind: the frame
+/// times, in whole ms, of some clients count fewer ms than the server's clock (live 2026-11-19e,
+/// player 185: its stamps fell from 13 to 70 ms before its states went out over 20:39:23 to
+/// 20:39:27 UTC, about 14 ms a second, then stayed 65 to 115 ms before them on the
+/// [`MAX_INPUT_CLOCK_LAG_MS`] floor; 19c player 184 the same from 17:36:26; Inferred cause: a
+/// 1/30 s frame time rounds to 33 ms, 1 % short, and the client's frame times may run slow).
+/// The viewer's client saw stamp ages of -136/-107/-13 ms, p10/50/90, where retail's were
+/// -36/-23/-12 ms, and set its delay for the player to 154 ms at the median, retail 71 ms.
+const INPUT_CLOCK_CATCH_UP_RECORDS: u64 = 8;
 /// Milliseconds per second, for the input clock.
 const INPUT_CLOCK_MS_PER_S: f32 = 1_000.0;
 
 /// The client's time of its next input record on the sim's clock: the time of the record before
-/// (`clock`) plus the record's frame time (`frame_s`), at most `now_ms` and at least
-/// [`MAX_INPUT_CLOCK_LAG_MS`] before it; `now_ms` for the first record. Retail stamps a player's
-/// states by its client's frame times (Observed, 2026-11-18 timing study: exactly 33.3 or 50.0 ms
-/// per state number); ours stamped the server time each record came at, and when a controller's
-/// records came in bursts its states carried stamps up to 1,132 ms old, then jumped (live
-/// 2026-11-18: other players saw it late and jerky).
+/// (`clock`) plus the record's frame time (`frame_s`) and a share of its lag behind `now_ms`
+/// ([`INPUT_CLOCK_CATCH_UP_RECORDS`]), at most `now_ms` and at least [`MAX_INPUT_CLOCK_LAG_MS`]
+/// before it; `now_ms` for the first record. Retail stamps a player's states by its client's
+/// frame times (Observed, 2026-11-18 timing study: exactly 33.3 or 50.0 ms per state number);
+/// ours stamped the server time each record came at, and when a controller's records came in
+/// bursts its states carried stamps up to 1,132 ms old, then jumped (live 2026-11-18: other
+/// players saw it late and jerky).
 fn input_clock_after(clock: Option<u64>, frame_s: f32, now_ms: u64) -> u64 {
     #[allow(
         clippy::cast_possible_truncation,
@@ -293,7 +306,9 @@ fn input_clock_after(clock: Option<u64>, frame_s: f32, now_ms: u64) -> u64 {
     )]
     let frame_ms = (frame_s.max(0.0) * INPUT_CLOCK_MS_PER_S).round() as u64;
     clock.map_or(now_ms, |clock| {
-        (clock + frame_ms)
+        let stepped = clock + frame_ms;
+        let catch_up = now_ms.saturating_sub(stepped) / INPUT_CLOCK_CATCH_UP_RECORDS;
+        (stepped + catch_up)
             .min(now_ms)
             .max(now_ms.saturating_sub(MAX_INPUT_CLOCK_LAG_MS))
     })
@@ -4644,6 +4659,7 @@ impl SimWorld {
             name: GhostName::of(&player.name),
             level: progression.level_of(player.experience),
             sequence: player.slayer.remote_sequence(),
+            upper_sequence: player.slayer.remote_upper_seconds(),
             movement: player.slayer.card_movement(),
             look: player.look,
             health: vitals.health.current(),
@@ -4654,11 +4670,12 @@ impl SimWorld {
             action: player.slayer.remote_action(),
             upper: player.slayer.remote_upper(),
             posture: player.slayer.remote_posture(),
-            // Off the floor from the lift on: retail cleared another player's floor bit 167 to
-            // 333 ms after its jump started (13,586 of 19,012 clears in the jump), past the
-            // standing jump's wind-up.
+            // Off the floor from the lift on, but not before the jump's floor time
+            // ([`slayer::SlayerTrack::jump_holds_floor`]): retail cleared another player's floor
+            // bit 167 to 333 ms after its jump started (13,586 of 19,012 clears in the jump).
             flags: RemoteMoveFlags {
-                grounded: !player.tracked.is_lifted() && !player.tracked.is_swimming(),
+                grounded: player.slayer.jump_holds_floor()
+                    || (!player.tracked.is_lifted() && !player.tracked.is_swimming()),
             },
             blocking: vitals.blocking(),
             spawned_ms: clock.spawn_ms,
@@ -13613,9 +13630,13 @@ mod tests {
         const BURST_MS: u64 = 1_200;
         let first = input_clock_after(None, FRAME_S, ARRIVED_MS);
         assert_eq!(first, ARRIVED_MS);
-        // Three records arrive together: they keep the client's spacing, not the arrival time.
+        // Three records arrive together: they keep most of the client's spacing, not the
+        // arrival time.
         let second = input_clock_after(Some(first - 3 * FRAME_MS), FRAME_S, ARRIVED_MS);
-        assert_eq!(second, ARRIVED_MS - 2 * FRAME_MS);
+        assert_eq!(
+            second,
+            ARRIVED_MS - 2 * FRAME_MS + 2 * FRAME_MS / INPUT_CLOCK_CATCH_UP_RECORDS
+        );
         // The clock never runs ahead of the sim's.
         assert_eq!(
             input_clock_after(Some(first), FRAME_S, ARRIVED_MS),
@@ -13626,6 +13647,31 @@ mod tests {
             input_clock_after(Some(first), FRAME_S, ARRIVED_MS + BURST_MS),
             ARRIVED_MS + BURST_MS - MAX_INPUT_CLOCK_LAG_MS
         );
+    }
+
+    #[test]
+    fn an_input_clock_behind_the_records_catches_up() {
+        // Live 2026-11-19c, player 184 after 17:36:26 UTC: records every 33 ms, stamps 65 to
+        // 115 ms before their states went out for the rest of the session; retail's stamp age
+        // at the viewer was -23 ms at the median.
+        const FRAME_S: f32 = 1.0 / 30.0;
+        const ARRIVAL_MS: [u64; 3] = [33, 33, 34];
+        const SECOND_RECORDS: usize = 30;
+        const MINUTE_RECORDS: usize = 1_800;
+        const CAUGHT_UP_MS: u64 = 10;
+        let run = |mut clock: u64, mut now_ms: u64, records: usize| {
+            for record in 0..records {
+                now_ms += ARRIVAL_MS[record % ARRIVAL_MS.len()];
+                clock = input_clock_after(Some(clock), FRAME_S, now_ms);
+            }
+            now_ms - clock
+        };
+        let start_ms = 10_000;
+        let behind = run(start_ms - MAX_INPUT_CLOCK_LAG_MS, start_ms, SECOND_RECORDS);
+        assert!(behind < CAUGHT_UP_MS, "{behind} ms behind after 1 s");
+        // 1/30 s frames in whole ms count 33 ms for 33.3: the clock no longer drifts to the floor.
+        let behind = run(start_ms, start_ms, MINUTE_RECORDS);
+        assert!(behind < CAUGHT_UP_MS, "{behind} ms behind after a minute");
     }
 
     #[test]

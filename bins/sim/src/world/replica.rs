@@ -35,8 +35,9 @@ use nw_messages::{
     Hands, HealthChange, InputPosition, ItemLook, KnownStamp, LookDir, MemberState, MessageError,
     PaperdollPublic, PaperdollState, PlayerGear, PlayerIdentity, PlayerLook, PlayerStates,
     ProgressionState, RemoteMoveFlags, RemoteSequenceClock, RemoteStep, RemoteUpper,
-    SOCIAL_COMPONENT, SPAWN_MOVEMENT, SecondSlayerState, ShownItem, ShownSocial, SlayerState,
-    SlotChange, StepPlace, UpperSlots, VitalsData, put_looking_through_loadout, put_member,
+    RemoteUpperClocks, SOCIAL_COMPONENT, SPAWN_MOVEMENT, SecondSlayerState, ShownItem, ShownSocial,
+    SlayerState, SlotChange, StepPlace, UPPER_SLOTS, UpperSlots, VitalsData,
+    put_looking_through_loadout, put_member,
 };
 use nw_sim_core::Position;
 
@@ -80,6 +81,9 @@ pub(super) struct ReplicaSource {
     pub(super) level: u32,
     /// The time into its slayer state's sequence ([`super::slayer::SlayerTrack::remote_sequence`]).
     pub(super) sequence: Option<f32>,
+    /// The time into the sequence of each of its upper slots that plays
+    /// ([`super::slayer::SlayerTrack::remote_upper_seconds`]).
+    pub(super) upper_sequence: [Option<f32>; UPPER_SLOTS],
     /// The slayer state and sequence of its movement now
     /// ([`super::slayer::SlayerTrack::card_movement`]), for its card.
     pub(super) movement: (u64, u64),
@@ -142,6 +146,7 @@ impl ReplicaSource {
             name: self.name,
             level: self.level,
             sequence_s: self.sequence,
+            upper_sequence_s: self.upper_sequence,
             movement: Some(self.movement),
             look: self.look.map(|look| look.choices()),
             health: self.health,
@@ -195,6 +200,7 @@ impl ReplicaSource {
             name: ghost.name,
             level: ghost.level,
             sequence: ghost.sequence_s,
+            upper_sequence: ghost.upper_sequence_s,
             movement: ghost.movement.unwrap_or(SPAWN_MOVEMENT),
             look: ghost.look.map(PlayerLook::of_choices),
             health: ghost.health,
@@ -684,6 +690,7 @@ impl Replica {
             // viewer's client has them from there.
             *sight = ViewerSight {
                 sequence: RemoteSequenceClock::after_spawn(),
+                upper: RemoteUpperClocks::after_spawn(),
                 stamp: KnownStamp::default().after(self.stamp),
             };
             return Ok(Some(group));
@@ -782,6 +789,7 @@ impl Replica {
                 slayer: self.sent_action(),
                 sequence_time: source.sequence.map(|seconds| sight.sequence.time(seconds)),
                 upper: source.upper,
+                upper_times: sight.upper.times(source.upper_sequence),
                 posture: self.sent_posture(),
                 flags: self.sent_flags(),
             })?),
@@ -842,6 +850,8 @@ pub(super) struct RemotePlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct ViewerSight {
     pub(super) sequence: RemoteSequenceClock,
+    /// Its sequence times of the slots past the first.
+    pub(super) upper: RemoteUpperClocks,
     pub(super) stamp: KnownStamp,
 }
 
@@ -946,6 +956,7 @@ pub(super) mod tests {
             name: GhostName::of(NAME),
             level: LEVEL,
             sequence: None,
+            upper_sequence: [None; UPPER_SLOTS],
             movement: SPAWN_MOVEMENT,
             look: None,
             health: MAX_HEALTH,
@@ -1083,6 +1094,43 @@ pub(super) mod tests {
             "a new absolute part for a viewer whose client has none"
         );
         assert_eq!(sight.sequence, expected, "the viewer's clock took it");
+    }
+
+    #[test]
+    fn another_players_states_carry_its_upper_slot_times_without_a_slot_change() {
+        // Retail interest 36 at 20:57:10.226 UTC: `0=df 1=8b 2=ac 4=8b 6=9f`, no slot change.
+        const SECOND_S: f32 = 0.2;
+        const THIRD_S: f32 = 0.4;
+        let source = ReplicaSource {
+            upper_sequence: [Some(SECOND_S), Some(THIRD_S), None],
+            ..source()
+        };
+        let (replica, _) = Replica::new(source, AT, None, SPAWNED_MS);
+        let mut sight = ViewerSight {
+            upper: RemoteUpperClocks::after_spawn(),
+            ..ViewerSight::default()
+        };
+        let mut expected = sight.upper;
+        let group = replica
+            .group(9, 1, AT, false, HOME_WORLD, &mut sight)
+            .expect("group")
+            .expect("state");
+        let MemberState::Alc(alc) = &group.members[0].state else {
+            panic!("the ALC first");
+        };
+        let times = expected.times([Some(SECOND_S), Some(THIRD_S), None]).0;
+        let children = alc.slot0_children().expect("children");
+        let child = |index: usize| {
+            children
+                .iter()
+                .find(|(child, _)| *child == index)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(child(4), times[0].map(|time| vec![time.rel]));
+        assert_eq!(child(6), times[1].map(|time| vec![time.rel]));
+        assert!(child(4).is_some() && child(16).is_none(), "the time alone");
+        assert_eq!(child(8), None, "the fourth slot plays nothing");
+        assert_eq!(sight.upper, expected, "the viewer's clocks took them");
     }
 
     fn aiming() -> ReplicaSource {

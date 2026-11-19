@@ -801,7 +801,15 @@ const SLAYER_MARKER_CHILD: usize = 48;
 /// second slot and in all 27,628 and 14,112 of the third and fourth; at a start the byte was
 /// `7f`, `81` or `83` (0, 2 and 4 steps from the slot's absolute part, which the first state
 /// sets to 0) in nine of ten, and the state's echoes carry it on, about three states a start.
-const UPPER_SEQUENCE_TIME_REL_CHILDREN: [usize; 3] = [4, 6, 8];
+const UPPER_SEQUENCE_TIME_REL_CHILDREN: [usize; UPPER_SLOTS] = [4, 6, 8];
+/// Slot 0 children of the `slayerSeqTimeAbs` part of the second, third and fourth slayer slots
+/// (`slayerSeqTimeAbs1` to `3`), each a `half` in seconds that its slot's byte counts from.
+const UPPER_SEQUENCE_TIME_ABS_CHILDREN: [usize; UPPER_SLOTS] = [5, 7, 9];
+/// The slayer slots past the first: the second, third and fourth.
+pub const UPPER_SLOTS: usize = 3;
+/// The `slayerSeqTimeAbs` part of each slot past the first in a first state: 0 s (Observed: the
+/// retail first states, `5=0000 7=0000 9=0000`).
+const SPAWN_UPPER_SEQUENCE_ABS: u16 = 0;
 
 /// A change of one slayer slot past the first: any of its state, start and sequence children.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -917,11 +925,68 @@ pub struct SequenceTime {
 
 impl SequenceTime {
     fn children(self) -> Vec<(usize, Vec<u8>)> {
-        let mut children = vec![(SEQUENCE_TIME_REL_CHILD, vec![self.rel])];
+        self.children_at(SEQUENCE_TIME_REL_CHILD, SEQUENCE_TIME_ABS_CHILD)
+    }
+
+    /// Its children as the slot whose relative byte is child `rel_child` and whose absolute
+    /// part is child `abs_child` sends them.
+    fn children_at(self, rel_child: usize, abs_child: usize) -> Vec<(usize, Vec<u8>)> {
+        let mut children = vec![(rel_child, vec![self.rel])];
         if let Some(abs) = self.abs {
-            children.push((SEQUENCE_TIME_ABS_CHILD, abs.to_be_bytes().to_vec()));
+            children.push((abs_child, abs.to_be_bytes().to_vec()));
         }
         children
+    }
+}
+
+/// The time into the sequence of each slayer slot past the first that one remote state sends
+/// (children 4 to 9): `None` for a slot that plays nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UpperSequenceTimes(pub [Option<SequenceTime>; UPPER_SLOTS]);
+
+impl UpperSequenceTimes {
+    fn children(self) -> Vec<(usize, Vec<u8>)> {
+        self.0
+            .into_iter()
+            .zip(UPPER_SEQUENCE_TIME_REL_CHILDREN)
+            .zip(UPPER_SEQUENCE_TIME_ABS_CHILDREN)
+            .filter_map(|((time, rel), abs)| time.map(|time| time.children_at(rel, abs)))
+            .flatten()
+            .collect()
+    }
+}
+
+/// The sequence times of another player's slayer slots past the first as one viewer's client
+/// has them: one [`RemoteSequenceClock`] per slot. Retail sends a viewer the time byte of every
+/// slot that plays in every state of another player, not only at its start (Observed,
+/// `retail-2026-11-19-towns-duels`: child 4 in 151,132 of the 151,536 remote states while the
+/// second slot played; a reload `16=36 18=4249` of interest 36 at 20:57:10.142 UTC sent
+/// `4=86 5=2a66`, then `8b`, `8d`, `8f` one state apart, with child 6 of the third slot beside
+/// it); the byte counts from the slot's absolute part and a new part goes when the byte would
+/// leave its reach (`4=fe`, then `4=7f 5=441a`), as the first slot's. Ours sent the byte only in
+/// the 2 to 3 states that echoed a start (538 of 3,949 states, live 2026-11-19c), and the viewer
+/// played no reload, block, cast or draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RemoteUpperClocks([RemoteSequenceClock; UPPER_SLOTS]);
+
+impl RemoteUpperClocks {
+    /// The clocks of a client that took a first state ([`AlcState::remote_spawn`]): it has that
+    /// state's absolute part of each slot.
+    pub const fn after_spawn() -> Self {
+        let slot = RemoteSequenceClock {
+            abs: Some(SPAWN_UPPER_SEQUENCE_ABS),
+            again: false,
+        };
+        Self([slot; UPPER_SLOTS])
+    }
+
+    /// The wire form of `seconds` into the sequence of each slot for the next state.
+    pub fn times(&mut self, seconds: [Option<f32>; UPPER_SLOTS]) -> UpperSequenceTimes {
+        let mut times = [None; UPPER_SLOTS];
+        for ((time, clock), seconds) in times.iter_mut().zip(&mut self.0).zip(seconds) {
+            *time = seconds.map(|seconds| clock.time(seconds));
+        }
+        UpperSequenceTimes(times)
     }
 }
 
@@ -1080,6 +1145,8 @@ pub struct RemoteStep {
     pub sequence_time: Option<SequenceTime>,
     /// Its slayer slots past the first and its slayer marker, when they go with the state.
     pub upper: Option<RemoteUpper>,
+    /// The time into the sequence of each of its slots past the first that plays.
+    pub upper_times: UpperSequenceTimes,
     /// Its posture, when it goes with the state ([`AlcPosture`]).
     pub posture: Option<AlcPosture>,
     /// Its movement flags, when they go with the state ([`RemoteMoveFlags`]).
@@ -1609,8 +1676,14 @@ impl AlcState {
             children.extend(slayer.children()?);
         }
         if let Some(upper) = step.upper {
-            upper.put(&mut children)?;
+            // The slots' times go per slot, from the viewer's clocks.
+            let slots = UpperSlots {
+                time: None,
+                ..upper.slots
+            };
+            RemoteUpper { slots, ..upper }.put(&mut children)?;
         }
+        children.extend(step.upper_times.children());
         if let Some(time) = step.sequence_time {
             children.extend(time.children());
         }
@@ -2106,11 +2179,11 @@ const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
     (SEQUENCE_TIME_REL_CHILD, Byte(SPAWN_SEQUENCE_REL)),
     (SEQUENCE_TIME_ABS_CHILD, Word(SPAWN_SEQUENCE_ABS)),
     (4, Byte(127)),
-    (5, Word(0)),
+    (5, Word(SPAWN_UPPER_SEQUENCE_ABS)),
     (6, Byte(127)),
-    (7, Word(0)),
+    (7, Word(SPAWN_UPPER_SEQUENCE_ABS)),
     (8, Byte(127)),
-    (9, Word(0)),
+    (9, Word(SPAWN_UPPER_SEQUENCE_ABS)),
     (POS_REL_CHILD, PositionOffset),
     (11, Raw(&[0x66, 0xfe])),
     (12, Raw(&[0x19, 0x7f])),
@@ -2587,6 +2660,7 @@ mod tests {
             slayer: Some(attack),
             sequence_time: None,
             upper: Some(RemoteUpper { slots, after_state }),
+            upper_times: UpperSequenceTimes::default(),
             posture: None,
             flags: None,
         };
@@ -4058,6 +4132,100 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_state_carries_the_time_of_each_upper_slot_that_plays() {
+        // Retail `retail-2026-11-19-towns-duels`, interest 36 at 20:57:10.142 UTC: a reload
+        // `16=36 18=4249` with `4=86 5=2a66`, then `8b`, `8d`, `8f`, one state 2 steps on; a
+        // long second slot went `4=fe`, then `4=7f` with a new `5`, and the next state again.
+        const RELOAD_ABS: u16 = 0x2a66;
+        const RELOAD_RELS: [u8; 4] = [0x86, 0x8b, 0x8d, 0x8f];
+        const RELOAD_STEPS: [f32; 4] = [7.0, 12.0, 14.0, 16.0];
+        let step_s = |steps: f32| steps * SEQUENCE_TIME_STEP_S;
+        let mut clocks = RemoteUpperClocks::after_spawn();
+        let started = clocks.times([Some(0.0), None, None]);
+        assert_eq!(
+            started.children(),
+            [(4, vec![SEQUENCE_TIME_REL_ZERO])],
+            "the first state's absolute part 0 stays"
+        );
+        let moved = clocks.times([Some(step_s(200.0)), None, None]).0[0].expect("plays");
+        assert_eq!(
+            moved.rel, SEQUENCE_TIME_REL_ZERO,
+            "out of reach: a new part"
+        );
+        let mut clocks = RemoteUpperClocks(
+            [RemoteSequenceClock {
+                abs: Some(RELOAD_ABS),
+                again: false,
+            }; UPPER_SLOTS],
+        );
+        for (rel, steps) in RELOAD_RELS.into_iter().zip(RELOAD_STEPS) {
+            let seconds = half_value(RELOAD_ABS) + step_s(steps);
+            let times = clocks.times([Some(seconds), Some(seconds), None]);
+            assert_eq!(
+                times.children(),
+                [(4, vec![rel]), (6, vec![rel])],
+                "every state carries the byte of every slot that plays"
+            );
+        }
+        let held = half_value(RELOAD_ABS) + step_s(SEQUENCE_TIME_MAX_STEPS);
+        assert_eq!(
+            clocks.times([Some(held), None, None]).0[0].map(|time| time.rel),
+            Some(u8::MAX - 1)
+        );
+        let past = held + step_s(2.0);
+        let renewed = clocks.times([Some(past), None, None]);
+        let again = clocks.times([Some(past + step_s(2.0)), None, None]);
+        assert_eq!(
+            renewed.children(),
+            [
+                (4, vec![SEQUENCE_TIME_REL_ZERO]),
+                (5, half_bits(past).to_be_bytes().to_vec())
+            ]
+        );
+        assert_eq!(again.0[0].and_then(|time| time.abs), Some(half_bits(past)));
+        let slots = UpperSlots {
+            second: SlotChange {
+                state: Some(0x36),
+                started: Some(STAMP.id),
+                sequence: Some(4249),
+            },
+            ..UpperSlots::default()
+        };
+        let step = RemoteStep {
+            stamp: STAMP,
+            known: KnownStamp::default(),
+            position: None,
+            facing: None,
+            look: None,
+            slayer: None,
+            sequence_time: None,
+            upper: Some(RemoteUpper {
+                slots: slots.at_seconds(step_s(2.0)),
+                after_state: true,
+            }),
+            upper_times: renewed,
+            posture: None,
+            flags: None,
+        };
+        let state = AlcState::remote_step(&step).expect("step");
+        assert_eq!(
+            child(&state, 4),
+            Some(vec![SEQUENCE_TIME_REL_ZERO]),
+            "the viewer's clock, not the own state's time"
+        );
+        assert_eq!(
+            child(&state, 5),
+            Some(half_bits(past).to_be_bytes().to_vec())
+        );
+        let untimed = AlcState::remote_step(&RemoteStep {
+            upper_times: UpperSequenceTimes::default(),
+            ..step
+        })
+        .expect("step");
+        assert_eq!(child(&untimed, 4), None, "no slot plays");
+    }
+
+    #[test]
     fn a_remote_state_carries_the_retail_slayer_and_place_children() {
         // Retail remote player in the duel capture (51302 ms): `idRel` c5, `timeOffsetRel` fd,
         // `worldPosRel` at the anchor, `rotation`, slayer state 1a started in state 28c5 with
@@ -4093,6 +4261,7 @@ mod tests {
                 abs: None,
             }),
             upper: None,
+            upper_times: UpperSequenceTimes::default(),
             posture: None,
             flags: None,
         };

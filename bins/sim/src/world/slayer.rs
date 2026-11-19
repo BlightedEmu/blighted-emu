@@ -25,7 +25,7 @@ use nw_content::player_sequences::{
 };
 use nw_messages::{
     AlcPosture, AttackKeyBits, RemoteUpper, SecondSlayerState, SequenceClock, SequenceTime,
-    SlayerInput, SlayerState, SlotChange, UpperSlots,
+    SlayerInput, SlayerState, SlotChange, UPPER_SLOTS, UpperSlots,
 };
 use nw_sim_core::{Intent, Posture};
 
@@ -55,6 +55,13 @@ const LAND_MOVE_RECORDS: u16 = 4;
 /// fell (Inferred: the body leaves the floor in the record after the press, and the slayer
 /// reads the body one record late).
 const JUMP_LIFT_RECORDS: u16 = 3;
+/// Seconds from a jump's start through which the players who see the player still get its floor
+/// bit (child 41 bit `0x10`) set (Observed, `retail-2026-11-19-towns-duels`: the other players'
+/// floor bit cleared 103/166/235 ms after the jump's start, p10/50/90 of 170 jumps; 164 to 167 ms
+/// at the median for each of the five most common jump sequences, moving or standing, with the
+/// body 0.34 m up then at the median). Ours cleared it at the body's lift, 0/52/66 ms (live
+/// 2026-11-19c and 19e).
+const JUMP_FLOOR_S: f32 = 0.165;
 /// Milliseconds from a draw or sheathe in the second slot to that slot's end when the stance
 /// names none (Observed: retail ended a `16=44` start with `16=45 18=0` a median 534 ms later,
 /// 29,150 ends in 1,196 ledgers).
@@ -529,52 +536,107 @@ fn third_alone(sequence: u64) -> UpperSlots {
 }
 
 /// Where the player's own movement is, for its movement slayer states.
+///
+/// Retail never follows a move state by itself (Observed, other players' starts in
+/// `retail-2026-11-19-towns-duels`: 0 of 802 moves `13=1b` after a `13=1b`). A key after a stop
+/// went to the move start `13=1a` with the stance's start sequence (state `1b` sequence 1405 to
+/// `1a` 2794, 22 of 64; `1b` 2422 to `1a` 2794, 41 of 76), a move in state `1b` let go went to
+/// the stand (`1b` 2422 to `1f` 1081, 16 of 76), and the end of a sword's block walk while
+/// moving to its move start (`1b` 1130 to `1a` 1894, 20 of 65). Ours sent a stop and a restart
+/// both in `1b`: 159 of 227 moves after a move (live 2026-11-19c and 19e).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Locomotion {
     /// Standing still (the first own state's idle state).
     #[default]
     Idle,
-    /// Moving by its keys.
-    Moving,
+    /// Moving by its keys, back or not, in the slayer state its last start went out in.
+    Moving { back: bool, state: u64 },
     /// Its keys let go: records left until it stands still.
     Stopping(u16),
 }
 
 impl Locomotion {
+    /// Whether it moves by its keys.
+    const fn moving(self) -> bool {
+        matches!(self, Self::Moving { .. })
+    }
+
     /// The next movement after a record with `intent`, and the slayer state and sequence the
-    /// server starts in that record, when it starts one.
+    /// server starts in that record, when it starts one: a move from standing still, a new
+    /// direction (back or not) that starts in another state, a stop, a stand, or a move again
+    /// after a stop in the start state ([`Locomotion`]).
     fn step(self, intent: Intent, set: MoveSet) -> (Self, Option<(u64, u64)>) {
         let moving = intent.forward != 0 || intent.right != 0;
+        let back = intent.forward < 0;
+        let start = if back { set.back_start } else { set.start };
+        let moves = |play: (u64, u64)| {
+            (
+                Self::Moving {
+                    back,
+                    state: play.0,
+                },
+                Some(play),
+            )
+        };
         match (self, moving) {
-            (Self::Idle, true) => {
-                let start = if intent.forward < 0 {
-                    set.back_start
-                } else {
-                    set.start
-                };
-                (Self::Moving, Some(start))
-            }
+            (Self::Idle, true) => moves(start),
             // A set whose stop is its stand (the block or aim walk) stands at once (Observed: in
             // 398 retail ledgers 2,127 of 2,759 stops of a block walk started the block's stand
             // within 100 ms, 1,693 within 50 ms; ours held the walk 39 records, live 2026-11-17).
-            (Self::Moving, false) if set.stop == set.idle => (Self::Idle, Some(set.idle)),
-            (Self::Moving, false) => (Self::Stopping(set.stop_records), Some(set.stop)),
-            (Self::Stopping(_), true) => (Self::Moving, Some(set.restart)),
+            // A move in the stop's own state stands at once too ([`Locomotion`]).
+            (Self::Moving { state, .. }, false) if set.stop == set.idle || state == set.stop.0 => {
+                (Self::Idle, Some(set.idle))
+            }
+            (Self::Moving { .. }, false) => (Self::Stopping(set.stop_records), Some(set.stop)),
+            (Self::Moving { back: was, state }, true) if was != back && start.0 != state => {
+                moves(start)
+            }
+            (Self::Moving { state, .. }, true) => (Self::Moving { back, state }, None),
+            (Self::Stopping(_), true) if start.0 == set.stop.0 => (
+                Self::Moving {
+                    back,
+                    state: set.start.0,
+                },
+                Some(set.start),
+            ),
+            (Self::Stopping(_), true) => moves(start),
             (Self::Stopping(left), false) => match left.saturating_sub(1) {
                 0 => (Self::Idle, Some(set.idle)),
                 left => (Self::Stopping(left), None),
             },
-            (Self::Idle, false) | (Self::Moving, true) => (self, None),
+            (Self::Idle, false) => (self, None),
         }
     }
 
-    /// The state the movement plays now in `set`: sent again when the set changes.
+    /// The state the movement plays now in `set`: a move goes on in the set's move state, or
+    /// starts again in the set's start when that is the state it is in ([`Locomotion`]).
     const fn current(self, set: MoveSet) -> (u64, u64) {
         match self {
             Self::Idle => set.idle,
-            Self::Moving => (set.restart.0, set.moving),
+            Self::Moving { state, .. } if state == set.restart.0 => set.start,
+            Self::Moving { .. } => (set.restart.0, set.moving),
             Self::Stopping(_) => set.stop,
         }
+    }
+
+    /// [`Locomotion::current`] sent again: a move is in its state from here.
+    fn resend(&mut self, set: MoveSet) -> (u64, u64) {
+        let play = self.current(set);
+        if let Self::Moving { state, .. } = self {
+            *state = play.0;
+        }
+        play
+    }
+
+    /// The move or stand a landing lands into in `set`: a move starts again in the set's start
+    /// (Observed, `retail-2026-11-19-towns-duels`: 104 of the 178 other players' landings went
+    /// on in `13=1a`, 62 in `13=1b`).
+    fn landed(&mut self, set: MoveSet) -> (u64, u64) {
+        if let Self::Moving { state, .. } = self {
+            *state = set.start.0;
+            return set.start;
+        }
+        self.current(set)
     }
 }
 
@@ -711,6 +773,73 @@ impl SlotsOn {
             fourth: on(self.fourth, change.fourth),
         }
     }
+}
+
+/// Seconds into the sequence of each upper slot that plays, for the players who see this one
+/// ([`nw_messages::RemoteUpperClocks`]): a slot's time starts at 0 in the own state that first
+/// sends a new state or sequence of it, goes on with the records' frame times, and goes on
+/// through the states that send its end. Observed (`retail-2026-11-19-towns-duels`, other
+/// players): a new second-slot sequence without a new start (child 18 alone) took the byte back
+/// in 510 of 626 cases; the end state (`16=0` or `16=45`) carried child 4 in 2,281 of 2,803.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct UpperSeconds {
+    /// Seconds into each slot's sequence while it plays, second slot first.
+    seconds: [Option<f32>; UPPER_SLOTS],
+    /// The slot's end went out: its time stops once no state sends that end any more.
+    ending: [bool; UPPER_SLOTS],
+}
+
+impl UpperSeconds {
+    /// One input record of `frame_s` seconds went by.
+    fn advance(&mut self, frame_s: f32) {
+        for seconds in self.seconds.iter_mut().flatten() {
+            *seconds += frame_s;
+        }
+    }
+
+    /// An own state went out with the slot changes `changes` (second slot first, `None` for a
+    /// slot it leaves alone), which it sends for the first time when `first`.
+    fn after(&mut self, changes: [Option<SlotChange>; UPPER_SLOTS], first: bool) {
+        for (slot, change) in changes.into_iter().enumerate() {
+            let change =
+                change.filter(|change| change.state.is_some() || change.sequence.is_some());
+            match change {
+                Some(change) if first => {
+                    let ends = change.state == Some(CLEARED_SLOT)
+                        || change.sequence == Some(CLEARED_SLOT)
+                        || (slot == SECOND_SLOT && change.state == Some(CAST_END_STATE));
+                    self.ending[slot] = ends;
+                    if !ends {
+                        self.seconds[slot] = Some(0.0);
+                    }
+                }
+                Some(_) => {}
+                None if self.ending[slot] => {
+                    self.seconds[slot] = None;
+                    self.ending[slot] = false;
+                }
+                None => {}
+            }
+        }
+    }
+}
+
+/// The index of the second slot in [`UpperSeconds`].
+const SECOND_SLOT: usize = 0;
+
+/// The second slot's change that slayer state `state` sends ([`SecondSlayerState`]): a stop is
+/// its state 0.
+fn second_change(state: &SlayerState) -> Option<SlotChange> {
+    let second = state.second?;
+    let (state, sequence) = match second.playing {
+        Some((state, sequence)) => (Some(state), Some(sequence)),
+        None => (second.stopped.then_some(CLEARED_SLOT), None),
+    };
+    Some(SlotChange {
+        state,
+        started: Some(second.started),
+        sequence,
+    })
 }
 
 /// The weapon ability whose animation the slayer state plays.
@@ -1076,6 +1205,8 @@ pub(super) struct SlayerTrack {
     /// The upper slots that play: each one's last change set a state or sequence other than 0
     /// (the hit reaction clears them).
     slots_on: SlotsOn,
+    /// The time into each upper slot's sequence, for the players who see this one.
+    upper_seconds: UpperSeconds,
     /// A fast travel's channel or an unstuck's wait started: the kneel starts in the next own
     /// state ([`kneel`]).
     kneel_due: bool,
@@ -1128,6 +1259,7 @@ impl SlayerTrack {
         self.newest_frame_s = record.frame_s;
         self.newest_counter = record.counter;
         self.sequence_s += record.frame_s;
+        self.upper_seconds.advance(record.frame_s);
         // The key goes down at its press or at a controller's first held record, as the
         // attacks read it ([`AttackKeyBits::goes_down`]; a block start presses none,
         // [`AttackKeyBits::at_block_start`]); it stays down through a hit reaction.
@@ -1222,6 +1354,12 @@ impl SlayerTrack {
                 self.locomotion = next;
                 started.filter(|_| !(stop_ended && keeps_attack))
             });
+            // The air plays the jump or the fall until the landing: the keys start no move or
+            // stand there (Observed, `retail-2026-11-19-towns-duels`: 148 of the 170 other
+            // players' jumps went on to the landing, 6 to a stand; ours sent the stand of a
+            // stop that ended 34 to 117 ms into the jump, 3 of 12 jumps, live 2026-11-19c and
+            // 19e). The movement still steps, and the landing goes on in it.
+            let stepped = stepped.filter(|_| self.air.is_none());
             // A landing goes first; the move or stand it lands into follows
             // ([`LAND_MOVE_RECORDS`]).
             landing
@@ -1230,11 +1368,16 @@ impl SlayerTrack {
         };
         let mut movement = movement.filter(|_| !ability_holds);
         let stroke = stroke.filter(|_| !ability_holds);
-        if upper.is_some() && movement.is_none() && !self.keeps_attack() && !ability_holds {
+        if upper.is_some()
+            && movement.is_none()
+            && !self.keeps_attack()
+            && !ability_holds
+            && self.air.is_none()
+        {
             // The walk changes with the block or aim: retail sent the new walk sequence in the
             // state of the right-click (`15=af10` with the aim). A draw that arrives after a
             // tap has already started the light must not replace that attack with a walk.
-            movement = Some(self.locomotion.current(set));
+            movement = Some(self.locomotion.resend(set));
         }
         if let Some(upper) = upper {
             self.upper = Some(merge(self.upper.unwrap_or_default(), upper));
@@ -1306,7 +1449,7 @@ impl SlayerTrack {
         let Some(hold) = stance.alt_hold else {
             return Some(start);
         };
-        let walking = self.locomotion == Locomotion::Moving;
+        let walking = self.locomotion.moving();
         let sequence = hold.legs(walking).start;
         let third = AimThird::of(hold, walking);
         self.alt_play = Some(AltPlay {
@@ -1337,7 +1480,7 @@ impl SlayerTrack {
         let Some(hold) = stance.and_then(|stance| stance.alt_hold) else {
             return;
         };
-        let walking = self.locomotion == Locomotion::Moving;
+        let walking = self.locomotion.moving();
         self.aim_third_step(walking);
         if self
             .shot_steps
@@ -1409,7 +1552,7 @@ impl SlayerTrack {
     /// ([`AimThird::drawing`]): its sequence of the legs the player is on goes out alone when the
     /// third slot does not play it already.
     fn draw_third(&mut self, thirds: LegThirds) {
-        let walking = self.locomotion == Locomotion::Moving;
+        let walking = self.locomotion.moving();
         let Some(third) = self.alt_play.as_mut().and_then(|play| play.third.as_mut()) else {
             return;
         };
@@ -1530,7 +1673,7 @@ impl SlayerTrack {
         }
         let settled = self.locomotion.current(set).1;
         if let Some((from, to)) = change {
-            let moving = self.locomotion == Locomotion::Moving;
+            let moving = self.locomotion.moving();
             let (sequence, records) = posture::change(from, to, moving);
             let wait = records.saturating_sub(posture::SEEN_AFTER_RECORDS).max(1);
             self.posture_settle = (sequence.is_some() || started).then_some(wait);
@@ -1591,7 +1734,7 @@ impl SlayerTrack {
             return None;
         }
         self.land_settle = None;
-        Some(self.locomotion.current(set))
+        Some(self.locomotion.landed(set))
     }
 
     /// The state the server starts for the keys of `record` with the sequences of `stance`:
@@ -2075,7 +2218,7 @@ impl SlayerTrack {
             }
             self.shot_steps = None;
         }
-        let walking = self.locomotion == Locomotion::Moving;
+        let walking = self.locomotion.moving();
         let mut third = self.alt_play.as_mut().and_then(|play| play.third.as_mut());
         for change in due {
             let change = SlotsChange {
@@ -2183,7 +2326,9 @@ impl SlayerTrack {
             ..UpperSlots::default()
         };
         if on.first {
-            let (state, sequence) = self.card_movement();
+            let (state, sequence) = self
+                .locomotion
+                .resend(self.set.unwrap_or(MoveSet::SHEATHED));
             self.pending = Some((
                 Pending::State(state, sequence),
                 counter,
@@ -2470,6 +2615,19 @@ impl SlayerTrack {
         };
         self.consume_loadout_echo();
         let slots = slots.map(|slots| self.timed(slots, number));
+        if let Some(second) = state
+            .filter(|_| started.is_some())
+            .and_then(|state| second_change(&state))
+        {
+            self.upper_seconds.after([Some(second), None, None], true);
+        }
+        let first = self.upper_first.is_some_and(|(_, first)| first == number);
+        self.upper_seconds.after(
+            slots.map_or([None; UPPER_SLOTS], |slots| {
+                [Some(slots.second), Some(slots.third), Some(slots.fourth)]
+            }),
+            first,
+        );
         if let Some(slots) = slots {
             self.slots_on = self.slots_on.after(slots);
             self.track_second_end(slots.second, state_ms);
@@ -2672,6 +2830,14 @@ impl SlayerTrack {
             .current(self.set.unwrap_or(MoveSet::SHEATHED))
     }
 
+    /// Whether the players who see this one still get its floor bit set for its jump: the
+    /// newest start is a jump, under [`JUMP_FLOOR_S`] from its start state (the sequence time
+    /// counts the start record's frame too).
+    pub(super) fn jump_holds_floor(&self) -> bool {
+        self.played_state == Some(JUMP_STATE)
+            && self.sequence_s - self.newest_frame_s < JUMP_FLOOR_S
+    }
+
     /// How its body holds itself now, for the players who see this one: the newest record's
     /// posture, which the change's sequence goes out with ([`posture`]).
     pub(super) const fn remote_posture(&self) -> AlcPosture {
@@ -2683,6 +2849,12 @@ impl SlayerTrack {
     /// `16=24 18=9837 19=2e 21=9606 48=28` in 3 to 4 states, then without them).
     pub(super) const fn remote_upper(&self) -> Option<RemoteUpper> {
         self.remote
+    }
+
+    /// Seconds into the sequence of each upper slot that plays, second slot first, for the
+    /// players who see this one ([`UpperSeconds`]).
+    pub(super) const fn remote_upper_seconds(&self) -> [Option<f32>; UPPER_SLOTS] {
+        self.upper_seconds.seconds
     }
 
     /// Seconds into the newest slayer state's sequence, for the players who see this one;
@@ -3639,6 +3811,58 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn a_jump_keeps_its_floor_bit_and_its_air_until_the_landing() {
+        // Retail `retail-2026-11-19-towns-duels`: the floor bit cleared 166 ms (median) after
+        // the jump's start, and 148 of 170 jumps went on to the landing. Live 2026-11-19c: a
+        // stop that ended 52 ms into a jump sent the stand.
+        const FLOOR_STATES: u16 = 4;
+        let table = air_table();
+        let forward = Intent::of_keys(true, false, false, false);
+        let still = Intent::default();
+        let sheathed = |counter, intent, airborne| SlayerRecord {
+            weapon: weapon(GREATSWORD, false),
+            airborne,
+            ..quiet_record(counter, intent)
+        };
+        let mut track = spawned();
+        let mut counter = 10;
+        track.record(sheathed(counter, forward, false), &table);
+        own_state(&mut track, counter);
+        counter += 1;
+        track.record(sheathed(counter, still, false), &table);
+        let stop = own_state(&mut track, counter).state.expect("the stop");
+        assert_eq!(stop.state, Some(movement::MOVE_STATE));
+        counter += 1;
+        let jump = Intent {
+            jump: true,
+            ..still
+        };
+        track.record(sheathed(counter, jump, false), &table);
+        let jumped = own_state(&mut track, counter).state.expect("the jump");
+        assert_eq!(jumped.state, Some(JUMP_STATE));
+        assert!(track.jump_holds_floor(), "the start");
+        for held in 1..=movement::STOP_RECORDS {
+            counter += 1;
+            track.record(sheathed(counter, still, true), &table);
+            let state = own_state(&mut track, counter).state;
+            assert!(
+                state.is_none_or(|state| state.state == Some(JUMP_STATE)),
+                "record {held} in the air: {state:?}"
+            );
+            assert_eq!(
+                track.jump_holds_floor(),
+                held <= FLOOR_STATES,
+                "the floor bit at {held} records"
+            );
+        }
+        counter += 1;
+        track.record(sheathed(counter, still, false), &table);
+        let landed = own_state(&mut track, counter).state.expect("the landing");
+        assert_eq!(landed.state, Some(LAND_STATE));
+        assert!(!track.jump_holds_floor());
+    }
+
     /// Live 2026-11-18: a rapier's block stood on the ice gauntlet's stand (31/3987, never sent
     /// with a rapier in 1,195 retail ledgers; others stood on 31/1249 in 1,185 cases) and a
     /// spear's standing block played the walking block's start.
@@ -4249,6 +4473,57 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_players_who_see_one_get_the_time_of_each_upper_slot_in_every_state() {
+        // Retail `retail-2026-11-19-towns-duels`: child 4 in 151,132 of 151,536 remote states
+        // while the second slot played, rising each state; ours sent it in the echoes alone.
+        const HELD_STATES: u16 = 6;
+        const THIRD: usize = 1;
+        let table = table();
+        let aim = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let mut track = spawned();
+        assert_eq!(
+            track.remote_upper_seconds(),
+            [None; UPPER_SLOTS],
+            "no slot plays"
+        );
+        let start: u16 = 0x54ad;
+        track.record(keyed(start, aim, HELD, BLUNDERBUSS), &table);
+        own_state(&mut track, start);
+        assert_eq!(
+            track.remote_upper_seconds()[THIRD],
+            Some(0.0),
+            "the aim starts"
+        );
+        for held in 1..=HELD_STATES {
+            track.record(keyed(start + held, aim, HELD, BLUNDERBUSS), &table);
+            own_state(&mut track, start + held);
+            let seconds = track.remote_upper_seconds()[THIRD].expect("the aim plays");
+            assert!(
+                (seconds - f32::from(held) * FRAME_S).abs() < f32::EPSILON,
+                "state {held}: {seconds} s, after the echo too"
+            );
+        }
+        assert_eq!(track.remote_upper(), None, "the echo of the start is over");
+        let end = start + HELD_STATES + 1;
+        track.record(keyed(end, Intent::default(), HELD, BLUNDERBUSS), &table);
+        own_state(&mut track, end);
+        assert!(
+            track.remote_upper_seconds()[THIRD].is_some(),
+            "the end carries the time (retail 2,281 of 2,803 ends)"
+        );
+        own_state(&mut track, end);
+        assert!(
+            track.remote_upper_seconds()[THIRD].is_some(),
+            "and its echo"
+        );
+        own_state(&mut track, end);
+        assert_eq!(track.remote_upper_seconds()[THIRD], None, "then none");
+    }
+
+    #[test]
     fn the_players_who_see_one_get_its_upper_slots_while_its_state_echoes_them() {
         let table = table();
         let aim = Intent {
@@ -4552,9 +4827,34 @@ pub(crate) mod tests {
             (back.state, back.sequence),
             (Some(movement::MOVE_STATE), movement::BACK_START_SEQUENCE)
         );
-        step(&mut track, Intent::default());
+        // Retail, other players: a move in `13=1b` let go stands at once (`1b` 2422 to `1f`
+        // 1081), and a key after a stop starts in `13=1a` (`1b` 1405 to `1a` 2794); never a
+        // `13=1b` after a `13=1b` (0 of 802).
+        let stood = step(&mut track, Intent::default()).expect("standing");
+        assert_eq!(
+            (stood.state, stood.sequence),
+            (Some(movement::IDLE_STATE), movement::IDLE_SEQUENCE)
+        );
+        step(&mut track, forward).expect("a start");
+        let stop = step(&mut track, Intent::default()).expect("a stop");
+        assert_eq!(stop.state, Some(movement::MOVE_STATE));
         let again = step(&mut track, forward).expect("moving again");
-        assert_eq!(again.sequence, movement::RESTART_SEQUENCE);
+        assert_eq!(
+            (again.state, again.sequence),
+            (Some(movement::START_STATE), movement::START_SEQUENCE)
+        );
+        let turned = step(&mut track, Intent::of_keys(false, true, false, false));
+        assert_eq!(
+            turned.map(|state| (state.state, state.sequence)),
+            Some((Some(movement::MOVE_STATE), movement::BACK_START_SEQUENCE)),
+            "back while moving forward starts in the back move's state"
+        );
+        let ahead = step(&mut track, forward).expect("forward again");
+        assert_eq!(
+            ahead.state,
+            Some(movement::START_STATE),
+            "not 13=1b after 13=1b"
+        );
     }
 
     #[test]
@@ -5002,8 +5302,9 @@ pub(crate) mod tests {
         }
         assert_eq!(
             moved,
-            Some((STARTED + FREE_RECORDS, Some(movement::MOVE_STATE))),
-            "the held key moves it again from the free point, in the move state (13=1b)"
+            Some((STARTED + FREE_RECORDS, Some(movement::START_STATE))),
+            "the held key moves it again from the free point, in the move start (13=1a; retail \
+             `retail-2026-11-19-towns-duels`: 5 and 5 of the moves after a hit in 13=1a and 13=1b)"
         );
     }
 
