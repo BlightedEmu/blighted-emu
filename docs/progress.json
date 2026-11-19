@@ -679,7 +679,11 @@
               "proof": "tests"
             },
             {
-              "check": "Not fixed: a still block in pad mode stands about 1 m off in the tutorial replay (0.01 m with keys); a keyboard roll's stop steps back about 0.36 m in one record.",
+              "check": "A controller player's body keeps its camera boom while it moves (tests only, 2026-11-19): a pad's move went a quarter of the way to the camera's body from where the record began and dropped the stick's own step, so the body ran three records of its speed behind its client and the camera check shortened the boom toward it (replay of the retail tutorial with the moves as a pad's stick: 4.0 to 2.75 m in 10 s, a still block 0.98 m off). The quarter now starts from the stick's step: a still block 0.01 m off, a walk 0.27 m instead of 0.40 m in the tutorial and 0.26 m instead of 0.52 m in 11 open-world ledgers, as with keys.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not fixed: a roll's stop steps back about 0.36 m in one record, with keys and now with a pad: the camera's trail uses the server's roll speed, which goes on for two records after the client's camera stops. Three trail models cut the back steps but made other moves' error larger in the retail replays.",
               "proof": "none"
             }
           ]
@@ -3766,6 +3770,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Other players (2026-11-19, tests only): a controller player's body no longer falls behind its client while it moves, so its camera boom holds and a still block stands with the client (0.98 m off before in the replay).",
     "Other players (2026-11-19, tests only): a controller player's dodge no longer counts as a camera zoom key, so the server keeps that player's body with the client in and after rolls; the VM sends other players' states unreliable as retail.",
     "Admin site (2026-11-19, live): picking a player on the Live page no longer crashes the Brave tab; the Selected drawer opens when the row's press ends.",
     "Mob hit reactions (2026-11-19, tests only): a mob's reaction now lasts the stun of the hit that made it and its clip plays at the speed that ends it then, as retail; an attack's lunge with no key or stick moves the player's body on the server at once.",
@@ -4008,5 +4013,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-19",
-  "lastCommit": "d8836a1e"
+  "lastCommit": "53c388b2"
 }
