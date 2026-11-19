@@ -121,6 +121,16 @@ pub const ACTION_RECORDS: u8 = 52;
 /// (Observed, retail: the talk camera of `06a_msq_06_rescuefarmers` from 101.4 s, no key held,
 /// took the body 1.75 m away onto a crate, 1.18 m above retail's place, for 17 s; the board
 /// camera of `Hivetownboardmissions` from 457.6 s took it 4.8 m away, 1.69 m into the air).
+///
+/// In an action with no movement key or stick, the first camera that does not look at the body
+/// already shows where the client is: the action's own motion (an attack's lunge, a push) carried
+/// the client, the window's older cameras moved by the keys alone no longer fit the newest, and
+/// the body stood where the lunge began until the window emptied (Observed, retail Monarch's
+/// Bluffs ledgers with no key or stick held: `12-4_crewmates` from 84.58 s, 2.7 m in 0.33 s, the
+/// body up to 1.71 m from retail's place; `12-9_demonstorm2` from 82.33 s, 3.3 m in 0.2 s, up to
+/// 3.04 m; with the first camera 0.45 m and 0.73 m. Replay of 11 open-world ledgers: swings
+/// standing 0.18/0.76 m off, median/90th percentile, to 0.18/0.64 m; tutorial 0.43/1.60 to
+/// 0.42/1.54 m; the other classes as before).
 pub const RECOVER_AFTER_RECORDS: u16 = 30;
 /// How far above the highest known floor the camera's body may stand and still stand on it, m
 /// (Observed: on the retail tutorial deck the camera's body stood 0.48 m below to 0.73 m above the
@@ -574,12 +584,14 @@ impl TrackedBody {
             )
         });
         // A camera that has not looked at the body for [`RECOVER_AFTER_RECORDS`] shows where
-        // the client is: the body goes there.
+        // the client is: the body goes there. In an action with no movement key or stick, the
+        // first one does (see [`RECOVER_AFTER_RECORDS`]).
         let intent = input.character.intent;
         let moves_itself = acting || intent.moves() || intent.jump || intent.dodge;
+        let carried_by_action = acting && !intent.moves();
         let recovering = seen.is_none() && input.view.is_some() && moves_itself && {
             self.unfit_records = self.unfit_records.saturating_add(1);
-            self.unfit_records >= RECOVER_AFTER_RECORDS
+            self.unfit_records >= RECOVER_AFTER_RECORDS || carried_by_action
         };
         let seen = if recovering {
             input
@@ -2470,5 +2482,89 @@ mod tests {
         });
         assert!(worst_m < FREE_BOOM_DODGE_GAP_M, "in the roll {worst_m} m");
         assert!(rest_m < FREE_BOOM_REST_GAP_M, "at rest {rest_m} m");
+    }
+
+    /// A player on the Monarch's Bluffs beach, far from the level origin, walks up to a target
+    /// with `approach`, lets go of its keys or stick and attacks; the attack's lunge carries the
+    /// client 2.5 m along the view in 0.2 s with no key or stick held (retail `12-4_crewmates`
+    /// from 84.71 s; the replay's body there stood up to 1.71 m from retail's place). Its camera
+    /// follows it on a 3 m boom. Gives the largest gap between the body and the client's body in
+    /// the lunge and after it.
+    fn keyless_lunge_far_away(approach: Intent) -> f32 {
+        const BEACH: Position = Position {
+            x: 7196.37,
+            y: 3134.77,
+            z: GROUND_Z,
+        };
+        const RETAIL_BOOM_M: f32 = 3.0;
+        const WALK_RECORDS: usize = 30;
+        const STOP_RECORDS: usize = 15;
+        const LUNGE_M: f32 = 2.5;
+        const LUNGE_RECORDS: u8 = 6;
+        const AFTER_RECORDS: usize = 30;
+        let mut body = TrackedBody::new(BEACH);
+        let mut client = Character::new(BEACH);
+        let still = CharacterInput {
+            intent: Intent::default(),
+            yaw: 0.0,
+            dt_s: DT,
+        };
+        let walk = CharacterInput {
+            intent: approach,
+            ..still
+        };
+        let record_of = |character, view, action_started| TrackInput {
+            character,
+            view: Some(view),
+            boom_key: false,
+            action_started,
+        };
+        for character in (0..WALK_RECORDS)
+            .map(|_| walk)
+            .chain((0..STOP_RECORDS).map(|_| still))
+        {
+            client.step(character, &Flat, SEA);
+            let view = view_of(client.position(), RETAIL_BOOM_M, client.velocity());
+            body.record(record_of(character, view, false), &Flat, SEA);
+        }
+        let lunge_step_m = LUNGE_M / f32::from(LUNGE_RECORDS);
+        let lunge_mps = [0.0, lunge_step_m / DT];
+        let mut at = client.position();
+        let mut worst_m: f32 = 0.0;
+        for record in 0..LUNGE_RECORDS {
+            at.y += lunge_step_m;
+            let view = view_of(at, RETAIL_BOOM_M, lunge_mps);
+            let tracked = body.record(record_of(still, view, record == 0), &Flat, SEA);
+            worst_m = worst_m.max(tracked.position.horizontal_distance(at));
+        }
+        for _ in 0..AFTER_RECORDS {
+            let view = view_of(at, RETAIL_BOOM_M, [0.0; 2]);
+            let tracked = body.record(record_of(still, view, false), &Flat, SEA);
+            worst_m = worst_m.max(tracked.position.horizontal_distance(at));
+        }
+        worst_m
+    }
+
+    /// The most a key-less lunge's body may stand from its client's, m (our choice): the
+    /// camera's trail of the lunge, which the server's still body does not give
+    /// (`CAMERA_LAG_S` × 12.5 m/s = 0.75 m), and one [`FOLLOW_STEP_M`], rounded up. Without the
+    /// first-camera recovery the body stood 1.75 m from its client.
+    const KEYLESS_LUNGE_GAP_M: f32 = 1.2;
+
+    #[test]
+    fn a_keyboard_player_s_keyless_lunge_far_from_the_origin_keeps_the_body_with_its_client() {
+        let worst_m = keyless_lunge_far_away(Intent {
+            forward: 1,
+            ..Intent::default()
+        });
+        assert!(worst_m < KEYLESS_LUNGE_GAP_M, "{worst_m} m");
+    }
+
+    #[test]
+    fn a_controller_player_s_keyless_lunge_far_from_the_origin_keeps_the_body_with_its_client() {
+        // A stick tilted forward and a little left, as the live controller player's.
+        const STICK: [f32; 2] = [-0.156, 0.984];
+        let worst_m = keyless_lunge_far_away(Intent::default().with_stick(Some(STICK)));
+        assert!(worst_m < KEYLESS_LUNGE_GAP_M, "{worst_m} m");
     }
 }
