@@ -27,7 +27,8 @@
 //! ([`StanceSequences::alt_fire`], the bow's at the release), the hip shot ([`HipShot`]) and
 //! what follows them ([`TimedSlots`]; ranged shot study 2026-11-18,
 //! `local-data/scratch-work/ranged-shots-2026-11-18/findings.md`; the re-fires, reloads, aim legs
-//! and shot gap of 2026-11-19: the miners in `local-data/scratch-work/ranged-shots-2026-11-19/`).
+//! and shot gap of 2026-11-19: the miners in `local-data/scratch-work/ranged-shots-2026-11-19/`;
+//! the bow's full draw hold, [`DrawHold`]).
 //! Unknown (no retail data on the pinned build): the dagger.
 //!
 //! The client sends no slayer state for a weapon ability either (input row 1 is empty at every
@@ -466,6 +467,46 @@ pub struct AltCharge {
     /// What follows `fire`, by milliseconds from its own state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fire_after: Vec<TimedSlots>,
+    /// The full draw's hold while the key stays held. `None`: the full draw holds nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<DrawHold>,
+}
+
+/// The hold of a full draw ([`AltCharge`]) while the attack key stays held: `after_ms` after the
+/// full draw's own state, the second-slot `sequence` (child 18 alone: the aim's second-slot
+/// state stays) with the third-slot sequence of the legs (child 21 alone, no start), which
+/// takes the place of the aim's by legs ([`AltLegs::third`]): a change between walking and
+/// standing sends the other one in its own state, and the shot of the full draw sends that of
+/// its legs when the third slot does not play it already, up to the shot's step that sends the
+/// aim's again. A stance whose aim has no third slot by legs sends `sequence` alone.
+///
+/// Observed, bow (bow full draw study 2026-11-19, 1,195 retail ledgers, the miners in
+/// `local-data/scratch-work/bow-draw-2026-11-19/`; weapon checked per segment as the ranged shot
+/// study): `18=928` a median 133 ms after the `48=24` state (own 991, p10 120, p90 149; other
+/// players 1,675, median 134, p10 116, p90 151); the aim's second-slot state 36 before it in
+/// all; with `21=4275` on walking legs (first slot `13=27`) and `21=3077` standing (`13=31`):
+/// own 804 and 139, other players 1,009 and 569, the rest already playing it; no child 17 or 20
+/// in 1,020 own and 1,962 of 1,964 others' states. While it played, 320 of 322 own and 510 of
+/// 512 others' changes between 27 and 31 sent the other one in the same state. A release before
+/// it sent the drawn shot from the aim's hold `18=29` with the legs' one (own 462 of 464,
+/// others 934 of 946); after it, the shot sent none in 807 of 930 own; the shot's step `48=41`
+/// then sent the aim's of the legs (`4275` to `421` in 1,077 own, `3077` to `422` in 237).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DrawHold {
+    /// Milliseconds from the full draw's own state.
+    pub after_ms: u64,
+    /// Its second-slot sequence.
+    pub sequence: u64,
+    /// Its third-slot sequence on walking legs.
+    pub walk_third: u64,
+    /// Its third-slot sequence on standing legs.
+    pub stand_third: u64,
+    /// What follows it while the key stays held, by milliseconds from its own state. Observed,
+    /// bow: `18=32` alone 3,033 ms after `18=928` (own 47, 2,997 to 3,049 ms; other players 89,
+    /// median 3,033); 47 of 49 own holds of 2,950 ms or more went to it, the other 2 shot first;
+    /// its shot is still the drawn one `18=38 48=25` (own 38, others 46).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<TimedSlots>,
 }
 
 /// The shot of an attack key press from the hip: the server's, the client names none in row 1
@@ -1017,7 +1058,11 @@ mod tests {
                  "alt_fire_after": [{"after_ms": 433, "second_state": 39,
                                      "second_sequence": 2206, "marker": 40}],
                  "alt_charge": {"after_ms": 587, "drawn": {"marker": 24},
-                                "fire": {"second_sequence": 38, "marker": 25}},
+                                "fire": {"second_sequence": 38, "marker": 25},
+                                "hold": {"after_ms": 133, "sequence": 928,
+                                         "walk_third": 4275, "stand_third": 3077,
+                                         "after": [{"after_ms": 3033,
+                                                    "second_sequence": 32}]}},
                  "hip": {"start": {"second_state": 33, "second_sequence": 4720, "marker": 3},
                          "after": [{"after_ms": 33, "third_state": 46,
                                     "third_sequence": 4170, "marker": 67}],
@@ -1051,6 +1096,22 @@ mod tests {
             (587, Some(24), Some(25))
         );
         assert!(charge.fire_after.is_empty());
+        let hold = charge.hold.as_ref().expect("the full draw's hold");
+        assert_eq!(
+            (
+                hold.after_ms,
+                hold.sequence,
+                hold.walk_third,
+                hold.stand_third
+            ),
+            (133, 928, 4275, 3077)
+        );
+        assert_eq!(
+            hold.after
+                .first()
+                .map(|step| (step.after_ms, step.slots.second_sequence)),
+            Some((3033, Some(32)))
+        );
         let hip = bow.hip.as_ref().expect("the hip shot");
         assert_eq!(hip.start.second_sequence, Some(4720));
         assert_eq!(hip.after.first().map(|step| step.after_ms), Some(33));

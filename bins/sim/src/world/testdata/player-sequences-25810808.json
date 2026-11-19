@@ -2278,7 +2278,19 @@
       "after_ms": 1133,
       "second_sequence": 29
      }
-    ]
+    ],
+    "hold": {
+     "after_ms": 133,
+     "sequence": 928,
+     "walk_third": 4275,
+     "stand_third": 3077,
+     "after": [
+      {
+       "after_ms": 3033,
+       "second_sequence": 32
+      }
+     ]
+    }
    },
    "hip": {
     "start": {

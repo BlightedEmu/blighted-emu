@@ -19,9 +19,9 @@
 //! the state, that record's own included ([`SequenceClock`] has the wire form).
 
 use nw_content::player_sequences::{
-    AbilityPlay, AirSequences, AltHold, AttackPress, AttackSlot, Direction, DodgeLoad, FirstPlay,
-    HipShot, PlayerSequences, PressWindow, RunningAttack, SlotsChange, StanceSequences, StatePlay,
-    TimedSlots,
+    AbilityPlay, AirSequences, AltHold, AttackPress, AttackSlot, Direction, DodgeLoad, DrawHold,
+    FirstPlay, HipShot, PlayerSequences, PressWindow, RunningAttack, SlotsChange, StanceSequences,
+    StatePlay, TimedSlots,
 };
 use nw_messages::{
     AlcPosture, AttackKeyBits, RemoteUpper, SecondSlayerState, SequenceClock, SequenceTime,
@@ -431,39 +431,100 @@ struct AltPlay {
     third: Option<AimThird>,
 }
 
-/// The third-slot sequences of an aim on walking and standing legs
-/// ([`AltLegs::third`](nw_content::player_sequences::AltLegs::third)), and the one it sent last.
+/// Third-slot sequences on walking and standing legs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AimThird {
+struct LegThirds {
     walk: u64,
     stand: u64,
+}
+
+impl LegThirds {
+    /// The aim's of `hold` ([`AltLegs::third`](nw_content::player_sequences::AltLegs::third)).
+    fn of_aim(hold: AltHold) -> Option<Self> {
+        Some(Self {
+            walk: hold.walk.third?,
+            stand: hold.stand.third?,
+        })
+    }
+
+    /// The full draw hold's ([`DrawHold`]).
+    const fn of_draw(hold: &DrawHold) -> Self {
+        Self {
+            walk: hold.walk_third,
+            stand: hold.stand_third,
+        }
+    }
+
+    /// The sequence on walking (`walking`) or standing legs.
+    const fn on(self, walking: bool) -> u64 {
+        if walking { self.walk } else { self.stand }
+    }
+
+    /// Whether `sequence` is one of them.
+    const fn has(self, sequence: u64) -> bool {
+        sequence == self.walk || sequence == self.stand
+    }
+}
+
+/// The third slot of an aim by legs: the aim's sequences, the ones it plays now (the aim's, or
+/// a full draw hold's from that hold to the shot step that sends the aim's again,
+/// [`DrawHold`]), and the one it sent last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AimThird {
+    aim: LegThirds,
+    playing: LegThirds,
     sent: u64,
 }
 
 impl AimThird {
     /// The third slot of `hold` on walking (`walking`) or standing legs, sent now.
     fn of(hold: AltHold, walking: bool) -> Option<Self> {
-        let (walk, stand) = (hold.walk.third?, hold.stand.third?);
+        let aim = LegThirds::of_aim(hold)?;
         Some(Self {
-            walk,
-            stand,
-            sent: if walking { walk } else { stand },
+            aim,
+            playing: aim,
+            sent: aim.on(walking),
         })
     }
 
-    /// The third-slot sequence on walking (`walking`) or standing legs.
+    /// The third-slot sequence it plays on walking (`walking`) or standing legs.
     const fn on(&self, walking: bool) -> u64 {
-        if walking { self.walk } else { self.stand }
+        self.playing.on(walking)
     }
 
-    /// `sequence` on walking (`walking`) or standing legs: either legs' sequence becomes that
-    /// of these legs, and is the one sent last; another sequence stays.
+    /// `sequence` on walking (`walking`) or standing legs: either legs' sequence of the aim
+    /// plays the aim's again and becomes that of these legs, and is the one sent last; another
+    /// sequence stays.
     fn sending(&mut self, sequence: u64, walking: bool) -> u64 {
-        if sequence != self.walk && sequence != self.stand {
+        if !self.aim.has(sequence) {
             return sequence;
         }
-        self.sent = self.on(walking);
+        self.playing = self.aim;
+        self.sent = self.aim.on(walking);
         self.sent
+    }
+
+    /// Plays `thirds` in place of the aim's: their sequence on walking (`walking`) or standing
+    /// legs, when it is not the one sent last.
+    fn drawing(&mut self, thirds: LegThirds, walking: bool) -> Option<u64> {
+        self.playing = thirds;
+        let wanted = thirds.on(walking);
+        (wanted != self.sent).then(|| {
+            self.sent = wanted;
+            wanted
+        })
+    }
+}
+
+/// The upper slots that send third-slot `sequence` alone: no third state (child 19) and no
+/// start (child 20), as retail's aim and full draw hold by legs.
+fn third_alone(sequence: u64) -> UpperSlots {
+    UpperSlots {
+        third: SlotChange {
+            sequence: Some(sequence),
+            ..SlotChange::default()
+        },
+        ..UpperSlots::default()
     }
 }
 
@@ -691,12 +752,26 @@ enum Shot {
 
 /// An aimed press of a weapon that shoots at the release
 /// ([`StanceSequences::alt_fire_at_release`]), while the key is down.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct AimedDraw {
     /// Seconds of input records since the press.
     since_s: f32,
     /// The full draw went out ([`StanceSequences::alt_charge`]).
     full: bool,
+    /// The full draw's hold, from the full draw on.
+    hold: Option<DrawPlay>,
+}
+
+/// The hold of a full draw ([`DrawHold`]) while it goes out.
+#[derive(Debug, Clone, PartialEq)]
+struct DrawPlay {
+    hold: DrawHold,
+    /// When the own state of the full draw went out.
+    from_ms: Option<u64>,
+    /// When the hold's own state went out.
+    held_ms: Option<u64>,
+    /// The next of the hold's steps to go out.
+    next: usize,
 }
 
 /// The upper slot changes that follow a shot ([`TimedSlots`]), while they go out.
@@ -1327,14 +1402,61 @@ impl SlayerTrack {
             return;
         }
         third.sent = wanted;
-        let legs = UpperSlots {
-            third: SlotChange {
-                sequence: Some(wanted),
-                ..SlotChange::default()
-            },
-            ..UpperSlots::default()
+        self.upper = Some(merge(self.upper.unwrap_or_default(), third_alone(wanted)));
+    }
+
+    /// Plays the third slot `thirds` of a full draw hold in place of the aim's
+    /// ([`AimThird::drawing`]): its sequence of the legs the player is on goes out alone when the
+    /// third slot does not play it already.
+    fn draw_third(&mut self, thirds: LegThirds) {
+        let walking = self.locomotion == Locomotion::Moving;
+        let Some(third) = self.alt_play.as_mut().and_then(|play| play.third.as_mut()) else {
+            return;
         };
-        self.upper = Some(merge(self.upper.unwrap_or_default(), legs));
+        if let Some(sequence) = third.drawing(thirds, walking) {
+            self.upper = Some(merge(self.upper.unwrap_or_default(), third_alone(sequence)));
+        }
+    }
+
+    /// Sends the full draw's hold due by own state time `state_ms`, while the key stays held
+    /// ([`DrawHold`]): its clock starts at the own state that sends the full draw; at its time
+    /// its second-slot sequence alone with its third slot of the legs
+    /// ([`SlayerTrack::draw_third`]), then its steps.
+    fn step_draw(&mut self, state_ms: u64) {
+        let Some(play) = self.aimed_draw.as_mut().and_then(|draw| draw.hold.as_mut()) else {
+            return;
+        };
+        let from_ms = *play.from_ms.get_or_insert(state_ms);
+        let mut due = Vec::new();
+        let starts = play.held_ms.is_none();
+        if starts {
+            if state_ms.saturating_sub(from_ms) < play.hold.after_ms {
+                return;
+            }
+            play.held_ms = Some(state_ms);
+            due.push(SlotsChange {
+                second_sequence: Some(play.hold.sequence),
+                ..SlotsChange::default()
+            });
+        }
+        let held_ms = play.held_ms.unwrap_or(state_ms);
+        while let Some(step) = play.hold.after.get(play.next) {
+            if state_ms.saturating_sub(held_ms) < step.after_ms {
+                break;
+            }
+            due.push(step.slots);
+            play.next += 1;
+        }
+        let thirds = starts.then(|| LegThirds::of_draw(&play.hold));
+        let counter = self.newest_counter;
+        for change in due {
+            if let Some(slots) = slots_of(change, counter) {
+                self.upper = Some(merge(self.upper.unwrap_or_default(), slots));
+            }
+        }
+        if let Some(thirds) = thirds {
+            self.draw_third(thirds);
+        }
     }
 
     /// Ends the block that plays when `started` (in record `counter`) is a dodge, a jump or an
@@ -1726,8 +1848,12 @@ impl SlayerTrack {
 
     /// Drops the shot that plays: the aim's start or end, a draw, a sheathe, a hit reaction or
     /// an ability takes the upper slots, and the shot's later steps would put the shot's pose
-    /// back over it (Inferred).
+    /// back over it (Inferred); the aim's third slot by legs plays the aim's again, not a full
+    /// draw hold's (Inferred).
     fn drop_shot(&mut self) {
+        if let Some(third) = self.alt_play.as_mut().and_then(|play| play.third.as_mut()) {
+            third.playing = third.aim;
+        }
         self.aimed_draw = None;
         self.shot_steps = None;
         self.held_shot = None;
@@ -1795,7 +1921,11 @@ impl SlayerTrack {
     /// [`StanceSequences::alt_fire`] there. One that shoots at the release (the bow,
     /// [`StanceSequences::alt_fire_at_release`]) draws from the press: the full draw goes out
     /// once the key was held the stance's full draw time ([`StanceSequences::alt_charge`]), and
-    /// the release sends the full draw's shot after it, else the plain shot. Live 2026-11-18:
+    /// the release sends the full draw's shot after it, else the plain shot; the full draw's
+    /// hold goes on while the key stays held ([`SlayerTrack::step_draw`]), and its shot sends
+    /// the hold's third slot of the legs when the third slot does not play it already
+    /// ([`DrawHold`]: retail sent it when the release came before the hold; a shot held for the
+    /// shot gap sends it at the release, Inferred). Live 2026-11-18:
     /// ours sent the bow's shot at the press and nothing at the release, and the other players
     /// saw no arrow leave.
     fn aimed_shot(
@@ -1816,6 +1946,7 @@ impl SlayerTrack {
             self.aimed_draw = Some(AimedDraw {
                 since_s: 0.0,
                 full: false,
+                hold: None,
             });
         } else if !record.attack.released
             && let Some(draw) = self.aimed_draw.as_mut()
@@ -1828,6 +1959,12 @@ impl SlayerTrack {
                 return None;
             }
             draw.full = true;
+            draw.hold = charge.hold.clone().map(|hold| DrawPlay {
+                hold,
+                from_ms: None,
+                held_ms: None,
+                next: 0,
+            });
             return slots_of(charge.drawn, counter).map(Shot::Drawn);
         }
         if !record.attack.released {
@@ -1835,7 +1972,12 @@ impl SlayerTrack {
         }
         let draw = self.aimed_draw.take()?;
         let (change, steps) = match stance.alt_charge.as_ref().filter(|_| draw.full) {
-            Some(charge) => (charge.fire, ShotSteps::aimed(&charge.fire_after, &[])),
+            Some(charge) => {
+                if let Some(hold) = charge.hold.as_ref() {
+                    self.draw_third(LegThirds::of_draw(hold));
+                }
+                (charge.fire, ShotSteps::aimed(&charge.fire_after, &[]))
+            }
             None => (
                 stance.alt_fire?,
                 ShotSteps::aimed(&stance.alt_fire_after, &stance.alt_fire_empty_after),
@@ -2314,6 +2456,7 @@ impl SlayerTrack {
             ));
         }
         let (state, started) = self.next(number);
+        self.step_draw(state_ms);
         self.step_shot(state_ms);
         let sequence_s = self.sequence_s;
         let time = self
@@ -5960,6 +6103,221 @@ pub(crate) mod tests {
                 sending_from(&seen, next_draw.slots, held_until),
                 Some(state_after(held_until, next_draw.after_ms)),
                 "{device}: the held shot's steps count from it"
+            );
+        }
+    }
+
+    /// The bow key of `down` (a keyboard's press or a controller's held trigger) pressed in
+    /// record `press_at` and held to its release in record `release_at`.
+    fn held_until(
+        down: AttackKeyBits,
+        press_at: u16,
+        release_at: u16,
+    ) -> impl Fn(u16) -> AttackKeyBits {
+        let hold = if down == PAD_HOLD { PAD_HOLD } else { HELD };
+        move |number| match number {
+            number if number == press_at => down,
+            number if number == release_at => RELEASE,
+            number if number > press_at && number < release_at => hold,
+            _ => HELD,
+        }
+    }
+
+    /// The own state that sends the bow's full draw `48=24` for a key of `down` pressed in record
+    /// `press_at` of an aim standing still.
+    fn full_draw_at(table: &PlayerSequences, down: AttackKeyBits, press_at: u16) -> u16 {
+        let charge = table
+            .stance(stance_key(BOW))
+            .and_then(|bow| bow.alt_charge.as_ref())
+            .expect("the full draw");
+        let mut track = settled(table, BOW, true, press_at);
+        let key = held_until(down, press_at, u16::MAX);
+        let seen = shots(&mut track, table, BOW, aim(), press_at..press_at + 40, key);
+        first_sending(&seen, charge.drawn).expect("the full draw")
+    }
+
+    /// The upper slots own state `number` of `seen` sends, when it sends any.
+    fn slots_at(seen: &[(u16, UpperSlots)], number: u16) -> Option<UpperSlots> {
+        seen.iter()
+            .find(|(at, _)| *at == number)
+            .map(|(_, slots)| *slots)
+    }
+
+    /// Retail bow (bow full draw study 2026-11-19): `18=928` alone 133 ms after the full draw
+    /// `48=24` (own 991, others 1,675), with `21=3077` standing; a change to walking legs sent
+    /// `21=4275` in its own state (320 of 322 own); the drawn shot after it sent no third slot
+    /// (807 of 930 own); its step `48=41` sent the aim's of the legs (`4275` to `421`, 1,077).
+    #[test]
+    fn a_bow_full_draw_holds_with_the_third_slot_of_its_legs_with_keyboard_and_controller() {
+        const PRESS_AT: u16 = 80;
+        let table = crate::combat::test_support::test_player_sequences();
+        let bow = table.stance(stance_key(BOW)).expect("bow");
+        let charge = bow.alt_charge.as_ref().expect("the full draw");
+        let hold = charge.hold.as_ref().expect("the full draw's hold");
+        let aim_walk = bow
+            .alt_hold
+            .and_then(|legs| legs.walk.third)
+            .expect("the aim's walk");
+        let step = charge
+            .fire_after
+            .iter()
+            .find(|step| step.slots.third_sequence.is_some())
+            .expect("the third-slot step");
+        let walk = Intent {
+            forward: 1,
+            ..aim()
+        };
+        let third_alone = |sequence| SlotChange {
+            sequence: Some(sequence),
+            ..SlotChange::default()
+        };
+        for (device, down) in DEVICES {
+            let drawn = full_draw_at(&table, down, PRESS_AT);
+            let held_at = state_after(drawn, hold.after_ms);
+            let walk_at = held_at + 5;
+            let release_at = walk_at + 5;
+            let step_at = state_after(release_at, step.after_ms);
+            let key = held_until(down, PRESS_AT, release_at);
+            let mut track = settled(&table, BOW, true, PRESS_AT);
+            let mut seen = shots(&mut track, &table, BOW, aim(), PRESS_AT..walk_at, &key);
+            seen.extend(shots(
+                &mut track,
+                &table,
+                BOW,
+                walk,
+                walk_at..step_at + 2,
+                &key,
+            ));
+            let held = slots_at(&seen, held_at).expect("the hold");
+            assert_eq!(
+                (held.second, held.third),
+                (
+                    SlotChange {
+                        sequence: Some(hold.sequence),
+                        ..SlotChange::default()
+                    },
+                    third_alone(hold.stand_third)
+                ),
+                "{device}: the hold alone with the stand's third slot"
+            );
+            assert_eq!(
+                first_sending(
+                    &seen,
+                    SlotsChange {
+                        second_sequence: Some(hold.sequence),
+                        ..SlotsChange::default()
+                    }
+                ),
+                Some(held_at),
+                "{device}: {} ms after the full draw",
+                hold.after_ms
+            );
+            let walked = slots_at(&seen, walk_at).expect("the leg change");
+            assert_eq!(
+                walked.third,
+                third_alone(hold.walk_third),
+                "{device}: walking"
+            );
+            let shot = slots_at(&seen, release_at).expect("the drawn shot");
+            assert!(sends(&shot, charge.fire), "{device}: the drawn shot");
+            assert_eq!(
+                shot.third,
+                SlotChange::default(),
+                "{device}: no third slot again"
+            );
+            let stepped = slots_at(&seen, step_at).expect("the shot's step");
+            assert_eq!(
+                stepped.third.sequence,
+                Some(aim_walk),
+                "{device}: the aim's walk"
+            );
+        }
+    }
+
+    /// Retail bow: a release after the full draw `48=24` and before `18=928` sent the drawn shot
+    /// with the third slot of the legs (own 462 of 464, others 934 of 946), and no hold.
+    #[test]
+    fn a_bow_released_before_its_full_draw_hold_shoots_with_the_hold_s_third_slot() {
+        const PRESS_AT: u16 = 80;
+        let table = crate::combat::test_support::test_player_sequences();
+        let bow = table.stance(stance_key(BOW)).expect("bow");
+        let charge = bow.alt_charge.as_ref().expect("the full draw");
+        let hold = charge.hold.as_ref().expect("the full draw's hold");
+        let aim_stand = bow
+            .alt_hold
+            .and_then(|legs| legs.stand.third)
+            .expect("the aim's stand");
+        for (device, down) in DEVICES {
+            let drawn = full_draw_at(&table, down, PRESS_AT);
+            let release_at = drawn + 2;
+            let key = held_until(down, PRESS_AT, release_at);
+            let mut track = settled(&table, BOW, true, PRESS_AT);
+            let seen = shots(
+                &mut track,
+                &table,
+                BOW,
+                aim(),
+                PRESS_AT..release_at + 40,
+                key,
+            );
+            let shot = slots_at(&seen, release_at).expect("the drawn shot");
+            assert!(sends(&shot, charge.fire), "{device}: the drawn shot");
+            assert_eq!(
+                shot.third,
+                SlotChange {
+                    sequence: Some(hold.stand_third),
+                    ..SlotChange::default()
+                },
+                "{device}: the stand's third slot alone"
+            );
+            assert!(
+                seen.iter()
+                    .all(|(_, slots)| slots.second.sequence != Some(hold.sequence)),
+                "{device}: no hold after the release"
+            );
+            assert!(
+                seen.iter()
+                    .any(|(_, slots)| slots.third.sequence == Some(aim_stand)),
+                "{device}: the shot's step plays the aim's third slot again"
+            );
+        }
+    }
+
+    /// Retail bow: a full draw held 3,033 ms past its hold sent `18=32` alone (own 47 of 49
+    /// such holds), and the release after it still sent the drawn shot (own 38).
+    #[test]
+    fn a_bow_full_draw_held_long_goes_on_to_its_next_hold_and_still_shoots_drawn() {
+        const PRESS_AT: u16 = 80;
+        let table = crate::combat::test_support::test_player_sequences();
+        let bow = table.stance(stance_key(BOW)).expect("bow");
+        let charge = bow.alt_charge.as_ref().expect("the full draw");
+        let hold = charge.hold.as_ref().expect("the full draw's hold");
+        let next = hold.after.first().expect("the next hold");
+        for (device, down) in DEVICES {
+            let drawn = full_draw_at(&table, down, PRESS_AT);
+            let next_at = state_after(state_after(drawn, hold.after_ms), next.after_ms);
+            let release_at = next_at + 3;
+            let key = held_until(down, PRESS_AT, release_at);
+            let mut track = settled(&table, BOW, true, PRESS_AT);
+            let seen = shots(
+                &mut track,
+                &table,
+                BOW,
+                aim(),
+                PRESS_AT..release_at + 2,
+                key,
+            );
+            assert_eq!(
+                slots_at(&seen, next_at).map(|slots| slots.second),
+                Some(SlotChange {
+                    sequence: next.slots.second_sequence,
+                    ..SlotChange::default()
+                }),
+                "{device}: the next hold alone"
+            );
+            assert!(
+                slots_at(&seen, release_at).is_some_and(|slots| sends(&slots, charge.fire)),
+                "{device}: the drawn shot"
             );
         }
     }
