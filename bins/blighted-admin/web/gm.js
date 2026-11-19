@@ -83,6 +83,62 @@ export function teleportRequest(entity, xText, yText, zText) {
   return { request: { entity, x, y, z } };
 }
 
+/** The kinds of `/api/world/places`, in list order, with the word a place button shows. */
+export const PLACE_KINDS = Object.freeze([
+  ['settlement', 'Settlement'],
+  ['outpost', 'Outpost'],
+  ['fort', 'Fort'],
+  ['shrine', 'Shrine'],
+  ['expedition', 'Expedition'],
+  ['raid', 'Raid'],
+  ['trial', 'Trial'],
+]);
+
+/** How many places of each kind `places` holds, by kind. */
+export function placeKindCounts(places) {
+  const counts = new Map(PLACE_KINDS.map(([kind]) => [kind, 0]));
+  for (const place of places) {
+    counts.set(place.kind, (counts.get(place.kind) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * The places of `kind` ('' for every kind) whose name or region holds `query` (any case), in
+ * groups by region in the order they come: `[{ region, places }]`.
+ */
+export function placeGroups(places, query, kind) {
+  const wanted = String(query).trim().toLowerCase();
+  const groups = new Map();
+  for (const place of places) {
+    if (kind !== '' && place.kind !== kind) continue;
+    if (wanted !== '' && !`${place.name} ${place.region}`.toLowerCase().includes(wanted)) continue;
+    if (!groups.has(place.region)) groups.set(place.region, []);
+    groups.get(place.region).push(place);
+  }
+  return [...groups].map(([region, members]) => ({ region, places: members }));
+}
+
+/** The teleport request that sends a player to a place. */
+export function placeTeleportRequest(entity, place) {
+  return { entity, x: place.x, y: place.y, z: place.z };
+}
+
+/** The distance on the map between two points of `x` and `y` metres, in metres. */
+export function mapDistance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+/**
+ * The teleport-to-player requests that bring every other player that is no bot to `target`
+ * (bots walk their own plan).
+ */
+export function bringAllRequests(target, players) {
+  return players
+    .filter((player) => player.entity !== target && !player.bot)
+    .map((player) => ({ entity: player.entity, to_entity: target }));
+}
+
 /** The give-item request for a player, an item id and a quantity text, or an error text. */
 export function itemRequest(entity, itemText, quantityText) {
   const item = String(itemText).trim();

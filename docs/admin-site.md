@@ -71,6 +71,17 @@ bushes, the sea, and the players and mobs near the camera.
 - Players online: everyone in the game now, on every sim. Pick one to get their controls:
   teleport, heal, god mode, kill, kick, give or take items, start a quest, set the level, give
   experience, set weapon mastery, set coins.
+- Teleport (also in GM tools on the Live page), for the picked player:
+  - Type x, y and z and press Move.
+  - Other players: each one's position and distance, with Bring here (moves that player to the
+    picked one) and Go to (moves the picked one to that player). Bring everyone here moves every
+    other player to the picked one; bots are left where they are.
+  - Places: every settlement, outpost, fort, spirit shrine, expedition, raid and trial entrance of
+    the world, by region, with its name from the game data. Type a name or region, or pick a kind,
+    to find one. Click a place and the player goes there at once. A fort is named after its
+    region. An entrance whose dungeon the game server cannot name is not in the list (the same
+    entrances cannot open their dungeon in the game either).
+  - Only players who are online can be moved.
 - Ban an account: by login name, Discord user id or Discord username. A banned account cannot log
   in.
 - Admin ranks (head admin only): who may use the site. A CSR may only kick. A game master may do

@@ -24,6 +24,7 @@ use crate::host::{HOST_ROUTE, host};
 use crate::live::Live;
 use crate::live::bots::bot_routes;
 use crate::live::stream::live_routes;
+use crate::places::PLACES_ROUTE;
 use crate::relief::relief_tile;
 use crate::shapes::{LevelShapes, SHAPES_ROUTE, shapes};
 use crate::studio::Studio;
@@ -172,6 +173,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/world/relief/{level}/{row}/{column}", get(relief))
         .route("/api/world/spawns", get(spawns))
         .route("/api/world/spawn-cells", get(spawn_cells))
+        .route(PLACES_ROUTE, get(places))
         .route(SHAPES_ROUTE, get(shapes))
         .route(HOST_ROUTE, get(host))
         .route(HEIGHT_ROUTE, get(ground_height))
@@ -380,6 +382,11 @@ async fn spawn_cells(State(state): State<AppState>, Query(params): Query<KindPar
         .into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     }
+}
+
+/// The places a game master sends players to.
+async fn places(State(state): State<AppState>) -> Response {
+    Json(state.world.get().places()).into_response()
 }
 
 #[derive(Debug, Deserialize)]

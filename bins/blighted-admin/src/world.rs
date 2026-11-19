@@ -20,6 +20,7 @@ use nw_world::script::DesignData;
 use serde::Serialize;
 
 use crate::config::AdminConfig;
+use crate::places::{Place, places_of_bundle};
 
 /// Edge of one cell of the spawn index, in metres.
 pub const SPAWN_CELL_M: f32 = 256.0;
@@ -232,6 +233,8 @@ pub struct WorldLayer {
     design_data: Option<ContentLayout>,
     /// The level table and the weapon masteries, for the GM page.
     progression: Progression,
+    /// The places a game master sends players to, for the GM page.
+    places: Vec<Place>,
 }
 
 impl WorldLayer {
@@ -281,6 +284,7 @@ impl WorldLayer {
             max_spawns,
             design_data: None,
             progression: Progression::default(),
+            places: Vec::new(),
         }
     }
 
@@ -294,11 +298,12 @@ impl WorldLayer {
             load_client_build(&config.client_build_config).map_err(WorldLayerError::ClientBuild)?;
         let layout = ContentLayout::open(content_dir(), &build)?;
         let world = WorldFile::load(&layout, &config.level)?;
-        let (names, progression) = {
+        let (names, progression, places) = {
             let bundle = ContentBundle::load(&layout)?;
             (
                 SpawnNames::from_tables(&bundle.tables),
                 Progression::of_tables(&bundle.tables),
+                places_of_bundle(&world, &bundle),
             )
         };
         let path = map_dir(&layout, &config.level).join(TILES_FILE);
@@ -321,6 +326,7 @@ impl WorldLayer {
         Ok(Self {
             design_data: Some(layout),
             progression,
+            places,
             ..Self::new(world, names, tiles, config.max_spawns_per_request)
         })
     }
@@ -356,6 +362,11 @@ impl WorldLayer {
     /// The level table and the weapon masteries.
     pub fn progression(&self) -> &Progression {
         &self.progression
+    }
+
+    /// The places a game master sends players to.
+    pub fn places(&self) -> &[Place] {
+        &self.places
     }
 
     /// The tile grid.

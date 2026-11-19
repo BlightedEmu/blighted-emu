@@ -3,9 +3,46 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  MAX_SPAWN, coinsRequest, eventStartRequest, eventStopRequest, experienceRequest, itemRequest, levelRequest, masteryName,
-  masteryRankRequest, masteryRequest, questRequest, spawnRequest, teleportRequest,
+  MAX_SPAWN, PLACE_KINDS, bringAllRequests, coinsRequest, eventStartRequest, eventStopRequest, experienceRequest, itemRequest, levelRequest, masteryName,
+  mapDistance, masteryRankRequest, masteryRequest, placeGroups, placeKindCounts, placeTeleportRequest, questRequest,
+  spawnRequest, teleportRequest,
 } from './gm.js';
+
+const PLACES = [
+  { kind: 'settlement', name: 'Prydwen', region: "Monarch's Bluffs", x: 7348, y: 3740, z: 104 },
+  { kind: 'shrine', name: 'Hiraeth Shrine', region: "Monarch's Bluffs", x: 7079, y: 3609, z: 90 },
+  { kind: 'shrine', name: 'Church of the Courts', region: 'Nighthaven', x: 3991, y: 5604, z: 119 },
+  { kind: 'expedition', name: 'Amrine Excavation', region: 'Windsward', x: 9306, y: 3214, z: 89 },
+];
+
+test('places count by kind, with every kind listed', () => {
+  const counts = placeKindCounts(PLACES);
+  assert.deepEqual([...counts.keys()], PLACE_KINDS.map(([kind]) => kind));
+  assert.equal(counts.get('shrine'), 2);
+  assert.equal(counts.get('raid'), 0);
+});
+
+test('place groups keep the region order and filter by kind and by name or region', () => {
+  const regions = (groups) => groups.map((group) => `${group.region}:${group.places.length}`);
+  assert.deepEqual(regions(placeGroups(PLACES, '', '')), ["Monarch's Bluffs:2", 'Nighthaven:1', 'Windsward:1']);
+  assert.deepEqual(regions(placeGroups(PLACES, '', 'shrine')), ["Monarch's Bluffs:1", 'Nighthaven:1']);
+  assert.deepEqual(regions(placeGroups(PLACES, ' NIGHT ', '')), ['Nighthaven:1'], 'by region, any case');
+  assert.deepEqual(regions(placeGroups(PLACES, 'amrine', '')), ['Windsward:1'], 'by name');
+  assert.deepEqual(placeGroups(PLACES, 'amrine', 'shrine'), []);
+});
+
+test('a place teleport sends the player to the place point', () => {
+  assert.deepEqual(placeTeleportRequest(41, PLACES[3]), { entity: 41, x: 9306, y: 3214, z: 89 });
+});
+
+test('map distance leaves the height out', () => {
+  assert.equal(mapDistance({ x: 0, y: 0, z: 0 }, { x: 3, y: 4, z: 100 }), 5);
+});
+
+test('bring everyone moves each other player but no bot and not the target', () => {
+  const players = [{ entity: 1 }, { entity: 2 }, { entity: 3, bot: true }, { entity: 4, bot: false }];
+  assert.deepEqual(bringAllRequests(1, players), [{ entity: 2, to_entity: 1 }, { entity: 4, to_entity: 1 }]);
+});
 
 test('an event start needs an event and a point', () => {
   assert.deepEqual(eventStartRequest('invasion', '1', '2', '3'), { request: { event: 'invasion', x: 1, y: 2, z: 3 } });

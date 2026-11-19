@@ -86,8 +86,10 @@ let pickedEntity = null;
 
 const controls = mountPlayerControls(document.getElementById('picked-controls'), {
   entity: () => online.get(pickedEntity),
+  players: () => [...online.values()],
   say,
   sent: () => loadAudit(),
+  placesOpen: true,
 });
 
 function showPicked() {
@@ -148,6 +150,7 @@ async function loadOnline() {
   online = new Map((view.players ?? []).map((player) => [player.entity, playerEntity(player)]));
   showOnline();
   showPicked();
+  controls.refresh();
 }
 
 showBots.addEventListener('change', showOnline);

@@ -10,6 +10,7 @@ pub mod gm;
 pub mod guard;
 pub mod host;
 pub mod live;
+pub mod places;
 pub mod relay;
 pub mod relief;
 pub mod run;

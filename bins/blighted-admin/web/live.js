@@ -344,8 +344,22 @@ const playerControls = mountPlayerControls(document.getElementById('gm-player-co
     const entity = selectedEntity();
     return entity && entity.kind !== KINDS.MOB ? entity : undefined;
   },
+  players: () => [...entities().values()].filter((entity) => entity.kind !== KINDS.MOB),
   say: sayGm,
 });
+/** The other players table of the GM tools is drawn again at most this often (its buttons stay
+ * clickable between two states). */
+const OTHER_PLAYERS_REFRESH_MS = 1000;
+let otherPlayersShownMs = 0;
+
+/** Draws the other players of the GM tools again when they show and the last draw is old. */
+function showOtherPlayers(nowMs) {
+  if (gmPlayer.hidden || nowMs - otherPlayersShownMs < OTHER_PLAYERS_REFRESH_MS) {
+    return;
+  }
+  otherPlayersShownMs = nowMs;
+  playerControls.refresh();
+}
 
 /** Runs `send` with the selected entity, or says there is none. */
 function onSelected(send) {
@@ -539,6 +553,7 @@ function showAll() {
   showSelection();
   showPlayers();
   showEvents();
+  showOtherPlayers(nowMs);
 }
 
 function connect() {

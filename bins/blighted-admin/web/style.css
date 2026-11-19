@@ -762,6 +762,46 @@ details + details, .section-head ~ details { border-top: 1px solid var(--line); 
 .game .online-player { width: 100%; text-align: left; font: 14px var(--font-body); letter-spacing: 0; text-transform: none; border-color: transparent; padding: 6px 8px; }
 .picked h2 { text-transform: none; letter-spacing: 0.04em; }
 .picked .gm { padding: 0; margin-bottom: 8px; }
+/* Teleport: the point fields, the other players, then the places by region. */
+.teleport { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; padding-bottom: 14px; border-bottom: 1px solid var(--gm-row); }
+.teleport .gm { padding: 0; margin: 0; }
+.teleport h3 { font: 600 12px var(--font-serif); letter-spacing: 0.16em; text-transform: uppercase; color: var(--gm-mute); }
+.teleport-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.teleport-players { max-height: 220px; overflow: auto; border: 1px solid var(--gm-row); }
+.teleport-players .grid td { padding: 4px 10px; }
+.teleport-players .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.game .teleport-players .row-actions button { padding: 2px 8px; font-size: 11px; }
+.teleport .tag { margin-left: 8px; padding: 0 5px; font: 600 10px var(--font-serif); letter-spacing: 0.12em; text-transform: uppercase; color: var(--gm-mute); border: 1px solid var(--gm-edge); }
+.places summary { display: flex; align-items: baseline; gap: 10px; cursor: pointer; list-style: none; }
+.places summary::-webkit-details-marker { display: none; }
+.places summary::before { content: "▸"; color: var(--gm-gold); }
+.places[open] summary::before { content: "▾"; }
+.places .hint { margin: 8px 0; color: var(--gm-mute); }
+.place-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.game .place-filter input { width: 220px; padding: 4px 8px; font: 14px var(--font-body); color: var(--gm-ink); background: transparent; border: 1px solid var(--gm-edge); border-radius: 0; }
+.place-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.game .place-chips .chip { padding: 2px 8px; font-size: 11px; }
+.place-groups { max-height: 520px; overflow-y: auto; padding-right: 4px; }
+.place-region { margin: 12px 0 6px; font: 600 12px var(--font-serif); letter-spacing: 0.16em; text-transform: uppercase; color: var(--gm-gold); }
+.place-region:first-child { margin-top: 0; }
+.place-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 6px; }
+.game .place {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  text-align: left;
+  font: 13px var(--font-body);
+  letter-spacing: 0;
+  text-transform: none;
+  border-color: var(--gm-row);
+}
+.place-kind { font: 600 10px var(--font-serif); letter-spacing: 0.12em; text-transform: uppercase; color: var(--gm-mute); }
+.place-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--gm-ink); }
+.place-at { font-size: 11px; color: var(--gm-mute); font-variant-numeric: tabular-nums; }
+.place-settlement .place-kind, .place-outpost .place-kind, .place-fort .place-kind { color: var(--gm-gold); }
+.place-expedition .place-kind, .place-raid .place-kind, .place-trial .place-kind { color: var(--alert); }
 .audit { display: flex; flex-direction: column; min-height: 0; }
 .audit .table-scroll { flex: 1; min-height: 0; overflow: auto; margin: 0 -20px -18px; }
 .audit .grid th:first-child, .audit .grid td:first-child { padding-left: 20px; }
