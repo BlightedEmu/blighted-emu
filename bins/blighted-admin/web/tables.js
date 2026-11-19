@@ -7,6 +7,8 @@ const KIB = 1024;
 const MIB = KIB * KIB;
 const GIB = MIB * KIB;
 const DIRECTIONS = ['server → client', 'client → server'];
+/** The events that end a pointer press. */
+const PRESS_END_EVENTS = ['pointerup', 'pointercancel'];
 
 function missing(value) {
   return value === null || value === undefined;
@@ -70,4 +72,20 @@ export function largest(values, floor) {
     top = Math.max(top, value);
   }
   return top;
+}
+
+/**
+ * Runs `run` once, when the pointer press in progress on `target` (a document) ends. A row press
+ * that closes the drawer holding the row runs its drawer change here: closing it during the
+ * press crashed the Brave 1.99 (Chromium 157) tab (live page, 2026-11-19), Chrome 158 did not.
+ */
+export function whenPressEnds(target, run) {
+  const pressEnd = new AbortController();
+  const end = () => {
+    pressEnd.abort();
+    run();
+  };
+  for (const type of PRESS_END_EVENTS) {
+    target.addEventListener(type, end, { signal: pressEnd.signal });
+  }
 }

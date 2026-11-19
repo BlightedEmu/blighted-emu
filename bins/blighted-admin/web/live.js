@@ -8,7 +8,7 @@ import { mountPlayerControls } from './gm-player.js';
 import { WorldMap } from './map.js';
 import { SERIES, SIGNAL } from './palette.js';
 import { STATUS_GROUPS, isMarked, nextStatuses, statusText } from './status.js';
-import { sortRows } from './tables.js';
+import { sortRows, whenPressEnds } from './tables.js';
 import { TILE_KINDS, TRAIL_POINTS, factElements, formatTile, trailPush } from './tiles.js';
 
 const STREAM_URL = '/api/live/stream';
@@ -295,11 +295,9 @@ function showSelection() {
   selectionBox.replaceChildren(list);
 }
 
+/** Selects `key` (or null) and shows it on the map and in the Selected drawer. */
 function select(key) {
   selectedKey = key;
-  if (key !== null) {
-    selectedPanel.open = true;
-  }
   map.follow(key);
   showMap();
   showSelection();
@@ -633,15 +631,21 @@ bigMapButton.addEventListener('click', () => {
 trailsBox.addEventListener('change', showMap);
 sleepingBox.addEventListener('change', () => map.setSpawnKinds(sleepingBox.checked ? ['vitals'] : []));
 // The table is drawn again with every state: a press selects, a click could miss its row.
+// The Selected drawer and the players drawer share one `name`: opening one closes the other, so
+// the drawer opens once the row's press ends (see whenPressEnds).
 playersBody.addEventListener('pointerdown', (event) => {
   const key = event.target.closest('tr')?.dataset.key;
   if (key) {
     select(key);
+    whenPressEnds(document, () => {
+      selectedPanel.open = true;
+    });
   }
 });
 map.onSelect((item) => {
   if (item?.key) {
     select(item.key);
+    selectedPanel.open = true;
   }
 });
 for (const header of document.querySelectorAll('th.sortable')) {

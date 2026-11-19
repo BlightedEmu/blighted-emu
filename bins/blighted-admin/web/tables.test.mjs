@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { directionText, largest, formatBytes, formatRate, ratioText, sortRows } from './tables.js';
+import { directionText, largest, formatBytes, formatRate, ratioText, sortRows, whenPressEnds } from './tables.js';
 
 test('sortRows sorts numbers and puts missing last', () => {
   const rows = [{ n: 10 }, { n: null }, { n: 2 }, { n: 33 }];
@@ -44,4 +44,19 @@ test('largest takes a very long list and has a floor', () => {
   const values = Array.from({ length: 400000 }, (_, index) => index % 1000);
   assert.equal(largest(values, 1), 999);
   assert.equal(largest([], 1), 1);
+});
+
+test('whenPressEnds runs once at the end of the press', () => {
+  for (const ending of ['pointerup', 'pointercancel']) {
+    const target = new EventTarget();
+    let runs = 0;
+    whenPressEnds(target, () => {
+      runs += 1;
+    });
+    assert.equal(runs, 0, 'not during the press');
+    target.dispatchEvent(new Event(ending));
+    target.dispatchEvent(new Event('pointerup'));
+    target.dispatchEvent(new Event('pointercancel'));
+    assert.equal(runs, 1, `${ending}: once`);
+  }
 });
