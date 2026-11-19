@@ -229,7 +229,7 @@ impl SimWorld {
     /// The game mode CRC of the entrance whose capital is `capital`.
     fn entrance_mode_crc(&self, capital: u64) -> Option<u32> {
         let slice = self.content.entrances.get(&capital)?;
-        super::instances::entrance_mode(self.content.instances.modes(), slice).map(|mode| mode.crc)
+        nw_content::dungeon_entrances::entrance_mode(self.content.instances.modes(), slice).map(|mode| mode.crc)
     }
 
     /// The entrance entity of game mode `crc` nearest player `entity`.

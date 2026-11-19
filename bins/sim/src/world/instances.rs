@@ -46,7 +46,7 @@ use super::{
     handoff_offer, owner_in, quests_of, send_now, unix_ns,
 };
 use crate::login::phase_id;
-use crate::player_content::entrance_rest;
+use nw_content::dungeon_entrances::entrance_mode;
 
 /// Interaction kinds of the client's `InteractionUIActions` (`sheathe/interact_enum.tsv`).
 pub mod kind {
@@ -68,14 +68,6 @@ const NS_PER_MS: u64 = 1_000_000;
 const NS_PER_SECOND: u64 = 1_000_000_000;
 /// `m_singlePlayerInstanceState` after a trial ended (retail: 0 in the state after every exit).
 const SINGLE_PLAYER_ENDED: u8 = 0;
-/// The infix of a locked entrance (`DungeonEntrance_QuestAdiana_Locked_V2`): the same game mode.
-const LOCKED_INFIX: &str = "_locked";
-/// The version suffix of an entrance (`DungeonEntrance_QuestMammoth_V2`).
-const VERSION_SUFFIX: &str = "_v2";
-/// The `Dungeon` prefix of an expedition's game mode id (`DungeonAmrine` for `..._Amrine`).
-const DUNGEON_PREFIX: &str = "dungeon";
-/// The level folder part of an expedition map (`NW_Dungeon_Everfall_00` for `..._Everfall00`).
-const MAP_PREFIXES: [&str; 2] = ["nw_dungeon_", "nw_"];
 
 /// An instance the director gave the player: it enters it at its 946.
 #[derive(Debug, Clone, PartialEq)]
@@ -386,85 +378,6 @@ impl InstanceRun {
     pub(super) const fn ends_at_ms(&self) -> Option<u64> {
         self.ends_at_ms
     }
-}
-
-/// The game mode whose entrance slice is `slice_name`: the name after `DungeonEntrance`,
-/// without `_Locked`, `_V2` and a trailing hash number, is the game mode id, the id less its
-/// `Dungeon` prefix, or the map name less `NW_Dungeon_` or `NW_` (Inferred from the 40 entrance
-/// slices of the open world: 35 name one game mode this way, e.g. the QuestMorgaine entrance
-/// that retail answered with QuestMorgaine's 5038; the others name none or two and give none).
-pub(super) fn entrance_mode<'a>(
-    modes: impl Iterator<Item = &'a InstanceMode>,
-    slice_name: &str,
-) -> Option<&'a InstanceMode> {
-    // The last path part, without an extension (`.dynamicslice`).
-    let name = slice_name
-        .rsplit('/')
-        .next()?
-        .split('.')
-        .next()?
-        .to_lowercase();
-    let rest = entrance_rest(&name)?
-        .replace(LOCKED_INFIX, "")
-        .replace(VERSION_SUFFIX, "");
-    // A trailing number of more digits than a map number is a hash (`_1970794647`).
-    let rest = match rest.rsplit_once('_') {
-        Some((head, tail))
-            if tail.len() > MAP_NUMBER_DIGITS && tail.chars().all(|c| c.is_ascii_digit()) =>
-        {
-            head.to_owned()
-        }
-        _ => rest,
-    };
-    let names: Vec<(&InstanceMode, [String; 3])> = modes
-        .map(|mode| {
-            let id = mode.id.to_lowercase();
-            let map = mode.map.map_name.to_lowercase();
-            let map = MAP_PREFIXES
-                .iter()
-                .find_map(|prefix| map.strip_prefix(prefix))
-                .unwrap_or(&map);
-            let names = [
-                letters_and_digits(&id),
-                letters_and_digits(id.strip_prefix(DUNGEON_PREFIX).unwrap_or(&id)),
-                letters_and_digits(map),
-            ];
-            (mode, names)
-        })
-        .collect();
-    // The name's words, longest first, with and without their number-only words: a word after
-    // the mode's name is a variant (`Entrance_QuestIsabella_Simple`), a number-only word a stage
-    // (`DungeonEntranceTrial_00_BrimstoneSandworm`). The first key that names any mode decides:
-    // two modes for it give none.
-    let words: Vec<&str> = rest.split('_').filter(|word| !word.is_empty()).collect();
-    for count in (1..=words.len()).rev() {
-        let head = &words[..count];
-        let without_numbers: Vec<&str> = head
-            .iter()
-            .copied()
-            .filter(|word| !word.chars().all(|c| c.is_ascii_digit()))
-            .collect();
-        for key in [
-            letters_and_digits(&head.concat()),
-            letters_and_digits(&without_numbers.concat()),
-        ] {
-            let mut found = names
-                .iter()
-                .filter(|(_, names)| names.contains(&key))
-                .map(|(mode, _)| *mode);
-            if let Some(mode) = found.next() {
-                return found.next().is_none().then_some(mode);
-            }
-        }
-    }
-    None
-}
-
-/// Digits of a map number at the end of an entrance name (`brimstone00`).
-const MAP_NUMBER_DIGITS: usize = 2;
-
-fn letters_and_digits(text: &str) -> String {
-    text.chars().filter(char::is_ascii_alphanumeric).collect()
 }
 
 /// The level of each map of each game mode of `catalog`, by the mode's CRC and the map's
@@ -1567,129 +1480,6 @@ pub(super) mod tests {
             rotation: Vec::new(),
             rotation_span_seconds: None,
         }
-    }
-
-    fn modes() -> Vec<InstanceMode> {
-        vec![
-            mode(
-                "QuestMedea",
-                "NewWorld_VitaeEterna",
-                InstanceKind::SoloTrial,
-            ),
-            mode(
-                "QuestApophis",
-                "NewWorld_VitaeEterna",
-                InstanceKind::SoloTrial,
-            ),
-            mode(
-                "QuestIsabella",
-                "NW_ORI_SM_QuestIsabella",
-                InstanceKind::SoloTrial,
-            ),
-            mode(
-                "TrialBrimstoneSandworm",
-                "NewWorld_VitaeEterna",
-                InstanceKind::RaidTrial,
-            ),
-            mode(
-                "DungeonAmrine",
-                "NW_Dungeon_Windsward_00",
-                InstanceKind::Expedition,
-            ),
-            mode(
-                "DungeonShatteredObelisk",
-                "NW_Dungeon_Everfall_00",
-                InstanceKind::Expedition,
-            ),
-            mode(
-                "QuestMorgaine",
-                "NewWorld_VitaeEterna",
-                InstanceKind::SoloTrial,
-            ),
-            mode(
-                "TrialSeason04Q02",
-                "NW_Trial_Season_04_DaichiDojo",
-                InstanceKind::SoloTrial,
-            ),
-            mode(
-                "TrialSeason01",
-                "NW_Trial_Season_02",
-                InstanceKind::RaidTrial,
-            ),
-            mode(
-                "TrialSeason04",
-                "NW_Trial_Season_04",
-                InstanceKind::RaidTrial,
-            ),
-            mode(
-                "TrialSeason04Q05",
-                "NW_Trial_Season_04",
-                InstanceKind::SoloTrial,
-            ),
-        ]
-    }
-
-    fn found(slice: &str) -> Option<String> {
-        let modes = modes();
-        entrance_mode(modes.iter(), slice).map(|mode| mode.id.clone())
-    }
-
-    #[test]
-    fn entrance_slices_name_their_game_modes() {
-        assert_eq!(
-            found("Dungeon/Entrance/dungeonentrance_questmorgaine").as_deref(),
-            Some("QuestMorgaine")
-        );
-        assert_eq!(
-            found("dungeon/entrance/dungeonentrance_amrine").as_deref(),
-            Some("DungeonAmrine")
-        );
-        assert_eq!(
-            found("Dungeon/Entrance/DungeonEntrance_Everfall00").as_deref(),
-            Some("DungeonShatteredObelisk"),
-            "by the map name"
-        );
-        assert_eq!(
-            found("Dungeon/Entrance/DungeonEntrance_TrialSeason04Q02_Locked_V2_1970794647")
-                .as_deref(),
-            Some("TrialSeason04Q02")
-        );
-        assert_eq!(
-            found("Dungeon/Entrance/DungeonEntranceTrial_Season_01").as_deref(),
-            Some("TrialSeason01")
-        );
-        // Two modes share the map NW_Trial_Season_04: no game mode.
-        assert_eq!(
-            found("Dungeon/Entrance/DungeonEntranceTrial_Season_04"),
-            None
-        );
-        assert_eq!(found("Dungeon/Entrance/DungeonEntrance_FirstLight02"), None);
-        // The story instance forms of the open world's capitals.
-        assert_eq!(
-            found("Dungeon/MedeaWindsward/4_1_Trial_Entrance_QuestMedea").as_deref(),
-            Some("QuestMedea")
-        );
-        assert_eq!(
-            found("Dungeon/MedeaWindsward/4__Trial_Entrance_QuestMedea_Locked").as_deref(),
-            Some("QuestMedea")
-        );
-        assert_eq!(
-            found("Dungeon/ApophisBrimstone/Entrance_QuestApophis_V2").as_deref(),
-            Some("QuestApophis")
-        );
-        assert_eq!(
-            found("Dungeon/IsabellaShattered/Entrance_QuestIsabella_Persisting_Collision_V2")
-                .as_deref(),
-            Some("QuestIsabella"),
-            "a variant word after the name"
-        );
-        assert_eq!(
-            found("Dungeon/Entrance/DungeonEntranceTrial_00_BrimstoneSandworm").as_deref(),
-            Some("TrialBrimstoneSandworm"),
-            "a stage number before the name"
-        );
-        assert_eq!(found("IO_Season_04_Q03_Boat_Entrance"), None);
-        assert_eq!(found("POIs/Settlement/Townboard"), None);
     }
 
     fn clock() -> ResetClock {

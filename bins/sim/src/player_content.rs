@@ -12,6 +12,7 @@ use nw_content::crafting::{Recipes, StructureCosts};
 use nw_content::creature_animations::CreatureAnimations;
 use nw_content::deaths_door::DeathsDoorRules;
 use nw_content::drop_rolls::DropRolls;
+use nw_content::dungeon_entrances::entrance_rest;
 use nw_content::equip_load::EquipLoads;
 use nw_content::fishing::FishingRules;
 use nw_content::game_mode_rewards::ModeRewards;
@@ -1012,24 +1013,6 @@ pub struct PlayerContent {
     pub dungeon_scripts: DungeonScripts,
     /// What the level holds that the quests' steps need, for `!questplan` and the quest walk.
     pub quest_guide: crate::world::QuestGuide,
-}
-
-/// The lower-case words an instance entrance's slice name starts with, after its stage number
-/// and a `Trial_` (Observed in the open world's capitals: `DungeonEntrance_Amrine`,
-/// `DungeonEntranceTrial_Season_01`, `RaidEntrance_MonarchsBluffs00`,
-/// `4_1_Trial_Entrance_QuestMedea`, `Entrance_QuestApophis_V2`).
-pub const ENTRANCE_WORDS: [&str; 3] = ["dungeonentrance", "raidentrance", "entrance"];
-/// The word before the entrance word of a story instance's entrance (`3_2_Trial_Entrance_...`).
-const TRIAL_WORD: &str = "trial_";
-
-/// What follows the entrance word in the lower-case slice file name `name`
-/// (`_questmedea` of `4_1_trial_entrance_questmedea`); `None` for a slice that is no entrance.
-pub fn entrance_rest(name: &str) -> Option<&str> {
-    let name = name.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
-    let name = name.strip_prefix(TRIAL_WORD).unwrap_or(name);
-    ENTRANCE_WORDS
-        .iter()
-        .find_map(|word| name.strip_prefix(word))
 }
 
 /// The catacombs generation rules of `tables`; `None` (with a warning) when they do not read.
