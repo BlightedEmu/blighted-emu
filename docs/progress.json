@@ -651,7 +651,7 @@
               "proof": "tests"
             },
             {
-              "check": "Melee swings that miss a mob the player stands close to on its own screen: the body comes from the camera and can be 1.3 to 1.7 m off while swinging (90th percentile, retail replay); cause of the live boar misses Inferred, not fixed.",
+              "check": "Melee swings that miss a mob the player stands close to on its own screen (open): in the live misses of 2026-11-18 only the range failed (the server body 4.5 m from the boar, retail hits land about 2.0 m away; facing, hit timing and the boar's place were right). The body followed a camera body 0.56 m above the floor, the sign of a short boom: likely the far-from-origin boom fault fixed on 2026-11-19, not proven (those logs hold no boom). Fixed on 2026-11-19 too: an attack's lunge with no key or stick now moves the body at once (replay of 11 retail ledgers: standing swings 0.76 to 0.64 m off, 90th percentile). Needs one live session of swings at a boar.",
               "proof": "none"
             },
             {
@@ -1481,8 +1481,8 @@
               "proof": "tests"
             },
             {
-              "check": "A boar's hit reaction lasts 775 ms in ours and about 635 ms in retail (not proven, not changed).",
-              "proof": "none"
+              "check": "A mob's hit reaction ends with the hit's stun and plays faster or slower to end then (tests only, 2026-11-19): retail sends the reaction again at its `HitStun` clip with a new speed, (length - clip start) / (stun - clip start), and the stun is the attack row's `HitStun_AI` (boar reactions 15 to 28 frames, median 634 ms; 350 of 415 retail speed switches match bit for bit). Ours played 775 ms for every attack. Open: the grey wolf's `r_R2` ends 1.1 frames later in retail.",
+              "proof": "tests"
             }
           ]
         },
@@ -3673,7 +3673,7 @@
     }
   ],
   "nextSteps": [
-    "**Other players: live check of the ninth round (2026-11-19, tests only), then the unreliable bundles.** First play as now: dodge rolls (keyboard and controller), jumps and falls (no floating), crouch and prone, bow and gun shots aimed and from the hip, the bow's full draw, blunderbuss re-fire and reload, blocks, and a spear chain on a boar. Then turn the reliable bundles off on the VM (NW_RELIABLE_BUNDLES in the stack script) and check with the real client that the other player stays visible and moves without the 230 ms holds; the client trace (`blighted-emu-tools`, delay trace) measures the viewer's delay. The two-bot `pair` test passes with and without reliable bundles on the PC.\n\nStill open: the admin site's Live page crashes the browser tab when a player is picked (not reproduced off-line); the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
+    "**Other players: live check of the ninth round (2026-11-19, tests only), then the unreliable bundles.** First play as now: dodge rolls (keyboard and controller), jumps and falls (no floating), crouch and prone, bow and gun shots aimed and from the hip, the bow's full draw, blunderbuss re-fire and reload, blocks, a spear chain on a boar (the swings must hit from about 2 m, and the boar must reel shorter for light hits than for heavy ones). Then turn the reliable bundles off on the VM (NW_RELIABLE_BUNDLES in the stack script) and check with the real client that the other player stays visible and moves without the 230 ms holds; the client trace (`blighted-emu-tools`, delay trace) measures the viewer's delay. The two-bot `pair` test passes with and without reliable bundles on the PC.\n\nStill open: the admin site's Live page crashes the browser tab when a player is picked (not reproduced off-line); the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
@@ -3758,6 +3758,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Mob hit reactions (2026-11-19, tests only): a mob's reaction now lasts the stun of the hit that made it and its clip plays at the speed that ends it then, as retail; an attack's lunge with no key or stick moves the player's body on the server at once.",
     "Other players, ninth round (2026-11-19, tests only): the floor bit goes off in jumps and falls, the blunderbuss fires again and reloads as retail, the aim and the bow's full draw show their walk and stand forms, a basic mob reels from four hits in a row, and the two-bot pair test passes again.",
     "Other players, fifth live round (2026-11-18, tests only): another player's states now carry its client's time and repeat their clock after a change, a held heavy charge and a still controller player no longer float.",
     "Other players, fourth live round (2026-11-17, tests only): the gear load no longer counts the main-hand weapons (light and medium armor dodged as medium and heavy), an aim no longer sends a block, and a controller player's body is smoothed and no longer floats.",
@@ -3997,5 +3998,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-19",
-  "lastCommit": "6890b436"
+  "lastCommit": "b94e4707"
 }
