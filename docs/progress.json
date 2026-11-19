@@ -693,6 +693,30 @@
             {
               "check": "An ability's aim view holds the camera as the right-click aim does (tests only, 2026-11-19): Penetrating Shot's aim and Rain of Arrows' targeting changed the camera boom with no key, and the server body slid up to 5.9 m from a still client (proven with a client trace).",
               "proof": "tests"
+            },
+            {
+              "check": "Another player's upper-body animation plays through (tests only, 2026-11-19): retail sends the second slot's sequence time (child 4) in 151,132 of 151,536 remote states while it plays; ours sent it only after a start (538 of 3,949), so hip fire, reloads, blocks and casts stayed at their first frame. Each upper slot now keeps its own clock in every remote state.",
+              "proof": "tests"
+            },
+            {
+              "check": "Another player's state stamps stay near the send time (tests only, 2026-11-19): some clients' frame times ran slow and our stamps drifted up to 100 ms behind (age -136/-107/-13 ms against retail's -36/-23/-12); the input clock now catches up an eighth of its lag a record (replay: -20/-11/0 ms).",
+              "proof": "tests"
+            },
+            {
+              "check": "A run after a stop or a turn starts with the move-start state as retail's (tests only, 2026-11-19): retail never follows a move state by a move state (0 of 802), ours did in 159 of 227 starts.",
+              "proof": "tests"
+            },
+            {
+              "check": "A jump keeps its floor bit about 165 ms as retail's and no key movement cuts it (tests only, 2026-11-19): ours cleared it at once, and 3 of 12 jumps ended in a stand.",
+              "proof": "tests"
+            },
+            {
+              "check": "A resting body comes back onto the floor (tests only, 2026-11-19): against a client trace of a retail town session, heights off by more than 0.3 m fell from 7.3 % to 5.1 % of records. Not fixed: a walking or climbing body under a too short camera boom can still float.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not built yet (retail session 2026-11-19): the dodge's child 41 and marker child 48, child 48 on 96 % of attack presses (ours 50 %), mounted rider states, crafting-station states.",
+              "proof": "none"
             }
           ]
         },
@@ -3787,6 +3811,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Other players (2026-11-19, tests only): upper-body animations play through, stamps stay near the send time, runs start and jumps hold as retail's, a resting body comes back onto the floor; abilities' dashes move the body; the bow's aims clear their tag groups.",
     "Bow (2026-11-19, tests only): Penetrating Shot, Splinter Shot, Rain of Arrows and Poison Shot fire; arrows aim at the crosshair point; an ability's aim no longer slides the body.",
     "Admin teleport (2026-11-19, tests only): the GM page and the Live page's GM tools list every settlement, outpost, fort, spirit shrine, expedition, raid and trial entrance of the world by region, with names from the game data; a click sends the picked player there. Each other player has Bring here and Go to, and Bring everyone here moves every other player (not bots) to the picked one.",
     "Other players (2026-11-19, tests only): a controller player's body no longer falls behind its client while it moves, so its camera boom holds and a still block stands with the client (0.98 m off before in the replay).",
@@ -4032,5 +4057,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-19",
-  "lastCommit": "b127b0bd"
+  "lastCommit": "b4e6da37"
 }
