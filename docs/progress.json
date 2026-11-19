@@ -655,7 +655,19 @@
               "proof": "none"
             },
             {
-              "check": "After a shot, a gun or a bow goes back to its aim in retail with its own marker (blunderbuss 4248 with marker 40 about 0.7 s after the shot); ours sends nothing after the shot. Not built.",
+              "check": "Bow, musket and blunderbuss shots show to the other players (tests only, 2026-11-19): the bow's aimed shot at the release (244 of 244 retail) and its full draw (157 of 157), the hip shots of all three with their steps and end, a bow press during its hip shot fires again, and the musket's steps after an aimed shot (reload, aim again). Open: the guns' second hip shot during the first, the blunderbuss automatic reload.",
+              "proof": "tests"
+            },
+            {
+              "check": "A crouch, a prone and a stand-up show to the other players with the change (tests only, 2026-11-19): the posture goes in ALC child 43 with the change sequence, as retail sent it in 10,563 of 10,969 changes; ours sent the sequence only, and the crouch showed about 1 s late.",
+              "proof": "tests"
+            },
+            {
+              "check": "A body far from the level's middle keeps its camera boom (tests only, 2026-11-19): the boom solve ran in level coordinates in f32 and stepped by 0.9 m about 7,300 m out, and a controller player's dodge roll went back and forth and snapped back 1.1 m; the live records replayed now stay within 0.41 m.",
+              "proof": "tests"
+            },
+            {
+              "check": "Other players' states go unreliable on channel 1 as retail's (not done): the stack scripts still start the sims with NW_RELIABLE_BUNDLES=1, so a lost datagram holds every later state about 230 ms until its resend (34 holds in a 2.5 min client trace, the viewer's delay then up to 350 ms). A live check with the real client is needed before the switch goes off.",
               "proof": "none"
             }
           ]
@@ -3649,7 +3661,7 @@
     }
   ],
   "nextSteps": [
-    "**Other players: live check of the seventh round (2026-11-18, tests only).** Both players, keyboard and controller: blocks standing and walking (spear and rapier), a rifle's and a bow's aim, a run and a stop, and a melee fight with a boar (the log now holds the camera and its boom, to find why swings missed a boar the player stood behind).\n\nStill open: the boar misses (cause not proven: the server had the body 4.5 m from the boar's middle; the boar's place sent was right); a gun's or bow's return to its aim after a shot; children 41 to 44 for other players (Unknown effect); the 1 s late crouch (Unknown); a controller stick that goes to rest for one to six records shows a stop and a new start, as retail does for the same input. Also open: a new realm data pack version with the re-mined player sequence table, its gear-load dodges and the block and aim holds; the medium and heavy dodges of most weapons (Unknown); the other pad keys (abilities) and a mount ridden with the stick.",
+    "**Other players: live check of the eighth round (2026-11-19, tests only), then the unreliable bundles.** First play as now: dodge rolls (keyboard and controller), crouch and prone, bow and gun shots aimed and from the hip, blocks. Then turn the reliable bundles off on the VM (NW_RELIABLE_BUNDLES in the stack script) and check with the real client that the other player stays visible and moves without the 230 ms holds; the client trace (`blighted-emu-tools`, delay trace) measures the viewer's delay.\n\nStill open: the admin site's Live page crashes the browser tab when a player is picked (not reproduced off-line); the two-bot `pair` test fails on the current stack (the bots never see each other); the drawn block shake and the boar swing feel (no measured fault left); children 41, 42 and 44 for other players (Unknown effect).",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
@@ -3971,6 +3983,6 @@
     "Other players' animations (2026-11-17, tests only): block pose end, upper slot times, landings and falls, draw ends, sheathed dodges, the re-mined player sequence table, the heavy attack lift and the press start kept at a draw."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-18",
-  "lastCommit": "6c5c9b45"
+  "updated": "2026-11-19",
+  "lastCommit": "f1c8211d"
 }
