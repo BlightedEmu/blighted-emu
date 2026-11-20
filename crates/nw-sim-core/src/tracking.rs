@@ -39,7 +39,9 @@
 //! off in them ([`CAMERA_SETTLE_RECORDS`]). A resting body's still camera that stands it more than
 //! [`BOOM_SHORT_GAP_M`] above the floor under it, where a longer boom stands it on a floor the
 //! level knows, held a boom shorter than the client's: the body goes onto that floor with that
-//! boom and does not take a floor the level lacks. A body the server dropped
+//! boom and does not take a floor the level lacks. Nor does a body whose camera holds a boom
+//! shorter than the client's zoom (`BOOM_BELOW_ZOOM_M`): that camera met the level and its
+//! boom glides back out. A body the server dropped
 //! (a move into the air) falls by the physics until it lands.
 //!
 //! The camera does not carry the body through a wall ([`wall_between`]) from close by: the
@@ -166,6 +168,22 @@ pub const CAMERA_FLOOR_SPREAD_M: f32 = 1.5;
 /// 2.49 % / 15.16 %, and the place error over 0.5 m 30.5 / 30.7 / 28.0 % before, 26.5 / 30.1 /
 /// 26.9 % after.
 pub const BOOM_SHORT_GAP_M: f32 = 0.5;
+/// How much shorter than the client's zoom ([`CameraCheck::zoom_m`]) the boom may be and its
+/// camera's height still stand the body on a floor the level lacks, m. A camera that met the
+/// level shortened its boom and glides back out to the zoom with no boom key, and the check
+/// holds the short boom: its camera's body stands too near the camera and too high, over higher
+/// steps behind the client (Observed, retail towns session 2026-11-19 against the client's own
+/// trace: on stairs at 21:08:51.7 the client's boom fell to 0.68 m and grew back to 7.4 m in
+/// 2 s while it walked down, the check held 0.04 to 0.6 m, and the body stood on its camera's
+/// height up to 4.4 m above the client; of the session's 189 records that stood on a floor the
+/// level lacks, the 58 with a boom under 2.2 m all stood more than 0.3 m off). Our choice from
+/// the replays (records more than 0.3 m off in height, towns against the client's trace /
+/// towns / 11 open-world ledgers against retail's places): 0.5 m raised the tutorial's records
+/// more than 1 m off from 2.01 % to 2.04 %; 1.0 m raised the open world's median place error
+/// from 0.261 to 0.262 m (both with 9.0 m among the zoom lengths); 0.75 m gave
+/// 4.74 / 4.88 / 2.27 % against 5.06 / 5.18 / 2.49 % before and kept or improved every other
+/// summary value.
+const BOOM_BELOW_ZOOM_M: f32 = 0.75;
 /// The flattest look down whose camera's height may show a short boom, radians: below it a
 /// metre of boom moves the camera's body less than 0.2 m in height, and the line along the view
 /// meets the rising floor ahead, not the floor under the client (Observed, retail newchar
@@ -843,6 +861,12 @@ impl TrackedBody {
                 },
                 ..position
             };
+            // A camera whose boom is shorter than the client's zoom met the level: its height
+            // shows no floor ([`BOOM_BELOW_ZOOM_M`]).
+            let boom_of_zoom = self
+                .camera
+                .zoom_m()
+                .is_none_or(|zoom| seen.boom_m >= zoom - BOOM_BELOW_ZOOM_M);
             match floor_under(ground, search_at, sea_level_m) {
                 // A floor the level lacks. An action does not find one: its camera's body rises
                 // with the animation (live 2026-11-17: a held heavy attack put the camera's body
@@ -862,7 +886,8 @@ impl TrackedBody {
                         && intent.stick.is_none()
                         && (was_on_lacking_floor || intent.forward != 0 || intent.right != 0)
                         && (held || (walking_height && !camera_moved))
-                        && height - floor > CAMERA_FLOOR_SPREAD_M =>
+                        && height - floor > CAMERA_FLOOR_SPREAD_M
+                        && boom_of_zoom =>
                 {
                     self.character.land_at(Position {
                         z: height,
@@ -2845,7 +2870,12 @@ mod tests {
     // stood ahead by the trail of the server's roll speed, which went on for two records after
     // the client's camera stopped (not the snap-back of a shrunk boom). This is still open: a
     // trail that fades over the camera's lag, or one from the camera's own motion, cut the back
-    // steps but made the error of other moves larger in the retail replays.
+    // steps but made the error of other moves larger in the retail replays. So did (2026-11-19)
+    // a trail of the body's motion over the last 0.06 s (the retail tutorial's median place
+    // error 0.258 to 0.368 m), the mean of its velocities over that time (0.306 m), the same
+    // mean in a dodge only (the open world's records more than 0.5 m off 30.03 to 30.04 %, and
+    // still a step back of 0.24 m), and a fast roll cut at its 0.5 s marker (a step back of
+    // 0.36 m against 0.26 m).
 
     #[test]
     fn a_controller_s_live_roll_on_a_long_boom_stays_with_its_client() {
@@ -3012,5 +3042,67 @@ mod tests {
                 tracked.position
             );
         }
+    }
+    /// A client on its zoom whose camera meets the level at rest and then walks off while the
+    /// boom glides back out with no boom key (retail towns session 2026-11-19, 21:08:46 to
+    /// 21:08:54 against the client's own trace: the boom 7.2 m at rest, 0.68 m against the
+    /// level, back to 7.4 m in 2 s, at a pitch of 0.62 rad). Gives the highest the body stood
+    /// above the flat ground in the walk.
+    fn walk_while_the_boom_glides_out() -> f32 {
+        const PITCH_STAIRS: f32 = 0.62;
+        const ZOOM_M: f32 = 7.2;
+        const MET_M: f32 = 0.68;
+        const GLIDE_M_PER_RECORD: f32 = (7.4 - MET_M) / 60.0;
+        const REST_RECORDS: usize = 30;
+        const WALK_RECORDS: usize = 90;
+        let camera_of = |body: Position, boom: f32, velocity: [f32; 2]| {
+            let (forward, right) = yaw_axes(0.0);
+            let level = boom * PITCH_STAIRS.cos();
+            CameraView::new(
+                Position {
+                    x: body.x - level * forward[0] + SHOULDER_RIGHT_M * right[0]
+                        - CAMERA_LAG_S * velocity[0],
+                    y: body.y - level * forward[1] + SHOULDER_RIGHT_M * right[1]
+                        - CAMERA_LAG_S * velocity[1],
+                    z: body.z + CAMERA_RISE_M + boom * PITCH_STAIRS.sin(),
+                },
+                0.0,
+                PITCH_STAIRS,
+            )
+        };
+        let mut body = TrackedBody::new(start());
+        let mut client = Character::new(start());
+        for boom in std::iter::repeat_n(ZOOM_M, REST_RECORDS)
+            .chain(std::iter::repeat_n(MET_M, REST_RECORDS))
+        {
+            body.record(input(0, camera_of(start(), boom, [0.0; 2])), &Flat, SEA);
+        }
+        let mut highest_m: f32 = 0.0;
+        let mut boom = MET_M;
+        for _ in 0..WALK_RECORDS {
+            let walk = input(1, camera_of(start(), boom, [0.0; 2]));
+            client.step(walk.character, &Flat, SEA);
+            boom = (boom + GLIDE_M_PER_RECORD).min(ZOOM_M);
+            let view = camera_of(client.position(), boom, client.velocity());
+            let tracked = body.record(
+                TrackInput {
+                    view: Some(view),
+                    ..walk
+                },
+                &Flat,
+                SEA,
+            );
+            highest_m = highest_m.max(tracked.position.z - GROUND_Z);
+        }
+        highest_m
+    }
+
+    #[test]
+    fn a_walk_under_a_boom_shorter_than_the_zoom_stands_on_no_floor_the_level_lacks() {
+        // Before, the body stood on its camera's height as a floor the level lacks, up to 4.4 m
+        // above the client in the retail session.
+        const FLOOR_WITHIN_M: f32 = 0.1;
+        let highest_m = walk_while_the_boom_glides_out();
+        assert!(highest_m < FLOOR_WITHIN_M, "{highest_m} m above the floor");
     }
 }

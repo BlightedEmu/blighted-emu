@@ -74,7 +74,7 @@ use nw_content::mob_prefabs::{ASSET_ID_LEN, MobPrefabs, PrefabKey, PrefabMember}
 use nw_content::starter::StarterKits;
 use nw_messages::{AlcState, AssetId, BundleMember, MemberState, VitalsState};
 
-use crate::asset_solids::AssetSolids;
+use crate::asset_solids::{AssetSolids, SliceSolids};
 use crate::charting::ChartRules;
 use crate::control_point_rules::ControlPointRules;
 use crate::invite_rules::InviteRules;
@@ -817,6 +817,9 @@ pub struct PlayerContent {
     /// The settlements' crafting and refining station slots and slices; empty until the sim
     /// loads their file.
     pub town_stations: nw_content::town_stations::TownStations,
+    /// The solids of the level's deferred slices, the settlement stations' among them; empty
+    /// until the sim sets them from the level collision.
+    pub slice_solids: SliceSolids,
     /// The root groups of the open world's encounter slices, in the town props table form;
     /// empty until the sim loads their file.
     pub encounter_roots: nw_content::town_props::TownProps,
@@ -1305,7 +1308,9 @@ impl<'a> CapitalsOnPoints<'a> {
     fn on(&self, point: [f32; 3]) -> Vec<&'a Capital> {
         let [x, y, z] = on_point_cell(point);
         let mut near: Vec<usize> = (-1..=1)
-            .flat_map(|dx| (-1..=1).flat_map(move |dy| (-1..=1).map(move |dz| [x + dx, y + dy, z + dz])))
+            .flat_map(|dx| {
+                (-1..=1).flat_map(move |dy| (-1..=1).map(move |dz| [x + dx, y + dy, z + dz]))
+            })
             .filter_map(|cell| self.cells.get(&cell))
             .flatten()
             .copied()
@@ -1318,14 +1323,19 @@ impl<'a> CapitalsOnPoints<'a> {
             })
             .collect();
         near.sort_unstable();
-        near.into_iter().map(|index| &self.capitals[index]).collect()
+        near.into_iter()
+            .map(|index| &self.capitals[index])
+            .collect()
     }
 }
 
 /// The [`CAPITAL_ON_POINT_M`] cell of `position`.
 fn on_point_cell(position: [f32; 3]) -> [i64; 3] {
     // A world coordinate over a centimetre fits an i64.
-    #[allow(clippy::cast_possible_truncation, reason = "world coordinates in metres")]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "world coordinates in metres"
+    )]
     position.map(|axis| (axis / CAPITAL_ON_POINT_M).floor() as i64)
 }
 /// The part of a capital's slice name that marks an object broken by weapon hits (lower case:
@@ -1410,7 +1420,10 @@ impl QuestObjects {
                         respawn_ms: gatherable.respawn_ms.0,
                         id: capital.and_then(|capital| capital_id(&capital.id)),
                         detection_m: spheres.radius_of(point.gatherable_id).map(|radius_m| {
-                            radius_m * capital.and_then(|capital| capital.scale).unwrap_or(UNSCALED)
+                            radius_m
+                                * capital
+                                    .and_then(|capital| capital.scale)
+                                    .unwrap_or(UNSCALED)
                         }),
                     }
                 })
@@ -1599,6 +1612,7 @@ impl PlayerContent {
             quick_course_paths: QuickCoursePaths::default(),
             town_props: nw_content::town_props::TownProps::default(),
             town_stations: nw_content::town_stations::TownStations::default(),
+            slice_solids: SliceSolids::default(),
             encounter_roots: nw_content::town_props::TownProps::default(),
             encounter_objects: nw_content::town_props::TownProps::default(),
             entrance_entities: Vec::new(),
@@ -1949,7 +1963,11 @@ mod tests {
             ..Capital::default()
         };
         let capitals = [
-            capital("near-across-a-cell", "slices/a", [-HALF_CELL_M, 0.0, HALF_CELL_M]),
+            capital(
+                "near-across-a-cell",
+                "slices/a",
+                [-HALF_CELL_M, 0.0, HALF_CELL_M],
+            ),
             capital("too-far", "slices/b", [3.0 * CAPITAL_ON_POINT_M, 0.0, 0.0]),
             capital("spawn-group", "CoatGen\\x\\Master", [0.0, 0.0, 0.0]),
             capital("on-it", "slices/c", [HALF_CELL_M, 0.0, 0.0]),
@@ -1980,6 +1998,7 @@ mod tests {
             tool_required: false,
             by_hand: true,
             game_event: Some(EVENT.to_owned()),
+            animation: None,
         }]);
         let point = |x| GatherablePoint {
             gatherable_id: lowercase_crc32(NODULE),

@@ -242,7 +242,12 @@ const DODGE_TRANSLATION_S: f32 = 0.566_666_66;
 /// `AnimationDrivenMotion` `Roll_Translation` 1.28; retail `walk_running_crouch_prone` record
 /// 3328, a back dodge of the normal class: the place at 0.5 s within 0.034 m).
 pub const NORMAL_DODGE_TRANSLATION: f32 = 1.28;
-/// The fast dodge's translation multiplier (`FastRoll_Translation` 1.15; no retail sample).
+/// The fast dodge's translation multiplier (`FastRoll_Translation` 1.15; Observed, retail towns
+/// session 2026-11-19 against the client's own trace, a fast-class player: in 9 dodges whose
+/// first 15 records stepped evenly, 0.29 to 0.30 m a record forward, the clip's 0.262 m a frame
+/// × 1.15 = 0.30 m, and 0.26 to 0.27 m to the side or back, its back clip's 0.24 m × 1.15 =
+/// 0.28 m; from the 16th record, with a movement key held each time, the steps fell as the run
+/// took over, as here).
 pub const FAST_DODGE_TRANSLATION: f32 = 1.15;
 /// The slow dodge's translation multiplier (Observed: a least squares fit of the 13 clean retail
 /// newchar land dodges, a character of the slow class, to the `quickstep_hvy` clips: 1.124 to

@@ -10,11 +10,18 @@
 //! deferred slice of that slice whose spawner places it there is its own (Observed: the boat
 //! wreck at 484.350, 848.598, 91.383 against the retail 484.350, 848.598, 91.366, the fog wall at
 //! 474.000, 238.000, 23.000 against 474.000, 238.000, 22.985).
+//!
+//! The open world's settlement stations are such slices too ([`SliceSolids`]): the sim spawns
+//! each at its slot's place ([`crate::world`] town stations), and their solids stand in every
+//! player's ground there (Observed, retail towns session 2026-11-19 against the client's own
+//! trace: 188 records whose client stood 0.4 to 0.5 m above the level's floor near (9584, 6336)
+//! stood on the carpentry station `settlement_station_carpentry_t5.dynamicslice`, whose solids
+//! the collision file keeps only as a deferred slice).
 
 use std::sync::Arc;
 
 use nw_content::ftue_entities::AssetEntity;
-use nw_world::collision::{Body, LevelCollision};
+use nw_world::collision::{Body, DeferredSlice, LevelCollision};
 use nw_world::collision_index::CollisionIndex;
 
 /// How far an asset entity's place may be from its deferred slice's origin, m (our choice: the
@@ -78,12 +85,63 @@ impl AssetSolids {
             .flatten()
             .copied()
             .collect();
-        if bodies.is_empty() {
-            return None;
+        solids_index(self.level.as_ref(), bodies)
+    }
+}
+
+/// The index of `bodies` over the shapes of `level`; `None` without bodies or a level.
+fn solids_index(
+    level: Option<&Arc<CollisionIndex>>,
+    bodies: Vec<Body>,
+) -> Option<Arc<CollisionIndex>> {
+    if bodies.is_empty() {
+        return None;
+    }
+    level.map(|level| Arc::new(level.with_bodies(bodies)))
+}
+
+/// The solids of the deferred slices a spawner of the level places, by slice and place: the
+/// settlement stations the open world's sim spawns.
+#[derive(Debug, Clone, Default)]
+pub struct SliceSolids {
+    /// The level's collision, whose shapes the solids use.
+    level: Option<Arc<CollisionIndex>>,
+    /// The level's deferred slices.
+    deferred: Arc<LevelCollision>,
+}
+
+/// Two are equal when their slices are: the level index only lends them its shapes.
+impl PartialEq for SliceSolids {
+    fn eq(&self, other: &Self) -> bool {
+        self.deferred == other.deferred
+    }
+}
+
+impl SliceSolids {
+    /// The deferred slices of `collision`, whose index is `level`.
+    pub fn of(collision: &LevelCollision, level: &Arc<CollisionIndex>) -> Self {
+        let deferred: Vec<DeferredSlice> = collision.deferred.clone();
+        Self {
+            level: Some(Arc::clone(level)),
+            deferred: Arc::new(LevelCollision {
+                deferred,
+                ..LevelCollision::default()
+            }),
         }
-        self.level
-            .as_ref()
-            .map(|level| Arc::new(level.with_bodies(bodies)))
+    }
+
+    /// The solids of the slice `slice` / `sub_id` that a spawner places at `at`; empty when the
+    /// level has none there ([`ASSET_MATCH_M`]).
+    pub fn bodies_of(&self, slice: [u8; 16], sub_id: u32, at: [f32; 3]) -> Vec<Body> {
+        self.deferred
+            .deferred_at(slice, sub_id, at, ASSET_MATCH_M)
+            .map(|deferred| deferred.bodies.clone())
+            .unwrap_or_default()
+    }
+
+    /// The solids `bodies` as a ground's structures; `None` without any.
+    pub fn index(&self, bodies: Vec<Body>) -> Option<Arc<CollisionIndex>> {
+        solids_index(self.level.as_ref(), bodies)
     }
 }
 
@@ -125,6 +183,19 @@ mod tests {
             changes: Vec::new(),
             despawns: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_slice_spawned_at_its_spawner_s_place_has_its_solids() {
+        let collision = level();
+        let index = Arc::new(CollisionIndex::new(collision.clone()));
+        let solids = SliceSolids::of(&collision, &index);
+        let bodies = solids.bodies_of([7; 16], 2, [10.0, 0.0, 0.01]);
+        assert_eq!(bodies.len(), 1);
+        assert!(solids.bodies_of([7; 16], 2, [40.0, 0.0, 0.0]).is_empty());
+        assert!(solids.index(Vec::new()).is_none());
+        let ground = solids.index(bodies).expect("solids");
+        assert!((ground.floor_at(10.0, 0.0, 1.0).expect("top") - 1.0).abs() < 1e-4);
     }
 
     #[test]

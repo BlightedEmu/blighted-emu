@@ -52,8 +52,15 @@ pub const CAMERA_LAG_S: f32 = 0.06;
 pub const MOUNTED_CAMERA_LAG_S: f32 = 0.45;
 /// The zoom lengths of the boom at rest, m (Observed: the retail resting booms of the newchar
 /// capture gather at 3.00, 4.00, 5.00, 6.00 and 7.00 m, the zoom keys step between them, and
-/// the short-boom key sets 2.75 m).
-pub const ZOOM_BOOMS_M: [f32; 6] = [2.75, 3.0, 4.0, 5.0, 6.0, 7.0];
+/// the short-boom key sets 2.75 m; in the retail towns session 2026-11-19, a keyboard player,
+/// the client's own resting booms also gathered at 8.00 m, 3,514 records;
+/// `libs/camera/gamecamera.xml` `DynamicCamera`: `Distance` 2.0 plus a zoom of `MinZoom` 0.2 to
+/// `MaxZoom` 6.0, stepped by `zoomAmount` 1.0). The towns session's rarer resting booms are not
+/// snapped to: 9.0 m (136 records) put its records more than 0.5 m from retail's places at
+/// 27.7 % against 26.0 % without; 2.0 and 2.2 m and the lengths 0.2 m past a whole metre (3.2
+/// to 8.2 m) took the 2.44 m resting booms of `12-5_survivors` to 2.0 m and raised the
+/// tutorial's records more than 0.5 m off from 26.9 % to 27.7 %.
+pub const ZOOM_BOOMS_M: [f32; 7] = [2.75, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
 /// A resting boom this near a zoom length is that length, m: half a zoom step.
 const ZOOM_SNAP_M: f32 = 0.5;
 /// Input records in the moving solve (replay of the newchar capture with the other values here,
@@ -85,10 +92,23 @@ const CAMERA_FIT_M: f32 = 1.0;
 /// retail beach past its bound.
 const ORBIT_TURN_RAD: f32 = 0.3;
 /// The longest boom of a camera that follows the body, m (Observed: retail resting booms from
-/// 0.1 m, against a wall, to 7.0 m, the longest zoom; moving booms up to 8.4 m with the trail).
+/// 0.1 m, against a wall, to 7.0 m in the newchar capture and 9.0 m in the towns session of
+/// 2026-11-19; moving booms up to 8.4 m with the trail in the newchar capture. A limit of 10 m
+/// put the towns session's records more than 0.5 m off from retail's places from 26.5 % to
+/// 27.5 %).
 pub const MAX_BOOM_M: f32 = 9.0;
 /// The boom of a camera that follows the body, m.
 const BOOM_RANGE_M: std::ops::Range<f32> = 0.0..MAX_BOOM_M;
+/// Records in a row at rest whose boom stays within [`ZOOM_STEADY_M`] after which that boom is
+/// the client's zoom ([`CameraCheck::zoom_m`]). Our choice from the replays (with a zoom from
+/// the last steady boom, 1.0 m for [`crate::tracking`]'s floor rule): 10 records put the 11
+/// open-world ledgers' records more than 0.5 m from retail's places at 30.10 % against 30.06 %
+/// before; 15 records gave 30.02 %, and the towns session's records more than 0.3 m from the
+/// client's own trace in height 4.85 % against 4.97 % with 20 and 4.95 % with 60.
+const ZOOM_STEADY_RECORDS: u8 = 15;
+/// How much a resting boom may change from one record to the next and stay steady, m (our
+/// choice: the camera's own spread about the boom model, [`CAMERA_SIGMA_M`]).
+const ZOOM_STEADY_M: f32 = CAMERA_SIGMA_M;
 
 /// The client's camera of one input record.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -194,6 +214,10 @@ pub struct CameraCheck {
     /// client's zoom does not change with it.
     last_boom_m: Option<f32>,
     free_records: u8,
+    /// Records in a row at rest with a steady boom ([`ZOOM_STEADY_RECORDS`]).
+    steady_records: u8,
+    /// The client's zoom since its last boom key ([`Self::zoom_m`]).
+    zoom_m: Option<f32>,
     /// The body rested in the record before; a body the server just placed rests where it put it.
     was_resting: bool,
 }
@@ -205,6 +229,8 @@ impl Default for CameraCheck {
             boom_m: None,
             last_boom_m: None,
             free_records: 0,
+            steady_records: 0,
+            zoom_m: None,
             was_resting: true,
         }
     }
@@ -274,10 +300,12 @@ fn zoom_length(boom: f32) -> Option<f32> {
 
 impl CameraCheck {
     /// Forgets the cameras: after a server move the camera jumps with the body. The last boom
-    /// stays for [`Self::body_at_last_boom`]: the client's zoom does not change with the move.
+    /// stays for [`Self::body_at_last_boom`], and the zoom stays: the client's zoom does not
+    /// change with the move.
     pub fn forget(&mut self) {
         *self = Self {
             last_boom_m: self.last_boom_m,
+            zoom_m: self.zoom_m,
             ..Self::default()
         };
     }
@@ -302,6 +330,8 @@ impl CameraCheck {
     ) -> Option<CameraBody> {
         if boom_key {
             self.free_records = BOOM_FREE_RECORDS;
+            self.zoom_m = None;
+            self.steady_records = 0;
         }
         for seen in &mut self.seen {
             seen.moved = [seen.moved[0] + moved[0], seen.moved[1] + moved[1]];
@@ -325,6 +355,18 @@ impl CameraCheck {
         };
         self.free_records = self.free_records.saturating_sub(1);
         let found = found.filter(|found| BOOM_RANGE_M.contains(&found.boom_m))?;
+        let steady = resting
+            && self
+                .boom_m
+                .is_some_and(|boom| (boom - found.boom_m).abs() <= ZOOM_STEADY_M);
+        self.steady_records = if steady {
+            self.steady_records.saturating_add(1)
+        } else {
+            0
+        };
+        if self.steady_records >= ZOOM_STEADY_RECORDS {
+            self.learn_zoom(found.boom_m);
+        }
         self.boom_m = Some(found.boom_m);
         self.last_boom_m = Some(found.boom_m);
         Some(found)
@@ -336,6 +378,26 @@ impl CameraCheck {
     pub fn hold_boom(&mut self, boom_m: f32) {
         self.boom_m = Some(boom_m);
         self.last_boom_m = Some(boom_m);
+        self.learn_zoom(boom_m);
+    }
+
+    /// The client's zoom, once known: the longest boom it held steady at rest, or that the
+    /// level's floor showed ([`Self::hold_boom`]), since its last boom key. Only a boom key
+    /// changes the zoom; a camera that meets the level (`CameraCollides`) shortens its boom and
+    /// glides back out to the zoom, so a resting boom shorter than one held before is the
+    /// level's, not a new zoom (Observed, retail towns session 2026-11-19 with the client's own
+    /// trace: at 21:08:46 the client's resting boom went from 7.2 to 2.67 m for 1.2 s and back to
+    /// 7.2 m with no boom key; at 21:08:51.7 it fell to 0.68 m on stairs and grew back to 7.4 m
+    /// in 2 s while the client walked down). A boom key forgets it until the boom is steady at
+    /// rest again: a zoom kept over boom keys put the retail tutorial's records more than 1 m
+    /// off in height at 2.06 % against 2.01 %.
+    pub const fn zoom_m(&self) -> Option<f32> {
+        self.zoom_m
+    }
+
+    /// Takes `boom_m` as the client's zoom when it is longer than the zoom known.
+    fn learn_zoom(&mut self, boom_m: f32) {
+        self.zoom_m = Some(self.zoom_m.map_or(boom_m, |zoom| zoom.max(boom_m)));
     }
 
     /// Where the camera `view` puts the body at the boom the camera last had; `None` before it
@@ -702,6 +764,60 @@ mod tests {
             check.observe(cutscene, body, [0.0; 2], [0.0; 2], true, false),
             None
         );
+    }
+
+    #[test]
+    fn a_steady_resting_boom_is_the_zoom_and_a_shorter_one_does_not_lower_it() {
+        // Retail towns session 2026-11-19, 21:08:37 to 21:08:47: the client rested on its
+        // 7.2 m zoom, then its camera met the level and rested at 2.67 m for 1.2 s, with no boom
+        // key.
+        const ZOOM_M: f32 = 7.2;
+        const MET_M: f32 = 2.67;
+        const RECORDS: u8 = 36;
+        let body = at(7243.8, 5419.9);
+        let mut check = CameraCheck::default();
+        let rest = |check: &mut CameraCheck, boom: f32, boom_key: bool| {
+            let view = camera_of(body, 0.6, boom, [0.0; 2]);
+            check.observe(view, body, [0.0; 2], [0.0; 2], true, boom_key)
+        };
+        for _ in 0..ZOOM_STEADY_RECORDS {
+            rest(&mut check, ZOOM_M, false);
+        }
+        assert_eq!(check.zoom_m(), None, "not yet steady for long enough");
+        rest(&mut check, ZOOM_M, false);
+        let zoom = check.zoom_m().expect("a zoom");
+        assert!((zoom - ZOOM_M).abs() < CLOSE_M, "{zoom}");
+        for _ in 0..RECORDS {
+            rest(&mut check, MET_M, false);
+        }
+        let zoom = check.zoom_m().expect("a zoom");
+        assert!((zoom - ZOOM_M).abs() < CLOSE_M, "{zoom}");
+        // A boom key changes the zoom: it is learnt again.
+        rest(&mut check, MET_M, true);
+        assert_eq!(check.zoom_m(), None);
+        for _ in 0..RECORDS {
+            rest(&mut check, MET_M, false);
+        }
+        let zoom = check.zoom_m().expect("a zoom");
+        assert!((zoom - MET_M).abs() < CLOSE_M, "{zoom}");
+    }
+
+    #[test]
+    fn a_resting_boom_comes_to_the_8_m_zoom() {
+        // Retail towns session 2026-11-19: the client's own resting booms gathered at 8.00 m
+        // (3,514 records). A body that comes to rest with a boom near it holds that length.
+        const SOLVED_M: f32 = 8.3;
+        const ZOOM_M: f32 = 8.0;
+        let body = at(9339.2, 3163.0);
+        let view = camera_of(body, -0.8, SOLVED_M, [0.0; 2]);
+        let mut check = CameraCheck {
+            was_resting: false,
+            ..CameraCheck::default()
+        };
+        let seen = check
+            .observe(view, body, [0.0; 2], [0.0; 2], true, false)
+            .expect("fits");
+        assert!((seen.boom_m - ZOOM_M).abs() < CLOSE_M, "{seen:?}");
     }
 
     #[test]

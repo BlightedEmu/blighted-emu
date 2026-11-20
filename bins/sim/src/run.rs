@@ -39,7 +39,7 @@ use nw_world::roads::RoadMap;
 use nw_world::script::{DesignData, LevelDesign};
 use nw_world::water::WaterMap;
 
-use crate::asset_solids::AssetSolids;
+use crate::asset_solids::{AssetSolids, SliceSolids};
 use crate::combat::CombatSettings;
 use crate::config::{SimConfig, SimConfigError, SimRole, load_sim_config};
 use crate::gameplay::{GameplayError, load_gameplay, load_shop};
@@ -364,6 +364,7 @@ pub fn load_level(config: &SimConfig, content_dir: &Path) -> Result<LoadedLevel,
     );
     content.asset_solids =
         AssetSolids::of(&deferred_level, &collision, &content.tutorial_level.assets);
+    content.slice_solids = SliceSolids::of(&deferred_level, &collision);
     content.trading_post = config.trading_post.clone();
     content.store = store_table(&bundle.tables, &bundle.text);
     content.shop = load_shop(&config.edge_config)?;
