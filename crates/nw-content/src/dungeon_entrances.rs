@@ -136,21 +136,33 @@ impl DungeonEntrances {
 }
 
 /// The lower-case words an instance entrance's slice name starts with, after its stage number
-/// and a `Trial_` (Observed in the open world's capitals: `DungeonEntrance_Amrine`,
-/// `DungeonEntranceTrial_Season_01`, `RaidEntrance_MonarchsBluffs00`,
-/// `4_1_Trial_Entrance_QuestMedea`, `Entrance_QuestApophis_V2`).
-pub const ENTRANCE_WORDS: [&str; 3] = ["dungeonentrance", "raidentrance", "entrance"];
+/// and a `Trial_`, each with the game mode id prefix of its kind (Observed in the open world's
+/// capitals: `DungeonEntrance_Amrine` of `DungeonAmrine`, `RaidEntrance_MonarchsBluffs00` of
+/// `RaidMonarchsBluffs00`, `DungeonEntranceTrial_Season_01`, `4_1_Trial_Entrance_QuestMedea`,
+/// `Entrance_QuestApophis_V2`).
+const ENTRANCE_WORDS: [(&str, &str); 3] = [
+    ("dungeonentrance", DUNGEON_PREFIX),
+    ("raidentrance", RAID_PREFIX),
+    ("entrance", DUNGEON_PREFIX),
+];
 /// The word before the entrance word of a story instance's entrance (`3_2_Trial_Entrance_...`).
 const TRIAL_WORD: &str = "trial_";
 
-/// What follows the entrance word in the lower-case slice file name `name`
-/// (`_questmedea` of `4_1_trial_entrance_questmedea`); `None` for a slice that is no entrance.
-pub fn entrance_rest(name: &str) -> Option<&str> {
+/// The game mode id prefix of the entrance word and what follows that word in the lower-case
+/// slice file name `name` (`_questmedea` of `4_1_trial_entrance_questmedea`); `None` for a slice
+/// that is no entrance.
+fn entrance_parts(name: &str) -> Option<(&'static str, &str)> {
     let name = name.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
     let name = name.strip_prefix(TRIAL_WORD).unwrap_or(name);
     ENTRANCE_WORDS
         .iter()
-        .find_map(|word| name.strip_prefix(word))
+        .find_map(|(word, prefix)| Some((*prefix, name.strip_prefix(word)?)))
+}
+
+/// What follows the entrance word in the lower-case slice file name `name`
+/// (`_questmedea` of `4_1_trial_entrance_questmedea`); `None` for a slice that is no entrance.
+pub fn entrance_rest(name: &str) -> Option<&str> {
+    entrance_parts(name).map(|(_, rest)| rest)
 }
 
 /// The infix of a locked entrance (`DungeonEntrance_QuestAdiana_Locked_V2`): the same game mode.
@@ -159,28 +171,70 @@ const LOCKED_INFIX: &str = "_locked";
 const VERSION_SUFFIX: &str = "_v2";
 /// The `Dungeon` prefix of an expedition's game mode id (`DungeonAmrine` for `..._Amrine`).
 const DUNGEON_PREFIX: &str = "dungeon";
+/// The `Raid` prefix of a raid's game mode id (`RaidMonarchsBluffs00` for `RaidEntrance_...`).
+const RAID_PREFIX: &str = "raid";
 /// The level folder part of an expedition map (`NW_Dungeon_Everfall_00` for `..._Everfall00`).
 const MAP_PREFIXES: [&str; 2] = ["nw_dungeon_", "nw_"];
 
-/// The game mode whose entrance slice is `slice_name`: the name after `DungeonEntrance`,
-/// without `_Locked`, `_V2` and a trailing hash number, is the game mode id, the id less its
-/// `Dungeon` prefix, or the map name less `NW_Dungeon_` or `NW_` (Inferred from the 40 entrance
-/// slices of the open world: 35 name one game mode this way, e.g. the QuestMorgaine entrance
-/// that retail answered with QuestMorgaine's 5038; the others name none or two and give none).
+/// An instance entrance of a level: its slice and the dungeon area it stands in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EntranceDoor {
+    /// The capital's slice name (`Dungeon/Entrance/DungeonEntrance_Amrine`).
+    pub slice: String,
+    /// The game mode id of the dungeon area that holds the door, when one does.
+    pub area_mode: Option<String>,
+}
+
+impl EntranceDoor {
+    /// The game mode among `modes` that the door opens ([`entrance_mode`]).
+    pub fn mode<'a>(
+        &self,
+        modes: impl Iterator<Item = &'a InstanceMode>,
+    ) -> Option<&'a InstanceMode> {
+        entrance_mode(modes, &self.slice, self.area_mode.as_deref())
+    }
+}
+
+/// The game mode whose entrance slice is `slice_name`, standing in the dungeon area of game mode
+/// `area_mode` (the territory definition's `GameMode` of the door's place, when it has one).
+///
+/// The name decides first: the name after the entrance word, without `_Locked`, `_V2` and a
+/// trailing hash number, is the game mode id or the id less the prefix of the entrance word
+/// (`Dungeon`, `Raid`); else the map name less `NW_Dungeon_` or `NW_`; else, for a name with no
+/// map number, the id less its number (`DungeonEntrance_CutlassKeys` of `DungeonCutlassKeys00`).
+/// A name that gives none or two modes leaves the area's mode (Inferred from the 60 entrance
+/// slices of the open world: the name gives the mode of 58, among them the QuestMorgaine
+/// entrance that retail answered with QuestMorgaine's 5038; `DungeonEntrance_Brimstone00` and
+/// `DungeonEntrance_FirstLight02` name none and stand 9 and 10 m from the points of the areas
+/// of The Ennead and the Hive of Gorgons).
 pub fn entrance_mode<'a>(
     modes: impl Iterator<Item = &'a InstanceMode>,
     slice_name: &str,
+    area_mode: Option<&str>,
 ) -> Option<&'a InstanceMode> {
     // The last path part, without an extension (`.dynamicslice`).
     let name = slice_name
-        .rsplit('/')
+        .rsplit(['/', '\\'])
         .next()?
         .split('.')
         .next()?
         .to_lowercase();
-    let rest = entrance_rest(&name)?
-        .replace(LOCKED_INFIX, "")
-        .replace(VERSION_SUFFIX, "");
+    let (prefix, rest) = entrance_parts(&name)?;
+    let modes: Vec<&InstanceMode> = modes.collect();
+    mode_of_name(&modes, prefix, rest).or_else(|| {
+        let area_mode = area_mode?;
+        modes.into_iter().find(|mode| mode.id == area_mode)
+    })
+}
+
+/// The game mode that names the entrance whose name after the entrance word is `rest`, for an
+/// entrance word of the game mode id prefix `prefix` ([`entrance_mode`]).
+fn mode_of_name<'a>(
+    modes: &[&'a InstanceMode],
+    prefix: &str,
+    rest: &str,
+) -> Option<&'a InstanceMode> {
+    let rest = rest.replace(LOCKED_INFIX, "").replace(VERSION_SUFFIX, "");
     // A trailing number of more digits than a map number is a hash (`_1970794647`).
     let rest = match rest.rsplit_once('_') {
         Some((head, tail))
@@ -190,26 +244,14 @@ pub fn entrance_mode<'a>(
         }
         _ => rest,
     };
-    let names: Vec<(&InstanceMode, [String; 3])> = modes
-        .map(|mode| {
-            let id = mode.id.to_lowercase();
-            let map = mode.map.map_name.to_lowercase();
-            let map = MAP_PREFIXES
-                .iter()
-                .find_map(|prefix| map.strip_prefix(prefix))
-                .unwrap_or(&map);
-            let names = [
-                letters_and_digits(&id),
-                letters_and_digits(id.strip_prefix(DUNGEON_PREFIX).unwrap_or(&id)),
-                letters_and_digits(map),
-            ];
-            (mode, names)
-        })
+    let names: Vec<ModeNames> = modes
+        .iter()
+        .map(|mode| ModeNames::of(mode, prefix))
         .collect();
     // The name's words, longest first, with and without their number-only words: a word after
     // the mode's name is a variant (`Entrance_QuestIsabella_Simple`), a number-only word a stage
-    // (`DungeonEntranceTrial_00_BrimstoneSandworm`). The first key that names any mode decides:
-    // two modes for it give none.
+    // (`DungeonEntranceTrial_00_BrimstoneSandworm`). The first key that names any mode by its id,
+    // else by its map, decides: two modes for it give none.
     let words: Vec<&str> = rest.split('_').filter(|word| !word.is_empty()).collect();
     for count in (1..=words.len()).rev() {
         let head = &words[..count];
@@ -222,16 +264,74 @@ pub fn entrance_mode<'a>(
             letters_and_digits(&head.concat()),
             letters_and_digits(&without_numbers.concat()),
         ] {
-            let mut found = names
-                .iter()
-                .filter(|(_, names)| names.contains(&key))
-                .map(|(mode, _)| *mode);
-            if let Some(mode) = found.next() {
-                return found.next().is_none().then_some(mode);
+            for named in [ModeNames::by_id, ModeNames::by_map] {
+                if let Some(found) = only_one(&names, |names| named(names, &key)) {
+                    return found;
+                }
             }
         }
     }
-    None
+    // A name with no map number names the mode of its id and a map number.
+    let key = letters_and_digits(&words.concat());
+    if key.ends_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    only_one(&names, |names| names.by_id_less_number(&key)).flatten()
+}
+
+/// `Some` when any mode of `names` is `named`: that mode when it is the only one, `None` for two.
+fn only_one<'a>(
+    names: &[ModeNames<'a>],
+    named: impl Fn(&ModeNames<'a>) -> bool,
+) -> Option<Option<&'a InstanceMode>> {
+    let mut found = names
+        .iter()
+        .filter(|names| named(names))
+        .map(|names| names.mode);
+    let first = found.next()?;
+    Some(found.next().is_none().then_some(first))
+}
+
+/// The names an entrance may call a game mode by, in letters and digits.
+struct ModeNames<'a> {
+    mode: &'a InstanceMode,
+    /// The id and the id less the prefix of the entrance word.
+    ids: [String; 2],
+    /// The map name less its level folder part.
+    map: String,
+}
+
+impl<'a> ModeNames<'a> {
+    fn of(mode: &'a InstanceMode, prefix: &str) -> Self {
+        let id = mode.id.to_lowercase();
+        let map = mode.map.map_name.to_lowercase();
+        let map = MAP_PREFIXES
+            .iter()
+            .find_map(|folder| map.strip_prefix(folder))
+            .unwrap_or(&map);
+        Self {
+            mode,
+            ids: [
+                letters_and_digits(&id),
+                letters_and_digits(id.strip_prefix(prefix).unwrap_or(&id)),
+            ],
+            map: letters_and_digits(map),
+        }
+    }
+
+    fn by_id(&self, key: &str) -> bool {
+        self.ids.iter().any(|id| id == key)
+    }
+
+    fn by_map(&self, key: &str) -> bool {
+        self.map == key
+    }
+
+    fn by_id_less_number(&self, key: &str) -> bool {
+        self.ids
+            .iter()
+            .any(|id| id.trim_end_matches(|c: char| c.is_ascii_digit()) == key)
+    }
 }
 
 /// Digits of a map number at the end of an entrance name (`brimstone00`).
@@ -339,12 +439,41 @@ mod tests {
                 "NW_Trial_Season_04",
                 InstanceKind::SoloTrial,
             ),
+            mode(
+                "RaidMonarchsBluffs00",
+                "NW_Raid_MonarchBluff_00",
+                InstanceKind::RaidTrial,
+            ),
+            mode(
+                "DungeonCutlassKeys00",
+                "NW_Dungeon_CutlassKeys_00",
+                InstanceKind::Expedition,
+            ),
+            mode(
+                "RaidCutlassKeys00",
+                "NW_Raid_CutlassKeys_00",
+                InstanceKind::RaidTrial,
+            ),
+            mode(
+                "DungeonBrimstoneSands00",
+                "NW_Dungeon_BrimstoneSands_00",
+                InstanceKind::Expedition,
+            ),
+            mode(
+                "DungeonFirstLight01",
+                "NW_Dungeon_FirstLight_01",
+                InstanceKind::Expedition,
+            ),
         ]
     }
 
-    fn found(slice: &str) -> Option<String> {
+    fn found_in(slice: &str, area_mode: Option<&str>) -> Option<String> {
         let modes = modes();
-        entrance_mode(modes.iter(), slice).map(|mode| mode.id.clone())
+        entrance_mode(modes.iter(), slice, area_mode).map(|mode| mode.id.clone())
+    }
+
+    fn found(slice: &str) -> Option<String> {
+        found_in(slice, None)
     }
 
     #[test]
@@ -371,10 +500,10 @@ mod tests {
             found("Dungeon/Entrance/DungeonEntranceTrial_Season_01").as_deref(),
             Some("TrialSeason01")
         );
-        // Two modes share the map NW_Trial_Season_04: no game mode.
         assert_eq!(
-            found("Dungeon/Entrance/DungeonEntranceTrial_Season_04"),
-            None
+            found("Dungeon/Entrance/DungeonEntranceTrial_Season_04").as_deref(),
+            Some("TrialSeason04"),
+            "the id wins over the map NW_Trial_Season_04 that two modes share"
         );
         assert_eq!(found("Dungeon/Entrance/DungeonEntrance_FirstLight02"), None);
         // The story instance forms of the open world's capitals.
@@ -403,6 +532,69 @@ mod tests {
         );
         assert_eq!(found("IO_Season_04_Q03_Boat_Entrance"), None);
         assert_eq!(found("POIs/Settlement/Townboard"), None);
+    }
+
+    #[test]
+    fn a_raid_door_names_its_mode_less_the_raid_prefix() {
+        assert_eq!(
+            found("Dungeon/Raids/Entrances/RaidEntrance_MonarchsBluffs00").as_deref(),
+            Some("RaidMonarchsBluffs00")
+        );
+    }
+
+    #[test]
+    fn a_door_with_no_map_number_names_the_mode_of_its_kind() {
+        assert_eq!(
+            found("Dungeon/Entrance/DungeonEntrance_CutlassKeys").as_deref(),
+            Some("DungeonCutlassKeys00"),
+            "the expedition, not the raid of the same map name"
+        );
+        assert_eq!(
+            found("Dungeon/Entrance/DungeonEntrance_FirstLight02"),
+            None,
+            "a map number that no mode has names no other number's mode"
+        );
+    }
+
+    #[test]
+    fn a_door_that_names_no_mode_opens_the_mode_of_its_area() {
+        assert_eq!(
+            found_in(
+                "Dungeon/Entrance/DungeonEntrance_FirstLight02",
+                Some("RaidCutlassKeys00")
+            )
+            .as_deref(),
+            Some("RaidCutlassKeys00")
+        );
+        assert_eq!(
+            found_in(
+                "Dungeon/Entrance/DungeonEntrance_Brimstone00",
+                Some("DungeonBrimstoneSands00")
+            )
+            .as_deref(),
+            Some("DungeonBrimstoneSands00")
+        );
+        assert_eq!(
+            found_in(
+                "Dungeon/Entrance/DungeonEntrance_Amrine",
+                Some("DungeonBrimstoneSands00")
+            )
+            .as_deref(),
+            Some("DungeonAmrine"),
+            "the name wins over the area"
+        );
+        assert_eq!(
+            found_in(
+                "Dungeon/Entrance/DungeonEntrance_Brimstone00",
+                Some("NoSuchMode")
+            ),
+            None
+        );
+        assert_eq!(
+            found_in("POIs/Settlement/Townboard", Some("DungeonAmrine")),
+            None,
+            "a slice that is no entrance has no mode"
+        );
     }
 
     /// The row of the Gawain entrance as the capture tools mined it from 6 retail cards: the

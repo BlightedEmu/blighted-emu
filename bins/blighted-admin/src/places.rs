@@ -9,7 +9,7 @@
 //!   an area, else its region (a shrine landmark lies in its shrine's point of interest,
 //!   `Church of the Courts`).
 //! - An entrance is a level capital whose slice is an instance entrance; its game mode comes
-//!   from [`entrance_mode`] (as the sim opens it), its name from the mode's `DisplayName`, else
+//!   from [`entrance_mode`] with the dungeon area it stands in (as the sim opens it), its name from the mode's `DisplayName`, else
 //!   from the territory definition of that `GameMode` (some trials have no display name). One
 //!   place stands for the entrances of one mode within [`SAME_ENTRANCE_M`] (a locked and an open
 //!   form of one door).
@@ -23,7 +23,8 @@ use nw_content::dungeon_entrances::{entrance_mode, entrance_rest};
 use nw_content::instances::{InstanceCatalog, InstanceKind};
 use nw_content::{ContentBundle, Tables};
 use nw_world::WorldFile;
-use nw_world::records::Landmark;
+use nw_world::dungeon_areas::DungeonAreas;
+use nw_world::records::{Capital, Landmark};
 use serde::Serialize;
 
 /// The route of the places.
@@ -156,6 +157,7 @@ impl Territories {
 pub fn places_of_bundle(world: &WorldFile, bundle: &ContentBundle) -> Vec<Place> {
     let territories = Territories::of_tables(&bundle.tables, &bundle.text);
     let catalog = InstanceCatalog::from_tables(&bundle.tables);
+    let areas = DungeonAreas::of_level(world, &bundle.tables);
     let display_names: HashMap<&str, &str> = bundle
         .tables
         .game_mode_data
@@ -176,8 +178,12 @@ pub fn places_of_bundle(world: &WorldFile, bundle: &ContentBundle) -> Vec<Place>
             Some((row.game_mode.as_deref()?, name))
         })
         .collect();
-    places_of(world, &territories, |slice| {
-        let mode = entrance_mode(catalog.modes(), slice)?;
+    places_of(world, &territories, |capital| {
+        let mode = entrance_mode(
+            catalog.modes(),
+            &capital.slice_name,
+            areas.mode_at(capital.position),
+        )?;
         let kind = match mode.kind {
             InstanceKind::Expedition | InstanceKind::Catacombs => PlaceKind::Expedition,
             InstanceKind::RaidTrial => PlaceKind::Raid,
@@ -209,13 +215,12 @@ pub struct Entrance {
     pub kind: PlaceKind,
 }
 
-/// The places of `world`: its landmark places named by `territories`, and its entrances that
-/// `entrance_of` gives a game mode (by the capital's slice name), sorted by region, kind and
-/// name.
+/// The places of `world`: its landmark places named by `territories`, and its entrance capitals
+/// that `entrance_of` gives a game mode, sorted by region, kind and name.
 pub fn places_of(
     world: &WorldFile,
     territories: &Territories,
-    entrance_of: impl Fn(&str) -> Option<Entrance>,
+    entrance_of: impl Fn(&Capital) -> Option<Entrance>,
 ) -> Vec<Place> {
     let mut places: Vec<Place> = world
         .landmarks
@@ -232,7 +237,7 @@ pub fn places_of(
         if entrance_rest(&file.to_lowercase()).is_none() {
             continue;
         }
-        let Some(entrance) = entrance_of(&capital.slice_name) else {
+        let Some(entrance) = entrance_of(capital) else {
             continue;
         };
         let [x, y, z] = capital.position;
@@ -307,7 +312,6 @@ fn nearest_region<'a>(
 
 #[cfg(test)]
 mod tests {
-    use nw_world::records::Capital;
 
     use super::*;
 
@@ -360,8 +364,9 @@ mod tests {
         }
     }
 
-    fn amrine(slice: &str) -> Option<Entrance> {
-        slice.to_lowercase().contains("amrine").then(|| Entrance {
+    fn amrine(capital: &Capital) -> Option<Entrance> {
+        let slice = capital.slice_name.to_lowercase();
+        slice.contains("amrine").then(|| Entrance {
             mode: "DungeonAmrine".to_owned(),
             name: "The Amrine Excavation".to_owned(),
             kind: PlaceKind::Expedition,

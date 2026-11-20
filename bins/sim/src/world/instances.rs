@@ -46,7 +46,6 @@ use super::{
     handoff_offer, owner_in, quests_of, send_now, unix_ns,
 };
 use crate::login::phase_id;
-use nw_content::dungeon_entrances::entrance_mode;
 
 /// Interaction kinds of the client's `InteractionUIActions` (`sheathe/interact_enum.tsv`).
 pub mod kind {
@@ -561,8 +560,9 @@ impl SimWorld {
 
     /// The game mode of the expedition entrance whose capital is the facet entity `entity`.
     fn entrance_at(&self, entity: u64) -> Option<u32> {
-        let slice = self.content.entrances.get(&entity)?;
-        entrance_mode(self.content.instances.modes(), slice).map(|mode| mode.crc)
+        let door = self.content.entrances.get(&entity)?;
+        door.mode(self.content.instances.modes())
+            .map(|mode| mode.crc)
     }
 
     /// Whether player `entity` may enter `mode` (from afar when `remote`): the game mode allows

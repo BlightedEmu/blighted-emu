@@ -228,8 +228,9 @@ impl SimWorld {
 
     /// The game mode CRC of the entrance whose capital is `capital`.
     fn entrance_mode_crc(&self, capital: u64) -> Option<u32> {
-        let slice = self.content.entrances.get(&capital)?;
-        nw_content::dungeon_entrances::entrance_mode(self.content.instances.modes(), slice).map(|mode| mode.crc)
+        let door = self.content.entrances.get(&capital)?;
+        door.mode(self.content.instances.modes())
+            .map(|mode| mode.crc)
     }
 
     /// The entrance entity of game mode `crc` nearest player `entity`.
@@ -328,6 +329,13 @@ mod tests {
             instances: nw_content::instances::InstanceCatalog::build([mode]),
             entrances: [(CAPITAL, slice.clone()), (FAR_CAPITAL, slice)]
                 .into_iter()
+                .map(|(capital, slice)| {
+                    let door = nw_content::dungeon_entrances::EntranceDoor {
+                        slice,
+                        area_mode: None,
+                    };
+                    (capital, door)
+                })
                 .collect(),
             entrance_entities: entrances.clone(),
             ..crate::player_content::PlayerContent::default()

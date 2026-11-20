@@ -8,6 +8,7 @@ pub mod catacomb_tiles;
 pub mod claim_plots;
 pub mod collision;
 pub mod collision_index;
+pub mod dungeon_areas;
 pub mod dungeon_scripts;
 pub mod effect_areas;
 pub mod height;

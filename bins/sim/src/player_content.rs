@@ -12,7 +12,7 @@ use nw_content::crafting::{Recipes, StructureCosts};
 use nw_content::creature_animations::CreatureAnimations;
 use nw_content::deaths_door::DeathsDoorRules;
 use nw_content::drop_rolls::DropRolls;
-use nw_content::dungeon_entrances::entrance_rest;
+use nw_content::dungeon_entrances::{EntranceDoor, entrance_rest};
 use nw_content::equip_load::EquipLoads;
 use nw_content::fishing::FishingRules;
 use nw_content::game_mode_rewards::ModeRewards;
@@ -58,6 +58,7 @@ use nw_sim_core::{EquipLoad, EquipLoadLimits, Position};
 use nw_world::camps::CampSlices;
 use nw_world::claim_plots::PlacedClaimPlot;
 use nw_world::collision::QuestVolume;
+use nw_world::dungeon_areas::DungeonAreas;
 use nw_world::dungeon_scripts::DungeonScripts;
 use nw_world::interact_tags::TagOwner;
 use nw_world::quick_courses::QuickCoursePaths;
@@ -1007,7 +1008,7 @@ pub struct PlayerContent {
     pub mutations: MutationCatalog,
     /// The expedition entrances of the level: the slice name of each entrance capital, by its
     /// entity id (the facet entity of an `OpenDungeonMenu` or `EnterDungeon` interaction).
-    pub entrances: HashMap<u64, String>,
+    pub entrances: HashMap<u64, EntranceDoor>,
     /// The encounters and loot containers of each instance game mode's level script
     /// (`instances/dungeon-scripts.json`).
     pub dungeon_scripts: DungeonScripts,
@@ -1029,20 +1030,30 @@ fn catacomb_rules(tables: &Tables) -> Option<nw_content::catacombs::CatacombRule
     }
 }
 
-/// The expedition entrances among the capitals of `level`: each one's slice name by its entity
-/// id (`capital_id`).
-pub fn dungeon_entrances(level: &WorldFile) -> HashMap<u64, String> {
+/// Whether `capital` is an instance entrance ([`entrance_rest`]).
+fn is_entrance(capital: &Capital) -> bool {
+    capital
+        .slice_name
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| entrance_rest(&name.to_lowercase()).is_some())
+}
+
+/// The expedition entrances among the capitals of `level`: each one's door (its slice and the
+/// dungeon area of `tables` it stands in) by its entity id (`capital_id`).
+pub fn dungeon_entrances(level: &WorldFile, tables: &Tables) -> HashMap<u64, EntranceDoor> {
+    let areas = DungeonAreas::of_level(level, tables);
     level
         .capitals
         .iter()
-        .filter(|capital| {
-            capital
-                .slice_name
-                .rsplit('/')
-                .next()
-                .is_some_and(|name| entrance_rest(&name.to_lowercase()).is_some())
+        .filter(|capital| is_entrance(capital))
+        .filter_map(|capital| {
+            let door = EntranceDoor {
+                slice: capital.slice_name.clone(),
+                area_mode: areas.mode_at(capital.position).map(str::to_owned),
+            };
+            Some((capital_id(&capital.id)?, door))
         })
-        .filter_map(|capital| Some((capital_id(&capital.id)?, capital.slice_name.clone())))
         .collect()
 }
 
@@ -1068,13 +1079,13 @@ pub fn entrance_entities(
     level: &WorldFile,
     table: &nw_content::dungeon_entrances::DungeonEntrances,
 ) -> Vec<EntranceEntity> {
-    let entrances = dungeon_entrances(level);
     level
         .capitals
         .iter()
+        .filter(|capital| is_entrance(capital))
         .filter_map(|capital| {
             let id = capital_id(&capital.id)?;
-            let slice = table.of_slice(entrances.get(&id)?)?;
+            let slice = table.of_slice(&capital.slice_name)?;
             let [x, y, z] = capital.position;
             Some(EntranceEntity {
                 capital: id,
@@ -1716,7 +1727,7 @@ impl PlayerContent {
             instances: InstanceCatalog::from_tables(tables),
             catacombs: catacomb_rules(tables),
             mutations: MutationCatalog::from_tables(tables),
-            entrances: dungeon_entrances(level),
+            entrances: dungeon_entrances(level, tables),
             dungeon_scripts: DungeonScripts::default(),
             quest_guide: crate::world::QuestGuide::default(),
         }
