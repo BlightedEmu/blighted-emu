@@ -440,8 +440,28 @@ pub struct StanceSequences {
     /// sent their plain shot 1,066 ms after it (p10 1,048, p90 1,083), a median 267 ms after the
     /// release; 345 later releases shot a median 36 ms after the release; of 11,807 plain shots
     /// seen by other players, 122 came 100 to 1,000 ms after the shot before (median 1,068 ms).
+    /// Observed, musket (rifle study 2026-11-20, 1,195 retail ledgers): 86 aimed shots that a
+    /// press before them waited for came a median 1,734 ms after the shot before (p10 1,712),
+    /// 267 ms after the aim's return `16=36 18=3544` (p10 258, p90 283).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_fire_gap_ms: Option<u64>,
+    /// How long after an aimed shot's own state an aimed shot asked for waits for
+    /// [`StanceSequences::alt_fire_gap_ms`]: one asked for before this fires nothing. `None`:
+    /// every one waits. Observed, musket (rifle study 2026-11-20): of the presses inside a
+    /// shot's reload with none after the aim's return, 16 of 17 whose newest press came before
+    /// the reload's `18=1716` step (867 ms after the shot) fired nothing, and 4 of 5 after it
+    /// fired 267 ms after the aim's return; a press 131 ms after the shot (2026-09-27 musket
+    /// capture) fired nothing, and the next shot came at the next press 2.5 s after the shot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_fire_wait_from_ms: Option<u64>,
+    /// An aimed shot asked for less than this after the aim's start (the right-click's
+    /// [`StanceSequences::alt_start`]) waits until then. Observed (rifle study 2026-11-20, own
+    /// aim starts with no shot in the 2.5 s before and an aimed press before 150 ms after the
+    /// start): the musket shot 267 ms after the start (p10 252, 71 aims; none before 247), the
+    /// blunderbuss 133 ms after it at the earliest (147 aims, p10 134). The bow shoots at its
+    /// release after its draw, so none for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_fire_ready_ms: Option<u64>,
     /// The aimed shot of a key held to its full draw.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt_charge: Option<AltCharge>,
@@ -554,6 +574,23 @@ pub struct HipShot {
     /// step, then `16=45 18=0` a median 566 ms after the reload (98 of 148).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub empty_after: Vec<TimedSlots>,
+    /// With the right-click held, the aim starts this long after the shot's own state (or its
+    /// re-fire's), not at once; `None`: at the shot's end ([`HipShot::aim_at_ms`]). Observed
+    /// (rifle study 2026-11-20, own hip shots with the block held from before the end): the
+    /// musket's aim `16=36 18=3544` came 2,215 to 2,269 ms after its hip shot (16 cases,
+    /// median 2,249), before its end at 2,566 ms and whenever the block went down; the bow's
+    /// 919 to 1,021 ms (79 cases, end 1,000 ms) and the blunderbuss's 850 to 903 ms (12 of 16,
+    /// end 894 ms) came at their ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aim_after_ms: Option<u64>,
+}
+
+impl HipShot {
+    /// Milliseconds from the shot's own state to the aim's start with the right-click held
+    /// ([`HipShot::aim_after_ms`], else the end's).
+    pub fn aim_at_ms(&self) -> u64 {
+        self.aim_after_ms.unwrap_or(self.end.after_ms)
+    }
 }
 
 /// A span of milliseconds from a shot's own state.
@@ -573,6 +610,12 @@ impl PressWindow {
 }
 
 impl StanceSequences {
+    /// The stance shoots: its shots are an aimed shot ([`StanceSequences::alt_fire`]) or a hip
+    /// shot ([`StanceSequences::hip`]).
+    pub fn shoots(&self) -> bool {
+        self.alt_fire.is_some() || self.hip.is_some()
+    }
+
     /// What a release of the attack key starts while the attack `running` plays.
     pub fn release_after(&self, running: RunningAttack) -> Option<RunningAttack> {
         self.releases

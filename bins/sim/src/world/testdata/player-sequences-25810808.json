@@ -1480,7 +1480,8 @@
      "second_state": 36,
      "second_sequence": 4225
     }
-   ]
+   ],
+   "alt_fire_ready_ms": 133
   },
   {
    "tags": "2H_Ranged,Rifle",
@@ -1651,8 +1652,12 @@
      "after_ms": 2566,
      "second_state": 45,
      "second_sequence": 0
-    }
-   }
+    },
+    "aim_after_ms": 2249
+   },
+   "alt_fire_gap_ms": 1734,
+   "alt_fire_wait_from_ms": 867,
+   "alt_fire_ready_ms": 267
   },
   {
    "tags": "MagicStaff,Fire",

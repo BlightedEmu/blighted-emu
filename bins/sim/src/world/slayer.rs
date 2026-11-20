@@ -18,6 +18,7 @@
 //! The sequence time is the sum of the input records' frame times since the record that started
 //! the state, that record's own included ([`SequenceClock`] has the wire form).
 
+use nw_content::player_attacks::AttackKind;
 use nw_content::player_sequences::{
     AbilityPlay, AirSequences, AltHold, AttackPress, AttackSlot, Direction, DodgeLoad, DrawHold,
     FirstPlay, HipShot, PlayerSequences, PressWindow, RiderPlays, RunningAttack, SlotsChange,
@@ -1158,6 +1159,24 @@ enum Shot {
     Fire(UpperSlots, Box<ShotSteps>),
 }
 
+/// A shot the other players see go out ([`SlayerTrack::take_fired`]): the server fires the same
+/// shot, so its projectile and its damage come with the shot they see. Live 2026-11-20: the
+/// server read a bow's and a gun's attack key as a melee weapon's; it fired a gun's aimed shot
+/// every 530 ms while the client and the others played one shot and its 1.7 s reload, and it
+/// fired no arrow for a bow's hip shots (a hold of 167 ms swung `Bow_Gunbutt` instead).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct FiredShot {
+    /// The own state number of the input record it started in ([`super::members::own_state_counter`]);
+    /// `None` for a shot that went out with an own state after its record (a held aimed shot, a
+    /// hip re-fire).
+    pub(super) record: Option<u16>,
+    /// The hip shot and the aimed shot are light attacks; the aimed shot of a full draw is the
+    /// charged one ([`nw_content::player_attacks::Stance::aimed_attack`]).
+    pub(super) kind: AttackKind,
+    /// The right-click's aimed shot, not the hip shot.
+    pub(super) aimed: bool,
+}
+
 /// An aimed press of a weapon that shoots at the release
 /// ([`StanceSequences::alt_fire_at_release`]), while the key is down.
 #[derive(Debug, Clone, PartialEq)]
@@ -1199,6 +1218,8 @@ struct ShotSteps {
     /// The second-slot sequence the last step sent.
     last_second: Option<u64>,
     kind: ShotKind,
+    /// The attack of the shot ([`FiredShot::kind`]).
+    attack: AttackKind,
 }
 
 /// An aimed shot sent before the stance's shortest time from the shot before
@@ -1209,6 +1230,9 @@ struct HeldShot {
     steps: ShotSteps,
     /// The own state time it goes out at.
     at_ms: u64,
+    /// The stance's ready time after the aim's start ([`StanceSequences::alt_fire_ready_ms`]):
+    /// it goes out only once the aim was up that long.
+    aim_ready_ms: Option<u64>,
 }
 
 /// Which shot [`ShotSteps`] follow.
@@ -1238,6 +1262,16 @@ impl ShotSteps {
             empty_steps: (!empty_steps.is_empty()).then(|| empty_steps.to_vec()),
             last_second: None,
             kind: ShotKind::Aimed,
+            attack: AttackKind::Light,
+        }
+    }
+
+    /// The shot these steps follow, started in own state number `record` (`None`: the newest).
+    fn fired(&self, record: Option<u16>) -> FiredShot {
+        FiredShot {
+            record,
+            kind: self.attack,
+            aimed: self.kind == ShotKind::Aimed,
         }
     }
 
@@ -1281,14 +1315,16 @@ impl ShotSteps {
     /// The changes due by own state time `state_ms` (the first call is the shot's own state),
     /// merged in their order; with the weapon `empty`, the steps of an emptied weapon go on
     /// ([`ShotSteps::empty`]). A hip shot's end goes out as its re-fire when a press asked for
-    /// one; its steps then count again from there.
-    fn due(&mut self, state_ms: u64, empty: bool) -> Vec<SlotsChange> {
+    /// one; its steps then count again from there. Gives the changes, and whether the re-fire
+    /// went out (a shot of its own: [`FiredShot`]).
+    fn due(&mut self, state_ms: u64, empty: bool) -> (Vec<SlotsChange>, bool) {
         let from_ms = *self.from_ms.get_or_insert(state_ms);
         self.at_ms = Some(state_ms);
         if empty {
             self.empty();
         }
         let mut due = Vec::new();
+        let mut refired = false;
         while let Some(step) = self.steps.get(self.next) {
             if state_ms.saturating_sub(from_ms) < step.after_ms {
                 break;
@@ -1304,6 +1340,7 @@ impl ShotSteps {
             {
                 *refire_due = false;
                 due.push(*refire);
+                refired = true;
                 self.next = 0;
                 self.from_ms = Some(state_ms);
                 break;
@@ -1314,7 +1351,7 @@ impl ShotSteps {
         if let Some(sequence) = due.iter().rev().find_map(|change| change.second_sequence) {
             self.last_second = Some(sequence);
         }
-        due
+        (due, refired)
     }
 
     /// Every step went out.
@@ -1494,6 +1531,16 @@ pub(super) struct SlayerTrack {
     shot_steps: Option<ShotSteps>,
     /// An aimed shot that waits for the stance's shortest time from the shot before.
     held_shot: Option<HeldShot>,
+    /// The own state time of the last aimed shot's own state.
+    aimed_from_ms: Option<u64>,
+    /// The right-click's aim started in a record no own state carried yet.
+    aim_start_due: bool,
+    /// The own state time of the newest aim start's own state.
+    aim_from_ms: Option<u64>,
+    /// The newest own state time ([`SlayerTrack::advance`]).
+    newest_state_ms: Option<u64>,
+    /// The shots that went out since the server last took them ([`SlayerTrack::take_fired`]).
+    fired: Vec<FiredShot>,
     /// The second-slot sequence an aimed shot's steps left the aim on, for its hold.
     alt_resume: Option<u64>,
     /// The previous record's keys: right-click, dodge, jump; and whether the weapon was drawn.
@@ -1799,6 +1846,7 @@ impl SlayerTrack {
             }
             Some(Shot::Fire(slots, steps)) => {
                 self.upper = Some(merge(self.upper.unwrap_or_default(), slots));
+                self.fired.push(steps.fired(Some(record.counter)));
                 self.shot_steps = Some(*steps);
                 self.alt_resume = None;
             }
@@ -2652,7 +2700,12 @@ impl SlayerTrack {
             // Let go during the action that ended it: nothing to start again.
             self.alt_broken = false;
         }
-        let alt = held && !self.alt_broken;
+        // A hip shot that plays holds a new aim back until its aim time
+        // ([`HipShot::aim_at_ms`]); the right-click held starts it there. Ours started the aim
+        // at once and dropped the hip shot's reload.
+        let hip_holds =
+            !self.alt_held && stance.is_some_and(|stance| self.hip_aim_left_ms(stance).is_some());
+        let alt = held && !self.alt_broken && !hip_holds;
         let was_alt = self.alt_held;
         let was_drawn = self.drawn;
         let was_stance = self.drawn_stance;
@@ -2686,10 +2739,15 @@ impl SlayerTrack {
         let alt_starts = alt && !was_alt;
         let alt_ends = !alt && was_alt && record.intent.is_some();
         let draws = drawn && (!was_drawn || was_stance != self.drawn_stance);
-        if alt_starts || alt_ends || draws {
+        if alt_starts {
+            // An aimed shot asked for while the aim was held back waits for the aim
+            // ([`SlayerTrack::aim_ready_in_ms`]).
+            self.drop_shot_steps();
+        } else if alt_ends || draws {
             self.drop_shot();
         }
         let change = (if alt_starts {
+            self.aim_start_due = true;
             self.start_alt(stance)
         } else if alt_ends {
             alt_end(stance)
@@ -2708,17 +2766,28 @@ impl SlayerTrack {
         slots_of(change, record.counter)
     }
 
+    /// The shots that went out since the last call, oldest first ([`FiredShot`]).
+    pub(super) fn take_fired(&mut self) -> Vec<FiredShot> {
+        std::mem::take(&mut self.fired)
+    }
+
     /// Drops the shot that plays: the aim's start or end, a draw, a sheathe, a hit reaction or
     /// an ability takes the upper slots, and the shot's later steps would put the shot's pose
     /// back over it (Inferred); the aim's third slot by legs plays the aim's again, not a full
     /// draw hold's (Inferred).
     fn drop_shot(&mut self) {
+        self.drop_shot_steps();
+        self.aimed_draw = None;
+        self.held_shot = None;
+    }
+
+    /// Drops the steps of the shot that plays ([`SlayerTrack::drop_shot`]), not an aimed draw or
+    /// an aimed shot that waits.
+    fn drop_shot_steps(&mut self) {
         if let Some(third) = self.alt_play.as_mut().and_then(|play| play.third.as_mut()) {
             third.playing = third.aim;
         }
-        self.aimed_draw = None;
         self.shot_steps = None;
-        self.held_shot = None;
         self.alt_resume = None;
     }
 
@@ -2757,7 +2826,9 @@ impl SlayerTrack {
         self.was_empty = empty;
         let aiming = drawn && record.intent.is_some_and(|intent| intent.block);
         if !aiming {
+            // Let go before the aim was up (a hip shot held it back): no aimed shot.
             self.aimed_draw = None;
+            self.held_shot = None;
         }
         if !drawn {
             return None;
@@ -2838,7 +2909,11 @@ impl SlayerTrack {
                 if let Some(hold) = charge.hold.as_ref() {
                     self.draw_third(LegThirds::of_draw(hold));
                 }
-                (charge.fire, ShotSteps::aimed(&charge.fire_after, &[]))
+                let steps = ShotSteps {
+                    attack: AttackKind::Charged,
+                    ..ShotSteps::aimed(&charge.fire_after, &[])
+                };
+                (charge.fire, steps)
             }
             None => (
                 stance.alt_fire?,
@@ -2848,11 +2923,14 @@ impl SlayerTrack {
         self.aimed_fire(stance, change, steps, counter)
     }
 
-    /// The aimed shot `change` of `stance` started in record `counter`, with its `steps`; while
-    /// the aimed shot before's steps go out, held until the stance's shortest time from it
-    /// ([`StanceSequences::alt_fire_gap_ms`]; the bow's last step, the aim's hold 1,133 ms after
-    /// the shot, comes after it), then sent by [`SlayerTrack::step_shot`]. A release while a
-    /// shot is held shoots no other.
+    /// The aimed shot `change` of `stance` started in record `counter`, with its `steps`; before
+    /// the stance's shortest time from the aimed shot before
+    /// ([`StanceSequences::alt_fire_gap_ms`]) it waits for that time, then goes out with
+    /// [`SlayerTrack::step_shot`]; asked for before the stance's wait starts
+    /// ([`StanceSequences::alt_fire_wait_from_ms`], the musket's reload), it fires nothing. A
+    /// release or a press while a shot waits shoots no other. Live 2026-11-20: a musket's presses
+    /// during its reload each started a new shot for the other players (one every 200 ms while
+    /// the player pressed fast), as its steps ended before the gap.
     fn aimed_fire(
         &mut self,
         stance: &StanceSequences,
@@ -2863,23 +2941,81 @@ impl SlayerTrack {
         if self.held_shot.is_some() {
             return None;
         }
-        let held_until_ms = stance.alt_fire_gap_ms.and_then(|gap_ms| {
-            let before = self
-                .shot_steps
-                .as_ref()
-                .filter(|before| before.kind == ShotKind::Aimed)?;
-            let due_ms = before.from_ms?.saturating_add(gap_ms);
-            (before.at_ms? < due_ms).then_some(due_ms)
+        let early_ms = stance.alt_fire_gap_ms.and_then(|gap_ms| {
+            let since_ms = self.since_aimed_shot_ms()?;
+            (since_ms < gap_ms).then_some((since_ms, gap_ms))
         });
-        if let Some(at_ms) = held_until_ms {
+        if let Some((since_ms, _)) = early_ms
+            && stance
+                .alt_fire_wait_from_ms
+                .is_some_and(|wait_from_ms| since_ms < wait_from_ms)
+        {
+            return None;
+        }
+        let wait_ms = early_ms
+            .map_or(0, |(since_ms, gap_ms)| gap_ms - since_ms)
+            .max(self.aim_ready_in_ms(stance));
+        if wait_ms > 0 {
             self.held_shot = Some(HeldShot {
                 change,
                 steps,
-                at_ms,
+                at_ms: self
+                    .newest_state_ms
+                    .unwrap_or_default()
+                    .saturating_add(wait_ms),
+                aim_ready_ms: stance.alt_fire_ready_ms,
             });
             return None;
         }
         slots_of(change, counter).map(|slots| Shot::Fire(slots, Box::new(steps)))
+    }
+
+    /// Milliseconds from the newest own state until the aim lets an aimed shot of `stance` go
+    /// out ([`StanceSequences::alt_fire_ready_ms`] after the aim's start): an aim start no own
+    /// state carried yet starts now, and an aim a hip shot holds back starts at its aim time
+    /// ([`SlayerTrack::hip_aim_left_ms`]). 0 for a stance with no ready time.
+    fn aim_ready_in_ms(&self, stance: &StanceSequences) -> u64 {
+        let Some(ready_ms) = stance.alt_fire_ready_ms else {
+            return 0;
+        };
+        if let Some(left_ms) = self.hip_aim_left_ms(stance) {
+            return left_ms.saturating_add(ready_ms);
+        }
+        let since_start_ms = if self.aim_start_due {
+            0
+        } else {
+            match self.newest_state_ms.zip(self.aim_from_ms) {
+                Some((at_ms, from_ms)) => at_ms.saturating_sub(from_ms),
+                None => return 0,
+            }
+        };
+        ready_ms.saturating_sub(since_start_ms)
+    }
+
+    /// Milliseconds left until the hip shot of `stance` that plays lets the aim start
+    /// ([`HipShot::aim_at_ms`] from its own state, or its re-fire's; all of it while its own
+    /// state did not go out yet); `None` when no hip shot holds it.
+    fn hip_aim_left_ms(&self, stance: &StanceSequences) -> Option<u64> {
+        let aim_at_ms = stance.hip.as_ref()?.aim_at_ms();
+        let steps = self
+            .shot_steps
+            .as_ref()
+            .filter(|steps| matches!(steps.kind, ShotKind::Hip { .. }))?;
+        let elapsed_ms = steps.elapsed_ms().unwrap_or(0);
+        (elapsed_ms < aim_at_ms).then(|| aim_at_ms - elapsed_ms)
+    }
+
+    /// Milliseconds from the last aimed shot's own state to the newest own state: 0 while an
+    /// aimed shot started and no own state carried it yet; `None` with no aimed shot before.
+    fn since_aimed_shot_ms(&self) -> Option<u64> {
+        if self
+            .shot_steps
+            .as_ref()
+            .is_some_and(|steps| steps.kind == ShotKind::Aimed && steps.from_ms.is_none())
+        {
+            return Some(0);
+        }
+        Some(self.newest_state_ms?.saturating_sub(self.aimed_from_ms?))
     }
 
     /// The hip shot of `stance` for an attack key press in record `counter`: its start, and its
@@ -2917,12 +3053,23 @@ impl SlayerTrack {
     /// aim's second-slot sequence for its hold ([`SlayerTrack::alt_hold_step`]); in the aim,
     /// a step's third-slot sequence of the aim's legs goes out as that of the legs it is on
     /// ([`AimThird`]). The weapon emptied by the shot turns its steps to those of an emptied
-    /// weapon ([`ShotSteps::due`]).
+    /// weapon ([`ShotSteps::due`]). A held shot and a hip re-fire that go out are shots of their
+    /// own ([`SlayerTrack::take_fired`]).
     fn step_shot(&mut self, state_ms: u64) {
         let counter = self.newest_counter;
-        if let Some(held) = self.held_shot.take_if(|held| state_ms >= held.at_ms) {
+        let aim_up_ms = self
+            .aim_from_ms
+            .filter(|_| self.alt_held && !self.aim_start_due)
+            .map(|from_ms| state_ms.saturating_sub(from_ms));
+        if let Some(held) = self.held_shot.take_if(|held| {
+            state_ms >= held.at_ms
+                && held
+                    .aim_ready_ms
+                    .is_none_or(|ready_ms| aim_up_ms.is_some_and(|up_ms| up_ms >= ready_ms))
+        }) {
             if let Some(slots) = slots_of(held.change, counter) {
                 self.upper = Some(merge(self.upper.unwrap_or_default(), slots));
+                self.fired.push(held.steps.fired(None));
             }
             self.shot_steps = Some(held.steps);
             self.alt_resume = None;
@@ -2930,7 +3077,13 @@ impl SlayerTrack {
         let Some(steps) = self.shot_steps.as_mut() else {
             return;
         };
-        let due = steps.due(state_ms, self.was_empty);
+        let (due, refired) = steps.due(state_ms, self.was_empty);
+        if refired {
+            self.fired.push(steps.fired(None));
+        }
+        if steps.kind == ShotKind::Aimed {
+            self.aimed_from_ms = steps.from_ms;
+        }
         if steps.done() {
             if steps.kind == ShotKind::Aimed {
                 self.alt_resume = steps.last_second;
@@ -3307,6 +3460,10 @@ impl SlayerTrack {
     /// more ([`ECHO_STATES`]); its sequence time goes with every own state. The players who see
     /// this one get the newest state at once ([`SlayerTrack::current`]).
     pub(super) fn advance(&mut self, number: u16, state_ms: u64) {
+        self.newest_state_ms = Some(state_ms);
+        if std::mem::take(&mut self.aim_start_due) {
+            self.aim_from_ms = Some(state_ms);
+        }
         self.step_loadout(state_ms);
         if self
             .reaction_free_ms
@@ -7417,6 +7574,232 @@ pub(crate) mod tests {
                 .any(|(number, slots)| *number == AGAIN_AT && sends(slots, shot)),
             "the first press after the load shoots"
         );
+    }
+
+    /// Retail musket (rifle study 2026-11-20): presses inside the shot's reload before its
+    /// `18=1716` step fire nothing; a press after it waits, and the shot goes out 1,734 ms after
+    /// the shot before. Live 2026-11-20: a player pressing every 200 ms through the reload
+    /// showed the others a new shot each time.
+    #[test]
+    fn a_musket_press_in_its_reload_fires_nothing_and_a_later_one_waits_for_its_gap() {
+        const PRESS_AT: u16 = 80;
+        /// Presses 165 to 660 ms after the shot, before the wait starts at 867 ms.
+        const EARLY: [u16; 3] = [5, 10, 20];
+        /// A press 990 ms after the shot.
+        const WAITING: u16 = 30;
+        let table = crate::combat::test_support::test_player_sequences();
+        let musket = table.stance(stance_key(MUSKET)).expect("musket");
+        let shot = musket.alt_fire.expect("the aimed shot");
+        let gap_ms = musket.alt_fire_gap_ms.expect("the gap");
+        let wait_from_ms = musket.alt_fire_wait_from_ms.expect("the wait start");
+        assert!(u64::from(EARLY[2]) * TICK_MS < wait_from_ms);
+        assert!(u64::from(WAITING) * TICK_MS > wait_from_ms);
+        let end = state_after(PRESS_AT, gap_ms) + 4;
+        let fired = FiredShot {
+            record: Some(PRESS_AT),
+            kind: AttackKind::Light,
+            aimed: true,
+        };
+        for (device, down) in DEVICES {
+            let mut track = settled(&table, MUSKET, true, PRESS_AT);
+            let early = EARLY.map(|after| PRESS_AT + after);
+            let presses = taps(down, std::iter::once(PRESS_AT).chain(early).collect());
+            let seen = shots(&mut track, &table, MUSKET, aim(), PRESS_AT..end, presses);
+            let fires: Vec<u16> = seen
+                .iter()
+                .filter(|(_, slots)| sends(slots, shot))
+                .map(|(number, _)| *number)
+                .collect();
+            assert_eq!(
+                fires,
+                vec![PRESS_AT],
+                "{device}: one shot, none in the reload"
+            );
+            assert_eq!(
+                track.take_fired(),
+                vec![fired],
+                "{device}: the server's one shot"
+            );
+            let mut track = settled(&table, MUSKET, true, PRESS_AT);
+            let presses = taps(down, vec![PRESS_AT, PRESS_AT + WAITING]);
+            let seen = shots(&mut track, &table, MUSKET, aim(), PRESS_AT..end, presses);
+            assert_eq!(
+                sending_from(&seen, shot, PRESS_AT + 1),
+                Some(state_after(PRESS_AT, gap_ms)),
+                "{device}: the waiting press shoots at the gap"
+            );
+            assert_eq!(
+                track.take_fired(),
+                vec![
+                    fired,
+                    FiredShot {
+                        record: None,
+                        ..fired
+                    }
+                ],
+                "{device}: the waiting shot goes out with its own state"
+            );
+        }
+    }
+
+    /// Retail musket (rifle study 2026-11-20): with the right-click held during a hip shot, the
+    /// aim starts 2,249 ms after the shot (16 cases, 2,215 to 2,269), and an aimed press in that
+    /// time shoots 267 ms after the aim's start; a fresh aim's press shoots 267 ms after the
+    /// aim's start (71 aims). Ours raised the aim at once, dropped the hip shot's reload and shot
+    /// at the press.
+    #[test]
+    fn a_musket_aim_waits_for_its_hip_shot_and_shoots_once_it_is_up_with_keyboard_and_controller() {
+        const PRESS_AT: u16 = 50;
+        /// The right-click goes down 330 ms after the hip shot, the aimed press 1,320 ms after.
+        const AIM_AFTER: u16 = 10;
+        const AIMED_PRESS_AFTER: u16 = 40;
+        /// A fresh aim's start and its press in the next record.
+        const FRESH_AIM_AT: u16 = 40;
+        let table = crate::combat::test_support::test_player_sequences();
+        let musket = table.stance(stance_key(MUSKET)).expect("musket");
+        let hip = musket.hip.clone().expect("the hip shot");
+        let start = musket.alt_start.expect("the aim's start");
+        let aim_start = SlotsChange {
+            second_state: start.second_state,
+            second_sequence: start.second_sequence,
+            ..SlotsChange::default()
+        };
+        let shot = musket.alt_fire.expect("the aimed shot");
+        let ready_ms = musket.alt_fire_ready_ms.expect("the aim's ready time");
+        let aim_due = state_after(PRESS_AT, hip.aim_at_ms());
+        let end = aim_due + 40;
+        let still = Intent::default();
+        for (device, down) in DEVICES {
+            let mut track = settled(&table, MUSKET, false, PRESS_AT);
+            let presses = taps(down, vec![PRESS_AT, PRESS_AT + AIMED_PRESS_AFTER]);
+            let mut seen = shots(
+                &mut track,
+                &table,
+                MUSKET,
+                still,
+                PRESS_AT..PRESS_AT + AIM_AFTER,
+                &presses,
+            );
+            seen.extend(shots(
+                &mut track,
+                &table,
+                MUSKET,
+                aim(),
+                PRESS_AT + AIM_AFTER..end,
+                &presses,
+            ));
+            let aimed = sending_from(&seen, aim_start, PRESS_AT + 1).expect("the aim");
+            assert!(
+                (aim_due..=aim_due + 1).contains(&aimed),
+                "{device}: the aim at {aimed}, due at {aim_due}"
+            );
+            let reload = hip
+                .after
+                .iter()
+                .find(|step| step.slots.second_sequence.is_some())
+                .expect("the hip shot's reload");
+            assert_eq!(
+                sending_from(&seen, reload.slots, PRESS_AT),
+                Some(state_after(PRESS_AT, reload.after_ms)),
+                "{device}: the hip shot's reload plays"
+            );
+            assert_eq!(
+                sending_from(&seen, shot, PRESS_AT),
+                Some(state_after(aimed, ready_ms)),
+                "{device}: the aimed shot once the aim is up"
+            );
+            let mut track = settled(&table, MUSKET, false, FRESH_AIM_AT);
+            let presses = taps(down, vec![FRESH_AIM_AT + 1]);
+            let seen = shots(
+                &mut track,
+                &table,
+                MUSKET,
+                aim(),
+                FRESH_AIM_AT..FRESH_AIM_AT + 20,
+                presses,
+            );
+            assert_eq!(
+                sending_from(&seen, aim_start, FRESH_AIM_AT),
+                Some(FRESH_AIM_AT),
+                "{device}: a fresh aim starts at once"
+            );
+            assert_eq!(
+                sending_from(&seen, shot, FRESH_AIM_AT),
+                Some(state_after(FRESH_AIM_AT, ready_ms)),
+                "{device}: its press shoots once the aim is up"
+            );
+        }
+    }
+
+    /// The shots the others see are the shots the server fires ([`SlayerTrack::take_fired`]):
+    /// the bow's hip shot at its press and its re-fire at the end's time, and its full draw's
+    /// shot as the charged aimed attack.
+    #[test]
+    fn the_server_takes_each_shot_the_others_see_with_keyboard_and_controller() {
+        const PRESS_AT: u16 = 50;
+        const AGAIN_AT: u16 = 62;
+        const DRAW_PRESS_AT: u16 = 80;
+        const DRAW_RELEASE_AT: u16 = 110;
+        let table = crate::combat::test_support::test_player_sequences();
+        let hip = table
+            .stance(stance_key(BOW))
+            .and_then(|stance| stance.hip.clone())
+            .expect("the hip shot");
+        let due_end = state_after(PRESS_AT, hip.end.after_ms);
+        let still = Intent::default();
+        let hip_shot = FiredShot {
+            record: Some(PRESS_AT),
+            kind: AttackKind::Light,
+            aimed: false,
+        };
+        for (device, down) in DEVICES {
+            let mut track = settled(&table, BOW, false, PRESS_AT);
+            let presses = taps(down, vec![PRESS_AT, AGAIN_AT]);
+            shots(
+                &mut track,
+                &table,
+                BOW,
+                still,
+                PRESS_AT..due_end + 2,
+                presses,
+            );
+            assert_eq!(
+                track.take_fired(),
+                vec![
+                    hip_shot,
+                    FiredShot {
+                        record: None,
+                        ..hip_shot
+                    }
+                ],
+                "{device}: the hip shot and its re-fire"
+            );
+            let mut track = settled(&table, BOW, true, DRAW_PRESS_AT);
+            let hold = if down == PAD_HOLD { PAD_HOLD } else { HELD };
+            let key = |number: u16| match number {
+                DRAW_PRESS_AT => down,
+                DRAW_RELEASE_AT => RELEASE,
+                number if number < DRAW_RELEASE_AT => hold,
+                _ => HELD,
+            };
+            shots(
+                &mut track,
+                &table,
+                BOW,
+                aim(),
+                DRAW_PRESS_AT..DRAW_RELEASE_AT + 2,
+                key,
+            );
+            assert_eq!(
+                track.take_fired(),
+                vec![FiredShot {
+                    record: Some(DRAW_RELEASE_AT),
+                    kind: AttackKind::Charged,
+                    aimed: true,
+                }],
+                "{device}: the full draw's shot at the release"
+            );
+        }
     }
 
     /// The key pressed and the controller's trigger held, for the ranged shot tests.

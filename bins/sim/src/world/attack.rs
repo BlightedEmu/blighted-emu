@@ -34,6 +34,7 @@ use nw_content::passive_abilities::Trigger;
 use nw_content::player_attacks::{
     AttackHit, AttackKind, AttackMotion, BasicAttack, GritWindow, Homing, MeleeShape, Stance,
 };
+use nw_content::player_sequences::StanceSequences;
 use nw_content::respawn_points::{nearest_respawn_point, respawn_point};
 use nw_content::status_effects::{Control, RowKey};
 use nw_formats::objectstream::lowercase_crc32;
@@ -57,6 +58,7 @@ use super::hit_shape::{
     MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, SweptShape, Wedge, bodies_overlap, body_frame,
     homing_score, turn,
 };
+use super::members::OWN_STATE_LEAD;
 use super::mob_timeline::{HitSide, limiter_chain_count, yaw_toward};
 use super::passives::{HitAim, HitMods};
 use super::projectile::{Shot, ShotHit};
@@ -497,10 +499,11 @@ impl AttackKeys {
         Some(attack)
     }
 
-    /// Reads `record` at `record_ms` for a stance that aims, aimed in it (the bow with the
-    /// right-click held): a press (`pressed`, [`AttackKeys::pressed_in`]) draws, and the release
-    /// shoots the aimed shot at once, or when [`AIMED_SHOT_GAP_MS`] after the last shot ends;
-    /// holding the key shoots nothing.
+    /// Reads `record` at `record_ms` for a stance that aims, aimed in it, whose shots the
+    /// player sequence table does not have (a bow and a gun fire the shots their slayer state
+    /// shows: [`SimWorld::attack_input`]): a press (`pressed`, [`AttackKeys::pressed_in`])
+    /// draws, and the release shoots the aimed shot at once, or when [`AIMED_SHOT_GAP_MS`] after
+    /// the last shot ends; holding the key shoots nothing.
     ///
     /// Observed (4,885 retail bow shots of 42 ledgers, 2026-11-17): the arrow spawned a median
     /// 77 ms after the key's release (p10 27, p90 152 ms), a tap of 50 ms fired too, and no
@@ -2011,8 +2014,10 @@ impl SimWorld {
     /// reads the attacks (a press and its release) in the records of `records` not read before,
     /// oldest first, with the stance of the weapon the attack key uses: a release picks the light or
     /// heavy attack by the hold, a hold to the charge starts the charged attack
-    /// ([`Stance::released`]). The first attack starts ([`SimWorld::player_swings_due`] lands
-    /// it); the others of the same message are [`AttackRefusal::TooFast`], which this returns.
+    /// ([`Stance::released`]); a bow or a gun fires the shots its slayer state showed the other
+    /// players ([`super::slayer::SlayerTrack::take_fired`]), not attacks of its keys. The first
+    /// attack starts ([`SimWorld::player_swings_due`] lands it); the others of the same message
+    /// are [`AttackRefusal::TooFast`], which this returns.
     /// The counter of the newest record carries over to the next message. Nothing for a
     /// connection without a player.
     pub fn attack_input(
@@ -2027,6 +2032,13 @@ impl SimWorld {
         let Some(number) = self.world.get::<Player>(entity).map(|player| player.number) else {
             return Vec::new();
         };
+        // The shots the other players saw go out since the last message, taken every message
+        // ([`super::slayer::FiredShot`]).
+        let fired = self
+            .world
+            .get_mut::<Player>(entity)
+            .map(|mut player| player.slayer.take_fired())
+            .unwrap_or_default();
         let swimming = self.world.get::<Body>(entity).is_some_and(|body| {
             body.motion.position().z <= self.settings.ocean_level_m + SWIM_HEIGHT_M
         });
@@ -2060,6 +2072,15 @@ impl SimWorld {
         let data = Arc::clone(&self.combat.data);
         let held = self.held_weapon(entity).map(|(weapon, _)| weapon);
         let spread = held.is_some_and(|weapon| weapon.spread_shot);
+        // A bow or a gun (not the spread-shot weapon, which fires through its own request) fires
+        // the shots its slayer state shows the other players ([`StanceSequences::shoots`]): the
+        // attack key starts no attack of its own.
+        let shoots_as_seen = !spread
+            && held.is_some_and(|weapon| {
+                data.player_sequences()
+                    .stance(weapon.stance)
+                    .is_some_and(StanceSequences::shoots)
+            });
         let (stance, hand) = if spread {
             let melee = self.world.get::<Player>(entity).and_then(|player| {
                 let gear = player.gear.as_ref()?;
@@ -2112,6 +2133,11 @@ impl SimWorld {
         // A press of the swap weapon key ([`Gear::swap_key`]).
         let mut swap_pressed = false;
         let newest_counter = records.first().map(|record| record.u16_after_mask);
+        // A record's time: one record time before the newer one.
+        let record_ms_of = |counter: u16| {
+            let behind = newest_counter.map_or(0, |newest| newest.wrapping_sub(counter));
+            now_ms.saturating_sub(u64::from(behind.saturating_mul(INPUT_RECORD_MS)))
+        };
         for record in records.iter().rev() {
             let counter = record.u16_after_mask;
             if vitals
@@ -2127,9 +2153,11 @@ impl SimWorld {
             block_pressed |= record.blocking() && !vitals.keys.blocking;
             sheathe_pressed |= record.sheathe_pressed();
             swap_pressed |= record.weapon_swap_pressed();
-            let behind = newest_counter.map_or(0, |newest| newest.wrapping_sub(counter));
-            let record_ms =
-                now_ms.saturating_sub(u64::from(behind.saturating_mul(INPUT_RECORD_MS)));
+            if shoots_as_seen {
+                vitals.keys.note_down(record);
+                continue;
+            }
+            let record_ms = record_ms_of(counter);
             match vitals
                 .keys
                 .record(stance, record, record_ms, attacks.is_empty())
@@ -2150,6 +2178,22 @@ impl SimWorld {
                 None => {}
             }
         }
+        // The shots the others saw go out start at their record's time, else (a held aimed shot,
+        // a hip re-fire, sent with an own state) at the newest record's.
+        let fired_aimed = shoots_as_seen.then(|| {
+            for shot in &fired {
+                let started_ms = shot.record.map_or(now_ms, |record| {
+                    record_ms_of(record.wrapping_sub(OWN_STATE_LEAD))
+                });
+                attacks.push(KeyAttack {
+                    step: 0,
+                    kind: shot.kind,
+                    started_ms,
+                    pressed_ms: started_ms,
+                });
+            }
+            fired.first().is_some_and(|shot| shot.aimed)
+        });
         let lock_target = records.first().and_then(InputRecord::lock_target);
         if std::mem::replace(&mut vitals.lock_target, lock_target) != lock_target {
             tracing::info!(player = number, target = ?lock_target, "lock target");
@@ -2216,8 +2260,9 @@ impl SimWorld {
         // With the right-click held, a gun or a bow fires the aimed shot of its aim fragment
         // (`MusketAttack1`, `BowAttack1`, the drawn charge's `BowAttack2`), not the hip fire
         // (`MusketAttack_Hipfire`, `BowAttack_Hipshot`; `player_2h_ranged.adb`,
-        // `player_bow.adb`).
-        let aiming = records.first().is_some_and(InputRecord::blocking);
+        // `player_bow.adb`): the shot the others saw is aimed or not.
+        let aiming =
+            fired_aimed.unwrap_or_else(|| records.first().is_some_and(InputRecord::blocking));
         let aimed = stance
             .filter(|_| aiming)
             .and_then(|stance| stance.aimed_attack(kind));
@@ -5961,8 +6006,21 @@ mod tests {
     }
 
     /// [`fight_at`] `x` with player 1 holding a weapon of the stance `tags` (the kit sword with
-    /// that stance).
+    /// that stance), with no player sequence table.
     fn caster_at(x: f32, tags: &str) -> SimWorld {
+        caster_with(
+            x,
+            tags,
+            nw_content::player_sequences::PlayerSequences::default(),
+        )
+    }
+
+    /// [`caster_at`] with the player sequence table `sequences`.
+    fn caster_with(
+        x: f32,
+        tags: &str,
+        sequences: nw_content::player_sequences::PlayerSequences,
+    ) -> SimWorld {
         const CASTER: &str = "CasterT2";
         let mut source = crate::combat::test_support::test_source();
         let sword = source.weapons[0].1;
@@ -5976,7 +6034,7 @@ mod tests {
         source
             .item_stats
             .push((gear::tests::SWORD.to_owned(), CASTER.to_owned()));
-        let data = test_data_of(source);
+        let data = test_data_of(source).with_player_sequences(sequences);
         let mut world = fight_at(x);
         world.combat = committed().combat_settings(
             Arc::new(data),
@@ -6174,6 +6232,159 @@ mod tests {
             aimed_hit > hip_hit,
             "the aimed row hits harder: {aimed_hit} against {hip_hit}"
         );
+    }
+
+    /// A bow or a gun of player 1 [`caster_with`] the retail sequence table, drawn by a press at
+    /// [`NOW`]: its shots are those its slayer state shows.
+    fn drawn_shooter(tags: &str) -> SimWorld {
+        /// Out of every melee reach.
+        const AWAY_M: f32 = 15.0;
+        let mut world = caster_with(
+            MOB_X + AWAY_M,
+            tags,
+            crate::combat::test_support::test_player_sequences(),
+        );
+        shoot_records(&mut world, &message(1, &[Key::Press, Key::Release]), NOW);
+        world
+    }
+
+    /// The server reads `records` (newest first) at `at_ms` as it reads a client input: the
+    /// move (which steps the slayer state), then the attack keys; then the own state of the
+    /// newest record goes out.
+    fn shoot_records(world: &mut SimWorld, records: &[InputRecord], at_ms: u64) {
+        let _ = world.move_from_input(&connection(1), records, at_ms);
+        world.attack_input(&connection(1), records, at_ms);
+        let entity = world.by_connection[&connection(1)];
+        let newest = records.first().expect("a record").u16_after_mask;
+        let mut player = world.world.get_mut::<Player>(entity).expect("player");
+        player
+            .slayer
+            .advance(crate::world::members::own_state_counter(newest), at_ms);
+        let _ = player.slayer.take_due();
+    }
+
+    /// One record per message from counter `first` at `from_ms`, one record time apart, with
+    /// the key `key(i)` of the `i`-th and the aim held when `aimed`; the swings (action, start)
+    /// that started.
+    fn shots_of(
+        world: &mut SimWorld,
+        first: u16,
+        from_ms: u64,
+        count: u16,
+        aimed: bool,
+        key: impl Fn(u16) -> Key,
+    ) -> Vec<(String, u64)> {
+        for i in 0..count {
+            let mut records = message(first + i, &[key(i)]);
+            if aimed {
+                for record in &mut records {
+                    record.slots.values[AIM_VALUE] |= 1 << AIM_BIT;
+                }
+            }
+            let at_ms = from_ms + u64::from(i) * u64::from(INPUT_RECORD_MS);
+            shoot_records(world, &records, at_ms);
+        }
+        world
+            .player_swings
+            .iter()
+            .map(|swing| (swing.attack.action.clone(), swing.started_ms))
+            .collect()
+    }
+
+    /// Retail bow (rifle study 2026-11-20, 1,195 ledgers): 29 hip presses held 167 to 1,000 ms
+    /// each sent the hip shot `16=33 18=4720` at the press, and none a melee start. Live
+    /// 2026-11-20: ours read the hold as the charged attack and swung `Bow_Gunbutt` 0.27 s after
+    /// the press; no arrow flew, and the swing held off the next hip shots.
+    #[test]
+    fn a_bow_hip_press_held_past_the_charge_shoots_its_hip_shot_with_keyboard_and_controller() {
+        const BOW: &str = "Bow,LongBow";
+        /// A hold of 330 ms: past the stance's 167 ms charge.
+        const HOLD_RECORDS: u16 = 10;
+        const FIRST: u16 = 10;
+        let from_ms = NOW + LONG_AFTER_MS;
+        for (device, down, hold) in [
+            ("keyboard", Key::Press, Key::Hold),
+            ("controller", Key::PadHold, Key::PadHold),
+        ] {
+            let mut world = drawn_shooter(BOW);
+            let hip = world
+                .combat
+                .data
+                .stance(stance_key(BOW))
+                .and_then(|stance| stance.attack(AttackKind::Light))
+                .cloned()
+                .expect("the hip shot");
+            let key = |i: u16| match i {
+                0 => down,
+                HOLD_RECORDS => Key::Release,
+                _ => hold,
+            };
+            let swings = shots_of(&mut world, FIRST, from_ms, HOLD_RECORDS + 1, false, key);
+            assert_eq!(
+                swings,
+                vec![(hip.action.clone(), from_ms)],
+                "{device}: the hip shot at the press, no swing"
+            );
+        }
+    }
+
+    /// Retail musket (rifle study 2026-11-20): the first aimed shot goes out 267 ms after the
+    /// aim's start; presses in the shot's reload before its `18=1716` step fire nothing; a later
+    /// one waits for the next shot 1,734 ms after the shot before. Live 2026-11-20: ours fired
+    /// an aimed shot every 530 ms of fast presses (22 in 11 s) while the client played one shot
+    /// and its reload.
+    #[test]
+    fn a_musket_fires_one_aimed_shot_per_reload_however_fast_the_presses_come() {
+        const MUSKET: &str = "2H_Ranged,Rifle";
+        /// A press every 200 ms for 2.2 s.
+        const PRESS_EVERY: u16 = 6;
+        const RECORDS: u16 = 66;
+        const FIRST: u16 = 10;
+        let from_ms = NOW + LONG_AFTER_MS;
+        for (device, down) in [("keyboard", Key::Press), ("controller", Key::PadHold)] {
+            let mut world = drawn_shooter(MUSKET);
+            let sequences = world
+                .combat
+                .data
+                .player_sequences()
+                .stance(stance_key(MUSKET))
+                .cloned()
+                .expect("the musket's sequences");
+            let gap_ms = sequences.alt_fire_gap_ms.expect("the gap");
+            let ready_ms = sequences.alt_fire_ready_ms.expect("the aim's ready time");
+            let aimed = world
+                .combat
+                .data
+                .stance(stance_key(MUSKET))
+                .and_then(|stance| stance.aimed_attack(AttackKind::Light))
+                .cloned()
+                .expect("the aimed shot");
+            // The aim starts in the first record (a block start presses no key), the presses
+            // from the next on.
+            let key = |i: u16| match i % PRESS_EVERY {
+                1 => down,
+                2 => Key::Release,
+                _ => Key::Hold,
+            };
+            let swings = shots_of(&mut world, FIRST, from_ms, RECORDS, true, key);
+            let starts: Vec<u64> = swings
+                .iter()
+                .filter(|(action, _)| *action == aimed.action)
+                .map(|(_, started_ms)| *started_ms)
+                .collect();
+            assert_eq!(starts.len(), 2, "{device}: two shots: {swings:?}");
+            let ready = from_ms + ready_ms;
+            assert!(
+                (ready..ready + 3 * u64::from(INPUT_RECORD_MS)).contains(&starts[0]),
+                "{device}: the first once the aim is up: {} ms after it",
+                starts[0] - from_ms
+            );
+            let gap = starts[1] - starts[0];
+            assert!(
+                (gap_ms..gap_ms + 2 * u64::from(INPUT_RECORD_MS)).contains(&gap),
+                "{device}: the waiting press shoots at the gap: {gap} ms"
+            );
+        }
     }
 
     /// When `attack` lands at the earliest, after it starts.
