@@ -558,6 +558,20 @@ impl SimWorld {
             .push(interactor_target(request.target_entity));
         player.station = Some(station.station_type.clone());
         player.station_interaction = Some(request.interaction);
+        // The station's use plays its kind's sequence for the others
+        // ([`PlayerSequences::station`]).
+        //
+        // [`PlayerSequences::station`]: nw_content::player_sequences::PlayerSequences::station
+        let sequence = self
+            .combat
+            .data
+            .player_sequences()
+            .station(&String::from_utf8_lossy(&station.name));
+        player.slayer.interacted(super::slayer::InteractPlay {
+            state: super::slayer::INTERACTION_STATE,
+            sequence,
+            crouch: false,
+        });
     }
 
     /// Player `number` (`entity`) crafts `crafts` of the recipe whose lowercase id has the CRC-32
@@ -1479,8 +1493,8 @@ mod tests {
     #[test]
     fn a_recipe_cooldown_counts_its_crafts_and_refuses_past_its_quantity() {
         use nw_content::loot_limits::LootLimitRules;
-        use nw_content::resets::{ResetClock, ServerRegion};
         use nw_content::recipe_cooldowns::RecipeCooldown;
+        use nw_content::resets::{ResetClock, ServerRegion};
         use nw_messages::crafting_state::{CRAFTING_STATE_COMPONENT, CRAFTING_STATE_TYPE_INDEX};
         /// A daily cooldown of 2 crafts (`LeatherT51` has 10).
         const QUANTITY: u32 = 2;

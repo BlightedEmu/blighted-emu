@@ -104,6 +104,8 @@ impl SimWorld {
             component: OBJECTIVE_INTERACTOR_COMPONENT,
             state: MemberState::ObjectiveInteractor(state),
         });
+        let play = self.interaction_play(request.kind);
+        self.play_interaction(entity, play);
     }
 
     /// The raw id of the zone capital plot nearest to `at`: the provider retail names for a

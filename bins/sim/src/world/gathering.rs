@@ -87,8 +87,8 @@ use super::gates::timeline_member;
 use super::loot_bag::{EntryRange, LimitsSent};
 use super::slots::Slot;
 use super::statics::{
-    GatherCounters, GatherRun, gather_ended, gather_started, gatherers_changed,
-    interactor_target, water_gather_ended,
+    GatherCounters, GatherRun, gather_ended, gather_started, gatherers_changed, interactor_target,
+    water_gather_ended,
 };
 use super::tradeskill::EventScale;
 use super::{Body, Player, SimWorld, gather_answer, gather_interrupted, send_now};
@@ -599,11 +599,7 @@ impl SimWorld {
             send_now(&mut self.combat_messages, &player.connection, &[refusal]);
             return;
         };
-        let gatherers = if instanced {
-            NO_GATHERERS
-        } else {
-            gatherers
-        };
+        let gatherers = if instanced { NO_GATHERERS } else { gatherers };
         // A group node holds its work; a stopped gather of another object left its work for the
         // next one, whoever gathers it.
         let work_ms = match group {
@@ -643,6 +639,22 @@ impl SimWorld {
         };
         let accept = gather_answer(number, request, GATHER_ACCEPTED, NO_NAME);
         send_now(&mut self.combat_messages, &player.connection, &[accept]);
+        // The gather plays its animation's sequence for the others
+        // ([`PlayerSequences::gather`]).
+        //
+        // [`PlayerSequences::gather`]: nw_content::player_sequences::PlayerSequences::gather
+        if let Some(play) = self
+            .combat
+            .data
+            .player_sequences()
+            .gather(gatherable.animation.as_deref())
+        {
+            player.slayer.interacted(super::slayer::InteractPlay {
+                state: super::slayer::GATHER_STATE,
+                sequence: play.sequence,
+                crouch: play.crouch,
+            });
+        }
         let started = gather_started(request.target_entity, &mut player.gathers, run);
         player.extra_members.extend(started);
         tracing::debug!(player = number, gatherable = %gatherable.id, duration_ms, single_swing, "gather");
@@ -1051,7 +1063,9 @@ impl SimWorld {
         let (mobs, objects) = (&self.mobs, &self.encounter_objects);
         self.kept_gathers.retain(|kept| {
             kept.mob.is_none_or(|mob| mobs.health(mob) == Some(0))
-                && kept.start_object.is_none_or(|object| objects.stands(object))
+                && kept
+                    .start_object
+                    .is_none_or(|object| objects.stands(object))
         });
         let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.open_gathers)
             .into_iter()
@@ -1173,9 +1187,7 @@ impl SimWorld {
                 self.erosion_gathered(gather.number, &gather.gatherable.id);
             }
             // An instanced object stays for everyone else: only its gatherer's tracker locks it.
-            None if gather.instanced => self
-                .nodes
-                .release(&gather.request.target, gather.number),
+            None if gather.instanced => self.nodes.release(&gather.request.target, gather.number),
             None => {
                 let respawn_at_ms = now_ms.saturating_add(self.respawn_roll_ms(&gather.gatherable));
                 self.nodes
@@ -2077,7 +2089,10 @@ impl Nodes {
             .by_ref
             .get(gde_ref)
             .map(|index| &mut self.nodes[*index])
-            && let Some(at) = node.gatherers.iter().position(|gatherer| *gatherer == player)
+            && let Some(at) = node
+                .gatherers
+                .iter()
+                .position(|gatherer| *gatherer == player)
         {
             node.gatherers.remove(at);
             node.interactors_changed();
@@ -2270,8 +2285,8 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     use nw_content::gathering::{
-        CyclicGatherables, GatherRule, GatherRules, Gatherables, InstancedGathers,
-        InstancedObject, ToolEfficiencies, ToolEfficiency,
+        CyclicGatherables, GatherRule, GatherRules, Gatherables, InstancedGathers, InstancedObject,
+        ToolEfficiencies, ToolEfficiency,
     };
     use nw_content::progression::{Progression, RankPerks, TradeskillRankRow, TradeskillSource};
     use nw_content::rewards::{EventGrant, EventGrants};
@@ -2421,7 +2436,10 @@ pub(crate) mod tests {
     fn a_level_point_keeps_the_node_id_it_first_had() {
         const OTHER: [u8; RAW_ID_LEN] = [0x6c; RAW_ID_LEN];
         let mut nodes = Nodes::default();
-        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None), Ok(1));
+        assert_eq!(
+            nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
+            Ok(1)
+        );
         nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
         assert_eq!(
             nodes.join(OTHER, FLINT_POINT, AT, PLAYER, SENT, None),
@@ -2442,7 +2460,10 @@ pub(crate) mod tests {
     #[test]
     fn a_node_of_another_layout_is_never_sent() {
         let mut nodes = Nodes::default();
-        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, None, None), Ok(1));
+        assert_eq!(
+            nodes.join(FLINT, FLINT_POINT, AT, PLAYER, None, None),
+            Ok(1)
+        );
         nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
         assert_eq!(
             nodes.join(FLINT, FLINT_POINT, AT, PLAYER, None, None),
@@ -2466,7 +2487,10 @@ pub(crate) mod tests {
     fn a_depletion_is_saved_once_and_a_restored_node_stays_depleted_until_its_time() {
         const UNIX_OF_ZERO_MS: u64 = 1_798_761_600_000;
         let mut nodes = Nodes::default();
-        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None), Ok(1));
+        assert_eq!(
+            nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
+            Ok(1)
+        );
         nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
         let saved = nodes.take_unsaved(|at_ms| at_ms + UNIX_OF_ZERO_MS);
         assert_eq!(
@@ -2519,20 +2543,41 @@ pub(crate) mod tests {
             new: true,
         };
         let kept = Slot { new: false, ..new };
-        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None), Ok(1));
+        assert_eq!(
+            nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
+            Ok(1)
+        );
         let card = nodes.group(number, new, &mut sent).expect("card");
-        assert_eq!(interact_bytes(&card), ["04b22d01030100000001"], "the card with its gatherer");
+        assert_eq!(
+            interact_bytes(&card),
+            ["04b22d01030100000001"],
+            "the card with its gatherer"
+        );
         nodes.release(&FLINT, PLAYER);
         let stopped = nodes.group(number, kept, &mut sent).expect("stop");
         assert_eq!(stopped.members.len(), 1, "the count alone");
         assert_eq!(interact_bytes(&stopped), ["04b22d010200000000"]);
         nodes.release(&FLINT, PLAYER);
-        assert_eq!(nodes.group(number, kept, &mut sent), None, "no gatherer to stop");
-        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None), Ok(1));
-        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None), Ok(1));
+        assert_eq!(
+            nodes.group(number, kept, &mut sent),
+            None,
+            "no gatherer to stop"
+        );
+        assert_eq!(
+            nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
+            Ok(1)
+        );
+        assert_eq!(
+            nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
+            Ok(1)
+        );
         let started = nodes.group(number, kept, &mut sent).expect("start");
         assert_eq!(interact_bytes(&started), ["04b22d010200000001"]);
-        assert_eq!(nodes.group(number, kept, &mut sent), None, "one start, one change");
+        assert_eq!(
+            nodes.group(number, kept, &mut sent),
+            None,
+            "one start, one change"
+        );
         nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
         let harvested = nodes.group(number, kept, &mut sent).expect("harvest");
         assert_eq!(interact_bytes(&harvested), ["04b22d01030000000000"]);
@@ -2545,7 +2590,10 @@ pub(crate) mod tests {
     #[test]
     fn a_node_is_gathered_once_until_it_grows_back() {
         let mut nodes = Nodes::default();
-        assert_eq!(nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None), Ok(1));
+        assert_eq!(
+            nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
+            Ok(1)
+        );
         assert_eq!(
             nodes.join(FLINT, FLINT_POINT, AT, PLAYER + 1, SENT, None),
             Err(NodeBusy::Gathered)
@@ -2631,6 +2679,7 @@ pub(crate) mod tests {
             tool_required: !by_hand,
             by_hand,
             game_event: (!by_hand).then(|| MINING_EVENT.to_owned()),
+            animation: None,
         }
     }
 
@@ -2831,8 +2880,18 @@ pub(crate) mod tests {
         };
         let rules = LevelRules {
             gates: vec![
-                opens(LEVER, Trigger::SwitchUsed { switch: LEVER.to_owned() }),
-                opens(DOOR, Trigger::SwitchStarted { switch: LEVER.to_owned() }),
+                opens(
+                    LEVER,
+                    Trigger::SwitchUsed {
+                        switch: LEVER.to_owned(),
+                    },
+                ),
+                opens(
+                    DOOR,
+                    Trigger::SwitchStarted {
+                        switch: LEVER.to_owned(),
+                    },
+                ),
             ],
             ..LevelRules::default()
         };
@@ -3068,7 +3127,13 @@ pub(crate) mod tests {
         // Another vein, stopped within its first step: all its work is left.
         world.gather_open_world(entity, NUMBER, request(2, 0x12, VEIN), &[], NOW + 2_000);
         world.cancel_gather(entity, 2, NOW + 2_050);
-        world.gather_open_world(entity, NUMBER, request(3, 0x11, VEIN), &[], NOW + RESUMED_AT_MS);
+        world.gather_open_world(
+            entity,
+            NUMBER,
+            request(3, 0x11, VEIN),
+            &[],
+            NOW + RESUMED_AT_MS,
+        );
         let [gather] = world.open_gathers.as_slice() else {
             panic!("one gather runs: {:?}", world.open_gathers);
         };
@@ -3084,13 +3149,18 @@ pub(crate) mod tests {
         #[allow(clippy::cast_precision_loss, reason = "a gather time of seconds")]
         let left_s = LEFT_MS as f32 / MS_PER_SECOND;
         assert!(
-            amount_sent(&world, entity).is_some_and(|amount| (amount - left_s).abs() < f32::EPSILON),
+            amount_sent(&world, entity)
+                .is_some_and(|amount| (amount - left_s).abs() < f32::EPSILON),
             "the own state's amount left: {:?}",
             amount_sent(&world, entity)
         );
         world.gathers_due(NOW + RESUMED_AT_MS + left_at_tool_ms);
         assert!(mining(&world, entity) > 0, "the harvest");
-        assert_eq!(world.kept_gathers.take(&KEPT_VEIN), None, "the harvest took it");
+        assert_eq!(
+            world.kept_gathers.take(&KEPT_VEIN),
+            None,
+            "the harvest took it"
+        );
         assert_eq!(
             world.kept_gathers.take(&[0x12; RAW_ID_LEN]),
             Some(VEIN_MS),
@@ -3115,13 +3185,21 @@ pub(crate) mod tests {
         world.cancel_gather(entity, 1, NOW + 1_250);
         world.gather_open_world(entity, NUMBER, request(2, 0x11, VEIN), &[], NOW + 2_000);
         let end_ms = world.open_gathers.first().expect("the gather runs").end_ms;
-        assert_eq!(end_ms, NOW + 2_000 + full_ms, "a gatherable that starts over");
+        assert_eq!(
+            end_ms,
+            NOW + 2_000 + full_ms,
+            "a gatherable that starts over"
+        );
         world.cancel_gather(entity, 2, NOW + 2_500);
         let (mut world, entity) = admitted();
         with_kept_vein(&mut world, true);
         world.gather_open_world(entity, NUMBER, request(1, 0x11, VEIN), &[], NOW);
         world.cancel_gather(entity, 1, NOW + 1_250);
-        assert_eq!(world.kept_gathers.take(&KEPT_VEIN), None, "an instanced object");
+        assert_eq!(
+            world.kept_gathers.take(&KEPT_VEIN),
+            None,
+            "an instanced object"
+        );
     }
 
     /// The work left on a corpse goes when its mob is no longer dead, on a start object when it
@@ -3136,13 +3214,29 @@ pub(crate) mod tests {
             mob,
             start_object,
         };
-        world.kept_gathers.keep([1; RAW_ID_LEN], kept(Some(NO_SUCH_MOB), None));
-        world.kept_gathers.keep([2; RAW_ID_LEN], kept(None, Some(NO_SUCH_OBJECT)));
+        world
+            .kept_gathers
+            .keep([1; RAW_ID_LEN], kept(Some(NO_SUCH_MOB), None));
+        world
+            .kept_gathers
+            .keep([2; RAW_ID_LEN], kept(None, Some(NO_SUCH_OBJECT)));
         world.kept_gathers.keep(KEPT_VEIN, kept(None, None));
         world.gathers_due(NOW);
-        assert_eq!(world.kept_gathers.take(&[1; RAW_ID_LEN]), None, "no dead mob");
-        assert_eq!(world.kept_gathers.take(&[2; RAW_ID_LEN]), None, "no standing object");
-        assert_eq!(world.kept_gathers.take(&KEPT_VEIN), Some(VEIN_MS), "a level node's");
+        assert_eq!(
+            world.kept_gathers.take(&[1; RAW_ID_LEN]),
+            None,
+            "no dead mob"
+        );
+        assert_eq!(
+            world.kept_gathers.take(&[2; RAW_ID_LEN]),
+            None,
+            "no standing object"
+        );
+        assert_eq!(
+            world.kept_gathers.take(&KEPT_VEIN),
+            Some(VEIN_MS),
+            "a level node's"
+        );
     }
 
     /// `0513_LighthouseLure` (`InteractOnlyOnQuest` 1, tag `IO_0513_LighthouseLure`): a gather of
@@ -3549,7 +3643,9 @@ pub(crate) mod tests {
         let player = world.world.get::<Player>(entity).expect("player");
         assert!(player.loot.opened(&target), "the opener's tracker holds it");
         assert_eq!(
-            world.nodes.join(target, FLINT_POINT, AT, PLAYER, SENT, None),
+            world
+                .nodes
+                .join(target, FLINT_POINT, AT, PLAYER, SENT, None),
             Ok(1),
             "the chest is not depleted for others"
         );
@@ -3603,7 +3699,11 @@ pub(crate) mod tests {
         world.content = Arc::new(content);
         place_nodes(&mut world, NUMBER, &[WELL]);
         world.gather_open_world(entity, NUMBER, request(1, 0x17, WELL), &[], NOW);
-        let end_ms = world.open_gathers.first().expect("the well is gathered").end_ms;
+        let end_ms = world
+            .open_gathers
+            .first()
+            .expect("the well is gathered")
+            .end_ms;
         world.server_ms = server_ms;
         world.gathers_due(end_ms);
         (world, entity)
@@ -3807,7 +3907,11 @@ pub(crate) mod tests {
         world.content = Arc::new(content);
         place_nodes(&mut world, NUMBER, &[CHEST]);
         world.gather_open_world(entity, NUMBER, request(1, 0x15, CHEST), &[], NOW);
-        let end_ms = world.open_gathers.first().expect("the chest is opened").end_ms;
+        let end_ms = world
+            .open_gathers
+            .first()
+            .expect("the chest is opened")
+            .end_ms;
         let opened_server_ms = OPENED_UNIX_MS - SERVER_EPOCH_UNIX_MS;
         let reset_server_ms = RESET_UNIX_MS - SERVER_EPOCH_UNIX_MS;
         world.server_ms = opened_server_ms;
@@ -3889,7 +3993,9 @@ pub(crate) mod tests {
         let player = world.world.get::<Player>(entity).expect("player");
         assert!(!player.loot.opened(&target), "no tracker entry");
         assert_eq!(
-            world.nodes.join(target, FLINT_POINT, AT, PLAYER, SENT, None),
+            world
+                .nodes
+                .join(target, FLINT_POINT, AT, PLAYER, SENT, None),
             Err(NodeBusy::Depleted),
             "depleted for everyone"
         );
@@ -3933,7 +4039,10 @@ pub(crate) mod tests {
         gather(&mut world, 0, 1, 0);
         gather(&mut world, 1, 2, 100);
         assert!(
-            world.open_gathers.iter().all(|gather| gather.end_ms == u64::MAX),
+            world
+                .open_gathers
+                .iter()
+                .all(|gather| gather.end_ms == u64::MAX),
             "no work with 2 gatherers"
         );
         gather(&mut world, 2, 3, THIRD_AT_MS);
@@ -3972,9 +4081,17 @@ pub(crate) mod tests {
             "the third comes back to the work left"
         );
         let end_ms = NOW + THIRD_BACK_AT_MS + LEFT_MS;
-        assert!(world.open_gathers.iter().all(|gather| gather.end_ms == end_ms));
+        assert!(
+            world
+                .open_gathers
+                .iter()
+                .all(|gather| gather.end_ms == end_ms)
+        );
         world.gathers_due(end_ms);
-        assert!(world.open_gathers.is_empty(), "every gather ends with the work");
+        assert!(
+            world.open_gathers.is_empty(),
+            "every gather ends with the work"
+        );
         assert_eq!(
             world.nodes.group_work_left(&[0x30; RAW_ID_LEN], end_ms),
             Some(MONOLITH_MS),

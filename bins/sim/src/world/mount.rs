@@ -250,6 +250,11 @@ impl PlayerMount {
         }
     }
 
+    /// Whether its mount dashes.
+    pub(super) const fn dashing(&self) -> bool {
+        self.dashing
+    }
+
     /// The mount it rides.
     pub(super) const fn riding(&self) -> Option<u32> {
         match self.phase {
@@ -1859,8 +1864,8 @@ mod tests {
         fn a_mount_food_of_quick_slot_3_feeds_the_horse_up_to_the_daily_limit() {
             use nw_content::item_rules::{ConsumableRow, ItemRuleRow, ItemRuleSource, ItemRules};
             use nw_content::loot_limits::{LimitRow, LootLimitRules, LootLimits};
-            use nw_content::resets::{ResetClock, ServerRegion};
             use nw_content::progression::{Progression, ProgressionSource};
+            use nw_content::resets::{ResetClock, ServerRegion};
             use nw_content::rewards::{EventGrant, EventGrants};
             use nw_content::status_effects::{
                 EffectSourceRow, StatusEffectRules, StatusEffectSource,

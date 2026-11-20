@@ -177,9 +177,19 @@ pub struct DrawnMoves {
     /// A move from standing still, back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub back_start: Option<StatePlay>,
+    /// The run a start goes on in once its start sequence has played: the sequence alone, in
+    /// the start's state (Observed, 2026-11-19 study of the 391 ledgers with verified weapons:
+    /// the own `13=1a` starts of each stance went on in one run sequence, for example the
+    /// rifle's 1855 in 1584 in 96 of 98, 1,366 ms after the start at the median).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<u64>,
     /// The keys let go.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<u64>,
+    /// The keys let go soon after a start (Observed, same study: a start let go within 270 ms
+    /// stopped in its own sequence, the rifle's in 3543 in 55 of 103).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_stop: Option<u64>,
     /// A key again while stopping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<u64>,
@@ -692,6 +702,102 @@ struct TableFile {
     abilities: Vec<AbilityPlay>,
     #[serde(default)]
     reactions: Vec<ReactionPlay>,
+    #[serde(default)]
+    riders: Vec<RiderSequences>,
+    #[serde(default)]
+    interactions: Vec<InteractionPlay>,
+    #[serde(default)]
+    stations: Vec<StationPlay>,
+    #[serde(default)]
+    gathers: Vec<GatherPlay>,
+}
+
+/// A pair of sequences of a rider's change, by the legs it starts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LegPair {
+    /// Moving by the movement keys.
+    pub moving: u64,
+    /// Standing still.
+    pub still: u64,
+}
+
+/// The first-slot sequences of a rider of one mount type (2026-11-19 study, `local-data/
+/// scratch-work/remote-all-2026-11-19` `rider3.py`: every player's states of 1,196 ledgers
+/// against the mount of its mount member, slot 2). The server sends them all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RiderPlays {
+    /// The mount-up (`13=20`).
+    pub mount_up: LegPair,
+    /// The ride (`13=21`) a moving mount-up goes on in.
+    pub after_mount_up: u64,
+    /// The ride (`13=21`) moving.
+    pub ride: u64,
+    /// The ride dashing.
+    pub fast: u64,
+    /// The ride starting or stopping: the walk the stand comes and goes through.
+    pub slow: u64,
+    /// Standing still (`13=23`).
+    pub idle: u64,
+    /// The jump (`13=18`).
+    pub jump: u64,
+    /// The jump's landing (`13=17`).
+    pub land: u64,
+    /// A fall without a jump (`13=19`).
+    pub fall: u64,
+    /// The fall's landing (`13=17`).
+    pub fall_land: u64,
+    /// The dismount (`13=15`).
+    pub dismount: LegPair,
+}
+
+/// The rider sequences of one mount type (`MountTypeData` `MountType`), with whether a capture
+/// holds them or they are another type's (**Inferred**).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RiderSequences {
+    /// The mount type.
+    pub mount_type: String,
+    /// Its sequences.
+    #[serde(flatten)]
+    pub plays: RiderPlays,
+    /// No capture holds this type: its sequences are another type's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inferred: bool,
+}
+
+/// The first-slot state and sequence the server starts when it accepts an interaction of one
+/// kind (2026-11-19 study, `interact.py`: the own state 10 ms after each accepted 3743 of the
+/// kind, 1,196 ledgers). A kind without a row starts none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InteractionPlay {
+    /// The interaction kind.
+    pub kind: u8,
+    /// Its state.
+    pub state: u64,
+    /// Its sequence.
+    pub sequence: u64,
+}
+
+/// The sequence of the use of one kind of crafting station (state `13=24`), by the stem of the
+/// station's display name (`@SmeltingT2_MasterName`: `Smelting`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StationPlay {
+    /// The stem of the display name.
+    pub station: String,
+    /// Its sequence.
+    pub sequence: u64,
+}
+
+/// The sequence of a gather (state `13=09`), by the gatherable's `GatheringFragment`, else its
+/// `GatheringAction`, and whether the gatherer crouches in it (ALC child 43).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatherPlay {
+    /// The fragment or action.
+    pub animation: String,
+    /// Its sequence.
+    pub sequence: u64,
+    /// The gatherer crouches.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub crouch: bool,
 }
 
 /// The sequence of one hit reaction entry: the server starts it in the reaction state
@@ -719,7 +825,27 @@ pub struct PlayerSequences {
     abilities: HashMap<u32, AbilityPlay>,
     /// The reaction sequences, by the entry's animations ([`ReactionPlay`]).
     reactions: HashMap<String, u64>,
+    /// The rider sequences, by lowercase mount type.
+    riders: HashMap<String, RiderSequences>,
+    /// The interactions' states, by kind.
+    interactions: HashMap<u8, InteractionPlay>,
+    /// The crafting stations' sequences, by lowercase stem.
+    stations: HashMap<String, u64>,
+    /// The gathers' sequences, by lowercase fragment or action.
+    gathers: HashMap<String, GatherPlay>,
 }
+
+/// The mount type whose rider sequences a type without a row plays (**Inferred**: the horse is
+/// the type with the most rides in the captures after the wolf, and the one of every mount
+/// quest).
+const FALLBACK_MOUNT_TYPE: &str = "horse";
+/// The station sequence of a station kind without a row (**Inferred**: `2513` is the sequence
+/// of the most station kinds, alchemy, engineering, the kiln and the shops).
+const FALLBACK_STATION_SEQUENCE: u64 = 2513;
+/// The gather animation of a gatherable that names none (its `GatheringAction` is `None`).
+const NO_GATHER_ANIMATION: &str = "none";
+/// The station name's stem ends at its tier (`T` and a digit).
+const STATION_TIER: char = 'T';
 
 impl PlayerSequences {
     /// The table of `layout`.
@@ -741,9 +867,60 @@ impl PlayerSequences {
     /// Returns [`PlayerSequencesError::Json`] when the text is not the table.
     pub fn parse(text: &str) -> Result<Self, PlayerSequencesError> {
         let file: TableFile = serde_json::from_str(text)?;
-        Ok(Self::of_parts(file.stances, file.follow_ups)
+        let mut table = Self::of_parts(file.stances, file.follow_ups)
             .with_abilities(file.abilities)
-            .with_reactions(file.reactions))
+            .with_reactions(file.reactions);
+        table.riders = file
+            .riders
+            .into_iter()
+            .map(|rider| (rider.mount_type.to_lowercase(), rider))
+            .collect();
+        table.interactions = file
+            .interactions
+            .into_iter()
+            .map(|play| (play.kind, play))
+            .collect();
+        table.stations = file
+            .stations
+            .into_iter()
+            .map(|play| (play.station.to_lowercase(), play.sequence))
+            .collect();
+        table.gathers = file
+            .gathers
+            .into_iter()
+            .map(|play| (play.animation.to_lowercase(), play))
+            .collect();
+        Ok(table)
+    }
+
+    /// The rider sequences of mount type `mount_type`, else the fallback type's
+    /// ([`FALLBACK_MOUNT_TYPE`]).
+    pub fn rider(&self, mount_type: &str) -> Option<RiderPlays> {
+        self.riders
+            .get(&mount_type.to_lowercase())
+            .or_else(|| self.riders.get(FALLBACK_MOUNT_TYPE))
+            .map(|rider| rider.plays)
+    }
+
+    /// The state and sequence an accepted interaction of `kind` starts, when it starts one.
+    pub fn interaction(&self, kind: u8) -> Option<InteractionPlay> {
+        self.interactions.get(&kind).copied()
+    }
+
+    /// The sequence of the use of the crafting station whose display name is `name`
+    /// (`@SmeltingT2_MasterName`), else the fallback ([`FALLBACK_STATION_SEQUENCE`]).
+    pub fn station(&self, name: &str) -> u64 {
+        self.stations
+            .get(&station_stem(name).to_lowercase())
+            .copied()
+            .unwrap_or(FALLBACK_STATION_SEQUENCE)
+    }
+
+    /// The gather of a gatherable whose gatherer plays `animation` (its `GatheringFragment`,
+    /// else its `GatheringAction`): that animation's row, else that of no animation.
+    pub fn gather(&self, animation: Option<&str>) -> Option<&GatherPlay> {
+        let row = |name: &str| self.gathers.get(&name.to_lowercase());
+        animation.and_then(row).or_else(|| row(NO_GATHER_ANIMATION))
     }
 
     /// The same table with the reaction sequences `reactions`.
@@ -789,6 +966,10 @@ impl PlayerSequences {
                 .collect(),
             abilities: HashMap::new(),
             reactions: HashMap::new(),
+            riders: HashMap::new(),
+            interactions: HashMap::new(),
+            stations: HashMap::new(),
+            gathers: HashMap::new(),
         }
     }
 
@@ -849,8 +1030,35 @@ impl PlayerSequences {
     }
 }
 
+/// The stem of a station's display name: without the leading `@` and up to its tier (`T` and
+/// a digit), else the whole name (`@SmeltingT2_MasterName`: `Smelting`;
+/// `@ui_watcherscampfire`: `ui_watcherscampfire`).
+fn station_stem(name: &str) -> &str {
+    let name = name.trim().trim_start_matches('@');
+    let bytes = name.as_bytes();
+    let end = (1..bytes.len())
+        .find(|&at| {
+            char::from(bytes[at]) == STATION_TIER
+                && bytes.get(at + 1).is_some_and(u8::is_ascii_digit)
+        })
+        .unwrap_or(bytes.len());
+    &name[..end]
+}
+
 #[cfg(test)]
 mod tests {
+    /// The stems of the retail station names (2026-11-19 study, `interact.py`).
+    #[test]
+    fn a_station_is_named_by_the_stem_of_its_display_name() {
+        assert_eq!(super::station_stem("@SmeltingT2_MasterName"), "Smelting");
+        assert_eq!(super::station_stem("@CookingKitT1_Name"), "CookingKit");
+        assert_eq!(
+            super::station_stem("@ui_watcherscampfire"),
+            "ui_watcherscampfire"
+        );
+        assert_eq!(super::station_stem(""), "");
+    }
+
     use super::*;
 
     /// Two stances and a follow-up as the table file holds them (values of the mined table).

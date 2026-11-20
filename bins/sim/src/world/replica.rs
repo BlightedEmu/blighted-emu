@@ -106,6 +106,11 @@ pub(super) struct ReplicaSource {
     pub(super) posture: AlcPosture,
     /// Its movement flags: whether its body stands on a floor ([`RemoteMoveFlags`]).
     pub(super) flags: RemoteMoveFlags,
+    /// Its stamina in whole segments ([`nw_messages::stamina_segments`]).
+    pub(super) stamina_segments: u8,
+    /// The weapon accuracy of its movement
+    /// ([`super::slayer::SlayerTrack::remote_movement_accuracy`]).
+    pub(super) movement_accuracy: f32,
     pub(super) blocking: bool,
     pub(super) spawned_ms: u64,
     pub(super) gear_version: u64,
@@ -190,6 +195,9 @@ impl ReplicaSource {
             }),
             posture: ghost_posture(self.posture),
             airborne: !self.flags.grounded,
+            dodging: self.flags.dodging,
+            stamina_segments: self.stamina_segments,
+            movement_accuracy: self.movement_accuracy,
         }
     }
 
@@ -238,7 +246,10 @@ impl ReplicaSource {
             posture: posture_of_ghost(ghost.posture),
             flags: RemoteMoveFlags {
                 grounded: !ghost.airborne,
+                dodging: ghost.dodging,
             },
+            stamina_segments: ghost.stamina_segments,
+            movement_accuracy: ghost.movement_accuracy,
             blocking: ghost.blocking,
             spawned_ms: ghost.spawned_ms,
             gear_version: ghost.gear_version,
@@ -319,6 +330,7 @@ const fn ghost_posture(posture: AlcPosture) -> GhostPosture {
         AlcPosture::Stand => GhostPosture::Stand,
         AlcPosture::Crouch => GhostPosture::Crouch,
         AlcPosture::Prone => GhostPosture::Prone,
+        AlcPosture::Riding => GhostPosture::Riding,
     }
 }
 
@@ -328,6 +340,7 @@ const fn posture_of_ghost(posture: GhostPosture) -> AlcPosture {
         GhostPosture::Stand => AlcPosture::Stand,
         GhostPosture::Crouch => AlcPosture::Crouch,
         GhostPosture::Prone => AlcPosture::Prone,
+        GhostPosture::Riding => AlcPosture::Riding,
     }
 }
 
@@ -367,6 +380,12 @@ pub(super) struct ReplicaMemory {
     /// Its movement flags, and how many more states carry them.
     flags: RemoteMoveFlags,
     flags_echoes: u8,
+    /// Its stamina segments, and how many more states carry them.
+    stamina: u8,
+    stamina_echoes: u8,
+    /// The weapon accuracy of its movement, and how many more states carry it.
+    accuracy: f32,
+    accuracy_echoes: u8,
     /// The server time of its last new life (ms since 2000-01-01).
     life_ms: u64,
     /// The `pos10` every viewer places it from: its states move it by offsets from it (Observed:
@@ -409,6 +428,13 @@ pub(super) struct Replica {
     flags_changed: bool,
     /// Its state of this tick carries its movement flags ([`REMOTE_ACTION_ECHO_STATES`]).
     sends_flags: bool,
+    /// Its stamina segments changed: the others see it now.
+    stamina_changed: bool,
+    /// Its state of this tick carries its stamina segments ([`REMOTE_ACTION_ECHO_STATES`]).
+    sends_stamina: bool,
+    /// Its state of this tick carries the weapon accuracy of its movement
+    /// ([`REMOTE_ACTION_ECHO_STATES`]).
+    sends_accuracy: bool,
     /// Its own state echoes a change of its upper slots: the others see it now.
     upper_due: bool,
     /// Where its state of this tick puts it: an offset from its anchor, or a new anchor.
@@ -461,6 +487,21 @@ impl Replica {
         let (flags_changed, flags_echoes_left) = echoes_from(
             seen.map(|seen| (seen.flags, seen.flags_echoes)),
             source.flags,
+        );
+        // Its stamina goes from its change on too (Observed, `retail-2026-11-19-towns-duels`:
+        // other players' child 44 in 4,379 changes, 3,846 up and 533 down, and 12,507 states
+        // that sent the same value again; 443 of the 444 dodge starts carried it). Ours sent
+        // none.
+        let (stamina_changed, stamina_echoes_left) = echoes_from(
+            seen.map(|seen| (seen.stamina, seen.stamina_echoes)),
+            source.stamina_segments,
+        );
+        // The weapon accuracy of its movement goes with the change of its movement and the
+        // next states, as its slayer state (Observed, `retail-2026-11-19-towns-duels`: child 37
+        // in 1.5 % of the other players' states; ours sent none).
+        let (_, accuracy_echoes_left) = echoes_from(
+            seen.map(|seen| (seen.accuracy, seen.accuracy_echoes)),
+            source.movement_accuracy,
         );
         let upper_due = seen.is_some() && source.upper.is_some();
         let gear = source.gear();
@@ -541,6 +582,10 @@ impl Replica {
             posture_echoes: posture_echoes_left.saturating_sub(1),
             flags: source.flags,
             flags_echoes: flags_echoes_left.saturating_sub(1),
+            stamina: source.stamina_segments,
+            stamina_echoes: stamina_echoes_left.saturating_sub(1),
+            accuracy: source.movement_accuracy,
+            accuracy_echoes: accuracy_echoes_left.saturating_sub(1),
             life_ms,
             anchor,
         };
@@ -562,6 +607,9 @@ impl Replica {
             sends_posture: posture_echoes_left > 0,
             flags_changed,
             sends_flags: flags_echoes_left > 0,
+            stamina_changed,
+            sends_stamina: stamina_echoes_left > 0,
+            sends_accuracy: accuracy_echoes_left > 0,
             upper_due,
             place,
             anchor,
@@ -584,6 +632,7 @@ impl Replica {
             || self.action_changed
             || self.posture_changed
             || self.flags_changed
+            || self.stamina_changed
             || self.anchor_moved
             || self.upper_due
     }
@@ -678,13 +727,19 @@ impl Replica {
                     anchor: self.anchor,
                     at: pos,
                 };
-                alc.state = MemberState::Alc(AlcState::remote_spawn(
-                    place,
-                    self.stamp,
-                    source.movement,
-                    source.posture,
-                    source.flags,
-                )?);
+                // The card carries its stamina (retail: 61 of the other players' first full
+                // states in `retail-2026-11-19-towns-duels` carried child 44).
+                alc.state = MemberState::Alc(
+                    AlcState::remote_spawn(
+                        place,
+                        self.stamp,
+                        source.movement,
+                        source.posture,
+                        source.flags,
+                    )?
+                    .with_stamina_segments(source.stamina_segments)
+                    .with_movement_accuracy(source.movement_accuracy),
+                );
             }
             // The first state carries the own spawn's sequence time and the whole clock: the
             // viewer's client has them from there.
@@ -775,6 +830,18 @@ impl Replica {
         Some(self.source.flags).filter(|_| self.sends_flags)
     }
 
+    /// Its stamina segments, when its states of this tick carry them
+    /// ([`REMOTE_ACTION_ECHO_STATES`]).
+    fn sent_stamina(&self) -> Option<u8> {
+        Some(self.source.stamina_segments).filter(|_| self.sends_stamina)
+    }
+
+    /// The weapon accuracy of its movement, when its states of this tick carry it
+    /// ([`REMOTE_ACTION_ECHO_STATES`]).
+    fn sent_accuracy(&self) -> Option<f32> {
+        Some(self.source.movement_accuracy).filter(|_| self.sends_accuracy)
+    }
+
     /// Its ALC state for a viewer whose client has `sight` of it, which then has its clock.
     fn step_member(&self, sight: &mut ViewerSight) -> Result<BundleMember, MessageError> {
         let source = &self.source;
@@ -792,6 +859,8 @@ impl Replica {
                 upper_times: sight.upper.times(source.upper_sequence),
                 posture: self.sent_posture(),
                 flags: self.sent_flags(),
+                stamina_segments: self.sent_stamina(),
+                movement_accuracy: self.sent_accuracy(),
             })?),
         };
         sight.stamp = sight.stamp.after(self.stamp);
@@ -934,6 +1003,8 @@ pub(super) mod tests {
     use super::*;
 
     const SPAWNED_MS: u64 = 1_000_000;
+    /// The stamina segments of a full stamina of 100 (retail `44=14`).
+    const FULL_STAMINA_SEGMENTS: u8 = 20;
     const MAX_HEALTH: u32 = 856;
     const HOME_WORLD: [u8; RAW_ID_LEN] = [3; RAW_ID_LEN];
     const NAME: &str = "Remote";
@@ -974,6 +1045,8 @@ pub(super) mod tests {
             upper: None,
             posture: AlcPosture::Stand,
             flags: RemoteMoveFlags::default(),
+            stamina_segments: FULL_STAMINA_SEGMENTS,
+            movement_accuracy: 0.0,
             blocking: false,
             spawned_ms: SPAWNED_MS,
             gear_version: 3,
@@ -1154,7 +1227,10 @@ pub(super) mod tests {
     #[test]
     fn a_ghost_carries_the_whole_replica() {
         let jumping = ReplicaSource {
-            flags: RemoteMoveFlags { grounded: false },
+            flags: RemoteMoveFlags {
+                grounded: false,
+                ..RemoteMoveFlags::default()
+            },
             ..source()
         };
         for source in [source(), aiming(), jumping] {
@@ -1286,6 +1362,61 @@ pub(super) mod tests {
         );
     }
 
+    /// Retail `retail-2026-11-19-towns-duels`: another player's dodge start carried its stamina
+    /// segments (443 of 444), a change went in its state and the next ones (4,379 changes,
+    /// 12,507 states with the same value again); ours sent none.
+    #[test]
+    fn others_get_a_change_of_the_stamina_in_its_first_states_only() {
+        /// Retail `44=0b` after a dodge of 45 from full: 55 points, 11 segments.
+        const AFTER_DODGE_SEGMENTS: u8 = 11;
+        let segments = |replica: &Replica| {
+            let group = replica
+                .group(9, 1, AT, false, HOME_WORLD, &mut ViewerSight::default())
+                .expect("group")
+                .expect("state");
+            let MemberState::Alc(alc) = &group.members[0].state else {
+                panic!("the ALC first");
+            };
+            alc.slot0_children()
+                .expect("children")
+                .into_iter()
+                .find(|(child, _)| *child == 44)
+                .map(|(_, bytes)| bytes)
+        };
+        let dodged = ReplicaSource {
+            stamina_segments: AFTER_DODGE_SEGMENTS,
+            ..source()
+        };
+        let (_, mut seen) = Replica::new(source(), AT, None, SPAWNED_MS);
+        let mut sent = Vec::new();
+        for (tick, now) in [
+            source(),
+            dodged.clone(),
+            dodged.clone(),
+            dodged.clone(),
+            dodged,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let at_ms = SPAWNED_MS + (u64::try_from(tick).expect("tick") + 1) * 33;
+            let (replica, now_seen) = Replica::new(now, AT, Some(seen), at_ms);
+            sent.push((replica.changed(), segments(&replica)));
+            seen = now_seen;
+        }
+        let after = Some(vec![AFTER_DODGE_SEGMENTS]);
+        assert_eq!(
+            sent,
+            [
+                (false, None),
+                (true, after.clone()),
+                (false, after.clone()),
+                (false, after),
+                (false, None),
+            ]
+        );
+    }
+
     /// Retail other players (1,195 ledgers): child 41 goes in the state of a change and in 1 to
     /// 3 more (658,929 runs); a jump clears its floor bit (`f3` to `e3`), the landing sets it.
     #[test]
@@ -1309,7 +1440,10 @@ pub(super) mod tests {
                 .map(|(_, bytes)| bytes)
         };
         let jumping = ReplicaSource {
-            flags: RemoteMoveFlags { grounded: false },
+            flags: RemoteMoveFlags {
+                grounded: false,
+                ..RemoteMoveFlags::default()
+            },
             ..source()
         };
         let (card, mut seen) = Replica::new(source(), AT, None, SPAWNED_MS);

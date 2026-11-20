@@ -62,11 +62,8 @@ use uuid::Uuid;
 mod abilities;
 mod ability_instances;
 mod admin;
-mod afk;
 mod afflictions;
-mod effect_areas;
-mod expedition_mode;
-mod expedition_scripts;
+mod afk;
 mod arena_match;
 mod asset_script;
 mod attack;
@@ -86,9 +83,12 @@ mod duel;
 mod dungeon_entrances;
 mod dungeon_script;
 pub mod economy;
+mod effect_areas;
 mod encounter;
 mod encounter_roots;
 mod events;
+mod expedition_mode;
+mod expedition_scripts;
 mod faction;
 mod faction_board;
 mod fall_damage;
@@ -2165,6 +2165,16 @@ impl SimWorld {
         // An ability's aim view (Penetrating Shot's aim, Rain of Arrows' targeting) moves the
         // camera to its own boom with no right-click ([`abilities::AbilityRun::aims`]).
         let ability_aims = player.abilities.aims();
+        // The rider's states play its mount type's sequences ([`slayer::RideKeys`]).
+        let ride = player
+            .mount
+            .riding()
+            .and_then(|mount_id| self.content.mounts.mount(mount_id))
+            .and_then(|mount| combat.player_sequences().rider(&mount.mount_type))
+            .map(|plays| slayer::RideKeys {
+                plays,
+                dashing: player.mount.dashing(),
+            });
         if let Some(load) = player.gear.as_ref().and_then(|gear| {
             self.content.equip_load(
                 EQUIP_LOAD_SLOTS
@@ -2267,6 +2277,7 @@ impl SimWorld {
                     airborne,
                     posture,
                     load,
+                    ride,
                 },
                 combat.player_sequences(),
             );
@@ -3926,7 +3937,10 @@ impl SimWorld {
         let ended = self
             .world
             .get_mut::<Player>(entity)
-            .is_some_and(|mut player| std::mem::replace(&mut player.interacting, false));
+            .is_some_and(|mut player| {
+                player.slayer.interaction_over();
+                std::mem::replace(&mut player.interacting, false)
+            });
         if ended {
             self.give_weapon_back(entity, Stow::Gather, now_ms);
         }
@@ -3954,6 +3968,31 @@ impl SimWorld {
         {
             tracing::debug!(player = player.number, ?reason, "weapon given back");
         }
+    }
+
+    /// The server accepted an interaction of player `entity` that plays `play` for the players
+    /// who see it ([`slayer::SlayerTrack::interacted`]).
+    fn play_interaction(&mut self, entity: Entity, play: Option<slayer::InteractPlay>) {
+        if let Some(play) = play
+            && let Some(mut player) = self.world.get_mut::<Player>(entity)
+        {
+            player.slayer.interacted(play);
+        }
+    }
+
+    /// What an accepted interaction of `kind` plays, by the kind ([`PlayerSequences::interaction`]).
+    ///
+    /// [`PlayerSequences::interaction`]: nw_content::player_sequences::PlayerSequences::interaction
+    fn interaction_play(&self, kind: u8) -> Option<slayer::InteractPlay> {
+        self.combat
+            .data
+            .player_sequences()
+            .interaction(kind)
+            .map(|play| slayer::InteractPlay {
+                state: play.state,
+                sequence: play.sequence,
+                crouch: false,
+            })
     }
 
     /// The client of player `entity` ended interaction `interaction` at `now_ms`: each interact
@@ -4676,7 +4715,10 @@ impl SimWorld {
             flags: RemoteMoveFlags {
                 grounded: player.slayer.jump_holds_floor()
                     || (!player.tracked.is_lifted() && !player.tracked.is_swimming()),
+                dodging: player.slayer.dodge_clears_flag(),
             },
+            stamina_segments: player.stamina.segments(),
+            movement_accuracy: player.slayer.remote_movement_accuracy(),
             blocking: vitals.blocking(),
             spawned_ms: clock.spawn_ms,
             gear_version,
@@ -7740,10 +7782,13 @@ mod tests {
         use nw_messages::list_delta::ReplicatedList;
         let bundle = bundle_of(outgoing, who)?;
         let known = nw_messages::BundlePayload::decode_known(&bundle.payload).expect("payload");
-        let state = known.members.iter().find_map(|(member, _)| match &member.state {
-            MemberState::CategoricalProgression(state) => Some(state.clone()),
-            _ => None,
-        })?;
+        let state = known
+            .members
+            .iter()
+            .find_map(|(member, _)| match &member.state {
+                MemberState::CategoricalProgression(state) => Some(state.clone()),
+                _ => None,
+            })?;
         match &state.progression_ids {
             Some(ReplicatedList::Full(list)) => ids.clone_from(&list.elements),
             Some(ReplicatedList::Changes(changes)) => {
@@ -7757,9 +7802,8 @@ mod tests {
             }
             None => {}
         }
-        let camping = nw_formats::objectstream::lowercase_crc32(
-            nw_content::progression::CAMPING_PROGRESSION,
-        );
+        let camping =
+            nw_formats::objectstream::lowercase_crc32(nw_content::progression::CAMPING_PROGRESSION);
         let index = ids.iter().position(|id| *id == camping)?;
         fn at<T: Copy>(list: Option<&ReplicatedList<T>>, index: usize) -> Option<T> {
             match list? {
@@ -7844,7 +7888,11 @@ mod tests {
         set_level(&mut world, PLAYER, 14);
         assert_eq!(next(&mut world, &mut ids), Some((Some(2), None)));
         set_level(&mut world, PLAYER, 13);
-        assert_eq!(next(&mut world, &mut ids), None, "a lower level keeps the tier");
+        assert_eq!(
+            next(&mut world, &mut ids),
+            None,
+            "a lower level keeps the tier"
+        );
     }
 
     #[test]
@@ -8818,6 +8866,7 @@ mod tests {
             tool_required: false,
             by_hand,
             game_event: None,
+            animation: None,
         };
         let gatherables =
             Gatherables::build([gatherable("SingleStone", true), gatherable(VEIN, false)]);
@@ -8945,6 +8994,7 @@ mod tests {
             tool_required: false,
             by_hand: true,
             game_event: None,
+            animation: None,
         }]);
         let loot = LootTables::build(LootSource {
             rows: vec![
@@ -9108,6 +9158,7 @@ mod tests {
             tool_required: false,
             by_hand: true,
             game_event: None,
+            animation: None,
         }]);
         let mut rows = loot_rows(VARIANT_TABLE, &[(gear::tests::POTION, "0")]);
         rows.extend(loot_rows(EMPTY, &[]));
@@ -9328,6 +9379,7 @@ mod tests {
                     tool_required: true,
                     by_hand: false,
                     game_event: None,
+                    animation: None,
                 }]),
                 // The T1 skinning knife's gathering efficiency range (2 to 2): retail skinned
                 // the boar in 7.5 s of its 15 s.
@@ -9749,6 +9801,7 @@ mod tests {
             tool_required: false,
             by_hand: true,
             game_event: Some(event.to_owned()),
+            animation: None,
         };
         let gatherables = Gatherables::build([
             gatherable(
@@ -10426,7 +10479,9 @@ mod tests {
         });
         assert_eq!(
             faction,
-            Some(vec![0x06, 0x41, 0x00, 0x00, 0x0f, SYNDICATE, 0x00, 0x01, 0x00]),
+            Some(vec![
+                0x06, 0x41, 0x00, 0x00, 0x0f, SYNDICATE, 0x00, 0x01, 0x00
+            ]),
             "retail's login body (general-other-01) with the sanctuary: the client takes the \
              faction from the card, and no change takes the card's place"
         );
@@ -10626,7 +10681,10 @@ mod tests {
     #[test]
     fn an_ability_aim_holds_the_camera_as_the_right_click_does() {
         let plain = InputRecord::default();
-        assert!(camera_aims(true, &block_record(1), false), "the right-click");
+        assert!(
+            camera_aims(true, &block_record(1), false),
+            "the right-click"
+        );
         assert!(camera_aims(true, &plain, true), "an ability's aim view");
         assert!(!camera_aims(true, &plain, false), "no aim");
         assert!(
@@ -12840,6 +12898,7 @@ mod tests {
             tool_required: false,
             by_hand: true,
             game_event: Some(TORCH_EVENT.to_owned()),
+            animation: None,
         }]);
         let quest_objects = QuestObjects::build(
             &[GatherablePoint {

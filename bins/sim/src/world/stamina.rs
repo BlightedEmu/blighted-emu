@@ -122,6 +122,12 @@ impl Stamina {
         self.cur
     }
 
+    /// The stamina now in whole segments, as the players who see this one get it (slot-0 child
+    /// 44, [`nw_messages::stamina_segments`]).
+    pub(super) fn segments(&self) -> u8 {
+        nw_messages::stamina_segments(self.cur, MAX_STAMINA)
+    }
+
     /// The stamina now as a share of the max.
     pub(super) fn share(&self) -> f64 {
         f64::from(self.cur / MAX_STAMINA)

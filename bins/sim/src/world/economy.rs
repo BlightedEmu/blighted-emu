@@ -938,6 +938,8 @@ impl SimWorld {
         }
         send_now(&mut self.combat_messages, &connection, &[answer]);
         tracing::debug!(player = number, outpost, "trading post opened");
+        let play = self.interaction_play(request.kind);
+        self.play_interaction(entity, play);
     }
 
     /// A create call (2972) of player `entity`: checked here, its coins and items taken, then

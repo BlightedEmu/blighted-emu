@@ -1169,6 +1169,15 @@ pub struct PlayerGhost {
     /// `nw_messages::RemoteMoveFlags`).
     #[serde(default)]
     pub airborne: bool,
+    /// Its body is in the first part of a dodge (ALC child 41, `nw_messages::RemoteMoveFlags`).
+    #[serde(default)]
+    pub dodging: bool,
+    /// Its stamina in whole segments (ALC child 44, `nw_messages::stamina_segments`).
+    #[serde(default)]
+    pub stamina_segments: u8,
+    /// The weapon accuracy of its movement (ALC child 37).
+    #[serde(default)]
+    pub movement_accuracy: f32,
 }
 
 /// How the body of a player ghost holds itself (ALC child 43).
@@ -1181,6 +1190,8 @@ pub enum GhostPosture {
     Crouch,
     /// Lying prone.
     Prone,
+    /// On a mount.
+    Riding,
 }
 
 /// A change of one slayer slot past the first of a player ghost (ALC children 16 to 24).
@@ -2112,6 +2123,9 @@ mod tests {
                 }),
                 posture: GhostPosture::Prone,
                 airborne: true,
+                dodging: true,
+                stamina_segments: u8::MAX,
+                movement_accuracy: f32::MAX,
             }),
             ..ghost
         };

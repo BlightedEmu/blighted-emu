@@ -91,6 +91,12 @@ const SCOPE_DATA_CHILD: usize = 32;
 const SCOPE_INFO_CHILD: usize = 33;
 /// Slot 0 child of the Mannequin tag state (`globalFragTags`).
 const FRAG_TAGS_CHILD: usize = 34;
+/// Slot 0 child of the weapon accuracy of a character's movement (`wpnaccrymvmnt`, a big-endian
+/// `half`; Observed, `retail-2026-11-19-towns-duels`, other players: `c500` -5 in the move
+/// start and run `13=1a`, 2,442 of 2,445; `c700` -7 in a restart or back move `13=1b`, 985 of
+/// 1,097; `c000` -2 in the other moves `13=1b`, the stops and the block or aim walk, 1,983 of
+/// 2,371; `0000` 0 standing still and in a jump, 1,806 of 1,806).
+const MOVEMENT_ACCURACY_CHILD: usize = 37;
 /// Slot 0 child of the stamina in whole segments (`segmentedStamina`, [`stamina_segments`];
 /// Observed: entry 44 of the slot-0 field table of the ALC constructor `FUN_142a36d50`).
 const STAMINA_SEGMENTS_CHILD: usize = 44;
@@ -609,6 +615,11 @@ pub fn stamina_segments(stamina: f32, max: f32) -> u8 {
 const POSTURE_CHILD: usize = 43;
 /// The bit of [`POSTURE_CHILD`] where the posture starts: its top two bits.
 const POSTURE_SHIFT: u8 = 6;
+/// The bit of [`POSTURE_CHILD`] of a rider (Observed, 2026-11-19 study of 1,196 ledgers: every
+/// player's child 43 went from `00` to `20` in 581 mount-up states `13=20` and back to `00` in
+/// 637 dismount states `13=15`; `20` with the low bits in 4,097 of the 6,135 riding states that
+/// carried it). The low five bits change on their own (meaning Unknown); ours stay 0.
+const POSTURE_RIDING: u8 = 0x20;
 
 /// How a player's body holds itself, in the top two bits of slot 0 child 43: 0 standing, 1
 /// crouching, 2 prone. Observed: each of the 16 crouch and prone toggles of the four retail
@@ -628,6 +639,8 @@ pub enum AlcPosture {
     Crouch,
     /// Lying prone.
     Prone,
+    /// On a mount ([`POSTURE_RIDING`]).
+    Riding,
 }
 
 impl AlcPosture {
@@ -637,6 +650,7 @@ impl AlcPosture {
             Self::Stand => 0,
             Self::Crouch => 1,
             Self::Prone => 2,
+            Self::Riding => return POSTURE_RIDING,
         };
         bits << POSTURE_SHIFT
     }
@@ -657,6 +671,12 @@ impl AlcPosture {
 /// of 14,991 sets in the landing's first state); it is on in 99.8 % of the states that stand
 /// still (`13=1f`), 4 % of the falls and 9 % of the swims (`13=06`).
 const DATA_BITS_GROUNDED: u8 = 0x10;
+/// The `dataBits` bit that another player's dodge clears (Observed,
+/// `retail-2026-11-19-towns-duels`: 292 of the 300 clears of another player's bit `0x02` came in
+/// a dodge's start state, `d3` to `d1`, and 251 set it again in the same dodge 384/400/415 ms
+/// later, p10/50/90; the dodge's `Invulnerability` window of `Dodge_Roll` is 0 to 500 ms).
+/// Unknown: the client's name of the bit.
+const DATA_BITS_DODGE: u8 = 0x02;
 /// `dataBits` of another player's first state on a floor: `f3` on 5,230 of the 11,709 first
 /// states of other players that carry it (`d3` on 4,432; 1,195 ledgers). Bit 5 (`0x20`) is the
 /// own client's input throttle; for another player its meaning is Unknown, so ours keeps it.
@@ -676,22 +696,30 @@ const OWN_SPAWN_DATA_BITS: u8 = 0xf3;
 pub struct RemoteMoveFlags {
     /// The body stands on a floor: not in a jump or a fall, and not swimming.
     pub grounded: bool,
+    /// The body is in the first part of a dodge ([`DATA_BITS_DODGE`]).
+    pub dodging: bool,
 }
 
 impl Default for RemoteMoveFlags {
     fn default() -> Self {
-        Self { grounded: true }
+        Self {
+            grounded: true,
+            dodging: false,
+        }
     }
 }
 
 impl RemoteMoveFlags {
     /// The `dataBits` byte of these flags.
     pub const fn data_bits(self) -> u8 {
-        if self.grounded {
-            REMOTE_DATA_BITS
-        } else {
-            REMOTE_DATA_BITS & !DATA_BITS_GROUNDED
+        let mut bits = REMOTE_DATA_BITS;
+        if !self.grounded {
+            bits &= !DATA_BITS_GROUNDED;
         }
+        if self.dodging {
+            bits &= !DATA_BITS_DODGE;
+        }
+        bits
     }
 
     /// Child 41 with these flags.
@@ -1151,6 +1179,11 @@ pub struct RemoteStep {
     pub posture: Option<AlcPosture>,
     /// Its movement flags, when they go with the state ([`RemoteMoveFlags`]).
     pub flags: Option<RemoteMoveFlags>,
+    /// Its stamina in whole segments ([`stamina_segments`]), when it goes with the state.
+    pub stamina_segments: Option<u8>,
+    /// The weapon accuracy of its movement ([`MOVEMENT_ACCURACY_CHILD`]), when it goes with the
+    /// state.
+    pub movement_accuracy: Option<f32>,
 }
 
 /// What a viewer's client has of another player's clock: its anchor and the high bytes of its
@@ -1167,15 +1200,23 @@ pub struct KnownStamp {
     pub id_high: Option<u8>,
     /// The high byte of the state time it has.
     pub time_high: Option<u8>,
-    /// States left that send the anchor and the high bytes again after a change
-    /// ([`STAMP_REPEAT_STATES`]).
-    pub repeats: u8,
+    /// States left that send the anchor again after a change of it ([`STAMP_REPEAT_STATES`]).
+    pub anchor_repeats: u8,
+    /// States left that send the high byte of the number again after a change of it.
+    pub id_repeats: u8,
+    /// States left that send the high byte of the time again after a change of it.
+    pub time_repeats: u8,
 }
 
 /// The states after a change of another player's anchor or high bytes that send them again
 /// (Observed, 2026-11-18 timing study of 398 retail ledgers: retail sends children 25, 26 and 40
 /// again in 3 to 6 states after a change; ours sent them once on the unreliable channel, and one
-/// lost state left the viewer's clock 256 ms off). Our choice: 4.
+/// lost state left the viewer's clock 256 ms off). Our choice: 4. Each child goes again after
+/// its own change only (Observed, `retail-2026-11-19-towns-duels`, other players: child 26 in
+/// 26.8 % of the states, 36,974 changes and 112,381 repeats; child 40 in 0.11 %, every time
+/// with a change of 26 but only at its own changes; child 25 in 0.69 %). Ours sent all three
+/// after each change of the time's high byte: 40 and 25 in 39 % of the states (live 2026-11-19c
+/// and 19e).
 pub const STAMP_REPEAT_STATES: u8 = 4;
 
 impl KnownStamp {
@@ -1185,23 +1226,28 @@ impl KnownStamp {
             anchor_us: Some(stamp.anchor_us),
             id_high: Some(AlcStamp::high(stamp.id)),
             time_high: Some(AlcStamp::high(stamp.offset_ms)),
-            repeats: 0,
+            anchor_repeats: 0,
+            id_repeats: 0,
+            time_repeats: 0,
         }
     }
 
     /// What a client has after a state with `stamp` went to it: the next
-    /// [`STAMP_REPEAT_STATES`] states send the clock again when this one changed it.
+    /// [`STAMP_REPEAT_STATES`] states send each child of the clock this one changed again.
     #[must_use]
     pub fn after(self, stamp: AlcStamp) -> Self {
         let now = Self::of(stamp);
-        let changed = (self.anchor_us, self.id_high, self.time_high)
-            != (now.anchor_us, now.id_high, now.time_high);
-        Self {
-            repeats: if changed {
+        let left = |changed: bool, repeats: u8| {
+            if changed {
                 STAMP_REPEAT_STATES
             } else {
-                self.repeats.saturating_sub(1)
-            },
+                repeats.saturating_sub(1)
+            }
+        };
+        Self {
+            anchor_repeats: left(self.anchor_us != now.anchor_us, self.anchor_repeats),
+            id_repeats: left(self.id_high != now.id_high, self.id_repeats),
+            time_repeats: left(self.time_high != now.time_high, self.time_repeats),
             ..now
         }
     }
@@ -1324,6 +1370,14 @@ pub fn rotation_bytes(yaw: f32) -> Vec<u8> {
         let tag = QUAT_TAG_Z_DERIVED | if z < 0.0 { QUAT_TAG_NEGATIVE } else { 0 };
         vec![tag, byte(w)]
     }
+}
+
+/// Child 37 with the weapon accuracy `accuracy`.
+fn accuracy_child(accuracy: f32) -> (usize, Vec<u8>) {
+    (
+        MOVEMENT_ACCURACY_CHILD,
+        half_bits(accuracy).to_be_bytes().to_vec(),
+    )
 }
 
 /// The number and clock children of `stamp`.
@@ -1655,12 +1709,14 @@ impl AlcState {
         let mut children: Vec<(usize, Vec<u8>)> = stamp_children(stamp)
             .into_iter()
             .filter(|(child, value)| match *child {
-                ID_ABS_CHILD => known.repeats > 0 || known.id_high != value.first().copied(),
-                TIME_ABS_CHILD => known.repeats > 0 || known.time_high != value.first().copied(),
+                ID_ABS_CHILD => known.id_repeats > 0 || known.id_high != value.first().copied(),
+                TIME_ABS_CHILD => {
+                    known.time_repeats > 0 || known.time_high != value.first().copied()
+                }
                 _ => true,
             })
             .collect();
-        if known.repeats > 0 || known.anchor_us != Some(stamp.anchor_us) {
+        if known.anchor_repeats > 0 || known.anchor_us != Some(stamp.anchor_us) {
             children.push((TIME_ANCHOR_CHILD, stamp.anchor_us.to_be_bytes().to_vec()));
         }
         if let Some(place) = step.position {
@@ -1693,10 +1749,29 @@ impl AlcState {
         if let Some(flags) = step.flags {
             children.push(flags.child());
         }
+        if let Some(segments) = step.stamina_segments {
+            children.push((STAMINA_SEGMENTS_CHILD, vec![segments]));
+        }
+        if let Some(accuracy) = step.movement_accuracy {
+            children.push(accuracy_child(accuracy));
+        }
         Ok(Self::of_slot0(
             children,
             step.position.and_then(StepPlace::pos10),
         ))
+    }
+
+    /// The same body with the weapon accuracy of its movement at `accuracy`
+    /// ([`MOVEMENT_ACCURACY_CHILD`]): a card of another player that moves.
+    #[must_use]
+    pub fn with_movement_accuracy(&self, accuracy: f32) -> Self {
+        let Ok(walked) = walk(&mut Reader::new(&self.bytes)) else {
+            return self.clone();
+        };
+        Self {
+            bytes: self.with_children(walked, &[accuracy_child(accuracy)]),
+            pos10: self.pos10,
+        }
     }
 
     /// A state of the client's own player on its clock `stamp`: the client takes an own state
@@ -2663,6 +2738,8 @@ mod tests {
             upper_times: UpperSequenceTimes::default(),
             posture: None,
             flags: None,
+            stamina_segments: None,
+            movement_accuracy: None,
         };
         let child_of = |state: &AlcState, index: usize| {
             state
@@ -3152,13 +3229,45 @@ mod tests {
     #[test]
     fn another_players_floor_bit_is_bit_4_of_data_bits() {
         let on_floor = RemoteMoveFlags::default();
-        let off_floor = RemoteMoveFlags { grounded: false };
+        let off_floor = RemoteMoveFlags {
+            grounded: false,
+            ..RemoteMoveFlags::default()
+        };
         assert_eq!(on_floor.data_bits(), 0xf3);
         assert_eq!(off_floor.data_bits(), 0xe3);
         assert_eq!(
             on_floor.data_bits() ^ off_floor.data_bits(),
             DATA_BITS_GROUNDED,
             "only the floor bit differs"
+        );
+    }
+
+    /// Retail `retail-2026-11-19-towns-duels`: another player's run carried `37=c500` (-5),
+    /// its stand `37=0000`.
+    #[test]
+    fn another_players_movement_accuracy_is_a_big_endian_half() {
+        assert_eq!(
+            accuracy_child(-5.0),
+            (MOVEMENT_ACCURACY_CHILD, vec![0xc5, 0x00])
+        );
+        assert_eq!(accuracy_child(-7.0).1, vec![0xc7, 0x00]);
+        assert_eq!(accuracy_child(-2.0).1, vec![0xc0, 0x00]);
+        assert_eq!(accuracy_child(0.0).1, vec![0x00, 0x00]);
+    }
+
+    /// Retail `retail-2026-11-19-towns-duels`: another player's dodge start went from `d3` to
+    /// `d1` (224 of the 306 dodge starts that carried child 41).
+    #[test]
+    fn another_players_dodge_clears_bit_1_of_data_bits() {
+        let dodging = RemoteMoveFlags {
+            dodging: true,
+            ..RemoteMoveFlags::default()
+        };
+        assert_eq!(dodging.data_bits(), 0xf1);
+        assert_eq!(
+            RemoteMoveFlags::default().data_bits() ^ dodging.data_bits(),
+            DATA_BITS_DODGE,
+            "only the dodge bit differs"
         );
     }
 
@@ -3187,7 +3296,10 @@ mod tests {
             child(&own, DATA_BITS_CHILD),
             "on a floor, the first state's `f3`"
         );
-        let jumping = card(RemoteMoveFlags { grounded: false });
+        let jumping = card(RemoteMoveFlags {
+            grounded: false,
+            ..RemoteMoveFlags::default()
+        });
         assert_eq!(child(&jumping, DATA_BITS_CHILD), Some(vec![0xe3]));
         assert_eq!(
             child(&jumping, DATA_BITS_HIGH_CHILD),
@@ -4206,6 +4318,8 @@ mod tests {
             upper_times: renewed,
             posture: None,
             flags: None,
+            stamina_segments: None,
+            movement_accuracy: None,
         };
         let state = AlcState::remote_step(&step).expect("step");
         assert_eq!(
@@ -4264,6 +4378,8 @@ mod tests {
             upper_times: UpperSequenceTimes::default(),
             posture: None,
             flags: None,
+            stamina_segments: None,
+            movement_accuracy: None,
         };
         let ours = AlcState::remote_step(&step).expect("step");
         assert_eq!(child(&ours, POSTURE_CHILD), None, "no posture change");
@@ -4279,7 +4395,10 @@ mod tests {
         );
         assert_eq!(child(&ours, DATA_BITS_CHILD), None, "no flag change");
         let jumped = AlcState::remote_step(&RemoteStep {
-            flags: Some(RemoteMoveFlags { grounded: false }),
+            flags: Some(RemoteMoveFlags {
+                grounded: false,
+                ..RemoteMoveFlags::default()
+            }),
             ..step
         })
         .expect("step");
@@ -4377,9 +4496,22 @@ mod tests {
         assert_eq!(present, [0, 1, 26], "a new high byte of the time goes");
         let changed = KnownStamp::default().after(step.stamp);
         for left in (1..=STAMP_REPEAT_STATES).rev() {
-            assert_eq!(changed.repeats, STAMP_REPEAT_STATES);
+            assert_eq!(
+                (
+                    changed.anchor_repeats,
+                    changed.id_repeats,
+                    changed.time_repeats
+                ),
+                (
+                    STAMP_REPEAT_STATES,
+                    STAMP_REPEAT_STATES,
+                    STAMP_REPEAT_STATES
+                )
+            );
             let repeated = KnownStamp {
-                repeats: left,
+                anchor_repeats: left,
+                id_repeats: left,
+                time_repeats: left,
                 ..changed
             };
             let present: Vec<usize> = children_of(
@@ -4403,7 +4535,35 @@ mod tests {
                 "after a change the clock goes again (retail: 3 to 6 states)"
             );
         }
-        assert_eq!(changed.after(step.stamp).repeats, STAMP_REPEAT_STATES - 1);
+        assert_eq!(
+            changed.after(step.stamp).time_repeats,
+            STAMP_REPEAT_STATES - 1
+        );
+        // A new high byte of the time sends that byte again, not the anchor and the number's
+        // high byte (retail: 26 in 26.8 % of the other players' states, 40 in 0.11 %).
+        let settled = (0..=STAMP_REPEAT_STATES).fold(changed, |known, _| known.after(step.stamp));
+        let ticked_stamp = AlcStamp {
+            offset_ms: step.stamp.offset_ms + 0x100,
+            ..step.stamp
+        };
+        let ticked = settled.after(ticked_stamp);
+        let present: Vec<usize> = children_of(
+            &AlcState::remote_step(&RemoteStep {
+                stamp: ticked_stamp,
+                known: ticked,
+                position: None,
+                facing: None,
+                look: None,
+                slayer: None,
+                sequence_time: None,
+                ..step
+            })
+            .expect("step"),
+        )
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect();
+        assert_eq!(present, [0, 1, 26], "only the changed child goes again");
     }
 
     /// The retail newchar sequence started at record 0x2aa (20 Hz records of 0.05 s): the

@@ -74,6 +74,9 @@ pub struct Gatherable {
     /// `GameEventID`: the game event of a gather of it (`MSQ_CorruptedNodule_1_interact` for a
     /// quest nodule, which a quest's `TaskGameEvent` counts).
     pub game_event: Option<String>,
+    /// The gatherer's animation: its `GatheringFragment`, else its `GatheringAction`
+    /// (`PlayerSequences::gather`).
+    pub animation: Option<String>,
 }
 
 /// The gatherables by the CRC-32 of their lowercase id.
@@ -129,19 +132,26 @@ impl Gatherables {
     /// gatherers of each `NumRequiredToGather` above one ([`Gatherables::gatherers_needed`]).
     pub fn from_tables(tables: &Tables) -> Self {
         let rows = || tables.gatherable_data.iter().flat_map(|table| &table.rows);
-        Self::build(rows().map(|row| Gatherable {
-            id: row.gatherable_id.clone(),
-            gather_ms: ms_of(row.base_gather_time),
-            respawn_ms: (ms_of(row.min_respawn_rate), ms_of(row.max_respawn_rate)),
-            loot_table: row.final_loot_table.clone(),
-            loot_container: row.is_loot_container.unwrap_or_default(),
-            tradeskill: row.tradeskill.clone(),
-            tool_required: row.restriction.as_deref() == Some(TOOL_REQUIRED),
-            by_hand: row
-                .gathering_type
-                .as_deref()
-                .is_none_or(|kind| kind == BY_HAND),
-            game_event: row.game_event_id.clone().filter(|event| !event.is_empty()),
+        Self::build(rows().map(|row| {
+            Gatherable {
+                id: row.gatherable_id.clone(),
+                gather_ms: ms_of(row.base_gather_time),
+                respawn_ms: (ms_of(row.min_respawn_rate), ms_of(row.max_respawn_rate)),
+                loot_table: row.final_loot_table.clone(),
+                loot_container: row.is_loot_container.unwrap_or_default(),
+                tradeskill: row.tradeskill.clone(),
+                tool_required: row.restriction.as_deref() == Some(TOOL_REQUIRED),
+                by_hand: row
+                    .gathering_type
+                    .as_deref()
+                    .is_none_or(|kind| kind == BY_HAND),
+                game_event: row.game_event_id.clone().filter(|event| !event.is_empty()),
+                animation: row
+                    .gathering_fragment
+                    .clone()
+                    .filter(|fragment| !fragment.is_empty())
+                    .or_else(|| row.gathering_action.clone()),
+            }
         }))
         .with_kept_progress(
             rows()
@@ -203,7 +213,8 @@ impl Gatherables {
     /// of their stopped gathers.
     #[must_use]
     pub fn with_kept_progress<'a>(mut self, ids: impl IntoIterator<Item = &'a str>) -> Self {
-        self.kept_progress.extend(ids.into_iter().map(lowercase_crc32));
+        self.kept_progress
+            .extend(ids.into_iter().map(lowercase_crc32));
         self
     }
 
@@ -765,6 +776,7 @@ mod tests {
             tool_required: false,
             by_hand: true,
             game_event: None,
+            animation: None,
         }
     }
 
@@ -810,6 +822,7 @@ mod tests {
             tool_required: false,
             by_hand: true,
             game_event: None,
+            animation: None,
         }]);
         // Retail flint request: crc `a417137f`.
         let flint = gatherables.get(0xa417_137f).cloned().expect("flint");

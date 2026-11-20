@@ -2556,6 +2556,7 @@ mod tests {
                         tool_required: false,
                         by_hand: false,
                         game_event: None,
+                        animation: None,
                     },
                     nw_content::gathering::Gatherable {
                         id: RESCUE_GATHERABLE.to_owned(),
@@ -2567,6 +2568,7 @@ mod tests {
                         tool_required: false,
                         by_hand: true,
                         game_event: Some(RESCUE_EVENT.to_owned()),
+                        animation: None,
                     },
                 ]),
                 ..PlayerContent::default()

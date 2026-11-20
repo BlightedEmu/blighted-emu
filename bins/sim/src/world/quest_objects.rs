@@ -305,6 +305,8 @@ impl SimWorld {
         {
             self.fire_game_event(number, &event, now_ms);
         }
+        let play = self.interaction_play(request.kind);
+        self.play_interaction(entity, play);
     }
 
     /// Fires game event `event` for player `number`: its whisper plays on the client (5070),
@@ -747,6 +749,7 @@ mod tests {
             tool_required: false,
             by_hand: true,
             game_event: Some(TABLET_EVENT.to_owned()),
+            animation: None,
         }]);
         let mut world = world_with_spawns(Vec::new());
         // The kit and the quest come before the admit: the bag is made from the kit.
@@ -906,6 +909,7 @@ mod tests {
             tool_required: false,
             by_hand: true,
             game_event: Some(COFFIN_EVENT.to_owned()),
+            animation: None,
         }]);
         let quest_objects = QuestObjects::build(
             &[GatherablePoint {

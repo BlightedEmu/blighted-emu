@@ -35,7 +35,9 @@
     "back_start": {
      "state": 27,
      "sequence": 2980
-    }
+    },
+    "run": 1667,
+    "short_stop": 2403
    },
    "dodge": {
     "forward": {
@@ -150,7 +152,9 @@
     "back_start": {
      "state": 27,
      "sequence": 1394
-    }
+    },
+    "run": 1567,
+    "short_stop": 1140
    },
    "dodge": {
     "forward": {
@@ -338,7 +342,9 @@
     "back_start": {
      "state": 27,
      "sequence": 1048
-    }
+    },
+    "run": 1567,
+    "short_stop": 3684
    },
    "dodge": {
     "forward": {
@@ -500,7 +506,9 @@
     "back_start": {
      "state": 27,
      "sequence": 1129
-    }
+    },
+    "run": 1686,
+    "short_stop": 2768
    },
    "dodge": {
     "forward": {
@@ -706,7 +714,9 @@
     "back_start": {
      "state": 27,
      "sequence": 1063
-    }
+    },
+    "run": 1579,
+    "short_stop": 1211
    },
    "dodge": {
     "forward": {
@@ -863,7 +873,9 @@
     "back_start": {
      "state": 27,
      "sequence": 1065
-    }
+    },
+    "run": 1844,
+    "short_stop": 1200
    },
    "dodge": {
     "forward": {
@@ -1144,7 +1156,9 @@
     "back_start": {
      "state": 27,
      "sequence": 1068
-    }
+    },
+    "run": 1579,
+    "short_stop": 1207
    },
    "dodge": {
     "forward": {
@@ -1316,7 +1330,9 @@
     "back_start": {
      "state": 27,
      "sequence": 1304
-    }
+    },
+    "run": 2756,
+    "short_stop": 1228
    },
    "dodge": {
     "forward": {
@@ -1515,7 +1531,9 @@
     "back_start": {
      "state": 27,
      "sequence": 1570
-    }
+    },
+    "run": 1584,
+    "short_stop": 3543
    },
    "dodge": {
     "forward": {
@@ -1669,7 +1687,9 @@
     "back_start": {
      "state": 27,
      "sequence": 3345
-    }
+    },
+    "run": 1667,
+    "short_stop": 1307
    },
    "dodge": {
     "forward": {
@@ -1796,7 +1816,9 @@
     "back_start": {
      "state": 27,
      "sequence": 2980
-    }
+    },
+    "run": 1667,
+    "short_stop": 2403
    },
    "dodge": {
     "forward": {
@@ -1893,7 +1915,9 @@
     "back_start": {
      "state": 27,
      "sequence": 1065
-    }
+    },
+    "run": 1844,
+    "short_stop": 1200
    },
    "dodge": {
     "forward": {
@@ -1923,7 +1947,9 @@
     "back_start": {
      "state": 27,
      "sequence": 3201
-    }
+    },
+    "run": 2616,
+    "short_stop": 1320
    },
    "dodge": {
     "forward": {
@@ -2070,7 +2096,9 @@
     "back_start": {
      "state": 27,
      "sequence": 1570
-    }
+    },
+    "run": 1584,
+    "short_stop": 3543
    },
    "dodge": {
     "forward": {
@@ -2140,7 +2168,9 @@
     "back_start": {
      "state": 27,
      "sequence": 2747
-    }
+    },
+    "run": 2035,
+    "short_stop": 1268
    },
    "dodge": {
     "forward": {
@@ -2360,13 +2390,15 @@
     "restart": 1522,
     "stop": 1289,
     "start": {
-     "state": 27,
-     "sequence": 1103
+     "state": 26,
+     "sequence": 1865
     },
     "back_start": {
      "state": 27,
      "sequence": 1522
-    }
+    },
+    "run": 3050,
+    "short_stop": 2009
    },
    "dodge": {
     "forward": {
@@ -2469,7 +2501,9 @@
     "back_start": {
      "state": 27,
      "sequence": 2646
-    }
+    },
+    "run": 3050,
+    "short_stop": 2584
    },
    "dodge": {
     "forward": {
@@ -2626,7 +2660,9 @@
     "back_start": {
      "state": 27,
      "sequence": 2476
-    }
+    },
+    "run": 1579,
+    "short_stop": 1211
    },
    "dodge": {
     "forward": {
@@ -4296,6 +4332,393 @@
   {
    "animations": "grtswrd_b0_f",
    "sequence": 1898
+  }
+ ],
+ "riders": [
+  {
+   "mount_type": "Horse",
+   "mount_up": {
+    "moving": 926,
+    "still": 2374
+   },
+   "after_mount_up": 946,
+   "ride": 946,
+   "fast": 954,
+   "slow": 957,
+   "idle": 953,
+   "jump": 884,
+   "land": 893,
+   "fall": 915,
+   "fall_land": 3406,
+   "dismount": {
+    "moving": 881,
+    "still": 2888
+   }
+  },
+  {
+   "mount_type": "DireWolf",
+   "mount_up": {
+    "moving": 935,
+    "still": 1966
+   },
+   "after_mount_up": 1451,
+   "ride": 1451,
+   "fast": 2319,
+   "slow": 3065,
+   "idle": 1518,
+   "jump": 889,
+   "land": 2221,
+   "fall": 916,
+   "fall_land": 920,
+   "dismount": {
+    "moving": 2579,
+    "still": 2119
+   }
+  },
+  {
+   "mount_type": "Sabretooth",
+   "mount_up": {
+    "moving": 1098,
+    "still": 921
+   },
+   "after_mount_up": 942,
+   "ride": 942,
+   "fast": 952,
+   "slow": 2389,
+   "idle": 1665,
+   "jump": 3290,
+   "land": 890,
+   "fall": 2348,
+   "fall_land": 2068,
+   "dismount": {
+    "moving": 876,
+    "still": 874
+   }
+  },
+  {
+   "mount_type": "Bear",
+   "mount_up": {
+    "moving": 2280,
+    "still": 1690
+   },
+   "after_mount_up": 1568,
+   "ride": 992,
+   "fast": 1568,
+   "slow": 955,
+   "idle": 1907,
+   "jump": 1695,
+   "land": 2562,
+   "fall": 3659,
+   "fall_land": 3548,
+   "dismount": {
+    "moving": 2146,
+    "still": 873
+   }
+  },
+  {
+   "mount_type": "Grunt",
+   "mount_up": {
+    "moving": 925,
+    "still": 924
+   },
+   "after_mount_up": 944,
+   "ride": 944,
+   "fast": 1327,
+   "slow": 1229,
+   "idle": 2755,
+   "jump": 882,
+   "land": 892,
+   "fall": 2535,
+   "fall_land": 2855,
+   "dismount": {
+    "moving": 879,
+    "still": 3268
+   }
+  },
+  {
+   "mount_type": "Turkey",
+   "mount_up": {
+    "moving": 930,
+    "still": 3327
+   },
+   "after_mount_up": 949,
+   "ride": 949,
+   "fast": 1264,
+   "slow": 1779,
+   "idle": 914,
+   "jump": 887,
+   "land": 896,
+   "fall": 2359,
+   "fall_land": 919,
+   "dismount": {
+    "moving": 2919,
+    "still": 1490
+   }
+  }
+ ],
+ "interactions": [
+  {
+   "kind": 63,
+   "state": 24,
+   "sequence": 1081
+  },
+  {
+   "kind": 21,
+   "state": 24,
+   "sequence": 3839
+  },
+  {
+   "kind": 47,
+   "state": 24,
+   "sequence": 3839
+  },
+  {
+   "kind": 51,
+   "state": 24,
+   "sequence": 3839
+  }
+ ],
+ "stations": [
+  {
+   "station": "Smelting",
+   "sequence": 3490
+  },
+  {
+   "station": "Blacksmith",
+   "sequence": 3847
+  },
+  {
+   "station": "Alchemy",
+   "sequence": 2513
+  },
+  {
+   "station": "Cooking",
+   "sequence": 3845
+  },
+  {
+   "station": "Carpentry",
+   "sequence": 3846
+  },
+  {
+   "station": "Masonry",
+   "sequence": 3427
+  },
+  {
+   "station": "Tanning",
+   "sequence": 3844
+  },
+  {
+   "station": "Engineering",
+   "sequence": 2513
+  },
+  {
+   "station": "Kiln",
+   "sequence": 2513
+  },
+  {
+   "station": "Outfitting",
+   "sequence": 3843
+  },
+  {
+   "station": "Weaving",
+   "sequence": 3840
+  },
+  {
+   "station": "ReekwaterShop",
+   "sequence": 2513
+  },
+  {
+   "station": "DoubloonShop",
+   "sequence": 2513
+  },
+  {
+   "station": "CookingKit",
+   "sequence": 3849
+  },
+  {
+   "station": "ui_watcherscampfire",
+   "sequence": 3849
+  },
+  {
+   "station": "",
+   "sequence": 3849
+  },
+  {
+   "station": "alchemy_station",
+   "sequence": 2513
+  },
+  {
+   "station": "ui_craft",
+   "sequence": 2513
+  },
+  {
+   "station": "Runeglass",
+   "sequence": 2513
+  }
+ ],
+ "gathers": [
+  {
+   "animation": "None",
+   "sequence": 3832,
+   "crouch": true
+  },
+  {
+   "animation": "Handcrafting",
+   "sequence": 3810
+  },
+  {
+   "animation": "LootContainer",
+   "sequence": 3810
+  },
+  {
+   "animation": "Mining",
+   "sequence": 2161
+  },
+  {
+   "animation": "Chopping",
+   "sequence": 3825
+  },
+  {
+   "animation": "Cutting",
+   "sequence": 3812,
+   "crouch": true
+  },
+  {
+   "animation": "Dressing",
+   "sequence": 3811,
+   "crouch": true
+  },
+  {
+   "animation": "AzothStaffLow",
+   "sequence": 3636
+  },
+  {
+   "animation": "AzothStaffHigh",
+   "sequence": 1732
+  },
+  {
+   "animation": "ChoppingVertical",
+   "sequence": 3824
+  },
+  {
+   "animation": "Interact_FireDropper",
+   "sequence": 2941
+  },
+  {
+   "animation": "Emote_Pondering",
+   "sequence": 2739
+  },
+  {
+   "animation": "AzothStaffCreate",
+   "sequence": 3285
+  },
+  {
+   "animation": "emote_chestpound",
+   "sequence": 4684
+  },
+  {
+   "animation": "Interact_BlacksmithLoop",
+   "sequence": 3799
+  },
+  {
+   "animation": "Welling",
+   "sequence": 3103
+  },
+  {
+   "animation": "Emote_Wings",
+   "sequence": 3654
+  },
+  {
+   "animation": "Emote_Pray",
+   "sequence": 4638
+  },
+  {
+   "animation": "Interact_Carpentry",
+   "sequence": 2633
+  },
+  {
+   "animation": "Interact_Stomp",
+   "sequence": 3761
+  },
+  {
+   "animation": "Emote_DigGrave_PlayerOnly",
+   "sequence": 4678
+  },
+  {
+   "animation": "Etching",
+   "sequence": 1021
+  },
+  {
+   "animation": "Interact_HousingCannon",
+   "sequence": 3785
+  },
+  {
+   "animation": "Interact_PlayFlute_WindsofAutumn",
+   "sequence": 1027
+  },
+  {
+   "animation": "Emote_DigGrave",
+   "sequence": 2290
+  },
+  {
+   "animation": "Kicking",
+   "sequence": 3807
+  },
+  {
+   "animation": "Crafting",
+   "sequence": 3832
+  },
+  {
+   "animation": "Interact_S2_FluteGatherSounds",
+   "sequence": 1197
+  },
+  {
+   "animation": "Interact_Play_Mandolin",
+   "sequence": 2728
+  },
+  {
+   "animation": "Interact_Play_Guitar",
+   "sequence": 2649
+  },
+  {
+   "animation": "Interact_Play_URBass",
+   "sequence": 1025
+  },
+  {
+   "animation": "Interact_Play_Flute",
+   "sequence": 1023
+  },
+  {
+   "animation": "MSQTheRitual",
+   "sequence": 3107
+  },
+  {
+   "animation": "Interact_MartialBow",
+   "sequence": 1875
+  },
+  {
+   "animation": "Emote_Bow",
+   "sequence": 1018
+  },
+  {
+   "animation": "Emote_Beckon",
+   "sequence": 4693
+  },
+  {
+   "animation": "Emote_Wave",
+   "sequence": 1720
+  },
+  {
+   "animation": "Emote_Hi",
+   "sequence": 3583
+  },
+  {
+   "animation": "Interact_S2_FluteOpenDoor",
+   "sequence": 1031
+  },
+  {
+   "animation": "Crafting_Interaction",
+   "sequence": 2528
   }
  ]
 }

@@ -43,6 +43,8 @@ impl SimWorld {
         tracing::debug!(player = number, target = ?request.target, "talk");
         let answer = gather_answer(number, request, TALK_ACCEPTED, TALK_NAME);
         send_now(&mut self.combat_messages, &player.connection, &[answer]);
+        let play = self.interaction_play(request.kind);
+        self.play_interaction(entity, play);
         let npc = String::from_utf8_lossy(name);
         let npc = npc.trim_start_matches(NPC_NAME_MARK).trim_end_matches('\0');
         if !npc.is_empty() {
