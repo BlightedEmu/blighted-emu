@@ -715,8 +715,24 @@
               "proof": "tests"
             },
             {
-              "check": "Not built yet (retail session 2026-11-19): the dodge's child 41 and marker child 48, child 48 on 96 % of attack presses (ours 50 %), mounted rider states, crafting-station states.",
+              "check": "Open after the retail comparison (2026-11-20): child 36 (aim accuracy), interaction state 29, two contents in one stamp (the half-tick send), a walking body under a too short camera boom on stairs, and the step back at a roll's end.",
               "proof": "none"
+            },
+            {
+              "check": "Another player's legs run (tests only, 2026-11-20): retail sends the stance's run sequence alone 1,366 ms after the move start (median of 12,776); ours kept the start clip and the legs froze. Short stops, restarts, the run after a dodge and after a landing follow retail too.",
+              "proof": "tests"
+            },
+            {
+              "check": "Another player's roll and attack presses carry retail's flags (tests only, 2026-11-20): child 41 bit 0x02 clear for 400 ms from a dodge, the dodge's marker, the chain bit of child 48 on attack presses; stamina (child 44) and movement accuracy (child 37) go to other players.",
+              "proof": "tests"
+            },
+            {
+              "check": "Riders and interactions show to other players (tests only, 2026-11-20): mount-up, ride, walk, dash, jump and dismount states per mount type mined from 1,196 ledgers; talk, trading post, town board, crafting stations by name and gathers by kind.",
+              "proof": "tests"
+            },
+            {
+              "check": "A walking body stands on no floor the level lacks under a too short boom, and town stations' floors stand in the body's ground (tests only, 2026-11-20): towns against a retail client trace, heights off by more than 0.3 m 5.06 to 4.49 % of records.",
+              "proof": "tests"
             }
           ]
         },
@@ -3815,6 +3831,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Other players (2026-11-20, tests only): legs run, rolls and attacks carry retail's flags, riders and interactions show; town station floors stand in the body's ground; the 8 m zoom.",
     "Dungeon doors (2026-11-19, tests only): the doors of Barnacles and Black Powder, The Ennead, Isle of Night, Hive of Gorgons and the Winter Rune Forge raid open their game mode; the admin teleport list shows them.",
     "Other players (2026-11-19, tests only): upper-body animations play through, stamps stay near the send time, runs start and jumps hold as retail's, a resting body comes back onto the floor; abilities' dashes move the body; the bow's aims clear their tag groups.",
     "Bow (2026-11-19, tests only): Penetrating Shot, Splinter Shot, Rain of Arrows and Poison Shot fire; arrows aim at the crosshair point; an ability's aim no longer slides the body.",
@@ -4061,6 +4078,6 @@
     "Other players' animations (2026-11-17, tests only): block pose end, upper slot times, landings and falls, draw ends, sheathed dodges, the re-mined player sequence table, the heavy attack lift and the press start kept at a draw."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-19",
-  "lastCommit": "9fd5dfe4"
+  "updated": "2026-11-20",
+  "lastCommit": "ae36a9f7"
 }
