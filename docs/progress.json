@@ -406,16 +406,8 @@
               "proof": "tests"
             },
             {
-              "check": "A fresh clone of `dev` with the install tables built by the README steps from a New World install, and the version 1 pack installed by `just realm-data`, runs the starting-zone quest walk of the sim with the same result as the content folder of the maintainer's PC (2026-11-14).",
+              "check": "A fresh clone of `dev` with the install tables built by the README steps from a New World install, and a pack installed by `just realm-data`, runs the starting-zone quest walk of the sim with the same result as the content folder of the maintainer's PC (2026-11-14).",
               "proof": "tests"
-            },
-            {
-              "check": "Pack version 1 (made again on 2026-11-16 from the content layout code; the numbering starts again because no earlier pack is in use) holds the 15 capture-made tables, the war forts with the siege weapon list, and installs all 15 into an empty content folder.",
-              "proof": "tests"
-            },
-            {
-              "check": "Pack version 1 is shared with the community, with its `SHA256SUMS`.",
-              "proof": "none"
             }
           ]
         },
@@ -3769,7 +3761,6 @@
     "**Other players: live check of the 2026-11-20 round (tests only).** Two players, keyboard and controller: a gun pressed fast through its reload (one shot per reload, aimed and from the hip, and a hip shot then an aim), a bow's hip shots held long and short (arrows fly, no melee swing), walking and running backward with keys, keys let go during an attack (no slide), and walk starts. Then the earlier list: dodge rolls, jumps and falls, crouch and prone, the bow's full draw, blunderbuss re-fire and reload, blocks, a spear chain on a boar.\n\nStill open: the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
-    "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
     "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
     "**Camps (2026-11-15): the rest of the live check.**\n\n- Respawn at the camp after a death.\n- Craft at the camp's station.\n- Place a camp with no wood: it stands unbuilt; gather the wood and build it.\n- A game master gets the reason line of a refused camp in chat.",
     "**One busy sim (2026-11-15): the bundle stops of the 110-bot run.**\n\n- The run: `nw-testclient hunt`, `gather` and `swarm` together on the real-client stack (30, 30 and 50 bots).\n- The ticks keep time now; the hunt and gather bots still report a stop in their bundles. Find the cause.",
@@ -3870,7 +3861,6 @@
     "Quest bots (2026-11-17): the four open items of the main story run are fixed and proven by bots. Creatures fight with the weapon in their mouth slot, so the shipwreck ghosts cast `LightningBolt`. The director holds a trial request while it starts a trial sim, so the first entry on a new stack works. The bot kills named mobs and opens their loot bags for quest items (A Pirate's Plan, Broken Oath). The bot cooks at a level campfire with the meat it skinned (Boar Feast).",
     "Quest bots (2026-11-16): bots end the Monarch's Bluffs main story from Fragments of Truth to its end. Fixes: a reward item named in another letter case is given; the bot acknowledges each gather end as the client does; the quest plan in a trial names the trial's own boss; the bot enters and leaves trials.",
     "Content folder review: the VM director config still had the removed `content_dir` key, so the director stopped at start and logins waited in a queue; fixed on the PC and the VM. A rebuilt step with the same bytes is fresh at the next build, migrate keeps each file's own time, a design file named in two ways has one name, and the live stack fails when a program stops at start (2026-11-16).",
-    "A first test pack was shared on 2026-11-14 and taken back; the pack numbering starts again at version 1 with the content layout (2026-11-16).",
     "Batch E built and tested: war gates, war raid numbers (migration 0049), cow launcher areas, Hedet fire droppers, the Isle of Night ballista, Myrkgard darkness events, expedition gatherable score and task triggers, shots that stop at level walls, collision entity ids; deployed to the PC and the game VM (2026-11-13, tests only).",
     "The far move of the `nw-testclient pair` check is 400 m, past the 104 m move budget of the sim, as in the gateway end-to-end test; at 50 m the sim accepted it and the check could not pass (2026-11-13, config tests only).",
     "The systems of 2026-11-13 built and tested (8,217 tests pass), with world migrations 0044 to 0048, and deployed to the PC and the game VM (2026-11-13, tests only).",
