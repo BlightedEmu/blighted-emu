@@ -1,125 +1,172 @@
-# nw-testclient configuration (M3 spec section 8, M4 spec section 9). This file holds no secret.
-# Secrets: NW_SECRET_TESTCLIENT_PASSWORD, the password of the test account,
-# NW_SECRET_TESTCLIENT_PASSWORD_B, the password of the second account (pair only), and
-# NW_SECRET_TESTCLIENT_SWARM_PASSWORD, the password of every bot account (swarm only).
-# Any key below can be overridden with NW_TESTCLIENT_<KEY>.
+# Settings of nw-testclient, the test client and bot tool. It logs in like the game client and
+# plays test runs: one client (the default), `pair` (two clients), `swarm` (many walking bots),
+# `hunt` (bots that fight mobs), `gather` (bots that gather) and the play bot. It is a test tool:
+# a server for players does not need it.
+#
+# This file holds no secret. The passwords come from environment variables:
+#   NW_SECRET_TESTCLIENT_PASSWORD        the password of the test account.
+#   NW_SECRET_TESTCLIENT_PASSWORD_B      the password of the second account (`pair` only).
+#   NW_SECRET_TESTCLIENT_SWARM_PASSWORD  the password of every bot account (`swarm`, `hunt` and
+#                                        `gather`).
+# config/servers.env.example lists every variable the servers and tools read.
+#
+# Any key here can also be set with an environment variable: NW_TESTCLIENT_ and the key in
+# capitals. Join the keys of a section with "__", for example NW_TESTCLIENT_SWARM__BOTS=100.
+#
+# The game data comes from the content folder: the environment variable NW_CONTENT_DIR,
+# local-data/content when it is not set. See "Content data" in README.md.
 
-# The launcher API and the game routes of edge-http.
+# The login and game addresses of edge-http: https://login.<domain> and https://game.<domain>.
 login_url = "https://login.example.org"
 game_url = "https://game.example.org"
-# Optional: the address both hosts above are sent to instead of their DNS address, for bots on
-# a server whose public names point to another machine (a game server behind a relay), for
-# example connect_address = "127.0.0.1". Left out: the DNS address.
-# Test account; it is registered on the first run.
+# The IP address to send both hosts above to, in place of their DNS address. Use it for bots on
+# a server whose public names point to another machine, for example a game server behind a
+# relay. Left out, the client uses the DNS address.
+# connect_address = "127.0.0.1"
+# The test account. The client makes it on the first run.
 account = "testclient"
-# Character made when the account has none (3 to 16 letters).
+# The character the client makes when the account has none: 3 to 16 letters.
 character_name = "Testclient"
-# Second account and character of `nw-testclient pair`.
+# The second account and its character, for `nw-testclient pair`.
 second_account = "testclient_b"
 second_character_name = "Testclientb"
-# The gateway's certificate (the file rep-gateway generate-certificate wrote).
+# The gateway's certificate, the file that `rep-gateway generate-certificate` wrote. The client
+# trusts only this certificate.
 certificate_file = "local-data/rep-gateway/cert.pem"
-# DTLS MTU in bytes.
+# The largest encrypted packet, in bytes. Use the mtu of config/rep-gateway.toml.
 mtu = 1200
-# Seconds to stay connected after registration (M3 exit test: 60).
+# How many seconds the client stays connected after its login to the gateway.
 hold_seconds = 60
-# Seconds to wait for the registration response.
+# The longest wait, in seconds, for the gateway to answer the login.
 registration_timeout_seconds = 30
-# pair: largest distance in the ground plane between the saved position and the next login, in
-# metres.
+# pair: the largest distance, in metres on the ground, between the saved position and the
+# position at the next login.
 position_tolerance_m = 0.1
-# pair: the first client walks these points (east, north of where it stands, in metres) at the
-# walking speed of the datasheets, then sends one move this far east, which sim must refuse.
-# jump_m must be farther than a full distance budget of config/sim.toml reaches (13 m/s for an
-# 8 s burst, 104 m), as the real teleports of the retail captures (400 m or more) and as JUMP_M
-# of the rep-gateway end-to-end test.
+# pair: the first client walks these points (metres east and north of where it stands) at
+# route_speed_mps, the walking speed of the game data. Then it sends one move jump_m metres east,
+# and the sim must refuse it. jump_m must be farther than the sim's movement check allows
+# (13 m/s for an 8 s burst, 104 m, with config/sim.toml). Real teleports in the retail
+# captures were 400 m or more.
 route_m = [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]]
 route_speed_mps = 1.65
 jump_m = 400.0
-# pair and swarm: largest distance of a seen position from the route, in metres.
+# pair and swarm: the largest distance, in metres, of a seen position from the route.
 path_tolerance_m = 1.0
 
-# swarm (M5 exit test): bots walk to their lane, then east and west across the start line. Put
-# world-director's start_position on a sim border (the director logs the x range of each sim).
+# swarm: many bots walk to their own lane, then east and west across a start line. Put a start
+# position of the world director on the border of two sims (the director logs the x range of
+# each sim), so the bots cross from one sim to the other.
 [swarm]
+# How many bots run, at most 17576.
 bots = 1000
-# world-director's start_positions (config/world-director.toml); each bot crosses the x of the
-# start nearest to where it appears.
+# The start_positions of config/world-director.toml, in metres east and north. Each bot crosses
+# the x of the start nearest to where it appears.
 starts_m = [[11132.5, 7305.9]]
-# Receive and send buffer of each bot socket. Linux caps it at net.core.rmem_max / wmem_max.
+# The receive and send buffer of each bot socket, in bytes. Linux caps it at net.core.rmem_max
+# and net.core.wmem_max.
 udp_buffer_bytes = 4194304
-# Accounts bot00000, bot00001, ...; characters Swarmaaa, Swarmaab, ... They are registered on the
-# first run; raise edge-http's auth.login_fail_limit for that run (one registration per bot).
+# The bot names: accounts bot00000, bot00001, ... and characters Swarmaaa, Swarmaab, ...
+# Character names may hold letters only. The bots make their accounts on the first run, one
+# login each, so raise login_fail_limit of config/edge.toml for that run.
 account_prefix = "bot"
 character_prefix = "Swarm"
+# How many new bots start each second.
 bots_per_second = 50
+# The lanes spread this many metres north and south of the start.
 lane_spread_m = 150.0
+# Each bot walks this many metres east and west of the start line.
 swing_m = 20.0
-# Below the sim limit of 7.15 m/s, also on a slope.
+# The bots' walking speed, in metres a second. It stays far below the sim's movement check, also
+# on a slope.
 speed_mps = 4.0
+# How many seconds each bot stays in the world.
 duration_seconds = 120
+# The fewest times each bot must cross the start line.
 min_crossings = 4
+# The longest gap, in milliseconds, between two world updates that a bot gets for itself.
 max_bundle_gap_ms = 250
-# Each bot changes its block every 2 s; every bot times how fast it sees the others' changes.
+# Each bot changes its block every this many milliseconds, and the run measures how fast the
+# other bots see the change. Left out, the bots do not block.
 block_toggle_ms = 2000
-# Two 33 ms ticks and the loopback network (replication note).
+# The longest time, in milliseconds, from one bot's change to the others seeing it (99 % of the
+# changes). 100 ms is two 33 ms sim ticks and a local network.
 max_sync_latency_ms = 100
-# The metrics listener of every sim.
+# The metrics page of every sim.
 metrics_urls = ["http://127.0.0.1:9102/metrics"]
+# The file that names the game client build.
 client_build_config = "config/client-build.toml"
-# The content folder (the files of the pinned build are in <content folder>/<build>/, `just
-# content`) comes from NW_CONTENT_DIR, default local-data/content (README "Content data").
+# The open-world level.
 level = "newworld_vitaeeterna"
 
-# hunt (M6-B exit test): bots walk to the nearest mob they see, stop in reach and attack it; a
-# bot that dies asks to respawn. The sockets, walking speed and ground are those of [swarm].
-# Put the hunt starts on flat land near low-level spawns (the M6-B record lists them). New
-# characters appear at world-director's start_positions, so run the director with the hunt
-# starts (NW_DIRECTOR_START_POSITIONS='[{x = 11132.5, y = 7305.9}]') and new hunt names; a bot
-# more than 70 m from every start fails "every bot began near a hunt start". The M6-B record ran
-# the sims with a 5 s mob respawn (NW_SIM_COMBAT__MOB_RESPAWN_MS=5000), so every bot finds a mob.
+# hunt: bots walk to the nearest mob they see, stop in reach and attack it. A bot that dies asks
+# to respawn. The sockets, the walking speed and the ground come from [swarm].
+# Put the hunt starts on flat land near low-level mobs. New characters appear at the world
+# director's start_positions, so run the director with the hunt starts, for example
+# NW_DIRECTOR_START_POSITIONS='[{x = 11132.5, y = 7305.9}]', and use new hunt names. A bot that
+# appears more than 70 m from every start fails the run. Run the sims with a short mob respawn
+# (NW_SIM_COMBAT__MOB_RESPAWN_MS=5000), so every bot finds a mob.
 [hunt]
-# At most 30 bots per start: each player sees its 47 nearest entities, bots and mobs together.
+# How many bots run, at most 30 for each start: each player sees its 47 nearest entities (bots
+# and mobs together), and a start has up to 17 mobs.
 bots = 30
-# Not the swarm's accounts: a swarm run leaves its bots elsewhere.
+# The bot names. Use other names than [swarm], because a swarm run leaves its bots in another
+# place.
 account_prefix = "hunter"
 character_prefix = "Hunter"
+# How many new bots start each second.
 bots_per_second = 10
-# Bot n waits on a ring of 8 m around start n modulo their number while it sees no mob.
+# The hunt starts, in metres east and north. While it sees no mob, bot n waits on a ring of 8 m
+# around start number n (counting round the list).
 starts_m = [[11132.5, 7305.9]]
-# Below the sim's attack reach (combat.attack_reach_m = 3.0).
+# A bot attacks a mob that is this many metres away or nearer. Keep it below attack_reach_m of
+# config/sim.toml (3.0).
 reach_m = 2.5
+# The time between two attacks of a bot, in milliseconds.
 attack_interval_ms = 600
-# The captured gap from a 4299 to the client's 1938 is 2.42 to 2.65 s.
+# How long a dead bot waits before it asks to respawn, in milliseconds. Retail clients asked
+# 2.42 to 2.65 s after the death message.
 respawn_wait_ms = 2500
+# How many seconds each bot stays in the world.
 duration_seconds = 120
+# The longest gap, in milliseconds, between two world updates that a bot gets for itself.
 max_bundle_gap_ms = 250
+# The metrics page of every sim.
 metrics_urls = ["http://127.0.0.1:9102/metrics"]
 
-# gather: bots pick an archetype (its starter kit), walk to the gather nodes of the level near
-# where they appear (the world file's gatherable points of the gatherables of the tradeskills
-# below that a new character may gather: no loot container, no rank or item asked) and gather
-# each until it ends.
-# Run the sims of a test world with the lowest tools worn by new characters (the data has no T1
-# logging axe; `2hAxeT2` is the lowest):
+# gather: bots pick an archetype (and its starter kit), walk to the gathering nodes near the
+# place they appear, and gather each node until it is used up. They use only the nodes of the
+# tradeskills below that a new character may gather (no loot container, no rank, no item
+# needed). The sockets and the walking speed come from [swarm].
+# Run the sims of a test world with the lowest tools on new characters. The game data has no
+# tier 1 logging axe, so 2hAxeT2 is the lowest:
 # NW_SIM_START_TOOLS='[{item = "2hAxeT2", slot = 33}, {item = "1hSickleT1", slot = 34},
-# {item = "2hPickT1", slot = 36}]'. The sockets, walking speed and ground are those of [swarm].
+# {item = "2hPickT1", slot = 36}]'
 [gather]
+# How many bots run.
 bots = 30
-# New accounts of their own: their characters pick an archetype.
+# The bot names. Use other names than [swarm] and [hunt]: these characters pick an archetype.
 account_prefix = "gatherer"
 character_prefix = "Gatherer"
+# How many new bots start each second.
 bots_per_second = 10
+# The archetype that each new bot character picks. It gives the starter kit.
 backstory = "Archetype_Soldier"
-# The tradeskills of the start tools (TOOL_SLOTS of the sim: 33 logging, 34 harvesting, 36
-# mining); only their nodes are gathered.
+# The tradeskills of the start tools (tool slots of the sim: 33 logging, 34 harvesting,
+# 36 mining). The bots gather only the nodes of these tradeskills.
 tradeskills = ["Logging", "Harvesting", "Mining"]
+# A bot gathers the nodes within this many metres of the place it appeared.
 search_m = 300.0
+# A bot starts to gather a node that is this many metres away or nearer.
 reach_m = 2.0
-# A 3743 comes in the tick after the request.
+# The longest wait, in milliseconds, for the server to answer a gather. The answer normally
+# comes on the next tick.
 answer_wait_ms = 5000
-# The longest T1 gathers with a T1 tool and no rank take about 10 s.
+# The longest wait, in milliseconds, for a started gather to end. The longest tier 1 gathers with
+# a tier 1 tool and no rank take about 10 s.
 gather_wait_ms = 30000
+# How many seconds each bot stays in the world.
 duration_seconds = 180
+# The longest gap, in milliseconds, between two world updates that a bot gets for itself.
 max_bundle_gap_ms = 250
+# The metrics page of every sim.
 metrics_urls = ["http://127.0.0.1:9102/metrics"]
