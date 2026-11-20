@@ -805,7 +805,7 @@ impl Locomotion {
             ) => {
                 let since_s = since_s + frame_s;
                 let run = set.run.filter(|_| {
-                    now == set.start.0 && reached(since_s, frame_s, movement::RUN_AFTER_S)
+                    !back && now == set.start.0 && reached(since_s, frame_s, movement::RUN_AFTER_S)
                 });
                 match run {
                     Some(run) => (
@@ -842,6 +842,20 @@ impl Locomotion {
                     Some(MoveStart::Sequence(set.stop.0, set.restart.1)),
                 )
             }
+            // A back key during a stop goes on in the stop's state with the back move's sequence
+            // alone (Observed, `retail-2026-11-19-towns-duels`: a back key during the stop
+            // `27/1386` sent `15=2747` 134 ms later and held it 1,066 ms while the body moved
+            // back; of 179 runs and 892 starts while other players moved back, 3 and 25). Ours
+            // sent the forward start `13=26` and 1.37 s later its run: the legs ran forward
+            // while the body backed up (live 2026-11-20, 148 of 322 back-key records).
+            (Self::Stopping(_), true) if back && start.0 == set.stop.0 => (
+                Self::Moving {
+                    back,
+                    state: start.0,
+                    start_s: None,
+                },
+                Some(MoveStart::Sequence(start.0, start.1)),
+            ),
             (Self::Stopping(_), true) if start.0 == set.stop.0 => {
                 (Self::playing(back, set.start, set), state(set.start))
             }
@@ -858,12 +872,14 @@ impl Locomotion {
         }
     }
 
-    /// The state the movement plays now in `set`: a move goes on in the set's move state, or
-    /// starts again in the set's start when that is the state it is in, or runs on in the
-    /// start's state once it runs ([`Locomotion`]).
+    /// The state the movement plays now in `set`: a move back in the set's back move; a move
+    /// goes on in the set's move state, or starts again in the set's start when that is the
+    /// state it is in, or runs on in the start's state once it runs ([`Locomotion`]).
     fn current(self, set: MoveSet) -> (u64, u64) {
         match self {
             Self::Idle => set.idle,
+            // A move back goes on in its back move, never the forward start.
+            Self::Moving { back: true, .. } => set.back_start,
             Self::Moving { state, .. } if state == set.restart.0 => set.start,
             Self::Moving {
                 state,
@@ -886,6 +902,27 @@ impl Locomotion {
             *self = Self::playing(back, play, set);
         }
         play
+    }
+
+    /// The move or stand that goes out, in `set`, when an attack lets the first slot go after
+    /// it held the movement's starts and stops back ([`SlayerTrack::keeps_attack`]), `back`
+    /// with the back key: a body that stopped stands (no stop; Observed,
+    /// `retail-2026-11-19-towns-duels`: no stop came after 536 other players' attack starts,
+    /// and their next movement was a stand a median 866 ms after it, a start 1,119 ms, a block
+    /// walk or a back move); a restart starts its move; a move goes on ([`Locomotion::resend`]).
+    fn after_attack(&mut self, back: bool, set: MoveSet) -> (u64, u64) {
+        match *self {
+            Self::Idle | Self::Stopping(_) => {
+                *self = Self::Idle;
+                set.idle
+            }
+            Self::Restarting => {
+                let start = if back { set.back_start } else { set.start };
+                *self = Self::playing(back, start, set);
+                start
+            }
+            Self::Moving { .. } => self.resend(set),
+        }
     }
 
     /// The move or stand a landing or a dodge goes on in, in `set`: a move forward runs at once
@@ -1559,6 +1596,8 @@ pub(super) struct SlayerTrack {
     set: Option<MoveSet>,
     /// The player's own movement.
     locomotion: Locomotion,
+    /// An attack held a movement start or stop back ([`Locomotion::after_attack`]).
+    move_held: bool,
     /// Seconds of input records since a dodge started, while its state plays
     /// ([`DODGE_END_S`]).
     roll_s: Option<f32>,
@@ -1765,15 +1804,29 @@ impl SlayerTrack {
             // The end of a stop is no key: it does not replace the attack that runs (live
             // 2026-11-17: a spear player stopped and held the heavy attack; the stand started
             // two records after the charge and the others saw no heavy attack).
+            // A movement start or stop does not replace the attack that runs either: the
+            // movement steps, and the move or stand it is in goes out once the attack lets the
+            // first slot go ([`Locomotion::after_attack`]). Live 2026-11-20: a stop 64 ms after
+            // a press start replaced it, and the others saw the body slide 1.2 m with no legs
+            // (6 of 28 stops came within 1.1 s of an attack start; retail 2 of 191, none within
+            // 0.5 s).
             let keeps_attack = self.keeps_attack();
             let stepped = record.intent.filter(|_| !held_start).and_then(|intent| {
                 let (next, started) = self.locomotion.step(intent, set, record.frame_s);
-                let stop_ended = matches!(
-                    (self.locomotion, next),
-                    (Locomotion::Stopping(_), Locomotion::Idle)
-                );
                 self.locomotion = next;
-                started.filter(|_| !(stop_ended && keeps_attack))
+                if keeps_attack && started.is_some() {
+                    self.move_held = true;
+                    return None;
+                }
+                started
+            });
+            let stepped = stepped.or_else(|| {
+                let back = record.intent?.forward < 0;
+                if keeps_attack || !std::mem::take(&mut self.move_held) {
+                    return None;
+                }
+                let (state, sequence) = self.locomotion.after_attack(back, set);
+                Some(MoveStart::State(state, sequence))
             });
             // The air plays the jump or the fall until the landing: the keys start no move or
             // stand there (Observed, `retail-2026-11-19-towns-duels`: 148 of the 170 other
@@ -1810,6 +1863,13 @@ impl SlayerTrack {
                         _ => None,
                     }
                 }
+                // A back move's sequence whose state does not play (after a hit reaction, whose
+                // stop does not play) starts in its state, as a back move after a dodge does
+                // (Observed: retail went from a dodge `7/4487` into the back move `27/1246`).
+                (None, Locomotion::Moving { back: true, .. }, _) => match sequence {
+                    Some((state, Pending::Sequence(sequence))) => Some((state, sequence)),
+                    _ => stepped,
+                },
                 _ => stepped,
             };
             move_sequence = shown.map(|(_, sequence)| sequence);
@@ -1833,6 +1893,24 @@ impl SlayerTrack {
             // The walk changes with the block or aim: retail sent the new walk sequence in the
             // state of the right-click (`15=af10` with the aim). A draw that arrives after a
             // tap has already started the light must not replace that attack with a walk.
+            movement = Some(self.locomotion.resend(set));
+        }
+        if movement.is_none()
+            && record.action.is_none()
+            && self.pending.is_none()
+            && self.locomotion.moving()
+            && self.played_state == Some(set.idle.0)
+            && !self.keeps_attack()
+            && !ability_holds
+            && self.air.is_none()
+            && self.roll_s.is_none()
+            && !record.swimming
+        {
+            // A body that moves goes on in its move when a stand plays (a stand the client
+            // named in the move's first record took its place). Observed: 3 of 4 retail block
+            // stands that started while moving went on in the block walk 15 to 234 ms later.
+            // Live 2026-11-20: a controller player's stand `31/1249` played for 848 ms while the
+            // body moved, and the others saw it glide with no legs.
             movement = Some(self.locomotion.resend(set));
         }
         if let Some(upper) = upper {
@@ -1887,8 +1965,12 @@ impl SlayerTrack {
             self.upper = Some(merge(self.upper.unwrap_or_default(), clear));
         }
         self.alt_hold_step(stance, record.frame_s, record.counter);
-        if let Some(input) = record.action {
-            // The attack the client named runs now: a release or a hold follows it.
+        if let Some(input) = record.action
+            && u64::from(input.state) != set.idle.0
+        {
+            // The attack the client named runs now: a release or a hold follows it. A stand the
+            // client names is none: the move goes on after it (live 2026-11-20: a controller
+            // player's named stand held the move back as an attack for 1.1 s).
             self.running = Some((first_slot(input.sequence), record.counter));
             self.chain_state = Some(u64::from(input.state));
             match table.follow_up(input.sequence) {
@@ -4692,16 +4774,206 @@ pub(crate) mod tests {
         for _ in 0..movement::STOP_RECORDS + HOLD_RECORDS + AFTER_RECORDS {
             step(&mut track, still, HELD);
         }
+        let charged_at = states
+            .iter()
+            .find(|state| state.sequence == CHARGE)
+            .and_then(|state| state.started)
+            .expect("the charge");
+        let stood_at = states
+            .iter()
+            .find(|state| state.state == Some(movement::IDLE_STATE))
+            .and_then(|state| state.started);
         assert!(
-            states.iter().any(|state| state.sequence == CHARGE),
-            "the charge: {states:?}"
-        );
-        assert!(
-            !states
-                .iter()
-                .any(|state| state.state == Some(movement::IDLE_STATE)),
+            stood_at.is_none_or(|at| at.wrapping_sub(charged_at) >= ATTACK_RUN_RECORDS),
             "no stand in the attack: {states:?}"
         );
+    }
+
+    /// Records of `intent` from counter `from` on, fed one by one with own states: the slayer
+    /// states that went out (echoes left out).
+    fn moved(
+        track: &mut SlayerTrack,
+        table: &PlayerSequences,
+        from: u16,
+        intents: &[Intent],
+    ) -> Vec<SlayerState> {
+        let mut states: Vec<SlayerState> = Vec::new();
+        for (counter, intent) in (from..).zip(intents) {
+            track.record(quiet_record(counter, *intent), table);
+            if let Some(state) = own_state(track, counter).state
+                && states.last() != Some(&state)
+            {
+                states.push(state);
+            }
+        }
+        states
+    }
+
+    /// Retail (`retail-2026-11-19-towns-duels`): a back key during a stop sent the back move's
+    /// sequence alone in the stop's state (`15=2747` 134 ms after the stop `27/1386`) and held
+    /// it while the body backed up; of 179 runs and 892 starts while other players moved back,
+    /// 3 and 25. Live 2026-11-20 (keys): ours sent the forward start `13=26` and 1.37 s later
+    /// its run, and the legs ran forward while the body backed up. A controller's stick pulled
+    /// back runs toward the stick instead (no back move), and its block walk never stops.
+    #[test]
+    fn a_back_key_during_a_stop_backs_up_in_the_stop_s_state_and_never_runs() {
+        let table = table();
+        let forward = Intent::of_keys(true, false, false, false);
+        let back = Intent::of_keys(false, true, false, false);
+        let mut track = spawned();
+        let mut intents = vec![forward; 5];
+        intents.push(Intent::default());
+        let before = moved(&mut track, &table, 100, &intents);
+        let stop = before.last().expect("the stop");
+        assert_eq!(
+            (stop.state, stop.sequence),
+            (Some(movement::MOVE_STATE), movement::SHORT_STOP_SEQUENCE)
+        );
+        let backing = moved(
+            &mut track,
+            &table,
+            106,
+            &vec![back; usize::from(RUN_RECORDS) * 2],
+        );
+        let first = backing.first().expect("the back move");
+        assert_eq!(
+            (first.state, first.started, first.sequence),
+            (None, None, movement::BACK_START_SEQUENCE),
+            "the back move's sequence alone in the stop's state"
+        );
+        assert!(
+            backing
+                .iter()
+                .all(|state| state.state != Some(movement::START_STATE)
+                    && state.sequence != movement::RUN_SEQUENCE),
+            "no forward start and no run: {backing:?}"
+        );
+    }
+
+    /// A back key once a hit reaction lets the player go (its stop does not play) starts the
+    /// back move in its state (Observed: retail went from a dodge `7/4487` into the back move
+    /// `27/1246`).
+    #[test]
+    fn a_back_key_after_a_hit_reaction_starts_the_back_move() {
+        const STARTED: u16 = 100;
+        const FREE_RECORDS: u16 = 10;
+        let back = Intent::of_keys(false, true, false, false);
+        let mut track = spawned();
+        let free_ms = u64::from(FREE_RECORDS) * TICK_MS;
+        track.reacted(
+            pull::SEQUENCE,
+            u64::from(STARTED) * TICK_MS - 1,
+            free_ms,
+            2 * free_ms,
+        );
+        own_state(&mut track, STARTED);
+        let mut moved = None;
+        for counter in STARTED..STARTED + 2 * FREE_RECORDS {
+            track.record(quiet_record(counter, back), &table());
+            let due = own_state(&mut track, counter + 1);
+            if moved.is_none()
+                && let Some(state) = due.state.filter(|state| state.state != Some(pull::STATE))
+            {
+                moved = Some((state.state, state.sequence));
+            }
+        }
+        assert_eq!(
+            moved,
+            Some((Some(movement::MOVE_STATE), movement::BACK_START_SEQUENCE))
+        );
+    }
+
+    /// Retail (`retail-2026-11-19-towns-duels`): no stop came after 536 other players' attack
+    /// starts; their next movement was a stand a median 866 ms after it. Live 2026-11-20: a stop
+    /// 64 ms after a press start replaced it, and the others saw the body slide 1.2 m with no
+    /// legs.
+    #[test]
+    fn keys_let_go_in_an_attack_send_no_stop_and_the_stand_follows_the_attack() {
+        let table = table();
+        let forward = Intent::of_keys(true, false, false, false);
+        let still = Intent::default();
+        let mut track = spawned();
+        let mut states = Vec::new();
+        let mut feed = |track: &mut SlayerTrack, counter: u16, intent, attack| {
+            track.record(keyed(counter, intent, attack, GREATSWORD), &table);
+            if let Some(state) = own_state(track, counter).state {
+                states.push(state);
+            }
+        };
+        for counter in 100..110 {
+            feed(&mut track, counter, forward, HELD);
+        }
+        feed(&mut track, 110, forward, PRESS);
+        feed(&mut track, 111, still, RELEASE);
+        let last = 111 + 2 * ATTACK_RUN_RECORDS;
+        for counter in 112..last {
+            feed(&mut track, counter, still, HELD);
+        }
+        let light_at = states
+            .iter()
+            .find(|state| state.sequence == LIGHT)
+            .and_then(|state| state.started)
+            .expect("the light attack");
+        assert!(
+            !states.iter().any(|state| {
+                state.sequence == movement::STOP_SEQUENCE
+                    || state.sequence == movement::SHORT_STOP_SEQUENCE
+            }),
+            "no stop: {states:?}"
+        );
+        let stood = states
+            .iter()
+            .find(|state| state.state == Some(movement::IDLE_STATE))
+            .and_then(|state| state.started)
+            .expect("the stand after the attack");
+        assert_eq!(stood.wrapping_sub(light_at), ATTACK_RUN_RECORDS);
+    }
+
+    /// Live 2026-11-20: a controller player's client named the stand `31/1249` in the first
+    /// record of a move; the stand played 848 ms while the body moved, and the others saw it
+    /// glide with no legs. Retail: 3 of 4 block stands that started while moving went on in the
+    /// block walk 15 to 234 ms later. Keys and a stick move by the same intent.
+    #[test]
+    fn a_stand_the_client_names_while_moving_goes_on_in_the_move() {
+        let table = table();
+        let stick = Intent {
+            stick: Some([0.0, 1.0]),
+            ..Intent::of_keys(true, false, false, false)
+        };
+        for (device, moving) in [
+            ("keyboard", Intent::of_keys(true, false, false, false)),
+            ("controller", stick),
+        ] {
+            let mut track = spawned();
+            let named = SlayerRecord {
+                action: Some(SlayerInput {
+                    sequence: movement::IDLE_SEQUENCE,
+                    state: u16::try_from(movement::IDLE_STATE).expect("a state"),
+                    second_state: u16::MAX,
+                    second_sequence: 0,
+                }),
+                ..quiet_record(100, moving)
+            };
+            track.record(named, &table);
+            let stand = own_state(&mut track, 100)
+                .state
+                .expect("the client's stand");
+            assert_eq!(stand.sequence, movement::IDLE_SEQUENCE, "{device}");
+            let states = moved(&mut track, &table, 101, &[moving; 3]);
+            let next = states
+                .iter()
+                .find(|state| state.state.is_some() && state != &&stand)
+                .expect("a move");
+            assert!(
+                matches!(
+                    next.state,
+                    Some(movement::START_STATE | movement::MOVE_STATE)
+                ),
+                "{device}: {next:?}"
+            );
+            // After the stand's echo: 66 ms, inside retail's 15 to 234 ms.
+            assert_eq!(next.started, Some(102), "{device}: after the stand's echo");
+        }
     }
 
     #[test]
