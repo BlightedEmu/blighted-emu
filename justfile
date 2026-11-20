@@ -24,6 +24,7 @@ test-scripts:
     scripts/no-game-data.test.sh
     scripts/live-stack.test.sh
     scripts/patch-client.test.sh
+    scripts/patch-client-lua.test.sh
     scripts/launcher-release-manifest.test.sh
     scripts/realm-data.test.sh
 
