@@ -1,165 +1,212 @@
-# sim configuration (M4 spec section 7, M5 spec section 7.1). This file holds no secret.
-# Secrets: the world and global database passwords, in the variables named by
-# world_database_password_env and global_database_password_env.
-# Any key below can be overridden with NW_SIM_<KEY>, nested keys joined by "__".
+# Settings of one sim. A sim runs the game world: players, mobs, combat, quests and loot.
+# One world has one open-world sim (or several, each with its own cells of the map), and can
+# have more sims for expeditions and other instances.
+#
+# This file holds no passwords. The two database passwords come from environment variables.
+# The keys world_database_password_env and global_database_password_env below name them.
+# config/servers.env.example lists every variable the servers read.
+#
+# Any key here can also be set with an environment variable: NW_SIM_ and the key in capitals.
+# Join the keys of a section with "__". Examples: NW_SIM_SIM_ID=sim-2,
+# NW_SIM_COMBAT__LOOT_DROP_MULTIPLIER=2.0. A NW_SIM_ variable that names no key stops the sim.
+#
+# The game data comes from the content folder: the environment variable NW_CONTENT_DIR,
+# local-data/content when it is not set. See "Content data" in README.md.
 
-# This sim's id; unique in the world. world-director gives it cells.
+# The name of this sim. Every sim of a world needs its own name. The world director uses it to
+# give the sim its part of the map.
 sim_id = "sim-1"
-# The [[world]] id in config/edge.toml.
+# The id of the world this sim belongs to. It must be the id of a [[world]] in config/edge.toml.
 world_id = "8d0f4c2e-0000-4000-8000-000000000001"
-# NATS. Keep it on an internal address.
+# The NATS message bus that links the servers. Keep it on an address that only your servers
+# can reach.
 nats_url = "nats://127.0.0.1:4222"
+# The names of the environment variables that hold the database passwords.
 world_database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
 global_database_password_env = "NW_SECRET_GLOBAL_DATABASE_PASSWORD"
+# The file that names the game client build this server supports.
 client_build_config = "config/client-build.toml"
-# The edge-http config. The sim reads the gameplay values (XP multipliers, disabled item
-# classes, datasheet overrides, ...) from the same remote config sets edge-http gives the client
-# ([remote_config] there), so the server and the client use one source.
+# The edge-http settings file. The sim reads the gameplay values from it (experience
+# multipliers, fast travel cost, disabled items and the other remote config values), so the
+# server and the game client use the same values.
 edge_config = "config/edge.toml"
-# The content folder (the files of the pinned build are in <content folder>/<build>/, `just
-# content`) comes from NW_CONTENT_DIR, default local-data/content (README "Content data").
-# The open map level; the same as in config/world-director.toml.
+# The level this sim runs. Use the same level as config/world-director.toml.
 level = "newworld_vitaeeterna"
-# What this sim runs: "openmap" (cells of the open map, or the tutorial) or "instance" (one
-# expedition, raid or trial at a time; level is then the lower-case map name of its game mode,
-# for example "nw_dungeon_windsward_00"). The world director can start instance sims itself
-# ([instances.launch] in config/world-director.toml).
+# The kind of sim:
+#   "openmap"   the open world (or the tutorial), in cells the world director gives it.
+#   "instance"  one expedition, raid or trial at a time. The level is then the lower-case map
+#               name of that game mode, for example "nw_dungeon_windsward_00". The world
+#               director can start these sims for you ([instances.launch] in
+#               config/world-director.toml).
 role = "openmap"
-# Longest wait for the director's answer to an expedition request; above the director's group
-# and opening waits, and above its start wait (start_wait_ms of [instances.launch] in
-# config/world-director.toml: a request that finds no free instance sim waits for one it starts).
+# The longest time, in milliseconds, that a player waits after asking to enter an expedition.
+# Keep it longer than the director's waits, and longer than start_wait_ms of
+# [instances.launch] in config/world-director.toml.
 instance_request_timeout_ms = 65000
-# The queued modes (arena, outpost_rush, capture_the_flag, catacombs) whose queue stays closed on
-# this build (a join gets "not run here"), for example closed_queues = ["catacombs"]. Every
-# queued mode is open on this build.
-# Most players in this sim; the director adds the free ones to the login queue.
+# Queued game modes that stay closed on this server. A player who joins one gets the answer
+# "not run here". Allowed names: "arena", "outpost_rush", "capture_the_flag", "catacombs".
+# Left out, every mode is open.
+# closed_queues = ["catacombs"]
+# The most players this sim takes. The world director puts the free places into the login
+# queue.
 max_players = 2000
-# Our own choice; the retail range is Unknown.
+# How far a player sees other players and mobs, in metres. This is our own value; the retail
+# value is Unknown.
 interest_radius_m = 100.0
-# Most others a player sees: those fighting it first, then the nearest. Bundles split by bytes
-# and a per-tick budget picks who goes each tick, so this is no bundle limit. Retail's 45-vs-45
-# war showed one client 180 other players; at most 500.
+# The most other players one player sees. Players who fight that player come first, then the
+# nearest ones. At most 500. A retail war of 45 against 45 showed one client 180 other players.
 max_visible_players = 200
+# How far below the ground a player's position may be, in metres, before the sim refuses it.
 ground_tolerance_m = 2.0
-# Above the largest captured fall (128.6 m, movement numbers note, Check section).
+# How far above the ground a player's position may be, in metres. It is above the longest
+# fall seen on retail (128.6 m).
 max_height_above_ground_m = 150.0
-# Movement (M4 spec section 7.2 with sections 15 and 16). run_speed_mps is the datasheet
-# ServerValidatedCanRun speed. The limit is 3.25 x (1 + 3.0) = 13 m/s: faster than the fastest
-# honest pace of the retail tutorial capture (10.3 m/s while dodging: 17.1 m in 1 s, 37.2 m in
-# 3 s, 61.8 m in 6 s, and 6.3 m/s over 40 s), so the distance budget fills again while the
-# player dodges. With 7.15 m/s, and again with 10.4 m/s and a 3 s burst (31.2 m < 37.2 m), a
-# live fight and the swim to shore emptied the budget and every later move was refused
-# (2026-09-14). Watch sim_moves_refused_total in live tests.
+# The movement check. The sim refuses a move that is faster than
+# run_speed_mps x (1 + speed_margin) metres a second: 3.25 x 4 = 13 m/s with these values.
+# run_speed_mps is the run speed of the game data. The margin lets dodges through: the fastest
+# honest retail pace was 10.3 m/s. Smaller values refused real players in a live fight and
+# while they swam (2026-09-14). If players say they snap back, watch the metric
+# sim_moves_refused_total.
 run_speed_mps = 3.25
 speed_margin = 3.0
-# 8 s at the limit hold 104 m: above the largest burst of the retail capture (61.8 m in 6 s)
-# and above a move that covers the longest gap between captured movement messages (1.5 to
-# 2.5 s), so a player who moved on during a stall is not refused when its next message comes.
-# What stays refused is a real teleport (400 m or more in the captures).
+# How many seconds of fast movement the check saves up. 8 s at 13 m/s is 104 m. That is more
+# than the largest burst seen on retail (61.8 m in 6 s) and more than a move after a short
+# network stall. A real teleport (400 m or more) is still refused.
 burst_seconds = 8.0
-# Handoff (M5 spec section 3.3): a player this far into another sim's cells moves to that sim.
+# A player who goes this many metres into the cells of another sim moves to that sim.
 handoff_margin_m = 5.0
+# The longest wait, in milliseconds, for the other sim to take the player.
 handoff_timeout_ms = 250
+# The wait, in milliseconds, before the sim tries a refused or late move to another sim again.
 handoff_retry_ms = 1000
-# Inputs that reach this sim after a handoff go on to the new sim for this long.
+# After a player moved to another sim, the inputs that still come here go on to the new sim for
+# this many milliseconds.
 forward_ttl_ms = 10000
-# Ghosts of another sim that are not renewed for this long are dropped.
+# A copy of a player or mob of a neighbour sim goes away when the neighbour has not renewed it
+# for this many milliseconds.
 ghost_ttl_ms = 1000
-# Threads of the bundle step; 0 = every core. Several sims on one PC can share the cores.
+# The threads that build the network updates. 0 uses every CPU core. Give each sim fewer
+# threads when several sims share one machine.
 tick_threads = 0
+# How often, in milliseconds, the sim saves its players to the world database.
 save_interval_ms = 10000
+# How often, in milliseconds, the sim tells the world director that it is alive.
 heartbeat_interval_ms = 1000
+# How many heartbeats in a row the sim may miss before the director treats it as gone.
 heartbeat_misses = 3
+# The address of the Prometheus metrics page. Keep it on an address that only your servers can
+# reach.
 metrics_listen = "127.0.0.1:9102"
+# How much the sim logs: "error", "warn", "info", "debug" or "trace", or a filter per module,
+# for example "info,sim::world=debug".
 log_filter = "info"
 
+# The world database: characters, items and the saved world. Write the address without the
+# password; the password comes from world_database_password_env. max_connections is the size of
+# the connection pool.
 [world_database]
 url = "postgres://nw@127.0.0.1:5432/nw_world_1"
 max_connections = 5
 
-# The leaderboard stats (docs/re/2026-09-18-leaderboards-and-analytics.md); the same database as
-# [global_database] in config/edge.toml.
+# The global database: accounts and leaderboards. Use the same database as [global_database] in
+# config/edge.toml.
 [global_database]
 url = "postgres://nw@127.0.0.1:5432/nw_global"
 max_connections = 2
 
-# The leaderboard rotations. They must equal the keys the config layers give the client
-# (javelin.leaderboard-rotation-startDate, javelin.weekly-leaderboard-reset-hour,
-# javelin.leaderboard-season-rotation), or the sim writes boards the client never asks for.
-# Retail values: start date and season from the 2026-06-30 capture (w178, m41, s11), reset hour
-# from the iad-prod RegionId layer of 2026-09-18.
+# When the leaderboards start a new week, month and season. These values must be the same as
+# the remote config values the game client gets (javelin.leaderboard-rotation-startDate,
+# javelin.weekly-leaderboard-reset-hour and javelin.leaderboard-season-rotation). If they are
+# different, the sim writes boards that the client never asks for. These are the retail values.
 [leaderboards]
 rotation_start_date = "2023-02-07"
 weekly_reset_hour = 2
 season = 11
 
-# The server's resets: the daily loot limits, recipe cooldowns, instance refreshes and gather
-# locks end each day at 05:00 local time of the region's time zone (with its daylight saving
-# time), the weekly ones on Tuesday at that time. Retail (lastDailyResetTime of 802 social states
-# in 948 capture ledgers): US East 09:00 UTC in summer and 10:00 UTC from 2026-11-01, EU Central
-# 03:00 UTC in summer and 04:00 UTC from 2026-10-25 (nw-content `resets`). Regions: us-east,
-# us-west, eu-central, sa-east, ap-southeast; keep it the same as the edge world's region.
+# The time of the daily and weekly resets (loot limits, recipe cooldowns, instance refreshes and
+# gathering locks). The daily reset is at 05:00 local time of the region, with daylight saving
+# time. The weekly reset is on Tuesday at the same time. This is how retail did it. Allowed
+# regions: "us-east", "us-west", "eu-central", "sa-east", "ap-southeast". Use the region of
+# this world in config/edge.toml.
 [resets]
 region = "us-east"
 
-# Mobs and combat (M6-A spec section 9). Values marked Unknown are not in the game files yet;
-# the study notes of M6-B replace them with numbers from the captures.
+# Mobs and combat. Every key in this section has a default, so you can leave out any of them.
 [combat]
+# The game data entries of the player: its vitals, its first weapon and its damage table.
 player_vitals_id = "Player"
 weapon_id = "SwordT1"
-# The player's damage table (the player slice names javelindata_damagetable, unique id DamageTable).
 damage_table = "DamageTable"
+# The share of the damage that armor can stop, from 0.0 to 1.0.
 armor_share = 0.35
-# wake_radius_m: absent means interest_radius_m.
+# A player this many metres from a sleeping mob wakes it. Left out, it is interest_radius_m.
+# wake_radius_m = 100.0
+# An awake mob with no target goes back to sleep after this many milliseconds.
 sleep_after_ms = 30000
-# The reach of a player's attack request without a swing: Unknown.
+# How far a player's attack reaches when the attack has no swing of its own, in metres. Our own
+# value; the retail value is Unknown.
 attack_reach_m = 3.0
+# Extra reach, in metres, so that a player with a slow connection still hits.
 reach_margin_m = 1.0
-# The retail sword's hit spacing, the fastest tutorial weapon (sword 400, axe 700, hammer 830 ms).
+# The shortest time between two attacks of a player, in milliseconds. The retail sword, the
+# fastest tutorial weapon, hits every 400 ms.
 min_attack_interval_ms = 400
-# The retail respawn: 62 s seen in a capture, though the spawner slices say 360 s (rule Unknown).
+# How long a killed mob stays away before it comes back, in milliseconds. 62 s was seen on
+# retail. The game data says 360 s; why retail used 62 s is Unknown.
 mob_respawn_ms = 62000
-# Shortest time from a death to a respawn request (the client asks, type 1938): below the
-# lowest captured gap.
+# The shortest time from a player's death to its respawn request, in milliseconds.
 min_respawn_ms = 2000
-# A fixed dice seed (crits, loot, crafting, gathering) for a replay; without one each start rolls
-# a new seed.
+# A fixed seed for the dice (critical hits, loot, crafting and gathering), to replay a test the
+# same way. Left out, each start rolls a new seed.
 # seed = 1
-# The u32 of a mob spawn card AssetId (Azoth catalog field note: always 2).
+# A fixed number in each mob's spawn message. Retail always sent 2. Do not change it.
 asset_sub_id = 2
-# Times each mob type's LootDropChance (the share of kills whose loot table rolls), at most a
-# sure drop. 1.0 is the game data's chance (retail); 2.0 doubles the kills that drop loot.
+# Multiplies the chance that a killed mob drops loot. 1.0 is the game data (retail). 2.0 gives
+# loot from twice as many kills. The chance never goes above a sure drop.
 loot_drop_multiplier = 1.0
 
-# How often a mob's behavior tree runs (retail ALC state rates of the newchar capture
-# 2026-09-18, trace finding c; the rate of the states is Inferred equal to the AI tick rate):
-# with a target 33 ms at every distance; moving without one 98 ms within 20 m, 218 ms to
-# 40 m and 333 ms beyond; standing without one 333 ms.
+# How often each mob thinks, in milliseconds. A mob with a target thinks every 33 ms. A moving
+# mob with no target thinks every 98 ms within 20 m of a player, every 218 ms within 40 m and
+# every 333 ms farther away. A mob that stands with no target thinks every 333 ms. These are the
+# rates seen on retail. You can leave out the whole section; if you keep it, give all four keys.
 [mob_ai]
 combat_interval_ms = 33
 moving_interval_ms = [98, 218, 333]
 moving_range_m = [20.0, 40.0]
 idle_interval_ms = 333
 
-# The admin tool's live panel (admin tools spec, section 5). The
-# snapshot of players and awake mobs on the bus is off at 0; at least 100 ms when on.
-# `max_gm_spawn` is our own limit (not retail) on the GM mobs one command, script or event
-# spawns, at least 1: each runs its tree every tick, so a mistyped count must not fill a cell.
+# Settings for the admin site.
 [admin]
+# How often, in milliseconds, the sim sends a list of its players and awake mobs to the admin
+# site's live page. 0 turns it off. When it is on, use 100 or more.
 snapshot_interval_ms = 0
+# The most mobs that one GM command, script or event may spawn, at least 1. This is our own
+# limit. Each mob costs work on every tick, so a typo in a count must not fill an area.
 max_gm_spawn = 50
 
-# The trading post (economy note, run 15). Durations 1, 3, 7 and 14 days are every captured
-# order's; a 5 % trading tax was Observed at the settlements of three retail characters; at most
-# 40 open orders is the client's ContractConfigData default. The retail posting fee table is in
-# no client pak (Unknown), so no fee is listed. A settlement with its own tax is an entry of
-# `outposts` ({ outpost = <id>, trading_tax = <rate> }); a fee is an entry of `posting_fees`
-# ({ kind = "buy" | "sell", days = <days>, flat = <hundredths>, share = <rate> }). The sim
-# takes the trading post deliveries of its players every `delivery_poll_ms`.
+# The trading post. Every key in this section has a default.
 [trading_post]
+# The order lengths a player can pick, in days. These are the retail lengths.
 durations_days = [1, 3, 7, 14]
+# The most open orders one player can have. 40 is the game client's own default.
 max_open_orders = 40
+# The tax on a sale, from 0.0 to below 1.0. 0.05 is 5 %, as seen on retail.
 trading_tax = 0.05
+# A settlement with its own tax. Each entry is { outpost = <settlement id>, trading_tax = <rate> }.
+# Example: outposts = [{ outpost = 1, trading_tax = 0.08 }]
 outposts = []
+# The fee to post an order. The retail fee table is Unknown, so this file sets no fee. Each entry
+# is { kind = "buy" or "sell", days = <order length>, flat = <hundredths of a coin>,
+# share = <part of the order value, 0.0 to below 1.0> }.
+# Example: posting_fees = [{ kind = "sell", days = 1, flat = 0, share = 0.01 }]
 posting_fees = []
+# How often, in milliseconds, the sim gives its players the items and coin of their finished
+# orders.
 delivery_poll_ms = 2000
+
+# Test worlds only: tools that each new character wears when it first enters the world. Leave
+# this out in a world that players use. slot is the tool slot: 33 logging, 34 harvesting,
+# 35 skinning, 36 mining, 37 fishing. item is an item id of the game data.
+# [[start_tools]]
+# item = "LoggingAxeT1"
+# slot = 33

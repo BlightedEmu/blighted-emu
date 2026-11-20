@@ -1,41 +1,65 @@
-# world-director configuration (M5 spec section 6). This file holds no secret.
-# Secrets: the world database password, in the variable named by world_database_password_env,
-# and the global database password, in the variable named by global_database.password_env.
-# Any key below can be overridden with NW_DIRECTOR_<KEY>, nested keys joined by "__".
+# Settings of the world director. The director runs one world. It splits the map into cells,
+# gives the cells to the sims, puts each player who logs in on the right sim, and starts
+# expeditions and other instances.
+#
+# This file holds no passwords. The world database password comes from the environment variable
+# that world_database_password_env names. The global database password comes from the one that
+# global_database.password_env names. config/servers.env.example lists every variable the
+# servers read.
+#
+# Any key here can also be set with an environment variable: NW_DIRECTOR_ and the key in
+# capitals. Join the keys of a section with "__", for example
+# NW_DIRECTOR_INSTANCES__ARENA__MATCH_SIZE=2.
+#
+# The game data comes from the content folder: the environment variable NW_CONTENT_DIR,
+# local-data/content when it is not set. See "Content data" in README.md.
 
-# The [[world]] id in config/edge.toml.
+# The id of the world. It must be the id of a [[world]] in config/edge.toml.
 world_id = "8d0f4c2e-0000-4000-8000-000000000001"
-# NATS. Keep it on an internal address.
+# The NATS message bus that links the servers. Keep it on an address that only your servers
+# can reach.
 nats_url = "nats://127.0.0.1:4222"
-# Valkey of edge-http: the director writes the free player slots there.
+# The Valkey of edge-http. The director writes the number of free player places there, so the
+# login queue knows when to let players in.
 valkey_url = "redis://127.0.0.1:6379"
+# The name of the environment variable that holds the world database password.
 world_database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
+# The file that names the game client build this server supports.
 client_build_config = "config/client-build.toml"
-# The content folder (the files of the pinned build are in <content folder>/<build>/, `just
-# content`) comes from NW_CONTENT_DIR, default local-data/content (README "Content data").
-# The open map level; every sim of this world runs it.
+# The open-world level. Every open-world sim of this world runs it.
 level = "newworld_vitaeeterna"
-# Where characters that were never in the world appear, in turn (by entity number): next to a
-# fast travel shrine near Edengrove. The height comes from the ground of the world file. Add
-# more { x, y } entries to spread new players over the map.
+# Where a new character appears the first time it enters the world. With more than one entry,
+# new characters take the entries in turn. The height comes from the ground of the map. This
+# entry is next to a fast travel shrine near Edengrove. Add more { x = ..., y = ... } entries to
+# spread new players over the map.
 start_positions = [{ x = 11132.5, y = 7305.9 }]
-# Edge length of a cell in metres; 2048 is one region of the world file.
+# The edge length of one map cell, in metres. 2048 is one region of the map file.
 cell_size_m = 2048.0
-# Longest wait for a sim to take a player; below join_timeout_ms of config/rep-gateway.toml.
+# The longest wait, in milliseconds, for a sim to take a player who logs in. Keep it below
+# join_timeout_ms of config/rep-gateway.toml.
 admit_timeout_ms = 3000
+# How often, in milliseconds, the sims say that they are alive. Use the same value as
+# heartbeat_interval_ms of config/sim.toml.
 heartbeat_interval_ms = 1000
-# Missed sim heartbeats before its cells go to the other sims.
+# How many heartbeats in a row a sim may miss. After that, the director gives its cells to the
+# other sims.
 heartbeat_misses = 3
+# The address of the Prometheus metrics page. Keep it on an address that only your servers can
+# reach.
 metrics_listen = "127.0.0.1:9103"
+# How much the director logs: "error", "warn", "info", "debug" or "trace", or a filter per
+# module, for example "info,world_director=debug".
 log_filter = "info"
 
+# The world database: characters and the saved world. Write the address without the password.
+# max_connections is the size of the connection pool.
 [world_database]
 url = "postgres://nw@127.0.0.1:5432/nw_world_1"
 max_connections = 5
 
-# The global database with the admin ranks: an account with the game_master rank (or higher)
-# gets the client GM flag at login, and its sim takes the client's GM messages. Leave this
-# section out to give no account GM rights.
+# The global database with the staff ranks. An account with the game_master rank (or higher)
+# gets the game master flag at login, and its sim takes its game master commands. Leave this
+# section out and no account gets game master rights.
 [global_database]
 password_env = "NW_SECRET_GLOBAL_DATABASE_PASSWORD"
 
@@ -43,45 +67,61 @@ password_env = "NW_SECRET_GLOBAL_DATABASE_PASSWORD"
 url = "postgres://nw@127.0.0.1:5432/nw_global"
 max_connections = 2
 
-# Expeditions, raids and trials (run 15 instances study). Each instance runs on a sim with
-# role = "instance" and the level of its game mode (config/sim.toml). These are operator
-# settings: how long an empty instance stays (a group can come back), and the waits for the
-# instance sim and the social service. Leave the section out for a world without instances.
+# Expeditions, raids, trials and the queued modes. Each instance runs on a sim with
+# role = "instance" and the level of its game mode (see config/sim.toml). Leave this section out
+# for a world without instances.
 [instances]
+# An instance with no player in it ends after this many milliseconds, and its sim is free
+# again. Until then a group that left can come back.
 empty_timeout_ms = 300000
+# The longest wait, in milliseconds, for an instance sim to open an instance. Keep it below
+# admit_timeout_ms.
 open_timeout_ms = 1000
+# The longest wait, in milliseconds, for the social service to answer a question about a group.
 group_timeout_ms = 500
 
-# The arena matchmaking queue (arena flow study 2026-11-11): the players of one match (6 for a
-# 3v3; 2 makes the 1v1 matches retail made when few players queued) and how long the players
-# have to accept a found match.
+# The 3v3 arena queue. match_size is the number of players in one match: 6 for a 3v3. With 2,
+# the queue makes 1v1 matches, as retail did when few players queued. accept_timeout_ms is how
+# long the players have to accept a match that the queue found. match_size must be even.
 [instances.arena]
 match_size = 6
 accept_timeout_ms = 45000
 
-# The matchmaking queue of Outpost Rush: the players of a match (two teams of half; retail 40,
-# two teams of 20) and how long the players have to accept the match once its instance is open.
-# A small even size (2 or 4) lets a few test players start a match.
+# The Outpost Rush queue: two teams of half the match size each (retail: 40, two teams of 20). A
+# small even size such as 2 or 4 lets a few test players start a match. accept_timeout_ms counts
+# from the moment the instance is open.
 [instances.outpost_rush]
 match_size = 40
 accept_timeout_ms = 90000
 
-# The matchmaking queue of capture the flag: the players of a match (two teams of half; retail
-# 20, two teams of 10) and how long the players have to accept the match once its instance is
-# open. A small even size (2 or 4) lets a few test players start a match.
+# The capture the flag queue: two teams of half the match size each (retail: 20, two teams of
+# 10). A small even size such as 2 or 4 lets a few test players start a match.
 [instances.capture_the_flag]
 match_size = 20
 accept_timeout_ms = 90000
 
-# The director starts instance sims itself with this command (on this host, no cloud service)
-# and stops the ones it started when they stay free. Leave it out to start them by hand.
+# The catacombs queue. accept_timeout_ms is how long the players have to accept a run.
+# fill_wait_ms is how long a player who asked for other players waits for them before the team
+# goes in as it is. Both values are Inferred: 90 s is the invite time of the catacombs row in
+# the game data, and retail teams that were short went in 62 to 66 s after they queued.
+[instances.catacombs]
+accept_timeout_ms = 90000
+fill_wait_ms = 60000
+
+# The director can start the instance sims itself, on this machine, and stop the ones it started
+# when they stay free. Leave this section out to start instance sims by hand.
 # [instances.launch]
+# The sim program and its arguments.
 # program = "target/release/sim"
 # args = ["--config", "config/sim.toml"]
+# How many free instance sims each level keeps ready while players ask for it.
 # spare_per_level = 1
+# The most instance sims that run at one time.
 # max_sims = 64
+# The start of the names of the sims the director starts.
 # id_prefix = "inst"
+# A level that nobody asked for in this many milliseconds keeps no free sim ready.
 # forget_after_ms = 600000
-# A request that finds no free sim waits this long for one the director starts for it (default
-# 60000); below instance_request_timeout_ms of config/sim.toml.
+# How long, in milliseconds, a player waits for a sim that the director starts for the player.
+# Keep it below instance_request_timeout_ms of config/sim.toml. Left out, it is 60000.
 # start_wait_ms = 60000

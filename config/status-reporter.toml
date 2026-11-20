@@ -1,45 +1,57 @@
-# status-reporter configuration: sends one world's status and leaderboards to the public website.
-# One status-reporter runs per world, on the game machine. Data only goes out: the website opens no
-# connection to this machine and never reads its databases. This file holds no secret.
-# Secrets (environment variables):
-#   the variable named by secret_env                    the world's report secret: the same text
-#                                                       as the third part of the website's WORLDS
-#                                                       entry for this world, 32+ characters
-#                                                       (openssl rand -hex 32)
-#   the variable named by global_database.password_env  password of [global_database]
-#   the variable named by world_database_password_env   password of [world_database]
-# Any key below can be overridden with NW_REPORTER_<KEY>, nested keys joined by "__",
-# for example NW_REPORTER_SITE_URL=http://localhost:3000.
+# Settings of the status reporter. It sends one world's status (online, player count) and its
+# leaderboards to the public website. Run one reporter for each world, on the game machine. Data
+# only goes out: the website never connects to this machine and never reads its databases.
+#
+# This file holds no secret. Three values come from environment variables:
+#   the variable that secret_env names                   the world's report secret. It is the
+#                                                        same text as the third part of this
+#                                                        world's WORLDS entry on the website,
+#                                                        32 characters or more
+#                                                        (openssl rand -hex 32).
+#   the variable that global_database.password_env names the global database password.
+#   the variable that world_database_password_env names  the world database password.
+# config/servers.env.example lists every variable the servers read.
+#
+# Any key here can also be set with an environment variable: NW_REPORTER_ and the key in
+# capitals. Join the keys of a section with "__", for example
+# NW_REPORTER_SITE_URL=http://localhost:3000. Every key is required.
 
-# The [[world]] id in config/edge.toml: the first part of the website's WORLDS entry.
+# The id of the world. It must be the id of a [[world]] in config/edge.toml, and the first part
+# of this world's WORLDS entry on the website.
 world_id = "8d0f4c2e-0000-4000-8000-000000000001"
-# The website, with no trailing /.
+# The address of the website, with no / at the end.
 site_url = "https://example.org"
+# The names of the environment variables that hold the report secret and the world database
+# password.
 secret_env = "NW_SECRET_STATUS_REPORT_SECRET"
 world_database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
-# Seconds between two status reports: 3 to 15. The website takes at most 20 a minute and shows
-# "No signal" after 45 s without a report.
+# Seconds between two status reports, from 3 to 15. The website takes at most 20 reports a
+# minute, and it shows "No signal" after 45 s with no report.
 status_interval_s = 15
-# Seconds between two leaderboard reports: at least 15 (the website takes 4 a minute).
+# Seconds between two leaderboard reports, 15 or more. The website takes at most 4 a minute.
 leaderboards_interval_s = 300
-# Longest wait for one metrics page or one website answer, in milliseconds; below the status
-# interval.
+# The longest wait, in milliseconds, for one metrics page or one answer of the website. Keep it
+# shorter than the status interval.
 request_timeout_ms = 5000
+# How much the reporter logs: "error", "warn", "info", "debug" or "trace", or a filter per
+# module.
 log_filter = "info"
 
-# The pinned client build: it names the build folder of the leaderboard table.
+# The file that names the game client build. The leaderboard table is in the folder of that
+# build.
 client_build_config = "config/client-build.toml"
-# The edge-http config of this world: its remote config sets give the season end
-# (javelin.leaderboard-season-end-datetime), the time the season boards reset.
+# The edge-http settings file of this world. The reporter reads the season end date from its
+# remote config sets (javelin.leaderboard-season-end-datetime), so it knows when the season
+# boards start again.
 edge_config = "config/edge.toml"
-# The leaderboard table is <build>/services/leaderboards.json in the content folder, which comes
-# from NW_CONTENT_DIR, default local-data/content (README "Content data"). Make it with
-# `content-tool leaderboards` (from the content bundle of the same build folder).
+# The leaderboard table is <build>/services/leaderboards.json in the content folder (the
+# environment variable NW_CONTENT_DIR, local-data/content when it is not set). Make it with
+# `content-tool leaderboards`. See "Content data" in README.md.
 
-# The metrics pages (metrics_listen) of each part of the world. A part is up when every page of
-# it answers; the website shows the world Offline when the gateway or the sims are down, and
-# Having problems when another part is down. List every sim of the world (one sim per open
-# world, more with instances): a sim that is not listed is not checked.
+# The metrics pages (metrics_listen) of each server of the world. A server counts as up when all
+# its pages answer. The website shows the world as Offline when the gateway or the sims are
+# down, and as Having problems when another server is down. List every sim of the world: the
+# reporter does not check a sim that is not in the list.
 [parts]
 login = ["http://127.0.0.1:9100/metrics"]
 gateway = ["http://127.0.0.1:9101/metrics"]
@@ -47,13 +59,15 @@ director = ["http://127.0.0.1:9103/metrics"]
 sims = ["http://127.0.0.1:9102/metrics"]
 social = ["http://127.0.0.1:9111/metrics"]
 
-# The leaderboard rotations: the same values as [leaderboards] in config/sim.toml.
+# When the leaderboards start a new week, month and season. Use the same values as
+# [leaderboards] in config/sim.toml.
 [leaderboards]
 rotation_start_date = "2023-02-07"
 weekly_reset_hour = 2
 season = 11
 
-# The global database with the leaderboard values (the sims write them).
+# The global database with the leaderboard values that the sims write. password_env names the
+# environment variable that holds its password.
 [global_database]
 password_env = "NW_SECRET_GLOBAL_DATABASE_PASSWORD"
 

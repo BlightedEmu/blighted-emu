@@ -1,63 +1,91 @@
-# social configuration (run 15 social study): the social service of one world (chat, friends,
-# blocks, groups, companies, voice setup). This file holds no secret.
-# Secrets: the world database password, in the variable named by world_database_password_env,
-# and the voice token key, in the variable named by voice.key_env.
-# Any key below can be overridden with NW_SOCIAL_<KEY>, nested keys joined by "__".
+# Settings of the social service of one world: chat, friends, blocked players, groups,
+# companies and the voice chat setup.
+#
+# This file holds no passwords. The world database password comes from the environment variable
+# that world_database_password_env names. With the optional sections below, the global database
+# password and the voice token key also come from environment variables.
+# config/servers.env.example lists every variable the servers read.
+#
+# Any key here can also be set with an environment variable: NW_SOCIAL_ and the key in capitals.
+# Join the keys of a section with "__", for example NW_SOCIAL_GAME_DIR="/srv/new-world".
 
-# The [[world]] id in config/edge.toml.
+# The id of the world. It must be the id of a [[world]] in config/edge.toml.
 world_id = "8d0f4c2e-0000-4000-8000-000000000001"
-# NATS. Keep it on an internal address.
+# The NATS message bus that links the servers. Keep it on an address that only your servers
+# can reach.
 nats_url = "nats://127.0.0.1:4222"
+# The name of the environment variable that holds the world database password.
 world_database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
-# The game install: the profanity lists come from its paks.
+# The folder of the New World game install. The social service reads the chat word filter
+# lists from its game files.
 game_dir = "/opt/new-world"
-# The sims beat once per second (heartbeat_interval_ms of config/sim.toml).
+# How often, in milliseconds, the sims say that they are alive. Use the same value as
+# heartbeat_interval_ms of config/sim.toml.
 heartbeat_interval_ms = 1000
-# Missed sim heartbeats before its players count as offline (heartbeat_misses of the director).
+# How many heartbeats in a row a sim may miss before its players count as offline. Use the same
+# value as heartbeat_misses of config/world-director.toml.
 heartbeat_misses = 3
-# Longest wait for a sim to move a player's coins (company treasury).
+# The longest wait, in milliseconds, for a sim to move a player's coin into or out of a
+# company treasury.
 coin_timeout_ms = 2000
-# Milliseconds between two reads of the privacy settings that changed (best guess: a change
-# reaches the world within seconds at one small read each time).
+# How often, in milliseconds, the service reads the privacy settings that players changed. Left
+# out, it is 5000. This is our own value: a change reaches the world in a few seconds, and each
+# read is small.
 privacy_poll_ms = 5000
+# The address of the Prometheus metrics page. Keep it on an address that only your servers can
+# reach.
 metrics_listen = "127.0.0.1:9111"
+# How much the service logs: "error", "warn", "info", "debug" or "trace", or a filter per
+# module, for example "info,social=debug".
 log_filter = "info"
 
-# Company rules, named after the client's javelin.social.* keys. The retail remote
-# configuration of the captures sets none of them; the client's own defaults are 0.
+# Company rules. Each key has the name of a javelin.social key of the game client. The retail
+# remote config set none of them, and the client's own default for each is 0.
 [companies]
-# Seconds after leaving a company before joining one again (guild-rejoining-cooldown-seconds,
-# guild-switching-cooldown-seconds; client default 0).
+# How many seconds a player who left a company must wait before joining one again.
 join_cooldown_s = 0
-# Least zero-based level that joins a company (guild-join-required-level; client default 0).
+# The lowest level that can join a company. The count starts at 0, so 0 is level 1.
 join_required_level = 0
-# Most coin a treasury holds, hundredths of a coin (best guess: 100,000 coins; no capture or
-# client data shows the retail maximum).
+# The most coin a company treasury can hold, in hundredths of a coin. 10000000 is 100,000 coin.
+# This is our own value; the retail maximum is Unknown.
 treasury_max = 10000000
 
+# The world database: characters, groups and companies. Write the address without the
+# password. max_connections is the size of the connection pool.
 [world_database]
 url = "postgres://nw@127.0.0.1:5432/nw_world_1"
 max_connections = 4
 
-# The global database with the players' privacy settings (set in the game's privacy menu, stored
-# by edge-http). Without this section every setting keeps its default: everyone may write, talk,
-# ask for friendship and see the online status. Its password is in the variable named by
-# password_env.
+# The global database with the players' privacy settings. Players set them in the game's privacy
+# menu, and edge-http saves them. Leave this section out and every player keeps the default
+# settings: anyone may write to them, talk to them, ask them for friendship and see when they are
+# online. password_env names the environment variable that holds the password.
 # [global_database]
 # password_env = "NW_SECRET_GLOBAL_DATABASE_PASSWORD"
 # [global_database.database]
 # url = "postgres://nw@127.0.0.1:5432/nw_global"
 # max_connections = 2
 
-# A Vivox-compatible voice service the community runs. Without this section voice calls stay
-# unanswered and the client keeps its voice chat off. With edge-http's [voice], api_url is
-# https://game.<domain>/vivox/api2/: edge-http answers the voice SDK's first call there. An
-# address with a port gets that call without TLS: on a server with other public ports than 443
-# and 80, name edge-http's public ping port (https://game.<domain>:8080/vivox/api2/).
+# The voice chat service (config/voice-server.toml, or another service that speaks the same
+# protocol as Vivox). Leave this section out and the game keeps its voice chat off.
 # [voice]
+# The address the game's voice code calls first. With edge-http's [voice] section, use
+# https://game.<your domain>/vivox/api2/, because edge-http answers that first call. If players
+# reach edge-http on another port than 443, the game makes this call without TLS: then name
+# edge-http's public ping port, for example https://game.example.org:8080/vivox/api2/.
 # api_url = "https://game.example.org/vivox/api2/"
+# The name that signs the voice login tokens. Use the same text as issuer in
+# config/voice-server.toml.
 # issuer = "community-1"
+# The voice domain. Use the same text as realm in config/voice-server.toml and edge-http's
+# [voice] section.
 # domain = "voice.example.org"
+# The name of the environment variable that holds the key that signs the voice tokens. Use the
+# same variable as key_env in config/voice-server.toml.
 # key_env = "NW_SECRET_VOICE_KEY"
+# Text added to the end of every voice channel name of this world. Give each world its own text
+# when several worlds share one voice service.
 # channel_suffix = ""
+# The size of the area of a nearby-voice channel, in metres. Players in the same area hear each
+# other.
 # cell_size_m = 512.0

@@ -1,120 +1,154 @@
-# edge-http configuration (M2 spec section 9). This file holds no secret.
-# Secrets come from environment variables:
-#   NW_SECRET_SIGNING_KEY               entry ticket key, hex, 32+ bytes (openssl rand -hex 32)
-#   NW_SECRET_GLOBAL_DATABASE_PASSWORD  password of [global_database]
-#   NW_SECRET_DISCORD_CLIENT_SECRET     Discord client secret (mode = "discord" only)
-#   the variable named by each [[world]] database_password_env
-# Any key below can be overridden with NW_EDGE_<KEY>, nested keys joined by "__",
-# for example NW_EDGE_AUTH__MODE=discord.
+# Settings of edge-http: the login server and web front door. The launcher and the game client
+# talk to it over HTTPS. It does the logins, the world list and the login queue, and it answers
+# the web addresses the game would ask Amazon for (remote config, news, the store and the
+# region ping).
+#
+# This file holds no secret. These values come from environment variables:
+#   NW_SECRET_SIGNING_KEY               the key that signs the entry tickets, as hex, 32 bytes or
+#                                       more (openssl rand -hex 32). rep-gateway needs the same
+#                                       key.
+#   NW_SECRET_GLOBAL_DATABASE_PASSWORD  the password of [global_database].
+#   NW_SECRET_DISCORD_CLIENT_SECRET     the Discord client secret. Only for mode = "discord".
+#   the variable that each [[world]] database_password_env names: that world's database
+#   password.
+# config/servers.env.example lists every variable the servers read.
+#
+# Any key here can also be set with an environment variable: NW_EDGE_ and the key in capitals.
+# Join the keys of a section with "__", for example NW_EDGE_AUTH__MODE=discord.
+#
+# The store table comes from the content folder: the environment variable NW_CONTENT_DIR,
+# local-data/content when it is not set. See "Content data" in README.md.
 
+# The server name that the launcher shows.
 server_name = "Blighted test server"
-# Your own domain. The launcher API and the channel config are on https://login.<domain>, the
-# game routes on https://game.<domain>. The certificate must cover both names.
+# Your own domain. The launcher and the login pages are on https://login.<domain>, and the game
+# pages are on https://game.<domain>. Your TLS certificate must cover both names.
 domain = "example.org"
+# The HTTPS address and port.
 https_listen = "0.0.0.0:443"
-# Plain HTTP listener of the client's region ping (GET /ping on dynamodb.<region>.amazonaws.com,
-# which the launcher maps to this server). The client pings port 80.
+# The plain HTTP address for the game's region ping. The game pings port 80 of
+# dynamodb.<region>.amazonaws.com, and the launcher sends that ping to this server.
 ping_listen = "0.0.0.0:80"
-# The ports players reach the two listeners on. Set them when a router or proxy forwards other
-# ports to the listeners, or when the listeners use other ports. Links to login.<domain> and
-# game.<domain> name public_https_port when it is not 443, and players type it after the domain
-# in the launcher (example.org:8443). The launcher's proxy sends the region ping to
-# public_ping_port. With other ports than 443 and 80, players need a client patched with
-# --aws-proxy (docs/client-patch.md), also on Linux.
+# The ports that players reach the two addresses above on. Change them when a router or proxy
+# forwards other ports to this server, or when the listeners use other ports. When
+# public_https_port is not 443, the links name the port, and players type it after the domain
+# in the launcher (example.org:8443). With other ports than 443 and 80, players need a game
+# client patched with --aws-proxy (docs/client-patch.md), also on Linux.
 public_https_port = 443
 public_ping_port = 80
-# Prometheus metrics. Keep this on an internal address.
+# The address of the Prometheus metrics page. Keep it on an address that only your servers can
+# reach.
 metrics_listen = "127.0.0.1:9100"
+# The longest time, in seconds, for one web request.
 request_timeout_seconds = 10
-# Most requests in progress at one time.
+# The most web requests in progress at one time. More requests wait for a free place, until
+# request_timeout_seconds runs out.
 max_connections = 4096
+# How much edge-http logs: "error", "warn", "info", "debug" or "trace", or a filter per module,
+# for example "info,nw_login=debug".
 log_filter = "info"
 
+# Your TLS certificate and its private key, as PEM files. An ACME tool such as certbot or lego
+# makes them. Keep them in local-data/ and never put them in git.
 [tls]
-# PEM files from an ACME tool (certbot, lego). Keep them in local-data/, never in git.
 certificate_pem_path = "local-data/edge-http/fullchain.pem"
 private_key_pem_path = "local-data/edge-http/privkey.pem"
 
+# How players log in.
 [auth]
-# Login type, one per server:
-#   "password"  players make an account with a username and password in the launcher.
-#   "discord"   players log in with Discord (needs [discord] below and the
-#               NW_SECRET_DISCORD_CLIENT_SECRET secret).
+# One login type for each server:
+#   "password"  players make an account with a user name and a password in the launcher.
+#   "discord"   players log in with Discord. This needs [discord] below and the
+#               NW_SECRET_DISCORD_CLIENT_SECRET environment variable.
 mode = "password"
-# Password mode only: true lets players make new accounts in the launcher; false: only
-# accounts that exist can log in. (In Discord mode, use [discord] allow_list instead.)
+# Password mode only. true: players can make new accounts in the launcher. false: only
+# accounts that already exist can log in. In Discord mode, use allow_list in [discord].
 allow_registration = true
-# Parallel Argon2id hashes; 0 = number of CPUs.
+# How many password checks may run at the same time. 0 uses the number of CPU cores.
 argon2_parallel = 0
+# After this many failed logins in login_fail_window_seconds, from one IP address or for one
+# user name, more tries are refused until the window ends.
 login_fail_limit = 10
 login_fail_window_seconds = 600
+# A game session ends when it is not used for this many seconds.
 game_session_ttl_seconds = 7200
 
+# Discord login. edge-http uses this section only when [auth] mode = "discord". Every new account
+# is a normal player. Give staff ranks on the admin site.
 [discord]
-# Used only when [auth] mode = "discord". Every new account is a normal player; staff ranks
-# are given on the admin site.
-#
-# Discord application id (Discord Developer Portal, your app, OAuth2, Client ID).
+# The Discord application id (Discord Developer Portal, your application, OAuth2, Client ID).
 client_id = ""
-# Discord server check. A Discord server id (Discord: Developer Mode on, right-click the
-# server, Copy Server ID): only members of that server can log in.
-# Off: "" (empty).
+# Only members of this Discord server can log in. Find the id in Discord: turn on Developer
+# Mode, right-click the server, Copy Server ID. "" turns this check off.
 guild_id = ""
-# Allow list. true: only the Discord user ids in allowed_user_ids and the holders of a role in
-# allowed_role_ids can log in and make accounts; a user taken off the list can no longer press
-# Play, even with an old login. false (the default): every Discord user can (still limited by
-# guild_id). Both checks can be on together. Restart edge-http after a change.
+# true: only the users in allowed_user_ids and the members with a role in allowed_role_ids can
+# log in and make accounts. A user that you take off the list can no longer press Play, even with
+# an old login. false: every Discord user can log in (guild_id still applies). Both checks can be
+# on together. Restart edge-http after a change.
 allow_list = false
-# Discord user ids (Discord: Developer Mode on, right-click a name, Copy User ID), for
-# example ["80351110224678912", "175928847299117063"].
+# Discord user ids (Developer Mode on, right-click a name, Copy User ID), for example
+# ["80351110224678912", "175928847299117063"].
 allowed_user_ids = []
-# Discord role ids in the guild_id server (Server Settings, Roles, right-click a role, Copy Role
-# ID). Needs guild_id. The roles are read at each Discord login; a Play uses those of the last
-# login, so a role given or taken in Discord counts from the player's next login.
+# Discord role ids of the guild_id server (Server Settings, Roles, right-click a role, Copy Role
+# ID). This needs guild_id. edge-http reads a player's roles at each Discord login, so a role
+# that you give or take counts from the player's next login.
 allowed_role_ids = []
 
+# The global database: accounts, staff ranks, store unlocks, privacy settings, leaderboard
+# stats and analytics. Write the address
+# without the password; the password comes from NW_SECRET_GLOBAL_DATABASE_PASSWORD.
+# max_connections is the size of the connection pool.
 [global_database]
 url = "postgres://nw@127.0.0.1:5432/nw_global"
 max_connections = 5
 
+# The Valkey that holds the entry tickets and the login queue. rep-gateway and world-director
+# use the same Valkey.
 [valkey]
 url = "redis://127.0.0.1:6379"
 
-# Our own remote config sets (docs/re/2026-09-18-remote-config-layers.md). The client reads them
-# from an S3 bucket; this server answers that bucket's host. `directory` holds one JSON file per
-# layer: <application>-<dimension>.json (ProductId, RegionId, CognitoId) and
-# <application>-WorldId-<world id>.json for each world, for the applications `public` and
-# `publicGameplay`; no other file. The server fills omni.leaderboards.client-endpoint of
-# publicGameplay-RegionId.json with game.<domain>.
+# The remote config: the game settings that the game client downloads at login. The client
+# asks an Amazon S3 bucket for them, and edge-http answers in its place.
 [remote_config]
+# The folder with one JSON file for each layer: <application>-<dimension>.json for ProductId,
+# RegionId and CognitoId, and <application>-WorldId-<world id>.json for each world. The
+# applications are "public" and "publicGameplay". Put no other file in the folder. edge-http
+# fills in omni.leaderboards.client-endpoint of publicGameplay-RegionId.json with
+# game.<domain>.
 directory = "config/remote-config"
-# The bucket the client asks for (its log line "Configuring remote config with bucket ...").
+# The bucket name the client asks for. The game client writes it in its log ("Configuring
+# remote config with bucket ..."). Allowed: "ags-javelin-remote-config",
+# "ags-javelin-staging-remote-config", "ags-javelin-dev-remote-config".
 bucket = "ags-javelin-remote-config"
-# Our own id, sent to the client as -CognitoPool. It names no Amazon pool.
+# Our own id, sent to the client as -CognitoPool. It is not an Amazon pool.
 cognito_pool_id = "b04fbfcd-942c-472d-88c0-c762c4076b2f"
 
-# Our own news: the message of the day, the news stories and the menu tiles the client reads
-# from its news host, and their images. One subfolder per host, named after it; every file in it
-# is served at its path. The news host folder must hold motd/worlds_STEAM_APP_ID.1063730.json,
-# newsstories/STEAM_APP_ID.1063730/metadata.json and marketingtiles/STEAM_APP_ID.1063730/
-# metadata.json; each image URL in them needs its file in the image host folder.
+# The news that the game shows: the message of the day, the news stories, the menu tiles and
+# their images. The folder has one subfolder for each news host, with the host's name. edge-http
+# serves every file in it at its own path. The news host folder must hold
+# motd/worlds_STEAM_APP_ID.1063730.json, newsstories/STEAM_APP_ID.1063730/metadata.json and
+# marketingtiles/STEAM_APP_ID.1063730/metadata.json. Each image address in them needs its file
+# in the image host folder.
 [cms]
 directory = "config/cms"
 
-# The community's public website (docs/website-integration.md) is a [website] section with one
-# key, site_url (such as https://example.org, no trailing /). This file has none: a server
-# without a site shows no launcher news and serves the message of the day from [cms]. Put the
-# section in the git-ignored local config. With it, the launcher reads its news from
-# <site_url>/api/news?target=launcher (GET /launcher/news-source names it), and edge-http gets
-# the message of the day from <site_url>/api/game/cms/motd once a minute; the [cms] file is only
-# the first copy.
+# Your community website (docs/website-integration.md). Left out, the launcher shows no news,
+# and the message of the day comes from [cms]. With it, the launcher reads its news from
+# <site_url>/api/news?target=launcher, and edge-http takes the message of the day from
+# <site_url>/api/game/cms/motd once a minute (the [cms] file is only the first copy). Write the
+# address with http:// or https:// and with no / at the end. Put this section in your own,
+# git-ignored copy of this file.
+# [website]
+# site_url = "https://example.org"
 
-# The Amazon names our launcher maps to this server, for the game process only (private hosts
-# file and trust file under bwrap, or the loopback proxy on Windows). Only the remote-config
-# bucket host, Kinesis, STS and DynamoDB (region ping) hosts and the two news hosts are allowed,
-# and the bucket host, the region ping host of us-east-1 and both news hosts are required. Make
-# the certificate with `edge-http aws-mirror-certificate` (again after a change of this list);
-# keep both files in local-data/, never in git.
+# The Amazon host names that the launcher sends to this server, for the game only. On Linux the
+# launcher gives the game its own hosts file and trust file; on Windows it uses a local proxy.
+# Only these hosts are allowed: the remote config bucket host, the Kinesis, STS and DynamoDB
+# (region ping) hosts, and the two news hosts. The bucket host, the us-east-1 region ping host
+# and both news hosts are required. Make the certificate with
+#   edge-http aws-mirror-certificate
+# and make it again after you change this list. Keep both files in local-data/ and never put
+# them in git.
 [aws_mirror]
 hosts = [
     "ags-javelin-remote-config.s3.amazonaws.com",
@@ -127,63 +161,64 @@ hosts = [
 certificate_pem_path = "local-data/edge-http/aws-mirror.pem"
 private_key_pem_path = "local-data/edge-http/aws-mirror-key.pem"
 
-# The in-game store. edge-http serves its catalog, each account's unlocks and each account's
-# Marks of Fortune (the store currency) on game.<domain>; a purchase goes through the game
-# connection to the sim, which pays it from the account's wallet and saves the unlock. Restart
+# The in-game store. edge-http serves the store catalog, the unlocks of each account and each
+# account's Marks of Fortune (the store money). A purchase goes through the game connection to
+# the sim, which takes the price from the account's wallet and saves the unlock. Restart
 # edge-http and the sims after a change. Give an account Marks of Fortune with
-# `blighted-admin give-marks <login name> <amount>` (a negative amount takes them).
+#   blighted-admin give-marks <login name> <amount>
+# (a negative amount takes them away).
 [shop]
-# edge-http reads the store table that `content-tool store` writes from the content bundle
-# (`<build>/services/store.json`, the build of client_build_config, in the content folder of
-# NW_CONTENT_DIR, default local-data/content): the mounts the store sells (52 in build 25810808).
-# Without the file the store sells nothing.
+# The file that names the game client build. edge-http reads the store table of that build,
+# <build>/services/store.json in the content folder (made by `content-tool store`). It lists the
+# mounts the store sells: 52 in build 25810808. Without the file the store sells nothing.
 client_build_config = "config/client-build.toml"
-# Whether the store sells. false: the catalog is empty and purchases are refused; the mounts an
-# account already got stay its own.
+# true: the store sells. false: the catalog is empty and purchases are refused. Mounts that an
+# account already has stay its own.
 enabled = true
-# Whether every mount costs 0 Marks of Fortune, as in retail's last weeks. false: a mount costs
-# its price below, paid from the account's wallet; a wallet below the price buys nothing.
+# true: every mount costs 0 Marks of Fortune, as in the last weeks of retail. false: each mount
+# costs the price below, from the account's wallet, and a wallet below the price buys nothing.
 free = true
-# The price of a mount in Marks of Fortune when the store is not free (retail: 20000 for most
-# mounts, 15000 or 10000 for some).
+# The price of a mount in Marks of Fortune when the store is not free. Retail: 20000 for most
+# mounts, 15000 or 10000 for some.
 mount_price = 20000
 
-# The price of single mounts, by the store entitlement that unlocks them (the `entitlement` of the
-# store table); every other mount costs mount_price. For example:
+# Prices for single mounts, by the store entitlement that unlocks them (the `entitlement` column
+# of the store table). Every other mount costs mount_price. Example:
 # Ent_Mount_MTX_1_wolf = 15000
 [shop.mount_prices]
 
-# The analytics stream the client puts its events on (research data; nothing reads it).
-# Best guesses from 6,533 retail PutRecords of 255 sessions: the largest body was 61,922 bytes,
-# one client sent at most 44 requests and 1,096,336 bytes in a minute.
+# The game's analytics events. The client sends them, edge-http stores them for research, and
+# nothing else reads them. These limits are our own values from 6,533 retail uploads of 255
+# sessions: the largest body was 61,922 bytes, and one client sent at most 44 requests and
+# 1,096,336 bytes in a minute.
 [analytics]
-# Largest body of one request, in bytes.
+# The largest body of one request, in bytes.
 max_body_bytes = 262144
-# Requests of one client address a minute.
+# The most requests from one client address in a minute.
 requests_per_minute = 120
-# Body bytes of one client address a minute.
+# The most body bytes from one client address in a minute.
 bytes_per_minute = 4194304
-# Days a record is kept; older ones are deleted once an hour.
+# How many days a record is kept. Older records are deleted once an hour.
 retention_days = 30
 
 # Experience multipliers. Each value multiplies one kind of experience: 1.0 is normal (the
-# amount the game data gives), 2.0 is double, 0.5 is half, 0.0 gives none. Any number of 0 or
-# more works. The server sends these values to the game (remote config javelin.xp-multipliers,
-# publicGameplay-ProductId layer) and the sims use the same values, so what a player sees and
-# what the server gives match. A setting left out is 1.0. Restart edge-http and the sims after
-# a change. Retail without an event is 1.0 everywhere; retail's last event (servers closing) was
+# amount of the game data), 2.0 is double, 0.5 is half and 0.0 gives none. Any number of 0 or
+# more works. edge-http sends these values to the game (remote config javelin.xp-multipliers),
+# and the sims use the same values, so what a player sees and what the server gives are the
+# same. A key that you leave out is 1.0. Restart edge-http and the sims after a change. Retail
+# was 1.0 everywhere outside events. The last retail event (before the servers closed) was
 # character 2.0, trade skills 2.0, weapon masteries 2.0 and territory standing 3.0.
 [experience]
 # Character experience: everything that raises the character level (mob kills, quests, town
-# projects, expeditions, gathering and crafting character experience).
+# projects, expeditions, and the character experience of gathering and crafting).
 character = 1.0
 # Umbral Crystals (the UmbralCurrency progression of the game data).
 umbral_crystals = 1.0
 
-# Trade skill experience, one value per trade skill.
+# Trade skill experience, one value for each trade skill.
 [experience.trade_skills]
 # Crafting skills.
-# Weaponsmithing: crafting melee weapons (swords, axes, hammers, ...).
+# Weaponsmithing: crafting melee weapons (swords, axes, hammers and more).
 weaponsmithing = 1.0
 # Armoring: crafting heavy, medium and light armor.
 armoring = 1.0
@@ -215,7 +250,7 @@ mining = 1.0
 logging = 1.0
 # Harvesting: plants, fibers and herbs.
 harvesting = 1.0
-# Tracking and Skinning: animal carcasses (the game data calls it Skinning).
+# Tracking and Skinning: animal bodies (the game data calls it Skinning).
 skinning = 1.0
 # Fishing: catching fish.
 fishing = 1.0
@@ -225,7 +260,7 @@ musician = 1.0
 # Riding: for example mount food, mount races and mount quests.
 riding = 1.0
 
-# Weapon mastery experience, one value per weapon.
+# Weapon mastery experience, one value for each weapon.
 [experience.weapon_masteries]
 # One-handed weapons.
 sword_and_shield = 1.0
@@ -248,8 +283,8 @@ life_staff = 1.0
 ice_gauntlet = 1.0
 void_gauntlet = 1.0
 
-# Territory standing experience, one value per territory: standing points from quests, town
-# projects, crafting, gathering and kills in that territory.
+# Territory standing experience, one value for each territory: the standing points from quests,
+# town projects, crafting, gathering and kills in that territory.
 [experience.territory_standing]
 brightwood = 1.0
 everfall = 1.0
@@ -266,45 +301,62 @@ restless_shore = 1.0
 brimstone_sands = 1.0
 nighthaven = 1.0
 
-# Fast travel. free = true: a fast travel to a settlement or a shrine costs no azoth.
-# free = false: the retail cost (20 azoth, 10 within your own territory). An inn recall and a
-# home travel never cost azoth. The server sends this value to the game (remote config
-# javelin.playtest-disable-fast-travel-costs, publicGameplay-ProductId layer) and the sims use the
-# same value, so the cost the map shows and the azoth the server takes match. Left out is
-# false. Restart edge-http and the sims after a change.
+# Fast travel. true: a fast travel to a settlement or a shrine costs no azoth. false: the retail
+# cost (20 azoth, 10 inside your own territory). An inn recall and a travel home never cost
+# azoth. edge-http sends this value to the game (remote config
+# javelin.playtest-disable-fast-travel-costs), and the sims use the same value, so the cost the
+# map shows and the azoth the server takes are the same. Left out, it is false. Restart edge-http
+# and the sims after a change.
 [fast_travel]
 free = false
 
-# The community's voice service. The social service's [voice] api_url
-# (https://game.<domain>/vivox/api2/) leads the game's voice SDK here first: this server answers
-# its prelogin with the hosts below. Left out, the prelogin is not served and voice stays off.
-# When players reach this server on another HTTPS port than 443, the voice SDK sends the prelogin
-# without TLS: the ping listener answers it too, and api_url names the public ping port
-# (https://game.<domain>:<public_ping_port>/vivox/api2/).
+# The community's voice chat service (config/voice-server.toml). The social service's [voice]
+# api_url (https://game.<domain>/vivox/api2/) sends the game's voice code here first, and
+# edge-http answers with the hosts below. Left out, edge-http does not answer, and voice chat
+# stays off. When players reach this server on another HTTPS port than 443, the voice code makes
+# that first call without TLS. The ping listener answers it too, so api_url then names the
+# public ping port (https://game.<domain>:<public_ping_port>/vivox/api2/).
 # [voice]
-# realm = "voice.example.org"            # the social service's [voice] domain
-# xmpp_host = "game.example.org"         # the voice server that signs players in
+# The voice domain: domain in the social service's [voice] and realm in
+# config/voice-server.toml.
+# realm = "voice.example.org"
+# The voice server that signs players in, and its port (xmpp_listen of
+# config/voice-server.toml).
+# xmpp_host = "game.example.org"
 # xmpp_port = 5223
+# true: the sign-in connection uses TLS from its start.
 # xmpp_tls = true
+# The voice server's sign-in address over a WebSocket.
 # ws_xmpp_url = "wss://game.example.org:443/ws-xmpp"
+# The address that gets the voice code's call statistics.
 # telemetry_url = "https://game.example.org"
 
+# One [[world]] section for each world. Copy the section for a second world, with its own id,
+# rep-gateway, world database and servers.
 [[world]]
+# The world's id. The other servers name the world by this id (world_id in their files).
 id = "8d0f4c2e-0000-4000-8000-000000000001"
+# The name and region text that the world list shows. Use the same region as [resets] region of
+# config/sim.toml.
 name = "Aeternum"
 region = "us-east"
-# Token.RepAddress: IPv4:port of the rep-gateway that serves this world. One rep-gateway serves
-# one world, so each [[world]] needs its own address.
+# The public IPv4 address and UDP port of the rep-gateway of this world (its udp_listen). The
+# game client connects there. One rep-gateway serves one world, so each world needs its own
+# address.
 rep_address = "127.0.0.1:33435"
+# The name of the environment variable that holds this world's database password.
 database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
-# Live entry tickets at one time. Players are admitted only while world-director also reports
-# free player slots (M5).
+# The most entry tickets at one time. Players also get in only while the world director reports
+# free places on the sims.
 capacity = 100
-# Characters one account may have in this world.
+# How many characters one account may have in this world.
 max_characters_per_account = 2
+# How often, in seconds, a client in the login queue asks for its place.
 refresh_interval_seconds = 5
+# The most queue joins and queue requests of one account in a minute.
 queue_requests_per_minute = 30
 
+# This world's database. Write the address without the password.
 [world.database]
 url = "postgres://nw@127.0.0.1:5432/nw_world_1"
 max_connections = 5

@@ -1,20 +1,31 @@
-# blighted-admin relay configuration (admin relay spec, 2026-11-04-admin-relay-design.md, kept
-# locally). This file holds no secret.
-# The relay runs on another machine than the game servers. It takes the browser connections and
-# sends them to the admin site on the game machine, which connects to it (`agent_listen`).
-# Any key below can be overridden with BLIGHTED_ADMIN_RELAY_<KEY>, nested keys joined by "__".
+# Settings of the admin relay (blighted-admin relay). The relay runs on another machine than the
+# game servers. Staff browsers connect to the relay, and the admin site on the game machine
+# connects out to the relay (agent_listen). So the game machine needs no open port for the admin
+# site. See "Admin site on another machine" in README.md.
+#
+# This file holds no secret, and the relay reads no secret from the environment.
+#
+# Any key here can also be set with an environment variable: BLIGHTED_ADMIN_RELAY_ and the key
+# in capitals. Join the keys of a section with "__", for example
+# BLIGHTED_ADMIN_RELAY_LISTEN=127.0.0.1:9200.
 
-# The browser address. Without [tls] the relay serves plain HTTP: put a TLS proxy in front, and
-# reach the site only by HTTPS (the session cookie is Secure).
+# The address for the browsers. Without tls below, the relay serves plain HTTP. Then put a TLS
+# proxy in front of it and reach the site only over HTTPS, because the login cookie works only
+# over HTTPS.
 listen = "127.0.0.1:9190"
+# How much the relay logs: "error", "warn", "info", "debug" or "trace", or a filter per module.
 log_filter = "info"
 # HTTPS for the browsers (optional):
 #   tls = { certificate_pem_path = "...", private_key_pem_path = "..." }
 
-# The admin site on the game machine connects here. Open this port to the game machine only.
+# The address that the admin site on the game machine connects to. Open this port to the game
+# machine only.
 agent_listen = "0.0.0.0:9191"
 
-# The files of `blighted-admin relay-keys --relay-name <relay DNS name>`.
+# The certificates of the link to the admin site. Make them with
+#   blighted-admin relay-keys --relay-name <the relay's DNS name>
+# certificate_pem_path and private_key_pem_path are the relay's own certificate and key. The
+# relay takes a connection only from an admin site that shows exactly agent_certificate_pem_path.
 [agent_tls]
 certificate_pem_path = "local-data/admin-relay/relay.pem"
 private_key_pem_path = "local-data/admin-relay/relay-key.pem"

@@ -206,8 +206,14 @@ Every server reads its file in `config/`, and `--config <file>` picks another. A
 | `world-director` | `config/world-director.toml` | `NW_DIRECTOR_` |
 | `sim` | `config/sim.toml` | `NW_SIM_` |
 | `social` | `config/social.toml` | `NW_SOCIAL_` |
+| `voice-server` | `config/voice-server.toml` | `NW_VOICE_` |
+| `status-reporter` | `config/status-reporter.toml` | `NW_REPORTER_` |
 | `nw-testclient` | `config/nw-testclient.toml` | `NW_TESTCLIENT_` |
 | `blighted-admin` | `config/blighted-admin.toml` | `BLIGHTED_ADMIN_` |
+| `blighted-admin relay` | `config/blighted-admin-relay.toml` | `BLIGHTED_ADMIN_RELAY_` |
+| every server (client build) | `config/client-build.toml` | `NW_CLIENT_` |
+
+A comment above each key of these files says what the key does and which values it takes. [`config/servers.env.example`](config/servers.env.example) lists every environment variable that the servers read: the secrets, the content and game folders, and the debug switches. Copy it to `local-data/m3-test.env` and set your own values. A server that you start with systemd needs the file as its `EnvironmentFile=`.
 
 Secrets come from environment variables, never from the config file:
 

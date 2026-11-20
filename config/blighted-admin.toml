@@ -1,86 +1,130 @@
-# blighted-admin configuration (Blighted Emu admin tools, spec section 6). This file holds no secret.
-# Any key below can be overridden with BLIGHTED_ADMIN_<KEY>, nested keys joined by "__".
+# Settings of the admin site (blighted-admin serve): the world map, the capture viewer, the live
+# panel, the studio and, in server mode, the staff tools. docs/admin-site.md explains how to use
+# it.
+#
+# This file holds no secret. In server mode, the global database password and the Discord client
+# secret come from the environment variables that the [access] keys name. A GitHub token for the
+# to-do import comes from the variable that studio.github_token_env names. The live panel gives
+# its bot batches the NW_SECRET_ lines of live.testclient_env_file.
+# config/servers.env.example lists every variable the servers read.
+#
+# Any key here can also be set with an environment variable: BLIGHTED_ADMIN_ and the key in
+# capitals. Join the keys of a section with "__", for example BLIGHTED_ADMIN_LIVE__MAX_BOTS=100.
+#
+# The game data comes from the content folder: the environment variable NW_CONTENT_DIR,
+# local-data/content when it is not set. The site reads the merged world file and the content
+# bundle of the pinned build (`just content`), and the map tiles of `just map-tiles` from
+# <content folder>/map/. The capture viewer reads typeindex.json from the game install folder
+# that NW_GAME_DIR names.
 
-# The admin pages. In local mode ([access]) only a loopback address is allowed: there is no login.
+# The address of the admin pages. In local mode, only a loopback address (127.0.0.1) is
+# allowed, because local mode has no login.
 listen = "127.0.0.1:9180"
+# How much the site logs: "error", "warn", "info", "debug" or "trace", or a filter per module.
 log_filter = "info"
+# The file that names the game client build.
 client_build_config = "config/client-build.toml"
-# The content folder comes from NW_CONTENT_DIR, default local-data/content (README "Content
-# data"): the merged world file and content bundle of the pinned build (`just content`, in
-# <content folder>/<build>/), and the map tiles from `just map-tiles` (in <content folder>/map/).
+# The level that the map shows.
 level = "newworld_vitaeeterna"
-# Most spawn points one map request returns.
+# The most spawn points that one map request returns.
 max_spawns_per_request = 5000
 
+# The capture viewer.
 [captures]
-# Capture ledgers (`ledger.bin`) in any folder below this one.
+# The folder with the capture files (ledger.bin). The viewer looks in every folder below it.
 captures_dir = "local-data/captures"
-# The saved Discord threads that name the open-world sessions (with their original archives).
+# The saved Discord threads that name the open-world capture sessions.
 discord_dir = "local-data/captures/ow captures og"
-# The archive that local-data/azoth-catalog/archive.py saves from the Azoth catalog site.
+# The saved copy of the Azoth catalog site (made by local-data/azoth-catalog/archive.py).
 azoth_dir = "local-data/azoth-catalog"
-# The client type table, in the install folder (NW_GAME_DIR).
+# The game's message type table, in the game install folder (NW_GAME_DIR).
 type_index = "typeindex.json"
-# Aeternum-World class names (AGPL-3.0).
+# The class names of the Aeternum-World project (AGPL-3.0).
 type_names = "local-data/Aeternum-World-main/Catalog/uuid_to_class.json"
 
+# The live panel (/live): the running servers, players, mobs and bot batches. Leave this section
+# out and the live pages are off.
 [live]
-# The bus and the world of config/world-director.toml.
+# The message bus and the world of config/world-director.toml.
 nats_url = "nats://127.0.0.1:4222"
 world_id = "8d0f4c2e-0000-4000-8000-000000000001"
-# The metrics listeners of config/rep-gateway.toml, config/sim.toml and config/world-director.toml.
+# The metrics pages of config/rep-gateway.toml, config/sim.toml and config/world-director.toml.
 metrics_urls = ["http://127.0.0.1:9101/metrics", "http://127.0.0.1:9102/metrics", "http://127.0.0.1:9103/metrics"]
-# Time between scrapes and CPU samples, and between two states sent to the page (at least 100).
+# How often, in milliseconds, the panel reads the metrics and the CPU use.
 scrape_interval_ms = 1000
+# How often, in milliseconds, the panel sends a new state to the page, 100 or more.
 state_interval_ms = 250
-# Program names of the CPU tile.
+# The programs that the CPU tile shows.
 processes = ["sim", "rep-gateway", "world-director", "edge-http", "nw-testclient"]
-# Bot batches (`nw-testclient swarm` until stopped). The program and its config come from here,
-# never from the page. Only the NW_SECRET_* lines of the environment file reach a batch.
+# The bot batches. Each batch is `nw-testclient swarm`, running until you stop it. The program
+# and its settings file come only from here, never from the page. A batch gets only the
+# NW_SECRET_ lines of testclient_env_file.
 testclient_bin = "target/release/nw-testclient"
 testclient_config = "local-data/nw-testclient.toml"
 testclient_env_file = "local-data/m3-test.env"
-# Each batch adds its letters (a, b, ... z, ba, ...); character names hold letters only.
+# The start of the account and character names of the bots. Each batch adds its own letters
+# (a, b, ... z, ba, ...), because character names may hold letters only.
 bot_account_prefix = "adminbot"
 bot_character_prefix = "Adminbot"
-# Character prefixes of bots started outside this panel (config/nw-testclient.toml and the
-# local test runs); the live page marks players with these names, and the one above, as bots.
+# The start of the character names of bots that run outside this panel. The panel marks players
+# with these names, and with bot_character_prefix, as bots.
 other_bot_prefixes = ["Swarm", "Mobsb"]
+# The most bots the panel may run.
 max_bots = 10000
-# A sim silent for heartbeat_interval_ms x heartbeat_misses has left: the same two values as
-# config/world-director.toml.
+# A sim that is silent for heartbeat_interval_ms x heartbeat_misses has stopped. Use the same
+# values as config/world-director.toml.
 heartbeat_interval_ms = 1000
 heartbeat_misses = 3
 
+# The studio: the team's design files and the Apply button. Leave this section out and the
+# studio pages are off.
 [studio]
-# The team's design files and the control FIFO that `just live` (scripts/live-stack.sh) reads.
-# The design files are merged over the retail files of the content folder (`<build>/retail/`,
-# from `just bundle` and `just world`). Apply writes the merged files into the build folder of
-# the content folder, then restarts the sims and waits for them. Each sim reads the world files at
-# start; from a spinning disk with a cold cache that takes several minutes.
+# The team's design files. Apply merges them over the retail files of the content folder
+# (<build>/retail/, from `just bundle` and `just world`) and writes the result into the build
+# folder of the content folder.
 design_dir = "content"
+# The control pipe that `just live` (scripts/live-stack.sh) reads. Apply restarts the sims
+# through it.
 control_fifo = "local-data/logs/live/control"
+# The longest wait, in seconds, for every sim to start again after Apply. Each sim reads the
+# world files at its start. From a slow disk with a cold cache, that can take several minutes.
 restart_timeout_s = 600
+# The GitHub API that the to-do import reads issues from. Left out, it is
+# "https://api.github.com".
+# github_api_url = "https://api.github.com"
+# The name of the environment variable that holds a GitHub token. You need it only for the
+# issues of a private repository.
+# github_token_env = "NW_SECRET_GITHUB_TOKEN"
 
-[access]
-# "local": loopback only, no login, every right (a team member's own PC).
-# "server": HTTPS, logins with the game accounts, ranks and an audit log (the community server).
-# Server mode also needs (see README "Admin tools"):
+# Who can use the site.
+#   "local"   loopback only, no login, every right. Use it on a team member's own PC.
+#   "server"  HTTPS, login with the game accounts, staff ranks and an audit log. Use it on the
+#             community server. See "Admin tools" in README.md.
+# Server mode also needs these keys in this section:
 #   hosts = ["admin.example.org"]
 #   global_database = { url = "postgres://nw@127.0.0.1:5432/nw_global", max_connections = 5 }
 #   global_database_password_env = "NW_SECRET_GLOBAL_DATABASE_PASSWORD"
 #   tls = { certificate_pem_path = "...", private_key_pem_path = "..." }
-# Relay (optional, server mode only): remove listen and tls, and this site connects to a relay
-# on another machine (`blighted-admin relay`), which serves the browsers (README "Admin site on
-# another machine"):
+# hosts lists the names (and ports) the site is reached by. The site refuses a request for
+# another name.
+#
+# Relay (optional, server mode only). To serve the browsers from another machine, take out
+# listen and tls, and add the section below. This site then connects to the relay
+# (`blighted-admin relay`, config/blighted-admin-relay.toml). See "Admin site on another machine"
+# in README.md.
 #   [access.relay]
 #   address = "admin-relay.example.org:9191"
 #   server_name = "admin-relay.example.org"
 #   relay_certificate_pem_path = "local-data/admin-relay/relay.pem"
 #   certificate_pem_path = "local-data/admin-relay/agent.pem"
 #   private_key_pem_path = "local-data/admin-relay/agent-key.pem"
-# Discord login (optional, server mode only), with the Discord app of the game login:
+# address is the relay's agent_listen address. server_name is the name in the relay's
+# certificate. The site connects only to a relay that shows exactly relay_certificate_pem_path.
+# certificate_pem_path and private_key_pem_path are this site's own certificate and key.
+#
+# Discord login (optional, server mode only). Use the Discord app of the game login.
 #   [access.discord]
 #   client_id = "<Discord application id>"
 #   client_secret_env = "NW_SECRET_DISCORD_CLIENT_SECRET"
+[access]
 mode = "local"

@@ -1,48 +1,76 @@
-# rep-gateway configuration (M3 spec section 6, M4 spec section 6.3). This file holds no secret.
-# Secret: NW_SECRET_SIGNING_KEY, the same entry ticket key as edge-http.
-# Any key below can be overridden with NW_GATEWAY_<KEY>, nested keys joined by "__",
-# for example NW_GATEWAY_LIMITS__MAX_CONNECTIONS=500.
+# Settings of the world gateway (rep-gateway). The game client connects to the gateway over UDP
+# when the player enters the world. The gateway checks the player's entry ticket, keeps the
+# encrypted connection, and passes the game traffic between the client and the sims.
+#
+# This file holds no secret. The gateway reads the entry ticket key from the environment
+# variable NW_SECRET_SIGNING_KEY. It must be the same key as edge-http uses.
+# config/servers.env.example lists every variable the servers read.
+#
+# Any key here can also be set with an environment variable: NW_GATEWAY_ and the key in
+# capitals. Join the keys of a section with "__", for example
+# NW_GATEWAY_LIMITS__MAX_CONNECTIONS=500. Every key is required.
 
-# Public UDP listener. rep_address of this world's [[world]] in config/edge.toml must point here.
+# The public UDP address and port. Players must reach it. The rep_address of this world's
+# [[world]] in config/edge.toml must point here, with the public IP address of this machine.
 udp_listen = "0.0.0.0:33435"
-# The [[world]] id in config/edge.toml that this gateway serves.
+# The id of the world this gateway serves. It must be the id of a [[world]] in
+# config/edge.toml. The gateway refuses an entry ticket for another world.
 world_id = "8d0f4c2e-0000-4000-8000-000000000001"
-# Server version text in the registration response (the retail servers sent
-# "[RETAIL].Javelin.1.365.6031.<n>").
+# The server version text that the client writes in its log. Retail servers sent
+# "[RETAIL].Javelin.1.365.6031.<n>".
 server_version = "[BLIGHTED].Javelin.1.365.6031.6004151"
-# The gateway's own certificate and key. Make them once with
+# The gateway's own certificate and private key. Make them one time with
 #   rep-gateway generate-certificate
-# Keep them in local-data/, never in git. Test clients trust exactly this certificate.
+# Keep them in local-data/ and never put them in git.
 certificate_file = "local-data/rep-gateway/cert.pem"
 private_key_file = "local-data/rep-gateway/key.pem"
-# Valkey with the entry records of edge-http.
+# The Valkey of edge-http, where edge-http writes the entry tickets.
 valkey_url = "redis://127.0.0.1:6379"
-# Prometheus metrics. Keep this on an internal address.
+# The address of the Prometheus metrics page. Keep it on an address that only your servers can
+# reach.
 metrics_listen = "127.0.0.1:9101"
-# DTLS MTU in bytes.
+# The largest encrypted packet, in bytes, from 576 to 1500. 1200 fits through almost every
+# network. Make it smaller only if players on a VPN or tunnel cannot connect.
 mtu = 1200
+# How much the gateway logs: "error", "warn", "info", "debug" or "trace", or a filter per
+# module, for example "info,rep_gateway=debug".
 log_filter = "info"
-# This gateway's id in bus subjects.
+# The name of this gateway on the message bus.
 gateway_id = "gw-1"
-# NATS. Keep it on an internal address.
+# The NATS message bus that links the servers. Keep it on an address that only your servers
+# can reach.
 nats_url = "nats://127.0.0.1:4222"
-# Longest wait for world-director to place a character; below limits.registration_timeout_ms
-# and above admit_timeout_ms of config/world-director.toml.
+# The longest wait, in milliseconds, for the world director to place a player on a sim. Keep it
+# above admit_timeout_ms of config/world-director.toml and below
+# limits.registration_timeout_ms.
 join_timeout_ms = 5000
+# How often, in milliseconds, the gateway tells the other servers that it is alive.
 heartbeat_interval_ms = 1000
-# Workers on udp_listen, one per core you give the gateway (M5 load spec section 3). More than one
-# needs SO_REUSEPORT (Linux). The [limits] counts are shared out over the workers.
+# The number of worker threads on udp_listen. Use one for each CPU core you give the gateway.
+# More than one needs Linux (SO_REUSEPORT). The counts in [limits] are shared out over the
+# workers.
 workers = 1
-# Receive and send buffer of each socket. Linux caps it at net.core.rmem_max / wmem_max.
+# The receive and send buffer of each socket, in bytes. Linux caps it at net.core.rmem_max and
+# net.core.wmem_max. Raise those with sysctl if you raise this value.
 udp_buffer_bytes = 4194304
-# Most resumes (players of a lost sim) that wait for world-director at one time.
+# The most players of a lost sim that may wait at one time for the director to move them to
+# another sim.
 max_resumes_in_flight = 64
 
+# Limits that keep the gateway safe from too much traffic.
 [limits]
+# The most players connected to this gateway at one time.
 max_connections = 2000
+# The most connections that are in the middle of the encryption handshake at one time.
 max_handshakes = 256
+# The most new connections a second from one IP address (for IPv6, from one /64 network).
 handshakes_per_ip_per_second = 5
+# The longest time, in milliseconds, from a client's first packet to its finished login. A
+# client that is slower than this is dropped.
 registration_timeout_ms = 10000
+# A connection with no packet for this many milliseconds is dropped.
 silence_timeout_ms = 10000
+# The most packets a second that one connection may send.
 datagrams_per_connection_per_second = 400
+# How often, in milliseconds, the gateway pings each client.
 ping_interval_ms = 1000
