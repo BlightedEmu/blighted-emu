@@ -733,6 +733,22 @@
             {
               "check": "A walking body stands on no floor the level lacks under a too short boom, and town stations' floors stand in the body's ground (tests only, 2026-11-20): towns against a retail client trace, heights off by more than 0.3 m 5.06 to 4.49 % of records.",
               "proof": "tests"
+            },
+            {
+              "check": "A gun's presses during its reload show no new shot (tests only, 2026-11-20): in 1,195 retail ledgers, 16 of 17 presses before the reload's `18=1716` step fired nothing, and a later press waited and shot 1,734 ms after the shot before (86 shots, 267 ms after the aim came back); a fresh aim shoots 267 ms after its start (71 aims), the blunderbuss's 133 ms; with the right-click held during a hip shot, the gun's aim comes up 2,249 ms after it (16 cases), the bow's and the blunderbuss's at the hip shot's end, and the hip shot's reload still plays. Live 2026-11-20: a player pressing every 200 ms through the reload showed the others a new shot each time.",
+              "proof": "tests"
+            },
+            {
+              "check": "A back key shows a back move, never a forward run (tests only, 2026-11-20): a back key during a stop sent the forward start and 1.37 s later its run, so the legs ran forward while the body backed up (live, 148 of 322 back-key records). Retail sends the back move's sequence in the stop's state (of 892 starts and 179 runs while other players moved back, 25 and 3). Keys path; a controller's stick pulled back runs toward the stick, and its block walk was right already.",
+              "proof": "tests"
+            },
+            {
+              "check": "Keys let go during an attack send no stop, and the stand follows the attack (tests only, 2026-11-20): a stop 64 ms after a press start replaced it, and the others saw the body slide 1.2 m with no legs (6 of 28 live stops within 1.1 s of an attack; retail 2 of 191, and none after 536 other players' attack starts). A stand the client names while the body moves goes on in the move in the next record (live: a stand played 848 ms while a controller player moved).",
+              "proof": "tests"
+            },
+            {
+              "check": "Open (2026-11-20): a controller player's states reach the server unevenly (25 % of gaps over 45 ms, keys 3.6 %), and the state stamp takes the arrival time; whether that makes its moves look jerky to others is Unknown. A body that moved about 1 m with no key after a heavy attack (cause Unknown).",
+              "proof": "none"
             }
           ]
         },
@@ -1106,12 +1122,16 @@
               "proof": "tests"
             },
             {
-              "check": "An aimed bow shot draws on the press and shoots on the release, never on a hold, and a release within 530 ms of the last shot shoots when they end (live 2026-11-17: all 7 bow shots after the deploy hit the boar; retail: 4,885 bow shots of 42 ledgers). Live before the fix, the hold shot 0.23 s after the press and the next presses were dropped for 1.8 s.",
+              "check": "An aimed bow shot draws on the press and shoots on the release, never on a hold (live 2026-11-17: all 7 bow shots after the deploy hit the boar; retail: 4,885 bow shots of 42 ledgers). Live before the fix, the hold shot 0.23 s after the press and the next presses were dropped for 1.8 s.",
               "proof": "live"
             },
             {
               "check": "The drawn bow shot of a long hold (retail: 125 m/s after about 700 ms, its own damage row) is not built: our data gives the aim's charged shot the plain shot's row.",
               "proof": "none"
+            },
+            {
+              "check": "The server fires the bow and gun shots the other players see, by one rule (tests only, 2026-11-20): the animation side decides each shot from retail's timing, and the server fires the same shot with its damage and projectile. Live 2026-11-20 before the fix: a gun's aimed shot fired every 530 ms of fast presses (22 in 11 s) while the client showed one shot and its reload, and a bow's hip shots fired no arrow (a hold of 167 ms swung `Bow_Gunbutt`, and that swing held off the next hip shots). Retail: 29 bow hip presses held 167 to 1,000 ms each fired the hip shot and no swing; aimed bow shots came no sooner than 1,049 ms apart (p5 of 3,308 shots), not 530 ms as the old rule had it.",
+              "proof": "tests"
             }
           ]
         },
@@ -3746,7 +3766,7 @@
   ],
   "nextSteps": [
     "**Player body: key physics first (2026-11-19 study).** The server guesses each body from the client camera, and the camera boom changes with no key the server sees. A test with camera corrections across the view only made the live error larger (90th percentile 2.9 to 17 m), so the key physics must improve first, measured cause by cause with the fresh-start replay: attack and ability motion and the move lock in attacks, the dodge distance from the gear's equip load, slope speed, walls our collision has and the game does not, and ledge climbs. Then the camera's correction along the view can go, and the own states can carry the input counter as retail's do.\n\nLive check of this round: the bow abilities and the crosshair aim on a boar, with the client trace on.",
-    "**Other players: live check of the ninth round (2026-11-19, tests only), then the unreliable bundles.** First play as now: dodge rolls (keyboard and controller), jumps and falls (no floating), crouch and prone, bow and gun shots aimed and from the hip, the bow's full draw, blunderbuss re-fire and reload, blocks, a spear chain on a boar (the swings must hit from about 2 m, and the boar must reel shorter for light hits than for heavy ones). Then turn the reliable bundles off on the VM (NW_RELIABLE_BUNDLES in the stack script) and check with the real client that the other player stays visible and moves without the 230 ms holds; the client trace (`blighted-emu-tools`, delay trace) measures the viewer's delay. The two-bot `pair` test passes with and without reliable bundles on the PC.\n\nStill open: the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
+    "**Other players: live check of the 2026-11-20 round (tests only).** Two players, keyboard and controller: a gun pressed fast through its reload (one shot per reload, aimed and from the hip, and a hip shot then an aim), a bow's hip shots held long and short (arrows fly, no melee swing), walking and running backward with keys, keys let go during an attack (no slide), and walk starts. Then the earlier list: dodge rolls, jumps and falls, crouch and prone, the bow's full draw, blunderbuss re-fire and reload, blocks, a spear chain on a boar.\n\nStill open: the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Realm data pack version 1:** share the zip and `SHA256SUMS` from `local-data/realm-pack/v1/` with the community, and pin the post.",
@@ -3831,6 +3851,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Other players (2026-11-20, tests only): a gun shows one shot per reload, a bow's hip shots fire arrows, the server fires the shots the others see, back keys back up, and keys let go in an attack send no stop.",
     "Other players (2026-11-20, tests only): legs run, rolls and attacks carry retail's flags, riders and interactions show; town station floors stand in the body's ground; the 8 m zoom.",
     "Dungeon doors (2026-11-19, tests only): the doors of Barnacles and Black Powder, The Ennead, Isle of Night, Hive of Gorgons and the Winter Rune Forge raid open their game mode; the admin teleport list shows them.",
     "Other players (2026-11-19, tests only): upper-body animations play through, stamps stay near the send time, runs start and jumps hold as retail's, a resting body comes back onto the floor; abilities' dashes move the body; the bow's aims clear their tag groups.",
@@ -4079,5 +4100,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-20",
-  "lastCommit": "ae36a9f7"
+  "lastCommit": "56c4ff95"
 }
