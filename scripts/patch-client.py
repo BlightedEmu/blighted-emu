@@ -681,23 +681,32 @@ def main() -> None:
     )
     arguments = parser.parse_args()
 
+    skip_lua = arguments.skip_lua
+    if not skip_lua and sys.platform == "win32":
+        print(
+            "note: Lua pak patch skipped on Windows (its Oodle helper is Linux only); "
+            "the four exe-side account-link patches are still applied",
+            file=sys.stderr,
+        )
+        skip_lua = True
+
     official = os.path.join(arguments.bin64, OFFICIAL_NAME)
     backup = os.path.join(arguments.bin64, BACKUP_NAME)
     patched = os.path.join(arguments.bin64, PATCHED_NAME)
 
     if arguments.revert:
         revert(patched)
-        if not arguments.skip_lua:
+        if not skip_lua:
             run_lua_patch(arguments.bin64, "--revert")
         return
     if not os.path.isfile(official):
         sys.exit(f"error: not found: {official}")
     if arguments.verify:
         exe_result = verify_patched(official, patched, arguments.aws_proxy)
-        lua_result = 0 if arguments.skip_lua else run_lua_patch(arguments.bin64, "--verify")
+        lua_result = 0 if skip_lua else run_lua_patch(arguments.bin64, "--verify")
         sys.exit(exe_result or lua_result)
     make_patched(official, backup, patched, arguments.aws_proxy)
-    if not arguments.skip_lua:
+    if not skip_lua:
         lua_result = run_lua_patch(arguments.bin64, "")
         if lua_result != 0:
             sys.exit(lua_result)
