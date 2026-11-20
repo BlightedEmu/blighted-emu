@@ -145,8 +145,8 @@ impl EntitySlots {
     }
 
     /// Ties `interest` to `entity` without a spawn card: type 164 names the local player's
-    /// entity, and slot [`LOCAL_PLAYER_INTEREST`] holds that player even when the card knob is
-    /// off (local-player-check note).
+    /// entity, and slot [`LOCAL_PLAYER_INTEREST`] holds that player before its card is read
+    /// (local-player-check note).
     pub fn bind(&mut self, interest: u16, entity: u64) {
         self.entities.insert(interest, entity);
     }

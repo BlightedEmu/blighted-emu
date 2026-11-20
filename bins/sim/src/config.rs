@@ -544,7 +544,6 @@ impl SimConfig {
             handoff_retry_ms: self.handoff_retry_ms,
             ghost_ttl_ms: self.ghost_ttl_ms,
             tick_threads: self.tick_threads(),
-            local_player_card: crate::world::local_player_card(),
             level: self.level_spec(instances)?,
             ocean_level_m,
             instance_role: self.role == SimRole::Instance,

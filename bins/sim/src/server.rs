@@ -3009,16 +3009,13 @@ mod tests {
 
     fn settings(world_id: Uuid, name: &str) -> LoopSettings {
         let config = committed();
-        let mut world = config
+        let world = config
             .world_settings(
                 bounds(),
                 TEST_OCEAN_LEVEL_M,
                 &nw_content::instances::InstanceCatalog::default(),
             )
             .expect("world settings");
-        // The live path under test: own player card on, other entities held until the client
-        // sends movement (local-player-check note).
-        world.local_player_card = true;
         LoopSettings {
             sim_id: id(name),
             world_id,

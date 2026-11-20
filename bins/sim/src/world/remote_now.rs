@@ -63,19 +63,11 @@ impl SimWorld {
         if sources.is_empty() || positions_only() {
             return Ok(Vec::new());
         }
-        let local_player_card = self.settings.local_player_card;
         let home_world = *self.settings.world_id.as_bytes();
         let mut outgoing = Vec::new();
         let mut query = self.world.query::<(&mut Player, &Body, &Vitals)>();
         for (mut viewer, body, vitals) in query.iter_mut(&mut self.world) {
-            if viewer.frozen
-                || others_held(
-                    local_player_card,
-                    vitals.spawned,
-                    viewer.others_due_ms,
-                    now_ms,
-                )
-            {
+            if viewer.frozen || others_held(vitals.spawned, viewer.others_due_ms, now_ms) {
                 continue;
             }
             let own = viewer.number;

@@ -444,17 +444,6 @@ fn reliable_bundles() -> bool {
     *RELIABLE.get_or_init(|| std::env::var_os("NW_RELIABLE_BUNDLES").is_some())
 }
 
-/// Work-in-progress knob (env `NW_LOCAL_PLAYER_CARD`): send the client its own player as a spawn
-/// card (player prefab, slot 1) with a connected type-3935 state and empty states of the other
-/// player components (local-player-check note). Off by default until a live InGame check passes.
-/// Overnight 2026-09-10: do not make this return true. Without the card the client loads the
-/// level and waits at `WaitingForPlayerSpawn`. Read once.
-pub(crate) fn local_player_card() -> bool {
-    use std::sync::OnceLock;
-    static CARD: OnceLock<bool> = OnceLock::new();
-    *CARD.get_or_init(|| std::env::var_os("NW_LOCAL_PLAYER_CARD").is_some())
-}
-
 /// Debug bisection knob (env `NW_POSITIONS_ONLY`): put only the own player's group in the
 /// bundles and omit every other entity, to test the local-player spawn with nothing else in the
 /// bundles. Off by default. Read once.
@@ -493,8 +482,6 @@ pub struct WorldSettings {
     pub ghost_ttl_ms: u64,
     /// Threads of the bundle step.
     pub tick_threads: usize,
-    /// Whether a client gets its own player as a spawn card ([`local_player_card`]).
-    pub local_player_card: bool,
     /// The level this sim runs. The tutorial is a set of private instances: it hands players
     /// on only at its exit, into the open world (new-player-start note).
     pub level: LevelSpec,
@@ -5027,7 +5014,6 @@ impl SimWorld {
             wars: &self.wars,
             war_unix_ms: self.unix_ms(),
             replicas,
-            local_player_card: self.settings.local_player_card,
             world_id: self.settings.world_id,
             now_ms,
             server_time,
@@ -5711,7 +5697,6 @@ struct Neighbourhood<'a> {
     war_unix_ms: u64,
     /// Every player as the players who see it get it this tick.
     replicas: HashMap<u64, Replica>,
-    local_player_card: bool,
     /// The world this sim serves: every player's home world.
     world_id: Uuid,
     now_ms: u64,
@@ -5753,16 +5738,11 @@ impl Neighbourhood<'_> {
             if just_in_game {
                 player.others_due_ms = Some(self.now_ms.saturating_add(OTHER_ENTITY_SETTLE_MS));
             }
-            let hold_others = others_held(
-                self.local_player_card,
-                vitals.spawned,
-                player.others_due_ms,
-                self.now_ms,
-            );
+            let hold_others = others_held(vitals.spawned, player.others_due_ms, self.now_ms);
             // The first InGame bundle stays own-only. Live 2026-09-24 dumped
             // statics and nodes 33 ms after InGame and failed StateReplication
             // 6077. Bags and nodes go on later ticks; mobs wait the settle.
-            let hold_world = self.local_player_card && (!vitals.spawned || just_in_game);
+            let hold_world = !vitals.spawned || just_in_game;
             let mut numbers: Vec<u64> = if positions_only() || hold_others {
                 Vec::new()
             } else {
@@ -5851,16 +5831,14 @@ impl Neighbourhood<'_> {
             // spawned and on a level change, never after the spawn
             // (newchar-retail-2026-09-18: 27 cards in the 9 s before the spawn, 6 at the
             // tutorial exit, none in the 17.5 min after).
-            let first_card = !player.own_card_sent
-                && self.local_player_card
-                && self.now_ms >= player.own_card_due_ms;
+            let first_card = !player.own_card_sent && self.now_ms >= player.own_card_due_ms;
             if first_card {
                 player.own_card_sent = true;
                 player.own_spawned_ms = Some(self.server_time);
                 player.life_ms = self.server_time;
                 player.slayer.spawned();
             }
-            let own_sent = first_card || vitals.spawned || !self.local_player_card;
+            let own_sent = first_card || vitals.spawned;
             let own_card = if first_card {
                 OwnCard::Spawn
             } else {
@@ -6556,17 +6534,11 @@ impl Neighbourhood<'_> {
     }
 }
 
-/// Whether a player's client gets no other entities yet: with the own spawn card
-/// (`local_player_card`), until its client spawned (`spawned`) and for the settle after
-/// ([`Player::others_due_ms`]) at `now_ms`.
-fn others_held(
-    local_player_card: bool,
-    spawned: bool,
-    others_due_ms: Option<u64>,
-    now_ms: u64,
-) -> bool {
+/// Whether a player's client gets no other entities yet: until its client spawned (`spawned`)
+/// from its own spawn card, and for the settle after ([`Player::others_due_ms`]) at `now_ms`.
+fn others_held(spawned: bool, others_due_ms: Option<u64>, now_ms: u64) -> bool {
     let settling = others_due_ms.is_some_and(|due| due > 0 && now_ms < due);
-    local_player_card && (!spawned || settling)
+    !spawned || settling
 }
 
 /// The bundle envelopes of `groups` for `player`, numbered on from its last bundle
@@ -6932,7 +6904,6 @@ mod tests {
             handoff_retry_ms: RETRY_MS,
             ghost_ttl_ms: GHOST_TTL_MS,
             tick_threads: 1,
-            local_player_card: true,
             level: OPEN_WORLD_LEVEL,
             ocean_level_m: OCEAN_LEVEL_M,
             instance_role: false,
@@ -13482,29 +13453,29 @@ mod tests {
     }
 
     #[test]
-    fn without_the_card_knob_the_own_player_is_its_position_every_tick() {
-        let mut world = world_of(
-            "sim-a",
-            WorldSettings {
-                local_player_card: false,
-                ..settings(MANY, MAX_PLAYERS)
-            },
-        );
+    fn a_login_gets_no_bundle_before_its_own_card_and_then_the_card() {
+        let mut world = world_of("sim-a", settings(MANY, MAX_PLAYERS));
         world
             .admit(&admit_at(1, 0.0, true), NOW, SERVER_TIME)
             .expect("admit");
-        for step in 0..2 {
-            let messages = tick(&mut world, NOW + 33 * step).messages;
-            let bundle = bundle_of(&messages, &connection(1)).expect("bundle");
-            let own: Vec<bool> = SlotRead::of(&bundle)
-                .expect("read")
-                .updates
-                .into_iter()
-                .filter(SlotUpdate::is_local_player)
-                .map(|update| update.card.is_some())
-                .collect();
-            assert_eq!(own, vec![false], "no own card, the position every tick");
-        }
+        let early = tick(&mut world, NOW).messages;
+        assert!(
+            bundle_of(&early, &connection(1)).is_none(),
+            "a bundle before LevelInfoChanged is dropped as one of a previous ClientContext"
+        );
+        let messages = tick(&mut world, NOW + OWN_CARD_DELAY_MS).messages;
+        let bundle = bundle_of(&messages, &connection(1)).expect("bundle");
+        let own_cards = SlotRead::of(&bundle)
+            .expect("read")
+            .updates
+            .into_iter()
+            .filter(SlotUpdate::is_local_player)
+            .filter(|update| update.card.is_some())
+            .count();
+        assert_eq!(
+            own_cards, 1,
+            "without the own card the client waits at WaitingForPlayerSpawn"
+        );
     }
 
     #[test]
