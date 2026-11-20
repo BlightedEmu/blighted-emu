@@ -2687,6 +2687,10 @@
               "proof": "tests"
             },
             {
+              "check": "Every entrance door of the open world opens a game mode (tests only, 2026-11-19): the door's name names the mode by its id, then by its map; a raid door drops the `Raid` prefix and a door with no map number takes the mode of its kind. A door whose name names no mode opens the mode of the dungeon area it stands in. Barnacles and Black Powder, The Ennead, Isle of Night, Hive of Gorgons and the Winter Rune Forge raid door now open, and the admin teleport list shows them.",
+              "proof": "tests"
+            },
+            {
               "check": "The director starts instance sims from its config (`[instances.launch]`).",
               "proof": "tests"
             },
@@ -3811,6 +3815,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Dungeon doors (2026-11-19, tests only): the doors of Barnacles and Black Powder, The Ennead, Isle of Night, Hive of Gorgons and the Winter Rune Forge raid open their game mode; the admin teleport list shows them.",
     "Other players (2026-11-19, tests only): upper-body animations play through, stamps stay near the send time, runs start and jumps hold as retail's, a resting body comes back onto the floor; abilities' dashes move the body; the bow's aims clear their tag groups.",
     "Bow (2026-11-19, tests only): Penetrating Shot, Splinter Shot, Rain of Arrows and Poison Shot fire; arrows aim at the crosshair point; an ability's aim no longer slides the body.",
     "Admin teleport (2026-11-19, tests only): the GM page and the Live page's GM tools list every settlement, outpost, fort, spirit shrine, expedition, raid and trial entrance of the world by region, with names from the game data; a click sends the picked player there. Each other player has Bring here and Go to, and Bring everyone here moves every other player (not bots) to the picked one.",
@@ -4057,5 +4062,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-19",
-  "lastCommit": "b4e6da37"
+  "lastCommit": "9fd5dfe4"
 }
