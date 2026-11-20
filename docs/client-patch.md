@@ -22,8 +22,9 @@ We never change the official `NewWorld.exe`. We make a separate patched copy,
 - Our launcher runs `BlightedNewWorld.exe` directly. `NewWorldLauncher.exe` starts Easy
   Anti-Cheat, so Easy Anti-Cheat never runs.
 
-The copy has five changes. A sixth change is added with `--aws-proxy`. No change alters the
-file length.
+The copy has six changes. A seventh change is added with `--aws-proxy`. No change alters the
+file length. The tool then runs `scripts/patch-client-lua.py` on the client's `assets/` folder
+(next to `Bin64/`) for the [Lua pop-up patch](#lua-pop-up-patch); `--skip-lua` leaves it out.
 
 ## First change: certificate bypass
 
@@ -195,7 +196,38 @@ The tool finds the check by its byte signature (`SHADOW_ACCOUNT_CHECK`) and chan
 is a shadow account then, and the pop-up does not open. The only code reference to the check is
 its vtable slot; Unknown: which other scripts ask `GetIsShadowAccount`.
 
-## Sixth change: AWS proxy (`--aws-proxy`)
+## Sixth change: Amazon account link gates
+
+The landing screen script also reads three console variables that the server can reach:
+`javelin.enable-agid-account-linking` (a bool that must be true for the pop-up to open),
+`javelin.agid-link-modal-cooldown-secs` (the time between shows) and
+`javelin.agid-link-modal-button-cooldown` (the cooldown of the Later button). The tool changes
+the bool's creation default to 0 and the two cooldown defaults to the largest signed 32-bit
+integer (`0x7FFFFFFF` seconds, about 68 years). The pop-up is then off by default and never
+leaves its cooldown, also if the shadow account answer of the fifth change does not hold. The
+tool finds each site by its variable creation shape (`LEA RDX,[name]` / `LEA RCX,[RBP+var]` /
+`CALL` / `MOV R8B,imm8` or `MOV R8D,imm32` / `LEA RDX,[RBP+var]`), with the name's one copy in
+`.rdata` as the anchor, as for the typed chat.
+
+The launcher also applies the fifth change itself before each play, on Windows and on Linux
+(`bins/launcher/src/patch_client.rs`, `apply_shadow_patch`), so a copy that an older tool made
+still has the pop-up off. Keep its signature bytes the same as `SHADOW_ACCOUNT_CHECK` in the
+tool.
+
+## Lua pop-up patch
+
+`scripts/patch-client-lua.py <assets-directory>` changes `lyshineui/main menu/landingscreenv2.luac`
+in `assets/DataStrm-part3.pak`: the bodies of the closures `TryShowAGIDLink` and
+`ShowAGIDLinkModal` become one `RETURN 0 1` instruction, so the pop-up cannot open from Lua. The
+pak is a ZIP archive. The tool writes the changed entry back stored (method 0, as hundreds of
+entries of that pak already are), so it needs no Oodle encoder; it reads the Oodle Kraken entry
+with the `oodle-tool` helper (`--oodle-tool`, else `$NW_OODLE_TOOL`, the file next to the script,
+then `~/nw-re/out-charselect/q2-icon/oodle-tool/target/release/oodle-tool`). The changed copy is
+`DataStrm-part3.blighted.pak` next to the official pak; the first run backs the official pak up
+to `DataStrm-part3.pak.orig`. `--verify` checks the copy, `--revert` deletes it. Tests:
+`scripts/patch-client-lua.test.sh`.
+
+## Seventh change: AWS proxy (`--aws-proxy`)
 
 This change is for Windows only. Windows has no `bwrap` sandbox to give the game process a
 private hosts file and trust file.
@@ -449,7 +481,7 @@ When `public_https_port` is not 443:
 When `public_ping_port` is not 80, the launcher's proxy sends the region ping to it.
 
 The launcher runs the loopback proxy on Windows and on Linux, but only a Windows client can use
-it (sixth change). A Linux client uses the private hosts file, which leads to ports 443 and 80
+it (seventh change). A Linux client uses the private hosts file, which leads to ports 443 and 80
 only, so point 3 above is needed for Linux players.
 
 Unknown: the game client reads a link with a port (`game.example.org:8443/s/<session>`). The
@@ -512,6 +544,9 @@ You need a Windows PC with Steam and New World installed, and the project launch
 - `scripts/patch-client.py`: makes, checks and reverts the patched copy (with `--aws-proxy`
   for Windows).
 - `scripts/patch-client.test.sh`: tests the tool on a synthetic exe (`just test-scripts`).
+- `scripts/patch-client-lua.py`: makes, checks and reverts the Lua pop-up patch of the client's
+  pak; `scripts/patch-client-lua.test.sh` tests it on a synthetic pak (`just test-scripts`).
+- `bins/launcher/src/patch_client.rs`: the fifth change, applied by the launcher before each play.
 - `bins/launcher/src/aws_proxy.rs`: the loopback proxy (Windows, and Linux with a client patched
   with `--aws-proxy`).
 - `bins/launcher/testdata/proxy-tls.crt` and `proxy-tls-key.pem`: the proxy's own
@@ -521,3 +556,5 @@ You need a Windows PC with Steam and New World installed, and the project launch
 - `<Bin64>/NewWorld.exe`: the official client, never changed.
 - `<Bin64>/NewWorld.exe.orig`: the one-time backup of the official client.
 - `<Bin64>/BlightedNewWorld.exe`: the patched client that our launcher runs.
+- `<assets>/DataStrm-part3.blighted.pak` and `DataStrm-part3.pak.orig`: the Lua-patched pak copy
+  and the one-time backup of the official pak.

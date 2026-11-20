@@ -3,8 +3,8 @@
 """Make the patched copy of the New World client that the emulator needs.
 
 This tool writes a patched copy, ``BlightedNewWorld.exe``, next to the official
-``NewWorld.exe`` (which it never modifies). The copy has five changes, and a
-sixth one with ``--aws-proxy``:
+``NewWorld.exe`` (which it never modifies). The copy has six changes, and a
+seventh one with ``--aws-proxy``:
 
 1. Certificate bypass. The real client refuses the emulator's self-signed
    game-server certificate. The tool finds OpenSSL ``SSL_CTX_set_verify`` by a
@@ -43,7 +43,20 @@ sixth one with ``--aws-proxy``:
    tool makes that ``MOV AL,1`` a ``MOV AL,0``, so no account is a shadow
    account. The check is found by a byte signature.
 
-6. AWS proxy (``--aws-proxy``, for Windows only: Wine's WinHTTP cannot use the
+6. Amazon account link gates. The character-select Lua also reads three
+   console variables that the server can reach: ``javelin.enable-agid-account-
+   linking`` (a bool that must be true for the pop-up to fire),
+   ``javelin.agid-link-modal-cooldown-secs`` (the between-shows cooldown)
+   and ``javelin.agid-link-modal-button-cooldown`` (the Later-button
+   cooldown). The tool makes the bool's creation default 0, and the two
+   cooldown defaults the largest signed 32-bit integer (``0x7FFFFFFF``
+   seconds, about 68 years), so the pop-up is off by default and never
+   leaves its cooldown even when the shadow-account answer somehow slips
+   through. Each site is found by a variable-creation signature: a shape
+   the same as the typed-chat one, with the name's single occurrence in
+   .rdata as the anchor.
+
+7. AWS proxy (``--aws-proxy``, for Windows only: Wine's WinHTTP cannot use the
    proxy, so a Linux client reaches these names through the launcher's private
    hosts file instead; docs/client-patch.md). The remote-config (S3), analytics
    (Kinesis), analytics-credentials (STS) and news (CMS) clients call fixed
@@ -73,6 +86,7 @@ import os
 import re
 import shutil
 import struct
+import subprocess
 import sys
 from typing import NoReturn
 
@@ -219,6 +233,35 @@ SHADOW_ACCOUNT_CHECK = re.compile(
 )
 NOT_SHADOW = b"\x00"
 
+# Amazon account-link console variables. The character-select Lua
+# (lyshineui/main menu/landingscreenv2.luac, TryShowAGIDLink) only opens the
+# Amazon Games iD link pop-up when ``javelin.enable-agid-account-linking`` is
+# true and the between-shows and Later-button cooldowns have elapsed. Each of
+# the three variables is created in the client with the same shape: LEA RDX,
+# [name] / LEA RCX,[RBP+var] / CALL / MOV R8?,<default> / LEA RDX,[RBP+var].
+# The bool uses MOV R8B,imm8; the two int32 cooldowns use MOV R8D,imm32.
+AGID_ENABLE_VARIABLE = b"javelin.enable-agid-account-linking"
+AGID_COOLDOWN_SECS_VARIABLE = b"javelin.agid-link-modal-cooldown-secs"
+AGID_BUTTON_COOLDOWN_VARIABLE = b"javelin.agid-link-modal-button-cooldown"
+MOV_R8D_IMM32 = bytes.fromhex("41b8")
+INT32_LEN = 4
+# The largest signed 32-bit integer, about 68 years in seconds. A cooldown
+# this long never elapses while the client is running, so once a cooldown
+# starts (if it ever starts) the Lua gate never clears again.
+COOLDOWN_FOREVER = struct.pack("<I", 0x7FFFFFFF)
+VARIABLE_CREATION_INT32 = re.compile(
+    re.escape(LEA_RDX_RIP)
+    + b"(?P<name>.{4})"
+    + re.escape(bytes.fromhex("488d8d"))
+    + b"(?P<variable>.{4})"
+    + b"\xe8.{4}"
+    + re.escape(MOV_R8D_IMM32)
+    + b"(?P<default>.{4})"
+    + re.escape(bytes.fromhex("488d95"))
+    + b"(?P=variable)",
+    re.DOTALL,
+)
+
 # AWS proxy patch (docs/re/2026-09-20-windows-launcher-network.md). The launcher's loopback proxy
 # listens here; bins/launcher/src/aws_proxy.rs holds the same port.
 AWS_PROXY_HOST = b"127.0.0.1"
@@ -286,6 +329,13 @@ POINTER_LEN = 8
 OFFICIAL_NAME = "NewWorld.exe"
 BACKUP_NAME = "NewWorld.exe.orig"
 PATCHED_NAME = "BlightedNewWorld.exe"
+
+# The Lua pak patch tool runs as a sibling script against the client's assets/
+# directory, which sits next to Bin64/. It turns the TryShowAGIDLink closure
+# in landingscreenv2.luac into an early return so the Amazon account-link
+# pop-up cannot open from Lua even if a native gate changes.
+LUA_PATCH_SCRIPT = "patch-client-lua.py"
+ASSETS_DIR_NAME = "assets"
 
 SEE_DOC = "see docs/client-patch.md"
 
@@ -478,6 +528,33 @@ def plan_account_link(data: bytes) -> "list[tuple[str, int, bytes]]":
     return [("account link", site, NOT_SHADOW)]
 
 
+def plan_account_link_gates(data: bytes) -> "list[tuple[str, int, bytes]]":
+    """The edits that close the Lua gates for the Amazon account link pop-up: the
+    enable bool's default becomes 0, and the two cooldown defaults become
+    ``0x7FFFFFFF`` seconds. The shadow-account byte patch is the first gate; these
+    are a second, independent line of defense in the Lua layer."""
+    enable = default_site(
+        data, AGID_ENABLE_VARIABLE, VARIABLE_CREATION, "AGID link enable"
+    )
+    cooldown = default_site(
+        data,
+        AGID_COOLDOWN_SECS_VARIABLE,
+        VARIABLE_CREATION_INT32,
+        "AGID link cooldown secs",
+    )
+    button = default_site(
+        data,
+        AGID_BUTTON_COOLDOWN_VARIABLE,
+        VARIABLE_CREATION_INT32,
+        "AGID link button cooldown",
+    )
+    return [
+        ("account link enable", enable, DEFAULT_OFF),
+        ("account link cooldown secs", cooldown, COOLDOWN_FOREVER),
+        ("account link button cooldown", button, COOLDOWN_FOREVER),
+    ]
+
+
 def plan_patches(data: bytes, aws_proxy: bool) -> "list[tuple[str, int, bytes]]":
     """The (name, file offset, new bytes) edits that make the patched copy from `data`; with
     `aws_proxy`, also the AWS proxy edits."""
@@ -491,6 +568,7 @@ def plan_patches(data: bytes, aws_proxy: bool) -> "list[tuple[str, int, bytes]]"
         *plan_offline_ticket(data),
         *plan_typed_chat(data),
         *plan_account_link(data),
+        *plan_account_link_gates(data),
     ]
     return edits + plan_aws_proxy(data) if aws_proxy else edits
 
@@ -557,6 +635,26 @@ def revert(patched: str) -> None:
         print("nothing to remove")
 
 
+def assets_dir(bin64: str) -> str:
+    """The `assets` directory next to a `Bin64` directory, where the Lua pak lives."""
+    return os.path.join(os.path.dirname(os.path.abspath(bin64)), ASSETS_DIR_NAME)
+
+
+def lua_patch_argv(bin64: str, mode: str) -> "list[str]":
+    """The argv for the Lua pak patch tool in mode `""`, `"--verify"` or `"--revert"`."""
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), LUA_PATCH_SCRIPT)
+    argv = [sys.executable, script, assets_dir(bin64)]
+    if mode:
+        argv.append(mode)
+    return argv
+
+
+def run_lua_patch(bin64: str, mode: str) -> int:
+    """Run the Lua pak patch tool in mode `""`, `"--verify"` or `"--revert"`. Returns its
+    exit code."""
+    return subprocess.call(lua_patch_argv(bin64, mode))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Make BlightedNewWorld.exe, the patched client copy the emulator needs."
@@ -575,6 +673,12 @@ def main() -> None:
         help="also send the remote-config, Kinesis, STS, news and region ping clients through "
         "the launcher's loopback proxy (Windows only)",
     )
+    parser.add_argument(
+        "--skip-lua",
+        action="store_true",
+        help="skip the Lua pak patch (defense-in-depth stub of TryShowAGIDLink); "
+        "use when the Oodle helper tool is not available",
+    )
     arguments = parser.parse_args()
 
     official = os.path.join(arguments.bin64, OFFICIAL_NAME)
@@ -583,12 +687,20 @@ def main() -> None:
 
     if arguments.revert:
         revert(patched)
+        if not arguments.skip_lua:
+            run_lua_patch(arguments.bin64, "--revert")
         return
     if not os.path.isfile(official):
         sys.exit(f"error: not found: {official}")
     if arguments.verify:
-        sys.exit(verify_patched(official, patched, arguments.aws_proxy))
+        exe_result = verify_patched(official, patched, arguments.aws_proxy)
+        lua_result = 0 if arguments.skip_lua else run_lua_patch(arguments.bin64, "--verify")
+        sys.exit(exe_result or lua_result)
     make_patched(official, backup, patched, arguments.aws_proxy)
+    if not arguments.skip_lua:
+        lua_result = run_lua_patch(arguments.bin64, "")
+        if lua_result != 0:
+            sys.exit(lua_result)
 
 
 if __name__ == "__main__":
