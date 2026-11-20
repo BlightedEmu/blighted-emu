@@ -14,6 +14,7 @@ pub mod mirror;
 pub mod news;
 pub mod news_html;
 pub mod options;
+pub mod patch_client;
 pub mod server;
 pub mod session;
 pub mod settings;

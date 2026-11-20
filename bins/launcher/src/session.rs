@@ -23,6 +23,7 @@ use crate::game::{checked_windows_launch, start_game_windows};
 #[cfg(not(windows))]
 use crate::mirror::{NETWORK_DIR, write_network_files};
 use crate::options::{DEFAULT_PREFIX_DIR, LaunchOptions, ProtonSwitch};
+use crate::patch_client::apply_shadow_patch;
 use crate::server::api_base_url;
 use crate::settings::{Settings, ThemeChoice, same_server};
 use crate::steam::{self, Found};
@@ -177,6 +178,9 @@ fn windows_play_job(
             Ok(launch) => launch,
             Err(error) => return Event::Failed(error.to_string()),
         };
+        if let Err(error) = apply_shadow_patch(&launch.exe) {
+            return Event::Failed(error.to_string());
+        }
         let environment = match options.environment(false) {
             Ok(environment) => environment,
             Err(error) => return Event::Failed(error.to_string()),
@@ -215,6 +219,9 @@ fn linux_play_job(
             Ok(launch) => launch,
             Err(error) => return Event::Failed(error.to_string()),
         };
+        if let Err(error) = apply_shadow_patch(&launch.exe) {
+            return Event::Failed(error.to_string());
+        }
         let environment = match options.environment(true) {
             Ok(environment) => environment,
             Err(error) => return Event::Failed(error.to_string()),
