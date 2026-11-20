@@ -475,6 +475,10 @@
               "proof": "live"
             },
             {
+              "check": "A sim needs no extra setting to send the own spawn card (tests only, 2026-11-20): before, the card waited on a hidden switch that only our own stack scripts turned on, so a server set up from the repository alone left the client at a black screen after the level loaded.",
+              "proof": "tests"
+            },
+            {
               "check": "The select screen shows the saved level (not live-checked).",
               "proof": "tests"
             },
@@ -3842,6 +3846,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Hosting (2026-11-20, tests only): a server set up from the repository alone sends the own spawn card, so the client no longer stays at a black screen after the level loads.",
     "Other players (2026-11-20, tests only): a gun shows one shot per reload, a bow's hip shots fire arrows, the server fires the shots the others see, back keys back up, and keys let go in an attack send no stop.",
     "Other players (2026-11-20, tests only): legs run, rolls and attacks carry retail's flags, riders and interactions show; town station floors stand in the body's ground; the 8 m zoom.",
     "Dungeon doors (2026-11-19, tests only): the doors of Barnacles and Black Powder, The Ennead, Isle of Night, Hive of Gorgons and the Winter Rune Forge raid open their game mode; the admin teleport list shows them.",
@@ -4090,5 +4095,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-20",
-  "lastCommit": "56c4ff95"
+  "lastCommit": "b95dbe1c"
 }
