@@ -279,14 +279,15 @@ mod tests {
 
     #[test]
     fn the_posture_toggles_and_the_walk_key_go_to_the_character() {
-        // Slot value 4: bit 21 a crouch press, bit 57 the walk key; value 5 bit 11 a prone press
-        // (posture study 2026-09-20).
-        const CROUCH_AND_WALK: u64 = 1 << 21 | 1 << 57;
-        const PRONE: u64 = 1 << 11;
+        // Slot value 4 bit 57 the walk key; value 8 bit 31 a crouch press and value 3 bit 59 a
+        // prone press of any device (`crouch_toggle_virtual`, `prone_toggle_virtual`).
+        const WALK: u64 = 1 << 57;
+        const CROUCH: u64 = 1 << 31;
+        const PRONE: u64 = 1 << 59;
         let record = InputRecord {
             slots: InputSlots {
                 count: 19,
-                values: vec![0, 0, 0, 0, CROUCH_AND_WALK, PRONE],
+                values: vec![0, 0, 0, PRONE, WALK, 0, 0, 0, CROUCH],
                 bytes: [128; 4],
             },
             ..InputRecord::default()

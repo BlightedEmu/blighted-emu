@@ -2458,13 +2458,14 @@ mod tests {
 
         #[test]
         fn a_crouch_cancels_the_summon_and_a_hit_on_a_rider_takes_stamina() {
-            const CROUCH: u64 = 1 << 21;
+            /// A crouch press of any device: `crouch_toggle_virtual`, slot value 8 bit 31.
+            const CROUCH: u64 = 1 << 31;
             let mut world = world_with(vec![UNLOCK_BIT, GIFT_BIT]);
             ticked(&mut world, NOW);
             press(&mut world, 1, NOW + TICK_MS);
             world.mount_input(
                 &connection(PLAYER),
-                &[record(2, vec![0, 0, 0, 0, CROUCH])],
+                &[record(2, vec![0, 0, 0, 0, 0, 0, 0, 0, CROUCH])],
                 NOW + 2 * TICK_MS,
             );
             let cancelled = ticked(&mut world, NOW + 2 * TICK_MS);

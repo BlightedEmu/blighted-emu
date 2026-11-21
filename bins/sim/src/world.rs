@@ -10820,15 +10820,21 @@ mod tests {
     /// Live 2026-11-18: a keyboard player crouched and the other player saw it about a second
     /// later. Retail (the four posture captures, 16 toggles): the state of the change's sequence
     /// carries the posture in child 43, 28 to 68 ms after the toggle (`43=40` at a crouch,
-    /// `43=00` at the stand-up), and other players get it with that sequence. The keys and a
-    /// pad press the same crouch toggle (input 277, slot value 4 bit 21; Inferred for the pad:
-    /// its record names input actions, as its block button sets the keys' block bit).
+    /// `43=00` at the stand-up), and other players get it with that sequence. Live 2026-11-20:
+    /// a pad's crouch press sets its own input (298, slot value 4 bit 42), not the keys' (277,
+    /// value 4 bit 21), and no other player saw it; each device's press also sets
+    /// `crouch_toggle_virtual` (543, value 8 bit 31), as the records below do.
     #[test]
     fn another_player_sees_a_crouch_and_its_stand_up_one_record_after_the_toggle() {
         const POSTURE: usize = 43;
         const SEQUENCE: usize = 15;
-        const CROUCH_TOGGLE_VALUE: usize = 4;
-        const CROUCH_TOGGLE: u64 = 1 << 21;
+        /// The record bits of a crouch press: each device's input in slot value 4 (keys 277,
+        /// pad 298) and the virtual input in value 8.
+        const DEVICE_VALUE: usize = 4;
+        const KEYS_CROUCH: u64 = 1 << 21;
+        const PAD_CROUCH: u64 = 1 << 42;
+        const VIRTUAL_VALUE: usize = 8;
+        const VIRTUAL_CROUCH: u64 = 1 << 31;
         const CROUCH_BYTE: u8 = 0x40;
         const STAND_BYTE: u8 = 0x00;
         /// The left stick pushed forward: right at rest, forward 1.
@@ -10843,10 +10849,10 @@ mod tests {
         };
         /// No stick: both at rest.
         const STICKS_AT_REST: [u8; 4] = [128; 4];
-        for (device, slots, stick) in [
-            ("keys standing", STANDING_SLOTS, STICKS_AT_REST),
-            ("keys moving", FORWARD_SLOTS, STICKS_AT_REST),
-            ("pad moving", STANDING_SLOTS, STICK_FORWARD),
+        for (device, slots, stick, crouch) in [
+            ("keys standing", STANDING_SLOTS, STICKS_AT_REST, KEYS_CROUCH),
+            ("keys moving", FORWARD_SLOTS, STICKS_AT_REST, KEYS_CROUCH),
+            ("pad moving", STANDING_SLOTS, STICK_FORWARD, PAD_CROUCH),
         ] {
             let mut world = two_players();
             let (a, b) = (connection(1), connection(2));
@@ -10862,7 +10868,8 @@ mod tests {
                     .position();
                 let mut values = slots;
                 if TOGGLES.iter().any(|(toggle, _)| *toggle == counter) {
-                    values[CROUCH_TOGGLE_VALUE] |= CROUCH_TOGGLE;
+                    values[DEVICE_VALUE] |= crouch;
+                    values[VIRTUAL_VALUE] |= VIRTUAL_CROUCH;
                 }
                 let mut record = camera_record(counter, at, VIEW, [0.0; 2], values);
                 record.slots.bytes = stick;
@@ -10905,7 +10912,8 @@ mod tests {
     /// fall and sets it at the landing, in the state of the change and 1 to 3 more; ours sent
     /// `f3` in the first state only. The client here moves its own body as the server does and
     /// shows it to its camera; a pad runs by its left stick and jumps by the same input action
-    /// as the keys (input record slot value 1 bit 9; Inferred for the pad, as for its crouch).
+    /// as the keys (input record slot value 1 bit 9: `defaultprofile.xml` binds `jump` to the
+    /// space key and the pad's `az_a`).
     #[test]
     fn another_player_sees_a_jump_leave_the_floor_and_land() {
         use nw_sim_core::{CharacterInput, Intent};

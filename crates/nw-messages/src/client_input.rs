@@ -791,15 +791,24 @@ const JUMP_KEY: (usize, u32) = (1, 9);
 /// press with value 4 bit 3; in the clean toggle captures each of the 20 presses while running
 /// switched the speed between 5.5 and 3.25 m/s forward, 4.0 and 3.25 m/s back).
 const WALK_TOGGLE_KEY: (usize, u32) = (4, 22);
-/// The slot value and bit of a press of the crouch toggle (the Azoth catalog input 277, `crouch
-/// toggle`; posture study 2026-09-20: set in one record per press, 7 presses in the three retail
-/// `walk_running_crouch_prone` captures, each followed by the crouch speeds: 2.50 m/s forward, the
-/// sprint action list's `Crouch` `Speed` 2.5).
-const CROUCH_TOGGLE_KEY: (usize, u32) = (4, 21);
-/// The slot value and bit of a press of the prone toggle (the Azoth catalog input 331, `prone
-/// toggle`; posture study: set in one record per press, 5 presses, after the first of each pair
-/// the own place went 1.23 to 1.26 m/s forward, the sprint action list's `Prone` `Speed` 1.25).
-const PRONE_TOGGLE_KEY: (usize, u32) = (5, 11);
+/// The slot value and bit of a press of the crouch toggle by any device: input 543
+/// (`crouch_toggle_virtual`). The client sets it in the record of each press of the keys'
+/// toggle (input 277, `crouch_toggle`, `c`) and of the pad's (input 298, `crouch_toggle_pad`:
+/// the left stick clicked with the left shoulder held, `defaultprofile.xml`). Observed: the
+/// retail crouch press of the posture study (2026-09-20; `walk_running_crouch_prone_2` record
+/// 902) holds 277 and 543; live 2026-11-20, each of 9 crouch presses held 543 with its device's
+/// input (4 keys, 5 pad). Input 277 alone missed every pad press: other players saw no crouch.
+/// Each press is one record; the crouch speeds follow it (2.50 m/s forward, the sprint action
+/// list's `Crouch` `Speed` 2.5).
+const CROUCH_TOGGLE_KEY: (usize, u32) = (8, 31);
+/// The slot value and bit of a press of the prone toggle by any device: input 251
+/// (`prone_toggle_virtual`), set with the keys' toggle (input 331, `prone_toggle`, `z`) and the
+/// pad's (input 521, `prone_toggle_pad`: the left stick held with the left shoulder held).
+/// Observed: the retail prone press of the posture study (record 1328) holds 331 and 251; live
+/// 2026-11-20, each of 5 prone presses held 251 with its device's input (4 keys, 1 pad). Each
+/// press is one record; after the first of each pair the own place went 1.23 to 1.26 m/s
+/// forward, the sprint action list's `Prone` `Speed` 1.25.
+const PRONE_TOGGLE_KEY: (usize, u32) = (3, 59);
 /// The slot value and bit of the walk key, set while it is held (the Azoth catalog input 313,
 /// `walk`; posture study: set in every record of the 4 slow periods of the
 /// `walk_running_crouch_prone` captures and in no record of their running periods).
@@ -2092,6 +2101,43 @@ mod tests {
         assert!(walking.walk_held() && walking.move_keys().forward);
         assert!(!walking.crouch_toggle_pressed() && !walking.prone_toggle_pressed());
         assert!(!walking.walk_toggle_pressed());
+    }
+
+    #[test]
+    fn the_pad_posture_presses_read_as_the_toggles() {
+        // Live 2026-11-20 pad records (23:29:17.324 and 23:29:22.824): a crouch press sets
+        // `crouch_toggle_pad` (value 4 bit 42) and `crouch_toggle_virtual` (value 8 bit 31); a
+        // prone press sets `prone_toggle_pad` (value 8 bit 9) and `prone_toggle_virtual` (value 3
+        // bit 59). Both hold the left shoulder's `attack_special_hold` (value 4 bit 10) and
+        // neither the keys' crouch (value 4 bit 21) nor prone (value 5 bit 11).
+        const PAD_CROUCH: [u64; 10] = [
+            0,
+            0,
+            0,
+            0,
+            0x400_0000_0400,
+            0,
+            0,
+            0x402_0000_0800_0000,
+            0x200_0000_8000_0000,
+            0,
+        ];
+        const PAD_PRONE: [u64; 10] = [
+            0,
+            0,
+            0,
+            0x800_0000_0000_0000,
+            0x400,
+            0,
+            0,
+            0x402_0000_0800_0000,
+            0x200_0000_0000_0200,
+            0,
+        ];
+        let crouch = standing_with(PAD_CROUCH);
+        assert!(crouch.crouch_toggle_pressed() && !crouch.prone_toggle_pressed());
+        let prone = standing_with(PAD_PRONE);
+        assert!(prone.prone_toggle_pressed() && !prone.crouch_toggle_pressed());
     }
 
     #[test]
