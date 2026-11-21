@@ -175,6 +175,22 @@ impl CameraView {
             z: self.camera.z - CAMERA_RISE_M - boom * self.pitch.sin(),
         }
     }
+
+    /// The camera, looking with `yaw` and `pitch`, of a body at `body` moving at `velocity` on a
+    /// boom of `boom` m: the place that [`Self::body`] takes back to `body`. A bot that walks
+    /// with key records sends it as its records' camera, as the game client sends its own.
+    pub fn of_body(body: Position, yaw: f32, pitch: f32, boom: f32, velocity: [f32; 2]) -> Self {
+        let (forward, right) = yaw_axes(yaw);
+        let level = pitch.cos();
+        let camera = Position {
+            x: body.x - boom * forward[0] * level + SHOULDER_RIGHT_M * right[0]
+                - CAMERA_LAG_S * velocity[0],
+            y: body.y - boom * forward[1] * level + SHOULDER_RIGHT_M * right[1]
+                - CAMERA_LAG_S * velocity[1],
+            z: body.z + CAMERA_RISE_M + boom * pitch.sin(),
+        };
+        Self::new(camera, yaw, pitch)
+    }
 }
 
 /// One camera of the window: the body was at `base + boom × ray`, and moved since by `moved`.
@@ -516,19 +532,25 @@ mod tests {
 
     /// The camera of a body at `body` with boom `boom`, yaw `yaw`, trailing `lag`.
     fn camera_of(body: Position, yaw: f32, boom: f32, lag: [f32; 2]) -> CameraView {
-        let mut view = CameraView::new(body, yaw, PITCH);
-        let ray = view.ray();
-        let (_, right) = yaw_axes(yaw);
-        view.camera = Position {
-            x: body.x - boom * ray[0] + SHOULDER_RIGHT_M * right[0] - lag[0],
-            y: body.y - boom * ray[1] + SHOULDER_RIGHT_M * right[1] - lag[1],
-            z: body.z + CAMERA_RISE_M + boom * PITCH.sin(),
-        };
-        view
+        let velocity = lag.map(|axis| axis / CAMERA_LAG_S);
+        CameraView::of_body(body, yaw, PITCH, boom, velocity)
     }
 
     fn at(x: f32, y: f32) -> Position {
         Position { x, y, z: 10.0 }
+    }
+
+    #[test]
+    fn the_camera_of_a_body_puts_the_same_body_back_on_its_boom() {
+        const YAW: f32 = 0.7;
+        const VELOCITY: [f32; 2] = [-2.0, 4.5];
+        let body = at(500.0, 300.0);
+        let view = CameraView::of_body(body, YAW, PITCH, BOOM, VELOCITY);
+        let back = view.body(BOOM, VELOCITY);
+        assert!((back.x - body.x).abs() < CLOSE_M, "{back:?}");
+        assert!((back.y - body.y).abs() < CLOSE_M, "{back:?}");
+        assert!((back.z - body.z).abs() < CLOSE_M, "{back:?}");
+        assert!((view.boom_to(body, VELOCITY) - BOOM).abs() < CLOSE_M);
     }
 
     #[test]
