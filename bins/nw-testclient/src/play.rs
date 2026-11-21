@@ -109,6 +109,12 @@ const FIRST_INPUT_COUNTER: u16 = 1;
 const LEVEL_PITCH: f32 = 0.0;
 /// The facet component of the bot's calls (Inferred: the sim reads the body only).
 pub(crate) const CALL_COMPONENT: u64 = 0;
+/// The first number of a salvage or open call (1733): 1 in all 173 retail calls (salvage note).
+const SALVAGE_FIRST: u32 = 1;
+/// The number of unknown meaning of a salvage call: 0 in all 173 retail calls.
+const SALVAGE_UNKNOWN: u32 = 0;
+/// How many of a stack one open takes (Inferred: 1 in all 173 retail calls).
+const SALVAGE_ONE: u32 = 1;
 
 /// Says `line` in area chat as the own player `own`: a game master line (`!tp`) is one.
 ///
@@ -1871,6 +1877,21 @@ impl Player {
                         let counter = self.input_counter;
                         self.input_counter = counter.wrapping_add(ATTACK_RECORDS);
                         send_input(client, &ClientInputMsg::summon_mount(position, counter))?;
+                    }
+                }
+                Act::OpenBagItem(item_index) => {
+                    if let Some((bag_slot, instance)) = self.combat.bag_slot_of(*item_index) {
+                        Self::call(
+                            client,
+                            &ClientFacetMsg::InitiateSalvage {
+                                header: FacetHeader::of(CALL_COMPONENT, own),
+                                first: SALVAGE_FIRST,
+                                bag_slot,
+                                instance,
+                                unknown: SALVAGE_UNKNOWN,
+                                quantity: SALVAGE_ONE,
+                            },
+                        )?;
                     }
                 }
                 Act::Pause(wait) => {

@@ -13,6 +13,7 @@ use nw_content::Tables;
 use nw_content::crafting::{IngredientKind, Recipes};
 use nw_content::instances::{InstanceCatalog, InstanceKind};
 use nw_content::poi_tags::PoiTags;
+use nw_content::starter::StarterKits;
 use nw_content::town_props::ASSET_ID_LEN;
 use nw_content::town_stations::TownStations;
 use nw_formats::objectstream::lowercase_crc32;
@@ -76,6 +77,10 @@ const HARVESTED_GATHERABLE: &str = "SingleStone";
 const CRAFTED_ITEM: &str = "IngotT2";
 /// The quest that unlocks the first horse ("My Kingdom for a Horse").
 const MOUNT_QUEST: &str = "9401_BefriendHorse";
+/// The reward box the mount quest's end gives: the horse is owned once it is opened (content
+/// bundle 25810808: its salvage fires `Reward_MountReward_Box_1`, whose achievement owns the
+/// horse; retail mount quest capture, 283.210 s: the box opened (1733), then the first summon).
+const MOUNT_REWARD_BOX: &str = "MountItem_MountReward_Box_1";
 /// The wait from the summon's start to its authorization (retail: the client completed the
 /// summon 3,049 to 3,070 ms after the 5747).
 const SUMMON_WAIT: Duration = Duration::from_millis(3500);
@@ -162,6 +167,9 @@ pub enum Act {
     Teleport([f32; 3]),
     /// A press of the summon mount key in the bot's input.
     SummonKey,
+    /// The bag item of this client item index opens, as the client opens a loot container
+    /// item (1733); nothing when the bag holds none (it was opened before).
+    OpenBagItem(u32),
     /// A wait before the next act (a summon's authorization).
     Pause(Duration),
     /// A client call: its type index and body for the bot's own entity number.
@@ -390,7 +398,7 @@ impl Activity {
                 "needs a second bot in the world at the same time; a play run has one bot"
                     .to_owned(),
             ),
-            ActivityKind::Mount => Ok(mount()),
+            ActivityKind::Mount => mount(data),
             ActivityKind::Music => Err(
                 "needs an instrument worn: the bot cannot read the bag slot of a given instrument to equip it"
                     .to_owned(),
@@ -452,9 +460,13 @@ fn pvp() -> Vec<Step> {
     ]
 }
 
-/// A summon and ride of the horse that the mount quest unlocks.
-fn mount() -> Vec<Step> {
-    vec![
+/// A summon and ride of the horse that the mount quest unlocks, after its reward box opens.
+fn mount(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
+    let reward_box = StarterKits::from_tables(data.tables)
+        .item(MOUNT_REWARD_BOX)
+        .map(|item| item.item_index)
+        .ok_or_else(|| format!("the item catalog has no {MOUNT_REWARD_BOX}"))?;
+    Ok(vec![
         step(
             format!("the mount quest {MOUNT_QUEST} is done (play it with --quests first)"),
             vec![Act::Gm(format!("!queststate {MOUNT_QUEST}"))],
@@ -463,6 +475,12 @@ fn mount() -> Vec<Step> {
                 format!("done {MOUNT_QUEST}"),
             ),
             STEP_WAIT,
+        ),
+        step(
+            format!("open the reward box {MOUNT_REWARD_BOX} when the bag holds it"),
+            vec![Act::OpenBagItem(reward_box)],
+            Proof::Sent,
+            Duration::ZERO,
         ),
         step(
             "press the summon key",
@@ -489,7 +507,7 @@ fn mount() -> Vec<Step> {
             |line| line.contains(STATE_RIDING),
             "mount riding",
         ),
-    ]
+    ])
 }
 
 /// A node of a gatherable a player gathers by hand with no rank or item.
@@ -1514,8 +1532,8 @@ mod tests {
             Activity::of(ActivityKind::Mount, &data)
                 .steps
                 .map(|steps| steps.len()),
-            Ok(4),
-            "the mount needs no level data"
+            Err(format!("the item catalog has no {MOUNT_REWARD_BOX}")),
+            "the mount opens its reward box: it needs the item catalog"
         );
         assert!(
             Activity::of(ActivityKind::Harvest, &data).steps.is_err(),
