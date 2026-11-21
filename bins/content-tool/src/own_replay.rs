@@ -25,10 +25,6 @@ use nw_sim_core::{
     AmongCharacters, CharacterBody, Ground, LevelGround, MountPaces, Position, TrackedBody,
 };
 use nw_world::WorldFile;
-use nw_world::collision::LevelCollision;
-use nw_world::collision_index::CollisionIndex;
-use nw_world::roads::RoadMap;
-use nw_world::water::WaterMap;
 
 use crate::ai_trace::{MobTrace, MountSample, PlayerSample, trace_ledger};
 use crate::ftue_entities::read_ledger;
@@ -673,31 +669,10 @@ pub fn summarize(compared: &[Compared], server_moves: usize) -> ReplaySummary {
     }
 }
 
-/// The ground of `level` of the content of `layout`: the terrain, the level collision and the
-/// water, as the sim builds it; and the sea level.
-pub fn level_ground(
-    layout: &ContentLayout,
-    level: &str,
-) -> (LevelGround<std::sync::Arc<WorldFile>>, f32) {
-    use std::sync::Arc;
-    let world = Arc::new(WorldFile::load(layout, level).expect("world"));
-    let collision = LevelCollision::load(layout, level).expect("run `just collision` first");
-    let collision = Arc::new(CollisionIndex::new(LevelCollision {
-        deferred: Vec::new(),
-        ..collision
-    }));
-    let sea = world.level.ocean_level;
-    let ground = LevelGround::new(Arc::clone(&world), collision);
-    let ground = match WaterMap::load(layout, level) {
-        Ok(water) => ground.with_water(Arc::new(water)),
-        Err(_) => ground,
-    };
-    // The sim's ground holds the level's roads: a mount runs at its road speed on them.
-    let ground = match RoadMap::load(layout, level) {
-        Ok(roads) => ground.with_roads(Arc::new(roads)),
-        Err(_) => ground,
-    };
-    (ground, sea)
+/// The ground of `level` of the content of `layout`, as the sim builds it, and the sea level
+/// ([`nw_sim_core::player_level_ground`]).
+pub fn level_ground(layout: &ContentLayout, level: &str) -> (LevelGround<Arc<WorldFile>>, f32) {
+    nw_sim_core::player_level_ground(layout, level).expect("run `just collision` first")
 }
 
 /// The repository root.

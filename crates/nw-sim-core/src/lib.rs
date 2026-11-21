@@ -36,7 +36,7 @@ pub use equip_load::{EquipLoad, EquipLoadLimits};
 pub use footing::{Footing, WaterDepth};
 pub use grid::SpatialGrid;
 pub use interest::{Interest, InterestChanges};
-pub use level_ground::LevelGround;
+pub use level_ground::{LevelGround, player_level_ground};
 pub use movement::{
     CellBounds, Ground, GroundCheck, Motion, MotionState, MoveLimits, MoveLimitsError, MoveRefusal,
     Position,

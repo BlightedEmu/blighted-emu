@@ -15,6 +15,10 @@
 
 use std::sync::Arc;
 
+use nw_content::container::ContainerError;
+use nw_content::layout::ContentLayout;
+use nw_world::WorldFile;
+use nw_world::collision::LevelCollision;
 use nw_world::collision_index::{
     CollisionIndex, FLOOR_SEARCH_ABOVE_M, MAX_WALKABLE_SLOPE_DEG, NavMarkIndex,
 };
@@ -23,6 +27,33 @@ use nw_world::water::WaterMap;
 
 use crate::character::{STEP_UP_M, SWIM_DEPTH_M};
 use crate::movement::{Ground, Position};
+
+/// The ground a player walks on in `level` of the content of `layout`
+/// ([`LevelGround::of_player`]): its terrain, its level collision without the solids that only
+/// a shown level asset brings, its water and its roads when it has them; and its sea height, m.
+/// The replay tools and a bot that walks with key records stand on it as the sim's players do.
+///
+/// # Errors
+///
+/// Returns [`ContainerError`] when the world file or the collision file is missing or not valid.
+pub fn player_level_ground(
+    layout: &ContentLayout,
+    level: &str,
+) -> Result<(LevelGround<Arc<WorldFile>>, f32), ContainerError> {
+    let world = Arc::new(WorldFile::load(layout, level)?);
+    let collision = LevelCollision::load(layout, level)?;
+    let collision = Arc::new(CollisionIndex::new(LevelCollision {
+        deferred: Vec::new(),
+        ..collision
+    }));
+    let sea_level_m = world.level.ocean_level;
+    let water = WaterMap::load(layout, level).ok().map(Arc::new);
+    let roads = RoadMap::load(layout, level).ok().map(Arc::new);
+    Ok((
+        LevelGround::of_player(world, collision, water, roads),
+        sea_level_m,
+    ))
+}
 
 /// The terrain of `terrain` and the structures of `collision`.
 #[derive(Debug, Clone)]
@@ -43,6 +74,22 @@ impl<T: Ground> LevelGround<T> {
             roads: None,
             water: None,
             marks: None,
+        }
+    }
+
+    /// The ground a player walks on: `terrain` with the structures of `collision`, and the
+    /// level's water `water` and roads `roads` when it has them. The sim moves its players on it,
+    /// and a bot that walks with key records moves its own body on the same.
+    pub fn of_player(
+        terrain: T,
+        collision: Arc<CollisionIndex>,
+        water: Option<Arc<WaterMap>>,
+        roads: Option<Arc<RoadMap>>,
+    ) -> Self {
+        Self {
+            water,
+            roads,
+            ..Self::new(terrain, collision)
         }
     }
 

@@ -216,15 +216,12 @@ pub fn load_level(config: &SimConfig, content_dir: &Path) -> Result<LoadedLevel,
         }
     };
     let ground_over = |collision: Arc<CollisionIndex>| {
-        let ground = LevelGround::new(Arc::clone(&world_file), collision);
-        let ground = match &water {
-            Some(water) => ground.with_water(Arc::clone(water)),
-            None => ground,
-        };
-        match &roads {
-            Some(roads) => ground.with_roads(Arc::clone(roads)),
-            None => ground,
-        }
+        LevelGround::of_player(
+            Arc::clone(&world_file),
+            collision,
+            water.clone(),
+            roads.clone(),
+        )
     };
     let ground = ground_over(Arc::clone(&collision));
     let mob_ground = ground_over(mob_collision).with_marks(marks);
