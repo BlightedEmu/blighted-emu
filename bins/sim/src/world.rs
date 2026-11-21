@@ -772,6 +772,12 @@ struct Player {
     /// Its state moved on to a new number between ticks ([`remote_now`]): the next tick's own
     /// state carries that step, and the tick steps it no more.
     state_stepped: bool,
+    /// The body's place when its state moved on to its number ([`SimWorld::step_state`]): each
+    /// state of that number carries it to the players who see it. Live 2026-11-21: the tick
+    /// after a half-tick step sent the same number with the body of the next record, in 24 % and
+    /// 35 % of two moving players' states (retail: 2 of 57,297 numbers); the client took the
+    /// newer place for the old stamp, and the other player ran in a saw-tooth.
+    state_place: Option<Position>,
     /// The view angles of its newest input: where other players see it look.
     view: Option<LookDir>,
     /// Where other players see it face: the camera yaw, or a game pad's run direction while the
@@ -4772,8 +4778,10 @@ impl SimWorld {
     }
 
     /// Moves the player's state on to its client's newest record at `now_ms` (server time
-    /// `server_time`), and its slayer state with it: one step for each own state.
-    fn step_state(player: &mut Player, now_ms: u64, server_time: u64) {
+    /// `server_time`), and its slayer state with it: one step for each own state. The body is at
+    /// `place` then: the state's number carries that place ([`Player::state_place`]).
+    fn step_state(player: &mut Player, place: Position, now_ms: u64, server_time: u64) {
+        player.state_place = Some(place);
         if let Some(counter) = player.input_counter {
             // The state's time is its record's on the client's clock, as retail stamps it.
             let record_time = player.input_clock_ms.map_or(server_time, |clock| {
@@ -4804,13 +4812,18 @@ impl SimWorld {
         // The state numbers and the actions move on to this tick: the own state and the players
         // who see it get the same. A state that moved on at the half tick is this tick's: its
         // own state goes now.
-        for mut player in self.world.query::<&mut Player>().iter_mut(&mut self.world) {
+        for (mut player, body) in self
+            .world
+            .query::<(&mut Player, &Body)>()
+            .iter_mut(&mut self.world)
+        {
             if !std::mem::take(&mut player.state_stepped) {
-                Self::step_state(&mut player, now_ms, server_time);
+                Self::step_state(&mut player, body.motion.position(), now_ms, server_time);
             }
         }
-        // Every player as the players who see it get it this tick: ours, then the ghosts'.
-        let mut sources: Vec<(u64, ReplicaSource)> = self
+        // Every player as the players who see it get it this tick: ours at the place of their
+        // state's number ([`Player::state_place`]), then the ghosts' at theirs.
+        let mut sources: Vec<(u64, ReplicaSource, Option<Position>)> = self
             .world
             .query::<(&Player, &Vitals)>()
             .iter(&self.world)
@@ -4818,6 +4831,7 @@ impl SimWorld {
                 (
                     player.number,
                     Self::replica_source(player, vitals, server_time, &self.content.progression),
+                    player.state_place,
                 )
             })
             .collect();
@@ -4825,15 +4839,15 @@ impl SimWorld {
             if ghost.mob.is_none() && !own.contains(&ghost.entity) {
                 everyone.push((ghost.entity, ghost.position));
                 if let Some(player) = &ghost.player {
-                    sources.push((ghost.entity, ReplicaSource::of_ghost(player)));
+                    sources.push((ghost.entity, ReplicaSource::of_ghost(player), None));
                 }
             }
         }
         let mut replicas: HashMap<u64, Replica> = HashMap::with_capacity(sources.len());
         let mut memory = HashMap::with_capacity(sources.len());
         let places: HashMap<u64, Position> = everyone.iter().copied().collect();
-        for (number, source) in sources {
-            let Some(&position) = places.get(&number) else {
+        for (number, source, state_place) in sources {
+            let Some(position) = state_place.or_else(|| places.get(&number).copied()) else {
                 continue;
             };
             let seen = self.replica_memory.get(&number).copied();
@@ -5186,6 +5200,7 @@ impl SimWorld {
                     aim_camera_until_ms: None,
                     state_number: None,
                     state_stepped: false,
+                    state_place: None,
                     view: None,
                     facing: None,
                     facing_from_stick: false,
@@ -11105,6 +11120,124 @@ mod tests {
             input_between_ticks(&mut world, COUNTER, NOW + 70).is_empty(),
             "an old record is no new state"
         );
+    }
+
+    /// Each state number carries the place of its own record to the players who see it, with
+    /// keys and with a pad. Live 2026-11-21 (two moving players, 04:26:36.97 to 37.03): record
+    /// 1453 came, the half tick sent its number with place A; record 1454 came before the tick,
+    /// and the tick sent the same number with place B, in 24 % and 35 % of the moving states
+    /// (retail, `retail-2026-11-19-towns-duels`: 2 of 57,297 moving numbers). The viewer's
+    /// client took B for the old stamp, and the other player ran in a saw-tooth.
+    #[test]
+    fn a_state_number_keeps_its_records_place_when_the_next_record_comes_before_the_tick() {
+        use nw_sim_core::{CharacterInput, Intent};
+        /// The floor of the test world, at the test players' height.
+        const GROUND_M: f32 = 50.0;
+        const VIEW: LookDir = LookDir {
+            yaw: 0.0,
+            pitch: 0.3,
+        };
+        /// The left stick pushed forward: right at rest, forward 1.
+        const STICK_FORWARD: [u8; 4] = [128, 255, 128, 128];
+        const STICKS_AT_REST: [u8; 4] = [128; 4];
+        /// Records run before the checked pair, so the body runs at full speed.
+        const RUN_UP_RECORDS: u16 = 20;
+        /// Milliseconds from the half tick's record to the next one, both before the tick.
+        const NEXT_RECORD_MS: u64 = 12;
+        /// Milliseconds from the half tick to the tick.
+        const HALF_TICK_MS: u64 = 16;
+        let keys_run = Intent::of_keys(true, false, false, false);
+        let pad_run = Intent::default().with_stick(Some([0.0, 1.0]));
+        for (device, slots, stick, intent) in [
+            ("keys", FORWARD_SLOTS, STICKS_AT_REST, keys_run),
+            ("pad", STANDING_SLOTS, STICK_FORWARD, pad_run),
+        ] {
+            let mut world = SimWorld::new(
+                settings(MANY, MAX_PLAYERS),
+                WorldIds::random(0).expect("ids"),
+                Arc::new(FlatGround(GROUND_M)),
+                slot("sim-a"),
+                test_combat(),
+                Arc::default(),
+            );
+            join(&mut world, 1, 0.0);
+            join(&mut world, 2, 5.0);
+            tick(&mut world, NOW);
+            let (a, b) = (connection(1), connection(2));
+            let entity = world.by_connection[&a];
+            let start = world
+                .world
+                .get::<Body>(entity)
+                .expect("body")
+                .motion
+                .position();
+            let mut client = nw_sim_core::Character::new(start);
+            let mut send = |world: &mut SimWorld, counter: u16, input_at: u64| {
+                client.step(
+                    CharacterInput {
+                        intent,
+                        yaw: VIEW.yaw,
+                        dt_s: f32::from(attack::INPUT_RECORD_MS) / 1_000.0,
+                    },
+                    &FlatGround(GROUND_M),
+                    OCEAN_LEVEL_M,
+                );
+                let mut record =
+                    camera_record(counter, client.position(), VIEW, client.velocity(), slots);
+                record.slots.bytes = stick;
+                let _ = world.move_from_input(&a, &[record], input_at);
+            };
+            let record_ms = u64::from(attack::INPUT_RECORD_MS);
+            for counter in 1..=RUN_UP_RECORDS {
+                let input_at = NOW + u64::from(counter) * record_ms;
+                send(&mut world, counter, input_at);
+                tick(&mut world, input_at);
+            }
+            // The place a state of player 1 carries: its group's `pos10` (when sent) and its
+            // `worldPosRel` offset from it.
+            let places = |world: &SimWorld, outgoing: &[Outgoing]| {
+                outgoing
+                    .iter()
+                    .filter(|out| out.connection == b && out.channel == REPLICATION_CHANNEL)
+                    .flat_map(|out| &out.envelopes)
+                    .flat_map(|bytes| groups_in(world, &b, &bundle_in(bytes)))
+                    .filter(|(number, _)| *number == 1)
+                    .map(|(_, update)| {
+                        let offset = alc_children(
+                            &update
+                                .members
+                                .iter()
+                                .map(|member| member.state.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                        .into_iter()
+                        .find(|(child, _)| *child == nw_messages::alc::POS_REL_CHILD)
+                        .map(|(_, bytes)| bytes);
+                        (update.position.map(|at| (at.x, at.y)), offset)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let half_at = NOW + u64::from(RUN_UP_RECORDS + 1) * record_ms;
+            send(&mut world, RUN_UP_RECORDS + 1, half_at);
+            let half = world.states_now(half_at, SERVER_TIME).expect("states");
+            let half_places = places(&world, &half);
+            assert!(
+                half_places.len() == 1 && half_places[0].1.is_some(),
+                "{device}: the half tick's state and its place: {half_places:?}"
+            );
+            send(&mut world, RUN_UP_RECORDS + 2, half_at + NEXT_RECORD_MS);
+            let ticked = tick(&mut world, half_at + HALF_TICK_MS);
+            assert_eq!(
+                remote_ids(&world, &half, &b),
+                remote_ids(&world, &ticked.messages, &b),
+                "{device}: the tick sends the half tick's number again"
+            );
+            assert_eq!(
+                places(&world, &ticked.messages),
+                half_places,
+                "{device}: the number keeps its record's place"
+            );
+        }
     }
 
     #[test]

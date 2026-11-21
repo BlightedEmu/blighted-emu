@@ -51,9 +51,9 @@ impl SimWorld {
             if player.state_stepped || !new_number {
                 continue;
             }
-            Self::step_state(&mut player, now_ms, server_time);
-            player.state_stepped = true;
             let position = body.motion.position();
+            Self::step_state(&mut player, position, now_ms, server_time);
+            player.state_stepped = true;
             let source = Self::replica_source(&player, vitals, server_time, progression);
             let seen = self.replica_memory.get(&player.number).copied();
             let (replica, memory) = Replica::new(source, position, seen, server_time);
