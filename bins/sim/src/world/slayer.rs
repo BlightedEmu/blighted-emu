@@ -5197,6 +5197,62 @@ pub(crate) mod tests {
         assert_eq!(spear_hold.stand, STAND_BLOCK);
     }
 
+    /// Retail (1,195 ledgers, 2026-11-20): a rapier's heavy attack 584 started 19 records after
+    /// its press start 5057 in 6 of 6 own holds and 90 of 107 holds of other players (the other
+    /// 17 at 13 records), and 19 records after its second step 766 in 4 of 4. The client's
+    /// rapier charge is at 667 ms, one record more. The table said 27 and 22, so other players
+    /// saw the heavy attack late.
+    #[test]
+    fn a_rapier_hold_starts_its_heavy_19_records_in_with_keyboard_and_controller() {
+        const RAPIER: &str = "1H_Melee,Rapier";
+        const RAPIER_PRESS: u64 = 5057;
+        const RAPIER_SECOND_STEP: u64 = 766;
+        const RAPIER_HEAVY: u64 = 584;
+        const RAPIER_HOLD_RECORDS: u16 = 19;
+        const PRESS_RECORD: u16 = 100;
+        let table = crate::combat::test_support::test_player_sequences();
+        let holds = &table.stance(stance_key(RAPIER)).expect("stance").holds;
+        for after in [RAPIER_PRESS, RAPIER_SECOND_STEP] {
+            let hold = holds
+                .iter()
+                .find(|hold| hold.after.sequence == after)
+                .expect("the hold");
+            assert_eq!(
+                (hold.start.sequence, hold.records),
+                (RAPIER_HEAVY, RAPIER_HOLD_RECORDS),
+                "after {after}"
+            );
+        }
+        let still = Intent::default();
+        for (device, first, held) in [("keys", PRESS, HELD), ("pad", PAD_HOLD, PAD_HOLD)] {
+            let mut track = spawned();
+            track.record(keyed(PRESS_RECORD, still, first, RAPIER), &table);
+            let press = own_state(&mut track, PRESS_RECORD)
+                .state
+                .expect("the press start");
+            assert_eq!(press.sequence, RAPIER_PRESS, "{device}");
+            while own_state(&mut track, PRESS_RECORD).state.is_some() {}
+            let heavy_record = PRESS_RECORD + RAPIER_HOLD_RECORDS;
+            for counter in PRESS_RECORD + 1..heavy_record {
+                track.record(keyed(counter, still, held, RAPIER), &table);
+                assert_eq!(
+                    own_state(&mut track, counter).state,
+                    None,
+                    "{device} at {counter}"
+                );
+            }
+            track.record(keyed(heavy_record, still, held, RAPIER), &table);
+            let heavy = own_state(&mut track, heavy_record)
+                .state
+                .expect("the heavy attack");
+            assert_eq!(
+                (heavy.started, heavy.sequence),
+                (Some(heavy_record), RAPIER_HEAVY),
+                "{device}"
+            );
+        }
+    }
+
     /// Live 2026-11-17: a medium-gear spear player's hop showed as the light roll to the others.
     #[test]
     fn a_dodge_plays_the_player_s_gear_load() {
