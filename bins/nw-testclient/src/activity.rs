@@ -64,8 +64,10 @@ pub const OPEN_STORAGE_KIND: u8 = 26;
 pub const OPEN_STORAGE_NAME: &[u8] = b"@ui_global_storage";
 /// The landmark type of an inn recall (`INN_RESPAWN_LANDMARK` of the sim).
 const INN_RECALL_LANDMARK: u8 = 20;
-/// The slice folder of the settlement inns (Inferred: the world file's inn structures).
-const INN_SLICE_MARK: &str = "/social structures/inn/";
+/// The slice name part of an inn's innkeeper capital (`slices/characters/mission/
+/// npc_1222_innkeep`): a check in names the innkeeper's capital (the retail S8 check-in named
+/// the Prydwen innkeeper, `NPC_1222_Innkeep`), and an inn recall lands in front of it.
+const INNKEEPER_SLICE_MARK: &str = "_innkeep";
 /// The `POITag` of a fast travel shrine's territory (live-inn note section 4: all 137 rows are
 /// shrines).
 const FAST_TRAVEL_TAG: &str = "fasttravel";
@@ -895,10 +897,13 @@ fn inn(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
         .world
         .capitals
         .iter()
-        .find(|capital| capital.slice_name.contains(INN_SLICE_MARK))
-        .ok_or(
-            "no capital of the level is an inn: its inn structures are spawned slices, and which entity id a check in names is Unknown",
-        )?;
+        .find(|capital| {
+            capital
+                .slice_name
+                .to_ascii_lowercase()
+                .contains(INNKEEPER_SLICE_MARK)
+        })
+        .ok_or("no capital of the level is an innkeeper")?;
     let id = capital_id(&capital.id).ok_or("the inn's capital has no entity id")?;
     let request = |kind| InteractionRequest {
         target: [0; RAW_ID_LEN],
@@ -1513,6 +1518,52 @@ mod tests {
             Some(7)
         );
         assert_eq!(state_level("Done."), None);
+    }
+
+    #[test]
+    fn the_inn_check_in_names_the_capital_of_the_innkeeper() {
+        /// Made-up capital ids.
+        const INN_HOUSE: &str = "00112233-4455-6677-8899-aabbccddeef0";
+        const INNKEEPER: &str = "00112233-4455-6677-8899-aabbccddeeff";
+        let capital = |id: &str, slice: &str| nw_world::records::Capital {
+            id: id.to_owned(),
+            position: [100.0, 200.0, 30.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: None,
+            slice_name: slice.to_owned(),
+            variant_name: None,
+            slice_asset_id: String::new(),
+        };
+        let world = WorldFile {
+            capitals: vec![
+                capital(INN_HOUSE, "slices/social structures/inn/inn_a"),
+                capital(INNKEEPER, "slices/characters/mission/NPC_1222_Innkeep"),
+            ],
+            ..WorldFile::default()
+        };
+        let tables = Tables::default();
+        let town_stations = TownStations::default();
+        let data = ActivityData {
+            world: &world,
+            tables: &tables,
+            town_stations: &town_stations,
+        };
+        let steps = Activity::of(ActivityKind::Inn, &data).steps.expect("steps");
+        let targets: Vec<u64> = steps
+            .iter()
+            .flat_map(|step| &step.acts)
+            .filter_map(|act| match act {
+                Act::Interact { request, .. } => Some(request.target_entity),
+                _ => None,
+            })
+            .collect();
+        assert!(!targets.is_empty(), "the open and the check in");
+        assert!(
+            targets
+                .iter()
+                .all(|target| Some(*target) == capital_id(INNKEEPER)),
+            "{targets:?}"
+        );
     }
 
     #[test]
