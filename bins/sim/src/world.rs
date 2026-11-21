@@ -353,6 +353,9 @@ fn from_milli(milli: u32) -> f32 {
 /// client before it has applied `LevelInfoChanged` (channel 0), so the client drops it as a
 /// bundle "for a previous ClientContext", never loads the level, and never moves to spawn.
 pub(crate) const OWN_CARD_DELAY_MS: u64 = 1_000;
+/// The age of the last move of a player that enters this level from another ([`SimWorld::take`]):
+/// it arrives now.
+const ARRIVAL_MOVE_AGE_MS: u64 = 0;
 /// Time between two sends of the own spawn card bundle while the client loads its level.
 /// Retail resends its first bundle about every 350 ms until the client answers with its
 /// first time sync request (Soul Survivor capture, 2026-09-27: bundle 1 at 0, 348 and
@@ -1878,7 +1881,17 @@ impl SimWorld {
         };
         let state = MotionState {
             position: arrival.position,
-            move_age_ms: offer.move_age_ms,
+            // A player that enters this level arrives now, as at a login: its saves here are
+            // newer than every save the level it left made of it. With the age of its last move
+            // there, a player that left the tutorial and logged out before a move was saved at
+            // the tutorial's time, the database kept the tutorial's place, and the next login
+            // started in the tutorial with no progression (bot run 2026-11-21: a bot's faction
+            // went back to 0 at each login).
+            move_age_ms: if enters {
+                ARRIVAL_MOVE_AGE_MS
+            } else {
+                offer.move_age_ms
+            },
             budget_m: offer.budget_m,
         };
         let motion = Motion::import(state, now_ms, &self.settings.limits);
@@ -10279,6 +10292,11 @@ mod tests {
             .take(offer, card_at, SERVER_TIME)
             .expect("take")
             .expect("level change messages");
+        assert_eq!(
+            open.positions()[0].moved_at_ms,
+            card_at,
+            "the player arrives now: newer than the tutorial's save of its admission at {NOW}"
+        );
         let level = level_info_in(&change);
         assert_eq!(level.level, OPEN_WORLD_LEVEL);
         assert_eq!(level.client_context, LOGIN_CLIENT_CONTEXT + 1);
