@@ -253,9 +253,10 @@ impl SimWorld {
         }
     }
 
-    /// Wears the best item of each worn item's kind at its highest gear score
-    /// ([`nw_content::item_rolls::ItemRolls::best_of_kind`]): a test bot at the top of the
-    /// game, so its gear never limits a kill.
+    /// Wears the bag's gear in its empty worn slots ([`super::gear::Gear::wear_bag_gear`]: a new
+    /// character's class head and weapons), then the best item of each worn item's kind at its
+    /// highest gear score ([`nw_content::item_rolls::ItemRolls::best_of_kind`]): a test bot at
+    /// the top of the game, so its gear never limits a kill.
     fn gear_up(&mut self, entity: u64) -> AdminReply {
         let Some(target) = self.player_by_number(entity) else {
             return AdminReply::NotMine;
@@ -269,6 +270,7 @@ impl SimWorld {
                 reason: NO_BAG.to_owned(),
             };
         };
+        gear.wear_bag_gear(|item_id| content.is_item_disabled(item_id));
         for (slot_id, worn) in gear.worn_items() {
             let Some(best) = content
                 .item_rolls

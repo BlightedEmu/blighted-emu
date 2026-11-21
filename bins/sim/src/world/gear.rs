@@ -1219,6 +1219,33 @@ impl Gear {
         Some((u32::try_from(index).ok()?, stack.item.instance, slot_id))
     }
 
+    /// Equips each bag item of a worn kind into the first paperdoll slot of its kind while that
+    /// slot is empty, as a client's equip ([`Self::equip`]) with the items `disabled` names left
+    /// in the bag: a new character's class head and weapons start in the bag (bot soak
+    /// 2026-11-21: a Soldier wore its chest, hands, legs and feet; its head, sword, shield and
+    /// hatchet were in the bag). The ids worn, in bag order.
+    pub(super) fn wear_bag_gear(&mut self, disabled: impl Fn(&str) -> bool) -> Vec<String> {
+        let candidates: Vec<(usize, u32, [u8; RAW_ID_LEN])> = self
+            .bag
+            .iter()
+            .enumerate()
+            .filter_map(|(index, stack)| {
+                let stack = stack.as_ref()?;
+                Some((index, first_slot(stack.kind?), stack.item.instance))
+            })
+            .collect();
+        candidates
+            .into_iter()
+            .filter_map(|(index, slot_id, instance)| {
+                if self.worn_item(slot_id).is_some() {
+                    return None;
+                }
+                let bag_slot = u32::try_from(index).ok()?;
+                self.equip(bag_slot, slot_id, 1, instance, &disabled).ok()
+            })
+            .collect()
+    }
+
     /// Equips `quantity` of the item of instance `instance` in bag slot `bag_slot` into paperdoll
     /// slot `slot_id`; an item worn there goes back to the bag. An item that `disabled` names
     /// (by item id) stays in the bag. The id of the equipped item.
@@ -1395,6 +1422,34 @@ pub(crate) mod tests {
             Some(super::super::fishing::FISHING_SLOT)
         );
         assert_eq!(tool_slot_of(&["Resource".to_owned()]), None);
+    }
+
+    #[test]
+    fn the_bag_gear_of_an_empty_worn_slot_is_worn_and_the_rest_stays_in_the_bag() {
+        const HELM: &str = "HeavyHead_T1";
+        const SECOND_HELM: &str = "HeavyHead_T2";
+        const DISABLED_HELM: &str = "HeavyHead_Disabled";
+        let head = "EquippableHead+Armor+Heavy";
+        let kits = kits_with(&[(DISABLED_HELM, head), (HELM, head), (SECOND_HELM, head)]);
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("kit");
+        for item in [DISABLED_HELM, HELM, SECOND_HELM, STAFF] {
+            assert!(gear.add(kits.item(item).expect("item"), 1), "{item}");
+        }
+        let worn = gear.wear_bag_gear(|item_id| item_id == DISABLED_HELM);
+        assert_eq!(
+            worn,
+            vec![HELM.to_owned()],
+            "the first helm the rules allow"
+        );
+        assert_eq!(gear.worn_item(slot::HEAD), Some(HELM));
+        assert_eq!(gear.bag_count(SECOND_HELM), 1, "its slot was taken by then");
+        assert_eq!(gear.bag_count(DISABLED_HELM), 1, "a disabled item stays");
+        assert_eq!(
+            gear.bag_count(STAFF),
+            1,
+            "the kit sword holds the first main-hand option"
+        );
+        assert!(gear.wear_bag_gear(none_disabled).is_empty(), "nothing more");
     }
 
     /// The kit of [`BACKSTORY`] with its bag's staff worn in the second main-hand option: two
