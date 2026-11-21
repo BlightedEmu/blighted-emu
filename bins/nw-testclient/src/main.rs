@@ -37,7 +37,7 @@ use nw_testclient::fleet::{NewClient, udp_receive_errors};
 use nw_testclient::gather::{GatherNode, run_gather};
 use nw_testclient::hunt::run_hunt;
 use nw_testclient::pair::{Check, LATE_STATE_GAP, PairReport, PairSettings, run_pair};
-use nw_testclient::play::{PlaySettings, run_play};
+use nw_testclient::play::{PlayData, PlaySettings, run_play};
 use nw_testclient::rep::{LedgerSlot, RepClient};
 use nw_testclient::swarm::run_swarm;
 use nw_testclient::udp::{Hold, run_rep};
@@ -402,9 +402,7 @@ fn gather_nodes(
     config: &TestClientConfig,
     level: &WorldFile,
 ) -> Result<LevelNodes, Box<dyn std::error::Error>> {
-    let swarm = &config.swarm;
-    let build = load_client_build(&swarm.client_build_config)?;
-    let tables = ContentBundle::load(&ContentLayout::open(content_dir(), &build)?)?.tables;
+    let tables = ContentBundle::load(&level_layout(config)?)?.tables;
     let gatherables = Gatherables::from_tables(&tables);
     let rules = GatherRules::from_tables(&tables);
     let tradeskills = &config.gather.tradeskills;
@@ -460,16 +458,22 @@ async fn input_end() {
     while matches!(input.read(&mut buffer).await, Ok(read) if read > 0) {}
 }
 
+/// The content of the `[swarm]` level's client build.
+fn level_layout(config: &TestClientConfig) -> Result<ContentLayout, Box<dyn std::error::Error>> {
+    let build = load_client_build(&config.swarm.client_build_config)?;
+    Ok(ContentLayout::open(content_dir(), &build)?)
+}
+
 /// The ground of the `[swarm]` level and the maker of bot clients.
 fn fleet_parts(
     config: &TestClientConfig,
     trusted: DtlsClientConfig,
     ledger: Arc<LedgerSlot>,
 ) -> Result<(Arc<WorldFile>, NewClient), Box<dyn std::error::Error>> {
-    let swarm = &config.swarm;
-    let build = load_client_build(&swarm.client_build_config)?;
-    let layout = ContentLayout::open(content_dir(), &build)?;
-    let ground = Arc::new(WorldFile::load(&layout, &swarm.level)?);
+    let ground = Arc::new(WorldFile::load(
+        &level_layout(config)?,
+        &config.swarm.level,
+    )?);
     let mtu = config.mtu;
     let trusted = Arc::new(trusted);
     let new_client: NewClient = Arc::new(move |token| {
@@ -675,10 +679,8 @@ async fn play(
     report_path: &std::path::Path,
     ledger: &LedgerSlot,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let swarm = &config.swarm;
-    let build = load_client_build(&swarm.client_build_config)?;
-    let layout = ContentLayout::open(content_dir(), &build)?;
-    let world = WorldFile::load(&layout, &swarm.level)?;
+    let layout = level_layout(config)?;
+    let world = WorldFile::load(&layout, &config.swarm.level)?;
     let tables = ContentBundle::load(&layout)?.tables;
     let town_stations = TownStations::load(&layout)?;
     let data = ActivityData {
@@ -709,13 +711,16 @@ async fn play(
                 .is_some_and(|kind| kind.loot_container)
         })
         .collect();
-    let report = run_play(
-        http,
-        settings,
+    let data = PlayData {
         activities,
         nodes,
         containers,
-        PoiTags::from_tables(&tables),
+        poi_tags: PoiTags::from_tables(&tables),
+    };
+    let report = run_play(
+        http,
+        settings,
+        data,
         |token| RepClient::new(trusted, config.mtu, token, 0).map(|client| ledger.give(client)),
         |line| println!("{line}"),
     )

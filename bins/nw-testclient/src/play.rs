@@ -2271,10 +2271,21 @@ fn exited(header: FacetHeader, territory: u16) -> ClientFacetMsg {
     }
 }
 
-/// Runs the play. `nodes` are the level's gather nodes, `containers` the gatherables (the
-/// CRC-32 of each lowercase id) of those that are loot containers and `poi_tags` the
-/// territories' `POITag`s; `new_client` makes a client for a token; `report` gets one line per
-/// HTTPS step.
+/// What the play bot plays with besides its quests: the activities after them and the level's
+/// data.
+pub struct PlayData {
+    /// The activities to play after the quests, in order.
+    pub activities: Vec<Activity>,
+    /// The level's gather nodes.
+    pub nodes: Arc<[GatherNode]>,
+    /// The gatherables (the CRC-32 of each lowercase id) of the nodes that are loot containers.
+    pub containers: HashSet<u32>,
+    /// The territories' `POITag`s.
+    pub poi_tags: PoiTags,
+}
+
+/// Runs the play with `data`; `new_client` makes a client for a token; `report` gets one line
+/// per HTTPS step.
 ///
 /// # Errors
 ///
@@ -2282,13 +2293,16 @@ fn exited(header: FacetHeader, territory: u16) -> ClientFacetMsg {
 pub async fn run_play(
     http: &Client,
     settings: &PlaySettings,
-    activities: Vec<Activity>,
-    nodes: Arc<[GatherNode]>,
-    containers: HashSet<u32>,
-    poi_tags: PoiTags,
+    data: PlayData,
     new_client: impl Fn(LoginToken) -> Result<RepClient, RepError>,
     mut report: impl FnMut(String),
 ) -> Result<PlayReport, PairError> {
+    let PlayData {
+        activities,
+        nodes,
+        containers,
+        poi_tags,
+    } = data;
     let admission = walk(http, &settings.account, &mut report).await?;
     let mut player = Player {
         world: WorldView::default(),
