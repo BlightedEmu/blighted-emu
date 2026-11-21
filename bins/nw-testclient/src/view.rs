@@ -13,9 +13,9 @@ use nw_messages::entity_ids::IdHolder;
 use nw_messages::gde::LOOT_BAG_ASSET;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    EntitySlots, LOGIN_MESSAGE_TYPES, MemberState, MessageError, PLAYER_VITALS_ID, ServerMessage,
-    SlotRead, SlotUpdate, VitalsData, WorldPosition, entity_of_facet, number_of_seen_raw_id,
-    release_raw_id,
+    BAG_COMPONENT, EntitySlots, ItemRecord, LOGIN_MESSAGE_TYPES, MemberState, MessageError,
+    PLAYER_VITALS_ID, ReplicatedList, ServerMessage, SlotRead, SlotUpdate, VitalsData,
+    WorldPosition, entity_of_facet, number_of_seen_raw_id, release_raw_id,
 };
 use thiserror::Error;
 
@@ -305,6 +305,11 @@ pub struct CombatView {
     hits_dealt: u64,
     hits_taken: u64,
     deaths: u64,
+    /// The bot's own newest vitals said it is dead: no health left, or the dead block.
+    own_dead: bool,
+    /// The bot's bag: one item per bag slot, empty slots included (quantity 0), as its own
+    /// bag container sent them.
+    bag: Vec<ItemRecord>,
     /// Mobs in view whose vitals said they died.
     mob_deaths: u64,
     /// The last mob in view that died, with its last place: the corpse a skin step gathers.
@@ -329,6 +334,25 @@ impl CombatView {
         match read {
             Read::Bundle(mut bundle) => {
                 self.bundles += 1;
+                // A saved dead player logs in with its own vitals at no health and gets no 4299
+                // (bot soak 2026-11-21: 18 of 30 hunt characters came back dead and stayed so).
+                for update in bundle
+                    .updates
+                    .iter()
+                    .filter(|update| update.is_local_player())
+                {
+                    if let Some(dead) = vitals_dead(update) {
+                        self.own_dead = dead;
+                    }
+                    for member in &update.members {
+                        if let (BAG_COMPONENT, MemberState::Container(container)) =
+                            (member.component, &member.state)
+                            && let Some(items) = &container.items
+                        {
+                            apply_bag(&mut self.bag, items);
+                        }
+                    }
+                }
                 for gone in self.slots.resolve(&mut bundle) {
                     self.mobs.remove(&gone);
                     if self.last_death.is_some_and(|(dead, _)| dead == gone) {
@@ -449,6 +473,21 @@ impl CombatView {
         self.deaths
     }
 
+    /// Whether the bot's own newest vitals say it is dead.
+    pub const fn own_dead(&self) -> bool {
+        self.own_dead
+    }
+
+    /// The bag slot and instance of the first stack of the item of client item index
+    /// `item_index` in the bot's bag.
+    pub fn bag_slot_of(&self, item_index: u32) -> Option<(u32, [u8; RAW_ID_LEN])> {
+        self.bag.iter().enumerate().find_map(|(slot, item)| {
+            (item.quantity > 0 && item.item_index == item_index)
+                .then(|| Some((u32::try_from(slot).ok()?, item.instance)))
+                .flatten()
+        })
+    }
+
     /// The mobs in view that died.
     pub const fn mob_deaths(&self) -> u64 {
         self.mob_deaths
@@ -483,15 +522,49 @@ fn is_mob_card(update: &SlotUpdate) -> bool {
     creature_vitals || self_named
 }
 
+/// Takes the bag list `items` into `bag`: a full list is the whole bag, a change sets one slot
+/// (a slot past the end appends, with empty slots before it).
+fn apply_bag(bag: &mut Vec<ItemRecord>, items: &ReplicatedList<ItemRecord>) {
+    match items {
+        ReplicatedList::Full(list) => bag.clone_from(&list.elements),
+        ReplicatedList::Changes(changes) => {
+            for change in changes {
+                let Ok(slot) = usize::try_from(change.index) else {
+                    continue;
+                };
+                if slot >= bag.len() {
+                    bag.resize(slot + 1, ItemRecord::default());
+                }
+                bag[slot] = change.value;
+            }
+        }
+    }
+}
+
 /// Whether the vitals of `update` say its entity died: no health left, or the dead block.
 fn died(update: &SlotUpdate) -> bool {
-    update.members.iter().any(|member| match &member.state {
-        MemberState::Vitals(vitals) => vitals.slot_0.as_ref().is_some_and(|slot| {
-            slot.health_amount.is_some_and(|health| health <= 0.0)
-                || slot.vitals_data.as_ref().is_some_and(VitalsData::is_dead)
-        }),
-        _ => false,
-    })
+    vitals_dead(update) == Some(true)
+}
+
+/// What the vitals of `update` say of its entity's life: dead with no health left or the dead
+/// block, alive with health left; `None` when its vitals name neither (a mana-only vitals, or no
+/// vitals).
+fn vitals_dead(update: &SlotUpdate) -> Option<bool> {
+    let says = update
+        .members
+        .iter()
+        .filter_map(|member| match &member.state {
+            MemberState::Vitals(vitals) => {
+                let slot = vitals.slot_0.as_ref()?;
+                let dead_block = slot.vitals_data.as_ref().is_some_and(VitalsData::is_dead);
+                match slot.health_amount {
+                    Some(health) => Some(health <= 0.0 || dead_block),
+                    None => dead_block.then_some(true),
+                }
+            }
+            _ => None,
+        });
+    says.reduce(|dead, also| dead || also)
 }
 
 /// The world as one client saw it.
@@ -983,6 +1056,97 @@ mod tests {
         view.read(&mob_bundle(0, Vec::new(), vec![creature]))
             .expect("read");
         assert_eq!(view.mobs().collect::<Vec<_>>(), vec![(MOB, at(2.0))]);
+    }
+
+    #[test]
+    fn the_own_vitals_say_whether_the_bot_is_dead_and_a_bundle_without_them_keeps_it() {
+        const MAX_HEALTH: u32 = 1_000;
+        let own_vitals = |sequence: u64, health: u32| {
+            let mut own = entity_group(LOCAL_PLAYER_INTEREST, OWN, None, Some(at(1.0)));
+            own.members.push(BundleMember {
+                component: nw_messages::PLAYER_VITALS_COMPONENT,
+                state: MemberState::Vitals(VitalsState::player(health, MAX_HEALTH)),
+            });
+            let bundle = ReplicatedStateBundle::of_groups(
+                sequence,
+                LOGIN_CLIENT_CONTEXT,
+                Vec::new(),
+                vec![own],
+            )
+            .expect("bundle");
+            received(BUNDLE_CHANNEL, &ServerMessage::Bundle(bundle))
+        };
+        let mut view = combat_view();
+        assert!(!view.own_dead(), "no vitals yet");
+        view.read(&own_vitals(0, 0)).expect("read");
+        assert!(view.own_dead(), "logged in at no health");
+        view.read(&mob_bundle(1, Vec::new(), Vec::new()))
+            .expect("read");
+        assert!(view.own_dead(), "a bundle without own vitals keeps it");
+        view.read(&own_vitals(2, MAX_HEALTH)).expect("read");
+        assert!(!view.own_dead(), "respawned at full health");
+        assert_eq!(view.deaths(), 0, "no 4299");
+    }
+
+    #[test]
+    fn the_own_bag_names_the_slot_and_instance_of_an_item_until_it_leaves() {
+        const BOX_INDEX: u32 = 9_401;
+        const BOX_SLOT: u32 = 2;
+        const BOX_INSTANCE: [u8; RAW_ID_LEN] = [7; RAW_ID_LEN];
+        let own_bag = |sequence: u64, items: ReplicatedList<ItemRecord>| {
+            let mut own = entity_group(LOCAL_PLAYER_INTEREST, OWN, None, Some(at(1.0)));
+            own.members.push(BundleMember {
+                component: BAG_COMPONENT,
+                state: MemberState::Container(nw_messages::ContainerState {
+                    items: Some(items),
+                    ..nw_messages::ContainerState::default()
+                }),
+            });
+            let bundle = ReplicatedStateBundle::of_groups(
+                sequence,
+                LOGIN_CLIENT_CONTEXT,
+                Vec::new(),
+                vec![own],
+            )
+            .expect("bundle");
+            received(BUNDLE_CHANNEL, &ServerMessage::Bundle(bundle))
+        };
+        let reward_box = ItemRecord {
+            quantity: 1,
+            item_index: BOX_INDEX,
+            instance: BOX_INSTANCE,
+            ..ItemRecord::default()
+        };
+        let mut view = combat_view();
+        view.read(&own_bag(
+            0,
+            ReplicatedList::Full(nw_messages::FullList::first(vec![
+                ItemRecord::default(),
+                ItemRecord::default(),
+            ])),
+        ))
+        .expect("read");
+        assert_eq!(view.bag_slot_of(BOX_INDEX), None, "an empty bag");
+        let change = |value| {
+            ReplicatedList::Changes(vec![nw_messages::ListChange {
+                index: BOX_SLOT,
+                version: 0,
+                value,
+            }])
+        };
+        view.read(&own_bag(1, change(reward_box))).expect("read");
+        assert_eq!(
+            view.bag_slot_of(BOX_INDEX),
+            Some((BOX_SLOT, BOX_INSTANCE)),
+            "a slot past the end appends"
+        );
+        view.read(&own_bag(2, change(ItemRecord::default())))
+            .expect("read");
+        assert_eq!(
+            view.bag_slot_of(BOX_INDEX),
+            None,
+            "opened: the slot is empty"
+        );
     }
 
     #[test]

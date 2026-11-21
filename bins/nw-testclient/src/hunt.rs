@@ -215,6 +215,14 @@ impl Hunter {
         }
     }
 
+    /// The bot's own vitals say it is dead (`dead`) `since` the registration: a bot that logs in
+    /// dead (saved at no health) gets no 4299, and waits and asks to respawn as after one.
+    pub fn saw_own_life(&mut self, dead: bool, since: Duration) {
+        if dead && self.phase == Phase::Hunting {
+            self.phase = Phase::Dead { since };
+        }
+    }
+
     /// The bot's 2071 count is `hits`: a new hit starts its swings at its mob over.
     pub fn saw_hits(&mut self, hits: u64) {
         if hits > self.hits_seen {
@@ -587,6 +595,7 @@ impl FleetBot for HuntBot {
         };
         let mobs: Vec<(u64, WorldPosition)> = self.view.mobs().collect();
         self.hunter.saw_hits(self.view.hits_dealt());
+        self.hunter.saw_own_life(self.view.own_dead(), since);
         let action = self
             .hunter
             .step(own, &mobs, self.view.deaths(), since, &*self.ground);
@@ -934,6 +943,48 @@ mod tests {
             None
         );
         assert_eq!((hunter.lived_again(), hunter.waiting_since()), (1, None));
+    }
+
+    #[test]
+    fn a_bot_that_logs_in_dead_asks_to_respawn_after_its_wait_and_lives_again() {
+        let mut hunter = Hunter::new(settings(), 0);
+        let mobs = [(MOB, at(ORIGIN + 1.0))];
+        let login = Duration::from_secs(2);
+        let own = at(ORIGIN);
+        hunter.saw_own_life(true, login);
+        assert_eq!(
+            hunter.step(own, &mobs, 0, login, &NoGround),
+            None,
+            "dead: no attack"
+        );
+        let asked = login + RESPAWN_WAIT;
+        hunter.saw_own_life(true, asked);
+        assert_eq!(
+            hunter.step(own, &mobs, 0, asked, &NoGround),
+            Some(HuntAction::Respawn)
+        );
+        hunter.saw_own_life(true, asked + SEND_INTERVAL);
+        assert_eq!(hunter.waiting_since(), Some(asked), "asked once");
+        let respawn_point = at(ORIGIN + RESPAWN_POINT_M);
+        hunter.saw_own_life(false, asked * 2);
+        assert_eq!(
+            hunter.step(respawn_point, &mobs, 0, asked * 2, &NoGround),
+            None
+        );
+        assert_eq!((hunter.lived_again(), hunter.waiting_since()), (1, None));
+    }
+
+    #[test]
+    fn a_living_bot_hunts_on() {
+        let mut hunter = Hunter::new(settings(), 0);
+        for since in [SEND_INTERVAL, SEND_INTERVAL + RESPAWN_WAIT * 2] {
+            hunter.saw_own_life(false, since);
+            assert_ne!(
+                hunter.step(at(ORIGIN), &[], 0, since, &NoGround),
+                Some(HuntAction::Respawn),
+                "alive: no respawn request"
+            );
+        }
     }
 
     /// A check and the fault that must fail it alone.
