@@ -282,7 +282,7 @@ const TURRET_RAID: u64 = 0;
 const TURRET_FACTION: u8 = 0;
 const TURRET_PERMISSION_OPTIONS: u8 = 0;
 /// The step of the walk along a shot's line to the ground, metres.
-const GROUND_STEP_M: f32 = 0.5;
+pub(super) const GROUND_STEP_M: f32 = 0.5;
 /// The step of a cannon ball's flight, seconds.
 const FLIGHT_STEP_S: f32 = 0.02;
 /// Milliseconds and nanoseconds per second.

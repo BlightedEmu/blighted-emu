@@ -20,9 +20,9 @@
 
 use nw_content::player_attacks::AttackKind;
 use nw_content::player_sequences::{
-    AbilityPlay, AirSequences, AltHold, AttackPress, AttackSlot, Direction, DodgeLoad, DrawHold,
-    FirstPlay, HipShot, PlayerSequences, PressWindow, RiderPlays, RunningAttack, SlotsChange,
-    StanceSequences, StatePlay, TimedSlots,
+    AbilityCast, AbilityPlay, AirSequences, AltHold, AttackPress, AttackSlot, Direction, DodgeLoad,
+    DrawHold, FirstPlay, HipShot, PlayerSequences, PressWindow, RiderPlays, RunningAttack,
+    SlotsChange, StanceSequences, StatePlay, TimedSlots,
 };
 use nw_messages::{
     AlcPosture, AttackKeyBits, RemoteUpper, SecondSlayerState, SequenceClock, SequenceTime,
@@ -1166,10 +1166,52 @@ struct AbilityOn {
     ability: u32,
     /// It plays in the first slot (a full-body ability).
     first: bool,
-    /// It plays a third slot state (an aimed ability).
+    /// It plays a third slot (an aimed ability, or a shot's third-slot sequence).
     third: bool,
     /// Its cast went out.
     cast: bool,
+}
+
+/// The timed changes of the weapon ability that plays ([`AbilityPlay::after`],
+/// [`AbilityCast::after`]) while they go out, and its end when retail ends it before its action
+/// stops ([`AbilityCast::ends_after_ms`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AbilitySteps {
+    /// CRC-32 of the ability's lowercase id.
+    ability: u32,
+    /// The changes not sent yet, by milliseconds from `from_ms`, in their order.
+    steps: Vec<TimedSlots>,
+    /// Milliseconds from `from_ms` to the ability's end.
+    ends_after_ms: Option<u64>,
+    /// The time of the own state that sent the start or the cast; `None` until it goes out.
+    from_ms: Option<u64>,
+}
+
+impl AbilitySteps {
+    fn new(ability: u32, steps: &[TimedSlots], ends_after_ms: Option<u64>) -> Self {
+        Self {
+            ability,
+            steps: steps.to_vec(),
+            ends_after_ms,
+            from_ms: None,
+        }
+    }
+
+    /// The changes due by own state time `state_ms` (the first call is the time of the state
+    /// that sent the start or the cast), in their order, and whether the ability ends now.
+    fn due(&mut self, state_ms: u64) -> (Vec<SlotsChange>, bool) {
+        let since_ms = state_ms.saturating_sub(*self.from_ms.get_or_insert(state_ms));
+        let sent = self
+            .steps
+            .iter()
+            .take_while(|step| step.after_ms <= since_ms)
+            .count();
+        let due = self.steps.drain(..sent).map(|step| step.slots).collect();
+        let ends = self
+            .ends_after_ms
+            .is_some_and(|ends_ms| since_ms >= ends_ms);
+        (due, ends)
+    }
 }
 
 /// The weapon in the player's hand.
@@ -1677,6 +1719,8 @@ pub(super) struct SlayerTrack {
     remote_action: Option<SlayerState>,
     /// The weapon ability the slayer state plays, from its start to its end.
     ability: Option<AbilityOn>,
+    /// The timed changes of that ability ([`AbilitySteps`]).
+    ability_steps: Option<AbilitySteps>,
     /// The weapon accuracy of the movement the newest state plays ([`RUN_ACCURACY`]).
     accuracy: f32,
     /// The counter of the newest record.
@@ -3209,9 +3253,7 @@ impl SlayerTrack {
             .unwrap_or(started);
         self.drop_shot();
         if let Some(first) = play.first {
-            self.pending = Some((Pending::Ability(first), started, self.newest_frame_s));
-            self.sequence_s = self.newest_frame_s;
-            self.follow_up = None;
+            self.play_ability_first(first, started);
         }
         let second_started = UpperSlots {
             second: SlotChange {
@@ -3228,12 +3270,18 @@ impl SlayerTrack {
         self.ability = Some(AbilityOn {
             ability,
             first: play.first.is_some(),
-            third: play
-                .slots
-                .third_state
-                .is_some_and(|state| state != CLEARED_SLOT),
+            third: plays_third(&play.slots),
             cast: false,
         });
+        self.ability_steps = Some(AbilitySteps::new(ability, &play.after, None));
+    }
+
+    /// The first slot plays `first`, the full-body state of a weapon ability, from record
+    /// `started` ([`Pending::Ability`]).
+    fn play_ability_first(&mut self, first: FirstPlay, started: u16) {
+        self.pending = Some((Pending::Ability(first), started, self.newest_frame_s));
+        self.sequence_s = self.newest_frame_s;
+        self.follow_up = None;
     }
 
     /// The record from press record `pressed` on in which the client named first-slot sequence
@@ -3252,9 +3300,14 @@ impl SlayerTrack {
             .map(|(_, counter)| counter)
     }
 
-    /// Weapon ability `ability` cast its first spell: an aimed one plays its cast `play.cast`,
-    /// started in the newest record (retail Sacred Ground: `16=33 18=993 19=00 21=00 48=03` at
-    /// the click; Inferred: the server sends it at the cast, about 300 ms after the click).
+    /// Weapon ability `ability` fired (its first spell or its shot): an aimed one plays its cast
+    /// `play.cast`, started in the newest record (retail Sacred Ground: `16=33 18=993 19=00 21=00
+    /// 48=03` at the click; Inferred: the server sends it at the cast, about 300 ms after the
+    /// click). A full-body cast takes the first slot (Rain of Arrows' shot), and the ability then
+    /// ends as a full-body one does; the cast's own steps take the place of the start's, and the
+    /// ability ends at the cast's retail end when it has one ([`AbilityCast`]). Live 2026-11-21:
+    /// Rain of Arrows' shot sent Splinter Shot's `16=33 18=571 48=43` and no first slot, and the
+    /// own client stayed in the aim.
     pub(super) fn ability_cast(&mut self, ability: u32, play: &AbilityPlay) {
         let Some(on) = self
             .ability
@@ -3264,11 +3317,43 @@ impl SlayerTrack {
             return;
         };
         on.cast = true;
-        if let Some(cast) = play
-            .cast
-            .and_then(|cast| slots_of(cast, self.newest_counter))
-        {
-            self.upper = Some(merge(self.upper.unwrap_or_default(), cast));
+        let Some(cast) = play.cast.as_ref() else {
+            return;
+        };
+        let AbilityCast {
+            first,
+            slots,
+            after,
+            ends_after_ms,
+        } = cast;
+        on.first |= first.is_some();
+        on.third |= plays_third(slots);
+        let counter = self.newest_counter;
+        if let Some(first) = *first {
+            self.play_ability_first(first, counter);
+        }
+        if let Some(slots) = slots_of(*slots, counter) {
+            self.upper = Some(merge(self.upper.unwrap_or_default(), slots));
+        }
+        self.ability_steps = Some(AbilitySteps::new(ability, after, *ends_after_ms));
+    }
+
+    /// Sends the timed changes of the weapon ability that plays that are due by own state time
+    /// `state_ms`, and ends it at its retail end ([`AbilitySteps`]).
+    fn step_ability(&mut self, state_ms: u64) {
+        let Some(steps) = self.ability_steps.as_mut() else {
+            return;
+        };
+        let ability = steps.ability;
+        let (due, ends) = steps.due(state_ms);
+        let counter = self.newest_counter;
+        for change in due {
+            if let Some(slots) = slots_of(change, counter) {
+                self.upper = Some(merge(self.upper.unwrap_or_default(), slots));
+            }
+        }
+        if ends {
+            self.ability_ended(ability);
         }
     }
 
@@ -3282,6 +3367,7 @@ impl SlayerTrack {
             return;
         };
         self.ability = None;
+        self.ability_steps = None;
         let counter = self.newest_counter;
         let mut end = UpperSlots {
             marker: Some(CLEARED_SLOT),
@@ -3630,6 +3716,7 @@ impl SlayerTrack {
                 self.newest_frame_s,
             ));
         }
+        self.step_ability(state_ms);
         let (state, started) = self.next(number);
         self.step_draw(state_ms);
         self.step_shot(state_ms);
@@ -4108,6 +4195,16 @@ fn slots_of(change: SlotsChange, counter: u16) -> Option<UpperSlots> {
         time: None,
     };
     (slots != UpperSlots::default()).then_some(slots)
+}
+
+/// Whether `slots` play a third slot: a state or a sequence in it that is not the cleared one
+/// (Sacred Ground's aim `19=46 21=449`; Penetrating Shot's `21=2343` and Rain of Arrows' shot
+/// `21=387`, whose retail end clears it: `19=0 21=0`).
+fn plays_third(slots: &SlotsChange) -> bool {
+    [slots.third_state, slots.third_sequence]
+        .into_iter()
+        .flatten()
+        .any(|value| value != CLEARED_SLOT)
 }
 
 /// The upper slots of `older` with the children `newer` sends in their place.
@@ -7390,6 +7487,7 @@ pub(crate) mod tests {
                 marker: Some(1),
                 ..SlotsChange::default()
             },
+            after: Vec::new(),
             cast: None,
             seen: 15,
         }
@@ -7408,13 +7506,17 @@ pub(crate) mod tests {
                 marker: Some(33),
                 ..SlotsChange::default()
             },
-            cast: Some(SlotsChange {
-                second_state: Some(33),
-                second_sequence: Some(993),
-                third_state: Some(0),
-                third_sequence: Some(0),
-                marker: Some(3),
-                ..SlotsChange::default()
+            after: Vec::new(),
+            cast: Some(AbilityCast {
+                slots: SlotsChange {
+                    second_state: Some(33),
+                    second_sequence: Some(993),
+                    third_state: Some(0),
+                    third_sequence: Some(0),
+                    marker: Some(3),
+                    ..SlotsChange::default()
+                },
+                ..AbilityCast::default()
             }),
             seen: 417,
         }
@@ -7423,6 +7525,179 @@ pub(crate) mod tests {
     const PRESS_RECORD: u16 = 0x0fe4;
     const TRIP: u32 = 1;
     const GROUND: u32 = 2;
+
+    /// Records and own states (one each, standing still) from own state `number` on until the
+    /// own state for which `wanted` holds: gives its number and what it sent. Panics after
+    /// `MAX_STATES`.
+    fn state_until(
+        track: &mut SlayerTrack,
+        table: &PlayerSequences,
+        number: u16,
+        wanted: impl Fn(&SlayerDue) -> bool,
+    ) -> (u16, SlayerDue) {
+        const MAX_STATES: u16 = 60;
+        for next in number..number + MAX_STATES {
+            track.record(quiet_record(next, Intent::default()), table);
+            let due = own_state(track, next);
+            if wanted(&due) {
+                return (next, due);
+            }
+        }
+        panic!("no such own state in {MAX_STATES} states from {number}");
+    }
+
+    /// Milliseconds of own states from `from` to `to`.
+    fn states_ms(from: u16, to: u16) -> u64 {
+        u64::from(to - from) * TICK_MS
+    }
+
+    /// Rain of Arrows plays as retail's own states (1,195 ledgers, 2026-11-21: the miners in
+    /// `local-data/scratch-work/bow-live-2026-11-21/`), from the shared table: its aim's start,
+    /// `18=34 48=128` 352 ms later (16 of 16); at its fire the full-body shot `13=08 15=5037` with
+    /// `16=45 18=0 21=387 48=129` (15 of 16); 535 ms after the shot its end `19=0 21=0 48=0` (19
+    /// of 25 shots), the first slot back to the movement; the end of its action after that
+    /// changes nothing. The play needs no input: it is the same for a keyboard and a pad. Before,
+    /// live 2026-11-21: the shot sent Splinter Shot's `16=33 18=571 48=43` and no first slot, and
+    /// the own client stayed in the aim.
+    #[test]
+    fn rain_of_arrows_aims_then_shoots_on_the_full_body_and_ends_535_ms_after_the_shot() {
+        const RAIN: &str = "Ability_Bow_RainofArrows";
+        const AIM_SEQUENCE: u64 = 1453;
+        const AIM_LOOP_SEQUENCE: u64 = 34;
+        const AIM_LOOP_MS: u64 = 352;
+        const SHOT_STATE: u64 = 8;
+        const SHOT_SEQUENCE: u64 = 5037;
+        const SHOT_THIRD_SEQUENCE: u64 = 387;
+        const SHOT_MARKER: u64 = 129;
+        const SHOT_END_MS: u64 = 535;
+        let table = crate::combat::test_support::test_player_sequences();
+        let rain = nw_formats::objectstream::lowercase_crc32(RAIN);
+        let play = table.ability(rain).expect("the rain's play");
+        let mut track = spawned();
+        track.record(quiet_record(PRESS_RECORD, Intent::default()), &table);
+        track.ability_started(rain, play, PRESS_RECORD);
+        let start_state = PRESS_RECORD + 1;
+        let start = own_state(&mut track, start_state).slots.expect("the aim");
+        assert_eq!(start.second.sequence, Some(AIM_SEQUENCE));
+        let (looped, _) = state_until(&mut track, &table, start_state + 1, |due| {
+            due.slots
+                .is_some_and(|slots| slots.second.sequence == Some(AIM_LOOP_SEQUENCE))
+        });
+        let loop_ms = states_ms(start_state, looped);
+        assert!(
+            (AIM_LOOP_MS..AIM_LOOP_MS + TICK_MS).contains(&loop_ms),
+            "the aim's loop at {loop_ms} ms"
+        );
+        let shot_state = looped + 1;
+        track.record(quiet_record(shot_state, Intent::default()), &table);
+        track.ability_cast(rain, play);
+        let shot = own_state(&mut track, shot_state);
+        let first = shot.state.expect("the full-body shot");
+        assert_eq!(
+            (first.state, first.sequence, first.started),
+            (Some(SHOT_STATE), SHOT_SEQUENCE, Some(shot_state))
+        );
+        let slots = shot.slots.expect("the shot's slots");
+        assert_eq!(
+            (
+                slots.second.state,
+                slots.second.sequence,
+                slots.third.sequence,
+                slots.marker
+            ),
+            (
+                Some(CAST_END_STATE),
+                Some(CLEARED_SLOT),
+                Some(SHOT_THIRD_SEQUENCE),
+                Some(SHOT_MARKER)
+            )
+        );
+        let (ended, end) = state_until(&mut track, &table, shot_state + 1, |due| {
+            due.slots
+                .is_some_and(|slots| slots.marker == Some(CLEARED_SLOT))
+        });
+        let end_ms = states_ms(shot_state, ended);
+        assert!(
+            (SHOT_END_MS..SHOT_END_MS + TICK_MS).contains(&end_ms),
+            "the end at {end_ms} ms"
+        );
+        let slots = end.slots.expect("the end");
+        assert_eq!(
+            (slots.third.state, slots.third.sequence),
+            (Some(CLEARED_SLOT), Some(CLEARED_SLOT))
+        );
+        let stand = end.state.expect("back to the movement");
+        assert_ne!(stand.state, Some(SHOT_STATE));
+        assert!(track.ability.is_none(), "the play ended");
+        track.ability_ended(rain);
+        assert!(track.pending.is_none(), "the action's end changes nothing");
+    }
+
+    /// Penetrating Shot plays as retail's own states (733 own shots, 2026-11-21): at its fire
+    /// `18=36`, then `48=520` 667 ms after the shot, `18=4981 48=8` at 766 ms, `48=40` at 800 ms
+    /// and its end at 834 ms, which closes the second slot and clears the third (`21=2343` of
+    /// its aim) and the marker. The play needs no input: it is the same for a keyboard and a pad.
+    #[test]
+    fn penetrating_shot_shoots_then_lowers_and_ends_834_ms_after_the_shot() {
+        const PENETRATING: &str = "Ability_Bow_PenetratingShot";
+        const SHOT_SEQUENCE: u64 = 36;
+        const LOWER_SEQUENCE: u64 = 4981;
+        /// The changes after the shot: ms, and the marker each sends.
+        const STEPS: [(u64, u64); 3] = [(667, 520), (766, 8), (800, 40)];
+        const SHOT_END_MS: u64 = 834;
+        let table = crate::combat::test_support::test_player_sequences();
+        let penetrating = nw_formats::objectstream::lowercase_crc32(PENETRATING);
+        let play = table.ability(penetrating).expect("the shot's play");
+        let mut track = spawned();
+        track.record(quiet_record(PRESS_RECORD, Intent::default()), &table);
+        track.ability_started(penetrating, play, PRESS_RECORD);
+        own_state(&mut track, PRESS_RECORD + 1);
+        let shot_state = PRESS_RECORD + 2;
+        track.record(quiet_record(shot_state, Intent::default()), &table);
+        track.ability_cast(penetrating, play);
+        let shot = own_state(&mut track, shot_state).slots.expect("the shot");
+        assert_eq!(shot.second.sequence, Some(SHOT_SEQUENCE));
+        let mut number = shot_state + 1;
+        for (after_ms, marker) in STEPS {
+            let (at, due) = state_until(&mut track, &table, number, |due| {
+                due.slots.is_some_and(|slots| slots.marker == Some(marker))
+            });
+            let at_ms = states_ms(shot_state, at);
+            assert!(
+                (after_ms..after_ms + TICK_MS).contains(&at_ms),
+                "48={marker} at {at_ms} ms"
+            );
+            if marker != STEPS[0].1 {
+                assert_eq!(
+                    due.slots.map(|slots| slots.second.sequence),
+                    Some(Some(LOWER_SEQUENCE))
+                );
+            }
+            number = at + 1;
+        }
+        let (ended, end) = state_until(&mut track, &table, number, |due| {
+            due.slots
+                .is_some_and(|slots| slots.marker == Some(CLEARED_SLOT))
+        });
+        let end_ms = states_ms(shot_state, ended);
+        assert!(
+            (SHOT_END_MS..SHOT_END_MS + TICK_MS).contains(&end_ms),
+            "the end at {end_ms} ms"
+        );
+        let slots = end.slots.expect("the end");
+        assert_eq!(
+            (
+                slots.second.state,
+                slots.second.sequence,
+                slots.third.sequence
+            ),
+            (
+                Some(loadout::CLOSED_STATE),
+                Some(CLEARED_SLOT),
+                Some(CLEARED_SLOT)
+            )
+        );
+    }
 
     #[test]
     fn a_full_body_ability_plays_in_the_first_slot_from_its_press_then_stands() {

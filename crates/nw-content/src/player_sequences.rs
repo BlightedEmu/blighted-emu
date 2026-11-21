@@ -729,11 +729,39 @@ pub struct AbilityPlay {
     /// The slots past the first and the marker.
     #[serde(default)]
     pub slots: SlotsChange,
-    /// What an aimed ability's cast sends (Sacred Ground's `16=33 18=993 19=00 21=00 48=03`).
+    /// What follows the start, by milliseconds from its own state (Rain of Arrows' aim:
+    /// `18=34 48=128` 352 ms after its start in 16 of 16 retail own starts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<TimedSlots>,
+    /// What an aimed ability sends when it fires ([`AbilityCast`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cast: Option<SlotsChange>,
+    pub cast: Option<AbilityCast>,
     /// How many presses showed the start.
     pub seen: u32,
+}
+
+/// What an aimed ability sends when it fires (its cast or its shot, after the aim): Sacred
+/// Ground's `16=33 18=993 19=00 21=00 48=03`; Rain of Arrows' full-body shot
+/// `13=08 15=5037 16=45 18=0 21=387 48=129` (15 of 16 retail own starts, 145 ms after the click
+/// at the median), its end `19=0 21=0 48=0` 535 ms after the shot (19 of 25 shots; the shot
+/// fragment's `CanTransition` is at 567 ms); Penetrating Shot's `18=36`, then `48=520` at
+/// 667 ms, `18=4981 48=8` at 766 ms, `48=40` at 800 ms and its end at 834 ms (733 retail own
+/// shots; miners in `local-data/scratch-work/bow-live-2026-11-21/`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AbilityCast {
+    /// The first slot of a cast that plays on the full body; `None` for an upper-body one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first: Option<FirstPlay>,
+    /// The slots past the first and the marker.
+    #[serde(flatten)]
+    pub slots: SlotsChange,
+    /// What follows the cast, by milliseconds from its own state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<TimedSlots>,
+    /// Milliseconds from the cast's own state to the ability's end, when retail ends it there
+    /// (before its action stops); `None`: it ends when its action stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ends_after_ms: Option<u64>,
 }
 
 /// The file form of the table.
@@ -1137,6 +1165,50 @@ mod tests {
         ]
     }"#;
 
+    /// A row with steps after its start and a full-body cast with steps and an end, as Rain of
+    /// Arrows' (the cast's slots sit beside its other fields, as an older cast's do).
+    #[test]
+    fn an_ability_row_reads_its_steps_and_its_full_body_cast() {
+        const ROW: &str = r#"{"stances": [], "follow_ups": [], "abilities": [
+            {"ability": "Ability_Bow_RainofArrows",
+             "slots": {"second_state": 36, "second_sequence": 1453, "marker": 129},
+             "after": [{"after_ms": 352, "second_sequence": 34, "marker": 128}],
+             "cast": {"first": {"state": 8, "sequence": 5037}, "second_state": 45,
+                      "second_sequence": 0, "third_sequence": 387, "marker": 129,
+                      "after": [{"after_ms": 100, "marker": 1}], "ends_after_ms": 535},
+             "seen": 26}
+        ]}"#;
+        let table = PlayerSequences::parse(ROW).expect("table");
+        let rain = table
+            .ability(lowercase_crc32("Ability_Bow_RainofArrows"))
+            .expect("the rain");
+        assert_eq!(
+            rain.after,
+            [TimedSlots {
+                after_ms: 352,
+                slots: SlotsChange {
+                    second_sequence: Some(34),
+                    marker: Some(128),
+                    ..SlotsChange::default()
+                },
+            }]
+        );
+        let cast = rain.cast.as_ref().expect("the cast");
+        assert_eq!(
+            cast.first,
+            Some(FirstPlay {
+                state: 8,
+                sequence: 5037
+            })
+        );
+        assert_eq!(
+            (cast.slots.second_state, cast.slots.third_sequence),
+            (Some(45), Some(387))
+        );
+        assert_eq!(cast.after.len(), 1);
+        assert_eq!(cast.ends_after_ms, Some(535));
+    }
+
     #[test]
     fn an_ability_animation_is_found_by_the_crc_of_its_lowercase_id() {
         let table = PlayerSequences::parse(TABLE).expect("table");
@@ -1156,7 +1228,7 @@ mod tests {
             .expect("sacred ground");
         assert_eq!(ground.first, None, "an upper-body ability");
         assert_eq!(
-            ground.cast.map(|cast| cast.second_sequence),
+            ground.cast.as_ref().map(|cast| cast.slots.second_sequence),
             Some(Some(993))
         );
         assert_eq!(table.ability(lowercase_crc32("Ability_Unknown")), None);

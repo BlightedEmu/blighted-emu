@@ -3106,6 +3106,26 @@
     "third_sequence": 2343,
     "marker": 521
    },
+   "cast": {
+    "second_sequence": 36,
+    "after": [
+     {
+      "after_ms": 667,
+      "marker": 520
+     },
+     {
+      "after_ms": 766,
+      "second_sequence": 4981,
+      "marker": 8
+     },
+     {
+      "after_ms": 800,
+      "second_sequence": 4981,
+      "marker": 40
+     }
+    ],
+    "ends_after_ms": 834
+   },
    "seen": 656
   },
   {
@@ -3128,10 +3148,23 @@
     "third_sequence": 431,
     "marker": 129
    },
+   "after": [
+    {
+     "after_ms": 352,
+     "second_sequence": 34,
+     "marker": 128
+    }
+   ],
    "cast": {
-    "marker": 43,
-    "second_sequence": 571,
-    "second_state": 33
+    "first": {
+     "state": 8,
+     "sequence": 5037
+    },
+    "second_state": 45,
+    "second_sequence": 0,
+    "third_sequence": 387,
+    "marker": 129,
+    "ends_after_ms": 535
    },
    "seen": 26
   },

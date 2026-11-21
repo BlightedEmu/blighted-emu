@@ -35,7 +35,7 @@ use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::paperdoll::slot;
 use nw_messages::player_components::{CHARGE_COMPONENT, CHARGE_TYPE_INDEX};
 use nw_messages::{AbilityCooldown, BundleMember, InputRecord, LookDir, MemberState};
-use nw_sim_core::{Position, weapon_damage_scale};
+use nw_sim_core::{Ground, Position, weapon_damage_scale};
 
 use super::ability_instances::AbilityInstances;
 use super::gear::Gear;
@@ -45,6 +45,7 @@ use super::progression::Masteries;
 use super::projectile::{AimLine, Shot, ShotEnd, ShotHit, first_on_line, flight_ms, meets_head};
 use super::spell_areas::SpellArea;
 use super::status_effects::StatusEffects;
+use super::turrets::{GROUND_STEP_M, ground_along, point_on};
 use super::{Player, SimWorld};
 use crate::combat::{AttackOutcome, AttackRefusal};
 use crate::mobs::Capsule;
@@ -250,7 +251,8 @@ pub(super) enum AbilityEvent {
         /// The press's client frame.
         frame: u16,
     },
-    /// The action that plays ability `ability` cast its first spell.
+    /// The action that plays ability `ability` cast its first spell, or the aim that plays it
+    /// moved on to its shot ([`AbilityRun::tick_list`]): the ability fires.
     Casting {
         /// CRC-32 of the lowercase ability id.
         ability: u32,
@@ -475,8 +477,11 @@ pub(super) struct AbilityRun {
     last_frame: Option<u16>,
     /// The newest ability key press.
     press: Option<Press>,
-    /// The CAGE names of the inputs the newest input message holds, in any of its new frames.
+    /// The CAGE names of the inputs on in any new frame of the input messages read since the
+    /// tick before the last ([`AbilityRun::press`]).
     inputs_on: Vec<String>,
+    /// A tick read [`AbilityRun::inputs_on`]: the next message's inputs take their place.
+    inputs_ticked: bool,
     /// The running actions.
     running: Vec<Running>,
     /// The Mannequin tags its actions set and did not unset.
@@ -729,14 +734,21 @@ impl AbilityRun {
     /// Reads the presses of the ability keys in `records` (newest first, older frames repeated:
     /// each frame id once, oldest first); the newest names the ability that `mapped` maps to its
     /// key (CRC-32 of its lowercase id, 0 for an empty slot). The CAGE inputs on are those that
-    /// `inputs_of` names in the new frames.
+    /// `inputs_of` names in the new frames of this message and of the messages before it since
+    /// the last tick: messages come between the ticks, and two can come before one tick. Live
+    /// 2026-11-21 03:13:05.306 and 08.306: a click in the aim of Rain of Arrows (its
+    /// `attack_shoot` only in the frame of the press) came 29 ms before the next message and
+    /// both before a tick; the next message took the click's inputs away, and only the third
+    /// click, whose next message came 40 ms later, after a tick, placed the rain.
     pub fn press(
         &mut self,
         records: &[InputRecord],
         mapped: impl Fn(usize) -> Option<u32>,
         inputs_of: impl Fn(&InputRecord) -> Vec<String>,
     ) {
-        self.inputs_on.clear();
+        if std::mem::take(&mut self.inputs_ticked) {
+            self.inputs_on.clear();
+        }
         for record in records.iter().rev() {
             let frame = record.u16_after_mask;
             if self
@@ -767,6 +779,13 @@ impl AbilityRun {
         }
     }
 
+    /// A tick read the inputs on ([`AbilityRun::press`]): the next message's inputs take their
+    /// place. A tick of a weapon without ability lists reads them too, so they do not pile up
+    /// until the next weapon with lists comes in the hand.
+    pub(super) fn inputs_read(&mut self) {
+        self.inputs_ticked = true;
+    }
+
     /// One tick of the lists `lists` of the weapon in the hand at `now_ms` (`server_ms`: the same
     /// time on the server clock, ms since 2000-01-01): the mana comes back, and in each list
     /// actions move on, stop and start, and the running ones cast; gives what the world must do.
@@ -793,6 +812,7 @@ impl AbilityRun {
                 .into_iter()
                 .map(|ability| AbilityEvent::Ended { ability }),
         );
+        self.inputs_read();
         let tags = holder.tags();
         self.aiming = lists.first().is_some_and(|list| {
             self.world(lists, list, holder, &tags, None, now_ms)
@@ -815,6 +835,17 @@ impl AbilityRun {
     /// `Bow` aim.
     pub fn aims(&self) -> bool {
         self.aiming
+    }
+
+    /// The ability of the newest chain fires, once: its owner casts its first spell or moves on
+    /// to its shot ([`AbilityEvent::Casting`]).
+    fn fire_owner(&mut self, events: &mut Vec<AbilityEvent>) {
+        if let Some(owner) = self.owner.as_mut().filter(|owner| !owner.cast) {
+            owner.cast = true;
+            events.push(AbilityEvent::Casting {
+                ability: owner.ability,
+            });
+        }
     }
 
     /// The chain of the press just used starts with action `index` of list `list`: it owns the
@@ -987,12 +1018,24 @@ impl AbilityRun {
                     // A transition to the start of an ability (the flail's abilities chain from
                     // each other's windows) begins its chain and uses the press, as a start from
                     // the press does.
-                    let starts_chain = target.actions[to]
+                    let move_name = target.actions[to]
                         .ability
                         .as_ref()
-                        .is_some_and(|ability| ability.move_name.is_some());
+                        .and_then(|ability| ability.move_name.as_deref());
+                    let starts_chain = move_name.is_some();
+                    // A start of the ability the moving action plays is that ability's shot:
+                    // Penetrating Shot's aim goes on to `Bow_Penetrating_Shoot` at the click.
+                    // The ability plays on and fires (retail, 733 own shots: `18=36` at the
+                    // click, the aim's end 834 ms later). Live 2026-11-21 03:12:51.174: the
+                    // shot ended the ability and started it again, and the own state closed the
+                    // second slot (`16=45 18=0 48=0`) with no shot.
+                    let shoots = hands_on
+                        && move_name.is_some_and(|name| {
+                            self.owner
+                                .is_some_and(|owner| owner.ability == lowercase_crc32(name))
+                        });
                     if hands_on
-                        && !starts_chain
+                        && (!starts_chain || shoots)
                         && let Some(owner) = self.owner.as_mut()
                     {
                         owner.list = list_key(target);
@@ -1017,7 +1060,9 @@ impl AbilityRun {
                         (now_ms, server_ms),
                         events,
                     );
-                    if starts_chain {
+                    if shoots {
+                        self.fire_owner(events);
+                    } else if starts_chain {
                         self.own_press(target, to, events);
                     }
                     self.update_tags(lists, target, holder, &tags, now_ms);
@@ -1166,15 +1211,11 @@ impl AbilityRun {
             }
             self.mana.current -= cost;
             self.chain_placed |= cast.kind == CastKind::Raycast;
-            if let Some(owner) = self
+            if self
                 .owner
-                .as_mut()
-                .filter(|owner| owner.list == key && owner.action == action_index && !owner.cast)
+                .is_some_and(|owner| owner.list == key && owner.action == action_index)
             {
-                owner.cast = true;
-                events.push(AbilityEvent::Casting {
-                    ability: owner.ability,
-                });
+                self.fire_owner(events);
             }
             events.push(AbilityEvent::Cast {
                 action: list.actions[action_index].name.clone(),
@@ -2106,6 +2147,7 @@ impl SimWorld {
             };
             let lists = lists_on(&data, player.gear.as_ref(), item);
             if lists.is_empty() {
+                player.abilities.inputs_read();
                 continue;
             }
             let holder = PlayerHolder::of(
@@ -2375,7 +2417,7 @@ impl SimWorld {
     /// opens where the projectile ends.
     fn ability_spell_area(&mut self, caster: &Caster, spell: &SpellRow, now_ms: u64) {
         let reach_m = spell.cast_distance_m.unwrap_or_default().max(0.0);
-        let at = aimed_point(caster, reach_m, now_ms);
+        let at = aimed_point(&*self.ground, caster, reach_m, now_ms);
         let heal_base = self.spell_heal_base(caster.entity);
         self.open_spell_area(SpellArea::new(caster, spell, at, now_ms, heal_base));
         if let Some(secondary) = &spell.secondary {
@@ -2526,44 +2568,140 @@ pub(super) fn fresh_aim(aim: Option<(Position, u64)>, now_ms: u64) -> Option<Pos
 }
 /// A look this flat or higher meets no floor within reach (Inferred).
 const MIN_AIM_PITCH: f32 = 0.01;
+/// The smallest share of a look's length that counts as ground-plane reach: a look almost
+/// straight down still gets a line of bounded length (Inferred).
+const MIN_LOOK_LEVEL: f32 = 0.1;
+/// Halvings of the walk's last step that find where a look enters the terrain: 0.5 m over 2^8
+/// is 2 mm (retail's rain opened 0.01 m from the look's meeting with the floor).
+const TERRAIN_HALVINGS: u32 = 8;
+/// Half of a length.
+const HALF: f32 = 0.5;
 
-/// Where `caster` aims a spell of reach `reach_m` at `now_ms`, never farther than the reach
-/// from the caster (Inferred: `CastDistance` is the most a cast goes). Observed in the retail
-/// `general-other-01` (11 Sacred Ground and Orb of Protection area spells, their `strtpos`):
-/// the aim point of the client's input (row 3) when one came with the cast (0.1 to 0.5 m from
-/// the spell in 6 casts); else the point where the look from the camera meets the caster's
-/// floor (0.08 to 0.27 m in 3 casts). Before, the area opened the whole reach ahead (Sacred
-/// Ground 25 m) and healed nobody (live 2026-11-10); retail's were 1.7 to 20 m from the caster.
-/// Without a camera or with a look that meets no floor it is the reach ahead.
-fn aimed_point(caster: &Caster, reach_m: f32, now_ms: u64) -> Position {
+/// Where the look of a camera at `camera` along `look` first meets the level within
+/// `range_m` of the camera: a solid of its structures ([`Ground::first_solid`]) or the terrain
+/// ([`super::turrets::ground_along`]), whichever is nearer; `None` when it meets neither.
+fn look_meets_level(
+    ground: &dyn Ground,
+    camera: Position,
+    look: AimLine,
+    range_m: f32,
+) -> Option<Position> {
+    let end = point_on(camera, look, range_m);
+    let solid = ground.first_solid(camera, end).map(|(at, _)| at);
+    let under = |along_m: f32| {
+        let at = point_on(camera, look, along_m);
+        ground
+            .height_at(at.x, at.y)
+            .is_some_and(|height| at.z <= height)
+    };
+    let terrain =
+        ground_along(camera, look, range_m, |x, y| ground.height_at(x, y)).map(|along_m| {
+            // The walk's step under the terrain: halve the step before it to the entry point.
+            let (mut above_m, mut below_m) = ((along_m - GROUND_STEP_M).max(0.0), along_m);
+            for _ in 0..TERRAIN_HALVINGS {
+                let middle_m = (above_m + below_m) * HALF;
+                if under(middle_m) {
+                    below_m = middle_m;
+                } else {
+                    above_m = middle_m;
+                }
+            }
+            point_on(camera, look, below_m)
+        });
+    let from_camera = |at: &Position| {
+        let (dx, dy, dz) = (at.x - camera.x, at.y - camera.y, at.z - camera.z);
+        dx * dx + dy * dy + dz * dz
+    };
+    match (solid, terrain) {
+        (Some(solid), Some(terrain)) => Some(if from_camera(&solid) <= from_camera(&terrain) {
+            solid
+        } else {
+            terrain
+        }),
+        (one, other) => one.or(other),
+    }
+}
+
+/// Where `caster` aims a spell of reach `reach_m` at `now_ms` on `ground`, never farther than
+/// the reach from the caster (Inferred: `CastDistance` is the most a cast goes). Observed in
+/// the retail `general-other-01` (11 Sacred Ground and Orb of Protection area spells, their
+/// `strtpos`): the aim point of the client's input (row 3) when one came with the cast (0.1 to
+/// 0.5 m from the spell in 6 casts); else the point where the look from the camera meets the
+/// floor (0.08 to 0.27 m in 3 casts). Rain of Arrows sends no aim point (the retail
+/// `Hive_firestaff_and_bow_skill_tree` ledger at 230.128 s: the camera 5.2 m over the
+/// caster's floor, the look 0.693 down, the rain 0.01 m from where that look meets the floor):
+/// the look meets the level's real ground, its terrain or a solid of its structures
+/// ([`look_meets_level`]), not a flat floor at the caster's height (live 2026-11-21: rains on
+/// a slope opened where a flat floor would be). A ground with no data under the look falls back
+/// to the caster's floor. Before, the area opened the whole reach ahead (Sacred Ground 25 m)
+/// and healed nobody (live 2026-11-10); retail's were 1.7 to 20 m from the caster. Without a
+/// camera or with a look that meets no floor it is the reach ahead.
+fn aimed_point(ground: &dyn Ground, caster: &Caster, reach_m: f32, now_ms: u64) -> Position {
     let within_reach = |at: Position| {
         let distance_m = at.horizontal_distance(caster.from);
         if distance_m <= reach_m || distance_m <= f32::EPSILON {
             return at;
         }
         let share = reach_m / distance_m;
+        let (x, y) = (
+            caster.from.x + (at.x - caster.from.x) * share,
+            caster.from.y + (at.y - caster.from.y) * share,
+        );
         Position {
-            x: caster.from.x + (at.x - caster.from.x) * share,
-            y: caster.from.y + (at.y - caster.from.y) * share,
-            z: at.z,
+            x,
+            y,
+            z: ground.floor_at(x, y, at.z).unwrap_or(at.z),
         }
     };
-    if let Some(at) = fresh_aim(caster.aim, now_ms) {
-        return within_reach(at);
-    }
     let yaw = caster.view.map_or(0.0, |view| view.yaw);
-    match (caster.camera, caster.view) {
-        (Some(camera), Some(view)) if view.pitch >= MIN_AIM_PITCH && camera.z > caster.from.z => {
-            // The pitch is positive down: the look falls `sin(pitch)` per metre.
-            let along_m = (camera.z - caster.from.z) / view.pitch.sin() * view.pitch.cos();
-            let floor = ahead_of(camera, yaw, along_m);
-            within_reach(Position {
-                z: caster.from.z,
-                ..floor
-            })
+    let on_level = |camera: Position, view: LookDir| {
+        let look = AimLine {
+            yaw: view.yaw,
+            pitch: view.pitch,
+        };
+        let range_m = (reach_m + camera.horizontal_distance(caster.from))
+            / view.pitch.cos().max(MIN_LOOK_LEVEL);
+        look_meets_level(ground, camera, look, range_m)
+    };
+    let hit = caster
+        .camera
+        .zip(caster.view)
+        .and_then(|(camera, view)| on_level(camera, view));
+    let (at, source) = if let Some(at) = fresh_aim(caster.aim, now_ms) {
+        (within_reach(at), "the input's aim point")
+    } else if let Some(hit) = hit {
+        (within_reach(hit), "the camera's look on the level")
+    } else {
+        match (caster.camera, caster.view) {
+            (Some(camera), Some(view))
+                if view.pitch >= MIN_AIM_PITCH && camera.z > caster.from.z =>
+            {
+                // The pitch is positive down: the look falls `sin(pitch)` per metre.
+                let along_m = (camera.z - caster.from.z) / view.pitch.sin() * view.pitch.cos();
+                let floor = ahead_of(camera, yaw, along_m);
+                (
+                    within_reach(Position {
+                        z: caster.from.z,
+                        ..floor
+                    }),
+                    "the camera's look on the caster's floor",
+                )
+            }
+            _ => (ahead_of(caster.from, yaw, reach_m), "the reach ahead"),
         }
-        _ => ahead_of(caster.from, yaw, reach_m),
-    }
+    };
+    // Which source placed the spell, to check each one against retail's spell places (live
+    // 2026-11-21: a Rain of Arrows opened 3.8 m from its caster, from a source the log did not
+    // name).
+    tracing::debug!(
+        player = caster.number,
+        source,
+        distance_m = at.horizontal_distance(caster.from),
+        aim_age_ms = ?caster.aim.map(|(_, came_ms)| now_ms.saturating_sub(came_ms)),
+        camera = caster.camera.is_some(),
+        "spell aimed"
+    );
+    at
 }
 
 /// The point `distance_m` ahead of `from` along `yaw`, at its height.
@@ -4022,7 +4160,7 @@ mod tests {
             aim: None,
             ..world.caster(entity).expect("caster")
         };
-        let floor = aimed_point(&looking, REACH_M, NOW);
+        let floor = aimed_point(&*world.ground, &looking, REACH_M, NOW);
         let along_m = CAMERA_HEIGHT_M / PITCH.tan();
         assert!((floor.y - (from.y + along_m)).abs() < 0.01 && (floor.x - from.x).abs() < 0.01);
         assert!((floor.z - from.z).abs() < f32::EPSILON);
@@ -4035,8 +4173,11 @@ mod tests {
             aim: Some((aim, NOW)),
             ..world.caster(entity).expect("caster")
         };
-        assert_eq!(aimed_point(&aiming, REACH_M, NOW + AIM_POINT_MS), aim);
-        let stale = aimed_point(&aiming, REACH_M, NOW + AIM_POINT_MS + 1);
+        assert_eq!(
+            aimed_point(&*world.ground, &aiming, REACH_M, NOW + AIM_POINT_MS),
+            aim
+        );
+        let stale = aimed_point(&*world.ground, &aiming, REACH_M, NOW + AIM_POINT_MS + 1);
         assert_ne!(stale, aim, "an old aim point is not the cast's");
         let far = Caster {
             aim: Some((
@@ -4048,8 +4189,124 @@ mod tests {
             )),
             ..world.caster(entity).expect("caster")
         };
-        let clamped = aimed_point(&far, REACH_M, NOW);
+        let clamped = aimed_point(&*world.ground, &far, REACH_M, NOW);
         assert!((clamped.horizontal_distance(from) - REACH_M).abs() < 0.01);
+    }
+
+    /// Ground that rises northward from the caster: `RISE` metres per metre.
+    struct Slope {
+        base_m: f32,
+        from_y: f32,
+    }
+
+    /// The slope's rise per metre north.
+    const RISE: f32 = 0.25;
+
+    impl Ground for Slope {
+        fn height_at(&self, _x: f32, y: f32) -> Option<f32> {
+            Some(self.base_m + (y - self.from_y).max(0.0) * RISE)
+        }
+    }
+
+    /// A look down a slope that rises ahead meets the slope, nearer than a flat floor at the
+    /// caster's height would be (Rain of Arrows sends no aim point: the look on the level's real
+    /// ground places it, [`look_meets_level`]). Live 2026-11-21: the server placed every rain on
+    /// a flat floor at its caster's height.
+    #[test]
+    fn a_spell_without_an_aim_point_opens_where_the_look_meets_a_rising_ground() {
+        const REACH_M: f32 = 50.0;
+        const CAMERA_HEIGHT_M: f32 = 5.0;
+        const PITCH: f32 = 0.3;
+        /// The terrain walk finds the entry within its halvings.
+        const NEAR_M: f32 = 0.01;
+        let (world, entity) = spell_fight(&[]);
+        let caster = world.caster(entity).expect("caster");
+        let from = caster.from;
+        let looking = Caster {
+            view: Some(LookDir {
+                yaw: 0.0,
+                pitch: PITCH,
+            }),
+            camera: Some(Position {
+                z: from.z + CAMERA_HEIGHT_M,
+                ..from
+            }),
+            aim: None,
+            ..caster
+        };
+        let slope = Slope {
+            base_m: from.z,
+            from_y: from.y,
+        };
+        let at = aimed_point(&slope, &looking, REACH_M, NOW);
+        // The look falls `sin` per metre while the slope rises `RISE * cos`: they meet at `t`.
+        let along_m = CAMERA_HEIGHT_M / (PITCH.sin() + RISE * PITCH.cos());
+        let expected_y = from.y + along_m * PITCH.cos();
+        assert!(
+            (at.y - expected_y).abs() < NEAR_M && (at.x - from.x).abs() < NEAR_M,
+            "on the slope: {at:?}, expected y {expected_y}"
+        );
+        let flat_y = from.y + CAMERA_HEIGHT_M / PITCH.tan();
+        assert!(at.y < flat_y, "nearer than the flat floor at {flat_y}");
+        assert!(
+            (at.z - slope.height_at(at.x, at.y).expect("height")).abs() < NEAR_M,
+            "on the ground's height"
+        );
+    }
+
+    /// The retail Rain of Arrows of the `Hive_firestaff_and_bow_skill_tree` ledger at
+    /// 230.128 s (`spellplace`, 2026-11-21): the camera at (4345.212, 6451.484, 133.646), the
+    /// look yaw -0.9535 and pitch 0.6935, no aim point; the rain opened at (4350.21, 6455.00).
+    /// The look on the real ground of the open world, its terrain and its solids, gives that
+    /// place.
+    #[cfg(feature = "local-data")]
+    #[test]
+    fn the_retail_rain_of_arrows_opens_where_the_look_meets_the_real_ground() {
+        const OPEN_WORLD_LEVEL: &str = "newworld_vitaeeterna";
+        const REACH_M: f32 = 50.0;
+        const CASTER: Position = Position {
+            x: 4347.75,
+            y: 6453.90,
+            z: 128.422_74,
+        };
+        const CAMERA: Position = Position {
+            x: 4345.212,
+            y: 6451.484,
+            z: 133.646_15,
+        };
+        const LOOK: LookDir = LookDir {
+            yaw: -0.953_475_8,
+            pitch: 0.693_490_1,
+        };
+        const RETAIL_RAIN: [f32; 2] = [4350.21, 6455.00];
+        /// Within this of retail's place: the look and the camera of the input came 33 ms
+        /// before the spell, and the look on the floor gave retail's places to 0.08 to 0.27 m in
+        /// `general-other-01` (live 2026-11-21 study: 0.23 m here; on the terrain alone, under
+        /// the structure the caster stood on, 2.06 m).
+        const NEAR_M: f32 = 0.3;
+        let layout = nw_content::layout::repo_layout();
+        let terrain = nw_world::WorldFile::load(&layout, OPEN_WORLD_LEVEL).expect("world file");
+        // The live sim's ground (`run::load_level`): the terrain and the level's solids. The
+        // caster stood 1.6 m over the terrain, on a structure, and the rain opened on it.
+        let collision = nw_world::collision::LevelCollision::load(&layout, OPEN_WORLD_LEVEL)
+            .expect("collision file");
+        let solids =
+            nw_world::collision_index::CollisionIndex::new(nw_world::collision::LevelCollision {
+                deferred: Vec::new(),
+                ..collision
+            });
+        let level = nw_sim_core::LevelGround::new(Arc::new(terrain), Arc::new(solids));
+        let (world, entity) = spell_fight(&[]);
+        let caster = Caster {
+            from: CASTER,
+            view: Some(LOOK),
+            camera: Some(CAMERA),
+            aim: None,
+            ..world.caster(entity).expect("caster")
+        };
+        let at = aimed_point(&level, &caster, REACH_M, NOW);
+        let off_m = (at.x - RETAIL_RAIN[0]).hypot(at.y - RETAIL_RAIN[1]);
+        assert!(off_m < NEAR_M, "{off_m} m from retail's rain: {at:?}");
     }
 
     /// Retail spawns a projectile entity per shot (projectile study 2026-11-11): a card of the
@@ -4440,8 +4697,14 @@ mod tests {
         assert!(run.holds(&list, &staff, &shoot, 0), "named by the record");
         run.press(&[key_1(12)], mapped, no_inputs);
         assert!(
+            run.holds(&list, &staff, &shoot, 0),
+            "a message before the tick keeps it"
+        );
+        run.tick(&[&list], &staff, 0, SERVER_MS);
+        run.press(&[key_1(13)], mapped, no_inputs);
+        assert!(
             !run.holds(&list, &staff, &shoot, 0),
-            "the next message lets it go"
+            "the first message after the tick lets it go"
         );
     }
 }
@@ -5072,6 +5335,8 @@ mod retail_tests {
 
     /// The player's input messages of the live bow test (VM, 2026-11-19), in sections.
     const LIVE_BOW_KEYS: &str = include_str!("testdata/bow-live-keys-2026-11-19.txt");
+    /// The player's input messages of the live bow test of 2026-11-21 (VM), in sections.
+    const LIVE_BOW_KEYS_NOV_21: &str = include_str!("testdata/bow-live-keys-2026-11-21.txt");
     /// The ids of the abilities on the keys Q, R and F in the live test (its `ability keys`
     /// lines: `mapped=[Some(3511089424), Some(1088631440), Some(813723660)]`).
     const LIVE_MAPPED: [&str; 3] = [PENETRATING_SHOT, SPLINTER_SHOT, RAIN_OF_ARROWS];
@@ -5143,10 +5408,11 @@ mod retail_tests {
         }
     }
 
-    /// Runs the messages of section `name` of [`LIVE_BOW_KEYS`] through the bow's lists for the
-    /// live player (a bow, the [`LIVE_MAPPED`] abilities and the [`HASTE_PASSIVE`]): each
-    /// message is read before the first tick at or after its time.
-    fn live_run(name: &str) -> LiveRun {
+    /// Runs the messages of section `name` of the live keys file `keys` ([`LIVE_BOW_KEYS`],
+    /// [`LIVE_BOW_KEYS_NOV_21`]) through the bow's lists for the live player (a bow, the
+    /// [`LIVE_MAPPED`] abilities and the [`HASTE_PASSIVE`]): the ticks come every [`TICK_MS`]
+    /// from `tick_phase_ms`, and each message is read before the first tick at or after its time.
+    fn live_run(keys: &str, name: &str, tick_phase_ms: u64) -> LiveRun {
         let table = table();
         let lists = table.lists_for(&["Bow"]);
         let number = |input: &str| {
@@ -5154,7 +5420,7 @@ mod retail_tests {
             u32::try_from(at.expect(input)).expect("input number")
         };
         let header = format!("@ {name} ");
-        let messages: Vec<(u64, Vec<InputRecord>)> = LIVE_BOW_KEYS
+        let messages: Vec<(u64, Vec<InputRecord>)> = keys
             .lines()
             .skip_while(|line| !line.starts_with(&header))
             .skip(1)
@@ -5215,7 +5481,7 @@ mod retail_tests {
         };
         let last_ms = messages.last().map_or(0, |(at_ms, _)| *at_ms) + TAIL_MS;
         let mut next = messages.iter().peekable();
-        for now in (0..=last_ms).step_by(usize::try_from(TICK_MS).expect("tick")) {
+        for now in (tick_phase_ms..=last_ms).step_by(usize::try_from(TICK_MS).expect("tick")) {
             while let Some((_, records)) = next.next_if(|(at_ms, _)| *at_ms <= now) {
                 run.press(records, mapped, inputs_of);
             }
@@ -5251,7 +5517,7 @@ mod retail_tests {
         const F_CLICK_MS: u64 = 10_640;
         /// A click is read in the tick after its message, and a transition takes one more.
         const CLICK_TICKS_MS: u64 = 3 * TICK_MS;
-        let live = live_run("q-r-q-f");
+        let live = live_run(LIVE_BOW_KEYS, "q-r-q-f", 0);
         let strikes = live.strikes();
         let splinter: Vec<&(u64, String)> = strikes
             .iter()
@@ -5315,7 +5581,7 @@ mod retail_tests {
         /// The aim's raycast test counts a press for 15 client frames (`BackTicks="15"`); the aim
         /// starts 400 ms after the first press, inside that.
         const PRESS_COUNTS_MS: u64 = 15 * CLIENT_FRAME_MS;
-        let live = live_run("f-twice");
+        let live = live_run(LIVE_BOW_KEYS, "f-twice", 0);
         let rain = live.casts_of(RAIN_SPELL);
         assert_eq!(rain.len(), SECOND_PRESSES_MS.len(), "{rain:?}");
         for ((placed_ms, kind), press_ms) in rain.into_iter().zip(SECOND_PRESSES_MS) {
@@ -5329,5 +5595,68 @@ mod retail_tests {
             live.cooldowns_of(RAIN_OF_ARROWS).len(),
             SECOND_PRESSES_MS.len()
         );
+    }
+
+    /// Live 2026-11-21 03:13:00.900 to 03:13:12 (ms after 03:13:00.900): F at 361 aimed Rain of
+    /// Arrows; the click at 4,401 (`attack_shoot`, on in the frame of the press only, from the
+    /// left mouse button and from a pad's right trigger alike: `defaultprofile.xml` binds the
+    /// action to `mouse1` and `az_triggerr_btn`) must place the rain. Live, the ticks came just
+    /// before the messages (the cast at 03:13:09.009, one tick after the click at 08.976), the
+    /// next message came 29 ms after the click and before the next tick, and its inputs took the
+    /// click's place: the clicks at 4,401 and 7,400 placed nothing, the one at 8,070 did. The run
+    /// ticks so: 11 ms into each section of [`TICK_MS`], one tick at 4,400.
+    #[test]
+    fn a_click_in_the_rain_aim_places_the_rain_when_the_next_message_comes_before_the_tick() {
+        const FIRST_CLICK_MS: u64 = 4_401;
+        /// The live phase: a tick 1 ms before the click's message.
+        const LIVE_TICK_PHASE_MS: u64 = 11;
+        let live = live_run(LIVE_BOW_KEYS_NOV_21, "f-clicks", LIVE_TICK_PHASE_MS);
+        let rain = live.casts_of(RAIN_SPELL);
+        assert_eq!(rain.len(), 1, "one rain: {rain:?}");
+        let (placed_ms, kind) = rain[0];
+        assert_eq!(kind, CastKind::Raycast);
+        assert!(
+            (FIRST_CLICK_MS..=FIRST_CLICK_MS + TICK_MS).contains(&placed_ms),
+            "placed at the first click's tick: {placed_ms}"
+        );
+    }
+
+    /// The live Penetrating Shot of 2026-11-19 (section `q-r-q-f`: Q at 6,660, the click at
+    /// 7,200) fires its ability at the shot and plays it on: one start for each press, the fire
+    /// ([`AbilityEvent::Casting`]) at the shot, and the end after the shot, not at it. Before,
+    /// live 2026-11-21 03:12:51.174: the shot ended the ability and started it again in one tick,
+    /// and the own state closed the aim with no shot.
+    #[test]
+    fn the_live_penetrating_shot_fires_its_ability_at_the_click_and_plays_on() {
+        const PRESSES: usize = 2;
+        let live = live_run(LIVE_BOW_KEYS, "q-r-q-f", 0);
+        let crc = lowercase_crc32(PENETRATING_SHOT);
+        let shot_ms = live
+            .strikes()
+            .into_iter()
+            .find(|(_, row)| row == "Bow_Penetrating_Attack")
+            .map(|(at, _)| at)
+            .expect("the shot");
+        let of = |wanted: fn(&AbilityEvent) -> Option<u32>| -> Vec<u64> {
+            live.events
+                .iter()
+                .filter(|(_, event)| wanted(event) == Some(crc))
+                .map(|(at, _)| *at)
+                .collect()
+        };
+        let starts = of(|event| match event {
+            AbilityEvent::Started { ability, .. } => Some(*ability),
+            _ => None,
+        });
+        assert_eq!(starts.len(), PRESSES, "{starts:?}");
+        assert!(starts.iter().all(|at| *at < shot_ms), "{starts:?}");
+        let fires = of(|event| match event {
+            AbilityEvent::Casting { ability } => Some(*ability),
+            _ => None,
+        });
+        assert_eq!(fires, [shot_ms]);
+        let ends = live.ends_of(PENETRATING_SHOT);
+        assert!(ends.iter().all(|at| *at != shot_ms), "{ends:?}");
+        assert!(ends.iter().any(|at| *at > shot_ms), "{ends:?}");
     }
 }
