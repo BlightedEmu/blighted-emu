@@ -9,7 +9,7 @@ No packet capture was replayed. No packet bodies or private ids are included.
 
 ## Most useful new lead
 
-`local-data/azoth-catalog/packets/1635.json` marks LevelInfoChangedMsg
+`local-data/packet-catalog/packets/1635.json` marks LevelInfoChangedMsg
 as solved, has_spec true, spec_confidence inferred.
 It describes the level name, coatlicue path, phasing origin and bounds,
 phase entries, client context, master-player flag, and instance stamp.
@@ -29,7 +29,7 @@ Do not implement the displayed field table literally:
 
 ## Still open
 
-`local-data/azoth-catalog/packets/1628.json` marks
+`local-data/packet-catalog/packets/1628.json` marks
 PlayerManagerSelfIdentificationMsg captured, has_spec false, with no
 field list. That file does not finish the identity message.
 

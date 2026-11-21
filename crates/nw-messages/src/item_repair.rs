@@ -6,7 +6,7 @@
 //!
 //! Layouts: 3008 from 11 retail bodies in 6 ledgers (open-world
 //! `upgrade_artifact_at_gypsum_kiln`: header, item reference, `u16` gear score from, `u16` to);
-//! 3003, 3007 and 2079 are in no capture: their shapes are the Azoth catalog's (3003:
+//! 3003, 3007 and 2079 are in no capture: their shapes are the packet catalog's (3003:
 //! the 28-byte item reference of 2549 and a flag byte; 3007: the header alone; 2079: one
 //! `u64`) and the flag of 3003 is the client check `FUN_142eb1190`'s "use a repair kit"
 //! (Inferred).

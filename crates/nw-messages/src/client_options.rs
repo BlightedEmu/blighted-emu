@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The client's option calls and its phasing acknowledgement (run-15 core study; layouts from
 //! the retail captures `newchar-retail-2026-09-18` and `newchar-linux-2026-09-12`, names from the
-//! Azoth catalog). Each body is the facet header and one value:
+//! packet catalog). Each body is the facet header and one value:
 //!
 //! | Call | Value | Retail |
 //! |---|---|---|

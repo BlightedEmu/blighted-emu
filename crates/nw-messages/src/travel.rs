@@ -4,7 +4,7 @@
 //! with the server's answers (run 15 travel study, `local-data/scratch-work/run15/travel`).
 //!
 //! Every body is the facet header and the arguments; the layouts are those of the retail
-//! captures (Azoth catalog shapes, checked on every retail body of the types: 3713 x 322,
+//! captures (packet catalog shapes, checked on every retail body of the types: 3713 x 322,
 //! 3696 x 429, 3042 x 16, 388 x 76, 3980 x 50, 2190 x 46, 2774 x 29, 2728 x 78, the housing
 //! calls of the house, furniture and upkeep captures). A body of another length is refused.
 //!

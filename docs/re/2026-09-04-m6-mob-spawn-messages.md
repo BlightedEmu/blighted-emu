@@ -41,9 +41,9 @@ Captures checked for an exact read of type 10 and type 11, with the reliable-fra
 
 **Observed.** The `u32` inside `AssetId` is 2 on 79,123 of 79,534 reached bodies. On the 34,912 bodies reached with no passed class before them in the bundle, the value is 2 on all 34,912. The other 411 values sit only after a passed class, spread over 155 distinct values with at most 83 bodies each. The opened alias asset in the spawners note carries the same sub-id as a big-endian `u32` of 2.
 
-**Inferred.** The `AssetId` sub-id is 2. The few other values are walk-boundary artifacts of the extended walk, because they vanish under clean alignment. This matches the Azoth field note.
+**Inferred.** The `AssetId` sub-id is 2. The few other values are walk-boundary artifacts of the extended walk, because they vanish under clean alignment. This matches the packet catalog field note.
 
-**Later finding.** Azoth is another emulator. Its notes are not retail data. That match is corroboration only.
+**Later finding.** The packet catalog is another emulator's. Its notes are not retail data. That match is corroboration only.
 
 **Observed.** The same reader was run on all 695 ledgers. It accepts a type 10 member when that member is reached before any class the walk cannot read. Reached bodies: 66,223. Failures: 0. A failure means the reader ran off the end of the payload. The three fight sessions inside that total: training dummy 16, cave 52, catacombs 55.
 

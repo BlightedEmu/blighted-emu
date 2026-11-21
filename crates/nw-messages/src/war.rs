@@ -7,7 +7,7 @@
 //! capture point alone.
 //!
 //! The war board pushes (839, 3530, 2968) carry a variable list part after the header whose
-//! inner layout is not fully traced (Azoth catalog: a big-endian `u16`, then nested
+//! inner layout is not fully traced (packet catalog: a big-endian `u16`, then nested
 //! structures). This crate keeps those bytes whole: a body reads and writes back byte-exact,
 //! and [`WarboardManifest::of_participants`] builds the 3530 form this server sends, from the
 //! pattern of the retail bodies (a participant count, the value 2, then one character

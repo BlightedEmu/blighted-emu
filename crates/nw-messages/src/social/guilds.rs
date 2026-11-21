@@ -2,7 +2,7 @@
 //! `GuildsComponent` (company) calls and pushes other than the look-up by id (3639 and 3610 are
 //! [`crate::guild_lookup`]). Layouts from the retail sessions `company_actions`,
 //! `creating_a_company`, `leaving_a_company`, `company_ranks` and `ranks-rights-compagny` (every
-//! company call of the captures, 1 to 13 each), with the argument kinds of the Azoth catalog
+//! company call of the captures, 1 to 13 each), with the argument kinds of the packet catalog
 //! catalog.
 //!
 //! A company list page (1410) is a 3610 body with one more text: the page token the client sends

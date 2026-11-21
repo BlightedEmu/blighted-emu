@@ -202,6 +202,6 @@ Each record starts with 3 raw mask bytes and one `u16` big-endian. Later fields 
 - `local-data/Aeternum-World-main/Catalog/uuid_to_class.json`
 - `<game-dir>/typeindex.json`
 - `local-data/first-light-main/server/javelin/chunked_stream_08.py` and `action_history_635.py` for size claims only
-- `local-data/azoth-catalog/packets/<type>.json` for the class purpose text
+- `local-data/packet-catalog/packets/<type>.json` for the class purpose text
 - Ledgers under `local-data/captures/**/ledger.bin`
 - Ghidra program `NewWorld.exe` in `<re-scratch>/ghidra`, read-only

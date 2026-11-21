@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `MB::InteractorComponentReplicatedState` (type 3752): the entity the player interacts with,
-//! and whether it may interact (Azoth catalog field note for the names).
+//! and whether it may interact (packet catalog field note for the names).
 //!
 //! Slot 0 child 0 is `m_cachedCommittedInteractGDEID`, a big-endian `u64` facet entity; slot 1
 //! child 0 is `m_enabled`, a flag. Every captured body has these forms: `01 01 <u64>`,

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Lookups the client sends after the level entry, and the server's answers (retail captures
-//! `newchar-retail-2026-09-18` and `newchar-linux-2026-09-12`; names from the Azoth catalog
+//! `newchar-retail-2026-09-18` and `newchar-linux-2026-09-12`; names from the packet catalog
 //! catalog). Retail answered each call 25 to 60 ms after it, with the request's facet header:
 //!
 //! | Call | Answer |

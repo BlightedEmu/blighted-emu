@@ -38,7 +38,7 @@ const FIELD: &str = "gde metadata";
 pub struct AssetId {
     /// The 16 raw bytes.
     pub id: [u8; GDE_ID_LEN],
-    /// The big-endian `u32` after them (always 2 per the Azoth catalog field note).
+    /// The big-endian `u32` after them (always 2 per the packet catalog field note).
     pub sub_id: u32,
 }
 

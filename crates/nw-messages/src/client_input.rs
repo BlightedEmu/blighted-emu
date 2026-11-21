@@ -732,7 +732,7 @@ const ATTACK_PRESS_BIT: u32 = 40;
 /// The slot value and bit of the attack key's release: set in one record only.
 const ATTACK_RELEASE_VALUE: usize = 2;
 const ATTACK_RELEASE_BIT: u32 = 31;
-/// The slot value and bit set while the attack key is held (the Azoth catalog input 191, `primary
+/// The slot value and bit set while the attack key is held (the packet catalog input 191, `primary
 /// attack (held)`; fishing study, run 15: set from the record after each press until the
 /// release in all 9 casts and 7 reels of `open-world/Fishing`).
 const ATTACK_HELD_KEY: (usize, u32) = (2, 63);
@@ -765,11 +765,11 @@ const WEAPON_KEYS: [(usize, u32); 2] = [(0, 9), (5, 35)];
 /// 1,195 retail ledgers: 537 presses, each in one record, each with input 218
 /// (`quickslot-weaponSwap`, the same key) in the same record.
 const SWAP_WEAPON_KEY: (usize, u32) = (8, 51);
-/// The slot value and bit of the sheathe key (the Azoth catalog input 428, `sheathe`: input `n` is
+/// The slot value and bit of the sheathe key (the packet catalog input 428, `sheathe`: input `n` is
 /// value `n / 64` bit `n % 64`). Retail, 721 ledgers: with every weapon sheathed the server
 /// drew the selected option 42 ms (median) after it, 106 of 109 presses.
 const SHEATHE_KEY: (usize, u32) = (6, 44);
-/// The slot value and bit of the summon mount key (the Azoth catalog input 26, `summon mount`).
+/// The slot value and bit of the summon mount key (the packet catalog input 26, `summon mount`).
 /// Retail, 20 mount ledgers: each press got its 5747, 5937 or 5752 within 40 ms (Mount-quest
 /// capture: 13 summons, 13 dismounts, 1 refusal); one record per press.
 const SUMMON_MOUNT_KEY: (usize, u32) = (0, 26);
@@ -809,7 +809,7 @@ const CROUCH_TOGGLE_KEY: (usize, u32) = (8, 31);
 /// press is one record; after the first of each pair the own place went 1.23 to 1.26 m/s
 /// forward, the sprint action list's `Prone` `Speed` 1.25.
 const PRONE_TOGGLE_KEY: (usize, u32) = (3, 59);
-/// The slot value and bit of the walk key, set while it is held (the Azoth catalog input 313,
+/// The slot value and bit of the walk key, set while it is held (the packet catalog input 313,
 /// `walk`; posture study: set in every record of the 4 slow periods of the
 /// `walk_running_crouch_prone` captures and in no record of their running periods).
 const WALK_KEY: (usize, u32) = (4, 57);
@@ -1036,7 +1036,7 @@ impl AttackKeyBits {
     /// (live 2026-11-17: 94 releases and 5 presses of one controller player, no attack started;
     /// the mouse of the same laptop hit), and the profile binds that trigger (`az_triggerr_btn`)
     /// to `attack_primary_hold` as to the press and the release (`defaultprofile.xml`); the held
-    /// record (Azoth catalog input 191) is the press then, one record late (Inferred).
+    /// record (packet catalog input 191) is the press then, one record late (Inferred).
     pub const fn goes_down(self, down: bool) -> bool {
         self.pressed || (self.held && !down)
     }

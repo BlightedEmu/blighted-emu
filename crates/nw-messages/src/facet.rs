@@ -125,7 +125,7 @@ pub const QTE_COMPLETED_TYPE_INDEX: u64 = 6638;
 pub const TRIGGER_AREA_PASSTHROUGH_TYPE_INDEX: u64 = 560;
 /// Type index of `ObjectivesComponentServerFacet_NotifyOpenUiScreen`.
 pub const UI_SCREEN_OPENED_TYPE_INDEX: u64 = 2617;
-/// Type index of `GlobalStorageComponentServerFacet_SetReplicateStorage` (Azoth catalog 387).
+/// Type index of `GlobalStorageComponentServerFacet_SetReplicateStorage` (packet catalog 387).
 pub const SET_REPLICATE_STORAGE_TYPE_INDEX: u64 = 387;
 /// Type index of `PlayerTradeComponentServerFacet_TakeAllItems`.
 pub const TAKE_ALL_ITEMS_TYPE_INDEX: u64 = 2939;

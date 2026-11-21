@@ -5,8 +5,8 @@ Date: 2026-09-12. Build: Steam `25810808`. Labels: **Observed**, **Inferred**, *
 
 Sources: our own live capture of a new character (warmonger pick) from login to the open world
 (`local-data/captures/own/newchar-linux-2026-09-12/`), the content bundle (`ObjectiveTasks`,
-`VitalsBaseData`, `BackstoryDefinition`, `MasterItemDefinitions`), and the Azoth packet list
-(`local-data/azoth-catalog/packets/`). The full step table with times is in the session notes
+`VitalsBaseData`, `BackstoryDefinition`, `MasterItemDefinitions`), and the packet catalog list
+(`local-data/packet-catalog/packets/`). The full step table with times is in the session notes
 (not committed: it holds the live character's ids).
 
 ## 1. The tutorial is one objective task tree
@@ -49,7 +49,7 @@ achievements of the run in the retail order (test
 
 ## 2. Client calls
 
-**Observed** (Azoth names, our capture bodies). Header: two big-endian `u64` (target, entity).
+**Observed** (packet catalog names, our capture bodies). Header: two big-endian `u64` (target, entity).
 
 | Type | Name | Body after the header |
 |---:|---|---|
@@ -482,7 +482,7 @@ Source: the newchar ledger of 2026-09-12 (`local-data/captures/own/newchar-linux
 
 ### 15.2 Our ledger against retail (2026-09-18, live run 8)
 
-- **Observed (Azoth capture of our server, same tutorial, greatsword + blunderbuss).** The MMB
+- **Observed (capture app recording of our server, same tutorial, greatsword + blunderbuss).** The MMB
   press sets value 2 bit 20, value 5 bit 29 and value 7 bit 51 in both ledgers. Retail's row 3
   names the target at the press and keeps it 7.6 to 13.9 s. Ours: 60 presses, 2 targets (0.35 s
   and 1 s), and the first lock ended with no press and no server event for the mob.

@@ -47,7 +47,7 @@ Live: Game.log logs "actor game connection succeeds" and advances to
 
 Needed so the client loads the level/context. Layout taken from existing data,
 not a fresh decompile: the field list of
-`local-data/azoth-catalog/packets/1635.json` plus the captured body length
+`local-data/packet-catalog/packets/1635.json` plus the captured body length
 (open world is 106 bytes, from `scratch-bootstrap/layout-profile.txt`). The
 published field list sums to 89 bytes; the 17-byte remainder is exactly one
 phasing entry. The entry comes **right after the phasing count**, before the

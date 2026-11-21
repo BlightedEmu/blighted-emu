@@ -6,7 +6,7 @@
 //! the client to leave `WaitingForPlayerSpawn` and enter the world.
 //!
 //! Layout derived from existing data, not a fresh decompile: the field list of
-//! `local-data/azoth-catalog/packets/1635.json` plus the captured body lengths in the
+//! `local-data/packet-catalog/packets/1635.json` plus the captured body lengths in the
 //! bootstrap-bodies note (open world is the 106-byte body). The published field list sums to 89
 //! bytes; the 17-byte remainder is exactly one phasing entry (`u8` + `u32` + `u64` + `u32`), so
 //! the open-world message carries `phasing.count = 1`. The byte offsets in that archive are from
@@ -47,7 +47,7 @@ pub const OPEN_WORLD_LEVEL: LevelSpec = LevelSpec {
     folder: "newworld_vitaeeterna",
     map_name: b"NewWorld_VitaeEterna",
     coatlicue_path: b"coatlicue/NewWorld_VitaeEterna",
-    // 12272 m = 48 cells of 256 m; 10250 m = 41 cells of 256 m (Azoth catalog 1635 spec).
+    // 12272 m = 48 cells of 256 m; 10250 m = 41 cells of 256 m (packet catalog 1635 spec).
     phasing_origin: [2048.0, 16.0],
     phasing_bounds: [12272.0, 10250.0],
     flag_a3: 0,
@@ -112,7 +112,7 @@ const GRID_KEY_TYPE: u8 = 2;
 /// The area of the start beach (open-world note: retail sent it after the tutorial exit, 654279
 /// ms; the client showed "You cannot access this area" at the beach with our key 0).
 const START_BEACH_AREA: u32 = 0x2331;
-/// The width of one phasing grid cell, metres (Azoth catalog 1635 spec: the open world is 48 x 41
+/// The width of one phasing grid cell, metres (packet catalog 1635 spec: the open world is 48 x 41
 /// cells of 256 m).
 const PHASING_CELL_M: f32 = 256.0;
 /// The grid cells a player is phased in: the 2 x 2 nearest it (Inferred from retail updates).

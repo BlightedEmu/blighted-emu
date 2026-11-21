@@ -74,7 +74,7 @@ const PELLET_TAG: u8 = 5;
 /// The camera shake of a pellet: none.
 const NO_CAMERA_SHAKE: u32 = 0;
 /// Flags (little-endian `u16`) of every retail 3601 of a creature's melee hit (swing note:
-/// `02 00` on all tutorial hits; the Azoth catalog names it a direct hit).
+/// `02 00` on all tutorial hits; the packet catalog names it a direct hit).
 const MELEE_HIT_FLAGS: u16 = 0x0002;
 
 /// The `DamageTypeData` `IntID` of `Falling` (run-15 fall study: the item tag of all 385

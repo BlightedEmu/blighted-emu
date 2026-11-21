@@ -156,6 +156,6 @@ card carries its look, public paperdoll and health
 - `docs/re/2026-09-10-player-component-slots.md`
 - `docs/re/2026-09-10-local-player-check.md`
 - `docs/re/2026-09-04-m6-vitals-state.md`
-- `local-data/azoth-catalog/packets/1195.json`
+- `local-data/packet-catalog/packets/1195.json`
 - `crates/nw-messages/src/{slots,vitals,components,player_components,gde}.rs`
 - Session notes `appearance-1195-re.md`, `player-vitals-re.md` (side-session notes folder)

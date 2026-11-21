@@ -17,7 +17,7 @@ Method. All constructors were found on the old build by listing every caller of 
 child-register function `FUN_141775c60` and of the add-slot function `FUN_141677dd0`
 (Ghidra headless, read-only, analysis off, several parallel jobs on per-process project
 copies). Each constructor was matched to its class by the field-name strings it registers
-(per-class field lists in `local-data/azoth-catalog/packets/<type>.json`), then checked
+(per-class field lists in `local-data/packet-catalog/packets/<type>.json`), then checked
 against the class handler addresses in `<re-scratch>/scratch-pc/classes-old2.tsv`
 (the constructor always sits in the same code cluster as the class `CreateInstance` and
 `Unmarshal` entries, and the `Unmarshal` thunks call these constructors directly). Add-slot
@@ -141,7 +141,7 @@ capture decoder `0x17b4110`.
 and handlers.
 
 **Observed.** Component 56 (`GuildsComponentReplicatedState`) has no field list in the
-Azoth catalog packets. Its `Unmarshal` thunk `0x1434c9700` calls `0x1434dfd30` directly;
+packet catalog packets. Its `Unmarshal` thunk `0x1434c9700` calls `0x1434dfd30` directly;
 that function registers 26 `guild*` children, stores vtable `0x1481e3038`, and calls
 add-slot once. Two slots.
 
@@ -305,7 +305,7 @@ are real snapshots, never `0x00`.
   `docs/re/2026-09-06-m6-component-tables.md`, `docs/re/2026-09-04-m6-vitals-state.md`,
   `docs/re/2026-09-08-world-entry-live.md`
 - `local-data/Aeternum-World-main/Catalog/uuid_to_class.json`,
-  `local-data/azoth-catalog/packets/*.json`,
+  `local-data/packet-catalog/packets/*.json`,
   `local-data/captures/ow captures extracted/NH-MSQ-10.2-Quest-61c0a783ba281885/fragments.jsonl`
   (counts, sizes, decoder RVAs only)
 - `crates/nw-messages/src/{alc.rs,wire.rs,player_components.rs,slots.rs}`

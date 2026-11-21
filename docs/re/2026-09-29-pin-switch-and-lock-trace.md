@@ -170,9 +170,9 @@ Client→server counts (these ARE decoded):
 | Capture | Server | `1458` pin | `2709` auto-pin | `2415` S→C (mob targets you) |
 |---|---|---|---|---|
 | `captures/own/newchar-retail-2026-09-18` | retail | 12 | 62 | 1 |
-| `~/AzothCapture/.../fishing-01` | our server | 11 | 128 | 19 |
-| `~/AzothCapture/.../other-01` | our server | 0 | 51 | 4 |
-| `~/AzothCaptureBlighted/.../tar lock test … 5` | our server (patched client) | 0 | 30 | 3 |
+| `capture-app/.../fishing-01` | our server | 11 | 128 | 19 |
+| `capture-app/.../other-01` | our server | 0 | 51 | 4 |
+| `capture-app-blighted/.../tar lock test … 5` | our server (patched client) | 0 | 30 | 3 |
 | `local-data/.../run15/movement/caps/run15` | our server (pre-season-fix, Sep 22) | 0 | 30 | 3 (S→C) |
 | `local-data/captures/own/menus-linux-2026-09-12` | retail (high-level char, menus) | 0 | 19 | 0 |
 
@@ -220,7 +220,7 @@ New captures decoded 2026-09-29 (second scan of `local-data/captures/own` and th
 ### 2c. 1628 diff (our server vs retail): 1628 is not the auto-pin blocker
 
 Diff done 2026-09-29 from our codec (`crates/nw-messages/src/self_ident.rs`), our send site
-(`bins/sim/src/login.rs:140`), the Azoth spec (`local-data/azoth-catalog/packets/1628.json`,
+(`bins/sim/src/login.rs:140`), the packet catalog spec (`local-data/packet-catalog/packets/1628.json`,
 marked solved/verified), and the local-player note (`docs/re/2026-09-10-local-player-check.md`).
 
 Our `PlayerManagerSelfIdentificationMsg::encode` writes the retail body's **exact positional layout**
@@ -242,7 +242,7 @@ with the optional parts empty (157 bytes), field for field:
 
 - **Observed.** The only value differences are the two flag bytes (1 vs 5), the zeroed
   `identifierB`, the empty list, and `extra.value` 0 vs 56. Every one of those is documented as
-  accepted by the client (Azoth spec: a minimal all-zero body "is enough for the client to carry
+  accepted by the client (packet catalog spec: a minimal all-zero body "is enough for the client to carry
   on"). The one field the local-player check reads (`identifierA`, the character id) our server
   sets correctly (`for_entity`). So the body bytes of 1628 are **not** the auto-pin blocker.
 - **Observed (`docs/re/2026-09-10-local-player-check.md`).** The PlayerRegistry local-player entry

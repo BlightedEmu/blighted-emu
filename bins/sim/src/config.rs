@@ -59,7 +59,7 @@ pub const DEFAULT_MOB_RESPAWN_MS: u64 = 62_000;
 /// Default shortest time from a death to a respawn request: below the lowest captured gap
 /// (M6-B spec F7).
 pub const DEFAULT_MIN_RESPAWN_MS: u64 = 2_000;
-/// Default `u32` of a spawn card's `AssetId` (always 2 per the Azoth catalog field note).
+/// Default `u32` of a spawn card's `AssetId` (always 2 per the packet catalog field note).
 pub const DEFAULT_ASSET_SUB_ID: u32 = 2;
 /// Default loot drop multiplier: the game data's drop chance, as retail.
 pub const DEFAULT_LOOT_DROP_MULTIPLIER: f64 = 1.0;

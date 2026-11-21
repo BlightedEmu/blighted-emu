@@ -11,7 +11,7 @@ Labels: **Observed** means a capture, a type table, a packet file, or a JSON fil
 - **Observed.** 285 `ledger.bin` files under `local-data/captures`. Two full parses and one part-count parse. Decode errors: 0. Datagrams: 7,211,869. Duplicate reliable frames dropped: 1,522.
 - **Observed.** Type table `<game-dir>/typeindex.json`. Key `typeIndex`. 7,052 UUIDs. The list position is the type index. UUIDs have no hyphens.
 - **Observed.** Name map `local-data/Aeternum-World-main/Catalog/uuid_to_class.json`. 3,486 entries. UUID keys have hyphens. Every `type_idx` equals the type-table position. Difference count: 0.
-- **Observed.** Packet text `local-data/azoth-catalog/packets/<idx>.json`. The purpose text is the `what` field. The file has no key named `purpose`.
+- **Observed.** Packet text `local-data/packet-catalog/packets/<idx>.json`. The purpose text is the `what` field. The file has no key named `purpose`.
 - **Observed.** HTTP archives under `local-data/open world captures`. Compare note: `docs/re/2026-09-02-login-json-shapes.md`.
 - **Observed.** First-light sequence text: `local-data/first-light-main/docs/post-v3-sequence.md` and `post-v3-flow.md`. Codec size claims: files under `local-data/first-light-main/server/javelin/`. Facts only.
 - **Observed.** Carrier rules: `docs/re/2026-09-02-carrier-captures.md`. LZ4 blocks were unpacked before the frame decode. Envelope flag `0x04` did not occur.
@@ -201,11 +201,11 @@ A file title is often not a class name. The file integer is the type index. The 
 
 `level_info_changed.py` and `level_descriptor_663.py` are the same type index. The minimum of 48 holds. The fixed body of 106 does not.
 
-## 3. Azoth catalog status
+## 3. Packet catalog status
 
 **Observed.** 2,163 packet files. Index range 1 through 7,049. Status counts: `solved` 31, `captured` 229, `wanted` 1,903. `packets/574.json` is absent.
 
-**Later finding.** The status counts changed. The same 2,163 files in `local-data/azoth-catalog/packets/` now give `solved` 139, `captured` 454, `wanted` 1,570. The status and purpose texts come from Azoth, another emulator. They are not retail data.
+**Later finding.** The status counts changed. The same 2,163 files in `local-data/packet-catalog/packets/` now give `solved` 139, `captured` 454, `wanted` 1,570. The status and purpose texts come from Azoth, another emulator. They are not retail data.
 
 The sequence messages below use our type index from section 1. Purpose text is the first sentence of `what`, except where a later sentence is the whole field in section 1's solved rows.
 

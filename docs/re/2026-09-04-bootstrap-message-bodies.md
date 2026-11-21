@@ -221,7 +221,7 @@ The two scripts count type 8 bodies a little differently. The reason is that the
 - `local-data/Aeternum-World-main/docs/Network/packet_system.md`
 - `local-data/Aeternum-World-main/Catalog/uuid_to_class.json`
 - `<game-dir>/typeindex.json`
-- `local-data/azoth-catalog/packets/<type>.json` for the types in this note
+- `local-data/packet-catalog/packets/<type>.json` for the types in this note
 - First-light codec files under `local-data/first-light-main/server/javelin/` for claimed sizes and field splits only
 - `local-data/first-light-main/docs/post-v3-sequence.md` and `post-v3-flow.md`
 - Ledgers under `local-data/captures/**/ledger.bin`

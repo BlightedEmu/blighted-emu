@@ -8045,7 +8045,7 @@ mod tests {
         assert_eq!(drawn(&world), None, "put away at the death");
     }
 
-    /// An input message of one record whose sheathe key is pressed (the Azoth catalog input 428:
+    /// An input message of one record whose sheathe key is pressed (the packet catalog input 428:
     /// slot value 6, bit 44).
     fn sheathe_message() -> Vec<InputRecord> {
         const SHEATHE_VALUE: usize = 6;

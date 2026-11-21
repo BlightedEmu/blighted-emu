@@ -44,7 +44,7 @@ enum SalvageRefusal {
     Empty,
     /// The slot holds another instance than the call names.
     Instance,
-    /// Its owner locked it (the Azoth catalog note: the server refuses locked items).
+    /// Its owner locked it (the packet catalog note: the server refuses locked items).
     Locked,
     /// Its row is not `IsSalvageable`.
     NotSalvageable,

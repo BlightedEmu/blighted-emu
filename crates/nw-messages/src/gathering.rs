@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `MB::GatheringComponentReplicatedState` (type 81): the player's gather, which runs the progress
-//! ring of the client's interact prompt (Azoth catalog field note for the names).
+//! ring of the client's interact prompt (packet catalog field note for the names).
 //!
 //! The state has slot 1 only, with nine children. Their widths are fitted on every retail body of
 //! the tutorial chest (own component 36, 237308-239343 of the tutorial capture) and of two

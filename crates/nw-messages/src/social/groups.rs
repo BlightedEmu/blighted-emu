@@ -2,7 +2,7 @@
 //! `GroupsComponent` calls and pushes of a plain group: invite, answer, leave, leader, kick vote.
 //! Layouts from the retail sessions `Hive 3v3 group`, `3v3_arena_group`, `dungeon_dynasty_tank_`,
 //! `invasion` and `msq14` (6 invites, 27 answers, 15 leaves, 47 removed invites, 297 removed
-//! members), with the argument kinds of the Azoth catalog for 3502 and 3498.
+//! members), with the argument kinds of the packet catalog for 3502 and 3498.
 //!
 //! Retail flow (Observed): an invite (3492) names the invitee; when the invite ends, both sides
 //! get a 1677 with the invite id: the inviter with the invitee and `outbound` 1, the invitee with

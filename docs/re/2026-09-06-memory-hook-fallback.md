@@ -51,7 +51,7 @@ If either fact fails, use the backup below.
 
 ## Backup: in-memory certificate hook
 
-Source of the idea: the Azoth catalog owner, relayed by the user on
+Source of the idea: the packet catalog owner, relayed by the user on
 2026-09-06. The exact words: "there is no need of certificates. you just
 need to apply a proxy in the client memory. this is not the right way but
 is the best way." This is an outside claim, not local validation.

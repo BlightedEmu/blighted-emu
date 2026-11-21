@@ -208,4 +208,4 @@ non-null on the true path. It was not traced in this pass.
 - `crates/nw-messages/src/{player_components.rs,self_ident.rs,slots.rs}`
 - `bins/sim/src/world/members.rs`
 - `crates/nw-reflect/src/registration/token.rs`
-- `local-data/azoth-catalog/packets/3935.json`
+- `local-data/packet-catalog/packets/3935.json`

@@ -251,7 +251,7 @@ spawn card sends the archetype kit in the paperdoll
 - `docs/re/2026-09-10-player-component-slots.md`
 - `docs/re/2026-09-08-world-entry-live.md`
 - `docs/re/2026-09-04-bootstrap-message-bodies.md`
-- `local-data/azoth-catalog/packets/3935.json`
+- `local-data/packet-catalog/packets/3935.json`
 - `crates/nw-messages/src/{self_ident.rs,player_components.rs,gde.rs,vitals.rs}`
 - Ghidra current-build copies under `<re-scratch>/`; outputs
   `<re-scratch>/out-world-entry/`

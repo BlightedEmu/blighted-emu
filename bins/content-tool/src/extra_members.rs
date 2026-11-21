@@ -205,7 +205,7 @@ const LAYOUTS: [Layout; 12] = [
         masks: Masks::Single,
         fields: &[one(U32)],
     },
-    // Children (names from the Azoth catalog field list): spell data id, start position, start
+    // Children (names from the packet catalog field list): spell data id, start position, start
     // rotation, child position, child rotation, previous attachment, attachment, caster, spawn
     // time, spawn count, area scaling. The children never seen sent are Unread.
     Layout {

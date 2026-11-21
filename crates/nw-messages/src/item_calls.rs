@@ -4,7 +4,7 @@
 //! class and storage searches (run-15 items2 study), and the server's loadout status and
 //! converted-items call (6526).
 //!
-//! Every body starts with a [`FacetHeader`]. Layouts are the Azoth catalog's where it
+//! Every body starts with a [`FacetHeader`]. Layouts are the packet catalog's where it
 //! has one (2917, 1838, 826, 2801, 2942, 2549) and the retail open-world bodies' otherwise
 //! (`Hiveloadouts`, `gearsets`, `storage_open_deposit_withdraw_transfer`, `Drop_Item_Lootbag`,
 //! `drop_equipped_item`, `item_actions`). The player-trade calls (2801, 2942, 1461, 2950) name

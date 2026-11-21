@@ -40,7 +40,7 @@ const BOSS_PHASE_CHANGE_HEAD: [u8; 2] = [0x01, 0x01];
 
 /// Type index of `MB::LookTargetingComponentReplicatedState`.
 pub const LOOK_TARGETING_TYPE_INDEX: u64 = 2443;
-/// Children of the look targeting state: `currentLookAtTarget` (Azoth catalog field note).
+/// Children of the look targeting state: `currentLookAtTarget` (packet catalog field note).
 const LOOK_TARGETING_CHILDREN: u8 = 1;
 
 /// The body of a `MB::BossPhaseComponentReplicatedState` change to boss phase `phase`: child 0
@@ -58,7 +58,7 @@ const UNIT_RATE: f32 = 1.0;
 const COMBAT_STATUS_CHILDREN: u8 = 4;
 const DELAYED_EVENT_CHILDREN: u8 = 2;
 /// Children of the damage receiver: `isBlockActive` (a flag), `blockWeaponSlotAlias` and
-/// `debugCritChance` (names from the Azoth catalog field note; the last two are four bytes each per
+/// `debugCritChance` (names from the packet catalog field note; the last two are four bytes each per
 /// the damage-events note).
 const DAMAGE_RECEIVER_CHILDREN: u8 = 3;
 /// The `blockWeaponSlotAlias` of a player's first damage receiver state (retail own card).
