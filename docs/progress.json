@@ -234,6 +234,10 @@
             {
               "check": "In the same 110-bot run the hunt and gather bots still report a stop in their bundles, and the server refused moves of dead bots; the cause is Unknown (both were there before the speed fixes).",
               "proof": "none"
+            },
+            {
+              "check": "Ten hunt bots fight for four hours on one open world sim with less logging (bots, 2026-11-21): 126,504 hits, 7,600 mob deaths, 232 bot deaths and every dead bot lived again after its respawn request, no move refused, every server message read, and the tick's p99 stayed within one tick in 239 of 240 minutes. The sim's memory stayed flat (2,203 MB at the start, 2,208 MB at the end). The one late minute (796 ms without a bundle) came while a big test build ran on the same PC.",
+              "proof": "bots"
             }
           ]
         },
@@ -358,6 +362,10 @@
             {
               "check": "GM teleport on the admin site: a list of every settlement, outpost, fort, spirit shrine and dungeon entrance by region (names from the game data), one click sends the picked player there; bring another player here, go to another player, bring everyone here.",
               "proof": "tests"
+            },
+            {
+              "check": "`!gearup` first wears the bag's gear in empty worn slots (a new character's class head, sword and shield), then upgrades every worn item (bots, 2026-11-21: a Soldier bot wore its head, sword and shield at the top gear score; before, they stayed in the bag).",
+              "proof": "bots"
             }
           ]
         },
@@ -511,6 +519,10 @@
             {
               "check": "Open: the kill contribution ring gets no entry per kill, the game event ring no entry per discovery (the meaning of several entry fields is Unknown), the entitlement and transmog bit sets are not filled (the bit order is Inferred only), the name tag's hide level does not change, and stat changes do not update the multiplier table.",
               "proof": "none"
+            },
+            {
+              "check": "A player that leaves the tutorial and logs out soon after logs in in the open world next time (bots, 2026-11-21: a new bot left the tutorial, logged out, and its next login joined the open world sim). Before, the open world's save had the time of the tutorial's save, the database kept the tutorial's place, and the next login started in the tutorial with no progression (a bot lost its faction at each login).",
+              "proof": "bots"
             }
           ]
         },
@@ -781,8 +793,8 @@
               "proof": "none"
             },
             {
-              "check": "Each state number carries the place of its own input record to the players who see it, with keys and with a pad (tests only, 2026-11-21). Before, when the next record came before the tick, the tick sent the half tick's number again with the newer place: 24 % and 35 % of two moving players' states in the live test of 2026-11-21 (retail: 2 of 57,297), and the other player ran in a saw-tooth on screen.",
-              "proof": "tests"
+              "check": "Each state number carries the place of its own input record to the players who see it, with keys and with a pad (bots, 2026-11-21): a bot that walks with key records, then with pad records, as the game client does, was seen by a second bot, and no state number went out with two places, also when the next record came before the tick. Before, the tick sent the same number with the body of the next record, and the other player ran in a saw-tooth.",
+              "proof": "bots"
             },
             {
               "check": "Open (live test 2026-11-21): one of eight controller dodges ended after 130 ms on the other screen. The server's ground had a step there that the client's did not (the body rose 0.55 m onto it, then fell), so the server played a fall; which solid it is, is Unknown. A controller player's input records also reached the server unevenly (gaps of 0 to 60 ms, 8 over 200 ms; cause Unknown).",
@@ -1326,6 +1338,10 @@
             {
               "check": "Some respawn points.",
               "proof": "none"
+            },
+            {
+              "check": "A player saved dead logs in dead and lives again at its respawn request (bots, 2026-11-21: two hunt bots saved at no health respawned at their login and were saved alive).",
+              "proof": "bots"
             }
           ]
         },
@@ -1863,6 +1879,10 @@
             {
               "check": "A lore note sets the achievement its own row names (tests only, 2026-11-21): the Soulwarden plaque of `99A_MSQ_01_LearnSoulwardens` names `Lore_unlock_99A_MSQ_SoulwardenIntro_01_01`, not its title, so before the fix that step and `99A_MSQ_01B`, `99A_MSQ_03` and `06A_S_01` never ended. A row without one unlocks its title, as before.",
               "proof": "tests"
+            },
+            {
+              "check": "A task that a consecutive container lists twice is done with its first copy, as retail (bots, 2026-11-21): `04A_Side05_03_03B_Container_DeadDrop` lists `03B_GetDelivery` twice, and retail's two entries of it went Complete in one update. A bot then played `04A_Side05_03` and `04A_Side05_04` to their end. Before, the second copy waited for a second parcel that the level does not have, and both quests never ended.",
+              "proof": "bots"
             }
           ]
         },
@@ -1958,6 +1978,14 @@
             },
             {
               "check": "The Windsward start beach chain (`06_getoffbeach` to `06_raisealarm`) runs by bots with a GM start (10 of 10, 2026-11-21), but nothing offers it to a new character yet: not done.",
+              "proof": "none"
+            },
+            {
+              "check": "More next-zone quests by bots with a GM start (2026-11-21): the Windsward side quests `06A_F_01`, `06A_F_02`, `06A_P_01`, `06A_P_02`, `06A_TS_03`, `06A_S_01`, `06A_S_02`, `06A_Z_01` and `06A_IR_03`, the Windsward story `06A_MSQ_07_alt`, `06A_MSQ_22` and `06A_MSQ_22_alt`, the Aeternum story `99A_MSQ_01`, `99A_MSQ_01B` and `99A_MSQ_03` (the Soulwarden plaque's achievement), and the Everfall side quests `04A_Side02_03` to `04A_Side02_05` and `04A_Side04_07` complete.",
+              "proof": "bots"
+            },
+            {
+              "check": "Quest steps with no source on this server (bots, 2026-11-21): nothing gives the bone items of `0699_0102` and `0699_0103` or the yeti horn of `0424_2022_WC_04`, the level has no `wcStation` object for `0424_2022_WC_01`, and `0430_0101_Arena` needs the 3v3 arena: not done.",
               "proof": "none"
             }
           ]
@@ -2529,6 +2557,14 @@
             {
               "check": "Shrine travel needs no chart on the server.",
               "proof": "none"
+            },
+            {
+              "check": "A bot travels at a fast travel shrine: the channel, then the arrival (bots, 2026-11-21).",
+              "proof": "bots"
+            },
+            {
+              "check": "A bot checks in at an inn (it finds the innkeeper's capital), the state names the inn, and it recalls to the inn (bots, 2026-11-21).",
+              "proof": "bots"
             }
           ]
         },
@@ -2629,6 +2665,10 @@
             {
               "check": "A failed course's result: Unknown.",
               "proof": "none"
+            },
+            {
+              "check": "The mount quest's reward box opens from the bag (1733) and gives the horse (bots, 2026-11-21): a bot opened the box, summoned the horse and rode it.",
+              "proof": "bots"
             }
           ]
         },
@@ -2915,6 +2955,14 @@
             {
               "check": "A player enters a solo trial from afar and comes back (bots, 2026-11-16): the bot sends 5039, 5037 and 946, the director starts a trial sim, the trial's script spawns its boss where the player fights it, and after the win the player is back in the open world. On a stack that just started, the director starts a trial sim for the first request and holds the request until that sim is ready (`start_wait_ms`, 60 s); the first entry then works (bots, 2026-11-17).",
               "proof": "bots"
+            },
+            {
+              "check": "The director waits longer before each new start of a level whose instance sim stopped before its first beat (tests only, 2026-11-21; two seconds doubling to five minutes, our choice). Before, it started one every second while the level was wanted.",
+              "proof": "tests"
+            },
+            {
+              "check": "The content build makes no collision file for the dungeon levels (only the tutorial's, the open world's and the catacombs'), so an expedition's instance sim stops at its start (bots, 2026-11-21: `nw_dungeon_windsward_00`): not done.",
+              "proof": "none"
             }
           ]
         },
@@ -3880,6 +3928,7 @@
     "**Bow abilities and other players: live check of the 2026-11-21 fixes (tests only).** Two players, keyboard and controller: another player running across the screen (no saw-tooth), Rain of Arrows' place on a slope and on a structure. Rain of Arrows still keeps its own player in the aim: trace the client's `SpellRaycastState` during F (needs a player at the keyboard), then fix from what it shows.",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
+    "**Expeditions: collision files for the dungeon levels (2026-11-21).**\n\n- The content build makes collision only for the tutorial, the open world and the catacombs.\n- An expedition's instance sim stops at its start without one.\n- Adding the dungeon levels changes the content build, the realm pack and the game VM's content.",
     "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
     "**Camps (2026-11-15): the rest of the live check.**\n\n- Respawn at the camp after a death.\n- Craft at the camp's station.\n- Place a camp with no wood: it stands unbuilt; gather the wood and build it.\n- A game master gets the reason line of a refused camp in chat.",
     "**One busy sim (2026-11-15): the bundle stops of the 110-bot run.**\n\n- The run: `nw-testclient hunt`, `gather` and `swarm` together on the real-client stack (30, 30 and 50 bots).\n- The ticks keep time now; the hunt and gather bots still report a stop in their bundles. Find the cause.",
@@ -4212,7 +4261,8 @@
     "Game pad movement (2026-11-17, tests only): the server reads the left stick from the input record's scaled bytes, so a pad player's server body walks with the client. Before, the body stayed behind, swings were tested at the wrong place and other players saw the pad player at a stale spot.",
     "Controller attacks for other players (2026-11-17, tests only): the server's own attack starts for other players read a pad's held trigger as its press, as the hits do; the sim logs each input record to find where the server's body and the client part.",
     "Block end for other players (2026-11-17, tests only): the right-click's release ends the second slot (state 45, sequence 0) as retail; other players saw a rapier's block pose for the rest of the session.",
-    "Other players' animations (2026-11-17, tests only): block pose end, upper slot times, landings and falls, draw ends, sheathed dodges, the re-mined player sequence table, the heavy attack lift and the press start kept at a draw."
+    "Other players' animations (2026-11-17, tests only): block pose end, upper slot times, landings and falls, draw ends, sheathed dodges, the re-mined player sequence table, the heavy attack lift and the press start kept at a draw.",
+    "Bot tools and fixes (2026-11-21, bots): a bot walks with real input records (keys and pad), a bot saved dead respawns at login, a bot opens the mount reward box, `!gearup` wears the bag's class gear, a twice-listed quest task ends with its first copy, a tutorial exit is saved in the open world, and the director waits longer before each new start of a level whose sim stops at once."
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-21",
