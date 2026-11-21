@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The sessions under the captures folder (admin tools spec section 4.4): every `ledger.bin`,
-//! with the name and start time of its `metadata.json` and, for an open-world session, the
-//! title of the saved Discord post that holds its archive.
+//! The sessions under the captures folder (admin tools spec section 4.4): every `ledger.bin`
+//! and every ledger attached to a saved Discord post (`ledger-<hash>.bin`), with the name and
+//! start time of its `metadata.json` and, for a shared session, the title of the saved Discord
+//! post that holds its archive or ledger.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,14 +11,20 @@ use serde::{Deserialize, Serialize};
 
 /// File name of a ledger.
 pub const LEDGER_FILE: &str = "ledger.bin";
+/// Start of the file name of a ledger attached to a saved Discord post (`ledger-<hash>.bin`).
+const ATTACHED_LEDGER_START: &str = "ledger-";
+/// End of the file name of a ledger.
+const LEDGER_END: &str = ".bin";
 /// File name of the capture tool's session facts.
 pub const METADATA_FILE: &str = "metadata.json";
 /// Folder of the unpacked open-world sessions in the captures folder (one folder per archive).
 pub const OPEN_WORLD_DIR: &str = "ow captures extracted";
 /// End of a saved Discord post's file folder.
 const POST_FOLDER_END: &str = ".html_Files";
-/// Start of a saved Discord post's name.
-const POST_NAME_START: &str = "Open World - file-sharing - ";
+/// Separator of the server, channel and post title in a saved Discord post's name.
+const POST_NAME_SEPARATOR: &str = " - ";
+/// Parts of a saved Discord post's name: server, channel, title.
+const POST_NAME_PARTS: usize = 3;
 /// Deepest folder searched below the captures folder.
 const MAX_DEPTH: usize = 10;
 
@@ -49,6 +56,7 @@ struct Metadata {
 /// with a warning.
 pub fn scan(captures_dir: &Path, discord_dir: &Path) -> Vec<SessionEntry> {
     let titles = post_titles(discord_dir);
+    let discord_folder = discord_dir.strip_prefix(captures_dir).ok();
     let mut ledgers = Vec::new();
     find_ledgers(captures_dir, 0, &mut ledgers);
     let mut sessions: Vec<SessionEntry> = ledgers
@@ -63,6 +71,9 @@ pub fn scan(captures_dir: &Path, discord_dir: &Path) -> Vec<SessionEntry> {
             let metadata = read_metadata(&path);
             let post_title = match parts.as_slice() {
                 [open_world, stem, ..] if open_world == OPEN_WORLD_DIR => titles.get(stem).cloned(),
+                [.., post, _] if discord_folder.is_some_and(|folder| relative.starts_with(folder)) => {
+                    post_title(post)
+                }
                 _ => None,
             };
             Some(SessionEntry {
@@ -116,10 +127,15 @@ fn find_ledgers(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
         };
         if kind.is_dir() {
             find_ledgers(&path, depth + 1, found);
-        } else if entry.file_name() == LEDGER_FILE {
+        } else if is_ledger_file(&entry.file_name().to_string_lossy()) {
             found.push(path);
         }
     }
+}
+
+/// `ledger.bin`, or `ledger-<hash>.bin` as a saved Discord post names an attached ledger.
+fn is_ledger_file(name: &str) -> bool {
+    name == LEDGER_FILE || (name.starts_with(ATTACHED_LEDGER_START) && name.ends_with(LEDGER_END))
 }
 
 /// `metadata.json` beside the ledger, else in the folder above (sessions with a `dtls` folder).
@@ -164,10 +180,10 @@ fn post_titles(discord_dir: &Path) -> HashMap<String, String> {
     titles
 }
 
-/// `Open World - file-sharing - <title> [<n>].html_Files` to `<title>`.
+/// `<server> - <channel> - <title> [<n>].html_Files` to `<title>`.
 fn post_title(folder: &str) -> Option<String> {
     let name = folder.strip_suffix(POST_FOLDER_END)?;
-    let name = name.strip_prefix(POST_NAME_START).unwrap_or(name);
+    let name = name.splitn(POST_NAME_PARTS, POST_NAME_SEPARATOR).nth(POST_NAME_PARTS - 1).unwrap_or(name);
     let title = match name.rsplit_once(" [") {
         Some((title, number)) if number.ends_with(']') => title,
         _ => name,
@@ -250,7 +266,7 @@ mod tests {
         let post = root
             .path()
             .join("discord")
-            .join("Open World - file-sharing - Gorgon raid - part 2 [123].html_Files");
+            .join("Example Server - captures - Gorgon raid - part 2 [123].html_Files");
         std::fs::create_dir_all(&post).expect("dir");
         std::fs::write(post.join("run-1-abc.rar"), b"archive").expect("archive");
         std::fs::write(post.join("style.css"), b"").expect("page file");
@@ -258,6 +274,29 @@ mod tests {
         assert_eq!(
             sessions[0].post_title.as_deref(),
             Some("Gorgon raid - part 2")
+        );
+    }
+
+    #[test]
+    fn a_ledger_attached_to_a_saved_post_is_found_with_its_post_title() {
+        let root = tempfile::tempdir().expect("dir");
+        let captures = root.path().join("captures");
+        let discord = captures.join("posts");
+        let post = discord.join("Example Server - captures - Bow cap [456].html_Files");
+        std::fs::create_dir_all(&post).expect("dir");
+        std::fs::write(post.join("ledger-0123abcd.bin"), LEDGER_BYTES).expect("ledger");
+        std::fs::write(post.join("ledgers.bin.css"), b"").expect("page file");
+        let sessions = scan(&captures, &discord);
+        let found: Vec<(&str, Option<&str>)> = sessions
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.post_title.as_deref()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![(
+                "posts/Example Server - captures - Bow cap [456].html_Files/ledger-0123abcd.bin",
+                Some("Bow cap")
+            )]
         );
     }
 
