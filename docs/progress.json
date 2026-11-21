@@ -779,6 +779,18 @@
             {
               "check": "Not checked (2026-11-20): whether a dodge press during a roll takes stamina.",
               "proof": "none"
+            },
+            {
+              "check": "Each state number carries the place of its own input record to the players who see it, with keys and with a pad (tests only, 2026-11-21). Before, when the next record came before the tick, the tick sent the half tick's number again with the newer place: 24 % and 35 % of two moving players' states in the live test of 2026-11-21 (retail: 2 of 57,297), and the other player ran in a saw-tooth on screen.",
+              "proof": "tests"
+            },
+            {
+              "check": "Open (live test 2026-11-21): one of eight controller dodges ended after 130 ms on the other screen. The server's ground had a step there that the client's did not (the body rose 0.55 m onto it, then fell), so the server played a fall; which solid it is, is Unknown. A controller player's input records also reached the server unevenly (gaps of 0 to 60 ms, 8 over 200 ms; cause Unknown).",
+              "proof": "none"
+            },
+            {
+              "check": "Open (live test 2026-11-21): light attacks in the air slide 1.5 to 2 m each, as their animations do; the server copies the client's lunge and adds nothing. Retail lunges stop at their target; how far a retail swing goes with no target near is Unknown (no capture has one).",
+              "proof": "none"
             }
           ]
         },
@@ -1072,8 +1084,12 @@
               "proof": "tests"
             },
             {
-              "check": "Not checked in game (2026-11-20): that the own player leaves Rain of Arrows' aim after the shot and sees Penetrating Shot's shot. Where Rain of Arrows lands is not compared with retail: the server uses the client's aim point when one came, else the camera's look on a flat floor at the player's height (not the real ground), else the reach ahead; the log now names the source of each cast.",
+              "check": "Not working in game (live test 2026-11-21): the own player still stays in Rain of Arrows' aim after the shot, though the server now sends retail's aim, shot and end states and a spell object of retail's form. The client leaves the aim when its own aim ray reports `RaycastPassed` (`ActionConditionSpellSpawnLocationState`, `playeractions_ability_bow.actionlist`); what keeps that state from passing is Unknown and needs a trace of the client.",
               "proof": "none"
+            },
+            {
+              "check": "Rain of Arrows lands where the camera's look meets the level's real ground: its terrain or a solid of its structures (tests only, 2026-11-21). The retail client sends no aim point for it; a retail rain opened 0.23 m from our place on the real ground of the open world (2.06 m on the terrain alone, under the structure its caster stood on). Before, the server used a flat floor at the caster's height.",
+              "proof": "tests"
             },
             {
               "check": "Not built: Splinter Shot's later marker steps (`48=42`, `48=10`), and Penetrating Shot's end when the right mouse button stays held (retail goes back to the plain aim then).",
@@ -1617,6 +1633,10 @@
             {
               "check": "A mob's hit reaction ends with the hit's stun and plays faster or slower to end then (tests only, 2026-11-19): retail sends the reaction again at its `HitStun` clip with a new speed, (length - clip start) / (stun - clip start), and the stun is the attack row's `HitStun_AI` (boar reactions 15 to 28 frames, median 634 ms; 350 of 415 retail speed switches match bit for bit). Ours played 775 ms for every attack. Open: the grey wolf's `r_R2` ends 1.1 frames later in retail.",
               "proof": "tests"
+            },
+            {
+              "check": "A mob that cannot walk home stays in a leash reset (bot soak, 2026-11-21: five mobs looped for more than 30 minutes where the floor ahead was missing). The game data names stuck fixes (move left, move right, teleport a little) and a give-up choice; their values are Unknown: not done.",
+              "proof": "none"
             }
           ]
         },
@@ -1839,6 +1859,10 @@
             {
               "check": "A reward item that its game event names in another letter case than its item row is given (2026-11-16, tests only): 12 game events do this, as the amulet of the Lochnir's Notes turn-in (`amuletmonarchsblufft3` for `AmuletMonarchsBluffT3`). Before the fix the player got nothing.",
               "proof": "tests"
+            },
+            {
+              "check": "A lore note sets the achievement its own row names (tests only, 2026-11-21): the Soulwarden plaque of `99A_MSQ_01_LearnSoulwardens` names `Lore_unlock_99A_MSQ_SoulwardenIntro_01_01`, not its title, so before the fix that step and `99A_MSQ_01B`, `99A_MSQ_03` and `06A_S_01` never ended. A row without one unlocks its title, as before.",
+              "proof": "tests"
             }
           ]
         },
@@ -1919,6 +1943,22 @@
             {
               "check": "A player bot plays the Monarch's Bluffs main story from Fragments of Truth to its end (`12A_MSQ_09` to `12A_MSQ_26`), and each quest completes (bots on the PC stack, 2026-11-16). In Lost Legacy the bot enters the Gawain trial, fights the trial's own Gawain, takes the crown and turns in; the server gives the main story's meta achievement. In A Pirate's Plan and Broken Oath the bot kills the named mobs and takes the quest items from their loot bags (bots, 2026-11-17).",
               "proof": "bots"
+            },
+            {
+              "check": "A player bot plays the whole Monarch's Bluffs main story from the beach (`12_getoffbeach`) to `12A_MSQ_26_ToYonas`: all 32 quests complete (bots on the PC stack, 2026-11-21). 14 Monarch's Bluffs side quests complete too.",
+              "proof": "bots"
+            },
+            {
+              "check": "Next zones by bots with a GM start (2026-11-21): the Windsward main story `06A_MSQ_01` to `17`, 7 Windsward side quests, 22 Everfall side quests and 12 Aeternum story quests complete.",
+              "proof": "bots"
+            },
+            {
+              "check": "Two side quest steps have no source on this server: no object fires the encounter success event of `04A_Side02_02`, and nothing gives `04aSide04_06_Flowers` (`04A_Side04_06`): not done.",
+              "proof": "none"
+            },
+            {
+              "check": "The Windsward start beach chain (`06_getoffbeach` to `06_raisealarm`) runs by bots with a GM start (10 of 10, 2026-11-21), but nothing offers it to a new character yet: not done.",
+              "proof": "none"
             }
           ]
         },
@@ -3637,6 +3677,10 @@
             {
               "check": "A player sees missions on a town project board and takes one live.",
               "proof": "none"
+            },
+            {
+              "check": "A player bot takes town board missions, plays them and turns them in (bots, 2026-11-21): four missions complete (boar kills, alligator cooking, fasteners, blocks).",
+              "proof": "bots"
             }
           ]
         },
@@ -3833,7 +3877,7 @@
   "nextSteps": [
     "**Player body: key physics first (2026-11-19 study).** The server guesses each body from the client camera, and the camera boom changes with no key the server sees. A test with camera corrections across the view only made the live error larger (90th percentile 2.9 to 17 m), so the key physics must improve first, measured cause by cause with the fresh-start replay: attack and ability motion and the move lock in attacks, the dodge distance from the gear's equip load, slope speed, walls our collision has and the game does not, and ledge climbs. Then the camera's correction along the view can go, and the own states can carry the input counter as retail's do.\n\nLive check of this round: the bow abilities and the crosshair aim on a boar, with the client trace on.",
     "**Other players: live check of the 2026-11-20 second round (tests only).** Two players, keyboard and controller: crouch and prone with the pad (left shoulder with a left stick click, and held), quick double dodge presses (one roll each, no restart), and a keyboard video like the controller one. Then the earlier list: a bow's hip shots held long and short, walking and running backward, keys let go during an attack, walk starts, jumps and falls, the bow's full draw, blunderbuss re-fire and reload, blocks, a spear chain on a boar, a rapier's light and heavy attacks (the heavy now 19 records into the hold).\n\nStill open: the jerk of a player on a slow link (Unknown), the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
-    "**Bow abilities: live check of the 2026-11-20 fixes (tests only).** Keyboard and controller: Rain of Arrows (F, then a click) shows the shot and leaves the aim; every click in the aim shoots; Penetrating Shot (Q, then a click) shows its shot. Then compare where Rain of Arrows lands with where the player aimed (the sim log's `spell aimed` line names the source).",
+    "**Bow abilities and other players: live check of the 2026-11-21 fixes (tests only).** Two players, keyboard and controller: another player running across the screen (no saw-tooth), Rain of Arrows' place on a slope and on a structure. Rain of Arrows still keeps its own player in the aim: trace the client's `SpellRaycastState` during F (needs a player at the keyboard), then fix from what it shows.",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
@@ -3917,6 +3961,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Other players and ranged magic (2026-11-21, tests only): each state number keeps its own record's place for the players who see it (the other player's saw-tooth run), and Rain of Arrows lands where the camera's look meets the real ground.",
     "Ranged and magic (2026-11-20, tests only): a click in an ability's aim is no longer lost when two input messages come before one server tick, and Rain of Arrows and Penetrating Shot show their shot and end as in the retail captures.",
     "Progress check against the code (2026-11-20): every check was compared with the code. Checks whose tests exist now say tests, the built parts of not-built checks are split out with their own proof, and out-of-date text is fixed. The area once named \"Not started\" is now \"Late systems\": each of its systems has code.",
     "Other players (2026-11-20, tests only): a rapier's heavy attack shows 19 input records into the hold, as in the retail captures, not 27.",
@@ -4170,6 +4215,6 @@
     "Other players' animations (2026-11-17, tests only): block pose end, upper slot times, landings and falls, draw ends, sheathed dodges, the re-mined player sequence table, the heavy attack lift and the press start kept at a draw."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-20",
-  "lastCommit": "e0bb2cc9"
+  "updated": "2026-11-21",
+  "lastCommit": "41a96689"
 }
