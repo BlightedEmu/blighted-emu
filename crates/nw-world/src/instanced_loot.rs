@@ -86,11 +86,7 @@ fn holds(element: &Element, names: (u32, u32, u32)) -> bool {
             .and_then(|holder| holder.child(id))
             .and_then(|id| id.as_u64().ok())
             .is_some_and(|id| id != NO_ENTITY);
-    names_entity
-        || element
-            .children
-            .iter()
-            .any(|child| holds(child, names))
+    names_entity || element.children.iter().any(|child| holds(child, names))
 }
 
 /// The first element named `field` of `element` and its children, in stream order.
@@ -116,7 +112,10 @@ mod tests {
     const QUEST_AOI_RADIUS_M: f32 = 100.0;
 
     fn controller(loot_entity: u64) -> Element {
-        let id = Element::with_value(lowercase_crc32(ID_FIELD), loot_entity.to_be_bytes().to_vec());
+        let id = Element::with_value(
+            lowercase_crc32(ID_FIELD),
+            loot_entity.to_be_bytes().to_vec(),
+        );
         let holder = Element::with_children(lowercase_crc32(ENTITY_ID_FIELD), vec![id]);
         let reference = Element::with_children(lowercase_crc32(INSTANCED_LOOT_FIELD), vec![holder]);
         Element::with_children(lowercase_crc32("m_serverFacetPtr"), vec![reference])

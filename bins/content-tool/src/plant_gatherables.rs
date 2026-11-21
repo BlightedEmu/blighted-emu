@@ -99,7 +99,10 @@ impl PlantGatherables {
         let variants = rows
             .into_iter()
             .map(|(table, variant, entry)| {
-                ((table.to_lowercase(), variant.to_lowercase()), entry.to_owned())
+                (
+                    (table.to_lowercase(), variant.to_lowercase()),
+                    entry.to_owned(),
+                )
             })
             .collect();
         Self { slices, variants }
@@ -122,7 +125,9 @@ impl PlantGatherables {
 }
 
 /// The slice keys of the plants of `distributions`.
-pub fn plant_slice_keys<'a>(distributions: impl IntoIterator<Item = &'a Distribution>) -> BTreeSet<String> {
+pub fn plant_slice_keys<'a>(
+    distributions: impl IntoIterator<Item = &'a Distribution>,
+) -> BTreeSet<String> {
     distributions
         .into_iter()
         .flat_map(|distribution| distribution.slices.iter().map(|slice| slice_key(slice)))
@@ -201,7 +206,10 @@ mod tests {
     #[test]
     fn a_plant_s_gatherable_is_its_variant_s_or_else_its_slice_s() {
         let plants = plants();
-        assert_eq!(plants.gatherable(BUSH, "bush_suppawpaw_b"), Some("BushMedium"));
+        assert_eq!(
+            plants.gatherable(BUSH, "bush_suppawpaw_b"),
+            Some("BushMedium")
+        );
         assert_eq!(
             plants.gatherable("Slices\\Gatherables\\Master_Bush.dynamicslice", PAWPAW.1),
             Some("BushMedium"),
@@ -231,7 +239,10 @@ mod tests {
         let root = Element {
             children: vec![Element {
                 children: vec![
-                    component(GATHERABLE_CONTROLLER_TYPE, text(GATHERABLE_ENTRY_FIELD, "BushLarge")),
+                    component(
+                        GATHERABLE_CONTROLLER_TYPE,
+                        text(GATHERABLE_ENTRY_FIELD, "BushLarge"),
+                    ),
                     component(VARIATION_DATA, text(VARIATION_TABLE_FIELD, BUSH_TABLE)),
                 ],
                 ..Element::default()
@@ -275,7 +286,11 @@ mod tests {
         let distribution = Distribution {
             slices: vec![BUSH.to_owned(), ROCK.to_owned(), BEECH.to_owned()],
             variants: vec![PAWPAW.1.to_owned(), String::new(), String::new()],
-            rows: vec![row(0, [10.0, 20.0]), row(1, [11.0, 21.0]), row(2, [100.0, 200.0])],
+            rows: vec![
+                row(0, [10.0, 20.0]),
+                row(1, [11.0, 21.0]),
+                row(2, [100.0, 200.0]),
+            ],
         };
         let points = plant_points("r_+01_+00", &distribution, &world, &plants());
         let height = world.height_at(2058.0, 20.0).expect("terrain");
@@ -286,7 +301,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 (lowercase_crc32("BushMedium"), [2058.0, 20.0, height]),
-                (lowercase_crc32("TreeHardwoodMedium"), [2148.0, 200.0, height]),
+                (
+                    lowercase_crc32("TreeHardwoodMedium"),
+                    [2148.0, 200.0, height]
+                ),
             ],
             "the rock is no gatherable"
         );

@@ -75,10 +75,7 @@ impl SimWorld {
                 crest: owner.crest,
             });
         }
-        self.company_looks
-            .looks
-            .get(&Uuid::from_bytes(id))?
-            .clone()
+        self.company_looks.looks.get(&Uuid::from_bytes(id))?.clone()
     }
 
     /// The company of player `user` and its look ([`Self::company_look`]); `None` for a player
@@ -172,7 +169,11 @@ pub(in crate::world) mod tests {
         assert_eq!(world.take_company_reads(), vec![COMPANY]);
         world.ask_company_ids([COMPANY]);
         assert!(world.take_company_reads().is_empty(), "asked once");
-        assert_eq!(world.company_look(*COMPANY.as_bytes()), None, "not read yet");
+        assert_eq!(
+            world.company_look(*COMPANY.as_bytes()),
+            None,
+            "not read yet"
+        );
         world.companies_read(&[listing(COMPANY, NAME)]);
         assert_eq!(
             world.company_look(*COMPANY.as_bytes()),

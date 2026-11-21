@@ -211,13 +211,13 @@ use nw_messages::combat_effects::{AUTHORITATIVE_PROJECTILE_FLAG, CombatEffectMsg
 use nw_messages::entity_ids::{facet_of_raw_id, raw_id_of_entity};
 use nw_messages::facet::facet_entity;
 use nw_messages::items::SYNC_CRAFT_USED;
+use nw_messages::position::POSITION_IN_THE_WORLD_TYPE_INDEX;
 use nw_messages::projectile_state::ProjectileState;
 use nw_messages::turrets::{
     PROJECTILE_SPAWNER_TYPE_INDEX, ProjectileSpawnerState, TURRET_GDE_REF_LEN, TurretAim,
     TurretClientMsg, gde_ref_of, turret_half,
 };
 use nw_messages::war_states::GDE_REF_LEN;
-use nw_messages::position::POSITION_IN_THE_WORLD_TYPE_INDEX;
 use nw_messages::{
     BundleMember, ClaimOwner, FacetHeader, FullList, InteractCooldown, InteractCooldownState,
     InteractState, InteractionRequest, MemberState, OwnershipState, ServerMessage, TurretState,
@@ -590,7 +590,11 @@ impl TurretRun {
     /// `number`) as its build makes it (module doc): idle, whole and open to damage; its
     /// vitals and buildable states are the outpost structure's
     /// ([`super::outpost_rush_structures`]), so `turret` carries none.
-    pub(super) fn outpost_turret(turret: FortStructure, kind: TurretKind, number: u64) -> Option<Self> {
+    pub(super) fn outpost_turret(
+        turret: FortStructure,
+        kind: TurretKind,
+        number: u64,
+    ) -> Option<Self> {
         let mut run = Self::new(turret, kind)?;
         run.body.number = number;
         run.body.invulnerable = false;
@@ -600,9 +604,11 @@ impl TurretRun {
     /// It stands built again after the ruin of its outpost structure (module doc): as its first
     /// build made it, with its balls in flight and the last use its ownership names.
     pub(super) fn mend(&mut self) {
-        if let Some(mut mended) =
-            Self::outpost_turret(self.body.structure.clone(), self.kind.clone(), self.body.number)
-        {
+        if let Some(mut mended) = Self::outpost_turret(
+            self.body.structure.clone(),
+            self.kind.clone(),
+            self.body.number,
+        ) {
             mended.balls = std::mem::take(&mut self.balls);
             mended.used = self.used;
             *self = mended;
@@ -1105,7 +1111,10 @@ impl SimWorld {
         let Some(entity) = self.player_by_number(shooter) else {
             return;
         };
-        if self.hit_outpost_rush_structure(entity, target, amount).is_some() {
+        if self
+            .hit_outpost_rush_structure(entity, target, amount)
+            .is_some()
+        {
             self.outpost_rush_siege_hit(shooter, amount);
         }
     }
@@ -1138,7 +1147,10 @@ impl SimWorld {
     /// `outcome`: one that landed counts as the shooter's `DamageWithSiegeWeapons` on the
     /// Outpost Rush war board ([`Self::turret_body_hit`]).
     pub(super) fn count_siege_hit(&mut self, outcome: &AttackOutcome, shooter: u64, amount: u32) {
-        if matches!(outcome, AttackOutcome::Hit { .. } | AttackOutcome::Killed { .. }) {
+        if matches!(
+            outcome,
+            AttackOutcome::Hit { .. } | AttackOutcome::Killed { .. }
+        ) {
             self.outpost_rush_siege_hit(shooter, amount);
         }
     }
@@ -1322,24 +1334,28 @@ impl SimWorld {
         let refill = run.kind.ammo_refill.unwrap_or_default();
         run.ammo = run.ammo.saturating_add(refill).min(run.kind.max_ammo);
         run.effect_adds = run.effect_adds.saturating_add(1);
-        let cooldown = run.body.structure.interact_component.map(|component| BundleMember {
-            component,
-            state: MemberState::InteractCooldown(InteractCooldownState {
-                interact: InteractState {
-                    enabled: None,
-                    has_interactors: Some(NO_INTERACTORS),
-                },
-                cooldown_updates: FullList {
-                    version: Some(run.effect_adds),
-                    elements: vec![InteractCooldown {
-                        option: AMMO_ADD_OPTION,
-                        ends_unix_ns: super::unix_ns(
-                            self.server_ms.saturating_add(AMMO_ADD_COOLDOWN_MS),
-                        ),
-                    }],
-                },
-            }),
-        });
+        let cooldown = run
+            .body
+            .structure
+            .interact_component
+            .map(|component| BundleMember {
+                component,
+                state: MemberState::InteractCooldown(InteractCooldownState {
+                    interact: InteractState {
+                        enabled: None,
+                        has_interactors: Some(NO_INTERACTORS),
+                    },
+                    cooldown_updates: FullList {
+                        version: Some(run.effect_adds),
+                        elements: vec![InteractCooldown {
+                            option: AMMO_ADD_OPTION,
+                            ends_unix_ns: super::unix_ns(
+                                self.server_ms.saturating_add(AMMO_ADD_COOLDOWN_MS),
+                            ),
+                        }],
+                    },
+                }),
+            });
         let partial = cooldown
             .into_iter()
             .chain(run.spawner_member(ProjectileSpawnerState {
@@ -1515,7 +1531,11 @@ impl SimWorld {
             .map(|(target, at, body)| (TurretShotTarget::Shot(target), at, body))
             .collect();
         let structure = |number, facet, at, foe, capsule| {
-            (TurretShotTarget::Structure { number, facet, foe }, at, capsule)
+            (
+                TurretShotTarget::Structure { number, facet, foe },
+                at,
+                capsule,
+            )
         };
         if let Some(fight) = self.war_fight() {
             targets.extend(
@@ -1535,9 +1555,11 @@ impl SimWorld {
                         )
                     }),
             );
-            targets.extend(fight.standing_points().map(|(facet, at)| {
-                (TurretShotTarget::Obstacle { facet }, at, CAPTURE_POINT_BODY)
-            }));
+            targets.extend(
+                fight.standing_points().map(|(facet, at)| {
+                    (TurretShotTarget::Obstacle { facet }, at, CAPTURE_POINT_BODY)
+                }),
+            );
             return targets;
         }
         let raid = self
@@ -1689,10 +1711,12 @@ impl SimWorld {
                 return Some(Err(AttackRefusal::NotWeaponAttack));
             };
             let amount = self.level_hit_amount(shooter, coefficient);
-            return Some(match self.hit_outpost_rush_structure(entity, target, amount) {
-                Some(_) => Ok(AttackOutcome::Hit { target, amount }),
-                None => Err(AttackRefusal::UnknownTarget),
-            });
+            return Some(
+                match self.hit_outpost_rush_structure(entity, target, amount) {
+                    Some(_) => Ok(AttackOutcome::Hit { target, amount }),
+                    None => Err(AttackRefusal::UnknownTarget),
+                },
+            );
         }
         self.with_turrets(|world, fight| {
             let turret = fight
@@ -1834,7 +1858,8 @@ impl SimWorld {
                 (
                     flight_s * stop.along_m / way_m,
                     stop.at,
-                    stop.entity.map(|facet| TurretShotTarget::Obstacle { facet }),
+                    stop.entity
+                        .map(|facet| TurretShotTarget::Obstacle { facet }),
                 )
             }
             None => (flight_s, at, target),
@@ -1885,7 +1910,11 @@ impl SimWorld {
             header: run.spawner_header(),
         });
         for connection in others {
-            send_now(&mut self.combat_messages, &connection, std::slice::from_ref(&server_spawn));
+            send_now(
+                &mut self.combat_messages,
+                &connection,
+                std::slice::from_ref(&server_spawn),
+            );
         }
         let amount = self.turret_hit_amount(&run.kind, user.number);
         run.balls.push(BallFlight {
@@ -2354,7 +2383,11 @@ pub(crate) mod tests {
                 .any(|member| matches!(member.state, MemberState::Turret(_))),
             "its turret state"
         );
-        assert!(members.iter().any(|member| member.state == MemberState::Ownership(owner.clone())));
+        assert!(
+            members
+                .iter()
+                .any(|member| member.state == MemberState::Ownership(owner.clone()))
+        );
         let closed = world
             .place_turret(turret, kind, owner, false)
             .expect("placed");
@@ -2438,19 +2471,28 @@ pub(crate) mod tests {
 
     /// The ownership of the card of slot key `number`, and the last ownership of its state
     /// change that goes out.
-    fn ownerships(world: &SimWorld, number: u64) -> (Option<OwnershipState>, Option<OwnershipState>) {
+    fn ownerships(
+        world: &SimWorld,
+        number: u64,
+    ) -> (Option<OwnershipState>, Option<OwnershipState>) {
         let ownership = |members: Vec<BundleMember>| {
-            members.into_iter().rev().find_map(|member| match member.state {
-                MemberState::Ownership(state) => Some(state),
-                _ => None,
-            })
+            members
+                .into_iter()
+                .rev()
+                .find_map(|member| match member.state {
+                    MemberState::Ownership(state) => Some(state),
+                    _ => None,
+                })
         };
         let card = world.stations.members(number).map(<[BundleMember]>::to_vec);
         let slot = crate::world::slots::Slot {
             interest: 1,
             new: false,
         };
-        let sent = world.stations.group(number, slot).map(|group| group.members);
+        let sent = world
+            .stations
+            .group(number, slot)
+            .map(|group| group.members);
         (card.and_then(ownership), sent.and_then(ownership))
     }
 
@@ -2481,12 +2523,18 @@ pub(crate) mod tests {
         );
         world.tick_turrets(NOW + USE_TIMEOUT_MS);
         assert_eq!(
-            world.with_turret_runs(|_, turrets| turrets.iter().any(|run| run.used() && !run.in_use())),
+            world.with_turret_runs(|_, turrets| turrets
+                .iter()
+                .any(|run| run.used() && !run.in_use())),
             Some(true),
             "released and used"
         );
         world.show_side_looks(&[Uuid::from_u128(0xd1)]);
-        assert_eq!(ownerships(&world, number).0.and_then(|card| card.owner), owner, "a used turret keeps its user");
+        assert_eq!(
+            ownerships(&world, number).0.and_then(|card| card.owner),
+            owner,
+            "a used turret keeps its user"
+        );
     }
 
     /// Observed (`joining_defending_war_2` 83.729 s and 1883.719 s, `siege_structures` module
@@ -2516,7 +2564,10 @@ pub(crate) mod tests {
         table["structure_kinds"] = serde_json::json!([{"asset": GENERATOR_ASSET,
             "slice": "slices/structures/siege/siege_supplygenerator_t1.dynamicslice", "template": null}]);
         let forts = WarForts::parse(&table.to_string()).expect("table");
-        let (mut world, _) = war_world_with(forts, nw_content::war_forts::SIDE_DEFENDER, |content| content);
+        let (mut world, _) =
+            war_world_with(forts, nw_content::war_forts::SIDE_DEFENDER, |content| {
+                content
+            });
         let repeater = turret_number(&world, &REPEATER_REF).expect("repeater");
         let cannon = turret_number(&world, &CANNON_REF).expect("cannon");
         let generator = world
@@ -2529,7 +2580,11 @@ pub(crate) mod tests {
             })
             .map(|run| run.body.number)
             .expect("generator");
-        assert_eq!(ownerships(&world, generator).0, Some(generator_ownership()), "no company");
+        assert_eq!(
+            ownerships(&world, generator).0,
+            Some(generator_ownership()),
+            "no company"
+        );
         let change = |rule: Option<u8>, guild: Option<[u8; 16]>, raid: u64| OwnershipState {
             guild_id: guild,
             permission_rule: rule,
@@ -2543,7 +2598,10 @@ pub(crate) mod tests {
         world.wars.read(Ok(vec![read.clone()]));
         world.tick_war_fight();
         let started = |rule| Some(change(rule, None, DEFENDER_RAID));
-        assert_eq!(ownerships(&world, repeater).1, started(Some(WAR_RUN_PERMISSION_RULE)));
+        assert_eq!(
+            ownerships(&world, repeater).1,
+            started(Some(WAR_RUN_PERMISSION_RULE))
+        );
         assert_eq!(
             ownerships(&world, cannon).1,
             Some(change(Some(WAR_RUN_PERMISSION_RULE), None, ATTACKER_RAID)),
@@ -3481,7 +3539,11 @@ pub(crate) mod tests {
         )];
         let (met, along) = body_on_line(from, line, (125.0, 0.2), &structure).expect("met");
         assert_eq!(met.facet(), cannon_facet, "the 2720 target of a turret hit");
-        assert_eq!(met.hit_volume(), NO_HIT_VOLUME, "a turret has no hit volume");
+        assert_eq!(
+            met.hit_volume(),
+            NO_HIT_VOLUME,
+            "a turret has no hit volume"
+        );
         assert!((along - 20.0).abs() < 0.1);
     }
 
@@ -3505,13 +3567,21 @@ pub(crate) mod tests {
             None,
             "no point stands before the start"
         );
-        let mut war = world.wars.war(Uuid::from_u128(0x77)).cloned().expect("the war");
+        let mut war = world
+            .wars
+            .war(Uuid::from_u128(0x77))
+            .cloned()
+            .expect("the war");
         war.starts_ms = world.unix_ms();
         world.wars.read(Ok(vec![war]));
         world.tick_war_fight();
         let (target, at, body) =
             point(world.turret_shot_targets(DEFENDER, &turrets, SIDE_DEFENDER)).expect("the point");
-        assert_eq!(target.facet(), POINT_KEY, "the 2720 target: the point's key");
+        assert_eq!(
+            target.facet(),
+            POINT_KEY,
+            "the 2720 target: the point's key"
+        );
         assert_eq!(target.hit_volume(), NO_HIT_VOLUME);
         assert_eq!(target.held(), None, "a point takes no harm");
         assert_eq!((at.x, at.y, at.z), (13_694.4, 6_314.97, 57.7), "its place");
@@ -3588,33 +3658,71 @@ pub(crate) mod tests {
         world.admit(&admit, NOW, SERVER_TIME).expect("admit");
         let entity = world.player_by_number(DEFENDER).expect("player");
         const SLICE: &str = "slices/characters/expeditions/isleofnight/ion_ballista.dynamicslice";
-        let number = world.spawn_encounter_turret(SLICE, [5.0, 0.0, 0.0], 0.0).expect("spawned");
-        assert!(world.spawn_encounter_turret("slices/none.dynamicslice", [5.0, 0.0, 0.0], 0.0).is_none(), "no such turret");
+        let number = world
+            .spawn_encounter_turret(SLICE, [5.0, 0.0, 0.0], 0.0)
+            .expect("spawned");
+        assert!(
+            world
+                .spawn_encounter_turret("slices/none.dynamicslice", [5.0, 0.0, 0.0], 0.0)
+                .is_none(),
+            "no such turret"
+        );
         let ion_ref = world.wars.level.turrets[0].body.structure.gde_ref;
         assert_eq!(world.wars.level.turrets[0].body.structure.asset, ION);
         let run = &world.wars.level.turrets[0];
-        assert_eq!((run.ammo, run.body.structure.side), (1, LEVEL_SIDE), "one bolt");
+        assert_eq!(
+            (run.ammo, run.body.structure.side),
+            (1, LEVEL_SIDE),
+            "one bolt"
+        );
         world.wars.level.turrets[0].ammo = 0;
         let add = InteractionRequest {
             kind: ITEM_COST_KIND,
             ..use_request(ion_ref)
         };
         assert!(world.turret_interaction(entity, DEFENDER, add, &[], NOW));
-        assert_eq!(world.wars.level.turrets[0].ammo, 0, "no bolt effect: refused");
+        assert_eq!(
+            world.wars.level.turrets[0].ammo, 0,
+            "no bolt effect: refused"
+        );
         let content = Arc::clone(&world.content);
         let crc = nw_formats::objectstream::lowercase_crc32(BOLT);
         {
             let mut player = world.world.get_mut::<Player>(entity).expect("player");
-            assert!(player.status_effects.add_by_id(&content.status_effects, BOLT, POTENCY, DEFENDER, NOW));
+            assert!(player.status_effects.add_by_id(
+                &content.status_effects,
+                BOLT,
+                POTENCY,
+                DEFENDER,
+                NOW
+            ));
         }
         assert!(world.turret_interaction(entity, DEFENDER, add, &[], NOW));
         assert_eq!(world.wars.level.turrets[0].ammo, 1, "one bolt added");
-        assert!(!world.world.get::<Player>(entity).expect("player").status_effects.holds(crc), "the effect is spent");
-        let slot = crate::world::slots::Slot { interest: 1, new: false };
-        let sent = world.stations.group(number, slot).map(|group| group.members).unwrap_or_default();
+        assert!(
+            !world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .status_effects
+                .holds(crc),
+            "the effect is spent"
+        );
+        let slot = crate::world::slots::Slot {
+            interest: 1,
+            new: false,
+        };
+        let sent = world
+            .stations
+            .group(number, slot)
+            .map(|group| group.members)
+            .unwrap_or_default();
         assert!(sent.iter().any(|member| matches!(&member.state,
             MemberState::InteractCooldown(state) if state.cooldown_updates.elements.iter().any(|entry| entry.option == AMMO_ADD_OPTION))));
-        assert!(!world.remove_encounter_turret(number.saturating_add(1)), "not a turret");
+        assert!(
+            !world.remove_encounter_turret(number.saturating_add(1)),
+            "not a turret"
+        );
         assert!(world.remove_encounter_turret(number));
         assert!(world.wars.level.turrets.is_empty() && world.stations.members(number).is_none());
     }

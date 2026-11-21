@@ -3406,7 +3406,11 @@ mod tests {
                 panic!("the first entry goes in full");
             };
             let entry = &list.elements[0];
-            let event = if number == RED_PLAYER { WIN_EVENT } else { LOSS_EVENT };
+            let event = if number == RED_PLAYER {
+                WIN_EVENT
+            } else {
+                LOSS_EVENT
+            };
             assert_eq!(entry.event, lowercase_crc32(event));
             assert_eq!((entry.value_a, entry.flag), (25_000, true));
             assert_eq!(entry.rewards[0].quantity, items);

@@ -625,7 +625,11 @@ fn camp_tier_levels(tables: &Tables) -> Vec<u32> {
         .reward_milestone_data
         .iter()
         .flat_map(|table| &table.rows)
-        .filter(|row| row.reward_id.to_lowercase().starts_with(CAMP_TIER_MILESTONE))
+        .filter(|row| {
+            row.reward_id
+                .to_lowercase()
+                .starts_with(CAMP_TIER_MILESTONE)
+        })
         .filter_map(|row| u32::try_from(row.milestone_level).ok())
         .collect()
 }
@@ -899,7 +903,17 @@ pub(crate) mod tests {
         const MILESTONES: [u32; 5] = [25, 10, 55, 15, 40];
         let progression = Progression::default().with_camp_tier_levels(MILESTONES);
         // Zero-based levels: 9 is shown as level 10.
-        for (level, tiers) in [(0, 0), (8, 0), (9, 1), (13, 1), (14, 2), (24, 3), (39, 4), (54, 5), (64, 5)] {
+        for (level, tiers) in [
+            (0, 0),
+            (8, 0),
+            (9, 1),
+            (13, 1),
+            (14, 2),
+            (24, 3),
+            (39, 4),
+            (54, 5),
+            (64, 5),
+        ] {
             assert_eq!(progression.camp_tiers_at(level), tiers, "level {level}");
         }
         assert_eq!(Progression::default().camp_tiers_at(64), 0, "no milestones");

@@ -609,9 +609,8 @@ impl SimWorld {
                     (None, Some(stop.at))
                 }
             };
-            let splashed = centre.map_or_else(Vec::new, |centre| {
-                self.splashed(&flight, centre, first)
-            });
+            let splashed =
+                centre.map_or_else(Vec::new, |centre| self.splashed(&flight, centre, first));
             let first = first.into_iter().map(|target| (target, true));
             for (target, paced) in first.chain(splashed.into_iter().map(|other| (other, false))) {
                 let Some(damage_id) = &flight.damage_id else {
@@ -1019,7 +1018,9 @@ mod tests {
         );
         assert_eq!(world.projectile_flights.len(), 1, "its splash lands");
         assert!(
-            world.projectile_flights_due(MS_PER_SECOND as u64).is_empty(),
+            world
+                .projectile_flights_due(MS_PER_SECOND as u64)
+                .is_empty(),
             "no body stands in the splash"
         );
         assert!(world.projectile_flights.is_empty());

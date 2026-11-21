@@ -146,9 +146,11 @@ impl<T: Ground> Ground for LevelGround<T> {
             dx * dx + dy * dy + dz * dz
         };
         match (own, self.terrain.first_solid(from, to)) {
-            (Some(own), Some(under)) => {
-                Some(if distance(&own.0) <= distance(&under.0) { own } else { under })
-            }
+            (Some(own), Some(under)) => Some(if distance(&own.0) <= distance(&under.0) {
+                own
+            } else {
+                under
+            }),
             (own, under) => own.or(under),
         }
     }

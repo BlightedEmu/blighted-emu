@@ -368,10 +368,15 @@ impl ObjectivesState {
         let slot_1 = if children == 0 { 0 } else { SLOT_1 };
         writer.u8(slot_0 | slot_1);
         if let Some(end) = self.grace_period_end {
-            write_children(writer, GRACE_PERIOD_CHILDREN, SLOT_0_CHILDREN, |writer, _| {
-                writer.u64(end);
-                Ok::<(), MessageError>(())
-            })?;
+            write_children(
+                writer,
+                GRACE_PERIOD_CHILDREN,
+                SLOT_0_CHILDREN,
+                |writer, _| {
+                    writer.u64(end);
+                    Ok::<(), MessageError>(())
+                },
+            )?;
         }
         if children == 0 {
             return Ok(());
@@ -663,7 +668,9 @@ mod tests {
         };
         assert_eq!(changes[0].value, None);
         // A spin test 0.327 s: children 1, 3, 4 and the empty dynamic POI list (6).
-        let dynamic = read_and_write(&hex("02 5a 00 01 8e24 00 00 01 06 00 00 01 06 00 00 01 06 00"));
+        let dynamic = read_and_write(&hex(
+            "02 5a 00 01 8e24 00 00 01 06 00 00 01 06 00 00 01 06 00",
+        ));
         assert_eq!(dynamic.dynamic_poi_version, Some(6));
         let mut reader = Reader::new(&[0x02, 0x40, 0x00, 0x01, 0x06, 0x01, 0x00]);
         assert!(ObjectivesState::read(&mut reader).is_err());

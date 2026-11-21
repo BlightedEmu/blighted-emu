@@ -756,7 +756,10 @@ impl LoreNote {
         let achievement = achievement_id
             .map(str::trim)
             .filter(|id| !id.is_empty())
-            .map_or_else(|| format!("{LORE_ACHIEVEMENT_PREFIX}{title}"), str::to_owned);
+            .map_or_else(
+                || format!("{LORE_ACHIEVEMENT_PREFIX}{title}"),
+                str::to_owned,
+            );
         Self {
             id: lowercase_crc32(lore_id),
             title,

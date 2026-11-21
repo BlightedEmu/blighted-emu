@@ -3,8 +3,8 @@
 
 pub mod ability_instances;
 pub mod achievements;
-pub mod afk_modes;
 pub mod afflictions;
+pub mod afk_modes;
 pub mod artifacts;
 pub mod attribute_bonuses;
 pub mod attribute_damage;

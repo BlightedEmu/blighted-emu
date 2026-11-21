@@ -251,7 +251,11 @@ mod tests {
         let (mut gates, _) = live(&props);
         gates.switch_started(LEVER_A as u64);
         let opened = gates.step(&[], NOW_MS);
-        assert_eq!(opened.len(), 2, "the door and the lever's interact state: {opened:?}");
+        assert_eq!(
+            opened.len(),
+            2,
+            "the door and the lever's interact state: {opened:?}"
+        );
         let Some(GateChange::Change { members, .. }) = opened
             .iter()
             .find(|change| matches!(change, GateChange::Change { gate, .. } if *gate == DOOR_A))
@@ -267,7 +271,11 @@ mod tests {
             .iter()
             .filter(|change| matches!(change, GateChange::Change { gate, .. } if *gate == LEVER_A))
             .collect();
-        assert_eq!(lever_changes.len(), 2, "its interact state, then its move: {pulled:?}");
+        assert_eq!(
+            lever_changes.len(),
+            2,
+            "its interact state, then its move: {pulled:?}"
+        );
         let GateChange::Change { members, .. } = lever_changes[1] else {
             panic!("a change");
         };

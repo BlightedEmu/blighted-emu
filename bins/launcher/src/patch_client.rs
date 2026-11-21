@@ -22,9 +22,7 @@ use std::time::UNIX_EPOCH;
 
 /// Head of the `SHADOW_ACCOUNT_CHECK` signature:
 ///   `PUSH RBX` / `SUB RSP,0x20` / `MOV RBX,RCX` / `CALL rel32` opcode.
-pub const SHADOW_HEAD: &[u8] = &[
-    0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0xE8,
-];
+pub const SHADOW_HEAD: &[u8] = &[0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0xD9, 0xE8];
 /// After the call target: `TEST EAX,EAX` / `JNZ 0x10` / `CMP [RBX+disp32],EAX`.
 pub const SHADOW_MID_A: &[u8] = &[0x85, 0xC0, 0x75, 0x10, 0x39, 0x83];
 /// After the CMP displacement: `JNZ 0x08` / `MOV AL,` opcode.
@@ -216,11 +214,10 @@ pub fn apply_shadow_patch(exe: &Path) -> Result<PatchOutcome, PatchError> {
         return Err(PatchError::Missing(exe.to_path_buf()));
     }
     let marker = marker_path(exe);
-    let facts_now =
-        MarkerFacts::of(exe).ok_or_else(|| PatchError::Read {
-            path: exe.to_path_buf(),
-            source: std::io::Error::other("the patched client has no size or mtime"),
-        })?;
+    let facts_now = MarkerFacts::of(exe).ok_or_else(|| PatchError::Read {
+        path: exe.to_path_buf(),
+        source: std::io::Error::other("the patched client has no size or mtime"),
+    })?;
     if let Some(recorded) = MarkerFacts::read_from(&marker)
         && recorded == facts_now
     {

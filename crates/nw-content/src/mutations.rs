@@ -1171,10 +1171,7 @@ impl MutationCatalog {
                 } else {
                     minor.clone()
                 },
-                weaken: rule
-                    .weaken
-                    .filter(|_| major_curse)
-                    .map(str::to_owned),
+                weaken: rule.weaken.filter(|_| major_curse).map(str::to_owned),
                 explosion: rule
                     .explosion
                     .and_then(|cast| self.explosion(&Self::with_category(cast, category))),

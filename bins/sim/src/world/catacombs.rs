@@ -84,9 +84,9 @@ use nw_messages::list_delta::{ListChange, ReplicatedList};
 use nw_messages::position::{PositionInTheWorldReplicatedState, WorldPosition};
 use nw_messages::{BundleMember, MemberState};
 use nw_messages::{GameModeServerMsg, LeftGameModeQueueMsg, LevelSpec, ServerMessage};
+use nw_sim_core::Position;
 use nw_sim_core::level_ground::LevelGround;
 use nw_sim_core::movement::Ground;
-use nw_sim_core::Position;
 use nw_world::catacomb_tiles::{
     CatacombSolids, CatacombTile, CatacombTiles, NO_PICTURE, RunSolids, TileEncounter, TilePiece,
     placed_encounter, turned_point,
@@ -780,7 +780,11 @@ fn tile_spawns(layout: &CatacombLayout, tiles: &CatacombTiles, seed: u64) -> Opt
         let slots = spawned_slots(layout, index, tile, seed);
         for prop in tile.props.iter().filter(|prop| slots.contains(&prop.slot)) {
             let placed = placed_piece(&prop.piece, room.position, room.yaw_deg);
-            if let Some(gate) = prop.gate.as_ref().filter(|_| is_secret_gate_slot(&prop.slot)) {
+            if let Some(gate) = prop
+                .gate
+                .as_ref()
+                .filter(|_| is_secret_gate_slot(&prop.slot))
+            {
                 spawns.secrets.push(SecretProp {
                     room: index,
                     slot: prop.slot.clone(),
@@ -990,7 +994,10 @@ fn tile_first_state(progress: &RunProgress, state: u8) -> GameModeState {
     GameModeState {
         script_state: Some(state),
         linked_mode: Some(TILE_LINKED_MODE),
-        raids: Some(ReplicatedList::Full(full(FIRST_LIST_VERSION, vec![RAID_ID_BASE]))),
+        raids: Some(ReplicatedList::Full(full(
+            FIRST_LIST_VERSION,
+            vec![RAID_ID_BASE],
+        ))),
         ..shared_first_state(progress)
     }
 }
@@ -1045,9 +1052,8 @@ impl SimWorld {
         // The run's start objects (its extractions' cores, its chests) are slices of the start
         // objects table; an instance sim runs no open world encounters that hold their own.
         if self.world_events.is_none() {
-            self.encounter_objects = super::encounter_roots::EncounterObjects::build(
-                &self.content.encounter_objects,
-            );
+            self.encounter_objects =
+                super::encounter_roots::EncounterObjects::build(&self.content.encounter_objects);
         }
         let namespace = TILE_NAMESPACE ^ self.me.generation;
         // A cursed silver chest is a start object a player gathers ([`pool`]); the other
@@ -2403,12 +2409,13 @@ pub(in crate::world) mod tests {
                 .collect(),
             ..LevelCollision::default()
         };
-        let shapes = Arc::new(nw_world::collision_index::CollisionIndex::new(LevelCollision {
-            deferred: Vec::new(),
-            ..collision.clone()
-        }));
-        content.catacomb_solids =
-            CatacombSolids::of(&collision, &shapes, &content.catacomb_tiles);
+        let shapes = Arc::new(nw_world::collision_index::CollisionIndex::new(
+            LevelCollision {
+                deferred: Vec::new(),
+                ..collision.clone()
+            },
+        ));
+        content.catacomb_solids = CatacombSolids::of(&collision, &shapes, &content.catacomb_tiles);
         let (mut world, _) = arrived_run_with(content);
         let spot = run_start_spot(&world.content, Uuid::from_u128(INSTANCE)).expect("spot");
         let entity = world.player_by_number(PLAYER).expect("player");
@@ -2518,7 +2525,10 @@ pub(in crate::world) mod tests {
                 );
             }
         }
-        assert_eq!(chest_slot("EncounterKey", 9, 3), chest_slot("Hallway", 9, 3));
+        assert_eq!(
+            chest_slot("EncounterKey", 9, 3),
+            chest_slot("Hallway", 9, 3)
+        );
         assert_eq!(chest_slot("Hallway", 9, 3), chest_slot("Hallway", 9, 3));
         for room_type in crate::world::afflictions::ROOM_TILE_KINDS {
             assert!((0..DRAWS).all(|index| {
@@ -2571,8 +2581,18 @@ pub(in crate::world) mod tests {
         }
         let spawns = tile_spawns(&layout, &tiles, 11).expect("spawns");
         let rooms = layout.rooms.len();
-        assert_eq!(spawns.secrets.len(), 2 * rooms, "a door and a lever per room");
-        let plain = |asset: u8| spawns.pieces.iter().filter(|piece| piece.asset == [asset; 16]).count();
+        assert_eq!(
+            spawns.secrets.len(),
+            2 * rooms,
+            "a door and a lever per room"
+        );
+        let plain = |asset: u8| {
+            spawns
+                .pieces
+                .iter()
+                .filter(|piece| piece.asset == [asset; 16])
+                .count()
+        };
         assert_eq!((plain(0xd0), plain(0xd1), plain(0xd2)), (0, 0, rooms));
         let (level, rules) = secret_gates(&spawns.secrets);
         assert_eq!(level.gates.len(), 2 * rooms);
@@ -2783,13 +2803,19 @@ pub(in crate::world) mod tests {
             map_byte(&table, "Catacombs/Gameplay/Tiles/tile4_a_gameplay", 2),
             0x86
         );
-        assert_eq!(map_byte(&table, "catacombs/gameplay/tiles/tile5_a_gameplay", 0), 0x74);
+        assert_eq!(
+            map_byte(&table, "catacombs/gameplay/tiles/tile5_a_gameplay", 0),
+            0x74
+        );
         assert_eq!(
             map_byte(&table, "catacombs/gameplay/tiles/tile3_a_gameplay", 4),
             0x38,
             "four turns are none"
         );
-        assert_eq!(map_byte(&table, "catacombs/gameplay/tiles/tile5_d_gameplay", 1), 0x29);
+        assert_eq!(
+            map_byte(&table, "catacombs/gameplay/tiles/tile5_d_gameplay", 1),
+            0x29
+        );
         assert_eq!(
             map_byte(&table, "catacombs/gameplay/tiles/tile1_a_gameplay", 1),
             NO_PICTURE,
@@ -2812,7 +2838,10 @@ pub(in crate::world) mod tests {
             assert!(state.level_map.tiles.is_none(), "a tile holds no map");
             assert_eq!(
                 state.raids,
-                Some(ReplicatedList::Full(full(FIRST_LIST_VERSION, vec![RAID_ID_BASE]))),
+                Some(ReplicatedList::Full(full(
+                    FIRST_LIST_VERSION,
+                    vec![RAID_ID_BASE]
+                ))),
                 "a tile names the run's raid"
             );
         }
@@ -3072,8 +3101,7 @@ mod retail_room_tests {
 
     /// The folder of the room encounter slices.
     const ROOMS: &str = "slices/catacombs/gameplay/roomgameplay/";
-    const EXTRACTION: &str =
-        "slices/catacombs/gameplay/extractiongameplay/dg_enc_catacombs_extraction_prototype.dynamicslice";
+    const EXTRACTION: &str = "slices/catacombs/gameplay/extractiongameplay/dg_enc_catacombs_extraction_prototype.dynamicslice";
 
     /// One kind of mob an encounter spawns: (vitals row in lower case, (how many, whether it
     /// comes back)).
@@ -3134,14 +3162,35 @@ mod retail_room_tests {
     fn a_boss_room_spawns_its_boss_alone() {
         let tiles = tiles();
         for (name, boss) in [
-            ("dg_enc_catacombs_boss_flamekeeper", "Evil_Knight_Flamekeeper_Boss_Catacombs"),
-            ("dg_enc_catacombs_boss_gorillaelemental", "Wildlife_GorillaElemental_Boss_Catacombs"),
+            (
+                "dg_enc_catacombs_boss_flamekeeper",
+                "Evil_Knight_Flamekeeper_Boss_Catacombs",
+            ),
+            (
+                "dg_enc_catacombs_boss_gorillaelemental",
+                "Wildlife_GorillaElemental_Boss_Catacombs",
+            ),
             ("dg_enc_catacombs_boss_icegolem", "IceGolem_Boss_Catacombs"),
-            ("dg_enc_catacombs_boss_nagacorrupted", "Corrupted_Naga_Catacombs"),
-            ("dg_enc_catacombs_boss_dryadsiren", "AngryEarth_Dryad_Siren_Boss_Catacombs"),
-            ("dg_enc_catacombs_boss_ancientheavy", "AncientGuardian_Heavy_Boss_Catacombs"),
-            ("dg_enc_catacombs_boss_soulharvester", "Lost_SoulHarvester_Boss_Catacombs"),
-            ("dg_enc_catacombs_boss_fulgoris", "Dryad_Fulgoris_Boss_Catacombs"),
+            (
+                "dg_enc_catacombs_boss_nagacorrupted",
+                "Corrupted_Naga_Catacombs",
+            ),
+            (
+                "dg_enc_catacombs_boss_dryadsiren",
+                "AngryEarth_Dryad_Siren_Boss_Catacombs",
+            ),
+            (
+                "dg_enc_catacombs_boss_ancientheavy",
+                "AncientGuardian_Heavy_Boss_Catacombs",
+            ),
+            (
+                "dg_enc_catacombs_boss_soulharvester",
+                "Lost_SoulHarvester_Boss_Catacombs",
+            ),
+            (
+                "dg_enc_catacombs_boss_fulgoris",
+                "Dryad_Fulgoris_Boss_Catacombs",
+            ),
         ] {
             let encounter = encounter(&tiles, &room("boss", name));
             assert_eq!(spawned(&encounter), once(&[(boss, 1)]), "{name}");
@@ -3225,10 +3274,15 @@ mod retail_room_tests {
         const TORNADO_S: [f32; 3] = [2.0, 12.0, 22.0];
         const LIFETIME_S: f32 = 33.0;
         let tiles = tiles();
-        let flames = encounter(&tiles, &room("hazard", "dg_enc_catacombs_hazard_flamethrower"));
+        let flames = encounter(
+            &tiles,
+            &room("hazard", "dg_enc_catacombs_hazard_flamethrower"),
+        );
         assert_eq!(spawned(&flames), once(&[("Naga_Fire", 1)]));
-        let lightning =
-            encounter(&tiles, &room("hazard", "dg_enc_catacombs_hazard_lightning_parent"));
+        let lightning = encounter(
+            &tiles,
+            &room("hazard", "dg_enc_catacombs_hazard_lightning_parent"),
+        );
         assert_eq!(spawned(&lightning), Spawned::new());
         let hazard = lightning
             .targets
@@ -3236,9 +3290,18 @@ mod retail_room_tests {
             .flat_map(|target| &target.slices)
             .find(|slice| !slice.timed_mobs.is_empty())
             .expect("the hazard slice with its timed tornadoes");
-        let times: Vec<f32> = hazard.timed_mobs.iter().map(|timed| timed.delay_s).collect();
+        let times: Vec<f32> = hazard
+            .timed_mobs
+            .iter()
+            .map(|timed| timed.delay_s)
+            .collect();
         assert_eq!(times, TORNADO_S);
-        assert!(hazard.timed_mobs.iter().all(|timed| timed.mob.vitals_id == TORNADO));
+        assert!(
+            hazard
+                .timed_mobs
+                .iter()
+                .all(|timed| timed.mob.vitals_id == TORNADO)
+        );
         assert_eq!(hazard.lifetime_s, Some(LIFETIME_S));
     }
 

@@ -27,10 +27,17 @@
 //!
 //! Inferred: the next update is the next sim tick (retail's 33 ms is about one server frame).
 
-use nw_messages::position::{PositionInTheWorldReplicatedState, Rotation, RotationComponent, WorldPosition};
-use nw_messages::war_states::{CAPTURE_POINT_CAPTURING, CAPTURE_POINT_FLAG, CAPTURE_POINT_OPEN, CapturePointCold};
+use nw_messages::position::{
+    PositionInTheWorldReplicatedState, Rotation, RotationComponent, WorldPosition,
+};
+use nw_messages::war_states::{
+    CAPTURE_POINT_CAPTURING, CAPTURE_POINT_FLAG, CAPTURE_POINT_OPEN, CapturePointCold,
+};
 use nw_messages::wire::RAW_ID_LEN;
-use nw_messages::{AssetId, BundleMember, CapturePointState, DYNAMIC_SLICE_SUB_ID, GdeMetadataReplicatedState, MemberState};
+use nw_messages::{
+    AssetId, BundleMember, CapturePointState, DYNAMIC_SLICE_SUB_ID, GdeMetadataReplicatedState,
+    MemberState,
+};
 use nw_sim_core::Position;
 
 use super::super::crafting::{Station, dynamic_ref};
@@ -225,7 +232,10 @@ impl SimWorld {
     /// The point entities of the Outpost Rush map in `folder` for the match whose ids take
     /// `salt`, open and unowned (module doc); none for another map.
     pub(super) fn spawn_capture_points(&mut self, folder: &str, salt: u64) -> CapturePoints {
-        let Some(map) = POINT_MAPS.iter().find(|map| map.folder.eq_ignore_ascii_case(folder)) else {
+        let Some(map) = POINT_MAPS
+            .iter()
+            .find(|map| map.folder.eq_ignore_ascii_case(folder))
+        else {
             return CapturePoints::default();
         };
         let namespace = POINT_NAMESPACE ^ self.me.generation ^ salt;
@@ -334,11 +344,14 @@ impl SimWorld {
                 .unwrap_or(NO_OWNER_RAID)
         };
         for (index, point) in points.points.iter_mut().enumerate() {
-            let (Some(state), Some(present)) = (states.get(index), points.present.get(index)) else {
+            let (Some(state), Some(present)) = (states.get(index), points.present.get(index))
+            else {
                 continue;
             };
             let capturer_inside = state.capturer != NO_TEAM
-                && present.get(usize::from(state.capturer)).is_some_and(|count| *count > 0);
+                && present
+                    .get(usize::from(state.capturer))
+                    .is_some_and(|count| *count > 0);
             let wanted = Shown {
                 kind: wanted_kind(protected[index], capturer_inside),
                 value: raid_of(state.capturer),
@@ -351,7 +364,11 @@ impl SimWorld {
             }
             let owner_raid = raid_of(state.owner);
             if owner_raid != point.owner_raid {
-                changed.push(ownership_with(OWNERSHIP_COMPONENT, POINT_PERMISSION_RULE, owner_raid));
+                changed.push(ownership_with(
+                    OWNERSHIP_COMPONENT,
+                    POINT_PERMISSION_RULE,
+                    owner_raid,
+                ));
             }
             if changed.is_empty() {
                 continue;
@@ -363,8 +380,11 @@ impl SimWorld {
                     _ => member.clone(),
                 })
                 .collect();
-            self.stations
-                .change_camp(point.number, |members| merge_members(members, &held), changed);
+            self.stations.change_camp(
+                point.number,
+                |members| merge_members(members, &held),
+                changed,
+            );
             point.shown = next;
             point.owner_raid = owner_raid;
         }
@@ -397,16 +417,41 @@ mod tests {
             hot: 0,
         };
         let first = next_shown(open, capturing);
-        assert_eq!(first, Shown { kind: CAPTURE_POINT_OPEN, ..capturing }, "retail 126.931 s");
+        assert_eq!(
+            first,
+            Shown {
+                kind: CAPTURE_POINT_OPEN,
+                ..capturing
+            },
+            "retail 126.931 s"
+        );
         assert_eq!(next_shown(first, capturing), capturing, "retail 126.964 s");
         let captured = Shown {
             kind: CAPTURE_POINT_OPEN,
             value: 0,
             hot: 0,
         };
-        let end = next_shown(Shown { hot: 99, ..capturing }, captured);
-        assert_eq!(end, Shown { kind: CAPTURE_POINT_CAPTURING, value: 0, hot: 0 }, "kind 5 value 0");
-        assert_eq!(next_shown(end, captured), captured, "kind 4 one update later");
+        let end = next_shown(
+            Shown {
+                hot: 99,
+                ..capturing
+            },
+            captured,
+        );
+        assert_eq!(
+            end,
+            Shown {
+                kind: CAPTURE_POINT_CAPTURING,
+                value: 0,
+                hot: 0
+            },
+            "kind 5 value 0"
+        );
+        assert_eq!(
+            next_shown(end, captured),
+            captured,
+            "kind 4 one update later"
+        );
     }
 
     #[test]
@@ -420,8 +465,8 @@ mod tests {
 
     mod in_a_match {
         use super::super::super::tests::{
-            FIRST, SECOND, START_MS, capture_ticks, outpost_rush, running, rush_sim_with, shed_and_ward_table,
-            stand_in_outpost, tick_at,
+            FIRST, SECOND, START_MS, capture_ticks, outpost_rush, running, rush_sim_with,
+            shed_and_ward_table, stand_in_outpost, tick_at,
         };
         use super::super::super::{CAPTURE_TICK_MS, PREGAME_MS};
         use super::*;
@@ -448,22 +493,54 @@ mod tests {
         fn a_capture_sends_the_raid_then_capturing_then_open_with_the_owner_raid() {
             let (mut world, start_ms) = started();
             let raid = running(&world).raids[0];
-            assert_eq!(shown(&world, A), (Shown { kind: CAPTURE_POINT_OPEN, value: 0, hot: 0 }, 0));
+            assert_eq!(
+                shown(&world, A),
+                (
+                    Shown {
+                        kind: CAPTURE_POINT_OPEN,
+                        value: 0,
+                        hot: 0
+                    },
+                    0
+                )
+            );
             stand_in_outpost(&mut world, FIRST, A);
             tick_at(&mut world, start_ms + CAPTURE_TICK_MS);
-            assert_eq!(shown(&world, A).0, Shown { kind: CAPTURE_POINT_OPEN, value: raid, hot: 1 });
+            assert_eq!(
+                shown(&world, A).0,
+                Shown {
+                    kind: CAPTURE_POINT_OPEN,
+                    value: raid,
+                    hot: 1
+                }
+            );
             tick_at(&mut world, start_ms + CAPTURE_TICK_MS + 1);
-            assert_eq!(shown(&world, A).0.kind, CAPTURE_POINT_CAPTURING, "the kind follows");
+            assert_eq!(
+                shown(&world, A).0.kind,
+                CAPTURE_POINT_CAPTURING,
+                "the kind follows"
+            );
             let captured_ms = start_ms + capture_ticks(1) * CAPTURE_TICK_MS;
             tick_at(&mut world, captured_ms);
             assert_eq!(
                 shown(&world, A),
-                (Shown { kind: CAPTURE_POINT_CAPTURING, value: 0, hot: 0 }, raid),
+                (
+                    Shown {
+                        kind: CAPTURE_POINT_CAPTURING,
+                        value: 0,
+                        hot: 0
+                    },
+                    raid
+                ),
                 "retail: kind 5 value 0 hot 0 and the owner's raid"
             );
             tick_at(&mut world, captured_ms + 1);
             assert_eq!(shown(&world, A).0.kind, CAPTURE_POINT_OPEN);
-            assert_eq!(running(&world).capture_points.inside, vec![FIRST], "the board's contests");
+            assert_eq!(
+                running(&world).capture_points.inside,
+                vec![FIRST],
+                "the board's contests"
+            );
         }
 
         #[test]
@@ -475,8 +552,19 @@ mod tests {
                 tick_at(&mut world, start_ms + tick * CAPTURE_TICK_MS);
                 tick_at(&mut world, start_ms + tick * CAPTURE_TICK_MS + 1);
             }
-            assert_eq!(shown(&world, C).0, Shown { kind: PROTECTED_KIND, value: raid, hot: 0 });
-            assert_eq!(running(&world).points[C].progress, 0, "retail: progress stays");
+            assert_eq!(
+                shown(&world, C).0,
+                Shown {
+                    kind: PROTECTED_KIND,
+                    value: raid,
+                    hot: 0
+                }
+            );
+            assert_eq!(
+                running(&world).points[C].progress,
+                0,
+                "retail: progress stays"
+            );
         }
     }
 }

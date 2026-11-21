@@ -71,7 +71,9 @@ pub fn scan(captures_dir: &Path, discord_dir: &Path) -> Vec<SessionEntry> {
             let metadata = read_metadata(&path);
             let post_title = match parts.as_slice() {
                 [open_world, stem, ..] if open_world == OPEN_WORLD_DIR => titles.get(stem).cloned(),
-                [.., post, _] if discord_folder.is_some_and(|folder| relative.starts_with(folder)) => {
+                [.., post, _]
+                    if discord_folder.is_some_and(|folder| relative.starts_with(folder)) =>
+                {
                     post_title(post)
                 }
                 _ => None,
@@ -183,7 +185,10 @@ fn post_titles(discord_dir: &Path) -> HashMap<String, String> {
 /// `<server> - <channel> - <title> [<n>].html_Files` to `<title>`.
 fn post_title(folder: &str) -> Option<String> {
     let name = folder.strip_suffix(POST_FOLDER_END)?;
-    let name = name.splitn(POST_NAME_PARTS, POST_NAME_SEPARATOR).nth(POST_NAME_PARTS - 1).unwrap_or(name);
+    let name = name
+        .splitn(POST_NAME_PARTS, POST_NAME_SEPARATOR)
+        .nth(POST_NAME_PARTS - 1)
+        .unwrap_or(name);
     let title = match name.rsplit_once(" [") {
         Some((title, number)) if number.ends_with(']') => title,
         _ => name,

@@ -520,7 +520,9 @@ pub struct EncounterTasks {
 const fn task_class(kind: &ObjectiveSpec, time_limit_s: u32) -> Option<&'static str> {
     match kind {
         ObjectiveSpec::SliceDestroyed { .. } => Some("EncounterObjectiveSliceDestroyed"),
-        ObjectiveSpec::BossPhase { target: Some(_), .. } => Some("EncounterObjectiveBossPhase"),
+        ObjectiveSpec::BossPhase {
+            target: Some(_), ..
+        } => Some("EncounterObjectiveBossPhase"),
         ObjectiveSpec::EncounterEvent { .. } if time_limit_s > 0 => {
             Some("EncounterObjectiveEncounterEvent")
         }

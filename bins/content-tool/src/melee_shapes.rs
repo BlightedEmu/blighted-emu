@@ -202,9 +202,7 @@ impl Bodies {
             let end = match clip.end_s {
                 Some(end) => end,
                 None if clip.looped => clip.start_s,
-                None => {
-                    clip.natural_end_s(f64::from(self.clip(&clip.name).ok()?.duration_s()))
-                }
+                None => clip.natural_end_s(f64::from(self.clip(&clip.name).ok()?.duration_s())),
             };
             length = length.max(end);
         }
@@ -868,7 +866,9 @@ mod tests {
                 list(vec![
                     AnimationSource::Include(SHARED.to_owned()),
                     AnimationSource::Folder("animations/marketing".to_owned()),
-                    AnimationSource::Include("Objects\\Characters\\Player\\Player_Shared.chrparams".to_owned()),
+                    AnimationSource::Include(
+                        "Objects\\Characters\\Player\\Player_Shared.chrparams".to_owned(),
+                    ),
                     AnimationSource::Folder(
                         "animations/Gameplay/Character/Npc/SuperNatural/Archetypes/".to_owned(),
                     ),
@@ -880,7 +880,9 @@ mod tests {
                     AnimationSource::Folder(
                         "animations/Gameplay/Character/Npc/SuperNatural/Archetypes".to_owned(),
                     ),
-                    AnimationSource::Folder("animations/Gameplay/Character/Player/male/HeartGems".to_owned()),
+                    AnimationSource::Folder(
+                        "animations/Gameplay/Character/Player/male/HeartGems".to_owned(),
+                    ),
                 ]),
             ),
         ]);

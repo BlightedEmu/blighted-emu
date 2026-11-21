@@ -434,7 +434,10 @@ pub(crate) mod tests {
             .unlocking(PLAQUE_ACHIEVEMENT)
             .expect("the plaque");
         assert_eq!(note.title, PLAQUE_TITLE);
-        assert!(level.content.lore_points.first(note.id).is_some(), "on the level");
+        assert!(
+            level.content.lore_points.first(note.id).is_some(),
+            "on the level"
+        );
     }
 
     fn walked(quest: &str, outcome: Outcome, stop: Option<&str>) -> QuestWalk {

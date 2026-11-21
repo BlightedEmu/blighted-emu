@@ -84,10 +84,10 @@
 //!   1427.3 s). Inferred: an encounter whose root another sim shows, or that its group did not
 //!   choose, shows no areas here.
 
+use bevy_ecs::entity::Entity;
 use nw_bus::Point;
 use nw_sim_core::Position;
 use nw_world::catacomb_tiles::turned_point;
-use bevy_ecs::entity::Entity;
 use nw_world::dungeon_scripts::{
     Encounter, EncounterTasks, HazardObject, LevelScript, OPEN_WORLD_LEVEL, ObjectiveSpec,
     RandomizerChoice, Spawn, SpawnRandomizer, StageAction, Target, TargetMob, TargetSlice,
@@ -1672,7 +1672,10 @@ fn picked_due(
             run.picked[index].due_ms =
                 respawn_s.map(|respawn_s| died_ms.saturating_add(seconds_to_ms(respawn_s)));
         }
-        if run.picked[index].due_ms.is_some_and(|due_ms| due_ms <= now_ms) {
+        if run.picked[index]
+            .due_ms
+            .is_some_and(|due_ms| due_ms <= now_ms)
+        {
             run.picked[index].due_ms = None;
             let picked = run.picked[index].clone();
             run.picked[index].mob = spawn_picked(encounter, run, host, &picked);
@@ -1692,7 +1695,8 @@ fn deactivators_due(
 ) {
     for deactivator in &run.deactivators {
         for picked in run.picked.iter_mut().filter(|picked| !picked.off) {
-            let Some(volume_m) = choice_of(encounter, picked).and_then(|choice| choice.stop_radius_m)
+            let Some(volume_m) =
+                choice_of(encounter, picked).and_then(|choice| choice.stop_radius_m)
             else {
                 continue;
             };
@@ -1713,7 +1717,11 @@ fn deactivators_due(
         let Some(entity) = picked.mob.take() else {
             continue;
         };
-        if let Some(mob) = run.mobs.iter_mut().find(|mob| mob.entity == entity && !mob.gone) {
+        if let Some(mob) = run
+            .mobs
+            .iter_mut()
+            .find(|mob| mob.entity == entity && !mob.gone)
+        {
             host.remove(entity);
             mob.gone = true;
             mob.died_ms.get_or_insert(now_ms);
@@ -1766,7 +1774,9 @@ fn gather_clocks_due(
                     ends_ms: None,
                     of_object: true,
                 }),
-                None => tracing::warn!(vitals = %timed.mob.vitals_id, "a gather spawn cannot spawn"),
+                None => {
+                    tracing::warn!(vitals = %timed.mob.vitals_id, "a gather spawn cannot spawn")
+                }
             }
         }
         kept.push(clock);
@@ -1828,7 +1838,13 @@ fn refill_due(
             .and_then(|slice| slice.hazard.as_ref())
         {
             let place = (refill.target, refill.slice, refill.stage);
-            spawn_hazard(run, host, hazard, place, (refill.at, encounter.yaw_deg, now_ms));
+            spawn_hazard(
+                run,
+                host,
+                hazard,
+                place,
+                (refill.at, encounter.yaw_deg, now_ms),
+            );
             continue;
         }
         let Some((slice, mob)) = target
@@ -2294,7 +2310,10 @@ impl ScriptHost for SimHost<'_> {
     fn end_effects(&mut self, players: &[u64], effects: &[String], source: u64, now_ms: u64) {
         let content = std::sync::Arc::clone(&self.world.content);
         for number in players {
-            let Some(mut player) = self.world.world.get_mut::<Player>(Entity::from_bits(*number))
+            let Some(mut player) = self
+                .world
+                .world
+                .get_mut::<Player>(Entity::from_bits(*number))
             else {
                 continue;
             };
@@ -2746,8 +2765,7 @@ mod tests {
                 .players
                 .iter()
                 .filter(|(player, place)| {
-                    !skip.contains(player)
-                        && (place[0] - at[0]).hypot(place[1] - at[1]) <= radius_m
+                    !skip.contains(player) && (place[0] - at[0]).hypot(place[1] - at[1]) <= radius_m
                 })
                 .map(|(player, _)| *player)
                 .collect();
@@ -2756,7 +2774,8 @@ mod tests {
             given
         }
         fn end_effects(&mut self, players: &[u64], _effects: &[String], _source: u64, now_ms: u64) {
-            self.ended.extend(players.iter().map(|player| (*player, now_ms)));
+            self.ended
+                .extend(players.iter().map(|player| (*player, now_ms)));
         }
         fn health(&self, entity: u64) -> Option<u32> {
             self.health.get(&entity).copied()
@@ -2771,11 +2790,14 @@ mod tests {
             self.rolls.pop_front().unwrap_or_default()
         }
         fn open_slice_areas(&mut self, slice: &str, _at: [f32; 3], _yaw_deg: f32) -> Option<u64> {
-            self.area_slices.iter().any(|known| known == slice).then(|| {
-                self.next_area += 1;
-                self.open_areas.push((self.next_area, slice.to_owned()));
-                self.next_area
-            })
+            self.area_slices
+                .iter()
+                .any(|known| known == slice)
+                .then(|| {
+                    self.next_area += 1;
+                    self.open_areas.push((self.next_area, slice.to_owned()));
+                    self.next_area
+                })
         }
         fn close_slice_areas(&mut self, handle: u64) {
             self.open_areas.retain(|(open, _)| *open != handle);
@@ -2785,7 +2807,10 @@ mod tests {
     impl Host {
         /// The slices whose areas stand now, in their opening order.
         fn open_area_slices(&self) -> Vec<&str> {
-            self.open_areas.iter().map(|(_, slice)| slice.as_str()).collect()
+            self.open_areas
+                .iter()
+                .map(|(_, slice)| slice.as_str())
+                .collect()
         }
 
         fn kill(&mut self, vitals: &str) {
@@ -3030,7 +3055,9 @@ mod tests {
             name: "Cannonball".to_owned(),
             slices: vec![TargetSlice {
                 path: format!("slices/worldevents/{START_OBJECT}cannonball.dynamicslice"),
-                spawned_slices: vec!["slices/worldevents/rw_cannonball_trigger.dynamicslice".into()],
+                spawned_slices: vec![
+                    "slices/worldevents/rw_cannonball_trigger.dynamicslice".into(),
+                ],
                 ..TargetSlice::default()
             }],
         };
@@ -3409,7 +3436,9 @@ mod tests {
         let spawned_ms = now - 1;
         assert_eq!(host.spawned.len(), LIVE as usize, "three debris at once");
         assert!(
-            host.spawned.iter().all(|(slice, _)| slice.contains(HAZARD_OBJECT)),
+            host.spawned
+                .iter()
+                .all(|(slice, _)| slice.contains(HAZARD_OBJECT)),
             "{:?}",
             host.spawned
         );
@@ -3424,14 +3453,30 @@ mod tests {
             "once, by the one debris over the player"
         );
         run.tick(&mut host, &view(&[PLACE]), &[], at(OFF_MS));
-        assert_eq!(host.ended, [(PLAYER, at(OFF_MS))], "the stun ends with the area");
+        assert_eq!(
+            host.ended,
+            [(PLAYER, at(OFF_MS))],
+            "the stun ends with the area"
+        );
         run.tick(&mut host, &view(&[PLACE]), &[], at(LIFE_MS));
-        assert_eq!(host.removed.len(), LIVE as usize, "the debris goes at its end");
+        assert_eq!(
+            host.removed.len(),
+            LIVE as usize,
+            "the debris goes at its end"
+        );
         let comeback = at(LIFE_MS) + seconds_to_ms(SHORTEST_S);
         run.tick(&mut host, &view(&[PLACE]), &[], comeback - 1);
-        assert_eq!(host.spawned.len(), LIVE as usize, "not before its respawn time");
+        assert_eq!(
+            host.spawned.len(),
+            LIVE as usize,
+            "not before its respawn time"
+        );
         run.tick(&mut host, &view(&[PLACE]), &[], comeback);
-        assert_eq!(host.spawned.len(), 2 * LIVE as usize, "each comes back at its point");
+        assert_eq!(
+            host.spawned.len(),
+            2 * LIVE as usize,
+            "each comes back at its point"
+        );
         assert_eq!(host.spawned[LIVE as usize].1, host.spawned[0].1);
     }
 
@@ -4238,21 +4283,68 @@ mod tests {
         assert_eq!(host.spawned[0].0, CRAWLER);
         host.kill(CRAWLER);
         let died_ms = T0 + DEATH_MS;
-        tick_through(&mut run, &mut host, died_ms, died_ms + COMEBACK_MS - TICK_MS);
+        tick_through(
+            &mut run,
+            &mut host,
+            died_ms,
+            died_ms + COMEBACK_MS - TICK_MS,
+        );
         assert_eq!(host.spawned.len(), 1, "no comeback before its 8 s");
-        assert_eq!(stage_status(&run, 0), StageStatus::Running, "a comeback keeps the wave");
-        tick_through(&mut run, &mut host, died_ms + COMEBACK_MS, died_ms + COMEBACK_MS);
-        assert_eq!(host.spawned.len(), 2, "the crawler comes back 8 s after its death");
+        assert_eq!(
+            stage_status(&run, 0),
+            StageStatus::Running,
+            "a comeback keeps the wave"
+        );
+        tick_through(
+            &mut run,
+            &mut host,
+            died_ms + COMEBACK_MS,
+            died_ms + COMEBACK_MS,
+        );
+        assert_eq!(
+            host.spawned.len(),
+            2,
+            "the crawler comes back 8 s after its death"
+        );
         assert_eq!(host.spawned[1].0, CRAWLER, "the pick is kept");
         let second = 2;
-        tick_through(&mut run, &mut host, died_ms + COMEBACK_MS + TICK_MS, T0 + WAVE_MS);
-        assert_eq!(stage_status(&run, 0), StageStatus::Done, "the wave's limit ends it");
+        tick_through(
+            &mut run,
+            &mut host,
+            died_ms + COMEBACK_MS + TICK_MS,
+            T0 + WAVE_MS,
+        );
+        assert_eq!(
+            stage_status(&run, 0),
+            StageStatus::Done,
+            "the wave's limit ends it"
+        );
         let cleanup_ms = T0 + WAVE_MS;
-        tick_through(&mut run, &mut host, cleanup_ms + TICK_MS, cleanup_ms + DEACTIVATOR_LIFE_MS - TICK_MS);
-        assert!(!host.removed.contains(&second), "the crawler stands until the deactivator ends");
-        tick_through(&mut run, &mut host, cleanup_ms + DEACTIVATOR_LIFE_MS, cleanup_ms + DEACTIVATOR_LIFE_MS + TICK_MS);
-        assert!(host.removed.contains(&second), "the deactivator's end takes the crawler");
-        assert_eq!(host.spawned.len(), 2, "the closet brings no crawler back once it is off");
+        tick_through(
+            &mut run,
+            &mut host,
+            cleanup_ms + TICK_MS,
+            cleanup_ms + DEACTIVATOR_LIFE_MS - TICK_MS,
+        );
+        assert!(
+            !host.removed.contains(&second),
+            "the crawler stands until the deactivator ends"
+        );
+        tick_through(
+            &mut run,
+            &mut host,
+            cleanup_ms + DEACTIVATOR_LIFE_MS,
+            cleanup_ms + DEACTIVATOR_LIFE_MS + TICK_MS,
+        );
+        assert!(
+            host.removed.contains(&second),
+            "the deactivator's end takes the crawler"
+        );
+        assert_eq!(
+            host.spawned.len(),
+            2,
+            "the closet brings no crawler back once it is off"
+        );
     }
 
     /// The sun disk shield: its timeline plays while a player gathers it and holds its place
@@ -4280,7 +4372,9 @@ mod tests {
         let shield = Target {
             name: "shield".to_owned(),
             slices: vec![TargetSlice {
-                path: format!("slices/worldevents/brimstonesands/interact/{START_OBJECT}1624_diskatumshield.dynamicslice"),
+                path: format!(
+                    "slices/worldevents/brimstonesands/interact/{START_OBJECT}1624_diskatumshield.dynamicslice"
+                ),
                 gather_mobs: CLIPS
                     .iter()
                     .map(|(delay_s, offset)| TimedMob {
@@ -4327,7 +4421,12 @@ mod tests {
         tick_through(&mut run, &mut host, T0, T0);
         assert_eq!(host.spawned.len(), 1, "the shield stands");
         let shield_entity = 1;
-        let elementals = |host: &Host| host.spawned.iter().filter(|(id, _)| id == ELEMENTAL).count();
+        let elementals = |host: &Host| {
+            host.spawned
+                .iter()
+                .filter(|(id, _)| id == ELEMENTAL)
+                .count()
+        };
         let mut idle_from = T0;
         for ((start, end), spawned) in GATHERS.into_iter().zip(SPAWNED_AFTER) {
             tick_through(&mut run, &mut host, idle_from, T0 + start);
@@ -4344,7 +4443,11 @@ mod tests {
             .map(|(_, offset)| turned_point(*offset, PLACE, 0.0))
             .collect();
         assert_eq!(places, expected, "each elemental at its spawner");
-        assert_eq!(stage_status(&run, 0), StageStatus::Running, "the elementals' deaths do not end it");
+        assert_eq!(
+            stage_status(&run, 0),
+            StageStatus::Running,
+            "the elementals' deaths do not end it"
+        );
         // The gather's end takes the shield away.
         host.health.remove(&shield_entity);
         tick_through(&mut run, &mut host, idle_from, idle_from + 200);
@@ -4418,7 +4521,12 @@ mod tests {
         assert!(!shields.is_empty());
         for shield in &shields {
             assert_eq!(shield.gather_mobs.len(), SHIELD_SPAWNS);
-            assert!(shield.gather_mobs.iter().all(|timed| timed.mob.vitals_id == ELEMENTAL));
+            assert!(
+                shield
+                    .gather_mobs
+                    .iter()
+                    .all(|timed| timed.mob.vitals_id == ELEMENTAL)
+            );
             assert!((shield.gather_mobs[0].delay_s - FIRST_CLIP_S).abs() < 1e-3);
         }
         let objects = EncounterObjects::build(
@@ -4485,7 +4593,8 @@ mod tests {
     }
 
     /// The Myrkgard north portal (`enc_darkness_major_portal_sm_01`) and its hazard.
-    const PORTAL_SLICE: &str = "slices/darkness/events/pois/enc_darkness_major_portal_sm_01.dynamicslice";
+    const PORTAL_SLICE: &str =
+        "slices/darkness/events/pois/enc_darkness_major_portal_sm_01.dynamicslice";
     const HAZARD_SLICE: &str =
         "slices/darkness/events/general/hazards/darkness_hazard_corruption_major_l4.dynamicslice";
 
@@ -4607,7 +4716,11 @@ mod tests {
         let grace_ms = u64::from(GRACE_S) * MS_PER_S;
         run.tick(&mut host, &wiped, &[], T0 + 1);
         run.tick(&mut host, &wiped, &[], T0 + 1 + grace_ms);
-        assert_eq!(host.open_area_slices(), [PORTAL_SLICE], "the reset keeps the event's own");
+        assert_eq!(
+            host.open_area_slices(),
+            [PORTAL_SLICE],
+            "the reset keeps the event's own"
+        );
         let start = T0 + 2 + grace_ms;
         run.tick(&mut host, &here, &[], start);
         assert_eq!(host.open_area_slices(), [PORTAL_SLICE, HAZARD_SLICE]);

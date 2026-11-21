@@ -75,12 +75,12 @@
 //! team's summon is not refused (`attack.rs`).
 
 use bevy_ecs::entity::Entity;
+use nw_bus::ConnectionRef;
 use nw_bus::Point;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::client_input::GATHER_KIND;
 use nw_messages::game_mode_state::Keyed;
 use nw_messages::wire::RAW_ID_LEN;
-use nw_bus::ConnectionRef;
 use nw_messages::{BundleMember, InteractionAction, InteractionRequest, MemberState};
 use nw_sim_core::Position;
 use std::collections::HashMap;
@@ -134,8 +134,7 @@ const STONE_GATHERABLE: &str = "OR_Corrupted_Portal_Encounter_Gatherable";
 const GRANT_BRUTE_TOTEM: &str = "OutpostRush_GrantBruteTotem";
 /// The stone's slice (`or_azothportal_interact_post_encounter`).
 const STONE_ASSET: [u8; 16] = [
-    0xdc, 0x74, 0x7f, 0x00, 0xa5, 0x48, 0x5b, 0xe5, 0x84, 0x27, 0xa6, 0x11, 0x5d, 0xc7, 0x19,
-    0x0a,
+    0xdc, 0x74, 0x7f, 0x00, 0xa5, 0x48, 0x5b, 0xe5, 0x84, 0x27, 0xa6, 0x11, 0x5d, 0xc7, 0x19, 0x0a,
 ];
 /// The stone's gatherable state while its mobs live, and when it is ready (Observed).
 const STONE_WAITING: u8 = 8;
@@ -377,7 +376,12 @@ impl SummonRun {
         let map = self.map?;
         (0..CIRCLES)
             .filter(|circle| self.standing[*circle].is_none())
-            .map(|circle| (circle, position.horizontal_distance(position_of(map.circles[circle]))))
+            .map(|circle| {
+                (
+                    circle,
+                    position.horizontal_distance(position_of(map.circles[circle])),
+                )
+            })
             .filter(|(_, distance)| *distance <= CIRCLE_REACH_M)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(circle, _)| circle)
@@ -570,7 +574,11 @@ impl SimWorld {
     /// The team of summon `mob` standing on a circle; `None` for any other mob.
     pub(super) fn outpost_rush_summon_team(&self, mob: u64) -> Option<u8> {
         let run = &self.arena_matches.outpost_rush.as_ref()?.summons;
-        run.standing.iter().flatten().find(|summon| summon.mob == mob).map(|summon| summon.team)
+        run.standing
+            .iter()
+            .flatten()
+            .find(|summon| summon.mob == mob)
+            .map(|summon| summon.team)
     }
 
     /// The summons and the portal at `now_ms`: a dead summon frees its circle, the summons
@@ -584,7 +592,8 @@ impl SimWorld {
         else {
             return false;
         };
-        let living = |world: &Self, mob: u64| world.mobs.health(mob).is_some_and(|health| health > 0);
+        let living =
+            |world: &Self, mob: u64| world.mobs.health(mob).is_some_and(|health| health > 0);
         let mut standing = run.standing;
         for circle in &mut standing {
             if circle.is_some_and(|summon| !living(self, summon.mob)) {
@@ -604,19 +613,29 @@ impl SimWorld {
     }
 
     /// The portal of `run` at `now_ms`: its events, its mobs, its stone and its gather.
-    fn tick_portal(&mut self, run: &SummonRun, now_ms: u64, living: impl Fn(&Self, u64) -> bool) -> Portal {
+    fn tick_portal(
+        &mut self,
+        run: &SummonRun,
+        now_ms: u64,
+        living: impl Fn(&Self, u64) -> bool,
+    ) -> Portal {
         let Some(map) = run.map else {
             return run.portal.clone();
         };
         match run.portal.clone() {
-            Portal::Closed { soon_ms: Some(soon), open_ms } if now_ms >= soon => {
+            Portal::Closed {
+                soon_ms: Some(soon),
+                open_ms,
+            } if now_ms >= soon => {
                 self.note_portal_event(PORTAL_SOON, now_ms);
                 Portal::Closed {
                     soon_ms: None,
                     open_ms,
                 }
             }
-            Portal::Closed { open_ms, .. } if now_ms >= open_ms => self.open_portal(run, map, now_ms),
+            Portal::Closed { open_ms, .. } if now_ms >= open_ms => {
+                self.open_portal(run, map, now_ms)
+            }
             Portal::Open {
                 mobs,
                 stone,
@@ -651,11 +670,13 @@ impl SimWorld {
         let mobs: Vec<u64> = run
             .portal_mobs
             .iter()
-            .filter_map(|vitals| match self.spawn_gm(vitals, run.portal_level, map.portal, ONE, None) {
-                Ok(spawned) => spawned.first().copied(),
-                Err(reason) => {
-                    tracing::warn!(%reason, vitals, "a portal mob did not spawn");
-                    None
+            .filter_map(|vitals| {
+                match self.spawn_gm(vitals, run.portal_level, map.portal, ONE, None) {
+                    Ok(spawned) => spawned.first().copied(),
+                    Err(reason) => {
+                        tracing::warn!(%reason, vitals, "a portal mob did not spawn");
+                        None
+                    }
                 }
             })
             .collect();
@@ -730,7 +751,10 @@ impl SimWorld {
         let Some(running) = self.arena_matches.outpost_rush.as_ref() else {
             return false;
         };
-        let Some(stone) = running.summons.stone().filter(|stone| stone.gde_ref == request.target)
+        let Some(stone) = running
+            .summons
+            .stone()
+            .filter(|stone| stone.gde_ref == request.target)
         else {
             return false;
         };
@@ -739,7 +763,10 @@ impl SimWorld {
             .get::<Body>(entity)
             .zip(running.summons.map)
             .is_some_and(|(body, map)| {
-                body.motion.position().horizontal_distance(position_of(map.stone)) <= STONE_REACH_M
+                body.motion
+                    .position()
+                    .horizontal_distance(position_of(map.stone))
+                    <= STONE_REACH_M
             });
         let gatherable = request.gatherable == Some(lowercase_crc32(STONE_GATHERABLE));
         let free = matches!(running.summons.portal, Portal::Ready { gather: None, .. });
@@ -811,12 +838,12 @@ impl SimWorld {
 mod tests {
     use super::*;
     use crate::combat::test_support::{TEST_LEVEL, TEST_MOB};
+    use crate::world::Placement;
     use crate::world::arena_match::PREGAME_MS;
     use crate::world::outpost_rush::tests::{FIRST, SECOND, START_MS, outpost_rush, rush_sim_on};
     use crate::world::outpost_rush_structures::tests::WOOD;
     use crate::world::tests::{NOW, messages_to};
     use crate::world::turrets::tests::{bag_count, give};
-    use crate::world::Placement;
     use nw_messages::ServerMessage;
 
     /// The test's stones.
@@ -899,16 +926,18 @@ mod tests {
     #[test]
     fn the_keys_and_events_are_the_crcs_of_their_names() {
         let crc = |name: &str| lowercase_crc32(name);
-        assert_eq!(SUMMON_KINDS.map(|kind| kind.counts_key), [
-            crc("bearsummoncounts"),
-            crc("brutesummoncounts"),
-            crc("wraithsummoncounts"),
-        ]);
-        assert_eq!([PORTAL_SOON, PORTAL_OPEN, PORTAL_CLOSE], [
-            crc("portalsoon"),
-            crc("portalopen"),
-            crc("portalclose"),
-        ]);
+        assert_eq!(
+            SUMMON_KINDS.map(|kind| kind.counts_key),
+            [
+                crc("bearsummoncounts"),
+                crc("brutesummoncounts"),
+                crc("wraithsummoncounts"),
+            ]
+        );
+        assert_eq!(
+            [PORTAL_SOON, PORTAL_OPEN, PORTAL_CLOSE],
+            [crc("portalsoon"), crc("portalopen"), crc("portalclose"),]
+        );
         assert_eq!(lowercase_crc32(SUMMON_KINDS[0].action), 0x2b33_9e09);
         assert_eq!(lowercase_crc32(SUMMON_KINDS[0].stone), 0xe861_084d);
         // Observed big-endian in `OPR-Coral-Divide-2` (the kind 14 gather of the stone).
@@ -920,11 +949,14 @@ mod tests {
         let mut run = SummonRun::of_map(TRENCH_FOLDER);
         // `OPR_TEST3`: bear 1 for team 0, brute 2 and wraith 1 for team 1.
         run.counts = [[1, 0], [0, 2], [0, 1]];
-        assert_eq!(run.end_values(), vec![
-            (0x66ba_c9f8, 1),
-            (0x6d17_e78b, 2 << 16),
-            (0x75a0_0293, 1 << 16),
-        ]);
+        assert_eq!(
+            run.end_values(),
+            vec![
+                (0x66ba_c9f8, 1),
+                (0x6d17_e78b, 2 << 16),
+                (0x75a0_0293, 1 << 16),
+            ]
+        );
     }
 
     #[test]
@@ -932,10 +964,13 @@ mod tests {
         let mut run = SummonRun::of_map(VERTICAL_FOLDER);
         assert!(run.timers().is_empty(), "no timer before the start");
         run.start(START_MS);
-        assert_eq!(run.timers(), vec![
-            (PORTAL_SOON_TIMER, START_MS + 270_000),
-            (PORTAL_TIMER, START_MS + 300_000),
-        ]);
+        assert_eq!(
+            run.timers(),
+            vec![
+                (PORTAL_SOON_TIMER, START_MS + 270_000),
+                (PORTAL_TIMER, START_MS + 300_000),
+            ]
+        );
         assert!(SummonRun::of_map("elsewhere").timers().is_empty());
     }
 
@@ -965,7 +1000,11 @@ mod tests {
         assert_eq!(answer(&mut world, FIRST), Some(USE_ACCEPTED));
         assert!(use_circle(&mut world, FIRST));
         assert_eq!(answer(&mut world, FIRST), Some(USE_ACCEPTED));
-        assert_eq!(bag_count(&world, first, WOOD), STONES - 1, "the stone is used");
+        assert_eq!(
+            bag_count(&world, first, WOOD),
+            STONES - 1,
+            "the stone is used"
+        );
         let summon = summons(&world).standing[2].expect("a summon on B_1");
         assert_eq!(summon.team, 0);
         assert_eq!(summons(&world).counts[0], [1, 0]);
@@ -985,7 +1024,11 @@ mod tests {
         assert_eq!(answer(&mut world, FIRST), Some(USE_ACCEPTED));
         stand_on(&mut world, SECOND, 0);
         assert!(use_circle(&mut world, SECOND));
-        assert_eq!(answer(&mut world, SECOND), Some(USE_REFUSED), "no stone, B_1 too far");
+        assert_eq!(
+            answer(&mut world, SECOND),
+            Some(USE_REFUSED),
+            "no stone, B_1 too far"
+        );
         let first = world.player_by_number(FIRST).expect("player");
         let other = circle_request(ITEM_COST_KIND);
         assert!(!world.outpost_rush_summoning(first, FIRST, other, b"@ui_turret"));
@@ -1012,7 +1055,10 @@ mod tests {
         let start = START_MS + PREGAME_MS;
         let soon = start + PORTAL_DELAY_MS - PORTAL_WARNING_MS;
         assert!(world.tick_outpost_rush_summons(soon));
-        assert!(matches!(summons(&world).portal, Portal::Closed { soon_ms: None, .. }));
+        assert!(matches!(
+            summons(&world).portal,
+            Portal::Closed { soon_ms: None, .. }
+        ));
         let open = start + PORTAL_DELAY_MS;
         assert!(world.tick_outpost_rush_summons(open));
         let Portal::Open { mobs, stone, .. } = summons(&world).portal.clone() else {
@@ -1026,9 +1072,18 @@ mod tests {
         assert!(!world.tick_outpost_rush_summons(open + 2), "not ready yet");
         let ready = open + 1 + STONE_READY_DELAY_MS;
         assert!(world.tick_outpost_rush_summons(ready));
-        assert!(matches!(summons(&world).portal, Portal::Ready { gather: None, .. }));
+        assert!(matches!(
+            summons(&world).portal,
+            Portal::Ready { gather: None, .. }
+        ));
         let first = world.player_by_number(FIRST).expect("player");
-        world.place_player(first, position_of(SUMMON_MAPS[0].stone), None, Placement::Drop, NOW);
+        world.place_player(
+            first,
+            position_of(SUMMON_MAPS[0].stone),
+            None,
+            Placement::Drop,
+            NOW,
+        );
         let gather = InteractionRequest {
             kind: GATHER_KIND,
             gatherable: Some(lowercase_crc32(STONE_GATHERABLE)),
@@ -1041,10 +1096,17 @@ mod tests {
         }
         let second = world.player_by_number(SECOND).expect("player");
         assert!(world.outpost_rush_portal_gather(second, SECOND, gather, ready));
-        assert_eq!(answer(&mut world, SECOND), Some(USE_REFUSED), "one gatherer at a time");
+        assert_eq!(
+            answer(&mut world, SECOND),
+            Some(USE_REFUSED),
+            "one gatherer at a time"
+        );
         assert!(world.tick_outpost_rush_summons(ready + STONE_GATHER_MS));
         assert_eq!(summons(&world).portal, closed_from(ready + STONE_GATHER_MS));
-        assert!(world.stations.members(stone.number).is_none(), "the stone went");
+        assert!(
+            world.stations.members(stone.number).is_none(),
+            "the stone went"
+        );
     }
 
     #[test]
@@ -1065,7 +1127,13 @@ mod tests {
         let ready = open + 1 + STONE_READY_DELAY_MS;
         world.tick_outpost_rush_summons(ready);
         let first = world.player_by_number(FIRST).expect("player");
-        world.place_player(first, position_of(SUMMON_MAPS[0].stone), None, Placement::Drop, NOW);
+        world.place_player(
+            first,
+            position_of(SUMMON_MAPS[0].stone),
+            None,
+            Placement::Drop,
+            NOW,
+        );
         let gather = InteractionRequest {
             kind: GATHER_KIND,
             gatherable: Some(lowercase_crc32(STONE_GATHERABLE)),
@@ -1076,6 +1144,9 @@ mod tests {
             player.interacting = false;
         }
         world.tick_outpost_rush_summons(ready + 1);
-        assert!(matches!(summons(&world).portal, Portal::Ready { gather: None, .. }));
+        assert!(matches!(
+            summons(&world).portal,
+            Portal::Ready { gather: None, .. }
+        ));
     }
 }

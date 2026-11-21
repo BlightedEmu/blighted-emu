@@ -420,7 +420,10 @@ mod tests {
             &view,
             (interact_ms + TICK_MS, gone_ms - TICK_MS),
         );
-        assert!(host.objects.stands(glyph), "the glyph stands through its delay");
+        assert!(
+            host.objects.stands(glyph),
+            "the glyph stands through its delay"
+        );
         assert_eq!(
             stage_states(&mut roots, &run),
             STAGES_INTERACT,
@@ -434,7 +437,10 @@ mod tests {
             &view,
             (gone_ms, holdout_ms + TICK_MS),
         );
-        assert!(!host.objects.stands(glyph), "the glyph goes at its delay's end");
+        assert!(
+            !host.objects.stands(glyph),
+            "the glyph goes at its delay's end"
+        );
         assert_eq!(
             stage_states(&mut roots, &run),
             STAGES_HOLDOUT,

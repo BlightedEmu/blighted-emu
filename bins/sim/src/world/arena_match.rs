@@ -970,7 +970,11 @@ impl SimWorld {
             .iter()
             .map(|participant| {
                 let wins = running.wins[usize::from(participant.team.min(1))];
-                (participant.entity, participant.number, arena_end_event(wins))
+                (
+                    participant.entity,
+                    participant.number,
+                    arena_end_event(wins),
+                )
             })
             .collect();
         self.change_game_mode_state(entity, change);

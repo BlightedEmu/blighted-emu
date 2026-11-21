@@ -105,16 +105,14 @@ pub async fn walk(
     // counts against the address's limit (`nw-login` `register`: 429 after `login_fail_limit`
     // tries in `login_fail_window_seconds`, also for a name that exists).
     let login_url = format!("{}{LOGIN_PATH}", settings.login_url);
-    let session: LauncherSession =
-        match post(client, "login", &login_url, None, &credentials).await {
-            Err(WalkError::Refused { status, .. })
-                if status == StatusCode::UNAUTHORIZED.as_u16() =>
-            {
-                let register_url = format!("{}{REGISTER_PATH}", settings.login_url);
-                post(client, "register", &register_url, None, &credentials).await?
-            }
-            other => other?,
-        };
+    let session: LauncherSession = match post(client, "login", &login_url, None, &credentials).await
+    {
+        Err(WalkError::Refused { status, .. }) if status == StatusCode::UNAUTHORIZED.as_u16() => {
+            let register_url = format!("{}{REGISTER_PATH}", settings.login_url);
+            post(client, "register", &register_url, None, &credentials).await?
+        }
+        other => other?,
+    };
     report(format!("account {} ready", settings.account));
     let play_url = format!("{}{PLAY_PATH}", settings.login_url);
     let play: PlayReply = post(

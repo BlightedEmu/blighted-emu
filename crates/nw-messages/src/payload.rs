@@ -25,8 +25,8 @@ use crate::components::{
     COMBAT_STATUS_TYPE_INDEX, CURRENCY_TYPE_INDEX, CombatStatusState, CurrencyState,
     DAMAGE_RECEIVER_TYPE_INDEX, DELAYED_EVENT_TYPE_INDEX, DamageReceiverState, DelayedEventState,
     GATHERABLE_CONTROLLER_TYPE_INDEX, GatherableControllerState, INTERACT_TYPE_INDEX,
-    InteractCooldownState, InteractState, LOOK_TARGETING_TYPE_INDEX, LookTargetingState, MANA_TYPE_INDEX, ManaState,
-    STAMINA_TYPE_INDEX, StaminaState,
+    InteractCooldownState, InteractState, LOOK_TARGETING_TYPE_INDEX, LookTargetingState,
+    MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState,
 };
 use crate::containers::{
     CONTAINER_TYPE_INDEX, ContainerState, ITEM_MANAGEMENT_TYPE_INDEX, ItemManagementState,

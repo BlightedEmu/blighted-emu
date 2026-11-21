@@ -371,7 +371,10 @@ mod tests {
             assert_eq!(reward.coins, coins, "{event}");
             assert!((reward.azoth - azoth).abs() < f64::EPSILON, "{event}");
             assert!((reward.umbral - umbral).abs() < f64::EPSILON, "{event}");
-            assert!((reward.seasons_xp - seasons_xp).abs() < f64::EPSILON, "{event}");
+            assert!(
+                (reward.seasons_xp - seasons_xp).abs() < f64::EPSILON,
+                "{event}"
+            );
         }
         // An event without a modifier row: only its own cells (`CATACOMBS5` 1674.582 s).
         let boss = rewards.get("CatacombsKillEvent_Boss_01").expect("boss 1");

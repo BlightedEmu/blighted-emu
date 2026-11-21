@@ -2,17 +2,17 @@
 //! The capture viewer (admin tools spec section 4): the session list and the type names.
 
 pub mod api;
-pub mod packet_catalog;
 pub mod catalog;
 pub mod open;
+pub mod packet_catalog;
 
 use std::path::Path;
 
 use nw_capture::TypeNames;
 
 use crate::config::CapturesConfig;
-use packet_catalog::{CatalogTypes, TypeLabels};
 use catalog::{SessionEntry, scan};
+use packet_catalog::{CatalogTypes, TypeLabels};
 
 /// The sessions and the type labels, read at start.
 #[derive(Debug, Default)]

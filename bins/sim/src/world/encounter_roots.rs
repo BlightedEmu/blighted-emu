@@ -38,14 +38,14 @@ use std::collections::HashMap;
 
 use nw_content::dungeon_gates::EntityComponent;
 use nw_content::town_props::TownProps;
+use nw_messages::keyed_list::KeyedList;
 use nw_messages::position::{PositionInTheWorldReplicatedState, Rotation, WorldPosition};
 use nw_messages::timeline_state::{TIMELINE_TYPE_INDEX, TimelineState};
-use nw_messages::keyed_list::KeyedList;
 use nw_messages::{
     AssetId, BundleGroup, BundleMember, DYNAMIC_SLICE_SUB_ID, DelayedEventState, FullList,
-    GdeMetadataReplicatedState, InteractState, MemberState, OBJECTIVES_TYPE_INDEX,
-    ObjectiveRecord, ObjectivesState, PlacementObstructionState, Reader, ReplicatedList,
-    TaskEntry, TaskKey, TaskWireState, Writer,
+    GdeMetadataReplicatedState, InteractState, MemberState, OBJECTIVES_TYPE_INDEX, ObjectiveRecord,
+    ObjectivesState, PlacementObstructionState, Reader, ReplicatedList, TaskEntry, TaskKey,
+    TaskWireState, Writer,
 };
 use nw_sim_core::Position;
 use nw_world::dungeon_scripts::{Encounter, EncounterTasks};
@@ -54,9 +54,9 @@ use super::crafting::{CARD_COMPONENT, dynamic_ref};
 use super::dungeon_script::{
     EVENT_ACTIVATE, EVENT_DEACTIVATE, EVENT_TRIGGER, ObjectivePhase, TaskRun,
 };
-use super::unix_ns;
 use super::gates::{merge_members, seconds_ms, timeline_member};
 use super::slots::Slot;
+use super::unix_ns;
 
 /// The entity numbers of the encounter roots start here.
 pub(super) const ENCOUNTER_ROOT_ENTITY_BASE: u64 = 1 << 43;
@@ -300,7 +300,12 @@ impl RootObjective {
             } else {
                 TaskWireState::Active
             };
-            computed.push(entry(self.tasks.root_index, self.tasks.root_task, done, state));
+            computed.push(entry(
+                self.tasks.root_index,
+                self.tasks.root_task,
+                done,
+                state,
+            ));
         }
         let mut kept: Vec<TaskEntry> = entries
             .iter()
@@ -442,7 +447,11 @@ impl RootObjective {
         };
         let mut writer = Writer::new();
         match state.write(&mut writer) {
-            Ok(()) => Some(recorded(self.component, OBJECTIVES_TYPE_INDEX, writer.finish())),
+            Ok(()) => Some(recorded(
+                self.component,
+                OBJECTIVES_TYPE_INDEX,
+                writer.finish(),
+            )),
             Err(reason) => {
                 tracing::warn!(component = self.component, %reason, "encounter objective body");
                 None
@@ -638,8 +647,8 @@ impl EncounterRoots {
                         }),
                 )
                 .collect();
-            let number = ENCOUNTER_ROOT_ENTITY_BASE
-                + u64::try_from(roots.roots.len()).unwrap_or_default();
+            let number =
+                ENCOUNTER_ROOT_ENTITY_BASE + u64::try_from(roots.roots.len()).unwrap_or_default();
             let objective = encounter
                 .objectives_component
                 .zip(encounter.objective_tasks())
@@ -1072,7 +1081,11 @@ impl EncounterObjects {
     /// goes to [`DEPLETED_GATHERABLE_STATE`], its interact state counts no interactor, and no
     /// one can gather it again. Whether it stood and was not emptied yet.
     pub(super) fn deplete(&mut self, number: u64) -> bool {
-        let Some(object) = self.objects.get_mut(&number).filter(|object| !object.depleted) else {
+        let Some(object) = self
+            .objects
+            .get_mut(&number)
+            .filter(|object| !object.depleted)
+        else {
             return false;
         };
         object.changed.clear();
@@ -1092,7 +1105,11 @@ impl EncounterObjects {
     /// A player's gather of start object `number` starts: its interact state counts one
     /// interactor ([`GATHERING_INTERACT`]).
     pub(super) fn gather_started(&mut self, number: u64) {
-        if let Some(object) = self.objects.get_mut(&number).filter(|object| !object.depleted) {
+        if let Some(object) = self
+            .objects
+            .get_mut(&number)
+            .filter(|object| !object.depleted)
+        {
             object.interact_change(GATHERING_INTERACT);
         }
     }
@@ -1100,7 +1117,11 @@ impl EncounterObjects {
     /// A player's gather of start object `number` stopped undone: its interact state counts no
     /// interactor ([`STOPPED_INTERACT`]).
     pub(super) fn gather_stopped(&mut self, number: u64) {
-        if let Some(object) = self.objects.get_mut(&number).filter(|object| !object.depleted) {
+        if let Some(object) = self
+            .objects
+            .get_mut(&number)
+            .filter(|object| !object.depleted)
+        {
             object.interact_change(STOPPED_INTERACT);
         }
     }
@@ -1163,7 +1184,9 @@ impl EncounterObjects {
 
     /// The slice path of standing start object `number`.
     pub(super) fn slice_of(&self, number: u64) -> Option<&str> {
-        self.objects.get(&number).map(|object| object.slice.as_str())
+        self.objects
+            .get(&number)
+            .map(|object| object.slice.as_str())
     }
 
     /// Whether start object `number` stands.
@@ -1470,7 +1493,10 @@ mod tests {
         let mut sent = HashMap::new();
         roots.group(number, slot(true), &mut sent).expect("whole");
         roots.set_objective(0, |_| None);
-        assert!(roots.group(number, slot(false), &mut sent).is_none(), "no objective yet");
+        assert!(
+            roots.group(number, slot(false), &mut sent).is_none(),
+            "no objective yet"
+        );
         roots.set_objective(0, |tasks| {
             assert_eq!(tasks.root_index, 3);
             running(0, false, false)
@@ -1480,10 +1506,17 @@ mod tests {
         assert_eq!(record.accept_time, unix_ns(STAGE_START_MS));
         assert!(record.available && record.poi);
         assert!(entries(&made).is_empty(), "no task entry before a kill");
-        assert!(made.tracked.as_ref().is_some_and(|list| list.elements.is_empty()));
+        assert!(
+            made.tracked
+                .as_ref()
+                .is_some_and(|list| list.elements.is_empty())
+        );
         assert!(made.completed.is_none() && made.task_start_times.is_none());
         roots.set_objective(0, |_| running(0, false, false));
-        assert!(roots.group(number, slot(false), &mut sent).is_none(), "no change");
+        assert!(
+            roots.group(number, slot(false), &mut sent).is_none(),
+            "no change"
+        );
         roots.set_objective(0, |_| running(1, false, false));
         assert_eq!(
             entries(&objective_of(&roots, number, &mut sent)),
@@ -1500,13 +1533,25 @@ mod tests {
         );
         roots.set_objective(0, |_| Some(ObjectivePhase::Ended));
         let ended = objective_of(&roots, number, &mut sent);
-        let completed = ended.completed.as_ref().and_then(ReplicatedList::full).expect("full");
+        let completed = ended
+            .completed
+            .as_ref()
+            .and_then(ReplicatedList::full)
+            .expect("full");
         assert_eq!(completed.elements, [record.instance]);
-        assert!(ended.active.as_ref().is_some_and(|list| list.elements.is_empty()));
+        assert!(
+            ended
+                .active
+                .as_ref()
+                .is_some_and(|list| list.elements.is_empty())
+        );
         assert!(entries(&ended).is_empty());
         roots.set_objective(0, |_| Some(ObjectivePhase::Ended));
         roots.set_objective(0, |_| None);
-        assert!(roots.group(number, slot(false), &mut sent).is_none(), "ended stays ended");
+        assert!(
+            roots.group(number, slot(false), &mut sent).is_none(),
+            "ended stays ended"
+        );
         roots.set_objective(0, |_| running(0, false, false));
         let again = objective_of(&roots, number, &mut sent);
         let next = &again.active.as_ref().expect("active").elements[0];
@@ -1564,7 +1609,12 @@ mod tests {
         roots.set_objective(0, |_| None);
         let dropped = objective_of(&roots, number, &mut sent);
         assert!(dropped.completed.is_none());
-        assert!(dropped.active.as_ref().is_some_and(|list| list.elements.is_empty()));
+        assert!(
+            dropped
+                .active
+                .as_ref()
+                .is_some_and(|list| list.elements.is_empty())
+        );
         assert!(entries(&dropped).is_empty());
     }
 
@@ -1706,26 +1756,35 @@ mod tests {
         let mut sent = HashMap::new();
         objects.group(number, slot(true), &mut sent).expect("card");
         objects.gather_started(number);
-        let started = objects.group(number, slot(false), &mut sent).expect("start");
+        let started = objects
+            .group(number, slot(false), &mut sent)
+            .expect("start");
         assert_eq!(encoded_members(&started), ["04b22d010200000001"]);
         objects.gather_stopped(number);
         let stopped = objects.group(number, slot(false), &mut sent).expect("stop");
         assert_eq!(encoded_members(&stopped), ["04b22d010200000000"]);
         objects.gather_started(number);
-        objects.group(number, slot(false), &mut sent).expect("start again");
+        objects
+            .group(number, slot(false), &mut sent)
+            .expect("start again");
         objects.gathered(number, 0);
         let ended = objects.group(number, slot(false), &mut sent).expect("end");
         assert_eq!(
             encoded_members(&ended),
             ["030c010108", "04b22d01030000000000"]
         );
-        let viewer = objects.group(number, slot(true), &mut HashMap::new()).expect("card");
+        let viewer = objects
+            .group(number, slot(true), &mut HashMap::new())
+            .expect("card");
         assert!(
             encoded_members(&viewer).contains(&"04b22d01030000000000".to_owned()),
             "a new viewer gets the whole interact state"
         );
         objects.gather_started(number);
-        assert!(objects.group(number, slot(false), &mut sent).is_none(), "gathered once");
+        assert!(
+            objects.group(number, slot(false), &mut sent).is_none(),
+            "gathered once"
+        );
     }
 
     /// Retail `CATACOMBS5`: the chest's interact state (c3) counts its gatherer from 156.081 s
@@ -1745,10 +1804,14 @@ mod tests {
         let mut sent = HashMap::new();
         objects.group(number, slot(true), &mut sent).expect("card");
         objects.gather_started(number);
-        let started = objects.group(number, slot(false), &mut sent).expect("start");
+        let started = objects
+            .group(number, slot(false), &mut sent)
+            .expect("start");
         assert_eq!(encoded_members(&started), ["03b22d010200000001"]);
         assert!(objects.deplete(number));
-        let emptied = objects.group(number, slot(false), &mut sent).expect("emptied");
+        let emptied = objects
+            .group(number, slot(false), &mut sent)
+            .expect("emptied");
         assert_eq!(
             encoded_members(&emptied),
             ["020c010108", "03b22d010200000000"]

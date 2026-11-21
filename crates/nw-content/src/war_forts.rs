@@ -1775,7 +1775,9 @@ pub(crate) mod tests {
         );
         assert_eq!((drop.pour.component, drop.pour.delay_ms()), (18, 300));
         assert_eq!(
-            StructureRole::of_slice("slices/outpostrush/structures/or_turretfire_trench.dynamicslice"),
+            StructureRole::of_slice(
+                "slices/outpostrush/structures/or_turretfire_trench.dynamicslice"
+            ),
             Some((StructureRole::FireBarrelDropper, 1))
         );
         let war_dropper = id_of(0, "a3000000000000000000000000000000").expect("id");
@@ -1784,7 +1786,10 @@ pub(crate) mod tests {
             Some(war_dropper),
             "a war T1 socket builds the war dropper, not the vat"
         );
-        assert!(forts.replacement(&vat.asset, 3).is_none(), "a vat is no war socket");
+        assert!(
+            forts.replacement(&vat.asset, 3).is_none(),
+            "a vat is no war socket"
+        );
     }
 
     /// The retail blueprint rows (`BlueprintItemDefinitions`: `TurretBallistaT3` 120
@@ -1907,7 +1912,10 @@ pub(crate) mod tests {
         let gate = kind.gate.expect("gate parts");
         assert_eq!(gate.physical_radius_m, 10.23);
         let delay = gate.repair_delay.expect("repair delay");
-        assert_eq!((delay.component, delay.delay_ms(), delay.on_open), (8, 30_000, false));
+        assert_eq!(
+            (delay.component, delay.delay_ms(), delay.on_open),
+            (8, 30_000, false)
+        );
         assert_eq!(gate.door_interact, Some(17));
         assert_eq!(kind.weapon, None, "a gate is a major structure, no weapon");
     }
@@ -1948,7 +1956,9 @@ pub(crate) mod tests {
         let row = |text: &str| -> TimerRow { serde_json::from_str(text).expect("row") };
         let old = timer_of(&row(r#"{"component": 4, "delay_s": 4.0}"#));
         assert!(old.on_open, "an old table's timer starts at once");
-        let later = timer_of(&row(r#"{"component": 13, "delay_s": 3.0, "on_open": false}"#));
+        let later = timer_of(&row(
+            r#"{"component": 13, "delay_s": 3.0, "on_open": false}"#,
+        ));
         assert_eq!(old.open_delay_s(), 4.0);
         assert_eq!(later.open_delay_s(), 0.0);
         let area = SiegeArea {
@@ -1957,9 +1967,13 @@ pub(crate) mod tests {
             position_component: Some(5),
             timers: vec![
                 timer_of(&row(r#"{"component": 8, "delay_s": 3.8, "on_open": true}"#)),
-                timer_of(&row(r#"{"component": 10, "delay_s": 4.0, "on_open": true}"#)),
+                timer_of(&row(
+                    r#"{"component": 10, "delay_s": 4.0, "on_open": true}"#,
+                )),
                 later,
-                timer_of(&row(r#"{"component": 12, "delay_s": 9.0, "on_open": false}"#)),
+                timer_of(&row(
+                    r#"{"component": 12, "delay_s": 9.0, "on_open": false}"#,
+                )),
             ],
             radius_m: 4.0,
             once: false,

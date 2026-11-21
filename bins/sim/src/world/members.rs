@@ -16,6 +16,9 @@
 use nw_bus::MobGhost;
 use nw_content::combat::MobGuard;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
+use nw_messages::items::FullList;
+use nw_messages::list_delta::ReplicatedList;
+use nw_messages::temporary_affiliation::Affiliation;
 use nw_messages::{
     AlcPosture, AlcStamp, AlcState, AssetId, BOSS_PHASE_TYPE_INDEX, BundleGroup, BundleMember,
     BundlePayload, CardPlace, DAMAGE_RECEIVER_TYPE_INDEX, DATA_BITS_ACTIVE, DEPLETED_GATHERABLE,
@@ -28,9 +31,6 @@ use nw_messages::{
     TeleportStep, VitalsData, VitalsState, boss_phase_change, change_members, offset_from,
     player_members, raw_id_of_entity, remote_player_members,
 };
-use nw_messages::items::FullList;
-use nw_messages::list_delta::ReplicatedList;
-use nw_messages::temporary_affiliation::Affiliation;
 use nw_sim_core::Position;
 
 use super::MAX_BUNDLE_MEMBERS;
@@ -1111,8 +1111,16 @@ mod tests {
                 },
             ]
         };
-        assert_eq!(summon_affiliations(0), pair((1, 4), (0, 0)), "opr_match_4 team 0 bear");
-        assert_eq!(summon_affiliations(1), pair((0, 4), (1, 0)), "the prefabs' team 1 list");
+        assert_eq!(
+            summon_affiliations(0),
+            pair((1, 4), (0, 0)),
+            "opr_match_4 team 0 bear"
+        );
+        assert_eq!(
+            summon_affiliations(1),
+            pair((0, 4), (1, 0)),
+            "the prefabs' team 1 list"
+        );
         let recorded = |elements: Vec<Affiliation>| BundleMember {
             component: COMPONENT,
             state: MemberState::TemporaryAffiliation(TemporaryAffiliationState {

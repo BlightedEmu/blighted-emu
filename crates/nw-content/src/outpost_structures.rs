@@ -429,7 +429,10 @@ mod tests {
             .expect("template");
         assert_eq!(template.members, vec![vec![0x0a, 0x0b]]);
         assert_eq!(template.ownership_component, Some(3));
-        assert!(!table.slice(&first).expect("tier 1").template_inferred, "captured");
+        assert!(
+            !table.slice(&first).expect("tier 1").template_inferred,
+            "captured"
+        );
         let next = table.next_tier(&first).expect("tier 2");
         assert_eq!(next.blueprint.as_deref(), Some("OR_CommandPost_T2"));
         assert!(next.template_inferred, "the miner's mark");
@@ -475,10 +478,18 @@ mod tests {
     #[ignore = "needs local-data/content"]
     fn the_installed_table_holds_the_three_maps() {
         let table = OutpostStructures::load(&crate::layout::repo_layout()).expect("table");
-        for folder in ["nw_opr_004_trench", "nw_opr_005_vertical", "newworld_vitaeeterna"] {
+        for folder in [
+            "nw_opr_004_trench",
+            "nw_opr_005_vertical",
+            "newworld_vitaeeterna",
+        ] {
             let map = table.map(folder).expect("map");
             assert!(map.spawners.len() >= 30, "{folder}");
-            assert!(map.spawners.iter().all(|spawner| table.slice(&spawner.asset).is_some()));
+            assert!(
+                map.spawners
+                    .iter()
+                    .all(|spawner| table.slice(&spawner.asset).is_some())
+            );
         }
         let gate = table
             .slices

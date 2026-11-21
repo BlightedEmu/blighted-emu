@@ -204,12 +204,11 @@ pub fn build_catacomb_tiles(
         )? {
             tile.encounters = weighed(level.encounters);
         }
-        tile.picture =
-            *pictures
-                .get(variation)
-                .ok_or_else(|| CatacombTilesError::NoPicture {
-                    variation: variation.clone(),
-                })?;
+        tile.picture = *pictures
+            .get(variation)
+            .ok_or_else(|| CatacombTilesError::NoPicture {
+                variation: variation.clone(),
+            })?;
         by_variation.insert(variation.clone(), tile);
     }
     let mut power_ups = Vec::new();

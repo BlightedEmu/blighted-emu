@@ -90,8 +90,8 @@ use super::camps::APPLY_ALL_RESOURCES_KIND;
 use super::crafting::{Station, dynamic_ref};
 use super::encounter_roots::{card, place_member};
 use super::gates::merge_members;
-use super::outpost_rush_doors::{layout_placement, retail_half_yaw, team_ownership_on};
 use super::outpost_rush::NO_TEAM;
+use super::outpost_rush_doors::{layout_placement, retail_half_yaw, team_ownership_on};
 use super::siege_areas::{SiegeUses, apply_ownership_change};
 use super::siege_structures::{
     BROKEN_RUIN_TYPE, BROKEN_STATE, BUILT_STATE, NO_INTERACTORS, StructureRun,
@@ -212,7 +212,11 @@ pub(super) fn template_members(template: &Template) -> Vec<BundleMember> {
     template
         .members
         .iter()
-        .filter_map(|bytes| BundleMember::read_from(bytes).ok().map(|(member, _)| member))
+        .filter_map(|bytes| {
+            BundleMember::read_from(bytes)
+                .ok()
+                .map(|(member, _)| member)
+        })
         .collect()
 }
 
@@ -295,7 +299,11 @@ impl OutpostStructure {
             template,
             vitals,
             buildable,
-            health: if phase == Phase::Built { max_health } else { 0.0 },
+            health: if phase == Phase::Built {
+                max_health
+            } else {
+                0.0
+            },
             max_health,
             rate_per_s: if build_time_s > 0.0 {
                 max_health / build_time_s
@@ -537,9 +545,10 @@ impl OutpostStructures {
     pub(super) fn statuses(&self) -> [u64; OUTPOSTS] {
         let mut statuses = [0; OUTPOSTS];
         for structure in &self.structures {
-            let (Some(slot), Some(status)) =
-                (structure.slot, statuses.get_mut(usize::from(structure.outpost)))
-            else {
+            let (Some(slot), Some(status)) = (
+                structure.slot,
+                statuses.get_mut(usize::from(structure.outpost)),
+            ) else {
                 continue;
             };
             if structure.phase == Phase::Replaced {
@@ -595,7 +604,11 @@ impl OutpostStructures {
 
     /// The raid that owns the built structure of role `role` whose id is `gde_ref` (the armory
     /// shop of `outpost_rush`).
-    pub(super) fn built_raid(&self, gde_ref: &[u8; RAW_ID_LEN], role: StructureRole) -> Option<u64> {
+    pub(super) fn built_raid(
+        &self,
+        gde_ref: &[u8; RAW_ID_LEN],
+        role: StructureRole,
+    ) -> Option<u64> {
         let structure = &self.structures[self.index_of_ref(gde_ref)?];
         (structure.role == role && structure.phase == Phase::Built).then_some(structure.raid)
     }
@@ -614,7 +627,11 @@ impl OutpostStructures {
     /// ([`super::turrets`] module doc, **Shots on structures**): the whole built ones with
     /// vitals of the owned outposts that are no turret of slot keys `turrets`, by slot key,
     /// facet entity and place, with whether the other team owns their outpost.
-    pub(super) fn shot_structures(&self, raid: u64, turrets: &[u64]) -> Vec<(u64, u64, Position, bool)> {
+    pub(super) fn shot_structures(
+        &self,
+        raid: u64,
+        turrets: &[u64],
+    ) -> Vec<(u64, u64, Position, bool)> {
         self.structures
             .iter()
             .filter(|structure| {
@@ -638,7 +655,11 @@ impl OutpostStructures {
 impl SimWorld {
     /// The structures of the Outpost Rush map in `folder`, spawned for the viewers of the match
     /// whose ids take `salt` (module doc); none for a map the table does not hold.
-    pub(super) fn spawn_outpost_structures(&mut self, folder: &str, salt: u64) -> OutpostStructures {
+    pub(super) fn spawn_outpost_structures(
+        &mut self,
+        folder: &str,
+        salt: u64,
+    ) -> OutpostStructures {
         let content = std::sync::Arc::clone(&self.content);
         let (Some(map), Some(placement)) = (
             content.outpost_structures.map(folder),
@@ -698,7 +719,11 @@ impl SimWorld {
     }
 
     /// Sends `changed` of `structure` to its viewers and keeps them in its spawn members.
-    fn change_outpost_structure(&mut self, structure: &OutpostStructure, changed: Vec<BundleMember>) {
+    fn change_outpost_structure(
+        &mut self,
+        structure: &OutpostStructure,
+        changed: Vec<BundleMember>,
+    ) {
         if changed.is_empty() {
             return;
         }
@@ -718,7 +743,11 @@ impl SimWorld {
     }
 
     /// Each structure takes the raid of its outpost's owner (`raids` by outpost; 0: no owner).
-    pub(super) fn own_outpost_structures(&mut self, set: &mut OutpostStructures, raids: [u64; OUTPOSTS]) {
+    pub(super) fn own_outpost_structures(
+        &mut self,
+        set: &mut OutpostStructures,
+        raids: [u64; OUTPOSTS],
+    ) {
         for index in 0..set.structures.len() {
             let raid = raids
                 .get(usize::from(set.structures[index].outpost))
@@ -729,7 +758,10 @@ impl SimWorld {
             }
             set.structures[index].raid = raid;
             let structure = set.structures[index].clone();
-            let used = set.turrets.iter().any(|run| run.body.number == structure.number && run.used())
+            let used = set
+                .turrets
+                .iter()
+                .any(|run| run.body.number == structure.number && run.used())
                 || set
                     .droppers
                     .iter()
@@ -742,10 +774,18 @@ impl SimWorld {
                 );
             }
             let side = self.outpost_team_of_raid(raid);
-            if let Some(run) = set.turrets.iter_mut().find(|run| run.body.number == structure.number) {
+            if let Some(run) = set
+                .turrets
+                .iter_mut()
+                .find(|run| run.body.number == structure.number)
+            {
                 self.own_outpost_turret(run, side);
             }
-            if let Some(run) = set.droppers.iter_mut().find(|run| run.body.number == structure.number) {
+            if let Some(run) = set
+                .droppers
+                .iter_mut()
+                .find(|run| run.body.number == structure.number)
+            {
                 self.own_outpost_dropper(run, side);
             }
         }
@@ -797,27 +837,38 @@ impl SimWorld {
     /// state with a turret's own turret, interact and spawner states in the place of the retail
     /// ones, or with a dropper's use interact; the retail members for a structure that is
     /// neither of a known kind.
-    fn outpost_siege_built(&mut self, set: &mut OutpostStructures, structure: &OutpostStructure) -> Vec<BundleMember> {
+    fn outpost_siege_built(
+        &mut self,
+        set: &mut OutpostStructures,
+        structure: &OutpostStructure,
+    ) -> Vec<BundleMember> {
         let extras = &structure.built_extras;
         let built_dropper = |run: &StructureRun| {
             let mut members = extras.clone();
             members.extend(run.body.interact_member(NO_INTERACTORS));
             members
         };
-        if let Some(run) = set.droppers.iter_mut().find(|run| run.body.number == structure.number) {
+        if let Some(run) = set
+            .droppers
+            .iter_mut()
+            .find(|run| run.body.number == structure.number)
+        {
             self.mend_outpost_dropper(run);
             return built_dropper(&*run);
         }
         let content = std::sync::Arc::clone(&self.content);
         let side = self.outpost_team_of_raid(structure.raid);
-        let index = if let Some(index) = set.turrets.iter().position(|run| run.body.number == structure.number) {
+        let index = if let Some(index) = set
+            .turrets
+            .iter()
+            .position(|run| run.body.number == structure.number)
+        {
             set.turrets[index].mend();
             index
         } else if let Some(kind) = content.war_forts.kind(&structure.asset) {
-            let Some(run) = structure
-                .siege_structure(side, None)
-                .and_then(|turret| TurretRun::outpost_turret(turret, kind.clone(), structure.number))
-            else {
+            let Some(run) = structure.siege_structure(side, None).and_then(|turret| {
+                TurretRun::outpost_turret(turret, kind.clone(), structure.number)
+            }) else {
                 return extras.clone();
             };
             set.turrets.push(run);
@@ -878,7 +929,12 @@ impl SimWorld {
     }
 
     /// A build or repair of `pending`'s player: its bag gives what the structure still needs.
-    fn apply_resources(&mut self, set: &mut OutpostStructures, pending: &PendingRequest, raid: u64) -> bool {
+    fn apply_resources(
+        &mut self,
+        set: &mut OutpostStructures,
+        pending: &PendingRequest,
+        raid: u64,
+    ) -> bool {
         let Some(index) = set.index_of_ref(&pending.request.target) else {
             return false;
         };
@@ -906,7 +962,10 @@ impl SimWorld {
             if structure.phase == Phase::Ruin {
                 structure.phase = Phase::Foundation;
                 let structure = structure.clone();
-                self.change_outpost_structure(&structure, structure.buildable_member().into_iter().collect());
+                self.change_outpost_structure(
+                    &structure,
+                    structure.buildable_member().into_iter().collect(),
+                );
             }
         }
         taken_any
@@ -914,7 +973,12 @@ impl SimWorld {
 
     /// An upgrade of `pending`'s player: the built tier is replaced by the next tier's
     /// foundation (module doc).
-    fn upgrade_structure(&mut self, set: &mut OutpostStructures, pending: &PendingRequest, raid: u64) -> bool {
+    fn upgrade_structure(
+        &mut self,
+        set: &mut OutpostStructures,
+        pending: &PendingRequest,
+        raid: u64,
+    ) -> bool {
         let Some(index) = set.index_of_ref(&pending.request.target) else {
             return false;
         };
@@ -939,7 +1003,8 @@ impl SimWorld {
         let values = self.outpost_blueprint_values(next.blueprint.as_deref());
         let namespace = STRUCTURE_NAMESPACE ^ self.me.generation;
         let gde_ref = dynamic_ref(namespace ^ old.number, usize::from(next.tier));
-        let Some(mut upgrade) = OutpostStructure::new(&spawner, next, old.place, gde_ref, false, values)
+        let Some(mut upgrade) =
+            OutpostStructure::new(&spawner, next, old.place, gde_ref, false, values)
         else {
             return false;
         };
@@ -959,10 +1024,18 @@ impl SimWorld {
 
     /// The health of structure `index` rises toward its committed share over `elapsed_ms`; at
     /// full health with its cost committed it is built.
-    fn raise_structure(&mut self, set: &mut OutpostStructures, index: usize, now_ms: u64, elapsed_ms: u64) {
+    fn raise_structure(
+        &mut self,
+        set: &mut OutpostStructures,
+        index: usize,
+        now_ms: u64,
+        elapsed_ms: u64,
+    ) {
         let structure = &mut set.structures[index];
         let target = structure.target_health();
-        if !matches!(structure.phase, Phase::Foundation | Phase::Built) || structure.health >= target {
+        if !matches!(structure.phase, Phase::Foundation | Phase::Built)
+            || structure.health >= target
+        {
             return;
         }
         let step = structure.rate_per_s * elapsed_ms as f32 / MS_PER_SECOND;
@@ -1033,7 +1106,12 @@ impl SimWorld {
         if ruined && let Some(run) = set.turrets.iter_mut().find(|run| run.body.number == target) {
             self.break_outpost_turret(run);
         }
-        if ruined && let Some(run) = set.droppers.iter_mut().find(|run| run.body.number == target) {
+        if ruined
+            && let Some(run) = set
+                .droppers
+                .iter_mut()
+                .find(|run| run.body.number == target)
+        {
             self.break_outpost_dropper(run);
         }
         Some(ruined)
@@ -1164,7 +1242,11 @@ pub(super) mod tests {
             spawner.place,
             [1; RAW_ID_LEN],
             false,
-            (GATE_HEALTH, GATE_BUILD_S, vec![(WOOD.to_owned(), GATE_WOOD)]),
+            (
+                GATE_HEALTH,
+                GATE_BUILD_S,
+                vec![(WOOD.to_owned(), GATE_WOOD)],
+            ),
         )
         .expect("gate")
     }
@@ -1231,7 +1313,10 @@ pub(super) mod tests {
             members.iter().find(|member| member.component == 9),
             Some(&team_ownership_on(9, TEAM_RAID))
         );
-        assert_eq!(table.next_tier(&structure.asset).map(|slice| slice.tier), Some(2));
+        assert_eq!(
+            table.next_tier(&structure.asset).map(|slice| slice.tier),
+            Some(2)
+        );
     }
 
     /// An armory tier with a built template alone (the inferred `or_armory_t2`).
@@ -1275,9 +1360,23 @@ pub(super) mod tests {
             yaw: 0.0,
         };
         // `OR_Armory_T2`: 30,000 health, 4 s, 200 wood and 100 rawhide.
-        let values = (30_000.0, 4.0, vec![(WOOD.to_owned(), 200), ("OutpostRushRawhide".to_owned(), 100)]);
-        let upgrade = OutpostStructure::new(&spawner, slice, [0.0; 3], [2; RAW_ID_LEN], false, values.clone())
-            .expect("the inferred tier");
+        let values = (
+            30_000.0,
+            4.0,
+            vec![
+                (WOOD.to_owned(), 200),
+                ("OutpostRushRawhide".to_owned(), 100),
+            ],
+        );
+        let upgrade = OutpostStructure::new(
+            &spawner,
+            slice,
+            [0.0; 3],
+            [2; RAW_ID_LEN],
+            false,
+            values.clone(),
+        )
+        .expect("the inferred tier");
         assert_eq!(upgrade.phase, Phase::Foundation, "an upgrade builds");
         assert_eq!((upgrade.health, upgrade.shown_tier), (0.0, 0));
         assert_eq!(upgrade.needed().len(), 2, "its whole cost");
@@ -1287,8 +1386,9 @@ pub(super) mod tests {
             panic!("a buildable state");
         };
         assert_eq!(state.current_state, Some(FOUNDATION_STATE));
-        let spawned = OutpostStructure::new(&spawner, slice, [0.0; 3], [3; RAW_ID_LEN], true, values)
-            .expect("the tier built");
+        let spawned =
+            OutpostStructure::new(&spawner, slice, [0.0; 3], [3; RAW_ID_LEN], true, values)
+                .expect("the tier built");
         assert_eq!(spawned.phase, Phase::Built);
     }
 
@@ -1308,7 +1408,9 @@ pub(super) mod tests {
         use super::super::*;
         use super::Table;
         use crate::player_content::PlayerContent;
-        use crate::world::outpost_rush::tests::{FIRST, SECOND, outpost_rush, own_outpost, rush_sim_on};
+        use crate::world::outpost_rush::tests::{
+            FIRST, SECOND, outpost_rush, own_outpost, rush_sim_on,
+        };
         use crate::world::siege_areas::{
             DROPPER_COOLDOWN_MS, DROPPER_USE_MS, FIRST_COOLDOWN_VERSION, USE_OPTION,
         };
@@ -1338,7 +1440,10 @@ pub(super) mod tests {
         const SHOT_NS: u64 = 0x0b97_927a_bd0a_dcad;
 
         fn asset(hex_text: &str) -> [u8; 16] {
-            hex::decode(hex_text).expect("hex").try_into().expect("16 bytes")
+            hex::decode(hex_text)
+                .expect("hex")
+                .try_into()
+                .expect("16 bytes")
         }
 
         /// A built template of a turret with `parts` (turret, use interact, build interact,
@@ -1498,13 +1603,20 @@ pub(super) mod tests {
                     place,
                     gde_ref,
                     false,
-                    (TURRET_HEALTH, TURRET_BUILD_MS as f32 / MS_PER_SECOND, Vec::new()),
+                    (
+                        TURRET_HEALTH,
+                        TURRET_BUILD_MS as f32 / MS_PER_SECOND,
+                        Vec::new(),
+                    ),
                 )
                 .expect("a turret structure");
                 structure.raid = raid;
                 let structure = world.place_outpost_structure(structure);
                 made.push((structure.number, gde_ref));
-                running_mut(&mut world).structures.structures.push(structure);
+                running_mut(&mut world)
+                    .structures
+                    .structures
+                    .push(structure);
             }
             let first = world.player_by_number(FIRST).expect("first");
             let second = world.player_by_number(SECOND).expect("second");
@@ -1516,11 +1628,18 @@ pub(super) mod tests {
         }
 
         fn running_mut(world: &mut SimWorld) -> &mut crate::world::outpost_rush::OutpostRushMatch {
-            world.arena_matches.outpost_rush.as_mut().expect("the match")
+            world
+                .arena_matches
+                .outpost_rush
+                .as_mut()
+                .expect("the match")
         }
 
         /// Runs `change` on the match's structures, taken out as the match's tick does.
-        fn with_set<T>(world: &mut SimWorld, change: impl FnOnce(&mut SimWorld, &mut OutpostStructures) -> T) -> T {
+        fn with_set<T>(
+            world: &mut SimWorld,
+            change: impl FnOnce(&mut SimWorld, &mut OutpostStructures) -> T,
+        ) -> T {
             let mut set = std::mem::take(&mut running_mut(world).structures);
             let result = change(world, &mut set);
             running_mut(world).structures = set;
@@ -1580,10 +1699,16 @@ pub(super) mod tests {
         #[test]
         fn a_built_turret_becomes_a_turret_of_its_owner_team_with_its_own_idle_members() {
             let (mut world, _, [(repeater, _), _]) = turret_world();
-            assert!(turret_of(&world, repeater).is_none(), "a foundation is no turret");
+            assert!(
+                turret_of(&world, repeater).is_none(),
+                "a foundation is no turret"
+            );
             build_all(&mut world, NOW);
             let run = turret_of(&world, repeater).expect("the built repeater is a turret");
-            assert_eq!(run.body.structure.side, 0, "the first player's team owns outpost A");
+            assert_eq!(
+                run.body.structure.side, 0,
+                "the first player's team owns outpost A"
+            );
             assert!(!run.in_use() && !run.body.broken && !run.body.invulnerable);
             let [turret, use_interact, build_interact, spawner] = REPEATER_PARTS;
             let MemberState::Turret(state) = member_of(&world, repeater, turret) else {
@@ -1591,8 +1716,12 @@ pub(super) mod tests {
             };
             let interactor = state.interactor.expect("an interactor child");
             assert!(
-                interactor[..interactor.len() - NO_INTERACTOR_TAIL].iter().all(|byte| *byte == 0)
-                    && interactor[interactor.len() - NO_INTERACTOR_TAIL..].iter().all(|byte| *byte == u8::MAX),
+                interactor[..interactor.len() - NO_INTERACTOR_TAIL]
+                    .iter()
+                    .all(|byte| *byte == 0)
+                    && interactor[interactor.len() - NO_INTERACTOR_TAIL..]
+                        .iter()
+                        .all(|byte| *byte == u8::MAX),
                 "no interactor, not the retail player of the template"
             );
             assert_eq!(
@@ -1630,9 +1759,15 @@ pub(super) mod tests {
             build_all(&mut world, NOW);
             world.take_messages();
             assert!(world.turret_interaction(second, SECOND, use_request(repeater_ref), &[], NOW));
-            assert!(answered(&world.take_messages(), SECOND, USE_REFUSED), "the other team");
+            assert!(
+                answered(&world.take_messages(), SECOND, USE_REFUSED),
+                "the other team"
+            );
             assert!(world.turret_interaction(first, FIRST, use_request(repeater_ref), &[], NOW));
-            assert!(answered(&world.take_messages(), FIRST, USE_ACCEPTED), "the owner team");
+            assert!(
+                answered(&world.take_messages(), FIRST, USE_ACCEPTED),
+                "the owner team"
+            );
             assert!(turret_of(&world, repeater).is_some_and(TurretRun::in_use));
             let call = TurretClientMsg::RepeaterInput {
                 header: FacetHeader::of(0, FIRST),
@@ -1645,10 +1780,14 @@ pub(super) mod tests {
             let outgoing = world.take_messages();
             for number in [FIRST, SECOND] {
                 assert!(
-                    messages_to(&outgoing, number).iter().any(|message| matches!(
-                        message,
-                        ServerMessage::CombatEffect(CombatEffectMsg::TurretHitscanResult { .. })
-                    )),
+                    messages_to(&outgoing, number)
+                        .iter()
+                        .any(|message| matches!(
+                            message,
+                            ServerMessage::CombatEffect(
+                                CombatEffectMsg::TurretHitscanResult { .. }
+                            )
+                        )),
                     "every player gets the shot's 2720"
                 );
             }
@@ -1682,15 +1821,19 @@ pub(super) mod tests {
             world.turret_call(&connection, call, NOW + 10);
             let outgoing = world.take_messages();
             let spawned = |number: u64| {
-                messages_to(&outgoing, number).iter().any(|message| matches!(
-                    message,
-                    ServerMessage::CombatEffect(CombatEffectMsg::ProjectileServerSpawn { .. })
-                ))
+                messages_to(&outgoing, number).iter().any(|message| {
+                    matches!(
+                        message,
+                        ServerMessage::CombatEffect(CombatEffectMsg::ProjectileServerSpawn { .. })
+                    )
+                })
             };
-            let told = messages_to(&outgoing, FIRST).iter().any(|message| matches!(
-                message,
-                ServerMessage::CombatEffect(CombatEffectMsg::AuthoritativeProjectile { .. })
-            ));
+            let told = messages_to(&outgoing, FIRST).iter().any(|message| {
+                matches!(
+                    message,
+                    ServerMessage::CombatEffect(CombatEffectMsg::AuthoritativeProjectile { .. })
+                )
+            });
             assert!(told && !spawned(FIRST), "the shooter gets its 327 alone");
             assert!(spawned(SECOND), "the other player gets the 2900");
         }
@@ -1734,7 +1877,10 @@ pub(super) mod tests {
             );
             world.take_messages();
             assert!(world.turret_interaction(first, FIRST, use_request(repeater_ref), &[], NOW));
-            assert!(answered(&world.take_messages(), FIRST, USE_ACCEPTED), "usable again");
+            assert!(
+                answered(&world.take_messages(), FIRST, USE_ACCEPTED),
+                "usable again"
+            );
         }
 
         #[test]
@@ -1761,7 +1907,9 @@ pub(super) mod tests {
         const TURRET_OWNERSHIP: u64 = 4;
         /// The ownership children a use of an Outpost Rush structure sends (Observed, `OPR_TEST3`
         /// 1718.191 s: children 0 to 3 and 7).
-        const USE_CHILDREN: [bool; 11] = [true, true, true, true, false, false, false, true, false, false, false];
+        const USE_CHILDREN: [bool; 11] = [
+            true, true, true, true, false, false, false, true, false, false, false,
+        ];
 
         /// The last ownership on `component` of the state change of slot key `number` that goes
         /// out to the players who see it already.
@@ -1770,12 +1918,16 @@ pub(super) mod tests {
                 interest: 1,
                 new: false,
             };
-            world.stations.group(number, slot)?.members.into_iter().rev().find_map(|member| {
-                match member.state {
+            world
+                .stations
+                .group(number, slot)?
+                .members
+                .into_iter()
+                .rev()
+                .find_map(|member| match member.state {
                     MemberState::Ownership(state) if member.component == component => Some(state),
                     _ => None,
-                }
-            })
+                })
         }
 
         /// Which children of `state` are sent.
@@ -1805,7 +1957,8 @@ pub(super) mod tests {
             const COMPANY: uuid::Uuid = uuid::Uuid::from_u128(0xc0_ffee);
             const COMPANY_NAME: &str = "Test Company";
             const USER_FACTION: u8 = 1;
-            let (mut world, [first, second], [(repeater, repeater_ref), (ballista, _)]) = turret_world();
+            let (mut world, [first, second], [(repeater, repeater_ref), (ballista, _)]) =
+                turret_world();
             if let Some(mut player) = world.world.get_mut::<Player>(first) {
                 player.faction.faction = USER_FACTION;
             }
@@ -1814,8 +1967,13 @@ pub(super) mod tests {
             world.companies_read(&[listing(COMPANY, COMPANY_NAME)]);
             build_all(&mut world, NOW);
             assert!(world.turret_interaction(first, FIRST, use_request(repeater_ref), &[], NOW));
-            let sent = sent_ownership(&world, repeater, TURRET_OWNERSHIP).expect("the use's ownership");
-            assert_eq!(children(&sent), USE_CHILDREN, "the retail children of a use");
+            let sent =
+                sent_ownership(&world, repeater, TURRET_OWNERSHIP).expect("the use's ownership");
+            assert_eq!(
+                children(&sent),
+                USE_CHILDREN,
+                "the retail children of a use"
+            );
             let character = world.world.get::<Player>(first).expect("player").character;
             assert_eq!(
                 sent.owner.map(|owner| owner.first),
@@ -1824,7 +1982,11 @@ pub(super) mod tests {
             );
             assert_eq!(
                 (sent.guild_id, sent.guild_owner, sent.faction_type),
-                (Some(*COMPANY.as_bytes()), Some(COMPANY_NAME.as_bytes().to_vec()), Some(USER_FACTION)),
+                (
+                    Some(*COMPANY.as_bytes()),
+                    Some(COMPANY_NAME.as_bytes().to_vec()),
+                    Some(USER_FACTION)
+                ),
                 "the user's company and faction"
             );
             let raid = running(&world).raid_seat_of(FIRST).expect("a seat").0;
@@ -1837,7 +1999,11 @@ pub(super) mod tests {
 
             world.tick_turrets(NOW + crate::world::turrets::USE_TIMEOUT_MS + 1);
             assert!(turret_of(&world, repeater).is_some_and(|run| !run.in_use() && run.used()));
-            assert_eq!(ownership_of(&world, repeater, TURRET_OWNERSHIP), owned, "the release keeps it");
+            assert_eq!(
+                ownership_of(&world, repeater, TURRET_OWNERSHIP),
+                owned,
+                "the release keeps it"
+            );
 
             let foe = running(&world).raid_seat_of(SECOND).expect("a seat").0;
             with_set(&mut world, |world, set| {
@@ -1860,7 +2026,8 @@ pub(super) mod tests {
                 },
                 "its card keeps the last user's company"
             );
-            let unused = sent_ownership(&world, ballista, TURRET_OWNERSHIP).expect("the raid change");
+            let unused =
+                sent_ownership(&world, ballista, TURRET_OWNERSHIP).expect("the raid change");
             assert_eq!(
                 unused,
                 OwnershipState {
@@ -1891,10 +2058,18 @@ pub(super) mod tests {
             let foe_raid = running(&world).raid_seat_of(SECOND).expect("a seat").0;
             let foe_team = running(&world).team_of(SECOND).expect("a team");
             let set = &mut running_mut(&mut world).structures;
-            if let Some(structure) = set.structures.iter_mut().find(|structure| structure.number == ballista) {
+            if let Some(structure) = set
+                .structures
+                .iter_mut()
+                .find(|structure| structure.number == ballista)
+            {
                 structure.raid = foe_raid;
             }
-            if let Some(run) = set.turrets.iter_mut().find(|run| run.body.number == ballista) {
+            if let Some(run) = set
+                .turrets
+                .iter_mut()
+                .find(|run| run.body.number == ballista)
+            {
                 run.body.structure.side = foe_team;
             }
             (world, first, turrets)
@@ -1938,10 +2113,10 @@ pub(super) mod tests {
 
         #[test]
         fn a_turret_hit_on_a_foe_turret_hurts_it_and_counts_as_siege_damage_once() {
+            use crate::world::outpost_rush::tests::board_value;
             use nw_content::warboard_stats::{
                 DAMAGE_TO_OTHER, DAMAGE_WITH_SIEGE_WEAPONS, SCORE, TOTAL_DAMAGE_DEALT,
             };
-            use crate::world::outpost_rush::tests::board_value;
             let (mut world, _, [_, (ballista, _)]) = foe_ballista_world();
             let index = running(&world)
                 .structures
@@ -1958,10 +2133,20 @@ pub(super) mod tests {
                 .find(|structure| structure.number == ballista)
                 .map(|structure| structure.health)
                 .expect("the ballista");
-            assert!((health - (TURRET_HEALTH - SIEGE_HIT as f32)).abs() < 1e-3, "the structure's health");
+            assert!(
+                (health - (TURRET_HEALTH - SIEGE_HIT as f32)).abs() < 1e-3,
+                "the structure's health"
+            );
             assert_eq!(board_value(&world, FIRST, DAMAGE_TO_OTHER), SIEGE_HIT);
-            assert_eq!(board_value(&world, FIRST, DAMAGE_WITH_SIEGE_WEAPONS), SIEGE_HIT);
-            assert_eq!(board_value(&world, FIRST, TOTAL_DAMAGE_DEALT), SIEGE_HIT, "once in the total");
+            assert_eq!(
+                board_value(&world, FIRST, DAMAGE_WITH_SIEGE_WEAPONS),
+                SIEGE_HIT
+            );
+            assert_eq!(
+                board_value(&world, FIRST, TOTAL_DAMAGE_DEALT),
+                SIEGE_HIT,
+                "once in the total"
+            );
             assert_eq!(
                 board_value(&world, FIRST, SCORE) - score_before,
                 SIEGE_HIT_SCORE,
@@ -2114,13 +2299,20 @@ pub(super) mod tests {
                 VAT_PLACE,
                 gde_ref,
                 false,
-                (TURRET_HEALTH, TURRET_BUILD_MS as f32 / MS_PER_SECOND, Vec::new()),
+                (
+                    TURRET_HEALTH,
+                    TURRET_BUILD_MS as f32 / MS_PER_SECOND,
+                    Vec::new(),
+                ),
             )
             .expect("a vat structure");
             structure.raid = raid;
             let structure = world.place_outpost_structure(structure);
             let number = structure.number;
-            running_mut(&mut world).structures.structures.push(structure);
+            running_mut(&mut world)
+                .structures
+                .structures
+                .push(structure);
             let first = world.player_by_number(FIRST).expect("first");
             let second = world.player_by_number(SECOND).expect("second");
             if let Some(mut player) = world.world.get_mut::<Player>(first) {
@@ -2152,10 +2344,14 @@ pub(super) mod tests {
         }
 
         fn card_of(world: &SimWorld, number: u64) -> Option<String> {
-            world.stations.members(number)?.iter().find_map(|member| match &member.state {
-                MemberState::GdeMetadata(card) => card.asset.map(|asset| hex::encode(asset.id)),
-                _ => None,
-            })
+            world
+                .stations
+                .members(number)?
+                .iter()
+                .find_map(|member| match &member.state {
+                    MemberState::GdeMetadata(card) => card.asset.map(|asset| hex::encode(asset.id)),
+                    _ => None,
+                })
         }
 
         fn idle_use_interact(enabled: bool) -> MemberState {
@@ -2186,12 +2382,21 @@ pub(super) mod tests {
         #[test]
         fn a_built_vat_is_a_dropper_of_its_owner_team_with_its_use_interact_enabled() {
             let (mut world, _, (vat, _)) = vat_world();
-            assert!(dropper_of(&world, vat).is_none(), "a foundation is no dropper");
+            assert!(
+                dropper_of(&world, vat).is_none(),
+                "a foundation is no dropper"
+            );
             build_all(&mut world, NOW);
             let run = dropper_of(&world, vat).expect("the built vat is a dropper");
-            assert_eq!(run.body.structure.side, 0, "the first player's team owns outpost A");
+            assert_eq!(
+                run.body.structure.side, 0,
+                "the first player's team owns outpost A"
+            );
             assert!(!run.body.broken);
-            assert_eq!(member_of(&world, vat, VAT_USE_INTERACT), idle_use_interact(true));
+            assert_eq!(
+                member_of(&world, vat, VAT_USE_INTERACT),
+                idle_use_interact(true)
+            );
             assert_eq!(
                 member_of(&world, vat, VAT_BUILD_INTERACT),
                 MemberState::Interact(InteractState {
@@ -2205,19 +2410,30 @@ pub(super) mod tests {
 
         /// The retail use of `OPR_TEST3` (1714.326 to 1715.792 s) on the retail vat.
         #[test]
-        fn the_owner_team_uses_a_vat_that_pours_drops_the_war_barrel_ahead_and_opens_its_fire_area() {
+        fn the_owner_team_uses_a_vat_that_pours_drops_the_war_barrel_ahead_and_opens_its_fire_area()
+        {
             let (mut world, [first, second], (vat, vat_ref)) = vat_world();
             build_all(&mut world, NOW);
             world.take_messages();
             let used_ms = world.server_ms;
             assert!(world.turret_interaction(second, SECOND, trigger_request(vat_ref), &[], NOW));
-            assert!(answered(&world.take_messages(), SECOND, USE_REFUSED), "the other team");
+            assert!(
+                answered(&world.take_messages(), SECOND, USE_REFUSED),
+                "the other team"
+            );
             assert!(world.turret_interaction(first, FIRST, trigger_request(vat_ref), &[], NOW));
             let outgoing = world.take_messages();
             assert!(answered(&outgoing, FIRST, USE_ACCEPTED), "the owner team");
             let content = Arc::clone(&world.content);
-            let kind = content.war_forts.structure_kind(&asset(VAT)).expect("the vat kind");
-            let facet = dropper_of(&world, vat).expect("dropper").body.structure.facet_entity();
+            let kind = content
+                .war_forts
+                .structure_kind(&asset(VAT))
+                .expect("the vat kind");
+            let facet = dropper_of(&world, vat)
+                .expect("dropper")
+                .body
+                .structure
+                .facet_entity();
             let trigger = kind.trigger.expect("a trigger").target(facet);
             assert!(
                 messages_to(&outgoing, FIRST).iter().any(|message| matches!(message,
@@ -2250,14 +2466,26 @@ pub(super) mod tests {
                 (Some(raid), Some(4), Some(USER_FACTION)),
                 "the team's raid, rule 4 and the user's faction"
             );
-            assert_eq!(owned.guild_id, Some([0; 16]), "a user with no company names none");
+            assert_eq!(
+                owned.guild_id,
+                Some([0; 16]),
+                "a user with no company names none"
+            );
 
             world.tick_turrets(NOW + POUR_MS - 1);
-            assert!(running(&world).structures.uses.first_drop().is_none(), "still pouring");
+            assert!(
+                running(&world).structures.uses.first_drop().is_none(),
+                "still pouring"
+            );
             world.take_messages();
             world.tick_turrets(NOW + POUR_MS);
             assert!(POUR_MS.abs_diff(RETAIL_BARREL_MS) <= RETAIL_SLACK_MS);
-            let spawner = kind.drop.as_ref().expect("a drop").spawner_facet.target(facet);
+            let spawner = kind
+                .drop
+                .as_ref()
+                .expect("a drop")
+                .spawner_facet
+                .target(facet);
             assert!(
                 messages_to(&world.take_messages(), SECOND).iter().any(|message| matches!(message,
                     ServerMessage::CombatEffect(CombatEffectMsg::ProjectileServerSpawn { header }) if header.target == spawner)),
@@ -2271,15 +2499,30 @@ pub(super) mod tests {
                 }),
                 "the pour completes"
             );
-            let (barrel, land_ms, at) = running(&world).structures.uses.first_drop().expect("a falling barrel");
-            assert_eq!(card_of(&world, barrel).as_deref(), Some(BARREL_ASSET), "the war T1 barrel");
+            let (barrel, land_ms, at) = running(&world)
+                .structures
+                .uses
+                .first_drop()
+                .expect("a falling barrel");
+            assert_eq!(
+                card_of(&world, barrel).as_deref(),
+                Some(BARREL_ASSET),
+                "the war T1 barrel"
+            );
             assert!(
-                (at.x - RETAIL_BARREL[0]).abs() < PLACE_PRECISION_M && (at.y - RETAIL_BARREL[1]).abs() < PLACE_PRECISION_M,
+                (at.x - RETAIL_BARREL[0]).abs() < PLACE_PRECISION_M
+                    && (at.y - RETAIL_BARREL[1]).abs() < PLACE_PRECISION_M,
                 "2.79 m ahead of the vat as retail: {at:?}"
             );
-            assert!((at.z - FLOOR_Z).abs() < f32::EPSILON, "it falls to the floor");
+            assert!(
+                (at.z - FLOOR_Z).abs() < f32::EPSILON,
+                "it falls to the floor"
+            );
             let barrel_owner = ownership_of(&world, barrel, 1);
-            assert_eq!((barrel_owner.raid_id, barrel_owner.faction_type), (Some(raid), Some(USER_FACTION)));
+            assert_eq!(
+                (barrel_owner.raid_id, barrel_owner.faction_type),
+                (Some(raid), Some(USER_FACTION))
+            );
             assert!(
                 (land_ms - NOW).abs_diff(RETAIL_AREA_MS) <= RETAIL_SLACK_MS,
                 "the area opens about when retail's did: {} ms",
@@ -2287,10 +2530,21 @@ pub(super) mod tests {
             );
 
             world.tick_turrets(land_ms);
-            let (area, centre) = running(&world).structures.uses.first_area().expect("the fire area");
+            let (area, centre) = running(&world)
+                .structures
+                .uses
+                .first_area()
+                .expect("the fire area");
             assert!(running(&world).structures.uses.first_drop().is_none());
-            assert_eq!(card_of(&world, area).as_deref(), Some(AREA_ASSET), "the war T1 area");
-            assert!((centre.x - at.x).abs() < f32::EPSILON && (centre.y - at.y).abs() < f32::EPSILON, "where it landed");
+            assert_eq!(
+                card_of(&world, area).as_deref(),
+                Some(AREA_ASSET),
+                "the war T1 area"
+            );
+            assert!(
+                (centre.x - at.x).abs() < f32::EPSILON && (centre.y - at.y).abs() < f32::EPSILON,
+                "where it landed"
+            );
             assert_eq!(ownership_of(&world, area, 3).raid_id, Some(raid));
 
             world.tick_turrets(NOW + DROPPER_USE_MS - 1);
@@ -2308,10 +2562,28 @@ pub(super) mod tests {
             );
             assert!(dropper_of(&world, vat).is_some_and(|run| run.uses.user_number().is_none()));
             world.take_messages();
-            assert!(world.turret_interaction(first, FIRST, trigger_request(vat_ref), &[], NOW + DROPPER_USE_MS));
-            assert!(answered(&world.take_messages(), FIRST, USE_REFUSED), "on cooldown");
-            assert!(world.turret_interaction(first, FIRST, trigger_request(vat_ref), &[], NOW + DROPPER_COOLDOWN_MS));
-            assert!(answered(&world.take_messages(), FIRST, USE_ACCEPTED), "free again after 20 s");
+            assert!(world.turret_interaction(
+                first,
+                FIRST,
+                trigger_request(vat_ref),
+                &[],
+                NOW + DROPPER_USE_MS
+            ));
+            assert!(
+                answered(&world.take_messages(), FIRST, USE_REFUSED),
+                "on cooldown"
+            );
+            assert!(world.turret_interaction(
+                first,
+                FIRST,
+                trigger_request(vat_ref),
+                &[],
+                NOW + DROPPER_COOLDOWN_MS
+            ));
+            assert!(
+                answered(&world.take_messages(), FIRST, USE_ACCEPTED),
+                "free again after 20 s"
+            );
         }
 
         /// A turret shot of the vat's own team meets the built vat and stops there unharmed; a
@@ -2331,7 +2603,11 @@ pub(super) mod tests {
             let own = met(&mut world, FIRST).expect("the vat");
             assert_eq!(
                 own,
-                TurretShotTarget::Structure { number: vat, facet: facet_of_raw_id(&vat_ref), foe: false }
+                TurretShotTarget::Structure {
+                    number: vat,
+                    facet: facet_of_raw_id(&vat_ref),
+                    foe: false
+                }
             );
             assert_eq!(own.held(), None, "its own team's shot does it no harm");
             let foe = met(&mut world, SECOND).expect("the vat");
@@ -2348,7 +2624,11 @@ pub(super) mod tests {
             let (mut world, [first, _], (vat, vat_ref)) = vat_world();
             join_company(&mut world, first, COMPANY);
             world.tick_outpost_rush();
-            assert_eq!(world.take_company_reads(), vec![COMPANY], "the match asks for it");
+            assert_eq!(
+                world.take_company_reads(),
+                vec![COMPANY],
+                "the match asks for it"
+            );
             world.companies_read(&[listing(COMPANY, COMPANY_NAME)]);
             build_all(&mut world, NOW);
             assert!(world.turret_interaction(first, FIRST, trigger_request(vat_ref), &[], NOW));
@@ -2369,13 +2649,31 @@ pub(super) mod tests {
             });
             assert_eq!(ruined, Some(true));
             let run = dropper_of(&world, vat).expect("the dropper");
-            assert!(run.body.broken && run.uses.user_number().is_none(), "broken, its use stopped");
-            assert_eq!(member_of(&world, vat, VAT_USE_INTERACT), idle_use_interact(false));
+            assert!(
+                run.body.broken && run.uses.user_number().is_none(),
+                "broken, its use stopped"
+            );
+            assert_eq!(
+                member_of(&world, vat, VAT_USE_INTERACT),
+                idle_use_interact(false)
+            );
             world.tick_turrets(NOW + POUR_MS);
-            assert!(running(&world).structures.uses.first_drop().is_none(), "no barrel");
+            assert!(
+                running(&world).structures.uses.first_drop().is_none(),
+                "no barrel"
+            );
             world.take_messages();
-            assert!(world.turret_interaction(first, FIRST, trigger_request(vat_ref), &[], NOW + POUR_MS));
-            assert!(answered(&world.take_messages(), FIRST, USE_REFUSED), "disabled");
+            assert!(world.turret_interaction(
+                first,
+                FIRST,
+                trigger_request(vat_ref),
+                &[],
+                NOW + POUR_MS
+            ));
+            assert!(
+                answered(&world.take_messages(), FIRST, USE_REFUSED),
+                "disabled"
+            );
             with_set(&mut world, |_, set| {
                 let structure = set
                     .structures
@@ -2385,12 +2683,31 @@ pub(super) mod tests {
                 structure.phase = Phase::Foundation;
             });
             build_all(&mut world, NOW + TURRET_BUILD_MS);
-            assert!(dropper_of(&world, vat).is_some_and(|run| !run.body.broken), "freed at the rebuild");
-            assert_eq!(running(&world).structures.droppers.len(), 1, "one dropper a vat");
-            assert_eq!(member_of(&world, vat, VAT_USE_INTERACT), idle_use_interact(true));
+            assert!(
+                dropper_of(&world, vat).is_some_and(|run| !run.body.broken),
+                "freed at the rebuild"
+            );
+            assert_eq!(
+                running(&world).structures.droppers.len(),
+                1,
+                "one dropper a vat"
+            );
+            assert_eq!(
+                member_of(&world, vat, VAT_USE_INTERACT),
+                idle_use_interact(true)
+            );
             world.take_messages();
-            assert!(world.turret_interaction(first, FIRST, trigger_request(vat_ref), &[], NOW + TURRET_BUILD_MS));
-            assert!(answered(&world.take_messages(), FIRST, USE_ACCEPTED), "usable again");
+            assert!(world.turret_interaction(
+                first,
+                FIRST,
+                trigger_request(vat_ref),
+                &[],
+                NOW + TURRET_BUILD_MS
+            ));
+            assert!(
+                answered(&world.take_messages(), FIRST, USE_ACCEPTED),
+                "usable again"
+            );
         }
 
         #[test]
@@ -2404,13 +2721,31 @@ pub(super) mod tests {
             });
             let run = dropper_of(&world, vat).expect("the dropper");
             assert_eq!(run.body.structure.side, 1, "the second player's team");
-            assert!(run.uses.user_number().is_none(), "the first team's use stops");
+            assert!(
+                run.uses.user_number().is_none(),
+                "the first team's use stops"
+            );
             world.tick_turrets(NOW + POUR_MS);
-            assert!(running(&world).structures.uses.first_drop().is_none(), "no barrel");
+            assert!(
+                running(&world).structures.uses.first_drop().is_none(),
+                "no barrel"
+            );
             world.take_messages();
-            assert!(world.turret_interaction(first, FIRST, trigger_request(vat_ref), &[], NOW + POUR_MS));
+            assert!(world.turret_interaction(
+                first,
+                FIRST,
+                trigger_request(vat_ref),
+                &[],
+                NOW + POUR_MS
+            ));
             assert!(answered(&world.take_messages(), FIRST, USE_REFUSED));
-            assert!(world.turret_interaction(second, SECOND, trigger_request(vat_ref), &[], NOW + POUR_MS));
+            assert!(world.turret_interaction(
+                second,
+                SECOND,
+                trigger_request(vat_ref),
+                &[],
+                NOW + POUR_MS
+            ));
             assert!(answered(&world.take_messages(), SECOND, USE_ACCEPTED));
         }
     }

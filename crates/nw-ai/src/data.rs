@@ -943,7 +943,11 @@ mod tests {
             hit_from(Some(-150.0)),
             (BACK_FRAGMENT, Some(FragmentLength::Seconds(BACK_S)))
         );
-        assert_eq!(hit_from(None).0, stagger.fragment, "no hit: its own fragment");
+        assert_eq!(
+            hit_from(None).0,
+            stagger.fragment,
+            "no hit: its own fragment"
+        );
     }
 
     fn gore() -> CageAction {

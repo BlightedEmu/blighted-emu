@@ -536,8 +536,8 @@ mod tests {
         // entry holds). A play the mob left early only bounds the length from below.
         let table = CreatureAnimations::load(&crate::layout::repo_layout()).expect("table");
         for play in &RETAIL_PLAYS {
-            let asset = <[u8; ASSET_ID_LEN]>::try_from(hex::decode(play.asset).expect("hex"))
-                .expect("len");
+            let asset =
+                <[u8; ASSET_ID_LEN]>::try_from(hex::decode(play.asset).expect("hex")).expect("len");
             let ticks = table
                 .get(&asset)
                 .and_then(|creature| creature.fragment_ticks(play.fragment, play.tail))
@@ -545,7 +545,12 @@ mod tests {
             if play.played_out {
                 assert_eq!(ticks, play.ticks, "{} {}", play.asset, play.fragment);
             } else {
-                assert!(ticks >= play.ticks, "{} {}: {ticks}", play.asset, play.fragment);
+                assert!(
+                    ticks >= play.ticks,
+                    "{} {}: {ticks}",
+                    play.asset,
+                    play.fragment
+                );
             }
         }
     }

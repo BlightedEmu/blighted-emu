@@ -60,10 +60,10 @@ use nw_messages::{GameModeServerMsg, ServerMessage};
 use nw_world::catacomb_tiles::turned_point;
 
 use super::super::attack::Vitals;
-use super::board;
 use super::super::game_mode_entity::{PLAYING_STATUS, full, participant_lists};
 use super::super::queue::participant_header;
 use super::super::{Body, Player, SimWorld};
+use super::board;
 use super::{
     CLEARED_ROOM_STATE, CatacombRun, DYNAMIC_DIFFICULTY_VALUE, RESPAWNS_PER_PARTICIPANT,
     RESPAWNS_REMAINING_VALUE, THIRD_RUN_VALUE, run_timers, with_flag,
@@ -515,7 +515,10 @@ impl SimWorld {
         let mut states: Vec<(u64, GameModeState)> = Vec::new();
         let mut extracted_now = Vec::new();
         if run.end.started_ms.is_some() && run.end.state < RUN_ENDED_STATE {
-            states.extend(run.status_changes(&seen).map(|change| (mode_entity, change)));
+            states.extend(
+                run.status_changes(&seen)
+                    .map(|change| (mode_entity, change)),
+            );
             states.extend(run.start_close(server_ms));
             states.extend(run.extraction_changes(&tops, server_ms));
             let (changes, extracted) = run.exits(&tops, &seen, server_ms);
@@ -545,13 +548,18 @@ impl SimWorld {
         if let Some((_, change, _)) = end {
             states.push((mode_entity, change));
         }
-        states.extend(run.victory_change(server_ms).map(|change| (mode_entity, change)));
+        states.extend(
+            run.victory_change(server_ms)
+                .map(|change| (mode_entity, change)),
+        );
         let god_eyes: Vec<(Entity, u64)> = {
             let (due, waiting) = std::mem::take(&mut run.end.god_eyes_due)
                 .into_iter()
                 .partition(|(_, _, at)| *at <= server_ms);
             run.end.god_eyes_due = waiting;
-            due.into_iter().map(|(entity, number, _)| (entity, number)).collect()
+            due.into_iter()
+                .map(|(entity, number, _)| (entity, number))
+                .collect()
         };
         let leave_now = run.end.leave_ms.is_some_and(|at| at <= server_ms);
         let flags: Vec<(Entity, [u8; PARTICIPANT_FLAGS_LEN])> = extracted_now
@@ -948,7 +956,9 @@ impl CatacombRun {
         let mut change = GameModeState::default();
         if reason == EndReason::NoRespawnPoints && self.end.state < RUN_EXTRACTION_STATE {
             // Observed: the run goes through state 2 to 3 (`CATACOMBS` 947.915 s).
-            self.end.timers.retain(|(key, _)| *key == super::INSTANCE_END_TIMER);
+            self.end
+                .timers
+                .retain(|(key, _)| *key == super::INSTANCE_END_TIMER);
             self.end
                 .timers
                 .push((EXTRACTION_TIMER, server_ms.saturating_add(EXTRACTION_MS)));
@@ -961,7 +971,11 @@ impl CatacombRun {
             .enumerate()
             .map(|(currency, pool)| (currency, payout(*pool, extracted, participants)))
             .collect();
-        set_keyed(&mut self.end.values, PARTICIPANTS_VALUE, participants as u64);
+        set_keyed(
+            &mut self.end.values,
+            PARTICIPANTS_VALUE,
+            participants as u64,
+        );
         for (currency, amount) in &payouts {
             if let Some((_, _, key)) = CURRENCIES.get(*currency) {
                 set_keyed(&mut self.end.values, *key, u64::from(*amount));
@@ -996,9 +1010,9 @@ impl CatacombRun {
 #[cfg(test)]
 mod tests {
     use super::super::tests::{PLAYER, arrived_run, held_state, stand_in_room};
+    use super::*;
     use nw_formats::objectstream::lowercase_crc32;
     use nw_messages::MemberState;
-    use super::*;
 
     /// The server ms the run starts at in these tests.
     const START_MS: u64 = 1_000_000;
@@ -1040,7 +1054,11 @@ mod tests {
         let run = world.catacomb_run_mut().expect("run");
         let (values, timers) = run.end.start(1, START_MS, None);
         assert_eq!(values[1], (RESPAWNS_REMAINING_VALUE, 3));
-        assert_eq!(timers.len(), 1, "an instance with no end has the run timer alone");
+        assert_eq!(
+            timers.len(),
+            1,
+            "an instance with no end has the run timer alone"
+        );
         run.progress.started = true;
         let boss = run
             .layout
@@ -1089,7 +1107,12 @@ mod tests {
                 .clone()
         };
         assert!(!log(&world).has_change(), "not extracted");
-        world.catacomb_run_mut().expect("run").end.extracted.push(PLAYER);
+        world
+            .catacomb_run_mut()
+            .expect("run")
+            .end
+            .extracted
+            .push(PLAYER);
         world.give_catacomb_boss_events();
         let member = log(&world).take_member(1).expect("two entries");
         let MemberState::GameEvents(state) = member.state else {
@@ -1148,7 +1171,10 @@ mod tests {
         assert_eq!(run.end.value(DYNAMIC_DIFFICULTY_VALUE), 1);
         let held = held_state(&world, mode_entity);
         let values = held.values.expect("values").elements;
-        assert!(values.contains(&(DYNAMIC_DIFFICULTY_VALUE, 1)), "{values:x?}");
+        assert!(
+            values.contains(&(DYNAMIC_DIFFICULTY_VALUE, 1)),
+            "{values:x?}"
+        );
         let icon = run.progress.icons.last().expect("an icon");
         assert_eq!(icon.key, EXTRACTION_POINT_ICON);
         let room = &run.layout.rooms[boss];
@@ -1211,7 +1237,11 @@ mod tests {
         assert_eq!(payouts, vec![(0, 741), (1, 2)]);
         assert_eq!(change.script_state, Some(RUN_ENDED_STATE));
         let values = change.values.expect("values").elements;
-        for value in [(PARTICIPANTS_VALUE, 1), (0xc946_10a6, 741), (0xd638_d8aa, 2)] {
+        for value in [
+            (PARTICIPANTS_VALUE, 1),
+            (0xc946_10a6, 741),
+            (0xd638_d8aa, 2),
+        ] {
             assert!(values.contains(&value), "{values:x?}");
         }
         let timers = change.timers.expect("timers").elements;
@@ -1219,7 +1249,13 @@ mod tests {
         assert_eq!(run.victory_change(now), None);
         now += VICTORY_DELAY_MS;
         let victory = run.victory_change(now).expect("the victory");
-        assert!(victory.values.expect("values").elements.contains(&(THIRD_RUN_VALUE, 1)));
+        assert!(
+            victory
+                .values
+                .expect("values")
+                .elements
+                .contains(&(THIRD_RUN_VALUE, 1))
+        );
         let timers = victory.timers.expect("timers").elements;
         assert!(!timers.iter().any(|(key, _)| *key == VICTORY_TIMER));
         assert!(timers.contains(&(LEAVE_TIMER, now + LEAVE_DELAY_MS)));
@@ -1244,12 +1280,22 @@ mod tests {
         let mut now = START_MS + 60_000;
         for left in [2, 1, 0] {
             let change = run.status_changes(&seen(DEAD_STATUS)).expect("a death");
-            assert!(change.values.expect("values").elements.contains(&(RESPAWNS_REMAINING_VALUE, left)));
+            assert!(
+                change
+                    .values
+                    .expect("values")
+                    .elements
+                    .contains(&(RESPAWNS_REMAINING_VALUE, left))
+            );
             assert!(!run.end.out_of_respawns);
-            assert!(run.status_changes(&seen(PLAYING_STATUS)).is_some(), "respawned");
+            assert!(
+                run.status_changes(&seen(PLAYING_STATUS)).is_some(),
+                "respawned"
+            );
         }
         assert_eq!(run.status_changes(&seen(PLAYING_STATUS)), None, "no change");
-        run.status_changes(&seen(DEATHS_DOOR_STATUS)).expect("downed");
+        run.status_changes(&seen(DEATHS_DOOR_STATUS))
+            .expect("downed");
         run.status_changes(&seen(DEAD_STATUS)).expect("dead");
         assert!(run.end.out_of_respawns);
         run.end_checks(&seen(DEAD_STATUS), now);
@@ -1291,7 +1337,10 @@ mod tests {
         timed.progress.participants.push(other);
         timed.end.extracted.push(PLAYER + 1);
         timed.end_checks(&seen, START_MS + 10);
-        assert_eq!(timed.end.end_due.map(|(reason, _)| reason), Some(EndReason::ExtractionOver));
+        assert_eq!(
+            timed.end.end_due.map(|(reason, _)| reason),
+            Some(EndReason::ExtractionOver)
+        );
         let ends = START_MS + super::super::RUN_DURATION_MS;
         run.end_checks(&seen, ends - 1);
         assert_eq!(run.end.end_due, None);
@@ -1343,11 +1392,10 @@ mod tests {
         let (mode_entity, _) = run.progress.entity.expect("run entity");
         let held = held_state(&world, mode_entity);
         assert_eq!(
-            held.statuses
-                .and_then(|list| match list {
-                    ReplicatedList::Full(full) => Some(full.elements),
-                    ReplicatedList::Changes(_) => None,
-                }),
+            held.statuses.and_then(|list| match list {
+                ReplicatedList::Full(full) => Some(full.elements),
+                ReplicatedList::Changes(_) => None,
+            }),
             Some(Vec::new())
         );
         let stops = world
@@ -1418,7 +1466,10 @@ mod tests {
             let group = objects
                 .group(
                     number,
-                    super::super::super::slots::Slot { interest: 1, new: true },
+                    super::super::super::slots::Slot {
+                        interest: 1,
+                        new: true,
+                    },
                     &mut std::collections::HashMap::new(),
                 )
                 .expect("group");

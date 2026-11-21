@@ -1089,9 +1089,8 @@ mod tests {
     /// event; the player and the read request of the note.
     fn lore_reader(note: LoreNote) -> (SimWorld, Entity, InteractionRequest) {
         let mut world = world_with_spawns(Vec::new());
-        let indexes =
-            AchievementIndexes::build([(note.achievement.clone(), ACHIEVEMENT_BIT)])
-                .with_game_events([(note.achievement.clone(), READ_EVENT.to_owned())]);
+        let indexes = AchievementIndexes::build([(note.achievement.clone(), ACHIEVEMENT_BIT)])
+            .with_game_events([(note.achievement.clone(), READ_EVENT.to_owned())]);
         world.achievement_rules = AchievementRules::of(&indexes, &[]);
         let note_at = Position {
             x: 0.0,
@@ -1127,8 +1126,11 @@ mod tests {
 
     #[test]
     fn a_lore_read_sets_the_achievement_its_row_names() {
-        let (mut world, entity, request) =
-            lore_reader(LoreNote::of(PLAQUE_ID, PLAQUE_TITLE, Some(PLAQUE_ACHIEVEMENT)));
+        let (mut world, entity, request) = lore_reader(LoreNote::of(
+            PLAQUE_ID,
+            PLAQUE_TITLE,
+            Some(PLAQUE_ACHIEVEMENT),
+        ));
         world.read_lore(entity, PLAYER, request, PLAQUE_TITLE.as_bytes(), NOW);
         let player = world.world.get::<Player>(entity).expect("player");
         assert!(
@@ -1143,7 +1145,11 @@ mod tests {
     fn a_first_lore_read_keeps_the_note_and_fires_its_game_event_once() {
         let (mut world, entity, request) = lore_reader(LoreNote::of(LORE_ID, TITLE, None));
         assert_eq!(
-            world.content.lore_notes.titled(TITLE).map(|note| note.achievement.as_str()),
+            world
+                .content
+                .lore_notes
+                .titled(TITLE)
+                .map(|note| note.achievement.as_str()),
             Some(ACHIEVEMENT),
             "a row without an achievement unlocks its title"
         );

@@ -640,7 +640,11 @@ fn assign_creatures(encounter: &mut Encounter, points: &[EncounterPoint], bodies
         })
         .map(|point| (point, name_words(&point.vitals_id)))
         .collect();
-    let holders = |word: &String| free.iter().filter(|(_, words)| words.contains(word)).count();
+    let holders = |word: &String| {
+        free.iter()
+            .filter(|(_, words)| words.contains(word))
+            .count()
+    };
     let mut slices: Vec<&mut TargetSlice> = encounter
         .targets
         .iter_mut()
@@ -1432,7 +1436,10 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
             &mut self.report.missing_slices,
         )?;
         if let Some(script) = &script {
-            let has_spawner = script.entities.iter().any(|entity| entity.spawner.is_some());
+            let has_spawner = script
+                .entities
+                .iter()
+                .any(|entity| entity.spawner.is_some());
             if script.has_vitals() || has_spawner {
                 self.bodies.can_spawn.insert(slice.path.clone());
             }
@@ -1456,9 +1463,12 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
             ),
             None => (None, Vec::new(), Vec::new()),
         };
-        let detectable_radius_m = script
-            .as_ref()
-            .and_then(|script| script.entities.iter().find_map(|entity| entity.detectable_radius_m));
+        let detectable_radius_m = script.as_ref().and_then(|script| {
+            script
+                .entities
+                .iter()
+                .find_map(|entity| entity.detectable_radius_m)
+        });
         let level_of = |vitals_id: &str| {
             self.mobs
                 .levels
@@ -1582,7 +1592,11 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
         script: &SliceScript,
     ) -> Result<Vec<PickedSpawner>, DungeonScriptsBuildError> {
         let mut choices = Vec::new();
-        for owner in script.entities.iter().filter(|entity| entity.randomizer.is_some()) {
+        for owner in script
+            .entities
+            .iter()
+            .filter(|entity| entity.randomizer.is_some())
+        {
             for child in script
                 .entities
                 .iter()
@@ -1602,8 +1616,11 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
                 let Some(variant) = self.mob_of(&slice, NESTED_DEPTH)?.variant else {
                     continue;
                 };
-                let nested =
-                    read_script(&mut *self.source, &slice.path, &mut self.report.missing_slices)?;
+                let nested = read_script(
+                    &mut *self.source,
+                    &slice.path,
+                    &mut self.report.missing_slices,
+                )?;
                 let point = nested.as_ref().and_then(|nested| {
                     nested
                         .entities
@@ -1638,16 +1655,24 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
         script: &SliceScript,
     ) -> Result<Vec<(f32, [f32; 3], VitalsVariant)>, DungeonScriptsBuildError> {
         let mut mobs = Vec::new();
-        for (id, event) in script.entities.iter().filter_map(|entity| entity.gathering_start) {
-            let Some(timeline) = script.entity(id).filter(|_| event == TriggerEvent::Trigger) else {
+        for (id, event) in script
+            .entities
+            .iter()
+            .filter_map(|entity| entity.gathering_start)
+        {
+            let Some(timeline) = script.entity(id).filter(|_| event == TriggerEvent::Trigger)
+            else {
                 continue;
             };
-            let Some(asset) = timeline.replicated.iter().find_map(|component| {
-                match &component.kind {
-                    ReplicatedKind::Timeline { asset: Some(asset) } => Some(asset.path.clone()),
-                    _ => None,
-                }
-            }) else {
+            let Some(asset) =
+                timeline
+                    .replicated
+                    .iter()
+                    .find_map(|component| match &component.kind {
+                        ReplicatedKind::Timeline { asset: Some(asset) } => Some(asset.path.clone()),
+                        _ => None,
+                    })
+            else {
                 continue;
             };
             let Some(root) = self.source.root(&asset)? else {
@@ -1656,12 +1681,11 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
                 }
                 continue;
             };
-            let starts = timeline_clip_starts(&root).map_err(|source| {
-                DungeonScriptsBuildError::Script {
+            let starts =
+                timeline_clip_starts(&root).map_err(|source| DungeonScriptsBuildError::Script {
                     path: asset.clone(),
                     source,
-                }
-            })?;
+                })?;
             for (layer, entity) in &timeline.timeline_layers {
                 let Some((_, times)) = starts.iter().find(|(known, _)| known == layer) else {
                     continue;
@@ -1696,13 +1720,18 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
         &mut self,
         script: &SliceScript,
     ) -> Result<Option<(u32, AreaRefill, HazardObject)>, DungeonScriptsBuildError> {
-        for entity in script.entities.iter().filter(|entity| !entity.waits_for_trigger()) {
+        for entity in script
+            .entities
+            .iter()
+            .filter(|entity| !entity.waits_for_trigger())
+        {
             let (Some(spawner), Some(rules)) = (&entity.spawner, entity.rules) else {
                 continue;
             };
-            let (Some(refill), Some(object)) =
-                (area_refill(script, entity, spawner), named(spawner.slice.as_ref()))
-            else {
+            let (Some(refill), Some(object)) = (
+                area_refill(script, entity, spawner),
+                named(spawner.slice.as_ref()),
+            ) else {
                 continue;
             };
             let object = AssetRef {
@@ -1712,8 +1741,11 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
             if self.mob_of(&object, NESTED_DEPTH)?.variant.is_some() {
                 continue;
             }
-            let Some(object_script) =
-                read_script(&mut *self.source, &object.path, &mut self.report.missing_slices)?
+            let Some(object_script) = read_script(
+                &mut *self.source,
+                &object.path,
+                &mut self.report.missing_slices,
+            )?
             else {
                 continue;
             };
@@ -2304,15 +2336,14 @@ const fn event_value(event: nw_world::slice_triggers::TriggerEvent) -> u32 {
 mod tests {
     use nw_formats::objectstream::UUID_SIZE;
     use nw_world::level_script::{
+        AREA_SPAWNER_TYPE, AREA_STATUS_EFFECT_TYPE, CLIP_START_NAME, DETECTABLE_OBJECT_TYPE,
+        DETECTION_VOLUME_TYPE, LAYER_ASSIGNMENTS_NAME, LAYER_ID_NAME, PREFAB_SPAWN_RANDOMIZER_TYPE,
+        SPAWNER_SETTINGS_TYPE, TIMELINE_CLIPS_NAME, TIMELINE_LAYERS_NAME, TIMELINE_TYPE,
+    };
+    use nw_world::level_script::{
         CREATURE_VITALS_NAME, CREATURE_VITALS_TYPE, DELAYED_EVENT_TYPE, DESTROY_GDE_TYPE,
         ENCOUNTER_MANAGER_TYPE, ENCOUNTER_STAGE_TYPE, GATHERABLE_CONTROLLER_TYPE,
         POINT_SPAWNER_TYPE, PREFAB_SPAWNER_TYPE, VARIANT_PROVIDER_TYPE, objective_type,
-    };
-    use nw_world::level_script::{
-        AREA_SPAWNER_TYPE, AREA_STATUS_EFFECT_TYPE, CLIP_START_NAME, DETECTABLE_OBJECT_TYPE,
-        DETECTION_VOLUME_TYPE, LAYER_ASSIGNMENTS_NAME, LAYER_ID_NAME,
-        PREFAB_SPAWN_RANDOMIZER_TYPE, SPAWNER_SETTINGS_TYPE, TIMELINE_CLIPS_NAME,
-        TIMELINE_LAYERS_NAME, TIMELINE_TYPE,
     };
 
     use super::*;
@@ -2717,7 +2748,12 @@ mod tests {
     fn a_trigger_area_entity_gives_the_levels_trigger_area_in_world_metres() {
         const START_AT: [f32; 3] = [365.0, 92.0, -26.0];
         const START_PLACE: [f32; 3] = [577.0, 485.0, 343.0];
-        let floats = |values: &[f32]| values.iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>();
+        let floats = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|v| v.to_be_bytes())
+                .collect::<Vec<_>>()
+        };
         let start_box = typed(
             named(
                 "element",
@@ -2728,14 +2764,21 @@ mod tests {
             ),
             nw_world::level_script::BOX_SHAPE_TYPE,
         );
-        let trigger = typed(named("element", Vec::new()), nw_world::level_script::TRIGGER_AREA_TYPE);
+        let trigger = typed(
+            named("element", Vec::new()),
+            nw_world::level_script::TRIGGER_AREA_TYPE,
+        );
         let script = slice(vec![
             entity(
                 1,
                 nw_world::dungeon_scripts::START_AREA_ENTITY,
                 vec![transform(NO_PARENT, START_AT), start_box.clone(), trigger],
             ),
-            entity(2, "BoxOnly", vec![transform(NO_PARENT, START_AT), start_box]),
+            entity(
+                2,
+                "BoxOnly",
+                vec![transform(NO_PARENT, START_AT), start_box],
+            ),
         ]);
         let mut source = Slices(HashMap::from([(SCRIPT.to_owned(), script)]));
         let level = build_level(
@@ -2753,13 +2796,23 @@ mod tests {
         )
         .expect("build")
         .expect("level");
-        assert_eq!(level.trigger_areas.len(), 1, "the box without a trigger area");
+        assert_eq!(
+            level.trigger_areas.len(),
+            1,
+            "the box without a trigger area"
+        );
         let area = level
             .trigger_area(nw_world::dungeon_scripts::START_AREA_ENTITY)
             .expect("the start area");
         assert!(area.contains([942.0, 577.0, 317.0]));
-        assert!(area.contains([943.4, 586.0, 317.0]), "inside the box's edge");
-        assert!(!area.contains([944.0, 577.0, 317.0]), "past its 1.5 m half width");
+        assert!(
+            area.contains([943.4, 586.0, 317.0]),
+            "inside the box's edge"
+        );
+        assert!(
+            !area.contains([944.0, 577.0, 317.0]),
+            "past its 1.5 m half width"
+        );
         assert!(level.encounters.is_empty());
     }
 
@@ -3274,7 +3327,11 @@ mod tests {
             AREA_SPAWNER_TYPE,
         );
         let spawner_slice = slice(vec![
-            entity(10, "Catacombs_Extraction_SustainWave_Hazard", vec![area_spawner]),
+            entity(
+                10,
+                "Catacombs_Extraction_SustainWave_Hazard",
+                vec![area_spawner],
+            ),
             entity(20, "HazardSp", vec![transform(NO_PARENT, [3.0, 0.0, 0.0])]),
         ]);
         let mut source = Slices(HashMap::from([
@@ -3300,7 +3357,10 @@ mod tests {
         let target = builder.target_slice(&spawner, 0).expect("spawner slice");
         assert!(target.mob.is_none(), "the debris is no mob");
         assert_eq!(target.mobs_per_spawn, LIVE);
-        let refill = target.refill.as_ref().expect("its points and respawn range");
+        let refill = target
+            .refill
+            .as_ref()
+            .expect("its points and respawn range");
         assert_eq!(refill.points, [[3.0, 0.0, 0.0]]);
         assert_eq!(
             target.hazard,
@@ -3677,7 +3737,8 @@ mod tests {
         assert!(!is_breach_group(
             "coatgen/efc337e6/worldevent_spawngroup_single_master_3815808514.dynamicslice"
         ));
-        let myrkgard = "coatgen/827a175a/enc_darkness_major_portal_sm_01_spawn_169199085.dynamicslice";
+        let myrkgard =
+            "coatgen/827a175a/enc_darkness_major_portal_sm_01_spawn_169199085.dynamicslice";
         assert!(is_darkness_event(myrkgard) && is_spawn_group(myrkgard));
         assert!(!is_breach_group(myrkgard), "an event is no breach group");
         assert!(!is_darkness_event(
@@ -3821,7 +3882,10 @@ mod tests {
                     "element",
                     vec![named(
                         "m_shape",
-                        vec![named("element", vec![value("m_radius", &radius_m.to_be_bytes())])],
+                        vec![named(
+                            "element",
+                            vec![value("m_radius", &radius_m.to_be_bytes())],
+                        )],
                     )],
                 ),
                 type_id,
@@ -3840,9 +3904,21 @@ mod tests {
         );
         let closet = slice(vec![
             entity(ROOT_ID, "Closet_Randomizer", vec![randomizer]),
-            entity(2, "Crawler", vec![transform(ROOT_ID, CRAWLER_AT), waiting(31, CRAWLER_POINT)]),
-            entity(3, "Archer", vec![transform(ROOT_ID, [0.0; 3]), waiting(32, ARCHER_POINT)]),
-            entity(4, "Elsewhere", vec![transform(NO_PARENT, [0.0; 3]), waiting(31, CRAWLER_POINT)]),
+            entity(
+                2,
+                "Crawler",
+                vec![transform(ROOT_ID, CRAWLER_AT), waiting(31, CRAWLER_POINT)],
+            ),
+            entity(
+                3,
+                "Archer",
+                vec![transform(ROOT_ID, [0.0; 3]), waiting(32, ARCHER_POINT)],
+            ),
+            entity(
+                4,
+                "Elsewhere",
+                vec![transform(NO_PARENT, [0.0; 3]), waiting(31, CRAWLER_POINT)],
+            ),
         ]);
         let crawler_point = slice(vec![entity(
             1,
@@ -3889,32 +3965,49 @@ mod tests {
             named(
                 "element",
                 vec![
-                    named("BaseClass1", vec![value("m_replicationIndex", &7_u32.to_be_bytes())]),
                     named(
-                    "m_timelines",
-                    vec![named(
-                        "element",
-                        vec![
-                            asset("TimelineAsset", 41, TIMELINE),
-                            Element::with_children(
-                                LAYER_ASSIGNMENTS_NAME,
-                                vec![binding(LAYER, SPAWN_ID), binding(OTHER_LAYER, OTHER_SPAWN_ID)],
-                            ),
-                        ],
-                    )],
-                ),
+                        "BaseClass1",
+                        vec![value("m_replicationIndex", &7_u32.to_be_bytes())],
+                    ),
+                    named(
+                        "m_timelines",
+                        vec![named(
+                            "element",
+                            vec![
+                                asset("TimelineAsset", 41, TIMELINE),
+                                Element::with_children(
+                                    LAYER_ASSIGNMENTS_NAME,
+                                    vec![
+                                        binding(LAYER, SPAWN_ID),
+                                        binding(OTHER_LAYER, OTHER_SPAWN_ID),
+                                    ],
+                                ),
+                            ],
+                        )],
+                    ),
                 ],
             ),
             TIMELINE_TYPE,
         );
         let shield = slice(vec![
             entity(ROOT_ID, "IO_Test_Shield", vec![gatherable]),
-            entity(TIMELINE_ID, "Timeline", vec![transform(ROOT_ID, [0.0; 3]), timeline]),
-            entity(SPAWN_ID, "Spawn1", vec![transform(TIMELINE_ID, SPAWN_AT), waiting(33, ELEMENTAL)]),
+            entity(
+                TIMELINE_ID,
+                "Timeline",
+                vec![transform(ROOT_ID, [0.0; 3]), timeline],
+            ),
+            entity(
+                SPAWN_ID,
+                "Spawn1",
+                vec![transform(TIMELINE_ID, SPAWN_AT), waiting(33, ELEMENTAL)],
+            ),
             entity(
                 OTHER_SPAWN_ID,
                 "Spawn3",
-                vec![transform(TIMELINE_ID, OTHER_SPAWN_AT), waiting(33, ELEMENTAL)],
+                vec![
+                    transform(TIMELINE_ID, OTHER_SPAWN_AT),
+                    waiting(33, ELEMENTAL),
+                ],
             ),
         ]);
         let clip = |start: f32| {
@@ -3924,7 +4017,10 @@ mod tests {
                     "element",
                     vec![named(
                         "BaseClass1",
-                        vec![Element::with_value(CLIP_START_NAME, start.to_be_bytes().to_vec())],
+                        vec![Element::with_value(
+                            CLIP_START_NAME,
+                            start.to_be_bytes().to_vec(),
+                        )],
                     )],
                 )],
             )
@@ -3983,14 +4079,20 @@ mod tests {
             .iter()
             .map(|choice| choice.mob.vitals_id.as_str())
             .collect();
-        assert_eq!(rows, [CRAWLER_ROW, ARCHER_ROW], "only the spawners under it");
+        assert_eq!(
+            rows,
+            [CRAWLER_ROW, ARCHER_ROW],
+            "only the spawners under it"
+        );
         let crawler = &randomizer.choices[0];
         assert_eq!(crawler.offset, CRAWLER_AT);
         assert_eq!(crawler.respawn_s, Some(COMEBACK_S));
         assert_eq!(crawler.stop_radius_m, Some(VOLUME_M));
         let archer = &randomizer.choices[1];
         assert_eq!((archer.respawn_s, archer.stop_radius_m), (None, None));
-        let deactivator = builder.target_slice(&of(DEACTIVATOR), 0).expect("deactivator");
+        let deactivator = builder
+            .target_slice(&of(DEACTIVATOR), 0)
+            .expect("deactivator");
         assert_eq!(deactivator.detectable_radius_m, Some(DETECTABLE_M));
         assert!(deactivator.randomizer.is_none());
         let shield = builder.target_slice(&of(SHIELD), 0).expect("shield");

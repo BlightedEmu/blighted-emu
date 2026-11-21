@@ -341,7 +341,11 @@ impl GatherCounters {
     /// One step for a change of the gatherer count to or from `gatherers` (none for a gather
     /// that counts no gatherer).
     const fn count_step(gatherers: u8) -> u32 {
-        if gatherers > NO_GATHERERS { REF_STEP } else { 0 }
+        if gatherers > NO_GATHERERS {
+            REF_STEP
+        } else {
+            0
+        }
     }
 
     /// A gather that counts `gatherers` starts: `(m_gatherRefCount, m_syncGatherRefCount)`.
@@ -387,10 +391,7 @@ impl GatherCounters {
 /// The own members when the next gather of player counters `counters` starts at the chest with
 /// facet entity `facet`: the interactor target and the running gather (retail 237308 and
 /// 237342).
-pub(super) fn chest_gather_started(
-    facet: u64,
-    counters: &mut GatherCounters,
-) -> [BundleMember; 2] {
+pub(super) fn chest_gather_started(facet: u64, counters: &mut GatherCounters) -> [BundleMember; 2] {
     gather_started(
         facet,
         counters,
@@ -950,7 +951,13 @@ mod tests {
         let mut second = counters;
         let mut third = counters;
         assert_eq!(
-            counts(&gather_ended(CHEST_FACET, &mut counters, GROUP.gatherers, 0)).0,
+            counts(&gather_ended(
+                CHEST_FACET,
+                &mut counters,
+                GROUP.gatherers,
+                0
+            ))
+            .0,
             Some(5),
             "the first ender: status and count"
         );

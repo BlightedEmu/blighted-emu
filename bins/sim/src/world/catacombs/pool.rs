@@ -255,7 +255,11 @@ mod tests {
         world.place_catacomb_tiles();
         let run = world.catacomb_run().expect("run");
         assert_eq!(run.pool.chests.len(), 1, "the chest is a start object");
-        assert_eq!(run.placed.len(), 1, "only the run's own entity is a station");
+        assert_eq!(
+            run.placed.len(),
+            1,
+            "only the run's own entity is a station"
+        );
         let object = run.pool.chests[0].0;
         assert!(world.encounter_objects.stands(object));
         (world, object)
@@ -267,7 +271,10 @@ mod tests {
     #[test]
     fn a_gathered_chest_stays_emptied_and_feeds_the_pool_by_the_difficulty() {
         let (mut world, object) = chest_world();
-        assert!(!world.catacomb_chest_opened(object + 1), "no chest of the run");
+        assert!(
+            !world.catacomb_chest_opened(object + 1),
+            "no chest of the run"
+        );
         assert!(world.catacomb_chest_opened(object));
         assert!(world.encounter_objects.stands(object), "it stays");
         assert_eq!(pool_of(&world), [10, 0]);

@@ -813,7 +813,10 @@ impl SimWorld {
         let look = self.company_look(*company.as_bytes());
         turret_ownership(&ClaimOwner {
             guild_id: *company.as_bytes(),
-            guild_name: look.as_ref().map(|look| look.name.clone()).unwrap_or_default(),
+            guild_name: look
+                .as_ref()
+                .map(|look| look.name.clone())
+                .unwrap_or_default(),
             crest: look.map_or(GuildCrest::NONE, |look| look.crest),
             ..ClaimOwner::NONE
         })
@@ -922,16 +925,14 @@ impl SimWorld {
     /// The raid id of `side` of `fight`'s war: its war side number ([`side_numbers`]);
     /// [`NO_WAR_RAID`] when the war is not known.
     fn side_raid(&self, fight: &WarFight, side: u8) -> u64 {
-        self.wars
-            .war(fight.war().war)
-            .map_or(NO_WAR_RAID, |war| {
-                let (attacker, defender) = side_numbers(war);
-                if side == SIDE_ATTACKER {
-                    attacker
-                } else {
-                    defender
-                }
-            })
+        self.wars.war(fight.war().war).map_or(NO_WAR_RAID, |war| {
+            let (attacker, defender) = side_numbers(war);
+            if side == SIDE_ATTACKER {
+                attacker
+            } else {
+                defender
+            }
+        })
     }
 
     /// Every turret and structure of `fight` shows the war's start or result (module doc,
@@ -1669,14 +1670,12 @@ pub(crate) mod tests {
            "members": ["030d01034653cc1f45c9f48d118403f07c",
              "01ba1801070500000102010b5369656765537570706c79573a918000000000006400ffffffff00000033000000000000",
              "0483310103000000", "068b22010100"]}]}],"#;
-        let table = TABLE
-            .replacen(r#""yaw": 0.0}]}],"#, gates, 1)
-            .replacen(
-                r#""points": ["#,
-                r#""major_structures": [{"gde_ref": "680d78c1600df90a29357b8f4729b2d5", "kind": 7}],
+        let table = TABLE.replacen(r#""yaw": 0.0}]}],"#, gates, 1).replacen(
+            r#""points": ["#,
+            r#""major_structures": [{"gde_ref": "680d78c1600df90a29357b8f4729b2d5", "kind": 7}],
         "points": ["#,
-                1,
-            );
+            1,
+        );
         let kinds = r#", "structure_kinds": [
         {"asset": "a658fcb950ed5621bcbb5faccce6055e", "slice": "slices/structures/siege/siege_fortgate_m_t2.dynamicslice",
          "template": null, "gate": {"physical_radius_m": 8.0,
@@ -1684,7 +1683,9 @@ pub(crate) mod tests {
         {"asset": "a894c09ea7f25448a8f5d54384abb960", "slice": "slices/structures/siege/siege_warcamp_gate_t3.dynamicslice",
          "template": null, "gate": {"physical_radius_m": 8.0, "repair_delay": null, "door_interact": null}}]}"#;
         let table = format!("{}{kinds}", &table[..table.len() - 1]);
-        war_world_with(WarForts::parse(&table).expect("table"), side, |content| content)
+        war_world_with(WarForts::parse(&table).expect("table"), side, |content| {
+            content
+        })
     }
 
     fn gate(world: &SimWorld, gde_ref: [u8; 16]) -> StructureRun {
@@ -1721,7 +1722,11 @@ pub(crate) mod tests {
     }
 
     fn start_war(world: &mut SimWorld) -> nw_db::TerritoryWar {
-        let mut war = world.wars.war(Uuid::from_u128(0x77)).cloned().expect("the war");
+        let mut war = world
+            .wars
+            .war(Uuid::from_u128(0x77))
+            .cloned()
+            .expect("the war");
         war.starts_ms = world.unix_ms();
         world.wars.read(Ok(vec![war.clone()]));
         world.tick_war_fight();
@@ -1744,7 +1749,11 @@ pub(crate) mod tests {
         let fort_card = card(&world, fort.body.number);
         assert_eq!(fort_card.guild_id, Some(*Uuid::from_u128(0xd1).as_bytes()));
         assert_eq!(
-            (fort_card.permission_rule, fort_card.raid_id, fort_card.faction_type),
+            (
+                fort_card.permission_rule,
+                fort_card.raid_id,
+                fort_card.faction_type
+            ),
             (Some(GATE_PERMISSION_RULE), Some(NO_RAID), Some(NO_FACTION))
         );
         let camp_card = card(&world, camp.body.number);
@@ -1852,7 +1861,9 @@ pub(crate) mod tests {
             .map(|(_, _, body)| body.radius_m);
         assert_eq!(reach, Some(GATE_REACH_M), "the gate's reach");
         assert!(
-            !places.iter().any(|(number, _, _)| *number == camp.body.number),
+            !places
+                .iter()
+                .any(|(number, _, _)| *number == camp.body.number),
             "a camp gate is no target"
         );
         world.hurt_held(HeldHit::Structure(camp.body.number), GATE_HEALTH, DEFENDER);
@@ -1860,14 +1871,21 @@ pub(crate) mod tests {
         world.hurt_held(HeldHit::Structure(fort.body.number), GATE_HEALTH, DEFENDER);
         assert!(gate(&world, FORT_GATE_REF).body.broken);
         let broke = sent(&world, fort.body.number);
-        assert!(broke.iter().any(|member| member.component == REPAIR_DELAY_COMPONENT
-            && matches!(&member.state, MemberState::DelayedEvent(timer)
-                if timer.total_delay_s == Some(REPAIR_DELAY_S) && timer.completed.is_none())));
+        assert!(
+            broke
+                .iter()
+                .any(|member| member.component == REPAIR_DELAY_COMPONENT
+                    && matches!(&member.state, MemberState::DelayedEvent(timer)
+                if timer.total_delay_s == Some(REPAIR_DELAY_S) && timer.completed.is_none()))
+        );
         assert!(broke.iter().any(|member| member.component == DOOR_COMPONENT
             && matches!(&member.state, MemberState::Interact(state)
                 if state.enabled == Some(false) && state.has_interactors.is_none())));
         world.tick_war_fight();
-        let siege = world.war_fight().and_then(WarFight::siege_entity).expect("siege");
+        let siege = world
+            .war_fight()
+            .and_then(WarFight::siege_entity)
+            .expect("siege");
         let majors = world.stations.members(siege).and_then(|members| {
             members.iter().find_map(|member| match &member.state {
                 MemberState::SiegeWarfareData(state) => state.structures.clone(),
@@ -1923,7 +1941,13 @@ pub(crate) mod tests {
         let change = war_run_change(&before, &after);
         assert_eq!(change.guild_id, None, "a company stays");
         assert_eq!(change.faction_type, Some(DEFENDER_FACTION));
-        let back = war_run_change(&after, &OwnershipState { faction_type: Some(DEFENDER_FACTION), ..before.clone() });
+        let back = war_run_change(
+            &after,
+            &OwnershipState {
+                faction_type: Some(DEFENDER_FACTION),
+                ..before.clone()
+            },
+        );
         assert_eq!(back.faction_type, None, "the faction stays");
         assert_eq!(back.permission_rule, Some(GATE_PERMISSION_RULE));
         assert_eq!(back.raid_id, Some(NO_RAID));

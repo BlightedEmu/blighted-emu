@@ -1129,7 +1129,11 @@ impl SimWorld {
             Some(if named {
                 (expedition.score.named, NAMED_KILL_POINTS, NAMED_FOR_BONUS)
             } else {
-                (expedition.score.kills, script.kill_points, script.kills_for_bonus)
+                (
+                    expedition.score.kills,
+                    script.kill_points,
+                    script.kills_for_bonus,
+                )
             })
         }) else {
             return;
@@ -1172,7 +1176,9 @@ impl SimWorld {
             return;
         };
         let encounters = &run.script().encounters;
-        expedition.managers.resize(encounters.len(), STATUS_UNINITIALIZED);
+        expedition
+            .managers
+            .resize(encounters.len(), STATUS_UNINITIALIZED);
         expedition.stages.resize_with(encounters.len(), Vec::new);
         let mut events = Vec::new();
         for (index, encounter) in encounters.iter().enumerate() {
@@ -1262,7 +1268,11 @@ impl SimWorld {
                 .map_or(&[][..], |script| script.event_tasks)
                 .iter()
                 .filter(|task| {
-                    let due = if first { task.done >= done } else { task.done == done };
+                    let due = if first {
+                        task.done >= done
+                    } else {
+                        task.done == done
+                    };
                     due && meets(task.event)
                 })
                 .map(|task| task.done)
@@ -1346,9 +1356,9 @@ impl SimWorld {
         let run_s = i64::try_from(unix_s.saturating_sub(start_s)).unwrap_or(i64::MAX);
         let to_beat = i64::try_from(script.time_to_beat_s).unwrap_or(i64::MAX);
         let score = &mut expedition.score;
-        score.points = score.points.saturating_add(
-            POINTS_PER_SECOND_UNDER.saturating_mul(to_beat.saturating_sub(run_s)),
-        );
+        score.points = score
+            .points
+            .saturating_add(POINTS_PER_SECOND_UNDER.saturating_mul(to_beat.saturating_sub(run_s)));
         score.ended = true;
         let multiplier = i64::try_from(score.multiplier).unwrap_or(i64::MAX);
         let final_score = score.points.saturating_mul(multiplier);
@@ -1369,7 +1379,10 @@ impl SimWorld {
         let Some(expedition) = self.expedition_mut() else {
             return;
         };
-        if expedition.victory_due_ms.is_none_or(|due_ms| now_ms < due_ms) {
+        if expedition
+            .victory_due_ms
+            .is_none_or(|due_ms| now_ms < due_ms)
+        {
             return;
         }
         expedition.victory_due_ms = None;
@@ -1796,9 +1809,9 @@ pub(super) mod tests {
 
     use super::*;
     use crate::player_content::PlayerContent;
-    use crate::world::game_mode_entity::PLAYING_STATUS;
     use crate::world::afflictions::tests::effect_row;
     use crate::world::catacombs::tests::held_state;
+    use crate::world::game_mode_entity::PLAYING_STATUS;
     use crate::world::tests::{NOW, SERVER_TIME, admit_at, settings, slot};
 
     const PLAYER: u64 = 61;
@@ -2141,7 +2154,9 @@ pub(super) mod tests {
 
     /// The held script state and task entries (index, task, progress, state).
     fn tasks_of(world: &SimWorld) -> (u8, Vec<(u8, u32, u32, TaskWireState)>) {
-        let state = held_state(world, mode_entity(world)).script_state.expect("state");
+        let state = held_state(world, mode_entity(world))
+            .script_state
+            .expect("state");
         let tasks = objectives_of(world)
             .tasks
             .expect("tasks")
@@ -2233,7 +2248,10 @@ pub(super) mod tests {
         );
         let objectives = objectives_of(&world);
         let record = &objectives.active.expect("active").elements[0];
-        assert_eq!((record.objective, record.instance), (650_374_807, 3_812_856_275_804_359_371));
+        assert_eq!(
+            (record.objective, record.instance),
+            (650_374_807, 3_812_856_275_804_359_371)
+        );
         assert_eq!(record.accept_time, unix_ns(opened_ms));
         assert!(record.poi && record.available);
         assert!(objectives.tracked.expect("tracked").elements.is_empty());
@@ -2562,7 +2580,10 @@ pub(super) mod tests {
         assert_eq!(tasks.len(), 25);
         assert_eq!(tasks[0], (1, id(1), DONE_PROGRESS, TaskWireState::Complete));
         assert_eq!(tasks[1], (27, ROOT_TASK, 24, TaskWireState::Active));
-        assert_eq!(tasks[24], (24, id(24), DONE_PROGRESS, TaskWireState::Complete));
+        assert_eq!(
+            tasks[24],
+            (24, id(24), DONE_PROGRESS, TaskWireState::Complete)
+        );
         world.server_ms += 1_019;
         world.tick_expedition_mode();
         assert_eq!(tasks_of(&world).0, 24, "not yet");
@@ -2571,7 +2592,10 @@ pub(super) mod tests {
         let (state, tasks) = tasks_of(&world);
         assert_eq!(state, 25);
         assert_eq!(tasks[1], (27, ROOT_TASK, 25, TaskWireState::Active));
-        assert_eq!(tasks[25], (25, id(25), DONE_PROGRESS, TaskWireState::Complete));
+        assert_eq!(
+            tasks[25],
+            (25, id(25), DONE_PROGRESS, TaskWireState::Complete)
+        );
         world.complete_expedition_run(now);
         assert_eq!(tasks_of(&world).0, 25, "one end");
     }
@@ -2702,7 +2726,11 @@ pub(super) mod tests {
         assert_eq!(value_of(&world, SCORE_NEGATIVE), 0);
         assert_eq!(value_of(&world, FINAL_SCORE), 21_690);
         assert_eq!(value_of(&world, MUTATOR_RANK), 0);
-        assert_eq!((rank_of(26_235), rank_of(81_520)), (1, 2), "Depths, Fiendish run");
+        assert_eq!(
+            (rank_of(26_235), rank_of(81_520)),
+            (1, 2),
+            "Depths, Fiendish run"
+        );
     }
 
     /// Retail runs 15, 30, 37 and 40: a team wipe costs 500, counts, and the first one sets the
@@ -2772,7 +2800,11 @@ pub(super) mod tests {
         assert_eq!(value_of(&world, SCORE), kills);
         world.score_expedition_kill(false);
         assert_eq!(value_of(&world, NORMAL_KILLS), script.kills_for_bonus + 1);
-        assert_eq!(value_of(&world, SCORE), kills, "past the bonus a kill scores 0");
+        assert_eq!(
+            value_of(&world, SCORE),
+            kills,
+            "past the bonus a kill scores 0"
+        );
         for _ in 0..NAMED_FOR_BONUS {
             world.score_expedition_kill(true);
         }
@@ -2808,7 +2840,11 @@ pub(super) mod tests {
         assert_eq!(statuses(&world), [PLAYING_STATUS, PLAYING_STATUS]);
         let other = world.player_by_number(OTHER).expect("other");
         world.leave_expedition_mode(other);
-        assert_eq!(statuses(&world), [PLAYING_STATUS], "an exit still leaves the lists");
+        assert_eq!(
+            statuses(&world),
+            [PLAYING_STATUS],
+            "an exit still leaves the lists"
+        );
     }
 
     /// Retail `gatherablesCollected`: each resource node gathered counts and adds the script's
@@ -2825,7 +2861,9 @@ pub(super) mod tests {
         );
         let mut world = opened_mutated();
         arrive_mutated(&mut world, PLAYER, CATALOG_DIFFICULTY);
-        let points = expedition_script(CUTLASS_KEYS).expect("Barnacles").gatherable_points;
+        let points = expedition_script(CUTLASS_KEYS)
+            .expect("Barnacles")
+            .gatherable_points;
         const NODES: u64 = 11;
         for _ in 0..NODES {
             world.expedition_node_gathered();
@@ -2837,8 +2875,11 @@ pub(super) mod tests {
 
     /// The opened expedition of game mode `game_mode` (its CRC, one teleport) with one player.
     fn opened_expedition(game_mode: &str) -> SimWorld {
-        let mut mode =
-            crate::world::instances::tests::mode(game_mode, "NW_Dungeon_Test", InstanceKind::Expedition);
+        let mut mode = crate::world::instances::tests::mode(
+            game_mode,
+            "NW_Dungeon_Test",
+            InstanceKind::Expedition,
+        );
         mode.crc = lowercase_crc32(game_mode);
         let content = PlayerContent {
             instances: InstanceCatalog::build([mode.clone()]),
@@ -2871,7 +2912,9 @@ pub(super) mod tests {
         assert_eq!(tasks_of(&world).0, 17, "a done task's event");
         world.end_event_tasks(|event| event == TaskEvent::ObjectUsed("an_unknown_object"));
         assert_eq!(tasks_of(&world).0, 17);
-        world.end_event_tasks(|event| event == TaskEvent::ObjectUsed("dungeon_everfall_00_azoth_shrine"));
+        world.end_event_tasks(|event| {
+            event == TaskEvent::ObjectUsed("dungeon_everfall_00_azoth_shrine")
+        });
         assert_eq!(tasks_of(&world).0, 20);
     }
 
@@ -2899,7 +2942,8 @@ pub(super) mod tests {
     /// gate changes nothing.
     #[test]
     fn a_used_objects_slice_ends_its_task() {
-        const SHRINE: &str = "slices/dungeon/everfall/dungeon_everfall_00_azoth_shrine.dynamicslice";
+        const SHRINE: &str =
+            "slices/dungeon/everfall/dungeon_everfall_00_azoth_shrine.dynamicslice";
         /// A gate's slot key in no gate list.
         const NO_GATE: u64 = 1;
         let mut world = opened();
@@ -2946,7 +2990,14 @@ pub(super) mod tests {
         ) -> Vec<u64> {
             Vec::new()
         }
-        fn end_effects(&mut self, _players: &[u64], _effects: &[String], _source: u64, _now_ms: u64) {}
+        fn end_effects(
+            &mut self,
+            _players: &[u64],
+            _effects: &[String],
+            _source: u64,
+            _now_ms: u64,
+        ) {
+        }
         fn health(&self, _entity: u64) -> Option<u32> {
             None
         }
@@ -2981,7 +3032,12 @@ pub(super) mod tests {
         world.expedition_encounter_events(&run);
         assert_eq!(tasks_of(&world).0, 0, "not started");
         let now = world.server_ms;
-        run.tick(&mut NoHost, &crate::world::dungeon_script::ScriptView::default(), &[], now);
+        run.tick(
+            &mut NoHost,
+            &crate::world::dungeon_script::ScriptView::default(),
+            &[],
+            now,
+        );
         world.expedition_encounter_events(&run);
         assert_eq!(tasks_of(&world).0, 17);
     }
@@ -3130,7 +3186,12 @@ pub(super) mod tests {
             rise_escalates: false,
             ..fiendish()
         });
-        let max = world.world.get::<Vitals>(first).expect("vitals").health.max();
+        let max = world
+            .world
+            .get::<Vitals>(first)
+            .expect("vitals")
+            .health
+            .max();
         world.world.get_mut::<Vitals>(first).expect("vitals").health =
             nw_sim_core::Health::at(max / 2, max);
         world.run_curse_gain(

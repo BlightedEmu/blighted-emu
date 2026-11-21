@@ -48,7 +48,10 @@ impl SliceVariant {
 pub fn slice_key(slice: &str) -> String {
     let slice = slice.to_lowercase().replace('\\', "/");
     let slice = slice.strip_prefix(SLICES_PREFIX).unwrap_or(&slice);
-    slice.strip_suffix(SLICE_EXTENSION).unwrap_or(slice).to_owned()
+    slice
+        .strip_suffix(SLICE_EXTENSION)
+        .unwrap_or(slice)
+        .to_owned()
 }
 
 /// The pak path of the slice whose key is `key` ([`slice_key`]).

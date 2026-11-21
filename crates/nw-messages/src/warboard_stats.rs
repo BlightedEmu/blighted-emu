@@ -450,7 +450,10 @@ mod tests {
         ];
         for (body, expected) in cases {
             let payload = payload(body);
-            assert_eq!(WarboardStats::decode_payload(&payload), Ok(expected.clone()));
+            assert_eq!(
+                WarboardStats::decode_payload(&payload),
+                Ok(expected.clone())
+            );
             assert_eq!(expected.encode_payload(), Ok(payload));
         }
     }
@@ -481,7 +484,12 @@ mod tests {
         assert!(write(&[(STAT_SLOTS, 1)]).is_err());
         // Slot 58 named in the mask (bit 59 of the integer).
         let mut writer = Writer::new();
-        writer.u16(1).u8(0).wide_prefixed(1 << 59).wide_prefixed(1).u16(0);
+        writer
+            .u16(1)
+            .u8(0)
+            .wide_prefixed(1 << 59)
+            .wide_prefixed(1)
+            .u16(0);
         assert!(WarboardStats::decode_payload(&writer.finish()).is_err());
     }
 
@@ -548,7 +556,10 @@ mod tests {
                     sync: 9,
                     local_index: 3,
                     local: stats(&[]),
-                    lists: [vec![(2, stats(&[])), (3, stats(&[]))], vec![(4, stats(&[]))]],
+                    lists: [
+                        vec![(2, stats(&[])), (3, stats(&[]))],
+                        vec![(4, stats(&[]))],
+                    ],
                 },
             ),
             (
@@ -566,7 +577,10 @@ mod tests {
         ];
         for (body, expected) in cases {
             let body = payload(body);
-            assert_eq!(TeamsWarboardStats::decode_payload(&body), Ok(expected.clone()));
+            assert_eq!(
+                TeamsWarboardStats::decode_payload(&body),
+                Ok(expected.clone())
+            );
             assert_eq!(expected.encode_payload(), Ok(body));
         }
     }

@@ -843,7 +843,9 @@ fn unsigned(element: &Element) -> Option<u64> {
 /// ([`nw_world::level_script::engine_shape`]); `None` without its sizes or with an unreadable
 /// size.
 fn engine_shape(component: &Element) -> Option<Geometry> {
-    nw_world::level_script::engine_shape(component).ok().flatten()
+    nw_world::level_script::engine_shape(component)
+        .ok()
+        .flatten()
 }
 
 /// The first element named `name` under `element`, depth first (the `m_targetTag` of an
@@ -2020,8 +2022,7 @@ fn distribution_placements(
     report: &mut CollisionReport,
 ) -> Result<Vec<Pending>, CollisionError> {
     let folder = format!("{LEVELS_PREFIX}{level}{PATH_SEPARATOR}{REGIONS_DIR}");
-    let files =
-        index.paths(|path| path.starts_with(&folder) && path.ends_with(DISTRIBUTION_FILE));
+    let files = index.paths(|path| path.starts_with(&folder) && path.ends_with(DISTRIBUTION_FILE));
     let mut files_with_rows = Vec::new();
     for (path, read) in index.read_each(&files, |path, bytes| {
         parse_distribution(&bytes).map_err(|source| CollisionError::Distribution {

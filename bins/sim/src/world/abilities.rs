@@ -2323,17 +2323,36 @@ impl SimWorld {
         let effects = (!spell.status_effects.is_empty())
             .then_some((spell.status_effects.as_slice(), caster.number));
         match end {
-            Some(ShotEnd::Body { target: mob, flight_s }) => {
+            Some(ShotEnd::Body {
+                target: mob,
+                flight_s,
+            }) => {
                 let hit = ShotHit {
                     damage_id: enemy_row,
                     effects,
                     headshot: meets_head(&shot, (caster.from, aim), mob, &places),
                 };
-                self.launch(&caster.connection, (shot, hit), (mob, entity), flight_s, now_ms);
+                self.launch(
+                    &caster.connection,
+                    (shot, hit),
+                    (mob, entity),
+                    flight_s,
+                    now_ms,
+                );
             }
             Some(ShotEnd::Level { stop, flight_s }) => {
-                let hit = ShotHit { damage_id: enemy_row, effects, headshot: false };
-                self.launch_to_level(&caster.connection, (shot, hit), (stop, entity), flight_s, now_ms);
+                let hit = ShotHit {
+                    damage_id: enemy_row,
+                    effects,
+                    headshot: false,
+                };
+                self.launch_to_level(
+                    &caster.connection,
+                    (shot, hit),
+                    (stop, entity),
+                    flight_s,
+                    now_ms,
+                );
                 results.push(Ok(AttackOutcome::Missed));
             }
             Some(ShotEnd::Free) => results.push(Ok(AttackOutcome::Missed)),
@@ -2793,8 +2812,15 @@ mod tests {
             ],
             "the running cooldown in its key's map"
         );
-        assert_eq!(maps[2], [idle(TRIP), idle(SLAM), idle(BLAST)], "an ended one is idle");
-        assert!(run.take_cooldown_changes().is_empty(), "the maps carry the changes");
+        assert_eq!(
+            maps[2],
+            [idle(TRIP), idle(SLAM), idle(BLAST)],
+            "an ended one is idle"
+        );
+        assert!(
+            run.take_cooldown_changes().is_empty(),
+            "the maps carry the changes"
+        );
     }
 
     const SMITE: &str = "Ability_Life_Staff_Smite";
@@ -5234,9 +5260,14 @@ mod retail_tests {
         }
         assert!(!run.running.is_empty(), "Sacred Ground aims");
         let swap = run.tick(&flail, &flail_holder, AIM_TICKS * TICK_MS, SERVER_MS);
-        assert!(run.running.is_empty(), "the staff's actions end with the swap");
         assert!(
-            !run.tags_on.iter().any(|tag| tag.eq_ignore_ascii_case("Aim")),
+            run.running.is_empty(),
+            "the staff's actions end with the swap"
+        );
+        assert!(
+            !run.tags_on
+                .iter()
+                .any(|tag| tag.eq_ignore_ascii_case("Aim")),
             "{:?}",
             run.tags_on
         );
@@ -5245,9 +5276,8 @@ mod retail_tests {
             AbilityEvent::Ended { ability } if *ability == lowercase_crc32(SACRED_GROUND)
         )));
         run.press(&[key_1(2)], trip, no_inputs);
-        let started = (AIM_TICKS + 1..AIM_TICKS + 5).flat_map(|tick| {
-            run.tick(&flail, &flail_holder, tick * TICK_MS, SERVER_MS)
-        });
+        let started = (AIM_TICKS + 1..AIM_TICKS + 5)
+            .flat_map(|tick| run.tick(&flail, &flail_holder, tick * TICK_MS, SERVER_MS));
         assert!(
             started.into_iter().any(|event| matches!(
                 event,

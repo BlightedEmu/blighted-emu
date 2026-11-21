@@ -854,9 +854,8 @@ mod tests {
             ("tile5_d", 10),
         ];
         let rows = retail_rows();
-        let pictures =
-            tile_pictures(rows.iter().map(|(id, cell)| (id.as_str(), cell.as_str())))
-                .expect("pictures");
+        let pictures = tile_pictures(rows.iter().map(|(id, cell)| (id.as_str(), cell.as_str())))
+            .expect("pictures");
         assert_eq!(pictures.len(), RETAIL_IDS.len());
         for (tile, id) in RETAIL_IDS {
             let variation = format!("catacombs/gameplay/tiles/{tile}_gameplay");
@@ -869,23 +868,17 @@ mod tests {
     /// at the end does not.
     #[test]
     fn refused_rows_add_no_file_and_a_shared_path_keeps_its_later_id() {
-        let one_row = |cell: &'static str| {
-            tile_pictures([("Room", cell)]).expect("pictures")
-        };
+        let one_row = |cell: &'static str| tile_pictures([("Room", cell)]).expect("pictures");
         assert_eq!(
             one_row("A,B,"),
             BTreeMap::from([("a".to_owned(), 1), ("b".to_owned(), 2)])
         );
         assert_eq!(
             one_row("A,,B"),
-            BTreeMap::from([
-                ("a".to_owned(), 1),
-                (String::new(), 2),
-                ("b".to_owned(), 3)
-            ])
+            BTreeMap::from([("a".to_owned(), 1), (String::new(), 2), ("b".to_owned(), 3)])
         );
-        let with_refused = tile_pictures([("Room", "A"), ("", "B"), ("ROOM", "C")])
-            .expect("pictures");
+        let with_refused =
+            tile_pictures([("Room", "A"), ("", "B"), ("ROOM", "C")]).expect("pictures");
         assert_eq!(with_refused, BTreeMap::from([("a".to_owned(), 1)]));
         // `room` and `hall` share bucket 0 of 2: the walk keeps their datasheet order.
         let shared = tile_pictures([("Room", "A,B"), ("Hall", "a")]).expect("pictures");

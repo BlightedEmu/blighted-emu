@@ -93,8 +93,9 @@ impl TriggerVolume {
                 let (sin, cos) = (QUATERNION_HALF_ANGLES * z.atan2(w)).sin_cos();
                 let along = dx.mul_add(cos, dy * sin);
                 let across = dy.mul_add(cos, -dx * sin);
-                let within =
-                    |long: f32, wide: f32| along.abs() <= long * HALF && across.abs() <= wide * HALF;
+                let within = |long: f32, wide: f32| {
+                    along.abs() <= long * HALF && across.abs() <= wide * HALF
+                };
                 let quarter_too = QUARTER_TURNED_BOXES.contains(&self.tag);
                 dz.abs() <= height * HALF
                     && (within(length, width) || (quarter_too && within(width, length)))
@@ -4780,7 +4781,10 @@ pub(crate) mod tests {
             ..vista.at
         };
         assert!(vista.contains(ahead(1.4, 9.9)));
-        assert!(!vista.contains(ahead(9.9, 1.4)), "a box of no evidence is only as read");
+        assert!(
+            !vista.contains(ahead(9.9, 1.4)),
+            "a box of no evidence is only as read"
+        );
         let fight = TRIGGER_VOLUMES
             .iter()
             .find(|volume| volume.tag == "FTUE_First_Fight_Trigger")

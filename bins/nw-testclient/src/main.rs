@@ -22,8 +22,8 @@ use clap::{Parser, Subcommand};
 use nw_content::bundle::ContentBundle;
 use nw_content::client_build::load_client_build;
 use nw_content::gathering::{GatherRules, Gatherables};
-use nw_content::poi_tags::PoiTags;
 use nw_content::layout::{ContentLayout, content_dir};
+use nw_content::poi_tags::PoiTags;
 use nw_content::town_stations::TownStations;
 use nw_dtls::DtlsClientConfig;
 use nw_messages::WorldPosition;
@@ -703,7 +703,11 @@ async fn play(
         .gatherables
         .iter()
         .map(|point| point.gatherable_id)
-        .filter(|crc| gatherables.get(*crc).is_some_and(|kind| kind.loot_container))
+        .filter(|crc| {
+            gatherables
+                .get(*crc)
+                .is_some_and(|kind| kind.loot_container)
+        })
         .collect();
     let report = run_play(
         http,

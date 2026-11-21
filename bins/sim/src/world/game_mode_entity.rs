@@ -15,8 +15,8 @@ use bevy_ecs::entity::Entity;
 use nw_messages::NS_PER_MS;
 use nw_messages::facet::{FacetHeader, component, facet_entity};
 use nw_messages::game_mode_participant::{
-    ActiveGameMode, GAME_MODE_PARTICIPANT_COMPONENT, GameModeParticipantState,
-    MutationContextWire, NO_TEAM, PARTICIPANT_FLAGS_LEN,
+    ActiveGameMode, GAME_MODE_PARTICIPANT_COMPONENT, GameModeParticipantState, MutationContextWire,
+    NO_TEAM, PARTICIPANT_FLAGS_LEN,
 };
 use nw_messages::game_mode_state::{GameModeState, GeneratedMap, ParticipantRef};
 use nw_messages::items::FullList;

@@ -48,9 +48,7 @@
 use std::collections::HashMap;
 
 use bevy_ecs::entity::Entity;
-use nw_content::warboard_stats::{
-    self as stat, BoardStats, SCORE, STAT_SLOTS,
-};
+use nw_content::warboard_stats::{self as stat, BoardStats, SCORE, STAT_SLOTS};
 use nw_messages::facet::FacetHeader;
 use nw_messages::social::CharacterRef;
 use nw_messages::warboard_stats::{
@@ -76,15 +74,32 @@ pub(super) const ASSIST_WINDOW_MS: u64 = 10_000;
 const CONTESTS_PER_SECOND: u64 = 30;
 const MS_PER_S: u64 = 1_000;
 /// The contests of one score tick.
-pub(super) const CONTESTS_PER_SCORE_TICK: u32 = (CONTESTS_PER_SECOND * SCORE_TICK_MS / MS_PER_S) as u32;
+pub(super) const CONTESTS_PER_SCORE_TICK: u32 =
+    (CONTESTS_PER_SECOND * SCORE_TICK_MS / MS_PER_S) as u32;
 const SLOTS: usize = STAT_SLOTS as usize;
 /// The resource items of the match and their deposit and gather stats (Observed: the items of
 /// the loot tables `OutpostRush_Tree*`, `_OreVein*`, `_Wolf*` and the azoth grant).
 const RESOURCE_STATS: [(&str, u8, u8); 4] = [
-    ("OutpostRushWood", stat::INFUSED_WOOD_DEPOSITED, stat::INFUSED_WOOD_GATHERED),
-    ("OutpostRushOre", stat::INFUSED_ORE_DEPOSITED, stat::INFUSED_ORE_GATHERED),
-    ("OutpostRushRawhide", stat::INFUSED_HIDE_DEPOSITED, stat::INFUSED_HIDE_GATHERED),
-    ("OutpostRushAzothEssence", stat::AZOTH_ESSENCE_DEPOSITED, stat::AZOTH_ESSENCE_GATHERED),
+    (
+        "OutpostRushWood",
+        stat::INFUSED_WOOD_DEPOSITED,
+        stat::INFUSED_WOOD_GATHERED,
+    ),
+    (
+        "OutpostRushOre",
+        stat::INFUSED_ORE_DEPOSITED,
+        stat::INFUSED_ORE_GATHERED,
+    ),
+    (
+        "OutpostRushRawhide",
+        stat::INFUSED_HIDE_DEPOSITED,
+        stat::INFUSED_HIDE_GATHERED,
+    ),
+    (
+        "OutpostRushAzothEssence",
+        stat::AZOTH_ESSENCE_DEPOSITED,
+        stat::AZOTH_ESSENCE_GATHERED,
+    ),
 ];
 
 /// The 839 list of team `team` (Observed: team 1 first).
@@ -218,7 +233,8 @@ impl Board {
     fn manifest(&self) -> TeamsManifest {
         let mut lists: [Vec<(CharacterRef, u8)>; BOARD_LISTS] = Default::default();
         for member in &self.members {
-            lists[manifest_list(member.team)].push((CharacterRef(Some(member.character)), member.index));
+            lists[manifest_list(member.team)]
+                .push((CharacterRef(Some(member.character)), member.index));
         }
         TeamsManifest {
             sync: self.sync,
@@ -269,7 +285,10 @@ impl Board {
             .receivers()
             .map(|member| {
                 let stats = self.stats_push(&self.full_stats(member.index, rules));
-                (member.entity, manifest.iter().cloned().chain(stats).collect())
+                (
+                    member.entity,
+                    manifest.iter().cloned().chain(stats).collect(),
+                )
             })
             .collect();
         for member in &mut self.members {
@@ -281,7 +300,11 @@ impl Board {
     }
 
     /// The full pair for player `number` alone (its 3206); `None` when it is not on the board.
-    pub(super) fn full_for(&self, number: u64, rules: &BoardStats) -> Option<(Entity, Vec<WarServerMsg>)> {
+    pub(super) fn full_for(
+        &self,
+        number: u64,
+        rules: &BoardStats,
+    ) -> Option<(Entity, Vec<WarServerMsg>)> {
         let member = self.member(number).filter(|member| !member.left)?;
         let manifest = self.manifest_push(&self.manifest(), true);
         let stats = self.stats_push(&self.full_stats(member.index, rules));
@@ -302,7 +325,11 @@ impl Board {
         if self.closed || self.member(number).is_some() {
             return Vec::new();
         }
-        let index = self.members.iter().filter(|member| member.team == team).count();
+        let index = self
+            .members
+            .iter()
+            .filter(|member| member.team == team)
+            .count();
         self.members.push(Member {
             number,
             entity,
@@ -323,7 +350,10 @@ impl Board {
             self.next_full_ms = now_ms.saturating_add(FULL_RESEND_MS);
         }
         let mut lists: [Vec<(CharacterRef, u8)>; BOARD_LISTS] = Default::default();
-        lists[manifest_list(team)].push((CharacterRef(Some(character)), u8::try_from(index).unwrap_or(u8::MAX)));
+        lists[manifest_list(team)].push((
+            CharacterRef(Some(character)),
+            u8::try_from(index).unwrap_or(u8::MAX),
+        ));
         let update = self.manifest_push(
             &TeamsManifest {
                 sync: self.sync,
@@ -351,7 +381,14 @@ impl Board {
 
     /// `amount` of the stat `slot` for player `number`, `in_range` of its bonus or not: the
     /// slot, its sums and the score rise. A slot the table lacks counts nothing.
-    pub(super) fn note(&mut self, number: u64, slot: u8, amount: u32, in_range: bool, rules: &BoardStats) {
+    pub(super) fn note(
+        &mut self,
+        number: u64,
+        slot: u8,
+        amount: u32,
+        in_range: bool,
+        rules: &BoardStats,
+    ) {
         if self.closed || amount == 0 {
             return;
         }
@@ -367,7 +404,11 @@ impl Board {
         }
         member.score += rule.score_of(amount, in_range);
         // A score of thousands.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a score of thousands")]
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a score of thousands"
+        )]
         let score = member.score.floor().clamp(0.0, f64::from(u32::MAX)) as u32;
         member.values[usize::from(SCORE)] = score;
     }
@@ -378,7 +419,13 @@ impl Board {
     /// (`DamageToPlayers`, `DamageToAI`, `DamageToOther`) and in `DamageWithSiegeWeapons`, but
     /// `TotalDamageDealt` and the score count it once; retail's rule is Unknown (no capture
     /// holds the board of a player who used a turret).
-    pub(super) fn note_row_alone(&mut self, number: u64, slot: u8, amount: u32, rules: &BoardStats) {
+    pub(super) fn note_row_alone(
+        &mut self,
+        number: u64,
+        slot: u8,
+        amount: u32,
+        rules: &BoardStats,
+    ) {
         if self.closed || amount == 0 || rules.rule(slot).is_none() {
             return;
         }
@@ -440,21 +487,28 @@ impl Board {
     /// slots).
     fn changes(&mut self, rules: &BoardStats, end: bool) -> BoardPushes {
         let in_game: Vec<u8> = rules.in_game_slots().collect();
-        let changed = |values: &[u32; SLOTS], sent: &[u32; SLOTS]| -> std::collections::BTreeMap<u8, u32> {
-            in_game
-                .iter()
-                .filter(|slot| values[usize::from(**slot)] != sent[usize::from(**slot)])
-                .map(|slot| (*slot, values[usize::from(*slot)]))
-                .collect()
-        };
+        let changed =
+            |values: &[u32; SLOTS], sent: &[u32; SLOTS]| -> std::collections::BTreeMap<u8, u32> {
+                in_game
+                    .iter()
+                    .filter(|slot| values[usize::from(**slot)] != sent[usize::from(**slot)])
+                    .map(|slot| (*slot, values[usize::from(*slot)]))
+                    .collect()
+            };
         let entries: Vec<(u8, u8, ParticipantStats)> = self
             .members
             .iter()
             .filter_map(|member| {
                 let slots = changed(&member.values, &member.listed);
                 let left = member.left && !member.left_sent;
-                (left || !member.named || !slots.is_empty())
-                    .then_some((member.team, member.index, ParticipantStats { left: member.left, slots }))
+                (left || !member.named || !slots.is_empty()).then_some((
+                    member.team,
+                    member.index,
+                    ParticipantStats {
+                        left: member.left,
+                        slots,
+                    },
+                ))
             })
             .collect();
         let lists = Self::lists(entries);
@@ -515,7 +569,8 @@ impl SimWorld {
     /// Sends `pushes` to their players.
     pub(super) fn send_outpost_rush_board(&mut self, pushes: BoardPushes) {
         for (entity, messages) in pushes {
-            let messages: Vec<ServerMessage> = messages.into_iter().map(ServerMessage::War).collect();
+            let messages: Vec<ServerMessage> =
+                messages.into_iter().map(ServerMessage::War).collect();
             self.send_to(entity, &messages);
         }
     }
@@ -536,7 +591,8 @@ impl SimWorld {
         if running.state == ENDED {
             return;
         }
-        let in_range = range_m > 0.0 && at.is_some_and(|at| near_outpost(&running.outposts, at, range_m));
+        let in_range =
+            range_m > 0.0 && at.is_some_and(|at| near_outpost(&running.outposts, at, range_m));
         running.board.note(number, slot, amount, in_range, rules);
     }
 
@@ -569,7 +625,9 @@ impl SimWorld {
         };
         let slot = if healer == target {
             stat::HEALING_DONE_TO_SELF
-        } else if running.team_of(healer).is_some() && running.team_of(healer) == running.team_of(target) {
+        } else if running.team_of(healer).is_some()
+            && running.team_of(healer) == running.team_of(target)
+        {
             stat::HEALING_DONE_TO_ALLIES
         } else {
             return;
@@ -583,15 +641,26 @@ impl SimWorld {
     }
 
     /// Participant `number` gathered `quantity` of resource `item`.
-    pub(in crate::world) fn outpost_rush_gathered(&mut self, number: u64, item: &str, quantity: u32) {
-        if let Some((_, _, gathered)) = RESOURCE_STATS.iter().find(|(id, _, _)| id.eq_ignore_ascii_case(item)) {
+    pub(in crate::world) fn outpost_rush_gathered(
+        &mut self,
+        number: u64,
+        item: &str,
+        quantity: u32,
+    ) {
+        if let Some((_, _, gathered)) = RESOURCE_STATS
+            .iter()
+            .find(|(id, _, _)| id.eq_ignore_ascii_case(item))
+        {
             self.note_outpost_rush_stat(number, *gathered, quantity);
         }
     }
 
     /// A structure took `quantity` of resource `item` from participant `number`.
     pub(super) fn outpost_rush_deposited(&mut self, number: u64, item: &str, quantity: u32) {
-        if let Some((_, deposited, _)) = RESOURCE_STATS.iter().find(|(id, _, _)| id.eq_ignore_ascii_case(item)) {
+        if let Some((_, deposited, _)) = RESOURCE_STATS
+            .iter()
+            .find(|(id, _, _)| id.eq_ignore_ascii_case(item))
+        {
             self.note_outpost_rush_stat(number, *deposited, quantity);
         }
     }
@@ -657,7 +726,11 @@ impl SimWorld {
         };
         let inside = running.capture_points.inside.clone();
         for number in inside {
-            self.note_outpost_rush_stat(number, stat::CAPTURE_POINT_CONTESTS, CONTESTS_PER_SCORE_TICK.saturating_mul(ticks));
+            self.note_outpost_rush_stat(
+                number,
+                stat::CAPTURE_POINT_CONTESTS,
+                CONTESTS_PER_SCORE_TICK.saturating_mul(ticks),
+            );
         }
     }
 }
@@ -683,22 +756,67 @@ pub(in crate::world) mod tests {
             rule(SCORE, true, 0.0, 0.0, &[]),
             rule(stat::TOTAL_DAMAGE_DEALT, true, 0.0, 0.0, &[]),
             rule(stat::DEATHS, true, 0.0, 0.0, &[]),
-            rule(stat::DAMAGE_TO_PLAYERS, false, 0.005, 14.0, &[stat::TOTAL_DAMAGE_DEALT]),
-            rule(stat::DAMAGE_TO_AI, false, 0.0025, 0.0, &[stat::TOTAL_DAMAGE_DEALT]),
-            rule(stat::DAMAGE_TO_OTHER, false, 0.0025, 0.0, &[stat::TOTAL_DAMAGE_DEALT]),
-            rule(stat::DAMAGE_WITH_SIEGE_WEAPONS, false, 0.005, 0.0, &[stat::TOTAL_DAMAGE_DEALT]),
-            rule(stat::PLAYER_KILLS, true, 50.0, 14.0, &[stat::PLAYER_TAKEDOWNS]),
-            rule(stat::PLAYER_ASSISTS, true, 50.0, 14.0, &[stat::PLAYER_TAKEDOWNS]),
+            rule(
+                stat::DAMAGE_TO_PLAYERS,
+                false,
+                0.005,
+                14.0,
+                &[stat::TOTAL_DAMAGE_DEALT],
+            ),
+            rule(
+                stat::DAMAGE_TO_AI,
+                false,
+                0.0025,
+                0.0,
+                &[stat::TOTAL_DAMAGE_DEALT],
+            ),
+            rule(
+                stat::DAMAGE_TO_OTHER,
+                false,
+                0.0025,
+                0.0,
+                &[stat::TOTAL_DAMAGE_DEALT],
+            ),
+            rule(
+                stat::DAMAGE_WITH_SIEGE_WEAPONS,
+                false,
+                0.005,
+                0.0,
+                &[stat::TOTAL_DAMAGE_DEALT],
+            ),
+            rule(
+                stat::PLAYER_KILLS,
+                true,
+                50.0,
+                14.0,
+                &[stat::PLAYER_TAKEDOWNS],
+            ),
+            rule(
+                stat::PLAYER_ASSISTS,
+                true,
+                50.0,
+                14.0,
+                &[stat::PLAYER_TAKEDOWNS],
+            ),
             rule(stat::PLAYER_TAKEDOWNS, false, 50.0, 0.0, &[]),
             rule(stat::AI_KILLS, false, 20.0, 0.0, &[stat::AI_TAKEDOWNS]),
             rule(stat::AI_TAKEDOWNS, true, 0.0, 0.0, &[]),
             rule(stat::CAPTURE_POINT_CONTESTS, false, 0.42, 0.0, &[]),
-            rule(stat::INFUSED_WOOD_DEPOSITED, false, 2.4, 0.0, &[stat::TOTAL_RESOURCES_DEPOSITED]),
+            rule(
+                stat::INFUSED_WOOD_DEPOSITED,
+                false,
+                2.4,
+                0.0,
+                &[stat::TOTAL_RESOURCES_DEPOSITED],
+            ),
             rule(stat::TOTAL_RESOURCES_DEPOSITED, true, 0.0, 0.0, &[]),
         ])
     }
 
-    const GDE_REF: [u8; RAW_ID_LEN] = [0x5b, 0x88, 0x63, 0x46, 0x4b, 0x8e, 0xa5, 0x6a, 0xb3, 0x83, 0xa9, 0x6a, 0xc0, 0x26, 0x6f, 0x48];
+    const GDE_REF: [u8; RAW_ID_LEN] = [
+        0x5b, 0x88, 0x63, 0x46, 0x4b, 0x8e, 0xa5, 0x6a, 0xb3, 0x83, 0xa9, 0x6a, 0xc0, 0x26, 0x6f,
+        0x48,
+    ];
 
     fn entity(index: u32) -> Entity {
         Entity::from_bits(u64::from(index))
@@ -726,7 +844,14 @@ pub(in crate::world) mod tests {
         let rules = rules();
         let mut board = Board::new(&GDE_REF);
         for (number, team) in [(1, 0), (2, 1), (3, 1)] {
-            board.join(number, entity(number as u32), [number as u8; RAW_ID_LEN], team, 0, &rules);
+            board.join(
+                number,
+                entity(number as u32),
+                [number as u8; RAW_ID_LEN],
+                team,
+                0,
+                &rules,
+            );
         }
         (board, rules)
     }
@@ -748,23 +873,51 @@ pub(in crate::world) mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].1.len(), 2, "3530 and 839");
         let pushes = board.join(2, entity(2), [2; RAW_ID_LEN], 1, 500, &rules);
-        let to_first = &pushes.iter().find(|(to, _)| *to == entity(1)).expect("first").1;
+        let to_first = &pushes
+            .iter()
+            .find(|(to, _)| *to == entity(1))
+            .expect("first")
+            .1;
         let update = manifest_of(&to_first[0]);
-        assert!(matches!(to_first[0], WarServerMsg::UpdateWarboardManifest { .. }));
+        assert!(matches!(
+            to_first[0],
+            WarServerMsg::UpdateWarboardManifest { .. }
+        ));
         assert_eq!(update.sync, 2);
-        assert!(update.lists[0].is_empty(), "team 1 is the manifest's second list");
-        assert_eq!(update.lists[1], vec![(CharacterRef(Some([2; RAW_ID_LEN])), 0)]);
-        let to_joiner = &pushes.iter().find(|(to, _)| *to == entity(2)).expect("joiner").1;
+        assert!(
+            update.lists[0].is_empty(),
+            "team 1 is the manifest's second list"
+        );
+        assert_eq!(
+            update.lists[1],
+            vec![(CharacterRef(Some([2; RAW_ID_LEN])), 0)]
+        );
+        let to_joiner = &pushes
+            .iter()
+            .find(|(to, _)| *to == entity(2))
+            .expect("joiner")
+            .1;
         let full = manifest_of(&to_joiner[0]);
         assert_eq!(full.lists[0].len() + full.lists[1].len(), 2);
         let stats = decoded(&to_joiner[1]);
-        assert!(stats.local.slots.is_empty(), "the full 839's own part is empty");
+        assert!(
+            stats.local.slots.is_empty(),
+            "the full 839's own part is empty"
+        );
         assert_eq!(stats.lists[0].len(), 1, "team 1 is the 839's first list");
-        assert_eq!(stats.lists[0][0].1.slots.len(), rules.in_game_slots().count(), "every in-game slot");
+        assert_eq!(
+            stats.lists[0][0].1.slots.len(),
+            rules.in_game_slots().count(),
+            "every in-game slot"
+        );
         // The next push names the joiner with no slot.
         let named = board.flush(PUSH_MS, &rules);
         let stats = decoded(&named[0].1[0]);
-        assert!(stats.lists[0].iter().any(|(index, slots)| *index == 0 && slots.slots.is_empty()));
+        assert!(
+            stats.lists[0]
+                .iter()
+                .any(|(index, slots)| *index == 0 && slots.slots.is_empty())
+        );
     }
 
     /// A backfill into a running match (Observed: `OPR_Original_map` 0.53 s own index 16 of a
@@ -777,9 +930,17 @@ pub(in crate::world) mod tests {
         board.note(1, stat::PLAYER_KILLS, 1, false, &rules);
         board.leave(2);
         let pushes = board.join(4, entity(4), [4; RAW_ID_LEN], 1, PUSH_MS * 10, &rules);
-        let to_joiner = &pushes.iter().find(|(to, _)| *to == entity(4)).expect("joiner").1;
+        let to_joiner = &pushes
+            .iter()
+            .find(|(to, _)| *to == entity(4))
+            .expect("joiner")
+            .1;
         let full = manifest_of(&to_joiner[0]);
-        assert_eq!(full.lists[1].len(), 3, "team 1 keeps its leaver: 2, 3 and the joiner");
+        assert_eq!(
+            full.lists[1].len(),
+            3,
+            "team 1 keeps its leaver: 2, 3 and the joiner"
+        );
         assert!(full.lists[1].contains(&(CharacterRef(Some([4; RAW_ID_LEN])), 2)));
         let stats = decoded(&to_joiner[1]);
         assert_eq!(stats.local_index, 2);
@@ -806,7 +967,11 @@ pub(in crate::world) mod tests {
         board.note(3, stat::DEATHS, 1, false, &rules);
         assert_eq!(board.score_of(3), 0);
         board.note(3, stat::DAMAGE_TAKEN, 5, false, &rules);
-        assert_eq!(board.value(3, stat::DAMAGE_TAKEN), 0, "a stat the table lacks counts nothing");
+        assert_eq!(
+            board.value(3, stat::DAMAGE_TAKEN),
+            0,
+            "a stat the table lacks counts nothing"
+        );
     }
 
     #[test]
@@ -816,10 +981,18 @@ pub(in crate::world) mod tests {
         board.note_row_alone(1, stat::DAMAGE_WITH_SIEGE_WEAPONS, 1_000, &rules);
         assert_eq!(board.value(1, stat::DAMAGE_TO_PLAYERS), 1_000);
         assert_eq!(board.value(1, stat::DAMAGE_WITH_SIEGE_WEAPONS), 1_000);
-        assert_eq!(board.value(1, stat::TOTAL_DAMAGE_DEALT), 1_000, "once in the total");
+        assert_eq!(
+            board.value(1, stat::TOTAL_DAMAGE_DEALT),
+            1_000,
+            "once in the total"
+        );
         assert_eq!(board.score_of(1), 5, "once in the score: 1,000 x 0.005");
         board.note_row_alone(1, stat::DAMAGE_TAKEN, 5, &rules);
-        assert_eq!(board.value(1, stat::DAMAGE_TAKEN), 0, "a stat the table lacks counts nothing");
+        assert_eq!(
+            board.value(1, stat::DAMAGE_TAKEN),
+            0,
+            "a stat the table lacks counts nothing"
+        );
     }
 
     #[test]
@@ -827,24 +1000,78 @@ pub(in crate::world) mod tests {
         let (mut board, rules) = three_players();
         board.flush(PUSH_MS, &rules);
         board.note(2, stat::PLAYER_KILLS, 1, false, &rules);
-        board.note(2, stat::CAPTURE_POINT_CONTESTS, CONTESTS_PER_SCORE_TICK, false, &rules);
+        board.note(
+            2,
+            stat::CAPTURE_POINT_CONTESTS,
+            CONTESTS_PER_SCORE_TICK,
+            false,
+            &rules,
+        );
         assert!(board.flush(PUSH_MS + 500, &rules).is_empty(), "not due");
         let pushes = board.flush(2 * PUSH_MS, &rules);
         assert_eq!(pushes.len(), 3, "every player sees the change");
-        let to_killer = decoded(&pushes.iter().find(|(to, _)| *to == entity(2)).expect("killer").1[0]);
+        let to_killer = decoded(
+            &pushes
+                .iter()
+                .find(|(to, _)| *to == entity(2))
+                .expect("killer")
+                .1[0],
+        );
         assert_eq!(to_killer.local.slots.get(&stat::PLAYER_KILLS), Some(&1));
-        assert_eq!(to_killer.local.slots.get(&SCORE), Some(&87), "50 + 90 x 0.42 = 87.8");
-        assert!(!to_killer.local.slots.contains_key(&stat::CAPTURE_POINT_CONTESTS), "an end-game slot");
-        assert_eq!(to_killer.lists[0], vec![(0, ParticipantStats { left: false, slots: [(SCORE, 87), (stat::PLAYER_KILLS, 1)].into() })]);
-        let to_other = decoded(&pushes.iter().find(|(to, _)| *to == entity(1)).expect("other").1[0]);
+        assert_eq!(
+            to_killer.local.slots.get(&SCORE),
+            Some(&87),
+            "50 + 90 x 0.42 = 87.8"
+        );
+        assert!(
+            !to_killer
+                .local
+                .slots
+                .contains_key(&stat::CAPTURE_POINT_CONTESTS),
+            "an end-game slot"
+        );
+        assert_eq!(
+            to_killer.lists[0],
+            vec![(
+                0,
+                ParticipantStats {
+                    left: false,
+                    slots: [(SCORE, 87), (stat::PLAYER_KILLS, 1)].into()
+                }
+            )]
+        );
+        let to_other = decoded(
+            &pushes
+                .iter()
+                .find(|(to, _)| *to == entity(1))
+                .expect("other")
+                .1[0],
+        );
         assert!(to_other.local.slots.is_empty());
-        assert!(board.flush(3 * PUSH_MS, &rules).is_empty(), "nothing changed");
+        assert!(
+            board.flush(3 * PUSH_MS, &rules).is_empty(),
+            "nothing changed"
+        );
         let end = board.close(&rules);
-        let own = decoded(&end.iter().find(|(to, _)| *to == entity(2)).expect("killer").1[0]);
-        assert_eq!(own.local.slots.get(&stat::CAPTURE_POINT_CONTESTS), Some(&CONTESTS_PER_SCORE_TICK));
+        let own = decoded(
+            &end.iter()
+                .find(|(to, _)| *to == entity(2))
+                .expect("killer")
+                .1[0],
+        );
+        assert_eq!(
+            own.local.slots.get(&stat::CAPTURE_POINT_CONTESTS),
+            Some(&CONTESTS_PER_SCORE_TICK)
+        );
         assert_eq!(own.local.slots.get(&stat::PLAYER_TAKEDOWNS), Some(&1));
-        assert!(!own.local.slots.contains_key(&stat::DAMAGE_TO_AI), "a 0 stays out");
-        assert!(board.flush(10 * PUSH_MS, &rules).is_empty(), "no push after the end");
+        assert!(
+            !own.local.slots.contains_key(&stat::DAMAGE_TO_AI),
+            "a 0 stays out"
+        );
+        assert!(
+            board.flush(10 * PUSH_MS, &rules).is_empty(),
+            "no push after the end"
+        );
     }
 
     #[test]
@@ -855,11 +1082,24 @@ pub(in crate::world) mod tests {
         let pushes = board.flush(2 * PUSH_MS, &rules);
         assert_eq!(pushes.len(), 2, "the leaver gets nothing");
         let stats = decoded(&pushes[0].1[0]);
-        assert_eq!(stats.lists[0], vec![(1, ParticipantStats { left: true, slots: Default::default() })]);
+        assert_eq!(
+            stats.lists[0],
+            vec![(
+                1,
+                ParticipantStats {
+                    left: true,
+                    slots: Default::default()
+                }
+            )]
+        );
         assert!(board.flush(3 * PUSH_MS, &rules).is_empty());
         let full = board.flush(FULL_RESEND_MS, &rules);
         let stats = decoded(&full[0].1[1]);
-        assert!(stats.lists[0].iter().any(|(index, slots)| *index == 1 && slots.left));
+        assert!(
+            stats.lists[0]
+                .iter()
+                .any(|(index, slots)| *index == 1 && slots.left)
+        );
     }
 
     #[test]
@@ -871,14 +1111,20 @@ pub(in crate::world) mod tests {
         assert_eq!(board.take_assisters(1, 3, 12_000), vec![2]);
         assert!(board.take_assisters(1, 3, 12_000).is_empty(), "taken once");
         board.note_hit(2, 1, 0);
-        assert!(board.take_assisters(1, 3, ASSIST_WINDOW_MS + 1).is_empty(), "too old");
+        assert!(
+            board.take_assisters(1, 3, ASSIST_WINDOW_MS + 1).is_empty(),
+            "too old"
+        );
     }
 
     #[test]
     fn the_resources_name_their_deposit_and_gather_stats() {
         for (item, deposited, gathered) in RESOURCE_STATS {
             assert!(item.starts_with("OutpostRush"));
-            assert_eq!(gathered - deposited, stat::INFUSED_WOOD_GATHERED - stat::INFUSED_WOOD_DEPOSITED);
+            assert_eq!(
+                gathered - deposited,
+                stat::INFUSED_WOOD_GATHERED - stat::INFUSED_WOOD_DEPOSITED
+            );
         }
         assert_eq!(CONTESTS_PER_SCORE_TICK, 90);
     }

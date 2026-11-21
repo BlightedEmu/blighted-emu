@@ -342,9 +342,8 @@ impl CombatView {
                     .iter()
                     .filter(|update| !update.is_local_player())
                 {
-                    if let Some((asset, gde_ref)) = update
-                        .card
-                        .and_then(|card| card.asset.zip(card.gde_ref))
+                    if let Some((asset, gde_ref)) =
+                        update.card.and_then(|card| card.asset.zip(card.gde_ref))
                     {
                         self.cards.insert(asset.id, gde_ref);
                         if asset == LOOT_BAG_ASSET {
@@ -403,7 +402,9 @@ impl CombatView {
 
     /// The id of the newest card seen of one of the slice assets `assets`.
     pub fn card_of(&self, assets: &[[u8; ASSET_ID_LEN]]) -> Option<[u8; RAW_ID_LEN]> {
-        assets.iter().find_map(|asset| self.cards.get(asset).copied())
+        assets
+            .iter()
+            .find_map(|asset| self.cards.get(asset).copied())
     }
 
     /// The answers to the bot's interactions since the last call, oldest first.
@@ -588,10 +589,13 @@ impl WorldView {
 
     /// Keeps the listed tasks of the own player's objectives component in `update`.
     fn read_own_tasks(&mut self, update: &SlotUpdate) {
-        let tasks = update.members.iter().find_map(|member| match &member.state {
-            MemberState::Objectives(state) => state.tasks.as_ref(),
-            _ => None,
-        });
+        let tasks = update
+            .members
+            .iter()
+            .find_map(|member| match &member.state {
+                MemberState::Objectives(state) => state.tasks.as_ref(),
+                _ => None,
+            });
         if let Some(tasks) = tasks {
             self.listed_tasks = tasks
                 .elements

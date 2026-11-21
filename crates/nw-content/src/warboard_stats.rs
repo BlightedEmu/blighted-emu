@@ -311,7 +311,10 @@ mod tests {
     #[test]
     fn the_enum_names_its_slots_as_the_client() {
         assert_eq!(stat_slot("Score"), Some(SCORE));
-        assert_eq!(stat_slot("capturepointcontests"), Some(CAPTURE_POINT_CONTESTS));
+        assert_eq!(
+            stat_slot("capturepointcontests"),
+            Some(CAPTURE_POINT_CONTESTS)
+        );
         assert_eq!(stat_slot("BossesKilled"), Some(44));
         assert_eq!(stat_slot("WeeklyCrownsRemaining"), Some(0x39));
         assert_eq!(stat_slot("NoSuchStat"), None);
@@ -337,8 +340,17 @@ mod tests {
         assert_eq!(rule.sums, vec![PLAYER_TAKEDOWNS]);
         assert!((rule.score_of(2, false) - 100.0).abs() < f64::EPSILON);
         assert!((rule.score_of(2, true) - 125.0).abs() < f64::EPSILON);
-        assert!(board.rule(PLAYER_TAKEDOWNS).expect("takedowns").sums.is_empty());
-        assert_eq!(board.in_game_slots().collect::<Vec<_>>(), vec![SCORE, PLAYER_KILLS]);
+        assert!(
+            board
+                .rule(PLAYER_TAKEDOWNS)
+                .expect("takedowns")
+                .sums
+                .is_empty()
+        );
+        assert_eq!(
+            board.in_game_slots().collect::<Vec<_>>(),
+            vec![SCORE, PLAYER_KILLS]
+        );
         assert!(board.shows_at_end(PLAYER_TAKEDOWNS));
         let flat = board.rule(SCORE).expect("score");
         assert!((flat.score_of(3, true) - 0.0).abs() < f64::EPSILON);

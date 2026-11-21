@@ -95,10 +95,10 @@ pub mod travel_states;
 pub mod turrets;
 pub mod vitals;
 pub mod war;
-pub mod warboard_stats;
 pub mod war_roster;
 pub mod war_signup;
 pub mod war_states;
+pub mod warboard_stats;
 pub mod wire;
 
 pub use abilities::{
@@ -149,9 +149,9 @@ pub use categorical::{
 };
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use client_input::{
-    AttackKeyBits, Bit8, ClientInputMsg, HeadStep9, INPUT_Z_MAX, INPUT_Z_MIN, InputHead, InputPosition,
-    InputRecord, InputSlots, InteractionAction, InteractionRequest, MoveKeys, QUICK_SLOT_KEYS,
-    RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, SlayerInput,
+    AttackKeyBits, Bit8, ClientInputMsg, HeadStep9, INPUT_Z_MAX, INPUT_Z_MIN, InputHead,
+    InputPosition, InputRecord, InputSlots, InteractionAction, InteractionRequest, MoveKeys,
+    QUICK_SLOT_KEYS, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, SlayerInput,
 };
 pub use client_options::{ClientOptionMsg, FULL_CULL_LIMIT_PERCENT};
 pub use combat::{
@@ -165,9 +165,8 @@ pub use components::{
     CombatStatusState, CurrencyState, DAMAGE_RECEIVER_TYPE_INDEX, DELAYED_EVENT_TYPE_INDEX,
     DEPLETED_GATHERABLE, DamageReceiverState, DelayedEventState, GATHERABLE_CONTROLLER_TYPE_INDEX,
     GatherableControllerState, HEALTHY_GATHERABLE, INTERACT_TYPE_INDEX, InteractCooldown,
-    InteractCooldownState, InteractState,
-    LOOK_TARGETING_TYPE_INDEX, LookTargetingState, MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX,
-    StaminaState, boss_phase_change,
+    InteractCooldownState, InteractState, LOOK_TARGETING_TYPE_INDEX, LookTargetingState,
+    MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState, boss_phase_change,
 };
 pub use connected::{
     Block1415acc30, CALENDAR_CONNECTED_MSG_TYPE_INDEX, CalendarConnectedMsg, ConnectedBody,
@@ -190,8 +189,8 @@ pub use economy::{EconomyCall, EconomyMessage};
 pub use entity_ids::number_of_facet;
 pub use entity_ids::{
     Adopted, IdHolder, RawIdError, adopt_raw_id, as_dynamic_raw_id, entity_of_facet,
-    facet_of_raw_id, hold_raw_id, holds_raw_id, is_dynamic_raw_id, number_of_seen_raw_id, raw_id_count,
-    release_raw_id, renew_raw_id,
+    facet_of_raw_id, hold_raw_id, holds_raw_id, is_dynamic_raw_id, number_of_seen_raw_id,
+    raw_id_count, release_raw_id, renew_raw_id,
 };
 pub use entity_slots::{EntitySlots, SlotRead, SlotUpdate};
 pub use facet::{
@@ -316,7 +315,8 @@ pub use war_roster::{
 };
 pub use war_signup::{
     CallResult, REASON_BANNED, REASON_NONE, REASON_ROSTER_REFUSED, RosterPlace, SIDE_ATTACKER,
-    SIDE_DEFENDER, SIGNUP_LIST_PAGE, SignupEntry, WAR_PLAYER_KIND, WarPlayer, WarSignupClientMsg, WarSignupServerMsg,
+    SIDE_DEFENDER, SIGNUP_LIST_PAGE, SignupEntry, WAR_PLAYER_KIND, WarPlayer, WarSignupClientMsg,
+    WarSignupServerMsg,
 };
 pub use war_states::{
     BUILDER_BUILDING, BUILDER_IDLE, BUILDER_STATE_COMPONENT, BUILDER_TYPE_INDEX, BuilderState,

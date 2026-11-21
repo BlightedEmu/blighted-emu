@@ -213,7 +213,11 @@ mod tests {
     /// Retail `Playthrough_Part_01` 2,361.837 s: `Camping` (index 6) from rank 1 to rank 2 with 0
     /// points in the rank child alone, beside the rank up of another entry (index 3) with its
     /// points.
-    const RETAIL_RANK_ALONE: [u8; 31] = [0x01, 0x06, 0x02, 0x03, 0x06, 0x01, 0xd5, 0x9e, 0x08, 0x00, 0x02, 0x03, 0x01, 0x00, 0x00, 0x09, 0x01, 0x01, 0x03, 0x01, 0xd5, 0x9e, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x74];
+    const RETAIL_RANK_ALONE: [u8; 31] = [
+        0x01, 0x06, 0x02, 0x03, 0x06, 0x01, 0xd5, 0x9e, 0x08, 0x00, 0x02, 0x03, 0x01, 0x00, 0x00,
+        0x09, 0x01, 0x01, 0x03, 0x01, 0xd5, 0x9e, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07,
+        0x74,
+    ];
     /// The list index of `Camping` in [`RETAIL_RANK_ALONE`].
     const RETAIL_CAMPING_INDEX: u32 = 6;
     /// Retail rank up of the blunderbuss (t237696): its rank at index 6, the points of both
@@ -340,13 +344,18 @@ mod tests {
         let Some(ReplicatedList::Changes(ranks)) = &state.ranks else {
             panic!("rank changes: {state:?}");
         };
-        let ranks: Vec<(u32, u16)> = ranks.iter().map(|change| (change.index, change.value)).collect();
+        let ranks: Vec<(u32, u16)> = ranks
+            .iter()
+            .map(|change| (change.index, change.value))
+            .collect();
         assert!(ranks.contains(&(RETAIL_CAMPING_INDEX, 2)), "{ranks:?}");
         let Some(ReplicatedList::Changes(points)) = &state.points else {
             panic!("point changes: {state:?}");
         };
         assert!(
-            points.iter().all(|change| change.index != RETAIL_CAMPING_INDEX),
+            points
+                .iter()
+                .all(|change| change.index != RETAIL_CAMPING_INDEX),
             "no points of Camping: {points:?}"
         );
         assert_eq!(state.progression_ids, None);

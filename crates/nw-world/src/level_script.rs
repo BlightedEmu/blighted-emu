@@ -1491,9 +1491,7 @@ pub type LayerClipStarts = ([u8; UUID_SIZE], Vec<f32>);
 /// # Errors
 ///
 /// Returns [`LevelScriptError`] when a clip start is not a number.
-pub fn timeline_clip_starts(
-    root: &Element,
-) -> Result<Vec<LayerClipStarts>, LevelScriptError> {
+pub fn timeline_clip_starts(root: &Element) -> Result<Vec<LayerClipStarts>, LevelScriptError> {
     let names = Names::new();
     let mut layers = Vec::new();
     let Some(list) = find(root, TIMELINE_LAYERS_NAME, FIELD_DEPTH) else {
@@ -1772,7 +1770,12 @@ mod tests {
     /// `Configuration`; the Empyrean one a sphere of `Radius` 30.
     #[test]
     fn an_engine_shape_component_gives_its_box_or_sphere() {
-        let floats = |values: &[f32]| values.iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>();
+        let floats = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|v| v.to_be_bytes())
+                .collect::<Vec<_>>()
+        };
         let box_shape = typed(
             named(
                 "element",
@@ -1792,7 +1795,10 @@ mod tests {
         let sphere = typed(
             named(
                 "element",
-                vec![named("Configuration", vec![value("Radius", &floats(&[30.0]))])],
+                vec![named(
+                    "Configuration",
+                    vec![value("Radius", &floats(&[30.0]))],
+                )],
             ),
             SPHERE_SHAPE_TYPE,
         );
@@ -2208,10 +2214,7 @@ mod tests {
         );
         // The holdout's spawners name the flag on their spawn settings component.
         let settings = typed(
-            named(
-                "element",
-                vec![value("m_destroySpawnsOnDeactivate", &[1])],
-            ),
+            named("element", vec![value("m_destroySpawnsOnDeactivate", &[1])]),
             SPAWNER_SETTINGS_TYPE,
         );
         let root = named(
@@ -2320,7 +2323,10 @@ mod tests {
                 "Components",
                 vec![named(
                     "element",
-                    vec![named("Entities", vec![entity(1, "DamageVolumeStun", vec![area])])],
+                    vec![named(
+                        "Entities",
+                        vec![entity(1, "DamageVolumeStun", vec![area])],
+                    )],
                 )],
             )],
         );
@@ -2369,8 +2375,7 @@ mod tests {
         const OBJECTIVES_INDEX: u32 = 4;
         const REQUIRED: u32 = 3;
         const GATHERABLE_GUID: [u8; GUID_LEN] = [7; GUID_LEN];
-        const GATHERABLE_PATH: &str =
-            "slices/worldevents/elite_stronghold_siege/siren/rw_siren_cannonball_complete_gatherable.dynamicslice";
+        const GATHERABLE_PATH: &str = "slices/worldevents/elite_stronghold_siege/siren/rw_siren_cannonball_complete_gatherable.dynamicslice";
         let objectives = typed(
             named(
                 "element",
@@ -2414,7 +2419,9 @@ mod tests {
         ]))
         .expect("script");
         assert_eq!(
-            script.entity(ROOT).and_then(|root| root.objectives_component),
+            script
+                .entity(ROOT)
+                .and_then(|root| root.objectives_component),
             Some(OBJECTIVES_INDEX)
         );
         let wave = script
@@ -2730,7 +2737,10 @@ mod tests {
                     "m_timelines",
                     vec![named(
                         "element",
-                        vec![Element::with_children(LAYER_ASSIGNMENTS_NAME, vec![binding])],
+                        vec![Element::with_children(
+                            LAYER_ASSIGNMENTS_NAME,
+                            vec![binding],
+                        )],
                     )],
                 )],
             ),
@@ -2756,11 +2766,15 @@ mod tests {
             .expect("a detectable sphere");
         assert!((radius - DETECTABLE_RADIUS_M).abs() < f32::EPSILON);
         assert_eq!(
-            script.entity(SHIELD).and_then(|entity| entity.gathering_start),
+            script
+                .entity(SHIELD)
+                .and_then(|entity| entity.gathering_start),
             Some((SPAWN, TriggerEvent::Trigger))
         );
         assert_eq!(
-            script.entity(SPAWN).map(|entity| entity.timeline_layers.clone()),
+            script
+                .entity(SPAWN)
+                .map(|entity| entity.timeline_layers.clone()),
             Some(vec![(LAYER, SPAWN)])
         );
         let clip = |start: f32| {

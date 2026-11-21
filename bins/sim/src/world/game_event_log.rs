@@ -335,7 +335,13 @@ mod tests {
         }
         .entry(TIME_NS, TERRITORY);
         assert_eq!(
-            (kill.value_a, kill.flag, kill.standing, kill.value_f, kill.territory),
+            (
+                kill.value_a,
+                kill.flag,
+                kill.standing,
+                kill.value_f,
+                kill.territory
+            ),
             (540, false, 15, 10, TERRITORY)
         );
         assert!((kill.amount_a - WHOLE_SHARE).abs() < f32::EPSILON);

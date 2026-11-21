@@ -244,7 +244,12 @@ mod tests {
                 (50, "Windsward_Tower_01")
             ]
         );
-        assert!(rules.towers.iter().all(|tower| tower.territory == WINDSWARD));
+        assert!(
+            rules
+                .towers
+                .iter()
+                .all(|tower| tower.territory == WINDSWARD)
+        );
         assert_eq!(rules.towers[0].position, [1.0, 0.0, 0.0]);
         assert_eq!(i64::from(rules.towers[0].capture_s), CAPTURE_S);
         assert_eq!(i64::from(rules.towers[0].capture_min_s), CAPTURE_MIN_S);
@@ -349,7 +354,10 @@ mod retail_tests {
         }
         let mut territories: BTreeMap<u16, Vec<u8>> = BTreeMap::new();
         for tower in &rules.towers {
-            territories.entry(tower.territory).or_default().push(tower.entry);
+            territories
+                .entry(tower.territory)
+                .or_default()
+                .push(tower.entry);
         }
         assert!(
             territories

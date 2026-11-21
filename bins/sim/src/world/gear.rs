@@ -1573,10 +1573,14 @@ pub(crate) mod tests {
 
     /// [`kits_with`] for `extra` items with a stack size: (item id, item class, `MaxStackSize`).
     pub(crate) fn kits_with_stacks(extra: &[(&str, &str, Option<u32>)]) -> StarterKits {
-        kits_with_rows(extra.iter().map(|(item_id, item_class, max_stack)| ItemRow {
-            max_stack: *max_stack,
-            ..gear_row(item_id, item_class)
-        }))
+        kits_with_rows(
+            extra
+                .iter()
+                .map(|(item_id, item_class, max_stack)| ItemRow {
+                    max_stack: *max_stack,
+                    ..gear_row(item_id, item_class)
+                }),
+        )
     }
 
     /// [`kits`] with the resource rows of `extra` items too: (item id, item class).

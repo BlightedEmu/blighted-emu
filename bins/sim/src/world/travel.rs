@@ -2118,7 +2118,8 @@ impl SimWorld {
         let travel = &self.world.get::<Player>(entity)?.travel;
         if let Some(camp) = travel.camp.filter(|camp| camp.facet() == point) {
             let Position { x, y, z } = camp.spawn_point;
-            return (camp.spawn_point.distance(died_at) <= CAMP_RESPAWN_RANGE_M).then_some([x, y, z]);
+            return (camp.spawn_point.distance(died_at) <= CAMP_RESPAWN_RANGE_M)
+                .then_some([x, y, z]);
         }
         travel
             .saved
@@ -3685,7 +3686,10 @@ mod tests {
         };
         // Live 2026-11-15: a client that logged in inside an area named none; it checks the
         // place itself.
-        assert!(allowed(&mut world, Vec::new(), None), "no area named since the arrival");
+        assert!(
+            allowed(&mut world, Vec::new(), None),
+            "no area named since the arrival"
+        );
         let zone = Some(u32::from(TERRITORY));
         assert!(allowed(&mut world, Vec::new(), zone), "the last known zone");
         assert!(
@@ -4291,7 +4295,11 @@ mod tests {
         #[test]
         fn a_camp_is_placed_without_its_costs_and_built_once_they_are_in_the_bag() {
             let (mut world, entity) = camp_world(false, 0);
-            assert_eq!(place(&mut world, NOW), [placed(PLACEMENT_PLACED)], "the plan is placed");
+            assert_eq!(
+                place(&mut world, NOW),
+                [placed(PLACEMENT_PLACED)],
+                "the plan is placed"
+            );
             let camp = camp_of(&world, entity).expect("the camp stands unbuilt");
             tick(&mut world, NOW + COMMITTABLE_DELAY_MS);
             let accept_ms = start_build(&mut world, entity, &camp, NOW + COMMITTABLE_DELAY_MS + 1);
@@ -4299,7 +4307,11 @@ mod tests {
                 &tick(&mut world, accept_ms + COMMIT_INTERVAL_MS).messages,
                 CAMPER,
             );
-            assert_eq!(build_answers(&empty), (Vec::new(), 1), "nothing to take: the build ends");
+            assert_eq!(
+                build_answers(&empty),
+                (Vec::new(), 1),
+                "nothing to take: the build ends"
+            );
             {
                 let content = Arc::clone(&world.content);
                 let mut player = world.world.get_mut::<Player>(entity).expect("player");
@@ -4308,9 +4320,18 @@ mod tests {
                     assert!(gear.add(&content.kits.item(&id).cloned().expect("item"), quantity));
                 }
             }
-            let again = start_build(&mut world, entity, &camp, accept_ms + 2 * COMMIT_INTERVAL_MS);
+            let again = start_build(
+                &mut world,
+                entity,
+                &camp,
+                accept_ms + 2 * COMMIT_INTERVAL_MS,
+            );
             tick(&mut world, again + COMMIT_INTERVAL_MS);
-            assert_eq!(bag(&world, entity, WOOD), 4, "the build takes the first unit");
+            assert_eq!(
+                bag(&world, entity, WOOD),
+                4,
+                "the build takes the first unit"
+            );
         }
 
         #[test]
@@ -4644,7 +4665,10 @@ mod tests {
                 x: camp.spawn_point.x + CAMP_RESPAWN_RANGE_M - 1.0,
                 ..camp.spawn_point
             };
-            assert!(world.own_spawn_point(entity, camp.facet(), near).is_some(), "within range");
+            assert!(
+                world.own_spawn_point(entity, camp.facet(), near).is_some(),
+                "within range"
+            );
             let later = NOW + world.combat.min_respawn_ms;
             let at = world
                 .request_respawn(&connection(CAMPER), Some(camp.facet()), later)

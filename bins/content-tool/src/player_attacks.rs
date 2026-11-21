@@ -45,9 +45,9 @@ use nw_formats::skeleton::Skeleton;
 
 use crate::error::ToolError;
 use crate::melee_shapes::{
-    ANIMATION_LIST_SUFFIX, Bodies, CLIP_SUFFIX, ClipContext, DEFINITION_SUFFIX, EQUIP_TYPES, MS_PER_SECOND,
-    PLAYER_ANIMATION_LIST, PLAYER_ANIMATION_LIST_FOLDER, PLAYER_DEFINITION, PLAYER_SKELETON,
-    WeaponBody, clip_folders, equip_attachments, melee_shape, ms, normalized,
+    ANIMATION_LIST_SUFFIX, Bodies, CLIP_SUFFIX, ClipContext, DEFINITION_SUFFIX, EQUIP_TYPES,
+    MS_PER_SECOND, PLAYER_ANIMATION_LIST, PLAYER_ANIMATION_LIST_FOLDER, PLAYER_DEFINITION,
+    PLAYER_SKELETON, WeaponBody, clip_folders, equip_attachments, melee_shape, ms, normalized,
     root_path,
 };
 use crate::source::GameSource;

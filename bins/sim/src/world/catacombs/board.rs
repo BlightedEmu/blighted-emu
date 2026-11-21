@@ -140,7 +140,9 @@ fn board_index(index: usize) -> u8 {
 impl RunBoard {
     /// The index and member of player `number`.
     fn member(&self, number: u64) -> Option<usize> {
-        self.members.iter().position(|member| member.number == number)
+        self.members
+            .iter()
+            .position(|member| member.number == number)
     }
 
     /// The members still on the board, with their index.
@@ -245,7 +247,11 @@ impl RunBoard {
                     local: ParticipantStats::default(),
                     participants: vec![(board_index(index), ParticipantStats::default())],
                 };
-                let messages = joined.clone().into_iter().chain(stats_push(&named)).collect();
+                let messages = joined
+                    .clone()
+                    .into_iter()
+                    .chain(stats_push(&named))
+                    .collect();
                 (member.number, messages)
             })
             .collect();
@@ -356,7 +362,8 @@ impl SimWorld {
             }) else {
                 continue;
             };
-            let messages: Vec<ServerMessage> = messages.into_iter().map(ServerMessage::War).collect();
+            let messages: Vec<ServerMessage> =
+                messages.into_iter().map(ServerMessage::War).collect();
             self.send_to(entity, &messages);
         }
     }
@@ -479,7 +486,9 @@ mod tests {
         let end = stats_of(&pushes[0].1);
         assert_eq!(
             end.local.slots,
-            [(EXTRACTED, 2), (SILVERS_EXTRACTED, 741)].into_iter().collect()
+            [(EXTRACTED, 2), (SILVERS_EXTRACTED, 741)]
+                .into_iter()
+                .collect()
         );
         board.leave(7, 1_687_101);
         let pushes = board.flush(1_687_500);
@@ -491,6 +500,10 @@ mod tests {
         );
         board.count(CHESTS_OPENED, 1_688_000);
         let pushes = board.flush(1_688_500);
-        assert_eq!(stats_of(&pushes[0].1).participants.len(), 1, "the leaver is out");
+        assert_eq!(
+            stats_of(&pushes[0].1).participants.len(),
+            1,
+            "the leaver is out"
+        );
     }
 }

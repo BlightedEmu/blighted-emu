@@ -1348,7 +1348,11 @@ impl SimWorld {
         if let Some(outcome) = self.structure_hit(entity, number, target, damage_id) {
             return outcome;
         }
-        if self.mobs.tree(target).is_some_and(|mind| mind.spares(number)) {
+        if self
+            .mobs
+            .tree(target)
+            .is_some_and(|mind| mind.spares(number))
+        {
             return Err(AttackRefusal::OwnSide);
         }
         if spawn_index(target).is_none() {
@@ -1539,7 +1543,10 @@ impl SimWorld {
         // A hit the block did not take lowers the stamina of a mob whose grit is on; a mob of
         // another sim takes it there ([`Hit::stagger_milli`]).
         // Stagger of about a hundred points.
-        #[allow(clippy::cast_possible_truncation, reason = "stagger of about a hundred")]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "stagger of about a hundred"
+        )]
         let stagger = row.stagger(&weapon) as f32;
         if block.is_none() && view.owner.is_none() {
             self.grit_hit(target, number, stagger, now_ms);

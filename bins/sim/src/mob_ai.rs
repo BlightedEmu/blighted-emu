@@ -43,8 +43,8 @@ use std::sync::Arc;
 
 use nw_ai::brain::{Brain, Command, Destination, MotionOutcome, Runtime, Slot, World};
 use nw_ai::data::{
-    AiData, Archetype, CageAction, FacingMode, FragmentLength, FragmentVariant, MobCage,
-    NavConfig, ProcWindow, SliceTriggerRef,
+    AiData, Archetype, CageAction, FacingMode, FragmentLength, FragmentVariant, MobCage, NavConfig,
+    ProcWindow, SliceTriggerRef,
 };
 use nw_ai::keys::EngineKey;
 use nw_ai::node::{
@@ -2632,19 +2632,16 @@ impl TreeMind {
     fn entry_length_ms(&self, variants: &[FragmentVariant]) -> Option<u64> {
         let tags = self.brain.tags();
         let has_tag = |tag: NameId| tags.contains(&tag);
-        CageAction::variant_of(variants, &has_tag)
-            .and_then(|variant| match variant.length {
-                // A reaction of a few seconds.
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "a reaction of a few seconds"
-                )]
-                FragmentLength::Seconds(seconds) => {
-                    Some((seconds * MS_PER_SECOND_F32).round() as u64)
-                }
-                FragmentLength::Loops | FragmentLength::Unknown => None,
-            })
+        CageAction::variant_of(variants, &has_tag).and_then(|variant| match variant.length {
+            // A reaction of a few seconds.
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a reaction of a few seconds"
+            )]
+            FragmentLength::Seconds(seconds) => Some((seconds * MS_PER_SECOND_F32).round() as u64),
+            FragmentLength::Loops | FragmentLength::Unknown => None,
+        })
     }
 
     /// Its grit is on at `now_ms` while it holds the effects `held`: its slice's grit is its
@@ -2740,7 +2737,9 @@ impl TreeMind {
             return false;
         };
         let free = self.with_cage(ai, now_ms, held, |mob| {
-            names.enable_stagger.is_some_and(|effect| (mob.has_effect)(effect))
+            names
+                .enable_stagger
+                .is_some_and(|effect| (mob.has_effect)(effect))
                 && !names.reset.is_some_and(|effect| (mob.has_effect)(effect))
                 && !names
                     .disable_stagger
@@ -5214,7 +5213,14 @@ mod tests {
         );
         assert_eq!(mind.state.path, None, "an old answer gives no way");
         assert_eq!(mind.state.pending_path, Some(pending), "it still waits");
-        mind.path_answered(&ai, PathAnswer { mob: 1, id: ASK, plan: plan.clone() });
+        mind.path_answered(
+            &ai,
+            PathAnswer {
+                mob: 1,
+                id: ASK,
+                plan: plan.clone(),
+            },
+        );
         assert_eq!(mind.state.path, plan, "its own answer gives its way");
     }
 
@@ -6029,7 +6035,8 @@ mod tests {
         );
         let staggered_ms = (1..=MOST_HITS)
             .find(|now_ms| {
-                mind.grit_hit(&ai, (at, None), *now_ms, HEAVY_STAGGER, None) == Some(GritHit::Staggered)
+                mind.grit_hit(&ai, (at, None), *now_ms, HEAVY_STAGGER, None)
+                    == Some(GritHit::Staggered)
             })
             .expect("the hits stagger it");
         assert_eq!(mind.guard_stamina(), Some(0.0));
@@ -6060,7 +6067,10 @@ mod tests {
         let mut plain = TreeMind::new(&plain_ai, 0, START, 0.0, 1, None).expect("a tree");
         plain.set_guard(BEAR);
         plain.step(&plain_ai, &mut at, &around(0));
-        assert_eq!(plain.grit_hit(&plain_ai, (at, None), 0, HEAVY_STAGGER, None), None);
+        assert_eq!(
+            plain.grit_hit(&plain_ai, (at, None), 0, HEAVY_STAGGER, None),
+            None
+        );
         assert_eq!(plain.guard_stamina(), Some(BEAR.stamina_max));
     }
 
@@ -6649,7 +6659,10 @@ mod tests {
             view.engine_value(EngineKey::GuardObjectivePos),
             Some(Value::Vec3(GUARD))
         );
-        assert_eq!(view.position(PositionType::GuardObjectivePosition), Some(GUARD));
+        assert_eq!(
+            view.position(PositionType::GuardObjectivePosition),
+            Some(GUARD)
+        );
         let plain = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
         let view = plain.state.view(&ai, START, 0, false);
         assert_eq!(view.engine_value(EngineKey::GuardObjectivePos), None);

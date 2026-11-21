@@ -14,8 +14,8 @@ mod arena;
 mod character;
 mod conflicts;
 mod connect;
-mod control_points;
 mod consumable_cooldowns;
+mod control_points;
 mod entitlements;
 mod entity;
 mod error;
@@ -74,12 +74,12 @@ pub use conflicts::{
     declare_in_lottery, territory_conflicts, war_cost,
 };
 pub use connect::{DatabaseConfig, GlobalDatabase, connect, connect_lazy, connect_options};
+pub use consumable_cooldowns::SavedConsumableCooldown;
 pub use control_points::{
     ControlPoint, FIRST_TOWER_POINT, FORT_EXPERIENCE_BONUS_PERCENT, FORT_LOCK_MS, FORT_POINTS,
     RACE_WINDOW_MS, TOWER_BONUS_PERCENT, TOWER_INFLUENCE_POINTS, TOWERS_PER_TERRITORY,
     control_points, in_race_window, is_tower, store_control_point, with_bonus,
 };
-pub use consumable_cooldowns::SavedConsumableCooldown;
 pub use entitlements::{
     AccountConsumable, AccountEntitlement, Purchase, Wallet, account_consumables,
     account_entitlements, buy_consumable, buy_entitlement, give_marks, use_consumable, wallet,

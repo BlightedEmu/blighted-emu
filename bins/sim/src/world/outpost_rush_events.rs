@@ -254,8 +254,14 @@ mod tests {
             vec![(COMMAND_POST_UPGRADED, 0x3_0002)]
         );
         let ruined = status(2) | 0b100 << COMMAND_POST_STATUS_SHIFT;
-        assert!(command_post_events(&[ruined, 0, 0], &[status(2), 0, 0]).is_empty(), "a repair");
-        assert!(command_post_events(&[status(2), 0, 0], &[ruined, 0, 0]).is_empty(), "a ruin");
+        assert!(
+            command_post_events(&[ruined, 0, 0], &[status(2), 0, 0]).is_empty(),
+            "a repair"
+        );
+        assert!(
+            command_post_events(&[status(2), 0, 0], &[ruined, 0, 0]).is_empty(),
+            "a ruin"
+        );
     }
 
     #[test]

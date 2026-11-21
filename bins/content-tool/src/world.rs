@@ -371,7 +371,10 @@ fn plant_gatherables(
             Ok::<(), ToolError>(())
         },
     )?;
-    Ok(PlantGatherables::build(slices, variation_gatherables(tables)))
+    Ok(PlantGatherables::build(
+        slices,
+        variation_gatherables(tables),
+    ))
 }
 
 /// Groups entries by level folder. Only folders with a `tracts.json` are levels.

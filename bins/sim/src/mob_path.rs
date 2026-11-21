@@ -490,10 +490,7 @@ mod tests {
         const MOB: u64 = 9;
         const THREADS: usize = 2;
         let pool = PathPool::new(Arc::new(two_walls()), THREADS, ANSWER_WAIT).expect("a pool");
-        let asks = [
-            (at(0.0, 0.0), at(14.0, 0.0)),
-            (at(-6.0, 0.0), at(6.0, 0.0)),
-        ];
+        let asks = [(at(0.0, 0.0), at(14.0, 0.0)), (at(-6.0, 0.0), at(6.0, 0.0))];
         let ids: Vec<u64> = asks
             .iter()
             .map(|&(from, to)| pool.ask(MOB, from, to, None))

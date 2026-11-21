@@ -294,13 +294,20 @@ mod tests {
         assert_eq!(slot.place.len(), 17);
         let at_one = table.slice_of(slot, 1).expect("tier 1");
         assert_eq!(
-            (at_one.station_type.as_str(), at_one.tier, at_one.members.len()),
+            (
+                at_one.station_type.as_str(),
+                at_one.tier,
+                at_one.members.len()
+            ),
             ("Smelting4", 4, 3)
         );
         assert_eq!(at_one.asset[0], 0x11);
         let top = table.slice_of(slot, 3).expect("tier 3");
         assert_eq!(top.station_type, "Smelting5", "no alt slice: the plain one");
-        assert!(table.slice_of(slot, 0).is_none(), "no type-3 slice in this table");
+        assert!(
+            table.slice_of(slot, 0).is_none(),
+            "no type-3 slice in this table"
+        );
         assert_eq!(table.slices_of(9).count(), 2);
         assert_eq!(table.slices_of(0).count(), 0);
     }

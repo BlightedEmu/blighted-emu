@@ -103,8 +103,9 @@ impl InteractTags {
         capitals: impl IntoIterator<Item = (&'a str, Option<&'a str>, &'a [String])>,
         spawned: impl IntoIterator<Item = (u64, &'a str, &'a [String])>,
     ) -> Self {
-        let of_variant =
-            |variant: Option<&str>| variant.and_then(|variant| variants.get(&variant.to_lowercase()));
+        let of_variant = |variant: Option<&str>| {
+            variant.and_then(|variant| variants.get(&variant.to_lowercase()))
+        };
         let mut tags = Self::default();
         let capitals = capitals.into_iter().filter_map(|(guid, variant, slice)| {
             Some((capital_key(guid)?, of_variant(variant), slice))
@@ -369,7 +370,11 @@ mod tests {
             (lowercase_crc32(NODULE), tag_of(NODULE_TAG, false)),
         ]);
         assert_eq!(tags.quest_gate(LURE_ID, None), [LURE_TAG]);
-        assert_eq!(tags.of(LURE_ID), [LURE_TAG], "the gate tag is an interact tag too");
+        assert_eq!(
+            tags.of(LURE_ID),
+            [LURE_TAG],
+            "the gate tag is an interact tag too"
+        );
         assert!(tags.quest_gate(JOURNAL_ID, None).is_empty());
         assert_eq!(
             tags.quest_gate(REGION_POINT_FACET, Some(lowercase_crc32(LURE))),

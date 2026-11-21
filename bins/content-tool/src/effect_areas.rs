@@ -165,7 +165,10 @@ fn areas_of(
             continue;
         }
         let entity = script.entity(area.detection_entity);
-        let at = compose(place, &affine_of(&script.placement_of(area.detection_entity)));
+        let at = compose(
+            place,
+            &affine_of(&script.placement_of(area.detection_entity)),
+        );
         let engine_shape = || {
             entity
                 .and_then(|entity| entity.shape.clone())
@@ -289,7 +292,10 @@ fn spawned_areas(
 ) -> Result<Vec<StageAreas>, EffectAreasBuildError> {
     let mut by_slice: BTreeMap<&str, Vec<&StageSpawn>> = BTreeMap::new();
     for spawn in spawns {
-        by_slice.entry(spawn.slice.as_str()).or_default().push(spawn);
+        by_slice
+            .entry(spawn.slice.as_str())
+            .or_default()
+            .push(spawn);
     }
     let paths: Vec<String> = by_slice.keys().map(|path| (*path).to_owned()).collect();
     let mut stages: Vec<StageAreas> = Vec::new();
@@ -384,7 +390,10 @@ pub fn build_effect_areas(
     let spells = spell_slices(tables);
     let mut by_slice: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (spell, path) in &spells {
-        by_slice.entry(path.as_str()).or_default().push(spell.as_str());
+        by_slice
+            .entry(path.as_str())
+            .or_default()
+            .push(spell.as_str());
     }
     let paths: Vec<String> = by_slice.keys().map(|path| (*path).to_owned()).collect();
     read_slices(index, &paths, |path, root| {
@@ -504,7 +513,10 @@ mod tests {
                     ),
                     node(
                         "m_addStatusEffects",
-                        vec![node("element", vec![value("m_effectId", effect.as_bytes())])],
+                        vec![node(
+                            "element",
+                            vec![value("m_effectId", effect.as_bytes())],
+                        )],
                     ),
                     node("m_removeStatusEffects", removes),
                     value("m_removeOnExit", &[1]),
@@ -515,7 +527,10 @@ mod tests {
             DETECTION_VOLUME,
             vec![node(
                 "m_shape",
-                vec![typed(SPHERE_SHAPE, vec![value("m_radius", &RADIUS_M.to_be_bytes())])],
+                vec![typed(
+                    SPHERE_SHAPE,
+                    vec![value("m_radius", &RADIUS_M.to_be_bytes())],
+                )],
             )],
         );
         let transform = node("element", vec![value("m_localTM", &local_tm(LOCAL_AT))]);
@@ -541,7 +556,8 @@ mod tests {
         let mut place = IDENTITY_AFFINE;
         place[0][3] = 1_000.0;
         place[1][3] = 2_000.0;
-        let (areas, unread) = placed_areas(&chunk("ApplyBlight", &[]), &place, &kept).expect("areas");
+        let (areas, unread) =
+            placed_areas(&chunk("ApplyBlight", &[]), &place, &kept).expect("areas");
         assert_eq!(unread, 0);
         let [area] = areas.as_slice() else {
             panic!("one area: {areas:?}");
@@ -608,7 +624,11 @@ mod tests {
             [1_010.0, 1_020.0, 1_005.0],
             "a spawn without locations stands at its stage"
         );
-        assert!(spawns.iter().all(|spawn| spawn.stage == "Setup" && spawn.slice == SLICE));
+        assert!(
+            spawns
+                .iter()
+                .all(|spawn| spawn.stage == "Setup" && spawn.slice == SLICE)
+        );
     }
 
     #[test]
@@ -633,7 +653,9 @@ mod tests {
     fn hazard(active: bool) -> Element {
         let mut slice = chunk("ApplyCurseL4", &[]);
         let entity = &mut slice.children[0].children[0].children[0].children[0];
-        entity.children.push(value("IsRuntimeActive", &[u8::from(active)]));
+        entity
+            .children
+            .push(value("IsRuntimeActive", &[u8::from(active)]));
         let components = &mut entity.children[1].children;
         components.retain(|component| component.type_id != DETECTION_VOLUME);
         components.push(typed(DETECTION_VOLUME, vec![node("m_shape", Vec::new())]));
@@ -661,11 +683,18 @@ mod tests {
         let [x, y, z] = LOCAL_AT;
         assert!(area.contains([x + HAZARD_RADIUS_M - 1.0, y, z]));
         assert!(!area.contains([x + HAZARD_RADIUS_M + 1.0, y, z]));
-        assert!(!area.contains([x, y, z + HAZARD_HEIGHT_M]), "above its half height");
+        assert!(
+            !area.contains([x, y, z + HAZARD_HEIGHT_M]),
+            "above its half height"
+        );
         let (inactive, _) = slice_space_areas(&hazard(false), &kept).expect("areas");
         assert!(inactive.is_empty());
         let (placed, _) = placed_areas(&hazard(false), &IDENTITY_AFFINE, &kept).expect("areas");
-        assert_eq!(placed.len(), 1, "a level area of an inactive entity stays as it was");
+        assert_eq!(
+            placed.len(),
+            1,
+            "a level area of an inactive entity stays as it was"
+        );
     }
 
     #[test]
@@ -680,8 +709,8 @@ mod tests {
     #[test]
     fn a_coastal_damage_area_keeps_only_the_affliction_effect_it_removes() {
         let kept = HashSet::from([lowercase_crc32("Breath")]);
-        let (areas, _) = placed_areas(&chunk("Drowning", &["Breath"]), &IDENTITY_AFFINE, &kept)
-            .expect("areas");
+        let (areas, _) =
+            placed_areas(&chunk("Drowning", &["Breath"]), &IDENTITY_AFFINE, &kept).expect("areas");
         let [area] = areas.as_slice() else {
             panic!("one area: {areas:?}");
         };

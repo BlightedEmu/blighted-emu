@@ -98,27 +98,27 @@ use nw_messages::list_delta::{ListChange, ReplicatedList};
 use nw_messages::wire::RAW_ID_LEN;
 use nw_sim_core::Position;
 
+use self::board::Board;
+use self::capture_points::CapturePoints;
+use self::storage_shed::StorageSheds;
 use super::arena_match::{
     CLEANUP_TIMER, GAME_MODE_TIMEOUT, GAME_MODE_TIMEOUT_MS, LEAVER_PENALTY_NS, PREGAME_MS,
     PREGAME_TIMER, RAID_ID_BASE, READY_BIT, WINNING_TEAM, middle_of,
 };
+use super::camps::APPLY_ALL_RESOURCES_KIND;
 use super::game_mode_entity::team_affiliations;
 use super::game_mode_entity::{
     FIRST_LIST_VERSION, MatchEntry, MatchParticipant, PLAYING_STATUS, full, participant_lists,
 };
-use self::board::Board;
-use self::capture_points::CapturePoints;
-use self::storage_shed::StorageSheds;
 use super::outpost_rush_boss::BaronessRun;
 use super::outpost_rush_doors::{FortBarrier, ISLAND_FOLDER};
 use super::outpost_rush_events::{
     ARMORY_BUILT, AttackWatch, EventFeed, OUTPOST_ATTACKED, command_post_events,
 };
-use super::camps::APPLY_ALL_RESOURCES_KIND;
 use super::outpost_rush_structures::{OutpostStructures, RUIN_BIT, UPGRADE_BUILDABLE_KIND};
 use super::outpost_rush_summons::SummonRun;
-use super::turrets::{USE_ACCEPTED, USE_REFUSED};
 use super::queue::team_spot;
+use super::turrets::{USE_ACCEPTED, USE_REFUSED};
 use super::{Body, Player, SimWorld, unix_ns};
 
 /// The script states (Observed).
@@ -547,7 +547,10 @@ impl OutpostRushMatch {
 
     /// The team whose raid is `raid` (no team for raid 0).
     pub(super) fn team_of_raid(&self, raid: u64) -> Option<u8> {
-        let team = self.raids.iter().position(|team_raid| raid != 0 && *team_raid == raid)?;
+        let team = self
+            .raids
+            .iter()
+            .position(|team_raid| raid != 0 && *team_raid == raid)?;
         u8::try_from(team).ok()
     }
 
@@ -576,7 +579,11 @@ impl OutpostRushMatch {
             .zip(self.points)
             .map(|(outpost, point)| (outpost.key, point.value()))
             .collect();
-        values.extend(OUTPOST_STRUCTURE_STATUSES.into_iter().zip(self.structures.statuses()));
+        values.extend(
+            OUTPOST_STRUCTURE_STATUSES
+                .into_iter()
+                .zip(self.structures.statuses()),
+        );
         if self.state != PREGAME {
             values.push((TEAM_SCORES, team_scores(self.scores)));
             values.push((DOMINATION_MULTIPLIER, u64::from(self.multiplier)));
@@ -991,9 +998,11 @@ impl SimWorld {
         }
         if state != ENDED {
             let content = std::sync::Arc::clone(&self.content);
-            let pushes = self.arena_matches.outpost_rush.as_mut().map(|running| {
-                running.board.flush(now_ms, &content.outpost_rush_board)
-            });
+            let pushes = self
+                .arena_matches
+                .outpost_rush
+                .as_mut()
+                .map(|running| running.board.flush(now_ms, &content.outpost_rush_board));
             self.send_outpost_rush_board(pushes.unwrap_or_default());
         }
         match state {
@@ -1051,7 +1060,11 @@ impl SimWorld {
             .iter()
             .filter(|participant| participant.status & DEAD_BIT == 0)
             .filter_map(|participant| {
-                let at = self.world.get::<Body>(participant.entity)?.motion.position();
+                let at = self
+                    .world
+                    .get::<Body>(participant.entity)?
+                    .motion
+                    .position();
                 let index = board::outpost_index_at(&outposts, at)?;
                 Some((participant.number, participant.team, index))
             })
@@ -1074,10 +1087,15 @@ impl SimWorld {
                 let next = point.step(*present, protected[index]);
                 changed |= next != *point;
                 *point = next;
-                let taken_from_owner =
-                    next.owner != NO_TEAM && next.capturer != NO_TEAM && next.capturer != next.owner;
+                let taken_from_owner = next.owner != NO_TEAM
+                    && next.capturer != NO_TEAM
+                    && next.capturer != next.owner;
                 if taken_from_owner && running.attacks.attacked(index, now_ms) {
-                    running.feed.note(OUTPOST_ATTACKED, now_ms, u32::try_from(index).unwrap_or(u32::MAX));
+                    running.feed.note(
+                        OUTPOST_ATTACKED,
+                        now_ms,
+                        u32::try_from(index).unwrap_or(u32::MAX),
+                    );
                     changed = true;
                 }
             }
@@ -1207,17 +1225,27 @@ impl SimWorld {
             let Some(status) = self.armory_status(entity, &request.target) else {
                 return false;
             };
-            self.send_travel(entity, &[super::gather_answer(number, request, status, name)]);
+            self.send_travel(
+                entity,
+                &[super::gather_answer(number, request, status, name)],
+            );
             return true;
         }
-        if !matches!(request.kind, APPLY_ALL_RESOURCES_KIND | UPGRADE_BUILDABLE_KIND) {
+        if !matches!(
+            request.kind,
+            APPLY_ALL_RESOURCES_KIND | UPGRADE_BUILDABLE_KIND
+        ) {
             return false;
         }
         let now_ms = self.server_ms;
         self.arena_matches
             .outpost_rush
             .as_mut()
-            .is_some_and(|running| running.structures.ask(entity, number, request, name, now_ms))
+            .is_some_and(|running| {
+                running
+                    .structures
+                    .ask(entity, number, request, name, now_ms)
+            })
     }
 
     /// The answer to player `entity`'s use of the armory `target` (kind 78 `OpenArmory`): its
@@ -1232,7 +1260,9 @@ impl SimWorld {
     /// of an enemy armory).
     fn armory_status(&self, entity: Entity, target: &[u8; RAW_ID_LEN]) -> Option<u8> {
         let running = self.arena_matches.outpost_rush.as_ref()?;
-        let owner = running.structures.built_raid(target, StructureRole::Armory)?;
+        let owner = running
+            .structures
+            .built_raid(target, StructureRole::Armory)?;
         let raid = self.outpost_rush_raid_of(entity);
         Some(if raid == Some(owner) {
             USE_ACCEPTED
@@ -1315,7 +1345,11 @@ impl SimWorld {
         if ruined.is_some()
             && let Some(number) = number
         {
-            self.note_outpost_rush_stat(number, nw_content::warboard_stats::DAMAGE_TO_OTHER, amount);
+            self.note_outpost_rush_stat(
+                number,
+                nw_content::warboard_stats::DAMAGE_TO_OTHER,
+                amount,
+            );
         }
         let running = self.arena_matches.outpost_rush.as_mut()?;
         running.structures = set;
@@ -1323,13 +1357,20 @@ impl SimWorld {
         let attacker_team = number.and_then(|number| running.team_of(number));
         let attacked = ruined.is_some()
             && outpost.is_some_and(|outpost| {
-                let owner = running.points.get(outpost).map_or(NO_TEAM, |point| point.owner);
+                let owner = running
+                    .points
+                    .get(outpost)
+                    .map_or(NO_TEAM, |point| point.owner);
                 owner != NO_TEAM
                     && attacker_team.is_some_and(|team| team != owner)
                     && running.attacks.attacked(outpost, now_ms)
             });
         if let Some(outpost) = outpost.filter(|_| attacked) {
-            running.feed.note(OUTPOST_ATTACKED, now_ms, u32::try_from(outpost).unwrap_or(u32::MAX));
+            running.feed.note(
+                OUTPOST_ATTACKED,
+                now_ms,
+                u32::try_from(outpost).unwrap_or(u32::MAX),
+            );
         }
         if ruined == Some(true) || attacked {
             let change = running.values_change();
@@ -1383,7 +1424,12 @@ impl SimWorld {
             .iter()
             .map(|participant| {
                 let score = running.board.score_of(participant.number);
-                (participant.entity, participant.number, participant.team, score)
+                (
+                    participant.entity,
+                    participant.number,
+                    participant.team,
+                    score,
+                )
             })
             .collect();
         self.change_game_mode_state(entity, change);
@@ -1485,7 +1531,6 @@ pub(super) mod tests {
     use crate::world::tests::{NOW, admit_at, messages_to, slot};
     use crate::world::turrets::tests::{bag_count, give};
 
-
     /// Players of the test sim.
     const MANY_PLAYERS: usize = 10;
     /// The two players, one per team.
@@ -1565,11 +1610,19 @@ pub(super) mod tests {
 
     #[test]
     fn a_capture_takes_sixty_seconds_less_ten_for_each_extra_player_down_to_ten() {
-        assert_eq!(capture_ticks(1), 61, "60 s: 1,666 units a second, steps 2, 2, 1");
+        assert_eq!(
+            capture_ticks(1),
+            61,
+            "60 s: 1,666 units a second, steps 2, 2, 1"
+        );
         assert_eq!(capture_ticks(2), 50);
         assert_eq!(capture_ticks(3), 40);
         assert_eq!(capture_ticks(6), 10, "m_captureTimeMinimum");
-        assert_eq!(capture_ticks(9), 10, "m_captureMaxPlayerDelta counts five extra players");
+        assert_eq!(
+            capture_ticks(9),
+            10,
+            "m_captureMaxPlayerDelta counts five extra players"
+        );
         let shown: Vec<u8> = (1..=5)
             .scan(OutpostState::NEUTRAL, |point, _| {
                 *point = point.step([1, 0], false);
@@ -1606,7 +1659,11 @@ pub(super) mod tests {
                 ..OutpostState::NEUTRAL
             }
         );
-        assert_eq!(point.step([2, 0], false), point, "the owner holds its outpost");
+        assert_eq!(
+            point.step([2, 0], false),
+            point,
+            "the owner holds its outpost"
+        );
         let taken = (0..capture_ticks(1)).fold(point, |point, _| point.step([0, 1], false));
         assert_eq!(
             taken.owner, 1,
@@ -1629,7 +1686,11 @@ pub(super) mod tests {
             },
             "retail: capturer team 1 at progress 0 (opr_match_4 731.330 to 742.798 s)"
         );
-        assert_eq!(held.step([0, 1], false).progress, rise_of(1), "the ruined ward lets it rise");
+        assert_eq!(
+            held.step([0, 1], false).progress,
+            rise_of(1),
+            "the ruined ward lets it rise"
+        );
     }
 
     #[test]
@@ -1815,7 +1876,9 @@ pub(super) mod tests {
 
     /// A table of one storage shed (container 4, interact 5) at outpost A and one standing
     /// tier 1 Protection Ward at outpost C of the map in `folder`.
-    pub(in crate::world) fn shed_and_ward_table(folder: &str) -> nw_content::outpost_structures::OutpostStructures {
+    pub(in crate::world) fn shed_and_ward_table(
+        folder: &str,
+    ) -> nw_content::outpost_structures::OutpostStructures {
         use nw_messages::{BundleMember, ContainerState, InteractState};
         let encoded = |member: BundleMember| hex::encode(member.encode().expect("encode"));
         let container = encoded(BundleMember {
@@ -2002,7 +2065,11 @@ pub(super) mod tests {
         assert_eq!(end_event(1, Some(1), 6_441), "OutpostRush_T4");
         assert_eq!(end_event(0, Some(0), 2_000), "OutpostRush_T2");
         assert_eq!(end_event(0, Some(0), 5_999), "OutpostRush_T3");
-        assert_eq!(end_event(0, Some(0), u32::MAX), "OutpostRush_T4", "no tier above T4");
+        assert_eq!(
+            end_event(0, Some(0), u32::MAX),
+            "OutpostRush_T4",
+            "no tier above T4"
+        );
         assert_eq!(end_event(1, Some(0), 9_000), LOSS_EVENT, "a loss stays T1");
         assert_eq!(end_event(0, None, 9_000), LOSS_EVENT, "a tie");
     }
@@ -2130,7 +2197,12 @@ pub(super) mod tests {
             .map(|structure| (structure.gde_ref, structure.number))
             .expect("the gate foundation");
         assert_eq!(status_of_a(&world), ARMORY_TIER_ONE, "no gate yet");
-        give(&mut world, first, structure_tests::WOOD, structure_tests::GATE_WOOD);
+        give(
+            &mut world,
+            first,
+            structure_tests::WOOD,
+            structure_tests::GATE_WOOD,
+        );
         world.take_messages();
         assert!(world.outpost_rush_interaction(first, FIRST, build_request(gate), &[]));
         assert!(world.outpost_rush_interaction(second, SECOND, build_request(gate), &[]));
@@ -2142,25 +2214,42 @@ pub(super) mod tests {
         };
         assert!(answered(FIRST, USE_ACCEPTED), "the owner team builds");
         assert!(answered(SECOND, USE_REFUSED), "the other team does not");
-        assert_eq!(bag_count(&world, first, structure_tests::WOOD), 0, "the whole cost");
+        assert_eq!(
+            bag_count(&world, first, structure_tests::WOOD),
+            0,
+            "the whole cost"
+        );
         let build_ms = (structure_tests::GATE_BUILD_S * 1_000.0) as u64;
-        tick_at(&mut world, captured_ms + ACCEPT_DELAY_MS + build_ms + BUILD_SEND_MS);
+        tick_at(
+            &mut world,
+            captured_ms + ACCEPT_DELAY_MS + build_ms + BUILD_SEND_MS,
+        );
         assert_eq!(
             status_of_a(&world),
             ARMORY_TIER_ONE | 1 << GATE_ONE_SHIFT,
             "the gate stands at tier 1"
         );
         let whole = structure_tests::GATE_HEALTH as u32;
-        assert_eq!(world.hit_outpost_rush_structure(first, number, whole), None, "own team");
-        assert_eq!(world.hit_outpost_rush_structure(second, number, whole), Some(true));
+        assert_eq!(
+            world.hit_outpost_rush_structure(first, number, whole),
+            None,
+            "own team"
+        );
+        assert_eq!(
+            world.hit_outpost_rush_structure(second, number, whole),
+            Some(true)
+        );
         assert_eq!(
             status_of_a(&world),
             ARMORY_TIER_ONE | (1 | RUIN_BIT) << GATE_ONE_SHIFT,
             "a ruin keeps its tier (Observed gate 1 -> 5)"
         );
-        assert_eq!(world.hit_outpost_rush_structure(second, number, whole), None, "a ruin");
+        assert_eq!(
+            world.hit_outpost_rush_structure(second, number, whole),
+            None,
+            "a ruin"
+        );
     }
-
 
     #[test]
     fn an_upgrade_replaces_the_built_gate_with_the_next_tier_built_from_nothing() {
@@ -2180,7 +2269,12 @@ pub(super) mod tests {
                 .map(|structure| structure.gde_ref)
         };
         let t1 = gate(&world, Phase::Foundation).expect("the t1 foundation");
-        give(&mut world, first, structure_tests::WOOD, structure_tests::GATE_WOOD);
+        give(
+            &mut world,
+            first,
+            structure_tests::WOOD,
+            structure_tests::GATE_WOOD,
+        );
         assert!(world.outpost_rush_interaction(first, FIRST, build_request(t1), &[]));
         let t1_build_ms = (structure_tests::GATE_BUILD_S * 1_000.0) as u64;
         now_ms += ACCEPT_DELAY_MS;
@@ -2195,7 +2289,11 @@ pub(super) mod tests {
         assert!(world.outpost_rush_interaction(first, FIRST, upgrade, &[]));
         now_ms += ACCEPT_DELAY_MS;
         tick_at(&mut world, now_ms);
-        assert_eq!(gate(&world, Phase::Replaced), Some(t1), "state 7 while the t2 builds");
+        assert_eq!(
+            gate(&world, Phase::Replaced),
+            Some(t1),
+            "state 7 while the t2 builds"
+        );
         let t2 = gate(&world, Phase::Foundation).expect("the t2 foundation");
         assert_ne!(t2, t1, "a new entity");
         assert_eq!(
@@ -2203,8 +2301,18 @@ pub(super) mod tests {
             ARMORY_TIER_ONE | 1 << GATE_ONE_SHIFT,
             "the status keeps tier 1 while the t2 builds (Observed 1054.1 to 1060.1 s)"
         );
-        give(&mut world, first, structure_tests::WOOD, structure_tests::GATE_WOOD);
-        give(&mut world, first, structure_tests::ORE, structure_tests::GATE_T2_ORE);
+        give(
+            &mut world,
+            first,
+            structure_tests::WOOD,
+            structure_tests::GATE_WOOD,
+        );
+        give(
+            &mut world,
+            first,
+            structure_tests::ORE,
+            structure_tests::GATE_T2_ORE,
+        );
         assert!(world.outpost_rush_interaction(first, FIRST, build_request(t2), &[]));
         now_ms += ACCEPT_DELAY_MS;
         tick_at(&mut world, now_ms);
@@ -2340,19 +2448,36 @@ pub(super) mod tests {
         stand_in_outpost(&mut world, FIRST, 0);
         tick_at(&mut world, start_ms + SCORE_TICK_MS);
         let board = &running(&world).board;
-        assert_eq!(board.value(FIRST, CAPTURE_POINT_CONTESTS), board::CONTESTS_PER_SCORE_TICK);
-        assert_eq!(board.value(SECOND, CAPTURE_POINT_CONTESTS), 0, "not in an outpost");
+        assert_eq!(
+            board.value(FIRST, CAPTURE_POINT_CONTESTS),
+            board::CONTESTS_PER_SCORE_TICK
+        );
+        assert_eq!(
+            board.value(SECOND, CAPTURE_POINT_CONTESTS),
+            0,
+            "not in an outpost"
+        );
         world.outpost_rush_hit(SECOND, FIRST, 2_000);
         world.outpost_rush_hit(FIRST, FIRST, 2_000);
         world.outpost_rush_death(SECOND, FIRST);
         let board = &running(&world).board;
-        assert_eq!(board.value(FIRST, DAMAGE_TO_PLAYERS), 2_000, "a hit on a team mate counts nothing");
+        assert_eq!(
+            board.value(FIRST, DAMAGE_TO_PLAYERS),
+            2_000,
+            "a hit on a team mate counts nothing"
+        );
         assert_eq!(board.value(FIRST, TOTAL_DAMAGE_DEALT), 2_000);
         assert_eq!(board.value(FIRST, PLAYER_KILLS), 1);
         assert_eq!(board.value(SECOND, DEATHS), 1);
         assert!(board.score_of(FIRST) >= 50, "the kill's 50 points");
-        assert!(world.outpost_rush_board_enabled(FIRST), "a 3206 gets the full pair");
-        assert!(!world.outpost_rush_board_enabled(FIRST + SECOND + 1), "not a participant");
+        assert!(
+            world.outpost_rush_board_enabled(FIRST),
+            "a 3206 gets the full pair"
+        );
+        assert!(
+            !world.outpost_rush_board_enabled(FIRST + SECOND + 1),
+            "not a participant"
+        );
     }
 
     #[test]
@@ -2399,15 +2524,31 @@ pub(super) mod tests {
                     .is_some()
             })
             .expect("the test armory A");
-        assert_eq!(world.armory_status(first, &armory), Some(USE_REFUSED), "no owner yet");
+        assert_eq!(
+            world.armory_status(first, &armory),
+            Some(USE_REFUSED),
+            "no owner yet"
+        );
         let start_ms = START_MS + PREGAME_MS;
         tick_at(&mut world, start_ms);
         stand_in_outpost(&mut world, FIRST, 0);
         let captured_ms = start_ms + capture_ticks(1) * CAPTURE_TICK_MS;
         tick_at(&mut world, captured_ms);
         tick_at(&mut world, captured_ms + CAPTURE_TICK_MS);
-        assert_eq!(world.armory_status(first, &armory), Some(USE_ACCEPTED), "the owner team");
-        assert_eq!(world.armory_status(second, &armory), Some(USE_REFUSED), "the other team");
-        assert_eq!(world.armory_status(first, &[0; RAW_ID_LEN]), None, "no armory");
+        assert_eq!(
+            world.armory_status(first, &armory),
+            Some(USE_ACCEPTED),
+            "the owner team"
+        );
+        assert_eq!(
+            world.armory_status(second, &armory),
+            Some(USE_REFUSED),
+            "the other team"
+        );
+        assert_eq!(
+            world.armory_status(first, &[0; RAW_ID_LEN]),
+            None,
+            "no armory"
+        );
     }
 }

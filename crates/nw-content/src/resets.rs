@@ -260,7 +260,11 @@ mod tests {
             (ServerRegion::SaEast, 1_782_864_000, 1_782_889_200),
         ];
         for (region, now_s, reset_s) in captured {
-            assert_eq!(clock(region).next(ResetCycle::Daily, now_s), reset_s, "{region:?}");
+            assert_eq!(
+                clock(region).next(ResetCycle::Daily, now_s),
+                reset_s,
+                "{region:?}"
+            );
         }
     }
 
@@ -276,8 +280,8 @@ mod tests {
     #[test]
     fn an_end_keeps_the_starts_sub_second_part() {
         const SUB_SECOND_NS: u64 = 894_621_000;
-        let start_ns = u64::try_from(US_SUMMER_LAST_DAY_S).expect("positive") * NS_PER_SECOND
-            + SUB_SECOND_NS;
+        let start_ns =
+            u64::try_from(US_SUMMER_LAST_DAY_S).expect("positive") * NS_PER_SECOND + SUB_SECOND_NS;
         let reset_ns = u64::try_from(US_WINTER_RESET_S).expect("positive") * NS_PER_SECOND;
         assert_eq!(
             US_EAST_CLOCK.end_ns(ResetCycle::Daily, start_ns),

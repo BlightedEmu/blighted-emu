@@ -739,7 +739,10 @@ pub(super) const EXPEDITION_SCRIPTS: [ExpeditionScript; 12] = [
             (12, "@dungeon_shattermtn00_task_navigate_cave"),
             (13, "@dungeon_shattermtn00_task_continue_graveyard"),
             (14, "@dungeon_shattermtn00_task_open_gate_basilica"),
-            (15, "@dungeon_shattermtn00_task_defeat_isabella_basilica_entry"),
+            (
+                15,
+                "@dungeon_shattermtn00_task_defeat_isabella_basilica_entry",
+            ),
             (16, "@dungeon_shattermtn00_task_pursue_isabella_basilica"),
             (17, "@dungeon_shattermtn00_task_survive_basilica"),
             (18, "@dungeon_shattermtn00_task_pursue_isabella_chandeliers"),
@@ -999,11 +1002,20 @@ mod tests {
                 "{}",
                 script.game_mode
             );
-            assert!(script.tasks.iter().all(|(index, _)| *index < script.root_index));
-            let after = usize::from(script.end_done) + usize::from(script.victory_delay_ms.is_some());
+            assert!(
+                script
+                    .tasks
+                    .iter()
+                    .all(|(index, _)| *index < script.root_index)
+            );
+            let after =
+                usize::from(script.end_done) + usize::from(script.victory_delay_ms.is_some());
             assert!(after <= script.tasks.len(), "{}", script.game_mode);
         }
-        assert!(expedition_script("DungeonDunwood02").is_none(), "no retail run");
+        assert!(
+            expedition_script("DungeonDunwood02").is_none(),
+            "no retail run"
+        );
     }
 
     /// Every area task waits before the run's end, in rising order; 34 retail ties of 7
@@ -1012,12 +1024,18 @@ mod tests {
     fn the_area_tasks_end_before_the_run_does() {
         for script in &EXPEDITION_SCRIPTS {
             assert!(
-                script.area_tasks.windows(2).all(|pair| pair[0].done < pair[1].done),
+                script
+                    .area_tasks
+                    .windows(2)
+                    .all(|pair| pair[0].done < pair[1].done),
                 "{}",
                 script.game_mode
             );
             assert!(
-                script.area_tasks.iter().all(|task| task.done < script.end_done),
+                script
+                    .area_tasks
+                    .iter()
+                    .all(|task| task.done < script.end_done),
                 "{}",
                 script.game_mode
             );
@@ -1044,12 +1062,18 @@ mod tests {
     fn the_event_tasks_end_before_the_run_does() {
         for script in &EXPEDITION_SCRIPTS {
             assert!(
-                script.event_tasks.windows(2).all(|pair| pair[0].done <= pair[1].done),
+                script
+                    .event_tasks
+                    .windows(2)
+                    .all(|pair| pair[0].done <= pair[1].done),
                 "{}",
                 script.game_mode
             );
             assert!(
-                script.event_tasks.iter().all(|task| task.done < script.end_done),
+                script
+                    .event_tasks
+                    .iter()
+                    .all(|task| task.done < script.end_done),
                 "{}",
                 script.game_mode
             );

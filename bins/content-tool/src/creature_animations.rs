@@ -1004,7 +1004,10 @@ mod tests {
     fn whole_ticks_count_the_last_tick_the_fragment_plays() {
         // The sailor's `r_Death_F`: 56 frames of the clip's f32 1/30 s (retail 0x38).
         const SECONDS_PER_FRAME: f32 = 1.0 / 30.0;
-        #[allow(clippy::cast_possible_truncation, reason = "as the clip reader's f32 length")]
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "as the clip reader's f32 length"
+        )]
         let death_s = (56.0 * f64::from(SECONDS_PER_FRAME)) as f32;
         assert_eq!(whole_ticks(FragmentLength::Seconds(death_s)), Some(0x38));
         assert_eq!(whole_ticks(FragmentLength::Seconds(2.963)), Some(88));

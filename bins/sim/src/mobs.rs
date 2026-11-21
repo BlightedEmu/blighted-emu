@@ -42,8 +42,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::combat::CombatSettings;
 use crate::mob_ai::{
-    COMBAT_LEASH_KEY, GritHit, GuardHit, HeldEffects, MobAi, PATH_ASK_LIFE, RemoteFact, Shown, SpawnAi, SpellCast, Strike,
-    Summon, Surroundings, TaggedMob, TreeMind, floor_line, height_after_move,
+    COMBAT_LEASH_KEY, GritHit, GuardHit, HeldEffects, MobAi, PATH_ASK_LIFE, RemoteFact, Shown,
+    SpawnAi, SpellCast, Strike, Summon, Surroundings, TaggedMob, TreeMind, floor_line,
+    height_after_move,
 };
 use crate::mob_path::PathPool;
 use crate::objectives::KillTypes;

@@ -38,7 +38,9 @@ use nw_content::starter::KitItem;
 use nw_messages::items::{ItemRecord, SYNC_MOVED};
 use nw_messages::list_delta::ReplicatedList;
 use nw_messages::wire::RAW_ID_LEN;
-use nw_messages::{BundleMember, ContainerState, FullList, InteractState, InteractionRequest, MemberState};
+use nw_messages::{
+    BundleMember, ContainerState, FullList, InteractState, InteractionRequest, MemberState,
+};
 
 use super::super::gates::merge_members;
 use super::super::gear::MovedStack;
@@ -133,8 +135,12 @@ impl StorageSheds {
     }
 
     fn open_index(&self, entity: Entity, gde_ref: &[u8; RAW_ID_LEN]) -> Option<usize> {
-        self.index_of(gde_ref)
-            .filter(|index| self.sheds[*index].open_by.iter().any(|(open, _)| *open == entity))
+        self.index_of(gde_ref).filter(|index| {
+            self.sheds[*index]
+                .open_by
+                .iter()
+                .any(|(open, _)| *open == entity)
+        })
     }
 }
 
@@ -158,7 +164,11 @@ fn interact_member(shed: &StorageShed) -> Option<BundleMember> {
 impl SimWorld {
     /// The sheds among `structures` (by their slice) with their container and interact
     /// components, taking the items of `match_classes` (the mode's `ItemClassesToRemoveOnExit`).
-    pub(super) fn storage_sheds_of(&self, structures: &OutpostStructures, match_classes: &[String]) -> StorageSheds {
+    pub(super) fn storage_sheds_of(
+        &self,
+        structures: &OutpostStructures,
+        match_classes: &[String],
+    ) -> StorageSheds {
         let sheds = structures
             .structures
             .iter()
@@ -166,13 +176,20 @@ impl SimWorld {
             .filter_map(|structure| {
                 let members = self.stations.members(structure.number)?;
                 let component_of = |wanted: fn(&MemberState) -> bool| {
-                    members.iter().find(|member| wanted(&member.state)).map(|member| member.component)
+                    members
+                        .iter()
+                        .find(|member| wanted(&member.state))
+                        .map(|member| member.component)
                 };
                 Some(StorageShed {
                     number: structure.number,
                     gde_ref: structure.gde_ref,
-                    container_component: component_of(|state| matches!(state, MemberState::Container(_)))?,
-                    interact_component: component_of(|state| matches!(state, MemberState::Interact(_))),
+                    container_component: component_of(|state| {
+                        matches!(state, MemberState::Container(_))
+                    })?,
+                    interact_component: component_of(|state| {
+                        matches!(state, MemberState::Interact(_))
+                    }),
                     stacks: Vec::new(),
                     version: FIRST_VERSION,
                     made: 0,
@@ -188,11 +205,16 @@ impl SimWorld {
 
     /// Whether player `entity`'s team owns the outpost of the shed `gde_ref` (its raid).
     fn owns_shed(&self, entity: Entity, gde_ref: &[u8; RAW_ID_LEN]) -> bool {
-        let owner = self.arena_matches.outpost_rush.as_ref().and_then(|running| {
-            running
-                .structures
-                .built_raid(gde_ref, nw_content::outpost_structures::StructureRole::StorageShed)
-        });
+        let owner = self
+            .arena_matches
+            .outpost_rush
+            .as_ref()
+            .and_then(|running| {
+                running.structures.built_raid(
+                    gde_ref,
+                    nw_content::outpost_structures::StructureRole::StorageShed,
+                )
+            });
         owner.is_some() && self.outpost_rush_raid_of(entity) == owner
     }
 
@@ -207,8 +229,11 @@ impl SimWorld {
         else {
             return;
         };
-        self.stations
-            .change_camp(number, |held| merge_members(held, &members), members.clone());
+        self.stations.change_camp(
+            number,
+            |held| merge_members(held, &members),
+            members.clone(),
+        );
     }
 
     /// The open (kind [`OPEN_STORAGE_KIND`]) `request` of player `entity` (`number`, named
@@ -238,27 +263,36 @@ impl SimWorld {
         if !owns {
             return true;
         }
-        let interact = self.arena_matches.outpost_rush.as_mut().and_then(|running| {
-            let shed = running.sheds.sheds.get_mut(index)?;
-            shed.open_by.retain(|(open, _)| *open != entity);
-            shed.open_by.push((entity, request.interaction));
-            interact_member(shed)
-        });
+        let interact = self
+            .arena_matches
+            .outpost_rush
+            .as_mut()
+            .and_then(|running| {
+                let shed = running.sheds.sheds.get_mut(index)?;
+                shed.open_by.retain(|(open, _)| *open != entity);
+                shed.open_by.push((entity, request.interaction));
+                interact_member(shed)
+            });
         self.change_shed(index, interact.into_iter().collect());
         true
     }
 
     /// The client of player `entity` ended `interaction` (2473): a shed it opened with it, or
     /// every shed when `interaction` is `None` (it left the match), closes for it.
-    pub(in crate::world) fn outpost_rush_shed_closed(&mut self, entity: Entity, interaction: Option<u64>) {
+    pub(in crate::world) fn outpost_rush_shed_closed(
+        &mut self,
+        entity: Entity,
+        interaction: Option<u64>,
+    ) {
         let Some(running) = self.arena_matches.outpost_rush.as_mut() else {
             return;
         };
         let mut closed = Vec::new();
         for (index, shed) in running.sheds.sheds.iter_mut().enumerate() {
             let before = shed.open_by.len();
-            shed.open_by
-                .retain(|(open, with)| *open != entity || interaction.is_some_and(|wanted| wanted != *with));
+            shed.open_by.retain(|(open, with)| {
+                *open != entity || interaction.is_some_and(|wanted| wanted != *with)
+            });
             if shed.open_by.len() != before {
                 closed.extend(interact_member(shed).map(|member| (index, member)));
             }
@@ -376,11 +410,20 @@ impl SimWorld {
             return true;
         };
         let put = self.has_room(entity, std::slice::from_ref(&wanted))
-            && self.world.get_mut::<Player>(entity).is_some_and(|mut player| {
-                player.gear.as_mut().is_some_and(|gear| {
-                    gear.put_moved(&content.kits, item, taken, stack.values.as_ref(), SYNC_MOVED)
-                })
-            });
+            && self
+                .world
+                .get_mut::<Player>(entity)
+                .is_some_and(|mut player| {
+                    player.gear.as_mut().is_some_and(|gear| {
+                        gear.put_moved(
+                            &content.kits,
+                            item,
+                            taken,
+                            stack.values.as_ref(),
+                            SYNC_MOVED,
+                        )
+                    })
+                });
         if !put {
             tracing::debug!("a shed take with no room");
             return true;
@@ -477,12 +520,12 @@ mod tests {
         use nw_messages::ServerMessage;
 
         use super::super::super::super::item_calls::OPEN_STORAGE_KIND;
+        use super::super::super::super::outpost_rush_structures::tests as structure_tests;
         use super::super::super::super::tests::messages_to;
         use super::super::super::super::turrets::tests::{bag_count, give, use_request};
-        use super::super::super::super::outpost_rush_structures::tests as structure_tests;
         use super::super::super::tests::{
-            FIRST, SECOND, START_MS, capture_ticks, outpost_rush, running, rush_sim_with, shed_and_ward_table,
-            stand_in_outpost, tick_at, tick_sent,
+            FIRST, SECOND, START_MS, capture_ticks, outpost_rush, running, rush_sim_with,
+            shed_and_ward_table, stand_in_outpost, tick_at, tick_sent,
         };
         use super::super::super::{CAPTURE_TICK_MS, PREGAME_MS};
         use super::*;
@@ -512,10 +555,12 @@ mod tests {
         }
 
         fn status_to(outgoing: &[crate::world::Outgoing], number: u64) -> Option<u8> {
-            messages_to(outgoing, number).iter().find_map(|message| match message {
-                ServerMessage::InteractionValidated(answer) => Some(answer.status),
-                _ => None,
-            })
+            messages_to(outgoing, number)
+                .iter()
+                .find_map(|message| match message {
+                    ServerMessage::InteractionValidated(answer) => Some(answer.status),
+                    _ => None,
+                })
         }
 
         #[test]
@@ -533,7 +578,10 @@ mod tests {
             assert_eq!(shed.open_by.len(), 1, "the interact shows one interactor");
             assert!(!world.open_outpost_rush_shed(first, FIRST, open([9; RAW_ID_LEN]), b"Storage"));
             world.outpost_rush_shed_closed(first, Some(open(gde_ref).interaction));
-            assert!(running(&world).sheds.sheds[0].open_by.is_empty(), "2473 closes it");
+            assert!(
+                running(&world).sheds.sheds[0].open_by.is_empty(),
+                "2473 closes it"
+            );
         }
 
         #[test]
@@ -546,11 +594,19 @@ mod tests {
                 .world
                 .get::<Player>(first)
                 .and_then(|player| player.gear.as_ref().map(|gear| gear.bag_stacks()))
-                .and_then(|stacks| stacks.into_iter().find(|(_, id, _, _)| id == structure_tests::WOOD))
+                .and_then(|stacks| {
+                    stacks
+                        .into_iter()
+                        .find(|(_, id, _, _)| id == structure_tests::WOOD)
+                })
                 .map(|(_, _, instance, _)| instance)
                 .expect("the wood stack");
             assert!(world.outpost_rush_shed_give(first, &gde_ref, instance, WHOLE_STACK));
-            assert_eq!(bag_count(&world, first, structure_tests::WOOD), STORED, "the test catalog names no class");
+            assert_eq!(
+                bag_count(&world, first, structure_tests::WOOD),
+                STORED,
+                "the test catalog names no class"
+            );
             assert!(running(&world).sheds.sheds[0].stacks.is_empty());
             assert!(!world.outpost_rush_shed_give(first, &[9; RAW_ID_LEN], instance, WHOLE_STACK));
         }
@@ -564,7 +620,9 @@ mod tests {
         fn the_owner_team_deposits_a_stack_and_gets_an_empty_7048_with_its_bag_change() {
             let (mut world, gde_ref) = owned_shed();
             let mut content = (*world.content).clone();
-            content.instances = content.instances.with_item_classes(structure_tests::WOOD, &[MATCH_CLASS]);
+            content.instances = content
+                .instances
+                .with_item_classes(structure_tests::WOOD, &[MATCH_CLASS]);
             world.content = std::sync::Arc::new(content);
             let first = world.player_by_number(FIRST).expect("player");
             give(&mut world, first, structure_tests::WOOD, STORED);
@@ -576,12 +634,20 @@ mod tests {
                 .world
                 .get::<Player>(first)
                 .and_then(|player| player.gear.as_ref().map(|gear| gear.bag_stacks()))
-                .and_then(|stacks| stacks.into_iter().find(|(_, id, _, _)| id == structure_tests::WOOD))
+                .and_then(|stacks| {
+                    stacks
+                        .into_iter()
+                        .find(|(_, id, _, _)| id == structure_tests::WOOD)
+                })
                 .map(|(_, _, instance, _)| instance)
                 .expect("the wood stack");
             let version = running(&world).sheds.sheds[0].version;
             assert!(world.outpost_rush_shed_give(first, &gde_ref, instance, WHOLE_STACK));
-            assert_eq!(bag_count(&world, first, structure_tests::WOOD), 0, "the bag slot empties");
+            assert_eq!(
+                bag_count(&world, first, structure_tests::WOOD),
+                0,
+                "the bag slot empties"
+            );
             let shed = &running(&world).sheds.sheds[0];
             assert_eq!(shed.stacks.len(), 1);
             assert_eq!(shed.stacks[0].quantity, STORED);
@@ -601,9 +667,18 @@ mod tests {
             let (mut world, gde_ref) = owned_shed();
             let first = world.player_by_number(FIRST).expect("player");
             let second = world.player_by_number(SECOND).expect("player");
-            let item_index = world.content.kits.item(structure_tests::WOOD).expect("wood").item_index;
+            let item_index = world
+                .content
+                .kits
+                .item(structure_tests::WOOD)
+                .expect("wood")
+                .item_index;
             let instance = {
-                let running = world.arena_matches.outpost_rush.as_mut().expect("the match");
+                let running = world
+                    .arena_matches
+                    .outpost_rush
+                    .as_mut()
+                    .expect("the match");
                 let shed = &mut running.sheds.sheds[0];
                 let instance = shed.next_instance();
                 shed.stacks.push(ShedStack {
@@ -615,8 +690,15 @@ mod tests {
                 });
                 instance
             };
-            assert!(world.outpost_rush_shed_take(second, &gde_ref, instance, PART), "a shed of the match");
-            assert_eq!(bag_count(&world, second, structure_tests::WOOD), 0, "not open for the foe");
+            assert!(
+                world.outpost_rush_shed_take(second, &gde_ref, instance, PART),
+                "a shed of the match"
+            );
+            assert_eq!(
+                bag_count(&world, second, structure_tests::WOOD),
+                0,
+                "not open for the foe"
+            );
             assert!(world.open_outpost_rush_shed(first, FIRST, open(gde_ref), b"Storage"));
             let version = running(&world).sheds.sheds[0].version;
             assert!(world.outpost_rush_shed_take(first, &gde_ref, instance, PART));
@@ -626,7 +708,10 @@ mod tests {
             assert_eq!(shed.version, version + 1);
             assert!(world.outpost_rush_shed_take(first, &gde_ref, instance, WHOLE_STACK));
             assert_eq!(bag_count(&world, first, structure_tests::WOOD), STORED);
-            assert!(running(&world).sheds.sheds[0].stacks.is_empty(), "retail version 40: empty");
+            assert!(
+                running(&world).sheds.sheds[0].stacks.is_empty(),
+                "retail version 40: empty"
+            );
         }
     }
 }

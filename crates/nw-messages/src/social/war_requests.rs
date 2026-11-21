@@ -324,7 +324,11 @@ mod tests {
         })
         .encode_args()
         .expect("encode");
-        assert_eq!(lost.len(), RAW_ID_LEN + 2 + 4, "4139: 16 bytes, a u16, a u32");
+        assert_eq!(
+            lost.len(),
+            RAW_ID_LEN + 2 + 4,
+            "4139: 16 bytes, a u16, a u32"
+        );
         assert_eq!(&lost[RAW_ID_LEN..RAW_ID_LEN + 2], &TERRITORY.to_be_bytes());
         assert_eq!(&lost[RAW_ID_LEN + 2..], &WAR_DEC_NOT_SELECTED.to_be_bytes());
     }

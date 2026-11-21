@@ -878,7 +878,10 @@ mod tests {
             .collect();
         assert_eq!(
             ends,
-            [("BlockDisabled", None), ("Ability_Startup", Some(STARTUP_END_MS))]
+            [
+                ("BlockDisabled", None),
+                ("Ability_Startup", Some(STARTUP_END_MS))
+            ]
         );
         let transitions = transitions_of(&[looped], &list, &[]);
         assert_eq!(transitions.len(), 1);

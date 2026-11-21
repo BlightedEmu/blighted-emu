@@ -175,7 +175,11 @@ fn step<T: Copy + PartialEq>(
     AreaStep {
         entered,
         again,
-        lost: if rules.remove_on_exit { left } else { Vec::new() },
+        lost: if rules.remove_on_exit {
+            left
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -211,7 +215,12 @@ impl SimWorld {
         self.effect_area_runs.level.resize(level.len(), Vec::new());
         for (index, area) in level.into_iter().enumerate() {
             let present = within(area, ORIGIN);
-            let done = step(&mut self.effect_area_runs.level[index], &present, area.rules, now_ms);
+            let done = step(
+                &mut self.effect_area_runs.level[index],
+                &present,
+                area.rules,
+                now_ms,
+            );
             self.run_effect_area(area, LEVEL_AREA_SOURCE, &done, now_ms);
         }
         let mut stages = std::mem::take(&mut self.effect_area_runs.stages);
@@ -334,7 +343,12 @@ impl SimWorld {
     /// Opens the areas of slice `slice` standing at `at`, turned `yaw_deg` (module text); they
     /// give their effects from the next step on. Their handle, or `None` for a slice without
     /// areas.
-    pub(super) fn open_slice_areas(&mut self, slice: &str, at: [f32; 3], yaw_deg: f32) -> Option<u64> {
+    pub(super) fn open_slice_areas(
+        &mut self,
+        slice: &str,
+        at: [f32; 3],
+        yaw_deg: f32,
+    ) -> Option<u64> {
         let place = yaw_place(at, yaw_deg);
         let areas: Vec<EffectArea> = self
             .content
@@ -427,7 +441,9 @@ impl SimWorld {
         for (entity, given) in done.lost.iter().filter(|(_, given)| *given > 0) {
             if let Some(mut player) = self.world.get_mut::<Player>(*entity) {
                 for effect in &area.effects {
-                    player.status_effects.withdraw(lowercase_crc32(effect), *given);
+                    player
+                        .status_effects
+                        .withdraw(lowercase_crc32(effect), *given);
                 }
             }
         }
@@ -488,8 +504,14 @@ mod tests {
     #[test]
     fn a_level_area_gives_its_effects_once_per_entry_and_takes_them_back_at_the_exit() {
         let mut inside = Vec::new();
-        assert_eq!(step(&mut inside, &[PLAYER], CORRUPTION, 0), done(&[PLAYER], &[], &[]));
-        assert_eq!(step(&mut inside, &[PLAYER], CORRUPTION, 5_000), done(&[], &[], &[]));
+        assert_eq!(
+            step(&mut inside, &[PLAYER], CORRUPTION, 0),
+            done(&[PLAYER], &[], &[])
+        );
+        assert_eq!(
+            step(&mut inside, &[PLAYER], CORRUPTION, 5_000),
+            done(&[], &[], &[])
+        );
         assert_eq!(
             step(&mut inside, &[], CORRUPTION, 6_000),
             done(&[], &[], &[(PLAYER, 1)]),
@@ -551,25 +573,38 @@ mod tests {
     const CORRUPTION_EFFECT: &str = "ApplyCurseL4";
 
     fn applications(world: &SimWorld, entity: Entity) -> Option<u8> {
-        world
-            .world
-            .get::<Player>(entity)
-            .and_then(|player| player.status_effects.applications(lowercase_crc32(CORRUPTION_EFFECT)))
+        world.world.get::<Player>(entity).and_then(|player| {
+            player
+                .status_effects
+                .applications(lowercase_crc32(CORRUPTION_EFFECT))
+        })
     }
 
     #[test]
     fn a_stage_area_gives_its_effect_while_open_and_takes_it_back_when_it_closes() {
         let (mut world, entity) = invasion_world();
         world.tick_effect_areas();
-        assert_eq!(applications(&world, entity), None, "a stage area waits for its stage");
+        assert_eq!(
+            applications(&world, entity),
+            None,
+            "a stage area waits for its stage"
+        );
         world.open_stage_areas(SETUP, |_| true);
         world.tick_effect_areas();
         assert_eq!(applications(&world, entity), Some(1));
         world.open_stage_areas(SETUP, |_| true);
         world.tick_effect_areas();
-        assert_eq!(applications(&world, entity), Some(1), "an open stage opens once");
+        assert_eq!(
+            applications(&world, entity),
+            Some(1),
+            "an open stage opens once"
+        );
         world.close_stage_areas("setup");
-        assert_eq!(applications(&world, entity), None, "the closing takes it back");
+        assert_eq!(
+            applications(&world, entity),
+            None,
+            "the closing takes it back"
+        );
         world.tick_effect_areas();
         assert_eq!(applications(&world, entity), None);
     }
@@ -582,7 +617,11 @@ mod tests {
         assert_eq!(applications(&world, entity), None);
         world.open_stage_areas("Stage_1", |_| true);
         world.tick_effect_areas();
-        assert_eq!(applications(&world, entity), None, "only the named stage opens");
+        assert_eq!(
+            applications(&world, entity),
+            None,
+            "only the named stage opens"
+        );
     }
 
     /// The Myrkgard portal's hazard (`ApplyCurseL4`, remove on exit, delays 0) in its slice's
@@ -592,27 +631,36 @@ mod tests {
     fn a_placed_slices_area_stands_turned_with_it_and_its_close_takes_it_back() {
         use nw_world::collision::{Geometry, IDENTITY_AFFINE};
         use nw_world::dungeon_scripts::Detector;
-        const HAZARD: &str = "slices/darkness/events/pois/enc_darkness_major_portal_sm_01.dynamicslice";
+        const HAZARD: &str =
+            "slices/darkness/events/pois/enc_darkness_major_portal_sm_01.dynamicslice";
         const PORTAL: [f32; 3] = [1_000.0, 0.0, 0.0];
         const QUARTER_DEG: f32 = 90.0;
         const RADIUS_M: f32 = 3.0;
         let (mut world, entity) = invasion_world();
         let mut place = IDENTITY_AFFINE;
         place[0][3] = 10.0;
-        Arc::make_mut(&mut world.content).effect_areas.slices.insert(
-            HAZARD.to_owned(),
-            vec![EffectArea {
-                effects: vec![CORRUPTION_EFFECT.to_owned()],
-                removes: Vec::new(),
-                volume: Detector {
-                    shape: Geometry::Sphere { radius: RADIUS_M },
-                    place,
-                },
-                rules: CORRUPTION,
-            }],
+        Arc::make_mut(&mut world.content)
+            .effect_areas
+            .slices
+            .insert(
+                HAZARD.to_owned(),
+                vec![EffectArea {
+                    effects: vec![CORRUPTION_EFFECT.to_owned()],
+                    removes: Vec::new(),
+                    volume: Detector {
+                        shape: Geometry::Sphere { radius: RADIUS_M },
+                        place,
+                    },
+                    rules: CORRUPTION,
+                }],
+            );
+        assert_eq!(
+            world.open_slice_areas("slices/other.dynamicslice", PORTAL, 0.0),
+            None
         );
-        assert_eq!(world.open_slice_areas("slices/other.dynamicslice", PORTAL, 0.0), None);
-        let handle = world.open_slice_areas(HAZARD, PORTAL, QUARTER_DEG).expect("areas");
+        let handle = world
+            .open_slice_areas(HAZARD, PORTAL, QUARTER_DEG)
+            .expect("areas");
         let set_at = |world: &mut SimWorld, at: [f32; 3]| {
             use crate::world::tests::NOW;
             let [x, y, z] = at;
@@ -622,7 +670,11 @@ mod tests {
         };
         set_at(&mut world, [1_000.0, 10.0, 0.0]);
         world.tick_effect_areas();
-        assert_eq!(applications(&world, entity), Some(1), "north of the turned portal");
+        assert_eq!(
+            applications(&world, entity),
+            Some(1),
+            "north of the turned portal"
+        );
         set_at(&mut world, [1_010.0, 0.0, 0.0]);
         world.tick_effect_areas();
         assert_eq!(applications(&world, entity), None, "east is outside it");
@@ -630,7 +682,11 @@ mod tests {
         world.tick_effect_areas();
         assert_eq!(applications(&world, entity), Some(1));
         world.close_slice_areas(handle);
-        assert_eq!(applications(&world, entity), None, "the close takes it back");
+        assert_eq!(
+            applications(&world, entity),
+            None,
+            "the close takes it back"
+        );
         world.tick_effect_areas();
         assert_eq!(applications(&world, entity), None);
     }
@@ -642,7 +698,13 @@ mod tests {
             ..CORRUPTION
         };
         let mut inside = Vec::new();
-        assert_eq!(step(&mut inside, &[PLAYER], delayed, 0), done(&[], &[], &[]));
-        assert_eq!(step(&mut inside, &[], delayed, 100), done(&[], &[], &[(PLAYER, 0)]));
+        assert_eq!(
+            step(&mut inside, &[PLAYER], delayed, 0),
+            done(&[], &[], &[])
+        );
+        assert_eq!(
+            step(&mut inside, &[], delayed, 100),
+            done(&[], &[], &[(PLAYER, 0)])
+        );
     }
 }

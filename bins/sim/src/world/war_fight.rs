@@ -1218,7 +1218,11 @@ mod tests {
             let at = state.position.expect("a place");
             assert!((at.x - point.place[0]).abs() < PLACE_PRECISION_M);
             assert!((at.y - point.place[1]).abs() < PLACE_PRECISION_M);
-            assert_eq!(member.encode().expect("encodes"), point.position, "the retail bytes");
+            assert_eq!(
+                member.encode().expect("encodes"),
+                point.position,
+                "the retail bytes"
+            );
         }
     }
 
@@ -1229,7 +1233,11 @@ mod tests {
     fn the_start_spawns_the_points_with_their_retail_place_and_the_side_numbers() {
         use crate::world::turrets::tests::war_world_of;
         let (mut world, _) = war_world_of(SIDE_DEFENDER);
-        let mut war = world.wars.war(Uuid::from_u128(0x77)).cloned().expect("the war");
+        let mut war = world
+            .wars
+            .war(Uuid::from_u128(0x77))
+            .cloned()
+            .expect("the war");
         war.starts_ms = world.unix_ms();
         world.wars.read(Ok(vec![war.clone()]));
         world.tick_war_fight();
@@ -1242,7 +1250,11 @@ mod tests {
             .iter()
             .find(|member| member.component == point.position_component)
             .and_then(|member| member.encode().ok());
-        assert_eq!(place.as_ref(), Some(&point.position), "the retail place member");
+        assert_eq!(
+            place.as_ref(),
+            Some(&point.position),
+            "the retail place member"
+        );
         let ownership = members.iter().find_map(|member| match &member.state {
             MemberState::Ownership(state) => Some(state.raid_id),
             _ => None,
@@ -1273,8 +1285,14 @@ mod tests {
         const ODD_WAR: u64 = 535;
         const EVEN_WAR: u64 = 9428;
         const INVASION: u64 = 5338;
-        assert_eq!(side_numbers(&war(ODD_WAR, Uuid::from_u128(0xa1))), (535, 536));
-        assert_eq!(side_numbers(&war(EVEN_WAR, Uuid::from_u128(0xa1))), (9428, 9429));
+        assert_eq!(
+            side_numbers(&war(ODD_WAR, Uuid::from_u128(0xa1))),
+            (535, 536)
+        );
+        assert_eq!(
+            side_numbers(&war(EVEN_WAR, Uuid::from_u128(0xa1))),
+            (9428, 9429)
+        );
         let invasion = war(INVASION, Uuid::nil());
         assert!(invasion.is_invasion());
         assert_eq!(side_numbers(&invasion), (NO_SIDE_NUMBER, INVASION));

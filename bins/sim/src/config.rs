@@ -729,8 +729,11 @@ pub(crate) mod tests {
         let text = std::fs::read_to_string(&path).expect("committed config");
         let closed_path =
             std::env::temp_dir().join(format!("sim-closed-queues-{}.toml", std::process::id()));
-        std::fs::write(&closed_path, format!("closed_queues = [\"catacombs\"]\n{text}"))
-            .expect("write the closed config");
+        std::fs::write(
+            &closed_path,
+            format!("closed_queues = [\"catacombs\"]\n{text}"),
+        )
+        .expect("write the closed config");
         let loaded = load_sim_config(&closed_path);
         std::fs::remove_file(&closed_path).expect("remove the closed config");
         let closed = ClosedQueues::of(&loaded.expect("closed config").closed_queues);

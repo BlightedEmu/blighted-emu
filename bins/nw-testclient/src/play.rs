@@ -1196,11 +1196,13 @@ impl Player {
         if line.starts_with(STATE_DONE) {
             // A quest taken in an earlier run that this run turned in ended in this run too, and
             // so did a quest started by a game master line whose steps the bot played.
-            self.end_quest(if self.accepted || self.turned_in || !self.actions.is_empty() {
-                Verdict::Completed
-            } else {
-                Verdict::NotPlayed("the character had done it before this run".to_owned())
-            });
+            self.end_quest(
+                if self.accepted || self.turned_in || !self.actions.is_empty() {
+                    Verdict::Completed
+                } else {
+                    Verdict::NotPlayed("the character had done it before this run".to_owned())
+                },
+            );
             return self.next_quest(client, own, since);
         }
         let first: Vec<String> = quest_sources(line)
@@ -1780,7 +1782,12 @@ impl Player {
             .filter(|(index, node)| {
                 self.containers.contains(&node.gatherable) && !self.tried_nodes.contains(index)
             })
-            .map(|(index, node)| (index, planar([own.x, own.y, own.z], [node.at[0], node.at[1]])))
+            .map(|(index, node)| {
+                (
+                    index,
+                    planar([own.x, own.y, own.z], [node.at[0], node.at[1]]),
+                )
+            })
             .filter(|(_, distance)| *distance <= CONTAINER_SEARCH_M)
             .min_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(index, _)| index)
@@ -1825,7 +1832,10 @@ impl Player {
         };
         if let Some(position) = self.own_input_position() {
             let body = Bit8::of_interaction(request, name)?;
-            send_input(client, &ClientInputMsg::position(position).interacting(body))?;
+            send_input(
+                client,
+                &ClientInputMsg::position(position).interacting(body),
+            )?;
         }
         Ok(self.interaction)
     }
@@ -2589,7 +2599,10 @@ mod tests {
             "a loot comes after a kill"
         );
         const NEWER: u8 = 2;
-        let bags = [[1; nw_messages::wire::RAW_ID_LEN], [NEWER; nw_messages::wire::RAW_ID_LEN]];
+        let bags = [
+            [1; nw_messages::wire::RAW_ID_LEN],
+            [NEWER; nw_messages::wire::RAW_ID_LEN],
+        ];
         let steps = loot_steps(&[bags[1], bags[0]]);
         assert_eq!(steps.len(), bags.len());
         let Some(Act::Interact { request, .. }) = steps[0].acts.first() else {

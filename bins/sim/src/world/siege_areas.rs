@@ -123,10 +123,10 @@ use nw_messages::projectile_state::ProjectileState;
 use nw_messages::trigger_entity::SyncExecuteEntitiesMsg;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    AssetId, BundleMember, DYNAMIC_SLICE_SUB_ID, DelayedEventState, FacetHeader,
-    FullList, GdeMetadataReplicatedState, InteractCooldown, InteractCooldownState, InteractState,
-    InteractionRequest, MemberState, OwnershipState,
-    PositionInTheWorldReplicatedState, Rotation, ServerMessage, WorldPosition,
+    AssetId, BundleMember, DYNAMIC_SLICE_SUB_ID, DelayedEventState, FacetHeader, FullList,
+    GdeMetadataReplicatedState, InteractCooldown, InteractCooldownState, InteractState,
+    InteractionRequest, MemberState, OwnershipState, PositionInTheWorldReplicatedState, Rotation,
+    ServerMessage, WorldPosition,
 };
 use nw_sim_core::Position;
 
@@ -135,7 +135,9 @@ use super::crafting::{CARD_COMPONENT, Station, dynamic_ref};
 use super::gates::merge_members;
 use super::shot_entity::ProjectileSpawn;
 use super::siege_structures::{NO_INTERACTORS, StructureBody, StructureRun, spawn_members};
-use super::turrets::{ShotTarget, TurretHost, TurretRun, USE_ACCEPTED, USE_REFUSED, turret_ownership};
+use super::turrets::{
+    ShotTarget, TurretHost, TurretRun, USE_ACCEPTED, USE_REFUSED, turret_ownership,
+};
 use super::war_fight::replace_member;
 use super::{Player, SimWorld, gather_answer, send_now, unix_ns};
 use crate::combat::{AttackOutcome, AttackRefusal};
@@ -779,10 +781,7 @@ impl SimWorld {
                 option: USE_OPTION,
                 ends_unix_ns: unix_ns(self.server_ms.saturating_add(cooldown_ms)),
             },
-            version: run
-                .uses
-                .cooldown
-                .map_or(FIRST_COOLDOWN_VERSION, |last| {
+            version: run.uses.cooldown.map_or(FIRST_COOLDOWN_VERSION, |last| {
                 last.version.saturating_add(COOLDOWN_VERSION_STEP)
             }),
         });
@@ -1233,7 +1232,11 @@ impl SimWorld {
     /// ruin or new owner team): its pour drops no barrel (Inferred).
     fn stop_use(&mut self, run: &mut StructureRun) {
         run.uses = UseState::default();
-        let partial = run.body.interact_member(NO_INTERACTORS).into_iter().collect();
+        let partial = run
+            .body
+            .interact_member(NO_INTERACTORS)
+            .into_iter()
+            .collect();
         self.sync_structure(run, partial);
     }
 
@@ -1583,7 +1586,12 @@ mod tests {
         world.tick_turrets(drop.land_ms);
         let fight = world.war_fight().expect("fight");
         assert!(fight.uses.drops.is_empty());
-        let area = fight.uses.areas.first().cloned().expect("the barrel's area");
+        let area = fight
+            .uses
+            .areas
+            .first()
+            .cloned()
+            .expect("the barrel's area");
         let shown = members(&world, area.number);
         assert_eq!(card_asset(&shown).as_deref(), Some(BARREL_AREA_ASSET));
         assert_eq!(
@@ -1668,16 +1676,13 @@ mod tests {
             table["structure_kinds"][0]["use_interact"] = serde_json::json!(USE_INTERACT);
         });
         assert_eq!(
-            structure(&world, &DROPPER_REF).body.structure.interact_component,
+            structure(&world, &DROPPER_REF)
+                .body
+                .structure
+                .interact_component,
             Some(USE_INTERACT)
         );
-        assert!(world.turret_interaction(
-            entity,
-            DEFENDER,
-            trigger_request(DROPPER_REF),
-            b"",
-            NOW
-        ));
+        assert!(world.turret_interaction(entity, DEFENDER, trigger_request(DROPPER_REF), b"", NOW));
         let number = structure(&world, &DROPPER_REF).body.number;
         let shown = members(&world, number);
         let interact = shown
@@ -1715,7 +1720,11 @@ mod tests {
                     enabled: Some(false),
                     has_interactors: Some(ONE_USER),
                 },
-                cooldown_updates: cooldown_list(FIRST_COOLDOWN_VERSION, server_ms, HORN_COOLDOWN_MS),
+                cooldown_updates: cooldown_list(
+                    FIRST_COOLDOWN_VERSION,
+                    server_ms,
+                    HORN_COOLDOWN_MS
+                ),
             }),
             "the blow's change carries the 90 s cooldown (retail `01 07`, `invasion` 95.691 s)"
         );
@@ -1998,7 +2007,8 @@ mod tests {
         structure["gde_ref"] = serde_json::json!(hex::encode(LEVEL_REF));
         structure["place"] = serde_json::json!([5.0, 0.0, 0.0]);
         let mut kind = kinds()[0].clone();
-        kind["slice"] = serde_json::json!("coatgen/a4041713/dropper_fire_poi_2209365890.dynamicslice");
+        kind["slice"] =
+            serde_json::json!("coatgen/a4041713/dropper_fire_poi_2209365890.dynamicslice");
         let table = serde_json::json!({"forts": [], "level_droppers": [{
             "capital": "b212b88f-c633-a507-7490-96f1090779b4", "members_inferred": false,
             "structure": structure, "kind": kind}]});
@@ -2055,7 +2065,10 @@ mod tests {
         let sent = messages_to(&world.take_messages(), DEFENDER);
         assert!(accepted(&sent), "{sent:?}");
         world.tick_turrets(NOW + POUR_MS);
-        assert!(world.wars.level.uses.first_drop().is_some(), "the barrel falls");
+        assert!(
+            world.wars.level.uses.first_drop().is_some(),
+            "the barrel falls"
+        );
         world.tick_turrets(NOW + DROPPER_USE_MS);
         assert!(world.turret_interaction(
             entity,
@@ -2066,6 +2079,9 @@ mod tests {
         ));
         let sent = messages_to(&world.take_messages(), DEFENDER);
         assert!(!accepted(&sent), "the cooldown runs");
-        assert!(level_dropper(&world).body.invulnerable, "no harm in the open world");
+        assert!(
+            level_dropper(&world).body.invulnerable,
+            "no harm in the open world"
+        );
     }
 }

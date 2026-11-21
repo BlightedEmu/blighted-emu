@@ -1927,8 +1927,16 @@ mod tests {
         });
         let mut mob = StatusEffects::default();
         mob.end(&rules, crc(&rules, TRACKER), MOB, START_MS);
-        assert!(mob.held_view(&rules).effects.is_empty(), "nothing held, nothing follows");
-        mob.add(&rules, crc(&rules, TRACKER), Application::plain(MOB), START_MS);
+        assert!(
+            mob.held_view(&rules).effects.is_empty(),
+            "nothing held, nothing follows"
+        );
+        mob.add(
+            &rules,
+            crc(&rules, TRACKER),
+            Application::plain(MOB),
+            START_MS,
+        );
         let staggered = mob.held_view(&rules);
         assert!((staggered.stamina_rate + 100.0).abs() < f32::EPSILON);
         assert!(staggered.stagger_reduction.abs() < f32::EPSILON);
@@ -2439,11 +2447,19 @@ mod tests {
             effects.add(&rules, buff, Application::plain(PLAYER), START_MS);
         }
         effects.withdraw(buff, 3);
-        assert_eq!(effects.applications(buff), Some(1), "three areas left, one holds it");
+        assert_eq!(
+            effects.applications(buff),
+            Some(1),
+            "three areas left, one holds it"
+        );
         effects.withdraw(buff, 1);
         assert!(!effects.holds(buff), "the last area left");
         effects.add(&rules, buff, Application::plain(PLAYER), START_MS);
-        assert_eq!(effects.applications(buff), Some(1), "a new entry counts from 1");
+        assert_eq!(
+            effects.applications(buff),
+            Some(1),
+            "a new entry counts from 1"
+        );
         effects.withdraw(crc(&rules, FOOD), 1);
     }
 

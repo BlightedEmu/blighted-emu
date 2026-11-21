@@ -25,8 +25,8 @@ use std::path::Path;
 use nw_ai::data::{
     AiData, Archetype, BlockActivity, BlockEffect, CageAction, CageCondition, Completion, Creature,
     EntityTrigger, FacingMode, FragmentCase, FragmentLength, FragmentVariant, Grid, NavConfig,
-    ProcWindow,
-    ProjectileSlice, RangedAttack, SliceTriggerRef, TagActivity, TagEffect, TreeRef, Vision,
+    ProcWindow, ProjectileSlice, RangedAttack, SliceTriggerRef, TagActivity, TagEffect, TreeRef,
+    Vision,
 };
 use nw_ai::decode::{DecodeError, ServerPakError, TreeDecoder, decode_entries, server_pak_entries};
 use nw_ai::node::NodeId;
@@ -37,8 +37,7 @@ use nw_formats::datasheet::Datasheet;
 use nw_formats::mannequin::{
     ActionList, AnimDatabase, BlockActivity as NwBlockActivity, BlockChange, CageGrid, Condition,
     EntityTrigger as NwEntityTrigger, Fragment, FragmentCase as NwFragmentCase, GridList,
-    MannequinError, Node as XmlNode,
-    StaminaActivities, TagCase, TagChange, parse_tree,
+    MannequinError, Node as XmlNode, StaminaActivities, TagCase, TagChange, parse_tree,
 };
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
 use nw_formats::pak::{PakArchive, PakError, find_paks};
@@ -402,11 +401,7 @@ impl SliceAi {
         slice.max_slope_deg = float(decoder, root, MAX_SLOPE)?;
         if let Some(effects) = first(root, INITIAL_STATUS_EFFECTS) {
             // Each entry holds the effect id as its one text value (Observed in the bear slice).
-            slice.initial_effects = effects
-                .children
-                .iter()
-                .filter_map(text_leaf)
-                .collect();
+            slice.initial_effects = effects.children.iter().filter_map(text_leaf).collect();
         }
         slice.grit_uses_stamina = first(root, GRIT_USES_STAMINA)
             .and_then(|element| element.as_bool().ok())
@@ -638,7 +633,9 @@ fn list_actions(text: &str) -> Result<ParsedList, MannequinError> {
         // condition (the `ActivateGrit` action of `baseai_stagger.actionlist`); one a task
         // names needs a fragment to play.
         let engine_started = children_named(action, ACTIVATION_ELEMENT).next().is_some();
-        let fragment = action.attribute(FRAGMENT_NAME_ATTRIBUTE).unwrap_or_default();
+        let fragment = action
+            .attribute(FRAGMENT_NAME_ATTRIBUTE)
+            .unwrap_or_default();
         let mut tasks = Vec::new();
         for activation in children_named(action, ACTIVATION_ELEMENT) {
             for test in TASK_TESTS {
@@ -792,7 +789,9 @@ fn caf_seconds(bytes: &[u8]) -> Option<f64> {
             u32_at(at + MOTION_END_AT)? as i32 as f32,
         );
         let seconds_per_tick = f32::from_bits(u32_at(at + MOTION_SECONDS_PER_TICK_AT)?);
-        return Some(f64::from((end - start) * ticks_per_frame * seconds_per_tick));
+        return Some(f64::from(
+            (end - start) * ticks_per_frame * seconds_per_tick,
+        ));
     }
     None
 }
@@ -2080,12 +2079,17 @@ mod tests {
         let [grit] = &parsed.actions[..] else {
             panic!("only the engine action: {:?}", parsed.actions);
         };
-        assert_eq!((grit.name.as_str(), grit.fragment.as_str()), ("ActivateGrit", ""));
+        assert_eq!(
+            (grit.name.as_str(), grit.fragment.as_str()),
+            ("ActivateGrit", "")
+        );
         assert_eq!(grit.stamina.grit_on, Some(Condition::True));
         let mut decoder = TreeDecoder::default();
         let stagger = decoder.intern("r_Stagger");
-        let deactivation =
-            cage_condition(&mut decoder, grit.deactivation.as_ref().expect("a deactivation"));
+        let deactivation = cage_condition(
+            &mut decoder,
+            grit.deactivation.as_ref().expect("a deactivation"),
+        );
         let mob = |playing: bool| {
             deactivation.holds_with(&nw_ai::data::MobCage {
                 has_tag: &|_| false,

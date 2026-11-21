@@ -139,9 +139,11 @@ impl EffectArea {
     /// prism, [`prism_mesh`]) by [`mesh_contains`], any other shape as a detector.
     pub fn contains(&self, point: [f32; 3]) -> bool {
         match &self.volume.shape {
-            Geometry::Mesh { points, triangles } => invert(&self.volume.place).is_some_and(
-                |inverse| mesh_contains(points, triangles, transform_point(&inverse, point)),
-            ),
+            Geometry::Mesh { points, triangles } => {
+                invert(&self.volume.place).is_some_and(|inverse| {
+                    mesh_contains(points, triangles, transform_point(&inverse, point))
+                })
+            }
             _ => self.volume.contains(point),
         }
     }
@@ -169,7 +171,11 @@ impl EffectArea {
     /// Where its volume stands (in the volume's space).
     pub fn centre(&self) -> [f32; 3] {
         let [x, y, z] = &self.volume.place;
-        [x[TRANSLATION_COLUMN], y[TRANSLATION_COLUMN], z[TRANSLATION_COLUMN]]
+        [
+            x[TRANSLATION_COLUMN],
+            y[TRANSLATION_COLUMN],
+            z[TRANSLATION_COLUMN],
+        ]
     }
 }
 
@@ -430,7 +436,10 @@ pub fn mesh_contains(points: &[Vec3], triangles: &[[u16; 3]], local: Vec3) -> bo
 
 /// The corners and the height of `component`, a [`POLYGON_PRISM_TYPE`] component, as its closed
 /// mesh; `None` when it has fewer than three corners or no height.
-fn component_prism(component: &Element, names: &Names) -> Result<Option<Geometry>, EffectAreasError> {
+fn component_prism(
+    component: &Element,
+    names: &Names,
+) -> Result<Option<Geometry>, EffectAreasError> {
     let Some(height) = find(component, SHAPE_HEIGHT_NAME, PRISM_DEPTH)
         .map(Element::as_f32)
         .transpose()?
@@ -607,7 +616,8 @@ mod tests {
     fn a_gas_area_reads_its_effect_its_detection_entity_and_its_delays() {
         const OWNER: u64 = 0xd8c5_3967_dc3d_1580;
         const DETECTOR: u64 = 0xd8c5_3b3b_e8ad_5461;
-        let areas = slice_areas(&gas_slice(OWNER, DETECTOR, "AI_Fulgoris_Gas", &[])).expect("areas");
+        let areas =
+            slice_areas(&gas_slice(OWNER, DETECTOR, "AI_Fulgoris_Gas", &[])).expect("areas");
         assert_eq!(
             areas,
             vec![SliceArea {
@@ -627,8 +637,16 @@ mod tests {
 
     #[test]
     fn an_area_without_effects_and_a_slice_without_entities_give_nothing() {
-        assert!(slice_areas(&gas_slice(1, 1, "", &[])).expect("areas").is_empty());
-        assert!(slice_areas(&Element::with_children(0, Vec::new())).expect("areas").is_empty());
+        assert!(
+            slice_areas(&gas_slice(1, 1, "", &[]))
+                .expect("areas")
+                .is_empty()
+        );
+        assert!(
+            slice_areas(&Element::with_children(0, Vec::new()))
+                .expect("areas")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -669,7 +687,10 @@ mod tests {
             )]),
             slices: BTreeMap::from([(HAZARD.to_owned(), vec![area.clone()])]),
         };
-        assert_eq!(areas.of_level("newworld_vitaeeterna"), std::slice::from_ref(&area));
+        assert_eq!(
+            areas.of_level("newworld_vitaeeterna"),
+            std::slice::from_ref(&area)
+        );
         assert!(areas.of_level("nw_catacomb_00").is_empty());
         assert_eq!(
             areas.of_spell("AI_Fulgoris_Blight_Self_Destruct_Catacombs"),
@@ -682,7 +703,10 @@ mod tests {
         assert_eq!(areas.len(), 4);
         assert!(area.contains([1.0, 1.0, 1.0]) && !area.contains([2.0, 1.0, 0.0]));
         let text = serde_json::to_string(&areas).expect("json");
-        assert_eq!(serde_json::from_str::<EffectAreas>(&text).expect("back"), areas);
+        assert_eq!(
+            serde_json::from_str::<EffectAreas>(&text).expect("back"),
+            areas
+        );
     }
 
     #[test]
@@ -718,7 +742,14 @@ mod tests {
     #[test]
     fn a_polygon_prism_holds_the_points_of_its_polygon_up_to_its_height() {
         const HEIGHT_M: f32 = 13.0;
-        let corners = [[0.0, 0.0], [10.0, 0.0], [10.0, 4.0], [4.0, 4.0], [4.0, 10.0], [0.0, 10.0]];
+        let corners = [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 4.0],
+            [4.0, 4.0],
+            [4.0, 10.0],
+            [0.0, 10.0],
+        ];
         let prism = prism_mesh(&corners, HEIGHT_M).expect("prism");
         let area = EffectArea {
             effects: vec!["ApplyCurseL4".to_owned()],
@@ -748,7 +779,14 @@ mod tests {
     fn an_area_box_holds_its_points_and_follows_its_place() {
         const HEIGHT_M: f32 = 13.0;
         const LIFT_M: f32 = 100.0;
-        let corners = [[0.0, 0.0], [10.0, 0.0], [10.0, 4.0], [4.0, 4.0], [4.0, 10.0], [0.0, 10.0]];
+        let corners = [
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 4.0],
+            [4.0, 4.0],
+            [4.0, 10.0],
+            [0.0, 10.0],
+        ];
         let area = EffectArea {
             effects: vec!["ApplyCurseL4".to_owned()],
             removes: Vec::new(),
@@ -759,7 +797,12 @@ mod tests {
             rules: AreaRules::default(),
         };
         let bounds = area.bounds();
-        for inside in [[2.0, 8.0, 1.0], [8.0, 2.0, 12.0], [0.0, 0.0, 0.0], [10.0, 10.0, HEIGHT_M]] {
+        for inside in [
+            [2.0, 8.0, 1.0],
+            [8.0, 2.0, 12.0],
+            [0.0, 0.0, 0.0],
+            [10.0, 10.0, HEIGHT_M],
+        ] {
             assert!(bounds.holds(inside), "{inside:?}");
         }
         assert!(
