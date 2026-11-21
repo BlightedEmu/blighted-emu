@@ -773,7 +773,11 @@
               "proof": "tests"
             },
             {
-              "check": "Open (2026-11-20): the rapier's heavy attack starts 27 input records into the hold (the attack study: 898 ms, 6 of 7 own retail presses), but in the two-player retail capture it came 19 records in (3 cases); and a release during the light attack starts it again (the study: 33 of 33). Not changed until a new mine of the rapier settles it. Whether a dodge press during a roll takes stamina is not checked.",
+              "check": "A rapier's heavy attack shows 19 input records into the hold (tests only, 2026-11-20): in 1,195 retail ledgers its heavy attack started 19 records after the press start in 6 of 6 own holds and 90 of 107 holds of other players (the other 17 at 13 records), and 19 records after the second step in 4 of 4; the client's own data charges it at 667 ms. The table said 27 and 22 records, so the others saw the heavy attack late. A release during the light attack starts it again, as retail (33 of 33).",
+              "proof": "tests"
+            },
+            {
+              "check": "Not checked (2026-11-20): whether a dodge press during a roll takes stamina.",
               "proof": "none"
             }
           ]
@@ -3792,7 +3796,7 @@
   ],
   "nextSteps": [
     "**Player body: key physics first (2026-11-19 study).** The server guesses each body from the client camera, and the camera boom changes with no key the server sees. A test with camera corrections across the view only made the live error larger (90th percentile 2.9 to 17 m), so the key physics must improve first, measured cause by cause with the fresh-start replay: attack and ability motion and the move lock in attacks, the dodge distance from the gear's equip load, slope speed, walls our collision has and the game does not, and ledge climbs. Then the camera's correction along the view can go, and the own states can carry the input counter as retail's do.\n\nLive check of this round: the bow abilities and the crosshair aim on a boar, with the client trace on.",
-    "**Other players: live check of the 2026-11-20 second round (tests only).** Two players, keyboard and controller: crouch and prone with the pad (left shoulder with a left stick click, and held), quick double dodge presses (one roll each, no restart), and a keyboard video like the controller one. Then the earlier list: a bow's hip shots held long and short, walking and running backward, keys let go during an attack, walk starts, jumps and falls, the bow's full draw, blunderbuss re-fire and reload, blocks, a spear chain on a boar, a rapier's light and heavy attacks.\n\nStill open: the jerk of a player on a slow link (Unknown), the rapier's heavy hold time, the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
+    "**Other players: live check of the 2026-11-20 second round (tests only).** Two players, keyboard and controller: crouch and prone with the pad (left shoulder with a left stick click, and held), quick double dodge presses (one roll each, no restart), and a keyboard video like the controller one. Then the earlier list: a bow's hip shots held long and short, walking and running backward, keys let go during an attack, walk starts, jumps and falls, the bow's full draw, blunderbuss re-fire and reload, blocks, a spear chain on a boar, a rapier's light and heavy attacks (the heavy now 19 records into the hold).\n\nStill open: the jerk of a player on a slow link (Unknown), the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
     "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
@@ -3876,6 +3880,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Other players (2026-11-20, tests only): a rapier's heavy attack shows 19 input records into the hold, as in the retail captures, not 27.",
     "Other players (2026-11-20, tests only): a controller player's crouch and prone show, and a second dodge press during a roll no longer starts the roll again. Live: the gun's reload and shots and the keys' crouch and prone showed as retail.",
     "Hosting (2026-11-20, tests only): every example config file explains each key in plain words, and one example file lists every environment variable the servers read.",
     "Hosting (2026-11-20, tests only): a server set up from the repository alone sends the own spawn card, so the client no longer stays at a black screen after the level loads.",
@@ -4127,5 +4132,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-20",
-  "lastCommit": "dab03eff"
+  "lastCommit": "e0bb2cc9"
 }
