@@ -9981,13 +9981,14 @@ mod tests {
             .and_then(|entity| world.world.get::<Body>(entity))
             .map(|body| body.motion.position())
             .expect("reader");
-        let manifest_lore = lowercase_crc32("00_Aeternum_31_01");
+        let manifest = crate::player_content::LoreNote::of(
+            "00_Aeternum_31_01",
+            &String::from_utf8_lossy(MANIFEST),
+            Some(MANIFEST_LORE),
+        );
         world.content = Arc::new(PlayerContent {
-            lore_by_title: HashMap::from([(
-                crate::player_content::lore_title_key(&String::from_utf8_lossy(MANIFEST)),
-                manifest_lore,
-            )]),
-            lore_points: crate::placed_points::PlacedPoints::of([(manifest_lore, reader_at)]),
+            lore_points: crate::placed_points::PlacedPoints::of([(manifest.id, reader_at)]),
+            lore_notes: crate::player_content::LoreNotes::build([manifest]),
             ..(*world.content).clone()
         });
         world.interact(&who, request(LORE_KIND, 1, None), MANIFEST, at);

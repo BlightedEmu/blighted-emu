@@ -718,10 +718,90 @@ impl MobLooks {
     }
 }
 
-/// The key of a lore title in [`PlayerContent::lore_by_title`]: lowercase, without the
-/// localized mark `@` the client and `LoreData` start it with.
-pub fn lore_title_key(title: &str) -> String {
-    title.trim_start_matches('@').to_lowercase()
+/// Starts a localized name, such as a `LoreData` title and the title a client reads.
+const LOCALIZED_MARK: char = '@';
+/// Starts the achievement of a lore note whose `LoreData` row names none; the rest is its title
+/// without the [`LOCALIZED_MARK`] (Inferred: the client names `@00_Aeternum_Title_31_01`, the
+/// ship's manifest task of Lessons of a Pirate's Life waits for
+/// `Lore_unlock_00_Aeternum_Title_31_01`, and every `Lore_unlock_` achievement has the game event
+/// `Read_LoreItem`).
+const LORE_ACHIEVEMENT_PREFIX: &str = "Lore_unlock_";
+
+/// The key of a lore title in [`LoreNotes`]: lowercase, without the localized mark `@` the
+/// client and `LoreData` start it with.
+fn lore_title_key(title: &str) -> String {
+    title.trim_start_matches(LOCALIZED_MARK).to_lowercase()
+}
+
+/// A `LoreData` note: what a read of it sets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoreNote {
+    /// The lore id: the CRC-32 of the lowercase `LoreID`, as the level's lore points name it.
+    pub id: u32,
+    /// The title without its localized mark, in the case of the row.
+    pub title: String,
+    /// The achievement a read sets: the row's `AchievementId` (Observed, bundle 25810808: the
+    /// plaque `@99A_MSQ_SoulwardenIntro_Title_01_01` names
+    /// `Lore_unlock_99A_MSQ_SoulwardenIntro_01_01`, the achievement
+    /// `99A_MSQ_01_LearnSoulwardens` waits for), or [`LORE_ACHIEVEMENT_PREFIX`] and the title
+    /// when the row names none.
+    pub achievement: String,
+}
+
+impl LoreNote {
+    /// The note of lore id `lore_id` and title `title`, whose row names achievement
+    /// `achievement_id` (`None` or blank: none).
+    pub fn of(lore_id: &str, title: &str, achievement_id: Option<&str>) -> Self {
+        let title = title.trim_start_matches(LOCALIZED_MARK).to_owned();
+        let achievement = achievement_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map_or_else(|| format!("{LORE_ACHIEVEMENT_PREFIX}{title}"), str::to_owned);
+        Self {
+            id: lowercase_crc32(lore_id),
+            title,
+            achievement,
+        }
+    }
+}
+
+/// The `LoreData` notes, by title and by the achievement a read sets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LoreNotes {
+    /// The notes, by [`lore_title_key`] of their title.
+    by_title: HashMap<String, LoreNote>,
+    /// The title key of each note, by its achievement in lowercase.
+    by_achievement: HashMap<String, String>,
+}
+
+impl LoreNotes {
+    /// The notes `notes`.
+    pub fn build(notes: impl IntoIterator<Item = LoreNote>) -> Self {
+        let by_title: HashMap<String, LoreNote> = notes
+            .into_iter()
+            .map(|note| (lore_title_key(&note.title), note))
+            .collect();
+        let by_achievement = by_title
+            .iter()
+            .map(|(key, note)| (note.achievement.to_lowercase(), key.clone()))
+            .collect();
+        Self {
+            by_title,
+            by_achievement,
+        }
+    }
+
+    /// The note of title `title`, with or without its localized mark, in any case.
+    pub fn titled(&self, title: &str) -> Option<&LoreNote> {
+        self.by_title.get(&lore_title_key(title))
+    }
+
+    /// The note whose read sets achievement `achievement`, in any case.
+    pub fn unlocking(&self, achievement: &str) -> Option<&LoreNote> {
+        self.by_achievement
+            .get(&achievement.to_lowercase())
+            .and_then(|key| self.by_title.get(key))
+    }
 }
 
 /// A level record's position (x, y, z metres).
@@ -760,9 +840,8 @@ pub struct PlayerContent {
     pub lore_points: PlacedPoints,
     /// The time of day of the sim level's spawns, gatherable points and encounter slices.
     pub time_of_day: TimedPlaces,
-    /// The lore id (CRC-32 of the lowercase `LoreID`) of each `LoreData` title, by the title
-    /// in lowercase without its localized mark (`00_aeternum_title_31_01`).
-    pub lore_by_title: HashMap<String, u32>,
+    /// The `LoreData` notes.
+    pub lore_notes: LoreNotes,
     /// The crafting recipes.
     pub recipes: Recipes,
     /// The reward of each game event, for quest completions.
@@ -1574,12 +1653,15 @@ impl PlayerContent {
                     .iter()
                     .map(|point| (point.lore_id, point_position(point.position))),
             ),
-            lore_by_title: tables
-                .lore_data
-                .iter()
-                .flat_map(|table| &table.rows)
-                .map(|row| (lore_title_key(&row.title), lowercase_crc32(&row.lore_id)))
-                .collect(),
+            lore_notes: LoreNotes::build(
+                tables
+                    .lore_data
+                    .iter()
+                    .flat_map(|table| &table.rows)
+                    .map(|row| {
+                        LoreNote::of(&row.lore_id, &row.title, row.achievement_id.as_deref())
+                    }),
+            ),
             recipes: Recipes::from_tables(tables),
             rewards: Rewards::from_tables(tables),
             loot: LootTables::from_tables(tables),

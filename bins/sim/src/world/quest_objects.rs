@@ -31,7 +31,7 @@ use super::slots::Slot;
 use super::statics::object_gathered_whole;
 use super::{Body, Player, SimWorld, gather_answer, send_now};
 use crate::objectives::Event;
-use crate::player_content::{QuestObjects, lore_title_key};
+use crate::player_content::QuestObjects;
 use crate::stats::{GAME_EVENT_STAT, ONE_COMPLETION, StatEvent};
 use nw_bus::ConnectionRef;
 
@@ -43,13 +43,6 @@ const LORE_REFUSED: u8 = 2;
 /// How far from the player a lore note it reads may be, metres, across the ground (Inferred:
 /// the client's interaction reach is Unknown; generous for a position a moment old).
 const LORE_REACH_M: f32 = 15.0;
-/// Starts the achievement id of a lore note; the rest is its title without the
-/// [`LOCALIZED_MARK`] (Inferred: the client names `@00_Aeternum_Title_31_01`, the ship's
-/// manifest task of Lessons of a Pirate's Life waits for `Lore_unlock_00_Aeternum_Title_31_01`,
-/// and every `Lore_unlock_` achievement has the game event `Read_LoreItem`).
-const LORE_ACHIEVEMENT_PREFIX: &str = "Lore_unlock_";
-/// Starts a localized name.
-const LOCALIZED_MARK: char = '@';
 /// Swing hits that break a quest object (Observed: each of Grace's nodules broke on the
 /// greatsword's second 2071, 0.8 s after the first).
 const HITS_TO_BREAK: u32 = 2;
@@ -246,7 +239,8 @@ impl SimWorld {
 
     /// Player `number` (`entity`) reads the lore note of interaction `request`, whose title the
     /// client names `name`: the read is accepted (3743 kind 47 status 1 with the title, as
-    /// retail) and the note's achievement is set, an event of its quest; the first read also
+    /// retail) and the note's achievement ([`crate::player_content::LoreNote::achievement`]) is
+    /// set, an event of its quest; the first read also
     /// fires the achievement's game event. A title that is no
     /// `LoreData` title, or whose lore point is not within reach of the player, is refused
     /// (status 2, Inferred as for a busy gather): a client cannot read lore from anywhere.
@@ -259,33 +253,31 @@ impl SimWorld {
         now_ms: u64,
     ) {
         let title = String::from_utf8_lossy(name);
-        let in_reach = self
+        let at = self
             .world
             .get::<Body>(entity)
-            .map(|body| body.motion.position())
-            .zip(self.content.lore_by_title.get(&lore_title_key(&title)))
-            .is_some_and(|(at, lore)| {
+            .map(|body| body.motion.position());
+        let note = self.content.lore_notes.titled(&title).filter(|note| {
+            at.is_some_and(|at| {
                 !self
                     .content
                     .lore_points
-                    .within(*lore, at, LORE_REACH_M)
+                    .within(note.id, at, LORE_REACH_M)
                     .is_empty()
-            });
+            })
+        });
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
-        if !in_reach {
+        let Some(note) = note else {
             tracing::debug!(player = number, %title, "lore read of no lore in reach");
             let refusal = gather_answer(number, request, LORE_REFUSED, &[]);
             send_now(&mut self.combat_messages, &player.connection, &[refusal]);
             return;
-        }
+        };
         let answer = gather_answer(number, request, LORE_ACCEPTED, name);
         send_now(&mut self.combat_messages, &player.connection, &[answer]);
-        let achievement = format!(
-            "{LORE_ACHIEVEMENT_PREFIX}{}",
-            title.trim_start_matches(LOCALIZED_MARK)
-        );
+        let achievement = note.achievement.clone();
         let first_read = !player
             .flow
             .has_achievement(&self.achievement_rules, &achievement);
@@ -631,7 +623,7 @@ mod tests {
 
     use super::*;
     use crate::placed_points::PlacedPoints;
-    use crate::player_content::PlayerContent;
+    use crate::player_content::{LoreNote, LoreNotes, PlayerContent};
     use crate::world::gathering::tests::with_resets;
     use crate::world::level_flow::AchievementRules;
     use crate::world::tests::{NOW, SERVER_TIME, admit_at, world_with_spawns};
@@ -684,7 +676,12 @@ mod tests {
     const READ_EVENT: &str = "Read_LoreItem";
     const READ_EXPERIENCE: u32 = 2;
     const ACHIEVEMENT_BIT: u32 = 774;
-    const LORE: u32 = 0x1234;
+    const LORE_ID: &str = "Weavers_01_01";
+    /// The Soulwarden plaque of build 25810808: its row names an achievement that is no
+    /// `Lore_unlock_` and its title, and `99A_MSQ_01_LearnSoulwardens` waits for that one.
+    const PLAQUE_ID: &str = "99A_MSQ_SoulwardenIntro_01_01";
+    const PLAQUE_TITLE: &str = "@99A_MSQ_SoulwardenIntro_Title_01_01";
+    const PLAQUE_ACHIEVEMENT: &str = "Lore_unlock_99A_MSQ_SoulwardenIntro_01_01";
 
     /// The `m_aoiRadius` of `master_quest_instanced` and its proximity and damageable forms, m.
     const QUEST_AOI_RADIUS_M: f32 = 100.0;
@@ -1088,11 +1085,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_first_lore_read_keeps_the_note_and_fires_its_game_event_once() {
+    /// A world with note `note` at a player's place, its achievement and the achievement's game
+    /// event; the player and the read request of the note.
+    fn lore_reader(note: LoreNote) -> (SimWorld, Entity, InteractionRequest) {
         let mut world = world_with_spawns(Vec::new());
-        let indexes = AchievementIndexes::build([(ACHIEVEMENT.to_owned(), ACHIEVEMENT_BIT)])
-            .with_game_events([(ACHIEVEMENT.to_owned(), READ_EVENT.to_owned())]);
+        let indexes =
+            AchievementIndexes::build([(note.achievement.clone(), ACHIEVEMENT_BIT)])
+                .with_game_events([(note.achievement.clone(), READ_EVENT.to_owned())]);
         world.achievement_rules = AchievementRules::of(&indexes, &[]);
         let note_at = Position {
             x: 0.0,
@@ -1100,8 +1099,8 @@ mod tests {
             z: 50.0,
         };
         world.content = Arc::new(PlayerContent {
-            lore_by_title: [(lore_title_key(TITLE), LORE)].into_iter().collect(),
-            lore_points: PlacedPoints::of([(LORE, note_at)]),
+            lore_points: PlacedPoints::of([(note.id, note_at)]),
+            lore_notes: LoreNotes::build([note]),
             rewards: Rewards::build([(
                 READ_EVENT.to_owned(),
                 Reward {
@@ -1123,6 +1122,31 @@ mod tests {
             kind: LORE_KIND,
             gatherable: None,
         };
+        (world, entity, request)
+    }
+
+    #[test]
+    fn a_lore_read_sets_the_achievement_its_row_names() {
+        let (mut world, entity, request) =
+            lore_reader(LoreNote::of(PLAQUE_ID, PLAQUE_TITLE, Some(PLAQUE_ACHIEVEMENT)));
+        world.read_lore(entity, PLAYER, request, PLAQUE_TITLE.as_bytes(), NOW);
+        let player = world.world.get::<Player>(entity).expect("player");
+        assert!(
+            player
+                .flow
+                .has_achievement(&world.achievement_rules, PLAQUE_ACHIEVEMENT),
+            "the row's achievement, not one of its title"
+        );
+    }
+
+    #[test]
+    fn a_first_lore_read_keeps_the_note_and_fires_its_game_event_once() {
+        let (mut world, entity, request) = lore_reader(LoreNote::of(LORE_ID, TITLE, None));
+        assert_eq!(
+            world.content.lore_notes.titled(TITLE).map(|note| note.achievement.as_str()),
+            Some(ACHIEVEMENT),
+            "a row without an achievement unlocks its title"
+        );
         let experience = |world: &SimWorld| {
             world
                 .world

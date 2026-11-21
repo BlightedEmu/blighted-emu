@@ -51,8 +51,6 @@ const JOINABLE: [u8; 3] = [SYNDICATE, MARAUDERS, COVENANT];
 const EXPRESSION_MARKS: [&str; 4] = ["&&", "||", "(", ")"];
 /// The negation mark of an achievement expression.
 const NOT_MARK: char = '!';
-/// Starts the achievement of a lore note; the rest is its title (`quest_objects`).
-const LORE_PREFIX: &str = "Lore_unlock_";
 /// The enemy type of a kill step that counts player kills.
 const PLAYER_ENEMY: &str = "Player";
 /// How near a patrol's place the player stands while its stay counts.
@@ -500,17 +498,12 @@ impl SimWorld {
         if let Some(source) = level.achievement_sources.get(&name.to_lowercase()) {
             return Some(source.clone());
         }
-        let lore = name
-            .get(..LORE_PREFIX.len())
-            .filter(|prefix| prefix.eq_ignore_ascii_case(LORE_PREFIX))
-            .and_then(|_| name.get(LORE_PREFIX.len()..));
-        if let Some(title) = lore {
+        if let Some(note) = self.content.lore_notes.unlocking(name) {
             return self
                 .content
-                .lore_by_title
-                .get(&title.to_lowercase())
-                .filter(|lore_id| self.content.lore_points.first(**lore_id).is_some())
-                .map(|_| format!("the lore note {title} of the level"));
+                .lore_points
+                .first(note.id)
+                .map(|_| format!("the lore note {} of the level", note.title));
         }
         self.content
             .archetype_unlocks
@@ -2003,12 +1996,8 @@ impl SimWorld {
             return plan;
         };
         let note = given.iter().find_map(|(name, _)| {
-            let title = name
-                .get(..LORE_PREFIX.len())
-                .filter(|prefix| prefix.eq_ignore_ascii_case(LORE_PREFIX))
-                .and_then(|_| name.get(LORE_PREFIX.len()..))?;
-            let lore = self.content.lore_by_title.get(&title.to_lowercase())?;
-            Some((title.to_owned(), self.content.lore_points.first(*lore)?))
+            let note = self.content.lore_notes.unlocking(name)?;
+            Some((note.title.clone(), self.content.lore_points.first(note.id)?))
         });
         match note {
             Some((title, at)) => StepPlan::Lore {
@@ -2311,7 +2300,7 @@ mod tests {
     use crate::login::WorldIds;
     use crate::objectives::{KillTypes, TaskBook, TaskRow};
     use crate::placed_points::PlacedPoints;
-    use crate::player_content::{ObjectiveRow, PlayerContent, QuestBook};
+    use crate::player_content::{LoreNote, LoreNotes, ObjectiveRow, PlayerContent, QuestBook};
 
     const NPC: &str = "Walk_Npc";
     const CAMP: &str = "walk_camp";
@@ -2347,7 +2336,12 @@ mod tests {
     /// `12A_MSQ_24_DefeatGawain_Enter_GawainTrial`: `QuestGawain`, entered from afar).
     const TRIAL_QUEST: &str = "walk_trial";
     const LOOT_QUEST: &str = "walk_loot";
-    const LORE_TITLE: &str = "Walk_Note";
+    /// A lore note whose row names its achievement, which is no `Lore_unlock_` and its title
+    /// (retail: the plaque `@99A_MSQ_SoulwardenIntro_Title_01_01` of
+    /// `99A_MSQ_01_LearnSoulwardens` unlocks `Lore_unlock_99A_MSQ_SoulwardenIntro_01_01`).
+    const LORE_ID: &str = "Walk_Note";
+    const LORE_TITLE: &str = "@Walk_Note_Title";
+    const LORE_ACHIEVEMENT: &str = "Lore_unlock_Walk_Note";
 
     fn gateway() -> BusId {
         BusId::try_from("gw-walk".to_owned()).expect("id")
@@ -2462,7 +2456,7 @@ mod tests {
                 task("a_pin", "TaskGameEvent", &[]),
                 task("l_root", "ConsecutiveTaskContainer", &["l_read"]),
                 TaskRow {
-                    item_name: Some(format!("{LORE_PREFIX}{LORE_TITLE}")),
+                    item_name: Some(LORE_ACHIEVEMENT.to_owned()),
                     ..task("l_read", "TaskAchievement", &[])
                 },
                 task("t_root", "ConsecutiveTaskContainer", &["t_enter"]),
@@ -2537,12 +2531,13 @@ mod tests {
                 instances: nw_content::instances::InstanceCatalog::build([
                     super::super::instances::tests::trial(),
                 ]),
-                lore_by_title: HashMap::from([(
-                    LORE_TITLE.to_lowercase(),
-                    lowercase_crc32(LORE_TITLE),
+                lore_notes: LoreNotes::build([LoreNote::of(
+                    LORE_ID,
+                    LORE_TITLE,
+                    Some(LORE_ACHIEVEMENT),
                 )]),
                 lore_points: PlacedPoints::of([(
-                    lowercase_crc32(LORE_TITLE),
+                    lowercase_crc32(LORE_ID),
                     at(CELL_M / 2.0 + 35.0),
                 )]),
                 gatherables: nw_content::gathering::Gatherables::build([
@@ -2714,8 +2709,8 @@ mod tests {
         world.start_quest(1, LORE_QUEST, NOW).expect("start");
         assert_eq!(
             world.quest_plan_lines(1, LORE_QUEST),
-            ["plan l_read lore Walk_Note at 1059.0 10.0 50.0"],
-            "a player reads the note at its lore point"
+            ["plan l_read lore Walk_Note_Title at 1059.0 10.0 50.0"],
+            "a player reads the note that unlocks the step's achievement, at its lore point"
         );
         world.start_quest(1, TRIAL_QUEST, NOW).expect("start");
         let trial = super::super::instances::tests::trial();

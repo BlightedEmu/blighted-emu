@@ -419,6 +419,24 @@ pub(crate) mod tests {
         (level, world)
     }
 
+    /// The plaque of `99A_MSQ_01_LearnSoulwardens` (step `Investigate_Plaque_01`) unlocks the
+    /// achievement its `LoreData` row names, which is no `Lore_unlock_` and its title, and it
+    /// lies on the open world level.
+    #[cfg(feature = "local-data")]
+    #[test]
+    fn the_soulwarden_plaque_unlocks_the_achievement_of_its_row() {
+        const PLAQUE_ACHIEVEMENT: &str = "Lore_unlock_99A_MSQ_SoulwardenIntro_01_01";
+        const PLAQUE_TITLE: &str = "99A_MSQ_SoulwardenIntro_Title_01_01";
+        let (level, _) = retail_world("soulwarden-plaque");
+        let note = level
+            .content
+            .lore_notes
+            .unlocking(PLAQUE_ACHIEVEMENT)
+            .expect("the plaque");
+        assert_eq!(note.title, PLAQUE_TITLE);
+        assert!(level.content.lore_points.first(note.id).is_some(), "on the level");
+    }
+
     fn walked(quest: &str, outcome: Outcome, stop: Option<&str>) -> QuestWalk {
         QuestWalk {
             quest: quest.to_owned(),
