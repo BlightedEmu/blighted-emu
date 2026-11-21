@@ -5,20 +5,25 @@
 //! until then. The characters keep their saved places, which can be far apart, so the first
 //! client goes to the second with a game master teleport (`!tp`). Then it walks a route while
 //! the second watches, then sends one move that is far too long, which the world must refuse.
-//! Then the first logs in again at the position the world saved.
+//! Then the first logs in again at the position the world saved. The walk sends the route's
+//! points, or, with a [`RecordWalk`], key or pad records as the game client does
+//! ([`crate::record_walk`]); then the second client must see the first where its own body walked.
 
 use std::cell::Cell;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nw_messages::{
     BodyCodec, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, WorldPosition,
 };
 use nw_reflect::{LoginToken, REGISTRATION_STATUS_AUTHORIZED};
+use nw_sim_core::{Ground, Position};
 use reqwest::Client;
 use thiserror::Error;
 
 use crate::play::{say_in_area, send_time_sync};
+use crate::record_walk::{InputDevice, RecordWalker};
 use crate::rep::{RepClient, RepError};
 use crate::route::Route;
 use crate::udp::{Hold, RepOutcome, RunError, run_rep_with};
@@ -72,6 +77,18 @@ pub struct PairSettings {
     pub registration_timeout: Duration,
 }
 
+/// A walk with input records instead of points: the device, and the level's ground and sea
+/// height the bot's own body walks on.
+#[derive(Clone)]
+pub struct RecordWalk {
+    /// The device whose input the first client sends.
+    pub device: InputDevice,
+    /// The level's ground.
+    pub ground: Arc<dyn Ground + Send + Sync>,
+    /// The level's sea height, m.
+    pub sea_level_m: f32,
+}
+
 /// One registration and what the client saw.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Session {
@@ -108,6 +125,9 @@ pub struct PairReport {
     pub walk: Option<WalkStart>,
     /// When the second client got each new state of the first one, in order.
     pub walker_states: Vec<Instant>,
+    /// The first client's own body after each record of a [`RecordWalk`], from the start of the
+    /// walk; empty for a walk of points.
+    pub walked: Vec<WorldPosition>,
 }
 
 /// One named check and its result.
@@ -164,15 +184,23 @@ impl PairReport {
             .own_number()
             .map_or(&[][..], |number| self.second.view.track(number));
         let origin = self.walk.map(|walk| walk.origin);
+        // A walk of records went where the client's own body walked, not along the route's
+        // points at their times.
+        let walked_route = origin.and_then(|origin| self.walked_route(origin));
+        let route = if self.walked.is_empty() {
+            Some(&self.route)
+        } else {
+            walked_route.as_ref()
+        };
         let on_route = |position: &WorldPosition| {
-            origin.is_some_and(|origin| {
-                self.route.distance_to(offset(origin, *position)) <= path_tolerance_m
+            origin.zip(route).is_some_and(|(origin, route)| {
+                route.distance_to(offset(origin, *position)) <= path_tolerance_m
             })
         };
         let at_end = |position: &WorldPosition| {
-            origin.is_some_and(|origin| {
+            origin.zip(route).is_some_and(|(origin, route)| {
                 let [east, north] = offset(origin, *position);
-                let [end_east, end_north] = self.route.end();
+                let [end_east, end_north] = route.end();
                 (east - end_east).hypot(north - end_north) <= path_tolerance_m
             })
         };
@@ -219,6 +247,17 @@ impl PairReport {
                 passed: kept,
             },
         ]
+    }
+
+    /// The path of the first client's own body in a walk of records, from `origin`; `None` for a
+    /// walk of points or one too short for a path.
+    fn walked_route(&self, origin: WorldPosition) -> Option<Route> {
+        let points = self
+            .walked
+            .iter()
+            .map(|position| offset(origin, *position))
+            .collect();
+        Route::new(points, self.route.speed_mps()).ok()
     }
 
     /// Whether every check passed.
@@ -342,7 +381,10 @@ struct Meeting {
 
 /// The first client during its walk: once in the game it goes to the second client with a
 /// teleport, then it follows its own position in the bundles and sends [`walk_offset`] from
-/// where it landed, every [`SEND_INTERVAL`].
+/// where it landed, every [`SEND_INTERVAL`]: as the point itself, or, in a [`RecordWalk`], as
+/// the goal of its own body's next record. In a [`RecordWalk`] the far move is records whose
+/// camera is `jump_m` east of the body (a client that puts itself far away), and the body stays
+/// at the end of the route.
 struct Walker<'a> {
     route: &'a Route,
     jump_m: f32,
@@ -352,6 +394,9 @@ struct Walker<'a> {
     /// The start of the walk, and its time since the registration.
     start: Option<(WalkStart, Duration)>,
     last_sent: Option<Duration>,
+    records: Option<&'a RecordWalk>,
+    /// Its own body in a [`RecordWalk`], from the start of the walk.
+    body: Option<RecordWalker>,
 }
 
 /// The second client: once in the game it gives its place as the meeting point, and it notes
@@ -382,14 +427,40 @@ impl Watcher<'_> {
 /// Where the first client is `walked` after it started: on the route, then [`SETTLE`] at its
 /// end, then `jump_m` east of the end for [`JUMP_WINDOW`], then at the end again.
 pub fn walk_offset(route: &Route, jump_m: f32, walked: Duration) -> [f32; 2] {
-    let jump_start = route.duration() + SETTLE;
     let [end_east, end_north] = route.end();
-    if walked < jump_start {
+    if walked < route.duration() + SETTLE {
         route.offset_at(walked)
-    } else if walked < jump_start + JUMP_WINDOW {
+    } else if in_jump(route, walked) {
         [end_east + jump_m, end_north]
     } else {
         route.end()
+    }
+}
+
+/// Whether the first client sends the far move `walked` after it started.
+fn in_jump(route: &Route, walked: Duration) -> bool {
+    let jump_start = route.duration() + SETTLE;
+    (jump_start..jump_start + JUMP_WINDOW).contains(&walked)
+}
+
+/// `input` with the camera of its newest record `east_m` farther east.
+fn camera_moved_east(mut input: ClientInputMsg, east_m: f32) -> ClientInputMsg {
+    if let Some(camera) = input
+        .records
+        .first_mut()
+        .and_then(|record| record.bit_7.as_mut())
+    {
+        camera.x += east_m;
+    }
+    input
+}
+
+/// `at` as the place of a walking body.
+fn body_place(at: WorldPosition) -> Position {
+    Position {
+        x: at.x,
+        y: at.y,
+        z: at.z(),
     }
 }
 
@@ -425,6 +496,9 @@ impl Walker<'_> {
                     track_index: view.track(number).len().saturating_sub(1),
                     at: Instant::now(),
                 };
+                self.body = self
+                    .records
+                    .map(|records| RecordWalker::new(body_place(own), records.device));
                 *self.start.insert((start, since_registration))
             }
         };
@@ -438,12 +512,36 @@ impl Walker<'_> {
         self.last_sent = Some(since_registration);
         let walked = since_registration.saturating_sub(started);
         let [east, north] = walk_offset(self.route, self.jump_m, walked);
-        let Some(position) =
-            InputPosition::from_metres(origin.x + east, origin.y + north, origin.z())
-        else {
+        let goal = [origin.x + east, origin.y + north];
+        let input = match (self.records, self.body.as_mut()) {
+            (Some(records), Some(body)) => {
+                body.follow_server(body_place(own));
+                let jumping = in_jump(self.route, walked);
+                let [end_east, end_north] = self.route.end();
+                let goal = if jumping {
+                    [origin.x + end_east, origin.y + end_north]
+                } else {
+                    goal
+                };
+                let input = body.frame(
+                    goal,
+                    SEND_INTERVAL.as_secs_f32(),
+                    &*records.ground,
+                    records.sea_level_m,
+                );
+                if jumping {
+                    input.map(|input| camera_moved_east(input, self.jump_m))
+                } else {
+                    input
+                }
+            }
+            _ => InputPosition::from_metres(goal[0], goal[1], origin.z())
+                .map(ClientInputMsg::position),
+        };
+        let Some(input) = input else {
             return Ok(());
         };
-        let body = ClientInputMsg::position(position).encode()?;
+        let body = input.encode()?;
         client.send_message(
             INPUT_CHANNEL,
             false,
@@ -462,6 +560,7 @@ impl Walker<'_> {
 pub async fn run_pair(
     http: &Client,
     settings: &PairSettings,
+    records: Option<&RecordWalk>,
     new_client: impl Fn(LoginToken) -> Result<RepClient, RepError>,
     mut report: impl FnMut(String),
 ) -> Result<PairReport, PairError> {
@@ -476,6 +575,8 @@ pub async fn run_pair(
         teleported: false,
         start: None,
         last_sent: None,
+        records,
+        body: None,
     };
     let mut watcher = Watcher {
         meeting: &meeting,
@@ -499,6 +600,12 @@ pub async fn run_pair(
     let (first, second) = tokio::join!(walking, watching);
     let (first, second) = (first?, second?);
     let walk_start = walker.start.map(|(start, _)| start);
+    let walked = walker.body.map_or_else(Vec::new, |body| {
+        body.track()
+            .iter()
+            .filter_map(|at| WorldPosition::from_metres(at.x, at.y, at.z))
+            .collect()
+    });
     let again = walk(http, &settings.first, &mut report).await?;
     let again = session(
         again.rep_address,
@@ -514,6 +621,7 @@ pub async fn run_pair(
         route: settings.route.clone(),
         walk: walk_start,
         walker_states: watcher.walker_states,
+        walked,
     })
 }
 
@@ -620,6 +728,7 @@ mod tests {
             route: route(),
             walk: walk_start(first_track, 0),
             walker_states: Vec::new(),
+            walked: Vec::new(),
         }
     }
 
@@ -637,6 +746,30 @@ mod tests {
         let report = pair_report(&walked(), &walked(), at(ROUTE_END_M, 0.0));
         assert!(failed(&report).is_empty(), "{:?}", failed(&report));
         assert!(report.passed(PATH_TOLERANCE_M, POSITION_TOLERANCE_M));
+    }
+
+    #[test]
+    fn a_walk_of_records_is_checked_against_where_the_clients_own_body_walked() {
+        // The body went beside the route's points (keys move it at their own speed), and the
+        // second client saw it there.
+        let body = vec![
+            at(0.0, 0.0),
+            at(HALF_WAY_M, OFF_ROUTE_M),
+            at(ROUTE_END_M, 0.0),
+        ];
+        let mut report = pair_report(&body, &body, at(ROUTE_END_M, 0.0));
+        assert_eq!(
+            failed(&report),
+            vec![FOLLOWED_ROUTE, SNAPPED_BACK],
+            "against the route's points"
+        );
+        report.walked = body;
+        assert!(failed(&report).is_empty(), "{:?}", failed(&report));
+        // A place the body never walked fails, as off the route.
+        let mut seen = report.walked.clone();
+        seen[1] = at(HALF_WAY_M, -OFF_ROUTE_M);
+        report.second = session(SECOND, &[at(0.0, 0.0)], FIRST, &seen);
+        assert_eq!(failed(&report), vec![FOLLOWED_ROUTE]);
     }
 
     #[test]

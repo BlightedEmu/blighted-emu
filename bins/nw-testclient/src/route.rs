@@ -70,6 +70,11 @@ impl Route {
         self.segments().map(|(a, b)| distance(a, b)).sum()
     }
 
+    /// The walking speed, m/s.
+    pub const fn speed_mps(&self) -> f32 {
+        self.speed_mps
+    }
+
     /// Time to walk the route.
     pub const fn duration(&self) -> Duration {
         self.duration

@@ -426,6 +426,7 @@ async fn two_clients_see_each_other_across_the_border_and_a_saved_position_retur
         let report = run_pair(
             &stack.edge.http,
             &settings,
+            None,
             |token| Ok(client(token)),
             |_| {},
         )

@@ -10,6 +10,7 @@ pub mod gather;
 pub mod hunt;
 pub mod pair;
 pub mod play;
+pub mod record_walk;
 pub mod rep;
 pub mod route;
 pub mod swarm;

@@ -36,8 +36,9 @@ use nw_testclient::config::{
 use nw_testclient::fleet::{NewClient, udp_receive_errors};
 use nw_testclient::gather::{GatherNode, run_gather};
 use nw_testclient::hunt::run_hunt;
-use nw_testclient::pair::{Check, LATE_STATE_GAP, PairReport, PairSettings, run_pair};
+use nw_testclient::pair::{Check, LATE_STATE_GAP, PairReport, PairSettings, RecordWalk, run_pair};
 use nw_testclient::play::{PlayData, PlaySettings, run_play};
+use nw_testclient::record_walk::InputDevice;
 use nw_testclient::rep::{LedgerSlot, RepClient};
 use nw_testclient::swarm::run_swarm;
 use nw_testclient::udp::{Hold, run_rep};
@@ -84,7 +85,12 @@ enum Command {
     Registration,
     /// Two clients in the world: each sees the other, and the first logs in again at its saved
     /// position. The second password comes from `NW_SECRET_TESTCLIENT_PASSWORD_B`.
-    Pair,
+    Pair {
+        /// Walk with this device's input records, as the game client does, over the `[swarm]`
+        /// level's ground, instead of with the route's points.
+        #[arg(long, value_enum)]
+        input: Option<InputDevice>,
+    },
     /// Many bots across a sim border (`[swarm]`). The bot password comes from
     /// `NW_SECRET_TESTCLIENT_SWARM_PASSWORD`.
     Swarm {
@@ -203,7 +209,9 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
         Command::Registration => {
             registration(&config, &http, &trusted, &own(&config)?, &ledger).await
         }
-        Command::Pair => pair(&config, &http, &trusted, own(&config)?, &ledger).await,
+        Command::Pair { input } => {
+            pair(&config, &http, &trusted, own(&config)?, &ledger, input).await
+        }
         Command::Swarm { bots } => {
             let mut config = config;
             if let Some(bots) = bots {
@@ -543,7 +551,20 @@ async fn pair(
     trusted: &DtlsClientConfig,
     first: WalkSettings,
     ledger: &LedgerSlot,
+    input: Option<InputDevice>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    let records = match input {
+        Some(device) => {
+            let (ground, sea_level_m) =
+                nw_sim_core::player_level_ground(&level_layout(config)?, &config.swarm.level)?;
+            Some(RecordWalk {
+                device,
+                ground: Arc::new(ground),
+                sea_level_m,
+            })
+        }
+        None => None,
+    };
     let second = walk_settings(
         config,
         &config.second_account,
@@ -561,6 +582,7 @@ async fn pair(
     let report = run_pair(
         http,
         &settings,
+        records.as_ref(),
         |token| RepClient::new(trusted, config.mtu, token, 0).map(|client| ledger.give(client)),
         |line| println!("{line}"),
     )
