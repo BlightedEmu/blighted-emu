@@ -1440,6 +1440,9 @@ pub(super) struct SlayerRecord {
     pub(super) airborne: bool,
     /// How the body holds itself ([`nw_sim_core::TrackedBody::posture`]).
     pub(super) posture: Posture,
+    /// The body is in a land dodge of an earlier record ([`nw_sim_core::TrackedBody::is_dodging`]):
+    /// the body starts no dodge at a press in it, so the others get none.
+    pub(super) dodging: bool,
     /// How heavy its gear is: the kind of its dodge ([`PlayerSequences::dodge`]).
     pub(super) load: DodgeLoad,
     /// The mount the player rides, when it rides.
@@ -2591,7 +2594,12 @@ impl SlayerTrack {
 
     /// The state the server starts for the keys of `record` with the sequences of `stance`:
     /// a dodge or a jump at its key's press (state 07 and 0e, by direction), else an attack
-    /// ([`SlayerTrack::attack_start`]).
+    /// ([`SlayerTrack::attack_start`]). A dodge starts only when the body starts one, never in
+    /// the body's dodge ([`SlayerRecord::dodging`]; live 2026-11-20: 5 of a pad player's 25
+    /// dodges started again with a new stamp 164 to 200 ms after their start, at a second press,
+    /// while the body went on in the first; of 510 retail dodges seen by other players
+    /// (`retail-2026-11-19-towns-duels`) 13 started again with a new stamp, 12 of them 400 to
+    /// 486 ms after the first's start).
     fn server_start(
         &mut self,
         record: &SlayerRecord,
@@ -2601,7 +2609,7 @@ impl SlayerTrack {
         in_air: bool,
     ) -> Option<Pending> {
         let intent = record.intent?;
-        let dodge = intent.dodge && !self.dodge_held && !in_air;
+        let dodge = intent.dodge && !self.dodge_held && !in_air && !record.dodging;
         let jump = intent.jump && !self.jump_held && !in_air;
         self.dodge_held = intent.dodge;
         self.jump_held = intent.jump;
@@ -4319,6 +4327,7 @@ pub(crate) mod tests {
             falling: false,
             airborne: false,
             posture: Posture::Stand,
+            dodging: false,
             load: DodgeLoad::Fast,
             ride: None,
         }
@@ -6305,6 +6314,52 @@ pub(crate) mod tests {
             (next.1.state, next.1.sequence),
             (Some(movement::START_STATE), movement::RUN_SEQUENCE)
         );
+    }
+
+    /// Live 2026-11-20: a second dodge press in the body's dodge started the dodge again for
+    /// the others (5 of 25, 164 to 200 ms after the start) while the body went on in the first.
+    /// Only a press after the body's dodge starts one.
+    #[test]
+    fn a_dodge_press_in_the_body_s_dodge_starts_none_with_keyboard_and_controller() {
+        const SECOND_PRESS: u16 = 406;
+        const AFTER_THE_DODGE: u16 = 418;
+        /// The left stick pushed forward: right at rest, forward 1.
+        const STICK_FORWARD: [f32; 2] = [0.0, 1.0];
+        let table = crate::combat::test_support::test_player_sequences();
+        let keys = Intent::of_keys(true, false, false, false);
+        let pad = Intent::default().with_stick(Some(STICK_FORWARD));
+        for (device, forward) in [("keyboard", keys), ("controller", pad)] {
+            let dodge = Intent {
+                dodge: true,
+                ..forward
+            };
+            let mut track = spawned();
+            track.record(quiet_record(400, forward), &table);
+            own_state(&mut track, 400);
+            track.record(quiet_record(401, dodge), &table);
+            let roll = own_state(&mut track, 401).state.expect("the dodge");
+            assert_eq!(roll.state, Some(DODGE_STATE), "{device}");
+            let mut starts = Vec::new();
+            for counter in 402..=AFTER_THE_DODGE {
+                let pressed = counter == SECOND_PRESS || counter == AFTER_THE_DODGE;
+                let record = SlayerRecord {
+                    dodging: counter < AFTER_THE_DODGE,
+                    ..quiet_record(counter, if pressed { dodge } else { forward })
+                };
+                track.record(record, &table);
+                if let Some(state) = own_state(&mut track, counter).state
+                    && state.state == Some(DODGE_STATE)
+                    && state.started != roll.started
+                {
+                    starts.push(counter);
+                }
+            }
+            assert_eq!(
+                starts,
+                vec![AFTER_THE_DODGE],
+                "{device}: no dodge at the press in the body's dodge, one after it"
+            );
+        }
     }
 
     /// Retail `retail-2026-11-19-towns-duels`: a dodge with the marker set carried `48=00`

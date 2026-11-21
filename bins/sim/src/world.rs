@@ -2240,6 +2240,7 @@ impl SimWorld {
             let falling = player.tracked.is_falling();
             let airborne = !player.tracked.is_grounded() && !swimming;
             let posture = player.tracked.posture();
+            let dodging = player.tracked.is_dodging();
             let load = match player.tracked.equip_load() {
                 nw_sim_core::EquipLoad::Fast => DodgeLoad::Fast,
                 nw_sim_core::EquipLoad::Normal => DodgeLoad::Normal,
@@ -2263,6 +2264,7 @@ impl SimWorld {
                     falling,
                     airborne,
                     posture,
+                    dodging,
                     load,
                     ride,
                 },

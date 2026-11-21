@@ -592,6 +592,12 @@ impl TrackedBody {
         self.character.is_swimming()
     }
 
+    /// Whether it is in a land dodge ([`Character::is_dodging`]): a dodge press in it starts
+    /// none.
+    pub const fn is_dodging(&self) -> bool {
+        self.character.is_dodging()
+    }
+
     /// How it holds itself: standing, crouching or prone.
     pub const fn posture(&self) -> Posture {
         self.character.posture()
