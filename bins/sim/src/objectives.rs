@@ -2917,6 +2917,27 @@ impl ObjectiveRun {
         let siblings = &tree.tasks[parent].children;
         match tree.tasks[parent].kind {
             TaskKind::Consecutive => {
+                // A later copy of the same task in the container is done with it: retail's two
+                // entries of `04A_Side05_03_03B_GetDelivery`, which
+                // `04A_Side05_03_03B_Container_DeadDrop` lists twice, went Complete in one update
+                // (retail capture "It's Who You Know", 2026-09-30: task index 5 and 6, then the
+                // container's progress 2 of 4). Before, the second copy waited for a second
+                // parcel that the level does not have (bot run 2026-11-21).
+                let twins: Vec<usize> = siblings
+                    .iter()
+                    .skip_while(|sibling| **sibling != index)
+                    .skip(1)
+                    .copied()
+                    .filter(|sibling| {
+                        tree.tasks[*sibling].id == task.id
+                            && self.states[*sibling] != TaskState::Done
+                    })
+                    .collect();
+                for twin in twins {
+                    self.log_task(twin, TASK_DONE);
+                    self.states[twin] = TaskState::Done;
+                    self.list(twin);
+                }
                 // A later step done before goes on done, and a paused one waits again (an
                 // artifact's perk steps when its item is worn again, [`ObjectiveRun::sync_unworn`]).
                 let next = siblings
@@ -3379,6 +3400,49 @@ pub(crate) mod tests {
         run.event(Event::Talked("12_JeongIseul"), 0);
         assert!(run.is_done("Iseul"));
         run.event(Event::Talked("NPC_16195"), 0);
+        assert!(run.finished());
+    }
+
+    #[test]
+    fn a_task_a_consecutive_container_lists_twice_is_done_with_its_first_copy() {
+        // Build 25810808: `04A_Side05_03_03B_Container_DeadDrop` lists `03B_GetDelivery` twice,
+        // then the dead drop's game event.
+        const PARCEL: &str = "04aSide05_03_Delivery";
+        const DROP_EVENT: &str = "04aSide05_03_Delivery";
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["Get", "Get", "Drop"]),
+            TaskRow {
+                target_qty: Some(1),
+                ..with_item("Get", "TaskGatherAndReturnItems", PARCEL)
+            },
+            TaskRow {
+                kill_enemy_type: Some(DROP_EVENT.to_owned()),
+                target_qty: Some(1),
+                ..row("Drop", "TaskGameEvent")
+            },
+        ];
+        let tree = Arc::new(TaskBook::new(rows).tree("Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        let waiting = |run: &ObjectiveRun| -> Vec<String> {
+            run.waiting_steps()
+                .into_iter()
+                .map(|(id, _, _)| id.to_owned())
+                .collect()
+        };
+        assert_eq!(waiting(&run), vec!["Get".to_owned()]);
+        run.event(
+            Event::ItemGained {
+                item: PARCEL,
+                quantity: 1,
+            },
+            0,
+        );
+        assert_eq!(
+            waiting(&run),
+            vec!["Drop".to_owned()],
+            "the one parcel ends both copies"
+        );
+        run.event(Event::GameEvent(DROP_EVENT), 0);
         assert!(run.finished());
     }
 
