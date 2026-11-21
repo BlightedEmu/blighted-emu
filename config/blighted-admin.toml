@@ -35,8 +35,8 @@ max_spawns_per_request = 5000
 captures_dir = "local-data/captures"
 # The saved Discord threads that name the open-world capture sessions.
 discord_dir = "local-data/captures/ow captures og"
-# The saved copy of the Azoth catalog site (made by local-data/azoth-catalog/archive.py).
-azoth_dir = "local-data/azoth-catalog"
+# The saved copy of the packet catalog site (made by local-data/packet-catalog/archive.py).
+packet_catalog_dir = "local-data/packet-catalog"
 # The game's message type table, in the game install folder (NW_GAME_DIR).
 type_index = "typeindex.json"
 # The class names of the Aeternum-World project (AGPL-3.0).

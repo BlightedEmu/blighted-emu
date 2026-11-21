@@ -2,7 +2,7 @@
 //! The capture viewer (admin tools spec section 4): the session list and the type names.
 
 pub mod api;
-pub mod azoth;
+pub mod packet_catalog;
 pub mod catalog;
 pub mod open;
 
@@ -11,7 +11,7 @@ use std::path::Path;
 use nw_capture::TypeNames;
 
 use crate::config::CapturesConfig;
-use azoth::{AzothTypes, TypeLabels};
+use packet_catalog::{CatalogTypes, TypeLabels};
 use catalog::{SessionEntry, scan};
 
 /// The sessions and the type labels, read at start.
@@ -28,7 +28,7 @@ pub struct Captures {
 impl Captures {
     /// Scans the captures folder and reads the type names. Our names need the install folder
     /// (`game_dir`, for its `typeindex.json`); without it, or when a file cannot be read, only
-    /// the Azoth catalog's names are used.
+    /// the packet catalog's names are used.
     pub fn load(config: &CapturesConfig, game_dir: Option<&Path>) -> Self {
         let ours = game_dir.and_then(|dir| {
             TypeNames::load(&dir.join(&config.type_index), &config.type_names)
@@ -39,7 +39,7 @@ impl Captures {
         tracing::info!(sessions = sessions.len(), "capture sessions found");
         Self {
             sessions,
-            labels: TypeLabels::new(ours, AzothTypes::load(&config.azoth_dir)),
+            labels: TypeLabels::new(ours, CatalogTypes::load(&config.packet_catalog_dir)),
             open: open::OpenSessions::default(),
         }
     }

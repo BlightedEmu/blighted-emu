@@ -196,7 +196,7 @@ function showTypes() {
   const columns = [
     { key: 'type_index', label: 'idx', numeric: true },
     { key: 'name', label: 'Name' },
-    { key: 'azoth_status', label: 'Azoth' },
+    { key: 'catalog_status', label: 'Catalog' },
     { key: 'direction', label: 'Direction', format: directionText },
     { key: 'count', label: 'Count', numeric: true, format: (value) => value.toLocaleString() },
     { key: 'bytes', label: 'Bytes', numeric: true, format: formatBytes },

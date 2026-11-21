@@ -287,8 +287,8 @@ pub struct CapturesConfig {
     pub captures_dir: PathBuf,
     /// Saved Discord threads of the open-world sessions.
     pub discord_dir: PathBuf,
-    /// The local Azoth catalog archive.
-    pub azoth_dir: PathBuf,
+    /// The local packet catalog archive.
+    pub packet_catalog_dir: PathBuf,
     /// The client type table, relative to the install folder.
     pub type_index: PathBuf,
     /// Aeternum-World class names.

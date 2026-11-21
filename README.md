@@ -439,12 +439,12 @@ just map-tiles
 cargo run --release -p blighted-admin -- serve
 ```
 
-For the capture viewer, it lists every `ledger.bin` under `local-data/captures/` with the name of its `metadata.json`. For an open-world session, it also shows the title of the saved Discord post that holds its archive. Message type names come from the install's `typeindex.json` joined with the Aeternum-World names (set `NW_GAME_DIR`). Then they come from the local Azoth catalog archive (`local-data/azoth-catalog/types.json`, saved by its `archive.py` from their public API).
+For the capture viewer, it lists every `ledger.bin` under `local-data/captures/` with the name of its `metadata.json`. For an open-world session, it also shows the title of the saved Discord post that holds its archive. Message type names come from the install's `typeindex.json` joined with the Aeternum-World names (set `NW_GAME_DIR`). Then they come from the local packet catalog archive (`local-data/packet-catalog/types.json`, saved by its `archive.py` from their public API).
 
 The capture viewer page (`/web/captures.html`) opens a session and shows these items:
 
 - The totals of the session.
-- The message types, with names, Azoth catalog status, counts and rates. A click on a type draws its count per second.
+- The message types, with names, packet catalog status, counts and rates. A click on a type draws its count per second.
 - The entities with their paths on the map, and the player's own path.
 - A time slider, and the messages near the slider time.
 - The bytes of a message, with its bundle members marked.
