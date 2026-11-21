@@ -22,6 +22,7 @@ use clap::{Parser, Subcommand};
 use nw_content::bundle::ContentBundle;
 use nw_content::client_build::load_client_build;
 use nw_content::gathering::{GatherRules, Gatherables};
+use nw_content::poi_tags::PoiTags;
 use nw_content::layout::{ContentLayout, content_dir};
 use nw_content::town_stations::TownStations;
 use nw_dtls::DtlsClientConfig;
@@ -697,11 +698,20 @@ async fn play(
             at: point.position,
         })
         .collect();
+    let gatherables = Gatherables::from_tables(&tables);
+    let containers = world
+        .gatherables
+        .iter()
+        .map(|point| point.gatherable_id)
+        .filter(|crc| gatherables.get(*crc).is_some_and(|kind| kind.loot_container))
+        .collect();
     let report = run_play(
         http,
         settings,
         activities,
         nodes,
+        containers,
+        PoiTags::from_tables(&tables),
         |token| RepClient::new(trusted, config.mtu, token, 0).map(|client| ledger.give(client)),
         |line| println!("{line}"),
     )

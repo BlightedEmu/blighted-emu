@@ -1318,6 +1318,46 @@ fn faction_and_company(faction: &str, company: &str) -> Vec<Step> {
 }
 
 /// A town board mission of the content.
+/// The step that opens the town board, as the board activity's first step does.
+fn open_town_board() -> Step {
+    step(
+        "open the town board",
+        vec![Act::Interact {
+            request: InteractionRequest {
+                target: [0; RAW_ID_LEN],
+                target_entity: 0,
+                interaction: 0,
+                kind: TOWN_BOARD_KIND,
+                gatherable: None,
+            },
+            name: TOWN_BOARD_NAME.to_vec(),
+        }],
+        Proof::Accepted,
+        STEP_WAIT,
+    )
+}
+
+/// The steps of a town board mission's turn-in (its `ReturnToGiver` task): the town board
+/// opens, and the client turns in the mission of instance `instance` there (2461,
+/// `sim::world::missions`).
+pub fn mission_turn_in_steps(instance: u64) -> Vec<Step> {
+    vec![
+        open_town_board(),
+        step(
+            "turn in the mission",
+            vec![Act::Call(Box::new(move |own| {
+                let call = ObjectiveInteractorClientMsg::CompleteObjective {
+                    header: FacetHeader::of(0, own),
+                    instance,
+                };
+                Ok((call.type_index(), call.encode()))
+            }))],
+            Proof::Sent,
+            Duration::ZERO,
+        ),
+    ]
+}
+
 fn board(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
     let row = data
         .tables
@@ -1338,21 +1378,7 @@ fn board(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
     let project = lowercase_crc32(row.territory_project_id.as_deref().unwrap_or_default());
     let shown = mission.clone();
     Ok(vec![
-        step(
-            "open the town board",
-            vec![Act::Interact {
-                request: InteractionRequest {
-                    target: [0; RAW_ID_LEN],
-                    target_entity: 0,
-                    interaction: 0,
-                    kind: TOWN_BOARD_KIND,
-                    gatherable: None,
-                },
-                name: TOWN_BOARD_NAME.to_vec(),
-            }],
-            Proof::Accepted,
-            STEP_WAIT,
-        ),
+        open_town_board(),
         step(
             format!("take mission {mission}"),
             vec![Act::Call(Box::new(move |own| {

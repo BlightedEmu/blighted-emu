@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nw_carrier::MESSAGE_CHANNEL;
+use nw_content::poi_tags::PoiTags;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::client_input::TALK_KIND;
 use nw_messages::entity_ids::{facet_of_raw_id, raw_id_of_entity};
@@ -37,7 +38,7 @@ use reqwest::Client;
 use crate::activity::{
     Act, Activity, ActivityKind, OPEN_STORAGE_KIND, OPEN_STORAGE_NAME, Proof, STORAGE_TAG, Step,
     arena_verdict, camp_steps, gather_steps, leave_trial_steps, loot_steps, lore_steps,
-    quest_craft_steps, skin_steps, trial_steps, use_steps,
+    mission_turn_in_steps, quest_craft_steps, skin_steps, trial_steps, use_steps,
 };
 use crate::chat::{chat_lines, is_system};
 use crate::gather::GatherNode;
@@ -143,6 +144,10 @@ pub(crate) fn send_time_sync(client: &mut RepClient, own: u64) -> Result<(), Rep
 const ACT_GAP: Duration = Duration::from_millis(1500);
 /// How near its teleport's place the server's own state shows the bot once it landed, metres.
 const TELEPORT_SETTLED_M: f32 = 3.0;
+/// A teleport this far from where the bot came into an area leaves that area, metres
+/// (Inferred: the bot knows no area's shape; the steps of one place lie within some 200 m, as
+/// the go-to and kill plans of `withered_mines_30112` do).
+const AREA_LEFT_M: f32 = 300.0;
 /// The status of a taken interaction (3743).
 const ACCEPTED: u8 = 1;
 /// The name mark before an NPC id in a talk (`@12_JeongIseul`).
@@ -154,6 +159,10 @@ const STATE_RUNNING: &str = "running ";
 const STATE_FINISHED: &str = "finished ";
 const STATE_DONE: &str = "done ";
 const STATE_NOT_TAKEN: &str = "not taken ";
+/// The start of a step line of a running quest's `!queststate` answer, and the words before
+/// the `POITag` of the place where the step counts.
+const STATE_STEP: &str = "step ";
+const STATE_PLACE: &str = "place: Some(\"";
 const PLAN_LINE: &str = "plan ";
 const PLAN_NOT_RUNNING: &str = "not running ";
 const AT: &str = "at";
@@ -167,6 +176,20 @@ const PLACED: &str = "placed";
 const NODE: &str = "node";
 /// The word of an item plan whose step counts gathers only.
 const GATHERED: &str = "gathered";
+/// The source of an item plan whose item drops from the loot containers of the step's place
+/// (`sim::world::quest_walk`, a task's `ChestDropProbability`).
+const CONTAINER_DROP: &str = "a container drop";
+/// The name of a loot container node in the bot's report lines.
+const CONTAINER_NAME: &str = "loot container";
+/// The bot opens the loot containers this near it for a container drop, metres (Inferred: the
+/// go-to step put it in the place; `devilspit_30134` of Devil's Honey).
+const CONTAINER_SEARCH_M: f32 = 150.0;
+/// The game events of a mission's turn-in task in a plan the sim does not play
+/// (`sim::world::missions` `TURN_IN_TAGS`): the bot turns the mission in at its board.
+const MISSION_TURN_IN_EVENTS: [&str; 2] = [
+    "Interacted(\"ReturnToGiver\")",
+    "Interacted(\"ReturnToAnyGiver\")",
+];
 /// The words of a camp plan before its skin, its slice asset and each of its costs.
 const CAMP_SKIN: &str = "skin";
 const CAMP_ASSET: &str = "asset";
@@ -415,14 +438,18 @@ impl PlanStep {
     /// The order in which the bot picks among the waiting steps of a quest, lowest first: a step
     /// it can play now (a player does what is in front of it), then one that waits for
     /// achievements (that step ends by itself once they are set; when it alone is left, the bot
-    /// plays the quests that give them), then one it cannot play, then a wait. Retail
-    /// `12_getoffbeach` waits for either intro achievement or for the intro cutscene's end; the
-    /// achievements come only from the other beach's quest, so a new player ends the cutscene.
+    /// plays the quests that give them), then one it does not play yet, then one that cannot
+    /// end, then a wait. Retail `12_getoffbeach` waits for either intro achievement or for the
+    /// intro cutscene's end; the achievements come only from the other beach's quest, so a new
+    /// player ends the cutscene. A step that cannot end is often a branch that never should
+    /// (`06A_MSQ_18_ReturnSiriusJewel_impossible_task` beside its puzzle steps), so the step
+    /// the bot does not play is the stop it names.
     const fn pick_order(&self) -> u8 {
         match self {
             Self::Achievements { .. } => 1,
-            Self::Broken(_) | Self::NotPlayed(_) => 2,
-            Self::Wait => 3,
+            Self::NotPlayed(_) => 2,
+            Self::Broken(_) => 3,
+            Self::Wait => 4,
             _ => 0,
         }
     }
@@ -459,6 +486,28 @@ fn word_after<'a>(words: &[&'a str], word: &str) -> Option<&'a str> {
 /// The territory after the word [`TERRITORY`] in `words`.
 fn territory_of(words: &[&str]) -> Option<u16> {
     word_after(words, TERRITORY)?.parse().ok()
+}
+
+/// The `POITag` of the place in which task `task` counts, from the `!queststate` lines `state`
+/// (`step <task> <count> GatherItems { .. place: Some("drowned_shipwreck_3_30129") .. }`).
+/// `None` when the step names no place.
+fn step_place<'a>(state: &'a [String], task: &str) -> Option<&'a str> {
+    let step = state
+        .iter()
+        .find(|line| line.starts_with(&format!("{STATE_STEP}{task} ")))?;
+    let (_, after) = step.split_once(STATE_PLACE)?;
+    let (tag, _) = after.split_once('"')?;
+    Some(tag)
+}
+
+/// The area a client reports for a place of `POITag` `tag`: the first territory of
+/// `TerritoryDefinitions` that carries it (`drowned_shipwreck_3_30129` is territory 30129, and
+/// `shattered_obelisk` has no number in its tag).
+fn area_of_place(poi_tags: &PoiTags, tag: &str) -> Option<u16> {
+    poi_tags
+        .territories_with(tag)
+        .into_iter()
+        .find_map(|territory| u16::try_from(territory).ok())
 }
 
 /// A raw id written as lowercase hexadecimal (a plan line's item instance or station).
@@ -829,6 +878,11 @@ struct Player {
     played: std::collections::HashSet<String>,
     accepted: bool,
     turned_in: bool,
+    /// Whether the bot turned in the current mission at its board.
+    mission_turn_in_sent: bool,
+    /// The tasks of the current quest the sim planned (the CRC-32 of each lowercase id): they
+    /// tell the mission's instance at its turn-in ([`WorldView::instances_listing`]).
+    quest_tasks: Vec<u32>,
     rounds: u32,
     last_plan: Option<String>,
     same_plan: u32,
@@ -843,6 +897,10 @@ struct Player {
     running: Option<(ActivityKind, RunningSteps)>,
     /// Every gather node of the level, in world file order.
     nodes: Arc<[GatherNode]>,
+    /// The gatherables of the nodes that are loot containers (`IsLootContainer`).
+    containers: HashSet<u32>,
+    /// The `POITag`s of the territories, which name the area of a step's place.
+    poi_tags: PoiTags,
     /// The game master lines of the setup ([`setup_lines`]).
     setup_lines: Vec<String>,
     /// The nodes the bot gathered or tried to gather.
@@ -865,6 +923,11 @@ struct Player {
     answers: Vec<InteractionAnswer>,
     /// The place of the last teleport, or of the bot's last own move.
     teleported_to: Option<Position>,
+    /// The areas the bot told the server it came into (2297), each with where it was then; a
+    /// teleport far from that place leaves it (6416), as a client does when it travels.
+    entered_areas: Vec<(u16, Position)>,
+    /// The lines of the last `!queststate` answer of a running quest: its steps and their places.
+    state_lines: Vec<String>,
     /// The fight the bot fights now.
     fight: Option<Fight>,
     /// The fights for the current kill step.
@@ -1131,8 +1194,9 @@ impl Player {
             return self.next_quest(client, own, since);
         }
         if line.starts_with(STATE_DONE) {
-            // A quest taken in an earlier run that this run turned in ended in this run too.
-            self.end_quest(if self.accepted || self.turned_in {
+            // A quest taken in an earlier run that this run turned in ended in this run too, and
+            // so did a quest started by a game master line whose steps the bot played.
+            self.end_quest(if self.accepted || self.turned_in || !self.actions.is_empty() {
                 Verdict::Completed
             } else {
                 Verdict::NotPlayed("the character had done it before this run".to_owned())
@@ -1194,6 +1258,7 @@ impl Player {
             return Ok(());
         }
         if line.starts_with(STATE_RUNNING) {
+            self.state_lines = answer.to_vec();
             return self.ask(client, own, Ask::Plan, since);
         }
         self.end_quest(Verdict::Broken(format!(
@@ -1224,6 +1289,10 @@ impl Player {
             )));
             return self.next_quest(client, own, since);
         };
+        let task_crc = lowercase_crc32(&task.to_lowercase());
+        if !self.quest_tasks.contains(&task_crc) {
+            self.quest_tasks.push(task_crc);
+        }
         // A skin step without a corpse to skin kills one first, as a player does, and so does a
         // loot step without a bag of a kill to open.
         let step = match step {
@@ -1282,6 +1351,28 @@ impl Player {
                 self.end_quest(Verdict::Broken(format!("{task}: {reason}")));
                 return self.next_quest(client, own, since);
             }
+            PlanStep::NotPlayed(reason)
+                if !self.mission_turn_in_sent
+                    && MISSION_TURN_IN_EVENTS
+                        .iter()
+                        .any(|event| reason.contains(event)) =>
+            {
+                let instances = self.world.instances_listing(&self.quest_tasks);
+                let [instance] = instances[..] else {
+                    self.end_quest(Verdict::NotPlayed(format!(
+                        "{task}: {reason}; {} objectives of the own task list list the tasks the bot played, not one",
+                        instances.len()
+                    )));
+                    return self.next_quest(client, own, since);
+                };
+                // A mission ends at its giver: the bot turns it in at the town board.
+                self.mission_turn_in_sent = true;
+                self.gather = Some((
+                    format!("{task}: turned in the mission at the town board"),
+                    RunningSteps::of(mission_turn_in_steps(instance)),
+                ));
+                self.phase = Phase::Gather;
+            }
             PlanStep::NotPlayed(reason) => {
                 self.end_quest(Verdict::NotPlayed(format!("{task}: {reason}")));
                 return self.next_quest(client, own, since);
@@ -1323,7 +1414,7 @@ impl Player {
             PlanStep::Go { at, territory } => {
                 self.teleport(client, own, at)?;
                 if let Some(territory) = territory {
-                    Self::call(client, &entered(header, territory))?;
+                    self.enter(client, header, territory, at)?;
                 }
                 self.actions
                     .push(format!("{task}: went to {:.0} {:.0}", at.x, at.y));
@@ -1332,6 +1423,7 @@ impl Player {
             PlanStep::Leave(territories) => {
                 for territory in territories {
                     Self::call(client, &exited(header, territory))?;
+                    self.entered_areas.retain(|(known, _)| *known != territory);
                 }
                 self.actions.push(format!("{task}: left its place"));
                 self.pause(since, ACTION_PAUSE, Ask::State);
@@ -1345,7 +1437,7 @@ impl Player {
             } => {
                 self.teleport(client, own, at)?;
                 if let Some(territory) = territory {
-                    Self::call(client, &entered(header, territory))?;
+                    self.enter(client, header, territory, at)?;
                 }
                 if placed {
                     self.actions.push(format!(
@@ -1383,6 +1475,14 @@ impl Player {
                     return self.next_quest(client, own, since);
                 };
                 self.tried_nodes.insert(index);
+                // A drop that counts in one place only (a `POITag`) needs the bot in that area,
+                // as a client that walked in has told the server.
+                if let Some(territory) = self.step_area(&task) {
+                    let [x, y, z] = self.nodes[index].at;
+                    let at = Position { x, y, z };
+                    self.teleport(client, own, at)?;
+                    self.enter(client, header, territory, at)?;
+                }
                 let steps = gather_steps(&node, self.nodes[index], index);
                 self.gather = Some((
                     format!("{task}: gathered {node} node {index}"),
@@ -1397,6 +1497,27 @@ impl Player {
                 node: None,
                 ..
             } => {
+                let container = (source == CONTAINER_DROP)
+                    .then(|| self.untried_container())
+                    .flatten();
+                if let Some(index) = container {
+                    // The item drops from the loot containers of the step's place: the bot
+                    // opens the nearest one, in that area, as a player who walked in does.
+                    self.tried_nodes.insert(index);
+                    let node = self.nodes[index];
+                    let [x, y, z] = node.at;
+                    let at = Position { x, y, z };
+                    self.teleport(client, own, at)?;
+                    if let Some(territory) = self.step_area(&task) {
+                        self.enter(client, header, territory, at)?;
+                    }
+                    self.gather = Some((
+                        format!("{task}: opened loot container node {index}"),
+                        RunningSteps::of(gather_steps(CONTAINER_NAME, node, index)),
+                    ));
+                    self.phase = Phase::Gather;
+                    return Ok(());
+                }
                 // A game master's give is no gather: the step would never count it.
                 self.end_quest(Verdict::NotPlayed(format!(
                     "{task}: the step counts gathers of {item} ({source}), and the bot has no gather for it"
@@ -1649,6 +1770,28 @@ impl Player {
             .filter(|(corpse, _)| !self.skinned.contains(corpse))
     }
 
+    /// The nearest loot container node within [`CONTAINER_SEARCH_M`] of the bot that it has not
+    /// tried yet: the bot stands in the step's place after its go-to step.
+    fn untried_container(&self) -> Option<usize> {
+        let own = self.own_place()?;
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(index, node)| {
+                self.containers.contains(&node.gatherable) && !self.tried_nodes.contains(index)
+            })
+            .map(|(index, node)| (index, planar([own.x, own.y, own.z], [node.at[0], node.at[1]])))
+            .filter(|(_, distance)| *distance <= CONTAINER_SEARCH_M)
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(index, _)| index)
+    }
+
+    /// The area of the place in which task `task` of the running quest counts
+    /// ([`step_place`], [`area_of_place`]).
+    fn step_area(&self, task: &str) -> Option<u16> {
+        area_of_place(&self.poi_tags, step_place(&self.state_lines, task)?)
+    }
+
     /// The nearest node of gatherable `gatherable` to the bot that it has not tried yet.
     fn untried_node(&self, gatherable: u32) -> Option<usize> {
         let own = self.own_place()?;
@@ -1848,14 +1991,39 @@ impl Player {
         }
     }
 
-    /// Moves the bot to `at` with a game master line.
+    /// Moves the bot to `at` with a game master line. It first leaves each area it came into
+    /// farther than [`AREA_LEFT_M`] from `at`: a client tells the server the areas it leaves.
     fn teleport(&mut self, client: &mut RepClient, own: u64, at: Position) -> Result<(), RepError> {
+        let header = FacetHeader::of(CALL_COMPONENT, own);
+        let (left, kept) = self
+            .entered_areas
+            .drain(..)
+            .partition(|(_, entered_at)| entered_at.horizontal_distance(at) > AREA_LEFT_M);
+        self.entered_areas = kept;
+        for (territory, _) in left {
+            Self::call(client, &exited(header, territory))?;
+        }
         self.teleported_to = Some(at);
         self.say(
             client,
             own,
             &format!("!tp {:.1} {:.1} {:.1}", at.x, at.y, at.z),
         )
+    }
+
+    /// Tells the server the bot came into area `territory` (2297) at `at`, the place of its
+    /// last teleport.
+    fn enter(
+        &mut self,
+        client: &mut RepClient,
+        header: FacetHeader,
+        territory: u16,
+        at: Position,
+    ) -> Result<(), RepError> {
+        Self::call(client, &entered(header, territory))?;
+        self.entered_areas.retain(|(known, _)| *known != territory);
+        self.entered_areas.push((territory, at));
+        Ok(())
     }
 
     /// Where the bot stands: the place of its last teleport until the server's own state shows
@@ -2060,6 +2228,8 @@ impl Player {
         }
         self.accepted = false;
         self.turned_in = false;
+        self.mission_turn_in_sent = false;
+        self.quest_tasks.clear();
         self.fought = None;
         self.rounds = 0;
         self.last_plan = None;
@@ -2091,8 +2261,10 @@ fn exited(header: FacetHeader, territory: u16) -> ClientFacetMsg {
     }
 }
 
-/// Runs the play. `new_client` makes a client for a token; `report` gets one line per HTTPS
-/// step.
+/// Runs the play. `nodes` are the level's gather nodes, `containers` the gatherables (the
+/// CRC-32 of each lowercase id) of those that are loot containers and `poi_tags` the
+/// territories' `POITag`s; `new_client` makes a client for a token; `report` gets one line per
+/// HTTPS step.
 ///
 /// # Errors
 ///
@@ -2102,6 +2274,8 @@ pub async fn run_play(
     settings: &PlaySettings,
     activities: Vec<Activity>,
     nodes: Arc<[GatherNode]>,
+    containers: HashSet<u32>,
+    poi_tags: PoiTags,
     new_client: impl Fn(LoginToken) -> Result<RepClient, RepError>,
     mut report: impl FnMut(String),
 ) -> Result<PlayReport, PairError> {
@@ -2126,6 +2300,8 @@ pub async fn run_play(
             .collect(),
         accepted: false,
         turned_in: false,
+        mission_turn_in_sent: false,
+        quest_tasks: Vec::new(),
         rounds: 0,
         last_plan: None,
         same_plan: 0,
@@ -2138,6 +2314,8 @@ pub async fn run_play(
         activities: activities.into(),
         running: None,
         nodes,
+        containers,
+        poi_tags,
         tried_nodes: HashSet::new(),
         skinned: HashSet::new(),
         loot_from: 0,
@@ -2147,6 +2325,8 @@ pub async fn run_play(
         activity_plays: Vec::new(),
         answers: Vec::new(),
         teleported_to: None,
+        entered_areas: Vec::new(),
+        state_lines: Vec::new(),
         fight: None,
         fought: None,
     };
@@ -2200,6 +2380,38 @@ mod tests {
             ["!quest 12A_MSQ_09_ReturnRegent"]
         );
         assert_eq!(setup_lines(&[]).len(), SETUP_LINES.len());
+    }
+
+    #[test]
+    fn a_step_that_counts_in_one_place_names_the_area_of_its_poi_tag() {
+        // Live 2026-11-21 `!queststate 12_pillageship_soldier`: the treasure counts only in
+        // `drowned_shipwreck_3_30129`; `04A_Side03_02_AncientScrolls` only in `shattered_obelisk`.
+        const TREASURE: &str = "12_pillageship_04_01_GatherReturn_Treasure_A_shipwreck_3";
+        const SHIPWRECK: &str = "drowned_shipwreck_3_30129";
+        const SHIPWRECK_AREA: u32 = 30129;
+        const OBELISK: &str = "shattered_obelisk";
+        // A made-up area: the test names the tag's first territory.
+        const OBELISK_AREA: u32 = 40001;
+        let state = [
+            "running 12_pillageship_soldier".to_owned(),
+            format!(
+                "step {TREASURE} 0 GatherItems {{ item: \"0601_0104_Treasure_A\", count: 1, drop: \
+                 Some(QuestDrop {{ sources: [\"MSQ_Treasure_A\"], percent: 100, place: \
+                 Some(\"{SHIPWRECK}\") }}), chest: None, returned: true }}"
+            ),
+            "step anywhere 0 GatherItems { item: \"x\", count: 1, drop: None, chest: None }"
+                .to_owned(),
+        ];
+        assert_eq!(step_place(&state, TREASURE), Some(SHIPWRECK));
+        assert_eq!(step_place(&state, "anywhere"), None, "no place");
+        assert_eq!(step_place(&state, "12_pillageship"), None, "another task");
+        let tags = PoiTags::build([
+            (SHIPWRECK_AREA, SHIPWRECK.to_owned()),
+            (OBELISK_AREA, format!("{OBELISK}, ruins")),
+        ]);
+        assert_eq!(area_of_place(&tags, SHIPWRECK), Some(30129));
+        assert_eq!(area_of_place(&tags, OBELISK), Some(40001));
+        assert_eq!(area_of_place(&tags, "nowhere"), None);
     }
 
     #[test]
@@ -2540,6 +2752,23 @@ mod tests {
             picked_step(&waits[..1]).map(|(task, _)| task.as_str()),
             Some("wait")
         );
+    }
+
+    #[test]
+    fn a_step_the_bot_does_not_play_is_the_stop_before_a_branch_that_cannot_end() {
+        // The live `!questplan` answer of `06A_MSQ_18_ReturnSiriusJewel` (2026-11-21): its
+        // impossible task stands beside the puzzle steps that end the quest.
+        let plan = [
+            "plan 06A_MSQ_18_ReturnSiriusJewel_impossible_task stop Broken: no place: its trigger volume, its location and its POI are all unknown",
+            "plan 06A_MSQ_18_ReturnSiriusJewel_interact_puzzle2_stone1 event 1 Cyclic { cyclic: \"Cyclic_06A_MSQ_puzzle2_stone1\", state: 1 }",
+        ];
+        let steps: Vec<(String, PlanStep)> = plan
+            .iter()
+            .filter_map(|line| plan_step(line, header()))
+            .collect();
+        let (task, step) = picked_step(&steps).expect("a step");
+        assert_eq!(task, "06A_MSQ_18_ReturnSiriusJewel_interact_puzzle2_stone1");
+        assert!(matches!(step, PlanStep::NotPlayed(_)));
     }
 
     #[test]

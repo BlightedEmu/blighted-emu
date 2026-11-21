@@ -505,6 +505,10 @@ pub struct WorldView {
     own: OwnView,
     slots: EntitySlots,
     tracks: BTreeMap<u64, Vec<WorldPosition>>,
+    /// The listed tasks of the own player's objectives, from the last full task list of its
+    /// objectives component: each one's objective instance and task (the CRC-32 of its lowercase
+    /// id). A mission's turn-in names the instance whose tasks the bot played.
+    listed_tasks: Vec<(u64, u32)>,
 }
 
 /// Two views are equal when they saw the same; their id holders differ.
@@ -554,6 +558,9 @@ impl WorldView {
                     if let (Some(entity), Some(position)) = (entity, update.position) {
                         self.tracks.entry(entity).or_default().push(position);
                     }
+                    if entity.is_some() && entity == own {
+                        self.read_own_tasks(update);
+                    }
                 }
             }
             Read::Entry { type_index, .. }
@@ -577,6 +584,35 @@ impl WorldView {
     /// The client's own entity number.
     pub const fn own_number(&self) -> Option<u64> {
         self.own.own_number()
+    }
+
+    /// Keeps the listed tasks of the own player's objectives component in `update`.
+    fn read_own_tasks(&mut self, update: &SlotUpdate) {
+        let tasks = update.members.iter().find_map(|member| match &member.state {
+            MemberState::Objectives(state) => state.tasks.as_ref(),
+            _ => None,
+        });
+        if let Some(tasks) = tasks {
+            self.listed_tasks = tasks
+                .elements
+                .iter()
+                .map(|entry| (entry.instance, entry.task))
+                .collect();
+        }
+    }
+
+    /// The instances of the own player's objectives that list one of the tasks `tasks` (the
+    /// CRC-32 of each lowercase id), in list order, each once. A mission's record names only its
+    /// template objective (live 2026-11-21: six missions of one template, `m_missionId` 0), and
+    /// a task is listed once it has progress, so the tasks a bot played tell its mission.
+    pub fn instances_listing(&self, tasks: &[u32]) -> Vec<u64> {
+        let mut instances = Vec::new();
+        for (instance, task) in &self.listed_tasks {
+            if tasks.contains(task) && !instances.contains(instance) {
+                instances.push(*instance);
+            }
+        }
+        instances
     }
 
     /// The own number when the first time sync request is due ([`OwnView::time_sync_due`]).
@@ -616,8 +652,9 @@ mod tests {
     };
     use nw_messages::{
         AssetId, BodyCodec, BundleGroup, BundleMember, ClientAddEntryMsg, DYNAMIC_SLICE_SUB_ID,
-        DamageDealtMsg, DeathRecapMsg, GDE_ID_LEN, LOCAL_PLAYER_INTEREST, LOGIN_CLIENT_CONTEXT,
-        ReplicatedStateBundle, VitalsState,
+        DamageDealtMsg, DeathRecapMsg, FullList, GDE_ID_LEN, LOCAL_PLAYER_INTEREST,
+        LOGIN_CLIENT_CONTEXT, ObjectivesState, ReplicatedStateBundle, TaskEntry, TaskWireState,
+        VitalsState,
     };
     use nw_reflect::{Envelope, TypeId};
 
@@ -1029,6 +1066,51 @@ mod tests {
             (view.hits_dealt(), view.hits_taken(), view.deaths()),
             (1, 1, 1)
         );
+    }
+
+    #[test]
+    fn the_own_tasks_name_the_instances_that_list_them() {
+        // Live 2026-11-21: missions of one template share their task ids, and a task is listed
+        // once it has progress (a turn-in task with none is not).
+        const KILL: u32 = 3_110_136_768;
+        const GATHER: u32 = 4_096_978_439;
+        const KILL_MISSION: u64 = 10;
+        const GATHER_MISSION: u64 = 20;
+        const UNKNOWN: u32 = 1;
+        let entry = |instance, task| TaskEntry {
+            instance,
+            index: 0,
+            task,
+            progress: 1,
+            state: TaskWireState::Complete,
+        };
+        let tasks = vec![
+            entry(KILL_MISSION, KILL),
+            entry(GATHER_MISSION, GATHER),
+            entry(KILL_MISSION, GATHER),
+        ];
+        let update = SlotUpdate {
+            interest: LOCAL_PLAYER_INTEREST,
+            entity: Some(OWN),
+            card: None,
+            position: None,
+            members: vec![BundleMember {
+                component: 0,
+                state: MemberState::Objectives(ObjectivesState {
+                    tasks: Some(FullList::first(tasks)),
+                    ..ObjectivesState::default()
+                }),
+            }],
+        };
+        let mut view = WorldView::default();
+        view.read_own_tasks(&update);
+        assert_eq!(view.instances_listing(&[KILL]), [KILL_MISSION]);
+        assert_eq!(
+            view.instances_listing(&[GATHER, KILL]),
+            [KILL_MISSION, GATHER_MISSION],
+            "in list order, each once"
+        );
+        assert!(view.instances_listing(&[UNKNOWN]).is_empty());
     }
 
     #[test]
