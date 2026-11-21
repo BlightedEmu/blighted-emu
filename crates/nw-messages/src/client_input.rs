@@ -1092,6 +1092,62 @@ pub struct SlayerInput {
     pub second_sequence: u64,
 }
 
+/// How one frame record of a walking client moves the player ([`InputRecord::frame`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FrameMove {
+    /// The movement keys it holds.
+    Keys(MoveKeys),
+    /// The game pad's left stick: its right and its forward axis, each from -1 to 1.
+    Stick([f32; 2]),
+}
+
+impl InputRecord {
+    /// One frame of a client that walks, as the game client sends it: the counter `counter`
+    /// (one per frame), the frame time `frame_s` (bit 5), the view's yaw and pitch `view` (bit 6),
+    /// the camera point `camera` (bit 7) and the movement `moves` in its action slots.
+    pub fn frame(
+        counter: u16,
+        frame_s: f32,
+        view: [f32; 2],
+        camera: InputPosition,
+        moves: FrameMove,
+    ) -> Self {
+        let mut slots = no_action();
+        match moves {
+            FrameMove::Keys(keys) => {
+                // The forward key holds the forward navigation input with it in every retail
+                // record ([`FORWARD_NAV_KEY`]).
+                let held = [
+                    (keys.forward, FORWARD_KEY),
+                    (keys.forward, FORWARD_NAV_KEY),
+                    (keys.back, BACK_KEY),
+                    (keys.left, LEFT_KEY),
+                    (keys.right, RIGHT_KEY),
+                    (keys.jump, JUMP_KEY),
+                ];
+                for (_, (value, bit)) in held.into_iter().filter(|(on, _)| *on) {
+                    slots.values[value] |= 1 << bit;
+                }
+            }
+            FrameMove::Stick(axes) => {
+                for (index, axis) in LEFT_STICK_BYTES.into_iter().zip(axes) {
+                    // The client's own scaling ([`STICK_SCALE`]); the cast saturates at 0 and 255.
+                    slots.bytes[index] = ((axis + 1.0) * STICK_SCALE) as u8;
+                }
+            }
+        }
+        Self {
+            mask: 1 << BIT_5 | 1 << BIT_6 | 1 << BIT_7,
+            u16_after_mask: counter,
+            bit_5: Some(frame_s),
+            bit_6: Some(view),
+            bit_7: Some(camera),
+            slots,
+            ..Self::default()
+        }
+    }
+}
+
 /// The low 16 bits of row 1 value 1: one slot's state.
 const STATE_MASK: u64 = 0xffff;
 /// Where the second slot's state starts in row 1 value 1.
@@ -2400,6 +2456,55 @@ mod tests {
         assert!(press.summon_mount_pressed() && press.u16_after_mask == COUNTER);
         assert!(!later.summon_mount_pressed() && later.u16_after_mask == COUNTER + 1);
         assert!(!press.attack_pressed(), "no other key");
+    }
+
+    #[test]
+    fn a_frame_record_carries_its_counter_frame_view_camera_and_moves() {
+        const COUNTER: u16 = 41;
+        const FRAME_S: f32 = 0.033;
+        const VIEW: [f32; 2] = [0.8, 0.3];
+        const STICK: [f32; 2] = [-0.5, 1.0];
+        /// The stick's read back value within one scaled byte step.
+        const STICK_STEP: f32 = 1.0 / STICK_SCALE;
+        let keys = MoveKeys {
+            forward: true,
+            right: true,
+            ..MoveKeys::default()
+        };
+        let records = vec![
+            InputRecord::frame(
+                COUNTER + 1,
+                FRAME_S,
+                VIEW,
+                position(),
+                FrameMove::Stick(STICK),
+            ),
+            InputRecord::frame(COUNTER, FRAME_S, VIEW, position(), FrameMove::Keys(keys)),
+        ];
+        let input = ClientInputMsg {
+            records,
+            ..ClientInputMsg::default()
+        };
+        let decoded = ClientInputMsg::decode(&input.encode().expect("encode")).expect("decode");
+        let [pad, keyboard] = decoded.records.as_slice() else {
+            panic!("two records: {:?}", decoded.records);
+        };
+        assert_eq!(keyboard.u16_after_mask, COUNTER);
+        assert_eq!(keyboard.bit_5, Some(FRAME_S));
+        assert_eq!(keyboard.bit_6, Some(VIEW));
+        assert_eq!(keyboard.bit_7, Some(position()));
+        assert_eq!(keyboard.move_keys(), keys);
+        assert_eq!(keyboard.left_stick(), None);
+        assert_eq!(pad.u16_after_mask, COUNTER + 1);
+        assert_eq!(pad.move_keys(), MoveKeys::default());
+        let stick = pad.left_stick().expect("stick");
+        assert!(
+            stick
+                .iter()
+                .zip(STICK)
+                .all(|(read, sent)| (read - sent).abs() <= STICK_STEP),
+            "{stick:?}"
+        );
     }
 
     #[test]
