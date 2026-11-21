@@ -469,6 +469,14 @@ impl InstanceTable {
     }
 }
 
+/// The first wait before a level whose instance sim exited before it beat starts another (our
+/// choice: two launch rounds of the director's loop).
+const FIRST_START_RETRY: Duration = Duration::from_secs(2);
+/// The longest such wait (our choice). Each failed start doubles the wait up to it. Live
+/// 2026-11-21: an expedition level with no collision file started a sim every second for ten
+/// minutes, each of which stopped at once.
+const MAX_START_RETRY: Duration = Duration::from_secs(300);
+
 /// The instance sims to start and to stop for each level.
 #[derive(Debug, Default)]
 pub struct Launches {
@@ -476,6 +484,9 @@ pub struct Launches {
     started: BTreeMap<BusId, String>,
     /// The levels players asked for, with the time of the last ask.
     wanted: BTreeMap<String, Instant>,
+    /// The levels whose last started sim exited before it beat: when the next may start, and
+    /// the wait that started.
+    held_back: BTreeMap<String, (Instant, Duration)>,
     next: u64,
 }
 
@@ -510,10 +521,25 @@ impl Launches {
         settings: &LaunchSettings,
         free: impl Fn(&str) -> u32,
         live: impl Fn(&BusId) -> bool,
+        now: Instant,
     ) -> Vec<Launch> {
         let mut launches = Vec::new();
         let levels: Vec<String> = self.wanted.keys().cloned().collect();
         for level in levels {
+            if self
+                .started
+                .iter()
+                .any(|(id, started)| *started == level && live(id))
+            {
+                self.held_back.remove(&level);
+            }
+            if self
+                .held_back
+                .get(&level)
+                .is_some_and(|(retry_at, _)| now < *retry_at)
+            {
+                continue;
+            }
             let starting = self
                 .started
                 .iter()
@@ -573,9 +599,25 @@ impl Launches {
         stop
     }
 
-    /// A started sim exited.
-    pub fn exited(&mut self, id: &BusId) {
-        self.started.remove(id);
+    /// A started sim exited at `now`; `beat`: whether it beat before. A level whose sim exits
+    /// before it beat (a level the sim cannot load) starts its next one only after a wait that
+    /// doubles from [`FIRST_START_RETRY`] to [`MAX_START_RETRY`]; a sim of the level that beats
+    /// ends the wait ([`Self::to_start`]).
+    pub fn exited(&mut self, id: &BusId, beat: bool, now: Instant) {
+        let Some(level) = self.started.remove(id) else {
+            return;
+        };
+        if beat {
+            self.held_back.remove(&level);
+            return;
+        }
+        let wait = self
+            .held_back
+            .get(&level)
+            .map_or(FIRST_START_RETRY, |(_, wait)| {
+                wait.saturating_mul(2).min(MAX_START_RETRY)
+            });
+        self.held_back.insert(level, (now + wait, wait));
     }
 
     /// The sims this director started that did not exit.
@@ -1074,12 +1116,12 @@ mod tests {
         let start = Instant::now();
         assert!(
             launches
-                .to_start(&launch_settings(), |_| 0, |_| false)
+                .to_start(&launch_settings(), |_| 0, |_| false, start)
                 .is_empty()
         );
         launches.wanted(LEVEL, start);
         assert!(!launches.starting(LEVEL, |_| false), "nothing started yet");
-        let started = launches.to_start(&launch_settings(), |_| 0, |_| false);
+        let started = launches.to_start(&launch_settings(), |_| 0, |_| false, start);
         assert_eq!(started.len(), 2);
         assert!(started.iter().all(|launch| launch.level == LEVEL));
         assert!(
@@ -1091,13 +1133,13 @@ mod tests {
         // Not beating yet: they count as ready, so nothing more starts.
         assert!(
             launches
-                .to_start(&launch_settings(), |_| 0, |_| false)
+                .to_start(&launch_settings(), |_| 0, |_| false, start)
                 .is_empty()
         );
         launches.wanted("nw_dungeon_everfall_00", start);
         assert_eq!(
             launches
-                .to_start(&launch_settings(), |_| 0, |_| false)
+                .to_start(&launch_settings(), |_| 0, |_| false, start)
                 .len(),
             1,
             "the total limit"
@@ -1119,6 +1161,61 @@ mod tests {
         assert!(launches.to_stop(&launch_settings(), free, start).is_empty());
         let stop = launches.to_stop(&launch_settings(), free, start + FORGET_AFTER);
         assert_eq!(stop.len(), 2);
-        launches.exited(&stop[0]);
+    }
+
+    #[test]
+    fn a_level_whose_sim_exits_before_it_beats_waits_longer_each_time_until_one_beats() {
+        let settings = LaunchSettings {
+            spare_per_level: 1,
+            ..launch_settings()
+        };
+        let mut launches = Launches::default();
+        let start = Instant::now();
+        launches.wanted(LEVEL, start);
+        let mut now = start;
+        let mut waits = Vec::new();
+        for _ in 0..10 {
+            let started = launches.to_start(&settings, |_| 0, |_| false, now);
+            assert_eq!(started.len(), 1, "one start after each wait");
+            launches.exited(&started[0].id, false, now);
+            let (retry_at, wait) = launches.held_back[LEVEL];
+            assert!(
+                launches
+                    .to_start(
+                        &settings,
+                        |_| 0,
+                        |_| false,
+                        retry_at - Duration::from_millis(1)
+                    )
+                    .is_empty(),
+                "no start before the wait ends"
+            );
+            waits.push(wait);
+            now = retry_at;
+        }
+        assert_eq!(waits[0], FIRST_START_RETRY);
+        assert_eq!(waits[1], FIRST_START_RETRY * 2);
+        assert_eq!(
+            waits.last(),
+            Some(&MAX_START_RETRY),
+            "the wait stops growing"
+        );
+        // A sim of the level that beats ends the wait; one that exits after it beat starts no
+        // new wait.
+        let started = launches.to_start(&settings, |_| 0, |_| false, now);
+        let beating = started[0].id.clone();
+        assert!(
+            launches
+                .to_start(&settings, |_| 1, |id| *id == beating, now)
+                .is_empty(),
+            "the beating sim is the level's free sim"
+        );
+        assert!(!launches.held_back.contains_key(LEVEL));
+        launches.exited(&beating, true, now);
+        assert_eq!(
+            launches.to_start(&settings, |_| 0, |_| false, now).len(),
+            1,
+            "a crash after the start is started again at once"
+        );
     }
 }

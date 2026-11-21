@@ -773,13 +773,15 @@ impl InstanceLoop {
             .filter(|id| !self.children.contains_key(*id))
             .cloned()
             .collect();
+        let now = Instant::now();
         for id in &exited {
-            self.launches.exited(id);
+            // A sim that exits before its first beat is not in the registry.
+            self.launches.exited(id, sims.level_of(id).is_some(), now);
         }
         let free =
             |level: &str| u32::try_from(sims.free_instance_sims(level).len()).unwrap_or(u32::MAX);
         let live = |id: &BusId| sims.level_of(id).is_some();
-        for Launch { id, level } in self.launches.to_start(settings, free, live) {
+        for Launch { id, level } in self.launches.to_start(settings, free, live, now) {
             match start_sim(settings, &id, &level) {
                 Ok(child) => {
                     tracing::info!(sim = %id, %level, "instance sim started");
@@ -787,15 +789,14 @@ impl InstanceLoop {
                 }
                 Err(error) => {
                     tracing::warn!(sim = %id, %level, %error, "instance sim not started");
-                    self.launches.exited(&id);
+                    self.launches.exited(&id, false, now);
                 }
             }
         }
-        for id in self.launches.to_stop(
-            settings,
-            |level| sims.free_instance_sims(level),
-            Instant::now(),
-        ) {
+        for id in self
+            .launches
+            .to_stop(settings, |level| sims.free_instance_sims(level), now)
+        {
             if let Some(mut child) = self.children.remove(&id) {
                 tracing::info!(sim = %id, "free instance sim stopped");
                 if let Err(error) = child.start_kill() {
