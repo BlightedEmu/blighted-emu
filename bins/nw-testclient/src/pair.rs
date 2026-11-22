@@ -293,7 +293,7 @@ fn offset(origin: WorldPosition, position: WorldPosition) -> [f32; 2] {
 }
 
 /// Distance between two positions in the ground plane, in metres.
-fn horizontal_distance(a: WorldPosition, b: WorldPosition) -> f32 {
+pub fn horizontal_distance(a: WorldPosition, b: WorldPosition) -> f32 {
     (a.x - b.x).hypot(a.y - b.y)
 }
 

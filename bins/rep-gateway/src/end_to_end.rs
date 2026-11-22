@@ -32,7 +32,8 @@ use nw_reflect::{REGISTRATION_STATUS_AUTHORIZED, REGISTRATION_STATUS_REFUSED};
 use nw_sim_core::test_support::NoGround;
 use nw_sim_core::{CellGrid, Position};
 use nw_testclient::pair::{
-    INPUT_CHANNEL, PairSettings, SEND_INTERVAL, distance, run_pair, session, session_with,
+    INPUT_CHANNEL, PairSettings, SEND_INTERVAL, horizontal_distance, run_pair, session,
+    session_with,
 };
 use nw_testclient::route::Route;
 use nw_testclient::udp::{Hold, run_rep};
@@ -89,8 +90,9 @@ const RESUMES_IN_FLIGHT: usize = 64;
 /// Time in the world per session: the walk (about 5.6 s), the settle time and the far move
 /// (0.5 s each), and many bundles at 30 Hz after them.
 const PAIR_HOLD: Duration = Duration::from_secs(8);
-/// Time in the world of the last check.
-const SHORT_HOLD: Duration = Duration::from_secs(1);
+/// Time in the world of the last check: the sim sends the own spawn card 1 s after a login (its
+/// `OWN_CARD_DELAY_MS`), and the own position comes with that card.
+const SHORT_HOLD: Duration = Duration::from_secs(2);
 /// The walk: 14 m east, past the border and the margin, and back, at a run below the limit.
 const ROUTE_M: [[f32; 2]; 3] = [[0.0, 0.0], [14.0, 0.0], [0.0, 0.0]];
 const WALK_SPEED_MPS: f32 = 5.0;
@@ -462,7 +464,7 @@ async fn two_clients_see_each_other_across_the_border_and_a_saved_position_retur
         let expected =
             WorldPosition::from_metres(START.x + SAVED_OFFSET_M, START.y, START.z).expect("finite");
         let own = back.view.own_position().expect("own position");
-        assert!(distance(own, expected) <= TOLERANCE_M);
+        assert!(horizontal_distance(own, expected) <= TOLERANCE_M);
     })
     .await;
 }
