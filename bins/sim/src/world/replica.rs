@@ -32,12 +32,12 @@ use nw_messages::mount::riding_active_map;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     AlcPosture, AlcStamp, AlcState, BundleGroup, BundleMember, CardPlace, DamageReceiverState,
-    Hands, HealthChange, InputPosition, ItemLook, KnownStamp, LookDir, MemberState, MessageError,
-    PaperdollPublic, PaperdollState, PlayerGear, PlayerIdentity, PlayerLook, PlayerStates,
-    ProgressionState, RemoteMoveFlags, RemoteSequenceClock, RemoteStep, RemoteUpper,
-    RemoteUpperClocks, SOCIAL_COMPONENT, SPAWN_MOVEMENT, SecondSlayerState, ShownItem, ShownSocial,
-    SlayerState, SlotChange, StepPlace, UPPER_SLOTS, UpperSlots, VitalsData,
-    put_looking_through_loadout, put_member,
+    EffectMap, Hands, HealthChange, InputPosition, ItemLook, KnownStamp, LookDir, MemberState,
+    MessageError, PaperdollPublic, PaperdollState, PlayerGear, PlayerIdentity, PlayerLook,
+    PlayerStates, ProgressionState, RemoteEffect, RemoteMoveFlags, RemoteSequenceClock, RemoteStep,
+    RemoteUpper, RemoteUpperClocks, SOCIAL_COMPONENT, SPAWN_MOVEMENT, STATUS_EFFECTS_COMPONENT,
+    SecondSlayerState, ShownItem, ShownSocial, SlayerState, SlotChange, StatusEffectsState,
+    StepPlace, UPPER_SLOTS, UpperSlots, VitalsData, put_looking_through_loadout, put_member,
 };
 use nw_sim_core::Position;
 
@@ -63,13 +63,14 @@ const FAR_PERIOD_TICKS: u64 = 4;
 /// states, retail's p99 datagram of 1,028 bytes).
 pub(super) const REMOTE_GROUPS_PER_TICK: usize = 24;
 /// The states of another player that carry its slayer state once it started (Observed: retail
-/// sent other players' slayer state in runs of 1 to 8 states, 1 to 3 in 14 of the 22 runs, and
-/// left it out of the 1,683 other states of general-other-01 and newchar-retail). A change of
-/// its posture (child 43) goes in as many (our choice: retail sent it with the posture's
-/// sequence, in the same states), and a change of its movement flags (child 41) too (Observed,
-/// 1,195 ledgers: retail sent a change of another player's child 41 in its state and 1 to 3
-/// more in 658,929 runs, alone in 52,382; 2 more is the median).
-pub(super) const REMOTE_ACTION_ECHO_STATES: u8 = 3;
+/// sent other players' slayer state in runs of 3 to 5 states, median 4 in `timing-retail.txt`).
+/// A change of its posture (child 43), movement flags (child 41), stamina (child 44), accuracy
+/// (child 37), or remote status effects goes in as many.
+pub(super) const REMOTE_ACTION_ECHO_STATES: u8 = 4;
+/// The states after a new `pos10` anchor that repeat the anchor alongside its offset
+/// (`StepPlace::AnchorAgain`) so a single dropped unreliable datagram does not snap the remote
+/// player back ~4 m to the old anchor.
+pub(super) const REMOTE_ANCHOR_ECHO_STATES: u8 = 3;
 
 /// What a player is now, for the players who see it: from its own sim, or from a ghost.
 #[derive(Debug, Clone, PartialEq)]
@@ -129,6 +130,8 @@ pub(super) struct ReplicaSource {
     pub(super) social: ShownSocial,
     /// Its faction and PvP flags (the public slot of its faction state).
     pub(super) faction: PublicFaction,
+    /// The non-lightweight status effects others see on it (`m_remoteEffectsMap`, component 44).
+    pub(super) remote_effects: Vec<(u16, RemoteEffect)>,
 }
 
 impl ReplicaSource {
@@ -289,6 +292,7 @@ impl ReplicaSource {
                 sanctuary: ghost.pvp_flags.sanctuary,
                 ffa_flag: ghost.pvp_flags.free_for_all,
             },
+            remote_effects: Vec::new(),
         }
     }
 
@@ -354,7 +358,7 @@ const fn slot_of_ghost(slot: GhostSlotChange) -> SlotChange {
 }
 
 /// What the viewers were last sent of one player.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct ReplicaMemory {
     health: u32,
     max_health: u32,
@@ -386,6 +390,10 @@ pub(super) struct ReplicaMemory {
     /// The weapon accuracy of its movement, and how many more states carry it.
     accuracy: f32,
     accuracy_echoes: u8,
+    /// Its remote status effects, their list version, and how many more states carry them.
+    remote_effects: Vec<(u16, RemoteEffect)>,
+    remote_effects_version: u64,
+    remote_effects_echoes: u8,
     /// The server time of its last new life (ms since 2000-01-01).
     life_ms: u64,
     /// The `pos10` every viewer places it from: its states move it by offsets from it (Observed:
@@ -393,6 +401,10 @@ pub(super) struct ReplicaMemory {
     /// client drops a lock on a target that keeps getting a new one, Inferred, as for mobs in
     /// fadbf8b).
     anchor: Option<InputPosition>,
+    /// States left that repeat the new `pos10` anchor alongside its offset
+    /// (`StepPlace::AnchorAgain`) so a dropped unreliable datagram does not leave a viewer on the
+    /// old anchor.
+    anchor_echoes: u8,
 }
 
 /// One player as every viewer gets it this tick.
@@ -435,6 +447,12 @@ pub(super) struct Replica {
     /// Its state of this tick carries the weapon accuracy of its movement
     /// ([`REMOTE_ACTION_ECHO_STATES`]).
     sends_accuracy: bool,
+    /// Its remote status effects changed: the others see them now.
+    remote_effects_changed: bool,
+    /// Its state of this tick carries its remote status effects ([`REMOTE_ACTION_ECHO_STATES`]).
+    sends_remote_effects: bool,
+    /// The version of its remote status effects map.
+    remote_effects_version: u64,
     /// Its own state echoes a change of its upper slots: the others see it now.
     upper_due: bool,
     /// Where its state of this tick puts it: an offset from its anchor, or a new anchor.
@@ -454,17 +472,41 @@ impl Replica {
     pub(super) fn new(
         source: ReplicaSource,
         position: Position,
-        seen: Option<ReplicaMemory>,
+        seen: Option<&ReplicaMemory>,
         server_ms: u64,
     ) -> (Self, ReplicaMemory) {
         let seen_anchor = seen.and_then(|seen| seen.anchor);
-        let place = InputPosition::from_metres(position.x, position.y, position.z)
+        let raw_place = InputPosition::from_metres(position.x, position.y, position.z)
             .map(|at| StepPlace::of(seen_anchor, at));
-        let anchor = match place {
+        let anchor = match raw_place {
             Some(StepPlace::Anchor(at)) => Some(at),
             _ => seen_anchor,
         };
-        let anchor_moved = seen.is_some() && matches!(place, Some(StepPlace::Anchor(_)));
+        let anchor_moved = seen.is_some() && matches!(raw_place, Some(StepPlace::Anchor(_)));
+        let (place, anchor_echoes) = match raw_place {
+            Some(StepPlace::Anchor(at)) => (
+                Some(StepPlace::Anchor(at)),
+                if seen.is_some() {
+                    REMOTE_ANCHOR_ECHO_STATES
+                } else {
+                    0
+                },
+            ),
+            Some(StepPlace::Offset(offset)) => {
+                let left = seen.map_or(0, |seen| seen.anchor_echoes);
+                if left > 0
+                    && let Some(anchor) = anchor
+                {
+                    (
+                        Some(StepPlace::AnchorAgain { anchor, offset }),
+                        left.saturating_sub(1),
+                    )
+                } else {
+                    (Some(StepPlace::Offset(offset)), 0)
+                }
+            }
+            other => (other, 0),
+        };
         let clock = OwnClock::at(source.spawned_ms, server_ms, source.number);
         let health = source.health;
         let action = source
@@ -503,6 +545,18 @@ impl Replica {
             seen.map(|seen| (seen.accuracy, seen.accuracy_echoes)),
             source.movement_accuracy,
         );
+        let remote_effects_changed =
+            seen.is_some_and(|seen| seen.remote_effects != source.remote_effects);
+        let remote_effects_version = match seen {
+            Some(seen) if remote_effects_changed => seen.remote_effects_version.saturating_add(1),
+            Some(seen) => seen.remote_effects_version,
+            None => 1,
+        };
+        let remote_effects_echoes_left = match seen {
+            Some(_) if remote_effects_changed => REMOTE_ACTION_ECHO_STATES,
+            Some(seen) => seen.remote_effects_echoes,
+            None => 0,
+        };
         let upper_due = seen.is_some() && source.upper.is_some();
         let gear = source.gear();
         let paperdoll_change = seen.and_then(|seen| {
@@ -586,8 +640,12 @@ impl Replica {
             stamina_echoes: stamina_echoes_left.saturating_sub(1),
             accuracy: source.movement_accuracy,
             accuracy_echoes: accuracy_echoes_left.saturating_sub(1),
+            remote_effects: source.remote_effects.clone(),
+            remote_effects_version,
+            remote_effects_echoes: remote_effects_echoes_left.saturating_sub(1),
             life_ms,
             anchor,
+            anchor_echoes,
         };
         let replica = Self {
             gear,
@@ -610,6 +668,9 @@ impl Replica {
             stamina_changed,
             sends_stamina: stamina_echoes_left > 0,
             sends_accuracy: accuracy_echoes_left > 0,
+            remote_effects_changed,
+            sends_remote_effects: remote_effects_echoes_left > 0,
+            remote_effects_version,
             upper_due,
             place,
             anchor,
@@ -633,8 +694,23 @@ impl Replica {
             || self.posture_changed
             || self.flags_changed
             || self.stamina_changed
+            || self.remote_effects_changed
             || self.anchor_moved
             || self.upper_due
+    }
+
+    /// Whether this replica carries a single-shot (non-echoed) component change that should be
+    /// delivered reliably on the replication channel so a dropped UDP packet does not leave
+    /// viewers out of sync (weapon draw/sheathe, block, health, mount, look, faction, social).
+    pub(super) const fn needs_reliable(&self) -> bool {
+        self.health_change.is_some()
+            || self.paperdoll_change.is_some()
+            || self.loadout_change.is_some()
+            || self.mount_change.is_some()
+            || self.social_change.is_some()
+            || self.look_change.is_some()
+            || self.faction_change.is_some()
+            || self.block_changed
     }
 
     /// Whether it is in combat: it goes first.
@@ -719,6 +795,21 @@ impl Replica {
             // too (general-other-01: slot 2 child 4 `00`).
             put_looking_through_loadout(&mut group.members, source.looking_through_loadout);
             put_member(&mut group.members, source.faction.card().member()?);
+            if !source.remote_effects.is_empty() {
+                put_member(
+                    &mut group.members,
+                    BundleMember {
+                        component: STATUS_EFFECTS_COMPONENT,
+                        state: MemberState::StatusEffects(StatusEffectsState {
+                            remote: Some(EffectMap::full(
+                                self.remote_effects_version,
+                                source.remote_effects.clone(),
+                            )),
+                            ..StatusEffectsState::default()
+                        }),
+                    },
+                );
+            }
             if let Some(mount) = remote_member(None, source.mount) {
                 put_member(&mut group.members, mount);
             }
@@ -805,6 +896,18 @@ impl Replica {
                 state: MemberState::DamageReceiver(DamageReceiverState {
                     is_block_active: Some(source.blocking),
                     ..DamageReceiverState::default()
+                }),
+            });
+        }
+        if self.sends_remote_effects {
+            members.push(BundleMember {
+                component: STATUS_EFFECTS_COMPONENT,
+                state: MemberState::StatusEffects(StatusEffectsState {
+                    remote: Some(EffectMap::full(
+                        self.remote_effects_version,
+                        source.remote_effects.clone(),
+                    )),
+                    ..StatusEffectsState::default()
                 }),
             });
         }
@@ -1066,6 +1169,7 @@ pub(super) mod tests {
             mount: GhostMount::default(),
             social: ShownSocial::default(),
             faction: PublicFaction::default(),
+            remote_effects: Vec::new(),
         }
     }
 
@@ -1091,12 +1195,12 @@ pub(super) mod tests {
         const NEAR: f32 = 5.0;
         const FAR: f32 = 100.0;
         let (_, memory) = Replica::new(source(), AT, None, SPAWNED_MS);
-        let (still, _) = Replica::new(source(), AT, Some(memory), SPAWNED_MS);
+        let (still, _) = Replica::new(source(), AT, Some(&memory), SPAWNED_MS);
         let hurt = ReplicaSource {
             health: MAX_HEALTH - 1,
             ..source()
         };
-        let (changed, _) = Replica::new(hurt, AT, Some(memory), SPAWNED_MS);
+        let (changed, _) = Replica::new(hurt, AT, Some(&memory), SPAWNED_MS);
         assert!(!still.changed() && changed.changed());
         let candidate = |number, distance_m, replica| RemoteCandidate {
             number,
@@ -1242,7 +1346,7 @@ pub(super) mod tests {
     #[test]
     fn others_see_the_block_and_aim_slots_while_they_echo() {
         let (_, seen) = Replica::new(source(), AT, None, SPAWNED_MS + 10);
-        let (aim, seen) = Replica::new(aiming(), AT, Some(seen), SPAWNED_MS + 20);
+        let (aim, seen) = Replica::new(aiming(), AT, Some(&seen), SPAWNED_MS + 20);
         assert!(aim.changed(), "every viewer gets the aim now");
         let group = aim
             .group(5, 9, AT, false, HOME_WORLD, &mut ViewerSight::default())
@@ -1266,7 +1370,7 @@ pub(super) mod tests {
             "the retail sequence bytes"
         );
         assert_eq!(child(48), Some(vec![0x28]), "the marker");
-        let (quiet, _) = Replica::new(source(), AT, Some(seen), SPAWNED_MS + 30);
+        let (quiet, _) = Replica::new(source(), AT, Some(&seen), SPAWNED_MS + 30);
         assert!(!quiet.changed(), "the echo is over");
         let group = quiet
             .group(5, 9, AT, false, HOME_WORLD, &mut ViewerSight::default())
@@ -1302,7 +1406,7 @@ pub(super) mod tests {
             look: Some(female),
             ..styled.clone()
         };
-        let (first, seen) = Replica::new(changed.clone(), AT, Some(seen), SPAWNED_MS + 20);
+        let (first, seen) = Replica::new(changed.clone(), AT, Some(&seen), SPAWNED_MS + 20);
         assert!(first.changed(), "every viewer gets the change now");
         assert_eq!(
             first.look_change,
@@ -1312,9 +1416,9 @@ pub(super) mod tests {
                 next_change_flag(LOOK_UNCHANGED)
             ))
         );
-        let (quiet, seen) = Replica::new(changed, AT, Some(seen), SPAWNED_MS + 30);
+        let (quiet, seen) = Replica::new(changed, AT, Some(&seen), SPAWNED_MS + 30);
         assert_eq!(quiet.look_change, None);
-        let (back, _) = Replica::new(styled, AT, Some(seen), SPAWNED_MS + 40);
+        let (back, _) = Replica::new(styled, AT, Some(&seen), SPAWNED_MS + 40);
         assert_eq!(
             back.look_change.and_then(|change| change.change_flag),
             Some(LOOK_UNCHANGED),
@@ -1332,7 +1436,7 @@ pub(super) mod tests {
             gear_version: 4,
             ..source()
         };
-        let (changed, seen) = Replica::new(hit.clone(), AT, Some(seen), SPAWNED_MS + 20);
+        let (changed, seen) = Replica::new(hit.clone(), AT, Some(&seen), SPAWNED_MS + 20);
         assert_eq!(
             changed
                 .health_change
@@ -1344,7 +1448,7 @@ pub(super) mod tests {
         let (dead, seen) = Replica::new(
             ReplicaSource { health: 0, ..hit },
             AT,
-            Some(seen),
+            Some(&seen),
             SPAWNED_MS + 30,
         );
         assert!(
@@ -1352,7 +1456,7 @@ pub(super) mod tests {
                 .and_then(|change| change.life)
                 .is_some_and(|life| life.is_dead())
         );
-        let (again, _) = Replica::new(source(), AT, Some(seen), SPAWNED_MS + 40);
+        let (again, _) = Replica::new(source(), AT, Some(&seen), SPAWNED_MS + 40);
         assert!(
             again
                 .health_change
@@ -1394,13 +1498,14 @@ pub(super) mod tests {
             dodged.clone(),
             dodged.clone(),
             dodged.clone(),
+            dodged.clone(),
             dodged,
         ]
         .into_iter()
         .enumerate()
         {
             let at_ms = SPAWNED_MS + (u64::try_from(tick).expect("tick") + 1) * 33;
-            let (replica, now_seen) = Replica::new(now, AT, Some(seen), at_ms);
+            let (replica, now_seen) = Replica::new(now, AT, Some(&seen), at_ms);
             sent.push((replica.changed(), segments(&replica)));
             seen = now_seen;
         }
@@ -1410,6 +1515,7 @@ pub(super) mod tests {
             [
                 (false, None),
                 (true, after.clone()),
+                (false, after.clone()),
                 (false, after.clone()),
                 (false, after),
                 (false, None),
@@ -1453,7 +1559,9 @@ pub(super) mod tests {
             jumping.clone(),
             jumping.clone(),
             jumping.clone(),
+            jumping.clone(),
             jumping,
+            source(),
             source(),
             source(),
             source(),
@@ -1463,7 +1571,7 @@ pub(super) mod tests {
         .enumerate()
         {
             let at_ms = SPAWNED_MS + (u64::try_from(tick).expect("tick") + 1) * 33;
-            let (replica, now_seen) = Replica::new(now, AT, Some(seen), at_ms);
+            let (replica, now_seen) = Replica::new(now, AT, Some(&seen), at_ms);
             sent.push((replica.changed(), data_bits(&replica)));
             seen = now_seen;
         }
@@ -1474,9 +1582,11 @@ pub(super) mod tests {
             [
                 (true, air.clone()),
                 (false, air.clone()),
+                (false, air.clone()),
                 (false, air),
                 (false, None),
                 (true, floor.clone()),
+                (false, floor.clone()),
                 (false, floor.clone()),
                 (false, floor),
                 (false, None),
@@ -1515,13 +1625,13 @@ pub(super) mod tests {
         let mut sent = Vec::new();
         for tick in 1..=6 {
             let (replica, now_seen) =
-                Replica::new(attacking.clone(), AT, Some(seen), SPAWNED_MS + tick * 33);
+                Replica::new(attacking.clone(), AT, Some(&seen), SPAWNED_MS + tick * 33);
             sent.push(carried(&replica));
             seen = now_seen;
         }
         assert_eq!(
             sent,
-            [true, true, true, false, false, false],
+            [true, true, true, true, false, false],
             "after the card: its action in {REMOTE_ACTION_ECHO_STATES} states, then no more"
         );
         let next = SlayerState {
@@ -1534,7 +1644,7 @@ pub(super) mod tests {
                 ..attacking
             },
             AT,
-            Some(seen),
+            Some(&seen),
             SPAWNED_MS + 7 * 33,
         );
         assert!(
@@ -1554,7 +1664,7 @@ pub(super) mod tests {
             },
             ..source()
         };
-        let (draw, seen) = Replica::new(drawn.clone(), AT, Some(seen), SPAWNED_MS + 33);
+        let (draw, seen) = Replica::new(drawn.clone(), AT, Some(&seen), SPAWNED_MS + 33);
         assert!(draw.changed(), "every viewer sees the draw now");
         let public = draw.paperdoll_change.clone().expect("a paperdoll change");
         assert!(public.sheathed.is_some() && public.attached.is_some());
@@ -1571,14 +1681,14 @@ pub(super) mod tests {
             &member.state,
             MemberState::Paperdoll(paperdoll) if paperdoll.owner.is_none()
         )));
-        let (same, seen) = Replica::new(drawn.clone(), AT, Some(seen), SPAWNED_MS + 66);
+        let (same, seen) = Replica::new(drawn.clone(), AT, Some(&seen), SPAWNED_MS + 66);
         assert_eq!(same.paperdoll_change, None, "nothing new");
         // The inventory open goes to the viewers as `lookingThroughLoadout`.
         let looking = ReplicaSource {
             looking_through_loadout: true,
             ..drawn
         };
-        let (open, _) = Replica::new(looking, AT, Some(seen), SPAWNED_MS + 99);
+        let (open, _) = Replica::new(looking, AT, Some(&seen), SPAWNED_MS + 99);
         assert_eq!(open.loadout_change, Some(true));
         let group = open
             .group(9, 1, AT, false, HOME_WORLD, &mut ViewerSight::default())
@@ -1622,7 +1732,7 @@ pub(super) mod tests {
             },
             ..source()
         };
-        let (up, seen) = Replica::new(riding.clone(), AT, Some(seen), SPAWNED_MS + 33);
+        let (up, seen) = Replica::new(riding.clone(), AT, Some(&seen), SPAWNED_MS + 33);
         assert!(up.changed(), "a mount-up goes to every viewer now");
         let group = up
             .group(9, 1, AT, false, HOME_WORLD, &mut ViewerSight::default())
@@ -1632,7 +1742,7 @@ pub(super) mod tests {
             mount_member(&group),
             remote_member(Some(GhostMount::default()), riding.mount)
         );
-        let (same, _) = Replica::new(riding, AT, Some(seen), SPAWNED_MS + 66);
+        let (same, _) = Replica::new(riding, AT, Some(&seen), SPAWNED_MS + 66);
         assert_eq!(same.mount_change, None, "nothing new");
     }
 
@@ -1649,16 +1759,16 @@ pub(super) mod tests {
         );
         assert!(!first.changed());
         // A step within reach is an offset, and nothing forces it to every viewer.
-        let (near, seen) = Replica::new(source(), east(1.0), Some(seen), SPAWNED_MS + 33);
+        let (near, seen) = Replica::new(source(), east(1.0), Some(&seen), SPAWNED_MS + 33);
         assert!(matches!(near.place, Some(StepPlace::Offset(_))));
         assert!(!near.changed());
         assert_eq!(near.anchor, first.anchor, "the anchor stays");
         // Out of reach: a new anchor, which every viewer gets now.
-        let (far, seen) = Replica::new(source(), east(3.0), Some(seen), SPAWNED_MS + 66);
+        let (far, seen) = Replica::new(source(), east(3.0), Some(&seen), SPAWNED_MS + 66);
         assert!(matches!(far.place, Some(StepPlace::Anchor(_))));
         assert!(far.changed(), "a new anchor goes to every viewer");
         // A viewer that sees it from now on gets the shared anchor with the offset.
-        let (late, _) = Replica::new(source(), east(3.5), Some(seen), SPAWNED_MS + 99);
+        let (late, _) = Replica::new(source(), east(3.5), Some(&seen), SPAWNED_MS + 99);
         assert_eq!(late.anchor, far.anchor);
         let group = late
             .group(
@@ -1711,6 +1821,92 @@ pub(super) mod tests {
         assert!(
             second.iter().all(|number| !first.contains(number)),
             "the ones that waited go next"
+        );
+    }
+
+    #[test]
+    fn a_new_remote_anchor_repeats_for_echo_states() {
+        let east = |metres: f32| Position {
+            x: AT.x + metres,
+            ..AT
+        };
+        let (_, seen) = Replica::new(source(), AT, None, SPAWNED_MS);
+        let (far, mut seen) = Replica::new(source(), east(3.0), Some(&seen), SPAWNED_MS + 33);
+        assert!(matches!(far.place, Some(StepPlace::Anchor(_))));
+        for step in 1..=u64::from(REMOTE_ANCHOR_ECHO_STATES) {
+            let (echo, next) = Replica::new(
+                source(),
+                east(3.0 + step as f32 * 0.1),
+                Some(&seen),
+                SPAWNED_MS + (step + 1) * 33,
+            );
+            assert!(
+                matches!(echo.place, Some(StepPlace::AnchorAgain { anchor, .. }) if Some(anchor) == far.anchor),
+                "echo {step} repeats the new anchor with the offset"
+            );
+            seen = next;
+        }
+        let (plain, _) = Replica::new(source(), east(3.5), Some(&seen), SPAWNED_MS + 200);
+        assert!(
+            matches!(plain.place, Some(StepPlace::Offset(_))),
+            "after the echoes, plain offset alone"
+        );
+    }
+
+    #[test]
+    fn others_see_remote_status_effects_on_card_and_change() {
+        let burn = vec![(17_u16, RemoteEffect::of(2, 1.0))];
+        let with_burn = ReplicaSource {
+            remote_effects: burn.clone(),
+            ..source()
+        };
+        let (card_replica, seen) = Replica::new(with_burn.clone(), AT, None, SPAWNED_MS);
+        let card = card_replica
+            .group(9, 1, AT, true, HOME_WORLD, &mut ViewerSight::default())
+            .expect("group")
+            .expect("card");
+        assert!(
+            card.members.iter().any(|member| {
+                member.component == STATUS_EFFECTS_COMPONENT
+                    && matches!(
+                        &member.state,
+                        MemberState::StatusEffects(state)
+                            if state.remote == Some(EffectMap::full(1, burn.clone()))
+                    )
+            }),
+            "card carries active remote status effects"
+        );
+        let cleared = ReplicaSource {
+            remote_effects: Vec::new(),
+            ..with_burn
+        };
+        let (change, mut seen) = Replica::new(cleared.clone(), AT, Some(&seen), SPAWNED_MS + 33);
+        assert!(change.changed(), "effect change wakes viewers");
+        let has_effects = |replica: &Replica| {
+            let group = replica
+                .group(9, 1, AT, false, HOME_WORLD, &mut ViewerSight::default())
+                .expect("group")
+                .expect("state");
+            group
+                .members
+                .iter()
+                .any(|member| member.component == STATUS_EFFECTS_COMPONENT)
+        };
+        assert!(has_effects(&change), "first state carries the cleared map");
+        for step in 1..u64::from(REMOTE_ACTION_ECHO_STATES) {
+            let (echo, next) = Replica::new(
+                cleared.clone(),
+                AT,
+                Some(&seen),
+                SPAWNED_MS + (step + 1) * 33,
+            );
+            assert!(has_effects(&echo), "echo {step} carries the map");
+            seen = next;
+        }
+        let (quiet, _) = Replica::new(cleared, AT, Some(&seen), SPAWNED_MS + 300);
+        assert!(
+            !has_effects(&quiet),
+            "after echoes, no status effect member"
         );
     }
 }

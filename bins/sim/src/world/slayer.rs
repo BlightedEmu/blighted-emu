@@ -1062,6 +1062,23 @@ enum Pending {
     Ability(FirstPlay),
 }
 
+impl Pending {
+    /// Priority of a pending start when multiple input records arrive before `advance()`:
+    /// higher-priority starts (abilities, combat actions, dodges, jumps, landings) are never
+    /// silently overwritten by a lower-priority movement or sequence update in the same batch.
+    const fn priority(self) -> u8 {
+        match self {
+            Self::Ability(_) => 3,
+            Self::Client(_)
+            | Self::Attack(_)
+            | Self::Press(_, _)
+            | Self::State(DODGE_STATE | JUMP_STATE | LAND_STATE, _) => 2,
+            Self::State(_, _) => 1,
+            Self::Sequence(_) | Self::Run(_) => 0,
+        }
+    }
+}
+
 /// Which upper slots play ([`SlayerTrack::slots_on`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct SlotsOn {
@@ -2033,8 +2050,15 @@ impl SlayerTrack {
         }
     }
 
-    /// `started` starts in `record`: it goes out with the next own state.
+    /// `started` starts in `record`: it goes out with the next own state. A lower-priority
+    /// start in a multi-record batch does not overwrite a higher-priority start that has not gone
+    /// out yet (e.g. a movement step after a dodge, jump, attack or ability).
     fn begin(&mut self, started: Pending, record: &SlayerRecord) {
+        if let Some((existing, _, _)) = self.pending
+            && started.priority() < existing.priority()
+        {
+            return;
+        }
         self.pending = Some((started, record.counter, record.frame_s));
         self.roll_s = Self::rolls(started).then_some(0.0);
         match started {
@@ -9079,5 +9103,53 @@ pub(crate) mod tests {
                 "{device}: the drawn shot"
             );
         }
+    }
+
+    #[test]
+    fn a_lower_priority_move_does_not_overwrite_a_pending_dodge_or_ability() {
+        let mut track = SlayerTrack::default();
+        let rec = |counter: u16| SlayerRecord {
+            counter,
+            frame_s: 1.0 / 30.0,
+            action: None,
+            intent: None,
+            attack: AttackKeyBits::default(),
+            weapon: None,
+            swimming: false,
+            falling: false,
+            airborne: false,
+            posture: Posture::Stand,
+            dodging: false,
+            load: DodgeLoad::Normal,
+            ride: None,
+        };
+        let dodge = Pending::State(DODGE_STATE, 4845);
+        track.begin(dodge, &rec(10));
+        // A movement start or sequence update arriving in the same batch must not overwrite it.
+        track.begin(
+            Pending::State(movement::START_STATE, movement::START_SEQUENCE),
+            &rec(11),
+        );
+        track.begin(Pending::Sequence(movement::RUN_SEQUENCE), &rec(12));
+        assert!(
+            matches!(
+                track.pending,
+                Some((Pending::State(DODGE_STATE, 4845), 10, _))
+            ),
+            "dodge stays pending: {:?}",
+            track.pending
+        );
+        // An ability (higher priority) CAN replace a dodge, and a dodge cannot overwrite an ability.
+        let ability = Pending::Ability(FirstPlay {
+            state: 8,
+            sequence: 44,
+        });
+        track.begin(ability, &rec(13));
+        track.begin(dodge, &rec(14));
+        assert!(
+            matches!(track.pending, Some((Pending::Ability(_), 13, _))),
+            "ability stays pending: {:?}",
+            track.pending
+        );
     }
 }

@@ -708,6 +708,56 @@ pub enum TableError {
     WrongSize,
 }
 
+/// The ALC fields of a player frozen when its state moves on to its number
+/// ([`SimWorld::step_state`]).
+#[derive(Debug, Clone, PartialEq)]
+struct StateSnapshot {
+    place: Position,
+    view: Option<LookDir>,
+    facing: Option<f32>,
+    sequence: Option<f32>,
+    upper_sequence: [Option<f32>; nw_messages::UPPER_SLOTS],
+    movement: (u64, u64),
+    action: Option<nw_messages::SlayerState>,
+    upper: Option<nw_messages::RemoteUpper>,
+    posture: nw_messages::AlcPosture,
+    flags: RemoteMoveFlags,
+    stamina_segments: u8,
+    movement_accuracy: f32,
+}
+
+impl Player {
+    /// The body's place frozen at its last [`SimWorld::step_state`], if any.
+    pub(super) const fn state_place(&self) -> Option<Position> {
+        match &self.state_snapshot {
+            Some(snapshot) => Some(snapshot.place),
+            None => None,
+        }
+    }
+
+    /// Snapshots the live ALC fields at `place` for the current `state_number`.
+    fn snapshot_state(&self, place: Position) -> StateSnapshot {
+        StateSnapshot {
+            place,
+            view: self.view,
+            facing: self.facing,
+            sequence: self.slayer.remote_sequence(),
+            upper_sequence: self.slayer.remote_upper_seconds(),
+            movement: self.slayer.card_movement(),
+            action: self.slayer.remote_action(),
+            upper: self.slayer.remote_upper(),
+            posture: self.slayer.remote_posture(),
+            flags: RemoteMoveFlags {
+                grounded: self.slayer.jump_holds_floor()
+                    || (!self.tracked.is_lifted() && !self.tracked.is_swimming()),
+                dodging: self.slayer.dodge_clears_flag(),
+            },
+            stamina_segments: self.stamina.segments(),
+            movement_accuracy: self.slayer.remote_movement_accuracy(),
+        }
+    }
+}
+
 #[derive(Component)]
 struct Player {
     connection: ConnectionRef,
@@ -775,12 +825,11 @@ struct Player {
     /// Its state moved on to a new number between ticks ([`remote_now`]): the next tick's own
     /// state carries that step, and the tick steps it no more.
     state_stepped: bool,
-    /// The body's place when its state moved on to its number ([`SimWorld::step_state`]): each
-    /// state of that number carries it to the players who see it. Live 2026-11-21: the tick
-    /// after a half-tick step sent the same number with the body of the next record, in 24 % and
-    /// 35 % of two moving players' states (retail: 2 of 57,297 numbers); the client took the
-    /// newer place for the old stamp, and the other player ran in a saw-tooth.
-    state_place: Option<Position>,
+    /// The ALC fields frozen when its state moved on to its number ([`SimWorld::step_state`]):
+    /// every state of that number (at the half tick and the full tick) carries the same snapshot
+    /// to viewers so a newer input arriving in between never tears `sequence_s`, `posture`,
+    /// `flags`, `facing`, `view`, `stamina`, or `place` away from `state_number`.
+    state_snapshot: Option<StateSnapshot>,
     /// The view angles of its newest input: where other players see it look.
     view: Option<LookDir>,
     /// Where other players see it face: the camera yaw, or a game pad's run direction while the
@@ -4692,6 +4741,7 @@ impl SimWorld {
         vitals: &Vitals,
         server_ms: u64,
         progression: &Progression,
+        status_effects: &nw_content::status_effects::StatusEffectRules,
     ) -> ReplicaSource {
         let clock = Self::alc_clock(player, server_ms);
         let (items, hands, gear_version) = player.gear.as_ref().map_or_else(
@@ -4701,32 +4751,37 @@ impl SimWorld {
                 (shown, gear.hands(), gear.shown_version())
             },
         );
+        let fallback;
+        let snap = match &player.state_snapshot {
+            Some(snap) => snap,
+            None => {
+                fallback = player.snapshot_state(Position {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                });
+                &fallback
+            }
+        };
         ReplicaSource {
             character: *player.character.as_bytes(),
             name: GhostName::of(&player.name),
             level: progression.level_of(player.experience),
-            sequence: player.slayer.remote_sequence(),
-            upper_sequence: player.slayer.remote_upper_seconds(),
-            movement: player.slayer.card_movement(),
+            sequence: snap.sequence,
+            upper_sequence: snap.upper_sequence,
+            movement: snap.movement,
             look: player.look,
             health: vitals.health.current(),
             max_health: vitals.health.max(),
-            view: player.view,
-            facing: player.facing,
+            view: snap.view,
+            facing: snap.facing,
             number: player.state_number,
-            action: player.slayer.remote_action(),
-            upper: player.slayer.remote_upper(),
-            posture: player.slayer.remote_posture(),
-            // Off the floor from the lift on, but not before the jump's floor time
-            // ([`slayer::SlayerTrack::jump_holds_floor`]): retail cleared another player's floor
-            // bit 167 to 333 ms after its jump started (13,586 of 19,012 clears in the jump).
-            flags: RemoteMoveFlags {
-                grounded: player.slayer.jump_holds_floor()
-                    || (!player.tracked.is_lifted() && !player.tracked.is_swimming()),
-                dodging: player.slayer.dodge_clears_flag(),
-            },
-            stamina_segments: player.stamina.segments(),
-            movement_accuracy: player.slayer.remote_movement_accuracy(),
+            action: snap.action,
+            upper: snap.upper,
+            posture: snap.posture,
+            flags: snap.flags,
+            stamina_segments: snap.stamina_segments,
+            movement_accuracy: snap.movement_accuracy,
             blocking: vitals.blocking(),
             spawned_ms: clock.spawn_ms,
             gear_version,
@@ -4738,6 +4793,7 @@ impl SimWorld {
             mount: player.mount.remote(),
             social: player.shown_social(),
             faction: player.public_faction(),
+            remote_effects: player.status_effects.remote_entries(status_effects),
         }
     }
 
@@ -4752,9 +4808,14 @@ impl SimWorld {
                 .filter(|(_, _, vitals)| !vitals.health.is_dead())
             {
                 let position = body.motion.position();
-                let ghost =
-                    Self::replica_source(player, vitals, self.server_ms, &self.content.progression)
-                        .ghost();
+                let ghost = Self::replica_source(
+                    player,
+                    vitals,
+                    self.server_ms,
+                    &self.content.progression,
+                    &self.content.status_effects,
+                )
+                .ghost();
                 for owner in cells.owners.others_within(cells.me, position, radius) {
                     if let Some(sim) = cells.sims.get(usize::from(owner)) {
                         lists.entry(sim.id.clone()).or_default().push(Ghost {
@@ -4792,9 +4853,8 @@ impl SimWorld {
 
     /// Moves the player's state on to its client's newest record at `now_ms` (server time
     /// `server_time`), and its slayer state with it: one step for each own state. The body is at
-    /// `place` then: the state's number carries that place ([`Player::state_place`]).
+    /// `place` then: every ALC field of this state number is frozen in [`Player::state_snapshot`].
     fn step_state(player: &mut Player, place: Position, now_ms: u64, server_time: u64) {
-        player.state_place = Some(place);
         if let Some(counter) = player.input_counter {
             // The state's time is its record's on the client's clock, as retail stamps it.
             let record_time = player.input_clock_ms.map_or(server_time, |clock| {
@@ -4810,6 +4870,7 @@ impl SimWorld {
         player
             .slayer
             .advance(clock.stamp().id, clock.since_spawn_ms);
+        player.state_snapshot = Some(player.snapshot_state(place));
     }
 
     /// A bundle for every player that is not frozen, on `tick_threads` threads for a large world.
@@ -4843,8 +4904,14 @@ impl SimWorld {
             .map(|(player, vitals)| {
                 (
                     player.number,
-                    Self::replica_source(player, vitals, server_time, &self.content.progression),
-                    player.state_place,
+                    Self::replica_source(
+                        player,
+                        vitals,
+                        server_time,
+                        &self.content.progression,
+                        &self.content.status_effects,
+                    ),
+                    player.state_place(),
                 )
             })
             .collect();
@@ -4863,7 +4930,7 @@ impl SimWorld {
             let Some(position) = state_place.or_else(|| places.get(&number).copied()) else {
                 continue;
             };
-            let seen = self.replica_memory.get(&number).copied();
+            let seen = self.replica_memory.get(&number);
             let (replica, now_seen) = Replica::new(source, position, seen, server_time);
             replicas.insert(number, replica);
             memory.insert(number, now_seen);
@@ -5213,7 +5280,7 @@ impl SimWorld {
                     aim_camera_until_ms: None,
                     state_number: None,
                     state_stepped: false,
-                    state_place: None,
+                    state_snapshot: None,
                     view: None,
                     facing: None,
                     facing_from_stick: false,
@@ -5898,6 +5965,7 @@ impl Neighbourhood<'_> {
                 OwnTeleport::of(player.teleports, clock, player.move_facing, step)
             });
             let mut groups: Vec<BundleGroup> = Vec::new();
+            let mut needs_reliable = false;
             // The slot-2 entity's groups go last: the claims state is larger than a datagram
             // and takes a bundle of its own (retail sends it over several chunks).
             let mut slot_2_groups: Vec<BundleGroup> = Vec::new();
@@ -6367,6 +6435,9 @@ impl Neighbourhood<'_> {
                         (station, board) => station.or(board),
                     };
                     if group.is_some() {
+                        if slot.new && number >= crafting::CAMP_ENTITY_BASE {
+                            needs_reliable = true;
+                        }
                         tracing::debug!(player = player.number, station = number, "station shown");
                     }
                     groups.extend(group);
@@ -6495,6 +6566,9 @@ impl Neighbourhood<'_> {
                                 player.remote_plan.sight(number),
                             )?;
                             if let Some(group) = &group {
+                                if slot.new || replica.needs_reliable() {
+                                    needs_reliable = true;
+                                }
                                 if slot.new {
                                     log_player_card(own, number, group);
                                 } else {
@@ -6528,7 +6602,7 @@ impl Neighbourhood<'_> {
                 player.own_card_bundle = Some(envelopes.clone());
                 player.own_card_sent_ms = self.now_ms;
             }
-            let reliable = reliable_bundles() || first_card;
+            let reliable = reliable_bundles() || first_card || needs_reliable;
             outgoing.extend(replication_outgoing(
                 &player.connection,
                 reliable,
@@ -10934,11 +11008,12 @@ mod tests {
                 "{device}: the posture with the change's sequence, one record after each toggle: \
                  {shown:?}"
             );
+            let echo = u16::from(replica::REMOTE_ACTION_ECHO_STATES);
             assert!(
                 shown.iter().all(|(counter, _, _)| TOGGLES
                     .iter()
-                    .any(|(toggle, _)| (toggle + 1..=toggle + 3).contains(counter))),
-                "{device}: three states carry each change, then no more: {shown:?}"
+                    .any(|(toggle, _)| (toggle + 1..=toggle + echo).contains(counter))),
+                "{device}: {echo} states carry each change, then no more: {shown:?}"
             );
         }
     }
@@ -11135,9 +11210,11 @@ mod tests {
             vec![low],
             "the tick sends it again"
         );
-        assert!(
-            input_between_ticks(&mut world, COUNTER, NOW + 70).is_empty(),
-            "an old record is no new state"
+        let repeated = input_between_ticks(&mut world, COUNTER, NOW + 70);
+        assert_eq!(
+            remote_ids(&world, &repeated, &connection(2)),
+            vec![low],
+            "an old record repeats the same state number on the steady half-tick beat"
         );
     }
 
@@ -11251,10 +11328,21 @@ mod tests {
                 remote_ids(&world, &ticked.messages, &b),
                 "{device}: the tick sends the half tick's number again"
             );
+            let seq_rel = |world: &SimWorld, outgoing: &[Outgoing]| {
+                alc_children(&states_of(world, outgoing, &b, 1))
+                    .into_iter()
+                    .find(|(child, _)| *child == 2)
+                    .map(|(_, bytes)| bytes)
+            };
             assert_eq!(
                 places(&world, &ticked.messages),
                 half_places,
                 "{device}: the number keeps its record's place"
+            );
+            assert_eq!(
+                seq_rel(&world, &ticked.messages),
+                seq_rel(&world, &half),
+                "{device}: the number keeps its record's sequence time too (no torn state)"
             );
         }
     }
@@ -14803,10 +14891,20 @@ mod tests {
         assert_eq!(seen_by(&world, &outgoing, &a), vec![1, 2]);
         assert_eq!(seen_by(&world, &outgoing, &b), vec![2, 1]);
         assert_eq!(seen_by(&world, &outgoing, &c), vec![3]);
+        // Plain ticks without a new remote card go unreliably; a bundle carrying a new remote
+        // player card goes reliably so a dropped datagram does not leave the player invisible.
         assert!(
             outgoing
                 .iter()
-                .all(|out| out.channel != REPLICATION_CHANNEL || !out.reliable)
+                .filter(|out| out.connection == c && out.channel == REPLICATION_CHANNEL)
+                .all(|out| !out.reliable)
+        );
+        assert!(
+            outgoing
+                .iter()
+                .filter(|out| (out.connection == a || out.connection == b)
+                    && out.channel == REPLICATION_CHANNEL)
+                .all(|out| out.reliable)
         );
     }
 
