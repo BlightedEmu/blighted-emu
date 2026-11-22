@@ -2379,7 +2379,8 @@ impl SimWorld {
             // player stood behind; the camera body's error along the view needs both), and the
             // record's input words, so a test can replay a live run's inputs as they came (live
             // 2026-11-19: the bow abilities' replay had to rebuild most input bits from the
-            // other fields).
+            // other fields), its mask and its scaled stick bytes (live 2026-11-22: a game pad
+            // player's records read no stick and no move keys while the player walked).
             tracing::debug!(
                 player = player.number,
                 counter,
@@ -2399,6 +2400,8 @@ impl SimWorld {
                 view_pitch = view.map(|view| view.pitch),
                 boom_m = player.tracked.camera_boom_m(),
                 inputs = ?record.slots.values,
+                mask = record.mask,
+                stick_bytes = ?record.slots.bytes,
                 "input record"
             );
             if tracked.consistent && tracked.on_floor {
