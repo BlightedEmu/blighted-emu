@@ -1657,7 +1657,13 @@
    },
    "alt_fire_gap_ms": 1734,
    "alt_fire_wait_from_ms": 867,
-   "alt_fire_ready_ms": 267
+   "alt_fire_ready_ms": 267,
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 2022
+    }
+   }
   },
   {
    "tags": "MagicStaff,Fire",
@@ -2569,7 +2575,13 @@
     }
    },
    "draw_end_ms": 724,
-   "sheathe": 3134
+   "sheathe": 3134,
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 1208
+    }
+   }
   },
   {
    "tags": "2H_Melee,Warhammer",

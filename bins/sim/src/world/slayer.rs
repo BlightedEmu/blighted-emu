@@ -5266,6 +5266,48 @@ pub(crate) mod tests {
         assert!(!track.jump_holds_floor());
     }
 
+    /// Live 2026-11-22 01:47:53 to 01:48:22 UTC: a controller player's jumps with a drawn musket
+    /// sent no state 14 (the table had no musket jump), only the landing, and the other player
+    /// saw the body rise with straight legs; its rapier jumps showed. Retail (re-mine
+    /// 2026-11-17, other players): the musket jumps with 14/2022 (213 of 247 jumps).
+    #[test]
+    fn a_drawn_musket_jumps_with_its_retail_jump_with_keyboard_and_controller() {
+        const MUSKET: &str = "2H_Ranged,Rifle";
+        const MUSKET_JUMP: u64 = 2022;
+        const JUMP_RECORD: u16 = 300;
+        /// The left stick pushed forward: right at rest, forward 1.
+        const STICK_FORWARD: [f32; 2] = [0.0, 1.0];
+        let table = crate::combat::test_support::test_player_sequences();
+        let keys = Intent::of_keys(true, false, false, false);
+        let pad = Intent::default().with_stick(Some(STICK_FORWARD));
+        for (device, moving) in [
+            ("keyboard still", Intent::default()),
+            ("keyboard", keys),
+            ("controller", pad),
+        ] {
+            let jump = Intent {
+                jump: true,
+                ..moving
+            };
+            let mut track = spawned();
+            track.record(
+                keyed(JUMP_RECORD - 1, moving, AttackKeyBits::default(), MUSKET),
+                &table,
+            );
+            own_state(&mut track, JUMP_RECORD - 1);
+            track.record(
+                keyed(JUMP_RECORD, jump, AttackKeyBits::default(), MUSKET),
+                &table,
+            );
+            let jumped = own_state(&mut track, JUMP_RECORD).state.expect("the jump");
+            assert_eq!(
+                (jumped.state, jumped.sequence),
+                (Some(JUMP_STATE), MUSKET_JUMP),
+                "{device}"
+            );
+        }
+    }
+
     /// Live 2026-11-18: a rapier's block stood on the ice gauntlet's stand (31/3987, never sent
     /// with a rapier in 1,195 retail ledgers; others stood on 31/1249 in 1,185 cases) and a
     /// spear's standing block played the walking block's start.
