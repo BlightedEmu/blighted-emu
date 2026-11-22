@@ -693,6 +693,10 @@ impl TrackedBody {
             ];
             moved.iter().all(|axis| axis.abs() <= STILL_CAMERA_M)
         });
+        // A camera on the floor shows no body along its view ([`camera_met_floor`]): it gives
+        // the body nothing, as a record with no camera.
+        let met_floor = view.is_some_and(|view| camera_met_floor(view, ground));
+        let view = view.filter(|_| !met_floor);
         let seen = view.and_then(|view| {
             self.camera.observe(
                 view,
@@ -709,14 +713,13 @@ impl TrackedBody {
         let intent = input.character.intent;
         let moves_itself = acting || intent.moves() || intent.jump || intent.dodge;
         let carried_by_action = acting && !intent.moves();
-        let recovering = seen.is_none() && input.view.is_some() && moves_itself && {
+        let input_view = input.view.filter(|_| !met_floor);
+        let recovering = seen.is_none() && input_view.is_some() && moves_itself && {
             self.unfit_records = self.unfit_records.saturating_add(1);
             self.unfit_records >= RECOVER_AFTER_RECORDS || carried_by_action
         };
         let seen = if recovering {
-            input
-                .view
-                .and_then(|view| self.camera.body_at_last_boom(view))
+            input_view.and_then(|view| self.camera.body_at_last_boom(view))
         } else {
             seen
         };
@@ -971,6 +974,35 @@ fn boom_to_known_floor(
         last = Some((boom_m, gap));
     }
     None
+}
+
+/// The radius of the sphere the client's camera casts against the level, m
+/// (`libs/camera/gamecamera.xml`: `collisionSphereCastRadius`).
+const CAMERA_SPHERE_RADIUS_M: f32 = 0.084;
+/// The client camera's near plane, m (`libs/camera/gamecamera.xml`: `NearPlane`).
+const CAMERA_NEAR_PLANE_M: f32 = 0.1;
+/// How far above its floor a camera that met it may stand past the sphere and the near plane, m
+/// (our choice: the level's floor under the camera may differ a little from the client's).
+const CAMERA_FLOOR_SLACK_M: f32 = 0.1;
+/// The highest a camera may stand above the floor under it and have met that floor, m.
+const CAMERA_FLOOR_MET_M: f32 = CAMERA_SPHERE_RADIUS_M + CAMERA_NEAR_PLANE_M + CAMERA_FLOOR_SLACK_M;
+
+/// Whether the camera of `view` met the floor of `ground` under it: it looks up (a negative
+/// pitch puts the camera below the body's eyes) and stands at most [`CAMERA_FLOOR_MET_M`] above
+/// that floor. Such a camera's boom is shorter than the check's by what the floor took off it
+/// (`CameraCollides`), so it gives no body along the view. Live 2026-11-22 01:46:40.485 UTC, a
+/// controller player at rest after a musket aim (records 5385 to 5398): the pitch went from
+/// -0.19 to -0.61 rad, the camera stayed at 45.106 m, 0.18 m above the flat floor, and came
+/// from 7.54 to 1.88 m of the still body; the check put the body where its 7.67 m boom met that
+/// camera and moved it 4.4 m for the other player. 2,220 of that player's 9,553 records looked
+/// up so (pitch below -0.2 rad, camera within 0.4 m of the feet), 16 of the keyboard player's
+/// 20,147.
+fn camera_met_floor(view: CameraView, ground: &(impl Ground + ?Sized)) -> bool {
+    let camera = view.camera;
+    view.pitch < 0.0
+        && ground
+            .floor_at(camera.x, camera.y, camera.z)
+            .is_some_and(|floor| camera.z - floor <= CAMERA_FLOOR_MET_M)
 }
 
 /// The floor under the feet of a body at `at`: the floor of `ground` there, or the swim floor of
@@ -2895,6 +2927,159 @@ mod tests {
         let (worst_m, end_m) = live_pad_roll(false);
         assert!(worst_m < LIVE_ROLL_GAP_M, "in the roll {worst_m} m");
         assert!(end_m < FREE_BOOM_REST_GAP_M, "at the end {end_m} m");
+    }
+
+    /// The cameras (x, y, z, yaw, pitch) of a controller player at rest after a musket aim,
+    /// live 2026-11-22 01:46:39.995 to 01:46:41.065 UTC (records 5370 to 5402): the view tips up,
+    /// the camera comes down to the floor at 45.106 m and slides in along the view from 7.54 to
+    /// 1.88 m of the still body. The server moved the body 4.4 m.
+    const LIVE_CAMERA_TO_FLOOR: [(f32, f32, f32, f32, f32); 33] = [
+        (7305.898, 3087.708, 49.72151, 1.1493, 0.3983),
+        (7305.9517, 3087.6758, 49.57045, 1.1483, 0.3779),
+        (7306.1, 3087.585, 49.10048, 1.1455, 0.3147),
+        (7306.1465, 3087.564, 48.932632, 1.1455, 0.2935),
+        (7306.1973, 3087.539, 48.747986, 1.1452, 0.2683),
+        (7306.2686, 3087.4985, 48.412292, 1.1443, 0.2268),
+        (7306.3013, 3087.443, 48.177307, 1.1396, 0.1965),
+        (7306.3447, 3087.33, 47.690536, 1.1289, 0.1347),
+        (7306.354, 3087.2795, 47.472336, 1.1236, 0.1063),
+        (7306.352, 3087.1765, 46.968796, 1.1119, 0.0437),
+        (7306.3413, 3087.135, 46.73381, 1.1067, 0.0146),
+        (7306.2954, 3087.062, 46.14633, 1.0960, -0.0597),
+        (7306.2603, 3087.0466, 45.81064, 1.0923, -0.1008),
+        (7306.214, 3087.0479, 45.458145, 1.0896, -0.1447),
+        (7306.159, 3087.0566, 45.139236, 1.0874, -0.1855),
+        (7304.063, 3088.152, 45.105667, 1.0866, -0.2693),
+        (7303.031, 3088.695, 45.105667, 1.0866, -0.3345),
+        (7302.6553, 3088.8923, 45.105667, 1.0866, -0.3678),
+        (7302.344, 3089.0562, 45.105667, 1.0866, -0.4005),
+        (7302.2446, 3089.1084, 45.105667, 1.0866, -0.4123),
+        (7302.1475, 3089.1594, 45.12245, 1.0866, -0.4240),
+        (7302.0137, 3089.2297, 45.12245, 1.0866, -0.4413),
+        (7301.867, 3089.307, 45.12245, 1.0866, -0.4616),
+        (7301.551, 3089.4734, 45.12245, 1.0866, -0.5151),
+        (7301.2646, 3089.6228, 45.105667, 1.0863, -0.5741),
+        (7301.2, 3089.6567, 45.105667, 1.0863, -0.5889),
+        (7301.1006, 3089.7092, 45.105667, 1.0863, -0.6135),
+        (7301.101, 3089.709, 45.105667, 1.0863, -0.6135),
+        (7301.1016, 3089.7087, 45.105667, 1.0863, -0.6135),
+        (7301.1016, 3089.7085, 45.105667, 1.0863, -0.6135),
+        (7301.102, 3089.7085, 45.105667, 1.0863, -0.6135),
+        (7301.102, 3089.7085, 45.105667, 1.0863, -0.6135),
+        (7301.102, 3089.7083, 45.105667, 1.0863, -0.6135),
+    ];
+
+    /// The flat open ground under the live cameras of [`LIVE_CAMERA_TO_FLOOR`], m.
+    const LIVE_CAMERA_FLOOR_M: f32 = 44.929;
+
+    struct LiveCameraFloor;
+    impl Ground for LiveCameraFloor {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(LIVE_CAMERA_FLOOR_M)
+        }
+    }
+
+    /// The most a still body may move under a camera that came down to the floor, m (our
+    /// choice: one step on the wire, [`FOLLOW_FROM_M`], with some margin).
+    const STILL_UNDER_FLOOR_CAMERA_M: f32 = 0.05;
+
+    #[test]
+    fn a_camera_that_comes_down_to_the_floor_leaves_a_still_body_where_it_stands() {
+        // The live body; its client held no key and no stick (at rest a controller sends no
+        // stick, as the keys none). The aim's end is an action of the client.
+        const STILL: Position = Position {
+            x: 7299.263,
+            y: 3_090.134_5,
+            z: LIVE_CAMERA_FLOOR_M,
+        };
+        const REST_RECORDS: usize = 30;
+        let view_of_live = |(x, y, z, yaw, pitch): (f32, f32, f32, f32, f32)| {
+            CameraView::new(Position { x, y, z }, yaw, pitch)
+        };
+        let mut body = TrackedBody::new(STILL);
+        let first = view_of_live(LIVE_CAMERA_TO_FLOOR[0]);
+        for _ in 0..REST_RECORDS {
+            body.record(input(0, first), &LiveCameraFloor, SEA);
+        }
+        let mut worst_m: f32 = 0.0;
+        for (index, camera) in LIVE_CAMERA_TO_FLOOR.into_iter().enumerate() {
+            let tracked = body.record(
+                TrackInput {
+                    action_started: index == 0,
+                    ..input(0, view_of_live(camera))
+                },
+                &LiveCameraFloor,
+                SEA,
+            );
+            worst_m = worst_m.max(tracked.position.horizontal_distance(STILL));
+        }
+        assert!(
+            worst_m < STILL_UNDER_FLOOR_CAMERA_M,
+            "the body moved {worst_m} m"
+        );
+    }
+
+    #[test]
+    fn a_camera_on_the_floor_gives_a_walk_nothing_with_keyboard_and_controller() {
+        // The view tipped up so that the camera lies on the floor 2 m behind the body: its
+        // boom is short, and the body moves by its keys or stick alone, as with no camera.
+        const LOOK_UP_PITCH: f32 = -0.5;
+        const FLOOR_BOOM_M: f32 = 2.0;
+        const WALK_RECORDS: usize = 60;
+        const CAMERA_ON_FLOOR_M: f32 = CAMERA_SPHERE_RADIUS_M + CAMERA_NEAR_PLANE_M;
+        /// The left stick pushed forward: right at rest, forward 1.
+        const STICK_FORWARD: [f32; 2] = [0.0, 1.0];
+        let keys = Intent {
+            forward: 1,
+            ..Intent::default()
+        };
+        let pad = Intent::default().with_stick(Some(STICK_FORWARD));
+        for (device, intent) in [("keyboard", keys), ("controller", pad)] {
+            let (intent, yaw) = intent.toward_stick(0.0);
+            let character = CharacterInput {
+                intent,
+                yaw,
+                dt_s: DT,
+            };
+            let mut body = TrackedBody::new(start());
+            let mut keys_alone = TrackedBody::new(start());
+            for record in 0..WALK_RECORDS {
+                let at = body.position();
+                let (forward, _) = yaw_axes(0.0);
+                let camera = Position {
+                    x: at.x - FLOOR_BOOM_M * forward[0],
+                    y: at.y - FLOOR_BOOM_M * forward[1],
+                    z: GROUND_Z + CAMERA_ON_FLOOR_M,
+                };
+                let tracked = body.record(
+                    TrackInput {
+                        character,
+                        view: Some(CameraView::new(camera, 0.0, LOOK_UP_PITCH)),
+                        boom_key: false,
+                        action_started: false,
+                    },
+                    &Flat,
+                    SEA,
+                );
+                let alone = keys_alone.record(
+                    TrackInput {
+                        character,
+                        view: None,
+                        boom_key: false,
+                        action_started: false,
+                    },
+                    &Flat,
+                    SEA,
+                );
+                assert!(!tracked.resynced, "{device} record {record}");
+                assert!(
+                    tracked.position.horizontal_distance(alone.position) < CLOSE,
+                    "{device} record {record}: {:?} against {:?}",
+                    tracked.position,
+                    alone.position
+                );
+            }
+        }
     }
 
     /// A player on the Monarch's Bluffs beach, far from the level origin, walks up to a target
