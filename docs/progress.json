@@ -366,6 +366,10 @@
             {
               "check": "`!gearup` first wears the bag's gear in empty worn slots (a new character's class head, sword and shield), then upgrades every worn item (bots, 2026-11-21: a Soldier bot wore its head, sword and shield at the top gear score; before, they stayed in the bag).",
               "proof": "bots"
+            },
+            {
+              "check": "`!gearup` also wears the bag's gathering tools in their tool slots (2026-11-22, bots): before, a bot with a pick in its bag was refused a crystal gather.",
+              "proof": "bots"
             }
           ]
         },
@@ -1911,6 +1915,18 @@
             {
               "check": "A task that a consecutive container lists twice is done with its first copy, as retail (bots, 2026-11-21): `04A_Side05_03_03B_Container_DeadDrop` lists `03B_GetDelivery` twice, and retail's two entries of it went Complete in one update. A bot then played `04A_Side05_03` and `04A_Side05_04` to their end. Before, the second copy waited for a second parcel that the level does not have, and both quests never ended.",
               "proof": "bots"
+            },
+            {
+              "check": "A video object (interaction kind 81, `PlayCinematicVideo`) gets its answer as retail (2026-11-22, tests): status 1 at once, and its quest tag counts when the client ends the video (`99B_MSQ_02`, the journal).",
+              "proof": "tests"
+            },
+            {
+              "check": "An encounter with no rewards fires its success game event (2026-11-22, bots): the content kept the event only beside rewards, so 142 encounters had none. The Everfall chain `04A_Side02_02` to `05` now completes by bots.",
+              "proof": "bots"
+            },
+            {
+              "check": "Turning stones and carts (cyclic objects with no gather point) can be used, again at once, and do not run out (2026-11-22, bots): the retail capture turns a stone twice 1.8 s apart. `06A_MSQ_18` and `99D_MSQ_01` complete.",
+              "proof": "bots"
             }
           ]
         },
@@ -2014,6 +2030,34 @@
             },
             {
               "check": "Quest steps with no source on this server (bots, 2026-11-21): nothing gives the bone items of `0699_0102` and `0699_0103` or the yeti horn of `0424_2022_WC_04`, the level has no `wcStation` object for `0424_2022_WC_01`, and `0430_0101_Arena` needs the 3v3 arena: not done.",
+              "proof": "none"
+            },
+            {
+              "check": "The Everfall main story by bots (2026-11-22): `99A_MSQ_01` to `99A_MSQ_15` all complete in one play, and the staff the story forges (`Darkness_AzothStaff_T1`) is in the bot's bag. The last quest's trial (QuestHeartforge) is entered at its door.",
+              "proof": "bots"
+            },
+            {
+              "check": "The Windsward main story ends by bots (2026-11-22): `06A_MSQ_18` (the two turning stones), `06A_MSQ_21` (the Medea trial, entered at its door) and `06A_MSQ_22` complete.",
+              "proof": "bots"
+            },
+            {
+              "check": "Later story chapters by bots with a GM start (2026-11-22): Brightwood `99B_MSQ_01` to `04`, `99C_MSQ_01` to `06`, Great Cleave `99D_MSQ_01` to `06`, Edengrove `99E_MSQ_01` to `06`, and the first quests of Ebonscale (`99F`) and Shattered Mountain (`99G`) complete.",
+              "proof": "bots"
+            },
+            {
+              "check": "Side quests of 14 zones by bots (2026-11-22): 274 of 348 complete, Monarch's Bluffs 17 of 17 in two plays with new bots, and 30 more of the 34 Everfall side quests.",
+              "proof": "bots"
+            },
+            {
+              "check": "Open world encounters whose objective counts kills of alias targets never start: the waves spawn other minion targets (`99B_MSQ_05`, `99E_MSQ_07`, `1656_0401`, `1434_0103`). Not done.",
+              "proof": "none"
+            },
+            {
+              "check": "The story trial levels (`nw_ori_*`, `nw_trial_*`) have no collision file, so their instance sims stop at start: `99D_MSQ_07` and the later story trials. Not done.",
+              "proof": "none"
+            },
+            {
+              "check": "Still not run (2026-11-22): the puzzle steps of `99F` and `99G` (client puzzle scripts), the cave door of `99C_MSQ_07` (the staff rank it needs is Unknown), the settlement station steps (`06A_TS_02`, `09A_S0`), and steps the bot cannot play yet (mount courses, fishing, PvP kills, a song).",
               "proof": "none"
             }
           ]
@@ -2999,6 +3043,14 @@
             {
               "check": "A group of three bots enters Amrine Excavation together (2026-11-21, bots): the leader invites the others, each accepts, the leader enters from afar and the others follow into the same instance; each walks the start area with keyboard or controller input, and after its first steps the server's body stands on the level's floor (4 of 5 places within 0.02 m, one 0.18 m; the place the server gives has one decimal). The body comes in at the teleport spot's height, 1.2 m above the floor, until its first move.",
               "proof": "bots"
+            },
+            {
+              "check": "A group of three bots enters Amrine Excavation and Starstone Barrows through the quest's own plan (2026-11-22, bots).",
+              "proof": "bots"
+            },
+            {
+              "check": "The boss of an expedition does not die when a bot group fights it (Amrine, Starstone Barrows): its hits stop after 20 to 30. Cause Unknown.",
+              "proof": "none"
             }
           ]
         },
@@ -3959,6 +4011,7 @@
     }
   ],
   "nextSteps": [
+    "**Quests by bots (2026-11-22).**\n\n- Encounters that count kills of alias targets (`99B_MSQ_05`, `99E_MSQ_07`): read the minion slices' own mob slice in the content and count its kills.\n- Collision files for the story trial levels (`nw_ori_*`, `nw_trial_*`), as for the expeditions.\n- Expedition bosses with a bot group: run the instance sims at debug level and find why the hits stop.\n- Puzzle steps (`99F`, `99G`): decode the retail captures.\n- A content table of each quest object's interaction kind, read from its slice.",
     "**Player body: physics leads (2026-11-21).**\n\n- Done (tests): attack root motion along the camera, side dodge rolls, the jump's wind-up, the start and stop lag, the camera on the floor, the measuring tool.\n- Next, in order: held-key attack chains, late and missed dodges (1,657 of 6,507 retail presses), the sprint before a jump and the sprint landing, the walls retail walks by (a stall near 7643, 4268).\n- Then let key physics lead and the camera only correct small error, measured on the fresh-start tool for keys and pad, and a live controller trace (no retail ledger has controller input).",
     "**Other players: live check of the 2026-11-20 second round (tests only).** Two players, keyboard and controller: crouch and prone with the pad (left shoulder with a left stick click, and held), quick double dodge presses (one roll each, no restart), and a keyboard video like the controller one. Then the earlier list: a bow's hip shots held long and short, walking and running backward, keys let go during an attack, walk starts, jumps and falls, the bow's full draw, blunderbuss re-fire and reload, blocks, a spear chain on a boar, a rapier's light and heavy attacks (the heavy now 19 records into the hold).\n\nStill open: the jerk of a player on a slow link (Unknown), the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
     "**Bow abilities and other players: live check of the 2026-11-21 fixes (tests only).** Two players, keyboard and controller: another player running across the screen (no saw-tooth), Rain of Arrows' place on a slope and on a structure. Rain of Arrows still keeps its own player in the aim: trace the client's `SpellRaycastState` during F (needs a player at the keyboard), then fix from what it shows.",
@@ -4299,9 +4352,10 @@
     "Block end for other players (2026-11-17, tests only): the right-click's release ends the second slot (state 45, sequence 0) as retail; other players saw a rapier's block pose for the rest of the session.",
     "Other players' animations (2026-11-17, tests only): block pose end, upper slot times, landings and falls, draw ends, sheathed dodges, the re-mined player sequence table, the heavy attack lift and the press start kept at a draw.",
     "Bot tools and fixes (2026-11-21, bots): a bot walks with real input records (keys and pad), a bot saved dead respawns at login, a bot opens the mount reward box, `!gearup` wears the bag's class gear, a twice-listed quest task ends with its first copy, a tutorial exit is saved in the open world, and the director waits longer before each new start of a level whose sim stops at once.",
-    "Physics-first body, first round (2026-11-21, tests): attacks move the body by their root motion, side dodges roll sideways, moving jumps wind up, starts and stops lag a record as retail, a camera on the floor gives the body nothing, the musket's jump shows to others, and the measuring tool reads the equip load, abilities and mobs."
+    "Physics-first body, first round (2026-11-21, tests): attacks move the body by their root motion, side dodges roll sideways, moving jumps wind up, starts and stops lag a record as retail, a camera on the floor gives the body nothing, the musket's jump shows to others, and the measuring tool reads the equip load, abilities and mobs.",
+    "Quests by bots (2026-11-22, bots): the Everfall main story to its end with the staff in the bag, the Windsward main story to its end, side quests in 14 zones, encounter success events, video objects, turning stones, story trials entered at their doors, and tools worn by `!gearup`."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-21",
-  "lastCommit": "ae0d6b56"
+  "updated": "2026-11-22",
+  "lastCommit": "c3f48c7d"
 }
