@@ -49,16 +49,12 @@ impl SimWorld {
                     .state_number
                     .is_none_or(|number| number.number != own_state_counter(counter))
             });
-            if !player.state_stepped && new_number {
-                let position = body.motion.position();
-                Self::step_state(&mut player, position, now_ms, server_time);
-                player.state_stepped = true;
-            } else if player.state_number.is_none() {
+            if player.state_stepped || !new_number {
                 continue;
             }
-            let position = player
-                .state_place()
-                .unwrap_or_else(|| body.motion.position());
+            let position = body.motion.position();
+            Self::step_state(&mut player, position, now_ms, server_time);
+            player.state_stepped = true;
             let source =
                 Self::replica_source(&player, vitals, server_time, progression, status_effects);
             let seen = self.replica_memory.get(&player.number);
@@ -79,7 +75,6 @@ impl SimWorld {
             let own = viewer.number;
             let own_at = body.motion.position();
             let mut groups: Vec<BundleGroup> = Vec::new();
-            let mut needs_reliable = false;
             for (number, position, replica) in sources.iter().filter(|(number, ..)| *number != own)
             {
                 // A player without a slot yet gets its card with the tick.
@@ -101,11 +96,10 @@ impl SimWorld {
                 else {
                     continue;
                 };
-                needs_reliable |= replica.needs_reliable();
                 log_player_state(own, *number, &group);
                 groups.push(group);
             }
-            outgoing.extend(Self::remote_bundles(&mut viewer, groups, needs_reliable)?);
+            outgoing.extend(Self::remote_bundles(&mut viewer, groups)?);
         }
         Ok(outgoing)
     }
@@ -114,17 +108,11 @@ impl SimWorld {
     fn remote_bundles(
         viewer: &mut Player,
         groups: Vec<BundleGroup>,
-        needs_reliable: bool,
     ) -> Result<Vec<Outgoing>, MessageError> {
         if groups.is_empty() {
             return Ok(Vec::new());
         }
         let envelopes = sequenced_bundles(viewer, groups)?;
-        Ok(replication_outgoing(
-            &viewer.connection,
-            reliable_bundles() || needs_reliable,
-            envelopes,
-        )
-        .collect())
+        Ok(replication_outgoing(&viewer.connection, reliable_bundles(), envelopes).collect())
     }
 }

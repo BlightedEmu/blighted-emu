@@ -66,7 +66,7 @@ pub(super) const STATION_ENTITY_BASE: u64 = 1 << 37;
 /// First slot key of a player's camp: the count of camps placed in this sim is added. The camps
 /// take the upper half of the station range (the level has far fewer than `1 << 36` stations),
 /// below the loot bags (`1 << 38`).
-pub(super) const CAMP_ENTITY_BASE: u64 = STATION_ENTITY_BASE | (1 << 36);
+const CAMP_ENTITY_BASE: u64 = STATION_ENTITY_BASE | (1 << 36);
 /// The component of a spawn card.
 pub(super) const CARD_COMPONENT: u64 = 0;
 /// The status of an accepted and of a refused station interaction.

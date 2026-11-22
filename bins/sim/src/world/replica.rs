@@ -63,10 +63,14 @@ const FAR_PERIOD_TICKS: u64 = 4;
 /// states, retail's p99 datagram of 1,028 bytes).
 pub(super) const REMOTE_GROUPS_PER_TICK: usize = 24;
 /// The states of another player that carry its slayer state once it started (Observed: retail
-/// sent other players' slayer state in runs of 3 to 5 states, median 4 in `timing-retail.txt`).
-/// A change of its posture (child 43), movement flags (child 41), stamina (child 44), accuracy
-/// (child 37), or remote status effects goes in as many.
-pub(super) const REMOTE_ACTION_ECHO_STATES: u8 = 4;
+/// sent other players' slayer state in runs of 1 to 8 states, 1 to 3 in 14 of the 22 runs, and
+/// left it out of the 1,683 other states of general-other-01 and newchar-retail). A change of
+/// its posture (child 43) goes in as many (our choice: retail sent it with the posture's
+/// sequence, in the same states), and a change of its movement flags (child 41) too (Observed,
+/// 1,195 ledgers: retail sent a change of another player's child 41 in its state and 1 to 3
+/// more in 658,929 runs, alone in 52,382; 2 more is the median). A change of its stamina
+/// (child 44), its accuracy (child 37) or its remote status effects goes in as many.
+pub(super) const REMOTE_ACTION_ECHO_STATES: u8 = 3;
 /// The states after a new `pos10` anchor that repeat the anchor alongside its offset
 /// (`StepPlace::AnchorAgain`) so a single dropped unreliable datagram does not snap the remote
 /// player back ~4 m to the old anchor.
@@ -697,20 +701,6 @@ impl Replica {
             || self.remote_effects_changed
             || self.anchor_moved
             || self.upper_due
-    }
-
-    /// Whether this replica carries a single-shot (non-echoed) component change that should be
-    /// delivered reliably on the replication channel so a dropped UDP packet does not leave
-    /// viewers out of sync (weapon draw/sheathe, block, health, mount, look, faction, social).
-    pub(super) const fn needs_reliable(&self) -> bool {
-        self.health_change.is_some()
-            || self.paperdoll_change.is_some()
-            || self.loadout_change.is_some()
-            || self.mount_change.is_some()
-            || self.social_change.is_some()
-            || self.look_change.is_some()
-            || self.faction_change.is_some()
-            || self.block_changed
     }
 
     /// Whether it is in combat: it goes first.
@@ -1498,7 +1488,6 @@ pub(super) mod tests {
             dodged.clone(),
             dodged.clone(),
             dodged.clone(),
-            dodged.clone(),
             dodged,
         ]
         .into_iter()
@@ -1515,7 +1504,6 @@ pub(super) mod tests {
             [
                 (false, None),
                 (true, after.clone()),
-                (false, after.clone()),
                 (false, after.clone()),
                 (false, after),
                 (false, None),
@@ -1559,9 +1547,7 @@ pub(super) mod tests {
             jumping.clone(),
             jumping.clone(),
             jumping.clone(),
-            jumping.clone(),
             jumping,
-            source(),
             source(),
             source(),
             source(),
@@ -1582,11 +1568,9 @@ pub(super) mod tests {
             [
                 (true, air.clone()),
                 (false, air.clone()),
-                (false, air.clone()),
                 (false, air),
                 (false, None),
                 (true, floor.clone()),
-                (false, floor.clone()),
                 (false, floor.clone()),
                 (false, floor),
                 (false, None),
@@ -1631,7 +1615,7 @@ pub(super) mod tests {
         }
         assert_eq!(
             sent,
-            [true, true, true, true, false, false],
+            [true, true, true, false, false, false],
             "after the card: its action in {REMOTE_ACTION_ECHO_STATES} states, then no more"
         );
         let next = SlayerState {

@@ -5968,7 +5968,6 @@ impl Neighbourhood<'_> {
                 OwnTeleport::of(player.teleports, clock, player.move_facing, step)
             });
             let mut groups: Vec<BundleGroup> = Vec::new();
-            let mut needs_reliable = false;
             // The slot-2 entity's groups go last: the claims state is larger than a datagram
             // and takes a bundle of its own (retail sends it over several chunks).
             let mut slot_2_groups: Vec<BundleGroup> = Vec::new();
@@ -6438,9 +6437,6 @@ impl Neighbourhood<'_> {
                         (station, board) => station.or(board),
                     };
                     if group.is_some() {
-                        if slot.new && number >= crafting::CAMP_ENTITY_BASE {
-                            needs_reliable = true;
-                        }
                         tracing::debug!(player = player.number, station = number, "station shown");
                     }
                     groups.extend(group);
@@ -6569,9 +6565,6 @@ impl Neighbourhood<'_> {
                                 player.remote_plan.sight(number),
                             )?;
                             if let Some(group) = &group {
-                                if slot.new || replica.needs_reliable() {
-                                    needs_reliable = true;
-                                }
                                 if slot.new {
                                     log_player_card(own, number, group);
                                 } else {
@@ -6605,7 +6598,7 @@ impl Neighbourhood<'_> {
                 player.own_card_bundle = Some(envelopes.clone());
                 player.own_card_sent_ms = self.now_ms;
             }
-            let reliable = reliable_bundles() || first_card || needs_reliable;
+            let reliable = reliable_bundles() || first_card;
             outgoing.extend(replication_outgoing(
                 &player.connection,
                 reliable,
@@ -11213,11 +11206,9 @@ mod tests {
             vec![low],
             "the tick sends it again"
         );
-        let repeated = input_between_ticks(&mut world, COUNTER, NOW + 70);
-        assert_eq!(
-            remote_ids(&world, &repeated, &connection(2)),
-            vec![low],
-            "an old record repeats the same state number on the steady half-tick beat"
+        assert!(
+            input_between_ticks(&mut world, COUNTER, NOW + 70).is_empty(),
+            "an old record is no new state"
         );
     }
 
@@ -14894,20 +14885,10 @@ mod tests {
         assert_eq!(seen_by(&world, &outgoing, &a), vec![1, 2]);
         assert_eq!(seen_by(&world, &outgoing, &b), vec![2, 1]);
         assert_eq!(seen_by(&world, &outgoing, &c), vec![3]);
-        // Plain ticks without a new remote card go unreliably; a bundle carrying a new remote
-        // player card goes reliably so a dropped datagram does not leave the player invisible.
         assert!(
             outgoing
                 .iter()
-                .filter(|out| out.connection == c && out.channel == REPLICATION_CHANNEL)
-                .all(|out| !out.reliable)
-        );
-        assert!(
-            outgoing
-                .iter()
-                .filter(|out| (out.connection == a || out.connection == b)
-                    && out.channel == REPLICATION_CHANNEL)
-                .all(|out| out.reliable)
+                .all(|out| out.channel != REPLICATION_CHANNEL || !out.reliable)
         );
     }
 
