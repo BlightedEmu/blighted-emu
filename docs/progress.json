@@ -539,8 +539,8 @@
               "proof": "live"
             },
             {
-              "check": "Attack windows: 1.27 m median after 1 s (ability strikes move the body by their root motion; basic attacks do not, as it made the camera follow worse).",
-              "proof": "code"
+              "check": "Attack windows (2026-11-21, tests): light, heavy and charged attacks now move the server's body by their root motion, along the camera's forward and not the move keys (retail: 11 of 13 swings with a held key other than forward went 4 to 23 degrees from the camera's forward). Key-only body over 1 s, median/90th percentile: tutorial moving attacks 1.25/3.68 to 0.76/2.29 m, open world 0.56/1.61 to 0.49/1.32 m. Held-key attack chains (the client chains attacks while the key is held 2 to 7 s) start no motion yet, and near a mob retail stops about 0.78 m from its capsule, ours at 0.41 m (cause Unknown).",
+              "proof": "tests"
             },
             {
               "check": "Ship fights 0.94 m (to-do t1).",
@@ -553,6 +553,30 @@
             {
               "check": "A game pad's left stick moves the server's body (tests only, 2026-11-17): the client sends a pad's move in the input record's scaled bytes (left stick right and forward, 128 at rest), not as key bits. The body goes along the stick's own angle from the camera yaw, and a small tilt goes slower (the posture's `MinSpeed` at a tilt of 0.2 or less, the full speed at 0.8 or more). Live before the fix, a pad player's server body stayed 10 to 20 m from the client's place: swings missed, mobs near the player did not wake, and other players saw the body at the old place. Not built: the stick's speed for a mount (Unknown).",
               "proof": "tests"
+            },
+            {
+              "check": "A side dodge moves by the left or right roll, not the forward roll (2026-11-21, tests): retail side dodges went 0.89 to 0.90 of the forward roll at 0.5 s (283 dodges); our side dodges over 0.5 s 1.25/3.30 to 1.08/3.03 m, median/90th percentile, 533 dodges.",
+              "proof": "tests"
+            },
+            {
+              "check": "A moving jump lifts in the fourth record after the press and runs on the floor until then, as retail (2026-11-21, tests: median 133 ms in 1,867 retail jumps). The jump's length is still off: before the jump our body often sprints where retail runs, and retail slows on a sprint landing (`Land_Sprint`, 0.8), which the server does not play.",
+              "proof": "tests"
+            },
+            {
+              "check": "A start or a stop moves each record at the speed of the record before, as retail (2026-11-21, tests: 33 clean retail starts; a sprint stop slides 0.67 m, retail median 0.71 m); a block stop does not drift; a body that slides into a corner goes as far as is free.",
+              "proof": "tests"
+            },
+            {
+              "check": "A camera that comes down to the floor (the player looks up) gives the server's body nothing (2026-11-21, tests): live 2026-11-22 01:46:40 UTC a controller player stood still after a musket aim, the camera came from 7.54 to 1.88 m of the body at 0.18 m over the floor, and the server moved the body 4.4 m for the other player. That player's camera met the floor in 2,220 of 9,553 records, a keyboard player's in 16 of 20,147.",
+              "proof": "tests"
+            },
+            {
+              "check": "The key physics measure (2026-11-21): the fresh-start replay tool now takes the equip load from retail's own dodges, gives abilities their own class, puts the mobs in the way and warms up 4 s. Over 1 s windows the key-only body is 0.01/0.79 m (open world) and 0.06/1.23 m (tutorial) from retail, the camera body 0.03/0.45 and 0.08/0.59 m. No retail ledger has controller input, so the pad numbers use a stick made from keys.",
+              "proof": "tests"
+            },
+            {
+              "check": "Physics leads the body and the camera only corrects small error: not done (2026-11-21). Open: attack chains, the 25 percent of retail dodge presses that start late or not at all (1,657 of 6,507; attack lock or stamina, not proven), the sprint before a jump and the landing, and walls our collision has where retail walks by.",
+              "proof": "none"
             }
           ]
         },
@@ -803,6 +827,10 @@
             {
               "check": "Open (live test 2026-11-21): light attacks in the air slide 1.5 to 2 m each, as their animations do; the server copies the client's lunge and adds nothing. Retail lunges stop at their target; how far a retail swing goes with no target near is Unknown (no capture has one).",
               "proof": "none"
+            },
+            {
+              "check": "A drawn musket's or void gauntlet's jump shows its jump start to the other players (2026-11-21, tests): the sequence table had no jump for them, so the others saw the body rise with straight legs (live 2026-11-22 01:47:53 to 01:48:22 UTC); retail others jump with 14/2022 (musket, 213 of 247 jumps) and 14/1208 (void gauntlet, 279 jumps). Dodges that the other player sometimes does not see: the server read, started and sent all 6 of a controller player's dodges in that log (cause Unknown; needs a viewer trace).",
+              "proof": "tests"
             }
           ]
         },
@@ -2961,8 +2989,16 @@
               "proof": "tests"
             },
             {
-              "check": "The content build makes no collision file for the dungeon levels (only the tutorial's, the open world's and the catacombs'), so an expedition's instance sim stops at its start (bots, 2026-11-21: `nw_dungeon_windsward_00`): not done.",
-              "proof": "none"
+              "check": "The content build makes the collision files of the 12 expedition levels (2026-11-21, tests): a slice's entities stand in the space of its top entity, and the top entity stands where the capital puts the slice. Against the retail own places of the shared retail capture recordings of 11 expeditions, 80 to 87 percent stand on the floor within 0.1 m (Windsward 33,468 of 41,456; it was 22,027 before the rule, with 10,168 places over no floor, now 0), and the tutorial and open world files did not get worse. A Windsward instance sim now starts with its file on the PC and on the game VM (2,508 solids, 72 mobs, no errors). `nw_dungeon_dunwood_02` has no retail capture.",
+              "proof": "tests"
+            },
+            {
+              "check": "The bridges, blockers, doors and plates of an expedition stand in the players' ground while their gate entity stands, by its state (2026-11-21, tests): the solids of a gate's `Healthy` entity stand while it is closed, those of its `Depleted` entity while it is open, and a solid that the gate's timeline moves only while it is closed. Against the retail own places of 11 expeditions this holds the players on the Shattered Mountain corruption bridges (299 places that had no floor at all now stand on one) and takes away 1,051 of 1,369 places where a solid stood over a player's feet. Not shown yet: the slices that encounter stages spawn (void tunnel portals, statues), and two bridges whose timelines do not fit the rule.",
+              "proof": "tests"
+            },
+            {
+              "check": "A group of three bots enters Amrine Excavation together (2026-11-21, bots): the leader invites the others, each accepts, the leader enters from afar and the others follow into the same instance; each walks the start area with keyboard or controller input, and after its first steps the server's body stands on the level's floor (4 of 5 places within 0.02 m, one 0.18 m; the place the server gives has one decimal). The body comes in at the teleport spot's height, 1.2 m above the floor, until its first move.",
+              "proof": "bots"
             }
           ]
         },
@@ -3923,12 +3959,12 @@
     }
   ],
   "nextSteps": [
-    "**Player body: key physics first (2026-11-19 study).** The server guesses each body from the client camera, and the camera boom changes with no key the server sees. A test with camera corrections across the view only made the live error larger (90th percentile 2.9 to 17 m), so the key physics must improve first, measured cause by cause with the fresh-start replay: attack and ability motion and the move lock in attacks, the dodge distance from the gear's equip load, slope speed, walls our collision has and the game does not, and ledge climbs. Then the camera's correction along the view can go, and the own states can carry the input counter as retail's do.\n\nLive check of this round: the bow abilities and the crosshair aim on a boar, with the client trace on.",
+    "**Player body: physics leads (2026-11-21).**\n\n- Done (tests): attack root motion along the camera, side dodge rolls, the jump's wind-up, the start and stop lag, the camera on the floor, the measuring tool.\n- Next, in order: held-key attack chains, late and missed dodges (1,657 of 6,507 retail presses), the sprint before a jump and the sprint landing, the walls retail walks by (a stall near 7643, 4268).\n- Then let key physics lead and the camera only correct small error, measured on the fresh-start tool for keys and pad, and a live controller trace (no retail ledger has controller input).",
     "**Other players: live check of the 2026-11-20 second round (tests only).** Two players, keyboard and controller: crouch and prone with the pad (left shoulder with a left stick click, and held), quick double dodge presses (one roll each, no restart), and a keyboard video like the controller one. Then the earlier list: a bow's hip shots held long and short, walking and running backward, keys let go during an attack, walk starts, jumps and falls, the bow's full draw, blunderbuss re-fire and reload, blocks, a spear chain on a boar, a rapier's light and heavy attacks (the heavy now 19 records into the hold).\n\nStill open: the jerk of a player on a slow link (Unknown), the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
     "**Bow abilities and other players: live check of the 2026-11-21 fixes (tests only).** Two players, keyboard and controller: another player running across the screen (no saw-tooth), Rain of Arrows' place on a slope and on a structure. Rain of Arrows still keeps its own player in the aim: trace the client's `SpellRaycastState` during F (needs a player at the keyboard), then fix from what it shows.",
     "**Account link pop-up (2026-11-17): live check (tests only).** Close the game, run `scripts/patch-client.py` again on each computer (with `--aws-proxy` on Windows), and start a few sessions: no Link Account pop-up at character select.",
     "**Quest bots: next checks.**\n\n- Play the Monarch's Bluffs side quests and the next zone's main story with the bots.\n- Watch early fights with wolves, boars and other creatures that bite: their mouth weapon now gives a blocked bite its stamina cost and its stagger (bots and tests only).\n- A player client waits for the answer while a trial sim starts (up to 60 s): check the client's screen in that time live.",
-    "**Expeditions: collision files for the dungeon levels (2026-11-21).**\n\n- The content build makes collision only for the tutorial, the open world and the catacombs.\n- An expedition's instance sim stops at its start without one.\n- Adding the dungeon levels changes the content build, the realm pack and the game VM's content.",
+    "**Expeditions: play one with a group (2026-11-21).**\n\n- A bot group enters Amrine Excavation and walks its start area (`nw-testclient expedition`). Next: walk it over a light bridge and through a door once they open, and play a run with players.\n- Check live that the bridges and doors of the other expeditions hold and stop players as on retail.\n- The world director forgot the Amrine instance 0.2 s after it opened (its sims' report came before the open); the other bots still came into the same instance. Find out why.",
     "**Plant gather nodes (2026-11-15): live check (tests only).**\n\n- Monarch's Bluffs: gather a bush, a small boulder and a tree; each gives its loot and grows back.\n- Check the sim's start time and memory with the bigger world file.",
     "**Camps (2026-11-15): the rest of the live check.**\n\n- Respawn at the camp after a death.\n- Craft at the camp's station.\n- Place a camp with no wood: it stands unbuilt; gather the wood and build it.\n- A game master gets the reason line of a refused camp in chat.",
     "**One busy sim (2026-11-15): the bundle stops of the 110-bot run.**\n\n- The run: `nw-testclient hunt`, `gather` and `swarm` together on the real-client stack (30, 30 and 50 bots).\n- The ticks keep time now; the hunt and gather bots still report a stop in their bundles. Find the cause.",
@@ -4262,7 +4298,8 @@
     "Controller attacks for other players (2026-11-17, tests only): the server's own attack starts for other players read a pad's held trigger as its press, as the hits do; the sim logs each input record to find where the server's body and the client part.",
     "Block end for other players (2026-11-17, tests only): the right-click's release ends the second slot (state 45, sequence 0) as retail; other players saw a rapier's block pose for the rest of the session.",
     "Other players' animations (2026-11-17, tests only): block pose end, upper slot times, landings and falls, draw ends, sheathed dodges, the re-mined player sequence table, the heavy attack lift and the press start kept at a draw.",
-    "Bot tools and fixes (2026-11-21, bots): a bot walks with real input records (keys and pad), a bot saved dead respawns at login, a bot opens the mount reward box, `!gearup` wears the bag's class gear, a twice-listed quest task ends with its first copy, a tutorial exit is saved in the open world, and the director waits longer before each new start of a level whose sim stops at once."
+    "Bot tools and fixes (2026-11-21, bots): a bot walks with real input records (keys and pad), a bot saved dead respawns at login, a bot opens the mount reward box, `!gearup` wears the bag's class gear, a twice-listed quest task ends with its first copy, a tutorial exit is saved in the open world, and the director waits longer before each new start of a level whose sim stops at once.",
+    "Physics-first body, first round (2026-11-21, tests): attacks move the body by their root motion, side dodges roll sideways, moving jumps wind up, starts and stops lag a record as retail, a camera on the floor gives the body nothing, the musket's jump shows to others, and the measuring tool reads the equip load, abilities and mobs."
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-21",
