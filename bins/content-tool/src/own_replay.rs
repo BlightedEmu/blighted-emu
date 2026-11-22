@@ -19,7 +19,7 @@ use nw_capture::{CLIENT_TO_SERVER, Decoder, ledger_records};
 use nw_content::creature_animations::CreatureAnimations;
 use nw_content::layout::ContentLayout;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
-use nw_content::player_attacks::{AttackMotion, Stance};
+use nw_content::player_attacks::{BasicAttack, Stance};
 use nw_messages::{BodyCodec, ClientInputMsg, InputRecord, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX};
 use nw_sim_core::{
     AmongCharacters, CharacterBody, Ground, LevelGround, MountPaces, Position, TrackedBody,
@@ -148,7 +148,6 @@ pub fn replay(
     ground: &(impl Ground + ?Sized),
     sea_level_m: f32,
 ) -> (Vec<Compared>, usize) {
-    let times = record_times(records);
     let mut next_attack = 0;
     let place = |sample: &PlayerSample| Position {
         x: sample.position[0],
@@ -164,7 +163,7 @@ pub fn replay(
     let mut compared = Vec::new();
     let mut server_moves = 0;
     let mut next_mount = 0;
-    for ((time_ms, record, view), &record_ms) in records.iter().zip(&times) {
+    for (time_ms, record, view) in records {
         if let Some(riding) = riding {
             while let Some(sample) = riding
                 .samples
@@ -191,18 +190,9 @@ pub fn replay(
         };
         while let Some(attack) = attacks
             .get(next_attack)
-            .filter(|attack| attack.at_ms <= record_ms)
+            .filter(|attack| attack.message_ms < *time_ms)
         {
-            // An attack is a few seconds of milliseconds.
-            #[allow(clippy::cast_precision_loss)]
-            let since_ms = (record_ms - attack.at_ms) as f32;
-            body.start_attack(
-                Arc::clone(&attack.motion),
-                attack.keys_from_ms,
-                since_ms,
-                ground,
-                sea_level_m,
-            );
+            attack.start_on(&mut body, ground, sea_level_m);
             next_attack += 1;
         }
         // Retail's places up to this input: a server move puts the body there.
@@ -409,41 +399,84 @@ pub fn record_times(records: &[(u64, InputRecord, sim::camera::RecordView)]) -> 
     times
 }
 
-/// An attack the server starts by the attack key, whose animation moves its player.
+/// An attack the sim starts by the attack key ([`sim::world::SimWorld::attack_input`]), whose
+/// animation moves its player.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttackStart {
+    /// The time of the input message whose records start it, ms from the first ledger record:
+    /// the sim starts its motion once that message's records moved the body.
+    pub message_ms: u64,
     /// When it starts, ms from the first ledger record.
     pub at_ms: u64,
-    /// How it moves its player.
-    pub motion: Arc<AttackMotion>,
-    /// From this long after its start a movement key ends it (its next attack's start), ms.
-    pub keys_from_ms: f32,
+    /// How long before the newest record of its message it started, ms (below 0: after).
+    pub since_ms: f32,
+    /// The attack it plays.
+    pub attack: Arc<BasicAttack>,
 }
 
-/// The attacks that a server reading the attack key of `records` at `times` with the weapon
-/// stance `stance` starts ([`sim::world::AttackKeys`]), those whose animation moves the player.
-pub fn attack_starts(
+impl AttackStart {
+    /// Its motion moves `body` over `ground` with the sea at `sea_level_m`, as the sim's does
+    /// ([`sim::world::start_attack_motion`]).
+    pub fn start_on(
+        &self,
+        body: &mut TrackedBody,
+        ground: &(impl Ground + ?Sized),
+        sea_level_m: f32,
+    ) -> Option<Position> {
+        sim::world::start_attack_motion(body, &self.attack, self.since_ms, ground, sea_level_m)
+    }
+}
+
+/// How the attack key of a player fires at a time, and the stance it attacks with
+/// ([`sim::world::KeyFire`]).
+pub type KeyStance<'a> = (sim::world::KeyFire, Option<&'a Stance>);
+
+/// The attacks that the sim starts for the attack key of `records` at `times`, whose key fires
+/// as `stance_at` says at the time of each message, those whose animation moves the player: as
+/// [`sim::world::SimWorld::attack_input`] reads one message, oldest record first, the first attack
+/// of a message continues the combo and starts, the others are too fast; with the right-click
+/// held in its newest record a stance that aims plays its aimed shot; a spread-shot weapon's
+/// swings wait for their hand and start no motion here.
+pub fn attack_starts<'a>(
     records: &[(u64, InputRecord, sim::camera::RecordView)],
     times: &[u64],
-    stance: &Stance,
+    stance_at: impl Fn(u64) -> KeyStance<'a>,
 ) -> Vec<AttackStart> {
     let mut keys = sim::world::AttackKeys::NONE;
-    records
-        .iter()
-        .zip(times)
-        .filter_map(|((_, record, _), &time_ms)| {
-            let attack = keys.record(Some(stance), record, time_ms, true)?;
-            let basic = stance.schedule(attack.step)?.attack(attack.kind)?;
-            // An attack's time is a few seconds of milliseconds.
+    let mut starts = Vec::new();
+    let mut from = 0;
+    while from < records.len() {
+        let message_ms = records[from].0;
+        let to = from + records[from..].partition_point(|(time_ms, ..)| *time_ms == message_ms);
+        let (fire, stance) = stance_at(message_ms);
+        let mut first = None;
+        for ((_, record, _), &record_ms) in records[from..to].iter().zip(&times[from..to]) {
+            let attack = keys.read(fire, stance, record, record_ms, first.is_none());
+            first = first.or(attack);
+        }
+        let newest_ms = times[to - 1];
+        let aiming = records[to - 1].1.blocking();
+        let played = first
+            .filter(|_| fire == sim::world::KeyFire::Attacks)
+            .and_then(|attack| {
+                let played = stance?.played(attack.step, attack.kind, aiming)?;
+                played.motion.as_ref()?;
+                Some((attack, played))
+            });
+        if let Some((attack, played)) = played {
+            // An attack starts within seconds of its message.
             #[allow(clippy::cast_precision_loss)]
-            let keys_from_ms = basic.next_attack_from_ms() as f32;
-            Some(AttackStart {
+            let since_ms = newest_ms as f32 - attack.started_ms as f32;
+            starts.push(AttackStart {
+                message_ms,
                 at_ms: attack.started_ms,
-                motion: Arc::new(basic.motion.clone()?),
-                keys_from_ms,
-            })
-        })
-        .collect()
+                since_ms,
+                attack: Arc::new(played.clone()),
+            });
+        }
+        from = to;
+    }
+    starts
 }
 
 /// The mobs of a ledger as bodies on the ground ([`AmongCharacters`]): each one's places until
@@ -523,7 +556,6 @@ pub fn key_windows(
     sea_level_m: f32,
     window_ms: u64,
 ) -> Vec<KeyWindow> {
-    let times = record_times(records);
     let place = |sample: &PlayerSample| Position {
         x: sample.position[0],
         y: sample.position[1],
@@ -560,11 +592,10 @@ pub fn key_windows(
         let mut body = TrackedBody::new(warm_at);
         let mut body_begin = warm_at;
         let (mut keys, mut acted, mut swam) = (false, false, false);
-        let mut next_attack = attacks.partition_point(|attack| attack.at_ms < warm_ms);
-        for ((time_ms, record, view), &record_ms) in records[first..]
+        let mut next_attack = attacks.partition_point(|attack| attack.message_ms < warm_ms);
+        for (time_ms, record, view) in records[first..]
             .iter()
-            .zip(&times[first..])
-            .take_while(|((time_ms, ..), _)| *time_ms < end_ms)
+            .take_while(|(time_ms, ..)| *time_ms < end_ms)
         {
             let Some(mut input) = sim::camera::track_input(record, *view) else {
                 continue;
@@ -579,18 +610,9 @@ pub fn key_windows(
             let mut attacked = false;
             while let Some(attack) = attacks
                 .get(next_attack)
-                .filter(|attack| attack.at_ms <= record_ms)
+                .filter(|attack| attack.message_ms < *time_ms)
             {
-                // An attack is a few seconds of milliseconds.
-                #[allow(clippy::cast_precision_loss)]
-                let since_ms = (record_ms - attack.at_ms) as f32;
-                body.start_attack(
-                    Arc::clone(&attack.motion),
-                    attack.keys_from_ms,
-                    since_ms,
-                    ground,
-                    sea_level_m,
-                );
+                attack.start_on(&mut body, ground, sea_level_m);
                 attacked = true;
                 next_attack += 1;
             }
@@ -717,10 +739,12 @@ mod tests {
         let bytes = read_ledger(&repo().join(ledger)).expect("ledger");
         let trace = trace_ledger(&bytes, &[]);
         let records = input_records(&bytes);
-        let attacks = attack_starts(&records, &record_times(&records), sword)
-            .into_iter()
-            .filter(|attack| attack.at_ms < sword_until_ms)
-            .collect();
+        let attacks = attack_starts(&records, &record_times(&records), |message_ms| {
+            (
+                sim::world::KeyFire::Attacks,
+                (message_ms < sword_until_ms).then_some(sword),
+            )
+        });
         Run {
             mobs: MobBodies::of(&trace.mobs, &creatures),
             retail: trace.player,

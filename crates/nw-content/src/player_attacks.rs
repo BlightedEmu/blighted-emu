@@ -827,6 +827,15 @@ impl Stance {
         }
     }
 
+    /// The attack that an attack of `kind` in combo step `step` plays: with the right-click held
+    /// (`aiming`) the aimed shot of a stance that aims ([`Stance::aimed_attack`]), else the
+    /// step's attack of `kind`.
+    pub fn played(&self, step: usize, kind: AttackKind, aiming: bool) -> Option<&BasicAttack> {
+        self.aimed_attack(kind)
+            .filter(|_| aiming)
+            .or_else(|| self.schedule(step)?.attack(kind))
+    }
+
     /// The attack a key let go `held_ms` after its press makes in the first combo step
     /// ([`Schedule::released`]).
     pub fn released(&self, held_ms: u64) -> Option<(AttackKind, u64)> {
@@ -1202,6 +1211,32 @@ mod tests {
         fields.remove("aimed_charged");
         let old: Stance = serde_json::from_value(json).expect("a file from before the aim");
         assert_eq!(old, greatsword());
+    }
+
+    #[test]
+    fn an_attack_plays_the_aimed_shot_only_while_it_aims() {
+        const SHOT_ROW: &str = "BowAttack1";
+        let bow = Stance {
+            aimed: Some(BasicAttack {
+                damage_row: SHOT_ROW.to_owned(),
+                ..melee("Bow_AimChargeShoot_SubState")
+            }),
+            ..greatsword()
+        };
+        let played = |aiming| {
+            bow.played(0, AttackKind::Light, aiming)
+                .map(|attack| attack.damage_row.clone())
+        };
+        assert_eq!(played(true).as_deref(), Some(SHOT_ROW));
+        assert_eq!(
+            played(false),
+            bow.light.as_ref().map(|attack| attack.damage_row.clone())
+        );
+        assert_eq!(
+            greatsword().played(0, AttackKind::Light, true),
+            greatsword().light.as_ref(),
+            "a stance that does not aim plays its own attack"
+        );
     }
 
     #[test]

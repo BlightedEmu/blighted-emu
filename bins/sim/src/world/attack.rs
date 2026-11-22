@@ -28,7 +28,8 @@ use std::sync::Arc;
 
 use nw_content::character_points::ATTRIBUTE_COUNT;
 use nw_content::combat::{
-    AffixDamage, AttackRow, DamageCategory, IncomingHit, LevelRow, MobGuard, RangedBlock, WeaponRow,
+    AffixDamage, AttackRow, CombatData, DamageCategory, IncomingHit, LevelRow, MobGuard,
+    RangedBlock, WeaponRow,
 };
 use nw_content::passive_abilities::Trigger;
 use nw_content::player_attacks::{
@@ -46,8 +47,9 @@ use nw_messages::{
 };
 use nw_sim_core::character::swim_floor;
 use nw_sim_core::{
-    CharacterBody, Damage, Health, PlayerAttack, TUTORIAL_START, armor_rating, armor_share,
-    mob_hit, player_hit, weapon_damage_scale,
+    AmongCharacters, CharacterBody, Damage, Ground, Health, LevelGround, PlayerAttack,
+    TUTORIAL_START, TrackedBody, armor_rating, armor_share, mob_hit, player_hit,
+    weapon_damage_scale,
 };
 
 use super::abilities::fresh_aim;
@@ -365,6 +367,24 @@ impl AttackKeys {
         record.attack_key_after(self.blocking).goes_down(self.down)
     }
 
+    /// Reads `record` at `record_ms` as the sim does for a player whose key fires as `fire`
+    /// says, with `stance`: a key that fires seen shots ([`KeyFire::SeenShots`]) starts no
+    /// attack, and only its state is noted; else [`AttackKeys::record`].
+    pub fn read(
+        &mut self,
+        fire: KeyFire,
+        stance: Option<&Stance>,
+        record: &InputRecord,
+        record_ms: u64,
+        continues_combo: bool,
+    ) -> Option<KeyAttack> {
+        if fire == KeyFire::SeenShots {
+            self.note_down(record);
+            return None;
+        }
+        self.record(stance, record, record_ms, continues_combo)
+    }
+
     /// Notes the key's state after `record` ([`nw_messages::AttackKeyBits::down_after`]).
     fn note_down(&mut self, record: &InputRecord) {
         self.down = record.attack_key_after(self.blocking).down_after(self.down);
@@ -556,6 +576,60 @@ impl AttackKeys {
         }
         Some(attack)
     }
+}
+
+/// How the attack key of a player starts its attacks, by the weapon in its hand
+/// ([`SimWorld::attack_input`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyFire {
+    /// The key starts the basic attacks of the weapon's stance ([`AttackKeys::record`]).
+    Attacks,
+    /// A spread-shot weapon fires through its own request; the key swings its melee option,
+    /// and only a swing without a shot request takes that option in hand
+    /// ([`SimWorld::melee_hand`]).
+    SpreadShot,
+    /// A bow or a gun fires the shots its slayer state shows the other players
+    /// ([`StanceSequences::shoots`]): the key starts no attack of its own.
+    SeenShots,
+}
+
+impl KeyFire {
+    /// How the key fires with `held` in the hand (`None`: no weapon), by `data`.
+    pub fn of(data: &CombatData, held: Option<&WeaponRow>) -> Self {
+        match held {
+            Some(weapon) if weapon.spread_shot => Self::SpreadShot,
+            Some(weapon)
+                if data
+                    .player_sequences()
+                    .stance(weapon.stance)
+                    .is_some_and(StanceSequences::shoots) =>
+            {
+                Self::SeenShots
+            }
+            _ => Self::Attacks,
+        }
+    }
+}
+
+/// The root motion of the basic attack `attack` (its action's `AnimationDrivenMotion`,
+/// [`BasicAttack::motion`]) moves `body` from `since_ms` after its start on (below 0: it starts
+/// that much later): the records the body took since the start are taken again with it, over
+/// `ground` with the sea at `sea_level_m`, and a movement key ends it from its next attack's
+/// start on ([`BasicAttack::next_attack_from_ms`], [`TrackedBody::start_attack`]). Gives where
+/// the attack started; `None` for an attack that leaves the motion to the keys. The sim calls
+/// it for every basic attack the attack key starts ([`SimWorld::attack_input`]); the replays of
+/// retail captures call it so too (`content-tool` `own_replay`).
+pub fn start_attack_motion(
+    body: &mut TrackedBody,
+    attack: &BasicAttack,
+    since_ms: f32,
+    ground: &(impl Ground + ?Sized),
+    sea_level_m: f32,
+) -> Option<Position> {
+    let motion = Arc::new(attack.motion.clone()?);
+    #[allow(clippy::cast_precision_loss, reason = "an attack of a few seconds")]
+    let keys_from_ms = attack.next_attack_from_ms() as f32;
+    Some(body.start_attack(motion, keys_from_ms, since_ms, ground, sea_level_m))
 }
 
 /// The least time between two aimed shots: a release before it shoots when it ends (Observed,
@@ -2078,16 +2152,9 @@ impl SimWorld {
         // spread-shot weapon (which fires through its own request), the melee option.
         let data = Arc::clone(&self.combat.data);
         let held = self.held_weapon(entity).map(|(weapon, _)| weapon);
-        let spread = held.is_some_and(|weapon| weapon.spread_shot);
-        // A bow or a gun (not the spread-shot weapon, which fires through its own request) fires
-        // the shots its slayer state shows the other players ([`StanceSequences::shoots`]): the
-        // attack key starts no attack of its own.
-        let shoots_as_seen = !spread
-            && held.is_some_and(|weapon| {
-                data.player_sequences()
-                    .stance(weapon.stance)
-                    .is_some_and(StanceSequences::shoots)
-            });
+        let fire = KeyFire::of(&data, held.as_ref());
+        let spread = fire == KeyFire::SpreadShot;
+        let shoots_as_seen = fire == KeyFire::SeenShots;
         let (stance, hand) = if spread {
             let melee = self.world.get::<Player>(entity).and_then(|player| {
                 let gear = player.gear.as_ref()?;
@@ -2160,28 +2227,26 @@ impl SimWorld {
             block_pressed |= record.blocking() && !vitals.keys.blocking;
             sheathe_pressed |= record.sheathe_pressed();
             swap_pressed |= record.weapon_swap_pressed();
-            if shoots_as_seen {
-                vitals.keys.note_down(record);
-                continue;
-            }
             let record_ms = record_ms_of(counter);
             match vitals
                 .keys
-                .record(stance, record, record_ms, attacks.is_empty())
+                .read(fire, stance, record, record_ms, attacks.is_empty())
             {
                 Some(attack) => attacks.push(attack),
                 // A press or release that starts nothing: a press before the links of the attack
                 // that plays, or a release with no charge (live 2026-11-12: light attacks of some
                 // players started no swing, and the log could not show why).
-                None if pressed || record.attack_released() => tracing::debug!(
-                    player = number,
-                    counter,
-                    pressed,
-                    released = record.attack_released(),
-                    stance = stance.is_some(),
-                    keys = ?vitals.keys,
-                    "attack key starts no attack"
-                ),
+                None if !shoots_as_seen && (pressed || record.attack_released()) => {
+                    tracing::debug!(
+                        player = number,
+                        counter,
+                        pressed,
+                        released = record.attack_released(),
+                        stance = stance.is_some(),
+                        keys = ?vitals.keys,
+                        "attack key starts no attack"
+                    )
+                }
                 None => {}
             }
         }
@@ -2270,15 +2335,8 @@ impl SimWorld {
         // `player_bow.adb`): the shot the others saw is aimed or not.
         let aiming =
             fired_aimed.unwrap_or_else(|| records.first().is_some_and(InputRecord::blocking));
-        let aimed = stance
-            .filter(|_| aiming)
-            .and_then(|stance| stance.aimed_attack(kind));
-        let Some(attack) = aimed
-            .or_else(|| {
-                stance
-                    .and_then(|stance| stance.schedule(step))
-                    .and_then(|schedule| schedule.attack(kind))
-            })
+        let Some(attack) = stance
+            .and_then(|stance| stance.played(step, kind, aiming))
             .cloned()
         else {
             tracing::debug!(
@@ -2315,10 +2373,18 @@ impl SimWorld {
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             player.attack_playing = Some(PlayingAttack::of(&attack, started_ms));
         }
-        let start = self
-            .world
-            .get::<Body>(entity)
-            .map(|body| body.motion.position());
+        // The attack's root motion moves the body (a spread-shot weapon's swing waits for its
+        // hand: [`SimWorld::melee_hand`]); its swing sweeps from where it started.
+        let moved_from = if spread {
+            None
+        } else {
+            self.start_body_attack(connection, entity, &attack, started_ms, now_ms)
+        };
+        let start = moved_from.or_else(|| {
+            self.world
+                .get::<Body>(entity)
+                .map(|body| body.motion.position())
+        });
         self.player_swings.push(PlayerSwing {
             attacker: connection.clone(),
             aim: Aim {
@@ -2350,6 +2416,68 @@ impl SimWorld {
             .iter()
             .map(|_| Err(AttackRefusal::TooFast))
             .collect()
+    }
+
+    /// The root motion of the basic attack `attack`, started at `started_ms`, moves the body of
+    /// player `entity` of `connection` from the records of the input message read at `now_ms` on
+    /// ([`start_attack_motion`]): its moves of that message are taken again with the motion,
+    /// over the ground its body moves on (the level with the solids shown to it, the mobs'
+    /// capsules), and the server's place takes the body's new place. Gives where the attack
+    /// started; `None` for an attack that leaves the motion to the keys.
+    ///
+    /// Observed (attack motion study 2026-11-21, `camerabody` fresh 1 s windows of the retail
+    /// newchar tutorial and 11 open world ledgers): retail's place went a median 0.84 m in a
+    /// standing swing's second, where the keys alone left the body standing; with the motion
+    /// the keys-only body erred by 0.55/1.90 m (median/90th percentile) in the tutorial's
+    /// standing swings against 0.72/2.08 m, by 0.77/2.29 against 1.25/3.68 m in its moving
+    /// ones, and in the open world by 0.72/1.81 against 0.80/2.23 and 0.55/1.31 against
+    /// 0.56/1.61 m.
+    fn start_body_attack(
+        &mut self,
+        connection: &ConnectionRef,
+        entity: Entity,
+        attack: &BasicAttack,
+        started_ms: u64,
+        now_ms: u64,
+    ) -> Option<Position> {
+        attack.motion.as_ref()?;
+        let at = self.world.get::<Body>(entity)?.motion.position();
+        let characters = self.character_bodies_near(at);
+        let level = Arc::clone(&self.ground);
+        let sea_level_m = self.settings.ocean_level_m;
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "an attack starts within seconds of its message"
+        )]
+        let since_ms = if now_ms >= started_ms {
+            (now_ms - started_ms) as f32
+        } else {
+            -((started_ms - now_ms) as f32)
+        };
+        let (started, moved_to) = {
+            let mut player = self.world.get_mut::<Player>(entity)?;
+            let with_solids = player
+                .solids
+                .clone()
+                .map(|solids| LevelGround::new(&*level, solids));
+            let level: &dyn Ground = match &with_solids {
+                Some(ground) => ground,
+                None => &*level,
+            };
+            let ground = AmongCharacters {
+                ground: level,
+                characters: &characters,
+            };
+            let started =
+                start_attack_motion(&mut player.tracked, attack, since_ms, &ground, sea_level_m)?;
+            (started, player.tracked.position())
+        };
+        if moved_to != at
+            && let Err(refusal) = self.move_to(connection, moved_to, now_ms)
+        {
+            tracing::debug!(?refusal, "attack motion move refused");
+        }
+        Some(started)
     }
 
     /// Whether `stance` has a melee basic attack.
@@ -4427,6 +4555,46 @@ mod tests {
         let mut world = fight();
         tick(&mut world, NOW);
         world
+    }
+
+    /// The basic attack the attack key starts moves the body by its root motion, along the
+    /// view, with no movement key (retail great sword swings in the open of
+    /// `12-5_survivors-Amidst-the-Wreckage`: 1.30 to 1.97 m in 1 s, the motion 1.32 m; the
+    /// server's body of the keys alone stood still).
+    #[test]
+    fn the_attack_key_s_swing_moves_the_body_by_its_root_motion() {
+        /// Far from the mob: its capsule does not stop the lunge.
+        const AWAY_M: f32 = 12.0;
+        /// The still records after the swing: over the light attack's 1.42 s.
+        const STILL_RECORDS: u16 = 50;
+        /// The test sword's light attack goes 2.13 m forward (`player-attacks-25810808.json`).
+        const LUNGE_M: f32 = 2.13;
+        const CLOSE_M: f32 = 0.05;
+        let mut world = fight_at(MOB_X + AWAY_M);
+        tick(&mut world, NOW);
+        let at = |world: &mut SimWorld| {
+            let entity = world.player_by_number(1).expect("player");
+            world
+                .world
+                .get::<Body>(entity)
+                .expect("body")
+                .motion
+                .position()
+        };
+        let start = at(&mut world);
+        let swing = message(1, &[Key::Press, Key::Release]);
+        let _ = world.move_from_input(&connection(1), &swing, NOW);
+        world.attack_input(&connection(1), &swing, NOW);
+        for counter in 3..3 + STILL_RECORDS {
+            let now = NOW + u64::from(counter - 2) * u64::from(INPUT_RECORD_MS);
+            let _ = world.move_from_input(&connection(1), &message(counter, &[Key::Hold]), now);
+        }
+        let end = at(&mut world);
+        // The view faces west (-x).
+        assert!(
+            (start.x - end.x - LUNGE_M).abs() < CLOSE_M && (end.y - start.y).abs() < CLOSE_M,
+            "from {start:?} to {end:?}"
+        );
     }
 
     #[test]

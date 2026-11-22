@@ -208,7 +208,7 @@ use statics::{
     chest_gather_started, facet_of, interactor_target,
 };
 
-pub use attack::{AttackKeys, Blow, INPUT_RECORD_MS, KeyAttack};
+pub use attack::{AttackKeys, Blow, INPUT_RECORD_MS, KeyAttack, KeyFire, start_attack_motion};
 pub use gm_chat::{
     COMPANY_IN_COMPANY, COMPANY_NAME_TAKEN, DONE as GM_DONE, FACTION_UNCHANGED, GmChat,
     answer_lines, company_made,

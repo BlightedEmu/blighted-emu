@@ -74,12 +74,19 @@
 //! nothing.
 //!
 //! An attack whose action's animation drives the motion (`AnimationDrivenMotion`,
-//! [`AttackMotion`]) moves the body by the animation's root, not by the keys: toward the keys of
-//! the record it starts in, else the camera's forward (Observed, retail newchar tutorial: the
-//! first attacks after a pause without a movement key went 1 to 24 degrees from the camera's
-//! forward; with a key held the place kept 0.84 to 0.97 m/s from 0.5 to 1 s after the start,
-//! against 3.5 to 5 m/s free), with the velocity it keeps, until a movement key ends it from its
-//! `CanTransition` marker on, a dodge or a block ends it, or its motion is over. The sim learns
+//! [`AttackMotion`]) moves the body by the animation's root, not by the keys: along the yaw of
+//! the record it starts in, with the velocity it keeps, until a movement key ends it from its
+//! `CanTransition` marker on, a dodge or a block ends it, or its motion is over. With the keys
+//! that yaw is the camera's: the attack's `CameraRelativeFacing` (`playeractions_attack.actionlist`,
+//! the `AttackFacing` player setting) faces the camera, and a held movement key neither turns
+//! nor moves it (Observed, attack motion study 2026-11-21, the basic attacks the sim starts in
+//! 12 retail ledgers, 128 attacks: of the 13 sword and great sword attacks with a key held other
+//! than forward alone that moved the place, 11 went 4 to 23 degrees from the camera's forward
+//! and 30 to 175 degrees from the keys' direction; a body that went along the keys ran backward
+//! on a back key). A pad's tilted stick turns the record's yaw to the stick
+//! ([`crate::character::Intent::toward_stick`]): the attack goes where the stick points
+//! (Inferred: the pad's `AttackFacing_Alternate` setting, whose default is Unknown; no retail
+//! ledger has stick input). The sim learns
 //! of an attack after the records of its message moved the body: those records are taken again
 //! with the attack's motion ([`TrackedBody::start_attack`]). An ability's fragment with an
 //! animation-driven motion moves the body so too, from the record after the message that
@@ -92,8 +99,8 @@ use nw_content::player_attacks::AttackMotion;
 
 use crate::camera_check::{CameraBody, CameraCheck, CameraView, MAX_BOOM_M, MOUNTED_CAMERA_LAG_S};
 use crate::character::{
-    Character, CharacterInput, MountPaces, Posture, SPRINT_SPEED_MPS, key_direction, swim_floor_at,
-    wall_between, yaw_axes,
+    Character, CharacterInput, MountPaces, Posture, SPRINT_SPEED_MPS, swim_floor_at, wall_between,
+    yaw_axes,
 };
 use crate::equip_load::EquipLoad;
 use crate::movement::{Ground, Position};
@@ -377,7 +384,8 @@ impl TrackedBody {
     /// The server started an attack of motion `motion` `since_ms` ago (below 0: it starts that
     /// much later), whose movement keys may end it from `keys_from_ms` after its start: its
     /// animation moves the body from then on. The records the body took since its start are
-    /// taken again with its motion, over `ground` with the sea at `sea_level_m`.
+    /// taken again with its motion, over `ground` with the sea at `sea_level_m`. Gives where it
+    /// started: where the body stood before the first record taken again, else where it stands.
     pub fn start_attack(
         &mut self,
         motion: Arc<AttackMotion>,
@@ -385,7 +393,7 @@ impl TrackedBody {
         since_ms: f32,
         ground: &(impl Ground + ?Sized),
         sea_level_m: f32,
-    ) {
+    ) -> Position {
         let mut rewind = 0;
         let mut rewound_ms = 0.0;
         for record in self.taken.iter().rev() {
@@ -403,9 +411,10 @@ impl TrackedBody {
             false,
         ));
         let Some(first) = again.first() else {
-            return;
+            return self.character.position();
         };
-        self.character.land_at(first.before);
+        let started = first.before;
+        self.character.land_at(started);
         for record in again {
             let driven = self.attack_motion(record.input, record.velocity);
             self.remember(record.input);
@@ -419,6 +428,7 @@ impl TrackedBody {
                 }
             }
         }
+        started
     }
 
     /// A hit reaction of motion `motion` starts now (`playeractions_reaction.actionlist`: the
@@ -483,14 +493,8 @@ impl TrackedBody {
             play.at_ms = to_ms;
             return None;
         }
-        let held = play.held;
         let forward = *play.forward.get_or_insert_with(|| {
-            let facing = yaw_axes(yaw).0;
-            let forward = if held {
-                facing
-            } else {
-                key_direction(intent, yaw).unwrap_or(facing)
-            };
+            let forward = yaw_axes(yaw).0;
             let right = [forward[1], -forward[0]];
             let along = |axis: [f32; 2]| velocity[0] * axis[0] + velocity[1] * axis[1];
             let kept = [along(right), along(forward)];
@@ -1181,6 +1185,44 @@ mod tests {
         body.stand_at(start());
         body.record(keys(0, yaw), &Flat, SEA);
         assert_eq!(body.position(), start(), "a server move ends the attack");
+    }
+
+    /// A movement key held at the attack's start does not turn it: the keyboard's attack faces
+    /// the camera (`CameraRelativeFacing`; retail: a back key held through a great sword's first
+    /// swing at 423.0 s of the newchar tutorial, the own place went 2.2 m, 11 degrees from the
+    /// camera's forward), and a pad's tilted stick, which turns the record's yaw, sends it where
+    /// the stick points.
+    #[test]
+    fn an_attack_goes_along_the_record_s_yaw_whatever_the_keys() {
+        let mut back = TrackedBody::new(start());
+        back.start_attack(lunge(), NO_KEYS_MS, 0.0, &Flat, SEA);
+        for _ in 0..LUNGE_RECORDS {
+            back.record(keys(-1, 0.0), &Flat, SEA);
+        }
+        let at = back.position();
+        assert!(
+            (at.y - (start().y + 1.0)).abs() < CLOSE && (at.x - start().x).abs() < CLOSE,
+            "a back key: along the camera's forward, {at:?}"
+        );
+        // A stick tilted right under a camera along +y: the record's yaw turns to the stick
+        // (`Intent::toward_stick`).
+        let (stick, yaw) = Intent::default()
+            .with_stick(Some([1.0, 0.0]))
+            .toward_stick(0.0);
+        let mut pad = TrackedBody::new(start());
+        pad.start_attack(lunge(), NO_KEYS_MS, 0.0, &Flat, SEA);
+        for _ in 0..LUNGE_RECORDS {
+            let mut record = keys(0, yaw);
+            record.character.intent = stick;
+            pad.record(record, &Flat, SEA);
+        }
+        let at = pad.position();
+        let facing = yaw_axes(yaw).0;
+        assert!(
+            (at.x - (start().x + facing[0])).abs() < CLOSE
+                && (at.y - (start().y + facing[1])).abs() < CLOSE,
+            "a stick: where it points, {at:?}"
+        );
     }
 
     /// An ability's fragment starts with the record after the message that pressed its key
