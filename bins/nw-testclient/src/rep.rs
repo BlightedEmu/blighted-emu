@@ -8,7 +8,9 @@
 use std::io::Write;
 
 use nw_capture::{CLIENT_TO_SERVER, LedgerWriter, SERVER_TO_CLIENT};
-use nw_carrier::{CarrierError, Connection, ConnectionState, Event, MESSAGE_CHANNEL};
+use nw_carrier::{
+    CarrierError, Connection, ConnectionState, Event, MESSAGE_CHANNEL, ReceiveLimits,
+};
 use nw_common::time::unix_ms;
 use nw_dtls::{DtlsClientConfig, DtlsError, DtlsSession};
 use nw_reflect::{
@@ -196,6 +198,10 @@ impl RepClient {
     fn message(&mut self, channel: u8, envelope: Envelope) -> Result<RepEvent, RepError> {
         Ok(match envelope.type_index() {
             Some(REGISTRATION_RESPONSE_MSG_TYPE_INDEX) => {
+                // After the registration the server sends messages over the registration limit,
+                // as the gateway takes them from the client (retail captures hold messages over
+                // 128 KiB; a character's login state grows with its finished quests).
+                self.carrier.set_receive_limits(ReceiveLimits::SESSION);
                 RepEvent::Registered(RegistrationResponseMsg::decode(&envelope.body)?)
             }
             Some(PING_MSG_TYPE_INDEX) => {
@@ -265,7 +271,7 @@ pub(crate) mod tests {
     use std::net::SocketAddr;
     use std::sync::LazyLock;
 
-    use nw_carrier::ReceiveLimits;
+    use nw_carrier::receiver::MAX_REGISTRATION_MESSAGE_LEN;
     use nw_dtls::{COOKIE_SECRET_LEN, DtlsServerConfig, Identity, self_signed_identity};
     use nw_reflect::{
         REGISTRATION_RESPONSE_OBSERVED_FLAGS, REGISTRATION_STATUS_AUTHORIZED,
@@ -281,6 +287,8 @@ pub(crate) mod tests {
     const SECRET: [u8; COOKIE_SECRET_LEN] = [3; COOKIE_SECRET_LEN];
     const PEER: &str = "192.0.2.20:50000";
     const PING_BODY: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 42];
+    /// The byte of a message body over the registration limit.
+    const LARGE_BYTE: u8 = 5;
     /// A game message the client does not read: channel 1, unreliable, as the replication.
     const OTHER_CHANNEL: u8 = 1;
     const OTHER_TYPE_INDEX: u64 = 446;
@@ -362,6 +370,17 @@ pub(crate) mod tests {
         }
     }
 
+    /// The gateway's answer to an admitted registration.
+    fn authorized() -> RegistrationResponseMsg {
+        RegistrationResponseMsg {
+            uint32_at_0x8: REGISTRATION_STATUS_AUTHORIZED,
+            uint64: 1,
+            bytes_at_0x18: b"TOKEN".to_vec(),
+            bytes_at_0x38: b"version".to_vec(),
+            bytes_at_0x58: REGISTRATION_RESPONSE_OBSERVED_FLAGS,
+        }
+    }
+
     /// Runs both sides until `done` returns true; returns the client events and server envelopes.
     fn run(
         client: &mut RepClient,
@@ -403,13 +422,7 @@ pub(crate) mod tests {
         let config = DtlsClientConfig::new(&IDENTITY.certificate_pem).expect("client config");
         let mut client = RepClient::new(&config, MTU, token(), START_MS).expect("client");
         let mut server = Server::new();
-        let response = RegistrationResponseMsg {
-            uint32_at_0x8: REGISTRATION_STATUS_AUTHORIZED,
-            uint64: 1,
-            bytes_at_0x18: b"TOKEN".to_vec(),
-            bytes_at_0x38: b"version".to_vec(),
-            bytes_at_0x58: REGISTRATION_RESPONSE_OBSERVED_FLAGS,
-        };
+        let response = authorized();
         let reply = response.encode().expect("response");
         let (events, envelopes) = run(
             &mut client,
@@ -429,6 +442,35 @@ pub(crate) mod tests {
         assert_eq!(events.last(), Some(&RepEvent::Registered(response)));
         let v3 = RegistrationRequestV3Msg::decode(&envelopes[0].body).expect("v3");
         assert_eq!(v3.login_token(), token());
+    }
+
+    #[test]
+    fn after_its_registration_the_client_takes_a_message_over_the_registration_limit() {
+        let config = DtlsClientConfig::new(&IDENTITY.certificate_pem).expect("client config");
+        let mut client = RepClient::new(&config, MTU, token(), START_MS).expect("client");
+        let mut server = Server::new();
+        let response = authorized().encode().expect("response");
+        let large = vec![LARGE_BYTE; MAX_REGISTRATION_MESSAGE_LEN + 1];
+        let (events, _) = run(
+            &mut client,
+            &mut server,
+            |server, envelope| {
+                if envelope.type_index() == Some(REGISTRATION_REQUEST_V3_MSG_TYPE_INDEX) {
+                    server.send(REGISTRATION_RESPONSE_MSG_TYPE_INDEX, response.clone());
+                    server.send(OTHER_TYPE_INDEX, large.clone());
+                }
+            },
+            |events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, RepEvent::Message(_)))
+            },
+        );
+        let expected = Received {
+            channel: MESSAGE_CHANNEL,
+            envelope: Envelope::message(TypeId::FileSlot(OTHER_TYPE_INDEX), large),
+        };
+        assert_eq!(events.last(), Some(&RepEvent::Message(expected)));
     }
 
     #[test]
@@ -531,14 +573,7 @@ pub(crate) mod tests {
 
     fn registered_with(client: &mut RepClient) {
         let mut server = Server::new();
-        let response = RegistrationResponseMsg {
-            uint32_at_0x8: REGISTRATION_STATUS_AUTHORIZED,
-            uint64: 1,
-            bytes_at_0x18: b"TOKEN".to_vec(),
-            bytes_at_0x38: b"version".to_vec(),
-            bytes_at_0x58: REGISTRATION_RESPONSE_OBSERVED_FLAGS,
-        };
-        let reply = response.encode().expect("response");
+        let reply = authorized().encode().expect("response");
         let (events, _) = run(
             client,
             &mut server,

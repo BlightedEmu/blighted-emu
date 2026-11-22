@@ -70,6 +70,7 @@ struct SeatState {
 pub struct GroupBoard {
     seats: Mutex<Vec<SeatState>>,
     leader_inside: AtomicBool,
+    leader_done: AtomicBool,
 }
 
 /// One bot's seat on a [`GroupBoard`].
@@ -85,6 +86,7 @@ impl GroupBoard {
         let board = Arc::new(Self {
             seats: Mutex::new(vec![SeatState::default(); bots]),
             leader_inside: AtomicBool::new(false),
+            leader_done: AtomicBool::new(false),
         });
         (0..bots)
             .map(|seat| GroupSeat {
@@ -156,6 +158,16 @@ impl GroupSeat {
     /// Whether the leader is in the instance.
     pub fn leader_inside(&self) -> bool {
         self.board.leader_inside.load(Ordering::SeqCst)
+    }
+
+    /// The leader ended its play.
+    pub fn set_leader_done(&self) {
+        self.board.leader_done.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the leader ended its play.
+    pub fn leader_done(&self) -> bool {
+        self.board.leader_done.load(Ordering::SeqCst)
     }
 
     /// The server gave this bot the place `place`.
@@ -242,26 +254,56 @@ fn where_step(seat: &GroupSeat, what: String) -> Step {
     }
 }
 
+/// The leader's invite of the other bots, proved once each of them is in the group.
+fn invite_step(seat: &GroupSeat) -> Step {
+    Step {
+        what: "invite the other bots into a group".to_owned(),
+        acts: vec![Act::InviteGroup(seat.clone())],
+        proof: Proof::GroupFull(seat.clone()),
+        wait: GROUP_WAIT,
+    }
+}
+
+/// A member's accept of the leader's invite, proved by its own groups state.
+fn accept_step(seat: &GroupSeat) -> Step {
+    Step {
+        what: "accept the leader's invite".to_owned(),
+        acts: vec![Act::AcceptGroupInvite(seat.clone())],
+        proof: Proof::InGroup(seat.clone()),
+        wait: GROUP_WAIT,
+    }
+}
+
+/// The steps of the bot of `seat` in a group whose leader plays quests that need a group (an
+/// expedition opens only for a group of its `MinGroupSize`): the leader invites the others and
+/// then plays its quests (`crate::play::PlayData::activities_first`); a member accepts and stays
+/// in the group, in the open world, until the leader's play ends or `hold` passes.
+pub fn quest_group_steps(seat: &GroupSeat, hold: Duration) -> Vec<Step> {
+    if seat.leads() {
+        vec![invite_step(seat)]
+    } else {
+        vec![
+            accept_step(seat),
+            Step {
+                what: "stay in the group while the leader plays".to_owned(),
+                acts: Vec::new(),
+                proof: Proof::LeaderDone(seat.clone()),
+                wait: hold,
+            },
+        ]
+    }
+}
+
 /// The steps of the bot of `seat` in the group that enters the expedition of game mode `mode`
 /// (the CRC-32 of its lowercase id `crc`) and walks with `records`: the group
 /// (the leader invites, a member accepts and waits for the leader in the instance), the entry,
 /// and the walk of [`WALK_LEGS`] with a server place before it and after each leg.
 pub fn expedition_steps(seat: &GroupSeat, mode: &str, crc: u32, records: &RecordWalk) -> Vec<Step> {
     let mut steps = if seat.leads() {
-        vec![Step {
-            what: "invite the other bots into a group".to_owned(),
-            acts: vec![Act::InviteGroup(seat.clone())],
-            proof: Proof::GroupFull(seat.clone()),
-            wait: GROUP_WAIT,
-        }]
+        vec![invite_step(seat)]
     } else {
         vec![
-            Step {
-                what: "accept the leader's invite".to_owned(),
-                acts: vec![Act::AcceptGroupInvite(seat.clone())],
-                proof: Proof::InGroup(seat.clone()),
-                wait: GROUP_WAIT,
-            },
+            accept_step(seat),
             Step {
                 what: "wait for the leader in the instance".to_owned(),
                 acts: Vec::new(),
@@ -464,6 +506,22 @@ mod tests {
                 .count(),
             WALK_LEGS.len() + 1
         );
+    }
+
+    #[test]
+    fn a_quest_group_leader_invites_and_a_member_stays_until_the_leader_is_done() {
+        const HOLD: Duration = Duration::from_secs(600);
+        let seats = GroupBoard::seats(3);
+        let leader = quest_group_steps(&seats[0], HOLD);
+        assert_eq!(leader.len(), 1);
+        assert_eq!(leader[0].what, "invite the other bots into a group");
+        let member = quest_group_steps(&seats[2], HOLD);
+        assert_eq!(member[0].what, "accept the leader's invite");
+        assert!(matches!(&member[1].proof, Proof::LeaderDone(_)));
+        assert_eq!(member[1].wait, HOLD);
+        assert!(!seats[1].leader_done());
+        seats[0].set_leader_done();
+        assert!(seats[1].leader_done(), "every seat of the board sees it");
     }
 
     #[test]

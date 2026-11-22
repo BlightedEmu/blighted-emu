@@ -40,7 +40,9 @@ use nw_testclient::config::{
 };
 use nw_testclient::fleet::{NewClient, udp_receive_errors};
 use nw_testclient::gather::{GatherNode, run_gather};
-use nw_testclient::group::{GroupBoard, GroupSeat, expedition_steps, floor_lines};
+use nw_testclient::group::{
+    GroupBoard, GroupSeat, LEADER, expedition_steps, floor_lines, quest_group_steps,
+};
 use nw_testclient::hunt::run_hunt;
 use nw_testclient::pair::{Check, LATE_STATE_GAP, PairReport, PairSettings, RecordWalk, run_pair};
 use nw_testclient::play::{PlayData, PlayReport, PlaySettings, Verdict, run_play};
@@ -182,6 +184,14 @@ enum Command {
         /// Longest time in the world, in minutes.
         #[arg(long, default_value_t = DEFAULT_EXPEDITION_MINUTES)]
         minutes: u64,
+        /// Quests the leader plays, comma-separated, once the group is formed (in place of the
+        /// walk of the start area): a quest step that needs the expedition enters it with the
+        /// group, and the others stay in the group until the leader ends.
+        #[arg(long, value_delimiter = ',')]
+        quests: Vec<String>,
+        /// Quests a game master line starts at the leader's setup, past their requirements.
+        #[arg(long, value_delimiter = ',')]
+        gm_start: Vec<String>,
     },
 }
 
@@ -309,18 +319,29 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
             accounts,
             report,
             minutes,
+            quests,
+            gm_start,
         } => {
             let first = own(&config)?;
             let bots = accounts
                 .iter()
-                .map(|account| PlaySettings {
+                .enumerate()
+                .map(|(seat, account)| PlaySettings {
                     account: WalkSettings {
                         account: account.clone(),
                         character_name: format!("{account}{PLAY_CHARACTER_MARK}"),
                         ..first.clone()
                     },
-                    quests: Vec::new(),
-                    gm_start: Vec::new(),
+                    quests: if seat == LEADER {
+                        quests.clone()
+                    } else {
+                        Vec::new()
+                    },
+                    gm_start: if seat == LEADER {
+                        gm_start.clone()
+                    } else {
+                        Vec::new()
+                    },
                     hold: Duration::from_secs(minutes * SECONDS_PER_MINUTE),
                     registration_timeout: Duration::from_secs(config.registration_timeout_seconds),
                 })
@@ -807,9 +828,12 @@ impl PlayContent {
 
     /// The play data of a bot that plays `activities`, in the seat `group` of a group of bots.
     fn play_data(&self, activities: Vec<Activity>, group: Option<GroupSeat>) -> PlayData {
-        let nodes = self
-            .world
-            .gatherables
+        // The sim's own gather nodes, in its order (with the cyclic stones' points).
+        let points = sim::player_content::level_gather_points(
+            &self.world,
+            &nw_content::gathering::CyclicGatherables::from_tables(&self.tables),
+        );
+        let nodes = points
             .iter()
             .map(|point| GatherNode {
                 gatherable: point.gatherable_id,
@@ -817,9 +841,7 @@ impl PlayContent {
             })
             .collect();
         let gatherables = Gatherables::from_tables(&self.tables);
-        let containers = self
-            .world
-            .gatherables
+        let containers = points
             .iter()
             .map(|point| point.gatherable_id)
             .filter(|crc| {
@@ -830,6 +852,7 @@ impl PlayContent {
             .collect();
         PlayData {
             activities,
+            activities_first: false,
             nodes,
             containers,
             poi_tags: PoiTags::from_tables(&self.tables),
@@ -892,25 +915,43 @@ async fn expedition(
     let (walk_ground, sea_level_m) = nw_sim_core::player_level_ground(&content.layout, level)?;
     let walk_ground: Arc<dyn nw_sim_core::Ground + Send + Sync> = Arc::new(walk_ground);
     let seats = GroupBoard::seats(bots.len());
+    // With quests, the leader plays them once the group is formed; else every bot walks.
+    let questing = bots.first().is_some_and(|leader| !leader.quests.is_empty());
     let runs = bots.iter().zip(&seats).map(|(settings, seat)| {
         let records = RecordWalk {
             device: seat_device(seat),
             ground: Arc::clone(&walk_ground),
             sea_level_m,
         };
+        let steps = if questing {
+            quest_group_steps(seat, settings.hold)
+        } else {
+            expedition_steps(seat, &mode.id, mode.crc, &records)
+        };
         let activity = Activity {
             kind: ActivityKind::Group,
-            steps: Ok(expedition_steps(seat, &mode.id, mode.crc, &records)),
+            steps: Ok(steps),
         };
-        let data = content.play_data(vec![activity], Some(seat.clone()));
+        let mut data = content.play_data(vec![activity], Some(seat.clone()));
+        data.activities_first = questing;
         let bot = seat.number();
-        run_play(
-            http,
-            settings,
-            data,
-            |token| RepClient::new(trusted, config.mtu, token, 0).map(|client| ledger.give(client)),
-            move |line| println!("bot {bot}: {line}"),
-        )
+        let seat = seat.clone();
+        async move {
+            let report = run_play(
+                http,
+                settings,
+                data,
+                |token| {
+                    RepClient::new(trusted, config.mtu, token, 0).map(|client| ledger.give(client))
+                },
+                move |line| println!("bot {bot}: {line}"),
+            )
+            .await;
+            if seat.leads() {
+                seat.set_leader_done();
+            }
+            report
+        }
     });
     let reports = all(runs.collect()).await;
     let mut markdown = format!(
@@ -927,7 +968,7 @@ async fn expedition(
             settings.account.account,
             seat_device(seat)
         );
-        passed &= expedition_section(&mut markdown, report, seat, &ground);
+        passed &= expedition_section(&mut markdown, report, seat, &ground, questing);
     }
     std::fs::write(report_path, &markdown)?;
     println!("{markdown}");
@@ -954,6 +995,7 @@ fn expedition_section(
     report: Result<PlayReport, nw_testclient::pair::PairError>,
     seat: &GroupSeat,
     ground: &CollisionIndex,
+    questing: bool,
 ) -> bool {
     let report = match report {
         Ok(report) => report,
@@ -969,6 +1011,16 @@ fn expedition_section(
         for action in &play.actions {
             let _ = writeln!(markdown, "  - {action}");
         }
+    }
+    if questing {
+        if seat.leads() {
+            passed &= report
+                .quests
+                .iter()
+                .all(|play| play.verdict == Verdict::Completed);
+            let _ = writeln!(markdown, "\n{}", report.markdown());
+        }
+        return passed;
     }
     let _ = writeln!(
         markdown,

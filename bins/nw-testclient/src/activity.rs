@@ -22,8 +22,9 @@ use nw_messages::arena::{
     PLAYER_ARENA_COMPONENT, REMOTE_INTERACT_RESULT_TYPE_INDEX,
 };
 use nw_messages::client_input::{
-    APPLY_ALL_RESOURCES_KIND, CRAFTING_STATION_KIND, GATHER_KIND, LOOT_KIND, LORE_KIND,
-    TOWN_BOARD_KIND, TOWN_BOARD_NAME, WAR_BOARD_KIND, WAR_BOARD_NAME,
+    APPLY_ALL_RESOURCES_KIND, CRAFTING_STATION_KIND, ENTER_DUNGEON_KIND, GATHER_KIND, LOOT_KIND,
+    LORE_KIND, OPEN_DUNGEON_MENU_KIND, TOWN_BOARD_KIND, TOWN_BOARD_NAME, WAR_BOARD_KIND,
+    WAR_BOARD_NAME,
 };
 use nw_messages::conversation_client::ObjectiveInteractorClientMsg;
 use nw_messages::facet::{
@@ -247,6 +248,8 @@ pub enum Proof {
     InGroup(GroupSeat),
     /// The leader of the seat's group is in the instance.
     LeaderInside(GroupSeat),
+    /// The group's leader ended its play ([`GroupSeat::leader_done`]).
+    LeaderDone(GroupSeat),
 }
 
 /// One step of an activity.
@@ -574,14 +577,29 @@ pub fn gather_steps(name: &str, node: GatherNode, index: usize) -> Vec<Step> {
     )
 }
 
+/// The steps of a gather of the encounter start object of raw id `object` (its card's id) as
+/// gatherable `gatherable` (the CRC-32 of its lowercase id): the encounter's stage that waits
+/// for its gather goes on. The bot stands at the object.
+pub fn start_object_steps(object: [u8; RAW_ID_LEN], gatherable: u32) -> Vec<Step> {
+    gather_of(
+        "gather the encounter's start object".to_owned(),
+        Vec::new(),
+        object,
+        nw_messages::facet_of_raw_id(&object),
+        gatherable,
+    )
+}
+
 /// The steps of a skin of the corpse of raw id `corpse` as gatherable `gatherable` (the
 /// CRC-32 of its lowercase id): the gather request of retail's skin (beach capture `12-3`:
 /// kind 14, the corpse's raw id and facet entity, gatherable `Boar`), then its end. The bot
-/// stands at the corpse after its fight.
-pub fn skin_steps(corpse: [u8; RAW_ID_LEN], gatherable: u32) -> Vec<Step> {
+/// goes to the corpse's place `at` first: a mob that moved in the fight dies away from the
+/// bot (live 2026-11-22 10:28:46: `gather out of reach of any such node
+/// gatherable=Primal_Lion`).
+pub fn skin_steps(corpse: [u8; RAW_ID_LEN], gatherable: u32, at: [f32; 3]) -> Vec<Step> {
     gather_of(
-        "skin the corpse".to_owned(),
-        Vec::new(),
+        "go to the corpse and skin it".to_owned(),
+        vec![teleport(at)],
         corpse,
         nw_messages::facet_of_raw_id(&corpse),
         gatherable,
@@ -1115,15 +1133,59 @@ pub fn trial_steps(mode: &str, game_mode: u32) -> Vec<Step> {
             Proof::ArenaYes(DUNGEON_ACTIVATE_RESULT_TYPE_INDEX),
             LONG_WAIT,
         ),
+        teleport_into(mode),
+    ]
+}
+
+/// Enters an instance of game mode `mode` (`game_mode`, the CRC-32 of its lowercase id) at its
+/// entrance capital `door`, as a player at the door does: it goes to the door's place `at` (when
+/// known), opens the entrance's menu (interaction 71, the 5038 answer), enters (72, the 6776
+/// answer), then 946 ([`teleport_into`]).
+pub fn door_trial_steps(mode: &str, game_mode: u32, door: u64, at: Option<[f32; 3]>) -> Vec<Step> {
+    let request = |kind| Act::Interact {
+        request: InteractionRequest {
+            target: [0; RAW_ID_LEN],
+            target_entity: door,
+            interaction: 0,
+            kind,
+            gatherable: None,
+        },
+        name: SOLO_TRIAL_ENTRY_NAME.to_vec(),
+    };
+    let mut open = Vec::from_iter(at.map(teleport));
+    open.push(request(OPEN_DUNGEON_MENU_KIND));
+    vec![
         step(
-            format!("teleport into game mode {mode}"),
-            vec![arena_call(|header| ArenaClientMsg::TeleportIntoDungeon {
-                header,
-            })],
-            Proof::Message(LEVEL_INFO_CHANGED_MSG_TYPE_INDEX),
+            format!("open the entrance {door:016x} of game mode {mode} ({game_mode:08x})"),
+            open,
+            Proof::ArenaYes(REMOTE_INTERACT_RESULT_TYPE_INDEX),
             LONG_WAIT,
         ),
+        step(
+            format!("enter game mode {mode} at its entrance"),
+            vec![request(ENTER_DUNGEON_KIND)],
+            Proof::ArenaYes(DUNGEON_ACTIVATE_RESULT_TYPE_INDEX),
+            LONG_WAIT,
+        ),
+        teleport_into(mode),
     ]
+}
+
+/// The name of a solo trial entrance's interactions, its leading space included (retail
+/// `06A_MSQ_21_DefeatBoss` and `99A_MSQ_15_Ritual`: 71 then 72 at the trial door).
+const SOLO_TRIAL_ENTRY_NAME: &[u8] = b" @arena_solo_enter";
+
+/// The 946 into the instance the server granted for game mode `mode`, which the handoff to the
+/// instance sim answers with the instance level (1635).
+fn teleport_into(mode: &str) -> Step {
+    step(
+        format!("teleport into game mode {mode}"),
+        vec![arena_call(|header| ArenaClientMsg::TeleportIntoDungeon {
+            header,
+        })],
+        Proof::Message(LEVEL_INFO_CHANGED_MSG_TYPE_INDEX),
+        LONG_WAIT,
+    )
 }
 
 /// Leaves the instance the bot is in (926), after which the handoff back to the open world
@@ -1713,6 +1775,26 @@ mod tests {
                     && request.gatherable == Some(lowercase_crc32(HARVESTED_GATHERABLE))
             ),
             "an empty node id names the first node anyone gathered with it"
+        );
+    }
+
+    /// Live 2026-11-22 10:28:46: a lion that moved in the fight died out of the bot's reach.
+    #[test]
+    fn a_skin_goes_to_the_corpse_then_gathers_it() {
+        const CORPSE: [u8; RAW_ID_LEN] = [9; RAW_ID_LEN];
+        const AT: [f32; 3] = [7250.7, 8173.0, 196.0];
+        let gatherable = lowercase_crc32("Primal_Lion");
+        let steps = skin_steps(CORPSE, gatherable, AT);
+        assert!(
+            matches!(
+                steps[0].acts.as_slice(),
+                [Act::Teleport(at), Act::Interact { request, .. }]
+                    if *at == AT
+                        && request.target == CORPSE
+                        && request.kind == GATHER_KIND
+                        && request.gatherable == Some(gatherable)
+            ),
+            "the bot stands at the corpse when it asks to skin it"
         );
     }
 }
