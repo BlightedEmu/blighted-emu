@@ -1219,19 +1219,28 @@ impl Gear {
         Some((u32::try_from(index).ok()?, stack.item.instance, slot_id))
     }
 
-    /// Equips each bag item of a worn kind into the first paperdoll slot of its kind while that
-    /// slot is empty, as a client's equip ([`Self::equip`]) with the items `disabled` names left
-    /// in the bag: a new character's class head and weapons start in the bag (bot soak
-    /// 2026-11-21: a Soldier wore its chest, hands, legs and feet; its head, sword, shield and
-    /// hatchet were in the bag). The ids worn, in bag order.
-    pub(super) fn wear_bag_gear(&mut self, disabled: impl Fn(&str) -> bool) -> Vec<String> {
+    /// Equips each bag item of a worn kind into the first paperdoll slot of its kind, and each
+    /// gathering tool (its `ItemClass` parts by `classes_of`) into its tool slot, while that slot
+    /// is empty, as a client's equip ([`Self::equip`]) with the items `disabled` names left in
+    /// the bag: a new character's class head and weapons start in the bag (bot soak 2026-11-21:
+    /// a Soldier wore its chest, hands, legs and feet; its head, sword, shield and hatchet were
+    /// in the bag). The ids worn, in bag order.
+    pub(super) fn wear_bag_gear(
+        &mut self,
+        disabled: impl Fn(&str) -> bool,
+        classes_of: impl Fn(&str) -> Vec<String>,
+    ) -> Vec<String> {
         let candidates: Vec<(usize, u32, [u8; RAW_ID_LEN])> = self
             .bag
             .iter()
             .enumerate()
             .filter_map(|(index, stack)| {
                 let stack = stack.as_ref()?;
-                Some((index, first_slot(stack.kind?), stack.item.instance))
+                let slot_id = stack
+                    .kind
+                    .map(first_slot)
+                    .or_else(|| tool_slot_of(&classes_of(&stack.item_id)))?;
+                Some((index, slot_id, stack.item.instance))
             })
             .collect();
         candidates
@@ -1395,6 +1404,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_bag_s_gathering_tools_are_worn_in_their_tool_slots() {
+        // `!gearup` of a bot with the pick and the knife in its bag (bot 2026-11-22: a quest
+        // gather of `99E_MSQ_02_MyrddinCrystalsA` was refused `NoTool` with them in the bag).
+        const PICK: &str = "2hPickT5";
+        const KNIFE: &str = "1hSkinningKnifeT5";
+        /// The mining and skinning tool slots (retail beach captures `12-1` and `12-2`).
+        const MINING_SLOT: u32 = 36;
+        const SKINNING_SLOT: u32 = 35;
+        let kits = kits_with(&[
+            (PICK, "EquippableTool+Axe+PickAxe"),
+            (KNIFE, "EquippableTool+Axe+SkinningKnife"),
+        ]);
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("kit");
+        for item in [PICK, KNIFE] {
+            assert!(gear.add(kits.item(item).expect("tool"), 1), "{item}");
+        }
+        let classes_of = |item_id: &str| -> Vec<String> {
+            let tool = if item_id == PICK {
+                "PickAxe"
+            } else {
+                "SkinningKnife"
+            };
+            ["EquippableTool", "Axe", tool].map(str::to_owned).into()
+        };
+        let worn = gear.wear_bag_gear(none_disabled, classes_of);
+        assert!(worn.contains(&PICK.to_owned()) && worn.contains(&KNIFE.to_owned()));
+        assert_eq!(gear.worn_item(MINING_SLOT), Some(PICK));
+        assert_eq!(gear.worn_item(SKINNING_SLOT), Some(KNIFE));
+    }
+
+    #[test]
     fn a_tool_in_the_bag_is_equipped_into_its_tool_slot() {
         const KNIFE: &str = "1hSkinningKnifeT1";
         /// The skinning tool slot (retail beach capture `12-2`).
@@ -1435,7 +1475,7 @@ pub(crate) mod tests {
         for item in [DISABLED_HELM, HELM, SECOND_HELM, STAFF] {
             assert!(gear.add(kits.item(item).expect("item"), 1), "{item}");
         }
-        let worn = gear.wear_bag_gear(|item_id| item_id == DISABLED_HELM);
+        let worn = gear.wear_bag_gear(|item_id| item_id == DISABLED_HELM, |_| Vec::new());
         assert_eq!(
             worn,
             vec![HELM.to_owned()],
@@ -1449,7 +1489,10 @@ pub(crate) mod tests {
             1,
             "the kit sword holds the first main-hand option"
         );
-        assert!(gear.wear_bag_gear(none_disabled).is_empty(), "nothing more");
+        assert!(
+            gear.wear_bag_gear(none_disabled, |_| Vec::new()).is_empty(),
+            "nothing more"
+        );
     }
 
     /// The kit of [`BACKSTORY`] with its bag's staff worn in the second main-hand option: two

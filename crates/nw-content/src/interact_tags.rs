@@ -235,6 +235,19 @@ impl InteractTags {
             .any(|known| known.eq_ignore_ascii_case(tag))
     }
 
+    /// The gatherables (the CRC-32 of each lowercase `GatherableEntryID`) whose variants set tag
+    /// `tag` (any case), lowest first.
+    pub fn gatherables_with(&self, tag: &str) -> Vec<u32> {
+        let mut found: Vec<u32> = self
+            .by_gatherable
+            .iter()
+            .filter(|(_, tags)| tags.iter().any(|known| known.eq_ignore_ascii_case(tag)))
+            .map(|(gatherable, _)| *gatherable)
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
     /// The interact tags of the object with facet entity `facet`; empty for an object with none.
     pub fn of(&self, facet: u64) -> &[String] {
         self.by_key
@@ -258,6 +271,18 @@ mod tests {
             tag: tag.to_owned(),
             only_on_quest,
         }
+    }
+
+    #[test]
+    fn a_tag_names_the_gatherables_whose_variants_set_it() {
+        const VISTA: u32 = 4_231_706_836;
+        const OTHER: u32 = 7;
+        let tags = InteractTags::default().with_gatherables([
+            (VISTA, tag_of("IO_1124_VistaPoint1", true)),
+            (OTHER, tag_of("IO_Other", false)),
+        ]);
+        assert_eq!(tags.gatherables_with("io_1124_vistapoint1"), [VISTA]);
+        assert!(tags.gatherables_with("IO_Missing").is_empty());
     }
 
     #[test]

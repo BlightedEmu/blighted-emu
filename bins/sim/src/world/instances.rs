@@ -49,12 +49,12 @@ use crate::login::phase_id;
 
 /// Interaction kinds of the client's `InteractionUIActions` (`sheathe/interact_enum.tsv`).
 pub mod kind {
-    /// `OpenDungeonMenu`: the menu of an expedition entrance.
-    pub const OPEN_DUNGEON_MENU: u8 = 71;
     /// `EnterDungeon`: activate the entrance's expedition.
-    pub const ENTER_DUNGEON: u8 = 72;
+    pub use nw_messages::client_input::ENTER_DUNGEON_KIND as ENTER_DUNGEON;
     /// `ExitDungeon`: leave the instance at its exit.
     pub use nw_messages::client_input::EXIT_DUNGEON_KIND as EXIT_DUNGEON;
+    /// `OpenDungeonMenu`: the menu of an expedition entrance.
+    pub use nw_messages::client_input::OPEN_DUNGEON_MENU_KIND as OPEN_DUNGEON_MENU;
 }
 
 /// The 3743 status of an accepted dungeon interaction (as for the travel interactions).

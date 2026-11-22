@@ -375,6 +375,9 @@ pub struct CyclicState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CyclicGatherables {
     by_crc: HashMap<u32, Vec<CyclicState>>,
+    /// The gatherables each cyclic shows, in state order, each once, by its lowercase
+    /// `VariantID`.
+    shown: HashMap<String, Vec<String>>,
 }
 
 impl CyclicGatherables {
@@ -426,7 +429,17 @@ impl CyclicGatherables {
     /// The cyclic gatherables of `cyclics` (variant id, the gatherable of each state).
     pub fn build(cyclics: impl IntoIterator<Item = (String, Vec<Option<String>>)>) -> Self {
         let mut by_crc: HashMap<u32, Vec<CyclicState>> = HashMap::new();
+        let mut shown: HashMap<String, Vec<String>> = HashMap::new();
         for (cyclic, gatherables) in cyclics {
+            let mut distinct: Vec<String> = Vec::new();
+            for gatherable in gatherables.iter().flatten() {
+                if !distinct.contains(gatherable) {
+                    distinct.push(gatherable.clone());
+                }
+            }
+            if !distinct.is_empty() {
+                shown.insert(cyclic.to_lowercase(), distinct);
+            }
             let states = u32::try_from(gatherables.len()).unwrap_or(u32::MAX);
             let mut shown: HashMap<u32, Vec<u32>> = HashMap::new();
             for (state, gatherable) in (0..states).zip(&gatherables) {
@@ -449,7 +462,15 @@ impl CyclicGatherables {
                 });
             }
         }
-        Self { by_crc }
+        Self { by_crc, shown }
+    }
+
+    /// The gatherables that the cyclic `cyclic` (a `VariantID`, any case) shows, in state order,
+    /// each once; empty for no cyclic.
+    pub fn gatherables_of(&self, cyclic: &str) -> &[String] {
+        self.shown
+            .get(&cyclic.to_lowercase())
+            .map_or(&[], Vec::as_slice)
     }
 
     /// The cyclic states the gatherable whose lowercase id has the CRC-32 `crc` shows.
@@ -953,6 +974,25 @@ mod tests {
         assert!(
             cyclic
                 .of(lowercase_crc32("13_summer_carpenter1"))
+                .is_empty()
+        );
+        assert_eq!(
+            cyclic.gatherables_of("cyclic_09a_m13_arcaneritual"),
+            [
+                "09A_M13_ArcaneRitual_0",
+                "09A_M13_ArcaneRitual_1",
+                "09A_M13_ArcaneRitual_2"
+            ],
+            "in state order, any case"
+        );
+        assert_eq!(
+            cyclic.gatherables_of("Cyclic_99C_MSQ_puzzle1_stone1"),
+            ["Cyclic_99C_MSQ_puzzle1_stone1"],
+            "a stone's one gatherable once"
+        );
+        assert!(
+            cyclic
+                .gatherables_of("Cyclic_13_Summer_Carpenter")
                 .is_empty()
         );
     }

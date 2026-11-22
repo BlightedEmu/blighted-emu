@@ -1188,6 +1188,16 @@ impl SimWorld {
             }
             // An instanced object stays for everyone else: only its gatherer's tracker locks it.
             None if gather.instanced => self.nodes.release(&gather.request.target, gather.number),
+            // A cyclic stone turns to its next state at once and stays (retail
+            // `06A_MSQ_18_ReturnSiriusJewel`: stone 1 gathered at 100.788 s and again at
+            // 102.591 s): it does not deplete.
+            None if gather
+                .request
+                .gatherable
+                .is_some_and(|crc| !self.content.cyclic_gatherables.of(crc).is_empty()) =>
+            {
+                self.nodes.release(&gather.request.target, gather.number);
+            }
             None => {
                 let respawn_at_ms = now_ms.saturating_add(self.respawn_roll_ms(&gather.gatherable));
                 self.nodes
@@ -3520,6 +3530,29 @@ pub(crate) mod tests {
         assert_eq!(
             world.cyclic_gathers(entity, lowercase_crc32(RITUAL_1)),
             [(RITUAL.to_owned(), 1)]
+        );
+    }
+
+    #[test]
+    fn a_cyclic_stone_turns_at_its_gather_and_can_be_gathered_again_at_once() {
+        // Retail `06A_MSQ_18_ReturnSiriusJewel`: stone 1 gathered at 100.788 s and again at
+        // 102.591 s, its respawn time 30 to 60 s.
+        const STONE: &str = "Cyclic_06A_MSQ_puzzle2_stone1";
+        let (mut world, entity) = admitted();
+        let mut content = (*world.content).clone();
+        content.gatherables = Gatherables::build([gatherable(STONE, true)]);
+        content.cyclic_gatherables =
+            CyclicGatherables::build([(STONE.to_owned(), vec![Some(STONE.to_owned()); 4])]);
+        world.content = Arc::new(content);
+        place_nodes(&mut world, NUMBER, &[STONE]);
+        world.gather_open_world(entity, NUMBER, request(1, 0x16, STONE), &[], NOW);
+        let end_ms = world.open_gathers.first().expect("the first turn").end_ms;
+        world.gathers_due(end_ms);
+        world.gather_open_world(entity, NUMBER, request(2, 0x16, STONE), &[], end_ms + 1);
+        assert_eq!(
+            world.open_gathers.len(),
+            1,
+            "the stone did not deplete: the second turn opens at once"
         );
     }
 

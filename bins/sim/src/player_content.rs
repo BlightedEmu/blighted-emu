@@ -812,6 +812,51 @@ const fn point_position([x, y, z]: nw_world::records::Position) -> Position {
     Position { x, y, z }
 }
 
+/// How near a world gatherable point of a cyclic's gatherable stands to the capital of that
+/// cyclic for it to be the capital's own point, metres.
+const CYCLIC_ON_POINT_M: f32 = 0.5;
+
+/// The gather points of `level`: its gatherable points, then one point for each gatherable that
+/// a cyclic capital shows (a `Master_Cyclic_Gatherable_Instanced` capital whose variant is a
+/// cyclic of `cyclics`) where the level has no point of it. Observed: the world file holds no
+/// point for the Sirius puzzle stones of `06A_MSQ_18_ReturnSiriusJewel` or the cart of
+/// `99D_MSQ_01_RescueWarden`, only their capitals; retail gathered stone 1 by its gatherable
+/// `Cyclic_06A_MSQ_puzzle2_stone1` (capture `06a_msq_18_returnsiriusjewel`, 100.788 s). The
+/// sim and the play bot both index the level's gather nodes in this order.
+pub fn level_gather_points(
+    level: &WorldFile,
+    cyclics: &CyclicGatherables,
+) -> Vec<nw_world::records::GatherablePoint> {
+    let near = |point: &nw_world::records::GatherablePoint, crc: u32, at: [f32; 3]| {
+        point.gatherable_id == crc
+            && point
+                .position
+                .iter()
+                .zip(at)
+                .all(|(axis, other)| (axis - other).abs() <= CYCLIC_ON_POINT_M)
+    };
+    let mut points = level.gatherables.clone();
+    for capital in &level.capitals {
+        let Some(variant) = &capital.variant_name else {
+            continue;
+        };
+        for gatherable in cyclics.gatherables_of(variant) {
+            let crc = lowercase_crc32(gatherable);
+            if !points
+                .iter()
+                .any(|point| near(point, crc, capital.position))
+            {
+                points.push(nw_world::records::GatherablePoint {
+                    gatherable_id: crc,
+                    position: capital.position,
+                    ..nw_world::records::GatherablePoint::default()
+                });
+            }
+        }
+    }
+    points
+}
+
 /// The player content of one content bundle and mob prefab table.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlayerContent {
@@ -1611,7 +1656,8 @@ impl PlayerContent {
         gameplay: GameplayConfig,
         resets: ResetClock,
     ) -> Self {
-        let level_gatherables = &level.gatherables;
+        let cyclic_gatherables = CyclicGatherables::from_tables(tables);
+        let level_gatherables = &level_gather_points(level, &cyclic_gatherables);
         let rows = task_rows(tables);
         let gatherables = Gatherables::from_tables(tables);
         let quest_objects = QuestObjects::with_drops(
@@ -1810,7 +1856,7 @@ impl PlayerContent {
             starting_ranks: StartingRanks::from_tables(tables),
             elite_chests: EliteChests::from_tables(tables),
             gather_rules: GatherRules::from_tables(tables),
-            cyclic_gatherables: CyclicGatherables::from_tables(tables),
+            cyclic_gatherables,
             tools: ToolEfficiencies::from_tables(tables),
             salvage: Salvage::from_tables(tables),
             asset_solids: AssetSolids::default(),
@@ -1934,6 +1980,63 @@ mod tests {
         assert!(
             !instanced.instanced(CHEST_FACET + 8),
             "another object is shared"
+        );
+    }
+
+    #[test]
+    fn a_cyclic_capital_without_a_point_gets_one_point_per_gatherable_it_shows() {
+        // The world file of build 25810808: the Sirius stone 1 of `06A_MSQ_18` is a capital
+        // (`Master_Cyclic_Gatherable_Instanced`, variant `Cyclic_06A_MSQ_puzzle2_stone1`) with
+        // no gatherable point; the 99C stone here has its point already.
+        const STONE: &str = "Cyclic_06A_MSQ_puzzle2_stone1";
+        const STONE_AT: [f32; 3] = [9796.031, 3202.2456, 134.8833];
+        const POINTED: &str = "Cyclic_99C_MSQ_puzzle1_stone1";
+        const POINTED_AT: [f32; 3] = [11372.986, 5554.2817, 108.72286];
+        const RITUAL: &str = "Cyclic_09A_M13_ArcaneRitual";
+        const RITUAL_AT: [f32; 3] = [100.0, 200.0, 30.0];
+        let capital = |variant: &str, position| nw_world::records::Capital {
+            variant_name: Some(variant.to_owned()),
+            position,
+            ..nw_world::records::Capital::default()
+        };
+        let level = WorldFile {
+            capitals: vec![
+                capital(STONE, STONE_AT),
+                capital(POINTED, POINTED_AT),
+                capital(RITUAL, RITUAL_AT),
+                capital("NoCyclic", [0.0, 0.0, 0.0]),
+            ],
+            gatherables: vec![nw_world::records::GatherablePoint {
+                gatherable_id: lowercase_crc32(POINTED),
+                position: [11372.9, 5554.3, 108.7],
+                ..nw_world::records::GatherablePoint::default()
+            }],
+            ..WorldFile::default()
+        };
+        let cyclics = CyclicGatherables::build([
+            (STONE.to_owned(), vec![Some(STONE.to_owned()); 4]),
+            (POINTED.to_owned(), vec![Some(POINTED.to_owned()); 4]),
+            (
+                RITUAL.to_owned(),
+                vec![
+                    Some("09A_M13_ArcaneRitual_0".to_owned()),
+                    Some("09A_M13_ArcaneRitual_1".to_owned()),
+                ],
+            ),
+        ]);
+        let points: Vec<(u32, [f32; 3])> = level_gather_points(&level, &cyclics)
+            .into_iter()
+            .map(|point| (point.gatherable_id, point.position))
+            .collect();
+        assert_eq!(
+            points,
+            [
+                (lowercase_crc32(POINTED), [11372.9, 5554.3, 108.7]),
+                (lowercase_crc32(STONE), STONE_AT),
+                (lowercase_crc32("09A_M13_ArcaneRitual_0"), RITUAL_AT),
+                (lowercase_crc32("09A_M13_ArcaneRitual_1"), RITUAL_AT),
+            ],
+            "the world's points first, in their order; a stone with its own point gets none"
         );
     }
 

@@ -132,6 +132,10 @@ const ONE: u32 = 1;
 const AREAS_AFTER_SUCCESS_MS: u64 = 10_200;
 /// A reward list of one event gives it at every difficulty (module text).
 const ONE_EVENT: usize = 1;
+/// The radius around an encounter within which its success counts for a player's quests when
+/// the encounter names no player volume, metres (Inferred: the 30 m volume of the retail quest
+/// encounters `Enc_Quest_04A_Side02_ObeliskDefenders_01` and `WorldEvent_Enc_99B_MSQ_YonasRetreat`).
+const DEFAULT_SUCCESS_RADIUS_M: f32 = 30.0;
 
 /// What the script asks of the sim.
 pub(super) trait ScriptHost {
@@ -573,6 +577,22 @@ impl DungeonRun {
             })
             .filter(|event| !event.is_empty())?;
         Some((encounter.position, rewards.radius_m, event.as_str()))
+    }
+
+    /// The success event of encounter `index` (its `m_universalSuccessGameEventId`), with its
+    /// place and the radius of its player volume ([`DEFAULT_SUCCESS_RADIUS_M`] when it names
+    /// none); `None` for an encounter without one.
+    pub(super) fn success_event_of(&self, index: usize) -> Option<([f32; 3], f32, &str)> {
+        let encounter = self.script.encounters.get(index)?;
+        let event = encounter
+            .rewards
+            .as_ref()
+            .map(|rewards| rewards.global_event.as_str())
+            .filter(|event| !event.is_empty())?;
+        let radius_m = encounter
+            .detection_radius_m
+            .unwrap_or(DEFAULT_SUCCESS_RADIUS_M);
+        Some((encounter.position, radius_m, event))
     }
 
     /// The run of the open world's `script` by `rules`: every encounter idle; a spawn group
@@ -2455,6 +2475,10 @@ impl SimWorld {
             match outcome {
                 ScriptOutcome::EncounterDone(index) => {
                     self.catacomb_encounter_done(index);
+                    if let Some((at, radius_m, event)) = run.success_event_of(index) {
+                        let event = event.to_owned();
+                        self.encounter_succeeded(position(at), radius_m, &event, now_ms);
+                    }
                     let chests: Vec<(String, [f32; 3])> = run
                         .chests_of(index)
                         .map(|(table, at)| (table.to_owned(), at))
@@ -2551,6 +2575,10 @@ impl SimWorld {
                     let event = event.to_owned();
                     self.reward_encounter(position(at), radius_m, &event, now_ms);
                 }
+                if let Some((at, radius_m, event)) = run.success_event_of(index) {
+                    let event = event.to_owned();
+                    self.encounter_succeeded(position(at), radius_m, &event, now_ms);
+                }
             }
         }
         self.show_encounters(&mut run, &owned, now_ms);
@@ -2607,18 +2635,30 @@ impl SimWorld {
         self.encounter_roots.tick(now_ms);
     }
 
+    /// Each player within `radius_m` of `at` counts the encounter's success event `event` for
+    /// its quests (`TaskGameEvent`): the step `04A_Side02_02_01a_Task_Encounter_01` waits for
+    /// `04A_Side02_02_Encounter_01_Success`, the success event of its encounter's slice. It is no
+    /// game event entry of the player (module text: retail sent no `Darkness_Any_GlobalSuccess`).
+    fn encounter_succeeded(&mut self, at: Position, radius_m: f32, event: &str, now_ms: u64) {
+        for number in self.player_numbers_within(at, radius_m) {
+            self.quest_event(number, crate::objectives::Event::GameEvent(event), now_ms);
+        }
+    }
+
+    /// The numbers of the players within `radius_m` of `at`, horizontally, the dead too.
+    fn player_numbers_within(&mut self, at: Position, radius_m: f32) -> Vec<u64> {
+        let mut query = self.world.query::<(&Player, &Body)>();
+        query
+            .iter(&self.world)
+            .filter(|(_, body)| body.motion.position().horizontal_distance(at) <= radius_m)
+            .map(|(player, _)| player.number)
+            .collect()
+    }
+
     /// Each player within `radius_m` of `at` gets the game event `event` (a won breach's
     /// reward, see the module text).
     fn reward_encounter(&mut self, at: Position, radius_m: f32, event: &str, now_ms: u64) {
-        let numbers: Vec<u64> = {
-            let mut query = self.world.query::<(&Player, &Body)>();
-            query
-                .iter(&self.world)
-                .filter(|(_, body)| body.motion.position().horizontal_distance(at) <= radius_m)
-                .map(|(player, _)| player.number)
-                .collect()
-        };
-        for number in numbers {
+        for number in self.player_numbers_within(at, radius_m) {
             self.fire_game_event(number, event, now_ms);
         }
     }
@@ -4648,6 +4688,41 @@ mod tests {
             }),
             ..Encounter::default()
         }
+    }
+
+    /// The quest encounter `Enc_Quest_04A_Side02_ObeliskDefenders_01`: no reward list, its
+    /// success event `04A_Side02_02_Encounter_01_Success` for the players in its 30 m volume.
+    #[test]
+    fn an_encounter_s_success_event_counts_within_its_volume() {
+        const SUCCESS: &str = "04A_Side02_02_Encounter_01_Success";
+        let quest_encounter = Encounter {
+            rewards: Some(nw_world::level_script::DifficultyRewards {
+                radius_m: 0.0,
+                events: Vec::new(),
+                global_event: SUCCESS.to_owned(),
+            }),
+            detection_radius_m: Some(DEFAULT_SUCCESS_RADIUS_M),
+            ..myrkgard_event()
+        };
+        let plain = Encounter {
+            rewards: None,
+            ..myrkgard_event()
+        };
+        let no_volume = Encounter {
+            detection_radius_m: None,
+            ..quest_encounter.clone()
+        };
+        let run = DungeonRun::new(Uuid::nil(), script(vec![quest_encounter, plain, no_volume]));
+        assert_eq!(
+            run.success_event_of(0),
+            Some((PLACE, DEFAULT_SUCCESS_RADIUS_M, SUCCESS))
+        );
+        assert_eq!(run.rewards_of(0), None, "no reward event");
+        assert_eq!(run.success_event_of(1), None);
+        assert_eq!(
+            run.success_event_of(2).map(|(_, radius_m, _)| radius_m),
+            Some(DEFAULT_SUCCESS_RADIUS_M)
+        );
     }
 
     /// Retail `Playthrough_Part_18` (the north Myrkgard portal): its success gives its one

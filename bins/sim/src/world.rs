@@ -30,8 +30,9 @@ use nw_content::mutations::MutationCatalog;
 use nw_content::player_sequences::DodgeLoad;
 use nw_content::recipe_cooldowns::{CooldownCount, RecipeCooldownCounts};
 use nw_messages::client_input::{
-    CRAFTING_STATION_KIND, GATHER_KIND, LOOT_KIND, LORE_KIND, REVIVE_PLAYER_KIND, TALK_KIND,
-    TOWN_BOARD_KIND, TRIGGER_KIND, WAR_BOARD_KIND, WATER_GATHER_KIND,
+    CRAFTING_STATION_KIND, GATHER_KIND, LOOT_KIND, LORE_KIND, PLAY_CINEMATIC_VIDEO_KIND,
+    REVIVE_PLAYER_KIND, TALK_KIND, TOWN_BOARD_KIND, TRIGGER_KIND, WAR_BOARD_KIND,
+    WATER_GATHER_KIND,
 };
 use nw_messages::entity_ids::IdHolder;
 use nw_messages::items::{FIRST_VERSION, FullList};
@@ -4170,6 +4171,13 @@ impl SimWorld {
                 }
                 economy::TRADING_POST_KIND => {
                     self.open_trading_post(entity, number, request, name);
+                }
+                // Retail `99B_MSQ_02_meetgalahad`: the journal's video interaction is taken at
+                // once (3743 status 1); its interact tags count at the client's end after the
+                // video ([`Self::interaction_ended`]).
+                PLAY_CINEMATIC_VIDEO_KIND => {
+                    let accepted = gather_answer(number, request, INTERACTION_ACCEPTED, name);
+                    self.send_to(entity, &[accepted]);
                 }
                 kind => {
                     if !self.outpost_rush_interaction(entity, number, request, name)
@@ -13490,6 +13498,60 @@ mod tests {
             "the vault step ended the quest"
         );
         assert_eq!(flint_of(&mut world), 2, "its reward");
+    }
+
+    #[test]
+    fn a_video_interact_is_taken_and_its_tag_counts_when_the_video_ends() {
+        /// A spawned object with the tag (retail: the Galahad journal of `99B_MSQ_02`).
+        const JOURNAL: u64 = 0x64bb_0ef5_075c_f8fb;
+        let journal = [STORAGE_TAG.to_owned()];
+        let tags = nw_content::interact_tags::InteractTags::build(
+            &HashMap::new(),
+            [],
+            [(JOURNAL, "", journal.as_slice())],
+        );
+        let mut world =
+            quest_world_of(nw_content::gameplay_config::GameplayConfig::default(), tags);
+        world.start_quest(1, VAULT_QUEST, NOW).expect("start");
+        let who = connection(1);
+        tick(&mut world, NOW + OWN_CARD_DELAY_MS);
+        let request = InteractionRequest {
+            target: [0; nw_messages::wire::RAW_ID_LEN],
+            target_entity: JOURNAL,
+            interaction: STORAGE_INTERACTION,
+            kind: PLAY_CINEMATIC_VIDEO_KIND,
+            gatherable: None,
+        };
+        world.interact(&who, request, b"", NOW + OWN_CARD_DELAY_MS);
+        let answered: Vec<(u8, u8)> =
+            messages_to(&tick(&mut world, NOW + OWN_CARD_DELAY_MS + 1).messages, 1)
+                .into_iter()
+                .filter_map(|message| match message {
+                    ServerMessage::InteractionValidated(answer) => {
+                        Some((answer.kind, answer.status))
+                    }
+                    _ => None,
+                })
+                .collect();
+        assert_eq!(
+            answered,
+            [(PLAY_CINEMATIC_VIDEO_KIND, INTERACTION_ACCEPTED)],
+            "retail takes the video interaction at once"
+        );
+        assert_eq!(world.quests_of_player(1).len(), 1, "the video plays");
+        let cancel = ClientFacetMsg::CancelInteraction {
+            header: nw_messages::FacetHeader::of(0, 1),
+            target: [0; nw_messages::wire::RAW_ID_LEN],
+            target_entity: JOURNAL,
+            interaction: STORAGE_INTERACTION,
+        };
+        world
+            .facet_message(&who, cancel, NOW + OWN_CARD_DELAY_MS + 2)
+            .expect("cancel");
+        assert!(
+            world.quests_of_player(1).is_empty(),
+            "the step ends at the video's end"
+        );
     }
 
     #[test]

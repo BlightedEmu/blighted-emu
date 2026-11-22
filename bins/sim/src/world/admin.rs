@@ -270,7 +270,16 @@ impl SimWorld {
                 reason: NO_BAG.to_owned(),
             };
         };
-        gear.wear_bag_gear(|item_id| content.is_item_disabled(item_id));
+        gear.wear_bag_gear(
+            |item_id| content.is_item_disabled(item_id),
+            |item_id| {
+                content
+                    .item_rolls
+                    .item(item_id)
+                    .map(|row| row.classes.clone())
+                    .unwrap_or_default()
+            },
+        );
         for (slot_id, worn) in gear.worn_items() {
             let Some(best) = content
                 .item_rolls

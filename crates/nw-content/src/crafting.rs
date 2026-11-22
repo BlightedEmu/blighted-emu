@@ -382,6 +382,21 @@ impl Recipes {
         self.details.get(&crc).cloned().unwrap_or_default()
     }
 
+    /// An item that `ingredient` takes: its own item, or of a category the item of that
+    /// category with the shortest lowercase id (the lowest tier: `timbert1` before `timbert2`),
+    /// the alphabetically first of those on a tie; `None` for a category no item is in.
+    pub fn item_for(&self, ingredient: &Ingredient) -> Option<String> {
+        match &ingredient.kind {
+            IngredientKind::Item(item) => Some(item.clone()),
+            IngredientKind::Category(_) => self
+                .categories
+                .keys()
+                .filter(|item| self.fits(ingredient, item))
+                .min_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+                .cloned(),
+        }
+    }
+
     /// The book of `recipes`, with each item's `IngredientCategories` cell in `categories` (item
     /// id, cell).
     pub fn build(
@@ -691,6 +706,33 @@ mod tests {
         assert_eq!(count_of(None), 1);
         assert_eq!(count_of(Some(0)), 1);
         assert_eq!(count_of(Some(3)), 3);
+    }
+
+    #[test]
+    fn an_ingredient_names_its_item_or_the_lowest_item_of_its_category() {
+        let mut recipes = recipes();
+        recipes
+            .categories
+            .insert("porkt12".to_owned(), vec!["FoodIngredientT1".to_owned()]);
+        let knife = recipes
+            .get(lowercase_crc32("1hSkinningKnifeT1"))
+            .expect("knife");
+        assert_eq!(
+            recipes.item_for(&knife.ingredients[0]).as_deref(),
+            Some("FlintT1")
+        );
+        let ration = recipes
+            .get(lowercase_crc32("Procedural_HealthRecoveryT1"))
+            .expect("ration");
+        assert_eq!(
+            recipes.item_for(&ration.ingredients[0]).as_deref(),
+            Some("porkt1")
+        );
+        let empty = Ingredient {
+            kind: IngredientKind::Category("Timber".to_owned()),
+            quantity: 1,
+        };
+        assert_eq!(recipes.item_for(&empty), None);
     }
 
     #[test]

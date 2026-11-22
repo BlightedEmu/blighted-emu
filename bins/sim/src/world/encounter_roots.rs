@@ -1189,6 +1189,21 @@ impl EncounterObjects {
             .map(|object| object.slice.as_str())
     }
 
+    /// The slice asset of a start object that stands, not gathered, within `radius_m` of
+    /// `position` (the card a player sees and gathers).
+    pub(super) fn standing_asset_near(
+        &self,
+        position: Position,
+        radius_m: f32,
+    ) -> Option<[u8; 16]> {
+        self.objects
+            .values()
+            .filter(|object| {
+                !object.depleted && object.position.horizontal_distance(position) <= radius_m
+            })
+            .find_map(|object| self.kinds.get(&object.slice).map(|kind| kind.asset))
+    }
+
     /// Whether start object `number` stands.
     pub(super) fn stands(&self, number: u64) -> bool {
         self.objects.contains_key(&number)
@@ -1651,6 +1666,14 @@ mod tests {
         assert_eq!(
             objects.numbers_near(near, 10.0).collect::<Vec<_>>(),
             [number]
+        );
+        assert_eq!(
+            objects.standing_asset_near(near, 10.0),
+            Some([
+                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x00, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff
+            ]),
+            "the card a player gathers"
         );
         let mut sent = HashMap::new();
         let group = objects

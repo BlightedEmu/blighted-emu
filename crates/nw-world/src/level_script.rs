@@ -1156,16 +1156,17 @@ fn text(element: &Element, name_crc: u32, depth: usize) -> Result<String, LevelS
         .map_err(LevelScriptError::from)
 }
 
-/// The difficulty rewards of `component`, when it holds them: the first entry's radius and
-/// events, and the global success event.
+/// The difficulty rewards of `component`, when it holds the list of them: the first entry's
+/// radius and events (none when the list is empty), and the global success event. Observed: the
+/// quest encounter `enc_quest_04a_side02_obeliskdefenders_01` holds an empty list and the success
+/// event `04A_Side02_02_Encounter_01_Success`, which its quest step waits for.
 fn difficulty_rewards(component: &Element) -> Result<Option<DifficultyRewards>, LevelScriptError> {
-    let Some(entry) = find(component, DIFFICULTY_REWARDS_NAME, FIELD_DEPTH)
-        .and_then(|rewards| rewards.children.first())
-    else {
+    let Some(rewards) = find(component, DIFFICULTY_REWARDS_NAME, FIELD_DEPTH) else {
         return Ok(None);
     };
+    let entry = rewards.children.first();
     let events = entry
-        .child(REWARD_EVENTS_NAME)
+        .and_then(|entry| entry.child(REWARD_EVENTS_NAME))
         .map(|list| {
             list.children
                 .iter()
@@ -1176,7 +1177,7 @@ fn difficulty_rewards(component: &Element) -> Result<Option<DifficultyRewards>, 
         .unwrap_or_default();
     Ok(Some(DifficultyRewards {
         radius_m: entry
-            .child(REWARD_RADIUS_NAME)
+            .and_then(|entry| entry.child(REWARD_RADIUS_NAME))
             .map_or(Ok(0.0), Element::as_f32)?,
         events,
         global_event: text(component, GLOBAL_SUCCESS_EVENT_NAME, FIELD_DEPTH)?,
@@ -2669,6 +2670,31 @@ mod tests {
         let plain =
             slice_script(&slice(vec![entity(ENCOUNTER, "Plain", Vec::new())])).expect("script");
         assert!(plain.rewards().is_none());
+    }
+
+    /// The success event of the quest encounter `enc_quest_04a_side02_obeliskdefenders_01`
+    /// (Observed layout): an empty rewards list beside the global event its quest waits for.
+    #[test]
+    fn a_quest_encounter_with_no_rewards_keeps_its_success_event() {
+        let holder = named(
+            "m_data",
+            vec![
+                Element::with_children(DIFFICULTY_REWARDS_NAME, Vec::new()),
+                Element::with_value(
+                    GLOBAL_SUCCESS_EVENT_NAME,
+                    b"04A_Side02_02_Encounter_01_Success".to_vec(),
+                ),
+            ],
+        );
+        let script = slice_script(&slice(vec![entity(
+            ENCOUNTER,
+            "Enc_Quest_04A_Side02_ObeliskDefenders_01",
+            vec![named("element", vec![holder])],
+        )]))
+        .expect("script");
+        let rewards = script.rewards().expect("rewards");
+        assert!(rewards.events.is_empty());
+        assert_eq!(rewards.global_event, "04A_Side02_02_Encounter_01_Success");
     }
 
     /// The trigger sources of the open world events: a prefab spawn randomizer's counts (the

@@ -206,9 +206,19 @@ pub const TOWN_BOARD_NAME: &[u8] = b"@ui_territory_board_town_project";
 pub const REVIVE_PLAYER_KIND: u8 = 30;
 /// The interaction kind of a trigger object (`InteractionUIActions` value 33, `Trigger`).
 pub const TRIGGER_KIND: u8 = 33;
+/// The interaction kind of the menu of an instance entrance (`InteractionUIActions` value 71,
+/// `OpenDungeonMenu`).
+pub const OPEN_DUNGEON_MENU_KIND: u8 = 71;
+/// The interaction kind of the entry at an instance entrance (`InteractionUIActions` value 72,
+/// `EnterDungeon`): it activates the entrance's game mode.
+pub const ENTER_DUNGEON_KIND: u8 = 72;
 /// The interaction kind of the exit of a dungeon (`InteractionUIActions` value 74,
 /// `ExitDungeon`).
 pub const EXIT_DUNGEON_KIND: u8 = 74;
+/// The interaction kind of an object that plays a cinematic video (`InteractionUIActions` value
+/// 81, `PlayCinematicVideo`; retail `99B_MSQ_02_meetgalahad`: the Galahad journal, answered with
+/// 3743 status 1, then the client's 2473 after the video).
+pub const PLAY_CINEMATIC_VIDEO_KIND: u8 = 81;
 /// The interaction kind of a lore note the player reads (retail 2026-09-18: Kubikiri's
 /// Occupation and La Rousette's Manifest on the start beach).
 pub const LORE_KIND: u8 = 47;
