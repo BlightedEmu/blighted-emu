@@ -4,10 +4,12 @@
 //!
 //! The level's capitals (`*.capitals.json`) place slices with a position, a rotation and a scale;
 //! its chunk lists (`region.chunks`, else the capitals' `.chunks`) place chunk slices at their
-//! position. In a slice, an entity's place is its `GameTransformComponent` `m_worldTM`, in the
-//! slice's space (Observed: `m_localTM` equals it in every entity of the build's slices, a child
-//! holds nearly its parent's values, and the tutorial's Thorpe arena floor is at the retail own
-//! place only without its parent's offset added again). A `PrefabSpawnerComponent` that spawns on
+//! position. In a slice, an entity's place is its `GameTransformComponent` `m_worldTM` from the
+//! slice's top entity, which stands where the slice is put (Observed: `m_localTM` equals it in
+//! every entity of the build's slices; a child holds the values of the groups between it and the
+//! top entity, so the tutorial's Thorpe arena floor is at the retail own place only without its
+//! `Ground` group added again; a dungeon hallway whose top entity is stored turned runs between
+//! its doors only with that turn taken back, [`slice_origin`]). A `PrefabSpawnerComponent` that spawns on
 //! initialize places its slice at its entity. An entity with a `GameRigidBodyComponent` is
 //! solid when its filter blocks the `Player` filter (`sharedassets/physics/default.collisionfilters`):
 //! its shape is the configuration's `m_rnrAsset` when set, else its collision shape, else the
@@ -41,6 +43,13 @@
 //! values (a tree's own trunk mesh, an ore's own boulder). The gatherable's depleted state
 //! ([`DEPLETED_GROUP`]) is not shown as the level loads.
 //!
+//! A slice that a spawner places later keeps its solids by gatherable state ([`DeferredSlice`]):
+//! those in its [`HEALTHY_GROUP`] and [`DEPLETED_GROUP`] apart from those of every state. A
+//! solid that one of the slice's timelines binds (`LayerEntityAssignments`), or whose parent one
+//! binds, stands where it is stored only while the slice is healthy ([`deferred_state`]): the
+//! timeline that plays when it is depleted moves it, and the server does not play timelines
+//! (the level-collision note, section 5.2).
+//!
 //! Each body that a capital's slice places carries the capital's GDE id, and each body of a slice
 //! that a spawner places as the level loads that slice's own id ([`BodyEntity`]: what a shot that
 //! meets the body names; the ids of the GDE id note, tag 3 and tag 7). The chunks' and the
@@ -67,10 +76,10 @@ use nw_oodle::KrakenDecompressor;
 use nw_world::capitals::{capital_id, parse_capitals};
 use nw_world::collision::{
     Affine, Body, BodyEntity, DeferredSlice, Geometry, IDENTITY_AFFINE, LevelCollision, NavMark,
-    NavMarkKind, QuestVolume, SolidFor, compose, hull_planes, place_of,
+    NavMarkKind, QuestVolume, SliceState, SolidFor, compose, hull_planes, invert, place_of,
 };
 use nw_world::collision_index::CollisionIndex;
-use nw_world::level_script::DETECTION_OFFSET_NAME;
+use nw_world::level_script::{DETECTION_OFFSET_NAME, LAYER_ASSIGNMENTS_NAME, TIMELINE_TYPE};
 use nw_world::records::WorldFile;
 use nw_world::slice_data::spawned_gde_id;
 use nw_world::water::WaterMap;
@@ -133,6 +142,12 @@ const HALF: f32 = 0.5;
 /// `Healthy` and a `Depleted` entity under the root, the tree's stump and the ore's fragments in
 /// `Depleted`).
 const DEPLETED_GROUP: &str = "Depleted";
+/// The entity of a gatherable slice that holds its healthy state: shown while the slice is
+/// healthy, as it spawns (Observed: the light bridge's `Blocker`, the gates' `Blocker`s and the
+/// corruption bridges' floors are in `Healthy`).
+const HEALTHY_GROUP: &str = "Healthy";
+/// The id of an entity reference that names no entity.
+const NO_ENTITY: u64 = 0xffff_ffff;
 /// The field of a `VariationDataComponent` that names its variation table (field name Unknown;
 /// `Gatherable_Trees`, `Gatherable_Bushes`).
 pub(crate) const VARIATION_TABLE_FIELD: u32 = 0x095a_1d04;
@@ -449,8 +464,11 @@ struct SolidEntity {
     source: Option<ShapeSource>,
     /// Its entity id, which a variation binding names.
     entity: Option<u64>,
-    /// It is in the gatherable's depleted state ([`DEPLETED_GROUP`]).
-    depleted: bool,
+    /// The gatherable state it stands in: its group ([`HEALTHY_GROUP`], [`DEPLETED_GROUP`]);
+    /// `None` for every state.
+    state: Option<SliceState>,
+    /// A timeline of its slice binds it or a parent of it: the timeline moves it.
+    moving: bool,
     /// The filters it blocks (none for a mark's own volume).
     solid_for: SolidFor,
     /// The navigation mark it carries.
@@ -522,6 +540,8 @@ struct SliceEntity {
     engine: EngineCollider,
     /// Its navigation obstacle component.
     nav_mark: Option<NavMarkRead>,
+    /// The entities its timeline components bind (`LayerEntityAssignments`).
+    timeline_bound: Vec<u64>,
 }
 
 /// The engine collider components of an entity.
@@ -721,6 +741,11 @@ fn slice_entities(root: &Element, names: &Names) -> Vec<SliceEntity> {
 
 /// Reads the parts of `component` this build uses into `entity`.
 fn read_component(component: &Element, names: &Names, entity: &mut SliceEntity) {
+    if component.type_id == TIMELINE_TYPE {
+        entity
+            .timeline_bound
+            .extend(timeline_bindings(component, names));
+    }
     match component.type_id {
         types::GAME_TRANSFORM => {
             entity.place = component.child(names.world_tm).and_then(transform_of);
@@ -828,6 +853,24 @@ fn read_component(component: &Element, names: &Names, entity: &mut SliceEntity) 
     }
 }
 
+/// The entities that timeline component `component` binds: each `LayerEntityAssignments`
+/// entry's `EntityId`.
+fn timeline_bindings<'a>(
+    component: &'a Element,
+    names: &'a Names,
+) -> impl Iterator<Item = u64> + 'a {
+    descendant(component, LAYER_ASSIGNMENTS_NAME)
+        .into_iter()
+        .flat_map(|list| &list.children)
+        .filter_map(|entry| {
+            entry
+                .child(names.entity_id)
+                .and_then(|holder| holder.child(names.id))
+                .and_then(|id| id.as_u64().ok())
+        })
+        .filter(|id| *id != NO_ENTITY)
+}
+
 /// The value of an unsigned integer element of 1, 2, 4 or 8 big-endian bytes.
 fn unsigned(element: &Element) -> Option<u64> {
     match element.value.len() {
@@ -895,12 +938,17 @@ fn slice_solids(root: &Element, names: &Names, filters: &SolidFilters) -> SliceS
         .iter()
         .filter_map(|entity| Some((entity.id?, (entity.parent, entity.name.as_str()))))
         .collect();
+    let origin = slice_origin(&entities);
+    let bound: HashSet<u64> = entities
+        .iter()
+        .flat_map(|entity| entity.timeline_bound.iter().copied())
+        .collect();
     let mut solids = SliceSolids::default();
     for entity in &entities {
         if solids.variation.is_none() {
             solids.variation.clone_from(&entity.variation);
         }
-        let place = entity.place.unwrap_or(IDENTITY_AFFINE);
+        let place = compose(&origin, &entity.place.unwrap_or(IDENTITY_AFFINE));
         if let (Some(tag), Some((shape, offset))) = (&entity.volume_tag, &entity.detection)
             && !entity.inactive
             && let Some(shape) = query_shape(shape, *offset, names)
@@ -914,12 +962,20 @@ fn slice_solids(root: &Element, names: &Names, filters: &SolidFilters) -> SliceS
                 on_initialize: on_initialize && !entity.inactive,
             });
         }
-        let depleted = in_depleted_group(entity, &parents);
+        let state = if in_group(entity, &parents, DEPLETED_GROUP) {
+            Some(SliceState::Depleted)
+        } else if in_group(entity, &parents, HEALTHY_GROUP) {
+            Some(SliceState::Healthy)
+        } else {
+            None
+        };
+        let moving = is_bound(entity, &parents, &bound);
         let solid = |source, solid_for, mark| SolidEntity {
             place,
             source,
             entity: entity.id,
-            depleted,
+            state,
+            moving,
             solid_for,
             mark,
         };
@@ -1008,22 +1064,62 @@ fn slice_solids(root: &Element, names: &Names, filters: &SolidFilters) -> SliceS
     solids
 }
 
-/// Whether `entity` is a gatherable's depleted state ([`DEPLETED_GROUP`]) or in it.
-fn in_depleted_group(entity: &SliceEntity, parents: &HashMap<u64, (Option<u64>, &str)>) -> bool {
-    if entity.name == DEPLETED_GROUP {
-        return true;
+/// The place that takes the stored places of a slice's entities to the place the slice is put
+/// at: the inverse of the stored place of its top entity, the one entity with a place and no
+/// parent in the slice, so the top entity stands where the slice is put and every entity keeps
+/// its stored place from it; nothing when the slice has no such single entity (Observed,
+/// 2026-11-21: the top entity of `dungeon_hallway_ancient_16m` is stored turned 90 degrees
+/// about z; its capital at (798.4, 672.0, 132.0) is turned 180 degrees; only with the top
+/// entity's turn taken back does the hallway run east between its door capitals at x 798.0 and
+/// 815.3, under the retail own places of x 801 to 813 at 133.1 m; the tutorial's Thorpe arena
+/// has an unmoved top entity, and its children hold the values of the groups between them and
+/// it, so adding the groups again put the arena floor 2 m too high).
+fn slice_origin(entities: &[SliceEntity]) -> Affine {
+    let ids: HashSet<u64> = entities.iter().filter_map(|entity| entity.id).collect();
+    let mut tops = entities.iter().filter_map(|entity| {
+        let in_slice = entity.parent.is_some_and(|parent| ids.contains(&parent));
+        entity.place.filter(|_| !in_slice)
+    });
+    match (tops.next(), tops.next()) {
+        (Some(top), None) => invert(&top).unwrap_or(IDENTITY_AFFINE),
+        _ => IDENTITY_AFFINE,
     }
+}
+
+/// The ids of `entity`'s parents in its slice, nearest first (`parents`: each entity's parent
+/// and name by id; a cycle stops after every entity).
+fn ancestors<'a>(
+    entity: &SliceEntity,
+    parents: &'a HashMap<u64, (Option<u64>, &'a str)>,
+) -> impl Iterator<Item = (u64, &'a str)> + 'a {
     let mut next = entity.parent;
-    for _ in 0..parents.len() {
-        let Some((parent, name)) = next.and_then(|id| parents.get(&id)) else {
-            return false;
-        };
-        if *name == DEPLETED_GROUP {
-            return true;
-        }
+    std::iter::from_fn(move || {
+        let id = next?;
+        let (parent, name) = parents.get(&id)?;
         next = *parent;
-    }
-    false
+        Some((id, *name))
+    })
+    .take(parents.len())
+}
+
+/// Whether `entity` is a gatherable's state entity named `group` ([`DEPLETED_GROUP`],
+/// [`HEALTHY_GROUP`]) or in it.
+fn in_group(
+    entity: &SliceEntity,
+    parents: &HashMap<u64, (Option<u64>, &str)>,
+    group: &str,
+) -> bool {
+    entity.name == group || ancestors(entity, parents).any(|(_, name)| name == group)
+}
+
+/// Whether a timeline of the slice binds `entity` or a parent of it (`bound`).
+fn is_bound(
+    entity: &SliceEntity,
+    parents: &HashMap<u64, (Option<u64>, &str)>,
+    bound: &HashSet<u64>,
+) -> bool {
+    entity.id.is_some_and(|id| bound.contains(&id))
+        || ancestors(entity, parents).any(|(id, _)| bound.contains(&id))
 }
 
 /// A `VariationDataComponent`'s table and bindings (field names Unknown, meaning from the
@@ -1492,6 +1588,10 @@ struct PlacedSolid {
     source: ShapeSource,
     /// The deferred slice it belongs to (`None`: the level as it loads).
     deferred: Option<usize>,
+    /// [`SolidEntity::state`].
+    state: Option<SliceState>,
+    /// [`SolidEntity::moving`].
+    moving: bool,
     solid_for: SolidFor,
     mark: Option<NavMarkKind>,
     /// [`Pending::entity`] of the slice that places it.
@@ -1645,7 +1745,7 @@ fn collide(
                     report.slice_data_without_collision += 1;
                 }
                 let mesh_slot = |body: &&SolidEntity| {
-                    !body.depleted
+                    body.state != Some(SliceState::Depleted)
                         && matches!(
                             body.source,
                             None | Some(ShapeSource::Mesh(_) | ShapeSource::MeshPath(_))
@@ -1659,13 +1759,15 @@ fn collide(
                 for body in solids
                     .bodies
                     .iter()
-                    .filter(|body| !body.depleted && !mesh_slot(body))
+                    .filter(|body| body.state != Some(SliceState::Depleted) && !mesh_slot(body))
                 {
                     if let Some(source) = &body.source {
                         placed_solids.push(PlacedSolid {
                             place: compose(&pending.place, &body.place),
                             source: source.clone(),
                             deferred: pending.deferred,
+                            state: body.state,
+                            moving: body.moving,
                             solid_for: body.solid_for,
                             mark: body.mark,
                             entity: pending.entity,
@@ -1678,6 +1780,8 @@ fn collide(
                             place: compose(&pending.place, &mesh.place),
                             source: ShapeSource::Mesh(mesh.mesh),
                             deferred: pending.deferred,
+                            state: None,
+                            moving: false,
                             solid_for,
                             mark: None,
                             entity: pending.entity,
@@ -1699,6 +1803,8 @@ fn collide(
                         place: compose(&pending.place, &body.place),
                         source,
                         deferred: pending.deferred,
+                        state: body.state,
+                        moving: body.moving,
                         solid_for: body.solid_for,
                         mark: body.mark,
                         entity: pending.entity,
@@ -1793,7 +1899,7 @@ fn save_collision(
     report.deferred_bodies = reloaded
         .deferred
         .iter()
-        .map(|slice| slice.bodies.len())
+        .map(|slice| slice.bodies.len() + slice.healthy.len() + slice.depleted.len())
         .sum();
     report.placed_triangles = reloaded
         .bodies
@@ -1852,7 +1958,7 @@ fn varied(
     variation: &Variation,
     row: &HashMap<String, String>,
 ) -> Option<SolidEntity> {
-    if body.depleted {
+    if body.state == Some(SliceState::Depleted) {
         return None;
     }
     let bindings = || {
@@ -2206,20 +2312,24 @@ fn place_solids(
     let physics_meshes = meshes_with_physics(index, &unread_meshes)?;
     let mut own_shapes: HashMap<String, u32> = HashMap::new();
     let mut sorted = SortedBodies::default();
-    let mut deferred_bodies: Vec<Vec<Body>> = vec![Vec::new(); deferred.len()];
+    let mut deferred_bodies: Vec<StateBodies> = vec![StateBodies::default(); deferred.len()];
     for solid in placed {
         let PlacedSolid {
             place,
             source,
             deferred: group,
+            state,
+            moving,
             solid_for,
             mark,
             entity,
         } = solid;
         let mut put = |bodies: &mut dyn Iterator<Item = Body>| match group {
             Some(group) => {
-                if solid_for.player {
-                    deferred_bodies[*group].extend(bodies);
+                if solid_for.player
+                    && let Some(stands) = deferred_state(*state, *moving)
+                {
+                    deferred_bodies[*group].of(stands).extend(bodies);
                 }
             }
             None => {
@@ -2282,7 +2392,9 @@ fn place_solids(
             slice: slice.0,
             sub_id: slice.1,
             origin: *origin,
-            bodies,
+            bodies: bodies.always,
+            healthy: bodies.healthy,
+            depleted: bodies.depleted,
         })
         .collect();
     Ok(LevelCollision {
@@ -2296,6 +2408,43 @@ fn place_solids(
         nav_marks: sorted.nav_marks,
         entities: sorted.entities,
     })
+}
+
+/// The gatherable state a solid of a deferred slice stands in (`Some(None)`: every state): its
+/// group's ([`SolidEntity::state`]); a solid that a timeline moves stands only while healthy,
+/// as stored, and not at all in the depleted group (`None`). Observed against the retail own
+/// places (level-collision note section 5.2): the Edengrove natural bridge's 118 timeline-bound
+/// solids held 488 own places, all while the bridge was healthy; the Great Cleave ice door's held
+/// none and stood over 63 own places of players who walked through it, all while it was depleted.
+const fn deferred_state(state: Option<SliceState>, moving: bool) -> Option<Option<SliceState>> {
+    match (state, moving) {
+        (Some(SliceState::Depleted), true) => None,
+        (None, true) => Some(Some(SliceState::Healthy)),
+        (state, _) => Some(state),
+    }
+}
+
+/// The placed shapes of one deferred slice, by the gatherable state they stand in.
+#[derive(Debug, Clone, Default)]
+struct StateBodies {
+    always: Vec<Body>,
+    healthy: Vec<Body>,
+    depleted: Vec<Body>,
+}
+
+impl StateBodies {
+    /// The shapes of state `state` (`None`: every state).
+    const fn of(&mut self, state: Option<SliceState>) -> &mut Vec<Body> {
+        match state {
+            None => &mut self.always,
+            Some(SliceState::Healthy) => &mut self.healthy,
+            Some(SliceState::Depleted) => &mut self.depleted,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.always.is_empty() && self.healthy.is_empty() && self.depleted.is_empty()
+    }
 }
 
 /// The placed shapes of the level as it loads, by the filters they block, and the marks.
@@ -2789,27 +2938,7 @@ mod tests {
     /// with the start mesh, and a `Depleted` group with the stump; both meshes are solid.
     fn gatherable() -> Element {
         let entity = |id: u64, name: &str, parent: u64, components: Vec<Element>| {
-            let mut all = vec![element(
-                "element",
-                types::GAME_TRANSFORM,
-                Vec::new(),
-                vec![
-                    transform(
-                        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-                        [0.0; 3],
-                    ),
-                    entity_id("m_parentId", parent),
-                ],
-            )];
-            all.extend(components);
-            list(
-                "element",
-                vec![
-                    entity_id("Id", id),
-                    string("name", name),
-                    list("Components", all),
-                ],
-            )
+            tree_entity(id, name, parent, UNTURNED, [0.0; 3], components)
         };
         let solid = |mesh: u8| {
             vec![
@@ -2853,14 +2982,55 @@ mod tests {
                 ),
             ],
         );
-        const NO_PARENT: u64 = 0xffff_ffff;
         let entities = vec![
             entity(1, "Master_Tree", NO_PARENT, vec![variation]),
-            entity(2, "Healthy", 1, Vec::new()),
+            entity(2, HEALTHY_GROUP, 1, Vec::new()),
             entity(3, "StartMesh", 2, solid(7)),
             entity(4, DEPLETED_GROUP, 1, Vec::new()),
             entity(5, "DepletedMesh", 4, solid(8)),
         ];
+        slice_of(entities)
+    }
+
+    /// The parent id of an entity at the top of its slice.
+    const NO_PARENT: u64 = 0xffff_ffff;
+    /// The rotation columns of an entity that is not turned.
+    const UNTURNED: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    /// The rotation columns of a turn of 90 degrees about z (x to y, y to -x).
+    const QUARTER_TURN: [[f32; 3]; 3] = [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+
+    /// An entity `id` named `name` under `parent`, stored at `columns` and `translation`, with
+    /// `components`.
+    fn tree_entity(
+        id: u64,
+        name: &str,
+        parent: u64,
+        columns: [[f32; 3]; 3],
+        translation: [f32; 3],
+        components: Vec<Element>,
+    ) -> Element {
+        let mut all = vec![element(
+            "element",
+            types::GAME_TRANSFORM,
+            Vec::new(),
+            vec![
+                transform(columns, translation),
+                entity_id("m_parentId", parent),
+            ],
+        )];
+        all.extend(components);
+        list(
+            "element",
+            vec![
+                entity_id("Id", id),
+                string("name", name),
+                list("Components", all),
+            ],
+        )
+    }
+
+    /// A slice of `entities`.
+    fn slice_of(entities: Vec<Element>) -> Element {
         list(
             "root",
             vec![list(
@@ -2868,6 +3038,208 @@ mod tests {
                 vec![list("element", vec![list("Entities", entities)])],
             )],
         )
+    }
+
+    /// A rigid body of filter `Structure` with a mesh.
+    fn structure_body() -> Vec<Element> {
+        vec![
+            element(
+                "element",
+                types::GAME_RIGID_BODY,
+                Vec::new(),
+                vec![list(
+                    "m_configuration",
+                    vec![string("m_strFilter", "Structure")],
+                )],
+            ),
+            element(
+                "element",
+                types::MESH,
+                Vec::new(),
+                vec![list(
+                    "Static Mesh Render Node",
+                    vec![asset("Static Mesh", 7, 0)],
+                )],
+            ),
+        ]
+    }
+
+    /// A timeline component that binds the entities `bound`.
+    fn timeline(bound: &[u64]) -> Element {
+        element(
+            "element",
+            TIMELINE_TYPE,
+            Vec::new(),
+            vec![list(
+                "LayerEntityAssignments",
+                bound
+                    .iter()
+                    .map(|id| list("element", vec![entity_id("EntityId", *id)]))
+                    .collect(),
+            )],
+        )
+    }
+
+    #[test]
+    fn a_solid_keeps_its_gatherable_group_and_whether_a_timeline_moves_it() {
+        // The light bridge (`interactobject_lightbridge`): a blocker in `Healthy`, a floor of
+        // every state, and a section mesh under a group that the bridge's timeline binds.
+        let entity = |id: u64, name: &str, parent: u64, components: Vec<Element>| {
+            tree_entity(id, name, parent, UNTURNED, [0.0; 3], components)
+        };
+        let entities = vec![
+            entity(1, "InteractObject_LightBridge", NO_PARENT, Vec::new()),
+            entity(2, HEALTHY_GROUP, 1, Vec::new()),
+            entity(3, "Blocker", 2, structure_body()),
+            entity(4, "BridgeCollision", 1, structure_body()),
+            entity(5, "Timeline_Bridge", 1, vec![timeline(&[6, NO_PARENT])]),
+            entity(6, "Bridge_1_sectionA_group", 5, Vec::new()),
+            entity(7, "Bridge_1_sectionA_mesh", 6, structure_body()),
+            entity(8, DEPLETED_GROUP, 1, Vec::new()),
+            entity(9, "Collision", 8, structure_body()),
+        ];
+        let solids = slice_solids(
+            &slice_of(entities),
+            &Names::new(),
+            &player_filters("Structure"),
+        );
+        let read: Vec<(Option<u64>, Option<SliceState>, bool)> = solids
+            .bodies
+            .iter()
+            .map(|body| (body.entity, body.state, body.moving))
+            .collect();
+        assert_eq!(
+            read,
+            [
+                (Some(3), Some(SliceState::Healthy), false),
+                (Some(4), None, false),
+                (Some(7), None, true),
+                (Some(9), Some(SliceState::Depleted), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_solid_that_a_timeline_moves_stands_only_while_its_slice_is_healthy() {
+        assert_eq!(deferred_state(None, false), Some(None));
+        assert_eq!(
+            deferred_state(Some(SliceState::Depleted), false),
+            Some(Some(SliceState::Depleted))
+        );
+        assert_eq!(deferred_state(None, true), Some(Some(SliceState::Healthy)));
+        assert_eq!(
+            deferred_state(Some(SliceState::Healthy), true),
+            Some(Some(SliceState::Healthy))
+        );
+        assert_eq!(deferred_state(Some(SliceState::Depleted), true), None);
+    }
+
+    #[test]
+    fn a_deferred_slice_s_shapes_go_to_the_state_they_stand_in() {
+        let body = |geometry| Body {
+            geometry,
+            place: IDENTITY_AFFINE,
+        };
+        let mut bodies = StateBodies::default();
+        assert!(bodies.is_empty());
+        bodies.of(None).push(body(0));
+        bodies.of(Some(SliceState::Healthy)).push(body(1));
+        bodies.of(Some(SliceState::Depleted)).push(body(2));
+        assert!(!bodies.is_empty());
+        assert_eq!(
+            (bodies.always, bodies.healthy, bodies.depleted),
+            (vec![body(0)], vec![body(1)], vec![body(2)])
+        );
+    }
+
+    /// The translation of the first body of `solids`.
+    fn first_body_at(solids: &SliceSolids) -> [f32; 3] {
+        let place = solids.bodies[0].place;
+        [place[0][3], place[1][3], place[2][3]]
+    }
+
+    #[test]
+    fn a_child_keeps_its_place_from_the_top_entity_where_the_slice_is_put() {
+        // `dungeon_hallway_ancient_16m`: the top entity is stored turned 90 degrees, a group
+        // under it holds the turn, and the floor box under the group is stored 7.7 m south.
+        let entities = vec![
+            tree_entity(1, "hallway", NO_PARENT, QUARTER_TURN, [0.0; 3], Vec::new()),
+            tree_entity(2, "Collision", 1, QUARTER_TURN, [0.0; 3], Vec::new()),
+            tree_entity(3, "floor", 2, UNTURNED, [0.0, -7.7, 1.0], structure_body()),
+        ];
+        let solids = slice_solids(
+            &slice_of(entities),
+            &Names::new(),
+            &player_filters("Structure"),
+        );
+        assert_eq!(solids.bodies.len(), 1);
+        let at = first_body_at(&solids);
+        assert!(
+            (at[0] + 7.7).abs() < 1e-5 && at[1].abs() < 1e-5 && (at[2] - 1.0).abs() < 1e-5,
+            "the turn is taken back: {at:?}"
+        );
+    }
+
+    #[test]
+    fn the_groups_between_a_child_and_its_top_entity_are_not_applied() {
+        // The tutorial's Thorpe arena: an unmoved top entity, its `Ground` group 2 m up, and a
+        // floor under the group that already holds the group's height.
+        let entities = vec![
+            tree_entity(1, "arena", NO_PARENT, UNTURNED, [0.0; 3], Vec::new()),
+            tree_entity(2, "Ground", 1, UNTURNED, [0.0, 0.0, 2.0], Vec::new()),
+            tree_entity(3, "floor", 2, UNTURNED, [0.0, 0.0, 2.5], structure_body()),
+        ];
+        let solids = slice_solids(
+            &slice_of(entities),
+            &Names::new(),
+            &player_filters("Structure"),
+        );
+        assert_eq!(first_body_at(&solids), [0.0, 0.0, 2.5]);
+    }
+
+    #[test]
+    fn a_top_entity_stands_where_its_slice_is_put() {
+        let entities = vec![tree_entity(
+            1,
+            "hallway",
+            NO_PARENT,
+            QUARTER_TURN,
+            [1.0, 2.0, 3.0],
+            structure_body(),
+        )];
+        let solids = slice_solids(
+            &slice_of(entities),
+            &Names::new(),
+            &player_filters("Structure"),
+        );
+        let place = solids.bodies[0].place;
+        for (row, values) in place.iter().enumerate() {
+            for (column, value) in values.iter().enumerate() {
+                let expected = IDENTITY_AFFINE[row][column];
+                assert!((value - expected).abs() < 1e-5, "{place:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_slice_with_several_top_entities_keeps_their_stored_places() {
+        let entities = vec![
+            tree_entity(
+                1,
+                "rock",
+                NO_PARENT,
+                QUARTER_TURN,
+                [4.0, 0.0, 0.0],
+                structure_body(),
+            ),
+            tree_entity(2, "tree", NO_PARENT, UNTURNED, [0.0, 6.0, 0.0], Vec::new()),
+        ];
+        let solids = slice_solids(
+            &slice_of(entities),
+            &Names::new(),
+            &player_filters("Structure"),
+        );
+        assert_eq!(first_body_at(&solids), [4.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -2881,7 +3253,12 @@ mod tests {
         assert_eq!(solids.bodies.len(), 2);
         let start = &solids.bodies[0];
         let stump = &solids.bodies[1];
-        assert!(!start.depleted && stump.depleted, "{:?}", solids.bodies);
+        assert_eq!(
+            (start.state, stump.state),
+            (Some(SliceState::Healthy), Some(SliceState::Depleted)),
+            "{:?}",
+            solids.bodies
+        );
         let row: HashMap<String, String> = [(
             "StartMesh".to_owned(),
             r"Objects\Trees\Oak\Oak_A.cgf".to_owned(),
@@ -2909,7 +3286,8 @@ mod tests {
             place: IDENTITY_AFFINE,
             source: Some(ShapeSource::Rnr(([1; GUID_LEN], 100))),
             entity: Some(9),
-            depleted: false,
+            state: None,
+            moving: false,
             solid_for: SolidFor {
                 player: true,
                 ai: true,

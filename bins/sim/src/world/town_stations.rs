@@ -230,6 +230,8 @@ mod tests {
                 sub_id: DYNAMIC_SLICE_SUB_ID,
                 origin: [at.x, at.y, at.z],
                 bodies: vec![Body { geometry: 0, place }],
+                healthy: Vec::new(),
+                depleted: Vec::new(),
             }],
             ..LevelCollision::default()
         };

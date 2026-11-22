@@ -14245,6 +14245,8 @@ mod tests {
                 sub_id: 2,
                 origin: wall,
                 bodies: vec![Body { geometry: 0, place }],
+                healthy: Vec::new(),
+                depleted: Vec::new(),
             }],
             volumes: Vec::new(),
             ..LevelCollision::default()

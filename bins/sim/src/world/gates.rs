@@ -29,23 +29,31 @@
 //! success" reproduces 181 of the 984 mined changes of the non-switch gates (18.4 %, below the
 //! 80 % bar; `gaterules.py` of the capture tools over 65 retail ledgers of 28 level scripts), so
 //! it is not used.
+//!
+//! While a gate stands, its slice's solids stand in every player's ground, those of its state
+//! ([`crate::asset_solids`]; level-collision note section 5.2): the bridges the players cross,
+//! the blockers and doors that stop them.
+
+use std::sync::Arc;
 
 use nw_content::dungeon_gates::{
     Entry, Gate, GateAction, GateLevel, GateRule, LevelRules, TimelineRole, Trigger,
 };
 use nw_messages::timeline_state::{TIMELINE_TYPE_INDEX, TimelineState};
 use nw_messages::{
-    BundleMember, DEPLETED_GATHERABLE, GatherableControllerState, HEALTHY_GATHERABLE,
-    InteractState, MemberState, RAW_ID_LEN,
+    BundleMember, DEPLETED_GATHERABLE, DYNAMIC_SLICE_SUB_ID, GatherableControllerState,
+    HEALTHY_GATHERABLE, InteractState, MemberState, RAW_ID_LEN,
 };
 use nw_sim_core::Position;
+use nw_world::collision::{Body, SliceState};
 
-use super::SimWorld;
 use super::crafting::{Station, dynamic_ref};
 use super::dungeon_script::DungeonRun;
 use super::encounter_roots::{
     STATUS_IN_PROGRESS, STATUS_NOT_STARTED, STATUS_SUCCEEDED, card, place_member,
 };
+use super::{Player, SimWorld};
+use crate::asset_solids::{ShownSolids, SliceSolids};
 
 /// The namespace of the `GdeRef`s of gate entities ("gatesdor").
 const GATE_NAMESPACE: u64 = 0x6761_7465_7364_6f72;
@@ -365,6 +373,8 @@ pub(super) struct LevelGates {
     switches_started: Vec<String>,
     /// The encounter statuses of the last step.
     watch: EncounterWatch,
+    /// The solids of the standing gates.
+    solids: ShownSolids,
 }
 
 impl LevelGates {
@@ -410,6 +420,7 @@ impl LevelGates {
             switches_used: Vec::new(),
             switches_started: Vec::new(),
             watch: EncounterWatch::default(),
+            solids: ShownSolids::default(),
         };
         (gates, spawns)
     }
@@ -424,6 +435,27 @@ impl LevelGates {
     /// The slot key of gate `gate`.
     pub(super) fn number(&self, gate: usize) -> Option<u64> {
         self.gates.get(gate).and_then(|live| live.number)
+    }
+
+    /// The solids of the standing gates, each in its gatherable state (a gate without one stands
+    /// as it spawns: healthy), from the level's deferred slices `solids`.
+    fn standing_bodies(&self, solids: &SliceSolids) -> Vec<Body> {
+        self.gates
+            .iter()
+            .filter(|live| live.present)
+            .flat_map(|live| {
+                let state = match live.state {
+                    Some(DEPLETED_GATHERABLE) => SliceState::Depleted,
+                    _ => SliceState::Healthy,
+                };
+                solids.bodies_in(
+                    live.def.asset,
+                    DYNAMIC_SLICE_SUB_ID,
+                    live.def.position,
+                    state,
+                )
+            })
+            .collect()
     }
 
     /// The slot keys of every gate in the world.
@@ -663,13 +695,50 @@ impl SimWorld {
         let (gates, spawns) = LevelGates::new(level, rules, namespace);
         self.dungeon_gates = Some(gates);
         self.apply_gate_changes(spawns);
+        self.sync_gate_solids();
     }
 
-    /// The gates of the instance that ended go.
+    /// The gates of the instance that ended go, and their solids with them.
     pub(super) fn stop_gates(&mut self) {
         if let Some(gates) = self.dungeon_gates.take() {
             for number in gates.numbers() {
                 self.stations.remove_camp(number);
+            }
+            if let Some(shown) = gates.solids.index() {
+                let mut query = self.world.query::<&mut Player>();
+                for mut player in query.iter_mut(&mut self.world) {
+                    if player
+                        .solids
+                        .as_ref()
+                        .is_some_and(|held| Arc::ptr_eq(held, shown))
+                    {
+                        player.solids = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The standing gates' solids, in every player's ground. A catacombs run's players stand on
+    /// its tiles' solids instead ([`super::catacombs`]), which its gates have none of.
+    fn sync_gate_solids(&mut self) {
+        if self.catacomb_run().is_some() {
+            return;
+        }
+        let Some(gates) = &mut self.dungeon_gates else {
+            return;
+        };
+        let bodies = gates.standing_bodies(&self.content.slice_solids);
+        gates.solids.show(&self.content.slice_solids, bodies);
+        let shown = gates.solids.index();
+        let mut query = self.world.query::<&mut Player>();
+        for mut player in query.iter_mut(&mut self.world) {
+            let same = match (&player.solids, shown) {
+                (Some(held), Some(shown)) => Arc::ptr_eq(held, shown),
+                (held, shown) => held.is_none() && shown.is_none(),
+            };
+            if !same {
+                player.solids = shown.cloned();
             }
         }
     }
@@ -683,6 +752,7 @@ impl SimWorld {
         let changes = gates.step(&events, now_ms);
         self.dungeon_gates = Some(gates);
         self.apply_gate_changes(changes);
+        self.sync_gate_solids();
     }
 
     /// The slot key of the switch with `GdeRef` `gde_ref` within `reach_m` of `position`.
@@ -1211,5 +1281,104 @@ mod tests {
             body_of(change_of(&ended, 0).expect("end"), CLOSE_TIMELINE),
             Some(TimelineState::end(7, LEVER_S).body().expect("end"))
         );
+    }
+
+    /// A collision whose deferred slice at `at` is the test gate's slice ([`gate`]): a floor box
+    /// of every state 1 m high, a blocker box 2 m high while healthy and a ledge 3 m high while
+    /// depleted, all at `at`.
+    fn gate_collision(at: [f32; 3]) -> nw_world::collision::LevelCollision {
+        use nw_world::collision::{DeferredSlice, Geometry, IDENTITY_AFFINE, LevelCollision};
+        let body = |geometry: u32, half_height: f32| {
+            let mut place = IDENTITY_AFFINE;
+            place[0][3] = at[0];
+            place[1][3] = at[1];
+            place[2][3] = at[2] + half_height;
+            Body { geometry, place }
+        };
+        let slab = |half_height: f32| Geometry::Box {
+            half_extents: [2.0, 2.0, half_height],
+        };
+        LevelCollision {
+            geometries: vec![slab(0.5), slab(1.0), slab(1.5)],
+            deferred: vec![DeferredSlice {
+                slice: gate(EXIT_DOOR, at).asset,
+                sub_id: DYNAMIC_SLICE_SUB_ID,
+                origin: at,
+                bodies: vec![body(0, 0.5)],
+                healthy: vec![body(1, 1.0)],
+                depleted: vec![body(2, 1.5)],
+            }],
+            ..LevelCollision::default()
+        }
+    }
+
+    #[test]
+    fn a_standing_gate_s_solids_are_those_of_its_state() {
+        use nw_world::collision_index::CollisionIndex;
+        let level = level();
+        let at = level.gates[0].position;
+        let collision = gate_collision(at);
+        let index = Arc::new(CollisionIndex::new(collision.clone()));
+        let solids = SliceSolids::of(&collision, &index);
+        let (mut gates, _) = LevelGates::new(&level, None, NAMESPACE);
+        let geometries = |gates: &LevelGates| {
+            gates
+                .standing_bodies(&solids)
+                .iter()
+                .map(|body| body.geometry)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            geometries(&gates),
+            [0, 2],
+            "open: depleted, as no rule mined"
+        );
+        gates.gates[0].set(HEALTHY_GATHERABLE, Play::OfRole, NOW);
+        assert_eq!(geometries(&gates), [0, 1], "closed: healthy");
+        gates.gates[0].present = false;
+        assert!(geometries(&gates).is_empty(), "a gate out of the world");
+    }
+
+    #[test]
+    fn the_standing_gates_solids_stand_in_every_player_s_ground_until_the_instance_ends() {
+        use nw_world::collision_index::CollisionIndex;
+
+        use crate::player_content::PlayerContent;
+        use crate::world::tests::{join, world_with_spawns};
+        let level = level();
+        let [x, y, z] = level.gates[0].position;
+        let collision = gate_collision([x, y, z]);
+        let index = Arc::new(CollisionIndex::new(collision.clone()));
+        let mut world = world_with_spawns(Vec::new());
+        world.content = Arc::new(PlayerContent {
+            slice_solids: SliceSolids::of(&collision, &index),
+            ..PlayerContent::default()
+        });
+        join(&mut world, 1, 0.0);
+        let floor = |world: &mut SimWorld| {
+            let entity = world.player_by_number(1).expect("player");
+            world
+                .world
+                .get::<Player>(entity)
+                .and_then(|player| player.solids.clone())
+                .and_then(|solids| solids.floor_at(x, y, z + 4.0))
+        };
+        world.spawn_gates(&level, None, 0);
+        let open = floor(&mut world).expect("the open gate's solids");
+        assert!(
+            (open - (z + 3.0)).abs() < 1e-3,
+            "the depleted ledge: {open}"
+        );
+        if let Some(gates) = &mut world.dungeon_gates {
+            gates.gates[0].set(HEALTHY_GATHERABLE, Play::OfRole, NOW);
+        }
+        world.sync_gate_solids();
+        let closed = floor(&mut world).expect("the closed gate's solids");
+        assert!(
+            (closed - (z + 2.0)).abs() < 1e-3,
+            "the healthy blocker: {closed}"
+        );
+        world.stop_gates();
+        assert_eq!(floor(&mut world), None, "no gate stands after the instance");
     }
 }

@@ -17,11 +17,19 @@
 //! trace: 188 records whose client stood 0.4 to 0.5 m above the level's floor near (9584, 6336)
 //! stood on the carpentry station `settlement_station_carpentry_t5.dynamicslice`, whose solids
 //! the collision file keeps only as a deferred slice).
+//!
+//! The gates, bridges, blockers, pressure plates, teleporters and portal stones of an instance
+//! level are such slices too ([`crate::world`] gates): the instance sim spawns each where its
+//! level script's spawner places it, and while it stands its solids stand in every player's
+//! ground there, those of its `Healthy` or `Depleted` entity by its gatherable state
+//! ([`nw_world::collision::SliceState`]; level-collision note section 5.2: retail players stood
+//! on the Shattered Mountain throne bridge at 1,345 own places while its entity was healthy, on
+//! the Amrine light bridge at 116 while it was depleted).
 
 use std::sync::Arc;
 
 use nw_content::ftue_entities::AssetEntity;
-use nw_world::collision::{Body, DeferredSlice, LevelCollision};
+use nw_world::collision::{Body, DeferredSlice, LevelCollision, SliceState};
 use nw_world::collision_index::CollisionIndex;
 
 /// How far an asset entity's place may be from its deferred slice's origin, m (our choice: the
@@ -59,7 +67,7 @@ impl AssetSolids {
                     .and_then(|at| {
                         collision.deferred_at(asset.asset, asset.asset_sub_id, at, ASSET_MATCH_M)
                     })
-                    .map(|deferred| deferred.bodies.clone())
+                    .map(|deferred| spawned_bodies(deferred, SliceState::Healthy))
                     .unwrap_or_default()
             })
             .collect();
@@ -87,6 +95,11 @@ impl AssetSolids {
             .collect();
         solids_index(self.level.as_ref(), bodies)
     }
+}
+
+/// The shapes of `deferred` that stand while its entity is in `state`.
+fn spawned_bodies(deferred: &DeferredSlice, state: SliceState) -> Vec<Body> {
+    deferred.bodies_in(state).copied().collect()
 }
 
 /// The index of `bodies` over the shapes of `level`; `None` without bodies or a level.
@@ -130,18 +143,60 @@ impl SliceSolids {
         }
     }
 
-    /// The solids of the slice `slice` / `sub_id` that a spawner places at `at`; empty when the
-    /// level has none there ([`ASSET_MATCH_M`]).
+    /// The solids of the slice `slice` / `sub_id` that a spawner places at `at`, as it spawns
+    /// (healthy); empty when the level has none there ([`ASSET_MATCH_M`]).
     pub fn bodies_of(&self, slice: [u8; 16], sub_id: u32, at: [f32; 3]) -> Vec<Body> {
+        self.bodies_in(slice, sub_id, at, SliceState::Healthy)
+    }
+
+    /// The solids of the slice `slice` / `sub_id` that a spawner places at `at` while its entity
+    /// is in `state`; empty when the level has none there ([`ASSET_MATCH_M`]).
+    pub fn bodies_in(
+        &self,
+        slice: [u8; 16],
+        sub_id: u32,
+        at: [f32; 3],
+        state: SliceState,
+    ) -> Vec<Body> {
         self.deferred
             .deferred_at(slice, sub_id, at, ASSET_MATCH_M)
-            .map(|deferred| deferred.bodies.clone())
+            .map(|deferred| spawned_bodies(deferred, state))
             .unwrap_or_default()
     }
 
     /// The solids `bodies` as a ground's structures; `None` without any.
     pub fn index(&self, bodies: Vec<Body>) -> Option<Arc<CollisionIndex>> {
         solids_index(self.level.as_ref(), bodies)
+    }
+}
+
+/// The solids a sim shows now (the standing slices of an instance), as the players' ground
+/// has them: the index is made again only when the solids change.
+#[derive(Debug, Clone, Default)]
+pub struct ShownSolids {
+    bodies: Vec<Body>,
+    index: Option<Arc<CollisionIndex>>,
+}
+
+/// Two are equal when their solids are: the index only places them.
+impl PartialEq for ShownSolids {
+    fn eq(&self, other: &Self) -> bool {
+        self.bodies == other.bodies
+    }
+}
+
+impl ShownSolids {
+    /// Shows `bodies` over the shapes of `solids`.
+    pub fn show(&mut self, solids: &SliceSolids, bodies: Vec<Body>) {
+        if bodies != self.bodies {
+            self.index = solids.index(bodies.clone());
+            self.bodies = bodies;
+        }
+    }
+
+    /// The shown solids as a ground's structures; `None` without any.
+    pub const fn index(&self) -> Option<&Arc<CollisionIndex>> {
+        self.index.as_ref()
     }
 }
 
@@ -167,6 +222,8 @@ mod tests {
                 sub_id: 2,
                 origin: [10.0, 0.0, 0.0],
                 bodies: vec![Body { geometry: 0, place }],
+                healthy: Vec::new(),
+                depleted: Vec::new(),
             }],
             volumes: Vec::new(),
             ..LevelCollision::default()

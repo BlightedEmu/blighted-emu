@@ -33,7 +33,7 @@ pub const COLLISION_MAGIC: [u8; 4] = *b"NWCO";
 pub const COLLISION_FORMAT_VERSION: u16 = 1;
 /// Version of the record types. Raise it when a type in this module changes; the golden test
 /// fails until it is raised.
-pub const COLLISION_SCHEMA_VERSION: u32 = 5;
+pub const COLLISION_SCHEMA_VERSION: u32 = 6;
 /// Header fields of the collision file.
 pub const COLLISION_CONTAINER: ContainerSpec = ContainerSpec {
     magic: COLLISION_MAGIC,
@@ -200,6 +200,12 @@ pub fn shape_contains(shape: &Geometry, place: &Affine, point: Vec3) -> bool {
 }
 
 /// The solids of one slice that a spawner places after the level loads.
+///
+/// A slice with a gatherable controller (a gate, a bridge, a blocker of a level script) holds a
+/// `Healthy` and a `Depleted` entity: the entities in each stand only while the slice's entity is
+/// in that gatherable state (level-collision note section 5.2; Observed: the Shattered Mountain
+/// corruption bridges' floors are in `Healthy`, and the retail players stood on them only while
+/// the bridge entity's gatherable state was 4).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeferredSlice {
     /// The slice's asset id: its GUID.
@@ -208,8 +214,33 @@ pub struct DeferredSlice {
     pub sub_id: u32,
     /// Where the spawner places the slice's origin.
     pub origin: Vec3,
-    /// Its placed shapes (with those of the slices it spawns on initialize).
+    /// Its placed shapes that stand in every state (with those of the slices it spawns on
+    /// initialize).
     pub bodies: Vec<Body>,
+    /// Its placed shapes that stand only while it is healthy (its `Healthy` entity).
+    pub healthy: Vec<Body>,
+    /// Its placed shapes that stand only while it is depleted (its `Depleted` entity).
+    pub depleted: Vec<Body>,
+}
+
+/// The gatherable state of a deferred slice's entity: which of its shapes stand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliceState {
+    /// Healthy: as it spawns (gatherable state 4, a closed gate).
+    Healthy,
+    /// Depleted (gatherable state 8, an open gate).
+    Depleted,
+}
+
+impl DeferredSlice {
+    /// The placed shapes that stand while its entity is in `state`.
+    pub fn bodies_in(&self, state: SliceState) -> impl Iterator<Item = &Body> {
+        let of_state = match state {
+            SliceState::Healthy => &self.healthy,
+            SliceState::Depleted => &self.depleted,
+        };
+        self.bodies.iter().chain(of_state)
+    }
 }
 
 /// One shape in its own space.
@@ -500,19 +531,18 @@ mod tests {
         0, 0, 0, 128, 63, 0, 0, 0, 0, 1, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129,
         129, 129, 129, 129, 129, 200, 1, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 2, 0, 0, 128,
         63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0, 1, 25, 84, 114, 105, 103, 103, 101, 114,
-        86, 111, 108, 95, 49, 54, 95, 83, 101, 97, 114, 99, 104, 86, 97, 117, 108, 116, 1, 0, 0,
-        64, 64, 0, 0, 128, 64, 0, 0, 0, 63, 0, 0, 0, 0, 0, 0, 128, 191, 0, 0, 0, 0, 0, 0, 200, 66,
-        0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 72, 67, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63,
-        0, 0, 240, 65, // ai_bodies: one sphere body in place.
-        1, 2, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0,
-        // player_only: body 0.
-        1, 0, // nav_marks: the top of box 1 in place.
-        1, 1, 1, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0,
-        // entities: body 0 of the start beach watchtower's capital.
-        1, 0, 195, 164, 161, 130, 196, 179, 152, 138, 140, 1,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0, 1, 1, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 128, 63, 0, 0, 0, 0, 1, 0, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0,
+        0, 0, 0, 1, 25, 84, 114, 105, 103, 103, 101, 114, 86, 111, 108, 95, 49, 54, 95, 83, 101,
+        97, 114, 99, 104, 86, 97, 117, 108, 116, 1, 0, 0, 64, 64, 0, 0, 128, 64, 0, 0, 0, 63, 0, 0,
+        0, 0, 0, 0, 128, 191, 0, 0, 0, 0, 0, 0, 200, 66, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 72, 67, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 240, 65, 1, 2, 0, 0, 128, 63, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 128, 63, 0, 0, 0, 0, 1, 0, 195, 164, 161, 130, 196, 179, 152, 138, 140, 1,
     ];
     /// The capital id of the start beach watchtower ([`crate::capitals::capital_id`]).
     const WATCHTOWER: u64 = 0x8c14_619c_4048_5243;
@@ -559,6 +589,14 @@ mod tests {
                 origin: [1.0, 2.0, 3.0],
                 bodies: vec![Body {
                     geometry: 2,
+                    place: IDENTITY_AFFINE,
+                }],
+                healthy: vec![Body {
+                    geometry: 1,
+                    place: IDENTITY_AFFINE,
+                }],
+                depleted: vec![Body {
+                    geometry: 0,
                     place: IDENTITY_AFFINE,
                 }],
             }],
@@ -673,6 +711,19 @@ mod tests {
                 .deferred_at([0x81; 16], 2, [1.0, 2.0, 3.0], 1.0)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_deferred_slice_stands_its_state_s_shapes_with_those_of_every_state() {
+        let slice = &sample().deferred[0];
+        let geometries = |state| {
+            slice
+                .bodies_in(state)
+                .map(|body| body.geometry)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(geometries(SliceState::Healthy), [2, 1]);
+        assert_eq!(geometries(SliceState::Depleted), [2, 0]);
     }
 
     #[test]

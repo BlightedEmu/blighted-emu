@@ -2405,6 +2405,8 @@ pub(in crate::world) mod tests {
                         geometry: 0,
                         place: slab,
                     }],
+                    healthy: Vec::new(),
+                    depleted: Vec::new(),
                 })
                 .collect(),
             ..LevelCollision::default()

@@ -33,10 +33,19 @@ Status labels: **Observed** (measured, with counts), **Inferred** (concluded, no
 2. Chunk lists: `region.chunks` (open world, the union of the capitals' `.chunks`), else each
    capital's `.chunks`: `assetId` {`guid`, `subId`} and `worldPosition`, no rotation.
 3. The `.dynamicslice` of a placement (asset id resolved by `assetcatalog.catalog`): its
-   entities' `GameTransformComponent` `m_worldTM` is the entity's place **in the slice's space**.
-   In the build's slices `m_localTM` equals `m_worldTM` in every entity, and a child holds about
-   its parent's values: the parent chain must **not** be applied again (the Thorpe arena floor
-   was 2 m too high with it, at the retail own place without it). (Observed)
+   entities' `GameTransformComponent` `m_worldTM` is the entity's place **in the space of the
+   slice's top entity** (the one entity with a place and no parent in the slice), and the top
+   entity stands where the placement puts the slice: an entity's place is the placement, then
+   the inverse of the top entity's `m_worldTM`, then its own `m_worldTM`. A slice with no such
+   single entity keeps its stored places. In the build's slices `m_localTM` equals `m_worldTM`
+   in every entity. A child holds the values of the groups between it and the top entity, so
+   those groups must **not** be applied again (the Thorpe arena's top entity is unmoved and its
+   `Ground` group is 2 m up: the floor was 2 m too high with the group, at the retail own place
+   without it). The top entity's own place must be taken back (2026-11-21: the top entity of
+   `dungeon_hallway_ancient_16m` is stored turned 90 degrees about z, and its capital at
+   798.4, 672.0, 132.0 is turned 180 degrees; only with the top entity's turn taken back does
+   the hallway run east between its door capitals at x 798.0 and 815.3, under the retail own
+   places of x 801 to 813 at 133.1 m; section 6.3). (Observed)
 4. A stored `Transform` is 12 big-endian floats: the 3 x 3 part **by columns** (basis x, y, z),
    then the translation. Check: open-world retail own places over the terrain by 0.3 m or more
    that a collision floor matches within 0.1 m: 1,384 of 2,319 with columns, 212 with rows.
@@ -111,12 +120,13 @@ Reader: `crates/nw-formats/src/rnr.rs`; its local-data test is in `crates/nw-ood
 
 `content-tool collision [levels]` (`just collision`) writes
 `local-data/content/<build>/levels/<level>/collision.bin`: the shared container header with magic
-`NWCO`, schema 2, then a postcard `LevelCollision` (`crates/nw-world/src/collision.rs`):
+`NWCO`, schema 6, then a postcard `LevelCollision` (`crates/nw-world/src/collision.rs`):
 shapes once (`Mesh`, `Box`, `Sphere`, `Capsule`, `Cylinder`, `Convex` with planes from the hull
 points), the bodies of the level as it loads (shape index + 3 x 4 place), and the **deferred
 slices**: the slices that a spawner places later (an encounter's spawn group, an event's;
 spawners without `m_spawnOnInitialize`, whose `m_sliceAsset` is in their server part), each
-with its slice id, its spawner's place and its bodies. (Observed)
+with its slice id, its spawner's place and its bodies: those of every state, and apart from them
+those of its `Healthy` and its `Depleted` entity (5.2). (Observed)
 
 ### 4.1 Variant capitals (Observed)
 
@@ -221,6 +231,84 @@ despawn), its bodies stand in that player's ground (`Player::solids`, a
 Mobs stand on the static ground only (they are shared by all players; the walls are each
 player's).
 
+### 5.2 Dynamic solids of the instance levels: the level script's gates (Observed, 2026-11-21)
+
+The slices that an expedition spawns later are the spawners of its level script
+(`slices/dungeon/levelscripts/<x>.dynamicslice`): the gates, doors, light and corruption bridges,
+blockers, pressure plates, teleporters and portal stones of the gates file
+(`nw_content::dungeon_gates`). Each one is a network entity of its own, which the instance sim
+already spawns, changes and removes (`bins/sim/src/world/gates.rs`, the mined rules of the
+dungeon gates note). Retail shows its solids only while that entity is in the world, and by its
+gatherable state:
+
+- The retail entity of a gate stands at its deferred slice's origin: 288 deferred slices of the
+  11 captured expeditions are gates of the gates file (same slice, origin within 0.5 m), and in
+  the 122 ledgers a card of the slice came at that origin for 276 of them (scratch tool
+  `deferredshow`, output `local-data/scratch-work/dungeon-collision/deferred/show-6.txt`;
+  cards of 360 other deferred slices, the encounters' spawns, came at their origin too).
+- The retail own places that a gate's floor holds (within 0.25 m; the level's own floor does
+  not) came while its entity was in view: the Shattered Mountain throne bridge 1,345 of 1,345,
+  its Naga bridge 461 of 461, the basilica bridge 479 of 479; the Amrine light bridge 116 while
+  in view (the rest came in ledgers that start inside the run).
+- By state: the corruption bridges, the natural and breakable bridges and the teleporters held
+  the players only while their entity was healthy (gatherable state 4); the light bridges only
+  while depleted (8). The doors and blockers held no one and stood over the players who walked
+  through them only while depleted (the Great Cleave ice door 63 own places, the Shattered
+  Mountain stair blocker 60, its basilica gate 15).
+- The slices say why (scratch tool `slicegroups`, output `deferred/groups-1.txt`): the bridge
+  floors and the blockers are in the slice's `Healthy` entity; the light bridge's `Blocker` is in
+  `Healthy` and its floor `BridgeCollision` in no group; the doors' solids are bound to the
+  slice's timelines (`LayerEntityAssignments` of its timeline components), which move them when
+  the gate opens.
+
+The rule the build and the sim use (`content-tool collision`, `deferred_state`;
+`AssetSolids`, `SliceSolids::bodies_in`, `ShownSolids` in `bins/sim/src/asset_solids.rs`;
+`LevelGates::standing_bodies` in `gates.rs`):
+
+- A solid in the slice's `Healthy` entity stands only while the entity is healthy, one in its
+  `Depleted` entity only while depleted, any other in every state.
+- A solid that a timeline of the slice binds (or a parent of it) stands only while the entity is
+  healthy, where it is stored: the timeline that plays when it is depleted moves it, and the
+  server plays no timeline (Inferred from the retail places above).
+- A standing gate's solids stand in every player's ground of the instance, those of its state; a
+  gate without a gatherable state stands as healthy. Mobs stand on the static ground only, as in
+  5.1. A catacombs run keeps its tiles' solids (its gates have none in its file).
+
+Retail own places of the 11 captured expeditions while the slice's entity was in view, against
+the deferred solids (old: every solid of the slice in every state; new: the rule):
+
+| Level | Held, old | Held, new | Over a player, old | Over a player, new | Gates only, held / over |
+|---|---:|---:|---:|---:|---:|
+| `nw_dungeon_brimstonesands_00` | 641 | 641 | 17 | 11 | 641 / 11 |
+| `nw_dungeon_cutlasskeys_00` | 189 | 189 | 385 | 246 | 140 / 246 |
+| `nw_dungeon_edengrove_00` | 650 | 650 | 25 | 0 | 642 / 0 |
+| `nw_dungeon_everfall_00` | 157 | 157 | 4 | 0 | 126 / 0 |
+| `nw_dungeon_firstlight_01` | 193 | 179 | 0 | 0 | 50 / 0 |
+| `nw_dungeon_greatcleave_00` | 299 | 313 | 124 | 47 | 313 / 47 |
+| `nw_dungeon_greatcleave_01` | 216 | 227 | 532 | 0 | 227 / 0 |
+| `nw_dungeon_reekwater_00` | 591 | 594 | 22 | 19 | 592 / 19 |
+| `nw_dungeon_restlessshores_01` | 293 | 293 | 2 | 2 | 291 / 2 |
+| `nw_dungeon_shattermtn_00` | 3,006 | 2,986 | 241 | 61 | 2,644 / 0 |
+| `nw_dungeon_windsward_00` | 241 | 257 | 17 | 0 | 250 / 0 |
+
+"Over a player": a floor of the slice 0.25 to 1.3 m above the retail feet (the player walked
+where the solid stood). The new rule keeps the held places (the firstlight extending bridge's
+14, held while depleted, are lost: its floor is timeline-bound) and takes away 1,051 of the
+1,369 places with a solid over the player. Left over: the Cutlass Keys ship bridge
+`BridgeShipEnter` (its `Depleted` collision stands over 246 places while depleted), the Glacial
+Tarn boss bridge (38 places while healthy) and plates in gatherable state 128 (a state the sim
+never sets; its meaning is Unknown). The non-gate slices (the Shattered Mountain void tunnel
+portals, statues and monolith, the Firstlight teleporter) are spawned by encounter stages; the
+sim does not show their solids (section 7).
+
+Bots (2026-11-21, PC stack, `nw-testclient expedition`, three game master bots, keyboard and
+game pad): the group entered Amrine Excavation (`DungeonAmrine`) into one instance sim (its
+entities 142202 to 142204) with the 16 gates of `amrinedungeon` and their mined rules, and walked 6 m legs
+around the entry with input records. The server's places (`!where`, one decimal): the arrival at
+the teleport spot (645.0, 663.0, 153.0), 1.19 m above the floor; after the first steps on the
+floor within 0.02 m at 4 places and 0.18 m at one. The start area has no gate slice, so the run
+does not test a gate's solids (`local-data/scratch-work/dungeon-collision/expedition/report-2.md`).
+
 The ship's rocking and sinking: no solid change is needed for the retail places. The galleon's
 own motion (`libs/timeline/ftuev2/galleon_rotate_loop.timeline` on its `AnchorTransform`) does
 not show in the own places: all 413 distinct retail deck places of the newchar tutorial are
@@ -283,12 +371,67 @@ The rest of the open-world places over the terrain: 74,243 have a collision floo
 bodies; 100 places that matched a floor within 0.1 m before now have a higher floor within
 1.3 m above their feet (a branch or a rock top of a variant's mesh over them).
 
+### 6.3 The expeditions and the top entity rule (Observed, 2026-11-21)
+
+Retail own places (moved 0.05 m) in the 122 ledgers that teleport into a dungeon or play the
+tutorial, each with the level of the last `LevelInfoChangedMsg` (its map name), against the
+collision files. "Floor" is `floor_at` within 0.1 m, "near" within 0.25 m, "none" no floor
+under the feet at all. The dungeon terrain is never the floor: every dungeon's `terrain.json`
+has `mountainHeight` 256 and its heightmap is one value (Windsward: 32 m, the floors are at 120
+to 145 m), so `world` gives the dungeons no terrain. Tool:
+`blighted-emu-tools/scratch-work/capdecode` `dungeonfloor`.
+
+| Level | Places | Floor before | Floor after | Near after | None before | None after |
+|---|---:|---:|---:|---:|---:|---:|
+| `ftue_v2` | 14,320 | 9,616 | 9,616 | 11,694 | 1,778 | 1,778 |
+| `newworld_vitaeeterna` | 964,716 | 350,499 | 350,596 | 415,091 | 412,434 | 412,389 |
+| `nw_dungeon_windsward_00` | 41,456 | 22,027 | 33,468 | 37,259 | 10,168 | 0 |
+| `nw_dungeon_brimstonesands_00` | 53,750 | - | 43,633 | 52,233 | - | 0 |
+| `nw_dungeon_cutlasskeys_00` | 49,295 | - | 41,646 | 47,081 | - | 0 |
+| `nw_dungeon_edengrove_00` | 57,911 | - | 49,755 | 54,988 | - | 0 |
+| `nw_dungeon_everfall_00` | 48,709 | - | 39,497 | 46,127 | - | 0 |
+| `nw_dungeon_firstlight_01` | 47,683 | - | 40,006 | 44,598 | - | 0 |
+| `nw_dungeon_greatcleave_00` | 54,496 | - | 44,200 | 50,444 | - | 0 |
+| `nw_dungeon_greatcleave_01` | 58,362 | - | 47,922 | 55,762 | - | 0 |
+| `nw_dungeon_reekwater_00` | 57,509 | - | 49,898 | 55,305 | - | 1 |
+| `nw_dungeon_restlessshores_01` | 60,779 | - | 51,788 | 58,557 | - | 0 |
+| `nw_dungeon_shattermtn_00` | 177,306 | - | 143,184 | 166,003 | - | 352 |
+
+"Before" is the rule without the top entity (the Windsward row is a trial build; the other
+dungeons had no file).
+
+The places with no floor at all that are left (2026-11-21, `deferredshow` and `holewindow` in
+`local-data/scratch-work/dungeon-collision/deferred/`):
+
+- `nw_dungeon_shattermtn_00` 352: 299 stand on a corruption bridge while its gate entity is in
+  view and healthy (5.2); the sim now shows them. 49 (three ledgers, x 1307 to 1312, y 1085 to
+  1089) are in the air over a gap: a ray down finds no surface within 300 m, and the place follows
+  a walk off a ledge at 123.5 m and a fall onto the floor at 117 to 118 m (`Tempest` ledger
+  933.887 to 934.246 s: 0.7 m down in 0.36 s, then the landing). 4 (x 712.7 to 713.2, y 703.2,
+  150.2 m) lie over a 0.54 m seam between two floors where the only surface under the point is
+  too steep to stand on (ray hits at 150.0 to 149.0 m); the client's capsule (0.82 m across)
+  stands on both floors. No solid is missing.
+- `nw_dungeon_reekwater_00` 1 (738.30, 828.06, 200.00): on the joint of two floor pieces at
+  199.966 and 199.998 m; the place before and after it is on a floor within 0.04 m, and a ray
+  down at the joint meets no face (a crack between two shapes). No solid is missing. The open world's "none" places stand on the terrain. A first try that
+applied the top entity's place instead of taking it back left 1,521 Windsward places and 6,891
+Restless Shores places with no floor. `nw_dungeon_dunwood_02` (18 placements, 13 bodies) has
+no retail capture.
+
 ## 7. Open (with where we looked)
 
 - Solids the file does not hold: player housing plots and their furniture (placed at run
   time), vegetation from `region.vegetation` (`VegetationPhysicsComponent`, not read), the 12
   bodies with a stale `m_rnrAsset` sub id (4.2), and the open world's deferred slices, which
-  no sim shows yet (the tutorial's are shown, 5.1).
+  no sim shows yet (the tutorial's are shown, 5.1; the settlement stations and the instance
+  gates are shown, 5.2).
+- Instance deferred slices that encounter stages spawn (not gates): the Shattered Mountain void
+  tunnel portals (180 held own places), corrupted statues (28) and madness monolith, the
+  Firstlight teleporter (129), the mutation treasure chests: the sim spawns no entity for them,
+  so their solids do not stand. The timelines of a gate are not played: a timeline-bound solid
+  stands as stored while healthy and not while depleted (5.2); the Cutlass Keys ship bridge and
+  the Glacial Tarn boss bridge do not fit that (5.2). Gatherable state 128 of the pressure
+  plates and teleporters: Unknown.
 - The 2,077 open-world solid entities outside variants that name no shape: their
   `m_shapeEntity` is invalid in every one; the client's use of such a body is Unknown (no
   shape found in the loader path read).

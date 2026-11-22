@@ -34,9 +34,39 @@ pub const TUTORIAL_LEVEL: &str = "ftue_v2";
 pub const OPEN_WORLD_LEVEL: &str = "newworld_vitaeeterna";
 /// The catacombs level (its collision holds the art tiles the server places).
 pub const CATACOMB_LEVEL: &str = "nw_catacomb_00";
-/// The levels whose collision file `collision` builds (the catacombs file comes from
-/// `catacomb-tiles`).
-pub const COLLISION_LEVELS: [&str; 2] = [TUTORIAL_LEVEL, OPEN_WORLD_LEVEL];
+/// The expedition levels: every dungeon level of the build's game mode and dungeon tables.
+pub const EXPEDITION_LEVELS: [&str; 12] = [
+    "nw_dungeon_brimstonesands_00",
+    "nw_dungeon_cutlasskeys_00",
+    "nw_dungeon_dunwood_02",
+    "nw_dungeon_edengrove_00",
+    "nw_dungeon_everfall_00",
+    "nw_dungeon_firstlight_01",
+    "nw_dungeon_greatcleave_00",
+    "nw_dungeon_greatcleave_01",
+    "nw_dungeon_reekwater_00",
+    "nw_dungeon_restlessshores_01",
+    "nw_dungeon_shattermtn_00",
+    "nw_dungeon_windsward_00",
+];
+/// The levels whose collision file `collision` builds: the tutorial, the open world and the
+/// expeditions (the catacombs file comes from `catacomb-tiles`).
+pub const COLLISION_LEVELS: [&str; 14] = [
+    TUTORIAL_LEVEL,
+    OPEN_WORLD_LEVEL,
+    EXPEDITION_LEVELS[0],
+    EXPEDITION_LEVELS[1],
+    EXPEDITION_LEVELS[2],
+    EXPEDITION_LEVELS[3],
+    EXPEDITION_LEVELS[4],
+    EXPEDITION_LEVELS[5],
+    EXPEDITION_LEVELS[6],
+    EXPEDITION_LEVELS[7],
+    EXPEDITION_LEVELS[8],
+    EXPEDITION_LEVELS[9],
+    EXPEDITION_LEVELS[10],
+    EXPEDITION_LEVELS[11],
+];
 /// The levels whose water file `water` builds.
 pub const WATER_LEVELS: [&str; 2] = [TUTORIAL_LEVEL, OPEN_WORLD_LEVEL];
 /// The levels whose road file `roads` builds: the open world, whose tract maps hold the roads.

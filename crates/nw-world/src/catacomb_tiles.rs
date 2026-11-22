@@ -732,6 +732,8 @@ mod tests {
                     geometry: 0,
                     place: slab,
                 }],
+                healthy: Vec::new(),
+                depleted: Vec::new(),
             }],
             ..LevelCollision::default()
         };
