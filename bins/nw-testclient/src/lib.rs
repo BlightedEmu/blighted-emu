@@ -7,6 +7,7 @@ pub mod chat;
 pub mod config;
 pub mod fleet;
 pub mod gather;
+pub mod group;
 pub mod hunt;
 pub mod pair;
 pub mod play;

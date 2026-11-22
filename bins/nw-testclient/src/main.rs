@@ -7,12 +7,16 @@
 //! for a GM chat command such as `!help` of a game master account, else the line itself). `voice`
 //! sets up the voice chat and checks the retail answers (it needs a `[voice]` service in the
 //! social service's configuration). `play`
-//! plays quests with a game master's bot and writes a report. Prints one line per step; exits with
-//! 0 only when every step passed.
+//! plays quests with a game master's bot and writes a report. `expedition` runs game master bots
+//! that form a group, enter an expedition and walk its start area. Prints one line per step;
+//! exits with 0 only when every step passed.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
@@ -22,6 +26,7 @@ use clap::{Parser, Subcommand};
 use nw_content::bundle::ContentBundle;
 use nw_content::client_build::load_client_build;
 use nw_content::gathering::{GatherRules, Gatherables};
+use nw_content::instances::InstanceCatalog;
 use nw_content::layout::{ContentLayout, content_dir};
 use nw_content::poi_tags::PoiTags;
 use nw_content::town_stations::TownStations;
@@ -35,9 +40,10 @@ use nw_testclient::config::{
 };
 use nw_testclient::fleet::{NewClient, udp_receive_errors};
 use nw_testclient::gather::{GatherNode, run_gather};
+use nw_testclient::group::{GroupBoard, GroupSeat, expedition_steps, floor_lines};
 use nw_testclient::hunt::run_hunt;
 use nw_testclient::pair::{Check, LATE_STATE_GAP, PairReport, PairSettings, RecordWalk, run_pair};
-use nw_testclient::play::{PlayData, PlaySettings, run_play};
+use nw_testclient::play::{PlayData, PlayReport, PlaySettings, Verdict, run_play};
 use nw_testclient::record_walk::InputDevice;
 use nw_testclient::rep::{LedgerSlot, RepClient};
 use nw_testclient::swarm::run_swarm;
@@ -45,6 +51,8 @@ use nw_testclient::udp::{Hold, run_rep};
 use nw_testclient::voice::{VoiceSettings, run_voice};
 use nw_testclient::walk::{CHARACTER_CREATION_PARAMS, WalkSettings, login_token, walk};
 use nw_world::WorldFile;
+use nw_world::collision::LevelCollision;
+use nw_world::collision_index::CollisionIndex;
 
 /// The committed example configuration.
 const DEFAULT_CONFIG: &str = "config/nw-testclient.toml";
@@ -52,6 +60,10 @@ const DEFAULT_CONFIG: &str = "config/nw-testclient.toml";
 const DEFAULT_CHAT_LINE: &str = "!help";
 /// The longest play without `--minutes`.
 const DEFAULT_PLAY_MINUTES: u64 = 30;
+/// The expedition of `expedition` without `--game-mode`: Amrine Excavation.
+const DEFAULT_EXPEDITION: &str = "DungeonAmrine";
+/// The longest expedition run without `--minutes`.
+const DEFAULT_EXPEDITION_MINUTES: u64 = 10;
 /// Seconds per minute.
 const SECONDS_PER_MINUTE: u64 = 60;
 /// The end of a play bot's character name after its account name.
@@ -151,6 +163,25 @@ enum Command {
         /// separated: the start of a test after a chain a player already played live.
         #[arg(long, value_delimiter = ',')]
         gm_start: Vec<String>,
+    },
+    /// Bots of game master accounts form a group of at least the game mode's `MinGroupSize`,
+    /// enter its expedition from afar, walk its start area, and write where the server put each
+    /// of them against the level's floor (`nw_testclient::group`). The first account leads; all
+    /// take the first account's password.
+    Expedition {
+        /// The game mode (`GameModeID`).
+        #[arg(long, default_value = DEFAULT_EXPEDITION)]
+        game_mode: String,
+        /// The bots' accounts, comma-separated, the leader first; each needs the game master
+        /// rank. A new one is registered.
+        #[arg(long, value_delimiter = ',', required = true)]
+        accounts: Vec<String>,
+        /// The report file (Markdown).
+        #[arg(long)]
+        report: PathBuf,
+        /// Longest time in the world, in minutes.
+        #[arg(long, default_value_t = DEFAULT_EXPEDITION_MINUTES)]
+        minutes: u64,
     },
 }
 
@@ -270,6 +301,32 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
                 &activities,
                 &report,
                 &ledger,
+            )
+            .await
+        }
+        Command::Expedition {
+            game_mode,
+            accounts,
+            report,
+            minutes,
+        } => {
+            let first = own(&config)?;
+            let bots = accounts
+                .iter()
+                .map(|account| PlaySettings {
+                    account: WalkSettings {
+                        account: account.clone(),
+                        character_name: format!("{account}{PLAY_CHARACTER_MARK}"),
+                        ..first.clone()
+                    },
+                    quests: Vec::new(),
+                    gm_start: Vec::new(),
+                    hold: Duration::from_secs(minutes * SECONDS_PER_MINUTE),
+                    registration_timeout: Duration::from_secs(config.registration_timeout_seconds),
+                })
+                .collect::<Vec<_>>();
+            expedition(
+                &config, &http, &trusted, &game_mode, &bots, &report, &ledger,
             )
             .await
         }
@@ -701,44 +758,17 @@ async fn play(
     report_path: &std::path::Path,
     ledger: &LedgerSlot,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let layout = level_layout(config)?;
-    let world = WorldFile::load(&layout, &config.swarm.level)?;
-    let tables = ContentBundle::load(&layout)?.tables;
-    let town_stations = TownStations::load(&layout)?;
+    let content = PlayContent::load(config)?;
     let data = ActivityData {
-        world: &world,
-        tables: &tables,
-        town_stations: &town_stations,
+        world: &content.world,
+        tables: &content.tables,
+        town_stations: &content.town_stations,
     };
     let activities = kinds
         .iter()
         .map(|kind| Activity::of(*kind, &data))
         .collect();
-    let nodes = world
-        .gatherables
-        .iter()
-        .map(|point| GatherNode {
-            gatherable: point.gatherable_id,
-            at: point.position,
-        })
-        .collect();
-    let gatherables = Gatherables::from_tables(&tables);
-    let containers = world
-        .gatherables
-        .iter()
-        .map(|point| point.gatherable_id)
-        .filter(|crc| {
-            gatherables
-                .get(*crc)
-                .is_some_and(|kind| kind.loot_container)
-        })
-        .collect();
-    let data = PlayData {
-        activities,
-        nodes,
-        containers,
-        poi_tags: PoiTags::from_tables(&tables),
-    };
+    let data = content.play_data(activities, None);
     let report = run_play(
         http,
         settings,
@@ -753,6 +783,201 @@ async fn play(
     }
     println!("report in {}", report_path.display());
     Ok(report.quests.len() == settings.quests.len() && report.activities.len() == kinds.len())
+}
+
+/// What a play bot reads of the content: the `[swarm]` level's world file, the tables and the
+/// settlements' station slots.
+struct PlayContent {
+    layout: ContentLayout,
+    world: WorldFile,
+    tables: nw_content::Tables,
+    town_stations: TownStations,
+}
+
+impl PlayContent {
+    fn load(config: &TestClientConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let layout = level_layout(config)?;
+        Ok(Self {
+            world: WorldFile::load(&layout, &config.swarm.level)?,
+            tables: ContentBundle::load(&layout)?.tables,
+            town_stations: TownStations::load(&layout)?,
+            layout,
+        })
+    }
+
+    /// The play data of a bot that plays `activities`, in the seat `group` of a group of bots.
+    fn play_data(&self, activities: Vec<Activity>, group: Option<GroupSeat>) -> PlayData {
+        let nodes = self
+            .world
+            .gatherables
+            .iter()
+            .map(|point| GatherNode {
+                gatherable: point.gatherable_id,
+                at: point.position,
+            })
+            .collect();
+        let gatherables = Gatherables::from_tables(&self.tables);
+        let containers = self
+            .world
+            .gatherables
+            .iter()
+            .map(|point| point.gatherable_id)
+            .filter(|crc| {
+                gatherables
+                    .get(*crc)
+                    .is_some_and(|kind| kind.loot_container)
+            })
+            .collect();
+        PlayData {
+            activities,
+            nodes,
+            containers,
+            poi_tags: PoiTags::from_tables(&self.tables),
+            group,
+        }
+    }
+}
+
+/// Runs `futures` at the same time; their outputs in order.
+async fn all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
+    let mut running: Vec<Pin<Box<F>>> = futures.into_iter().map(Box::pin).collect();
+    let mut outputs: Vec<Option<F::Output>> = running.iter().map(|_| None).collect();
+    std::future::poll_fn(|context| {
+        let mut pending = false;
+        for (future, output) in running.iter_mut().zip(outputs.iter_mut()) {
+            if output.is_none() {
+                match future.as_mut().poll(context) {
+                    Poll::Ready(done) => *output = Some(done),
+                    Poll::Pending => pending = true,
+                }
+            }
+        }
+        if pending {
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    })
+    .await;
+    outputs.into_iter().flatten().collect()
+}
+
+/// The `expedition` run: the bots of `bots` (the leader first) form a group, enter the
+/// expedition of `game_mode` and walk its start area; the report goes to `report_path`.
+async fn expedition(
+    config: &TestClientConfig,
+    http: &reqwest::Client,
+    trusted: &DtlsClientConfig,
+    game_mode: &str,
+    bots: &[PlaySettings],
+    report_path: &std::path::Path,
+    ledger: &LedgerSlot,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let content = PlayContent::load(config)?;
+    let catalog = InstanceCatalog::from_tables(&content.tables);
+    let mode = catalog
+        .by_id(game_mode)
+        .ok_or_else(|| format!("no game mode {game_mode}"))?;
+    let fewest = usize::try_from(mode.min_group.max(1))?;
+    let most = usize::try_from(mode.capacity)?;
+    if !(fewest..=most).contains(&bots.len()) {
+        return Err(format!(
+            "{game_mode} takes a group of {fewest} to {most} players; {} accounts given",
+            bots.len()
+        )
+        .into());
+    }
+    let level = &mode.map.folder;
+    let ground = CollisionIndex::new(LevelCollision::load(&content.layout, level)?);
+    let (walk_ground, sea_level_m) = nw_sim_core::player_level_ground(&content.layout, level)?;
+    let walk_ground: Arc<dyn nw_sim_core::Ground + Send + Sync> = Arc::new(walk_ground);
+    let seats = GroupBoard::seats(bots.len());
+    let runs = bots.iter().zip(&seats).map(|(settings, seat)| {
+        let records = RecordWalk {
+            device: seat_device(seat),
+            ground: Arc::clone(&walk_ground),
+            sea_level_m,
+        };
+        let activity = Activity {
+            kind: ActivityKind::Group,
+            steps: Ok(expedition_steps(seat, &mode.id, mode.crc, &records)),
+        };
+        let data = content.play_data(vec![activity], Some(seat.clone()));
+        let bot = seat.number();
+        run_play(
+            http,
+            settings,
+            data,
+            |token| RepClient::new(trusted, config.mtu, token, 0).map(|client| ledger.give(client)),
+            move |line| println!("bot {bot}: {line}"),
+        )
+    });
+    let reports = all(runs.collect()).await;
+    let mut markdown = format!(
+        "# Expedition run: {game_mode} ({level}), {} bots\n",
+        bots.len()
+    );
+    let mut passed = true;
+    for ((settings, seat), report) in bots.iter().zip(&seats).zip(reports) {
+        let role = if seat.leads() { "leader" } else { "member" };
+        let _ = write!(
+            markdown,
+            "\n## Bot {} ({role}, account {}, {:?})\n\n",
+            seat.number(),
+            settings.account.account,
+            seat_device(seat)
+        );
+        passed &= expedition_section(&mut markdown, report, seat, &ground);
+    }
+    std::fs::write(report_path, &markdown)?;
+    println!("{markdown}");
+    println!("report in {}", report_path.display());
+    Ok(passed)
+}
+
+/// The device a group bot walks with: the keyboard on even seats, a game pad on odd ones, so a
+/// run walks with both.
+const fn seat_device(seat: &GroupSeat) -> InputDevice {
+    /// The devices the seats take in turn.
+    const DEVICES: usize = 2;
+    if seat.number().is_multiple_of(DEVICES) {
+        InputDevice::Keys
+    } else {
+        InputDevice::Pad
+    }
+}
+
+/// Writes one bot's part of the expedition report into `markdown`: how its steps ended and its
+/// server places against the floor of `ground`; whether its steps all passed.
+fn expedition_section(
+    markdown: &mut String,
+    report: Result<PlayReport, nw_testclient::pair::PairError>,
+    seat: &GroupSeat,
+    ground: &CollisionIndex,
+) -> bool {
+    let report = match report {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = writeln!(markdown, "- the bot did not run: {error}");
+            return false;
+        }
+    };
+    let mut passed = !report.activities.is_empty();
+    for play in &report.activities {
+        let _ = writeln!(markdown, "- verdict: {:?}", play.verdict);
+        passed &= play.verdict == Verdict::Completed;
+        for action in &play.actions {
+            let _ = writeln!(markdown, "  - {action}");
+        }
+    }
+    let _ = writeln!(
+        markdown,
+        "\nServer places in the instance against the floor:\n"
+    );
+    for line in floor_lines(&seat.places(), ground) {
+        let _ = writeln!(markdown, "{line}");
+    }
+    passed
 }
 
 async fn registration(

@@ -4,13 +4,15 @@
 //! entity in the replication bundles, in order. A bundle carries one group per entity slot; a
 //! slot is tied to its entity by the spawn card in it ([`EntitySlots`]), and slot 1 is the
 //! client's own player. A hunt bot also keeps the mobs it is sent and counts the combat messages
-//! for it (M6-B spec section 9.1).
+//! for it (M6-B spec section 9.1). The own groups state tells the own group and the invites to
+//! it (an expedition group's bots, [`crate::group`]).
 
 use std::collections::BTreeMap;
 
 use nw_content::town_props::ASSET_ID_LEN;
 use nw_messages::entity_ids::IdHolder;
 use nw_messages::gde::LOOT_BAG_ASSET;
+use nw_messages::social::states::GroupsState;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     BAG_COMPONENT, EntitySlots, ItemRecord, LOGIN_MESSAGE_TYPES, MemberState, MessageError,
@@ -583,6 +585,10 @@ pub struct WorldView {
     /// objectives component: each one's objective instance and task (the CRC-32 of its lowercase
     /// id). A mission's turn-in names the instance whose tasks the bot played.
     listed_tasks: Vec<(u64, u32)>,
+    /// The own group, from the own groups state (`None`: none, or the all-zero id).
+    group: Option<[u8; RAW_ID_LEN]>,
+    /// The invites to the own player's group, from the last full list of the own groups state.
+    inbound_invites: Vec<[u8; RAW_ID_LEN]>,
 }
 
 /// Two views are equal when they saw the same; their id holders differ.
@@ -634,6 +640,7 @@ impl WorldView {
                     }
                     if entity.is_some() && entity == own {
                         self.read_own_tasks(update);
+                        self.read_own_groups(update);
                     }
                 }
             }
@@ -676,6 +683,41 @@ impl WorldView {
                 .map(|entry| (entry.instance, entry.task))
                 .collect();
         }
+    }
+
+    /// Keeps the own group and the invites to it from the own groups state in `update`: each
+    /// part that the state sends.
+    fn read_own_groups(&mut self, update: &SlotUpdate) {
+        let groups = update
+            .members
+            .iter()
+            .filter_map(|member| match &member.state {
+                MemberState::Groups(state) => Some(state),
+                _ => None,
+            });
+        for GroupsState {
+            group_id,
+            inbound_invites,
+            ..
+        } in groups
+        {
+            if let Some(group) = group_id {
+                self.group = (*group != [0; RAW_ID_LEN]).then_some(*group);
+            }
+            if let Some(invites) = inbound_invites {
+                self.inbound_invites = invites.elements.iter().map(|data| data.invite).collect();
+            }
+        }
+    }
+
+    /// The own group, once the own groups state names one.
+    pub const fn own_group(&self) -> Option<[u8; RAW_ID_LEN]> {
+        self.group
+    }
+
+    /// The first invite to the own player's group.
+    pub fn inbound_group_invite(&self) -> Option<[u8; RAW_ID_LEN]> {
+        self.inbound_invites.first().copied()
     }
 
     /// The instances of the own player's objectives that list one of the tasks `tasks` (the
@@ -1279,6 +1321,49 @@ mod tests {
             "in list order, each once"
         );
         assert!(view.instances_listing(&[UNKNOWN]).is_empty());
+    }
+
+    #[test]
+    fn the_own_groups_state_names_the_invite_and_then_the_group() {
+        use nw_messages::social::CharacterRef;
+        use nw_messages::social::states::GroupInviteData;
+        const INVITE: [u8; RAW_ID_LEN] = [5; RAW_ID_LEN];
+        const GROUP: [u8; RAW_ID_LEN] = [6; RAW_ID_LEN];
+        let update = |state: GroupsState| SlotUpdate {
+            interest: LOCAL_PLAYER_INTEREST,
+            entity: Some(OWN),
+            card: None,
+            position: None,
+            members: vec![BundleMember {
+                component: 0,
+                state: MemberState::Groups(state),
+            }],
+        };
+        let mut view = WorldView::default();
+        assert_eq!(
+            (view.own_group(), view.inbound_group_invite()),
+            (None, None)
+        );
+        view.read_own_groups(&update(GroupsState {
+            group_id: Some([0; RAW_ID_LEN]),
+            inbound_invites: Some(FullList::first(vec![GroupInviteData::plain(
+                INVITE,
+                [0; RAW_ID_LEN],
+                CharacterRef(None),
+                CharacterRef(None),
+                0,
+            )])),
+            ..GroupsState::default()
+        }));
+        assert_eq!(view.own_group(), None, "the all-zero group is none");
+        assert_eq!(view.inbound_group_invite(), Some(INVITE));
+        view.read_own_groups(&update(GroupsState {
+            group_id: Some(GROUP),
+            inbound_invites: Some(FullList::first(Vec::new())),
+            ..GroupsState::default()
+        }));
+        assert_eq!(view.own_group(), Some(GROUP));
+        assert_eq!(view.inbound_group_invite(), None, "the invite was answered");
     }
 
     #[test]

@@ -42,8 +42,10 @@ use crate::activity::{
 };
 use crate::chat::{chat_lines, is_system};
 use crate::gather::GatherNode;
+use crate::group::{GroupSeat, accept_call, invite_call};
 use crate::hunt::{planar, send_input};
-use crate::pair::{PairError, session_with};
+use crate::pair::{PairError, RecordWalk, SEND_INTERVAL, session_with};
+use crate::record_walk::{ARRIVED_M, RecordWalker};
 use crate::rep::{RepClient, RepError};
 use crate::udp::RepOutcome;
 use crate::view::{CombatView, InteractionAnswer, WorldView};
@@ -938,6 +940,8 @@ struct Player {
     fight: Option<Fight>,
     /// The fights for the current kill step.
     fought: Option<Fought>,
+    /// The bot's own body on its walk ([`Act::Walk`]).
+    walker: Option<RecordWalker>,
 }
 
 /// What the bot did in a fight for a kill step.
@@ -1929,6 +1933,37 @@ impl Player {
                     };
                     running.interaction = Some(self.interact(client, own, request, &[])?);
                 }
+                Act::InviteGroup(seat) => {
+                    let Some(members) = seat.members_ready() else {
+                        return Ok(None);
+                    };
+                    for character in members {
+                        let (type_index, body) = invite_call(character, own)?;
+                        client.send_message(MESSAGE_CHANNEL, true, type_index, body)?;
+                    }
+                }
+                // A bot already in a group (of an earlier run: the social service keeps it) has
+                // no invite to answer.
+                Act::AcceptGroupInvite(seat) if self.world.own_group().is_none() => {
+                    seat.set_ready();
+                    let Some(invite) = self.world.inbound_group_invite() else {
+                        return Ok(None);
+                    };
+                    let (type_index, body) = accept_call(invite, own)?;
+                    client.send_message(MESSAGE_CHANNEL, true, type_index, body)?;
+                }
+                Act::AcceptGroupInvite(seat) => seat.set_ready(),
+                Act::LeaderInside(seat) => seat.set_leader_inside(),
+                Act::Walk {
+                    seat,
+                    east_m,
+                    north_m,
+                    records,
+                } => {
+                    if !self.walk(client, seat, [*east_m, *north_m], records, since)? {
+                        return Ok(None);
+                    }
+                }
                 Act::EndInteraction { target_entity } => {
                     if let Some(interaction) = running.interaction {
                         Self::call(
@@ -1987,6 +2022,12 @@ impl Player {
                         if Some(*interaction) == running.interaction)
                 })
                 .then_some(Ok(())),
+            Proof::GroupFull(seat) => seat.others_joined().then_some(Ok(())),
+            Proof::InGroup(seat) => self.world.own_group().map(|_| {
+                seat.set_joined();
+                Ok(())
+            }),
+            Proof::LeaderInside(seat) => seat.leader_inside().then_some(Ok(())),
         };
         match proof {
             Some(Ok(())) => {
@@ -2005,6 +2046,9 @@ impl Player {
                     Proof::Ended => "the interaction's end".to_owned(),
                     Proof::Answered => "an answer to the interaction".to_owned(),
                     Proof::Sent => String::new(),
+                    Proof::GroupFull(_) => "every other bot in the group".to_owned(),
+                    Proof::InGroup(_) => "a group in the own groups state".to_owned(),
+                    Proof::LeaderInside(_) => "the leader in the instance".to_owned(),
                 };
                 let answered = self.lines[running.lines_before..].join(" / ");
                 Ok(Some(Verdict::Broken(format!(
@@ -2019,6 +2063,52 @@ impl Player {
                 ))))
             }
             None => Ok(None),
+        }
+    }
+
+    /// One frame of the walk to `offset` (east, north) from the first server place of `seat`
+    /// with input records of `records` ([`RecordWalker`]), one every [`SEND_INTERVAL`]; whether
+    /// the bot's own body is there. The server sends no own place for the bot's own moves: the
+    /// bot stands where its own body walked.
+    fn walk(
+        &mut self,
+        client: &mut RepClient,
+        seat: &GroupSeat,
+        offset: [f32; 2],
+        records: &RecordWalk,
+        since: Duration,
+    ) -> Result<bool, RepError> {
+        let Some([x, y, z]) = seat.first_place() else {
+            return Ok(true);
+        };
+        let walker = self
+            .walker
+            .get_or_insert_with(|| RecordWalker::new(Position { x, y, z }, records.device));
+        let goal = [x + offset[0], y + offset[1]];
+        let at = walker.position();
+        if planar([at.x, at.y, at.z], goal) <= ARRIVED_M {
+            return Ok(true);
+        }
+        if self
+            .last_move
+            .is_some_and(|last| since.saturating_sub(last) < SEND_INTERVAL)
+        {
+            return Ok(false);
+        }
+        self.last_move = Some(since);
+        let input = walker.frame(
+            goal,
+            SEND_INTERVAL.as_secs_f32(),
+            &*records.ground,
+            records.sea_level_m,
+        );
+        self.teleported_to = Some(walker.position());
+        match input {
+            Some(input) => {
+                send_input(client, &input)?;
+                Ok(false)
+            }
+            None => Ok(true),
         }
     }
 
@@ -2303,6 +2393,8 @@ pub struct PlayData {
     pub containers: HashSet<u32>,
     /// The territories' `POITag`s.
     pub poi_tags: PoiTags,
+    /// The bot's seat in a group of bots ([`crate::group`]); `None` for a bot alone.
+    pub group: Option<GroupSeat>,
 }
 
 /// Runs the play with `data`; `new_client` makes a client for a token; `report` gets one line
@@ -2323,8 +2415,12 @@ pub async fn run_play(
         nodes,
         containers,
         poi_tags,
+        group,
     } = data;
     let admission = walk(http, &settings.account, &mut report).await?;
+    if let Some(seat) = &group {
+        seat.set_character(admission.token.character_id.clone());
+    }
     let mut player = Player {
         world: WorldView::default(),
         combat: CombatView::default(),
@@ -2374,6 +2470,7 @@ pub async fn run_play(
         state_lines: Vec::new(),
         fight: None,
         fought: None,
+        walker: None,
     };
     let session = session_with(
         admission.rep_address,

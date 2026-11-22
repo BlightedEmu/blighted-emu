@@ -49,6 +49,8 @@ use nw_world::capitals::capital_id;
 use sim::world::GM_DONE as DONE;
 
 use crate::gather::{GatherNode, node_id};
+use crate::group::GroupSeat;
+use crate::pair::RecordWalk;
 
 /// The kind of an inn's open interaction (`travel::kind::OPEN_INN` of the sim; retail opened
 /// the inn with it before the check in, live-inn note section 1).
@@ -198,6 +200,26 @@ pub enum Act {
         /// The object's facet entity.
         target_entity: u64,
     },
+    /// The leader of a group of bots invites every other bot of its seat's group (3492), once
+    /// each of them is in the world ([`crate::group`]).
+    InviteGroup(GroupSeat),
+    /// A bot of a group accepts the invite its own groups state shows (3495), once one shows.
+    AcceptGroupInvite(GroupSeat),
+    /// The leader of a group tells the other bots it is in the instance.
+    LeaderInside(GroupSeat),
+    /// The bot walks to `east_m` and `north_m` metres from the first server place of its seat
+    /// (where it came into the instance) with input records, as the game client walks
+    /// ([`crate::record_walk`]).
+    Walk {
+        /// The bot's seat, whose first place is the start.
+        seat: GroupSeat,
+        /// Metres east of the start.
+        east_m: f32,
+        /// Metres north of the start.
+        north_m: f32,
+        /// The device and the level's ground of the bot's own body.
+        records: RecordWalk,
+    },
 }
 
 /// What proves that a step worked.
@@ -219,6 +241,12 @@ pub enum Proof {
     /// Nothing: the server answers the call with no message (a toggle, a territory entry, a
     /// board take); a later step proves it.
     Sent,
+    /// Every other bot of the seat's group is in the group.
+    GroupFull(GroupSeat),
+    /// The own groups state names a group; the seat tells the others.
+    InGroup(GroupSeat),
+    /// The leader of the seat's group is in the instance.
+    LeaderInside(GroupSeat),
 }
 
 /// One step of an activity.
@@ -397,7 +425,8 @@ impl Activity {
             ActivityKind::Dungeon => dungeon(data),
             ActivityKind::Board => board(data),
             ActivityKind::Group => Err(
-                "needs a second bot in the world at the same time; a play run has one bot"
+                "needs the other bots of a group in the world at the same time: \
+                 `nw-testclient expedition` runs them"
                     .to_owned(),
             ),
             ActivityKind::Mount => mount(data),
