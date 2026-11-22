@@ -5,18 +5,19 @@
 //! `n - 1` moved by input record `n` (in the newchar capture the motion of a new key showed in
 //! the place of the record that held it, 30 of 41 key starts).
 //!
-//! The direction follows the keys and the camera yaw at once (a first diagonal record already
-//! moved at 45° at full speed); the speed ramps at the action lists' rates. Up and down follow the
-//! floor under the body (the ground's: the terrain and the level's structures, decks, roofs,
-//! stairs: [`crate::LevelGround`]), and the speed is along it (retail ran 5.50 m/s along slopes,
-//! median of 33 steady windows, and less over the ground). A body walks off an edge and falls to
-//! the floor below, and a floor too high to step onto is an obstacle it does not climb. A wall
-//! stops the body only where a solid still stands at the step-up's highest detection height
-//! ([`WALL_HEIGHT_M`]) and the body slides along it: a replay of the retail tutorial that stopped
-//! the body at the level's solids a step above its feet erred by a median 0.73 m against 0.22 m
-//! without (the client's capsule steps onto and slides over low rocks and rails), and with no
-//! wall at all run 15 (2026-09-22) walked the body into the 4 m block under the tutorial
-//! beach's stair landing, where its client was pushed into the solid and stuck.
+//! The direction follows the keys and the camera yaw at once (a first diagonal record already moved
+//! at 45° at full speed); the speed ramps at the action lists' rates, and a record moves the body
+//! at the speed of the record before (move physics study 2026-11-21). Up and down follow the floor
+//! under the body (the ground's: the terrain and the level's structures, decks, roofs, stairs:
+//! [`crate::LevelGround`]), and the speed is along it (retail ran 5.50 m/s along slopes, median of
+//! 33 steady windows, and less over the ground). A body walks off an edge and falls to the floor
+//! below, and a floor too high to step onto is an obstacle it does not climb. A wall stops the body
+//! only where a solid still stands at the step-up's highest detection height ([`WALL_HEIGHT_M`])
+//! and the body slides along it: a replay of the retail tutorial that stopped the body at the
+//! level's solids a step above its feet erred by a median 0.73 m against 0.22 m without (the
+//! client's capsule steps onto and slides over low rocks and rails), and with no wall at all run 15
+//! (2026-09-22) walked the body into the 4 m block under the tutorial beach's stair landing, where
+//! its client was pushed into the solid and stuck.
 //!
 //! The movement modes (movement modes study 2026-09-20, `local-data/scratch-work/movemodes`):
 //! - The posture: the crouch and prone toggles (`playeractions_postureinput.actionlist`
@@ -37,6 +38,7 @@
 use nw_world::collision_index::FLOOR_SEARCH_ABOVE_M;
 
 use nw_content::mounts::{MountMovement, MountSurface, SurfaceSpeeds};
+use nw_content::player_sequences::Direction;
 
 use crate::equip_load::EquipLoad;
 use crate::footing::WaterDepth;
@@ -85,8 +87,15 @@ pub const GRAVITY_MPS2: f32 = 15.24;
 /// records 3073 to 3108, 36 places, root mean square 0.007 m; the jump's pull is stronger).
 pub const FALL_GRAVITY_MPS2: f32 = 9.76;
 /// Input records between a standing jump's key and the lift (Observed: 3 in 7 of the newchar
-/// standing jumps; a running jump lifts at once).
+/// standing jumps).
 pub const STANDING_JUMP_WIND_UP: u8 = 3;
+/// Input records between a moving jump's key and the lift, while the body goes on along the
+/// floor (Observed, move physics study 2026-11-21: in 1,867 retail jumps with a key held, of 284
+/// ledgers, the own place first stood 0.1 m above its place at the press a median 133 to 134 ms
+/// after it, the 4th record; 15 of the 21 jumps of the 12 study ledgers in the 4th record; the
+/// horizontal steps of the 3 records before kept the run's speed; the peak, 1.00 m, came a median
+/// 443 ms after the press).
+pub const MOVING_JUMP_WIND_UP: u8 = 4;
 /// How far below the sea a swimming body's feet are, m (Observed: the retail own place at 18.59 m
 /// in the tutorial sea of level 20, every record of the swim to shore).
 pub const SWIM_DEPTH_M: f32 = 1.41;
@@ -254,6 +263,11 @@ pub const FAST_DODGE_TRANSLATION: f32 = 1.15;
 /// 1.173 per dodge, median 1.15; the place at 0.5 s erred by a median 0.021 m. The action list's
 /// `SlowRoll_Translation` says 1.43; what makes retail's factor smaller is Unknown).
 pub const SLOW_DODGE_TRANSLATION: f32 = 1.15;
+/// The normal dodge's translation multiplier to the side (`playeractions_dodge.actionlist`
+/// `Roll_Translation_Side` 1.1: the `Dodge_Roll_Translation` marker with the `LeftNav` or
+/// `RightNav` tag; move physics study 2026-11-21: 79 retail side dodges of a normal load
+/// with the key held went 0.886 of the forward roll's 1.28 at 0.5 s, and 1.1 / 1.28 is 0.859).
+pub const NORMAL_SIDE_DODGE_TRANSLATION: f32 = 1.1;
 /// The root of the normal forward dodge (`unarmed_quickstep_f`): frame and distance along the
 /// dodge, m; linear between keys.
 const NORMAL_DODGE_FORWARD_ROOT: [(u8, f32); 13] = [
@@ -283,6 +297,10 @@ const NORMAL_DODGE_BACK_ROOT: [(u8, f32); 9] = [
     (27, 3.0),
     (44, 3.0),
 ];
+/// The root of the normal left dodge (`unarmed_quickstep_l`).
+const NORMAL_DODGE_LEFT_ROOT: [(u8, f32); 4] = [(0, 0.0), (15, 2.8), (19, 3.0), (44, 3.0)];
+/// The root of the normal right dodge (`unarmed_quickstep_r`).
+const NORMAL_DODGE_RIGHT_ROOT: [(u8, f32); 4] = [(0, 0.0), (15, 2.8), (16, 3.0), (44, 3.0)];
 /// The root of the fast forward dodge (`unarmed_dodgeroll_f_light_to_crch`).
 const FAST_DODGE_FORWARD_ROOT: [(u8, f32); 9] = [
     (0, 0.0),
@@ -311,6 +329,30 @@ const FAST_DODGE_BACK_ROOT: [(u8, f32); 13] = [
     (27, 4.114),
     (29, 4.115),
 ];
+/// The root of the fast left dodge (`unarmed_dodgeroll_l_light_to_crch`).
+const FAST_DODGE_LEFT_ROOT: [(u8, f32); 19] = [
+    (0, 0.0),
+    (1, 0.238),
+    (2, 0.475),
+    (3, 0.713),
+    (4, 0.95),
+    (5, 1.187),
+    (6, 1.424),
+    (7, 1.663),
+    (8, 1.901),
+    (9, 2.142),
+    (10, 2.384),
+    (11, 2.627),
+    (12, 2.873),
+    (13, 3.121),
+    (14, 3.371),
+    (15, 3.624),
+    (16, 3.881),
+    (17, 4.14),
+    (29, 4.14),
+];
+/// The root of the fast right dodge (`unarmed_dodgeroll_r_light_to_crch`).
+const FAST_DODGE_RIGHT_ROOT: [(u8, f32); 4] = [(0, 0.0), (17, 3.924), (23, 3.925), (29, 3.925)];
 /// The root of the slow forward dodge (`unarmed_quickstep_hvy_f`, the same for the one-handed,
 /// two-handed and bow stances).
 const SLOW_DODGE_FORWARD_ROOT: [(u8, f32); 27] = [
@@ -372,6 +414,80 @@ const SLOW_DODGE_BACK_ROOT: [(u8, f32); 30] = [
     (29, 2.928),
     (30, 2.956),
     (31, 2.98),
+    (32, 3.0),
+    (38, 3.0),
+];
+/// The root of the slow left dodge (`unarmed_quickstep_hvy_l`).
+const SLOW_DODGE_LEFT_ROOT: [(u8, f32); 34] = [
+    (0, 0.0),
+    (1, 0.163),
+    (2, 0.33),
+    (3, 0.493),
+    (4, 0.673),
+    (5, 0.827),
+    (6, 0.98),
+    (7, 1.131),
+    (8, 1.27),
+    (9, 1.399),
+    (10, 1.526),
+    (11, 1.649),
+    (12, 1.768),
+    (13, 1.882),
+    (14, 1.99),
+    (15, 2.1),
+    (16, 2.217),
+    (17, 2.333),
+    (18, 2.437),
+    (19, 2.526),
+    (20, 2.6),
+    (21, 2.659),
+    (22, 2.705),
+    (23, 2.743),
+    (24, 2.777),
+    (25, 2.808),
+    (26, 2.839),
+    (27, 2.87),
+    (28, 2.901),
+    (29, 2.93),
+    (30, 2.957),
+    (31, 2.981),
+    (32, 3.0),
+    (38, 3.0),
+];
+/// The root of the slow right dodge (`unarmed_quickstep_hvy_r`).
+const SLOW_DODGE_RIGHT_ROOT: [(u8, f32); 34] = [
+    (0, 0.0),
+    (1, 0.165),
+    (2, 0.334),
+    (3, 0.498),
+    (4, 0.659),
+    (5, 0.822),
+    (6, 0.981),
+    (7, 1.132),
+    (8, 1.27),
+    (9, 1.396),
+    (10, 1.513),
+    (11, 1.623),
+    (12, 1.728),
+    (13, 1.832),
+    (14, 1.935),
+    (15, 2.039),
+    (16, 2.141),
+    (17, 2.242),
+    (18, 2.339),
+    (19, 2.43),
+    (20, 2.516),
+    (21, 2.593),
+    (22, 2.659),
+    (23, 2.714),
+    (24, 2.761),
+    (25, 2.802),
+    (26, 2.84),
+    (27, 2.877),
+    (28, 2.913),
+    (29, 2.947),
+    (30, 2.974),
+    (31, 2.993),
     (32, 3.0),
     (38, 3.0),
 ];
@@ -721,20 +837,42 @@ struct DodgeRoot {
 }
 
 impl DodgeRoot {
-    /// The dodge of a body of equip load `load`, back or forward (`playeractions_dodge.
+    /// The dodge of a body of equip load `load` in `direction` (`playeractions_dodge.
     /// actionlist`: the fragment `Dodge_Roll_Fast` for the fast class, `Dodge_Roll_Slow` for the
-    /// slow one, `Dodge_Roll` for the others).
-    const fn of(load: EquipLoad, back: bool) -> Self {
-        let (keys, translation): (&'static [(u8, f32)], f32) = match (load, back) {
-            (EquipLoad::Fast, false) => (&FAST_DODGE_FORWARD_ROOT, FAST_DODGE_TRANSLATION),
-            (EquipLoad::Fast, true) => (&FAST_DODGE_BACK_ROOT, FAST_DODGE_TRANSLATION),
-            (EquipLoad::Slow, false) => (&SLOW_DODGE_FORWARD_ROOT, SLOW_DODGE_TRANSLATION),
-            (EquipLoad::Slow, true) => (&SLOW_DODGE_BACK_ROOT, SLOW_DODGE_TRANSLATION),
-            (EquipLoad::Normal | EquipLoad::Overburdened, false) => {
+    /// slow one, `Dodge_Roll` for the others; its clip by the `ForwardNav`, `BackNav`, `LeftNav`
+    /// or `RightNav` tag, back without a key). Move physics study 2026-11-21, 284 retail
+    /// ledgers: side dodges of a fast load with the key held went 0.902 (n 204) of the forward
+    /// clip at 0.5 s, the side clips 0.89 to 0.93 of it; back dodges 1.005 (n 316) of the back
+    /// clip.
+    const fn of(load: EquipLoad, direction: Direction) -> Self {
+        let (keys, translation): (&'static [(u8, f32)], f32) = match (load, direction) {
+            (EquipLoad::Fast, Direction::Forward) => {
+                (&FAST_DODGE_FORWARD_ROOT, FAST_DODGE_TRANSLATION)
+            }
+            (EquipLoad::Fast, Direction::Back | Direction::None) => {
+                (&FAST_DODGE_BACK_ROOT, FAST_DODGE_TRANSLATION)
+            }
+            (EquipLoad::Fast, Direction::Left) => (&FAST_DODGE_LEFT_ROOT, FAST_DODGE_TRANSLATION),
+            (EquipLoad::Fast, Direction::Right) => (&FAST_DODGE_RIGHT_ROOT, FAST_DODGE_TRANSLATION),
+            (EquipLoad::Slow, Direction::Forward) => {
+                (&SLOW_DODGE_FORWARD_ROOT, SLOW_DODGE_TRANSLATION)
+            }
+            (EquipLoad::Slow, Direction::Back | Direction::None) => {
+                (&SLOW_DODGE_BACK_ROOT, SLOW_DODGE_TRANSLATION)
+            }
+            (EquipLoad::Slow, Direction::Left) => (&SLOW_DODGE_LEFT_ROOT, SLOW_DODGE_TRANSLATION),
+            (EquipLoad::Slow, Direction::Right) => (&SLOW_DODGE_RIGHT_ROOT, SLOW_DODGE_TRANSLATION),
+            (EquipLoad::Normal | EquipLoad::Overburdened, Direction::Forward) => {
                 (&NORMAL_DODGE_FORWARD_ROOT, NORMAL_DODGE_TRANSLATION)
             }
-            (EquipLoad::Normal | EquipLoad::Overburdened, true) => {
+            (EquipLoad::Normal | EquipLoad::Overburdened, Direction::Back | Direction::None) => {
                 (&NORMAL_DODGE_BACK_ROOT, NORMAL_DODGE_TRANSLATION)
+            }
+            (EquipLoad::Normal | EquipLoad::Overburdened, Direction::Left) => {
+                (&NORMAL_DODGE_LEFT_ROOT, NORMAL_SIDE_DODGE_TRANSLATION)
+            }
+            (EquipLoad::Normal | EquipLoad::Overburdened, Direction::Right) => {
+                (&NORMAL_DODGE_RIGHT_ROOT, NORMAL_SIDE_DODGE_TRANSLATION)
             }
         };
         Self { keys, translation }
@@ -781,8 +919,9 @@ struct Dodge {
 enum Vertical {
     /// On a floor.
     Grounded,
-    /// A standing jump before the lift: records left.
-    WindUp(u8),
+    /// A jump before the lift: records left, and whether it stands still meanwhile (a
+    /// standing jump) or goes on along the floor (a moving one).
+    WindUp { left: u8, standing: bool },
     /// In a jump, rising at `rise` m/s (falling below 0).
     Jumping(f32),
     /// Falling off a floor, rising at this speed (falling below 0).
@@ -873,25 +1012,36 @@ pub fn wall_between(
     )
 }
 
+/// How often a slide that meets a second wall is halved to find the part of it that is free
+/// (Inferred: the character controller sweeps its capsule up to the contact; 4 halvings leave a
+/// sixteenth of the step).
+const WALL_SLIDE_HALVINGS: u8 = 4;
+
 /// Where a body at `from` that moves to `to` stops for the walls of `ground`: at `to` when the
-/// way is free; else slid along the wall it meets (its motion less the part into the wall), or
-/// at `from` when the slide meets a wall too. The height stays `to`'s.
+/// way is free; else slid along the wall it meets (its motion less the part into the wall), as
+/// far along the slide as is free when the slide meets a wall too (a corner), or at `from`. The
+/// height stays `to`'s. Move physics study 2026-11-21, `mb-pirateplan` 164.9 s: a body that met
+/// two faces at once with its full step stood there for good, where retail walked on.
 pub fn stop_at_walls(ground: &(impl Ground + ?Sized), from: Position, to: Position) -> Position {
     let Some(normal) = wall_between(ground, from, to) else {
         return to;
     };
     let step = [to.x - from.x, to.y - from.y];
     let into = (step[0] * normal[0] + step[1] * normal[1]).min(0.0);
-    let slid = Position {
-        x: to.x - into * normal[0],
-        y: to.y - into * normal[1],
-        ..to
-    };
-    if wall_between(ground, from, slid).is_some() {
-        Position { z: to.z, ..from }
-    } else {
-        slid
+    let slide = [step[0] - into * normal[0], step[1] - into * normal[1]];
+    let mut share = 1.0;
+    for _ in 0..=WALL_SLIDE_HALVINGS {
+        let slid = Position {
+            x: from.x + slide[0] * share,
+            y: from.y + slide[1] * share,
+            ..to
+        };
+        if wall_between(ground, from, slid).is_none() {
+            return slid;
+        }
+        share /= 2.0;
     }
+    Position { z: to.z, ..from }
 }
 
 /// The unit vector in the ground plane of the keys of `intent` with camera yaw `yaw`, when they
@@ -1022,7 +1172,7 @@ impl Character {
     pub const fn is_jumping(&self) -> bool {
         matches!(
             self.vertical,
-            Vertical::WindUp(_) | Vertical::Jumping { .. }
+            Vertical::WindUp { .. } | Vertical::Jumping { .. }
         )
     }
 
@@ -1222,22 +1372,32 @@ impl Character {
             next = Position { z: free.z, ..start };
             self.speed_mps = 0.0;
         } else if next != free {
-            // The wall takes the motion into it: the body goes on at the speed it kept.
+            // The wall takes the motion into it: the body goes on at the share of its speed it
+            // kept. Move physics study 2026-11-21, 284 retail ledgers: keeping the keys' speed at
+            // walls and mobs instead made the jumps 0.80 m off retail at 0.5 s (median, n 2,562)
+            // against 0.68 m, and the stops 0.38 against 0.35 m.
             let kept = start.horizontal_distance(next);
             if kept > f32::EPSILON {
                 self.heading = [(next.x - start.x) / kept, (next.y - start.y) / kept];
             }
-            self.speed_mps = kept / dt_s;
+            self.speed_mps *= kept / start.horizontal_distance(free);
         }
         let distance = start.horizontal_distance(next);
         match self.vertical {
             Vertical::Grounded => self.walk(&mut next, distance, ground, swim),
-            Vertical::WindUp(left) => {
-                next = start;
-                self.vertical = match left.saturating_sub(1) {
-                    0 => Vertical::Jumping(JUMP_SPEED_MPS),
-                    left => Vertical::WindUp(left),
-                };
+            Vertical::WindUp { left, standing } => {
+                if standing {
+                    next = start;
+                } else {
+                    self.walk(&mut next, distance, ground, swim);
+                }
+                // A floor that fell away under the wind-up is a fall, not the jump.
+                if !matches!(self.vertical, Vertical::Falling(_)) {
+                    self.vertical = match left.saturating_sub(1) {
+                        0 => Vertical::Jumping(JUMP_SPEED_MPS),
+                        left => Vertical::WindUp { left, standing },
+                    };
+                }
             }
             Vertical::Jumping(rise) => {
                 self.vertical = self
@@ -1293,14 +1453,20 @@ impl Character {
     }
 
     /// The dodge of a press with the keys of `intent` and camera yaw `yaw`
-    /// (`playeractions_dodge.actionlist`: forward along the keys; back with the back key or with
-    /// no key, straight back from the camera without one).
+    /// (`playeractions_dodge.actionlist`: along the keys, with the clip of their direction as
+    /// the server's dodge sequence picks it, [`Direction::of_keys`]; with no key straight back
+    /// from the camera). A stick counts by the keys it stands in for ([`Intent::with_stick`]).
     fn dodge_of(&self, intent: Intent, yaw: f32) -> Dodge {
         let (forward, _) = yaw_axes(yaw);
-        let back = intent.forward < 0 || !intent.moves();
+        let keys = Direction::of_keys(
+            intent.forward > 0,
+            intent.forward < 0,
+            intent.right < 0,
+            intent.right > 0,
+        );
         let direction = key_direction(intent, yaw).unwrap_or([-forward[0], -forward[1]]);
         Dodge {
-            root: DodgeRoot::of(self.equip_load, back),
+            root: DodgeRoot::of(self.equip_load, keys),
             direction,
             at_s: 0.0,
         }
@@ -1334,7 +1500,13 @@ impl Character {
         distance
     }
 
-    /// One record of the keys' motion: the new speed and heading; gives the distance.
+    /// One record of the keys' motion: the new speed and heading; gives the distance, at the
+    /// speed the body had before the record's change along the new heading (the speed rises and
+    /// falls from the next record on; a swim dash takes its speed at once). Move physics study
+    /// 2026-11-21: in 33 clean forward starts of the 12 study ledgers, retail's steps after the
+    /// press record were 0.02, 0.05, 0.06, 0.09, 0.11, 0.13, 0.16 and 0.18 m, a speed that rose
+    /// by 20 m/s² one record later than the key; in 63 sprint stops it slid a median 0.71 m after
+    /// the release's record (0.67 m with the lag, 0.51 m without).
     fn key_step(
         &mut self,
         intent: Intent,
@@ -1343,12 +1515,13 @@ impl Character {
         dashing: bool,
         wading: bool,
     ) -> f32 {
+        let before_mps = self.speed_mps;
         if self.posture_change_s > 0.0 {
             // The posture change holds the body: it slows in its own direction.
             self.posture_change_s = (self.posture_change_s - dt_s).max(0.0);
             self.speed_mps = (self.speed_mps - POSTURE_CHANGE_DECELERATION_MPS2 * dt_s).max(0.0);
             self.sprint_s = 0.0;
-            return self.speed_mps * dt_s;
+            return before_mps * dt_s;
         }
         let heading = key_direction(intent, yaw);
         self.heading = heading.unwrap_or(self.heading);
@@ -1377,7 +1550,15 @@ impl Character {
         } else if self.is_grounded() {
             self.sprint_s = 0.0;
         }
-        self.speed_mps * dt_s
+        // A blocking body that slows moves at its new speed (move physics study 2026-11-21:
+        // retail moved 0.000 m, median of 447 block stops, in the record after the release; the
+        // block's move rows are `Forced`, `playeractions_nav.actionlist` `Block_Nav_Speed`).
+        let blocking_slows = intent.block && self.speed_mps < before_mps;
+        if (dashing && heading.is_some()) || blocking_slows {
+            self.speed_mps * dt_s
+        } else {
+            before_mps * dt_s
+        }
     }
 
     /// The speed its keys ask for in its mode now, and how fast it gets there; `dashing` in a
@@ -1512,10 +1693,14 @@ impl Character {
         let pressed = held && !self.jump_held;
         self.jump_held = held;
         if pressed && self.vertical == Vertical::Grounded && !deep_water {
-            self.vertical = if self.speed_mps == 0.0 {
-                Vertical::WindUp(STANDING_JUMP_WIND_UP)
-            } else {
-                Vertical::Jumping(JUMP_SPEED_MPS)
+            let standing = self.speed_mps == 0.0;
+            self.vertical = Vertical::WindUp {
+                left: if standing {
+                    STANDING_JUMP_WIND_UP
+                } else {
+                    MOVING_JUMP_WIND_UP
+                },
+                standing,
             };
         }
     }
@@ -2113,7 +2298,7 @@ mod tests {
             character.step(dodge, &Flat, SEA);
         }
         // The root times the multiplier to the marker's end, the root alone after it.
-        let back = DodgeRoot::of(EquipLoad::Slow, true).distance(AFTER_CLIP_S);
+        let back = DodgeRoot::of(EquipLoad::Slow, Direction::Back).distance(AFTER_CLIP_S);
         let root_end = SLOW_DODGE_BACK_ROOT[SLOW_DODGE_BACK_ROOT.len() - 1].1;
         assert!(back > root_end && back < root_end * SLOW_DODGE_TRANSLATION);
         assert!(
@@ -2156,6 +2341,177 @@ mod tests {
         assert!((settle(&mut heavy, input(1, 0)) - RUN_SPEED_MPS).abs() < CLOSE);
         heavy.step(keyed(1, 0, |keys| keys.dodge = true), &Flat, SEA);
         assert!((speed(&heavy) - RUN_SPEED_MPS).abs() < CLOSE, "no dodge");
+    }
+
+    /// The keys of a keyboard and of a game pad for the same move: `forward` and `right` as keys,
+    /// and as a full stick turned as the sim turns it ([`Intent::toward_stick`]).
+    fn devices(forward: i8, right: i8, change: impl Fn(&mut Intent)) -> [CharacterInput; 2] {
+        let keys = keyed(forward, right, &change);
+        let tilt = f32::from(forward).hypot(f32::from(right));
+        let stick = [f32::from(right) / tilt, f32::from(forward) / tilt];
+        let mut pad = Intent::default();
+        change(&mut pad);
+        let (intent, yaw) = pad.with_stick(Some(stick)).toward_stick(0.0);
+        [
+            keys,
+            CharacterInput {
+                intent,
+                yaw,
+                ..input(0, 0)
+            },
+        ]
+    }
+
+    #[test]
+    fn a_side_dodge_moves_by_its_side_clip_with_keyboard_and_controller() {
+        // Move physics study 2026-11-21: retail side dodges went 0.902 (fast, n 204) and 0.886
+        // (normal, n 79) of the forward roll at 0.5 s with the key held.
+        let at_hold_end =
+            |load, direction| DodgeRoot::of(load, direction).distance(DODGE_CONTROL_S);
+        let cases = [
+            (EquipLoad::Fast, -1, Direction::Left),
+            (EquipLoad::Fast, 1, Direction::Right),
+            (EquipLoad::Normal, 1, Direction::Right),
+            (EquipLoad::Slow, -1, Direction::Left),
+        ];
+        for (load, right, direction) in cases {
+            let side = at_hold_end(load, direction);
+            let forward = at_hold_end(load, Direction::Forward);
+            assert!(side < forward, "{load:?} {direction:?}: {side} {forward}");
+            // A blocking pad keeps its stick's sectors (the stick stands in for the keys); the
+            // keyboard has its keys.
+            let [keys, _] = devices(0, right, |keys| keys.dodge = true);
+            let pad = CharacterInput {
+                intent: Intent {
+                    dodge: true,
+                    block: true,
+                    ..Intent::default()
+                }
+                .with_stick(Some([f32::from(right), 0.0])),
+                ..input(0, 0)
+            };
+            for device in [keys, pad] {
+                let mut character = Character::new(origin());
+                character.set_equip_load(load);
+                for _ in 0..DODGE_RECORDS {
+                    character.step(device, &Flat, SEA);
+                }
+                let gone = character.position().x * f32::from(right);
+                assert!(
+                    (gone - side).abs() < 1e-3,
+                    "{load:?} {direction:?}: {gone} {side}"
+                );
+                assert!(character.position().y.abs() < CLOSE);
+            }
+        }
+        // The normal roll's side translation is `Roll_Translation_Side`.
+        let normal_right = at_hold_end(EquipLoad::Normal, Direction::Right);
+        assert!((normal_right - 2.8 * NORMAL_SIDE_DODGE_TRANSLATION).abs() < 1e-3);
+        // A pad that runs where its stick points rolls forward there (Unknown against retail: no
+        // retail ledger holds a game pad's dodge).
+        let [_, pad] = devices(0, -1, |keys| keys.dodge = true);
+        let mut character = Character::new(origin());
+        character.set_equip_load(EquipLoad::Fast);
+        for _ in 0..DODGE_RECORDS {
+            character.step(pad, &Flat, SEA);
+        }
+        let forward = at_hold_end(EquipLoad::Fast, Direction::Forward);
+        assert!((-character.position().x - forward).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_record_moves_at_the_speed_of_the_record_before_with_keyboard_and_controller() {
+        // Move physics study 2026-11-21: retail's steps from rest were 0.02, 0.05, 0.06, 0.09 m
+        // after the press record, and a sprint slid a median 0.71 m after the release record.
+        const RETAIL_SLIDE_M: [f32; 2] = [0.6, 0.75];
+        for device in devices(1, 0, |_| ()) {
+            let mut character = Character::new(origin());
+            character.step(device, &Flat, SEA);
+            assert!(character.position().y.abs() < CLOSE, "the press record");
+            character.step(device, &Flat, SEA);
+            let first = ACCELERATION_MPS2 * DT * DT;
+            assert!(
+                (character.position().y - first).abs() < CLOSE,
+                "the record after"
+            );
+            for _ in 0..SETTLE {
+                character.step(device, &Flat, SEA);
+            }
+            let released = character.position().y;
+            character.step(input(0, 0), &Flat, SEA);
+            let runs_on = character.position().y - released;
+            assert!((runs_on - SPRINT_SPEED_MPS * DT).abs() < CLOSE, "{runs_on}");
+            let stopping = character.position().y;
+            run(&mut character, SETTLE, 0, 0);
+            let slide = character.position().y - stopping;
+            assert!(
+                (RETAIL_SLIDE_M[0]..=RETAIL_SLIDE_M[1]).contains(&slide),
+                "{slide}"
+            );
+            assert!(character.is_resting());
+        }
+        // A blocking body stops in the release record (retail: 0.000 m after it, 447 stops).
+        for device in devices(-1, 0, |keys| keys.block = true) {
+            let mut character = Character::new(origin());
+            for _ in 0..SETTLE {
+                character.step(device, &Flat, SEA);
+            }
+            let held = keyed(0, 0, |keys| keys.block = true);
+            character.step(held, &Flat, SEA);
+            let released = character.position().y;
+            run_held(&mut character, held);
+            assert!(
+                (character.position().y - released).abs() < CLOSE,
+                "{}",
+                character.position().y - released
+            );
+        }
+    }
+
+    /// [`SETTLE`] records of `keys`.
+    fn run_held(character: &mut Character, keys: CharacterInput) {
+        for _ in 0..SETTLE {
+            character.step(keys, &Flat, SEA);
+        }
+    }
+
+    #[test]
+    fn a_moving_jump_runs_on_the_floor_through_its_wind_up_with_keyboard_and_controller() {
+        // Move physics study 2026-11-21: retail's moving jumps first stood 0.1 m up in the 4th
+        // record after the press, at the run's speed until then, and peaked at 1.00 m.
+        const RETAIL_PEAK_M: f32 = 1.0;
+        const PEAK_TOLERANCE_M: f32 = 0.05;
+        for device in devices(1, 0, |keys| keys.jump = true) {
+            let mut character = Character::new(origin());
+            let [run_keys, run_pad] = devices(1, 0, |_| ());
+            let running = if device.intent.stick.is_some() {
+                run_pad
+            } else {
+                run_keys
+            };
+            for _ in 0..SETTLE {
+                character.step(running, &Flat, SEA);
+            }
+            for record in 0..MOVING_JUMP_WIND_UP {
+                let before = character.position();
+                character.step(device, &Flat, SEA);
+                let after = character.position();
+                assert!(after.z.abs() < CLOSE, "wind-up record {record}");
+                assert!(
+                    (after.y - before.y - SPRINT_SPEED_MPS * DT).abs() < CLOSE,
+                    "it runs on in record {record}"
+                );
+            }
+            let mut peak: f32 = 0.0;
+            character.step(device, &Flat, SEA);
+            assert!(character.position().z > 0.1, "it lifts");
+            for _ in 0..SETTLE {
+                character.step(device, &Flat, SEA);
+                peak = peak.max(character.position().z);
+            }
+            assert!((peak - RETAIL_PEAK_M).abs() < PEAK_TOLERANCE_M, "{peak}");
+            assert!(character.is_grounded());
+        }
     }
 
     #[test]
@@ -2851,7 +3207,43 @@ mod tests {
         let (sin, cos) = TURN.sin_cos();
         let off_face = at.x * sin - (at.y - FACE_Y) * cos;
         assert!(off_face >= PLAYER_RADIUS_M * cos - CLOSE, "{at:?}");
-        assert!(at.x > 1.0, "it slid east along the face: {at:?}");
+        // A record moves at the speed of the record before, so the slide builds one record
+        // later than the push into the face.
+        assert!(at.x > 0.5, "it slid east along the face: {at:?}");
+    }
+
+    #[test]
+    fn a_slide_into_a_corner_goes_as_far_as_is_free() {
+        /// A face north at y 1 and one east at x 0.6, each seen at the probe's end.
+        struct Corner;
+        impl Ground for Corner {
+            fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+                Some(0.0)
+            }
+            fn wall(&self, _: Position, to: Position) -> Option<[f32; 2]> {
+                const NORTH_FACE_Y: f32 = 1.0;
+                const EAST_FACE_X: f32 = 0.6;
+                if to.y > NORTH_FACE_Y {
+                    Some([0.0, -1.0])
+                } else if to.x > EAST_FACE_X {
+                    Some([-1.0, 0.0])
+                } else {
+                    None
+                }
+            }
+        }
+        let from = Position { y: 0.5, ..origin() };
+        let to = Position {
+            x: 0.2,
+            y: 0.9,
+            ..origin()
+        };
+        // The slide east (0.2 m) meets the east face with the capsule ahead; half of it does not.
+        let at = stop_at_walls(&Corner, from, to);
+        assert!(
+            (at.x - 0.1).abs() < CLOSE && (at.y - 0.5).abs() < CLOSE,
+            "{at:?}"
+        );
     }
 
     #[test]

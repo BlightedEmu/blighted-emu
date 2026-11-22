@@ -2402,6 +2402,8 @@ mod tests {
         };
         let mut cutscene = view_of(far, BOOM, [0.0; 2]);
         cutscene.yaw = 2.0;
+        // A record moves at the speed of the record before: the second keyed record moves.
+        body.record(input(1, cutscene), &Flat, SEA);
         let tracked = body.record(input(1, cutscene), &Flat, SEA);
         assert!(!tracked.consistent && !tracked.resynced);
         assert!((tracked.position.y - start().y - ACCELERATION_MPS2 * DT * DT).abs() < 1e-4);
@@ -2564,6 +2566,13 @@ mod tests {
             y: at.y - 4.0,
             ..at
         };
+        // A record moves at the speed of the record before: the second keyed record moves.
+        let first = body.record(
+            input(1, view_of(behind, BOOM, [0.0; 2])),
+            &TutorialSea,
+            TUTORIAL_SEA_M,
+        );
+        assert!(!first.resynced, "{first:?}");
         let tracked = body.record(
             input(1, view_of(behind, BOOM, [0.0; 2])),
             &TutorialSea,
