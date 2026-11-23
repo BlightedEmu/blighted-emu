@@ -1757,6 +1757,14 @@
             {
               "check": "An AI animation action with no entry for the mob's tags ends at once (2026-11-22, bots; Inferred): the prowlers' alert step waited forever before.",
               "proof": "bots"
+            },
+            {
+              "check": "A mob that turns to a player it sees ends its turn (2026-11-23, tests only): the turn animation is a blend of an idle and the 90 and 180 degree turn clips, so its length comes from the angle to the player. Before, 291 mob kinds (the skeletons of a camp among them) saw a player beside them and then stood in the turn for good. Live 2026-11-23: a sword skeleton took a player 11 m away and did not move for 3 minutes.",
+              "proof": "tests"
+            },
+            {
+              "check": "A waited AI animation whose length no source gives ends after 1.5 s (2026-11-23, tests only; design choice): about 80 such actions stay, for example the Anubian brute's alert turn and the naga's combat turn.",
+              "proof": "tests"
             }
           ]
         },
@@ -1784,6 +1792,10 @@
             },
             {
               "check": "Live check.",
+              "proof": "none"
+            },
+            {
+              "check": "Crawling skeletons that looked still on a patrol path (live 2026-11-23): the cause is Unknown. The mob log now holds each mob's place, so the next live run shows if the server moves them.",
               "proof": "none"
             }
           ]
@@ -4587,9 +4599,10 @@
     "Physics-first body, first round (2026-11-21, tests): attacks move the body by their root motion, side dodges roll sideways, moving jumps wind up, starts and stops lag a record as retail, a camera on the floor gives the body nothing, the musket's jump shows to others, and the measuring tool reads the equip load, abilities and mobs.",
     "Quests by bots (2026-11-22, bots): the Everfall main story to its end with the staff in the bag, the Windsward main story to its end, side quests in 14 zones, encounter success events, video objects, turning stones, story trials entered at their doors, and tools worn by `!gearup`.",
     "Quests by bots, day run (2026-11-22, bots): open world wave encounters, puzzle steps, story trial collision and trials, expedition bosses and expedition side quests, level variants for kills, loot and looks, fishing, PvP kills, mount courses, songs and settlement stations.",
-    "Bots, night of 2026-11-23: story trial bosses (Liang, Isabella, Adiana), Tempest's Heart, group kills and loot in expeditions, the Ennead Goliaths, all three PvP modes, a war and invasion waves, saves over a restart, the economy and social basics, and many bots across four sims; PC freezes much shorter."
+    "Bots, night of 2026-11-23: story trial bosses (Liang, Isabella, Adiana), Tempest's Heart, group kills and loot in expeditions, the Ennead Goliaths, all three PvP modes, a war and invasion waves, saves over a restart, the economy and social basics, and many bots across four sims; PC freezes much shorter.",
+    "Mob aggro (2026-11-23, tests only): a mob that turns to a player it sees no longer stands in the turn for good. The turn animation's length now comes from the angle to the player; 291 mob kinds had no length for it."
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-23",
-  "lastCommit": "a3a40830"
+  "lastCommit": "dcce1ad8"
 }
