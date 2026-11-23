@@ -83,11 +83,23 @@ pub struct OpenInstance {
     pub owner: Uuid,
     /// Unix milliseconds when it ends, when its game mode limits it.
     pub ends_at_ms: Option<u64>,
-    /// Whether the sim confirmed the opening.
-    pub confirmed: bool,
+    /// The beat count of its sim when the sim confirmed the opening
+    /// ([`crate::sims::SimRegistry::beats`]); `None` until then. A beat of that count or older
+    /// was sent before the sim opened the instance.
+    pub confirmed_at_beat: Option<u64>,
     /// The territory war it runs ([`crate::war_instances`]); `None` for every other instance.
     pub war: Option<WarInstance>,
 }
+
+impl OpenInstance {
+    /// Whether its sim confirmed the opening.
+    pub const fn is_confirmed(&self) -> bool {
+        self.confirmed_at_beat.is_some()
+    }
+}
+
+/// The confirmation beat of an instance adopted from a sim's beat that shows it running.
+const ADOPTED_BEAT: u64 = 0;
 
 /// What to do with a request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,7 +198,7 @@ impl Instances {
             if open.game_mode != request.game_mode {
                 return refuse(InstanceRefusal::GroupInOtherInstance);
             }
-            if !open.confirmed {
+            if !open.is_confirmed() {
                 return Decision::Wait { instance: open.id };
             }
             if open.members.contains(&request.requester) {
@@ -241,7 +253,7 @@ impl Instances {
             ends_at_ms: request
                 .timeout_seconds
                 .map(|seconds| now_ms.saturating_add(seconds.saturating_mul(MS_PER_SECOND))),
-            confirmed: false,
+            confirmed_at_beat: None,
             war: None,
         };
         self.by_owner.insert(owner, id);
@@ -295,10 +307,16 @@ impl Instances {
     }
 
     /// The answer of the sim to the opening of `instance`: kept when it opened, else dropped.
-    pub fn opened(&mut self, instance: Uuid, ok: bool) -> Option<OpenInstance> {
+    /// `beats` gives the beat count of a sim now.
+    pub fn opened(
+        &mut self,
+        instance: Uuid,
+        ok: bool,
+        beats: impl Fn(&SimSlot) -> u64,
+    ) -> Option<OpenInstance> {
         if ok {
             let open = self.open.get_mut(&instance)?;
-            open.confirmed = true;
+            open.confirmed_at_beat = Some(beats(&open.sim));
             return Some(open.clone());
         }
         self.remove(instance);
@@ -322,13 +340,17 @@ impl Instances {
     }
 
     /// The instances to end from the instance sims' reports `running` (each live instance sim
-    /// with what it runs) at Unix millisecond `now_ms`; an instance whose sim is gone, or that
-    /// its sim no longer runs, is forgotten.
+    /// with what it runs, from its newest beat; `beats` gives a sim's beat count) at Unix
+    /// millisecond `now_ms`; an instance whose sim is gone, or that its sim no longer runs, is
+    /// forgotten. A sim's report of no instance from a beat that came before its confirmation of
+    /// an opening was sent before that opening: it ends nothing (live 2026-11-23 03:30:22Z: an
+    /// Outpost Rush instance ended 0.14 s after its sim opened it, on the beat of 03:30:21).
     pub fn review(
         &mut self,
         running: &[(SimSlot, Option<RunningInstance>)],
         settings: &InstanceSettings,
         now_ms: u64,
+        beats: impl Fn(&SimSlot) -> u64,
     ) -> Vec<Closing> {
         let empty_ms = u64::try_from(settings.empty_timeout.as_millis()).unwrap_or(u64::MAX);
         let mut closing = Vec::new();
@@ -341,8 +363,14 @@ impl Instances {
             match report {
                 // The sim went silent: the instance ended with it.
                 None => gone.push(open.id),
-                // The sim runs no instance although it confirmed this one: it ended there.
-                Some(None) if open.confirmed => gone.push(open.id),
+                // The sim runs no instance in a beat after it confirmed this one: it ended there.
+                Some(None)
+                    if open
+                        .confirmed_at_beat
+                        .is_some_and(|confirmed| beats(&open.sim) > confirmed) =>
+                {
+                    gone.push(open.id);
+                }
                 Some(Some(running)) if running.instance != open.id => gone.push(open.id),
                 Some(Some(running)) => {
                     let timed_out = open.ends_at_ms.is_some_and(|end| now_ms >= end);
@@ -402,7 +430,8 @@ impl Instances {
                     capacity,
                     owner,
                     ends_at_ms: report.ends_at_ms,
-                    confirmed: true,
+                    // Adopted from a beat that shows it running: any later beat is newer.
+                    confirmed_at_beat: Some(ADOPTED_BEAT),
                     war: report.war,
                 },
             );
@@ -465,7 +494,7 @@ impl InstanceTable {
     pub fn sim_for(&self, instance: &Uuid, character: &Uuid) -> Option<&OpenInstance> {
         self.open
             .get(instance)
-            .filter(|open| open.confirmed && open.members.contains(character))
+            .filter(|open| open.is_confirmed() && open.members.contains(character))
     }
 }
 
@@ -476,6 +505,12 @@ const FIRST_START_RETRY: Duration = Duration::from_secs(2);
 /// 2026-11-21: an expedition level with no collision file started a sim every second for ten
 /// minutes, each of which stopped at once.
 const MAX_START_RETRY: Duration = Duration::from_secs(300);
+
+/// The most instance sims that start at the same time, over all levels. A sim loads its whole
+/// level as it starts, and two or three starting at once froze the PC for up to 11 s and
+/// dropped every player (2026-11-22, sim-1 `ticks ran late` at 07:20, 15:07 and 15:37 UTC). A
+/// start takes about 5 s, so the next one waits that long.
+pub const MAX_STARTING_SIMS: usize = 1;
 
 /// The instance sims to start and to stop for each level.
 #[derive(Debug, Default)]
@@ -514,8 +549,9 @@ impl Launches {
     }
 
     /// The sims to start: for each wanted level, as many as it lacks of its spare count, within
-    /// the total limit. `free` gives the number of a level's free instance sims, and `live`
-    /// whether a sim beats: a started sim that does not beat yet counts as free.
+    /// the total limit and [`MAX_STARTING_SIMS`] at a time. `free` gives the number of a
+    /// level's free instance sims, and `live` whether a sim beats: a started sim that does not
+    /// beat yet counts as free.
     pub fn to_start(
         &mut self,
         settings: &LaunchSettings,
@@ -524,6 +560,7 @@ impl Launches {
         now: Instant,
     ) -> Vec<Launch> {
         let mut launches = Vec::new();
+        let mut starting_now = self.started.keys().filter(|id| !live(id)).count();
         let levels: Vec<String> = self.wanted.keys().cloned().collect();
         for level in levels {
             if self
@@ -547,9 +584,12 @@ impl Launches {
                 .count();
             let ready = free(&level).saturating_add(u32::try_from(starting).unwrap_or(u32::MAX));
             for _ in ready..settings.spare_per_level {
-                if u32::try_from(self.started.len()).unwrap_or(u32::MAX) >= settings.max_sims {
+                if u32::try_from(self.started.len()).unwrap_or(u32::MAX) >= settings.max_sims
+                    || starting_now >= MAX_STARTING_SIMS
+                {
                     return launches;
                 }
+                starting_now += 1;
                 self.next += 1;
                 let name = format!("{}-{}", settings.id_prefix, self.next);
                 let Ok(id) = BusId::try_from(name) else {
@@ -641,6 +681,10 @@ mod tests {
     const NOW_MS: u64 = 1_000_000;
     const PHASE: u64 = 0xbd6e_b5a2_6a1f_2b2f;
     const TRIAL_SECONDS: u64 = 1800;
+    /// The beat count of the instance sim when it confirms an opening in these tests, and a
+    /// beat count after it.
+    const CONFIRM_BEAT: u64 = 5;
+    const LATER_BEAT: u64 = CONFIRM_BEAT + 1;
 
     fn slot(name: &str) -> SimSlot {
         SimSlot {
@@ -786,7 +830,7 @@ mod tests {
         assert_eq!(open.sim, slot("inst-1"));
         assert_eq!(open.members.len(), 3);
         assert!(instances.table().sim_for(&open.id, &character(1)).is_none());
-        assert!(instances.opened(open.id, true).is_some());
+        assert!(instances.opened(open.id, true, |_| CONFIRM_BEAT).is_some());
         assert!(instances.table().sim_for(&open.id, &character(2)).is_some());
         // Another member asks: the same instance, no new one.
         let again = instances.decide(
@@ -833,7 +877,7 @@ mod tests {
 
     fn open_confirmed(open: &OpenInstance) -> OpenInstance {
         OpenInstance {
-            confirmed: true,
+            confirmed_at_beat: Some(ADOPTED_BEAT),
             ..open.clone()
         }
     }
@@ -876,7 +920,10 @@ mod tests {
             refuse(InstanceRefusal::NoInstanceSim)
         );
         // A failed opening frees the sim.
-        assert_eq!(instances.opened(Uuid::from_u128(7), false), None);
+        assert_eq!(
+            instances.opened(Uuid::from_u128(7), false, |_| CONFIRM_BEAT),
+            None
+        );
         assert!(instances.is_empty());
     }
 
@@ -903,7 +950,7 @@ mod tests {
             open.ends_at_ms,
             Some(NOW_MS + TRIAL_SECONDS * MS_PER_SECOND)
         );
-        instances.opened(open.id, true);
+        instances.opened(open.id, true, |_| CONFIRM_BEAT);
         let report = |empty_for_ms: Option<u64>| {
             vec![(
                 slot("inst-1"),
@@ -923,7 +970,7 @@ mod tests {
         };
         assert!(
             instances
-                .review(&report(None), &settings(), NOW_MS)
+                .review(&report(None), &settings(), NOW_MS, |_| LATER_BEAT)
                 .is_empty()
         );
         let close = Closing {
@@ -931,12 +978,12 @@ mod tests {
             instance: open.id,
         };
         assert_eq!(
-            instances.review(&report(Some(60_000)), &settings(), NOW_MS),
+            instances.review(&report(Some(60_000)), &settings(), NOW_MS, |_| LATER_BEAT),
             vec![close.clone()]
         );
         let end_ms = NOW_MS + TRIAL_SECONDS * MS_PER_SECOND;
         assert_eq!(
-            instances.review(&report(None), &settings(), end_ms),
+            instances.review(&report(None), &settings(), end_ms, |_| LATER_BEAT),
             vec![close]
         );
         assert!(
@@ -944,7 +991,11 @@ mod tests {
             "a close to send ends nothing yet"
         );
         // The sim went silent: forgotten.
-        assert!(instances.review(&[], &settings(), NOW_MS).is_empty());
+        assert!(
+            instances
+                .review(&[], &settings(), NOW_MS, |_| LATER_BEAT)
+                .is_empty()
+        );
         assert!(instances.is_empty());
         assert_eq!(
             instances.take_ended(),
@@ -952,6 +1003,42 @@ mod tests {
             "the end goes to the entrances once"
         );
         assert!(instances.take_ended().is_empty());
+    }
+
+    #[test]
+    fn a_beat_of_no_instance_from_before_the_confirmation_ends_nothing() {
+        let mut instances = Instances::default();
+        let solo = InstanceRequest {
+            min_group: 0,
+            ..request(1)
+        };
+        let Decision::Open(open) = instances.decide(
+            &solo,
+            &GroupAnswer::Alone,
+            &[slot("inst-1")],
+            (Uuid::from_u128(7), PHASE),
+            NOW_MS,
+        ) else {
+            panic!("opens");
+        };
+        instances.opened(open.id, true, |_| CONFIRM_BEAT);
+        let free = vec![(slot("inst-1"), None)];
+        assert!(
+            instances
+                .review(&free, &settings(), NOW_MS, |_| CONFIRM_BEAT)
+                .is_empty()
+        );
+        assert!(
+            instances.table().sim_for(&open.id, &character(1)).is_some(),
+            "the beat before the opening keeps it"
+        );
+        assert!(instances.take_ended().is_empty());
+        instances.review(&free, &settings(), NOW_MS, |_| LATER_BEAT);
+        assert_eq!(
+            instances.take_ended(),
+            vec![open.id],
+            "a later beat of no instance ends it"
+        );
     }
 
     #[test]
@@ -981,7 +1068,7 @@ mod tests {
             panic!("opens");
         };
         instances.closed(first.id);
-        assert_eq!(instances.opened(second.id, false), None);
+        assert_eq!(instances.opened(second.id, false, |_| CONFIRM_BEAT), None);
         assert_eq!(instances.take_ended(), vec![first.id, second.id]);
         instances.closed(first.id);
         assert!(
@@ -1036,7 +1123,7 @@ mod tests {
         // The end time ends it.
         let end_ms = NOW_MS + TRIAL_SECONDS * MS_PER_SECOND;
         assert_eq!(
-            instances.review(&adopted_report(5), &settings(), end_ms),
+            instances.review(&adopted_report(5), &settings(), end_ms, |_| LATER_BEAT),
             vec![Closing {
                 sim: slot("inst-1"),
                 instance: Uuid::from_u128(7),
@@ -1085,7 +1172,7 @@ mod tests {
             instances.decide(&request(4), &group(&[1, 2, 3, 4]), &free, ids, NOW_MS),
             Decision::Wait { instance: open.id }
         );
-        instances.opened(open.id, true);
+        instances.opened(open.id, true, |_| CONFIRM_BEAT);
         assert!(matches!(
             instances.decide(&request(2), &group(&[1, 2, 3]), &free, ids, NOW_MS),
             Decision::Reply(InstanceReply::Granted { .. })
@@ -1121,25 +1208,39 @@ mod tests {
         );
         launches.wanted(LEVEL, start);
         assert!(!launches.starting(LEVEL, |_| false), "nothing started yet");
-        let started = launches.to_start(&launch_settings(), |_| 0, |_| false, start);
-        assert_eq!(started.len(), 2);
-        assert!(started.iter().all(|launch| launch.level == LEVEL));
+        let mut started = launches.to_start(&launch_settings(), |_| 0, |_| false, start);
+        assert_eq!(started.len(), MAX_STARTING_SIMS, "one start at a time");
         assert!(
             launches.starting(LEVEL, |_| false),
             "started, not beating yet"
         );
         assert!(!launches.starting(LEVEL, |_| true), "beating");
         assert!(!launches.starting("nw_dungeon_everfall_00", |_| false));
-        // Not beating yet: they count as ready, so nothing more starts.
+        // Not beating yet: it counts as ready and starts, so nothing more starts.
         assert!(
             launches
                 .to_start(&launch_settings(), |_| 0, |_| false, start)
                 .is_empty()
         );
+        // The first beats: the level's second spare starts.
+        started.extend(launches.to_start(&launch_settings(), |_| 1, |_| true, start));
+        assert_eq!(started.len(), 2);
+        assert!(started.iter().all(|launch| launch.level == LEVEL));
         launches.wanted("nw_dungeon_everfall_00", start);
-        assert_eq!(
+        assert!(
             launches
                 .to_start(&launch_settings(), |_| 0, |_| false, start)
+                .is_empty(),
+            "the second still starts"
+        );
+        assert_eq!(
+            launches
+                .to_start(
+                    &launch_settings(),
+                    |level| if level == LEVEL { 2 } else { 0 },
+                    |_| true,
+                    start
+                )
                 .len(),
             1,
             "the total limit"

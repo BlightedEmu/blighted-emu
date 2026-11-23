@@ -13,6 +13,10 @@ use nw_bus::{
 };
 use nw_sim_core::{CellGrid, CellOwners, Position};
 
+/// The beat count of a sim's first beat of a generation, and of a sim that is not live.
+const FIRST_BEAT: u64 = 1;
+const NO_BEATS: u64 = 0;
+
 struct Live {
     generation: u64,
     /// The level it runs.
@@ -22,6 +26,8 @@ struct Live {
     /// Admits since the last heartbeat, which its player count does not hold yet.
     pending: u32,
     last_seen: Instant,
+    /// The beats of this generation so far, the newest included.
+    beats: u64,
     /// `Some` for a sim with the instance role, with the instance it runs.
     instance: Option<InstanceBeat>,
 }
@@ -59,6 +65,11 @@ impl SimRegistry {
     /// A heartbeat at `now`. Returns `true` when the set of live sims changed: a new sim or a
     /// new generation of a known one.
     pub fn beat(&mut self, beat: &SimHeartbeat, now: Instant) -> bool {
+        let beats = self
+            .sims
+            .get(&beat.id)
+            .filter(|known| known.generation == beat.started_at_ms)
+            .map_or(FIRST_BEAT, |known| known.beats.saturating_add(1));
         let live = Live {
             generation: beat.started_at_ms,
             level: beat.level.clone(),
@@ -66,6 +77,7 @@ impl SimRegistry {
             max_players: beat.max_players,
             pending: 0,
             last_seen: now,
+            beats,
             instance: beat.instance.clone(),
         };
         let before = self.sims.insert(beat.id.clone(), live);
@@ -130,6 +142,15 @@ impl SimRegistry {
                 Some((slot_of(id, live), beat.running.clone()))
             })
             .collect()
+    }
+
+    /// The beats of the live sim `slot` so far (of its generation); 0 for a sim not live. A beat
+    /// that came later has a higher count, so a report of a count holds what the sim sent then.
+    pub fn beats(&self, slot: &SimSlot) -> u64 {
+        self.sims
+            .get(&slot.id)
+            .filter(|live| live.generation == slot.generation)
+            .map_or(NO_BEATS, |live| live.beats)
     }
 
     /// The level of the live sim `id`.
@@ -493,6 +514,32 @@ mod tests {
     }
 
     const DUNGEON: &str = "nw_dungeon_windsward_00";
+
+    #[test]
+    fn each_beat_of_a_generation_counts_and_a_new_generation_counts_again() {
+        let mut sims = SimRegistry::new(Duration::from_secs(1), 3);
+        let now = Instant::now();
+        let first = instance_beat("inst-1", None);
+        let slot = SimSlot {
+            id: first.id.clone(),
+            generation: first.started_at_ms,
+        };
+        assert_eq!(sims.beats(&slot), NO_BEATS, "not live yet");
+        sims.beat(&first, now);
+        sims.beat(&first, now);
+        assert_eq!(sims.beats(&slot), FIRST_BEAT + 1);
+        let restarted = SimHeartbeat {
+            started_at_ms: first.started_at_ms + 1,
+            ..first.clone()
+        };
+        sims.beat(&restarted, now);
+        assert_eq!(sims.beats(&slot), NO_BEATS, "the old generation is gone");
+        let slot = SimSlot {
+            generation: restarted.started_at_ms,
+            ..slot
+        };
+        assert_eq!(sims.beats(&slot), FIRST_BEAT);
+    }
 
     fn instance_beat(name: &str, running: Option<RunningInstance>) -> SimHeartbeat {
         SimHeartbeat {

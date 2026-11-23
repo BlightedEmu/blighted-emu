@@ -1553,7 +1553,8 @@ mod tests {
         ) else {
             panic!("opens");
         };
-        instances.opened(open.id, true);
+        // The sim's beat count at its confirmation (any count: no beat is reviewed here).
+        instances.opened(open.id, true, |_| u64::MIN);
         let table = instances.table();
         assert_eq!(
             stay_route(&stay, Some(&inside), &table, member, LEVEL),

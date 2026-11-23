@@ -258,7 +258,7 @@ impl InstanceLoop {
         match event {
             InstanceEvent::Grouped { request, group } => self.decide(request, group, sims, None),
             InstanceEvent::Opened { instance, ok } => {
-                self.instances.opened(instance, ok);
+                self.instances.opened(instance, ok, |slot| sims.beats(slot));
                 metrics::gauge!(METRIC_INSTANCES).set(self.instances.len() as f64);
                 // The requests that waited get what the first one got: a decision on the
                 // confirmed instance, or the same refusal.
@@ -280,7 +280,8 @@ impl InstanceLoop {
                 instance,
                 ok,
             } => {
-                self.instances.opened(instance.id, ok);
+                self.instances
+                    .opened(instance.id, ok, |slot| sims.beats(slot));
                 metrics::gauge!(METRIC_INSTANCES).set(self.instances.len() as f64);
                 let result = if ok { OPENED } else { NOT_OPENED };
                 metrics::counter!(METRIC_MATCHES, RESULT_LABEL => result).increment(1);
@@ -298,7 +299,8 @@ impl InstanceLoop {
             } => self.instances.remove_member(instance, character),
             InstanceEvent::WarsRead(read) => self.wars_read(read, sims),
             InstanceEvent::WarOpened { war, instance, ok } => {
-                self.instances.opened(instance.id, ok);
+                self.instances
+                    .opened(instance.id, ok, |slot| sims.beats(slot));
                 metrics::gauge!(METRIC_INSTANCES).set(self.instances.len() as f64);
                 let result = if ok { OPENED } else { NOT_OPENED };
                 metrics::counter!(METRIC_WAR_INSTANCES, RESULT_LABEL => result).increment(1);
@@ -595,7 +597,8 @@ impl InstanceLoop {
             Decision::Open(open) => {
                 let Some(timeout) = self.settings.as_ref().map(|settings| settings.open_timeout)
                 else {
-                    self.instances.opened(open.id, false);
+                    self.instances
+                        .opened(open.id, false, |slot| sims.beats(slot));
                     self.reply(
                         request,
                         InstanceReply::Refused {
@@ -714,7 +717,10 @@ impl InstanceLoop {
         let running = sims.running_instances();
         self.instances
             .adopt(&running, |slot| sims.level_of(&slot.id));
-        for closing in self.instances.review(&running, &settings, unix_ms()) {
+        for closing in self
+            .instances
+            .review(&running, &settings, unix_ms(), |slot| sims.beats(slot))
+        {
             self.close(closing.sim, closing.instance);
             self.instances.closed(closing.instance);
         }
