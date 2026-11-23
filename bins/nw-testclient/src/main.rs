@@ -28,15 +28,17 @@ use nw_content::bundle::ContentBundle;
 use nw_content::client_build::load_client_build;
 use nw_content::gathering::{GatherRules, Gatherables};
 use nw_content::instances::InstanceCatalog;
+use nw_content::invasion_forts::InvasionForts;
 use nw_content::layout::{ContentLayout, content_dir};
 use nw_content::poi_tags::PoiTags;
 use nw_content::quick_courses::QuickCourseRules;
 use nw_content::town_stations::TownStations;
+use nw_content::war_forts::WarForts;
 use nw_dtls::DtlsClientConfig;
 use nw_messages::WorldPosition;
 use nw_reflect::REGISTRATION_STATUS_AUTHORIZED;
 use nw_testclient::activity::{
-    Activity, ActivityData, ActivityKind, CourseRoutes, mount_reward_box,
+    Activity, ActivityData, ActivityKind, CourseRoutes, INVASION_FIGHT_TERRITORY, mount_reward_box,
 };
 use nw_testclient::chat::{ChatSettings, run_chat};
 use nw_testclient::config::{
@@ -53,6 +55,7 @@ use nw_testclient::play::{PlayData, PlayReport, PlaySettings, Verdict, run_play}
 use nw_testclient::record_walk::InputDevice;
 use nw_testclient::rep::{LedgerSlot, RepClient};
 use nw_testclient::swarm::run_swarm;
+use nw_testclient::systems::{SystemsBoard, SystemsCheck, SystemsData, seat_steps};
 use nw_testclient::udp::{Hold, run_rep};
 use nw_testclient::voice::{VoiceSettings, run_voice};
 use nw_testclient::walk::{CHARACTER_CREATION_PARAMS, WalkSettings, login_token, walk};
@@ -195,12 +198,42 @@ enum Command {
         minutes: u64,
         /// Quests the leader plays, comma-separated, once the group is formed (in place of the
         /// walk of the start area): a quest step that needs the expedition enters it with the
-        /// group, and the others stay in the group until the leader ends.
+        /// group, and the others stay in the group until the leader ends (with `--all-play`
+        /// they play the quests too).
         #[arg(long, value_delimiter = ',')]
         quests: Vec<String>,
         /// Quests a game master line starts at the leader's setup, past their requirements.
         #[arg(long, value_delimiter = ',')]
         gm_start: Vec<String>,
+        /// Every bot plays the quests and takes their game master starts, not only the leader:
+        /// the members accept the invite and then play, so the whole group enters the
+        /// expedition and fights its bosses.
+        #[arg(long)]
+        all_play: bool,
+    },
+    /// Game master bots check one of the server's systems through the client's calls
+    /// (`nw_testclient::systems`): saves, the economy, the trading post, social, character
+    /// progress. A new account is registered; each needs the game master rank.
+    Systems {
+        /// The check.
+        #[arg(long, value_enum)]
+        check: SystemsCheck,
+        /// The bots' accounts, comma-separated, as many as the check takes; the first leads.
+        #[arg(long, value_delimiter = ',', required = true)]
+        accounts: Vec<String>,
+        /// The record file of the save checks: written by `save-record`, read by `save-check`.
+        #[arg(long)]
+        record: Option<PathBuf>,
+        /// The archetype pick of a new character (`Archetype_Soldier`): it wears that starter
+        /// kit and has a bag.
+        #[arg(long)]
+        backstory: Option<String>,
+        /// The report file (Markdown).
+        #[arg(long)]
+        report: PathBuf,
+        /// Longest time in the world, in minutes.
+        #[arg(long, default_value_t = DEFAULT_PLAY_MINUTES)]
+        minutes: u64,
     },
 }
 
@@ -332,6 +365,7 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
             minutes,
             quests,
             gm_start,
+            all_play,
         } => {
             let first = own(&config)?;
             let bots = accounts
@@ -343,12 +377,12 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
                         character_name: format!("{account}{PLAY_CHARACTER_MARK}"),
                         ..first.clone()
                     },
-                    quests: if seat == LEADER {
+                    quests: if seat == LEADER || all_play {
                         quests.clone()
                     } else {
                         Vec::new()
                     },
-                    gm_start: if seat == LEADER {
+                    gm_start: if seat == LEADER || all_play {
                         gm_start.clone()
                     } else {
                         Vec::new()
@@ -360,6 +394,39 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
                 .collect::<Vec<_>>();
             expedition(
                 &config, &http, &trusted, &game_mode, &bots, &report, &ledger,
+            )
+            .await
+        }
+        Command::Systems {
+            check,
+            accounts,
+            record,
+            backstory,
+            report,
+            minutes,
+        } => {
+            let mut first = own(&config)?;
+            if let Some(backstory) = backstory {
+                first.creation_params = nw_login::look::bot_creation_params(&backstory)
+                    .ok_or("the creation settings of the backstory do not write")?;
+            }
+            let bots = accounts
+                .iter()
+                .map(|account| PlaySettings {
+                    account: WalkSettings {
+                        account: account.clone(),
+                        character_name: format!("{account}{PLAY_CHARACTER_MARK}"),
+                        ..first.clone()
+                    },
+                    quests: Vec::new(),
+                    gm_start: Vec::new(),
+                    pvp_foe: None,
+                    hold: Duration::from_secs(minutes * SECONDS_PER_MINUTE),
+                    registration_timeout: Duration::from_secs(config.registration_timeout_seconds),
+                })
+                .collect::<Vec<_>>();
+            systems(
+                &config, &http, &trusted, check, &bots, record, &report, &ledger,
             )
             .await
         }
@@ -796,6 +863,7 @@ async fn play(
         world: &content.world,
         tables: &content.tables,
         town_stations: &content.town_stations,
+        war_forts: &content.war_forts,
     };
     let activities = kinds
         .iter()
@@ -865,6 +933,9 @@ struct PlayContent {
     world: WorldFile,
     tables: nw_content::Tables,
     town_stations: TownStations,
+    /// The war forts; an empty table when the content has none (the war activities then name
+    /// why they cannot be played).
+    war_forts: WarForts,
     courses: Arc<CourseRoutes>,
     /// The gather nodes of each instance game mode whose map is another level than the
     /// `[swarm]` level, by the lowercase game mode id.
@@ -885,6 +956,7 @@ impl PlayContent {
             }),
             tables,
             town_stations: TownStations::load(&layout)?,
+            war_forts: WarForts::load(&layout).unwrap_or_default(),
             layout,
         })
     }
@@ -909,6 +981,7 @@ impl PlayContent {
         PlayData {
             activities,
             activities_first: false,
+            game_master_setup: true,
             nodes,
             trial_nodes: Arc::clone(&self.trial_nodes),
             containers,
@@ -983,7 +1056,7 @@ async fn expedition(
             sea_level_m,
         };
         let steps = if questing {
-            quest_group_steps(seat, settings.hold)
+            quest_group_steps(seat, settings.hold, !settings.quests.is_empty())
         } else {
             expedition_steps(seat, &mode.id, mode.crc, &records)
         };
@@ -1028,6 +1101,114 @@ async fn expedition(
             seat_device(seat)
         );
         passed &= expedition_section(&mut markdown, report, seat, &ground, questing);
+    }
+    std::fs::write(report_path, &markdown)?;
+    println!("{markdown}");
+    println!("report in {}", report_path.display());
+    Ok(passed)
+}
+
+/// The `systems` run of `check` by the bots of `bots` (the first leads), with the save checks'
+/// `record` file; the report goes to `report_path`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the run's connection, its bots and its files, as `expedition` takes them"
+)]
+async fn systems(
+    config: &TestClientConfig,
+    http: &reqwest::Client,
+    trusted: &DtlsClientConfig,
+    check: SystemsCheck,
+    bots: &[PlaySettings],
+    record: Option<PathBuf>,
+    report_path: &std::path::Path,
+    ledger: &LedgerSlot,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if !check.bots().contains(&bots.len()) {
+        return Err(format!(
+            "the check {check:?} takes {:?} accounts; {} given",
+            check.bots(),
+            bots.len()
+        )
+        .into());
+    }
+    let content = PlayContent::load(config)?;
+    let wave_vitals = InvasionForts::load(&content.layout)?
+        .fort(INVASION_FIGHT_TERRITORY)
+        .map(|fort| {
+            let mut vitals: Vec<u32> = fort
+                .waves
+                .iter()
+                .flat_map(|wave| &wave.spawns)
+                .map(|spawn| spawn.vitals)
+                .collect();
+            vitals.sort_unstable();
+            vitals.dedup();
+            vitals
+        })
+        .unwrap_or_default();
+    let activity = ActivityData {
+        world: &content.world,
+        tables: &content.tables,
+        town_stations: &content.town_stations,
+        war_forts: &content.war_forts,
+    };
+    let data = SystemsData {
+        activity: &activity,
+        record,
+        board: Arc::new(SystemsBoard::default()),
+        first_account: bots
+            .first()
+            .map(|bot| bot.account.account.clone())
+            .unwrap_or_default(),
+        wave_vitals,
+    };
+    let seats = GroupBoard::seats(bots.len());
+    let runs = bots.iter().zip(&seats).map(|(settings, seat)| {
+        let activity = Activity {
+            kind: ActivityKind::Systems,
+            steps: seat_steps(check, seat, &data),
+        };
+        let mut play = content.play_data(vec![activity], Some(seat.clone()));
+        play.activities_first = true;
+        play.game_master_setup = check.game_master_setup();
+        let bot = seat.number();
+        async move {
+            run_play(
+                http,
+                settings,
+                play,
+                |token| {
+                    RepClient::new(trusted, config.mtu, token, 0).map(|client| ledger.give(client))
+                },
+                move |line| println!("bot {bot}: {line}"),
+            )
+            .await
+        }
+    });
+    let reports = all(runs.collect()).await;
+    let mut markdown = format!("# Systems run: {check:?}, {} bots\n", bots.len());
+    let mut passed = true;
+    for ((settings, seat), report) in bots.iter().zip(&seats).zip(reports) {
+        let _ = write!(
+            markdown,
+            "\n## Bot {} (account {})\n\n",
+            seat.number(),
+            settings.account.account
+        );
+        match report {
+            Ok(report) => {
+                markdown.push_str(&report.markdown());
+                passed &= report
+                    .activities
+                    .iter()
+                    .all(|play| play.verdict == Verdict::Completed);
+            }
+            Err(error) => {
+                let _ = writeln!(markdown, "The bot failed: {error}");
+                passed = false;
+            }
+        }
     }
     std::fs::write(report_path, &markdown)?;
     println!("{markdown}");

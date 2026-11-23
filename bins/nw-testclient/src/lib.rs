@@ -5,6 +5,7 @@
 pub mod activity;
 pub mod chat;
 pub mod config;
+pub mod crossing_state;
 pub mod fishing;
 pub mod fleet;
 pub mod gather;
@@ -17,6 +18,7 @@ pub mod rep;
 pub mod route;
 pub mod swarm;
 pub mod sync;
+pub mod systems;
 pub mod udp;
 pub mod view;
 pub mod voice;

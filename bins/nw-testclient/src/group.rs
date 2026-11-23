@@ -42,6 +42,11 @@ const GROUP_WAIT: Duration = Duration::from_secs(180);
 const LEADER_WAIT: Duration = Duration::from_secs(150);
 /// How long one leg may take: [`WALK_LEGS`] at the bots' walking speed, with room.
 const LEG_WAIT: Duration = Duration::from_secs(20);
+/// How long a playing member waits per seat before its quests: each bot's first `!questplan`
+/// holds the sim's tick about a second (live 2026-11-23 02:43:54-02:43:58Z: five plans of
+/// `1689_EXP_Coins_Objective` 0.92 s apart, ticks ran late, then "gateway silent; its players
+/// leave"), so the bots plan one after another. Inferred: a second of plan and room.
+const MEMBER_PLAY_GAP: Duration = Duration::from_secs(4);
 /// How long the answer to `!where` may take.
 const WHERE_WAIT: Duration = Duration::from_secs(10);
 /// The game master line that answers with the sender's server place.
@@ -277,10 +282,24 @@ fn accept_step(seat: &GroupSeat) -> Step {
 /// The steps of the bot of `seat` in a group whose leader plays quests that need a group (an
 /// expedition opens only for a group of its `MinGroupSize`): the leader invites the others and
 /// then plays its quests (`crate::play::PlayData::activities_first`); a member accepts and stays
-/// in the group, in the open world, until the leader's play ends or `hold` passes.
-pub fn quest_group_steps(seat: &GroupSeat, hold: Duration) -> Vec<Step> {
+/// in the group, in the open world, until the leader's play ends or `hold` passes. With
+/// `members_play` a member accepts, waits its turn ([`MEMBER_PLAY_GAP`] per seat) and then plays
+/// the same quests: its entry of their
+/// expedition joins the group's instance (the director adds a member of the group to the group's
+/// open instance, or holds it until that instance is ready), so the whole group fights there.
+pub fn quest_group_steps(seat: &GroupSeat, hold: Duration, members_play: bool) -> Vec<Step> {
     if seat.leads() {
         vec![invite_step(seat)]
+    } else if members_play {
+        vec![
+            accept_step(seat),
+            Step {
+                what: "wait for the bots before it to plan".to_owned(),
+                acts: Vec::new(),
+                proof: Proof::Paused,
+                wait: MEMBER_PLAY_GAP * u32::try_from(seat.number()).unwrap_or(u32::MAX),
+            },
+        ]
     } else {
         vec![
             accept_step(seat),
@@ -512,10 +531,18 @@ mod tests {
     fn a_quest_group_leader_invites_and_a_member_stays_until_the_leader_is_done() {
         const HOLD: Duration = Duration::from_secs(600);
         let seats = GroupBoard::seats(3);
-        let leader = quest_group_steps(&seats[0], HOLD);
+        let leader = quest_group_steps(&seats[0], HOLD, false);
         assert_eq!(leader.len(), 1);
         assert_eq!(leader[0].what, "invite the other bots into a group");
-        let member = quest_group_steps(&seats[2], HOLD);
+        let playing = quest_group_steps(&seats[2], HOLD, true);
+        assert_eq!(playing[0].what, "accept the leader's invite");
+        assert!(matches!(playing[1].proof, Proof::Paused));
+        assert_eq!(
+            playing[1].wait,
+            MEMBER_PLAY_GAP * 2,
+            "the third seat waits for two"
+        );
+        let member = quest_group_steps(&seats[2], HOLD, false);
         assert_eq!(member[0].what, "accept the leader's invite");
         assert!(matches!(&member[1].proof, Proof::LeaderDone(_)));
         assert_eq!(member[1].wait, HOLD);

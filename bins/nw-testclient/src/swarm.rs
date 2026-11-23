@@ -15,6 +15,7 @@ use nw_reflect::REGISTRATION_STATUS_AUTHORIZED;
 use nw_sim_core::Ground;
 use reqwest::Client;
 
+use crate::crossing_state::CrossingCheck;
 use crate::fleet::{
     BOTS_CONNECTED, BOTS_REGISTERED, BUNDLES_STEADY, BundleClock, FleetBot, FleetRun,
     FleetSettings, NewBot, NewClient, error_kinds, p99, ratio, run_fleet,
@@ -29,6 +30,10 @@ use tokio::sync::watch;
 
 /// Check: every bot crossed the start line at least `min_crossings` times.
 pub const BOTS_CROSSED: &str = "every bot crossed the sim border often enough";
+/// Check: every bot kept its health, its running quest steps and its group over each sim
+/// crossing ([`crate::crossing_state`]).
+pub const BOTS_KEPT_STATE: &str =
+    "every bot kept its health, quest steps and group over each crossing";
 /// Check: every own position of every bot was on its route.
 pub const BOTS_ON_ROUTE: &str = "every bot stayed on its route";
 /// Check: enough handoffs, and none refused or late.
@@ -89,6 +94,10 @@ pub struct BotReport {
     pub bundles_expected: u64,
     /// The delays from another bot's block change to its sight in this bot's bundles.
     pub sync_delays: Vec<Duration>,
+    /// The crossings whose own state the bot compared ([`crate::crossing_state`]).
+    pub crossings_checked: u32,
+    /// The differences of its own state over its crossings, in words.
+    pub state_changes: Vec<String>,
     /// Why the bot could not run, if it could not.
     pub error: Option<String>,
 }
@@ -110,6 +119,10 @@ impl SwarmReport {
             Check {
                 name: BOTS_CROSSED,
                 passed: all(&|bot| bot.crossings >= settings.min_crossings),
+            },
+            Check {
+                name: BOTS_KEPT_STATE,
+                passed: all(&|bot| bot.state_changes.is_empty()),
             },
             Check {
                 name: BOTS_ON_ROUTE,
@@ -182,12 +195,19 @@ impl SwarmReport {
             .fold(1.0, f64::min);
         let fewest = self.bots.iter().map(|bot| bot.crossings).min();
         let errors = self.bots.iter().filter(|bot| bot.error.is_some()).count();
+        let checked: u32 = self.bots.iter().map(|bot| bot.crossings_checked).sum();
+        let changes: Vec<&str> = self
+            .bots
+            .iter()
+            .flat_map(|bot| bot.state_changes.iter().map(String::as_str))
+            .collect();
         let delays = self.sync_delays();
         let millis = |share| quantile(&delays, share).unwrap_or_default().as_millis();
         format!(
             "bots {}, failed to start {errors}, fewest crossings {}, worst bundle gap {} ms, \
              fewest bundles {worst_share:.4}, handoffs {} (failed {}), within one tick: handoffs \
-             {:.4}, ticks {:.4}, action-to-visible p50 {} ms p99 {} ms ({} samples)",
+             {:.4}, ticks {:.4}, action-to-visible p50 {} ms p99 {} ms ({} samples), \
+             crossings state-checked {checked}, state changes {} {:?}",
             self.bots.len(),
             fewest.unwrap_or_default(),
             worst_gap.unwrap_or_default().as_millis(),
@@ -198,6 +218,8 @@ impl SwarmReport {
             millis(MEDIAN),
             millis(P99),
             delays.len(),
+            changes.len(),
+            changes,
         )
     }
 }
@@ -314,9 +336,32 @@ struct Bot {
     /// It holds block, and when it changes it next.
     blocking: bool,
     next_toggle: Option<Duration>,
+    /// Its own state over its crossings.
+    state: CrossingCheck,
 }
 
 impl Bot {
+    /// The walk of a bot that first sees itself at `first` at `since`: its route from the start
+    /// nearest to it; `None` with no start.
+    fn first_walk(
+        &self,
+        first: WorldPosition,
+        since: Duration,
+    ) -> Result<Option<Walk>, RouteError> {
+        let settings = &*self.settings;
+        let Some(start) = nearest_start(&settings.starts, first) else {
+            return Ok(None);
+        };
+        let route = route_from(settings, self.n, [first.x - start[0], first.y - start[1]])?;
+        Ok(Some(Walk {
+            route,
+            start,
+            track: BotTrack::new(start),
+            started: since,
+            height: first.z(),
+        }))
+    }
+
     /// Whether it holds block at `since`: the state changes once per `block_toggle`, from a time
     /// spread by the bot's number, and the change goes on the probe.
     fn block_at(&mut self, since: Duration) -> bool {
@@ -388,39 +433,37 @@ impl FleetBot for Bot {
         outcome: &mut RepOutcome,
         since: Duration,
     ) -> Result<(), RepError> {
-        let mut seen = Vec::new();
         for received in outcome.messages.drain(..) {
             // A message that does not decode is not a position; the checks miss it.
             let Ok(read) = self.view.read(&received) else {
                 continue;
             };
-            seen.extend(read.own_position);
             let now = Instant::now();
             for (entity, blocking) in read.blocks {
                 self.sync.saw(&self.probe, entity, blocking, now);
             }
+            if let Some(position) = read.own_position {
+                if self.walk.is_none() {
+                    self.walk = self.first_walk(position, since)?;
+                }
+                // Each position in order: the state before a crossing is the one held before
+                // the message that crosses.
+                if let Some(walk) = &mut self.walk {
+                    let before = walk.track.crossings;
+                    walk.track.saw(&walk.route, &[position], since);
+                    if walk.track.crossings > before {
+                        self.state.crossed(walk.track.crossings, since);
+                    }
+                }
+            }
+            for state in &read.own_states {
+                self.state.apply(state);
+            }
         }
-        if self.walk.is_none() {
-            let Some(first) = seen.first() else {
-                return Ok(());
-            };
-            let settings = &*self.settings;
-            let Some(start) = nearest_start(&settings.starts, *first) else {
-                return Ok(());
-            };
-            let route = route_from(settings, self.n, [first.x - start[0], first.y - start[1]])?;
-            self.walk = Some(Walk {
-                route,
-                start,
-                track: BotTrack::new(start),
-                started: since,
-                height: first.z(),
-            });
-        }
+        self.state.tick(since);
         let Some(walk) = &mut self.walk else {
             return Ok(());
         };
-        walk.track.saw(&walk.route, &seen, since);
         if self
             .last_sent
             .is_some_and(|sent| since.saturating_sub(sent) < SEND_INTERVAL)
@@ -452,6 +495,7 @@ impl FleetBot for Bot {
             .walk
             .map_or_else(|| BotTrack::new(NO_START), |walk| walk.track);
         let (bundles_received, bundles_expected) = track.clock.bundles(outcome.held);
+        let (crossings_checked, state_changes) = self.state.finish();
         BotReport {
             registered: outcome.status == Some(REGISTRATION_STATUS_AUTHORIZED),
             closed: outcome.closed_by_server,
@@ -461,6 +505,8 @@ impl FleetBot for Bot {
             bundles_received,
             bundles_expected,
             sync_delays: self.sync.samples().to_vec(),
+            crossings_checked,
+            state_changes,
             error: None,
         }
     }
@@ -495,6 +541,7 @@ pub async fn run_swarm(
         sync: SyncTrack::default(),
         blocking: false,
         next_toggle: None,
+        state: CrossingCheck::default(),
     });
     run_fleet(http, fleet, new_client, new_bot, stop, report).await
 }
@@ -685,6 +732,8 @@ mod tests {
             bundles_received: 299,
             bundles_expected: 300,
             sync_delays: vec![Duration::from_millis(40), Duration::from_millis(70)],
+            crossings_checked: MIN_CROSSINGS,
+            state_changes: Vec::new(),
             error: None,
         }
     }
@@ -711,9 +760,12 @@ mod tests {
     fn the_swarm_checks_fail_on_each_fault() {
         let settings = settings();
         assert!(good_report().passed(&settings));
-        let faults: [Fault; 12] = [
+        let faults: [Fault; 13] = [
             (BOTS_REGISTERED, |report| report.bots[0].registered = false),
             (BOTS_CROSSED, |report| report.bots[1].crossings = 1),
+            (BOTS_KEPT_STATE, |report| {
+                report.bots[1].state_changes = vec!["crossing 2: health 1000 -> 900".to_owned()];
+            }),
             (BOTS_ON_ROUTE, |report| {
                 report.bots[0].worst_off_route_m = 3.0
             }),

@@ -17,6 +17,7 @@ use nw_content::quick_courses::QuickCourseRules;
 use nw_content::starter::StarterKits;
 use nw_content::town_props::ASSET_ID_LEN;
 use nw_content::town_stations::TownStations;
+use nw_content::war_forts::{CLAIM_POINT_NUMBER, WarForts};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::arena::{
     ActivateResponse, ArenaClientMsg, ArenaServerMsg, DUNGEON_ACTIVATE_RESULT_TYPE_INDEX,
@@ -28,8 +29,15 @@ use nw_messages::client_input::{
     WAR_BOARD_NAME,
 };
 use nw_messages::conversation_client::ObjectiveInteractorClientMsg;
+use nw_messages::facet::LEFT_GAME_MODE_QUEUE_TYPE_INDEX;
 use nw_messages::facet::{
     CRAFTING_PROGRESS_TYPE_INDEX, INGREDIENT_ITEM, TELEPORT_WITH_LOADING_SCREEN_TYPE_INDEX,
+    component as facet_component,
+};
+use nw_messages::game_mode::{
+    ARENA_ACTIVITY, CAPTURE_THE_FLAG_ACTIVITY, MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX,
+    OUTPOST_RUSH_ACTIVITY, ROLE_SELECTION_CANCELED_TYPE_INDEX,
+    START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX,
 };
 use nw_messages::mount::{
     MOUNT_FACET, MountClientMsg, QUICK_COURSE_ENDED_TYPE_INDEX, SUMMON_PENDING_TYPE_INDEX,
@@ -37,6 +45,8 @@ use nw_messages::mount::{
 use nw_messages::music::{
     MUSIC_CHILD, MUSIC_FACET, MusicClientMsg, PERFORMANCE_CREATED_TYPE_INDEX,
 };
+use nw_messages::social::SocialFacet;
+use nw_messages::social::groups::{GroupCall, LEAVE_VALUE, SIEGE_WARFARE_ENDED_TYPE_INDEX};
 use nw_messages::travel::{
     LandmarkRef, PLACEMENT_RESULTS_TYPE_INDEX, StructurePlacement, TravelClientMsg, component,
 };
@@ -46,9 +56,10 @@ use nw_messages::war_signup::{
 };
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    BundleMember, ClientFacetMsg, CraftIngredient, FacetHeader, InteractionRequest,
-    LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, MemberState, MessageError, TERRITORY_FACET_READY_TYPE_INDEX,
-    TERRITORY_INTERACTOR_COMPONENT, WarSignupClientMsg,
+    BundleMember, ClientFacetMsg, CraftIngredient, FacetHeader, GameModeClientMsg,
+    InteractionRequest, ItemRecord, LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, MemberState, MessageError,
+    QueueActivity, TERRITORY_FACET_READY_TYPE_INDEX, TERRITORY_INTERACTOR_COMPONENT,
+    WarSignupClientMsg,
 };
 use nw_world::WorldFile;
 use nw_world::capitals::capital_id;
@@ -57,8 +68,10 @@ use nw_world::quick_courses::QuickCoursePaths;
 use sim::world::GM_DONE as DONE;
 
 use crate::gather::{GatherNode, node_id};
-use crate::group::GroupSeat;
+use crate::group::{GroupSeat, accept_call};
 use crate::pair::RecordWalk;
+use crate::rep::Received;
+use crate::view::Matchmaking;
 
 /// The kind of an inn's open interaction (`travel::kind::OPEN_INN` of the sim; retail opened
 /// the inn with it before the check in, live-inn note section 1).
@@ -113,9 +126,9 @@ const CRAFT_COINS: u32 = 10_000;
 /// The rank of a craft's tradeskill.
 const CRAFT_RANK: u32 = 200;
 /// How long a step's proof may take.
-const STEP_WAIT: Duration = Duration::from_secs(10);
+pub(crate) const STEP_WAIT: Duration = Duration::from_secs(10);
 /// How long a gather or a fast travel may take: the gather time, the 10 s channel.
-const LONG_WAIT: Duration = Duration::from_secs(25);
+pub(crate) const LONG_WAIT: Duration = Duration::from_secs(25);
 /// The first words of the sim's `!state` line.
 const STATE_LEVEL: &str = "state level ";
 /// How the first word of the PvP part of the `!state` line starts.
@@ -170,10 +183,60 @@ pub enum ActivityKind {
     /// defender, the only side of an invasion; the invasion is cancelled and the territory given
     /// back to no owner at the end.
     InvasionSignup,
+    /// A check of the server's systems (saves, economy, social, character progress) by one or
+    /// two bots at the same time: `nw-testclient systems` runs it ([`crate::systems`]).
+    Systems,
+    /// The bot queues for the 3v3 arena alone, accepts the match the queue finds, plays it (it
+    /// fights the players of the other team) and is back in the open world at its end
+    /// ([`queued_match_steps`]). The match needs as many bots in the queue as the world
+    /// director's `[instances.arena] match_size`.
+    Arena,
+    /// As [`ActivityKind::Arena`] for Outpost Rush: team 0 takes the three outposts in turn,
+    /// team 1 stays at its spawn ([`MatchGoal::Outposts`]).
+    OutpostRush,
+    /// As [`ActivityKind::Arena`] for capture the flag: team 0 takes team 1's flag to its own
+    /// base, team 1 stays at its spawn ([`MatchGoal::Flags`]).
+    CaptureTheFlag,
+    /// The bot closes the arena queue's role picking screen, then joins and leaves the queue
+    /// ([`queue_leave_steps`]): no match and no instance.
+    QueueLeave,
 }
 
 /// One call of a step, written once the bot knows its own entity number.
 pub type Call = Box<dyn Fn(u64) -> Result<(u64, Vec<u8>), MessageError>>;
+
+/// What a bot saw, for an act or a proof that reads it ([`Act::Dynamic`], [`Proof::Check`]).
+pub struct BotSight<'a> {
+    /// The bot's own entity number.
+    pub own: u64,
+    /// The bot's bag, one record per slot ([`crate::view::CombatView::bag`]).
+    pub bag: &'a [ItemRecord],
+    /// The system chat lines since the step's first act.
+    pub lines: &'a [String],
+    /// The bodies of the player chat lines since the step's first act.
+    pub heard: &'a [String],
+    /// The server messages since the step's first act.
+    pub messages: &'a [Received],
+    /// Whether the bot's own newest vitals say it is dead.
+    pub dead: bool,
+    /// Whether the bot's own groups state names a group.
+    pub in_group: bool,
+    /// The bot's own queue and game modes ([`crate::view::WorldView::matchmaking`]).
+    pub matchmaking: &'a Matchmaking,
+    /// The first invite in the bot's own groups state (a group's or a war raid's).
+    pub group_invite: Option<[u8; RAW_ID_LEN]>,
+}
+
+/// The calls of an act that reads what the bot saw: `None` to wait for a later tick, else the
+/// calls to send (type index and body each; none for an act that only notes what it saw).
+pub type Dynamic = Box<dyn Fn(&BotSight<'_>) -> Option<Result<Vec<(u64, Vec<u8>)>, MessageError>>>;
+
+/// The request of an interaction written from what the bot saw: `None` to wait for a later tick.
+pub type DynamicInteraction = Box<dyn Fn(&BotSight<'_>) -> Option<InteractionRequest>>;
+
+/// A proof that reads what the bot saw: `None` while it waits, else whether the step worked
+/// (with why not).
+pub type Check = Box<dyn Fn(&BotSight<'_>) -> Option<Result<(), String>>>;
 
 /// What a step sends.
 pub enum Act {
@@ -236,6 +299,31 @@ pub enum Act {
         /// The device and the level's ground of the bot's own body.
         records: RecordWalk,
     },
+    /// Calls written from what the bot saw ([`Dynamic`]); the act waits while it gives `None`.
+    Dynamic(Dynamic),
+    /// The bot fights the nearest mob within this many metres of where it stands now, each tick,
+    /// while the next steps wait (a kill experience check); `None` ends the hunt.
+    Hunt(Option<f32>),
+    /// An interaction whose request is written from what the bot saw (the revive of another
+    /// bot's player, whose number that bot tells); the act waits while it gives `None`. The bot
+    /// gives it a fresh id.
+    InteractDynamic(DynamicInteraction),
+    /// The bot accepts each new pop of its queue ([`pop_to_accept`], [`accept_calls`]) until the
+    /// match moves it (5449); with none within `longest` from the act's start the step fails.
+    AcceptPops {
+        /// The longest wait for the move.
+        longest: Duration,
+    },
+    /// The bot plays a match or a war for `goal` until `end`; one that lasts longer than
+    /// `longest` from the act's start fails the step.
+    PlayMatch {
+        /// What ends it.
+        end: MatchEnd,
+        /// What the bot does in it.
+        goal: MatchGoal,
+        /// The longest match.
+        longest: Duration,
+    },
 }
 
 /// What proves that a step worked.
@@ -265,6 +353,61 @@ pub enum Proof {
     LeaderInside(GroupSeat),
     /// The group's leader ended its play ([`GroupSeat::leader_done`]).
     LeaderDone(GroupSeat),
+    /// The step's wait passed: a pause.
+    Paused,
+    /// A check of what the bot saw ([`Check`]), described.
+    Check(Check, String),
+}
+
+/// What a bot does in a match of a queued game mode ([`Act::PlayMatch`]). The two roles of
+/// Outpost Rush and capture the flag are a test plan (our design): one team plays the objective
+/// alone, so that the match comes to its scored end.
+/// The bot has no path finder and walls and gates stand between the places, so it goes to each
+/// place with a game master's teleport.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MatchGoal {
+    /// Fight the nearest player of the other team (the arena).
+    Fight,
+    /// Team 0 goes onto the outposts A, B and C in turn and stays in each while it takes it;
+    /// team 1 stays at its spawn (Outpost Rush).
+    Outposts,
+    /// Team 0 goes to team 1's flag, takes it with the trigger interaction and brings it to its
+    /// own base, again and again; team 1 stays at its spawn (capture the flag).
+    Flags,
+    /// Go round these war capture points and stay in each while it is taken; none: stay at the
+    /// arrival (a war's defender).
+    Siege(Vec<[f32; 3]>),
+    /// Hold this claim position: stand on it and fight the mobs that come within the capture
+    /// radius of it (an invasion's defender).
+    Defend([f32; 3]),
+    /// Clear an invasion's waves around the claim position `claim`: fight the nearest mob within
+    /// [`CLEAR_RADIUS_M`] of it whose vitals id (the CRC-32 of its lowercase id) is one of
+    /// `vitals`, the fort's wave mobs (a game master's teleport to one out of reach on foot),
+    /// else go back onto the claim. A wave starts only once the mobs of the wave before it are
+    /// dead (the sim's `invasions` module), so a defender that only holds the claim keeps the
+    /// first wave; the open-world mobs and the fort's own structures near it are no wave mobs
+    /// (live 2026-11-23 06:52Z and 05:54Z: a clearing bot fought both).
+    Clear {
+        /// The claim position.
+        claim: [f32; 3],
+        /// The vitals ids of the fort's wave mobs.
+        vitals: Vec<u32>,
+    },
+}
+
+/// How far from the claim position an invasion's clearing defender goes for a mob, metres
+/// (Inferred: the waves come from their lanes outside the fort's walls; live 2026-11-23
+/// 04:59-05:24Z, defenders that held the claim alone kept the invasion in its first wave).
+pub const CLEAR_RADIUS_M: f32 = 250.0;
+
+/// What ends a bot's match play ([`Act::PlayMatch`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchEnd {
+    /// The own participant state shows the player out of this game mode (the CRC-32 of its
+    /// lowercase id): the match ended and the player is back.
+    LeftMode(u32),
+    /// The war or invasion ended: its result came (245).
+    WarEnded,
 }
 
 /// One step of an activity.
@@ -295,10 +438,12 @@ pub struct ActivityData<'a> {
     pub tables: &'a Tables,
     /// The settlements' station slots and slices.
     pub town_stations: &'a TownStations,
+    /// The war forts: their capture points.
+    pub war_forts: &'a WarForts,
 }
 
 /// A step of `what` that sends `acts` and waits `wait` for `proof`.
-fn step(what: impl Into<String>, acts: Vec<Act>, proof: Proof, wait: Duration) -> Step {
+pub(crate) fn step(what: impl Into<String>, acts: Vec<Act>, proof: Proof, wait: Duration) -> Step {
     Step {
         what: what.into(),
         acts,
@@ -308,7 +453,7 @@ fn step(what: impl Into<String>, acts: Vec<Act>, proof: Proof, wait: Duration) -
 }
 
 /// A game master line answered with [`DONE`].
-fn gm_done(line: String) -> Step {
+pub(crate) fn gm_done(line: String) -> Step {
     step(
         line.clone(),
         vec![Act::Gm(line)],
@@ -331,7 +476,7 @@ fn state_shows(what: &str, wanted: impl Fn(&str) -> bool + 'static, described: &
 }
 
 /// A teleport to `at`.
-const fn teleport(at: [f32; 3]) -> Act {
+pub(crate) const fn teleport(at: [f32; 3]) -> Act {
     Act::Teleport(at)
 }
 
@@ -457,6 +602,15 @@ impl Activity {
             ActivityKind::EnemyCompany => Ok(enemy_company()),
             ActivityKind::WarSignup => Ok(war_signup()),
             ActivityKind::InvasionSignup => Ok(invasion_signup()),
+            ActivityKind::Systems => Err(
+                "needs its check and its bots: `nw-testclient systems` runs it".to_owned(),
+            ),
+            ActivityKind::Arena => queued_match_steps(data, InstanceKind::Arena),
+            ActivityKind::OutpostRush => queued_match_steps(data, InstanceKind::OutpostRush),
+            ActivityKind::CaptureTheFlag => {
+                queued_match_steps(data, InstanceKind::CaptureTheFlag)
+            }
+            ActivityKind::QueueLeave => queue_leave_steps(data),
         };
         Self { kind, steps }
     }
@@ -1373,7 +1527,7 @@ pub fn leave_trial_steps() -> Vec<Step> {
 /// The made-up company of the company activity.
 const BOT_COMPANY: &str = "Bot Test Company";
 /// The faction the company activity's bot joins (any faction makes a company).
-const BOT_FACTION: &str = "syndicate";
+pub(crate) const BOT_FACTION: &str = "syndicate";
 /// Monarch's Bluffs, the town of the company activity.
 const MONARCHS_BLUFFS: u16 = 12;
 /// The Monarch's Bluffs town project board (retail `SQ-Monarchs-Bluffs`, as its card names it):
@@ -1434,7 +1588,7 @@ fn company(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
 const ENEMY_COMPANY: &str = "Bot War Company";
 /// The faction of the enemy company: not the faction of the company activity, so a war of the
 /// two has a side for each.
-const ENEMY_FACTION: &str = "covenant";
+pub(crate) const ENEMY_FACTION: &str = "covenant";
 
 /// The territory of the war sign-up activity: Reekwater, an invasion and war fort.
 const WAR_TERRITORY: u16 = 5;
@@ -1447,7 +1601,7 @@ const FIRST_LIST_PAGE: u32 = 1;
 const ROSTER_POLL_WAIT: Duration = Duration::from_secs(5);
 
 /// A war sign-up call of the bot ([`TERRITORY_INTERACTOR_COMPONENT`]).
-fn war_call(make: impl Fn(FacetHeader) -> WarSignupClientMsg + 'static) -> Act {
+pub(crate) fn war_call(make: impl Fn(FacetHeader) -> WarSignupClientMsg + 'static) -> Act {
     Act::Call(Box::new(move |own| {
         let call = make(FacetHeader::of(TERRITORY_INTERACTOR_COMPONENT, own));
         Ok((call.type_index(), call.encode()?))
@@ -1459,37 +1613,18 @@ fn war_call(make: impl Fn(FacetHeader) -> WarSignupClientMsg + 'static) -> Act {
 /// with 2169 and 2722), and the war leader's Fill Roster (2777, answered with 2733).
 fn war_signup() -> Vec<Step> {
     let cancel = format!("!war {WAR_TERRITORY} cancel");
-    vec![
-        step(
-            cancel.clone(),
-            vec![Act::Gm(cancel.clone())],
-            Proof::Line(Box::new(|_| true), "any answer".to_owned()),
-            STEP_WAIT,
-        ),
+    let mut steps = vec![
+        gm_any(cancel.clone()),
         gm_done(format!(
             "!war {WAR_TERRITORY} {WAR_START_MINUTES} {ENEMY_COMPANY}"
         )),
-        step(
-            "use the war board from afar (2791)",
-            vec![war_call(|header| {
-                WarSignupClientMsg::RequestRemoteInteract {
-                    header,
-                    territory: WAR_TERRITORY,
-                }
-            })],
-            Proof::Message(TERRITORY_FACET_READY_TYPE_INDEX),
-            STEP_WAIT,
-        ),
-        step(
-            "sign up as the attacker (2762)",
-            vec![war_call(|header| WarSignupClientMsg::RequestSignup {
-                header,
-                side: SIDE_ATTACKER,
-                territory: WAR_TERRITORY,
-            })],
-            Proof::Message(SIGNUP_RESPONSE_RECEIVED_TYPE_INDEX),
-            STEP_WAIT,
-        ),
+    ];
+    steps.extend(war_board_signup(
+        WAR_TERRITORY,
+        SIDE_ATTACKER,
+        "sign up as the attacker (2762)",
+    ));
+    steps.extend([
         step(
             "ask for the roster and the first page of its side's sign-up list (2772, 2767)",
             vec![
@@ -1510,7 +1645,8 @@ fn war_signup() -> Vec<Step> {
             STEP_WAIT,
         ),
         gm_done(cancel),
-    ]
+    ]);
+    steps
 }
 
 /// The territory of the invasion sign-up activity: an invasion fort of the content (Observed:
@@ -1527,37 +1663,18 @@ fn invasion_signup() -> Vec<Step> {
     let cancel = format!("!war {INVASION_TERRITORY} cancel");
     let mut steps = faction_and_company(BOT_FACTION, BOT_COMPANY);
     steps.extend([
-        step(
-            cancel.clone(),
-            vec![Act::Gm(cancel.clone())],
-            Proof::Line(Box::new(|_| true), "any answer".to_owned()),
-            STEP_WAIT,
-        ),
+        gm_any(cancel.clone()),
         gm_done(format!("!owner {INVASION_TERRITORY} {BOT_COMPANY}")),
         gm_done(format!(
             "!invasion {INVASION_TERRITORY} {INVASION_START_MINUTES}"
         )),
-        step(
-            "use the war board from afar (2791)",
-            vec![war_call(|header| {
-                WarSignupClientMsg::RequestRemoteInteract {
-                    header,
-                    territory: INVASION_TERRITORY,
-                }
-            })],
-            Proof::Message(TERRITORY_FACET_READY_TYPE_INDEX),
-            STEP_WAIT,
-        ),
-        step(
-            "sign up as a defender of the invasion (2762)",
-            vec![war_call(|header| WarSignupClientMsg::RequestSignup {
-                header,
-                side: SIDE_DEFENDER,
-                territory: INVASION_TERRITORY,
-            })],
-            Proof::Message(SIGNUP_RESPONSE_RECEIVED_TYPE_INDEX),
-            STEP_WAIT,
-        ),
+    ]);
+    steps.extend(war_board_signup(
+        INVASION_TERRITORY,
+        SIDE_DEFENDER,
+        "sign up as a defender of the invasion (2762)",
+    ));
+    steps.extend([
         gm_done(cancel),
         gm_done(format!("!owner {INVASION_TERRITORY} clear")),
     ]);
@@ -1570,7 +1687,7 @@ fn enemy_company() -> Vec<Step> {
 }
 
 /// The bot joins `faction` (or is in it already).
-fn faction_step(faction: &str) -> Step {
+pub(crate) fn faction_step(faction: &str) -> Step {
     step(
         format!("!faction {faction}"),
         vec![Act::Gm(format!("!faction {faction}"))],
@@ -1748,12 +1865,424 @@ fn board(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
     ])
 }
 
+/// The first role pick of a queue join (Observed: 1 at once in every retail join).
+const FIRST_ROLE: u8 = 1;
+/// The role a bot picks: not the healer role 4 (the director's `HEALER_ROLE`), as a team takes
+/// at most one healer and a queue of healers forms no match (Inferred: retail picked 3 or 4).
+const DAMAGE_ROLE: u8 = 3;
+/// The `extra` value and flag of a solo queue join (Observed: `01 3316 0001 00` solo).
+const SOLO_JOIN_EXTRA: u16 = 1;
+const SOLO_JOIN_FLAG: u8 = 0;
+/// The last byte of a 5741 (Observed: 1 in retail).
+const ACCEPT_FLAG: u8 = 1;
+/// The longest wait for the queue to find a match: the other bots join over some minutes.
+const QUEUE_WAIT: Duration = Duration::from_secs(600);
+/// The longest wait from the accept to the move (5449): an arena match moves once every
+/// player accepted, an Outpost Rush or capture the flag match once its instance opened.
+const ACCEPT_WAIT: Duration = Duration::from_secs(180);
+/// The longest wait from the 5450 to the arrival in the match (the handoff to the instance sim).
+const ARRIVAL_WAIT: Duration = Duration::from_secs(90);
+/// The longest wait from the end of the match play to the move back into the open world.
+const RETURN_WAIT: Duration = Duration::from_secs(120);
+/// The longest arena match (Inferred: a margin above its rounds and its 60 s cleanup).
+const ARENA_LONGEST: Duration = Duration::from_secs(20 * SECONDS_PER_MINUTE);
+/// The longest Outpost Rush match: 90 s pregame, `TimeLimit` 2,700 s and 180 s cleanup (the
+/// sim's `outpost_rush` module text), and a minute more.
+const OUTPOST_RUSH_LONGEST: Duration = Duration::from_secs(90 + 2_700 + 180 + SECONDS_PER_MINUTE);
+/// The longest capture the flag match: 180 s pregame, 600 s play, 300 s overtime and 60 s
+/// cleanup (the sim's `capture_the_flag` module text), and a minute more.
+const CAPTURE_THE_FLAG_LONGEST: Duration =
+    Duration::from_secs(180 + 600 + 300 + 60 + SECONDS_PER_MINUTE);
+/// Seconds per minute.
+const SECONDS_PER_MINUTE: u64 = 60;
+
+/// The participant call `make` with the bot's game mode participant header.
+fn participant_call(make: impl Fn(FacetHeader) -> GameModeClientMsg + 'static) -> Act {
+    Act::Call(Box::new(move |own| {
+        let call = make(FacetHeader::of(facet_component::GAME_MODE_PARTICIPANT, own));
+        Ok((call.type_index(), call.encode()?))
+    }))
+}
+
+/// A proof that the own game mode participant state shows `wanted`, described.
+fn matchmaking_shows(wanted: impl Fn(&Matchmaking) -> bool + 'static, described: &str) -> Proof {
+    Proof::Check(
+        Box::new(move |sight| wanted(sight.matchmaking).then_some(Ok(()))),
+        described.to_owned(),
+    )
+}
+
+/// The accept of the match `match_id` of a pop by the bot `own`: 5741 with the match id and
+/// 946, sent together as retail sends them (the sim's `queue` module text, point 5).
+///
+/// # Errors
+///
+/// Returns [`MessageError`] when the 5741 does not write.
+pub fn accept_calls(own: u64, match_id: &str) -> Result<Vec<(u64, Vec<u8>)>, MessageError> {
+    let accept = GameModeClientMsg::AcceptMatch {
+        header: FacetHeader::of(facet_component::GAME_MODE_PARTICIPANT, own),
+        match_id: match_id.to_owned(),
+        flag: ACCEPT_FLAG,
+    };
+    let teleport = ArenaClientMsg::TeleportIntoDungeon {
+        header: FacetHeader::of(PLAYER_ARENA_COMPONENT, own),
+    };
+    Ok(vec![
+        (accept.type_index(), accept.encode()?),
+        (teleport.type_index(), teleport.encode()),
+    ])
+}
+
+/// The match id of a pop the bot has not accepted yet: the own participant state's newest, when
+/// it is not `accepted`. A match that did not open pops again with a new id, and a client
+/// accepts each pop it shows (live 2026-11-23 04:51:56-04:52:39Z: 45 pops while no capture the
+/// flag sim was free; the bots that kept their first accept never moved).
+pub fn pop_to_accept(matchmaking: &Matchmaking, accepted: Option<&str>) -> Option<String> {
+    matchmaking
+        .match_id
+        .clone()
+        .filter(|match_id| Some(match_id.as_str()) != accepted)
+}
+
+/// The join of the queue of game mode `id` (its 6254 `activity`) alone, answered with 6295.
+fn join_queue(id: &str, activity: u16) -> Step {
+    step(
+        format!("join the {id} queue alone (6254)"),
+        vec![participant_call(move |header| {
+            GameModeClientMsg::JoinQueueForActivities {
+                header,
+                activities: vec![QueueActivity {
+                    activity,
+                    extra: SOLO_JOIN_EXTRA,
+                    flag: SOLO_JOIN_FLAG,
+                }],
+            }
+        })],
+        Proof::Message(START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX),
+        STEP_WAIT,
+    )
+}
+
+/// The two role picks of a join (6272): the bot is in the queue after the second.
+fn pick_roles() -> Step {
+    step(
+        "pick the roles (6272 twice)",
+        [FIRST_ROLE, DAMAGE_ROLE]
+            .into_iter()
+            .map(|role| {
+                participant_call(move |header| GameModeClientMsg::SetMatchmakingRole {
+                    header,
+                    role,
+                })
+            })
+            .collect(),
+        Proof::Sent,
+        Duration::ZERO,
+    )
+}
+
+/// [`ActivityKind::QueueLeave`]: the bot joins the 3v3 arena queue alone and closes the role
+/// picking screen (6297, answered with 6296), joins again, picks its roles and leaves the queue
+/// (1066, answered with 4970), as the sim's `queue` module text has it (point 7). A bot alone
+/// in the queue finds no match (a match takes `[instances.arena] match_size` players), so no
+/// instance opens.
+fn queue_leave_steps(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
+    let catalog = InstanceCatalog::from_tables(data.tables);
+    let mode = catalog
+        .modes()
+        .find(|mode| mode.kind == InstanceKind::Arena)
+        .ok_or("no arena game mode")?;
+    let (id, crc) = (mode.id.clone(), mode.crc);
+    Ok(vec![
+        join_queue(&id, ARENA_ACTIVITY),
+        step(
+            "close the role picking screen (6297)",
+            vec![participant_call(|header| {
+                GameModeClientMsg::CancelRoleSelection { header }
+            })],
+            Proof::Message(ROLE_SELECTION_CANCELED_TYPE_INDEX),
+            STEP_WAIT,
+        ),
+        join_queue(&id, ARENA_ACTIVITY),
+        pick_roles(),
+        step(
+            format!("leave the {id} queue (1066)"),
+            vec![participant_call(move |header| {
+                GameModeClientMsg::LeaveQueueForGameMode {
+                    header,
+                    game_mode: crc,
+                    group: false,
+                }
+            })],
+            Proof::Message(LEFT_GAME_MODE_QUEUE_TYPE_INDEX),
+            STEP_WAIT,
+        ),
+    ])
+}
+
+/// The steps of a queued PvP game mode of `kind` as the client plays it (the sim's `queue`
+/// module text): 6211 (subscribe), 6254 answered with 6295, the two 6272, the pop (the match id
+/// in the own participant state), 5741 with 946 answered with 5449, 5450 and the move into the
+/// match, the match, and the move back.
+fn queued_match_steps(data: &ActivityData<'_>, kind: InstanceKind) -> Result<Vec<Step>, String> {
+    let catalog = InstanceCatalog::from_tables(data.tables);
+    let mode = catalog
+        .modes()
+        .find(|mode| mode.kind == kind)
+        .ok_or_else(|| format!("no game mode of kind {kind:?}"))?;
+    let (activity, goal, longest, god) = match kind {
+        InstanceKind::Arena => (ARENA_ACTIVITY, MatchGoal::Fight, ARENA_LONGEST, false),
+        InstanceKind::OutpostRush => (
+            OUTPOST_RUSH_ACTIVITY,
+            MatchGoal::Outposts,
+            OUTPOST_RUSH_LONGEST,
+            true,
+        ),
+        InstanceKind::CaptureTheFlag => (
+            CAPTURE_THE_FLAG_ACTIVITY,
+            MatchGoal::Flags,
+            CAPTURE_THE_FLAG_LONGEST,
+            true,
+        ),
+        _ => return Err(format!("{kind:?} is not a queued PvP game mode")),
+    };
+    let crc = mode.crc;
+    let id = mode.id.clone();
+    let described = format!("{goal:?}");
+    let mut steps = vec![
+        step(
+            "open the queue screen (6211)",
+            vec![participant_call(|header| {
+                GameModeClientMsg::ModifyGroupEligibilitySubscription {
+                    header,
+                    subscribed: true,
+                }
+            })],
+            Proof::Sent,
+            Duration::ZERO,
+        ),
+        join_queue(&id, activity),
+        pick_roles(),
+        step(
+            "the queue finds a match",
+            Vec::new(),
+            matchmaking_shows(
+                |matchmaking| matchmaking.match_id.is_some(),
+                "a match id in the own participant state",
+            ),
+            QUEUE_WAIT,
+        ),
+        step(
+            "accept the match (5741, 946)",
+            vec![Act::AcceptPops {
+                longest: ACCEPT_WAIT,
+            }],
+            Proof::Message(MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX),
+            ACCEPT_WAIT,
+        ),
+        step(
+            format!("sign in to the match (5450) and move into {id}"),
+            vec![participant_call(|header| {
+                GameModeClientMsg::MatchmakingLoginConfirmed { header }
+            })],
+            matchmaking_shows(
+                move |matchmaking| matchmaking.active.contains(&crc),
+                "the game mode in the own participant state",
+            ),
+            ARRIVAL_WAIT,
+        ),
+    ];
+    // God mode holds on the sim it was turned on in: the match's sim starts without it.
+    if god {
+        steps.push(gm_done("!god on".to_owned()));
+    }
+    steps.push(step(
+        format!("play the {id} match ({described}) to its end and come back"),
+        vec![Act::PlayMatch {
+            end: MatchEnd::LeftMode(crc),
+            goal,
+            longest,
+        }],
+        matchmaking_shows(
+            move |matchmaking| !matchmaking.active.contains(&crc),
+            "the game mode gone from the own participant state",
+        ),
+        RETURN_WAIT,
+    ));
+    Ok(steps)
+}
+
+/// The territory of the war fight activities: a war fort whose capture points the captures
+/// show (Observed: `everfall_war`, `everfall_war_2`; the fort table's territory 4), so its war
+/// gets an instance.
+pub(crate) const WAR_FIGHT_TERRITORY: u16 = 4;
+/// Minutes from the declaration to the war's start: the sign-ups, the roster and the move into
+/// the instance (which opens at once, 15 minutes before a start) come first.
+pub(crate) const WAR_FIGHT_START_MINUTES: u32 = 6;
+/// The territory of the invasion fight: the invasion fort of the `invasion` ledger.
+pub const INVASION_FIGHT_TERRITORY: u16 = INVASION_TERRITORY;
+/// Minutes from the invasion's schedule to its start (the sign-ups and the move come first).
+pub(crate) const INVASION_FIGHT_START_MINUTES: u32 = 4;
+/// How long a bot waits after its sign-up before it fills the roster: the other bots of its side
+/// sign up meanwhile, and only the war leader's fill counts (the others are refused).
+pub(crate) const FILL_WAIT: Duration = Duration::from_secs(60);
+/// The longest wait for the raid invite and the move into the instance.
+const INVITE_WAIT: Duration = Duration::from_secs(10 * SECONDS_PER_MINUTE);
+/// The longest war: its start and its 30 minutes, and a margin.
+pub(crate) const WAR_LONGEST: Duration = Duration::from_secs(45 * SECONDS_PER_MINUTE);
+/// The longest invasion: its start and its 1,500 s, and a margin.
+pub(crate) const INVASION_LONGEST: Duration = Duration::from_secs(40 * SECONDS_PER_MINUTE);
+
+/// A step whose game master line `line` takes any answer: a repeat by another bot of the side
+/// (a war or invasion that is there already) answers otherwise, and the step goes on.
+pub(crate) fn gm_any(line: String) -> Step {
+    step(
+        line.clone(),
+        vec![Act::Gm(line)],
+        Proof::Line(Box::new(|_| true), "any answer".to_owned()),
+        STEP_WAIT,
+    )
+}
+
+/// The war board use from afar (2791, answered with 2722) and the sign-up `what` for `side`
+/// of `territory` (2762, answered with 2169), as a client's war board screen does.
+pub(crate) fn war_board_signup(territory: u16, side: u32, what: &str) -> [Step; 2] {
+    [
+        step(
+            "use the war board from afar (2791)",
+            vec![war_call(move |header| {
+                WarSignupClientMsg::RequestRemoteInteract { header, territory }
+            })],
+            Proof::Message(TERRITORY_FACET_READY_TYPE_INDEX),
+            STEP_WAIT,
+        ),
+        step(
+            what,
+            vec![war_call(move |header| WarSignupClientMsg::RequestSignup {
+                header,
+                side,
+                territory,
+            })],
+            Proof::Message(SIGNUP_RESPONSE_RECEIVED_TYPE_INDEX),
+            STEP_WAIT,
+        ),
+    ]
+}
+
+/// The accept (3495) of the raid invite in the own groups state; the move into the war's
+/// instance (its 1635) proves it.
+pub(crate) fn accept_raid_invite() -> Step {
+    step(
+        "accept the raid invite (3495) and move into the instance",
+        vec![Act::Dynamic(Box::new(|sight| {
+            let invite = sight.group_invite?;
+            Some(accept_call(invite, sight.own).map(|call| vec![call]))
+        }))],
+        Proof::Message(LEVEL_INFO_CHANGED_MSG_TYPE_INDEX),
+        INVITE_WAIT,
+    )
+}
+
+/// The play of a war or invasion for `goal` until its result (245), then the leave of its raid
+/// (2252) and the move back out of the instance (its 1635).
+pub(crate) fn war_play_steps(goal: MatchGoal, longest: Duration) -> Vec<Step> {
+    let described = format!("{goal:?}");
+    vec![
+        gm_done("!god on".to_owned()),
+        step(
+            format!("play the war ({described}) until its result (245)"),
+            vec![Act::PlayMatch {
+                end: MatchEnd::WarEnded,
+                goal,
+                longest,
+            }],
+            Proof::Message(SIEGE_WARFARE_ENDED_TYPE_INDEX),
+            STEP_WAIT,
+        ),
+        step(
+            "leave the raid (2252) and move back",
+            vec![Act::Call(Box::new(|own| {
+                let call = GroupCall::Leave { value: LEAVE_VALUE };
+                Ok((
+                    call.type_index(),
+                    call.encode(SocialFacet::Groups.header(own))?,
+                ))
+            }))],
+            Proof::Message(LEVEL_INFO_CHANGED_MSG_TYPE_INDEX),
+            RETURN_WAIT,
+        ),
+    ]
+}
+
+/// The capture points of the war fort of `territory` in the attackers' order: the outer ones in
+/// turn and the claim point ([`CLAIM_POINT_NUMBER`]) last.
+///
+/// # Errors
+///
+/// Names the territory when it has no war fort with capture points.
+pub(crate) fn siege_points(
+    data: &ActivityData<'_>,
+    territory: u16,
+) -> Result<Vec<[f32; 3]>, String> {
+    let fort = data
+        .war_forts
+        .fort(territory)
+        .filter(|fort| !fort.is_invasion_fort())
+        .ok_or_else(|| format!("no war fort with capture points in territory {territory}"))?;
+    let mut points: Vec<_> = fort.points.iter().collect();
+    points.sort_by_key(|point| (point.number == CLAIM_POINT_NUMBER, point.number));
+    Ok(points.into_iter().map(|point| point.place).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// The cold-stack refusal (6776 `EntranceActivationFailure`) fails the activation step
     /// instead of letting the teleport go out.
+    #[test]
+    fn a_match_accept_takes_each_new_pop_and_sends_5741_with_its_id_and_946() {
+        const OWN: u64 = 77;
+        const MATCH: &str = "00000000-0000-7000-8000-000000000001";
+        const NEXT_MATCH: &str = "00000000-0000-7000-8000-000000000002";
+        let popped = |id: &str| Matchmaking {
+            match_id: Some(id.to_owned()),
+            ..Matchmaking::default()
+        };
+        assert_eq!(
+            pop_to_accept(&Matchmaking::default(), None),
+            None,
+            "no pop yet"
+        );
+        assert_eq!(pop_to_accept(&popped(MATCH), None).as_deref(), Some(MATCH));
+        assert_eq!(pop_to_accept(&popped(MATCH), Some(MATCH)), None, "accepted");
+        assert_eq!(
+            pop_to_accept(&popped(NEXT_MATCH), Some(MATCH)).as_deref(),
+            Some(NEXT_MATCH),
+            "a new pop of a match that did not open"
+        );
+        let sent = accept_calls(OWN, MATCH).expect("the calls write");
+        let types: Vec<u64> = sent.iter().map(|(type_index, _)| *type_index).collect();
+        assert_eq!(
+            types,
+            [
+                nw_messages::game_mode::ACCEPT_MATCHMAKING_MATCH_TYPE_INDEX,
+                nw_messages::arena::TELEPORT_INTO_DUNGEON_TYPE_INDEX
+            ]
+        );
+        let accept = GameModeClientMsg::decode(types[0], &sent[0].1)
+            .expect("a matchmaking call")
+            .expect("it reads");
+        assert_eq!(
+            accept,
+            GameModeClientMsg::AcceptMatch {
+                header: FacetHeader::of(facet_component::GAME_MODE_PARTICIPANT, OWN),
+                match_id: MATCH.to_owned(),
+                flag: ACCEPT_FLAG,
+            }
+        );
+    }
+
     #[test]
     fn an_arena_answer_says_yes_only_when_it_allows_or_succeeds() {
         const OWN: u64 = 7;
@@ -1868,6 +2397,7 @@ mod tests {
             world: &world,
             tables: &tables,
             town_stations: &town_stations,
+            war_forts: &WarForts::default(),
         };
         let steps = Activity::of(ActivityKind::Inn, &data).steps.expect("steps");
         let targets: Vec<u64> = steps
@@ -1896,6 +2426,7 @@ mod tests {
             world: &world,
             tables: &tables,
             town_stations: &town_stations,
+            war_forts: &WarForts::default(),
         };
         for kind in [ActivityKind::Group, ActivityKind::Music] {
             assert!(Activity::of(kind, &data).steps.is_err(), "{kind:?}");
@@ -1965,6 +2496,17 @@ mod tests {
                 .map(|steps| steps.len()),
             Ok(4)
         );
+        for kind in [
+            ActivityKind::Arena,
+            ActivityKind::OutpostRush,
+            ActivityKind::CaptureTheFlag,
+            ActivityKind::QueueLeave,
+        ] {
+            assert!(
+                Activity::of(kind, &data).steps.is_err(),
+                "an empty content has no game mode of {kind:?}"
+            );
+        }
     }
 
     #[test]
@@ -1989,6 +2531,7 @@ mod tests {
             world: &world,
             tables: &tables,
             town_stations: &town_stations,
+            war_forts: &WarForts::default(),
         };
         let steps = Activity::of(ActivityKind::Harvest, &data)
             .steps

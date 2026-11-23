@@ -5,13 +5,15 @@
 //! slot is tied to its entity by the spawn card in it ([`EntitySlots`]), and slot 1 is the
 //! client's own player. A hunt bot also keeps the mobs it is sent and counts the combat messages
 //! for it (M6-B spec section 9.1). The own groups state tells the own group and the invites to
-//! it (an expedition group's bots, [`crate::group`]).
+//! it (an expedition group's bots, [`crate::group`]). The own game mode participant state
+//! (3312) tells the queue's pop, the match id and the game modes the player is in.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nw_content::town_props::ASSET_ID_LEN;
 use nw_messages::entity_ids::IdHolder;
 use nw_messages::fishing::StateTransition;
+use nw_messages::game_mode_participant::GameModeParticipantState;
 use nw_messages::gde::LOOT_BAG_ASSET;
 use nw_messages::social::states::GroupsState;
 use nw_messages::wire::RAW_ID_LEN;
@@ -239,6 +241,8 @@ pub struct SyncRead {
     pub own_position: Option<WorldPosition>,
     /// The block states of other entities it carried, by entity number.
     pub blocks: Vec<(u64, bool)>,
+    /// The own player's states it carried, in order ([`crate::crossing_state`]).
+    pub own_states: Vec<MemberState>,
 }
 
 impl SyncView {
@@ -251,10 +255,18 @@ impl SyncView {
         let mut read = decode(received, self.own.holder, Cards::Numbered)?;
         let own_position = self.own.apply(&read);
         let mut blocks = Vec::new();
+        let mut own_states = Vec::new();
         if let Read::Bundle(bundle) = &mut read {
             for gone in self.slots.resolve(bundle) {
                 release_raw_id(self.own.holder, gone);
             }
+            own_states.extend(
+                bundle
+                    .updates
+                    .iter()
+                    .filter(|update| update.is_local_player())
+                    .flat_map(|update| update.members.iter().map(|member| member.state.clone())),
+            );
             for update in &bundle.updates {
                 let Some(entity) = update.entity.filter(|entity| !self.own.is_own(*entity)) else {
                     continue;
@@ -275,6 +287,7 @@ impl SyncView {
         Ok(SyncRead {
             own_position,
             blocks,
+            own_states,
         })
     }
 
@@ -317,6 +330,8 @@ pub struct CombatView {
     mob_deaths: u64,
     /// The vitals id of each mob in view whose card named one.
     mob_vitals: BTreeMap<u64, u32>,
+    /// The mobs in view whose vitals say they take no hits now (`invulnerability` not 0).
+    invulnerable: BTreeSet<u64>,
     /// The mobs in view that died, oldest first, while their slots have not stopped: the
     /// corpses a skin step gathers.
     corpses: Vec<Corpse>,
@@ -380,6 +395,7 @@ impl CombatView {
                 for gone in self.slots.resolve(&mut bundle) {
                     self.mobs.remove(&gone);
                     self.mob_vitals.remove(&gone);
+                    self.invulnerable.remove(&gone);
                     // The corpse went: no skin is left.
                     self.corpses.retain(|corpse| corpse.entity != gone);
                     release_raw_id(self.own.holder, gone);
@@ -400,6 +416,15 @@ impl CombatView {
                     let Some(entity) = update.entity else {
                         continue;
                     };
+                    match vitals_invulnerability(update) {
+                        Some(0) => {
+                            self.invulnerable.remove(&entity);
+                        }
+                        Some(_) => {
+                            self.invulnerable.insert(entity);
+                        }
+                        None => {}
+                    }
                     if is_mob_card(update) {
                         // A card again keeps the place: a mob that stands still sends none.
                         self.mobs.entry(entity).or_insert(None);
@@ -449,6 +474,7 @@ impl CombatView {
                 self.slots = EntitySlots::default();
                 self.cards.clear();
                 self.mob_vitals.clear();
+                self.invulnerable.clear();
                 self.corpses.clear();
             }
             Read::Skipped | Read::Other { .. } => {}
@@ -490,6 +516,11 @@ impl CombatView {
         self.mob_vitals.get(&entity).copied()
     }
 
+    /// Whether the newest vitals of mob `entity` say it takes no hits now.
+    pub fn takes_no_hits(&self, entity: u64) -> bool {
+        self.invulnerable.contains(&entity)
+    }
+
     /// The bundles read so far.
     pub const fn bundles(&self) -> u64 {
         self.bundles
@@ -523,6 +554,11 @@ impl CombatView {
     /// Whether the bot's own newest vitals say it is dead.
     pub const fn own_dead(&self) -> bool {
         self.own_dead
+    }
+
+    /// The bot's bag: one record per bag slot, empty slots included (quantity 0).
+    pub fn bag(&self) -> &[ItemRecord] {
+        &self.bag
     }
 
     /// The bag slot and instance of the first stack of the item of client item index
@@ -574,6 +610,17 @@ fn creature_vitals_id(update: &SlotUpdate) -> Option<u32> {
                 .as_ref()
                 .and_then(|slot| slot.vitals_id)
                 .filter(|id| *id != PLAYER_VITALS_ID),
+            _ => None,
+        })
+}
+
+/// The `invulnerability` the vitals of `update` send; `None` when they send none.
+fn vitals_invulnerability(update: &SlotUpdate) -> Option<u8> {
+    update
+        .members
+        .iter()
+        .find_map(|member| match &member.state {
+            MemberState::Vitals(vitals) => vitals.slot_0.as_ref()?.invulnerability,
             _ => None,
         })
 }
@@ -659,6 +706,40 @@ pub struct WorldView {
     group: Option<[u8; RAW_ID_LEN]>,
     /// The invites to the own player's group, from the last full list of the own groups state.
     inbound_invites: Vec<[u8; RAW_ID_LEN]>,
+    /// The own queue and game modes, from the own game mode participant state.
+    matchmaking: Matchmaking,
+}
+
+/// The own queue and game modes, from each part of the own game mode participant state (3312)
+/// that the server sends.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Matchmaking {
+    /// `matchmakingServiceStatus` (10 at a pop, 1 while the match waits, 5 at the move).
+    pub status: Option<u32>,
+    /// The match id of the newest pop; `None` with no match (the empty id).
+    pub match_id: Option<String>,
+    /// The game modes the player is in: the CRC-32 of each lowercase `GameModeId`.
+    pub active: Vec<u32>,
+    /// `lastTeamIndex`: the team of the player's match.
+    pub team: Option<u8>,
+}
+
+impl Matchmaking {
+    /// Keeps each part of `state` that the server sent.
+    fn read(&mut self, state: &GameModeParticipantState) {
+        if let Some(status) = state.service.status {
+            self.status = Some(status);
+        }
+        if let Some(match_id) = &state.service.match_id {
+            self.match_id = (!match_id.is_empty()).then(|| match_id.clone());
+        }
+        if let Some(active) = &state.active {
+            self.active = active.elements.iter().map(|mode| mode.mode).collect();
+        }
+        if let Some(team) = state.last_team {
+            self.team = Some(team);
+        }
+    }
 }
 
 /// Two views are equal when they saw the same; their id holders differ.
@@ -711,6 +792,7 @@ impl WorldView {
                     if entity.is_some() && entity == own {
                         self.read_own_tasks(update);
                         self.read_own_groups(update);
+                        self.read_own_matchmaking(update);
                     }
                 }
             }
@@ -778,6 +860,21 @@ impl WorldView {
                 self.inbound_invites = invites.elements.iter().map(|data| data.invite).collect();
             }
         }
+    }
+
+    /// Keeps the own queue and game modes from the own game mode participant state in
+    /// `update`.
+    fn read_own_matchmaking(&mut self, update: &SlotUpdate) {
+        for member in &update.members {
+            if let MemberState::GameModeParticipant(state) = &member.state {
+                self.matchmaking.read(state);
+            }
+        }
+    }
+
+    /// The own queue and game modes.
+    pub const fn matchmaking(&self) -> &Matchmaking {
+        &self.matchmaking
     }
 
     /// The own group, once the own groups state names one.
@@ -1508,6 +1605,83 @@ mod tests {
         }));
         assert_eq!(view.own_group(), Some(GROUP));
         assert_eq!(view.inbound_group_invite(), None, "the invite was answered");
+    }
+
+    #[test]
+    fn the_own_participant_state_names_the_pop_then_the_match_then_its_end() {
+        use nw_messages::game_mode_participant::{ActiveGameMode, MatchmakingService};
+        /// CRC-32 of `arena3v3`.
+        const ARENA: u32 = 0x1fad_9d42;
+        const MATCH: &str = "00000000-0000-7000-8000-000000000001";
+        let update = |state: GameModeParticipantState| SlotUpdate {
+            interest: LOCAL_PLAYER_INTEREST,
+            entity: Some(OWN),
+            card: None,
+            position: None,
+            members: vec![BundleMember {
+                component: 0,
+                state: MemberState::GameModeParticipant(state),
+            }],
+        };
+        let mut view = WorldView::default();
+        view.read_own_matchmaking(&update(GameModeParticipantState {
+            service: MatchmakingService {
+                status: Some(10),
+                match_id: Some(MATCH.to_owned()),
+                ..MatchmakingService::default()
+            },
+            ..GameModeParticipantState::default()
+        }));
+        assert_eq!(view.matchmaking().match_id.as_deref(), Some(MATCH));
+        view.read_own_matchmaking(&update(GameModeParticipantState {
+            service: MatchmakingService {
+                status: Some(1),
+                ..MatchmakingService::default()
+            },
+            ..GameModeParticipantState::default()
+        }));
+        assert_eq!(
+            (
+                view.matchmaking().status,
+                view.matchmaking().match_id.as_deref()
+            ),
+            (Some(1), Some(MATCH)),
+            "a part without the id keeps it"
+        );
+        view.read_own_matchmaking(&update(GameModeParticipantState {
+            active: Some(FullList::first(vec![ActiveGameMode {
+                raw_id: [1; RAW_ID_LEN],
+                facet: 2,
+                second: 3,
+                mode: ARENA,
+                map: ARENA,
+                joined_ns: 4,
+                phase: 5,
+            }])),
+            last_team: Some(1),
+            ..GameModeParticipantState::default()
+        }));
+        assert_eq!(
+            (
+                view.matchmaking().active.as_slice(),
+                view.matchmaking().team
+            ),
+            ([ARENA].as_slice(), Some(1))
+        );
+        view.read_own_matchmaking(&update(GameModeParticipantState {
+            active: Some(FullList::first(Vec::new())),
+            service: MatchmakingService {
+                match_id: Some(String::new()),
+                ..MatchmakingService::default()
+            },
+            ..GameModeParticipantState::default()
+        }));
+        assert!(view.matchmaking().active.is_empty(), "the player left");
+        assert_eq!(
+            view.matchmaking().match_id,
+            None,
+            "the empty id is no match"
+        );
     }
 
     #[test]

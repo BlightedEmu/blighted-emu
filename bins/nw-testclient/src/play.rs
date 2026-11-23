@@ -23,7 +23,7 @@ use std::time::Duration;
 use nw_carrier::MESSAGE_CHANNEL;
 use nw_content::poi_tags::PoiTags;
 use nw_formats::objectstream::lowercase_crc32;
-use nw_messages::client_input::TALK_KIND;
+use nw_messages::client_input::{TALK_KIND, TRIGGER_KIND};
 use nw_messages::entity_ids::{facet_of_raw_id, raw_id_of_entity};
 use nw_messages::fishing::{FISHING_FACET, FishingClientMsg};
 use nw_messages::item_calls::ItemCallMsg;
@@ -38,23 +38,26 @@ use nw_sim_core::{Position, yaw_toward};
 use reqwest::Client;
 
 use crate::activity::{
-    Act, Activity, ActivityKind, CourseRoutes, OPEN_STORAGE_KIND, OPEN_STORAGE_NAME,
-    PVP_KILLER_FACTION, Proof, STORAGE_TAG, Step, arena_verdict, camp_steps, course_steps,
-    door_trial_steps, gather_steps, leave_trial_steps, loot_steps, lore_steps,
-    mission_turn_in_steps, mount_steps, pvp_flag_shown, pvp_flag_steps, quest_craft_steps,
-    skin_steps, song_steps, start_object_steps, trial_steps, use_steps,
+    Act, Activity, ActivityKind, BotSight, CLEAR_RADIUS_M, CourseRoutes, MatchEnd, MatchGoal,
+    OPEN_STORAGE_KIND, OPEN_STORAGE_NAME, PVP_KILLER_FACTION, Proof, STORAGE_TAG, Step,
+    accept_calls, arena_verdict, camp_steps, course_steps, door_trial_steps, gather_steps,
+    leave_trial_steps, loot_steps, lore_steps, mission_turn_in_steps, mount_steps, pop_to_accept,
+    pvp_flag_shown, pvp_flag_steps, quest_craft_steps, skin_steps, song_steps, start_object_steps,
+    trial_steps, use_steps,
 };
 use crate::chat::{chat_lines, is_system};
 use crate::fishing::{Angler, FishAct, FishEnd};
 use crate::gather::GatherNode;
 use crate::group::{GroupSeat, accept_call, invite_call};
-use crate::hunt::{planar, send_input};
+use crate::hunt::{MAX_SWINGS_WITHOUT_HIT, planar, send_input};
 use crate::pair::{PairError, RecordWalk, SEND_INTERVAL, session_with};
 use crate::record_walk::{ARRIVED_M, RecordWalker};
 use crate::rep::{Received, RepClient, RepError};
 use crate::udp::RepOutcome;
 use crate::view::{CombatView, InteractionAnswer, WorldView};
 use crate::walk::{WalkSettings, login_token, walk};
+use nw_messages::game_mode::MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX;
+use nw_messages::social::groups::SIEGE_WARFARE_ENDED_TYPE_INDEX;
 
 /// The game master lines after the tutorial's exit, before the first quest: the bot does not
 /// die, lives again when a mob killed it before (a dead player wakes no mob), is at the top
@@ -176,11 +179,11 @@ const LEVEL_PITCH: f32 = 0.0;
 /// The facet component of the bot's calls (Inferred: the sim reads the body only).
 pub(crate) const CALL_COMPONENT: u64 = 0;
 /// The first number of a salvage or open call (1733): 1 in all 173 retail calls (salvage note).
-const SALVAGE_FIRST: u32 = 1;
+pub(crate) const SALVAGE_FIRST: u32 = 1;
 /// The number of unknown meaning of a salvage call: 0 in all 173 retail calls.
-const SALVAGE_UNKNOWN: u32 = 0;
+pub(crate) const SALVAGE_UNKNOWN: u32 = 0;
 /// How many of a stack one open takes (Inferred: 1 in all 173 retail calls).
-const SALVAGE_ONE: u32 = 1;
+pub(crate) const SALVAGE_ONE: u32 = 1;
 
 /// Says `line` in area chat as the own player `own`: a game master line (`!tp`) is one.
 ///
@@ -216,6 +219,33 @@ pub(crate) fn send_time_sync(client: &mut RepClient, own: u64) -> Result<(), Rep
 const ACT_GAP: Duration = Duration::from_millis(1500);
 /// How near its teleport's place the server's own state shows the bot once it landed, metres.
 const TELEPORT_SETTLED_M: f32 = 3.0;
+/// How long a player the bot's swings did not hit in a match stays out of its fight: a
+/// teammate (PvP is between the two teams only), or a foe that was dead then.
+const FRIEND_MEMORY: Duration = Duration::from_secs(30);
+/// A match player farther than this is no foe of the bot: an entity of the level the bot left
+/// keeps its last place in the view.
+const MATCH_SIGHT_M: f32 = 200.0;
+/// The team that plays the objectives of an Outpost Rush or capture the flag match
+/// ([`MatchGoal`]); the other team stays at its spawn.
+const OBJECTIVE_TEAM: u8 = 0;
+/// The team whose flag the objective team takes.
+const FLAG_TEAM: usize = 1;
+/// How long the bot stays in an outpost: the 60 s capture of one player, and a margin
+/// (Inferred: the capture rule of the sim's `outpost_rush` module text).
+const OUTPOST_STAY: Duration = Duration::from_secs(70);
+/// How long the bot stays at a flag base: a few takes at the other team's, the capture at its
+/// own.
+const FLAG_STAY: Duration = Duration::from_secs(6);
+/// How long an attacker stays on a war capture point: an outer point rises by 1 to 2 a second
+/// to 99 (the sim's `war_fight` module text), and a margin.
+const SIEGE_POINT_STAY: Duration = Duration::from_secs(110);
+/// How far from the claim position an invasion's defender goes back onto it (a teleport), and
+/// the time between two such teleports.
+const CLAIM_STAND_M: f32 = 3.0;
+const CLAIM_RETURN_INTERVAL: Duration = Duration::from_secs(5);
+/// The time between two takes of a flag (a take in the pregame or within the flag's interact
+/// timer is not taken).
+const TAKE_INTERVAL: Duration = Duration::from_secs(2);
 /// A teleport this far from where the bot came into an area leaves that area, metres
 /// (Inferred: the bot knows no area's shape; the steps of one place lie within some 200 m, as
 /// the go-to and kill plans of `withered_mines_30112` do).
@@ -253,6 +283,15 @@ const PLACED: &str = "placed";
 /// The word before the radius around a kill plan's place that the bot fights within: the
 /// volume of the encounter that spawns the mobs, which resets when no player is in it.
 const WITHIN: &str = "within";
+/// The word before each place of a kill plan where its encounter spawns a pickup taken by
+/// touch (the talisman piles of `QuestLiang`): the bot walks onto them between its hits.
+const TOUCH: &str = "touch";
+/// The bot's swings at the fight's mob after each touch place: a taken talisman holds for the
+/// next hit (`AI_AbominableLiang_ProtectiveTalisman`, 10 s); a second swing covers one that
+/// missed.
+const SWINGS_PER_TOUCH: u32 = 2;
+/// The bot is on a touch place this near it, m (the server takes a pile within 1 m).
+const TOUCH_REACH_M: f32 = 0.5;
 /// The word of a plan that strikes puzzle objects (`strike <gatherable> at x y z ...`).
 const STRIKE: &str = "strike";
 /// Weapon swings at each puzzle object of a strike plan: the retail gong took one hit; a second
@@ -472,6 +511,9 @@ enum PlanStep {
         placed: bool,
         /// The radius around `at` that the bot fights within (`within <m>`).
         within: Option<f32>,
+        /// The places of the fight's pickups taken by touch (`touch x y z`, each): the bot
+        /// walks onto one before every [`SWINGS_PER_TOUCH`] swings.
+        touch: Vec<Position>,
     },
     /// Get `count` of `item` from `source`; `gathered`: the step counts gathers only; `node`:
     /// the gatherable whose nodes give it.
@@ -629,6 +671,26 @@ fn picked_step(steps: &[(String, PlanStep)]) -> Option<&(String, PlanStep)> {
         .enumerate()
         .min_by_key(|(index, (_, step))| (step.pick_order(), *index))
         .map(|(_, picked)| picked)
+}
+
+/// `steps` without the achievements steps that only quest `quest` itself gives, when another
+/// step is left: such a step is a check beside the quest's own path (retail
+/// `09A_M15_SoulTrial_Complete_Check1` waits for `09A_M15_ArtemisTrialComplete`, which a later
+/// step of `09A_M15_FightArtemis` unlocks), and the step beside it is the one to play (live
+/// 2026-11-23 04:47:39: the bot stopped at the check while `09A_M15_DummyAchievement` waited
+/// for `09A_M14` from `09A_M14_GetInfusedSeed`).
+fn without_own_achievements(
+    steps: Vec<(String, PlanStep)>,
+    quest: &str,
+) -> Vec<(String, PlanStep)> {
+    let own = |step: &PlanStep| {
+        matches!(step, PlanStep::Achievements { sources, .. }
+            if !sources.is_empty() && sources.iter().all(|source| source.eq_ignore_ascii_case(quest)))
+    };
+    if steps.iter().all(|(_, step)| own(step)) {
+        return steps;
+    }
+    steps.into_iter().filter(|(_, step)| !own(step)).collect()
 }
 
 /// The place in words `x y z`.
@@ -858,6 +920,12 @@ fn what_step(what: &str, header: FacetHeader) -> Option<PlanStep> {
                 .iter()
                 .position(|word| *word == WITHIN)
                 .and_then(|index| words.get(index + 1)?.parse().ok()),
+            touch: words
+                .iter()
+                .enumerate()
+                .filter(|(_, word)| **word == TOUCH)
+                .filter_map(|(index, _)| place_of(&words[index + 1..]))
+                .collect(),
         },
         "item" => {
             let (said, source) = what.split_once(&format!(" {FROM} ")).unwrap_or((what, ""));
@@ -1112,10 +1180,8 @@ struct RunningSteps {
     act: usize,
     /// When the last act went out.
     last_act: Option<Duration>,
-    /// What came before the step's first act: system lines, messages, interaction answers.
-    lines_before: usize,
-    messages_before: usize,
-    answers_before: usize,
+    /// What came before the step's first act.
+    marks: StepMarks,
     /// The id of the step's interaction.
     interaction: Option<u64>,
     /// The steps proved so far.
@@ -1129,11 +1195,54 @@ impl RunningSteps {
             step: 0,
             act: 0,
             last_act: None,
-            lines_before: 0,
-            messages_before: 0,
-            answers_before: 0,
+            marks: StepMarks::NONE,
             interaction: None,
             proved: Vec::new(),
+        }
+    }
+
+    /// The step is proved: the next one starts at its first act, with new marks.
+    const fn next_step(&mut self) {
+        self.step += 1;
+        self.act = 0;
+        self.marks.set = false;
+    }
+}
+
+/// The counts of what came before a step's first act: system lines, messages, interaction
+/// answers, heard lines. They are set once a step, and an act that waits over many ticks keeps
+/// them (live 2026-11-23 04:16:16: a war bot's match play set them again each tick and never saw
+/// the war's 245).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StepMarks {
+    lines: usize,
+    messages: usize,
+    answers: usize,
+    heard: usize,
+    /// Whether they were set for the step the bot is at.
+    set: bool,
+}
+
+impl StepMarks {
+    /// No marks yet.
+    const NONE: Self = Self {
+        lines: 0,
+        messages: 0,
+        answers: 0,
+        heard: 0,
+        set: false,
+    };
+
+    /// Notes the counts, unless they were set for this step.
+    const fn mark(&mut self, lines: usize, messages: usize, answers: usize, heard: usize) {
+        if !self.set {
+            *self = Self {
+                lines,
+                messages,
+                answers,
+                heard,
+                set: true,
+            };
         }
     }
 }
@@ -1180,6 +1289,8 @@ struct Player {
     afk_warned: bool,
     own_since: Option<Duration>,
     lines: Vec<String>,
+    /// The bodies of the player chat lines the bot heard (lines with a sender), in order.
+    heard: Vec<String>,
     phase: Phase,
     /// The quests still to play, in order.
     queue: std::collections::VecDeque<String>,
@@ -1264,6 +1375,8 @@ struct Player {
     strike: Option<Strikes>,
     /// The fights for the current kill step.
     fought: Option<Fought>,
+    /// The mobs the running fight swung at.
+    swung_at: Vec<u64>,
     /// The bot's own body on its walk ([`Act::Walk`]).
     walker: Option<RecordWalker>,
     /// The quick courses' rules and node paths.
@@ -1285,6 +1398,102 @@ struct Player {
     pvp_armed: bool,
     /// Whether the running gather puts the PvP flag on: it is on once it ends well.
     arming_pvp: bool,
+    /// The bot hunts the mobs of its fight while its activity's steps wait ([`Act::Hunt`]).
+    hunting: bool,
+    /// The match the bot plays ([`Act::PlayMatch`]).
+    match_play: Option<MatchPlay>,
+    /// The pops the bot accepts ([`Act::AcceptPops`]).
+    accepting: Option<Accepting>,
+}
+
+/// The accepts of a bot's pops ([`Act::AcceptPops`]): when the act began and the match id it
+/// accepted last.
+struct Accepting {
+    started: Duration,
+    accepted: Option<String>,
+}
+
+/// A bot's play in a match of a queued game mode ([`Act::PlayMatch`]).
+struct MatchPlay {
+    /// When the act began.
+    started: Duration,
+    /// The players (and the mobs of an invasion's defence) the bot's swings did not hit, each
+    /// with when it found that.
+    friends: HashMap<u64, Duration>,
+    /// The foe the bot fights.
+    target: Option<MatchTarget>,
+    /// The objective places of the bot's map and team in turn ([`objective_places`]); empty for
+    /// a bot that stays; `None` until the bot knows its place.
+    places: Option<Vec<Position>>,
+    /// The index of the place the bot goes to (it goes round), and when it came there.
+    next_place: usize,
+    at_place_since: Option<Duration>,
+    /// When the bot last sent a flag take.
+    last_take: Option<Duration>,
+}
+
+impl MatchPlay {
+    fn new(started: Duration) -> Self {
+        Self {
+            started,
+            friends: HashMap::new(),
+            target: None,
+            places: None,
+            next_place: 0,
+            at_place_since: None,
+            last_take: None,
+        }
+    }
+}
+
+/// The foe a bot fights in a match: its swings at it since its last hit, and the view's hits
+/// dealt then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MatchTarget {
+    number: u64,
+    swings: u32,
+    hits: u64,
+}
+
+/// The objective places of a bot of team `team` that stands at `own` in a match for `goal`, in
+/// the order it goes round them: the outposts A, B and C, or the other team's flag base then its
+/// own base, of the map whose places lie nearest; none for the team that stays or the fight. A
+/// war's capture points are the goal's own, for every team.
+fn objective_places(goal: &MatchGoal, team: Option<u8>, own: Position) -> Vec<Position> {
+    let at = |[x, y, z]: [f32; 3]| Position { x, y, z };
+    if let MatchGoal::Siege(points) = goal {
+        return points.iter().copied().map(at).collect();
+    }
+    if team != Some(OBJECTIVE_TEAM) {
+        return Vec::new();
+    }
+    let maps: Vec<Vec<[f32; 3]>> = match goal {
+        MatchGoal::Fight | MatchGoal::Siege(_) | MatchGoal::Defend(_) | MatchGoal::Clear { .. } => {
+            return Vec::new();
+        }
+        MatchGoal::Outposts => sim::world::outpost_places()
+            .map(|outposts| outposts.to_vec())
+            .collect(),
+        MatchGoal::Flags => sim::world::flag_bases()
+            .map(|bases| vec![bases[FLAG_TEAM], bases[usize::from(OBJECTIVE_TEAM)]])
+            .collect(),
+    };
+    let distance = |[x, y, z]: [f32; 3]| {
+        let (dx, dy, dz) = (x - own.x, y - own.y, z - own.z);
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    };
+    let nearest = |places: &Vec<[f32; 3]>| {
+        places
+            .iter()
+            .map(|place| distance(*place))
+            .fold(f32::INFINITY, f32::min)
+    };
+    maps.into_iter()
+        .min_by(|a, b| nearest(a).total_cmp(&nearest(b)))
+        .unwrap_or_default()
+        .into_iter()
+        .map(at)
+        .collect()
 }
 
 /// The fishing of a catch step.
@@ -1319,6 +1528,11 @@ struct Fight {
     /// tells by them whether the server sent the bot its surroundings.
     bundles_before: u64,
     mob_cards_before: u64,
+    /// The places of the fight's pickups taken by touch ([`PlanStep::Kill`]), the next one to
+    /// walk onto, and the swings since the last.
+    touch: Vec<Position>,
+    next_touch: usize,
+    swings_since_touch: u32,
 }
 
 /// The fights for one kill step so far: the hits the bot landed and the mobs that died in view.
@@ -1330,6 +1544,11 @@ struct Fought {
     fights: u32,
     /// The hits of the last fight.
     last_hits: u64,
+    /// The mobs the fights swung at since the last fight that landed a hit: the next fight takes
+    /// another mob first. Live 2026-11-23 04:48-04:50Z: the Ennead Goliaths have no mob prefab, so
+    /// their cards carry no vitals (no row, no invulnerability), and three fights swung at the
+    /// nearest one, Horus, who takes no hits while the Brute stands.
+    spared: Vec<u64>,
 }
 
 impl Fought {
@@ -1359,11 +1578,41 @@ impl Fought {
     }
 }
 
+/// How far above a place the bot's teleport asks to be put: the server drops the body from the
+/// asked height to the floor under it ([`Act::Teleport`] places), and a spawn point may lie a
+/// little under its floor. Live 2026-11-23 04:48:22.657Z: `!tp 1297.5 1442.9 929.3` (the Ennead
+/// Horus Goliath's spawn point, 0.3 m under the arena floor at 929.59) dropped the bot onto the
+/// floor 61 m below, z 868.02. Inferred: one metre clears such a point and stays under a ceiling.
+const TELEPORT_LIFT_M: f32 = 1.0;
+
+/// The game master line that teleports the bot to `at`, asked [`TELEPORT_LIFT_M`] above it.
+fn teleport_line(at: Position) -> String {
+    format!("!tp {:.1} {:.1} {:.1}", at.x, at.y, at.z + TELEPORT_LIFT_M)
+}
+
+/// The mobs a kill step's next fight takes last ([`Fought::spared`]): those of `spared` and the
+/// mobs `swung_at` of a fight that landed no hit, none after a fight whose `hits` landed.
+fn spared_after(mut spared: Vec<u64>, swung_at: Vec<u64>, hits: u64) -> Vec<u64> {
+    if hits > 0 {
+        return Vec::new();
+    }
+    for mob in swung_at {
+        if !spared.contains(&mob) {
+            spared.push(mob);
+        }
+    }
+    spared
+}
+
 /// The mob (entity, place) a kill step's fight swings at, from `mobs` in view: the nearest one in
-/// `area` whose vitals id (`vitals_of`) is the step's `vitals`, else the nearest one there.
+/// `area` whose vitals id (`vitals_of`) is the step's `vitals`, else the nearest one there; a mob
+/// that takes no hits now (`takes_no_hits`: its vitals show invulnerability) only when every mob
+/// there takes none. Live 2026-11-23 03:03:53Z: the Ennead Horus Goliath takes no hits while
+/// the Brute stands (retail rule, `EXP-The-Ennead` 1565.5-1698.8 s), and the bots swung at it.
 fn fight_target(
     mobs: &[(u64, nw_messages::WorldPosition)],
     vitals_of: impl Fn(u64) -> Option<u32>,
+    takes_no_hits: impl Fn(u64) -> bool,
     area: Option<(Position, f32)>,
     vitals: Option<u32>,
     from: [f32; 3],
@@ -1371,12 +1620,27 @@ fn fight_target(
     let nearest = |a: &(u64, nw_messages::WorldPosition), b: &(u64, nw_messages::WorldPosition)| {
         planar(from, [a.1.x, a.1.y]).total_cmp(&planar(from, [b.1.x, b.1.y]))
     };
-    let in_fight = || mobs.iter().filter(|(_, mob)| in_area(area, [mob.x, mob.y]));
-    in_fight()
+    let in_area_mobs: Vec<(u64, nw_messages::WorldPosition)> = mobs
+        .iter()
+        .filter(|(_, mob)| in_area(area, [mob.x, mob.y]))
+        .copied()
+        .collect();
+    let hittable: Vec<(u64, nw_messages::WorldPosition)> = in_area_mobs
+        .iter()
+        .filter(|(entity, _)| !takes_no_hits(*entity))
+        .copied()
+        .collect();
+    let in_fight = if hittable.is_empty() {
+        in_area_mobs
+    } else {
+        hittable
+    };
+    in_fight
+        .iter()
         .filter(|(entity, _)| vitals.is_some() && vitals_of(*entity) == vitals)
         .copied()
         .min_by(nearest)
-        .or_else(|| in_fight().copied().min_by(nearest))
+        .or_else(|| in_fight.iter().copied().min_by(nearest))
 }
 
 /// Whether a bot at `own` stays where it is for a kill step's fight in `area`: it is in that
@@ -1404,6 +1668,23 @@ struct Strikes {
 }
 
 impl Fight {
+    /// The touch place the bot walks onto next, when the fight has touch places and the bot
+    /// swung [`SWINGS_PER_TOUCH`] times since the last.
+    fn touch_due(&self) -> Option<Position> {
+        (self.swings_since_touch >= SWINGS_PER_TOUCH)
+            .then(|| self.touch.get(self.next_touch).copied())
+            .flatten()
+    }
+
+    /// The bot stands on the touch place [`Self::touch_due`] gave: its swings come next, then the
+    /// next place.
+    fn touched(&mut self) {
+        if !self.touch.is_empty() {
+            self.next_touch = (self.next_touch + 1) % self.touch.len();
+        }
+        self.swings_since_touch = 0;
+    }
+
     /// Whether the fight goes on past its time, given the view's `hits_dealt` and `mob_deaths`
     /// now: a mob fight whose hits landed since the last check and in which no mob died yet
     /// goes on (the run's hold bounds it). Live 2026-11-22 14:34-14:41: the `Barbary_Lion_61`
@@ -1457,12 +1738,11 @@ impl Player {
         if let Some(own) = self.combat.time_sync_due() {
             send_time_sync(client, own)?;
         }
-        self.lines.extend(
-            chat_lines(&outcome.messages[self.read..])
-                .into_iter()
-                .filter(is_system)
-                .map(|line| line.body),
-        );
+        let (system, heard): (Vec<_>, Vec<_>) = chat_lines(&outcome.messages[self.read..])
+            .into_iter()
+            .partition(is_system);
+        self.lines.extend(system.into_iter().map(|line| line.body));
+        self.heard.extend(heard.into_iter().map(|line| line.body));
         self.read = outcome.messages.len();
         self.answers.extend(self.combat.take_interactions());
         let Some(own) = self.world.own_number() else {
@@ -1745,10 +2025,13 @@ impl Player {
         if answer.iter().any(|line| line.starts_with(PLAN_NOT_RUNNING)) {
             return self.ask(client, own, Ask::State, since);
         }
-        let steps: Vec<(String, PlanStep)> = answer
-            .iter()
-            .filter_map(|line| plan_step(line, header))
-            .collect();
+        let steps = without_own_achievements(
+            answer
+                .iter()
+                .filter_map(|line| plan_step(line, header))
+                .collect(),
+            self.current(),
+        );
         // A gather step whose every node the bot tried waits for another step's gather (retail
         // `99B_MSQ_01_d_02_04_02_01_Gather_Candles`: one candle from each of the nodes that
         // the sibling steps name), so the bot plays the others first.
@@ -1957,6 +2240,7 @@ impl Player {
                 territory,
                 placed,
                 within,
+                touch,
             } => {
                 // A bot already in the encounter's fight area fights on where it stands: live
                 // 2026-11-22 22:07:43, a new fight round put it back on the place of
@@ -1996,6 +2280,9 @@ impl Player {
                     extensions: 0,
                     bundles_before: self.combat.bundles(),
                     mob_cards_before: self.combat.mob_cards(),
+                    touch,
+                    next_touch: 0,
+                    swings_since_touch: SWINGS_PER_TOUCH,
                 });
                 self.phase = Phase::Fight {
                     until: since + FIGHT_TIME,
@@ -2194,6 +2481,9 @@ impl Player {
                     extensions: 0,
                     bundles_before: self.combat.bundles(),
                     mob_cards_before: self.combat.mob_cards(),
+                    touch: Vec::new(),
+                    next_touch: 0,
+                    swings_since_touch: SWINGS_PER_TOUCH,
                 });
                 self.phase = Phase::Fight {
                     until: since + FIGHT_TIME,
@@ -2434,6 +2724,9 @@ impl Player {
         let Some((kind, mut running)) = self.running.take() else {
             return Ok(());
         };
+        if self.hunting {
+            self.fight(client, own, since)?;
+        }
         match self.steps_tick(client, outcome, own, since, &mut running)? {
             Some(verdict) => self.activity_plays.push(QuestPlay {
                 quest: format!("{kind:?}"),
@@ -2667,11 +2960,12 @@ impl Player {
             return Ok(None);
         }
         if let Some(act) = step.acts.get(running.act) {
-            if running.act == 0 {
-                running.lines_before = self.lines.len();
-                running.messages_before = outcome.messages.len();
-                running.answers_before = self.answers.len();
-            }
+            running.marks.mark(
+                self.lines.len(),
+                outcome.messages.len(),
+                self.answers.len(),
+                self.heard.len(),
+            );
             match act {
                 Act::Gm(line) => self.say(client, own, line)?,
                 Act::PvpFlagOn => {
@@ -2778,6 +3072,110 @@ impl Player {
                         return Ok(None);
                     }
                 }
+                Act::AcceptPops { longest } => {
+                    let accepting = self.accepting.get_or_insert(Accepting {
+                        started: since,
+                        accepted: None,
+                    });
+                    let moved = outcome.messages[running.marks.messages..]
+                        .iter()
+                        .any(|received| {
+                            received.envelope.type_index()
+                                == Some(MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX)
+                        });
+                    if !moved {
+                        if since.saturating_sub(accepting.started) > *longest {
+                            self.accepting = None;
+                            return Ok(Some(Verdict::Broken(format!(
+                                "{}: no move (5449) within {} s",
+                                step.what,
+                                longest.as_secs()
+                            ))));
+                        }
+                        if let Some(match_id) =
+                            pop_to_accept(self.world.matchmaking(), accepting.accepted.as_deref())
+                        {
+                            for (type_index, body) in accept_calls(own, &match_id)? {
+                                client.send_message(MESSAGE_CHANNEL, true, type_index, body)?;
+                            }
+                            accepting.accepted = Some(match_id);
+                        }
+                        return Ok(None);
+                    }
+                    self.accepting = None;
+                }
+                Act::PlayMatch { end, goal, longest } => {
+                    if self.match_play.is_none() {
+                        // The bot stands where the server put it in the match: its last teleport
+                        // was in the level it left.
+                        self.teleported_to = None;
+                        self.match_play = Some(MatchPlay::new(since));
+                    }
+                    let started = self.match_play.as_ref().map_or(since, |play| play.started);
+                    if since.saturating_sub(started) > *longest {
+                        self.match_play = None;
+                        return Ok(Some(Verdict::Broken(format!(
+                            "{}: the match did not end within {} s",
+                            step.what,
+                            longest.as_secs()
+                        ))));
+                    }
+                    let ended = match end {
+                        MatchEnd::LeftMode(mode) => !self.world.matchmaking().active.contains(mode),
+                        MatchEnd::WarEnded => outcome.messages[running.marks.messages..]
+                            .iter()
+                            .any(|received| {
+                                received.envelope.type_index()
+                                    == Some(SIEGE_WARFARE_ENDED_TYPE_INDEX)
+                            }),
+                    };
+                    if !ended {
+                        self.match_tick(client, own, goal, since)?;
+                        return Ok(None);
+                    }
+                    self.match_play = None;
+                }
+                Act::InteractDynamic(request) => {
+                    let Some(request) = request(&self.sight(outcome, own, running)) else {
+                        return Ok(None);
+                    };
+                    running.interaction = Some(self.interact(client, own, request, &[])?);
+                }
+                Act::Hunt(Some(radius_m)) => {
+                    let Some(center) = self.own_place() else {
+                        return Ok(None);
+                    };
+                    self.fight = Some(Fight {
+                        task: "hunt".to_owned(),
+                        foe: false,
+                        area: Some((center, *radius_m)),
+                        vitals: None,
+                        saw_mobs: false,
+                        swings: 0,
+                        hits_before: self.combat.hits_dealt(),
+                        mob_deaths_before: self.combat.mob_deaths(),
+                        hits_at_check: self.combat.hits_dealt(),
+                        extensions: 0,
+                        bundles_before: self.combat.bundles(),
+                        mob_cards_before: self.combat.mob_cards(),
+                        touch: Vec::new(),
+                        next_touch: 0,
+                        swings_since_touch: SWINGS_PER_TOUCH,
+                    });
+                    self.hunting = true;
+                }
+                Act::Hunt(None) => {
+                    self.hunting = false;
+                    self.fight = None;
+                }
+                Act::Dynamic(calls) => {
+                    let Some(calls) = calls(&self.sight(outcome, own, running)) else {
+                        return Ok(None);
+                    };
+                    for (type_index, body) in calls? {
+                        client.send_message(MESSAGE_CHANNEL, true, type_index, body)?;
+                    }
+                }
                 Act::EndInteraction { target_entity } => {
                     if let Some(interaction) = running.interaction {
                         Self::call(
@@ -2797,18 +3195,18 @@ impl Player {
             return Ok(None);
         }
         let started = running.last_act.unwrap_or(since);
-        let new_answers = &self.answers[running.answers_before..];
+        let new_answers = &self.answers[running.marks.answers..];
         let proof = match &step.proof {
             Proof::Sent => Some(Ok(())),
-            Proof::Line(takes, _) => self.lines[running.lines_before..]
+            Proof::Line(takes, _) => self.lines[running.marks.lines..]
                 .iter()
                 .any(|line| takes(line))
                 .then_some(Ok(())),
-            Proof::Message(type_index) => outcome.messages[running.messages_before..]
+            Proof::Message(type_index) => outcome.messages[running.marks.messages..]
                 .iter()
                 .any(|received| received.envelope.type_index() == Some(*type_index))
                 .then_some(Ok(())),
-            Proof::ArenaYes(type_index) => outcome.messages[running.messages_before..]
+            Proof::ArenaYes(type_index) => outcome.messages[running.marks.messages..]
                 .iter()
                 .find(|received| received.envelope.type_index() == Some(*type_index))
                 .map(|received| {
@@ -2843,12 +3241,14 @@ impl Player {
             }),
             Proof::LeaderInside(seat) => seat.leader_inside().then_some(Ok(())),
             Proof::LeaderDone(seat) => seat.leader_done().then_some(Ok(())),
+            Proof::Paused => (since.saturating_sub(started) >= step.wait).then_some(Ok(())),
+            Proof::Check(check, _) => check(&self.sight(outcome, own, running))
+                .map(|checked| checked.map_err(|why| format!("{}: {why}", step.what))),
         };
         match proof {
             Some(Ok(())) => {
                 running.proved.push(step.what.clone());
-                running.step += 1;
-                running.act = 0;
+                running.next_step();
                 Ok(None)
             }
             Some(Err(why)) => Ok(Some(Verdict::Broken(why))),
@@ -2865,8 +3265,10 @@ impl Player {
                     Proof::InGroup(_) => "a group in the own groups state".to_owned(),
                     Proof::LeaderInside(_) => "the leader in the instance".to_owned(),
                     Proof::LeaderDone(_) => "the end of the leader's play".to_owned(),
+                    Proof::Paused => "the end of the pause".to_owned(),
+                    Proof::Check(_, described) => described.clone(),
                 };
-                let answered = self.lines[running.lines_before..].join(" / ");
+                let answered = self.lines[running.marks.lines..].join(" / ");
                 Ok(Some(Verdict::Broken(format!(
                     "{}: no proof within {} s (waited for {wanted}; the server answered: {})",
                     step.what,
@@ -2879,6 +3281,26 @@ impl Player {
                 ))))
             }
             None => Ok(None),
+        }
+    }
+
+    /// What the bot saw since the first act of the running step ([`BotSight`]).
+    fn sight<'a>(
+        &'a self,
+        outcome: &'a RepOutcome,
+        own: u64,
+        running: &RunningSteps,
+    ) -> BotSight<'a> {
+        BotSight {
+            own,
+            bag: self.combat.bag(),
+            lines: &self.lines[running.marks.lines..],
+            heard: &self.heard[running.marks.heard..],
+            messages: &outcome.messages[running.marks.messages..],
+            dead: self.combat.own_dead(),
+            in_group: self.world.own_group().is_some(),
+            matchmaking: self.world.matchmaking(),
+            group_invite: self.world.inbound_group_invite(),
         }
     }
 
@@ -2941,11 +3363,7 @@ impl Player {
             Self::call(client, &exited(header, territory))?;
         }
         self.teleported_to = Some(at);
-        self.say(
-            client,
-            own,
-            &format!("!tp {:.1} {:.1} {:.1}", at.x, at.y, at.z),
-        )
+        self.say(client, own, &teleport_line(at))
     }
 
     /// Tells the server the bot came into area `territory` (2297) at `at`, the place of its
@@ -3047,12 +3465,14 @@ impl Player {
             "{}: swung {} times, landed {hits} hits, saw {mob_deaths} mobs die",
             fight.task, fight.swings
         ));
+        let swung_at = std::mem::take(&mut self.swung_at);
         self.fought = Some(match self.fought.take() {
             Some(fought) if fought.task == fight.task => Fought {
                 hits: fought.hits + hits,
                 mob_deaths: fought.mob_deaths + mob_deaths,
                 fights: fought.fights + 1,
                 last_hits: hits,
+                spared: spared_after(fought.spared, swung_at, hits),
                 ..fought
             },
             _ => Fought {
@@ -3061,6 +3481,7 @@ impl Player {
                 mob_deaths,
                 fights: 1,
                 last_hits: hits,
+                spared: spared_after(Vec::new(), swung_at, hits),
             },
         });
         self.ask(client, own, Ask::State, since)
@@ -3122,6 +3543,16 @@ impl Player {
             return Ok(());
         };
         let from = [own.x, own.y, own.z];
+        if let Some(place) = self.fight.as_ref().and_then(Fight::touch_due) {
+            let distance = planar(from, [place.x, place.y]);
+            if distance <= TOUCH_REACH_M {
+                if let Some(fight) = &mut self.fight {
+                    fight.touched();
+                }
+                return Ok(());
+            }
+            return self.walk_toward(client, own, place, distance, 0.0, since);
+        }
         let area = self.fight.as_ref().and_then(|fight| fight.area);
         let vitals = self.fight.as_ref().and_then(|fight| fight.vitals);
         let nearest = |a: &nw_messages::WorldPosition, b: &nw_messages::WorldPosition| {
@@ -3137,13 +3568,23 @@ impl Player {
                 .min_by(nearest)
         } else {
             let mobs: Vec<_> = self.combat.mobs().collect();
+            let spared: &[u64] = match (&self.fought, &self.fight) {
+                (Some(fought), Some(fight)) if fought.task == fight.task => &fought.spared,
+                _ => &[],
+            };
             let target = fight_target(
                 &mobs,
                 |entity| self.combat.vitals_of(entity),
+                |entity| self.combat.takes_no_hits(entity) || spared.contains(&entity),
                 area,
                 vitals,
                 from,
             );
+            if let Some((entity, _)) = target
+                && !self.swung_at.contains(&entity)
+            {
+                self.swung_at.push(entity);
+            }
             // A mob of the kill that keeps away (the fleeing `Elk_Strange_48` of
             // `0332_0102_fabulousfurs` stayed 10-12 m from the bot, sim 14:34:15-14:35:01
             // `FleeFromTarget`, `FleeAnyTowardHome`): the game master bot goes to it.
@@ -3174,53 +3615,327 @@ impl Player {
         if let Some(fight) = &mut self.fight {
             fight.saw_mobs = true;
         }
-        let distance = planar(from, [mob.x, mob.y]);
+        if self.close_and_swing(client, own, mob, since)?
+            && let Some(fight) = &mut self.fight
+        {
+            fight.swings += 1;
+            fight.swings_since_touch += 1;
+        }
+        Ok(())
+    }
+
+    /// Walks from `own` toward `target` until it is in reach, then swings at it once each
+    /// [`SWING_INTERVAL`]; whether it swung.
+    fn close_and_swing(
+        &mut self,
+        client: &mut RepClient,
+        own: Position,
+        target: nw_messages::WorldPosition,
+        since: Duration,
+    ) -> Result<bool, RepError> {
+        let place = Position {
+            x: target.x,
+            y: target.y,
+            z: target.z(),
+        };
+        let distance = planar([own.x, own.y, own.z], [target.x, target.y]);
         if distance > REACH_M {
-            if self
-                .last_move
-                .is_some_and(|last| since.saturating_sub(last) < MOVE_INTERVAL)
-            {
-                return Ok(());
-            }
-            self.last_move = Some(since);
-            let length = (SPEED_MPS * MOVE_INTERVAL.as_secs_f32()).min(distance - REACH_M / 2.0);
-            let x = own.x + (mob.x - own.x) / distance * length;
-            let y = own.y + (mob.y - own.y) / distance * length;
-            let Some(position) = InputPosition::from_metres(x, y, mob.z()) else {
-                return Ok(());
-            };
-            // The server sends no own place for the bot's own moves: the bot stands where it
-            // sent itself.
-            self.teleported_to = Some(Position { x, y, z: mob.z() });
-            return send_input(client, &ClientInputMsg::position(position));
+            self.walk_toward(client, own, place, distance, REACH_M / 2.0, since)?;
+            return Ok(false);
         }
         if self
             .last_swing
             .is_some_and(|last| since.saturating_sub(last) < SWING_INTERVAL)
         {
-            return Ok(());
+            return Ok(false);
         }
         self.last_swing = Some(since);
         let Some(at) = InputPosition::from_metres(own.x, own.y, own.z) else {
-            return Ok(());
+            return Ok(false);
         };
-        if let Some(fight) = &mut self.fight {
-            fight.swings += 1;
-        }
-        let yaw = yaw_toward(
-            own,
-            Position {
-                x: mob.x,
-                y: mob.y,
-                z: mob.z(),
-            },
-        );
+        let yaw = yaw_toward(own, place);
         let counter = self.input_counter;
         self.input_counter = counter.wrapping_add(ATTACK_RECORDS);
         send_input(
             client,
             &ClientInputMsg::attack(at, counter).looking([yaw, LEVEL_PITCH]),
-        )
+        )?;
+        Ok(true)
+    }
+
+    /// One tick of the bot's match play for `goal` ([`Act::PlayMatch`]); a dead bot waits.
+    fn match_tick(
+        &mut self,
+        client: &mut RepClient,
+        own_entity: u64,
+        goal: &MatchGoal,
+        since: Duration,
+    ) -> Result<(), RepError> {
+        let Some(own) = self.own_place() else {
+            return Ok(());
+        };
+        if self.combat.own_dead() {
+            return Ok(());
+        }
+        match goal {
+            MatchGoal::Fight => self.fight_foe(client, own, since),
+            MatchGoal::Defend(claim) => self.defend_claim(
+                client,
+                own_entity,
+                own,
+                *claim,
+                (sim::world::WAR_CAPTURE_RADIUS_M, None),
+                since,
+            ),
+            MatchGoal::Clear { claim, vitals } => self.defend_claim(
+                client,
+                own_entity,
+                own,
+                *claim,
+                (CLEAR_RADIUS_M, Some(vitals.as_slice())),
+                since,
+            ),
+            MatchGoal::Outposts | MatchGoal::Flags | MatchGoal::Siege(_) => {
+                self.play_objective(client, own_entity, own, goal, since)
+            }
+        }
+    }
+
+    /// Holds the claim position `claim` of an invasion: fights the nearest mob within
+    /// `radius_m` of it that takes hits (and whose vitals id is one of `vitals`, when given) (a teleport to one farther than [`CHASE_TELEPORT_M`], at
+    /// most one each [`CHASE_INTERVAL`]; a mob that [`MAX_SWINGS_WITHOUT_HIT`] swings did not hit
+    /// is left out for [`FRIEND_MEMORY`], as a match's friend is: live 2026-11-23 05:54-06:05Z, a
+    /// defender swung at one fort mob for ten minutes with no hit and the wave never ended),
+    /// else goes back onto it (a teleport, at most one each [`CLAIM_RETURN_INTERVAL`]) when it
+    /// stands farther than [`CLAIM_STAND_M`].
+    fn defend_claim(
+        &mut self,
+        client: &mut RepClient,
+        own_entity: u64,
+        own: Position,
+        claim: [f32; 3],
+        (radius_m, vitals): (f32, Option<&[u32]>),
+        since: Duration,
+    ) -> Result<(), RepError> {
+        let [x, y, z] = claim;
+        let claim = Position { x, y, z };
+        let hits = self.combat.hits_dealt();
+        let Some(play) = self.match_play.as_mut() else {
+            return Ok(());
+        };
+        play.friends
+            .retain(|_, found| since.saturating_sub(*found) < FRIEND_MEMORY);
+        let mob = self
+            .combat
+            .mobs()
+            .filter(|(entity, at)| {
+                planar([claim.x, claim.y, claim.z], [at.x, at.y]) <= radius_m
+                    && vitals.is_none_or(|wanted| {
+                        self.combat
+                            .vitals_of(*entity)
+                            .is_some_and(|id| wanted.contains(&id))
+                    })
+                    && !self.combat.takes_no_hits(*entity)
+                    && !play.friends.contains_key(entity)
+            })
+            .min_by(|(_, a), (_, b)| {
+                planar([own.x, own.y, own.z], [a.x, a.y])
+                    .total_cmp(&planar([own.x, own.y, own.z], [b.x, b.y]))
+            });
+        if let Some((number, mob)) = mob {
+            let target = play.target.get_or_insert(MatchTarget {
+                number,
+                swings: 0,
+                hits,
+            });
+            if target.number != number || hits > target.hits {
+                *target = MatchTarget {
+                    number,
+                    swings: 0,
+                    hits,
+                };
+            } else if target.swings >= MAX_SWINGS_WITHOUT_HIT {
+                play.friends.insert(number, since);
+                play.target = None;
+                return Ok(());
+            }
+            if planar([own.x, own.y, own.z], [mob.x, mob.y]) > CHASE_TELEPORT_M
+                && self
+                    .last_chase
+                    .is_none_or(|last| since.saturating_sub(last) >= CHASE_INTERVAL)
+            {
+                self.last_chase = Some(since);
+                return self.teleport(
+                    client,
+                    own_entity,
+                    Position {
+                        x: mob.x,
+                        y: mob.y,
+                        z: mob.z(),
+                    },
+                );
+            }
+            if self.close_and_swing(client, own, mob, since)?
+                && let Some(target) = self
+                    .match_play
+                    .as_mut()
+                    .and_then(|play| play.target.as_mut())
+            {
+                target.swings += 1;
+            }
+            return Ok(());
+        }
+        play.target = None;
+        let away = own.horizontal_distance(claim) > CLAIM_STAND_M;
+        let due = play
+            .at_place_since
+            .is_none_or(|last| since.saturating_sub(last) >= CLAIM_RETURN_INTERVAL);
+        if away && due {
+            play.at_place_since = Some(since);
+            return self.teleport(client, own_entity, claim);
+        }
+        Ok(())
+    }
+
+    /// Fights the nearest match player in sight that is no mob and not known as a friend: after
+    /// [`MAX_SWINGS_WITHOUT_HIT`] swings with no hit dealt it is a friend for [`FRIEND_MEMORY`].
+    fn fight_foe(
+        &mut self,
+        client: &mut RepClient,
+        own: Position,
+        since: Duration,
+    ) -> Result<(), RepError> {
+        let hits = self.combat.hits_dealt();
+        let mobs: HashSet<u64> = self.combat.mobs().map(|(number, _)| number).collect();
+        let Some(play) = self.match_play.as_mut() else {
+            return Ok(());
+        };
+        play.friends
+            .retain(|_, found| since.saturating_sub(*found) < FRIEND_MEMORY);
+        let from = [own.x, own.y, own.z];
+        let foe = self
+            .world
+            .others()
+            .into_iter()
+            .filter(|number| !mobs.contains(number) && !play.friends.contains_key(number))
+            .filter_map(|number| Some((number, self.world.position(number)?)))
+            .filter(|(_, at)| planar(from, [at.x, at.y]) <= MATCH_SIGHT_M)
+            .min_by(|(_, a), (_, b)| planar(from, [a.x, a.y]).total_cmp(&planar(from, [b.x, b.y])));
+        let Some((number, at)) = foe else {
+            play.target = None;
+            return Ok(());
+        };
+        let target = play.target.get_or_insert(MatchTarget {
+            number,
+            swings: 0,
+            hits,
+        });
+        if target.number != number || hits > target.hits {
+            *target = MatchTarget {
+                number,
+                swings: 0,
+                hits,
+            };
+        } else if target.swings >= MAX_SWINGS_WITHOUT_HIT {
+            play.friends.insert(number, since);
+            play.target = None;
+            return Ok(());
+        }
+        if self.close_and_swing(client, own, at, since)?
+            && let Some(target) = self
+                .match_play
+                .as_mut()
+                .and_then(|play| play.target.as_mut())
+        {
+            target.swings += 1;
+        }
+        Ok(())
+    }
+
+    /// Goes round the bot's objective places ([`objective_places`]) with a teleport onto each
+    /// and stays there; at the other team's flag base it takes the flag once each
+    /// [`TAKE_INTERVAL`].
+    fn play_objective(
+        &mut self,
+        client: &mut RepClient,
+        own_entity: u64,
+        own: Position,
+        goal: &MatchGoal,
+        since: Duration,
+    ) -> Result<(), RepError> {
+        let team = self.world.matchmaking().team;
+        let flag = self
+            .combat
+            .card_of(&[sim::world::FLAG_PICKUP_ASSETS[FLAG_TEAM]]);
+        let Some(play) = self.match_play.as_mut() else {
+            return Ok(());
+        };
+        let places = play
+            .places
+            .get_or_insert_with(|| objective_places(goal, team, own));
+        let Some(&place) = places.get(play.next_place % places.len().max(1)) else {
+            return Ok(());
+        };
+        let Some(arrived) = play.at_place_since else {
+            play.at_place_since = Some(since);
+            return self.teleport(client, own_entity, place);
+        };
+        let at_flag = *goal == MatchGoal::Flags && play.next_place % 2 == 0;
+        let take = at_flag
+            && play
+                .last_take
+                .is_none_or(|last| since.saturating_sub(last) >= TAKE_INTERVAL);
+        let stay = match goal {
+            MatchGoal::Outposts => OUTPOST_STAY,
+            MatchGoal::Siege(_) => SIEGE_POINT_STAY,
+            _ => FLAG_STAY,
+        };
+        if since.saturating_sub(arrived) >= stay {
+            play.next_place += 1;
+            play.at_place_since = None;
+        }
+        if take && let Some(target) = flag {
+            play.last_take = Some(since);
+            let request = InteractionRequest {
+                target,
+                target_entity: facet_of_raw_id(&target),
+                interaction: 0,
+                kind: TRIGGER_KIND,
+                gatherable: None,
+            };
+            self.interact(client, own_entity, request, &[])?;
+        }
+        Ok(())
+    }
+
+    /// One walking step from `own` toward `place`, `distance` away, to `stop_m` short of it,
+    /// at most one each [`MOVE_INTERVAL`].
+    fn walk_toward(
+        &mut self,
+        client: &mut RepClient,
+        own: Position,
+        place: Position,
+        distance: f32,
+        stop_m: f32,
+        since: Duration,
+    ) -> Result<(), RepError> {
+        if self
+            .last_move
+            .is_some_and(|last| since.saturating_sub(last) < MOVE_INTERVAL)
+        {
+            return Ok(());
+        }
+        self.last_move = Some(since);
+        let length = (SPEED_MPS * MOVE_INTERVAL.as_secs_f32()).min(distance - stop_m);
+        let x = own.x + (place.x - own.x) / distance * length;
+        let y = own.y + (place.y - own.y) / distance * length;
+        let Some(position) = InputPosition::from_metres(x, y, place.z) else {
+            return Ok(());
+        };
+        // The server sends no own place for the bot's own moves: the bot stands where it sent
+        // itself.
+        self.teleported_to = Some(Position { x, y, z: place.z });
+        send_input(client, &ClientInputMsg::position(position))
     }
 
     fn end_quest(&mut self, verdict: Verdict) {
@@ -3323,6 +4038,9 @@ pub struct PlayData {
     /// The activities come before the quests: a group leader forms its group first, so the
     /// quests' expedition opens for the group ([`crate::group::quest_group_steps`]).
     pub activities_first: bool,
+    /// The bot sends its game master setup lines ([`setup_lines`]) after it left the tutorial;
+    /// without them it plays as it logged in (a save check reads what the save gave back).
+    pub game_master_setup: bool,
     /// The open world level's gather nodes.
     pub nodes: Arc<[GatherNode]>,
     /// The gather nodes of each instance game mode on a level of its own, by the lowercase
@@ -3347,6 +4065,7 @@ impl Player {
         let PlayData {
             activities,
             activities_first,
+            game_master_setup,
             nodes,
             trial_nodes,
             containers,
@@ -3362,8 +4081,13 @@ impl Player {
             afk_warned: false,
             own_since: None,
             lines: Vec::new(),
+            heard: Vec::new(),
             phase: Phase::LeaveTutorial,
-            setup_lines: setup_lines(&settings.gm_start),
+            setup_lines: if game_master_setup {
+                setup_lines(&settings.gm_start)
+            } else {
+                Vec::new()
+            },
             queue: settings.quests.iter().skip(1).cloned().collect(),
             current: settings.quests.first().cloned(),
             deferred: Vec::new(),
@@ -3411,6 +4135,7 @@ impl Player {
             fight: None,
             strike: None,
             fought: None,
+            swung_at: Vec::new(),
             walker: None,
             courses,
             mount_reward_box,
@@ -3422,6 +4147,9 @@ impl Player {
             pvp_foe: settings.pvp_foe.clone(),
             pvp_armed: false,
             arming_pvp: false,
+            hunting: false,
+            match_play: None,
+            accepting: None,
         }
     }
 }
@@ -3509,6 +4237,30 @@ mod tests {
     use super::*;
 
     const OWN: u64 = 7;
+
+    #[test]
+    fn a_step_keeps_its_first_marks_while_an_act_waits_and_the_next_step_marks_again() {
+        let mut running = RunningSteps::of(Vec::new());
+        running.marks.mark(1, 10, 2, 3);
+        // A waiting act (a war bot's match play) ticks again with more messages.
+        running.marks.mark(5, 50, 6, 7);
+        assert_eq!(
+            (
+                running.marks.lines,
+                running.marks.messages,
+                running.marks.answers,
+                running.marks.heard
+            ),
+            (1, 10, 2, 3),
+            "the messages since the step began stay in view"
+        );
+        running.next_step();
+        running.marks.mark(5, 50, 6, 7);
+        assert_eq!(
+            (running.step, running.act, running.marks.messages),
+            (1, 0, 50)
+        );
+    }
 
     fn header() -> FacetHeader {
         FacetHeader::of(CALL_COMPONENT, OWN)
@@ -3600,6 +4352,7 @@ mod tests {
         let data = PlayData {
             activities: Vec::new(),
             activities_first: false,
+            game_master_setup: true,
             nodes: Arc::from(Vec::new()),
             trial_nodes: Arc::new(HashMap::new()),
             containers: HashSet::new(),
@@ -3618,6 +4371,49 @@ mod tests {
             "the node is untried for the next quest"
         );
         assert_eq!(player.same_plan, 0);
+    }
+
+    #[test]
+    fn the_objective_team_goes_round_the_places_of_its_map_and_the_other_stays() {
+        let at = |[x, y, z]: [f32; 3]| Position { x, y, z };
+        let vertical = sim::world::outpost_places()
+            .nth(1)
+            .expect("the Vertical map");
+        let near_vertical = at([vertical[1][0] + 5.0, vertical[1][1], vertical[1][2]]);
+        assert_eq!(
+            objective_places(&MatchGoal::Outposts, Some(OBJECTIVE_TEAM), near_vertical),
+            vertical.map(at).to_vec(),
+            "the outposts A, B and C of the map the bot stands in"
+        );
+        assert!(
+            objective_places(&MatchGoal::Outposts, Some(1), near_vertical).is_empty(),
+            "the other team stays"
+        );
+        assert!(objective_places(&MatchGoal::Outposts, None, near_vertical).is_empty());
+        let long = sim::world::flag_bases().next().expect("the Long map");
+        assert_eq!(
+            objective_places(&MatchGoal::Flags, Some(OBJECTIVE_TEAM), at(long[0])),
+            vec![at(long[FLAG_TEAM]), at(long[0])],
+            "the other team's flag base, then the own base"
+        );
+        assert!(objective_places(&MatchGoal::Fight, Some(OBJECTIVE_TEAM), at(long[0])).is_empty());
+        assert_eq!(
+            objective_places(
+                &MatchGoal::Siege(vec![long[1], long[0]]),
+                Some(1),
+                at(long[0])
+            ),
+            vec![at(long[1]), at(long[0])],
+            "a war's capture points for every side the goal names them"
+        );
+        assert!(
+            objective_places(
+                &MatchGoal::Defend(long[0]),
+                Some(OBJECTIVE_TEAM),
+                at(long[0])
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -3959,6 +4755,33 @@ mod tests {
     }
 
     #[test]
+    fn an_achievements_check_of_the_quest_itself_gives_way_to_another_step() {
+        const QUEST: &str = "09A_M15_FightArtemis";
+        let read = |line: &str| plan_step(line, header()).expect("a step");
+        let steps = vec![
+            read(
+                "plan c achievements 09A_M15_ArtemisTrialComplete (from a step of quest 09A_M15_FightArtemis)",
+            ),
+            read("plan f wait"),
+            read("plan d achievements 09A_M14 (from the end of quest 09A_M14_GetInfusedSeed)"),
+        ];
+        let left = without_own_achievements(steps.clone(), QUEST);
+        assert_eq!(
+            left.iter()
+                .map(|(task, _)| task.as_str())
+                .collect::<Vec<_>>(),
+            ["f", "d"]
+        );
+        assert_eq!(picked_step(&left).map(|(task, _)| task.as_str()), Some("d"));
+        let alone = vec![steps[0].clone()];
+        assert_eq!(
+            without_own_achievements(alone.clone(), QUEST),
+            alone,
+            "nothing else to play"
+        );
+    }
+
+    #[test]
     fn a_skin_line_reads_its_gatherable_and_its_kill() {
         let step = plan_step(
             "plan s skin Boar 1 kill CK_Boar_10WS10 1 at 6088.6 834.6 129.3",
@@ -3980,7 +4803,8 @@ mod tests {
                     },
                     territory: None,
                     placed: false,
-                    within: None
+                    within: None,
+                    touch: Vec::new()
                 })
             })
         );
@@ -4013,7 +4837,8 @@ mod tests {
                     },
                     territory: None,
                     placed: true,
-                    within: None
+                    within: None,
+                    touch: Vec::new()
                 })
             })
         );
@@ -4442,7 +5267,8 @@ mod tests {
                 },
                 territory: Some(42),
                 placed: false,
-                within: None
+                within: None,
+                touch: Vec::new()
             })
         );
         assert!(
@@ -4462,6 +5288,29 @@ mod tests {
                 })
             ),
             "the bot fights in the encounter's volume"
+        );
+        assert_eq!(
+            read(
+                "plan t kill Abominable_Liang_MSQ 1 at 1045.1 943.4 130.0 placed \
+                 touch 1041.1 938.4 130.0 touch 1034.1 938.4 130.0"
+            )
+            .and_then(|step| match step {
+                PlanStep::Kill { touch, .. } => Some(touch),
+                _ => None,
+            }),
+            Some(vec![
+                Position {
+                    x: 1041.1,
+                    y: 938.4,
+                    z: 130.0
+                },
+                Position {
+                    x: 1034.1,
+                    y: 938.4,
+                    z: 130.0
+                }
+            ]),
+            "the bot walks onto the talisman piles' places"
         );
         assert_eq!(
             read("plan p strike G1 at 1.0 2.0 3.0 G2 at 4.0 5.0 6.0"),
@@ -4556,6 +5405,7 @@ mod tests {
             mob_deaths,
             fights: 3,
             last_hits: 0,
+            spared: Vec::new(),
         };
         assert_eq!(
             Fought::verdict(Some(&fought(0)), "w_kill", "stop".to_owned()),
@@ -4573,6 +5423,30 @@ mod tests {
     }
 
     #[test]
+    fn a_teleport_asks_for_a_place_a_metre_above_its_point() {
+        let horus = Position {
+            x: 1297.5,
+            y: 1442.9,
+            z: 929.3,
+        };
+        assert_eq!(teleport_line(horus), "!tp 1297.5 1442.9 930.3");
+    }
+
+    #[test]
+    fn a_fight_that_landed_no_hit_spares_its_mobs_until_hits_land() {
+        const HORUS: u64 = 1;
+        const BRUTE: u64 = 2;
+        let spared = spared_after(Vec::new(), vec![HORUS], 0);
+        assert_eq!(spared, [HORUS], "no hit landed on Horus");
+        let spared = spared_after(spared, vec![HORUS], 0);
+        assert_eq!(spared, [HORUS], "once");
+        assert!(
+            spared_after(spared, vec![BRUTE], 40).is_empty(),
+            "hits landed"
+        );
+    }
+
+    #[test]
     fn the_bot_fights_on_while_its_hits_land() {
         let fought = |fights, last_hits| Fought {
             task: "w_kill".to_owned(),
@@ -4580,6 +5454,7 @@ mod tests {
             mob_deaths: 0,
             fights,
             last_hits,
+            spared: Vec::new(),
         };
         assert!(Fought::fights_on(Some(&fought(1, 56)), "w_kill"));
         assert!(
@@ -4630,19 +5505,44 @@ mod tests {
         };
         let from = [0.0, 0.0, 0.0];
         assert_eq!(
-            fight_target(&mobs, vitals_of, None, Some(ELK_VITALS), from),
+            fight_target(&mobs, vitals_of, |_| false, None, Some(ELK_VITALS), from),
             Some((ELK, at(9.0))),
             "the elk, though the wolf is nearer"
         );
         assert_eq!(
-            fight_target(&mobs, vitals_of, None, None, from),
+            fight_target(&mobs, vitals_of, |_| false, None, None, from),
             Some((WOLF, at(2.0))),
             "no vitals id: the nearest mob"
         );
         assert_eq!(
-            fight_target(&[(WOLF, at(2.0))], vitals_of, None, Some(ELK_VITALS), from),
+            fight_target(
+                &[(WOLF, at(2.0))],
+                vitals_of,
+                |_| false,
+                None,
+                Some(ELK_VITALS),
+                from
+            ),
             Some((WOLF, at(2.0))),
             "no elk in view: the nearest other mob"
+        );
+        let elk_takes_no_hits = |entity| entity == ELK;
+        assert_eq!(
+            fight_target(
+                &mobs,
+                vitals_of,
+                elk_takes_no_hits,
+                None,
+                Some(ELK_VITALS),
+                from
+            ),
+            Some((WOLF, at(2.0))),
+            "the elk takes no hits now: the wolf"
+        );
+        assert_eq!(
+            fight_target(&mobs, vitals_of, |_| true, None, Some(ELK_VITALS), from),
+            Some((ELK, at(9.0))),
+            "none takes hits: the step's mob"
         );
     }
 
@@ -4664,6 +5564,9 @@ mod tests {
             extensions: 0,
             bundles_before: 0,
             mob_cards_before: 0,
+            touch: Vec::new(),
+            next_touch: 0,
+            swings_since_touch: SWINGS_PER_TOUCH,
         };
         let mut lion = fight();
         for round in 1..=FIGHT_ROUNDS {
@@ -4705,6 +5608,42 @@ mod tests {
     }
 
     #[test]
+    fn a_fight_with_touch_places_walks_onto_each_in_turn_between_its_swings() {
+        let place = |x: f32| Position {
+            x,
+            y: 938.4,
+            z: 130.0,
+        };
+        let mut fight = Fight {
+            task: "t_kill".to_owned(),
+            foe: false,
+            area: None,
+            vitals: None,
+            saw_mobs: false,
+            swings: 0,
+            hits_before: 0,
+            mob_deaths_before: 0,
+            hits_at_check: 0,
+            extensions: 0,
+            bundles_before: 0,
+            mob_cards_before: 0,
+            touch: vec![place(1041.1), place(1034.1)],
+            next_touch: 0,
+            swings_since_touch: SWINGS_PER_TOUCH,
+        };
+        assert_eq!(fight.touch_due(), Some(place(1041.1)), "a pile first");
+        fight.touched();
+        assert_eq!(fight.touch_due(), None, "then its swings");
+        fight.swings_since_touch = SWINGS_PER_TOUCH;
+        assert_eq!(fight.touch_due(), Some(place(1034.1)));
+        fight.touched();
+        fight.swings_since_touch = SWINGS_PER_TOUCH;
+        assert_eq!(fight.touch_due(), Some(place(1041.1)), "round again");
+        fight.touch.clear();
+        assert_eq!(fight.touch_due(), None, "a fight without touch places");
+    }
+
+    #[test]
     fn a_fight_without_a_mob_in_view_plays_nothing_of_its_quest() {
         let mut fight = Fight {
             task: "w_kill".to_owned(),
@@ -4719,6 +5658,9 @@ mod tests {
             extensions: 0,
             bundles_before: 0,
             mob_cards_before: 0,
+            touch: Vec::new(),
+            next_touch: 0,
+            swings_since_touch: SWINGS_PER_TOUCH,
         };
         let view = CombatView::default();
         let at = Some(Position {
