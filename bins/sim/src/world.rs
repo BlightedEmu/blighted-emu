@@ -69,6 +69,7 @@ mod arena_match;
 mod asset_script;
 mod attack;
 mod barber;
+mod boss_scripts;
 mod camps;
 mod capture_the_flag;
 mod catacombs;
@@ -103,6 +104,7 @@ mod gear;
 mod gm_chat;
 mod gm_client;
 mod governance;
+mod health_floors;
 mod hit_reaction;
 mod hit_shape;
 mod housing_states;
@@ -117,6 +119,7 @@ mod level_assets;
 mod level_boards;
 mod level_doors;
 mod level_flow;
+mod linked_bosses;
 pub mod locked_doors;
 mod loot_bag;
 mod members;
@@ -211,10 +214,14 @@ use statics::{
 };
 
 pub use attack::{AttackKeys, Blow, INPUT_RECORD_MS, KeyAttack, KeyFire, start_attack_motion};
+pub use capture_the_flag::{FLAG_PICKUP_ASSETS, flag_bases};
 pub use gm_chat::{
     COMPANY_IN_COMPANY, COMPANY_NAME_TAKEN, DONE as GM_DONE, FACTION_UNCHANGED, GmChat,
-    answer_lines, company_made,
+    SHEET_ATTRIBUTES, SHEET_LINE, SHEET_POINTS, SHEET_STORAGE, answer_lines, company_made,
 };
+pub use land_claims::claim_position;
+pub use outpost_rush::outpost_places;
+pub use war_fight::CAPTURE_RADIUS_M as WAR_CAPTURE_RADIUS_M;
 
 use attack::{PendingMobSwing, PlayerSwing, Vitals};
 
@@ -1315,6 +1322,14 @@ pub struct SimWorld {
     boss_phases: HashMap<u64, u32>,
     /// The boss phase each shown boss mob last sent.
     boss_phases_shown: HashMap<u64, u32>,
+    /// How each mob's last card showed its invulnerability ([`crate::mobs::Mobs::set_invulnerable`]).
+    invulnerable_shown: HashMap<u64, Option<crate::mobs::Invulnerable>>,
+    /// The scripted bosses of the story trials ([`boss_scripts`]).
+    boss_fights: boss_scripts::BossFights,
+    /// The health floors of the mobs that have one ([`health_floors`]).
+    health_floors: health_floors::HealthFloors,
+    /// The intros and the linked Goliaths of the expedition bosses ([`linked_bosses`]).
+    linked_bosses: linked_bosses::LinkedBosses,
     /// The remote effects each shown mob's clients have, with the map's version.
     mob_effects_shown: HashMap<u64, (u64, Vec<(u16, nw_messages::RemoteEffect)>)>,
     /// The last player each shown mob picked as its target, by entity number.
@@ -1544,6 +1559,10 @@ impl SimWorld {
             mob_health_shown: HashMap::new(),
             boss_phases: HashMap::new(),
             boss_phases_shown: HashMap::new(),
+            invulnerable_shown: HashMap::new(),
+            boss_fights: boss_scripts::BossFights::default(),
+            health_floors: health_floors::HealthFloors::default(),
+            linked_bosses: linked_bosses::LinkedBosses::default(),
             mob_effects_shown: HashMap::new(),
             look_targets: HashMap::new(),
             nodes: Nodes::default(),
@@ -2493,7 +2512,6 @@ impl SimWorld {
         self.arena_left_sim(entity);
         // An expedition keeps the player's place offline until it comes again.
         self.expedition_went_offline(entity);
-        self.camp_left_server(entity);
         let departure = self.departure(entity);
         self.remove_player(connection, entity);
         departure
@@ -2768,6 +2786,7 @@ impl SimWorld {
         self.mob_health_shown.remove(&entity);
         self.look_targets.remove(&entity);
         self.boss_phases_shown.remove(&entity);
+        self.invulnerable_shown.remove(&entity);
     }
 
     /// The ghost `entity` and the sim it belongs to.
@@ -2924,6 +2943,8 @@ impl SimWorld {
         self.tick_quests(now_ms);
         self.detect_quest_objects(now_ms);
         self.tick_events(now_ms);
+        self.tick_boss_fights(now_ms);
+        self.tick_linked_bosses(now_ms);
         self.tick_dungeon_script(now_ms);
         self.solve_puzzles_due(now_ms);
         self.tick_scripts(now_ms);
@@ -3635,6 +3656,18 @@ impl SimWorld {
                         .filter(|volume| volume.contains(at))
                         .map(|volume| volume.tag.as_str()),
                 );
+                // A trigger area of the running instance's script is a place by its name
+                // (`0726_0101_d_01a_AreaTrigger` waits for `AreaEntryGate`, a trigger area of the
+                // DungeonShatterMtn00 script; no POI or quest volume of the level carries it).
+                if let Some(run) = &self.dungeon_run {
+                    places.extend(
+                        run.script()
+                            .trigger_areas
+                            .iter()
+                            .filter(|area| area.volume.contains(at))
+                            .map(|area| area.name.as_str()),
+                    );
+                }
                 let rules = &self.achievement_rules;
                 let achieved = |id: &str| player.flow.has_achievement(rules, id);
                 let content = &self.content;
@@ -4998,6 +5031,11 @@ impl SimWorld {
             card.first_damage = card.health_changed
                 && previous == Some(state.max_health)
                 && state.health < state.max_health;
+            card.invulnerable = self.mobs.invulnerable(entity);
+            card.invulnerable_changed = self
+                .invulnerable_shown
+                .insert(entity, card.invulnerable)
+                .is_some_and(|shown| shown != card.invulnerable);
             if let Some(&phase) = self.boss_phases.get(&entity) {
                 let shown = self.boss_phases_shown.insert(entity, phase);
                 card.boss_phase = Some(phase);
@@ -5077,6 +5115,8 @@ impl SimWorld {
         let shown: HashSet<u64> = cards.keys().copied().collect();
         self.mob_timelines.keep_only(&shown);
         self.mob_health_shown
+            .retain(|entity, _| shown.contains(entity));
+        self.invulnerable_shown
             .retain(|entity, _| shown.contains(entity));
         self.boss_phases_shown
             .retain(|entity, _| shown.contains(entity));
@@ -12246,14 +12286,17 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn a_kill_drops_the_quest_item_of_a_have_and_return_task_into_its_loot_bag() {
-        // Retail Secrets of the Earth (2026-10-02): each `02A_Side02_BoneDust` came with a loot
-        // bag use (kind 28) of a killed Lost, 30 to 50 ms before its task counted.
+    /// The quest of [`dust_world`].
+    const DUST_QUEST: &str = "02A_Side02_01_Secrets";
+    /// The item a kill of the test mob drops for [`DUST_QUEST`].
+    const DUST: &str = "02A_Side02_BoneDust";
+
+    /// A [`loot_world`] whose test mob, a Lost with no loot table, drops [`DUST`] for each
+    /// player on [`DUST_QUEST`].
+    fn dust_world() -> SimWorld {
         use crate::objectives::{KillTypes, TaskBook, TaskRow};
         use crate::player_content::{ObjectiveRow, QuestBook};
-        const QUEST: &str = "02A_Side02_01_Secrets";
-        const DUST: &str = "02A_Side02_BoneDust";
+        const QUEST: &str = DUST_QUEST;
         let mut world = loot_world(FLINT_TABLE, LootTables::default());
         let mut content = (*world.content).clone();
         content.mob_loot = MobLoot::default();
@@ -12276,6 +12319,14 @@ mod tests {
             }]),
         );
         world.content = Arc::new(content);
+        world
+    }
+
+    #[test]
+    fn a_kill_drops_the_quest_item_of_a_have_and_return_task_into_its_loot_bag() {
+        // Retail Secrets of the Earth (2026-10-02): each `02A_Side02_BoneDust` came with a loot
+        // bag use (kind 28) of a killed Lost, 30 to 50 ms before its task counted.
+        let mut world = dust_world();
         let mob = crate::mobs::mob_entity(0);
         world.drop_loot(mob, 1, NOW);
         assert_eq!(
@@ -12283,9 +12334,52 @@ mod tests {
             (0, 0),
             "a mob type without a table and no quest drops nothing"
         );
-        world.start_quest(1, QUEST, NOW).expect("quest");
+        world.start_quest(1, DUST_QUEST, NOW).expect("quest");
         world.drop_loot(mob, 1, NOW);
         assert_eq!(world.bags.items_for(1), [vec![(DUST.to_owned(), 1)]]);
+    }
+
+    /// Retail `EXP-The-Dynasty-Shipyard`: a group member that hit the summoner without the
+    /// killing hit got its own bag with its quest item. An instance kill drops a bag for the
+    /// killer and each hitting player, none for a player with no hits; an open-world kill
+    /// drops the killer's alone.
+    #[test]
+    fn an_instance_kill_drops_a_quest_bag_for_each_hitting_player() {
+        use nw_content::instances::InstanceKind;
+        const HELPER: u64 = 2;
+        const IDLE: u64 = 3;
+        let mut world = dust_world();
+        for number in [HELPER, IDLE] {
+            world
+                .admit(&admit_at(number, CELL_M / 2.0, true), NOW, SERVER_TIME)
+                .expect("admit");
+        }
+        for number in [1, HELPER, IDLE] {
+            world.start_quest(number, DUST_QUEST, NOW).expect("quest");
+        }
+        let mob = crate::mobs::mob_entity(0);
+        let credit = world.mobs.get(mob).expect("mob").health.max().div_ceil(100);
+        for number in [1, HELPER] {
+            world.note_mob_damage(mob, number, credit);
+        }
+        let dust = [vec![(DUST.to_owned(), 1)]];
+        world.drop_loot_of(None, mob, 1, NOW);
+        assert_eq!(world.bags.items_for(1), dust);
+        assert!(
+            world.bags.items_for(HELPER).is_empty(),
+            "the open world's killer alone"
+        );
+        world.drop_loot_of(Some(InstanceKind::Expedition), mob, 1, NOW);
+        assert_eq!(world.bags.items_for(1).len(), 2, "the killer's second bag");
+        assert_eq!(
+            world.bags.items_for(HELPER),
+            dust,
+            "the hitting member's own bag"
+        );
+        assert!(
+            world.bags.items_for(IDLE).is_empty(),
+            "no bag for a player with no hits"
+        );
     }
 
     #[test]

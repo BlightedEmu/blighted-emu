@@ -39,11 +39,15 @@
 //! at the placement and built the camp 3.2 to 4.2 s later with no interaction: that older form
 //! is not run here.
 //!
-//! The camp is an entity of its owner's sim while the owner is in it. It goes when its owner leaves
-//! the server (a logout, a kick, a lost connection, the server's stop), and it moves with its
-//! owner into another sim. Observed: retail `Playthrough_Part_01` placed a camp at 3,290.8 s, and
-//! the camping states (1292) of `Playthrough_Part_02` and `_03`, the same player's later
-//! sessions, name no camp; players say the same of retail.
+//! The camp is an entity of its owner's sim while the owner is in it; it moves with its owner
+//! into another sim, and a save keeps it, so it stands again at its owner's next login.
+//! Observed: retail logins whose first own card (164, then the login calls 4142 and 6444) names
+//! a camp placed in an earlier session: `cooking_mount_vittles` (the camping state at 0.351 s)
+//! and `enemy_pvp_destroying_camp` (0.478 s; the camp's own `@CampT5_MasterNameF` entity is
+//! there, and an enemy destroys it at 11.024 s). `Playthrough_Part_02` and `_03` carry no camping
+//! state at all (no own card in those captures), so they show nothing of the camp of
+//! `Playthrough_Part_01`. Inferred: a server stop keeps the camps as a log out does (no capture
+//! shows a camp over a maintenance).
 
 use bevy_ecs::entity::Entity;
 use nw_bus::ConnectionRef;
@@ -434,22 +438,6 @@ impl SimWorld {
         });
         if let Some(camp) = camp {
             self.stations.remove_camp(camp.number);
-        }
-    }
-
-    /// The camp of player `entity` goes as it leaves the server ([`super::camps`]): a save after
-    /// this keeps no camp.
-    pub(super) fn camp_left_server(&mut self, entity: Entity) {
-        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            player.travel.forget_camp();
-        }
-    }
-
-    /// The camps of every player go as the server stops ([`Self::camp_left_server`]).
-    pub fn camps_left_server(&mut self) {
-        let players: Vec<Entity> = self.by_connection.values().copied().collect();
-        for entity in players {
-            self.camp_left_server(entity);
         }
     }
 

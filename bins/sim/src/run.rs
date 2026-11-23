@@ -48,8 +48,8 @@ use crate::mobs::{SpawnFilter, sim_spawns, spawns_of_level};
 use crate::player_content::{MobLooks, PlayerContent};
 use crate::server::{
     Databases, LATENCY_BUCKETS_SECONDS, LoopSettings, METRIC_HANDOFF_SECONDS,
-    METRIC_SNAPSHOT_SECONDS, METRIC_TICK_PART_SECONDS, METRIC_TICK_SECONDS, ServeError,
-    serve as serve_loop,
+    METRIC_HANDOFF_TAKE_SECONDS, METRIC_SNAPSHOT_SECONDS, METRIC_TICK_PART_SECONDS,
+    METRIC_TICK_SECONDS, ServeError, serve as serve_loop,
 };
 use crate::world::WorldSettings;
 
@@ -130,7 +130,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         world: secret(&config.world_database_password_env)?,
         global: secret(&config.global_database_password_env)?,
     };
-    init_logging(&config.log_filter)?;
+    let _log_flush = init_logging(&config.log_filter)?;
     let level = load_level(&config, &nw_content::layout::content_dir())?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -822,6 +822,12 @@ async fn serve_async(
             Matcher::Full(METRIC_HANDOFF_SECONDS.to_owned()),
             &LATENCY_BUCKETS_SECONDS,
         )
+        .and_then(|builder| {
+            builder.set_buckets_for_metric(
+                Matcher::Full(METRIC_HANDOFF_TAKE_SECONDS.to_owned()),
+                &LATENCY_BUCKETS_SECONDS,
+            )
+        })
         .and_then(|builder| {
             builder.set_buckets_for_metric(
                 Matcher::Full(METRIC_TICK_SECONDS.to_owned()),

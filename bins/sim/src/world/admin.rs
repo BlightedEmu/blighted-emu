@@ -16,6 +16,11 @@ use super::attack::Vitals;
 use super::gear::unix_ns;
 use super::{Placement, Player, QuestRefusal, SimWorld};
 
+/// How far above a GM teleport's asked point a floor may be and still be the one it lands on
+/// (our choice: a point from the data sits at most a few tenths of a metre off its floor, and
+/// no floor is stacked within 1 m above another).
+const TELEPORT_FLOOR_ABOVE_M: f32 = 1.0;
+
 /// The answer for a player whose character has no bag (no starter kit row for it).
 pub const NO_BAG: &str = "the player has no bag (its character has no starter kit)";
 
@@ -139,10 +144,22 @@ impl SimWorld {
         let position = nw_sim_core::Position {
             x: to.x,
             y: to.y,
-            z: to.z,
+            z: self.teleport_drop_start(to),
         };
         self.place_player(target, position, None, Placement::Drop, now_ms);
         AdminReply::Done
+    }
+
+    /// The height a GM teleport to `to` drops from: the floor at most
+    /// [`TELEPORT_FLOOR_ABOVE_M`] above the asked point when one is there, else the asked
+    /// height. A point taken from the data can sit just under its floor (live 2026-11-23: Horus's
+    /// spawn point in `nw_dungeon_brimstonesands_00` is 0.3 m under the arena floor), and a drop
+    /// from there fell through to the floor 61 m below.
+    fn teleport_drop_start(&self, to: Point) -> f32 {
+        self.ground
+            .floor_at(to.x, to.y, to.z + TELEPORT_FLOOR_ABOVE_M)
+            .filter(|floor| *floor > to.z && *floor <= to.z + TELEPORT_FLOOR_ABOVE_M)
+            .unwrap_or(to.z)
     }
 
     /// Changes the vitals of the player `entity`; the next own state sends the health.
@@ -482,6 +499,40 @@ mod tests {
             (player.x, player.y, player.z),
             (TARGET.x, TARGET.y, TARGET.z)
         );
+    }
+
+    /// A floor 0.3 m above the asked point and another 61 m below it (live 2026-11-23,
+    /// `nw_dungeon_brimstonesands_00`): the teleport lands on the near floor above.
+    #[test]
+    fn a_teleport_just_under_a_floor_lands_on_that_floor() {
+        const NEAR_FLOOR_ABOVE_M: f32 = 0.3;
+        const FAR_FLOOR_BELOW_M: f32 = 61.0;
+        struct TwoFloors;
+        impl nw_sim_core::Ground for TwoFloors {
+            fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+                Some(TARGET.z - FAR_FLOOR_BELOW_M)
+            }
+            fn floor_at(&self, _: f32, _: f32, z: f32) -> Option<f32> {
+                let near = TARGET.z + NEAR_FLOOR_ABOVE_M;
+                Some(if z >= near {
+                    near
+                } else {
+                    TARGET.z - FAR_FLOOR_BELOW_M
+                })
+            }
+        }
+        let mut world = admitted();
+        world.ground = std::sync::Arc::new(TwoFloors);
+        assert_eq!(
+            world.admin(&teleport(PLAYER, TARGET), NOW),
+            AdminReply::Done
+        );
+        let (players, _, _) = world.snapshot();
+        let player = players
+            .iter()
+            .find(|player| player.entity == PLAYER)
+            .expect("player");
+        assert_eq!(player.z, TARGET.z + NEAR_FLOOR_ABOVE_M);
     }
 
     #[test]

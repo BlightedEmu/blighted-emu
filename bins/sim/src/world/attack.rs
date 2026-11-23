@@ -3080,10 +3080,7 @@ impl SimWorld {
             kind = ?swing.kind,
             action = swing.attack.action,
             ?touched,
-            targets = ?places
-                .iter()
-                .map(|(mob, at, _)| (*mob, at.x, at.y, at.z))
-                .collect::<Vec<_>>(),
+            targets = places.len(),
             "player swing"
         );
         let touched: Vec<(u64, String)> = touched
@@ -3245,8 +3242,9 @@ impl SimWorld {
         self.apply_hit_with(target, source, amount, 0, now_ms, style)
     }
 
-    /// Mob `mob`, killed by player `killer`, counts for the kill tasks of the killer's quest
-    /// (`TaskKillContribution`; the tutorial counts its kills in its encounter).
+    /// Mob `mob`, killed by player `killer`, counts for the kill tasks of the quests of each
+    /// player the kill credits ([`SimWorld::kill_credit_takers`]; `TaskKillContribution`; the
+    /// tutorial counts its kills in its encounter).
     fn quest_kill(&mut self, mob: u64, killer: u64, now_ms: u64) {
         let content = Arc::clone(&self.content);
         let Some((vitals_id, categories)) = self
@@ -3259,15 +3257,18 @@ impl SimWorld {
         let spawn_categories = content
             .kill_types
             .spawn_categories(self.mobs.category_of(mob));
-        self.quest_event(
-            killer,
-            Event::Killed {
-                vitals_id,
-                categories,
-                spawn_categories: &spawn_categories,
-            },
-            now_ms,
-        );
+        let kind = self.instance_kind();
+        for taker in self.kill_credit_takers(kind, mob, killer) {
+            self.quest_event(
+                taker,
+                Event::Killed {
+                    vitals_id,
+                    categories,
+                    spawn_categories: &spawn_categories,
+                },
+                now_ms,
+            );
+        }
     }
 
     /// [`SimWorld::apply_hit`] of a mob hit of `style`: a player's 3601 carries its damage type
@@ -3289,6 +3290,9 @@ impl SimWorld {
             {
                 return None;
             }
+            // A scripted boss's rules, then the mob's health floor ([`super::health_floors`]).
+            let amount = self.boss_hit_amount(target, attacker, amount, now_ms);
+            let amount = self.floored_hit(target, attacker, amount);
             let damage = self.mobs.get_mut(target)?.health.take(amount);
             self.note_mob_damage(target, attacker, amount);
             self.outpost_rush_hit(target, attacker, amount);

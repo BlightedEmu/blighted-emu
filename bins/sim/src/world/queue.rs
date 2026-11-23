@@ -71,17 +71,10 @@ use super::catacombs::run_start_spot;
 use super::game_mode_entity::full;
 use super::{Player, SimWorld, send_now, unix_ns};
 
-/// The 6254 activity of the 3v3 arena (Observed: 16 retail arena joins).
-pub(super) const ARENA_ACTIVITY: u16 = 0x3316;
-/// The 6254 activity of Outpost Rush (Observed: `opr_que_and_lost` 522.066 s, `OPR_TEST3`
-/// 12.510 s).
-pub(super) const OUTPOST_RUSH_ACTIVITY: u16 = 0x3116;
-/// The 6254 activity of capture the flag (Observed:
-/// `CTF_QueueAndJoin_PickUpSpeedHealthAndFlagThenDied` 27.657 s, `CTF01`).
-pub(super) const CAPTURE_THE_FLAG_ACTIVITY: u16 = 0x3016;
-/// The 6254 activity of the catacombs (Observed: `CATACOMBS2` 4.546 s, `CATACOMBS6` 6.734 s and
-/// three Hive catacombs ledgers).
-pub(super) const CATACOMBS_ACTIVITY: u16 = 0x0c16;
+/// The 6254 activities of the queued game modes.
+pub(super) use nw_messages::game_mode::{
+    ARENA_ACTIVITY, CAPTURE_THE_FLAG_ACTIVITY, CATACOMBS_ACTIVITY, OUTPOST_RUSH_ACTIVITY,
+};
 /// The first byte of every retail 6295.
 const ROLE_SELECTION_FLAG: u8 = 1;
 /// The 6272 calls of one join; the last one queues (Observed: two per join).

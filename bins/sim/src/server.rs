@@ -169,6 +169,9 @@ pub const METRIC_ADMITS: &str = "sim_admits_total";
 pub const METRIC_HANDOFFS: &str = "sim_handoffs_total";
 /// Metric: time from the freeze to the answer of a handoff.
 pub const METRIC_HANDOFF_SECONDS: &str = "sim_handoff_seconds";
+/// Metric: time the target sim's loop spends on a handoff offer (the take and its answer): the
+/// rest of [`METRIC_HANDOFF_SECONDS`] is the bus and the wait in the target's loop.
+pub const METRIC_HANDOFF_TAKE_SECONDS: &str = "sim_handoff_take_seconds";
 /// Metric: inputs sent on to the sim that took their player.
 pub const METRIC_FORWARDED_INPUTS: &str = "sim_forwarded_inputs_total";
 /// Metric: forwarded client messages dropped because a direct one came first.
@@ -1491,6 +1494,7 @@ impl Loop {
 
     /// A handoff offer from another sim, or the cancel of one that this sim took too late.
     fn handoff(&mut self, handoff: Incoming<HandoffMessage>) {
+        let started = Instant::now();
         let reply = match &handoff.message {
             HandoffMessage::Offer(offer) => {
                 Some(match self.world.take(offer, self.now_ms(), server_time()) {
@@ -1524,6 +1528,8 @@ impl Loop {
         };
         if let Some(reply) = reply {
             self.reply(handoff, reply);
+            metrics::histogram!(METRIC_HANDOFF_TAKE_SECONDS)
+                .record(started.elapsed().as_secs_f64());
         }
         self.count_players();
     }
@@ -2333,7 +2339,6 @@ impl Loop {
     /// Tells every client that the world closes (1630), sends what waits, saves every player
     /// once more, and waits at most [`SHUTDOWN_SAVE_WAIT`] for every save.
     async fn finish(&mut self) {
-        self.world.camps_left_server();
         let departures = self.world.departures();
         // Retail took its players out so at a maintenance (`MSQ5-lv25`).
         let closing = [ServerMessage::PlayerManagerRejected(

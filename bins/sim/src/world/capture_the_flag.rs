@@ -271,6 +271,8 @@ const fn asset(hex: &str) -> [u8; RAW_ID_LEN] {
 /// The slices (Observed, the client's asset catalog).
 const RED_PICKUP: [u8; RAW_ID_LEN] = asset("224cb695559250a0b2d6cf05065a841b");
 const BLUE_PICKUP: [u8; RAW_ID_LEN] = asset("67019cab42325497856db759e7ab1da1");
+/// The slice assets of the flags that a player takes: team 0's red flag, team 1's blue flag.
+pub const FLAG_PICKUP_ASSETS: [[u8; RAW_ID_LEN]; TEAMS] = [RED_PICKUP, BLUE_PICKUP];
 const RED_CARRIED: [u8; RAW_ID_LEN] = asset("096ef9d6e08d5a5da73031982aa36239");
 const BLUE_CARRIED: [u8; RAW_ID_LEN] = asset("f3ce2d3f2855501aba6dd01bf04406f0");
 const RED_GHOST: [u8; RAW_ID_LEN] = asset("585238f486245e14a530ebae7b4cac26");
@@ -435,6 +437,14 @@ const LONG_BARRIER_SCALE: Scale = Scale::PerAxis {
     tag: 2,
     values: [16384, 16384, 15360],
 };
+
+/// The flag bases of each capture the flag map, team 0's then team 1's, in [`CTF_MAPS`] order:
+/// each base is its team's dropzone, where a bot that plays a match takes and brings flags.
+pub fn flag_bases() -> impl Iterator<Item = [[f32; 3]; TEAMS]> {
+    CTF_MAPS
+        .iter()
+        .map(|map| map.flag_bases.map(|base| [base.x, base.y, base.z()]))
+}
 
 const CTF_MAPS: [CtfMap; 2] = [
     CtfMap {

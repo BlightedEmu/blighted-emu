@@ -32,6 +32,10 @@
 //! `2026-11-13-kill-xp-rounding.md`). Inferred: the meta achievement and season counters stay the
 //! killer's, and an instance kill keeps the run share above, not the credit modifier.
 //!
+//! A quest kill and the loot bags of a kill in a catacombs run or an expedition are the killer's
+//! and each player's that its credit takes ([`SimWorld::kill_credit_takers`]; Inferred: the
+//! open-world credit rule above); in the open world they are the killer's alone.
+//!
 //! A killer on another sim gets nothing here, as it gets no loot (its sim does not hear of the
 //! kill). A tutorial mob's character experience comes from the tutorial's own order (its
 //! `KillExperience`); its masteries come from here.
@@ -55,7 +59,7 @@ use super::quest_objects::{gain_experience, grant};
 use super::seasons::SeasonEvent;
 use super::status_effects::GainKind;
 use super::tradeskill::{AZOTH_CURRENCY, ONE_FIRING, progression_gain};
-use super::{Body, Player, SimWorld};
+use super::{Body, Player, Position, SimWorld};
 use crate::player_content::PlayerContent;
 
 /// One firing of a gain.
@@ -73,6 +77,13 @@ struct CreditHits {
     damage: u64,
     /// When it last hit (sim ms).
     last_ms: u64,
+}
+
+impl CreditHits {
+    /// The hits still credit at `now_ms`: the last is no older than the credit time.
+    fn fresh(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.last_ms) <= CREDIT_TIME_LIMIT_MS
+    }
 }
 
 /// The players' hits on each mob that may credit them for its kill (module text), by the mob's
@@ -104,21 +115,25 @@ impl KillCredits {
     }
 
     /// The players whose hits on mob `mob` of `max_health` credit them at `now_ms`, in the
-    /// order they first hit; the mob's hits go, and so do every mob's hits older than the
-    /// credit time.
-    fn take(&mut self, mob: u64, max_health: u32, now_ms: u64) -> Vec<u64> {
-        let fresh = |hits: &CreditHits| now_ms.saturating_sub(hits.last_ms) <= CREDIT_TIME_LIMIT_MS;
+    /// order they first hit; the hits stay.
+    fn credited(&self, mob: u64, max_health: u32, now_ms: u64) -> Vec<u64> {
         let needed = f64::from(max_health) * f64::from(CREDIT_HEALTH_SHARE);
-        let credited = self
-            .hits
-            .remove(&mob)
-            .unwrap_or_default()
+        self.hits
+            .get(&mob)
             .into_iter()
-            .filter(|hits| fresh(hits) && damage_amount(hits.damage) >= needed)
+            .flatten()
+            .filter(|hits| hits.fresh(now_ms) && damage_amount(hits.damage) >= needed)
             .map(|hits| hits.player)
-            .collect();
+            .collect()
+    }
+
+    /// [`KillCredits::credited`], then the mob's hits go, and so do every mob's hits older than
+    /// the credit time.
+    fn take(&mut self, mob: u64, max_health: u32, now_ms: u64) -> Vec<u64> {
+        let credited = self.credited(mob, max_health, now_ms);
+        self.hits.remove(&mob);
         self.hits.retain(|_, hits| {
-            hits.retain(|hits| fresh(hits));
+            hits.retain(|hits| hits.fresh(now_ms));
             !hits.is_empty()
         });
         credited
@@ -237,14 +252,58 @@ impl SimWorld {
     /// killer, then each other player of this sim whose hits credit it and that stands in the
     /// credit range of the mob.
     fn credited_players(&mut self, mob: u64, killer: (Entity, u64)) -> Vec<(Entity, u64)> {
+        let (max_health, at) = self.credit_mob(mob);
+        let hitters = self.kill_credits.take(mob, max_health, self.last_now_ms);
+        self.in_credit_range(hitters, killer, at)
+    }
+
+    /// The players a kill of mob `mob` by player `killer` (entity number) credits for its quest
+    /// kill and its loot bags on a sim of the instance kind `kind` (module text): in a catacombs
+    /// run or an expedition the killer and each other player whose hits credit it and that
+    /// stands in the credit range, elsewhere the killer alone. The hits stay for the kill's
+    /// rewards.
+    pub(super) fn kill_credit_takers(
+        &mut self,
+        kind: Option<InstanceKind>,
+        mob: u64,
+        killer: u64,
+    ) -> Vec<u64> {
+        let instance = matches!(
+            kind,
+            Some(InstanceKind::Catacombs | InstanceKind::Expedition)
+        );
+        let Some(entity) = self.player_by_number(killer).filter(|_| instance) else {
+            return vec![killer];
+        };
+        let (max_health, at) = self.credit_mob(mob);
+        let hitters = self
+            .kill_credits
+            .credited(mob, max_health, self.last_now_ms);
+        self.in_credit_range(hitters, (entity, killer), at)
+            .into_iter()
+            .map(|(_, number)| number)
+            .collect()
+    }
+
+    /// The full health and the place of mob `mob` for its kill credit (no mob: no health and
+    /// no place).
+    fn credit_mob(&self, mob: u64) -> (u32, Option<Position>) {
         let (max_health, at) = self
             .mobs
             .get(mob)
             .map(|mob| (mob.health.max(), mob.position))
             .unzip();
-        let hitters = self
-            .kill_credits
-            .take(mob, max_health.unwrap_or_default(), self.last_now_ms);
+        (max_health.unwrap_or_default(), at)
+    }
+
+    /// The killer `killer` (entity, number), then each other player of `hitters` (entity
+    /// numbers) on this sim that stands in the credit range of the mob's place `at`.
+    fn in_credit_range(
+        &mut self,
+        hitters: Vec<u64>,
+        killer: (Entity, u64),
+        at: Option<Position>,
+    ) -> Vec<(Entity, u64)> {
         let mut credited = vec![killer];
         for number in hitters {
             if number == killer.1 {
@@ -700,17 +759,16 @@ mod tests {
         assert_eq!(gained(&mut world, mob_entity(1)), 2);
     }
 
-    #[test]
-    fn a_kill_that_two_players_hit_gives_each_the_shared_credit() {
-        const HELPER: u64 = PLAYER + 1;
-        const FAR: u64 = PLAYER + 2;
-        /// Out of the credit range of the mob at x 0.
-        const FAR_X: f32 = 500.0;
-        /// Raw 10 x 0.7 = 7 points, x 2; alone 10 x 2.
-        const SHARED: u32 = 14;
-        const ALONE: u32 = 20;
-        /// 100 coins x 0.8.
-        const SHARED_COINS: u64 = 80;
+    /// A player that hits the test mob along with the killer [`PLAYER`].
+    const HELPER: u64 = PLAYER + 1;
+    /// A player out of the credit range of the test mob.
+    const FAR: u64 = PLAYER + 2;
+    /// Out of the credit range of the mob at x 0.
+    const FAR_X: f32 = 500.0;
+
+    /// A sim with one live Legion mob (its health and place from the combat rows) and the
+    /// players `players` (entity number, x) admitted; the mob and the damage of one credit.
+    fn world_with_a_credit_mob(players: &[(u64, f32)]) -> (SimWorld, u64, u32) {
         /// The level of the spawn: the level of the content's kill rows.
         const LEGION_LEVEL: u32 = 1;
         // The credit reads the live mob's health and place: the combat rows give the spawn's
@@ -732,18 +790,33 @@ mod tests {
             ..VitalsSpawn::default()
         }]
         .into();
-        let mut world = world_with_combat(settings(MANY, MAX_PLAYERS), combat);
+        let limit = u32::try_from(players.len())
+            .expect("a few players")
+            .max(MAX_PLAYERS);
+        let mut world = world_with_combat(settings(MANY, limit), combat);
         world.set_table(&table(&["sim-a"])).expect("table");
         let mut content = content();
         content.gameplay.xp.character = RETAIL_MULTIPLIER;
         world.content = Arc::new(content);
-        for (number, x) in [(PLAYER, 0.0), (HELPER, 1.0), (FAR, FAR_X)] {
+        for &(number, x) in players {
             world
                 .admit(&admit_at(number, x, true), NOW, SERVER_TIME)
                 .expect("admit");
         }
         let mob = mob_entity(0);
         let credit = world.mobs.get(mob).expect("mob").health.max().div_ceil(100);
+        (world, mob, credit)
+    }
+
+    #[test]
+    fn a_kill_that_two_players_hit_gives_each_the_shared_credit() {
+        /// Raw 10 x 0.7 = 7 points, x 2; alone 10 x 2.
+        const SHARED: u32 = 14;
+        const ALONE: u32 = 20;
+        /// 100 coins x 0.8.
+        const SHARED_COINS: u64 = 80;
+        let (mut world, mob, credit) =
+            world_with_a_credit_mob(&[(PLAYER, 0.0), (HELPER, 1.0), (FAR, FAR_X)]);
         for number in [PLAYER, HELPER, FAR] {
             world.note_mob_damage(mob, number, credit);
         }
@@ -766,6 +839,41 @@ mod tests {
         world.reward_kill(mob, PLAYER);
         assert_eq!(state(&mut world, PLAYER).0, SHARED + 2 * ALONE);
         assert_eq!(state(&mut world, HELPER).0, SHARED);
+    }
+
+    /// An instance quest kill counts for the killer and each hitting player in the credit
+    /// range, not for a player with no hits; the open-world quest kill stays the killer's.
+    #[test]
+    fn an_instance_quest_kill_counts_for_each_hitting_player_and_the_open_world_for_the_killer() {
+        const IDLE: u64 = PLAYER + 3;
+        let (mut world, mob, credit) =
+            world_with_a_credit_mob(&[(PLAYER, 0.0), (HELPER, 1.0), (FAR, FAR_X), (IDLE, 2.0)]);
+        for number in [PLAYER, HELPER, FAR] {
+            world.note_mob_damage(mob, number, credit);
+        }
+        for kind in [InstanceKind::Expedition, InstanceKind::Catacombs] {
+            assert_eq!(
+                world.kill_credit_takers(Some(kind), mob, PLAYER),
+                [PLAYER, HELPER],
+                "{kind:?}: the killer and the hitting member; not the far one, not the idle one"
+            );
+        }
+        assert_eq!(
+            world.kill_credit_takers(Some(InstanceKind::Expedition), mob, HELPER),
+            [HELPER, PLAYER],
+            "a member's kill counts for the leader that hit too"
+        );
+        assert_eq!(
+            world.kill_credit_takers(None, mob, PLAYER),
+            [PLAYER],
+            "the open world's killer alone"
+        );
+        world.reward_kill(mob, PLAYER);
+        assert_eq!(
+            world.kill_credit_takers(Some(InstanceKind::Expedition), mob, PLAYER),
+            [PLAYER],
+            "the kill's rewards took the hits"
+        );
     }
 
     #[test]

@@ -347,11 +347,6 @@ impl TravelState {
         carried
     }
 
-    /// Its camp goes: a save after this keeps none ([`super::camps`]).
-    pub(super) fn forget_camp(&mut self) {
-        self.saved.placed_camp = None;
-    }
-
     /// The builder state changes by `change`: its set slots go out with the next travel states.
     pub(super) fn builder_changed(&mut self, change: BuilderState) {
         let due = self.due.builder.get_or_insert_default();
@@ -5048,25 +5043,38 @@ mod tests {
         }
 
         #[test]
-        fn a_camp_goes_when_its_owner_leaves_the_server() {
+        fn a_camp_is_saved_when_its_owner_leaves_the_server() {
             let (mut world, entity) = camp_world(true, 0);
             place(&mut world, NOW);
             build_whole_camp(&mut world, entity);
             let camp = camp_of(&world, entity).expect("camp");
             let departure = world.leave(&connection(CAMPER)).expect("departure");
-            assert!(!shown(&world, &camp), "the camp leaves with its owner");
+            assert!(
+                !shown(&world, &camp),
+                "the camp leaves the sim with its owner"
+            );
             let travel = departure.progression.expect("saved").travel;
-            assert_eq!(travel.placed_camp, None, "no camp is saved");
+            assert!(
+                travel.placed_camp.is_some(),
+                "the camp is saved for the next login"
+            );
         }
 
         #[test]
-        fn a_camp_goes_when_the_server_stops() {
+        fn a_camp_is_saved_when_the_server_stops() {
             let (mut world, entity) = camp_world(true, 0);
             place(&mut world, NOW);
             build_whole_camp(&mut world, entity);
-            world.camps_left_server();
-            let saved = world.departures()[0].progression.clone().expect("saved");
-            assert_eq!(saved.travel.placed_camp, None, "no camp is saved");
+            let camper = world
+                .departures()
+                .into_iter()
+                .find(|departure| departure.connection == connection(CAMPER))
+                .expect("the camper's departure");
+            let saved = camper.progression.expect("saved");
+            assert!(
+                saved.travel.placed_camp.is_some(),
+                "the camp is saved for the next login"
+            );
         }
 
         #[test]

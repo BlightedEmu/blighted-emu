@@ -19,6 +19,7 @@ use std::sync::Arc;
 use bevy_ecs::entity::Entity;
 use nw_bus::ItemState;
 use nw_bus::LootLimitCount;
+use nw_content::instances::InstanceKind;
 use nw_content::loot::{LootContext, LootRoll};
 use nw_content::loot_limits::{LimitCount, LootLimitCounts, LootLimitRules};
 use nw_content::perks::{chance_hit, rarity};
@@ -1022,14 +1023,42 @@ impl SimWorld {
         }
     }
 
-    /// Mob `mob`, killed by player `killer` at `now_ms`, drops its loot bag at its corpse: the
-    /// roll of its loot table at its type's `LootDropChance` ([`nw_content::loot::MobLoot`];
-    /// every kill of a mob type with a table drops a bag, loot note) for the killer, less the
-    /// items its loot limits hold back, with the items the killer's quests drop for it
-    /// ([`crate::objectives::ObjectiveRun::kill_drops`]); its loot tracker lists the bag when it
-    /// holds items. A killer on another sim, a mob type with neither a table nor a quest drop
-    /// and the tutorial drop nothing.
+    /// Mob `mob`, killed by player `killer` at `now_ms`, drops its loot bags on this sim's
+    /// instance kind ([`SimWorld::drop_loot_of`]).
     pub(super) fn drop_loot(&mut self, mob: u64, killer: u64, now_ms: u64) {
+        let kind = self.instance_kind();
+        self.drop_loot_of(kind, mob, killer, now_ms);
+    }
+
+    /// Mob `mob`, killed by player `killer` at `now_ms` on a sim of the instance kind `kind`,
+    /// drops a loot bag for each player the kill credits there
+    /// ([`SimWorld::kill_credit_takers`]): in a catacombs run or an expedition the killer and
+    /// each player whose hits credit it, each with its own roll and quest drops (Observed:
+    /// `EXP-The-Dynasty-Shipyard` 94.2-95.9 s and `dungeon_dynasty_tank_` 365.3-408.5 s, the recording
+    /// player hit `Dynasty_Summoner_Named_DG_Ebonscale_00` without the killing hit, looted a bag
+    /// at its corpse and its `0899_0801_d_02_TaskHaveAndReturnItems_Shackles` was complete at
+    /// 97.1 s and 419.1 s; Inferred: a player with no hits gets no bag), elsewhere the killer
+    /// alone ([`SimWorld::drop_loot_for`]).
+    pub(super) fn drop_loot_of(
+        &mut self,
+        kind: Option<InstanceKind>,
+        mob: u64,
+        killer: u64,
+        now_ms: u64,
+    ) {
+        for taker in self.kill_credit_takers(kind, mob, killer) {
+            self.drop_loot_for(mob, taker, now_ms);
+        }
+    }
+
+    /// Mob `mob` drops player `killer`'s loot bag at its corpse at `now_ms`: the roll of its
+    /// loot table at its type's `LootDropChance` ([`nw_content::loot::MobLoot`]; every kill of
+    /// a mob type with a table drops a bag, loot note) for the player, less the items its loot
+    /// limits hold back, with the items the player's quests drop for it
+    /// ([`crate::objectives::ObjectiveRun::kill_drops`]); its loot tracker lists the bag when it
+    /// holds items. A player on another sim, a mob type with neither a table nor a quest drop
+    /// and the tutorial drop nothing.
+    fn drop_loot_for(&mut self, mob: u64, killer: u64, now_ms: u64) {
         if self.is_tutorial() || self.player_by_number(killer).is_none() {
             return;
         }

@@ -137,6 +137,16 @@ pub(super) const CLAIM_POSITIONS: [[f32; 3]; CLAIM_KEYS.len()] = [
     [13694.403, 6314.9653, 45.882_137],
     [11507.5625, 8964.927, 418.562_65],
 ];
+
+/// The claim position of territory `territory` (its key in [`CLAIM_KEYS`]); `None` for a key
+/// that is no claim. A bot that defends an invasion stands there.
+pub fn claim_position(territory: u16) -> Option<[f32; 3]> {
+    CLAIM_KEYS
+        .iter()
+        .position(|key| *key == territory)
+        .map(|index| CLAIM_POSITIONS[index])
+}
+
 /// The taxes and fees of every claim: the only rates of `playerbaseattributes.pbadb` (each
 /// lowest rate equals its highest), and the governance of all 13 claims in every retail
 /// ledger. The missed-upkeep flag stays clear: what a missed upkeep does is Unknown (module

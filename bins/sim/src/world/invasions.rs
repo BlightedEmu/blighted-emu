@@ -84,20 +84,20 @@ use nw_messages::social::groups::{
     PRE_RAID_SELECTED as PRE_RAID_INVITED, PRE_RAID_WAR_ENDED as PRE_RAID_ENDED,
 };
 use nw_messages::war_states::{FortStructure, NO_SIDE_KEY, WarSide};
-use nw_messages::{BundleMember, CLAIM_KEYS, ClaimProgression, MemberState, ProgressionTier};
+use nw_messages::{BundleMember, ClaimProgression, MemberState, ProgressionTier};
 use nw_sim_core::Position;
 use nw_world::records::{PathMode, PatrolPath, VitalsSpawn};
 use uuid::Uuid;
 
 use super::attack::Vitals;
 use super::crafting::Station;
+use super::dungeon_script::CORPSE_MS;
 use super::encounter_roots::{
     History, MANAGER_CLASS, STAGE_CLASS, STATUS_FAILED, STATUS_IN_PROGRESS, STATUS_NOT_STARTED,
     STATUS_SUCCEEDED, manager_body, recorded,
 };
 use super::gates::merge_members;
 use super::gm_chat::DONE;
-use super::land_claims::CLAIM_POSITIONS;
 use super::town_projects::ProjectSlots;
 use super::war_fight::{CAPTURE_RADIUS_M, point_ownership, side_numbers};
 use super::wars::WarAnswer;
@@ -474,6 +474,10 @@ struct WaveMob {
     entity: u64,
     wave: usize,
     siege: bool,
+    /// When its health was first seen at nothing, Unix ms; `None` while it lives.
+    died_ms: Option<u64>,
+    /// Its body went for good ([`InvasionRun::buried`]).
+    buried: bool,
 }
 
 /// How an invasion ended here.
@@ -566,6 +570,32 @@ impl InvasionRun {
             .collect()
     }
 
+    /// The dead wave mobs (`health` gives each mob's health, `None` for one that is gone) whose
+    /// bodies stood [`CORPSE_MS`] at Unix ms `now_ms`: they go for good, as an encounter's dead
+    /// mobs do. A wave mob is a GM mob of the sim, and a dead GM mob respawns after the mob
+    /// respawn time; a respawned mob of a wave kept that wave from its end (live 2026-11-23:
+    /// mob 17179922627 died at 08:34:36Z and stood again at 29,680 health at 08:37:15Z, the
+    /// wave's Brute had no health at 08:37:09Z and 545,000 at 08:39:35Z; no wave after the first
+    /// started in 25 minutes). Retail's next wave waits for the last mob of the wave before it
+    /// (module doc), so its mobs stay dead.
+    fn buried(&mut self, health: impl Fn(u64) -> Option<u32>, now_ms: u64) -> Vec<u64> {
+        let mut gone = Vec::new();
+        for mob in self.mobs.iter_mut().filter(|mob| !mob.buried) {
+            match health(mob.entity) {
+                None => mob.buried = true,
+                Some(0) => {
+                    let died = *mob.died_ms.get_or_insert(now_ms);
+                    if now_ms.saturating_sub(died) >= CORPSE_MS {
+                        mob.buried = true;
+                        gone.push(mob.entity);
+                    }
+                }
+                Some(_) => mob.died_ms = None,
+            }
+        }
+        gone
+    }
+
     /// The wave's mobs that live (`alive` says which do).
     fn living(&self, wave: usize, alive: impl Fn(u64) -> bool) -> usize {
         self.mobs
@@ -631,10 +661,7 @@ impl SimWorld {
     /// (Inferred: a war fort's claim point stands at its territory's claim position, Observed in
     /// the six war forts).
     pub(super) fn invasion_place(&self, territory: u16) -> Option<[f32; 3]> {
-        CLAIM_KEYS
-            .iter()
-            .position(|key| *key == territory)
-            .map(|index| CLAIM_POSITIONS[index])
+        super::land_claims::claim_position(territory)
     }
 
     /// Player `entity` got the raid invite of `war`: an invasion's comes with the pre-raid status
@@ -780,6 +807,8 @@ impl SimWorld {
         }
         run.next_tick_ms = now_ms.saturating_add(INVASION_TICK_MS);
         self.spawn_due(run, now_ms);
+        let gone = run.buried(|entity| self.mobs.health(entity), now_ms);
+        self.remove_gm(&gone);
         self.advance_wave(run, war.starts_ms, now_ms);
         self.siege_walls(run);
         if self.claim_lost(run, now_ms) {
@@ -915,6 +944,8 @@ impl SimWorld {
                     entity,
                     wave: index,
                     siege: spawn.siege,
+                    died_ms: None,
+                    buried: false,
                 }),
                 None => tracing::warn!(vitals = spawn.vitals, level, "invasion mob not spawned"),
             }
@@ -1172,6 +1203,42 @@ mod tests {
         // Observed, territory 16: wave 4 due at +510 s waited for wave 3's last mob (+535.8 s).
         assert!(!next_wave_starts(STARTS_MS, 3, STARTS_MS + 520_000, false));
         assert!(next_wave_starts(STARTS_MS, 3, STARTS_MS + 535_800, true));
+    }
+
+    #[test]
+    fn a_dead_wave_mob_goes_after_its_corpse_time_and_a_living_one_stays() {
+        const DEAD: u64 = 1;
+        const ALIVE: u64 = 2;
+        const GONE: u64 = 3;
+        let mut run = InvasionRun::new(Uuid::nil(), fort(), [0.0; 3]);
+        for entity in [DEAD, ALIVE, GONE] {
+            run.mobs.push(WaveMob {
+                entity,
+                wave: 0,
+                siege: false,
+                died_ms: None,
+                buried: false,
+            });
+        }
+        let health = |entity| match entity {
+            DEAD => Some(0),
+            ALIVE => Some(100),
+            _ => None,
+        };
+        assert!(
+            run.buried(health, STARTS_MS).is_empty(),
+            "a body stands first"
+        );
+        assert!(run.buried(health, STARTS_MS + CORPSE_MS - 1).is_empty());
+        assert_eq!(run.buried(health, STARTS_MS + CORPSE_MS), [DEAD]);
+        assert!(
+            run.buried(health, STARTS_MS + 2 * CORPSE_MS).is_empty(),
+            "a buried mob goes once"
+        );
+        assert_eq!(
+            run.living(0, |entity| health(entity).is_some_and(|h| h > 0)),
+            1
+        );
     }
 
     #[test]

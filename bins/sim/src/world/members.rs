@@ -28,8 +28,8 @@ use nw_messages::{
     MessageError, MobStep, PLAYER_SLICE_ASSET, POS3_LEN, PlayerStates, RemoteEffect,
     RemoteMoveFlags, ReplicatedStateBundle, SPAWN_MOVEMENT, SPAWN_STATE_ID, SPAWN_STATE_MS,
     SPAWN_TELEPORT, STATUS_EFFECTS_TYPE_INDEX, ServerMessage, StatusEffectsState, StepPlace,
-    TeleportStep, VitalsData, VitalsState, boss_phase_change, change_members, offset_from,
-    player_members, raw_id_of_entity, remote_player_members,
+    TeleportStep, VitalsData, VitalsSlot0, VitalsState, boss_phase_change, change_members,
+    offset_from, player_members, raw_id_of_entity, remote_player_members,
 };
 use nw_sim_core::Position;
 
@@ -84,6 +84,10 @@ pub(super) struct MobCard {
     pub(super) boss_phase: Option<u32>,
     /// Its boss phase changed since the last bundle step.
     pub(super) boss_phase_changed: bool,
+    /// How it shows that it takes no hits, while it takes none ([`crate::mobs::Mobs::set_invulnerable`]).
+    pub(super) invulnerable: Option<crate::mobs::Invulnerable>,
+    /// That changed since the last bundle step.
+    pub(super) invulnerable_changed: bool,
     /// The status effects others see on it (`m_remoteEffectsMap`): the map's version and
     /// entries, once it held one.
     pub(super) remote_effects: Option<(u64, Vec<(u16, RemoteEffect)>)>,
@@ -143,6 +147,8 @@ pub(super) const fn card_of(
         first_damage: false,
         boss_phase: None,
         boss_phase_changed: false,
+        invulnerable: None,
+        invulnerable_changed: false,
         remote_effects: None,
         remote_effects_changed: false,
         skinned: false,
@@ -509,6 +515,7 @@ pub(super) fn mob_group(
             }
         })
     };
+    let vitals = with_invulnerability(vitals, card, carded);
     if let Some(vitals) = vitals {
         group.members.push(BundleMember {
             component: look.vitals_component,
@@ -615,13 +622,39 @@ pub(super) fn mob_group(
     Ok((!group.members.is_empty()).then_some(group))
 }
 
-/// Logs the members of mob `mob`'s group at debug level, as hex, so a live run can be compared
-/// byte for byte with the retail captures.
+/// The vitals state `vitals` of a mob's group with its invulnerability: a card of an
+/// invulnerable mob and each change carry `invulnerability` and `displayImmuneWhenInvulnerable`
+/// (both 0 when it takes hits again; Observed: Isabella's 134.278 s, `99g_msq_sm_destroyenemy`).
+fn with_invulnerability(
+    vitals: Option<VitalsState>,
+    card: &MobCard,
+    carded: bool,
+) -> Option<VitalsState> {
+    let shows = card.invulnerable_changed || (carded && card.invulnerable.is_some());
+    if !shows {
+        return vitals;
+    }
+    let mut vitals = vitals.unwrap_or(VitalsState {
+        slot_0: None,
+        slot_1: None,
+    });
+    let slot = vitals.slot_0.get_or_insert_with(VitalsSlot0::default);
+    slot.invulnerability = Some(u8::from(card.invulnerable.is_some()));
+    slot.display_immune = Some(u8::from(
+        card.invulnerable.is_some_and(|state| state.display_immune),
+    ));
+    Some(vitals)
+}
+
+/// Logs the members of mob `mob`'s group at trace level, as hex, so a live run can be compared
+/// byte for byte with the retail captures. Trace, not debug: it runs for every mob in a
+/// player's view at every bundle, and at debug it filled most of a 29 GB sim log in 1.5 hours
+/// of bot runs (2026-11-22).
 pub(super) fn log_mob_group(mob: u64, carded: bool, group: &BundleGroup) {
-    if !tracing::enabled!(tracing::Level::DEBUG) {
+    if !tracing::enabled!(tracing::Level::TRACE) {
         return;
     }
-    tracing::debug!(
+    tracing::trace!(
         mob,
         interest = group.interest,
         carded,
@@ -1682,6 +1715,70 @@ mod tests {
         assert!(carries(&card(true), false), "the change goes out");
         assert!(!carries(&card(false), false), "no change, nothing");
         assert!(carries(&card(false), true), "a card carries them");
+    }
+
+    /// Retail `99g_msq_sm_destroyenemy`: Isabella's vitals carry `invulnerability` and
+    /// `displayImmuneWhenInvulnerable` at each change (119.447 s on, 134.278 s off).
+    #[test]
+    fn an_invulnerable_mob_s_vitals_carry_its_state_at_each_change_and_card() {
+        const VITALS_COMPONENT: u64 = 9;
+        let look = MobLook {
+            asset: AssetId {
+                id: [0x3c; GDE_ID_LEN],
+                sub_id: DYNAMIC_SLICE_SUB_ID,
+            },
+            alc_component: MOB_ALC_COMPONENT,
+            vitals_component: VITALS_COMPONENT,
+            alc: None,
+            vitals: None,
+            first: Vec::new(),
+            death: Vec::new(),
+            drawn: Vec::new(),
+        };
+        let state = MobGhost {
+            health: 100,
+            max_health: 100,
+            returning: false,
+            vitals_id: 1,
+            category_id: 2,
+            level: 1,
+        };
+        let flags = |card: &MobCard, carded: bool| {
+            mob_group(FIRST_REMOTE_INTEREST, card, Some(&look), carded)
+                .expect("encode")
+                .expect("group")
+                .members
+                .iter()
+                .find_map(|member| match &member.state {
+                    MemberState::Vitals(VitalsState {
+                        slot_0: Some(slot), ..
+                    }) if member.component == VITALS_COMPONENT => {
+                        slot.invulnerability.zip(slot.display_immune)
+                    }
+                    _ => None,
+                })
+        };
+        let immune = MobCard {
+            health_changed: false,
+            invulnerable: Some(crate::mobs::Invulnerable {
+                display_immune: true,
+            }),
+            invulnerable_changed: true,
+            ..card_of(ENTITY, at(), state, None)
+        };
+        assert_eq!(flags(&immune, false), Some((1, 1)), "the change");
+        let held = MobCard {
+            invulnerable_changed: false,
+            ..immune.clone()
+        };
+        assert_eq!(flags(&held, false), None, "sent once");
+        assert_eq!(flags(&held, true), Some((1, 1)), "a card carries it");
+        let again = MobCard {
+            invulnerable: None,
+            invulnerable_changed: true,
+            ..held
+        };
+        assert_eq!(flags(&again, false), Some((0, 0)), "it takes hits again");
     }
 
     #[test]

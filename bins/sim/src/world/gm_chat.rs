@@ -71,6 +71,23 @@ const STATE_ON: &str = "on";
 const STATE_PENDING: &str = "pending";
 const STATE_OFF: &str = "off";
 const STATE_NONE: &str = "none";
+/// The first word of each `!sheet` line.
+pub const SHEET_LINE: &str = "sheet";
+/// The second word of the `!sheet` line of the spent attribute points.
+pub const SHEET_ATTRIBUTES: &str = "attributes";
+/// The second word of the `!sheet` line of the assigned weapon points.
+pub const SHEET_POINTS: &str = "points";
+/// The second word of the `!sheet` line of the masteries and standings with experience.
+const SHEET_MASTERIES: &str = "masteries";
+/// The second word of the `!sheet` line of the worn items.
+const SHEET_WORN: &str = "worn";
+/// The second word of the `!sheet` line of the placed camp.
+const SHEET_CAMP: &str = "camp";
+/// The second word of the `!sheet` line of the stored items, the last line.
+pub const SHEET_STORAGE: &str = "storage";
+/// The separator of a key and its value in a `!sheet` list, and of the list's entries.
+const SHEET_PAIR: char = ':';
+const SHEET_ENTRIES: &str = ",";
 
 /// The answer to `!company` when the social service made company `name`.
 pub fn company_made(name: &str) -> String {
@@ -87,7 +104,7 @@ struct Verb {
 }
 
 /// Every command, in the order of `!help`.
-const VERBS: [Verb; 30] = [
+const VERBS: [Verb; 31] = [
     Verb {
         name: "help",
         usage: "!help",
@@ -295,6 +312,11 @@ const VERBS: [Verb; 30] = [
         read: |words| target(words, 0).map(|(_, target)| Command::State { target }),
     },
     Verb {
+        name: "sheet",
+        usage: "!sheet [player]",
+        read: |words| target(words, 0).map(|(_, target)| Command::Sheet { target }),
+    },
+    Verb {
         name: "tp",
         usage: "!tp <x> <y> <z> [player] | !tp <player>",
         read: |words| match words {
@@ -498,6 +520,10 @@ enum Command {
     State {
         target: Target,
     },
+    /// The saved holdings of a player besides the `!state` line ([`SimWorld::sheet_lines`]).
+    Sheet {
+        target: Target,
+    },
     /// A player's faction ([`SimWorld::set_faction`]).
     Faction {
         target: Target,
@@ -674,6 +700,106 @@ impl SimWorld {
             player.mount.phase_word(),
             player.done_quests.len()
         )
+    }
+
+    /// The `!sheet` lines of player `number`: what a save keeps besides the `!state` line, each
+    /// list sorted by its key, so two reads of the same holdings give the same lines: the spent
+    /// attribute points (attribute id), the assigned weapon points (point id), the masteries and
+    /// standings with experience (progression id), the worn items (paperdoll slot), the placed
+    /// camp (place and tier) and the stored items (item id, total over every storage).
+    fn sheet_lines(&mut self, number: u64) -> Vec<String> {
+        let Some(player) = self
+            .player_by_number(number)
+            .and_then(|entity| self.world.get::<Player>(entity))
+        else {
+            return vec![NOT_HERE.to_owned()];
+        };
+        let mut attributes = player.attributes.carried();
+        attributes.sort_unstable();
+        let mut points = player.masteries.carried_points();
+        points.sort();
+        let masteries = player
+            .masteries
+            .carried()
+            .into_iter()
+            .filter(|(_, experience)| *experience > 0);
+        let mut worn = player
+            .gear
+            .as_ref()
+            .map(super::gear::Gear::worn_items)
+            .unwrap_or_default();
+        worn.sort();
+        let storage = player
+            .gear
+            .as_ref()
+            .map(super::gear::Gear::stored_totals)
+            .unwrap_or_default();
+        let camp = player.travel.carried().placed_camp.map_or_else(
+            || STATE_NONE.to_owned(),
+            |camp| {
+                let nw_bus::Point { x, y, z } = camp.position.point();
+                format!("{x:.1} {y:.1} {z:.1} tier {}", camp.tier)
+            },
+        );
+        let line = |part: &str, list: Vec<String>| {
+            let list = if list.is_empty() {
+                STATE_NONE.to_owned()
+            } else {
+                list.join(SHEET_ENTRIES)
+            };
+            format!("{SHEET_LINE} {part} {list}")
+        };
+        let pairs = |list: Vec<(String, String)>| {
+            list.into_iter()
+                .map(|(key, value)| format!("{key}{SHEET_PAIR}{value}"))
+                .collect::<Vec<_>>()
+        };
+        vec![
+            line(
+                SHEET_ATTRIBUTES,
+                pairs(
+                    attributes
+                        .into_iter()
+                        .map(|(id, spent)| (id.to_string(), spent.to_string()))
+                        .collect(),
+                ),
+            ),
+            line(
+                SHEET_POINTS,
+                pairs(
+                    points
+                        .into_iter()
+                        .map(|(id, level)| (id, level.to_string()))
+                        .collect(),
+                ),
+            ),
+            line(
+                SHEET_MASTERIES,
+                pairs(
+                    masteries
+                        .map(|(id, experience)| (id, experience.to_string()))
+                        .collect(),
+                ),
+            ),
+            line(
+                SHEET_WORN,
+                pairs(
+                    worn.into_iter()
+                        .map(|(slot, item)| (slot.to_string(), item))
+                        .collect(),
+                ),
+            ),
+            format!("{SHEET_LINE} {SHEET_CAMP} {camp}"),
+            line(
+                SHEET_STORAGE,
+                pairs(
+                    storage
+                        .into_iter()
+                        .map(|(item, count)| (item, count.to_string()))
+                        .collect(),
+                ),
+            ),
+        ]
     }
 
     /// Why no NPC would offer quest `objective` to player `number`: its requirement or its
@@ -952,6 +1078,10 @@ impl SimWorld {
             },
             Command::State { target } => match self.gm_target(&target, number) {
                 Some(entity) => vec![self.state_line(entity)],
+                None => vec![NOT_HERE.to_owned()],
+            },
+            Command::Sheet { target } => match self.gm_target(&target, number) {
+                Some(entity) => self.sheet_lines(entity),
                 None => vec![NOT_HERE.to_owned()],
             },
             Command::QuestPlan { target, objective } => match self.gm_target(&target, number) {
@@ -1428,6 +1558,31 @@ pub(super) mod tests {
             answers(&mut world, GM)[0].body,
             "state level 1 xp 0 coins 0 faction 0 pvp off inn none mount foot quests 0 done 0"
         );
+    }
+
+    #[test]
+    fn sheet_names_what_a_save_keeps_besides_the_state_line() {
+        let mut world = world();
+        chat(&mut world, GM, &format!("!masteryxp {SWORD} 20"));
+        answers(&mut world, GM);
+        chat(&mut world, GM, "!sheet");
+        let lines: Vec<String> = answers(&mut world, GM)
+            .into_iter()
+            .map(|line| line.body)
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "sheet attributes none".to_owned(),
+                "sheet points none".to_owned(),
+                format!("sheet masteries {SWORD}:20"),
+                "sheet worn none".to_owned(),
+                "sheet camp none".to_owned(),
+                "sheet storage none".to_owned(),
+            ]
+        );
+        chat(&mut world, GM, "!sheet Nobody");
+        assert_eq!(answers(&mut world, GM)[0].body, NOT_HERE);
     }
 
     #[test]

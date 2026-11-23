@@ -170,6 +170,11 @@ impl ShopCatalog {
     pub fn by_crc(&self, crc: u32) -> Option<&ShopOffer> {
         self.offers.get(&crc)
     }
+
+    /// Every offer, in no fixed order.
+    pub fn offers(&self) -> impl Iterator<Item = &ShopOffer> {
+        self.offers.values()
+    }
 }
 
 #[cfg(test)]
@@ -246,6 +251,23 @@ mod tests {
                 ..row("NotForSale")
             },
         ]
+    }
+
+    #[test]
+    fn every_offer_is_listed_once() {
+        let rows = retail_rows();
+        let catalog = ShopCatalog::of(&rows);
+        let mut listed: Vec<&str> = catalog
+            .offers()
+            .map(|offer| offer.conversion_id.as_str())
+            .collect();
+        listed.sort_unstable();
+        assert_eq!(listed.len(), catalog.len());
+        assert!(
+            !listed.contains(&"NotForSale"),
+            "a row not bought is no offer"
+        );
+        assert!(listed.contains(&"PotionCleanseFTW"));
     }
 
     #[test]

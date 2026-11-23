@@ -454,6 +454,17 @@ pub struct Mobs {
     casts: Vec<(u64, SpellCast)>,
     /// The way searches off the tick ([`Mobs::search_paths_off_tick`]); `None`: in the tick.
     paths: Option<PathPool>,
+    /// The mobs that take no hits now, by spawn index ([`Mobs::set_invulnerable`]).
+    invulnerable: FxHashMap<u32, Invulnerable>,
+}
+
+/// How a mob that takes no hits shows it: its vitals send `invulnerability` 1, and
+/// `displayImmuneWhenInvulnerable` 1 when `display_immune` (Observed: Isabella's intro sent
+/// both, `99g_msq_sm_destroyenemy` 119.447 s; her floors sent `invulnerability` alone, 155.045 s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Invulnerable {
+    /// The client shows "Immune" on its hits.
+    pub display_immune: bool,
 }
 
 /// Metres between mobs spawned together (a GM command, a tree's summon), on a ring around the
@@ -769,7 +780,29 @@ impl Mobs {
             status_changes: Vec::new(),
             casts: Vec::new(),
             paths: None,
+            invulnerable: FxHashMap::default(),
         }
+    }
+
+    /// Mob `entity` takes no hits while `state` is set ([`Self::hurt`] refuses them), or takes
+    /// them again with `None`. Its owner (a boss script) sets and clears it.
+    pub fn set_invulnerable(&mut self, entity: u64, state: Option<Invulnerable>) {
+        let Some(index) = spawn_index(entity) else {
+            return;
+        };
+        match state {
+            Some(state) => {
+                self.invulnerable.insert(index, state);
+            }
+            None => {
+                self.invulnerable.remove(&index);
+            }
+        }
+    }
+
+    /// How mob `entity` shows that it takes no hits; `None` while it takes them.
+    pub fn invulnerable(&self, entity: u64) -> Option<Invulnerable> {
+        self.invulnerable.get(&spawn_index(entity)?).copied()
     }
 
     /// The mobs' way searches run off the tick, on `threads` threads over `ground` (the ground of
@@ -984,6 +1017,7 @@ impl Mobs {
         };
         self.gm_ai.remove(&index);
         self.gm_assets.remove(&index);
+        self.invulnerable.remove(&index);
         self.live.remove(&index);
         self.awake.remove(&index);
         self.left.push(entity);
@@ -1948,7 +1982,10 @@ impl Mobs {
         let Some(mob) = self.live.get_mut(&index) else {
             return false;
         };
-        if mob.dead_since_ms.is_some() || mob.health.is_dead() {
+        if mob.dead_since_ms.is_some()
+            || mob.health.is_dead()
+            || self.invulnerable.contains_key(&index)
+        {
             return false;
         }
         let counts = match &mut mob.mind {
@@ -2830,6 +2867,23 @@ mod tests {
         run(&mut mobs, &[player], 0, 1_000);
         assert!(at(&mobs, 0).x > SPAWN_X, "it ran");
         assert_eq!(at(&mobs, 0).z, DECK, "the ground is far below the deck");
+    }
+
+    #[test]
+    fn an_invulnerable_mob_takes_no_hit_until_its_owner_clears_it() {
+        let mut mobs = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
+        mobs.set_cells(every);
+        let entity = mob_entity(0);
+        let from = player_at(SPAWN_X + 1.0).position;
+        let immune = Invulnerable {
+            display_immune: true,
+        };
+        mobs.set_invulnerable(entity, Some(immune));
+        assert_eq!(mobs.invulnerable(entity), Some(immune));
+        assert!(!mobs.hurt(entity, PLAYER, from, 1, TICK_MS), "refused");
+        mobs.set_invulnerable(entity, None);
+        assert_eq!(mobs.invulnerable(entity), None);
+        assert!(mobs.hurt(entity, PLAYER, from, 1, TICK_MS), "hit again");
     }
 
     #[test]

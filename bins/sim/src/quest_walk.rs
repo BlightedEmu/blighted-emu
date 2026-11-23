@@ -41,7 +41,7 @@ const WALK_LOG_FILTER: &str = "warn";
 /// or the report cannot be written.
 pub fn walk(config_path: &Path, report_path: &Path, only: Option<&str>) -> Result<(), RunError> {
     let config = load_sim_config(config_path)?;
-    init_logging(WALK_LOG_FILTER)?;
+    let _log_flush = init_logging(WALK_LOG_FILTER)?;
     let level = load_level(&config, &nw_content::layout::content_dir())?;
     let gateway = BusId::try_from(WALK_GATEWAY.to_owned()).map_err(RunError::WalkId)?;
     let mut world = walk_world(&config, &level)?;

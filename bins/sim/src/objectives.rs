@@ -427,6 +427,10 @@ impl TriggerArea {
 const CONVERSATION_STATE_MARK: &str = "_State_";
 /// Separates the numbers of an `OverrideLocation` cell.
 const LOCATION_SEPARATOR: char = ' ';
+/// The `FailOnCondition` of a `TaskTimer` that fails its branch: build 25810808 has it on two
+/// timers (`09A_M15_SoulTrial_Fail`, `M_task_courier_timer_Xs`); 23 others carry "0", plain
+/// timers (`01_SoleSurvivor_TaskTimer`).
+const CONDITION_SET: &str = "1";
 /// Milliseconds per second of a `TaskTimer` duration.
 const MS_PER_SECOND: f64 = 1000.0;
 /// Separates the categories of a `VitalsCategories` cell.
@@ -471,6 +475,14 @@ pub(crate) enum TaskKind {
     RemoveItem { item: String, count: u32 },
     /// Done after a time.
     Timer { duration_ms: u64 },
+    /// A `TaskTimer` with `FailOnCondition`: at its end its branch fails, so it is never done.
+    /// Retail `09A_M15_SoulTrial_Fail` (1 s, `FailOnCondition` 1) ends
+    /// `09A_M15_Container_Trial_Fail_Check`, the branch beside the trial fight
+    /// `09A_M15_Container_03` that fails the step of a player at the lighthouse who holds
+    /// `09A_M15_Inside_SoulTrial` outside the trial. This sim has no task failure; Inferred: the
+    /// branch never succeeds, so its partial container waits for the fight (live 2026-11-22
+    /// 16:52:28: the timer ended the container and the quest went on without the trial).
+    FailTimer,
     /// Done when the cinematic video of this id starts.
     CinematicStart(u32),
     /// Done when the cinematic video of this id ends.
@@ -1188,6 +1200,9 @@ fn kind_of(row: &TaskRow) -> TaskKind {
             item: item(),
             count,
         },
+        "tasktimer" if row.fail_on_condition.as_deref().map(str::trim) == Some(CONDITION_SET) => {
+            TaskKind::FailTimer
+        }
         "tasktimer" => TaskKind::Timer {
             // Durations are a few seconds: the cast cannot overflow.
             duration_ms: (row.duration.unwrap_or_default().max(0.0) * MS_PER_SECOND) as u64,
@@ -4733,6 +4748,47 @@ pub(crate) mod tests {
             ObjectiveRun::resume(tree, &broken, LATER).is_none(),
             "a task out of the tree"
         );
+    }
+
+    /// Retail `09A_M15_Container_Trial_Check`: the branch that ends in a `TaskTimer` with
+    /// `FailOnCondition` fails, so only the other branch ends the partial container.
+    #[test]
+    fn a_fail_timer_never_ends_its_partial_container() {
+        let rows = vec![
+            container("Root", "PartialTaskContainer", &["Fail_Check", "Fight"]),
+            container("Fail_Check", "ConsecutiveTaskContainer", &["Fail"]),
+            TaskRow {
+                duration: Some(TIMER_S),
+                fail_on_condition: Some("1".to_owned()),
+                ..row("Fail", "TaskTimer")
+            },
+            container("Fight", "ConsecutiveTaskContainer", &["Wait"]),
+            TaskRow {
+                duration: Some(TIMER_S * 2.0),
+                ..row("Wait", "TaskTimer")
+            },
+        ];
+        let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        run.tick(NOW + TIMER_MS);
+        assert!(run.is_active("Fail"), "it never ends");
+        assert!(!run.finished());
+        run.tick(NOW + 2 * TIMER_MS);
+        assert!(run.is_done("Fight"));
+        assert!(run.finished(), "the other branch ends the container");
+        // `01_SoleSurvivor_TaskTimer`: `FailOnCondition` 0 is a plain timer.
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["Wait"]),
+            TaskRow {
+                duration: Some(TIMER_S),
+                fail_on_condition: Some("0".to_owned()),
+                ..row("Wait", "TaskTimer")
+            },
+        ];
+        let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        run.tick(NOW + TIMER_MS);
+        assert!(run.finished(), "a plain timer ends");
     }
 
     /// The beach bag taken while the weapon pick waits behind an earlier step: its weapons held

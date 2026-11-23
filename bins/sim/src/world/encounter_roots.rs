@@ -996,6 +996,10 @@ impl StartObject {
 /// The gatherable controller state of an emptied gatherable (Observed: a catacombs chest goes
 /// from 4 to 8 when gathered and stays, `CATACOMBS5` 157.079 s).
 const DEPLETED_GATHERABLE_STATE: u8 = 8;
+/// The gatherable controller state of a gatherable that a player can take (Observed: the
+/// talisman piles of `nw_ori_er_questliang` come with 4, go to 8 when a player takes one and
+/// back to 4 about 17 s later, `99f_msq_er_fightliang` i9 163.212 s and 180.879 s).
+const STANDING_GATHERABLE_STATE: u8 = 4;
 
 /// The start objects of the open world's encounters.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1100,6 +1104,46 @@ impl EncounterObjects {
         object.depleted = true;
         object.version += 1;
         true
+    }
+
+    /// Emptied start object `number` stands again: its gatherable controller state goes back to
+    /// [`STANDING_GATHERABLE_STATE`] and a player can take it. Whether it stood emptied.
+    pub(super) fn replenish(&mut self, number: u64) -> bool {
+        let Some(object) = self
+            .objects
+            .get_mut(&number)
+            .filter(|object| object.depleted)
+        else {
+            return false;
+        };
+        object.changed.clear();
+        for member in &mut object.members {
+            if let MemberState::GatherableController(state) = &mut member.state {
+                state.gatherable_state = Some(STANDING_GATHERABLE_STATE);
+                object.changed.push(member.clone());
+            }
+        }
+        object.depleted = false;
+        object.version += 1;
+        true
+    }
+
+    /// The start objects of slice `slice` that stand, not emptied, within `radius_m` of
+    /// `position`.
+    pub(super) fn fresh_near<'a>(
+        &'a self,
+        slice: &'a str,
+        position: Position,
+        radius_m: f32,
+    ) -> impl Iterator<Item = u64> + 'a {
+        self.objects
+            .iter()
+            .filter(move |(_, object)| {
+                !object.depleted
+                    && object.slice == slice
+                    && object.position.horizontal_distance(position) <= radius_m
+            })
+            .map(|(number, _)| *number)
     }
 
     /// A player's gather of start object `number` starts: its interact state counts one
@@ -1765,6 +1809,57 @@ mod tests {
             })
         ));
         assert!(objects.group(number, slot(false), &mut sent).is_none());
+    }
+
+    /// Retail `99f_msq_er_fightliang` i9: a talisman pile taken by touch goes to 8 (163.212 s)
+    /// and stands again with 4 (180.879 s); only a pile that is not emptied is found near.
+    #[test]
+    fn an_emptied_start_object_stands_again_and_sends_its_state() {
+        const PILE: &str = "slices/gatherables/msq/msq_abominableliang_talismanpile.dynamicslice";
+        let table = TownProps::parse(&format!(
+            r#"{{"props": [{{"asset": "d0368aa17e2856b696d8a96f0180366c", "slice": "{PILE}",
+            "members": ["010d0103448124ae446d167f1c0903da81", "020c010104"]}}]}}"#
+        ))
+        .expect("table");
+        let mut objects = EncounterObjects::build(&table);
+        let number = objects.spawn(PILE, AT, 0.0).expect("spawned");
+        let near = Position {
+            x: AT[0] + 0.5,
+            y: AT[1],
+            z: AT[2],
+        };
+        assert_eq!(
+            objects.fresh_near(PILE, near, 1.0).collect::<Vec<_>>(),
+            [number]
+        );
+        assert_eq!(
+            objects
+                .fresh_near("slices/other.dynamicslice", near, 1.0)
+                .count(),
+            0
+        );
+        assert!(!objects.replenish(number), "it stands already");
+        let mut sent = HashMap::new();
+        objects.group(number, slot(true), &mut sent).expect("card");
+        assert!(objects.deplete(number));
+        assert_eq!(objects.fresh_near(PILE, near, 1.0).count(), 0, "emptied");
+        objects
+            .group(number, slot(false), &mut sent)
+            .expect("emptied state");
+        assert!(objects.replenish(number));
+        let change = objects
+            .group(number, slot(false), &mut sent)
+            .expect("the change");
+        assert!(matches!(
+            change.members[..],
+            [BundleMember {
+                state: MemberState::GatherableController(nw_messages::GatherableControllerState {
+                    gatherable_state: Some(STANDING_GATHERABLE_STATE)
+                }),
+                ..
+            }]
+        ));
+        assert_eq!(objects.fresh_near(PILE, near, 1.0).count(), 1);
     }
 
     /// The encoded members of `group`.

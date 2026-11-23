@@ -290,6 +290,14 @@ const OUTPOST_MAPS: [OutpostMap; 3] = [
     },
 ];
 
+/// The places of the outposts A, B and C of each Outpost Rush map, in [`OUTPOST_MAPS`] order:
+/// a bot that plays a match walks onto them.
+pub fn outpost_places() -> impl Iterator<Item = [[f32; 3]; 3]> {
+    OUTPOST_MAPS
+        .iter()
+        .map(|map| map.outposts.map(|outpost| outpost.position))
+}
+
 /// The bits of one structure in an outpost's structure status, the tier's bits among them
 /// (Observed: [`super::outpost_rush_structures`], helper B10).
 const STATUS_SLOT_BITS: u32 = 3;

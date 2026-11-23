@@ -102,6 +102,10 @@ use super::{Body, Player, SimWorld, Vitals};
 use crate::mob_ai::script_mob_ai;
 use crate::objectives::Event;
 
+/// What the name of an encounter's intro stage holds, in lower case (`Intro 1 - Play`,
+/// `01 - Intro - Brute Goliath`, `Stage1_Intro`; [`DungeonRun::boss_intro_over`]).
+pub(super) const INTRO_STAGE_MARK: &str = "intro";
+
 /// Milliseconds in a second.
 const MS_PER_S: u64 = 1_000;
 const MS_PER_S_F64: f64 = 1_000.0;
@@ -121,7 +125,7 @@ pub(super) const EVENT_DEACTIVATE: u32 = 3;
 const DEFAULT_VOLUME_RADIUS_M: f32 = 30.0;
 /// How long a dead encounter mob's body stays before it goes (Inferred: the retail bodies of
 /// the tutorial stayed 5.1 to 7.1 s after their death, encounter note).
-const CORPSE_MS: u64 = 7_000;
+pub(super) const CORPSE_MS: u64 = 7_000;
 /// The blackboard key of a boss's phase (behavior-tree study, engine key table).
 const BOSS_PHASE_KEY: &str = "Boss_Phase";
 /// The potency of a hazard object's area effects (Inferred: the effect's own potency; the
@@ -292,6 +296,9 @@ struct EncounterMob {
     /// AI`, its shield's destruction) went on after its first sulfur elemental died
     /// (`1624_0401_thedemonscauldron` 200.2 s) until the shield's gather ended (220.0 s).
     of_object: bool,
+    /// The member of its spawner slice it is ([`TargetSlice::members`]); `None` for a mob of a
+    /// slice of one mob kind.
+    member: Option<usize>,
 }
 
 /// A mob that a slice spawn's own delayed event makes later
@@ -794,6 +801,67 @@ impl DungeonRun {
             .map(|mob| mob.entity)
     }
 
+    /// Where the intro of the encounter that spawned mob `mob` is, when `mob` is a boss of it
+    /// (the mob of a target that an objective of one of its top stages tracks) and the
+    /// encounter has intro stages (a stage whose name holds [`INTRO_STAGE_MARK`]): `false` while
+    /// none of them has started or one runs, `true` once one started and none runs. `None` for
+    /// another mob.
+    pub(super) fn boss_intro_over(&self, mob: u64) -> Option<bool> {
+        let (encounter, run, own) = self
+            .script
+            .encounters
+            .iter()
+            .zip(&self.encounters)
+            .find_map(|(encounter, run)| {
+                let own = run.mobs.iter().find(|known| known.entity == mob)?;
+                Some((encounter, run, own))
+            })?;
+        let boss = encounter.top_stages.iter().any(|&top| {
+            encounter.stages.get(top).is_some_and(|stage| {
+                stage
+                    .objectives
+                    .iter()
+                    .any(|objective| match objective.kind {
+                        ObjectiveSpec::SliceDestroyed {
+                            target: Some(target),
+                            ..
+                        } => is_of(encounter, own, target),
+                        _ => false,
+                    })
+            })
+        });
+        let intros: Vec<StageStatus> = encounter
+            .stages
+            .iter()
+            .zip(&run.stages)
+            .filter(|(stage, _)| stage.name.to_lowercase().contains(INTRO_STAGE_MARK))
+            .map(|(_, stage)| stage.status)
+            .collect();
+        if !boss || intros.is_empty() {
+            return None;
+        }
+        let started = intros.iter().any(|status| *status != StageStatus::Pending);
+        let running = intros.contains(&StageStatus::Running);
+        Some(started && !running)
+    }
+
+    /// When the stage named `stage` of the encounter that spawned mob `mob` started, while it
+    /// runs or after it ended; `None` before it started, or for a mob of no encounter.
+    pub(super) fn stage_started_ms(&self, mob: u64, stage: &str) -> Option<u64> {
+        let (encounter, run) = self
+            .script
+            .encounters
+            .iter()
+            .zip(&self.encounters)
+            .find(|(_, run)| run.mobs.iter().any(|known| known.entity == mob))?;
+        let index = encounter
+            .stages
+            .iter()
+            .position(|known| known.name == stage)?;
+        let stage = run.stages.get(index)?;
+        matches!(stage.status, StageStatus::Running | StageStatus::Done).then_some(stage.started_ms)
+    }
+
     /// One tick at `now_ms`. `owned` names the encounters this sim runs, by index (every one
     /// when it is empty): an encounter of another sim's cell resets here.
     pub(super) fn tick(
@@ -1160,6 +1228,7 @@ fn timed_due(run: &mut EncounterRun, host: &mut impl ScriptHost, now_ms: u64) {
                 refill_at: None,
                 ends_ms: timed.ends_ms,
                 of_object: false,
+                member: None,
             }),
             None => tracing::warn!(vitals = %timed.mob.vitals_id, "a timed spawn cannot spawn"),
         }
@@ -1222,6 +1291,7 @@ fn spawn_hazard(
         refill_at: Some(at),
         ends_ms: Some(now_ms.saturating_add(seconds_to_ms(hazard.life_s))),
         of_object: false,
+        member: None,
     });
     run.hazard_areas
         .extend(hazard.areas.iter().map(|area| HazardArea {
@@ -1624,6 +1694,7 @@ fn spawn_one(
                             refill_at: None,
                             ends_ms,
                             of_object: false,
+                            member: None,
                         });
                         if !target_slice.gather_mobs.is_empty() {
                             run.gather_clocks.push(GatherClock {
@@ -1652,6 +1723,23 @@ fn spawn_one(
             continue;
         };
         let at = at_of(number);
+        let members = &target.slices[slice].members;
+        if !members.is_empty() {
+            // A spawner slice of mixed mobs makes each point spawner's mob at its own place.
+            for (index, member) in members.iter().enumerate() {
+                let place = turned_point(member.offset, at, yaw_of(number));
+                spawn_mob(
+                    run,
+                    host,
+                    &member.mob,
+                    (spawn.target, slice, stage),
+                    (place, None),
+                    target,
+                    Some(index),
+                );
+            }
+            continue;
+        }
         let refill = target.slices[slice].refill.as_ref();
         for index in 0..per_spawn(slice) {
             // An area spawner's mobs stand at its points, turned with the spawn.
@@ -1670,9 +1758,9 @@ fn spawn_one(
                 host,
                 mob,
                 (spawn.target, slice, stage),
-                place,
-                refill_at,
+                (place, refill_at),
                 target,
+                None,
             );
         }
     }
@@ -1727,18 +1815,27 @@ fn in_family<'a>(
 }
 
 /// Spawns mob `mob` of slice `slice` of target `target_index` for stage `stage` at `at`; an
-/// area spawner's mob keeps `refill_at`, the point it comes back at. Its entity, or `None` when
-/// it cannot spawn.
+/// area spawner's mob keeps `refill_at`, the point it comes back at; a member of a spawner
+/// slice of mixed mobs (`member`, [`TargetSlice::members`]) walks its own waypoints. Its entity,
+/// or `None` when it cannot spawn.
 fn spawn_mob(
     run: &mut EncounterRun,
     host: &mut impl ScriptHost,
     mob: &TargetMob,
     (target_index, slice, stage): (usize, usize, usize),
-    at: [f32; 3],
-    refill_at: Option<[f32; 3]>,
+    (at, refill_at): ([f32; 3], Option<[f32; 3]>),
     target: &Target,
+    member: Option<usize>,
 ) -> Option<u64> {
-    let entity = host.spawn(mob, at, target.slices[slice].waypoints.as_ref());
+    let own = &target.slices[slice];
+    let waypoints = match member {
+        Some(index) => own
+            .members
+            .get(index)
+            .and_then(|member| member.waypoints.as_ref()),
+        None => own.waypoints.as_ref(),
+    };
+    let entity = host.spawn(mob, at, waypoints);
     match entity {
         Some(entity) => run.mobs.push(EncounterMob {
             entity,
@@ -1750,6 +1847,7 @@ fn spawn_mob(
             refill_at,
             ends_ms: None,
             of_object: false,
+            member,
         }),
         None => tracing::warn!(
             vitals = %mob.vitals_id,
@@ -1821,7 +1919,7 @@ fn spawn_picked(
     let target = encounter.targets.get(picked.target)?;
     let mob = &choice_of(encounter, picked)?.mob;
     let place = (picked.target, picked.slice, picked.stage);
-    spawn_mob(run, host, mob, place, picked.at, None, target)
+    spawn_mob(run, host, mob, place, (picked.at, None), target, None)
 }
 
 /// The comebacks of the spawners stage `stage` picked ([`PickedSpawner`]): the dead mob of a
@@ -1955,6 +2053,7 @@ fn gather_clocks_due(
                     refill_at: None,
                     ends_ms: None,
                     of_object: true,
+                    member: None,
                 }),
                 None => {
                     tracing::warn!(vitals = %timed.mob.vitals_id, "a gather spawn cannot spawn")
@@ -2038,7 +2137,15 @@ fn refill_due(
         };
         let mob = alias_rolled(host, slice, mob, difficulty);
         let place = (refill.target, refill.slice, refill.stage);
-        spawn_mob(run, host, mob, place, refill.at, Some(refill.at), target);
+        spawn_mob(
+            run,
+            host,
+            mob,
+            place,
+            (refill.at, Some(refill.at)),
+            target,
+            None,
+        );
     }
 }
 
@@ -2170,6 +2277,19 @@ fn is_of(encounter: &Encounter, mob: &EncounterMob, target: usize) -> bool {
     else {
         return false;
     };
+    if let Some(member) = mob.member.and_then(|index| own.members.get(index)) {
+        // A member of a spawner slice of mixed mobs is its spawner slice's, its own creature
+        // slice's and its own row's mob: the cave summoner ends the wave that tracks it.
+        return encounter.targets.get(target).is_some_and(|wanted| {
+            wanted.slices.iter().any(|slice| {
+                slice.path == own.path
+                    || member.slices.contains(&slice.path)
+                    || slice.mob.as_ref().is_some_and(|wanted| {
+                        wanted.vitals_id.eq_ignore_ascii_case(&member.mob.vitals_id)
+                    })
+            })
+        });
+    }
     encounter.targets.get(target).is_some_and(|wanted| {
         wanted.slices.iter().any(|slice| {
             slice.path == own.path
@@ -2236,14 +2356,24 @@ fn spawns_for(
     else {
         return false;
     };
-    if mob.of_object || own.spawned_slices.is_empty() {
+    if mob.of_object {
         return false;
     }
-    match target {
-        Some(target) => encounter
+    let same_slice = |target: usize| {
+        encounter
             .targets
             .get(target)
-            .is_some_and(|wanted| wanted.slices.iter().any(|slice| slice.path == own.path)),
+            .is_some_and(|wanted| wanted.slices.iter().any(|slice| slice.path == own.path))
+    };
+    // A creature slice that the target names and the stage spawns itself, with no spawner in
+    // it, is its own spawn. Observed: `QuestAdiana`'s `00 - Setup` (SliceSpawned of target 0,
+    // `ai_fl_adiana_archer`) ended at 264.542 s, 12 ms after Adiana's card (264.530 s,
+    // `09a_m15_fightartemis`).
+    if own.spawned_slices.is_empty() {
+        return own.mob.is_some() && target.is_some_and(same_slice);
+    }
+    match target {
+        Some(target) => same_slice(target),
         None => is_under(encounter, mob.stage, stage),
     }
 }
@@ -2587,7 +2717,9 @@ impl SimWorld {
     /// with it and ends with it; its encounters run; an ended one opens its loot containers,
     /// and the last one completes the instance.
     pub(super) fn tick_dungeon_script(&mut self, now_ms: u64) {
-        let events = self.mobs.take_encounter_events();
+        let mut events = self.mobs.take_encounter_events();
+        // The scripted bosses' events ([`super::boss_scripts`]).
+        events.extend(self.boss_fights.take_events());
         if !self.instance_sim {
             self.tick_world_events(events, now_ms);
             return;
@@ -2612,6 +2744,12 @@ impl SimWorld {
                 .as_ref()
                 .map_or(0, |(instance, _)| instance.as_u64_pair().0);
             self.start_gates(running.as_ref().map(|(_, mode)| mode.as_str()), salt);
+            // The script's start objects (the talisman piles of `QuestLiang`) are slices of the
+            // start objects table; a catacombs run builds its own ([`super::catacombs`]), and an
+            // instance sim runs no open world encounters that hold one.
+            if running.is_some() && self.catacomb_run().is_none() && self.world_events.is_none() {
+                self.encounter_objects = EncounterObjects::build(&self.content.encounter_objects);
+            }
             self.dungeon_run = running.and_then(|(instance, game_mode)| {
                 // A catacombs run's script is made from its layout ([`super::catacombs`]).
                 let script = match self.catacomb_run() {
@@ -2920,7 +3058,7 @@ impl SimWorld {
 mod tests {
     use std::collections::HashMap;
 
-    use nw_world::dungeon_scripts::{Stage, StageObjective, Target, TargetSlice};
+    use nw_world::dungeon_scripts::{SpawnerMember, Stage, StageObjective, Target, TargetSlice};
 
     use super::*;
 
@@ -3497,6 +3635,176 @@ mod tests {
         assert_eq!(run.chests_of(0).count(), 1);
         run.tick(&mut host, &view(&[PLACE]), &[], T0 + 4 + CORPSE_MS);
         assert_eq!(host.removed, [1], "the body goes after its corpse time");
+    }
+
+    /// Retail `09a_m15_fightartemis`: Adiana spawns 1 s into her setup (263.141 -> 264.542 s),
+    /// and her intro stage, beside the wait that waits for its parent, starts with her fight.
+    #[test]
+    fn the_adiana_trial_s_intro_starts_after_her_spawn() {
+        use nw_content::layout::repo_layout;
+        use nw_world::dungeon_scripts::DungeonScripts;
+        let scripts = DungeonScripts::load(&repo_layout()).expect("dungeon scripts file");
+        let script = scripts
+            .game_mode("QuestAdiana")
+            .expect("QuestAdiana")
+            .clone();
+        let at = script.encounters[0].position;
+        let mut run = DungeonRun::of_trial(Uuid::nil(), script, false);
+        let mut host = Host::default();
+        for tick in 0..30 {
+            run.tick(&mut host, &view(&[at]), &[], T0 + tick * 100);
+        }
+        let boss = host
+            .spawned
+            .iter()
+            .position(|(vitals, _)| vitals == "FL_AI_Adiana_Bow");
+        let boss = u64::try_from(boss.expect("the boss spawned") + 1).expect("entity");
+        assert!(run.stage_started_ms(boss, "01 - Intro").is_some());
+    }
+
+    /// A boss script times its events from its encounter's stages ([`super::boss_scripts`]).
+    #[test]
+    fn a_boss_s_stage_start_is_known_while_it_runs_and_after_it() {
+        const BOSS: u64 = 1;
+        let mut run = DungeonRun::new(Uuid::nil(), script(vec![boss_encounter()]));
+        let mut host = Host::default();
+        run.tick(&mut host, &view(&[[0.0, 0.0, 0.0]]), &[], T0);
+        run.tick(&mut host, &view(&[[0.0, 0.0, 0.0]]), &[], T0 + 1);
+        assert_eq!(run.stage_started_ms(BOSS, "Phase 1 Intro"), None, "not yet");
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 2);
+        assert_eq!(run.stage_started_ms(BOSS, "Phase 1 Intro"), Some(T0 + 2));
+        let mut events = view(&[PLACE]);
+        events.events.push((BOSS, "Intro2_Complete".to_owned()));
+        run.tick(&mut host, &events, &[], T0 + 3);
+        assert_eq!(
+            run.stage_started_ms(BOSS, "Phase 1 Intro"),
+            Some(T0 + 2),
+            "done"
+        );
+        assert_eq!(run.stage_started_ms(BOSS, "No such stage"), None);
+        assert_eq!(
+            run.stage_started_ms(BOSS + 100, "Phase 1 Intro"),
+            None,
+            "no mob of it"
+        );
+    }
+
+    /// A boss's intro is over once an intro stage started and none runs; a mob that no top
+    /// stage tracks has none.
+    #[test]
+    fn a_boss_intro_is_over_once_its_intro_stages_ran() {
+        const BOSS_MOB: u64 = 1;
+        let mut run = DungeonRun::new(Uuid::nil(), script(vec![boss_encounter()]));
+        let mut host = Host::default();
+        let far = [0.0, 0.0, 0.0];
+        run.tick(&mut host, &view(&[far]), &[], T0);
+        run.tick(&mut host, &view(&[far]), &[], T0 + 1);
+        assert_eq!(run.boss_intro_over(BOSS_MOB), Some(false), "no intro yet");
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 2);
+        assert_eq!(run.boss_intro_over(BOSS_MOB), Some(false), "the intro runs");
+        let mut events = view(&[PLACE]);
+        events.events.push((BOSS_MOB, "Intro2_Complete".to_owned()));
+        run.tick(&mut host, &events, &[], T0 + 3);
+        assert_eq!(run.boss_intro_over(BOSS_MOB), Some(true));
+        assert_eq!(run.boss_intro_over(BOSS_MOB + 100), None, "no mob of it");
+    }
+
+    /// A spawner slice of mixed mobs makes each member at its own place, and a wave that tracks
+    /// one member's creature slice ends with that member's death only (the Shipyard cave's
+    /// `Wave_01` ends when its summoner dies, not its swarmers).
+    #[test]
+    fn a_mixed_spawner_slice_spawns_each_member_and_only_its_tracked_member_ends_the_wave() {
+        const SWARMER: &str = "Corruption_Swarmer_DG_Ebonscale_00";
+        const SUMMONER: &str = "Dynasty_Summoner_Named_DG_Ebonscale_00";
+        const SUMMONER_SLICE: &str = "slices/characters/corrupted_dynasty_summoner.dynamicslice";
+        const SUMMONER_AT: [f32; 3] = [-1.0, 9.0, 0.0];
+        const SPAWNER: usize = 0;
+        const TRACKED: usize = 1;
+        let member = |vitals: &str, offset: [f32; 3], slice: &str| SpawnerMember {
+            mob: TargetMob {
+                vitals_id: vitals.to_owned(),
+                category_id: String::new(),
+                level: LEVEL,
+            },
+            offset,
+            slices: vec![slice.to_owned()],
+            waypoints: None,
+        };
+        let mut spawner = target(SWARMER);
+        spawner.slices[0].members = vec![
+            member(
+                SWARMER,
+                [0.0; 3],
+                "slices/characters/corruption_swarmer.dynamicslice",
+            ),
+            member(SUMMONER, SUMMONER_AT, SUMMONER_SLICE),
+        ];
+        let tracked = Target {
+            name: SUMMONER_SLICE.to_owned(),
+            slices: vec![TargetSlice {
+                path: SUMMONER_SLICE.to_owned(),
+                ..TargetSlice::default()
+            }],
+        };
+        let wave = Stage {
+            name: "Wave_01 - Objective: Kill Enemies".to_owned(),
+            spawns: vec![Spawn {
+                target: SPAWNER,
+                count: 1,
+                ..Spawn::default()
+            }],
+            objectives: vec![objective(
+                ObjectiveSpec::SliceDestroyed {
+                    target: Some(TRACKED),
+                    required: 1,
+                },
+                0,
+                false,
+            )],
+            ..Stage::default()
+        };
+        let cave = Encounter {
+            name: "EncounterCave".to_owned(),
+            position: PLACE,
+            auto_activate: true,
+            grace_period_s: GRACE_S,
+            detection_radius_m: Some(RADIUS_M),
+            top_stages: vec![0],
+            stages: vec![wave],
+            targets: vec![spawner, tracked],
+            ..Encounter::default()
+        };
+        let mut run = DungeonRun::new(Uuid::nil(), script(vec![cave]));
+        let mut host = Host::default();
+        run.tick(&mut host, &view(&[PLACE]), &[], T0);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
+        let summoner_at = [
+            PLACE[0] + SUMMONER_AT[0],
+            PLACE[1] + SUMMONER_AT[1],
+            PLACE[2] + SUMMONER_AT[2],
+        ];
+        assert_eq!(
+            host.spawned,
+            [
+                (SWARMER.to_owned(), PLACE),
+                (SUMMONER.to_owned(), summoner_at)
+            ]
+        );
+        host.kill(SWARMER);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 2);
+        assert_eq!(
+            stage_status(&run, 0),
+            StageStatus::Running,
+            "a swarmer died"
+        );
+        host.kill(SUMMONER);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 3);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 4);
+        assert_eq!(
+            stage_status(&run, 0),
+            StageStatus::Done,
+            "the summoner died"
+        );
     }
 
     /// A spawn group's area spawner gives the respawn range of its encounter, and one that does

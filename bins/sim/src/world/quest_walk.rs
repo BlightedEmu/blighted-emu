@@ -18,7 +18,7 @@ use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::client_input::TALK_KIND;
 use nw_messages::{ClientFacetMsg, ConversationClientMsg, FacetHeader, InteractionRequest};
 use nw_sim_core::Position;
-use nw_world::dungeon_scripts::OPEN_WORLD_LEVEL;
+use nw_world::dungeon_scripts::{OPEN_WORLD_LEVEL, TargetSlice};
 use nw_world::records::VitalsSpawn;
 use uuid::Uuid;
 
@@ -76,6 +76,10 @@ const PLAN_KILL: &str = "kill";
 const PLAN_ITEM: &str = "item";
 /// The word of a kill plan whose mobs count only as placed (by their spawn category).
 const PLAN_PLACED: &str = "placed";
+/// The word before each place where a kill plan's encounter spawns a pickup taken by touch (the
+/// talisman piles of `QuestLiang`, [`super::boss_scripts::touch_pickup`]): the player walks onto
+/// them during the fight.
+const PLAN_TOUCH: &str = "touch";
 /// The word before the radius around a kill plan's place that the player fights within: the
 /// volume of the encounter that spawns the mobs ([`super::dungeon_script::volume_radius_m`]).
 const PLAN_WITHIN: &str = "within";
@@ -1107,7 +1111,8 @@ impl SimWorld {
             TaskKind::Consecutive
             | TaskKind::Partial
             | TaskKind::Simple
-            | TaskKind::Timer { .. } => StepPlan::Wait,
+            | TaskKind::Timer { .. }
+            | TaskKind::FailTimer => StepPlan::Wait,
             TaskKind::UnlockAchievement(_)
             | TaskKind::LockAchievement(_)
             | TaskKind::TemporaryUnlock(_)
@@ -1382,10 +1387,16 @@ impl SimWorld {
                 state,
                 count,
             } => {
+                // A cyclic is known by a gatherable of that id (the turning stones of
+                // `06A_MSQ_18`) or by its own `VariantID` that names a gatherable per state:
+                // `09A_M14_PlaceStaff` asks for `Cyclic_09A_M14_NatureRitual`, whose three
+                // states show `09A_M14_NatureRitual_0` to `_2` (retail
+                // `09a_m14_getinfusedseed` gathered `_0` at 473.221 s and `_1` at 480.955 s).
                 if content
                     .cyclic_gatherables
                     .of(lowercase_crc32(cyclic))
                     .is_empty()
+                    && content.cyclic_gatherables.gatherables_of(cyclic).is_empty()
                 {
                     broken(format!("no cyclic gatherable {cyclic}"))
                 } else {
@@ -1554,6 +1565,20 @@ impl SimWorld {
                 territory: None,
             };
         }
+        // A trigger area of the running instance's script of that name: retail
+        // `0726_0101_d_01a_AreaTrigger` (tag `AreaEntryGate`) ended when the player walked into
+        // the gate area of `DungeonShatterMtn00` (`07-Tempests_Heart` 163.96 s at 1458.8 952.0).
+        if let Some(area) = self
+            .dungeon_run
+            .as_ref()
+            .and_then(|run| tags.iter().find_map(|tag| run.script().trigger_area(tag)))
+        {
+            let [x, y, z] = nw_world::collision::transform_point(&area.place, [0.0; 3]);
+            return StepPlan::Go {
+                at: Position { x, y, z },
+                territory: None,
+            };
+        }
         tags.iter()
             .find_map(|tag| {
                 content
@@ -1621,7 +1646,7 @@ impl SimWorld {
                     .flat_map(|stage| &stage.spawns)
                     .filter_map(|stage_spawn| encounter.targets.get(stage_spawn.target))
                     .flat_map(|target| &target.slices)
-                    .filter_map(|slice| slice.mob.as_ref())
+                    .flat_map(TargetSlice::mobs)
                     .any(|mob| lowercase_crc32(&mob.vitals_id) == spawn.vitals_id)
             })
             .map(|encounter| encounter.slice.clone())
@@ -1656,6 +1681,34 @@ impl SimWorld {
             .encounters
             .iter()
             .find(|encounter| encounter.slice == slice)
+    }
+
+    /// The places where the encounter of slice `slice` spawns pickups taken by touch, each once,
+    /// in stage order.
+    fn touch_points(&self, slice: &str) -> Vec<Position> {
+        let Some(encounter) = self
+            .encounter_script()
+            .and_then(|script| script.encounters.iter().find(|known| known.slice == slice))
+        else {
+            return Vec::new();
+        };
+        let mut places: Vec<[f32; 3]> = Vec::new();
+        for spawn in encounter.stages.iter().flat_map(|stage| &stage.spawns) {
+            let touched = encounter.targets.get(spawn.target).is_some_and(|target| {
+                target
+                    .slices
+                    .iter()
+                    .any(|known| super::boss_scripts::touch_pickup(&known.path))
+            });
+            if touched {
+                for place in &spawn.locations {
+                    if !places.contains(place) {
+                        places.push(*place);
+                    }
+                }
+            }
+        }
+        places.into_iter().map(position_of).collect()
     }
 
     /// The level script whose encounters this sim runs: the instance's, else the open world's
@@ -1793,7 +1846,7 @@ impl SimWorld {
                         .get(stage_spawn.target)?
                         .slices
                         .iter()
-                        .filter_map(|slice| slice.mob.as_ref())
+                        .flat_map(TargetSlice::mobs)
                         .find(|mob| {
                             self.content
                                 .kill_types
@@ -3179,8 +3232,15 @@ impl SimWorld {
                         )
                     })
                     .unwrap_or_default();
+                let touches: String = encounter
+                    .as_deref()
+                    .map(|slice| self.touch_points(slice))
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|place| format!(" {PLAN_TOUCH} {}", at(place)))
+                    .collect();
                 format!(
-                    "{PLAN_KILL} {vitals} {count} at {}{}{}{within}",
+                    "{PLAN_KILL} {vitals} {count} at {}{}{}{within}{touches}",
                     at(&position_of(spawn.position)),
                     territory(entered),
                     if *spawned {
@@ -3902,6 +3962,66 @@ mod tests {
     }
 
     #[test]
+    fn a_cyclic_step_named_by_the_cyclic_s_variant_is_the_gather_of_its_state_s_gatherable() {
+        // Retail `09a_m14_getinfusedseed`: `09A_M14_PlaceStaff` (state 0 of
+        // `Cyclic_09A_M14_NatureRitual`) ended with the gather of `09A_M14_NatureRitual_0`.
+        const QUEST: &str = "walk_ritual";
+        const CYCLIC: &str = "Cyclic_Walk_Ritual";
+        const STATES: [&str; 3] = ["Walk_Ritual_0", "Walk_Ritual_1", "Walk_Ritual_2"];
+        let (mut world, _) = walk_world();
+        world
+            .admit(
+                &super::super::tests::admit_at(1, CELL_M / 2.0, true),
+                NOW,
+                NOW,
+            )
+            .expect("admit");
+        let mut content = (*world.content).clone();
+        content.quests = QuestBook::build(
+            [ObjectiveRow {
+                id: QUEST.to_owned(),
+                root: "r_root".to_owned(),
+                ..ObjectiveRow::default()
+            }],
+            TaskBook::new(vec![
+                task("r_root", "ConsecutiveTaskContainer", &["r_place"]),
+                TaskRow {
+                    item_name: Some(CYCLIC.to_owned()),
+                    item_drop_probability: Some(0),
+                    ..task("r_place", "TaskGatherCyclicState", &[])
+                },
+            ]),
+        );
+        content.gatherables = nw_content::gathering::Gatherables::build(STATES.map(|id| {
+            nw_content::gathering::Gatherable {
+                id: id.to_owned(),
+                gather_ms: 0,
+                respawn_ms: (0, 0),
+                loot_table: None,
+                loot_container: false,
+                tradeskill: None,
+                tool_required: false,
+                by_hand: true,
+                game_event: None,
+                animation: None,
+            }
+        }));
+        content.gather_points =
+            PlacedPoints::of(STATES.map(|id| (lowercase_crc32(id), at(CELL_M / 2.0 + 20.0))));
+        content.cyclic_gatherables = nw_content::gathering::CyclicGatherables::build([(
+            CYCLIC.to_owned(),
+            STATES.map(|id| Some(id.to_owned())).to_vec(),
+        )]);
+        world.content = Arc::new(content);
+        world.start_quest(1, QUEST, NOW).expect("start");
+        assert_eq!(
+            world.quest_plan_lines(1, QUEST),
+            [format!("plan r_place gather {} 1", STATES[0])],
+            "the gatherable that the cyclic shows in state 0, once"
+        );
+    }
+
+    #[test]
     fn a_go_step_outside_the_instance_map_is_a_stop_so_the_player_leaves_first() {
         // Live 2026-11-22: `99D_MSQ_07_PortalFight_triggerArea_exitCorruptionTrigger` (8711 7733
         // of the open world) came next inside the `QuestNihilo` trial.
@@ -4498,6 +4618,190 @@ mod tests {
                 StepPlan::Stop(Outcome::Broken, _)
             ),
             "a sim that does not run the open world's encounters has no source"
+        );
+    }
+
+    /// Retail `07-Tempests_Heart`: `0726_0101_d_01a_AreaTrigger` (tag `AreaEntryGate`) ended at
+    /// 163.96 s when the player came into the gate area of the expedition's script.
+    #[test]
+    fn a_trigger_area_step_named_by_an_area_of_the_instance_script_is_a_go_there() {
+        use nw_world::collision::Geometry;
+        use nw_world::dungeon_scripts::{Detector, LevelScript, TriggerArea};
+        const QUEST: &str = "walk_gate";
+        const AREA: &str = "AreaWalkGate";
+        let (mut world, _) = walk_world();
+        world
+            .admit(
+                &super::super::tests::admit_at(1, CELL_M / 2.0, true),
+                NOW,
+                NOW,
+            )
+            .expect("admit");
+        let mut content = (*world.content).clone();
+        content.quests = QuestBook::build(
+            [ObjectiveRow {
+                id: QUEST.to_owned(),
+                root: "g_root".to_owned(),
+                ..ObjectiveRow::default()
+            }],
+            TaskBook::new(vec![
+                task("g_root", "ConsecutiveTaskContainer", &["g_gate"]),
+                TaskRow {
+                    target_tag: Some(AREA.to_owned()),
+                    ..task("g_gate", "TaskTriggerArea", &[])
+                },
+            ]),
+        );
+        world.content = Arc::new(content);
+        world.start_quest(1, QUEST, NOW).expect("start");
+        assert!(
+            world.quest_plan_lines(1, QUEST)[0].contains("Broken"),
+            "no instance runs: no area of that name"
+        );
+        world.dungeon_run = Some(super::super::dungeon_script::DungeonRun::new(
+            uuid::Uuid::from_u128(1),
+            LevelScript {
+                trigger_areas: vec![TriggerArea {
+                    name: AREA.to_owned(),
+                    volume: Detector {
+                        shape: Geometry::Box {
+                            half_extents: [5.0, 5.0, 5.0],
+                        },
+                        place: [
+                            [1.0, 0.0, 0.0, 1456.2],
+                            [0.0, 1.0, 0.0, 960.3],
+                            [0.0, 0.0, 1.0, 184.5],
+                        ],
+                    },
+                }],
+                ..LevelScript::default()
+            },
+        ));
+        assert_eq!(
+            world.quest_plan_lines(1, QUEST),
+            ["plan g_gate go 1456.2 960.3 184.5"]
+        );
+        world.tick_quests(NOW);
+        assert!(
+            world
+                .quests_of_player(1)
+                .iter()
+                .any(|quest| quest.def.id == QUEST),
+            "a player away from the area is not there"
+        );
+        let entity = world.player_by_number(1).expect("player");
+        let gate = Position {
+            x: 1456.2,
+            y: 960.3,
+            z: 184.5,
+        };
+        world.place_player(entity, gate, None, super::super::Placement::Stand, NOW);
+        world.tick_quests(NOW);
+        assert!(
+            world
+                .quests_of_player(1)
+                .iter()
+                .all(|quest| quest.def.id != QUEST),
+            "a player in the area counts as there"
+        );
+    }
+
+    /// `QuestLiang`: the encounter of the step's event spawns talisman piles, which a player
+    /// takes by walking onto them; the kill plan names their places once each.
+    #[test]
+    fn an_encounter_kill_names_the_places_of_its_touch_pickups() {
+        use nw_world::dungeon_scripts::{
+            Encounter, LevelScript, Spawn, Stage, Target, TargetMob, TargetSlice,
+        };
+        const QUEST: &str = "walk_talisman";
+        const SUCCESS: &str = "Walk_Talisman_Success";
+        const SLICE: &str = "slices/walk/enc_walk_talisman.dynamicslice";
+        let (mut world, _) = walk_world();
+        world
+            .admit(
+                &super::super::tests::admit_at(1, CELL_M / 2.0, true),
+                NOW,
+                NOW,
+            )
+            .expect("admit");
+        let mut content = (*world.content).clone();
+        content.quests = QuestBook::build(
+            [ObjectiveRow {
+                id: QUEST.to_owned(),
+                root: "t_root".to_owned(),
+                ..ObjectiveRow::default()
+            }],
+            TaskBook::new(vec![
+                task("t_root", "ConsecutiveTaskContainer", &["t_wait"]),
+                TaskRow {
+                    kill_enemy_type: Some(SUCCESS.to_owned()),
+                    ..task("t_wait", "TaskGameEvent", &[])
+                },
+            ]),
+        );
+        world.content = Arc::new(content);
+        world.start_quest(1, QUEST, NOW).expect("start");
+        let pile = |locations: Vec<[f32; 3]>| Spawn {
+            target: 1,
+            delay_s: 12,
+            count: 3,
+            locations,
+            turns_deg: Vec::new(),
+        };
+        world.dungeon_run = Some(super::super::dungeon_script::DungeonRun::new(
+            uuid::Uuid::from_u128(1),
+            LevelScript {
+                encounters: vec![Encounter {
+                    name: "EncounterBoss".to_owned(),
+                    slice: SLICE.to_owned(),
+                    position: [1045.1, 943.4, 130.0],
+                    targets: vec![
+                        Target {
+                            slices: vec![TargetSlice {
+                                mob: Some(TargetMob {
+                                    vitals_id: TEST_MOB.to_owned(),
+                                    ..TargetMob::default()
+                                }),
+                                ..TargetSlice::default()
+                            }],
+                            ..Target::default()
+                        },
+                        Target {
+                            slices: vec![TargetSlice {
+                                path: super::super::boss_scripts::TALISMAN_PILE_SLICE.to_owned(),
+                                ..TargetSlice::default()
+                            }],
+                            ..Target::default()
+                        },
+                    ],
+                    stages: vec![
+                        Stage {
+                            spawns: vec![pile(vec![
+                                [1041.1, 938.4, 130.0],
+                                [1034.1, 938.4, 130.0],
+                            ])],
+                            ..Stage::default()
+                        },
+                        Stage {
+                            spawns: vec![pile(vec![[1034.1, 938.4, 130.0]])],
+                            ..Stage::default()
+                        },
+                    ],
+                    rewards: Some(nw_world::level_script::DifficultyRewards {
+                        global_event: SUCCESS.to_owned(),
+                        ..nw_world::level_script::DifficultyRewards::default()
+                    }),
+                    ..Encounter::default()
+                }],
+                ..LevelScript::default()
+            },
+        ));
+        assert_eq!(
+            world.quest_plan_lines(1, QUEST),
+            [format!(
+                "plan t_wait kill {TEST_MOB} 1 at 1045.1 943.4 130.0 placed \
+                 touch 1041.1 938.4 130.0 touch 1034.1 938.4 130.0"
+            )]
         );
     }
 

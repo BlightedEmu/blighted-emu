@@ -94,7 +94,7 @@ pub(super) const CONTEST_STEP: u8 = 1;
 /// How often the capture progress moves (Observed: the hot values change about once a second).
 pub(super) const CAPTURE_TICK_MS: u64 = 1_000;
 /// How near a capture point a player holds it, metres (Inferred: the point's radius is Unknown).
-pub(super) const CAPTURE_RADIUS_M: f32 = 10.0;
+pub const CAPTURE_RADIUS_M: f32 = 10.0;
 /// The respawn wave period (Inferred: the retail 1635 pairs came about every 155 s).
 pub(super) const RESPAWN_WAVE_MS: u64 = 155_000;
 /// The 3455 value of a player that leaves the war (Observed: 0).
