@@ -1300,6 +1300,10 @@ fn print_creature_animations(report: &CreatureAnimationsReport, out: &Path) {
     for (asset, why) in &report.skipped {
         println!("  skipped {asset}: {why}");
     }
+    println!(
+        "  {} vitals rows name the creature slice their spawners spawn",
+        report.spawned_vitals
+    );
 }
 
 fn run_mob_prefabs(

@@ -112,6 +112,73 @@ impl SpawnerSlice {
     }
 }
 
+/// The field of a spawner's vitals table reference that names its table (name Unknown; CRC
+/// Observed in `pointspawner_0wp_wander_4255020265.dynamicslice` next to `javelindata_vitals`).
+const VITALS_TABLE_FIELD: u32 = 0xa6b1_2c6a;
+/// The field of that reference that names its row (name Unknown; CRC Observed there next to
+/// `Barbary_Lion_61`).
+const VITALS_ROW_FIELD: u32 = 0x5039_551e;
+/// The table a spawner's vitals reference names.
+const VITALS_TABLE: &str = "javelindata_vitals";
+
+/// What a point spawner slice spawns: the vitals row it gives its mob and the slice it spawns,
+/// by its `m_sliceAsset` or by the entries of its `m_aliasAsset`. Observed:
+/// `PointSpawner_0wp_Wander_Lion_Barbary_61` (`pointspawner_0wp_wander_4255020265.dynamicslice`,
+/// the spawner capital of the open world's `Barbary_Lion_61` at 7250.7 8173.0) names the row
+/// `Barbary_Lion_61` and the alias `alias_base_barbary_lion.aliasasset`, whose one entry is
+/// `slices/characters/barbary_lion.dynamicslice` (asset `0b7ea009...`), the asset of the
+/// retail cards of `Barbary_Lion_60`, `_62`, `_63` and `_66`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnerCreature {
+    /// The vitals row its mob takes.
+    pub vitals_id: String,
+    /// Its `m_sliceAsset`.
+    pub slice: Option<crate::level_script::AssetRef>,
+    /// Its `m_aliasAsset`.
+    pub alias: Option<crate::level_script::AssetRef>,
+}
+
+impl SpawnerCreature {
+    /// What the point spawner slice whose root element is `root` spawns; `None` for a slice
+    /// without a point spawner component, without a vitals row, or without a slice or alias.
+    pub fn of(root: &Element) -> Option<Self> {
+        let all = descendants(root);
+        let spawner = all
+            .iter()
+            .find(|element| element.type_id == crate::level_script::POINT_SPAWNER_TYPE)?;
+        let vitals_id = all.iter().find_map(|element| {
+            let table = element.child(VITALS_TABLE_FIELD)?.as_string().ok()?;
+            let row = element.child(VITALS_ROW_FIELD)?.as_string().ok()?;
+            (table == VITALS_TABLE && !row.is_empty()).then(|| row.to_owned())
+        })?;
+        // The references sit in the component's base class (`PrefabSpawnerComponent`); the first
+        // element below it that names a slice or an alias is the spawner's.
+        let (slice_crc, alias_crc) = (
+            lowercase_crc32(SLICE_ASSET_FIELD),
+            lowercase_crc32(ALIAS_ASSET_FIELD),
+        );
+        let reference = |element: &Element, crc| {
+            crate::level_script::asset(element.child(crc))
+                .ok()
+                .flatten()
+        };
+        descendants(spawner).into_iter().find_map(|element| {
+            let slice = reference(element, slice_crc);
+            let alias = reference(element, alias_crc);
+            (slice.is_some() || alias.is_some()).then(|| Self {
+                vitals_id: vitals_id.clone(),
+                slice,
+                alias,
+            })
+        })
+    }
+}
+
+/// A spawner's slice field.
+const SLICE_ASSET_FIELD: &str = "m_sliceAsset";
+/// A spawner's alias field.
+const ALIAS_ASSET_FIELD: &str = "m_aliasAsset";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +220,52 @@ mod tests {
                 ),
             ],
         )
+    }
+
+    /// The 48-byte head of an asset reference before its hint length ([`crate::level_script`]).
+    const REFERENCE_HEAD_LEN: usize = 48;
+
+    fn reference(name: &str, guid: [u8; 16], hint: &str) -> Element {
+        let mut bytes = guid.to_vec();
+        bytes.resize(REFERENCE_HEAD_LEN, 0);
+        bytes.extend(u64::try_from(hint.len()).expect("hint").to_be_bytes());
+        bytes.extend(hint.as_bytes());
+        named(name, bytes)
+    }
+
+    #[test]
+    fn a_point_spawner_names_its_vitals_row_and_what_it_spawns() {
+        // `pointspawner_0wp_wander_4255020265.dynamicslice` (`Barbary_Lion_61`).
+        const ALIAS: &str = "sharedassets/genericassets/aliasassets/base_aliases/alias_base_barbary_lion.aliasasset";
+        const ALIAS_GUID: [u8; 16] = [3; 16];
+        let vitals = Element::with_children(
+            0,
+            vec![
+                Element::with_value(VITALS_TABLE_FIELD, VITALS_TABLE.as_bytes().to_vec()),
+                Element::with_value(VITALS_ROW_FIELD, b"Barbary_Lion_61".to_vec()),
+            ],
+        );
+        let null_slice = reference(SLICE_ASSET_FIELD, [0; 16], "");
+        let spawner = typed(
+            crate::level_script::POINT_SPAWNER_TYPE,
+            vec![Element::with_children(
+                0,
+                vec![null_slice, reference(ALIAS_ASSET_FIELD, ALIAS_GUID, ALIAS)],
+            )],
+        );
+        let root = Element::with_children(0, vec![vitals.clone(), spawner]);
+        let found = SpawnerCreature::of(&root).expect("a spawner");
+        assert_eq!(found.vitals_id, "Barbary_Lion_61");
+        assert_eq!(found.slice, None, "a null slice reference");
+        assert_eq!(
+            found.alias.map(|alias| (alias.guid, alias.path)),
+            Some((ALIAS_GUID, ALIAS.to_owned()))
+        );
+        assert_eq!(
+            SpawnerCreature::of(&Element::with_children(0, vec![vitals])),
+            None,
+            "no point spawner component"
+        );
     }
 
     #[test]

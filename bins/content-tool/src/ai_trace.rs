@@ -1021,6 +1021,8 @@ mod tests {
             reaction_paces: BTreeMap::new(),
             collider_radius_mm: None,
             skinnable: false,
+            skin_gatherable: None,
+            spawned_vitals: Vec::new(),
             weapon_animation_database: None,
         }]
     }

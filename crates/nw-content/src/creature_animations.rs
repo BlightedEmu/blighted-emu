@@ -90,6 +90,18 @@ pub struct CreatureRow {
     /// ([`crate::corpse_times::corpse_ms`]). `false` in a table from before this field.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skinnable: bool,
+    /// The gatherable its skinnable corpse is (`m_gatherableEntryId` of its slice's gatherable
+    /// controller: `PigDomestic` for `slices/characters/pig_domestic.dynamicslice`; retail
+    /// `1127_0102_makinbacon` skinned `PigDomestic` from four `Pig_Domestic_49` corpses).
+    /// `None` without one, or in an older table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skin_gatherable: Option<String>,
+    /// The vitals rows the level's point spawners give the mobs they spawn of this slice (the
+    /// spawner slice names the row and spawns the slice, directly or as the one entry of its
+    /// alias): a mob of such a row without a prefab of its own shows this slice's. Empty in an
+    /// older table.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawned_vitals: Vec<String>,
     /// The animation database (lowercase pak path) of its main-hand weapon's `WeaponContext`
     /// scope: the weapon row's `AnimDbPath` (Observed: Janszoon's `Corrupted_First_Mate_2hAnchor`
     /// names `npc_damned_2h_axeanims.adb`, which holds the `CAGE-Damage` clips of his axe attacks;
@@ -119,6 +131,7 @@ pub struct CreatureAnimation {
     reaction_paces: BTreeMap<String, Vec<Option<ReactionPace>>>,
     collider_radius_mm: Option<u32>,
     skinnable: bool,
+    skin_gatherable: Option<String>,
 }
 
 /// The 1-based number of `name` in `names`.
@@ -131,6 +144,11 @@ impl CreatureAnimation {
     /// Its corpse can be skinned ([`CreatureRow::skinnable`]).
     pub const fn skinnable(&self) -> bool {
         self.skinnable
+    }
+
+    /// The gatherable its skinnable corpse is ([`CreatureRow::skin_gatherable`]).
+    pub fn skin_gatherable(&self) -> Option<&str> {
+        self.skin_gatherable.as_deref()
     }
 
     /// The radius of its body's capsule, m ([`CreatureRow::collider_radius_mm`]).
@@ -198,6 +216,10 @@ impl CreatureAnimation {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CreatureAnimations {
     by_asset: HashMap<[u8; ASSET_ID_LEN], CreatureAnimation>,
+    /// The slice asset the spawners spawn for each vitals row, by the CRC-32 of the lowercase
+    /// row id ([`CreatureRow::spawned_vitals`]); a row two slices name keeps the first slice in
+    /// asset order.
+    by_spawned_vitals: HashMap<u32, [u8; ASSET_ID_LEN]>,
 }
 
 impl CreatureAnimations {
@@ -228,8 +250,13 @@ impl CreatureAnimations {
     /// # Errors
     ///
     /// Returns [`CreatureAnimationsError::Asset`] when an asset is not 16 bytes of hex.
-    pub fn of_rows(rows: Vec<CreatureRow>) -> Result<Self, CreatureAnimationsError> {
-        let by_asset = rows
+    pub fn of_rows(mut rows: Vec<CreatureRow>) -> Result<Self, CreatureAnimationsError> {
+        rows.sort_by(|left, right| left.asset.cmp(&right.asset));
+        let spawned: Vec<(String, Vec<String>)> = rows
+            .iter()
+            .map(|row| (row.asset.clone(), row.spawned_vitals.clone()))
+            .collect();
+        let by_asset: HashMap<[u8; ASSET_ID_LEN], CreatureAnimation> = rows
             .into_iter()
             .map(|row| {
                 let asset = hex::decode(&row.asset)
@@ -254,11 +281,42 @@ impl CreatureAnimations {
                         reaction_paces: row.reaction_paces,
                         collider_radius_mm: row.collider_radius_mm,
                         skinnable: row.skinnable,
+                        skin_gatherable: row.skin_gatherable,
                     },
                 ))
             })
             .collect::<Result<_, CreatureAnimationsError>>()?;
-        Ok(Self { by_asset })
+        let mut by_spawned_vitals = HashMap::new();
+        for (asset, vitals) in spawned {
+            let Some(asset) = hex::decode(&asset)
+                .ok()
+                .and_then(|bytes| <[u8; ASSET_ID_LEN]>::try_from(bytes).ok())
+            else {
+                continue;
+            };
+            for vitals_id in vitals {
+                by_spawned_vitals
+                    .entry(nw_formats::objectstream::lowercase_crc32(&vitals_id))
+                    .or_insert(asset);
+            }
+        }
+        Ok(Self {
+            by_asset,
+            by_spawned_vitals,
+        })
+    }
+
+    /// The slice asset the level's spawners spawn for vitals row `vitals_id` (CRC-32 of the
+    /// lowercase id; [`CreatureRow::spawned_vitals`]).
+    pub fn spawned_slice(&self, vitals_id: u32) -> Option<&[u8; ASSET_ID_LEN]> {
+        self.by_spawned_vitals.get(&vitals_id)
+    }
+
+    /// Every vitals row (CRC-32 of the lowercase id) with the slice asset its spawners spawn.
+    pub fn spawned(&self) -> impl Iterator<Item = (u32, [u8; ASSET_ID_LEN])> + '_ {
+        self.by_spawned_vitals
+            .iter()
+            .map(|(vitals_id, asset)| (*vitals_id, *asset))
     }
 
     /// The creature of slice asset `asset`, when the table has it.
@@ -337,6 +395,8 @@ mod tests {
             reaction_paces: BTreeMap::from([("r_R2_F".to_owned(), vec![Some(BOAR_R2_PACE)])]),
             collider_radius_mm: Some(500),
             skinnable: true,
+            skin_gatherable: Some("Boar".to_owned()),
+            spawned_vitals: vec!["Boar_Spawned_12".to_owned()],
             weapon_animation_database: None,
         }
     }
@@ -346,6 +406,12 @@ mod tests {
         let text = serde_json::to_string(&[boar_row()]).expect("json");
         let table = CreatureAnimations::parse(&text).expect("table");
         let asset = <[u8; ASSET_ID_LEN]>::try_from(hex::decode(BOAR).expect("hex")).expect("len");
+        assert_eq!(
+            table.spawned_slice(nw_formats::objectstream::lowercase_crc32("boar_spawned_12")),
+            Some(&asset),
+            "the slice its spawners spawn for the row"
+        );
+        assert_eq!(table.spawned_slice(0), None);
         let boar = table.get(&asset).expect("boar");
         assert_eq!(
             (boar.fragment("Move"), boar.action("Move")),

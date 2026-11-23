@@ -26,6 +26,9 @@ use crate::ai_data::{ClipLengths, base_clip_names, fragment_length};
 use crate::collision::types::QUERY_SHAPE_CAPSULE;
 use crate::error::ToolError;
 use crate::source::GameSource;
+use nw_formats::azcs::{decode_azcs, is_azcs};
+use nw_world::level_script::alias_slices;
+use nw_world::spawner_slices::SpawnerCreature;
 
 /// The Mannequin component's fields (Observed names: their CRCs are those of these names).
 const DEFAULT_TAGS_FIELD: &str = "m_defaulttags";
@@ -114,6 +117,106 @@ pub struct CreatureAnimationsReport {
     pub creatures: usize,
     /// Assets with a problem, and what it was.
     pub skipped: Vec<(String, String)>,
+    /// Vitals rows whose spawners spawn one creature slice ([`spawned_vitals`]).
+    pub spawned_vitals: usize,
+}
+
+/// The part of the pak path of the spawner slices [`spawned_vitals`] reads.
+const SPAWNER_PATH_PART: &str = "spawner";
+/// The extension of a dynamic slice in the paks.
+const DYNAMIC_SLICE_PAK_SUFFIX: &str = ".dynamicslice";
+
+/// The vitals rows the point spawner slices of the paks give the creature slices they spawn,
+/// by slice asset, sorted: each spawner names its row and spawns one slice, by its
+/// `m_sliceAsset` or as the entries of its `m_aliasAsset` ([`SpawnerCreature`]); a spawner
+/// whose alias holds more than one slice is left out, and a row that spawners spawn as several
+/// slices goes to the slice most of them spawn. Observed: the `Barbary_Lion_61` spawner
+/// spawns `slices/characters/barbary_lion.dynamicslice` through `alias_base_barbary_lion`, and
+/// retail sent that slice's asset (`0b7ea009...`) with `Barbary_Lion_60`, `_62`, `_63` and `_66`
+/// (mob prefab table).
+///
+/// # Errors
+///
+/// Returns [`ToolError`] when the paks cannot be read.
+pub fn spawned_vitals(source: &GameSource) -> Result<HashMap<AssetId, Vec<String>>, ToolError> {
+    let mut spawners = Vec::new();
+    source.for_each_entry(
+        |path| path.contains(SPAWNER_PATH_PART) && path.ends_with(DYNAMIC_SLICE_PAK_SUFFIX),
+        |_, bytes| {
+            if let Some(spawner) = object_root(&bytes).as_ref().and_then(SpawnerCreature::of) {
+                spawners.push(spawner);
+            }
+            Ok::<(), ToolError>(())
+        },
+    )?;
+    let alias_paths: HashSet<String> = spawners
+        .iter()
+        .filter(|spawner| spawner.slice.is_none())
+        .filter_map(|spawner| spawner.alias.as_ref().map(|alias| alias.path.clone()))
+        .collect();
+    let aliases: HashMap<String, Vec<AssetId>> = read_entries(source, &alias_paths)?
+        .into_iter()
+        .filter_map(|(path, bytes)| {
+            let entries = alias_slices(&object_root(&bytes)?).ok()?;
+            let mut slices: Vec<AssetId> = entries.iter().map(|entry| entry.slice.guid).collect();
+            slices.sort_unstable();
+            slices.dedup();
+            Some((path, slices))
+        })
+        .collect();
+    Ok(slices_by_vitals(&spawners, &aliases))
+}
+
+/// The vitals rows of `spawners` by the one slice each spawns (its `m_sliceAsset`, else the one
+/// entry of its alias in `aliases`, by alias path), sorted; a row goes to the slice most of its
+/// spawners spawn (on a tie the lower asset), and a spawner whose alias holds several slices is
+/// left out ([`spawned_vitals`]).
+fn slices_by_vitals(
+    spawners: &[SpawnerCreature],
+    aliases: &HashMap<String, Vec<AssetId>>,
+) -> HashMap<AssetId, Vec<String>> {
+    let mut counts: HashMap<String, HashMap<AssetId, u32>> = HashMap::new();
+    for spawner in spawners {
+        let slice = match (&spawner.slice, &spawner.alias) {
+            (Some(slice), _) => Some(slice.guid),
+            (None, Some(alias)) => match aliases.get(&alias.path).map(Vec::as_slice) {
+                Some([only]) => Some(*only),
+                _ => None,
+            },
+            (None, None) => None,
+        };
+        if let Some(slice) = slice {
+            *counts
+                .entry(spawner.vitals_id.clone())
+                .or_default()
+                .entry(slice)
+                .or_default() += 1;
+        }
+    }
+    let mut by_slice: HashMap<AssetId, Vec<String>> = HashMap::new();
+    for (vitals_id, slices) in counts {
+        if let Some((slice, _)) = slices
+            .into_iter()
+            .max_by(|(a, a_count), (b, b_count)| a_count.cmp(b_count).then_with(|| b.cmp(a)))
+        {
+            by_slice.entry(slice).or_default().push(vitals_id);
+        }
+    }
+    for vitals in by_slice.values_mut() {
+        vitals.sort();
+    }
+    by_slice
+}
+
+/// The ObjectStream root of pak entry `bytes` (AZCS compressed or not); `None` when it does not
+/// parse.
+fn object_root(bytes: &[u8]) -> Option<Element> {
+    let stream = if is_azcs(bytes) {
+        decode_azcs(bytes).ok()?
+    } else {
+        bytes.to_vec()
+    };
+    parse_object_stream(&stream).ok()
 }
 
 /// What a creature slice says of its animations.
@@ -135,6 +238,8 @@ pub struct SliceMannequin {
     pub collider_radius_mm: Option<u32>,
     /// Its corpse can be skinned ([`skinnable`]).
     pub skinnable: bool,
+    /// The gatherable of its skinnable corpse ([`skin_gatherable`]).
+    pub skin_gatherable: Option<String>,
 }
 
 fn descendants<'a>(element: &'a Element, found: &mut Vec<&'a Element>) {
@@ -195,7 +300,22 @@ pub fn slice_mannequin(bytes: &[u8]) -> Option<SliceMannequin> {
         off_hand: hand_item_in(&all, OFF_HAND_SLOT),
         collider_radius_mm: collider_radius_mm(&all),
         skinnable: skinnable(&all),
+        skin_gatherable: skin_gatherable(&all),
     })
+}
+
+/// The gatherable of the skinnable corpse of the creature among the slice elements `all`: the
+/// `m_gatherableEntryId` of its gatherable controller (`PigDomestic` in
+/// `slices/characters/pig_domestic.dynamicslice`); `None` when the corpse is not skinnable.
+fn skin_gatherable(all: &[&Element]) -> Option<String> {
+    if !skinnable(all) {
+        return None;
+    }
+    all.iter()
+        .filter(|element| {
+            element.name_crc == Some(crate::plant_gatherables::GATHERABLE_ENTRY_FIELD)
+        })
+        .find_map(|element| string_of(element).filter(|id| !id.is_empty()))
 }
 
 /// Whether the corpse of the creature among the slice elements `all` can be skinned: the slice has
@@ -629,6 +749,8 @@ pub fn build_rows(
     let clip_names = base_clip_names(databases.values());
     let lengths = ClipLengths::read(source, game_dir, &clip_names)?;
     let weapons = item_weapons(tables);
+    let spawned = spawned_vitals(source)?;
+    report.spawned_vitals = spawned.values().map(Vec::len).sum();
     let mut rows = Vec::new();
     for asset in &assets {
         let name = hex::encode(asset);
@@ -703,6 +825,8 @@ pub fn build_rows(
             reaction_paces,
             collider_radius_mm: mannequin.collider_radius_mm,
             skinnable: mannequin.skinnable,
+            skin_gatherable: mannequin.skin_gatherable.clone(),
+            spawned_vitals: spawned.get(asset).cloned().unwrap_or_default(),
             weapon_animation_database: weapon.and_then(|weapon| weapon.animation_database.clone()),
         });
     }
@@ -797,6 +921,10 @@ mod tests {
                 collider("AICharacterCollider_Predator", 0.6),
                 text(ENTITY_NAME_FIELD, GATHERABLE_STATES_ENTITY),
                 gatherable_remains(),
+                Element::with_value(
+                    crate::plant_gatherables::GATHERABLE_ENTRY_FIELD,
+                    b"Boar".to_vec(),
+                ),
             ],
         ))
         .expect("stream")
@@ -823,6 +951,82 @@ mod tests {
         assert!(!skinnable(vec![gatherable_remains()]), "a sailor");
         assert!(!skinnable(vec![states()]), "the rat without gatherable");
         assert!(slice_mannequin(&boar_slice()).expect("mannequin").skinnable);
+    }
+
+    #[test]
+    fn a_vitals_row_goes_to_the_one_slice_its_spawners_spawn() {
+        use nw_world::level_script::AssetRef;
+        const LION: AssetId = [0x0b; ASSET_ID_LEN];
+        const CUB: AssetId = [0x0c; ASSET_ID_LEN];
+        const LION_ALIAS: &str = "alias_base_barbary_lion.aliasasset";
+        const MIXED_ALIAS: &str = "alias_mixed.aliasasset";
+        let reference = |guid, path: &str| AssetRef {
+            guid,
+            path: path.to_owned(),
+        };
+        let spawner =
+            |vitals: &str, slice: Option<AssetRef>, alias: Option<AssetRef>| SpawnerCreature {
+                vitals_id: vitals.to_owned(),
+                slice,
+                alias,
+            };
+        let aliases = HashMap::from([
+            (LION_ALIAS.to_owned(), vec![LION]),
+            (MIXED_ALIAS.to_owned(), vec![LION, CUB]),
+        ]);
+        let spawners = [
+            spawner(
+                "Barbary_Lion_61",
+                None,
+                Some(reference([1; 16], LION_ALIAS)),
+            ),
+            spawner(
+                "Barbary_Lion_61",
+                None,
+                Some(reference([1; 16], LION_ALIAS)),
+            ),
+            spawner(
+                "Barbary_Lion_61",
+                Some(reference(CUB, "cub.dynamicslice")),
+                None,
+            ),
+            spawner("Lion_Cub", Some(reference(CUB, "cub.dynamicslice")), None),
+            spawner("Pride", None, Some(reference([2; 16], MIXED_ALIAS))),
+        ];
+        let found = slices_by_vitals(&spawners, &aliases);
+        assert_eq!(found.get(&LION), Some(&vec!["Barbary_Lion_61".to_owned()]));
+        assert_eq!(found.get(&CUB), Some(&vec!["Lion_Cub".to_owned()]));
+        assert_eq!(found.len(), 2, "the mixed alias names no one slice");
+    }
+
+    #[test]
+    fn a_skinnable_corpse_names_its_gatherable() {
+        // `slices/characters/pig_domestic.dynamicslice` names `PigDomestic` in its gatherable
+        // controller's `m_gatherableEntryId`.
+        let entry = || {
+            Element::with_value(
+                crate::plant_gatherables::GATHERABLE_ENTRY_FIELD,
+                b"PigDomestic".to_vec(),
+            )
+        };
+        let gatherable = |elements: Vec<Element>| {
+            let root = Element::with_children(0, elements);
+            let mut all = Vec::new();
+            descendants(&root, &mut all);
+            skin_gatherable(&all)
+        };
+        let states = || text(ENTITY_NAME_FIELD, GATHERABLE_STATES_ENTITY);
+        assert_eq!(
+            gatherable(vec![states(), gatherable_remains(), entry()]),
+            Some("PigDomestic".to_owned())
+        );
+        assert_eq!(gatherable(vec![entry()]), None, "not skinnable");
+        assert_eq!(
+            slice_mannequin(&boar_slice())
+                .expect("mannequin")
+                .skin_gatherable,
+            Some("Boar".to_owned())
+        );
     }
 
     /// The dryad soldier's paperdoll: its sword in slot 24 and its kite shield in slot 27.

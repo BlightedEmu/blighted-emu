@@ -29,7 +29,7 @@ use crate::slice_meta::slice_key;
 
 /// `m_gatherableEntryId`: the field of a `GatherableControllerComponent` that names its
 /// gatherable.
-const GATHERABLE_ENTRY_FIELD: u32 = 0x2d69_6003;
+pub(crate) const GATHERABLE_ENTRY_FIELD: u32 = 0x2d69_6003;
 
 /// What a plant slice gives: its own gatherable and its variation table.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

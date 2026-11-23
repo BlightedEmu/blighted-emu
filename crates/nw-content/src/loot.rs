@@ -1045,7 +1045,36 @@ impl MobLoot {
                 #[allow(clippy::cast_precision_loss, reason = "0 or 1")]
                 chance: row.loot_drop_chance.map(|chance| chance as f64),
             });
-        Self::build(base.chain(other))
+        Self::build(base.chain(other)).with_variants(
+            tables
+                .vitals_level_variant_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .map(|row| (row.vitals_id.as_str(), row.base_vitals_id.as_str())),
+        )
+    }
+
+    /// These drops with the level variants `variants` (variant vitals id, base vitals id): a
+    /// variant drops its base type's loot; a variant id that has a drop of its own keeps it, and
+    /// a variant of a base without a drop drops nothing. Observed (data, build 25810808): 7,304
+    /// open-world spawns name a variant id only (`Legion_Sagittarii_61` of `Legion_Sagittarii_60`,
+    /// `CreatureLootMaster` at 0.1); the sim's kill types take a variant the same way.
+    pub fn with_variants<'a>(
+        mut self,
+        variants: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Self {
+        let found: Vec<_> = variants
+            .into_iter()
+            .filter_map(|(variant, base)| {
+                let key = lowercase_crc32(variant);
+                if self.by_crc.contains_key(&key) {
+                    return None;
+                }
+                Some((key, self.by_crc.get(&lowercase_crc32(base))?.clone()))
+            })
+            .collect();
+        self.by_crc.extend(found);
+        self
     }
 
     /// The drops of `rows`; a row without a table drops nothing, and the first row of a vitals
@@ -1672,6 +1701,51 @@ mod tests {
         );
         assert_eq!(of("Ghost"), None, "no table: no loot");
         assert_eq!(of("Blank"), None);
+    }
+
+    #[test]
+    fn a_level_variant_drops_its_base_types_loot() {
+        // Client rows: `Legion_Sagittarii_61` is a level variant of `Legion_Sagittarii_60`
+        // (`CreatureLootMaster`); `Barbary_Lion_62` is a variant of itself.
+        let row = |id: &str, table: &str| MobLootRow {
+            vitals_id: id.to_owned(),
+            table: Some(table.to_owned()),
+            chance: Some(0.1),
+            ..MobLootRow::default()
+        };
+        let loot = MobLoot::build([
+            row("Legion_Sagittarii_60", "CreatureLootMaster"),
+            row("Barbary_Lion_62", "LionLoot"),
+        ])
+        .with_variants([
+            ("Legion_Sagittarii_61", "Legion_Sagittarii_60"),
+            ("Barbary_Lion_62", "Barbary_Lion_62"),
+            ("Ghost_60", "Ghost"),
+        ]);
+        let of = |id: &str| loot.of(lowercase_crc32(id)).map(|drop| drop.table.clone());
+        assert_eq!(
+            of("legion_sagittarii_61"),
+            Some("CreatureLootMaster".to_owned())
+        );
+        assert_eq!(of("barbary_lion_62"), Some("LionLoot".to_owned()));
+        assert_eq!(of("ghost_60"), None, "a base without a drop");
+    }
+
+    #[test]
+    fn the_content_level_variants_drop_their_base_loot() {
+        let bundle = crate::ContentBundle::load(&crate::layout::repo_layout()).expect("bundle");
+        let loot = MobLoot::from_tables(&bundle.tables);
+        for (variant, base) in [
+            ("Legion_Sagittarii_61", "Legion_Sagittarii_60"),
+            ("Ghost_Charred_60_07SM05b", "Ghost_Charred_07SM05b"),
+        ] {
+            assert_eq!(
+                loot.of(lowercase_crc32(variant)),
+                loot.of(lowercase_crc32(base)),
+                "{variant}"
+            );
+            assert!(loot.of(lowercase_crc32(variant)).is_some(), "{variant}");
+        }
     }
 
     #[test]
