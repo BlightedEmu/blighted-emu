@@ -415,6 +415,7 @@ impl SimWorld {
         if quests.is_empty() {
             return;
         }
+        let puzzle_objects = self.open_strike_objects(number);
         let target = self
             .content
             .quest_objects
@@ -425,19 +426,34 @@ impl SimWorld {
                     .get(&index)
                     .and_then(|(_, until)| *until)
                     .is_some_and(|until| now_ms < until);
-                !broken
-                    && quests.iter().any(|quest| {
-                        quest.run.counts_game_event(&object.event)
-                            || (object.drops
-                                && !quest.run.gather_drops(&object.gatherable).is_empty())
-                    })
+                let puzzle = puzzle_objects
+                    .iter()
+                    .any(|gatherable| gatherable.eq_ignore_ascii_case(&object.gatherable));
+                puzzle
+                    || (!broken
+                        && quests.iter().any(|quest| {
+                            quest.run.counts_game_event(&object.event)
+                                || (object.drops
+                                    && !quest.run.gather_drops(&object.gatherable).is_empty())
+                        }))
             })
             .map(|(index, object)| {
                 let known = object.id;
                 let drops = object.drops.then(|| lowercase_crc32(&object.gatherable));
-                (index, object.event.clone(), object.respawn_ms, known, drops)
+                let puzzle = puzzle_objects
+                    .iter()
+                    .find(|gatherable| gatherable.eq_ignore_ascii_case(&object.gatherable))
+                    .copied();
+                (
+                    index,
+                    object.event.clone(),
+                    object.respawn_ms,
+                    known,
+                    drops,
+                    puzzle,
+                )
             });
-        let Some((index, event, respawn_ms, known, drops)) = target else {
+        let Some((index, event, respawn_ms, known, drops, puzzle)) = target else {
             return;
         };
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
@@ -462,6 +478,12 @@ impl SimWorld {
                     ServerMessage::GatheringInterrupted(ended),
                 ],
             );
+        }
+        // A gong of a strike puzzle: each hit strikes it (retail `99f_msq_er_meetwiseman`: one
+        // 2071 and 2724 per gong, the puzzle's end with the third), and it never breaks.
+        if let Some(gatherable) = puzzle {
+            self.puzzle_struck(number, gatherable, now_ms);
+            return;
         }
         let (hits, until) = player.strikes.objects.entry(index).or_default();
         *hits = if until.is_some() { 0 } else { *hits } + strike.hits();

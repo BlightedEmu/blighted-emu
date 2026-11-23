@@ -431,14 +431,32 @@ impl SimWorld {
     }
 
     /// Holds again the depleted nodes the world database kept for this level, at sim ms
-    /// `now_ms` and Unix ms `now_unix_ms`: each grows back at its saved time.
+    /// `now_ms` and Unix ms `now_unix_ms`: each grows back at its saved time. A node on an
+    /// instanced capital is no shared node ([`Self::instanced_object`]): a saved depletion of
+    /// one (left by a gather that the sim took for a shared one) is not held.
     pub(crate) fn restore_depleted_nodes(
         &mut self,
         saved: &[DepletedNode],
         now_ms: u64,
         now_unix_ms: u64,
     ) {
-        for node in saved {
+        let on_instanced = |point: usize| {
+            self.content
+                .gather_points
+                .position_of(point)
+                .and_then(|at| {
+                    self.content.instanced_gathers.at(
+                        [at.x, at.y, at.z],
+                        crate::player_content::CAPITAL_ON_POINT_M,
+                    )
+                })
+                .is_some()
+        };
+        let shared: Vec<&DepletedNode> = saved
+            .iter()
+            .filter(|node| !on_instanced(node.point))
+            .collect();
+        for node in shared {
             let left_ms = node.respawn_at_unix_ms.saturating_sub(now_unix_ms);
             let layout = self
                 .content
@@ -521,11 +539,8 @@ impl SimWorld {
             return;
         };
         let table = self.gather_table(&gatherable, request, name);
-        let instanced = mob.is_none()
-            && self
-                .content
-                .instanced_gathers
-                .instanced(request.target_entity);
+        let node_at = point.map(|(_, at)| at);
+        let instanced = mob.is_none() && self.instanced_object(&request, node_at).is_some();
         // An instanced object stays locked for its gatherer until its tracker entry's reset.
         let opened = instanced
             && self
@@ -890,6 +905,9 @@ impl SimWorld {
                 .quests_of_player(number)
                 .iter()
                 .any(|quest| gate.iter().any(|tag| quest.run.enables_interact(tag)))
+            || request
+                .gatherable
+                .is_some_and(|crc| self.puzzle_opens(number, crc))
     }
 
     /// Whether player `entity` may gather `gatherable`: one that needs its tradeskill's tool
@@ -1267,6 +1285,7 @@ impl SimWorld {
             self.grant_scaled_event(gather.number, event, ONE_GATHER, scale, now_ms);
             self.quest_event(gather.number, Event::GameEvent(event), now_ms);
         }
+        self.puzzle_gathered(gather.number, &gather.gatherable.id, now_ms);
         if let Some(tradeskill) = &gather.gatherable.tradeskill {
             self.meta_event(
                 entity,
@@ -1328,11 +1347,27 @@ impl SimWorld {
             return None;
         }
         let at = self.nodes.position_of(&gather.request.target)?;
-        let object = self
-            .content
-            .instanced_gathers
-            .of(gather.request.target_entity)?;
+        let object = self.instanced_object(&gather.request, Some(at))?;
         self.instanced_lock(object, &gather.gatherable, gather.request.gatherable, at)
+    }
+
+    /// The slice values of the instanced object that `request` gathers: the one its facet
+    /// entity names, else the instanced capital on its node's point `node_at` (a request that
+    /// names the node by its gatherable point); `None` for a shared object.
+    fn instanced_object(
+        &self,
+        request: &InteractionRequest,
+        node_at: Option<Position>,
+    ) -> Option<nw_content::gathering::InstancedObject> {
+        let gathers = &self.content.instanced_gathers;
+        gathers.of(request.target_entity).or_else(|| {
+            node_at.and_then(|at| {
+                gathers.at(
+                    [at.x, at.y, at.z],
+                    crate::player_content::CAPITAL_ON_POINT_M,
+                )
+            })
+        })
     }
 
     /// The lock that a gather of instanced object `object` (its slice's values) of gatherable
@@ -1438,12 +1473,23 @@ impl SimWorld {
         }
         // A quest object is most often a loot container too (346 of the 381 steps that drop
         // from a gatherable, `1225_Truffle` of Truffle Fever among them): it gives its own
-        // drops and the drops of any container in a mission's place.
+        // drops and the drops of any container in a mission's place. A step whose drop names
+        // the interact tag of the object's variant drops at its gather too (retail
+        // `04a_side04_06_getflowers`: each of the five gathers of `04A_Side04_01_Flowers`, tag
+        // `IO_04A_Side04_01_Flowers`, raised `04A_Side04_06_02_Task_RetrieveFlowersFromIO`
+        // by one, 70.1 s to 117.1 s).
+        let tags = self
+            .content
+            .interact_tags
+            .of_gatherable(lowercase_crc32(&gatherable.id));
         let drops = self
             .quests_of_player(number)
             .iter()
             .flat_map(|quest| {
                 let mut drops = quest.run.gather_drops(&gatherable.id);
+                for tag in tags {
+                    drops.extend(quest.run.gather_drops(tag));
+                }
                 if gatherable.loot_container {
                     drops.extend(quest.run.chest_drops());
                 }
@@ -4299,6 +4345,38 @@ pub(crate) mod tests {
             );
         }
         assert!(in_cannon_slots(&grown), "nothing in the plant slots");
+    }
+
+    /// A saved depletion of a node on an instanced capital is not held again (the shared
+    /// gathers of `09A_S16_ReroutePylonA` left it depleted for its 86,400 s respawn); one of a
+    /// shared node is.
+    #[test]
+    fn a_saved_depletion_of_an_instanced_capital_s_node_is_not_restored() {
+        const PYLON_GUID: &str = "75fe1bfe-9b34-30fb-a1d0-f73e72b0709f";
+        const NOW_UNIX_MS: u64 = 1_000;
+        let saved = DepletedNode {
+            gde_ref: FLINT,
+            point: FLINT_POINT,
+            position: AT,
+            respawn_at_unix_ms: RESPAWN_AT_MS,
+        };
+        let world_with = |instanced: InstancedGathers| {
+            let mut world = world_with_spawns(Vec::new());
+            let mut content = content();
+            content.gather_points = PlacedPoints::of([(lowercase_crc32("flint"), AT)]);
+            content.instanced_gathers = instanced;
+            world.content = Arc::new(content);
+            world.restore_depleted_nodes(std::slice::from_ref(&saved), NOW, NOW_UNIX_MS);
+            world
+        };
+        let quest = InstancedObject {
+            loot_type: 4,
+            aoi_radius_m: Some(100.0),
+        };
+        let instanced = InstancedGathers::build([(PYLON_GUID, quest)], [])
+            .with_places([(PYLON_GUID, [AT.x, AT.y, AT.z])]);
+        assert!(world_with(instanced).nodes.nodes.is_empty());
+        assert_eq!(world_with(InstancedGathers::default()).nodes.nodes.len(), 1);
     }
 
     #[test]

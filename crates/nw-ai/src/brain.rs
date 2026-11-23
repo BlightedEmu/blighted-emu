@@ -1812,7 +1812,14 @@ impl<'a, W: World> Ctx<'a, '_, W> {
                     done_at_ms: done_at,
                 });
                 self.task_running(task, cage.wait_for_completion);
-                if !cage.wait_for_completion {
+                // An action with no entry for the mob's tags plays no fragment, so no
+                // completion comes: it is done at once (Inferred: the engine's queue of a
+                // fragment it cannot find ends the action). Live 2026-11-22 (sim 15:33:39): the
+                // `09A_S17` prowlers (`dryad_prowler`, whose `Alert` entries all need a weapon
+                // tag) took the player and stood in `Alerted` to the end of the run; retail
+                // `09a_s17_establishdefenses` (116.8 s) shows them stand 1.4 to 1.7 s, then run.
+                if !cage.wait_for_completion || cage_action.variant(&has_tag).is_none() {
+                    self.task_running(task, false);
                     return LeafStart::Done(Status::Success);
                 }
                 LeafStart::Wait(State::Leaf {
@@ -2328,6 +2335,26 @@ mod tests {
         mob.tick(&runtime, &TestWorld::default(), &mut out);
         assert!(acted(&out));
         assert_eq!(played(&out, &data), ["Gore"]);
+    }
+
+    /// The `09A_S17` prowler: its `Alert` entries all need a weapon tag it has not, so the
+    /// action plays no fragment and is done at once; the sequence goes on to its next task.
+    #[test]
+    fn an_action_without_an_entry_for_the_mob_s_tags_is_done_at_once() {
+        const WEAPON_TAG: &str = "Sickle";
+        let mut build = Build::default();
+        let alert = build.gore("Alerted");
+        let weapon = build.name(WEAPON_TAG);
+        let action = build.data.cage_actions.len() - 1;
+        build.data.cage_actions[action].variants[0].tags = vec![weapon];
+        let run = build.gore("Run");
+        let root = build.sequence(&[alert, run]);
+        let data = build.finish(root);
+        let runtime = Runtime::new(data.clone());
+        let mut mob = brain(&data);
+        let mut out = Vec::new();
+        mob.tick(&runtime, &TestWorld::default(), &mut out);
+        assert_eq!(played(&out, &data), ["Alerted", "Run"]);
     }
 
     #[test]

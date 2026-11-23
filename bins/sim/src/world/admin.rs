@@ -344,6 +344,23 @@ impl SimWorld {
         count: u32,
         ai: Option<&SpawnAi>,
     ) -> Result<Vec<u64>, String> {
+        self.spawn_gm_of_category(vitals, None, level, at, count, ai)
+    }
+
+    /// [`Self::spawn_gm`] with the vitals category `category` of the mob's spawner slice
+    /// (`m_vitalsCategoryTableRowId`), which a kill task counts as the mob's spawn category:
+    /// the C10A_Q3 tyrant slice `worldevent_ai_10a_q3_spectraltyrant` spawns vitals row
+    /// `CK_Spectral_Lost_Fire` of category `CK_Spectral_Lost_Fire_Q3_WaveEvent`, the enemy of
+    /// the task `C10A_Q3_KillTyrant`.
+    pub(super) fn spawn_gm_of_category(
+        &mut self,
+        vitals: &str,
+        category: Option<&str>,
+        level: u32,
+        at: Point,
+        count: u32,
+        ai: Option<&SpawnAi>,
+    ) -> Result<Vec<u64>, String> {
         if self.combat.data.level(level).is_none() {
             let levels = self.combat.data.levels().map(|(level, _)| level);
             let (lowest, highest) = levels.fold((u32::MAX, 0), |(low, high), level| {
@@ -361,6 +378,7 @@ impl SimWorld {
         for (x, y) in ring(at.x, at.y, count) {
             let spawn = VitalsSpawn {
                 vitals_id: lowercase_crc32(vitals),
+                category_id: category.map_or(VitalsSpawn::default().category_id, lowercase_crc32),
                 level,
                 position: [x, y, at.z],
                 ..VitalsSpawn::default()

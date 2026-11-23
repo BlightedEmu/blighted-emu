@@ -1196,12 +1196,27 @@ impl EncounterObjects {
         position: Position,
         radius_m: f32,
     ) -> Option<[u8; 16]> {
+        self.standing_near(position, radius_m)
+            .map(|(_, asset)| asset)
+    }
+
+    /// The slice and the slice asset of a start object that stands, not gathered, within
+    /// `radius_m` of `position`.
+    pub(super) fn standing_near(
+        &self,
+        position: Position,
+        radius_m: f32,
+    ) -> Option<(&str, [u8; 16])> {
         self.objects
             .values()
             .filter(|object| {
                 !object.depleted && object.position.horizontal_distance(position) <= radius_m
             })
-            .find_map(|object| self.kinds.get(&object.slice).map(|kind| kind.asset))
+            .find_map(|object| {
+                self.kinds
+                    .get(&object.slice)
+                    .map(|kind| (object.slice.as_str(), kind.asset))
+            })
     }
 
     /// Whether start object `number` stands.

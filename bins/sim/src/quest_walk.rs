@@ -105,6 +105,28 @@ fn walk_world(config: &SimConfig, level: &LoadedLevel) -> Result<SimWorld, RunEr
     Ok(world)
 }
 
+/// The NPCs of the level's swap capitals, by the CRC-32 of the lowercase NPC id, with their
+/// places: a capital whose variant is a `VariationData` row that names an `NPCId` (the
+/// `masternpc_swap_defaulthidden` capital of variant `09a_Trahern_LC` at 8476 1143 235, which
+/// the level's NPC records leave out; its quest step `09A_M14_TalkToTrahern3` names 8481 1145).
+fn swap_npc_places<'a>(
+    capitals: &[nw_world::records::Capital],
+    npc_variants: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Vec<(u32, [f32; 3])> {
+    let npc_of_variant: HashMap<String, &str> = npc_variants
+        .filter(|(_, npc)| !npc.is_empty())
+        .map(|(variant, npc)| (variant.to_lowercase(), npc))
+        .collect();
+    capitals
+        .iter()
+        .filter_map(|capital| {
+            let variant = capital.variant_name.as_deref()?.to_lowercase();
+            let npc = npc_of_variant.get(&variant)?;
+            Some((lowercase_crc32(npc), capital.position))
+        })
+        .collect()
+}
+
 /// What level `world_file` holds that the quests of `content` need: the NPC and territory
 /// places, the quest givers and topic holders of `tables`, and what gives each achievement.
 pub fn quest_guide(world_file: &WorldFile, tables: &Tables, content: &PlayerContent) -> QuestGuide {
@@ -116,6 +138,14 @@ pub fn quest_guide(world_file: &WorldFile, tables: &Tables, content: &PlayerCont
     let mut npcs = HashMap::new();
     for npc in &world_file.npcs {
         npcs.entry(npc.npc_id).or_insert_with(|| at(npc.position));
+    }
+    let npc_variants = tables
+        .variation_data
+        .iter()
+        .flat_map(|table| &table.rows)
+        .filter_map(|row| Some((row.variant_id.as_deref()?, row.npc_id.as_deref()?)));
+    for (npc_id, position) in swap_npc_places(&world_file.capitals, npc_variants) {
+        npcs.entry(npc_id).or_insert_with(|| at(position));
     }
     let mut territory_spots = HashMap::new();
     let records = world_file
@@ -417,6 +447,30 @@ pub(crate) mod tests {
             load_level(&config, nw_content::layout::repo_layout().content_dir()).expect("level");
         let world = walk_world(&config, &level).expect("world");
         (level, world)
+    }
+
+    #[test]
+    fn a_swap_capital_of_an_npc_variant_places_that_npc() {
+        const NPC: &str = "09a_Trahern_LC";
+        const PLACE: [f32; 3] = [8476.3, 1143.2, 235.2];
+        let capitals = vec![
+            nw_world::records::Capital {
+                position: PLACE,
+                slice_name: "slices/characters/mission/sliceswaps/masternpc_swap_defaulthidden"
+                    .to_owned(),
+                variant_name: Some(NPC.to_lowercase()),
+                ..nw_world::records::Capital::default()
+            },
+            nw_world::records::Capital {
+                variant_name: Some("Ancient_T3_M".to_owned()),
+                ..nw_world::records::Capital::default()
+            },
+        ];
+        assert_eq!(
+            swap_npc_places(&capitals, [(NPC, NPC), ("09a_Trahern_SE", "")].into_iter()),
+            [(lowercase_crc32(NPC), PLACE)],
+            "the capital of an NPC variant places the NPC; a row with no NPC places none"
+        );
     }
 
     /// The plaque of `99A_MSQ_01_LearnSoulwardens` (step `Investigate_Plaque_01`) unlocks the

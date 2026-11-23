@@ -74,6 +74,8 @@ use crate::mobs::{
 };
 use crate::objectives::Event;
 
+/// The game event a player's kill of another player fires for the killer.
+pub(super) const PLAYER_KILL_EVENT: &str = "PlayerKill";
 /// How high above the sea a player still swims (Inferred: retail swam at 0.0 to 1.55 m above the
 /// tutorial's sea and walked onto the beach at 3.5 m).
 const SWIM_HEIGHT_M: f32 = 1.6;
@@ -3445,6 +3447,17 @@ impl SimWorld {
         let by_player =
             spawn_index(attacker).is_none() && self.player_by_number(attacker).is_some();
         self.wear_at_death(entity, by_player);
+        // A player's kill of a player counts for the killer's quests as game event
+        // `PlayerKill` (Inferred: the only use of that id in the game data is the event of
+        // `C10A_Q6_KillPlayers`, "Kill Players in the Citadel", no row of `GameEventData` has
+        // it, and no retail capture of that quest exists).
+        if by_player {
+            self.quest_event(
+                attacker,
+                crate::objectives::Event::GameEvent(PLAYER_KILL_EVENT),
+                now_ms,
+            );
+        }
         // A death puts the drawn weapon away (retail: 161 put-aways at the 4299).
         let time_ns = unix_ns(self.server_ms);
         if let Some(mut player) = self.world.get_mut::<Player>(entity)
@@ -8555,6 +8568,81 @@ mod tests {
             Err(AttackRefusal::TooFast),
             "the attack interval applies"
         );
+    }
+
+    /// `C10A_Q6_KillPlayers` waits for game event `PlayerKill`: a flagged player's kill of a
+    /// foe counts it for the killer, not for the one killed.
+    #[test]
+    fn a_player_s_kill_of_a_foe_is_the_killer_s_player_kill_event() {
+        use crate::objectives::{TaskBook, TaskRow};
+        use crate::player_content::{ObjectiveRow, QuestBook};
+        const PLAYER_2: u64 = 2;
+        const QUEST: &str = "C10A_Q6_Citadel";
+        const KILLS: &str = "C10A_Q6_KillPlayers";
+        const NEEDED: i64 = 3;
+        /// Past the death's door delay, past the attack interval.
+        const LATER_MS: u64 = 10_000;
+        const TRIES: u64 = 4;
+        let mut world = fight();
+        join(&mut world, PLAYER_2, MOB_X + 3.0);
+        let content = Arc::make_mut(&mut world.content);
+        content.quests = QuestBook::build(
+            [ObjectiveRow {
+                id: QUEST.to_owned(),
+                root: "root".to_owned(),
+                ..ObjectiveRow::default()
+            }],
+            TaskBook::new(vec![
+                TaskRow {
+                    task_id: "root".to_owned(),
+                    kind: "ConsecutiveTaskContainer".to_owned(),
+                    sub_tasks: vec![KILLS.to_owned()],
+                    ..TaskRow::default()
+                },
+                TaskRow {
+                    task_id: KILLS.to_owned(),
+                    kind: "TaskGameEvent".to_owned(),
+                    kill_enemy_type: Some(PLAYER_KILL_EVENT.to_owned()),
+                    target_qty: Some(NEEDED),
+                    ..TaskRow::default()
+                },
+            ]),
+        );
+        for number in [1, PLAYER_2] {
+            world.accept_quest(number, QUEST, None, NOW).expect("quest");
+        }
+        flag(&mut world, 1);
+        flag(&mut world, PLAYER_2);
+        let target = world.player_by_number(PLAYER_2).expect("player");
+        let max = health_of(&mut world, PLAYER_2).max();
+        world
+            .world
+            .get_mut::<Vitals>(target)
+            .expect("vitals")
+            .health = Health::at(1, max);
+        let killed = (0..TRIES).any(|index| {
+            matches!(
+                world.attack(&connection(1), PLAYER_2, LIGHT, NOW + index * LATER_MS),
+                Ok(AttackOutcome::Killed { .. })
+            )
+        });
+        assert!(killed, "the foe died");
+        let kills = |world: &SimWorld, number: u64| {
+            world
+                .quests_of_player(number)
+                .iter()
+                .find(|quest| quest.def.id == QUEST)
+                .and_then(|quest| {
+                    quest
+                        .run
+                        .progress()
+                        .into_iter()
+                        .find(|task| task.task == lowercase_crc32(&KILLS.to_lowercase()))
+                })
+                .map(|task| task.progress)
+        };
+        assert_eq!(kills(&world, 1), Some(1), "the killer's kill");
+        assert_eq!(kills(&world, PLAYER_2), None, "no kill for the one killed");
     }
 
     /// Two flagged players 3 m apart whose light row shakes by power level `power_level`

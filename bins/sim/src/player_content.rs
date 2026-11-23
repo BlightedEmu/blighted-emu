@@ -634,6 +634,9 @@ pub struct MobLooks {
     by_key: HashMap<PrefabKey, MobLook>,
     /// The asset of each vitals id's most seen prefab.
     default_asset: HashMap<u32, [u8; ASSET_ID_LEN]>,
+    /// For a vitals id without a prefab of its own, the prefab of the creature slice its
+    /// spawners spawn ([`MobLooks::with_spawned_slices`]).
+    spawned: HashMap<u32, PrefabKey>,
 }
 
 impl MobLooks {
@@ -692,6 +695,7 @@ impl MobLooks {
         let looks = Self {
             by_key,
             default_asset: prefabs.default_assets().collect(),
+            spawned: HashMap::new(),
         };
         (looks, skipped)
     }
@@ -705,6 +709,66 @@ impl MobLooks {
                 let asset = self.default_asset.get(&vitals_id)?;
                 self.by_key.get(&(vitals_id, *asset))
             })
+            .or_else(|| self.by_key.get(self.spawned.get(&vitals_id)?))
+    }
+
+    /// These looks with the creature slices `spawned` (vitals id, slice asset) that the level's
+    /// spawners spawn ([`nw_content::creature_animations::CreatureAnimations::spawned`]): a
+    /// vitals id without a prefab of its own shows a prefab of its slice (the one of the lowest
+    /// vitals id), with its own vitals written in at its card. Observed: the capture-made table
+    /// holds no `Barbary_Lion_61`, whose spawner spawns `barbary_lion.dynamicslice`; retail sent
+    /// that slice (asset `0b7ea009...`) as the card of `Barbary_Lion_60`, `_62`, `_63` and `_66`,
+    /// each with its own vitals id. Without a look the sim sent the lion as a bare place (no
+    /// vitals, no death), which neither a client nor the bot could see die (bot ledger
+    /// 2026-11-22 15:38, 82.6 s).
+    #[must_use]
+    pub fn with_spawned_slices(
+        mut self,
+        spawned: impl IntoIterator<Item = (u32, [u8; ASSET_ID_LEN])>,
+    ) -> Self {
+        let mut of_asset: HashMap<[u8; ASSET_ID_LEN], PrefabKey> = HashMap::new();
+        for key in self.by_key.keys() {
+            of_asset
+                .entry(key.1)
+                .and_modify(|known| *known = (*known).min(*key))
+                .or_insert(*key);
+        }
+        for (vitals_id, asset) in spawned {
+            if self.default_asset.contains_key(&vitals_id) {
+                continue;
+            }
+            if let Some(key) = of_asset.get(&asset) {
+                self.spawned.insert(vitals_id, *key);
+            }
+        }
+        self
+    }
+
+    /// These looks with the level variants `variants` (variant vitals id, base vitals id): a
+    /// variant without a look of its own or of its spawners' slice shows its base type's most
+    /// seen look, with its own vitals written in. Observed (mob prefab table): of the 95
+    /// variants whose base retail also showed, 92 came with the base's slice asset.
+    #[must_use]
+    pub fn with_variants(mut self, variants: impl IntoIterator<Item = (u32, u32)>) -> Self {
+        for (variant, base) in variants {
+            if variant == base
+                || self.default_asset.contains_key(&variant)
+                || self.spawned.contains_key(&variant)
+            {
+                continue;
+            }
+            if let Some(asset) = self.default_asset.get(&base) {
+                self.spawned.insert(variant, (base, *asset));
+            }
+        }
+        self
+    }
+
+    /// The vitals ids that show the prefab of their spawners' creature slice, with that asset.
+    pub fn spawned_assets(&self) -> impl Iterator<Item = (u32, [u8; ASSET_ID_LEN])> + '_ {
+        self.spawned
+            .iter()
+            .map(|(vitals_id, (_, asset))| (*vitals_id, *asset))
     }
 
     /// Prefabs with a look.
@@ -1401,11 +1465,17 @@ fn level_instanced_gathers(level: &WorldFile) -> InstancedGathers {
             TagOwner::Spawned(id) => Some((id, gather.object)),
         }),
     )
+    .with_places(
+        level
+            .capitals
+            .iter()
+            .map(|capital| (capital.id.as_str(), capital.position)),
+    )
 }
 
 /// The largest difference on each axis between a quest object's point and the capital on it, m
 /// (Observed: 0 on the four nodules; a float's rounding).
-const CAPITAL_ON_POINT_M: f32 = 0.01;
+pub(crate) const CAPITAL_ON_POINT_M: f32 = 0.01;
 
 /// The capitals that are no spawn group (`SPAWN_MASTER_FOLDER`), by the cell of
 /// [`CAPITAL_ON_POINT_M`] they stand in: a point's capitals are in its cell and the 26 around
@@ -1505,6 +1575,34 @@ impl QuestObjects {
             &HashSet::new(),
             capitals,
         )
+    }
+
+    /// These objects, each without a capital's id taking the GDE id of the damageable slice of
+    /// `spawned` that stands on its point (each axis within [`CAPITAL_ON_POINT_M`]): the gongs
+    /// of `PuzzleMSQGong` are spawned slices of `master_quest_damageable_instanced_scripted`
+    /// (variants `99f_gong_a`, `_bf`, `_c` on the points of `99F_MSQ_02_Puzzle1` to `3`), and
+    /// retail's hits named those ids (`99f_msq_er_meetwiseman` 340.729 s: 2071 to
+    /// `14d1789a25a8180f`, the id of `99f_gong_bf`).
+    #[must_use]
+    pub fn with_spawned_ids(mut self, spawned: &[nw_world::slice_data::SpawnedSlice]) -> Self {
+        let damageable: Vec<&nw_world::slice_data::SpawnedSlice> = spawned
+            .iter()
+            .filter(|slice| slice.slice.to_lowercase().contains(DAMAGEABLE_SLICE_MARK))
+            .collect();
+        for object in self.objects.iter_mut().filter(|object| object.id.is_none()) {
+            let point = [object.position.x, object.position.y, object.position.z];
+            object.id = damageable
+                .iter()
+                .find(|slice| {
+                    slice
+                        .position
+                        .iter()
+                        .zip(point)
+                        .all(|(a, b)| (a - b).abs() <= CAPITAL_ON_POINT_M)
+                })
+                .map(|slice| slice.id);
+        }
+        self
     }
 
     /// The quest objects among the level's gatherable `points`: those of a gatherable in
@@ -1667,7 +1765,8 @@ impl PlayerContent {
             &counted_game_events(&rows),
             &quest_drop_sources(&rows),
             &level.capitals,
-        );
+        )
+        .with_spawned_ids(&level.spawned);
         let kits = StarterKits::from_tables(tables);
         let travel = TravelRules::of(tables, level, &gameplay, &kits);
         let charting = ChartRules::of(tables, level);
@@ -1981,6 +2080,91 @@ mod tests {
             !instanced.instanced(CHEST_FACET + 8),
             "another object is shared"
         );
+    }
+
+    /// The gong `99F_MSQ_02_Puzzle2` (world file of build 25810808): its point holds no capital
+    /// but the damageable spawned slice `99f_gong_bf` (id `14d1789a25a8180f`, the facet entity of
+    /// retail's hits), whose id the quest object takes; another spawned slice there is no object.
+    #[test]
+    fn a_gong_quest_object_takes_the_id_of_the_damageable_slice_on_its_point() {
+        use nw_content::gathering::{DetectionSpheres, Gatherable, Gatherables};
+        const GONG: &str = "99F_MSQ_02_Puzzle2";
+        const EVENT: &str = "99F_MSQ_02_Puzzle2_interact";
+        const GONG_ID: u64 = 0x14d1_789a_25a8_180f;
+        const GONG_AT: [f32; 3] = [8288.1, 6693.65, 188.34];
+        let gatherables = Gatherables::build([Gatherable {
+            id: GONG.to_owned(),
+            gather_ms: 1_000,
+            respawn_ms: (0, 0),
+            loot_table: None,
+            loot_container: true,
+            tradeskill: Some("None".to_owned()),
+            tool_required: false,
+            by_hand: true,
+            game_event: Some(EVENT.to_owned()),
+            animation: None,
+        }]);
+        let point = GatherablePoint {
+            gatherable_id: lowercase_crc32(GONG),
+            position: GONG_AT,
+            ..GatherablePoint::default()
+        };
+        let spawned = |id: u64, slice: &str| nw_world::slice_data::SpawnedSlice {
+            id,
+            slice: slice.to_owned(),
+            variant: String::new(),
+            position: GONG_AT,
+        };
+        let objects = QuestObjects::build(
+            &[point],
+            &gatherables,
+            &DetectionSpheres::default(),
+            &HashSet::from([EVENT.to_lowercase()]),
+            &[],
+        )
+        .with_spawned_ids(&[
+            spawned(GONG_ID + 1, "slices/props/gong_base_mesh"),
+            spawned(
+                GONG_ID,
+                "slices/gatherables/master_quest_damageable_instanced_scripted",
+            ),
+        ]);
+        let at = Position {
+            x: GONG_AT[0],
+            y: GONG_AT[1],
+            z: GONG_AT[2],
+        };
+        let (_, gong) = objects.nearest(at, 1.0, |_, _| true).expect("the gong");
+        assert_eq!(gong.id, Some(GONG_ID));
+    }
+
+    /// The pylon `09A_S16_ReroutePylonA` (capital `75fe1bfe-...`, slice `Master_Quest_Instanced`,
+    /// world file of build 25810808): a gather that names it by its gatherable point finds the
+    /// instanced capital on that point; a point beside it finds none.
+    #[test]
+    fn an_instanced_capital_is_found_by_the_point_it_stands_on() {
+        const PYLON_GUID: &str = "75fe1bfe-9b34-30fb-a1d0-f73e72b0709f";
+        const PYLON_AT: [f32; 3] = [8364.0, 1421.0, 279.79];
+        const QUEST: InstancedObject = InstancedObject {
+            loot_type: 4,
+            aoi_radius_m: Some(100.0),
+        };
+        let level = WorldFile {
+            capitals: vec![nw_world::records::Capital {
+                id: PYLON_GUID.to_owned(),
+                position: PYLON_AT,
+                ..nw_world::records::Capital::default()
+            }],
+            instanced_gathers: vec![InstancedGather {
+                owner: TagOwner::Capital(PYLON_GUID.to_owned()),
+                object: QUEST,
+            }],
+            ..WorldFile::default()
+        };
+        let instanced = level_instanced_gathers(&level);
+        assert_eq!(instanced.at(PYLON_AT, CAPITAL_ON_POINT_M), Some(QUEST));
+        let [x, y, z] = PYLON_AT;
+        assert_eq!(instanced.at([x + 1.0, y, z], CAPITAL_ON_POINT_M), None);
     }
 
     #[test]
@@ -2410,5 +2594,40 @@ mod tests {
             Some(2),
             "and for an asset not in the table"
         );
+    }
+
+    #[test]
+    fn a_mob_without_a_prefab_shows_its_spawners_slice_else_its_base_types_look() {
+        // Retail cards of `barbary_lion.dynamicslice` came with `Barbary_Lion_62`; the table has
+        // no `Barbary_Lion_61`, whose spawner spawns that slice. Made-up ids for the rest.
+        let crc = nw_formats::objectstream::lowercase_crc32;
+        let (lion_62, lion_61) = (crc("barbary_lion_62"), crc("barbary_lion_61"));
+        let (base, variant, stranger) = (crc("test_wolf_40"), crc("test_wolf_48"), crc("ghost_9"));
+        const LION: [u8; ASSET_ID_LEN] = [0x0b; ASSET_ID_LEN];
+        const WOLF: [u8; ASSET_ID_LEN] = [0x0c; ASSET_ID_LEN];
+        let row = |vitals: u32, asset: [u8; ASSET_ID_LEN], sub_id: u32| {
+            let asset: String = asset.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!(
+                r#"{{"vitals_id":{vitals},"vitals_name":null,"asset":"{asset}",
+                    "sub_id":{sub_id},"alc_component":5,"vitals_component":9,
+                    "first_members":[],"death_members":[],"seen":1}}"#
+            )
+        };
+        let text = format!("[{},{}]", row(lion_62, LION, 2), row(base, WOLF, 3));
+        let (looks, _) = MobLooks::of(&MobPrefabs::parse(&text).expect("table"));
+        assert!(looks.look(lion_61, None).is_none(), "no prefab of its own");
+        let looks = looks
+            .with_spawned_slices([(lion_61, LION), (stranger, [0; ASSET_ID_LEN])])
+            .with_variants([(variant, base), (lion_61, lion_62)]);
+        let asset = |vitals| looks.look(vitals, None).map(|look| look.asset.id);
+        assert_eq!(asset(lion_61), Some(LION), "its spawners' slice");
+        assert_eq!(asset(variant), Some(WOLF), "its base type's look");
+        assert_eq!(asset(stranger), None, "a slice without a prefab");
+        assert_eq!(asset(lion_62), Some(LION), "its own");
+        let mut borrowed: Vec<_> = looks.spawned_assets().collect();
+        borrowed.sort_unstable();
+        let mut want = vec![(lion_61, LION), (variant, WOLF)];
+        want.sort_unstable();
+        assert_eq!(borrowed, want);
     }
 }

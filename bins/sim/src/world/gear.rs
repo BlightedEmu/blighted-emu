@@ -128,12 +128,16 @@ const TOOL_CLASSES: [(&str, &str); 4] = [
     ("PickAxe", "Mining"),
 ];
 
-/// The tool slot of an item whose `ItemClass` parts are `classes`: a fishing pole's, or the
-/// slot of the tradeskill of its tool class; `None` for an item that is no tool.
+/// The tool slot of an item whose `ItemClass` parts are `classes`: a fishing pole's, an
+/// instrument's ([`nw_content::music::instrument_class_slot`]), or the slot of the tradeskill of
+/// its tool class; `None` for an item that is no tool.
 fn tool_slot_of(classes: &[String]) -> Option<u32> {
     classes.iter().find_map(|class| {
         if class.eq_ignore_ascii_case(nw_content::fishing::FISHING_POLE_CLASS) {
             return Some(super::fishing::FISHING_SLOT);
+        }
+        if let Some(slot) = nw_content::music::instrument_class_slot(class) {
+            return Some(slot);
         }
         TOOL_CLASSES
             .iter()
@@ -1035,6 +1039,17 @@ impl Gear {
         true
     }
 
+    /// The bag slot of the first stack of item `item_id` (any case); `None` when the bag holds
+    /// none.
+    pub(super) fn bag_slot_of(&self, item_id: &str) -> Option<u32> {
+        let index = self.bag.iter().position(|stack| {
+            stack
+                .as_ref()
+                .is_some_and(|stack| stack.item_id.eq_ignore_ascii_case(item_id))
+        })?;
+        u32::try_from(index).ok()
+    }
+
     /// The item in bag slot `bag_slot`: its item id and record; `None` for an empty slot.
     pub(super) fn bag_item(&self, bag_slot: u32) -> Option<(&str, &GearItem)> {
         let stack = self.bag.get(usize::try_from(bag_slot).ok()?)?.as_ref()?;
@@ -1460,6 +1475,14 @@ pub(crate) mod tests {
         assert_eq!(
             tool_slot_of(&fishing),
             Some(super::super::fishing::FISHING_SLOT)
+        );
+        let flute: Vec<String> = ["EquippableTool", "InstrumentFlute"]
+            .map(str::to_owned)
+            .into();
+        assert_eq!(
+            tool_slot_of(&flute),
+            Some(39),
+            "retail: the flute went to 39"
         );
         assert_eq!(tool_slot_of(&["Resource".to_owned()]), None);
     }

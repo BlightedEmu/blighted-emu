@@ -1546,6 +1546,8 @@ mod tests {
             reaction_paces: std::collections::BTreeMap::new(),
             collider_radius_mm: None,
             skinnable: false,
+            skin_gatherable: None,
+            spawned_vitals: Vec::new(),
             weapon_animation_database: None,
         };
         let table = CreatureAnimations::of_rows(vec![row]).expect("table");

@@ -274,13 +274,41 @@ pub fn load_level(config: &SimConfig, content_dir: &Path) -> Result<LoadedLevel,
             .with_player_abilities(player_abilities)
             .with_player_sequences(player_sequences),
     );
+    let creature_animations = match CreatureAnimations::load(&layout) {
+        Ok(table) => {
+            tracing::info!(creatures = table.len(), "creature animation table");
+            table
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no creature animation table: mobs move without animations");
+            CreatureAnimations::default()
+        }
+    };
     let (mob_looks, look_assets, slice_vitals) = match MobPrefabs::load(&layout) {
         Ok(prefabs) => {
             let (looks, skipped) = MobLooks::of(&prefabs);
-            tracing::info!(prefabs = looks.len(), skipped, "mob prefab table");
+            let looks = looks
+                .with_spawned_slices(creature_animations.spawned())
+                .with_variants(
+                    bundle
+                        .tables
+                        .vitals_level_variant_data
+                        .iter()
+                        .flat_map(|table| &table.rows)
+                        .map(|row| {
+                            (
+                                nw_formats::objectstream::lowercase_crc32(&row.vitals_id),
+                                nw_formats::objectstream::lowercase_crc32(&row.base_vitals_id),
+                            )
+                        }),
+                );
+            let borrowed = looks.spawned_assets().count();
+            tracing::info!(prefabs = looks.len(), skipped, borrowed, "mob prefab table");
+            let mut assets = prefabs.default_assets().collect::<LookAssets>();
+            assets.extend(looks.spawned_assets());
             (
                 looks,
-                prefabs.default_assets().collect::<LookAssets>(),
+                assets,
                 prefabs
                     .iter()
                     .map(|((vitals_id, asset), _)| (asset, vitals_id))
@@ -326,16 +354,6 @@ pub fn load_level(config: &SimConfig, content_dir: &Path) -> Result<LoadedLevel,
         }
     }
     .with_slice_vitals(slice_vitals);
-    let creature_animations = match CreatureAnimations::load(&layout) {
-        Ok(table) => {
-            tracing::info!(creatures = table.len(), "creature animation table");
-            table
-        }
-        Err(error) => {
-            tracing::warn!(%error, "no creature animation table: mobs move without animations");
-            CreatureAnimations::default()
-        }
-    };
     let tutorial_level = match FtueLevel::load(&layout) {
         Ok(level) => {
             tracing::info!(

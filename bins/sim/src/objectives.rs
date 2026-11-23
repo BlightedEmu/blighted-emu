@@ -339,7 +339,7 @@ const TRIGGER_VOLUMES: [TriggerVolume; 27] = [
 /// place when the step after them began (no pak holds these server volumes, see
 /// [`TRIGGER_RADIUS_M`]). Without a place such a task never ended: live 2026-10-01, the
 /// `12_demonstorm2` quest stopped before its turn-in at `TriggerVol_12_Whisper6`.
-const OPEN_WORLD_AREAS: [(&str, Position); 2] = [
+const OPEN_WORLD_AREAS: [(&str, Position); 3] = [
     // Retail `12-9_demonstorm2` (2026-09-27): the client asked for the next whisper
     // (`01_Whisper_Beach_06`, 5235) here 169.8 s in, after the cave; `POITag` `watchtower`.
     (
@@ -359,6 +359,17 @@ const OPEN_WORLD_AREAS: [(&str, Position); 2] = [
             x: 7422.975,
             y: 3624.002,
             z: 104.22217,
+        },
+    ),
+    // Retail `1126_0102_atoast`: the player took the quest 45.9 s in, came down the stairs into
+    // the bar (49.9 s, 13165.6 6908.2), and turned it in to `1110_Barkeep` here 63.2 s in;
+    // the `TaskGiveItem` before the area names the barkeep's place (13171.0 6902.1).
+    (
+        "TriggerVol_1126_Bar",
+        Position {
+            x: 13171.67,
+            y: 6901.86,
+            z: 149.73,
         },
     ),
 ];
@@ -627,7 +638,12 @@ pub(crate) enum TaskKind {
     Salvage { item: String, count: u32 },
     /// Done after `count` crafts of an item of this family (`TaskCraftWeaponFamily`: its
     /// `CraftingRecipeID` names the weapon mastery, `SwordAbilityTable`, of any sword).
-    CraftFamily { family: String, count: u32 },
+    CraftFamily {
+        family: String,
+        /// The task's `ItemName`: the item a player makes for it (`1hSwordT2`).
+        item: Option<String>,
+        count: u32,
+    },
     /// Done while the player holds `count` items of this family (`TaskHaveItemsWithWeaponFamily`:
     /// a weapon mastery; `TaskHaveItemsWithItemFamily`: an `ItemClass` tag, `FishingTreasure`).
     HaveFamily { family: String, count: u32 },
@@ -664,8 +680,12 @@ pub(crate) enum TaskKind {
     /// `01_SoleSurvivor_GiveItem1`, the place of ten `TaskGoToPOITag` rows): done at once, as
     /// retail runs `01_SoleSurvivor_GiveItem1` (the real tutorial run test below).
     Empty,
-    /// A task type this server does not run yet (puzzle slayer scripts, emotes, PvP control
-    /// points): never done, so its quest waits and pays no reward; its start logs it.
+    /// A puzzle of a server slayer script (`TaskSlayerScript`, the script in `ItemName`, such
+    /// as `PuzzleMSQGong`): done when the sim solves that puzzle for the player
+    /// ([`Event::PuzzleSolved`], `crate::world::puzzles`).
+    SlayerScript(String),
+    /// A task type this server does not run yet (emotes, PvP control points): never done, so
+    /// its quest waits and pays no reward; its start logs it.
     NotRun(String),
 }
 
@@ -717,6 +737,16 @@ impl FishCatchRule {
         drop: None,
     };
 
+    /// The water loot tag in which its quest fish bites; `None`: any water, or no quest fish.
+    pub(crate) fn water(&self) -> Option<&str> {
+        self.drop.as_ref()?.water.as_deref()
+    }
+
+    /// The territory in which its quest fish bites; `None`: any, or no quest fish.
+    pub(crate) fn territory(&self) -> Option<u32> {
+        self.drop.as_ref()?.territory
+    }
+
     /// Whether it takes `catch`.
     fn takes(&self, catch: &FishCaught<'_>) -> bool {
         self.item
@@ -738,6 +768,10 @@ struct FishDrop {
     water: Option<String>,
     /// The territory (`TerritoryID`); `None`: any.
     territory: Option<u32>,
+    /// `GuranteedDropAttempts`: the bites without the quest fish after which the next bite is it
+    /// (Observed: retail `16_side_11_feedifrit`, `GuranteedDropAttempts` 5 at 35 %: five catches
+    /// of other fish, 132.6 s to 239.9 s, then the quest fish at the sixth, 272.1 s).
+    guaranteed_after: Option<u32>,
 }
 
 /// The item a mission task adds when the player opens a container (a loot crate) in its place
@@ -809,6 +843,10 @@ struct Task {
     /// Its row's `InteractTag`, of any task type: while the task is active, the interacts with
     /// this tag that are only on quest are open to the player ([`ObjectiveRun::enables_interact`]).
     interact_tag: Option<String>,
+    /// Its row's `GameModeID`, of any task type: the instance game mode it is played in
+    /// (`99F_MSQ_ER_FightLiang_KillLiang` a game event, `09A_M15_TriggerArea_TrialEnter` a
+    /// trigger area), which a player enters first ([`ObjectiveRun::task_game_mode`]).
+    game_mode: Option<String>,
     stay_active: bool,
     parent: Option<usize>,
     children: Vec<usize>,
@@ -880,6 +918,9 @@ pub struct TaskRow {
     pub target_threshold: Option<f64>,
     /// `MinGearScore`: of a quick course checkpoint task, the section it waits for.
     pub min_gear_score: Option<i64>,
+    /// `GuranteedDropAttempts`: of a catch task, the bites without its quest fish after which
+    /// the next bite is the quest fish.
+    pub guaranteed_drop_attempts: Option<i64>,
 }
 
 /// Every task row with an index by lowercase task id, made once for the trees of many
@@ -984,6 +1025,7 @@ pub fn task_rows(tables: &Tables) -> Vec<TaskRow> {
             loot_tag: row.loot_tag.clone(),
             target_threshold: row.target_threshold,
             min_gear_score: row.min_gear_score,
+            guaranteed_drop_attempts: row.guranteed_drop_attempts,
         })
         .collect()
 }
@@ -1090,8 +1132,17 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         .max(1);
     let filled = |cell: &Option<String>| cell.clone().filter(|text| !text.is_empty());
     let place = || row.enforce_location.then(|| filled(&row.poi_tag)).flatten();
+    // A drop with no `ItemDropVC` comes from the objects of its `InteractTag` (retail
+    // `04a_side04_06_getflowers`: each gather of `04A_Side04_01_Flowers`, whose variant sets
+    // `IO_04A_Side04_01_Flowers`, raised `04A_Side04_06_02_Task_RetrieveFlowersFromIO` by one).
     let drop = || {
-        let sources = categories_of(row.item_drop_vc.as_deref().unwrap_or_default());
+        let mut sources = categories_of(row.item_drop_vc.as_deref().unwrap_or_default());
+        if sources.is_empty()
+            && row.item_drop_probability.is_some_and(|percent| percent > 0)
+            && let Some(tag) = filled(&row.interact_tag)
+        {
+            sources.push(tag);
+        }
         (!sources.is_empty()).then(|| QuestDrop {
             sources,
             percent: row
@@ -1129,6 +1180,10 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "tasklockachievement" => TaskKind::LockAchievement(item()),
         "tasktemporaryunlockachievement" => TaskKind::TemporaryUnlock(item()),
         "taskachievement" => TaskKind::HasAchievement(item()),
+        "taskslayerscript" => filled(&row.item_name).map_or_else(
+            || TaskKind::NotRun(row.kind.clone()),
+            TaskKind::SlayerScript,
+        ),
         "taskremoveitem" => TaskKind::RemoveItem {
             item: item(),
             count,
@@ -1184,12 +1239,16 @@ fn kind_of(row: &TaskRow) -> TaskKind {
             // takes); a row with neither is done by any container loot.
             None => TaskKind::HaveItem(filled(&row.fail_on_condition)),
         },
+        // Retail `13a_sq_21_swampperfume`: five loot containers of `haunted_town_50216` (255.2 to
+        // 304.0 s) gave the five laudanum of `13A_SQ_21_SwampPerfume_Task_Loot_Chests_Laudanum`
+        // (`ChestDropProbability` 100); `1625_0502_scourgeaeonmadness` looted the bag of its
+        // `Alligator_Black_62` (127.9 s) for the teeth of an `ItemDropVC` row.
         "taskhaveitems" => TaskKind::HaveItems {
             item: item(),
             count,
             returned: false,
-            drop: None,
-            chest: None,
+            drop: drop(),
+            chest: chest(),
         },
         "taskgatheritems" => gather(false),
         "taskgatherandreturnitems" => gather(true),
@@ -1339,6 +1398,10 @@ fn kind_of(row: &TaskRow) -> TaskKind {
                     percent,
                     water: filled(&row.loot_tag),
                     territory: row.territory_id,
+                    guaranteed_after: row
+                        .guaranteed_drop_attempts
+                        .and_then(|attempts| u32::try_from(attempts).ok())
+                        .filter(|attempts| *attempts > 0),
                 }),
             ..FishCatchRule::ANY
         }),
@@ -1360,7 +1423,11 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         }
         "taskcraftweaponfamily" => {
             filled(&row.crafting_recipe_id).map_or(TaskKind::Empty, |family| {
-                TaskKind::CraftFamily { family, count }
+                TaskKind::CraftFamily {
+                    family,
+                    item: filled(&row.item_name),
+                    count,
+                }
             })
         }
         "taskhaveitemswithweaponfamily" | "taskhaveitemswithitemfamily" => filled(&row.item_name)
@@ -1463,6 +1530,7 @@ impl ObjectiveTree {
             id: row.task_id.clone(),
             kind: kind_of(row),
             interact_tag: row.interact_tag.clone().filter(|tag| !tag.is_empty()),
+            game_mode: row.game_mode_id.clone().filter(|mode| !mode.is_empty()),
             stay_active: row.stay_active,
             parent,
             children: Vec::new(),
@@ -1568,6 +1636,8 @@ pub enum Event<'a> {
     TopicFinished(u32),
     /// The player got this achievement.
     AchievementSet(&'a str),
+    /// The sim solved the puzzle of this slayer script for the player.
+    PuzzleSolved(&'a str),
     /// The player crafted the recipe of this id.
     Crafted(&'a str),
     /// The game event of this id happened for the player: the gather of a quest object, or one
@@ -1817,8 +1887,8 @@ pub struct KillTypes {
 }
 
 impl KillTypes {
-    /// The kill types of `VitalsBaseData` in `tables`, with the category groups of
-    /// `VitalsCategoryData`.
+    /// The kill types of `VitalsBaseData` in `tables` and of their level variants
+    /// (`VitalsLevelVariantData`), with the category groups of `VitalsCategoryData`.
     pub fn from_tables(tables: &Tables) -> Self {
         Self::build(
             tables
@@ -1829,6 +1899,13 @@ impl KillTypes {
                     let categories = row.vitals_categories.clone().unwrap_or_default();
                     (row.vitals_id.clone(), categories)
                 }),
+        )
+        .with_variants(
+            tables
+                .vitals_level_variant_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .map(|row| (row.vitals_id.clone(), row.base_vitals_id.clone())),
         )
         .with_groups(
             tables
@@ -1843,6 +1920,28 @@ impl KillTypes {
                     Some((row.vitals_category_id.clone(), group))
                 }),
         )
+    }
+
+    /// These kill types with the level variants `variants` (variant vitals id, base vitals id):
+    /// a variant is a kill type of its own id with its base type's categories. A variant id that
+    /// is a base type too keeps its base row, and a variant of an unknown base is left out.
+    /// Observed (data, build 25810808): 7,304 open-world spawns name a variant id only, among
+    /// them the `Elk_Strange_48` of `Elk_Stag_Strange_03GC04`'s spawners that the retail capture
+    /// `0332_0102_fabulousfurs` killed at 191.9 s and 209.7 s for its two pelts.
+    pub fn with_variants(mut self, variants: impl IntoIterator<Item = (String, String)>) -> Self {
+        let found: Vec<_> = variants
+            .into_iter()
+            .filter_map(|(variant, base)| {
+                let key = lowercase_crc32(&variant);
+                if self.by_vitals.contains_key(&key) {
+                    return None;
+                }
+                let (_, categories) = self.by_vitals.get(&lowercase_crc32(&base))?;
+                Some((key, (variant, categories.clone())))
+            })
+            .collect();
+        self.by_vitals.extend(found);
+        self
     }
 
     /// These kill types with the category groups `groups` (category id, group id).
@@ -2046,6 +2145,16 @@ impl ObjectiveRun {
             })
     }
 
+    /// The game mode (`GameModeID`) of task `task` (its id, any case); `None` for a task of
+    /// none or of no such id.
+    pub(crate) fn task_game_mode(&self, task: &str) -> Option<&str> {
+        self.tree
+            .tasks
+            .iter()
+            .find(|own| own.id.eq_ignore_ascii_case(task))
+            .and_then(|own| own.game_mode.as_deref())
+    }
+
     /// The waiting tasks that are no container, with what each waits for and its progress so
     /// far: what a player must do next.
     pub(crate) fn waiting_steps(&self) -> Vec<(&str, &TaskKind, u32)> {
@@ -2079,6 +2188,18 @@ impl ObjectiveRun {
                         .interact_tag
                         .as_deref()
                         .is_some_and(|own| own.eq_ignore_ascii_case(tag))
+            })
+    }
+
+    /// Whether a task of the puzzle of slayer script `script` waits ([`TaskKind::SlayerScript`]).
+    pub fn runs_puzzle(&self, script: &str) -> bool {
+        self.tree
+            .tasks
+            .iter()
+            .zip(&self.states)
+            .any(|(task, state)| {
+                matches!(state, TaskState::Active { .. })
+                    && matches!(&task.kind, TaskKind::SlayerScript(own) if own.eq_ignore_ascii_case(script))
             })
     }
 
@@ -2424,8 +2545,9 @@ impl ObjectiveRun {
     }
 
     /// The quest fish the waiting catch tasks make bite in water `water` (its tag) for a player
-    /// in `territories`: each item and its chance in percent.
-    pub fn fish_drops(&self, water: &str, territories: &[u32]) -> Vec<(String, u32)> {
+    /// in `territories`: each item, its chance in percent and the bites without it after which
+    /// it bites for sure.
+    pub fn fish_drops(&self, water: &str, territories: &[u32]) -> Vec<(String, u32, Option<u32>)> {
         self.waiting()
             .filter_map(|kind| match kind {
                 TaskKind::CatchFish {
@@ -2444,11 +2566,31 @@ impl ObjectiveRun {
                         .territory
                         .is_none_or(|territory| territories.contains(&territory)) =>
                 {
-                    Some((item.clone(), drop.percent))
+                    Some((item.clone(), drop.percent, drop.guaranteed_after))
                 }
                 _ => None,
             })
             .collect()
+    }
+
+    /// Whether a task of the run, waiting or not, drops item `item` (any case) from the
+    /// containers the player opens. Client rows of `1605_0501_miraclesmadness`:
+    /// `HaveAndReturn_3_CharmionsJournal` drops nothing; each of its sibling tasks
+    /// `GiveAndTake_CharmionJournalA..C` drops one journal from a container after its lore note.
+    pub(crate) fn drops_from_containers(&self, item: &str) -> bool {
+        self.tree.tasks.iter().any(|task| match &task.kind {
+            TaskKind::HaveItems {
+                item: own,
+                chest: Some(_),
+                ..
+            }
+            | TaskKind::GatherItems {
+                item: own,
+                chest: Some(_),
+                ..
+            } => own.eq_ignore_ascii_case(item),
+            _ => false,
+        })
     }
 
     /// The items the waiting item and gather tasks drop for a container the player opens (a loot
@@ -2510,6 +2652,16 @@ impl ObjectiveRun {
                 .as_ref()
                 .is_some_and(|places| places.iter().any(|known| known.eq_ignore_ascii_case(place)))
         })
+    }
+
+    /// The player is in an instance of `game_mode` already: a quest it starts there counts the
+    /// steps of that mode, as a quest that ran at its entry does. Retail
+    /// `0699_0101_Barkimedes_v2` is offered inside DungeonAmrine (its giver `0699_Barkimedes_A`
+    /// stands in no open world), and its last step kills `Withered_Brute_Named_08` in
+    /// DungeonAmrine only (live 2026-11-22 14:20:18: that kill was not counted). No task counts
+    /// an entry by it.
+    pub fn in_game_mode(&mut self, game_mode: &str) {
+        self.game_mode = Some(game_mode.to_owned());
     }
 
     /// Whether the player is in an instance of `game_mode` (`None`: anywhere).
@@ -2637,6 +2789,9 @@ impl ObjectiveRun {
                 (TaskKind::HasAchievement(wanted), Event::AchievementSet(set)) => {
                     (wanted.eq_ignore_ascii_case(set), 1, 1)
                 }
+                (TaskKind::SlayerScript(wanted), Event::PuzzleSolved(solved)) => {
+                    (wanted.eq_ignore_ascii_case(solved), 1, 1)
+                }
                 (
                     TaskKind::GameEvent {
                         event: wanted,
@@ -2693,13 +2848,15 @@ impl ObjectiveRun {
                     },
                     Event::Salvaged { item, quantity },
                 ) => (wanted.eq_ignore_ascii_case(item), quantity, *count),
-                (TaskKind::CraftFamily { family, count }, Event::CraftedFamilies(families)) => (
-                    families
-                        .iter()
-                        .any(|seen| seen.eq_ignore_ascii_case(family)),
-                    1,
-                    *count,
-                ),
+                (TaskKind::CraftFamily { family, count, .. }, Event::CraftedFamilies(families)) => {
+                    (
+                        families
+                            .iter()
+                            .any(|seen| seen.eq_ignore_ascii_case(family)),
+                        1,
+                        *count,
+                    )
+                }
                 (
                     TaskKind::PerformSong { song, near, count },
                     Event::SongPerformed { song: seen, at },
@@ -3642,6 +3799,7 @@ pub(crate) mod tests {
                 item_drop_probability: Some(50),
                 territory_id: Some(13),
                 target_qty: Some(3),
+                guaranteed_drop_attempts: Some(5),
                 ..with_item("Boot", "TaskFishingCatchFish", BOOT)
             },
             TaskRow {
@@ -3657,10 +3815,13 @@ pub(crate) mod tests {
         ];
         let tree = Arc::new(TaskBook::new(rows).tree("Root").expect("tree"));
         let (mut run, _) = ObjectiveRun::start(tree, 0);
-        assert_eq!(run.fish_drops("Salt", &[13]), [(BOOT.to_owned(), 50)]);
+        assert_eq!(
+            run.fish_drops("Salt", &[13]),
+            [(BOOT.to_owned(), 50, Some(5))]
+        );
         assert_eq!(
             run.fish_drops("Fresh", &[12]),
-            [(SNAIL.to_owned(), 25)],
+            [(SNAIL.to_owned(), 25, None)],
             "a sturgeon without a chance is no quest fish"
         );
         run.event(
@@ -3970,6 +4131,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_have_items_task_drops_its_item_from_containers_and_from_its_kills() {
+        // Client rows `13A_SQ_21_SwampPerfume_Task_Loot_Chests_Laudanum` (`TaskHaveItems`,
+        // `ChestDropProbability` 100) and `1625_0502_d_04_01_02_Gather_2_AlligatorTeeth`
+        // (`TaskHaveItems`, `ItemDropVC` `Alligator_Black_16BS05`).
+        const LAUDANUM: &str = "1334_0201_Laudanum";
+        const TEETH: &str = "1625_0502_AlligatorTeeth";
+        const ALLIGATOR: &str = "Alligator_Black_16BS05";
+        let rows = vec![
+            container("Root", "SimpleTaskContainer", &["Chests", "Teeth"]),
+            TaskRow {
+                chest_drop_probability: Some(100),
+                target_qty: Some(5),
+                ..with_item("Chests", "TaskHaveItems", LAUDANUM)
+            },
+            TaskRow {
+                item_drop_vc: Some(ALLIGATOR.to_owned()),
+                item_drop_probability: Some(100),
+                target_qty: Some(2),
+                ..with_item("Teeth", "TaskHaveItems", TEETH)
+            },
+        ];
+        let tree = Arc::new(TaskBook::new(rows).tree("Root").expect("tree"));
+        let (run, _) = ObjectiveRun::start(tree, 0);
+        assert_eq!(run.chest_drops(), [(LAUDANUM.to_owned(), 100)]);
+        let spawner = [lowercase_crc32(ALLIGATOR)];
+        assert_eq!(
+            run.kill_drops("Alligator_Black_62", &[], &spawner),
+            [(TEETH.to_owned(), 100)]
+        );
+    }
+
+    #[test]
     fn a_gather_task_with_a_container_chance_drops_its_item_from_containers() {
         // Retail row `1126_0101_02_Investigate_Ruins` (Stone Cold Secrets): `TaskGatherItems`,
         // `ChestDropProbability` 100; retail counted it 10 ms after a loot container's gather.
@@ -3992,6 +4185,34 @@ pub(crate) mod tests {
         );
         assert!(run.is_done("Ruins"));
         assert!(run.chest_drops().is_empty(), "done: no more drops");
+    }
+
+    #[test]
+    fn an_item_that_a_later_sibling_drops_from_containers_comes_from_containers() {
+        // Client rows of `1605_0501_miraclesmadness`: the journal count drops nothing; the
+        // journal task after the lore note drops one from a container.
+        const JOURNAL: &str = "1651_0101_CharmionsJournal";
+        let rows = vec![
+            container("Root", "SimpleTaskContainer", &["Count", "JournalA"]),
+            TaskRow {
+                target_qty: Some(3),
+                ..with_item("Count", "TaskHaveAndReturnItems", JOURNAL)
+            },
+            container("JournalA", "ConsecutiveTaskContainer", &["Lore", "Take"]),
+            with_item("Lore", "TaskAchievement", "Lore_unlock_Title_15_01"),
+            TaskRow {
+                chest_drop_probability: Some(100),
+                ..with_item("Take", "TaskGiveAndTakeItem", JOURNAL)
+            },
+        ];
+        let tree = Arc::new(TaskBook::new(rows).tree("Root").expect("tree"));
+        let (run, _) = ObjectiveRun::start(tree, 0);
+        assert!(
+            run.chest_drops().is_empty(),
+            "the journal task waits for its lore note"
+        );
+        assert!(run.drops_from_containers(&JOURNAL.to_lowercase()));
+        assert!(!run.drops_from_containers("Lore_unlock_Title_15_01"));
     }
 
     #[test]
@@ -4189,17 +4410,39 @@ pub(crate) mod tests {
     #[test]
     fn a_task_type_the_server_does_not_run_holds_its_quest() {
         let rows = vec![
-            container("Root", "ConsecutiveTaskContainer", &["Puzzle"]),
-            with_item("Puzzle", "TaskSlayerScript", "PuzzleMSQGong"),
+            container("Root", "ConsecutiveTaskContainer", &["Emote"]),
+            row("Emote", "TaskPerformEmote"),
         ];
         assert_eq!(
             kind_of(&rows[1]),
-            TaskKind::NotRun("TaskSlayerScript".to_owned())
+            TaskKind::NotRun("TaskPerformEmote".to_owned())
         );
         let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
         let (mut run, _) = ObjectiveRun::start(tree, NOW);
         run.event(Event::Died, NOW);
         assert!(!run.finished(), "no fake success: the quest waits");
+    }
+
+    /// `99F_MSQ_ER_MeetWiseman_Puzzle` (`TaskSlayerScript`, `ItemName` `PuzzleMSQGong`) waits
+    /// while its puzzle runs and ends when the sim solves that puzzle, not another one.
+    #[test]
+    fn a_slayer_script_task_ends_when_its_puzzle_is_solved() {
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["Puzzle"]),
+            with_item("Puzzle", "TaskSlayerScript", "PuzzleMSQGong"),
+        ];
+        assert_eq!(
+            kind_of(&rows[1]),
+            TaskKind::SlayerScript("PuzzleMSQGong".to_owned())
+        );
+        let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        assert!(run.runs_puzzle("puzzlemsqgong"));
+        run.event(Event::PuzzleSolved("PuzzleMSQAttackMentally"), NOW);
+        assert!(!run.finished(), "another puzzle");
+        run.event(Event::PuzzleSolved("PuzzleMSQGong"), NOW);
+        assert!(run.finished());
+        assert!(!run.runs_puzzle("PuzzleMSQGong"));
     }
 
     /// The tree of an artifact objective (build 25810808 `Objective_Artifact_Set1_MediumFeet`,
@@ -4319,6 +4562,53 @@ pub(crate) mod tests {
         )
         .expect("fits");
         assert_eq!(resumed.progress(), run.progress());
+    }
+
+    #[test]
+    fn a_quest_started_inside_an_instance_counts_the_kills_of_its_game_mode() {
+        const MODE: &str = "DungeonTest00";
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["Enter", "Finish"]),
+            TaskRow {
+                game_mode_id: Some(MODE.to_owned()),
+                ..row("Enter", "TaskGameMode")
+            },
+            TaskRow {
+                kill_enemy_type: Some("Ogre".to_owned()),
+                game_mode_id: Some(MODE.to_owned()),
+                ..row("Finish", "TaskKillContribution")
+            },
+        ];
+        let kill_rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["Finish"]),
+            rows[2].clone(),
+        ];
+        let (mut outside, _) = ObjectiveRun::start(
+            Arc::new(ObjectiveTree::build(&kill_rows, "Root").expect("tree")),
+            NOW,
+        );
+        outside.event(kill("Ogre"), NOW);
+        assert!(!outside.finished(), "a kill outside the instance");
+        let (mut inside, _) = ObjectiveRun::start(
+            Arc::new(ObjectiveTree::build(&kill_rows, "Root").expect("tree")),
+            NOW,
+        );
+        inside.in_game_mode(MODE);
+        inside.event(kill("Ogre"), NOW);
+        assert!(inside.finished(), "a kill in the instance it started in");
+        let (mut entry, _) = ObjectiveRun::start(
+            Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree")),
+            NOW,
+        );
+        entry.in_game_mode(MODE);
+        entry.event(kill("Ogre"), NOW);
+        assert!(
+            !entry.finished(),
+            "being in the instance is no entry: the kill step waits for it"
+        );
+        entry.event(Event::GameModeEntered(MODE), NOW);
+        entry.event(kill("Ogre"), NOW);
+        assert!(entry.finished());
     }
 
     #[test]
@@ -4720,6 +5010,13 @@ pub(crate) mod tests {
                 place(7381.4175, 3732.41, 112.64821),
                 place(7422.975, 3624.002, 104.22217),
             ),
+            // `1126_0102_ReturnToast2`: retail `1126_0102_atoast` came down the bar's stairs
+            // 49.9 s in, 8.8 m from the turn-in place.
+            (
+                "TriggerVol_1126_Bar",
+                place(13171.67, 7001.86, 149.73),
+                place(13165.56, 6908.2, 150.07),
+            ),
         ];
         for (tag, away, at) in cases {
             let rows = vec![
@@ -4939,6 +5236,59 @@ pub(crate) mod tests {
         assert_eq!(types.of(0), None);
     }
 
+    #[test]
+    fn a_level_variant_is_a_kill_type_with_its_base_categories() {
+        // Client rows: `Elk_Strange_48` is a level variant of `Elk_Strange_40`; the spawners of
+        // `0332_0102_fabulousfurs` give it the category `Elk_Stag_Strange_03GC04`.
+        let types = KillTypes::build([
+            ("Elk_Strange_40".to_owned(), "Elk,Beast,Prey".to_owned()),
+            (
+                "Barbary_Lion_62".to_owned(),
+                "Barbary_Lion_62,Hostile".to_owned(),
+            ),
+        ])
+        .with_variants([
+            ("Elk_Strange_48".to_owned(), "Elk_Strange_40".to_owned()),
+            ("Barbary_Lion_62".to_owned(), "Barbary_Lion_62".to_owned()),
+            ("Ghost_Unknown_60".to_owned(), "Ghost_Unknown".to_owned()),
+        ]);
+        let (id, categories) = types
+            .of(lowercase_crc32("elk_strange_48"))
+            .expect("variant");
+        assert_eq!(id, "Elk_Strange_48");
+        assert_eq!(categories, ["Elk", "Beast", "Prey"]);
+        let spawner = [lowercase_crc32("elk_stag_strange_03gc04")];
+        assert!(kills_count(
+            "Elk_Stag_Strange_03GC04",
+            id,
+            categories,
+            &spawner
+        ));
+        assert!(kills_count("Elk", id, categories, &[]));
+        let (lion, lion_categories) = types.of(lowercase_crc32("barbary_lion_62")).expect("base");
+        assert_eq!(lion, "Barbary_Lion_62");
+        assert_eq!(lion_categories, ["Barbary_Lion_62", "Hostile"]);
+        assert_eq!(types.of(lowercase_crc32("ghost_unknown_60")), None);
+    }
+
+    #[test]
+    fn the_content_level_variants_are_kill_types() {
+        let bundle =
+            nw_content::ContentBundle::load(&nw_content::layout::repo_layout()).expect("bundle");
+        let types = KillTypes::from_tables(&bundle.tables);
+        for (variant, category) in [
+            ("Elk_Strange_48", "Elk"),
+            ("Pig_Domestic_49", "Pig"),
+            ("Legion_Sagittarii_61", "Legion_Sagittarii"),
+            ("Elk_Stag_38", "Elk"),
+        ] {
+            let (id, categories) = types
+                .of(lowercase_crc32(variant))
+                .unwrap_or_else(|| panic!("{variant}"));
+            assert!(kills_count(category, id, categories, &[]), "{variant}");
+        }
+    }
+
     /// The retail events of the live tutorial run (live-tutorial note, step table), in order.
     fn retail_tutorial_events() -> Vec<RetailStep> {
         use RetailStep::{Cinematic, Cutscene, Equip, Gain, Kill, Loot, Move, Start, Wait};
@@ -5039,12 +5389,7 @@ pub(crate) mod tests {
         let kinds: Vec<&str> = counts.iter().map(|(kind, _, _)| kind.as_str()).collect();
         assert_eq!(
             kinds,
-            [
-                "patroltask",
-                "taskcontrolpoint",
-                "taskperformemote",
-                "taskslayerscript"
-            ],
+            ["patroltask", "taskcontrolpoint", "taskperformemote"],
             "{counts:#?}"
         );
     }

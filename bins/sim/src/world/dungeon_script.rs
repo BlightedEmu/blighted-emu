@@ -88,6 +88,7 @@ use bevy_ecs::entity::Entity;
 use nw_bus::Point;
 use nw_sim_core::Position;
 use nw_world::catacomb_tiles::turned_point;
+use nw_world::collision::Geometry;
 use nw_world::dungeon_scripts::{
     Encounter, EncounterTasks, HazardObject, LevelScript, OPEN_WORLD_LEVEL, ObjectiveSpec,
     RandomizerChoice, Spawn, SpawnRandomizer, StageAction, Target, TargetMob, TargetSlice,
@@ -182,6 +183,9 @@ pub(super) trait ScriptHost {
     }
     /// Closes the effect areas of handle `handle`.
     fn close_slice_areas(&mut self, _handle: u64) {}
+    /// Mob `mob`, just spawned by an open world encounter, takes the nearest living player for
+    /// whom `in_volume` holds as its target. A host without players does nothing.
+    fn engage(&mut self, _mob: u64, _in_volume: &dyn Fn(Position) -> bool) {}
 }
 
 /// The health a standing start object reports: it is not dead until it is gathered.
@@ -473,6 +477,8 @@ pub(crate) struct DungeonRun {
     groups: Vec<SpawnGroup>,
     /// The group of each encounter, by index.
     group_of: Vec<Option<usize>>,
+    /// Whether it runs the daily twin of each encounter that has one ([`trial_variant`]).
+    daily: bool,
 }
 
 /// The encounters of one alias spawner: one of them is its choice at a time.
@@ -494,6 +500,59 @@ impl SpawnGroup {
     fn choice(&self) -> Option<usize> {
         self.members.get(self.chosen).copied()
     }
+}
+
+/// The end of the slice path of a daily solo trial encounter; the slice path without it (and
+/// with [`SLICE_END`]) is its quest twin (`enc_quest_abominableliangboss_daily` and
+/// `enc_quest_abominableliangboss` in the `QuestLiang` script, 12 trial game modes).
+const DAILY_SLICE_END: &str = "_daily.dynamicslice";
+/// The end of a slice path.
+const SLICE_END: &str = ".dynamicslice";
+/// The start of a game mode's daily trial flag (achievement `DailyTrialLiang`).
+const DAILY_TRIAL_FLAG: &str = "DailyTrial";
+/// The end of the flag that the daily trial was done (`DailyTrialLiangComplete`).
+const DAILY_DONE_END: &str = "Complete";
+/// The game mode id starts that the daily trial flag leaves out (`QuestLiang` ->
+/// `DailyTrialLiang`, `TrialSeason04Q02` -> `DailyTrialSeason04Q02`).
+const TRIAL_MODE_STARTS: [&str; 2] = ["Quest", "Trial"];
+
+/// The daily trial flag of game mode `game_mode` and its done flag.
+pub(super) fn daily_trial_flags(game_mode: &str) -> (String, String) {
+    let name = TRIAL_MODE_STARTS
+        .iter()
+        .find_map(|start| game_mode.strip_prefix(start))
+        .unwrap_or(game_mode);
+    let flag = format!("{DAILY_TRIAL_FLAG}{name}");
+    let done = format!("{flag}{DAILY_DONE_END}");
+    (flag, done)
+}
+
+/// `script` with one encounter of each daily twin pair: the daily one when `daily`, else the
+/// quest one; encounters with no twin stay. Observed: retail ran one of the two per run, the
+/// quest one in the main story runs (`99f_msq_er_fightliang`, `MSQ19-lv65`,
+/// `Playthrough_Part_07`: asset `5e64fa12...` of `enc_quest_abominableliangboss`;
+/// `99g_msq_sm_destroyenemy`: `db197547...` of `enc_quest_isabella_msq2`) and the daily one in
+/// the soul trial repeats (`soultrialhealervg`, `Soul-Trial---Tempest-Mind`: `2e8415ee...` of
+/// `enc_quest_isabella_msq2_daily`). Both encounters' entities in the script slice are alike, so
+/// the rule that picks one is Inferred from the trial doors' conditions
+/// (`99F_Sun_Greet_FightLiang_00 || (DailyTrialLiang && !DailyTrialLiangComplete)`).
+fn trial_variant(mut script: LevelScript, daily: bool) -> LevelScript {
+    let slices: std::collections::HashSet<String> = script
+        .encounters
+        .iter()
+        .map(|encounter| encounter.slice.to_lowercase())
+        .collect();
+    script.encounters.retain(|encounter| {
+        let slice = encounter.slice.to_lowercase();
+        if let Some(stem) = slice.strip_suffix(DAILY_SLICE_END) {
+            return daily || !slices.contains(&format!("{stem}{SLICE_END}"));
+        }
+        let has_daily = slice
+            .strip_suffix(SLICE_END)
+            .is_some_and(|stem| slices.contains(&format!("{stem}{DAILY_SLICE_END}")));
+        !(daily && has_daily)
+    });
+    script
 }
 
 /// The spawn groups of `script`'s encounters and the group of each encounter whose objectives can
@@ -547,6 +606,16 @@ impl DungeonRun {
             sent_events: Vec::new(),
             groups,
             group_of,
+            daily: false,
+        }
+    }
+
+    /// The run of solo trial `script` for instance `instance`: of each encounter with a daily
+    /// twin, the daily one when `daily`, else the other ([`trial_variant`]).
+    pub(super) fn of_trial(instance: Uuid, script: LevelScript, daily: bool) -> Self {
+        Self {
+            daily,
+            ..Self::new(instance, trial_variant(script, daily))
         }
     }
 
@@ -742,35 +811,59 @@ impl DungeonRun {
                 .is_none_or(|group| group.choice() == Some(index));
             let run = &mut self.encounters[index];
             let shown = owned.get(index).copied().unwrap_or(true) && chosen;
-            sync_own_areas(encounter, run, host, shown, now_ms);
-            if !shown {
-                if run.status != EncounterStatus::Idle {
-                    reset(run, host, now_ms);
+            // The state before the tick, for the debug lines of its changes (only when they
+            // are written).
+            let before = (self.open_world.is_some() && tracing::enabled!(tracing::Level::DEBUG))
+                .then(|| EncounterState::of(run));
+            'tick: {
+                sync_own_areas(encounter, run, host, shown, now_ms);
+                if !shown {
+                    if run.status != EncounterStatus::Idle {
+                        reset(run, host, now_ms);
+                    }
+                    break 'tick;
                 }
-                continue;
-            }
-            if let Some(rules) = self.open_world {
-                let was_done = run.status == EncounterStatus::Done;
-                let runs = open_world_step(encounter, run, host, view, rules, now_ms);
-                if was_done
-                    && run.status == EncounterStatus::Idle
-                    && let Some(group) = group.and_then(|group| self.groups.get_mut(group))
+                if let Some(rules) = self.open_world {
+                    let was_done = run.status == EncounterStatus::Done;
+                    let runs = open_world_step(encounter, run, host, view, rules, now_ms);
+                    if was_done
+                        && run.status == EncounterStatus::Idle
+                        && let Some(group) = group.and_then(|group| self.groups.get_mut(group))
+                    {
+                        // It came back after its respawn time: the group picks its next choice.
+                        group.pick(now_ms);
+                    }
+                    if !runs {
+                        break 'tick;
+                    }
+                }
+                let events_before = run.entity_events.len();
+                let mobs_before = run.mobs.len();
+                tick_encounter(encounter, run, host, view, now_ms);
+                if let Some(rules) = self.open_world {
+                    // Observed (retail `09a_s17_establishdefenses`, 116.8 s): the two prowlers of
+                    // `Wave_03` spawned 34 and 37 m from the player, 31 and 32 m from the centre (a
+                    // 30 m sphere), and from 1.5 s on ran straight at the player at about 6 m/s.
+                    // Inferred: every mob an open world encounter spawns takes the nearest player in
+                    // its volume at once (the retail pick among several players is Unknown).
+                    let in_volume = |at: Position| detects(encounter, at, rules.near_m);
+                    for mob in run.mobs.get(mobs_before..).unwrap_or_default() {
+                        if !mob.of_object {
+                            host.engage(mob.entity, &in_volume);
+                        }
+                    }
+                }
+                for (entity, event, _) in run.entity_events.get(events_before..).unwrap_or_default()
                 {
-                    // It came back after its respawn time: the group picks its next choice.
-                    group.pick(now_ms);
+                    self.sent_events.push((index, *entity, *event));
                 }
-                if !runs {
-                    continue;
+                if run.status == EncounterStatus::Done && !run.reported {
+                    run.reported = true;
+                    outcomes.push(ScriptOutcome::EncounterDone(index));
                 }
             }
-            let before = run.entity_events.len();
-            tick_encounter(encounter, run, host, view, now_ms);
-            for (entity, event, _) in run.entity_events.get(before..).unwrap_or_default() {
-                self.sent_events.push((index, *entity, *event));
-            }
-            if run.status == EncounterStatus::Done && !run.reported {
-                run.reported = true;
-                outcomes.push(ScriptOutcome::EncounterDone(index));
+            if let Some(before) = before {
+                before.log_changes(&EncounterState::of(&self.encounters[index]), encounter);
             }
         }
         let all_done = !self.encounters.is_empty()
@@ -826,6 +919,59 @@ fn detects(encounter: &Encounter, at: Position, radius_m: f32) -> bool {
     }
 }
 
+/// An open world encounter's status and the status of each stage, for its debug lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EncounterState {
+    status: EncounterStatus,
+    stages: Vec<StageStatus>,
+}
+
+impl EncounterState {
+    /// The state of `run`; an idle encounter's stages all wait, so it holds none (no copy for
+    /// the many idle encounters of the open world).
+    fn of(run: &EncounterRun) -> Self {
+        Self {
+            status: run.status,
+            stages: if run.status == EncounterStatus::Idle {
+                Vec::new()
+            } else {
+                run.stages.iter().map(|stage| stage.status).collect()
+            },
+        }
+    }
+
+    /// The status of stage `index`: a stage it holds none of waits.
+    fn stage(&self, index: usize) -> StageStatus {
+        self.stages.get(index).copied().unwrap_or_default()
+    }
+
+    /// One debug line for each change from `self` to `now` of `encounter` (live 2026-11-22
+    /// 19:18:21: no start object stood at `Enc_WorldEvent_10A_Q3_SpectralTyrant` 90 s after
+    /// its success, and no line told how the encounter stood).
+    fn log_changes(&self, now: &Self, encounter: &Encounter) {
+        if self.status != now.status {
+            tracing::debug!(
+                encounter = %encounter.name,
+                from = ?self.status,
+                to = ?now.status,
+                "open world encounter status"
+            );
+        }
+        for index in 0..self.stages.len().max(now.stages.len()) {
+            let (before, after) = (self.stage(index), now.stage(index));
+            if before != after {
+                tracing::debug!(
+                    encounter = %encounter.name,
+                    stage = %encounter.stages.get(index).map_or("", |stage| stage.name.as_str()),
+                    from = ?before,
+                    to = ?after,
+                    "open world encounter stage"
+                );
+            }
+        }
+    }
+}
+
 /// The open world's part of an encounter's tick: whether the encounter runs its stages in this
 /// tick. It waits idle until a player is near, resets when every player left for its grace
 /// period, and starts again [`OpenWorldRules::respawn_ms`] after its end.
@@ -872,6 +1018,22 @@ pub(super) fn starts_when_enabled(encounter: &Encounter) -> bool {
         || encounter
             .spawner
             .is_none_or(|spawner| spawner.spawn_on_enable)
+}
+
+/// The radius around `encounter`'s place within which a player stays in its volume: the radius
+/// of its detection sphere, the smaller horizontal half size of its detection box, else its
+/// detection radius ([`DEFAULT_VOLUME_RADIUS_M`] without one). An open world encounter resets
+/// when no player is in its volume for its grace period ([`open_world_step`]):
+/// `WorldEvent_Enc_99B_MSQ_YonasRetreat` (a sphere of 30 m, a grace of 1 s) reset whenever a
+/// fight took the player 50 m north to the fort's placed mobs.
+pub(super) fn volume_radius_m(encounter: &Encounter) -> f32 {
+    match encounter.detector.as_ref().map(|detector| &detector.shape) {
+        Some(Geometry::Sphere { radius }) => *radius,
+        Some(Geometry::Box { half_extents }) => half_extents[0].min(half_extents[1]),
+        _ => encounter
+            .detection_radius_m
+            .unwrap_or(DEFAULT_VOLUME_RADIUS_M),
+    }
 }
 
 /// How long after its end at `done_ms` an open world encounter starts again: a time in its
@@ -2255,8 +2417,10 @@ impl ScriptHost for SimHost<'_> {
         let [x, y, z] = at;
         let ai =
             waypoints.map(|path| script_mob_ai(path, Position { x, y, z }, self.world.mobs.ai()));
-        match self.world.spawn_gm(
+        let category = Some(mob.category_id.as_str()).filter(|category| !category.is_empty());
+        match self.world.spawn_gm_of_category(
             &mob.vitals_id,
+            category,
             mob.level,
             Point { x, y, z },
             ONE,
@@ -2273,6 +2437,24 @@ impl ScriptHost for SimHost<'_> {
                 tracing::warn!(vitals = %mob.vitals_id, %reason, "encounter spawn");
                 None
             }
+        }
+    }
+
+    fn engage(&mut self, mob: u64, in_volume: &dyn Fn(Position) -> bool) {
+        let Some((at, _)) = self.world.mobs.places(mob) else {
+            return;
+        };
+        let mut query = self.world.world.query::<(&Player, &Body, &Vitals)>();
+        let nearest = query
+            .iter(&self.world.world)
+            .filter(|(_, body, vitals)| {
+                !vitals.health.is_dead() && in_volume(body.motion.position())
+            })
+            .map(|(player, body, _)| (player.number, body.motion.position().distance(at)))
+            .min_by(|(_, a), (_, b)| a.total_cmp(b));
+        if let Some((number, _)) = nearest {
+            let now_ms = self.world.last_now_ms;
+            self.world.mobs.provoke(mob, number, now_ms);
         }
     }
 
@@ -2414,8 +2596,14 @@ impl SimWorld {
             .instance_run
             .as_ref()
             .map(|run| (run.id(), run.game_mode().to_owned()));
-        let current = self.dungeon_run.as_ref().map(|run| run.instance);
-        if current != running.as_ref().map(|(instance, _)| *instance) {
+        let daily = running
+            .as_ref()
+            .is_some_and(|(_, game_mode)| self.daily_trial_player(game_mode));
+        let current = self
+            .dungeon_run
+            .as_ref()
+            .map(|run| (run.instance, run.daily));
+        if current != running.as_ref().map(|(instance, _)| (*instance, daily)) {
             if let Some(old) = self.dungeon_run.take() {
                 let mobs: Vec<u64> = old.mobs().collect();
                 self.remove_gm(&mobs);
@@ -2437,7 +2625,7 @@ impl SimWorld {
                     chests = script.chests.len(),
                     "dungeon script"
                 );
-                Some(DungeonRun::new(instance, script))
+                Some(DungeonRun::of_trial(instance, script, daily))
             });
             self.encounter_roots = self.dungeon_run.as_ref().map_or_else(
                 super::encounter_roots::EncounterRoots::default,
@@ -2506,6 +2694,17 @@ impl SimWorld {
     }
 
     /// The places of the players, for a script's view.
+    /// Whether a player in this sim plays game mode `game_mode`'s daily trial: it holds the
+    /// mode's daily trial flag and not its done flag ([`daily_trial_flags`]).
+    fn daily_trial_player(&mut self, game_mode: &str) -> bool {
+        let (flag, done) = daily_trial_flags(game_mode);
+        let rules = &self.achievement_rules;
+        let mut query = self.world.query::<&Player>();
+        query.iter(&self.world).any(|player| {
+            player.flow.has_achievement(rules, &flag) && !player.flow.has_achievement(rules, &done)
+        })
+    }
+
     fn see_players(&mut self, view: &mut ScriptView) {
         let mut query = self.world.query::<(&Player, &Body, &Vitals)>();
         for (_, body, vitals) in query.iter(&self.world) {
@@ -2767,6 +2966,8 @@ mod tests {
         area_slices: Vec<String>,
         /// The open slice areas: handle and slice.
         open_areas: Vec<(u64, String)>,
+        /// Each mob `engage` gave a target, with that player.
+        engaged: Vec<(u64, u64)>,
     }
 
     impl ScriptHost for Host {
@@ -2841,6 +3042,13 @@ mod tests {
         }
         fn close_slice_areas(&mut self, handle: u64) {
             self.open_areas.retain(|(open, _)| *open != handle);
+        }
+
+        fn engage(&mut self, mob: u64, in_volume: &dyn Fn(Position) -> bool) {
+            if let Some((number, _)) = self.players.iter().find(|(_, at)| in_volume(position(*at)))
+            {
+                self.engaged.push((mob, *number));
+            }
         }
     }
 
@@ -2964,6 +3172,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_solo_trial_runs_the_quest_or_the_daily_twin_of_an_encounter_never_both() {
+        const QUEST: &str = "slices/dungeon/liang/enc_quest_boss.dynamicslice";
+        const DAILY: &str = "slices/dungeon/liang/enc_quest_boss_daily.dynamicslice";
+        const LONE: &str = "slices/dungeon/liang/enc_side.dynamicslice";
+        let with_slice = |slice: &str| Encounter {
+            slice: slice.to_owned(),
+            ..boss_encounter()
+        };
+        let both = script(vec![with_slice(QUEST), with_slice(DAILY), with_slice(LONE)]);
+        let slices = |daily: bool| -> Vec<String> {
+            trial_variant(both.clone(), daily)
+                .encounters
+                .into_iter()
+                .map(|encounter| encounter.slice)
+                .collect()
+        };
+        assert_eq!(slices(false), [QUEST, LONE], "the quest's run");
+        assert_eq!(slices(true), [DAILY, LONE], "the daily trial's run");
+        assert_eq!(
+            daily_trial_flags("QuestLiang"),
+            (
+                "DailyTrialLiang".to_owned(),
+                "DailyTrialLiangComplete".to_owned()
+            )
+        );
+        assert_eq!(
+            daily_trial_flags("TrialSeason04Q02").0,
+            "DailyTrialSeason04Q02"
+        );
+        let run = DungeonRun::of_trial(Uuid::nil(), both.clone(), false);
+        assert_eq!(run.script().encounters.len(), 2);
+        assert!(!run.daily);
+    }
+
     fn script(encounters: Vec<Encounter>) -> LevelScript {
         LevelScript {
             level: "nw_dungeon_windsward_00".to_owned(),
@@ -3019,6 +3262,60 @@ mod tests {
         };
         assert!(detects(&plain, at(0.0, 5.0), RADIUS_M));
         assert!(!detects(&plain, at(RADIUS_M + 1.0, 0.0), RADIUS_M));
+    }
+
+    /// The fight radius of an encounter: its sphere's radius (`YonasRetreat`: 30 m), its box's
+    /// smaller horizontal half size, else its detection radius.
+    #[test]
+    fn the_volume_radius_is_the_sphere_radius_or_the_narrow_half_of_the_box() {
+        const SPHERE_RADIUS_M: f32 = 15.0;
+        const DETECTION_RADIUS_M: f32 = 12.0;
+        let detector = |shape| nw_world::dungeon_scripts::Detector {
+            shape,
+            place: nw_world::collision::place_of([0.0, 0.0, 0.0, 1.0], 1.0, PLACE),
+        };
+        let sphere = Encounter {
+            detector: Some(detector(Geometry::Sphere {
+                radius: SPHERE_RADIUS_M,
+            })),
+            detection_radius_m: Some(DETECTION_RADIUS_M),
+            ..Encounter::default()
+        };
+        assert!((volume_radius_m(&sphere) - SPHERE_RADIUS_M).abs() < f32::EPSILON);
+        let boxed = Encounter {
+            detector: Some(detector(Geometry::Box {
+                half_extents: [20.0, 2.0, 10.0],
+            })),
+            ..Encounter::default()
+        };
+        assert!((volume_radius_m(&boxed) - 2.0).abs() < f32::EPSILON);
+        let plain = Encounter {
+            detection_radius_m: Some(DETECTION_RADIUS_M),
+            ..Encounter::default()
+        };
+        assert!((volume_radius_m(&plain) - DETECTION_RADIUS_M).abs() < f32::EPSILON);
+        assert!(
+            (volume_radius_m(&Encounter::default()) - DEFAULT_VOLUME_RADIUS_M).abs() < f32::EPSILON
+        );
+    }
+
+    /// The debug lines of an open world encounter's state: an idle encounter holds no stage
+    /// copy, and its stages read as waiting, so its start shows each stage that began.
+    #[test]
+    fn an_idle_encounter_s_state_holds_no_stages_and_reads_them_as_waiting() {
+        let mut run =
+            DungeonRun::of_open_world(script(vec![boss_encounter()]), open_rules(), &|_| false);
+        let idle = EncounterState::of(&run.encounters[0]);
+        assert!(idle.stages.is_empty());
+        assert_eq!(idle.stage(0), StageStatus::Pending);
+        let mut host = Host::default();
+        run.tick(&mut host, &view(&[PLACE]), &[], T0);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
+        let running = EncounterState::of(&run.encounters[0]);
+        assert_eq!(running.status, EncounterStatus::Running);
+        assert_eq!(running.stage(0), StageStatus::Running);
+        assert_ne!(idle, running);
+        idle.log_changes(&running, &boss_encounter());
     }
 
     #[test]
@@ -3256,6 +3553,40 @@ mod tests {
             ..boss_encounter()
         };
         assert!(!starts_when_enabled(&triggered), "it waits for its trigger");
+    }
+
+    /// Retail `09a_s17_establishdefenses` (116.8 s): the prowlers spawned 31 and 32 m from the
+    /// centre and ran at the player. Each mob an open world encounter spawns takes a player in
+    /// its volume; a player out of it is no target.
+    #[test]
+    fn an_open_world_encounter_s_mobs_engage_a_player_in_its_volume() {
+        const PLAYER: u64 = 42;
+        const OUTSIDE: u64 = 43;
+        let rules = OpenWorldRules {
+            near_m: RADIUS_M,
+            respawn_ms: open_rules().respawn_ms,
+        };
+        let far = [PLACE[0] + RADIUS_M * 3.0, PLACE[1], PLACE[2]];
+        let mut run = DungeonRun::of_open_world(script(vec![boss_encounter()]), rules, &|_| false);
+        let mut host = Host {
+            players: vec![(OUTSIDE, far), (PLAYER, PLACE)],
+            ..Host::default()
+        };
+        run.tick(&mut host, &view(&[PLACE]), &[], T0);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
+        assert_eq!(host.spawned.len(), 1);
+        assert_eq!(host.engaged, [(1, PLAYER)]);
+        let mut instance = DungeonRun::new(Uuid::nil(), script(vec![boss_encounter()]));
+        let mut inside = Host {
+            players: vec![(PLAYER, PLACE)],
+            ..Host::default()
+        };
+        instance.tick(&mut inside, &view(&[PLACE]), &[], T0);
+        instance.tick(&mut inside, &view(&[PLACE]), &[], T0 + 1);
+        assert!(
+            inside.engaged.is_empty(),
+            "an instance's encounter picks by its own script"
+        );
     }
 
     #[test]
@@ -3891,6 +4222,33 @@ mod tests {
         );
         world.server_ms = NIGHT_MS;
         assert_eq!(world.runs_here(&run), [true, true]);
+    }
+
+    /// An encounter mob keeps its spawner slice's vitals category as its spawn category, which a
+    /// kill task counts (the C10A_Q3 tyrant: category `CK_Spectral_Lost_Fire_Q3_WaveEvent`); a
+    /// slice without one gives none.
+    #[test]
+    fn an_encounter_mob_keeps_its_slice_s_vitals_category() {
+        use crate::combat::test_support::{TEST_LEVEL, TEST_MOB};
+        use crate::world::tests::world_with_spawns;
+        const CATEGORY: &str = "CK_Spectral_Lost_Fire_Q3_WaveEvent";
+        let mut world = world_with_spawns(Vec::new());
+        let mob = |category: &str| TargetMob {
+            vitals_id: TEST_MOB.to_owned(),
+            category_id: category.to_owned(),
+            level: TEST_LEVEL,
+        };
+        let mut host = SimHost {
+            world: &mut world,
+            mutated: false,
+        };
+        let tyrant = host.spawn(&mob(CATEGORY), PLACE, None).expect("tyrant");
+        let plain = host.spawn(&mob(""), PLACE, None).expect("plain");
+        assert_eq!(
+            world.mobs.category_of(tyrant),
+            Some(nw_formats::objectstream::lowercase_crc32(CATEGORY))
+        );
+        assert_eq!(world.mobs.category_of(plain), None);
     }
 
     #[test]

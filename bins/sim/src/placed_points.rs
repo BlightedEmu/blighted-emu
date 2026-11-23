@@ -61,6 +61,11 @@ impl PlacedPoints {
         self.points.get(index).map(|(kind, _)| *kind)
     }
 
+    /// The position of the point of index `index`; `None` for no such point.
+    pub fn position_of(&self, index: usize) -> Option<Position> {
+        self.points.get(index).map(|(_, position)| *position)
+    }
+
     /// The first point of kind `kind`, anywhere on the level.
     pub fn first(&self, kind: u32) -> Option<Position> {
         self.first_of_kind

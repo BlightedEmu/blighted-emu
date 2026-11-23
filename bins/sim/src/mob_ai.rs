@@ -79,6 +79,13 @@ pub const MAX_STEP_DOWN_M: f32 = 3.0;
 /// them at -113 and -115 deg, out of their cone of 90 deg to each side; the client default is
 /// 2.5 m and the server profile is Unknown).
 pub(crate) const IMMEDIATE_VICINITY_M: f32 = 3.8;
+/// A target this near is reachable whatever the floor check between the two says: the mob
+/// stands at it. Live 2026-11-22 (sim 15:33:03-15:33:10): the encounter dryad of `1434_0103`
+/// fought the bot 0.28 to 1.76 m away while its floor check said unreachable, and
+/// `UnreachableTargetLeash` (`Time_Since_Target_Reachable` > 6) took it home 6.7 s after its
+/// last reachable answer; the player rule (memory "mob chase fallback") is never to drop a close
+/// player. Design choice: the immediate vicinity ([`IMMEDIATE_VICINITY_M`]).
+const CLOSE_TARGET_M: f32 = IMMEDIATE_VICINITY_M;
 /// Longest time one AI step may move a mob, so a stalled tick never makes it jump (our
 /// engineering limit).
 const MAX_STEP_MS: u64 = 1_000;
@@ -1859,24 +1866,25 @@ impl MindState {
             let position = self.manual.unwrap_or(player.position);
             let distance_m = position.horizontal_distance(at);
             let gap = yaw_gap(self.yaw, yaw_toward(at, position));
-            let reachable = self
-                .reach
-                .and_then(|check| check.answer(at, position))
-                .unwrap_or_else(|| {
-                    let (reachable, recheck_m) = if reaches(around.ground, at, position, max_slope)
-                    {
-                        (true, REACH_RECHECK_M)
-                    } else {
-                        self.search_reach(around, at, position, max_slope)
-                    };
-                    self.reach = Some(ReachCheck {
-                        from: at,
-                        to: position,
-                        reachable,
-                        recheck_m,
+            let reachable = distance_m <= CLOSE_TARGET_M
+                || self
+                    .reach
+                    .and_then(|check| check.answer(at, position))
+                    .unwrap_or_else(|| {
+                        let (reachable, recheck_m) =
+                            if reaches(around.ground, at, position, max_slope) {
+                                (true, REACH_RECHECK_M)
+                            } else {
+                                self.search_reach(around, at, position, max_slope)
+                            };
+                        self.reach = Some(ReachCheck {
+                            from: at,
+                            to: position,
+                            reachable,
+                            recheck_m,
+                        });
+                        reachable
                     });
-                    reachable
-                });
             if reachable {
                 self.reachable_ms = Some(around.now_ms);
             }
@@ -6609,6 +6617,35 @@ mod tests {
             "it takes the player behind the wall"
         );
         assert_eq!(mind.state.reachable_ms, Some(LATE_MS));
+    }
+
+    /// A target within [`CLOSE_TARGET_M`] stays reachable whatever the floor check says (the
+    /// `1434_0103` dryad went home from the bot 0.3 to 1.8 m away); one farther behind the wall
+    /// is not reachable after its pick.
+    #[test]
+    fn a_close_target_is_reachable_behind_a_wall() {
+        const FIRST_MS: u64 = 1_000;
+        const LATER_MS: u64 = 9_000;
+        let ai = test_ai(&[]);
+        let close = [Seen {
+            entity: 7,
+            position: east(1.0),
+        }];
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let mut at = START;
+        mind.step(&ai, &mut at, &alone_with(FIRST_MS, &close, &Wall));
+        mind.step(&ai, &mut at, &alone_with(LATER_MS, &close, &Wall));
+        assert_eq!(mind.target(), Some(7));
+        assert_eq!(mind.state.reachable_ms, Some(LATER_MS), "still reachable");
+        let far = [Seen {
+            entity: 7,
+            position: east(CLOSE_TARGET_M + 2.0),
+        }];
+        let mut behind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let mut there = START;
+        behind.step(&ai, &mut there, &alone_with(FIRST_MS, &far, &Wall));
+        behind.step(&ai, &mut there, &alone_with(LATER_MS, &far, &Wall));
+        assert_eq!(behind.state.reachable_ms, Some(FIRST_MS), "only its pick");
     }
 
     /// An Outpost Rush summon never takes a player of its own team, and drops one it held.

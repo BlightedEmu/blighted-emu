@@ -139,6 +139,7 @@ mod passives;
 mod points;
 mod progression;
 mod projectile;
+mod puzzles;
 mod quest_objects;
 mod quest_tracker;
 mod quest_walk;
@@ -1293,6 +1294,9 @@ pub struct SimWorld {
     tutorials: HashMap<u64, Tutorial>,
     /// Open-world sims: the running quests of each player, by entity number.
     quests: HashMap<u64, Vec<ActiveQuest>>,
+    /// Each player's progress in each puzzle its quests wait on, by player and slayer script
+    /// ([`puzzles`]).
+    puzzle_runs: HashMap<(u64, &'static str), puzzles::PuzzleRun>,
     /// The time of the last tick, for the quest runs that a save takes between ticks.
     last_now_ms: u64,
     /// The players' hits on each mob that credit them for its kill.
@@ -1530,6 +1534,7 @@ impl SimWorld {
             ),
             tutorials: HashMap::new(),
             quests: HashMap::new(),
+            puzzle_runs: HashMap::new(),
             last_now_ms: 0,
             kill_credits: kill_rewards::KillCredits::default(),
             scripts: scripts::Scripts::default(),
@@ -2920,6 +2925,7 @@ impl SimWorld {
         self.detect_quest_objects(now_ms);
         self.tick_events(now_ms);
         self.tick_dungeon_script(now_ms);
+        self.solve_puzzles_due(now_ms);
         self.tick_scripts(now_ms);
         self.drink_due(now_ms, server_time);
         self.tick_item_effects(server_time);
@@ -3257,7 +3263,10 @@ impl SimWorld {
             player: number,
             quest: def.id.clone(),
         };
-        let (run, effects) = ObjectiveRun::start_owned(Arc::clone(&def.tree), now_ms, owner);
+        let (mut run, effects) = ObjectiveRun::start_owned(Arc::clone(&def.tree), now_ms, owner);
+        if let Some(run_of_instance) = self.instance_run.as_ref() {
+            run.in_game_mode(run_of_instance.game_mode());
+        }
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             Self::journal_of(&mut player);
             // A repeated quest leaves the done list while it runs: the database keeps one row

@@ -671,7 +671,7 @@ impl SimWorld {
     }
 
     /// The instrument slots player `entity` wears an item in.
-    fn worn_instrument_slots(&self, entity: Entity) -> Vec<u32> {
+    pub(super) fn worn_instrument_slots(&self, entity: Entity) -> Vec<u32> {
         self.world
             .get::<Player>(entity)
             .and_then(|player| player.gear.as_ref())

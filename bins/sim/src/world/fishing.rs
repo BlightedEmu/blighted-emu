@@ -34,6 +34,7 @@
 //! [`SimWorld::loot_bonuses`]) is added to the catch roll's `FishRarity` bonus (Inferred, see
 //! [`roll_bonuses`]).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
@@ -118,6 +119,18 @@ const ONCE: u32 = 1;
 const ONE_BAIT: u32 = 1;
 /// The roll of a quest fish's chance, in percent.
 const PERCENT: u32 = 100;
+/// How far from a player the planner looks for a fishing place ([`SimWorld::fishing_place`]).
+pub(super) const FISHING_PLACE_SEARCH_M: f32 = 300.0;
+/// The spacing of the places it tries: rings this far apart, points this far apart on a ring.
+const FISHING_PLACE_STEP_M: f32 = 6.0;
+/// The views it tries at each place: an eighth of a circle apart.
+const FISHING_PLACE_YAWS: u16 = 8;
+/// The hold of the planned cast: the test bot holds the key 1.5 s (`nw-testclient`
+/// `fishing::CAST_HOLD`).
+const FISHING_PLACE_HOLD_MS: u64 = 1_500;
+/// How much shorter or longer a cast may fly than planned and still land in water: a bot's hold
+/// varies by a tick or two.
+const FISHING_PLACE_MARGIN_M: f32 = 2.0;
 
 /// The keys of one input record that fishing reads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -325,6 +338,8 @@ pub(super) struct PlayerFishing {
     bait: Option<String>,
     /// The bait on the hook of the running cast: its item id.
     hooked_bait: Option<String>,
+    /// The bites without each quest fish (by lowercase item id) since it last bit.
+    quest_misses: HashMap<String, u32>,
 }
 
 impl Default for PlayerFishing {
@@ -336,6 +351,7 @@ impl Default for PlayerFishing {
             held: false,
             bait: None,
             hooked_bait: None,
+            quest_misses: HashMap::new(),
         }
     }
 }
@@ -765,16 +781,40 @@ fn flight_ms(distance_m: f32) -> u64 {
     (FLIGHT_MS_PER_M * f64::from(distance_m) - FLIGHT_OFFSET_MS).max(0.0) as u64
 }
 
-/// The water type at `x`, `y` for a body at height `z` (the bobber: the surface), from
-/// `ground`'s water flags, its surface and the terrain under it (`FUN_1430e8590`).
-fn water_at(ground: &dyn Ground, x: f32, y: f32, z: f32, sea_level_m: f32) -> Option<WaterType> {
+/// What a water probe ([`water_at`]) looks at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    /// A body at the probe's height: the water above it counts (`FUN_1430e8590` with its third
+    /// argument 1, from `FUN_1430e3b00`).
+    Body,
+    /// The bobber on the surface: the water down to the terrain counts (`FUN_1430e8590` with
+    /// its third argument 0, from the cast `FUN_1430f0f40` and the reel `FUN_1430e2880`).
+    Bobber,
+}
+
+/// The water type at `x`, `y` for a probe at height `z` (the bobber: the surface), from
+/// `ground`'s water flags, its surface and the terrain under it (`FUN_1430e8590`): the depth is
+/// the surface over the terrain, and for a body no more than the surface over the body.
+fn water_at(
+    ground: &dyn Ground,
+    [x, y, z]: [f32; 3],
+    sea_level_m: f32,
+    probe: Probe,
+) -> Option<WaterType> {
     let flags = ground.water_flags(x, y)?;
     let surface = ground.water_surface(x, y, sea_level_m)?;
     let floor = ground.height_at(x, y)?;
     if z < floor || z > surface {
         return None;
     }
-    WaterType::of(flags, (surface - floor).min(surface - z))
+    let depth = surface - floor;
+    WaterType::of(
+        flags,
+        match probe {
+            Probe::Body => depth.min(surface - z),
+            Probe::Bobber => depth,
+        },
+    )
 }
 
 /// The reel distance of a bobber at `bobber` cast from the rod's tip `tip`: the distance
@@ -999,6 +1039,75 @@ impl SimWorld {
         self.content.fishing.pole(item)
     }
 
+    /// Whether player `entity` wears a fishing pole.
+    pub(super) fn wears_pole(&self, entity: Entity) -> bool {
+        self.worn_pole(entity).is_some()
+    }
+
+    /// A place near `from` from which a cast of player `entity`'s worn pole (a hold of
+    /// [`FISHING_PLACE_HOLD_MS`], its fishing rank and perks, as [`SimWorld::cast_line`] casts
+    /// it) lands in water of loot tag `water` (any water for `None`), and the yaw of that cast:
+    /// the nearest place on dry ground (rings [`FISHING_PLACE_STEP_M`] apart, out to
+    /// [`FISHING_PLACE_SEARCH_M`]) whose cast lands in such water at its planned length and
+    /// [`FISHING_PLACE_MARGIN_M`] shorter and longer, at the first of [`FISHING_PLACE_YAWS`]
+    /// views. Retail `16_side_11_feedifrit` stood at the water's edge (6473.6, 9155.9, 165.6);
+    /// two casts hit land before the player turned to the water.
+    pub(super) fn fishing_place(
+        &self,
+        entity: Entity,
+        from: Position,
+        water: Option<&str>,
+    ) -> Option<(Position, f32)> {
+        let pole = self.worn_pole(entity)?;
+        let (rank, _) = self.tradeskill_perks(entity, FISHING_TRADESKILL);
+        let perks = self.fishing_perks(entity, None);
+        let distance = perks.cast(cast_distance(
+            pole.cast_distance,
+            self.content.fishing.cast_bonus(rank),
+            FISHING_PLACE_HOLD_MS,
+        )) as f32;
+        let ground = &*self.ground;
+        let sea_level_m = self.settings.ocean_level_m;
+        let wet = |x: f32, y: f32| {
+            let Some(z) = ground.water_surface(x, y, sea_level_m) else {
+                return false;
+            };
+            water_at(ground, [x, y, z], sea_level_m, Probe::Bobber)
+                .is_some_and(|found| water.is_none_or(|tag| tag.eq_ignore_ascii_case(found.tag())))
+        };
+        let rings = (FISHING_PLACE_SEARCH_M / FISHING_PLACE_STEP_M) as u32;
+        for ring in 0..=rings {
+            let radius = ring as f32 * FISHING_PLACE_STEP_M;
+            let points =
+                ((std::f32::consts::TAU * radius / FISHING_PLACE_STEP_M).ceil() as u32).max(1);
+            for point in 0..points {
+                let angle = std::f32::consts::TAU * point as f32 / points as f32;
+                let (x, y) = (from.x + radius * angle.cos(), from.y + radius * angle.sin());
+                let Some(z) = ground.height_at(x, y) else {
+                    continue;
+                };
+                if water_at(ground, [x, y, z], sea_level_m, Probe::Body).is_some() {
+                    continue;
+                }
+                for turn in 0..FISHING_PLACE_YAWS {
+                    let yaw =
+                        std::f32::consts::TAU * f32::from(turn) / f32::from(FISHING_PLACE_YAWS);
+                    let (forward, _) = yaw_axes(yaw);
+                    let lands = [-FISHING_PLACE_MARGIN_M, 0.0, FISHING_PLACE_MARGIN_M]
+                        .iter()
+                        .all(|margin| {
+                            let reach = ROD_TIP_M + distance + margin;
+                            wet(x + forward[0] * reach, y + forward[1] * reach)
+                        });
+                    if lands {
+                        return Some((Position { x, y, z }, yaw));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Carries out `actions` for player `entity` at `now_ms`.
     fn fishing_actions(&mut self, entity: Entity, actions: Vec<FishingAction>, now_ms: u64) {
         for action in actions {
@@ -1072,8 +1181,13 @@ impl SimWorld {
         let perks = self.fishing_perks(entity, None);
         let ground = Arc::clone(&self.ground);
         let landing = place.zip(pole).and_then(|(place, pole)| {
-            if water_at(&*ground, place.x, place.y, place.z, sea_level_m)
-                .is_some_and(WaterType::is_deep)
+            if water_at(
+                &*ground,
+                [place.x, place.y, place.z],
+                sea_level_m,
+                Probe::Body,
+            )
+            .is_some_and(WaterType::is_deep)
             {
                 tracing::debug!(?place, "cast from deep water");
                 return None;
@@ -1096,7 +1210,7 @@ impl SimWorld {
                 .water_surface(x, y, sea_level_m)
                 .or_else(|| ground.height_at(x, y))
                 .unwrap_or(place.z);
-            let water = water_at(&*ground, x, y, z, sea_level_m);
+            let water = water_at(&*ground, [x, y, z], sea_level_m, Probe::Bobber);
             let hotspot = water.and_then(|_| content.fishing.hotspot_at(x, y, rank).cloned());
             Some((place, tip, [x, y, z], water, hotspot))
         });
@@ -1247,19 +1361,43 @@ impl SimWorld {
             .luck;
         let (bonuses, wire_modifiers) = roll_bonuses(modifiers, luck);
         let zones = super::player_territories(&content, &territories);
-        let quest_fish: Vec<(String, u32)> = self
+        let quest_fish: Vec<(String, u32, Option<u32>)> = self
             .quests
             .get(&number)
             .into_iter()
             .flatten()
             .flat_map(|quest| quest.run.fish_drops(water.tag(), &zones))
+            .filter(|(item, _, _)| rules.catchable(item).is_some())
             .collect();
+        let misses = self
+            .world
+            .get::<Player>(entity)
+            .map(|player| player.fishing.quest_misses.clone())
+            .unwrap_or_default();
         let bitten = quest_fish
-            .into_iter()
-            .find(|(item, percent)| {
-                rules.catchable(item).is_some() && self.dice.below(PERCENT) < *percent
+            .iter()
+            .find(|(item, percent, guaranteed_after)| {
+                let missed = misses
+                    .get(&item.to_lowercase())
+                    .copied()
+                    .unwrap_or_default();
+                guaranteed_after.is_some_and(|after| missed >= after)
+                    || self.dice.below(PERCENT) < *percent
             })
-            .map(|(item, _)| item);
+            .map(|(item, _, _)| item.clone());
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            for (item, _, _) in &quest_fish {
+                let key = item.to_lowercase();
+                if bitten
+                    .as_deref()
+                    .is_some_and(|bit| bit.eq_ignore_ascii_case(item))
+                {
+                    player.fishing.quest_misses.remove(&key);
+                } else {
+                    *player.fishing.quest_misses.entry(key).or_default() += 1;
+                }
+            }
+        }
         let (item, catchable) = match bitten {
             Some(item) => {
                 let catchable = rules.catchable(&item)?;
@@ -1729,6 +1867,266 @@ mod tests {
             ))
         );
         assert_eq!(member.component, FISHING_COMPONENT);
+    }
+
+    /// A shore along x: dry land west of [`SHORE_X`], a lake east of it.
+    struct Shore {
+        sea_level_m: f32,
+    }
+
+    /// Where the land of [`Shore`] meets the water.
+    const SHORE_X: f32 = 10.0;
+    /// The lake's water flags (a lake or river).
+    const LAKE_FLAGS: u32 = 0x07;
+
+    impl nw_sim_core::Ground for Shore {
+        fn height_at(&self, x: f32, _: f32) -> Option<f32> {
+            Some(self.sea_level_m + SHORE_X - x)
+        }
+
+        fn water_flags(&self, x: f32, _: f32) -> Option<u32> {
+            (x > SHORE_X).then_some(LAKE_FLAGS)
+        }
+    }
+
+    /// Retail `16_side_11_feedifrit` (`GuranteedDropAttempts` 5, 35 %): the sixth catch was
+    /// the quest fish. A quest fish at 1 % with two attempts bites at the third bite at the
+    /// latest.
+    #[test]
+    fn a_quest_fish_bites_for_sure_after_its_guaranteed_attempts() {
+        use nw_content::fishing::FishingRules;
+        use nw_content::generated::{
+            FishingBehaviorsData, FishingCatchablesData, FishingPolesData, MasterItemDefinitions,
+            Tables,
+        };
+        use nw_content::table::Table;
+
+        use super::super::gear;
+        use crate::objectives::{TaskBook, TaskRow};
+        use crate::player_content::{ObjectiveRow, QuestBook};
+        use crate::world::tests::{SERVER_TIME, admit_at, connection, world_with_spawns};
+        const POLE: &str = "2hFishingPoleT5";
+        const FISH: &str = "16_Side_11_TastyFish";
+        const QUEST: &str = "16_Side_11_FeedIfrit";
+        const NUMBER: u64 = 7;
+        const ATTEMPTS: u32 = 2;
+        fn table<T>(rows: Vec<T>) -> Table<T> {
+            Table {
+                source_path: String::new(),
+                unique_id: String::new(),
+                rows,
+            }
+        }
+        let pole_row: FishingPolesData = serde_json::from_value(serde_json::json!({
+            "id": POLE, "cast_distance_range": "5-20", "fish_rarity_roll_modifier": 1.25,
+            "fish_size_roll_modifier": 0, "summer_fish_rarity_roll_modifier": 0.0,
+            "fish_reel_time_seconds": 8, "line_tension_gain_per_second": 12.5,
+            "line_tension_recover_per_second": 47.0,
+        }))
+        .expect("pole row");
+        let pole_item: MasterItemDefinitions = serde_json::from_value(serde_json::json!({
+            "item_id": POLE, "item_class": "EquippableTool+FishingPole", "item_stats_ref": POLE,
+        }))
+        .expect("item row");
+        let fish = FishingCatchablesData {
+            id: FISH.to_owned(),
+            fish_size: "Medium".to_owned(),
+            fish_weight_range: "1-5".to_owned(),
+            fish_length_range: "9-15".to_owned(),
+            fishing_xp: 110,
+            fish_distance_swam_away_per_second: 0.15,
+            line_tension_gain_per_second_multiplier: 1.2,
+            fish_behaviors: "Lazy".to_owned(),
+            zoom_camera_on_success: false,
+            fish_character_definition_path: String::new(),
+            fish_scale: 0.7,
+            reward_game_event_id: None,
+        };
+        let mut world = world_with_spawns(Vec::new());
+        let content = Arc::make_mut(&mut world.content);
+        content.kits = gear::tests::kits_with(&[(POLE, "EquippableTool+FishingPole")]);
+        content.fishing = FishingRules::from_tables(&Tables {
+            fishing_poles_data: vec![table(vec![pole_row])],
+            master_item_definitions: vec![table(vec![pole_item])],
+            fishing_catchables_data: vec![table(vec![fish])],
+            fishing_behaviors_data: vec![table(vec![FishingBehaviorsData {
+                id: "Lazy".to_owned(),
+                fish_behavior_pattern: 0,
+                fish_behavior_localization_key: String::new(),
+            }])],
+            ..Tables::default()
+        });
+        content.quests = QuestBook::build(
+            [ObjectiveRow {
+                id: QUEST.to_owned(),
+                root: "root".to_owned(),
+                ..ObjectiveRow::default()
+            }],
+            TaskBook::new(vec![
+                TaskRow {
+                    task_id: "root".to_owned(),
+                    kind: "SimpleTaskContainer".to_owned(),
+                    sub_tasks: vec!["catch".to_owned()],
+                    ..TaskRow::default()
+                },
+                TaskRow {
+                    task_id: "catch".to_owned(),
+                    kind: "TaskFishingCatchFish".to_owned(),
+                    item_name: Some(FISH.to_owned()),
+                    item_drop_probability: Some(1),
+                    guaranteed_drop_attempts: Some(i64::from(ATTEMPTS)),
+                    target_qty: Some(1),
+                    ..TaskRow::default()
+                },
+            ]),
+        );
+        let mut admit = admit_at(NUMBER, 0.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let entity = world.by_connection[&connection(NUMBER)];
+        let pole = world.content.kits.item(POLE).cloned().expect("pole");
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .and_then(|mut player| {
+                player
+                    .gear
+                    .as_mut()
+                    .map(|gear| gear.renew(&pole, 1, FISHING_SLOT, 0))
+            })
+            .expect("gear");
+        world.accept_quest(NUMBER, QUEST, None, NOW).expect("quest");
+        let water = cast(Some(WaterType::FreshShallow));
+        let bit_at = (0..=ATTEMPTS).find(|_| {
+            world
+                .roll_catch(entity, &water, NOW)
+                .is_some_and(|hooked| hooked.fight.item == FISH)
+        });
+        assert!(
+            bit_at.is_some(),
+            "the quest fish bit by bite {}",
+            ATTEMPTS + 1
+        );
+        let misses = &world
+            .world
+            .get::<Player>(entity)
+            .expect("player")
+            .fishing
+            .quest_misses;
+        assert!(
+            misses.is_empty(),
+            "a bite starts the count over: {misses:?}"
+        );
+    }
+
+    /// Live sim before 2026-11-22: the bobber's probe took the water above the surface (none),
+    /// so every cast landed on land; the client's cast and reel probes take the full depth.
+    #[test]
+    fn the_bobber_finds_the_water_down_to_the_terrain_and_a_body_the_water_above_it() {
+        let ground = Shore { sea_level_m: 0.0 };
+        let deep_x = SHORE_X + 5.0;
+        let surface = [deep_x, 0.0, 0.0];
+        assert_eq!(
+            water_at(&ground, surface, 0.0, Probe::Bobber),
+            Some(WaterType::FreshDeep)
+        );
+        assert_eq!(water_at(&ground, surface, 0.0, Probe::Body), None);
+        assert_eq!(
+            water_at(&ground, [deep_x, 0.0, -1.0], 0.0, Probe::Body),
+            Some(WaterType::FreshShallow),
+            "1 m of water over the body"
+        );
+        assert_eq!(
+            water_at(&ground, [SHORE_X - 1.0, 0.0, 1.0], 0.0, Probe::Bobber),
+            None,
+            "dry land"
+        );
+    }
+
+    #[test]
+    fn the_fishing_place_stands_on_dry_ground_and_casts_into_the_water() {
+        use nw_content::fishing::FishingRules;
+        use nw_content::generated::{FishingPolesData, MasterItemDefinitions, Tables};
+        use nw_content::table::Table;
+
+        use super::super::gear;
+        use crate::world::tests::{SERVER_TIME, admit_at, connection, world_with_spawns};
+        const POLE: &str = "2hFishingPoleT5";
+        const NUMBER: u64 = 7;
+        /// The player stands well inland: the place is nearer the shore.
+        const INLAND_X: f32 = -60.0;
+        fn table<T>(rows: Vec<T>) -> Table<T> {
+            Table {
+                source_path: String::new(),
+                unique_id: String::new(),
+                rows,
+            }
+        }
+        let pole_row: FishingPolesData = serde_json::from_value(serde_json::json!({
+            "id": POLE, "cast_distance_range": "5-20", "fish_rarity_roll_modifier": 1.25,
+            "fish_size_roll_modifier": 0, "summer_fish_rarity_roll_modifier": 0.0,
+            "fish_reel_time_seconds": 8, "line_tension_gain_per_second": 12.5,
+            "line_tension_recover_per_second": 47.0,
+        }))
+        .expect("pole row");
+        let pole_item: MasterItemDefinitions = serde_json::from_value(serde_json::json!({
+            "item_id": POLE, "item_class": "EquippableTool+FishingPole", "item_stats_ref": POLE,
+        }))
+        .expect("item row");
+        let mut world = world_with_spawns(Vec::new());
+        let mut content = (*world.content).clone();
+        content.kits = gear::tests::kits_with(&[(POLE, "EquippableTool+FishingPole")]);
+        content.fishing = FishingRules::from_tables(&Tables {
+            fishing_poles_data: vec![table(vec![pole_row])],
+            master_item_definitions: vec![table(vec![pole_item])],
+            ..Tables::default()
+        });
+        world.content = Arc::new(content);
+        world.ground = Arc::new(Shore {
+            sea_level_m: world.settings.ocean_level_m,
+        });
+        let mut admit = admit_at(NUMBER, 0.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let entity = world.by_connection[&connection(NUMBER)];
+        let from = Position {
+            x: INLAND_X,
+            y: 0.0,
+            z: world.settings.ocean_level_m + SHORE_X - INLAND_X,
+        };
+        assert_eq!(
+            world.fishing_place(entity, from, None),
+            None,
+            "no pole worn"
+        );
+        assert!(!world.wears_pole(entity));
+        let pole = world.content.kits.item(POLE).cloned().expect("pole");
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .and_then(|mut player| {
+                player
+                    .gear
+                    .as_mut()
+                    .map(|gear| gear.renew(&pole, 1, FISHING_SLOT, 0))
+            })
+            .expect("gear");
+        assert!(world.wears_pole(entity));
+        let (place, yaw) = world
+            .fishing_place(entity, from, None)
+            .expect("a place on the shore");
+        assert!(place.x <= SHORE_X, "dry ground: {place:?}");
+        assert!(
+            place.x > INLAND_X,
+            "nearer the water than the player: {place:?}"
+        );
+        let (forward, _) = yaw_axes(yaw);
+        assert!(forward[0] > 0.9, "it looks at the lake: yaw {yaw}");
+        assert_eq!(
+            world.fishing_place(entity, from, Some("Salt")),
+            None,
+            "the lake is fresh water"
+        );
     }
 
     #[test]
