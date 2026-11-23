@@ -418,6 +418,40 @@ applied the top entity's place instead of taking it back left 1,521 Windsward pl
 Restless Shores places with no floor. `nw_dungeon_dunwood_02` (18 placements, 13 bodies) has
 no retail capture.
 
+### 6.4 The trial and raid levels (Observed, 2026-11-22)
+
+The quest trials, season trials and raids open their own level as an instance (the game mode
+map's `CoatlicueName`): `nw_ori_*` (QuestMotherwell, QuestLiang, QuestAdiana, QuestNihilo,
+QuestIsabella), `nw_trial_*` (QuestDracula and the season trials) and `nw_raid_*`
+(RaidCutlassKeys00, RaidMonarchsBluffs00). The same build as the
+expeditions (top entity rule, 6.3) gives their files; no trial level has terrain in its world
+file. The other trials (QuestMedea, QuestHeartforge, QuestApophis, ...) play in the open world.
+Before this, a sim of such a level stopped at start ("level collision file: cannot access").
+
+Retail own places (moved 0.05 m) in the 35 ledgers that name one of these maps (capture index
+text lines), same tool and limits as 6.3:
+
+| Level | Ledgers | Places | Floor (0.1 m) | Near (0.25 m) | None |
+|---|---:|---:|---:|---:|---:|
+| `nw_ori_eg_questmotherwell` | 5 | 9,889 | 7,975 (80.6 %) | 8,815 | 0 |
+| `nw_ori_er_questliang` | 3 | 9,470 | 9,061 (95.7 %) | 9,402 | 25 |
+| `nw_ori_fl_questadiana` | 2 | 3,878 | 3,872 (99.8 %) | 3,875 | 0 |
+| `nw_ori_gc_questnihilo` | 5 | 15,983 | 14,267 (89.3 %) | 15,741 | 2 |
+| `nw_ori_sm_questisabella` | 3 | 10,462 | 9,136 (87.3 %) | 10,239 | 0 |
+| `nw_raid_cutlasskeys_00` | 6 | 113,405 | 104,627 (92.3 %) | 110,915 | 5 |
+| `nw_raid_monarchbluff_00` | 1 | 53,521 | 45,496 (85.0 %) | 52,285 | 0 |
+| `nw_trial_dw_dracula` | 3 | 32,820 | 29,059 (88.5 %) | 32,194 | 0 |
+| `nw_trial_season_02` | 3 | 22,202 | 18,908 (85.2 %) | 21,085 | 0 |
+| `nw_trial_season_04` | 2 | 4,474 | 4,182 (93.5 %) | 4,468 | 0 |
+| `nw_trial_season_04_daichidojo` | 2 | 2,502 | 2,496 (99.8 %) | 2,500 | 0 |
+| `nw_trial_season_04_deviceroom` | 2 | 3,457 | 2,856 (82.6 %) | 3,254 | 0 |
+
+`nw_trial_season_02_q13` has no retail capture. The places with no floor: Liang 25, all at
+about 130 m in x 1020 to 1047, y 920 to 950 (three ledgers, the boss fight): a surface is above
+them and none below, so one floor piece of the boss area is not in the file (which solid:
+Unknown). Nihilo 2 (1002.2, 712.5, 169.0 and 949.0, 691.5, 163.6) and Cutlass Keys raid 5: single
+places in mid-air.
+
 ## 7. Open (with where we looked)
 
 - Solids the file does not hold: player housing plots and their furniture (placed at run

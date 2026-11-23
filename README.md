@@ -65,7 +65,7 @@ just infra-test
 | `just world` | Builds one retail world file per level into `local-data/content/<build>/retail/levels/` (run `just bundle` first) |
 | `just design` | Merges the design files of `content/` over the retail files into `local-data/content/<build>/` (run `just bundle` and `just world` first) |
 | `just check-design` | Checks the design files against the retail files; writes nothing |
-| `just collision` | Builds the collision files of the tutorial, the open world and the 12 expeditions into `local-data/content/<build>/levels/` |
+| `just collision` | Builds the collision files of the tutorial, the open world, the 12 expeditions and the 13 trial and raid levels into `local-data/content/<build>/levels/` |
 | `just realm-data <pack.zip>` | Installs the realm data pack and builds the tables made from it (see "Realm data pack") |
 | `just live <sims>` | Starts a local test world and the live panel (see "Live panel") |
 | `just capture-check` | Decodes every capture ledger under `local-data/captures/` and prints counts |
@@ -91,7 +91,7 @@ The content folder holds one folder per client build: `local-data/content/<build
 
 `just design` reads the retail files, merges the team's design files from `content/` over them (see [content/README.md](content/README.md)), and writes `game-data/bundle.bin`, `levels/<level>/world.bin` and `game-data/design.json`. The servers and the admin tools read these files. It does not read the game install. A merged file that equals its retail file (a level that no design file changes, and the bundle when no design file changes a table) is a hard link to the retail file, so it takes no room twice. When a design file has a problem, it prints each one and writes nothing.
 
-`just collision` writes the level collision files `levels/<level>/collision.bin` of the tutorial, the open world and the 12 expedition levels (`nw_dungeon_*`; about 163 MB in all). A collision file holds the solid shapes of the placed slices of a level, read from the game's physics assets (`.rnr`). It includes the variant capitals as their variation data shows them, and the slices that encounters spawn later. The sims stand the players and mobs on these shapes. A sim does not start without the collision file of its level. See `docs/re/2026-09-20-level-collision.md`.
+`just collision` writes the level collision files `levels/<level>/collision.bin` of the tutorial, the open world, the 12 expedition levels (`nw_dungeon_*`) and the 13 trial and raid levels (`nw_ori_*`, `nw_trial_*`, `nw_raid_*`; about 180 MB in all). A collision file holds the solid shapes of the placed slices of a level, read from the game's physics assets (`.rnr`). It includes the variant capitals as their variation data shows them, and the slices that encounters spawn later. The sims stand the players and mobs on these shapes. A sim does not start without the collision file of its level. See `docs/re/2026-09-20-level-collision.md`.
 
 A sim needs only the bundle, the world file and the collision file of its level. It also reads the other files below when they exist. When one is missing, the sim logs a warning and runs without that part. The paths are in the build folder; `<level>` is a level folder name. The sources: `retail` and `install` come from your install, `merged` from `just design`, `pack` from the realm data pack (capture-made), `derived` from other content files.
 
@@ -103,7 +103,7 @@ A sim needs only the bundle, the world file and the collision file of its level.
 | `game-data/design.json` | merged | `content-tool design` (`just design`) | No scripts or events |
 | `levels/<level>/world.bin` | merged | `content-tool design` (`just design`) | No sim of the level starts |
 | `levels/<level>/water.bin` | install | `content-tool water [levels]` (default `ftue_v2` and `newworld_vitaeeterna`) | The sea level is the only water |
-| `levels/<level>/collision.bin` | install | `content-tool collision [levels]` (`just collision`; default `ftue_v2`, `newworld_vitaeeterna` and the 12 `nw_dungeon_*` levels; reads the level's world and water files). The catacombs file (`nw_catacomb_00`) comes from `content-tool catacomb-tiles` | No sim of the level starts |
+| `levels/<level>/collision.bin` | install | `content-tool collision [levels]` (`just collision`; default `ftue_v2`, `newworld_vitaeeterna`, the 12 `nw_dungeon_*` levels and the 13 `nw_ori_*`, `nw_trial_*` and `nw_raid_*` levels; reads the level's world and water files). The catacombs file (`nw_catacomb_00`) comes from `content-tool catacomb-tiles` | No sim of the level starts |
 | `levels/<level>/roads.bin` | install | `content-tool roads [levels]` (default `newworld_vitaeeterna`) | No road sprint boost |
 | `levels/<level>/doors.json` | install | `content-tool level-doors [levels]` (default `newworld_vitaeeterna`; reads the level's world file) | No door capital of the level is shown |
 | `levels/ftue_v2/entities.json` | pack | The realm data pack (`just realm-data`), or: `content-tool ftue-entities <ledger.bin>` (a capture of a new character's tutorial) | The tutorial's level entities are not sent |

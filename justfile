@@ -102,8 +102,9 @@ world:
 design:
     cargo run --release -p content-tool -- design
 
-# Build the level collision files the sims read (the tutorial, the open world and the
-# expeditions) into local-data/content/<build>/levels/ from your install.
+# Build the level collision files the sims read (the tutorial, the open world, the
+# expeditions and the trial and raid levels) into local-data/content/<build>/levels/ from your
+# install.
 collision:
     cargo run --release -p content-tool -- collision
 

@@ -49,24 +49,51 @@ pub const EXPEDITION_LEVELS: [&str; 12] = [
     "nw_dungeon_shattermtn_00",
     "nw_dungeon_windsward_00",
 ];
-/// The levels whose collision file `collision` builds: the tutorial, the open world and the
-/// expeditions (the catacombs file comes from `catacomb-tiles`).
-pub const COLLISION_LEVELS: [&str; 14] = [
-    TUTORIAL_LEVEL,
-    OPEN_WORLD_LEVEL,
-    EXPEDITION_LEVELS[0],
-    EXPEDITION_LEVELS[1],
-    EXPEDITION_LEVELS[2],
-    EXPEDITION_LEVELS[3],
-    EXPEDITION_LEVELS[4],
-    EXPEDITION_LEVELS[5],
-    EXPEDITION_LEVELS[6],
-    EXPEDITION_LEVELS[7],
-    EXPEDITION_LEVELS[8],
-    EXPEDITION_LEVELS[9],
-    EXPEDITION_LEVELS[10],
-    EXPEDITION_LEVELS[11],
+/// The trial and raid levels: every level of the build's game mode table that a quest trial, a
+/// season trial or a raid opens as an instance (`GameModeMapData` `CoatlicueName` other than the
+/// open world, the expeditions, the catacombs and the player-versus-player maps).
+pub const TRIAL_LEVELS: [&str; 13] = [
+    "nw_ori_eg_questmotherwell",
+    "nw_ori_er_questliang",
+    "nw_ori_fl_questadiana",
+    "nw_ori_gc_questnihilo",
+    "nw_ori_sm_questisabella",
+    "nw_raid_cutlasskeys_00",
+    "nw_raid_monarchbluff_00",
+    "nw_trial_dw_dracula",
+    "nw_trial_season_02",
+    "nw_trial_season_02_q13",
+    "nw_trial_season_04",
+    "nw_trial_season_04_daichidojo",
+    "nw_trial_season_04_deviceroom",
 ];
+/// The levels that are not instance levels and have a collision file: the tutorial and the
+/// open world.
+const WORLD_COLLISION_LEVELS: [&str; 2] = [TUTORIAL_LEVEL, OPEN_WORLD_LEVEL];
+/// The number of [`COLLISION_LEVELS`].
+const COLLISION_LEVEL_COUNT: usize =
+    WORLD_COLLISION_LEVELS.len() + EXPEDITION_LEVELS.len() + TRIAL_LEVELS.len();
+/// The levels whose collision file `collision` builds: the tutorial, the open world, the
+/// expeditions and the trial and raid levels (the catacombs file comes from `catacomb-tiles`).
+pub const COLLISION_LEVELS: [&str; COLLISION_LEVEL_COUNT] = collision_levels();
+
+/// [`WORLD_COLLISION_LEVELS`], then [`EXPEDITION_LEVELS`], then [`TRIAL_LEVELS`].
+const fn collision_levels() -> [&'static str; COLLISION_LEVEL_COUNT] {
+    let mut levels = [""; COLLISION_LEVEL_COUNT];
+    let mut at = 0;
+    let groups: [&[&str]; 3] = [&WORLD_COLLISION_LEVELS, &EXPEDITION_LEVELS, &TRIAL_LEVELS];
+    let mut group = 0;
+    while group < groups.len() {
+        let mut index = 0;
+        while index < groups[group].len() {
+            levels[at] = groups[group][index];
+            at += 1;
+            index += 1;
+        }
+        group += 1;
+    }
+    levels
+}
 /// The levels whose water file `water` builds.
 pub const WATER_LEVELS: [&str; 2] = [TUTORIAL_LEVEL, OPEN_WORLD_LEVEL];
 /// The levels whose road file `roads` builds: the open world, whose tract maps hold the roads.
@@ -1217,6 +1244,21 @@ mod tests {
             content_dir_of(Some("/srv/blighted/content".into())),
             Path::new("/srv/blighted/content")
         );
+    }
+
+    #[test]
+    fn the_collision_levels_are_the_world_the_expedition_and_the_trial_levels_once_each() {
+        let expected: Vec<&str> = WORLD_COLLISION_LEVELS
+            .iter()
+            .chain(&EXPEDITION_LEVELS)
+            .chain(&TRIAL_LEVELS)
+            .copied()
+            .collect();
+        assert_eq!(COLLISION_LEVELS.to_vec(), expected);
+        let unique: BTreeSet<_> = COLLISION_LEVELS.iter().collect();
+        assert_eq!(unique.len(), COLLISION_LEVELS.len());
+        assert!(COLLISION_LEVELS.contains(&"nw_ori_gc_questnihilo"));
+        assert!(!COLLISION_LEVELS.contains(&CATACOMB_LEVEL));
     }
 
     #[test]
