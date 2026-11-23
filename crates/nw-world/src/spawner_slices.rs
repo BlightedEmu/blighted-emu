@@ -37,6 +37,8 @@ const NO_DURATION_S: f32 = -1.0;
 /// One waypoint of a spawner slice, in the slice's frame.
 #[derive(Debug, Clone, PartialEq)]
 struct SliceWaypoint {
+    /// Its entity id in the slice.
+    entity: u64,
     number: u32,
     at: [f32; AXES],
     /// Its task; `None` for a waypoint with an empty task name (a point to walk through).
@@ -81,6 +83,7 @@ impl SpawnerSlice {
                     })
                 });
                 Some(SliceWaypoint {
+                    entity: id,
                     number,
                     at: std::array::from_fn(|axis| placed[TRANSLATION_AT + axis]),
                     task,
@@ -109,6 +112,26 @@ impl SpawnerSlice {
                 .map(|waypoint| waypoint.task.clone())
                 .collect(),
         }
+    }
+
+    /// The path of the waypoints whose entity `owns` keeps, as [`Self::at`] makes it, with each
+    /// point from `from` (a place in the slice's frame); `None` when it keeps none. A slice of
+    /// several point spawners holds one waypoint entity under each spawner entity.
+    pub fn path_of(&self, owns: impl Fn(u64) -> bool, from: [f32; AXES]) -> Option<PatrolPath> {
+        let kept: Vec<&SliceWaypoint> = self
+            .waypoints
+            .iter()
+            .filter(|waypoint| owns(waypoint.entity))
+            .collect();
+        (!kept.is_empty()).then(|| PatrolPath {
+            points: kept
+                .iter()
+                .map(|waypoint| std::array::from_fn(|axis| waypoint.at[axis] - from[axis]))
+                .collect(),
+            waits_ms: Vec::new(),
+            mode: PathMode::Loop,
+            tasks: kept.iter().map(|waypoint| waypoint.task.clone()).collect(),
+        })
     }
 }
 
@@ -266,6 +289,36 @@ mod tests {
             None,
             "no point spawner component"
         );
+    }
+
+    #[test]
+    fn a_point_spawner_keeps_only_its_own_waypoint_from_its_place() {
+        // The Shipyard cave spawner slice: one `wp-nopath` under each point spawner.
+        const SUMMONER_WAYPOINT: u64 = 7;
+        let root = Element::with_children(
+            0,
+            vec![
+                waypoint(5, "wp-nopath", [-4.0, 14.6, -0.8], "", -1.0, -1.0),
+                waypoint(
+                    SUMMONER_WAYPOINT,
+                    "wp-nopath",
+                    [-1.0, 9.0, 0.0],
+                    "POI_Priest_Focus_Energy_LOOP",
+                    -1.0,
+                    -1.0,
+                ),
+            ],
+        );
+        let slice = SpawnerSlice::of(&root).expect("waypoints");
+        let path = slice
+            .path_of(|entity| entity == SUMMONER_WAYPOINT, [-1.0, 8.0, 0.0])
+            .expect("its waypoint");
+        assert_eq!(path.points, [[0.0, 1.0, 0.0]]);
+        assert_eq!(
+            path.tasks[0].as_ref().map(|task| task.task.as_str()),
+            Some("POI_Priest_Focus_Energy_LOOP")
+        );
+        assert_eq!(slice.path_of(|_| false, [0.0; AXES]), None);
     }
 
     #[test]

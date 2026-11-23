@@ -324,6 +324,10 @@ pub struct StatusEffectRule {
     pub health: f64,
     /// `HealthModifierPercent`: the share of the max health per change.
     pub health_share: f64,
+    /// `HealthMinPercent`: the share of its max health the holder's health does not go below
+    /// while it holds the effect (`AI_Isabella_MinHealth_80` 0.8: "Sets Isabella's minimum
+    /// health to 80%"); `None` for an effect without a floor.
+    pub health_min_share: Option<f64>,
     /// `HealthModifierDamageBased`: the share of the applying hit per change.
     pub hit_share: f64,
     /// `Stamina`: stamina per change.
@@ -523,6 +527,8 @@ pub struct EffectSourceRow {
     pub health: Option<f64>,
     /// `HealthModifierPercent`.
     pub health_share: Option<f64>,
+    /// `HealthMinPercent`.
+    pub health_min_share: Option<f64>,
     /// `HealthModifierDamageBased`.
     pub hit_share: Option<f64>,
     /// `Stamina`.
@@ -681,6 +687,7 @@ impl EffectSourceRow {
             // Health values of a few thousand.
             health: row.health.map(|health| health as f64),
             health_share: row.health_modifier_percent,
+            health_min_share: row.health_min_percent,
             hit_share: row.health_modifier_damage_based,
             stamina: row.stamina,
             damage_type: row.damage_type.clone(),
@@ -980,6 +987,7 @@ fn rule(
         blocked_by: names(row.antirequisite_categories.as_deref()),
         health: row.health.unwrap_or(0.0),
         health_share: row.health_share.unwrap_or(0.0),
+        health_min_share: row.health_min_share.filter(|share| *share > 0.0),
         hit_share: row.hit_share.unwrap_or(0.0),
         stamina: row.stamina.unwrap_or(0.0),
         damage_type: row.damage_type.as_deref().and_then(type_of),
@@ -1127,6 +1135,25 @@ mod tests {
                 status_effects: "AI_Bleed_9, AI_Bleed_9".to_owned(),
             }],
         }
+    }
+
+    #[test]
+    fn a_row_gives_its_health_floor_and_a_zero_floor_is_none() {
+        let mut source = source();
+        // The retail `AI_Isabella_MinHealth_80` row.
+        source.effects.push(EffectSourceRow {
+            health_min_share: Some(0.8),
+            ..row("AI_Isabella_MinHealth_80")
+        });
+        source.effects.push(EffectSourceRow {
+            health_min_share: Some(0.0),
+            ..row("NoFloor")
+        });
+        let rules = StatusEffectRules::build(source);
+        let floor = |id: &str| rules.by_id(id).expect("rule").health_min_share;
+        assert_eq!(floor("AI_Isabella_MinHealth_80"), Some(0.8));
+        assert_eq!(floor("NoFloor"), None);
+        assert_eq!(floor("AI_Bleed_9"), None);
     }
 
     #[test]

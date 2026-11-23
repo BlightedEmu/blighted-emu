@@ -67,21 +67,41 @@ pub const TRIAL_LEVELS: [&str; 13] = [
     "nw_trial_season_04_daichidojo",
     "nw_trial_season_04_deviceroom",
 ];
+/// The player-versus-player levels: every map of the build's arena, Outpost Rush and capture
+/// the flag game modes (the arena's map rotation `NW_Arena01`, `NW_Arena02`, `NW_Arena_3v3_04`;
+/// the Outpost Rush maps Trench and Vertical, its island map is the open world; the capture the
+/// flag maps Wide and Long). An instance sim of a level without a collision file stops at its
+/// start (live 2026-11-23 03:08:48Z: three sims of `nw_arena_3v3_04` in a row).
+pub const PVP_LEVELS: [&str; 7] = [
+    "nw_arena01",
+    "nw_arena02",
+    "nw_arena_3v3_04",
+    "nw_opr_004_trench",
+    "nw_opr_005_vertical",
+    "nw_ctf_002_wide",
+    "nw_ctf_003_long",
+];
 /// The levels that are not instance levels and have a collision file: the tutorial and the
 /// open world.
 const WORLD_COLLISION_LEVELS: [&str; 2] = [TUTORIAL_LEVEL, OPEN_WORLD_LEVEL];
 /// The number of [`COLLISION_LEVELS`].
 const COLLISION_LEVEL_COUNT: usize =
-    WORLD_COLLISION_LEVELS.len() + EXPEDITION_LEVELS.len() + TRIAL_LEVELS.len();
+    WORLD_COLLISION_LEVELS.len() + EXPEDITION_LEVELS.len() + TRIAL_LEVELS.len() + PVP_LEVELS.len();
 /// The levels whose collision file `collision` builds: the tutorial, the open world, the
-/// expeditions and the trial and raid levels (the catacombs file comes from `catacomb-tiles`).
+/// expeditions, the trial and raid levels and the player-versus-player levels (the catacombs
+/// file comes from `catacomb-tiles`).
 pub const COLLISION_LEVELS: [&str; COLLISION_LEVEL_COUNT] = collision_levels();
 
-/// [`WORLD_COLLISION_LEVELS`], then [`EXPEDITION_LEVELS`], then [`TRIAL_LEVELS`].
+/// [`WORLD_COLLISION_LEVELS`], then [`EXPEDITION_LEVELS`], [`TRIAL_LEVELS`] and [`PVP_LEVELS`].
 const fn collision_levels() -> [&'static str; COLLISION_LEVEL_COUNT] {
     let mut levels = [""; COLLISION_LEVEL_COUNT];
     let mut at = 0;
-    let groups: [&[&str]; 3] = [&WORLD_COLLISION_LEVELS, &EXPEDITION_LEVELS, &TRIAL_LEVELS];
+    let groups: [&[&str]; 4] = [
+        &WORLD_COLLISION_LEVELS,
+        &EXPEDITION_LEVELS,
+        &TRIAL_LEVELS,
+        &PVP_LEVELS,
+    ];
     let mut group = 0;
     while group < groups.len() {
         let mut index = 0;
@@ -1247,17 +1267,19 @@ mod tests {
     }
 
     #[test]
-    fn the_collision_levels_are_the_world_the_expedition_and_the_trial_levels_once_each() {
+    fn the_collision_levels_are_the_world_the_expedition_the_trial_and_the_pvp_levels_once_each() {
         let expected: Vec<&str> = WORLD_COLLISION_LEVELS
             .iter()
             .chain(&EXPEDITION_LEVELS)
             .chain(&TRIAL_LEVELS)
+            .chain(&PVP_LEVELS)
             .copied()
             .collect();
         assert_eq!(COLLISION_LEVELS.to_vec(), expected);
         let unique: BTreeSet<_> = COLLISION_LEVELS.iter().collect();
         assert_eq!(unique.len(), COLLISION_LEVELS.len());
         assert!(COLLISION_LEVELS.contains(&"nw_ori_gc_questnihilo"));
+        assert!(COLLISION_LEVELS.contains(&"nw_arena_3v3_04"));
         assert!(!COLLISION_LEVELS.contains(&CATACOMB_LEVEL));
     }
 

@@ -223,6 +223,29 @@ mod tests {
         )
     }
 
+    /// The Ennead Goliaths take the prefabs of their retail cards (`EXP-The-Ennead`: Horus
+    /// asset `9622b823...`, Brute `e85dc728...`); the table of 2026-11-05 had neither, so the sim
+    /// sent them as cards without vitals (no health, no invulnerability).
+    #[test]
+    fn the_content_table_gives_the_ennead_goliaths_their_retail_prefabs() {
+        let table = MobPrefabs::load(&crate::layout::repo_layout()).expect("table");
+        for (vitals, asset) in [
+            (
+                "AnubianGuardian_Horus_Boss",
+                "9622b823843c52c1a028987c18bdc44e",
+            ),
+            (
+                "AnubianGuardian_Brute_Boss",
+                "e85dc728525b5641a987b4a4ede0ecda",
+            ),
+        ] {
+            let prefab = table
+                .prefab(nw_formats::objectstream::lowercase_crc32(vitals))
+                .expect(vitals);
+            assert_eq!(hex::encode(prefab.asset), asset, "{vitals}");
+        }
+    }
+
     #[test]
     fn the_most_seen_prefab_of_a_vitals_id_is_its_default() {
         let other = "00112233445566778899aabbccddeeff";

@@ -161,6 +161,45 @@ pub struct TargetSlice {
     /// 3.17, 3.68, 9.57, 10.11, 15.40 and 15.94 s on it). Empty for another slice.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gather_mobs: Vec<TimedMob>,
+    /// The mob of each point spawner of a spawner slice whose point spawners name more than one
+    /// vitals row ([`SpawnerMember`]), in slice order: one spawn of the slice makes each of
+    /// them at its own place, and [`Self::mob`] is only the first. Observed: the Shipyard cave
+    /// spawner `dg_enc_ebonscale_00_cave_spawn_00` holds five `Corruption_Swarmer_DG_Ebonscale_00`
+    /// point spawners and one `Dynasty_Summoner_Named_DG_Ebonscale_00`, and retail showed the
+    /// summoner with five swarmers at the cave (`EXP-The-Dynasty-Shipyard` 74.5 to 76.2 s; the
+    /// tank run 329.7 to 333.6 s). Empty for a slice of one mob kind. Only a spawner slice that
+    /// is a target itself keeps them; a slice that spawns one through another slice keeps the
+    /// first row (no such slice in the 25810808 data: all 18 mixed spawner slices are targets).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<SpawnerMember>,
+}
+
+impl TargetSlice {
+    /// Every mob one spawn of it can make: its mob and the mob of each member
+    /// ([`Self::members`]).
+    pub fn mobs(&self) -> impl Iterator<Item = &TargetMob> {
+        self.mob
+            .iter()
+            .chain(self.members.iter().map(|member| &member.mob))
+    }
+}
+
+/// One point spawner of a spawner slice with mixed mobs ([`TargetSlice::members`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpawnerMember {
+    /// Its mob.
+    pub mob: TargetMob,
+    /// Its place from the slice's origin before the spawn's turn: east, north, up (metres).
+    pub offset: [f32; 3],
+    /// The creature slices it spawns: its `m_sliceAsset`, else the entries of its
+    /// `m_aliasAsset` (the cave summoner's alias names `corrupted_dynasty_summoner`). An
+    /// objective that tracks one of them counts this member's mob only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slices: Vec<String>,
+    /// The waypoints of its own point spawner, from its place; `None` for a point spawner
+    /// without one (a `0wp_Wander` spawner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waypoints: Option<PatrolPath>,
 }
 
 /// The spawners a prefab spawn randomizer (`Javelin::PrefabSpawnRandomizer`,
@@ -829,6 +868,18 @@ mod tests {
                             level: 60,
                         },
                     }],
+                    members: vec![SpawnerMember {
+                        mob: TargetMob {
+                            vitals_id: "Dynasty_Summoner_Named_DG_Ebonscale_00".to_owned(),
+                            category_id: String::new(),
+                            level: 55,
+                        },
+                        offset: [-1.0, 9.0, 0.0],
+                        slices: vec![
+                            "slices/characters/corrupted_dynasty_summoner.dynamicslice".to_owned(),
+                        ],
+                        waypoints: None,
+                    }],
                 }],
             }],
             ..Encounter::default()
@@ -850,6 +901,33 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    /// A slice's mobs are its mob and each member's mob (the Shipyard cave spawner's summoner).
+    #[test]
+    fn a_slice_s_mobs_are_its_mob_and_its_members_mobs() {
+        let mob = |vitals: &str| TargetMob {
+            vitals_id: vitals.to_owned(),
+            category_id: String::new(),
+            level: 55,
+        };
+        let slice = TargetSlice {
+            mob: Some(mob("Corruption_Swarmer_DG_Ebonscale_00")),
+            members: vec![SpawnerMember {
+                mob: mob("Dynasty_Summoner_Named_DG_Ebonscale_00"),
+                ..SpawnerMember::default()
+            }],
+            ..TargetSlice::default()
+        };
+        let rows: Vec<&str> = slice.mobs().map(|mob| mob.vitals_id.as_str()).collect();
+        assert_eq!(
+            rows,
+            [
+                "Corruption_Swarmer_DG_Ebonscale_00",
+                "Dynasty_Summoner_Named_DG_Ebonscale_00"
+            ]
+        );
+        assert_eq!(TargetSlice::default().mobs().count(), 0);
     }
 
     #[test]

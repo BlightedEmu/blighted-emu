@@ -29,8 +29,8 @@ use nw_world::collision::Affine;
 use nw_world::dungeon_scripts::{
     AliasMob, AreaRefill, Chest, Detector, DungeonScripts, DungeonScriptsError, EffectArea,
     Encounter, HazardObject, LevelScript, OPEN_WORLD_LEVEL, ObjectiveSpec, RandomizerChoice, Spawn,
-    SpawnRandomizer, Stage, StageAction, StageObjective, Target, TargetMob, TargetSlice, TimedMob,
-    TriggerArea,
+    SpawnRandomizer, SpawnerMember, Stage, StageAction, StageObjective, Target, TargetMob,
+    TargetSlice, TimedMob, TriggerArea,
 };
 use nw_world::level_script::{
     Action, AliasSlice, AssetRef, DYNAMIC_SLICE_SUFFIX, LevelScriptError, ObjectiveKind,
@@ -1548,6 +1548,16 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
                 percent,
             })
             .collect();
+        let members = found
+            .members
+            .into_iter()
+            .map(|member| SpawnerMember {
+                mob: target_mob(member.variant),
+                offset: member.offset,
+                slices: member.slices,
+                waypoints: member.waypoints,
+            })
+            .collect();
         if mob.is_some() {
             self.report.spawner_mobs += 1;
         } else {
@@ -1580,6 +1590,7 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
             randomizer,
             detectable_radius_m,
             gather_mobs,
+            members,
         })
     }
 
@@ -1769,13 +1780,22 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
         &mut self,
         script: &SliceScript,
     ) -> Result<Vec<String>, DungeonScriptsBuildError> {
-        let Some(spawner) = script
+        match script
             .entities
             .iter()
             .find_map(|entity| entity.spawner.as_ref())
-        else {
-            return Ok(Vec::new());
-        };
+        {
+            Some(spawner) => self.spawner_slices(spawner),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The slices spawner `spawner` spawns: its `m_sliceAsset`, else the entries of its
+    /// `m_aliasAsset`; empty when it names neither.
+    fn spawner_slices(
+        &mut self,
+        spawner: &Spawner,
+    ) -> Result<Vec<String>, DungeonScriptsBuildError> {
         if let Some(slice) = named(spawner.slice.as_ref()) {
             return Ok(vec![self.source.asset_path(&slice)?]);
         }
@@ -1847,6 +1867,58 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
             .map(|spawner| spawner.at(&origin)))
     }
 
+    /// The members of the spawner slice at `path` ([`TargetSlice::members`]): each of its
+    /// point spawner entities `spawners` with its vitals row, its place in the slice, the
+    /// creature slice it spawns and its own waypoints, when they name more than one vitals row;
+    /// empty when they all name one.
+    fn spawner_members(
+        &mut self,
+        path: &str,
+        script: &SliceScript,
+        spawners: &[&ScriptEntity],
+    ) -> Result<Vec<Member>, DungeonScriptsBuildError> {
+        let mixed = spawners
+            .iter()
+            .filter_map(|entity| entity.variant.as_ref())
+            .any(|variant| {
+                spawners
+                    .first()
+                    .and_then(|first| first.variant.as_ref())
+                    .is_some_and(|first| !first.vitals_id.eq_ignore_ascii_case(&variant.vitals_id))
+            });
+        if !mixed {
+            return Ok(Vec::new());
+        }
+        let waypoints = self
+            .source
+            .root(path)?
+            .and_then(|root| SpawnerSlice::of(&root));
+        let mut members = Vec::with_capacity(spawners.len());
+        for entity in spawners {
+            let Some(variant) = entity.variant.clone() else {
+                continue;
+            };
+            let offset = position_of(&script.placement_of(entity.id));
+            let slices = match entity.spawner.as_ref() {
+                Some(spawner) => self.spawner_slices(spawner)?,
+                None => Vec::new(),
+            };
+            let own_waypoints = waypoints.as_ref().and_then(|waypoints| {
+                waypoints.path_of(
+                    |waypoint| descends_from(script, waypoint, entity.id),
+                    offset,
+                )
+            });
+            members.push(Member {
+                variant,
+                offset,
+                slices,
+                waypoints: own_waypoints,
+            });
+        }
+        Ok(members)
+    }
+
     /// The mob the slice `slice` spawns and how many of it one spawn makes: its creature row
     /// when the retail captures showed its asset with that row, else its own vitals row (a
     /// spawner slice's), the mob the retail captures showed for its asset (only with the mob
@@ -1883,17 +1955,19 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
         if let Some(variant) = script.variant() {
             // A spawner slice with more than one spawner entity makes one mob for each (the
             // storm priest's `worldevent_ai_cultist_chaplain_minion`).
-            let spawners = script
+            let spawners: Vec<&ScriptEntity> = script
                 .entities
                 .iter()
                 .filter(|entity| entity.variant.is_some())
-                .count();
+                .collect();
+            let members = self.spawner_members(&path, &script, &spawners)?;
             return Ok(SliceMobs {
                 variant: Some(variant.clone()),
-                count: u32::try_from(spawners).unwrap_or(ONE_MOB),
+                count: u32::try_from(spawners.len()).unwrap_or(ONE_MOB),
                 by_difficulty: BTreeMap::new(),
                 refill: None,
                 alias_mobs: Vec::new(),
+                members,
             });
         }
         if let Some(vitals_id) = self
@@ -2023,6 +2097,34 @@ struct SliceMobs {
     refill: Option<AreaRefill>,
     /// Every mob of its spawner's mixed alias with its weight ([`TargetSlice::alias_mobs`]).
     alias_mobs: Vec<(VitalsVariant, u32)>,
+    /// Each point spawner of a spawner slice with mixed mobs ([`TargetSlice::members`]).
+    members: Vec<Member>,
+}
+
+/// One point spawner of a spawner slice with mixed mobs, as read ([`SpawnerMember`]).
+#[derive(Debug)]
+struct Member {
+    /// Its mob.
+    variant: VitalsVariant,
+    /// Its place in the slice.
+    offset: [f32; 3],
+    /// The creature slices it spawns.
+    slices: Vec<String>,
+    /// Its own waypoints, from its place.
+    waypoints: Option<PatrolPath>,
+}
+
+/// Whether entity `id` of `script` is `ancestor` or lies under it (its `m_parentId` chain).
+fn descends_from(script: &SliceScript, id: u64, ancestor: u64) -> bool {
+    let mut at = Some(id);
+    for _ in 0..script.entities.len() {
+        match at {
+            Some(current) if current == ancestor => return true,
+            Some(current) => at = script.entity(current).and_then(|entity| entity.parent),
+            None => return false,
+        }
+    }
+    false
 }
 
 impl SliceMobs {
@@ -2041,6 +2143,7 @@ impl SliceMobs {
                 .unwrap_or_default(),
             refill: None,
             alias_mobs: Vec::new(),
+            members: Vec::new(),
         }
     }
 }
@@ -3053,6 +3156,104 @@ mod tests {
         let tiered = builder.target_slice(&tiered, 0).expect("tiered");
         assert!(tiered.alias_mobs.is_empty(), "mobs by difficulty roll none");
         assert_eq!(tiered.difficulty_mobs.len(), TIERS.len());
+    }
+
+    /// A spawner slice whose point spawners name more than one vitals row keeps each spawner's
+    /// mob, place and creature slice (the Shipyard cave's five swarmers and one summoner); one
+    /// whose spawners name one row keeps none.
+    #[test]
+    fn a_spawner_slice_of_mixed_rows_keeps_each_spawners_mob_and_place() {
+        const CAVE: &str = "slices/dungeon_eventmanager/spawners/test_cave_spawn.dynamicslice";
+        const PACK: &str = "slices/dungeon_eventmanager/spawners/test_pack_spawn.dynamicslice";
+        const SWARMER: &str = "Corruption_Swarmer_DG_Ebonscale_00";
+        const SUMMONER: &str = "Dynasty_Summoner_Named_DG_Ebonscale_00";
+        const SWARMER_SLICE: &str = "slices/characters/test_swarmer.dynamicslice";
+        const SUMMONER_SLICE: &str = "slices/characters/test_summoner.dynamicslice";
+        const SUMMONER_AT: [f32; 3] = [-1.0, 9.0, 0.0];
+        const LEVEL: u32 = 55;
+        let point_spawner = |id: u64, vitals: &str, creature: &str, at: [f32; 3]| {
+            let variant = typed(
+                named(
+                    "element",
+                    vec![named(
+                        "m_serverFacetPtr",
+                        vec![
+                            value("m_vitalsTableRowId", vitals.as_bytes()),
+                            value("m_vitalsCategoryTableRowId", vitals.as_bytes()),
+                            value("m_vitalsLevel", &LEVEL.to_be_bytes()),
+                        ],
+                    )],
+                ),
+                VARIANT_PROVIDER_TYPE,
+            );
+            entity(
+                id,
+                "PointSpawner_1wp_Stand",
+                vec![transform(NO_PARENT, at), variant, spawner(creature)],
+            )
+        };
+        let mut source = Slices(HashMap::from([
+            (
+                CAVE.to_owned(),
+                slice(vec![
+                    point_spawner(1, SWARMER, SWARMER_SLICE, [0.0; 3]),
+                    point_spawner(2, SUMMONER, SUMMONER_SLICE, SUMMONER_AT),
+                    point_spawner(3, SWARMER, SWARMER_SLICE, [4.0, 1.0, 0.0]),
+                ]),
+            ),
+            (
+                PACK.to_owned(),
+                slice(vec![
+                    point_spawner(1, SWARMER, SWARMER_SLICE, [0.0; 3]),
+                    point_spawner(2, SWARMER, SWARMER_SLICE, [1.0; 3]),
+                ]),
+            ),
+        ]));
+        let (levels, families, seen) = (HashMap::new(), HashMap::new(), HashSet::new());
+        let mut report = DungeonScriptsReport::default();
+        let mut builder = EncounterBuilder::new(
+            &mut source,
+            MobSources {
+                levels: &levels,
+                families: &families,
+                prefabs: None,
+                seen: &seen,
+            },
+            &mut report,
+        );
+        let cave = AssetRef {
+            path: CAVE.to_owned(),
+            guid: [1; ASSET_ID_LEN],
+        };
+        let cave = builder.target_slice(&cave, 0).expect("cave spawner");
+        assert_eq!(cave.mobs_per_spawn, 3);
+        let members: Vec<(&str, u32, [f32; 3], &str)> = cave
+            .members
+            .iter()
+            .map(|member| {
+                (
+                    member.mob.vitals_id.as_str(),
+                    member.mob.level,
+                    member.offset,
+                    member.slices.first().map_or("", String::as_str),
+                )
+            })
+            .collect();
+        assert_eq!(
+            members,
+            [
+                (SWARMER, LEVEL, [0.0; 3], SWARMER_SLICE),
+                (SUMMONER, LEVEL, SUMMONER_AT, SUMMONER_SLICE),
+                (SWARMER, LEVEL, [4.0, 1.0, 0.0], SWARMER_SLICE),
+            ]
+        );
+        let pack = AssetRef {
+            path: PACK.to_owned(),
+            guid: [2; ASSET_ID_LEN],
+        };
+        let pack = builder.target_slice(&pack, 0).expect("pack spawner");
+        assert!(pack.members.is_empty(), "one row: no members");
+        assert_eq!(pack.mobs_per_spawn, 2);
     }
 
     /// The GUID byte of the alias entries of the test aliases.

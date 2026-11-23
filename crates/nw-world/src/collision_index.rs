@@ -50,6 +50,24 @@ const FACE_TOLERANCE_M: f32 = 1e-3;
 const PARITY_DIRECTION: Vec3 = [0.000_37, 0.000_71, 1.0];
 /// A floor this near the feet is the floor they stand on, m (our choice: under a step).
 const ON_TOP_M: f32 = 0.1;
+/// How far to each side [`CollisionIndex::floor_at`] looks when no floor is right under the
+/// feet, m. Inferred: the boss room of `nw_ori_er_questliang` has cracks 0.05-0.15 m wide
+/// between floor pieces that meet edge to edge (x 1039.50 and y 940.00, floor 129.90 on both
+/// sides), and 28 retail player places stand on them (`99f_msq_er_fightliang` 254.042 s at
+/// 1039.52 949.03 129.99; `MSQ19-lv65` 1735.406 s; `Playthrough_Part_07` 1058.691 s). The
+/// player capsule has a radius, so it stands on both sides of such a crack.
+const SEAM_REACH_M: f32 = 0.1;
+/// How far below the feet a floor beside them may lie to count over a crack, m. Inferred: the
+/// floors on both sides of the Liang cracks lie 0.01-0.1 m under the retail feet; a floor far
+/// down beside a true hole is no crack's side.
+const SEAM_DROP_M: f32 = 0.5;
+/// The places beside the feet that [`CollisionIndex::floor_at`] tries over a crack.
+const SEAM_STEPS: [(f32, f32); 4] = [
+    (SEAM_REACH_M, 0.0),
+    (-SEAM_REACH_M, 0.0),
+    (0.0, SEAM_REACH_M),
+    (0.0, -SEAM_REACH_M),
+];
 
 /// An axis-aligned box.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -477,8 +495,22 @@ impl CollisionIndex {
 
     /// The height of the floor under a body whose feet are at (`x`, `y`, `z`): the highest
     /// surface at most [`FLOOR_SEARCH_ABOVE_M`] above the feet that faces up at most
-    /// [`MAX_WALKABLE_SLOPE_DEG`] from level, or `None` where no solid is under it.
+    /// [`MAX_WALKABLE_SLOPE_DEG`] from level, or `None` where no solid is under it. Over a
+    /// crack between floor pieces (no floor at all right under the feet), the highest floor
+    /// [`SEAM_REACH_M`] to a side and at most [`SEAM_DROP_M`] under the feet.
     pub fn floor_at(&self, x: f32, y: f32, z: f32) -> Option<f32> {
+        self.floor_under(x, y, z).or_else(|| {
+            SEAM_STEPS
+                .iter()
+                .filter_map(|(dx, dy)| self.floor_under(x + dx, y + dy, z))
+                .filter(|floor| z - floor <= SEAM_DROP_M)
+                .reduce(f32::max)
+        })
+    }
+
+    /// The floor right under feet at (`x`, `y`, `z`) ([`Self::floor_at`] without the crack
+    /// rule).
+    fn floor_under(&self, x: f32, y: f32, z: f32) -> Option<f32> {
         let (column, row) = self.grid.cell_of(x, y)?;
         let top = z + FLOOR_SEARCH_ABOVE_M;
         let min_up = MAX_WALKABLE_SLOPE_DEG.to_radians().cos();
@@ -1644,6 +1676,41 @@ mod tests {
         assert!((floor(120.0).expect("from above") - 89.38).abs() < TOLERANCE);
         assert_eq!(floor(80.0), None, "far under the deck: over the head");
         assert_eq!(index.floor_at(470.0, 849.7, 89.38), None, "off the deck");
+    }
+
+    #[test]
+    fn a_crack_between_two_floor_pieces_has_the_floor_of_its_sides() {
+        const CRACK_M: f32 = 0.12;
+        const DECK_HALF_M: f32 = 5.0;
+        let side = DECK_HALF_M + CRACK_M / 2.0;
+        let index = index(
+            vec![deck()],
+            vec![
+                Body {
+                    geometry: 0,
+                    place: moved(-side, 0.0, 129.90),
+                },
+                Body {
+                    geometry: 0,
+                    place: moved(side, 0.0, 129.98),
+                },
+            ],
+        );
+        let crack = index
+            .floor_at(0.0, 0.0, 130.0)
+            .expect("a floor over the crack");
+        assert!((crack - 129.98).abs() < TOLERANCE, "the higher side");
+        assert!((index.floor_at(-1.0, 0.0, 130.0).expect("left") - 129.90).abs() < TOLERANCE);
+        assert_eq!(
+            index.floor_at(0.0, DECK_HALF_M + 1.0, 130.0),
+            None,
+            "past the pieces' far edge"
+        );
+        assert_eq!(
+            index.floor_at(0.0, 0.0, 131.0),
+            None,
+            "a floor beside a hole far under the feet is no crack's side"
+        );
     }
 
     #[test]
