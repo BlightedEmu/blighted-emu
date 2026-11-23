@@ -151,7 +151,7 @@ fn runtime() -> Result<tokio::runtime::Runtime, RunError> {
 pub fn migrate(config_path: &Path) -> Result<(), RunError> {
     let config = load_edge_config(config_path)?;
     let passwords = load_database_passwords(&config, env_lookup)?;
-    init_logging(&config.log_filter)?;
+    let _log_flush = init_logging(&config.log_filter)?;
     runtime()?.block_on(async {
         ensure_database(&config.global_database, &passwords.global).await?;
         for (world, password) in config.worlds.iter().zip(&passwords.worlds) {
@@ -182,7 +182,7 @@ pub fn link_discord(
     check_discord_user_id(discord_user_id)?;
     let config = load_edge_config(config_path)?;
     let passwords = load_database_passwords(&config, env_lookup)?;
-    init_logging(&config.log_filter)?;
+    let _log_flush = init_logging(&config.log_filter)?;
     runtime()?.block_on(async {
         let (global, worlds) = connect_all(&config, &passwords)
             .await
@@ -236,7 +236,7 @@ pub fn make_mirror_certificate(config_path: &Path) -> Result<(), RunError> {
 pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let config = load_edge_config(config_path)?;
     let secrets = load_secrets(&config, env_lookup)?;
-    init_logging(&config.log_filter)?;
+    let _log_flush = init_logging(&config.log_filter)?;
     install_crypto_provider();
     runtime()?.block_on(serve_async(config, secrets))
 }

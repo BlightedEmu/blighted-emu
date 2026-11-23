@@ -182,7 +182,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
             })
         })
         .transpose()?;
-    init_logging(&config.log_filter)?;
+    let _log_flush = init_logging(&config.log_filter)?;
     let filter = profanity_filter(&config.game_dir)?;
     tracing::info!(words = filter.len(), "profanity lists read");
     let rules = SocialRules {

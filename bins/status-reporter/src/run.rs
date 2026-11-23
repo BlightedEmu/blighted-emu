@@ -325,7 +325,7 @@ fn prepare(config: ReporterConfig) -> Result<Ready, RunError> {
 /// not valid, or the runtime cannot start.
 pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let config = load_reporter_config(config_path)?;
-    init_logging(&config.log_filter)?;
+    let _log_flush = init_logging(&config.log_filter)?;
     let site_url = config.site_url.clone();
     let world_id = config.world_id;
     let runtime = tokio::runtime::Builder::new_multi_thread()

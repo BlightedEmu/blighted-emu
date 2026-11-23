@@ -105,7 +105,7 @@ const HASH_PARALLEL: usize = 0;
 pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let config = load_admin_config(config_path)?;
     let front = config.front()?;
-    init_logging(&config.log_filter)?;
+    let _log_flush = init_logging(&config.log_filter)?;
     let world = WorldLayer::load(&config)?;
     let game_dir = std::env::var_os(GAME_DIR_ENV).map(std::path::PathBuf::from);
     // Captures never leave their machine: a site behind a relay serves none.
@@ -173,7 +173,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
 /// fails.
 pub fn relay(config_path: &Path) -> Result<(), RunError> {
     let config = load_relay_config(config_path).map_err(AdminConfigError::from)?;
-    init_logging(&config.log_filter)?;
+    let _log_flush = init_logging(&config.log_filter)?;
     let acceptor = TlsAcceptor::from(Arc::new(
         relay_agent_tls(&config.agent_tls).map_err(RelayError::from)?,
     ));

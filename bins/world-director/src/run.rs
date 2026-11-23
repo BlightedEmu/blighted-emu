@@ -86,7 +86,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         .ok()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| RunError::MissingSecret(config.world_database_password_env.clone()))?;
-    init_logging(&config.log_filter)?;
+    let _log_flush = init_logging(&config.log_filter)?;
     let build = load_client_build(&config.client_build_config).map_err(RunError::ClientBuild)?;
     let layout = ContentLayout::open(content_dir(), &build)?;
     let world_file = WorldFile::load(&layout, &config.level)?;

@@ -20,6 +20,7 @@ check:
 
 # Run the shell script tests.
 test-scripts:
+    scripts/cargo-low.test.sh
     scripts/target-size.test.sh
     scripts/no-game-data.test.sh
     scripts/live-stack.test.sh

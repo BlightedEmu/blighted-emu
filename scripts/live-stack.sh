@@ -11,6 +11,7 @@
 # It needs the git-ignored local files below. The servers get the secrets of the env file;
 # blighted-admin does not (its bot batches read the env file themselves). Logs go to LOG_DIR.
 # LIVE_STACK_ROOT overrides the repository folder (used by the tests).
+# LIVE_STACK_EDGE_PING_PORT sets the edge's region ping port (default 8080, plus the instance shift).
 # The control FIFO (LOG_DIR/control) takes one command per line: `restart-world` stops the
 # world-director and the sims and starts them again (the Studio page's Apply uses it); the other
 # programs keep running. Results go to LOG_DIR/control.log.
@@ -51,8 +52,10 @@ readonly RESTART_WORLD="restart-world"
 readonly EDGE_PORT=$((8443 + SHIFT))
 readonly EDGE_LISTEN="0.0.0.0:$EDGE_PORT"
 readonly EDGE_METRICS_LISTEN="127.0.0.1:$((9100 + SHIFT))"
-# The bots send no region ping; a high port needs no right to bind.
-readonly EDGE_PING_PORT=$((8080 + SHIFT))
+# The bots send no region ping; a high port needs no right to bind. LIVE_STACK_EDGE_PING_PORT
+# moves it when another program holds 8080 (2026-11-23: a Steam helper listens on 127.0.0.1:8080).
+readonly DEFAULT_EDGE_PING_PORT=8080
+readonly EDGE_PING_PORT=$((${LIVE_STACK_EDGE_PING_PORT:-$DEFAULT_EDGE_PING_PORT} + SHIFT))
 readonly EDGE_PING_LISTEN="127.0.0.1:$EDGE_PING_PORT"
 readonly GATEWAY_PORT=$((33435 + SHIFT))
 readonly ADMIN_LISTEN="127.0.0.1:$((9180 + SHIFT))"

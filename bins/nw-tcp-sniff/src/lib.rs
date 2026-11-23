@@ -47,7 +47,7 @@ pub enum SniffError {
 ///
 /// Returns [`SniffError`] when logging setup, the runtime, or the listening socket fails.
 pub fn serve(config: SniffConfig) -> Result<(), SniffError> {
-    init_logging(&config.log_filter)?;
+    let _log_flush = init_logging(&config.log_filter)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

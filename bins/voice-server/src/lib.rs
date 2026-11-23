@@ -107,7 +107,7 @@ pub fn acceptor(config: &VoiceServerConfig) -> Result<TlsAcceptor, VoiceServerEr
 /// Returns [`VoiceServerError`] when the configuration, the certificate or the listener fails.
 pub fn serve(path: &Path) -> Result<(), VoiceServerError> {
     let config: VoiceServerConfig = load_config(path, ENV_PREFIX)?;
-    nw_common::logging::init_logging(&config.log)?;
+    let _log_flush = nw_common::logging::init_logging(&config.log)?;
     nw_login::install_crypto_provider();
     let acceptor = acceptor(&config)?;
     let key = std::env::var(&config.key_env)

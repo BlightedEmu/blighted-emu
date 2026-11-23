@@ -88,7 +88,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         &std::env::var(SIGNING_KEY_ENV)
             .map_err(|_| SecretError::Missing(SIGNING_KEY_ENV.to_owned()))?,
     )?;
-    init_logging(&config.log_filter)?;
+    let _log_flush = init_logging(&config.log_filter)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
