@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use nw_content::town_props::ASSET_ID_LEN;
 use nw_messages::entity_ids::IdHolder;
+use nw_messages::fishing::StateTransition;
 use nw_messages::gde::LOOT_BAG_ASSET;
 use nw_messages::social::states::GroupsState;
 use nw_messages::wire::RAW_ID_LEN;
@@ -314,14 +315,30 @@ pub struct CombatView {
     bag: Vec<ItemRecord>,
     /// Mobs in view whose vitals said they died.
     mob_deaths: u64,
-    /// The last mob in view that died, with its last place: the corpse a skin step gathers.
-    last_death: Option<(u64, WorldPosition)>,
+    /// The vitals id of each mob in view whose card named one.
+    mob_vitals: BTreeMap<u64, u32>,
+    /// The mobs in view that died, oldest first, while their slots have not stopped: the
+    /// corpses a skin step gathers.
+    corpses: Vec<Corpse>,
     /// The answers to the bot's interactions since the last [`CombatView::take_interactions`].
     interactions: Vec<InteractionAnswer>,
     /// The id of the newest card seen of each slice asset.
     cards: BTreeMap<[u8; ASSET_ID_LEN], [u8; RAW_ID_LEN]>,
     /// The ids of the loot bags seen ([`LOOT_BAG_ASSET`] cards), oldest first.
     bags: Vec<[u8; RAW_ID_LEN]>,
+    /// The bot's own fishing steps seen, by sequence (each listing repeats the steps the client
+    /// has not acknowledged yet).
+    fishing: Vec<StateTransition>,
+}
+
+/// Adds the steps of a fishing listing `listed` that `seen` does not hold yet (a later
+/// sequence than its last).
+fn note_fishing(seen: &mut Vec<StateTransition>, listed: &[StateTransition]) {
+    for step in listed {
+        if seen.last().is_none_or(|last| step.sequence > last.sequence) {
+            seen.push(*step);
+        }
+    }
 }
 
 impl CombatView {
@@ -353,14 +370,18 @@ impl CombatView {
                         {
                             apply_bag(&mut self.bag, items);
                         }
+                        if let MemberState::Fishing(state) = &member.state
+                            && let Some(listing) = &state.transitions
+                        {
+                            note_fishing(&mut self.fishing, &listing.elements);
+                        }
                     }
                 }
                 for gone in self.slots.resolve(&mut bundle) {
                     self.mobs.remove(&gone);
-                    if self.last_death.is_some_and(|(dead, _)| dead == gone) {
-                        // The corpse went: no skin is left.
-                        self.last_death = None;
-                    }
+                    self.mob_vitals.remove(&gone);
+                    // The corpse went: no skin is left.
+                    self.corpses.retain(|corpse| corpse.entity != gone);
                     release_raw_id(self.own.holder, gone);
                 }
                 for update in bundle
@@ -383,11 +404,24 @@ impl CombatView {
                         // A card again keeps the place: a mob that stands still sends none.
                         self.mobs.entry(entity).or_insert(None);
                         self.mob_cards += 1;
+                        if let Some(vitals) = creature_vitals_id(update) {
+                            self.mob_vitals.insert(entity, vitals);
+                        }
                     }
                     if died(update) {
                         if let Some(place) = self.mobs.remove(&entity) {
                             self.mob_deaths += 1;
-                            self.last_death = place.or(update.position).map(|at| (entity, at));
+                            if let Some(at) = place.or(update.position) {
+                                self.corpses.push(Corpse {
+                                    entity,
+                                    at,
+                                    vitals: self
+                                        .mob_vitals
+                                        .get(&entity)
+                                        .copied()
+                                        .or_else(|| creature_vitals_id(update)),
+                                });
+                            }
                         }
                     } else if let Some(mob) = self.mobs.get_mut(&entity)
                         && update.position.is_some()
@@ -414,11 +448,17 @@ impl CombatView {
                 }
                 self.slots = EntitySlots::default();
                 self.cards.clear();
-                self.last_death = None;
+                self.mob_vitals.clear();
+                self.corpses.clear();
             }
             Read::Skipped | Read::Other { .. } => {}
         }
         Ok(own_position)
+    }
+
+    /// The bot's own fishing steps seen, oldest first.
+    pub fn fishing_steps(&self) -> &[StateTransition] {
+        &self.fishing
     }
 
     /// The ids of the loot bags seen, oldest first.
@@ -443,6 +483,11 @@ impl CombatView {
         self.mobs
             .iter()
             .filter_map(|(number, position)| Some((*number, (*position)?)))
+    }
+
+    /// The vitals id (CRC-32 of the lowercase id) that the card of mob `entity` named.
+    pub fn vitals_of(&self, entity: u64) -> Option<u32> {
+        self.mob_vitals.get(&entity).copied()
     }
 
     /// The bundles read so far.
@@ -495,10 +540,42 @@ impl CombatView {
         self.mob_deaths
     }
 
-    /// The last mob in view that died and its last place, while its slot has not stopped.
-    pub const fn last_death(&self) -> Option<(u64, WorldPosition)> {
-        self.last_death
+    /// The mobs in view of vitals id `vitals` (CRC-32 of the lowercase id) that died, newest
+    /// first, each with its last place, while their slots have not stopped. Live 2026-11-22
+    /// 10:46:13: a scorpion died after the bot's lion (10:45:45), and the skin of the newest
+    /// corpse gave no lion heart.
+    pub fn corpses_of(&self, vitals: u32) -> impl Iterator<Item = (u64, WorldPosition)> + '_ {
+        self.corpses
+            .iter()
+            .rev()
+            .filter(move |corpse| corpse.vitals == Some(vitals))
+            .map(|corpse| (corpse.entity, corpse.at))
     }
+}
+
+/// A mob in view that died.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Corpse {
+    entity: u64,
+    /// Its last place.
+    at: WorldPosition,
+    /// Its vitals id, when its card named one.
+    vitals: Option<u32>,
+}
+
+/// The vitals id of the creature vitals of `update` (not the player's).
+fn creature_vitals_id(update: &SlotUpdate) -> Option<u32> {
+    update
+        .members
+        .iter()
+        .find_map(|member| match &member.state {
+            MemberState::Vitals(vitals) => vitals
+                .slot_0
+                .as_ref()
+                .and_then(|slot| slot.vitals_id)
+                .filter(|id| *id != PLAYER_VITALS_ID),
+            _ => None,
+        })
 }
 
 /// Whether `update` is the card of a mob: one with creature vitals (a mob of the prefab table: its
@@ -509,14 +586,7 @@ fn is_mob_card(update: &SlotUpdate) -> bool {
     let Some(card) = update.card else {
         return false;
     };
-    let creature_vitals = update.members.iter().any(|member| match &member.state {
-        MemberState::Vitals(vitals) => vitals
-            .slot_0
-            .as_ref()
-            .and_then(|slot| slot.vitals_id)
-            .is_some_and(|id| id != PLAYER_VITALS_ID),
-        _ => false,
-    });
+    let creature_vitals = creature_vitals_id(update).is_some();
     let self_named = card
         .asset
         .zip(card.gde_ref)
@@ -965,6 +1035,13 @@ mod tests {
         sub_id: DYNAMIC_SLICE_SUB_ID,
     };
     const CREATURE_VITALS_ID: u32 = 7;
+    /// The vitals id the death states of the corpse tests name.
+    const DEAD_VITALS_ID: u32 = 1;
+    /// The mobs of the skin-the-planned-kill test.
+    const LION_MOB: u64 = (1 << 34) + 9;
+    const SCORPION_MOB: u64 = (1 << 34) + 10;
+    const LION_VITALS_ID: u32 = 11;
+    const SCORPION_VITALS_ID: u32 = 12;
 
     /// The card asset of a mob without a prefab: its own raw id (sim `EntityKind::mob`).
     fn self_named_asset(mob: u64) -> AssetId {
@@ -1199,14 +1276,14 @@ mod tests {
         let mut dead = entity_group(MOB_SLOT, MOB, None, None);
         dead.members.push(BundleMember {
             component: MOB_VITALS_COMPONENT,
-            state: MemberState::Vitals(VitalsState::creature(0, MOB_HEALTH, 1, 1, 1)),
+            state: MemberState::Vitals(VitalsState::creature(0, MOB_HEALTH, DEAD_VITALS_ID, 1, 1)),
         });
         view.read(&mob_bundle(1, Vec::new(), vec![dead]))
             .expect("read");
         assert_eq!(view.mobs().count(), 0, "dead");
         assert_eq!(view.mob_deaths(), 1);
         assert_eq!(
-            view.last_death(),
+            view.corpses_of(DEAD_VITALS_ID).next(),
             Some((MOB, at(2.0))),
             "its corpse to skin"
         );
@@ -1216,6 +1293,69 @@ mod tests {
         view.read(&mob_bundle(3, Vec::new(), vec![mob_at(MOB, 3.0, true)]))
             .expect("read");
         assert_eq!(view.mobs().collect::<Vec<_>>(), vec![(MOB, at(3.0))]);
+    }
+
+    #[test]
+    fn a_skin_finds_the_newest_corpse_of_its_kill_not_the_newest_corpse() {
+        // Live 2026-11-22: the lion died 10:45:45, a scorpion 10:46:13, and the skin at
+        // 10:46:32 went to the scorpion.
+        let mut view = combat_view();
+        let creature = |slot, mob, vitals, health, x| {
+            let mut group = entity_group(slot, mob, Some(CREATURE_ASSET), Some(at(x)));
+            group.members.push(BundleMember {
+                component: MOB_VITALS_COMPONENT,
+                state: MemberState::Vitals(VitalsState::creature(health, MOB_HEALTH, vitals, 1, 1)),
+            });
+            group
+        };
+        view.read(&mob_bundle(
+            0,
+            Vec::new(),
+            vec![
+                creature(MOB_SLOT, LION_MOB, LION_VITALS_ID, MOB_HEALTH, 2.0),
+                creature(
+                    OTHER_SLOT,
+                    SCORPION_MOB,
+                    SCORPION_VITALS_ID,
+                    MOB_HEALTH,
+                    4.0,
+                ),
+            ],
+        ))
+        .expect("read");
+        let death = |slot, mob| {
+            let mut dead = entity_group(slot, mob, None, None);
+            dead.members.push(BundleMember {
+                component: MOB_VITALS_COMPONENT,
+                state: MemberState::Vitals(VitalsState {
+                    slot_0: Some(nw_messages::VitalsSlot0 {
+                        health_amount: Some(0.0),
+                        ..nw_messages::VitalsSlot0::default()
+                    }),
+                    slot_1: None,
+                }),
+            });
+            dead
+        };
+        view.read(&mob_bundle(1, Vec::new(), vec![death(MOB_SLOT, LION_MOB)]))
+            .expect("read");
+        view.read(&mob_bundle(
+            2,
+            Vec::new(),
+            vec![death(OTHER_SLOT, SCORPION_MOB)],
+        ))
+        .expect("read");
+        assert_eq!(view.mob_deaths(), 2);
+        assert_eq!(
+            view.corpses_of(LION_VITALS_ID).next(),
+            Some((LION_MOB, at(2.0))),
+            "the lion's corpse, older than the scorpion's"
+        );
+        assert_eq!(
+            view.corpses_of(SCORPION_VITALS_ID).next(),
+            Some((SCORPION_MOB, at(4.0)))
+        );
+        assert_eq!(view.corpses_of(CREATURE_VITALS_ID).next(), None);
     }
 
     #[test]
@@ -1245,14 +1385,18 @@ mod tests {
         let mut dead = entity_group(MOB_SLOT, CORPSE_MOB, None, None);
         dead.members.push(BundleMember {
             component: MOB_VITALS_COMPONENT,
-            state: MemberState::Vitals(VitalsState::creature(0, MOB_HEALTH, 1, 1, 1)),
+            state: MemberState::Vitals(VitalsState::creature(0, MOB_HEALTH, DEAD_VITALS_ID, 1, 1)),
         });
         view.read(&mob_bundle(1, Vec::new(), vec![dead]))
             .expect("read");
-        assert!(view.last_death().is_some());
+        assert!(view.corpses_of(DEAD_VITALS_ID).next().is_some());
         view.read(&mob_bundle(2, vec![MOB_SLOT], Vec::new()))
             .expect("read");
-        assert_eq!(view.last_death(), None, "the corpse went");
+        assert_eq!(
+            view.corpses_of(DEAD_VITALS_ID).next(),
+            None,
+            "the corpse went"
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ use nw_content::Tables;
 use nw_content::crafting::{IngredientKind, Recipes};
 use nw_content::instances::{InstanceCatalog, InstanceKind};
 use nw_content::poi_tags::PoiTags;
+use nw_content::quick_courses::QuickCourseRules;
 use nw_content::starter::StarterKits;
 use nw_content::town_props::ASSET_ID_LEN;
 use nw_content::town_stations::TownStations;
@@ -30,7 +31,12 @@ use nw_messages::conversation_client::ObjectiveInteractorClientMsg;
 use nw_messages::facet::{
     CRAFTING_PROGRESS_TYPE_INDEX, INGREDIENT_ITEM, TELEPORT_WITH_LOADING_SCREEN_TYPE_INDEX,
 };
-use nw_messages::mount::{MOUNT_FACET, MountClientMsg, SUMMON_PENDING_TYPE_INDEX};
+use nw_messages::mount::{
+    MOUNT_FACET, MountClientMsg, QUICK_COURSE_ENDED_TYPE_INDEX, SUMMON_PENDING_TYPE_INDEX,
+};
+use nw_messages::music::{
+    MUSIC_CHILD, MUSIC_FACET, MusicClientMsg, PERFORMANCE_CREATED_TYPE_INDEX,
+};
 use nw_messages::travel::{
     LandmarkRef, PLACEMENT_RESULTS_TYPE_INDEX, StructurePlacement, TravelClientMsg, component,
 };
@@ -46,6 +52,7 @@ use nw_messages::{
 };
 use nw_world::WorldFile;
 use nw_world::capitals::capital_id;
+use nw_world::quick_courses::QuickCoursePaths;
 /// A game master line the sim carried out.
 use sim::world::GM_DONE as DONE;
 
@@ -121,6 +128,10 @@ pub enum ActivityKind {
     Level,
     /// The PvP flag on, then off.
     Pvp,
+    /// The foe of another bot's PvP quest step (`C10A_Q6_KillPlayers`): god mode off, the PvP
+    /// flag on in [`PVP_FOE_FACTION`], and up again after each death for [`FOE_STAND`]; the
+    /// killer bot plays the quest with `--pvp-foe` naming this bot's character.
+    PvpFoe,
     /// Harvest a gather node by hand.
     Harvest,
     /// Craft a recipe at a crafting station.
@@ -172,6 +183,10 @@ pub enum Act {
     Teleport([f32; 3]),
     /// A press of the summon mount key in the bot's input.
     SummonKey,
+    /// A toggle of the PvP flag (2525) unless the newest `!state` line shows the flag on or on
+    /// its way on: a toggle then would put it off (live 2026-11-22 15:07: a foe bot flagged by
+    /// an earlier run toggled it off).
+    PvpFlagOn,
     /// The bag item of this client item index opens, as the client opens a loot container
     /// item (1733); nothing when the bag holds none (it was opened before).
     OpenBagItem(u32),
@@ -420,6 +435,7 @@ impl Activity {
         let steps = match kind {
             ActivityKind::Level => Ok(level()),
             ActivityKind::Pvp => Ok(pvp()),
+            ActivityKind::PvpFoe => Ok(pvp_foe()),
             ActivityKind::Harvest => harvest(data),
             ActivityKind::Craft => craft(data),
             ActivityKind::TownCraft => town_craft(data),
@@ -463,8 +479,20 @@ fn level() -> Vec<Step> {
     ]
 }
 
+/// Whether the `!state` line `line` shows the PvP flag on or on its way on.
+pub fn pvp_flag_shown(line: &str) -> bool {
+    line.starts_with(STATE_LEVEL)
+        && (line.contains(&format!("{STATE_PVP}on"))
+            || line.contains(&format!("{STATE_PVP}pending")))
+}
+
+/// A toggle of the PvP flag (2525).
+fn pvp_toggle() -> Act {
+    facet(|header| ClientFacetMsg::TogglePvpFlag { header }, 0)
+}
+
 fn pvp() -> Vec<Step> {
-    let toggle = || facet(|header| ClientFacetMsg::TogglePvpFlag { header }, 0);
+    let toggle = pvp_toggle;
     vec![
         step(
             "toggle the PvP flag on",
@@ -496,11 +524,26 @@ fn pvp() -> Vec<Step> {
 
 /// A summon and ride of the horse that the mount quest unlocks, after its reward box opens.
 fn mount(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
-    let reward_box = StarterKits::from_tables(data.tables)
+    mount_reward_box(data.tables).map(mount_steps)
+}
+
+/// The client item index of the mount quest's reward box ([`MOUNT_REWARD_BOX`]).
+///
+/// # Errors
+///
+/// Names the box when the item catalog of `tables` does not hold it.
+pub fn mount_reward_box(tables: &Tables) -> Result<u32, String> {
+    StarterKits::from_tables(tables)
         .item(MOUNT_REWARD_BOX)
         .map(|item| item.item_index)
-        .ok_or_else(|| format!("the item catalog has no {MOUNT_REWARD_BOX}"))?;
-    Ok(vec![
+        .ok_or_else(|| format!("the item catalog has no {MOUNT_REWARD_BOX}"))
+}
+
+/// The steps of a summon and ride of the horse of the done mount quest: the reward box of client
+/// item index `reward_box` opens (once: the horse is owned after it), the summon key starts the
+/// summon, and the client completes it once it is authorized.
+pub fn mount_steps(reward_box: u32) -> Vec<Step> {
+    vec![
         step(
             format!("the mount quest {MOUNT_QUEST} is done (play it with --quests first)"),
             vec![Act::Gm(format!("!queststate {MOUNT_QUEST}"))],
@@ -541,7 +584,132 @@ fn mount(data: &ActivityData<'_>) -> Result<Vec<Step>, String> {
             |line| line.contains(STATE_RIDING),
             "mount riding",
         ),
-    ])
+    ]
+}
+
+/// The quick courses a rider rides: their rules and their node paths.
+#[derive(Debug, Clone, Default)]
+pub struct CourseRoutes {
+    /// The courses' rules (a course may ride another's path).
+    pub rules: QuickCourseRules,
+    /// The node paths of the courses' slices.
+    pub paths: QuickCoursePaths,
+}
+
+impl CourseRoutes {
+    /// The node places of course `course` (any case), in section order: the path of its
+    /// `PathReferenceQuickCourseId`, else its own, as the sim rides it; `None` for a course with
+    /// no path.
+    pub fn nodes(&self, course: &str) -> Option<Vec<[f32; 3]>> {
+        let path = self
+            .rules
+            .course(course)
+            .map_or(course, |rules| rules.path_id());
+        self.paths
+            .get(path)
+            .map(|path| path.nodes.iter().map(|node| node.position).collect())
+    }
+}
+
+/// What the bot waits after a song's length for its end: the results come 1.05 s after the song
+/// (the sim's music module; retail `open-world/Music`), with a margin.
+const SONG_END_WAIT: Duration = Duration::from_secs(3);
+
+/// A music call `make` of the bot's performance, on the own player's music child (the sim's
+/// `music_header`; live 2026-11-22 14:34:16: a header of the facet alone was "a music call of
+/// another target").
+fn music(make: impl Fn(FacetHeader) -> MusicClientMsg + 'static) -> Act {
+    Act::Call(Box::new(move |own| {
+        let call = make(FacetHeader::of_child(MUSIC_FACET, MUSIC_CHILD, own));
+        Ok((call.type_index(), call.encode()))
+    }))
+}
+
+/// The steps of a performance of song `song` from sheet `sheet` (the CRC-32 of each lowercase
+/// id) of `duration_s` seconds at `at`, with an instrument of the sheet worn, as retail
+/// `04a_side05_02_playfortown` played it: create (4891, answered by 4869 at 113.0 s), the song
+/// (4867), the sheet (4879), the start with the song's length (4865), ready (5091), the song,
+/// then the post show's end (5233, 195.2 s); the bot plays no notes (the sim counts a finished
+/// song whatever its score) and leaves the performance (4881).
+pub fn song_steps(song: u32, sheet: u32, duration_s: f32, at: [f32; 3]) -> Vec<Step> {
+    let call = |what: &str, act: Act| step(what, vec![act], Proof::Sent, Duration::ZERO);
+    vec![
+        step(
+            "create a performance where the bot stands",
+            vec![
+                teleport(at),
+                music(|header| MusicClientMsg::CreatePerformance { header }),
+            ],
+            Proof::Message(PERFORMANCE_CREATED_TYPE_INDEX),
+            STEP_WAIT,
+        ),
+        call(
+            "pick the song",
+            music(move |header| MusicClientMsg::SetSong { header, song }),
+        ),
+        call(
+            "pick the sheet",
+            music(move |header| MusicClientMsg::SetSheet { header, sheet }),
+        ),
+        call(
+            "start the song",
+            music(move |header| MusicClientMsg::StartPerformance { header, duration_s }),
+        ),
+        step(
+            "the song plays to its end",
+            vec![
+                music(|header| MusicClientMsg::ClientReady {
+                    header,
+                    ready: true,
+                }),
+                Act::Pause(Duration::from_secs_f32(duration_s) + SONG_END_WAIT),
+            ],
+            Proof::Sent,
+            Duration::ZERO,
+        ),
+        call(
+            "end the post show",
+            music(|header| MusicClientMsg::EndPostShow { header }),
+        ),
+        call(
+            "leave the performance",
+            music(|header| MusicClientMsg::LeavePerformance { header }),
+        ),
+    ]
+}
+
+/// How long the rider stays at a course node before it rides on: the sim finds a hit at its
+/// next tick, and a course starts one tick after its rider is on a mount with the course task
+/// running (`world/quick_course.rs` of the sim).
+const COURSE_NODE_WAIT: Duration = Duration::from_secs(1);
+
+/// The steps of a ride of a quick course whose nodes stand at `nodes`, in section order: the
+/// rider goes to each node in turn (retail `ef_tour_0-Hermit-s-Rally`: the client sends nothing
+/// for a start, a hit or a finish; the server finds the hits from the rider's place). A ride to
+/// the course's end (`finishes`) waits for the server's `OnQuickCourseEnded` (6065).
+pub fn course_steps(nodes: &[[f32; 3]], finishes: bool) -> Vec<Step> {
+    let last = nodes.len().saturating_sub(1);
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(index, &at)| {
+            let what = format!(
+                "ride to course node {index} at {:.1} {:.1} {:.1}",
+                at[0], at[1], at[2]
+            );
+            let acts = vec![teleport(at), Act::Pause(COURSE_NODE_WAIT)];
+            if finishes && index == last {
+                step(
+                    what,
+                    acts,
+                    Proof::Message(QUICK_COURSE_ENDED_TYPE_INDEX),
+                    STEP_WAIT,
+                )
+            } else {
+                step(what, acts, Proof::Sent, Duration::ZERO)
+            }
+        })
+        .collect()
 }
 
 /// A node of a gatherable a player gathers by hand with no rank or item.
@@ -1401,20 +1569,82 @@ fn enemy_company() -> Vec<Step> {
     faction_and_company(ENEMY_FACTION, ENEMY_COMPANY)
 }
 
+/// The bot joins `faction` (or is in it already).
+fn faction_step(faction: &str) -> Step {
+    step(
+        format!("!faction {faction}"),
+        vec![Act::Gm(format!("!faction {faction}"))],
+        Proof::Line(
+            Box::new(|line| line == DONE || line == sim::world::FACTION_UNCHANGED),
+            "a faction".to_owned(),
+        ),
+        STEP_WAIT,
+    )
+}
+
+/// The faction of the killer bot of a PvP quest step, and of its foe bot: two factions, so the
+/// two flagged players are foes (the sim's `pvp_foes`: flagged players of two factions).
+pub const PVP_KILLER_FACTION: &str = "syndicate";
+const PVP_FOE_FACTION: &str = "marauder";
+/// How long a toggled PvP flag takes to come on outside a sanctuary (the sim's
+/// `PVP_FLAG_DELAY_MS`, 30 s, retail `Hive_flag_pvp_on_and_off`), with a margin.
+const PVP_FLAG_ON_WAIT: Duration = Duration::from_secs(32);
+/// How long the foe bot stands for its killer, and how often it gets up after a death (a game
+/// master's `!heal` raises a fallen player, and refills a living one: live 2026-11-22 14:51, a
+/// heal every 5 s undid the killer bot's hits of about 380 points twice a second, so the gap
+/// is longer than the killer takes for a kill).
+const FOE_STAND: Duration = Duration::from_secs(600);
+const FOE_RISE_GAP: Duration = Duration::from_secs(40);
+
+/// The steps that put the bot's PvP flag on in `faction`: the faction, the state, the toggle
+/// (2525) when the state does not show the flag on, the flag's countdown, and the state that
+/// shows it on.
+pub fn pvp_flag_steps(faction: &str) -> Vec<Step> {
+    vec![
+        faction_step(faction),
+        state_shows("the state before the toggle", |_| true, "a state line"),
+        step(
+            "toggle the PvP flag on unless it is on",
+            vec![Act::PvpFlagOn],
+            Proof::Sent,
+            Duration::ZERO,
+        ),
+        step(
+            "wait for the flag's countdown",
+            vec![Act::Pause(PVP_FLAG_ON_WAIT)],
+            Proof::Sent,
+            Duration::ZERO,
+        ),
+        state_shows(
+            "the flag is on",
+            |line| line.contains(&format!("{STATE_PVP}on")),
+            "pvp on",
+        ),
+    ]
+}
+
+/// The foe of a PvP quest step ([`ActivityKind::PvpFoe`]).
+fn pvp_foe() -> Vec<Step> {
+    let mut steps = vec![gm_done("!god off".to_owned())];
+    steps.extend(pvp_flag_steps(PVP_FOE_FACTION));
+    let rises = FOE_STAND.as_secs() / FOE_RISE_GAP.as_secs();
+    steps.extend((0..rises).map(|_| {
+        step(
+            "stand up after a death",
+            vec![Act::Gm("!heal".to_owned()), Act::Pause(FOE_RISE_GAP)],
+            Proof::Sent,
+            Duration::ZERO,
+        )
+    }));
+    steps
+}
+
 /// The bot joins `faction` and makes the company `company` (or is in it already, or the name
 /// is taken).
 fn faction_and_company(faction: &str, company: &str) -> Vec<Step> {
     let made = sim::world::company_made(company);
     vec![
-        step(
-            format!("!faction {faction}"),
-            vec![Act::Gm(format!("!faction {faction}"))],
-            Proof::Line(
-                Box::new(|line| line == DONE || line == sim::world::FACTION_UNCHANGED),
-                "a faction".to_owned(),
-            ),
-            STEP_WAIT,
-        ),
+        faction_step(faction),
         step(
             format!("!company {company}"),
             vec![Act::Gm(format!("!company {company}"))],
@@ -1776,6 +2006,127 @@ mod tests {
             ),
             "an empty node id names the first node anyone gathered with it"
         );
+    }
+
+    #[test]
+    fn a_state_line_shows_the_pvp_flag_on_or_on_its_way() {
+        let line = |pvp: &str| {
+            format!(
+                "state level 65 xp 1 coins 2 faction 2 pvp {pvp} inn none mount foot quests 0 done 0"
+            )
+        };
+        assert!(pvp_flag_shown(&line("on")));
+        assert!(pvp_flag_shown(&line("pending")));
+        assert!(!pvp_flag_shown(&line("off")));
+        assert!(!pvp_flag_shown("pvp on"), "only a state line");
+    }
+
+    #[test]
+    fn a_pvp_foe_drops_god_mode_flags_in_the_other_faction_and_gets_up_after_deaths() {
+        let steps = pvp_foe();
+        assert!(matches!(steps[0].acts.as_slice(), [Act::Gm(line)] if line == "!god off"));
+        assert!(matches!(steps[1].acts.as_slice(), [Act::Gm(line)] if line == "!faction marauder"));
+        assert_ne!(PVP_FOE_FACTION, PVP_KILLER_FACTION, "two factions are foes");
+        let rises = steps
+            .iter()
+            .filter(|step| matches!(step.acts.as_slice(), [Act::Gm(line), Act::Pause(_)] if line == "!heal"))
+            .count();
+        assert_eq!(
+            u64::try_from(rises).expect("count"),
+            FOE_STAND.as_secs() / FOE_RISE_GAP.as_secs()
+        );
+        let killer = pvp_flag_steps(PVP_KILLER_FACTION);
+        assert!(
+            matches!(killer[0].acts.as_slice(), [Act::Gm(line)] if line == "!faction syndicate")
+        );
+        assert!(matches!(killer[2].acts.as_slice(), [Act::PvpFlagOn]));
+        assert!(
+            matches!(killer[4].proof, Proof::Line(..)),
+            "the state shows the flag on"
+        );
+    }
+
+    #[test]
+    fn a_song_creates_picks_starts_waits_for_its_length_and_leaves() {
+        const SONG: u32 = 0x1bfb_903e;
+        const SHEET: u32 = 0x00d9_dc3e;
+        const LENGTH_S: f32 = 60.888;
+        const AT: [f32; 3] = [8904.8, 4223.9, 138.7];
+        const OWN: u64 = 7;
+        let steps = song_steps(SONG, SHEET, LENGTH_S, AT);
+        assert!(matches!(
+            steps[0].acts.as_slice(),
+            [Act::Teleport(at), Act::Call(_)] if *at == AT
+        ));
+        assert!(matches!(
+            steps[0].proof,
+            Proof::Message(PERFORMANCE_CREATED_TYPE_INDEX)
+        ));
+        let calls: Vec<u64> = steps
+            .iter()
+            .flat_map(|step| &step.acts)
+            .filter_map(|act| match act {
+                Act::Call(make) => Some(make(1).expect("call").0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, [4891, 4867, 4879, 4865, 5091, 5233, 4881]);
+        let Act::Call(make) = &steps[0].acts[1] else {
+            panic!("the create call");
+        };
+        let (_, body) = make(OWN).expect("call");
+        assert_eq!(
+            MusicClientMsg::decode(4891, &body)
+                .expect("a music call")
+                .expect("decodes")
+                .header(),
+            FacetHeader::of_child(MUSIC_FACET, MUSIC_CHILD, OWN),
+            "the own player's music child, as the sim reads it"
+        );
+        assert!(steps.iter().any(|step| matches!(
+            step.acts.as_slice(),
+            [_, Act::Pause(wait)] if *wait > Duration::from_secs_f32(LENGTH_S)
+        )));
+    }
+
+    #[test]
+    fn a_course_rides_its_reference_path_node_by_node_and_waits_for_the_end() {
+        use nw_content::quick_courses::QuickCourse;
+        use nw_world::quick_courses::{QuickCourseNode, QuickCoursePath};
+        const START: [f32; 3] = [8921.0, 5130.3, 151.1];
+        const FINISH: [f32; 3] = [9492.9, 4260.6, 110.4];
+        let course = |id: &str, path: Option<&str>| QuickCourse {
+            id: id.to_owned(),
+            timed: true,
+            starting_seconds: None,
+            path: path.map(str::to_owned),
+            node_time_multiplier: 1.0,
+        };
+        let node = |position| QuickCourseNode {
+            position,
+            node_type: "Start".to_owned(),
+        };
+        let routes = CourseRoutes {
+            rules: QuickCourseRules::build([course("EF_Rally_3", Some("EF_Rally_1"))], Vec::new()),
+            paths: QuickCoursePaths::of([QuickCoursePath {
+                course: "EF_Rally_1".to_owned(),
+                nodes: vec![node(START), node(FINISH)],
+            }]),
+        };
+        let nodes = routes.nodes("ef_rally_3").expect("the reference path");
+        assert_eq!(nodes, vec![START, FINISH]);
+        assert_eq!(routes.nodes("EF_Rally_9"), None);
+        let steps = course_steps(&nodes, true);
+        assert!(matches!(
+            steps[0].acts.as_slice(),
+            [Act::Teleport(at), Act::Pause(_)] if *at == START
+        ));
+        assert!(matches!(steps[0].proof, Proof::Sent));
+        assert!(matches!(
+            steps[1].proof,
+            Proof::Message(QUICK_COURSE_ENDED_TYPE_INDEX)
+        ));
+        assert!(matches!(course_steps(&nodes, false)[1].proof, Proof::Sent));
     }
 
     /// Live 2026-11-22 10:28:46: a lion that moved in the fight died out of the bot's reach.

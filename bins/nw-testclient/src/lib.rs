@@ -5,6 +5,7 @@
 pub mod activity;
 pub mod chat;
 pub mod config;
+pub mod fishing;
 pub mod fleet;
 pub mod gather;
 pub mod group;

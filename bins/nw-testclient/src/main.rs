@@ -11,6 +11,7 @@
 //! that form a group, enter an expedition and walk its start area. Prints one line per step;
 //! exits with 0 only when every step passed.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -29,11 +30,14 @@ use nw_content::gathering::{GatherRules, Gatherables};
 use nw_content::instances::InstanceCatalog;
 use nw_content::layout::{ContentLayout, content_dir};
 use nw_content::poi_tags::PoiTags;
+use nw_content::quick_courses::QuickCourseRules;
 use nw_content::town_stations::TownStations;
 use nw_dtls::DtlsClientConfig;
 use nw_messages::WorldPosition;
 use nw_reflect::REGISTRATION_STATUS_AUTHORIZED;
-use nw_testclient::activity::{Activity, ActivityData, ActivityKind};
+use nw_testclient::activity::{
+    Activity, ActivityData, ActivityKind, CourseRoutes, mount_reward_box,
+};
 use nw_testclient::chat::{ChatSettings, run_chat};
 use nw_testclient::config::{
     PASSWORD_ENV, SECOND_PASSWORD_ENV, SWARM_PASSWORD_ENV, TestClientConfig, load_testclient_config,
@@ -55,6 +59,7 @@ use nw_testclient::walk::{CHARACTER_CREATION_PARAMS, WalkSettings, login_token, 
 use nw_world::WorldFile;
 use nw_world::collision::LevelCollision;
 use nw_world::collision_index::CollisionIndex;
+use nw_world::quick_courses::QuickCoursePaths;
 
 /// The committed example configuration.
 const DEFAULT_CONFIG: &str = "config/nw-testclient.toml";
@@ -165,6 +170,10 @@ enum Command {
         /// separated: the start of a test after a chain a player already played live.
         #[arg(long, value_delimiter = ',')]
         gm_start: Vec<String>,
+        /// The character of the foe bot of the PvP quest steps (a bot that plays the
+        /// `pvp-foe` activity at the same time): the bot kills it for their player kills.
+        #[arg(long)]
+        pvp_foe: Option<String>,
     },
     /// Bots of game master accounts form a group of at least the game mode's `MinGroupSize`,
     /// enter its expedition from afar, walk its start area, and write where the server put each
@@ -286,6 +295,7 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
             account,
             backstory,
             gm_start,
+            pvp_foe,
         } => {
             let mut bot = own(&config)?;
             if let Some(account) = account {
@@ -300,6 +310,7 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
                 account: bot,
                 quests,
                 gm_start,
+                pvp_foe,
                 hold: Duration::from_secs(minutes * SECONDS_PER_MINUTE),
                 registration_timeout: Duration::from_secs(config.registration_timeout_seconds),
             };
@@ -342,6 +353,7 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
                     } else {
                         Vec::new()
                     },
+                    pvp_foe: None,
                     hold: Duration::from_secs(minutes * SECONDS_PER_MINUTE),
                     registration_timeout: Duration::from_secs(config.registration_timeout_seconds),
                 })
@@ -806,6 +818,46 @@ async fn play(
     Ok(report.quests.len() == settings.quests.len() && report.activities.len() == kinds.len())
 }
 
+/// The sim's own gather nodes of a level's gather `points`, in its order (with the cyclic
+/// stones' points).
+fn gather_nodes_of(points: &[nw_world::records::GatherablePoint]) -> Arc<[GatherNode]> {
+    points
+        .iter()
+        .map(|point| GatherNode {
+            gatherable: point.gatherable_id,
+            at: point.position,
+        })
+        .collect()
+}
+
+/// The gather nodes of each instance game mode of `tables` whose map is a level other than
+/// `open_level`, by the lowercase game mode id: a trial's quest objects stand on its own level
+/// (`99E_Motherwell_MSQ_PlaceStaff` in `nw_ori_eg_questmotherwell`). A level with no world file
+/// (the generated catacombs) has no nodes.
+fn trial_nodes(
+    layout: &ContentLayout,
+    tables: &nw_content::Tables,
+    open_level: &str,
+) -> HashMap<String, Arc<[GatherNode]>> {
+    let cyclic = nw_content::gathering::CyclicGatherables::from_tables(tables);
+    let mut by_level: HashMap<String, Option<Arc<[GatherNode]>>> = HashMap::new();
+    InstanceCatalog::from_tables(tables)
+        .modes()
+        .filter(|mode| mode.map.folder != open_level)
+        .filter_map(|mode| {
+            let nodes = by_level
+                .entry(mode.map.folder.clone())
+                .or_insert_with(|| {
+                    WorldFile::load(layout, &mode.map.folder).ok().map(|world| {
+                        gather_nodes_of(&sim::player_content::level_gather_points(&world, &cyclic))
+                    })
+                })
+                .clone()?;
+            Some((mode.id.to_lowercase(), nodes))
+        })
+        .collect()
+}
+
 /// What a play bot reads of the content: the `[swarm]` level's world file, the tables and the
 /// settlements' station slots.
 struct PlayContent {
@@ -813,14 +865,25 @@ struct PlayContent {
     world: WorldFile,
     tables: nw_content::Tables,
     town_stations: TownStations,
+    courses: Arc<CourseRoutes>,
+    /// The gather nodes of each instance game mode whose map is another level than the
+    /// `[swarm]` level, by the lowercase game mode id.
+    trial_nodes: Arc<HashMap<String, Arc<[GatherNode]>>>,
 }
 
 impl PlayContent {
     fn load(config: &TestClientConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let layout = level_layout(config)?;
+        let tables = ContentBundle::load(&layout)?.tables;
+        let trial_nodes = Arc::new(trial_nodes(&layout, &tables, &config.swarm.level));
         Ok(Self {
             world: WorldFile::load(&layout, &config.swarm.level)?,
-            tables: ContentBundle::load(&layout)?.tables,
+            trial_nodes,
+            courses: Arc::new(CourseRoutes {
+                rules: QuickCourseRules::from_tables(&tables),
+                paths: QuickCoursePaths::load(&layout)?,
+            }),
+            tables,
             town_stations: TownStations::load(&layout)?,
             layout,
         })
@@ -828,18 +891,11 @@ impl PlayContent {
 
     /// The play data of a bot that plays `activities`, in the seat `group` of a group of bots.
     fn play_data(&self, activities: Vec<Activity>, group: Option<GroupSeat>) -> PlayData {
-        // The sim's own gather nodes, in its order (with the cyclic stones' points).
         let points = sim::player_content::level_gather_points(
             &self.world,
             &nw_content::gathering::CyclicGatherables::from_tables(&self.tables),
         );
-        let nodes = points
-            .iter()
-            .map(|point| GatherNode {
-                gatherable: point.gatherable_id,
-                at: point.position,
-            })
-            .collect();
+        let nodes = gather_nodes_of(&points);
         let gatherables = Gatherables::from_tables(&self.tables);
         let containers = points
             .iter()
@@ -854,9 +910,12 @@ impl PlayContent {
             activities,
             activities_first: false,
             nodes,
+            trial_nodes: Arc::clone(&self.trial_nodes),
             containers,
             poi_tags: PoiTags::from_tables(&self.tables),
             group,
+            courses: Arc::clone(&self.courses),
+            mount_reward_box: mount_reward_box(&self.tables),
         }
     }
 }
