@@ -24,7 +24,8 @@ use std::path::Path;
 
 use nw_ai::data::{
     AiData, Archetype, BlockActivity, BlockEffect, CageAction, CageCondition, Completion, Creature,
-    EntityTrigger, FacingMode, FragmentCase, FragmentLength, FragmentVariant, Grid, NavConfig,
+    EntityTrigger, FacingLength, FacingMode, FragmentCase, FragmentLength, FragmentVariant, Grid,
+    NavConfig,
     ProcWindow, ProjectileSlice, RangedAttack, SliceTriggerRef, TagActivity, TagEffect, TreeRef,
     Vision,
 };
@@ -143,6 +144,17 @@ const CLIP_EXTENSIONS: [&str; 3] = [
 const EXAMPLE_ELEMENT: &str = "Example";
 const BLEND_SPACE_ELEMENT: &str = "BlendSpace";
 const CLIP_NAME_ATTRIBUTE: &str = "AName";
+/// The dimensions of a blend space and the place of each example in them (Observed in
+/// `mc_broken_combat_turn_blend_l.bspace`: `<Dimensions><Param Name="DesiredFacing" Min="0"
+/// Max="3.1400001"/>`, `<Example SetPara0="1.575" AName="mc_broken_combat_idleturn90_l"/>`; the
+/// `.comb` files write the dimension's attribute `name`).
+const DIMENSIONS_ELEMENT: &str = "Dimensions";
+const PARAM_ELEMENT: &str = "Param";
+const PARAM_NAME_ATTRIBUTE: &str = "Name";
+const EXAMPLE_PARAM_ATTRIBUTE: &str = "SetPara0";
+/// The blend parameter of a turn: the signed angle the mob turns by, radians
+/// (`SetDesiredFacingBlendParam` sets it).
+const FACING_PARAM: &str = "DesiredFacing";
 /// Two clip lengths closer than this are the same (one 30 fps frame is 33 ms).
 const SAME_LENGTH_S: f64 = 1e-4;
 
@@ -213,7 +225,7 @@ pub struct AiDataReport {
     pub with_animation_database: usize,
     /// Fragment entries over all CAGE actions, and those with a known length.
     pub variants: usize,
-    /// Fragment entries with a length in seconds.
+    /// Fragment entries with a length in seconds (one length, or one per turn).
     pub timed_variants: usize,
     /// Trees a slice names that Server.pak does not have, with the slices that name them.
     pub missing_trees: BTreeMap<String, BTreeSet<String>>,
@@ -813,6 +825,30 @@ fn blend_members(text: &str) -> Result<Vec<String>, MannequinError> {
     Ok(members)
 }
 
+/// The `DesiredFacing` of each example of a blend space, in file order; `None` when
+/// `DesiredFacing` is not its one dimension or an example has no place in it.
+fn facing_params(text: &str) -> Option<Vec<f64>> {
+    let root = parse_tree(text).ok()?;
+    let mut dimensions = Vec::new();
+    root.descendants(DIMENSIONS_ELEMENT, &mut dimensions);
+    let mut params = Vec::new();
+    for dimension in dimensions {
+        dimension.descendants(PARAM_ELEMENT, &mut params);
+    }
+    let [param] = params.as_slice() else {
+        return None;
+    };
+    if param.attribute_any_case(PARAM_NAME_ATTRIBUTE) != Some(FACING_PARAM) {
+        return None;
+    }
+    let mut examples = Vec::new();
+    root.descendants(EXAMPLE_ELEMENT, &mut examples);
+    examples
+        .iter()
+        .map(|example| example.attribute(EXAMPLE_PARAM_ATTRIBUTE)?.parse().ok())
+        .collect()
+}
+
 /// The lower-case file name of a path without its folder and extension.
 fn base_name(path: &str) -> String {
     let file = path
@@ -826,9 +862,15 @@ fn base_name(path: &str) -> String {
         .map_or(file.clone(), str::to_owned)
 }
 
+/// The example clips of a blend space on `DesiredFacing`: the facing (radians) and the length
+/// (seconds) of each, sorted by facing.
+type FacingClips = Vec<(f64, f64)>;
+
 /// Clip lengths by base name, read from the game paks.
 pub(crate) struct ClipLengths {
     lengths: HashMap<String, ClipLength>,
+    /// The blend spaces on `DesiredFacing`, and the combined blend spaces of such.
+    facing: HashMap<String, FacingClips>,
 }
 
 impl ClipLengths {
@@ -840,6 +882,7 @@ impl ClipLengths {
                 .iter()
                 .map(|(name, length)| ((*name).to_owned(), length.clone()))
                 .collect(),
+            facing: HashMap::new(),
         }
     }
 
@@ -914,21 +957,28 @@ impl ClipLengths {
                 .filter(|name| !raw.contains_key(name))
                 .collect();
         }
+        Ok(Self::resolved(&raw))
+    }
+
+    /// The lengths of the animation files `raw`, by base name: the bytes of each, or why it
+    /// was not read.
+    fn resolved(raw: &HashMap<String, Result<Vec<u8>, String>>) -> Self {
         let mut lengths = HashMap::new();
-        let names: Vec<String> = raw.keys().cloned().collect();
-        for name in names {
-            let length = Self::resolve(&name, &raw, &mut lengths, &mut Vec::new());
-            lengths.insert(name, length);
+        let mut facing = HashMap::new();
+        for name in raw.keys() {
+            let length = Self::resolve(name, raw, &mut lengths, &mut facing, &mut Vec::new());
+            lengths.insert(name.clone(), length);
         }
-        Ok(Self { lengths })
+        Self { lengths, facing }
     }
 
     /// The length of `name`: a `.caf` from its chunk, a blend space from the clips it plays when
-    /// they all have one length.
+    /// they all have one length ([`Self::blend_length`]).
     fn resolve(
         name: &str,
         raw: &HashMap<String, Result<Vec<u8>, String>>,
         lengths: &mut HashMap<String, ClipLength>,
+        facing: &mut HashMap<String, FacingClips>,
         stack: &mut Vec<String>,
     ) -> ClipLength {
         if let Some(known) = lengths.get(name) {
@@ -942,29 +992,15 @@ impl ClipLengths {
             Some(Err(reason)) => Err(reason.clone()),
             Some(Ok(bytes)) => match caf_seconds(bytes) {
                 Some(seconds) => Ok(seconds),
-                None => match text_of(Some(bytes)).map(blend_members) {
-                    Some(Ok(members)) if !members.is_empty() => {
+                None => match text_of(Some(bytes)).map(|text| (text, blend_members(text))) {
+                    Some((text, Ok(members))) if !members.is_empty() => {
                         stack.push(name.to_owned());
                         let parts: Vec<ClipLength> = members
                             .iter()
-                            .map(|member| Self::resolve(member, raw, lengths, stack))
+                            .map(|member| Self::resolve(member, raw, lengths, facing, stack))
                             .collect();
                         stack.pop();
-                        match parts.iter().find_map(|part| part.as_ref().err()) {
-                            Some(reason) => Err(format!("a blended clip: {reason}")),
-                            None => {
-                                let values: Vec<f64> = parts.into_iter().flatten().collect();
-                                let first = values[0];
-                                if values
-                                    .iter()
-                                    .all(|value| (value - first).abs() < SAME_LENGTH_S)
-                                {
-                                    Ok(first)
-                                } else {
-                                    Err("blends clips of different lengths".to_owned())
-                                }
-                            }
-                        }
+                        Self::blend_length(name, text, &members, &parts, facing)
                     }
                     _ => Err("neither a CAF nor a blend space".to_owned()),
                 },
@@ -974,11 +1010,61 @@ impl ClipLengths {
         length
     }
 
+    /// The length of the blend space `name` (its file `text`), which plays `members` of the
+    /// lengths `parts`: their one length; Unknown when they differ. A blend space on
+    /// `DesiredFacing`, and a combined blend space of such, also gives `facing` its examples:
+    /// its length is then the blend of the examples around the mob's turn
+    /// ([`FragmentLength::ByFacing`]).
+    fn blend_length(
+        name: &str,
+        text: &str,
+        members: &[String],
+        parts: &[ClipLength],
+        facing: &mut HashMap<String, FacingClips>,
+    ) -> ClipLength {
+        let own = facing_params(text)
+            .filter(|params| params.len() == parts.len())
+            .and_then(|params| {
+                params
+                    .into_iter()
+                    .zip(parts)
+                    .map(|(param, part)| Some((param, *part.as_ref().ok()?)))
+                    .collect::<Option<FacingClips>>()
+            });
+        let combined = || {
+            members
+                .iter()
+                .map(|member| facing.get(member).cloned())
+                .collect::<Option<Vec<FacingClips>>>()
+                .map(|spaces| spaces.concat())
+        };
+        if let Some(mut examples) = own.or_else(combined) {
+            examples.sort_by(|a, b| a.0.total_cmp(&b.0));
+            examples.dedup_by(|a, b| a.0 == b.0);
+            facing.insert(name.to_owned(), examples);
+        }
+        if let Some(reason) = parts.iter().find_map(|part| part.as_ref().err()) {
+            return Err(format!("a blended clip: {reason}"));
+        }
+        let mut values = parts.iter().flatten();
+        let first = *values.next().ok_or("a blend space of no clips")?;
+        if values.all(|value| (value - first).abs() < SAME_LENGTH_S) {
+            Ok(first)
+        } else {
+            Err("blends clips of different lengths".to_owned())
+        }
+    }
+
     fn get(&self, name: &str) -> ClipLength {
         self.lengths
             .get(name)
             .cloned()
             .unwrap_or_else(|| Err("not read".to_owned()))
+    }
+
+    /// The examples of the blend space `name` on `DesiredFacing`; `None` when it is none.
+    fn facing(&self, name: &str) -> Option<&FacingClips> {
+        self.facing.get(name)
     }
 }
 
@@ -988,8 +1074,10 @@ impl ClipLengths {
 /// `(length - StartTime) / speed`; a layer whose last `<Animation>` is empty ends where that
 /// clip starts ([`Fragment::layer_ends_s`]; one of negative exit time: at the end of the clip
 /// before, [`nw_formats::mannequin::AnimClip::chained_end`]); else the entry ends with its last
-/// clip, and a looping last clip never ends. The time base of `ExitTime` and `StartTime`
-/// (seconds) is Inferred; it fits the retail boar `Attack_Gore` (one clip; 1,465 and 1,498 ms
+/// clip, and a looping last clip never ends. A last clip that is a blend space on
+/// `DesiredFacing` of clips of different lengths ends by the mob's turn
+/// ([`FragmentLength::ByFacing`]: each example as that clip alone would end). The time base of
+/// `ExitTime` and `StartTime` (seconds) is Inferred; it fits the retail boar `Attack_Gore` (one clip; 1,465 and 1,498 ms
 /// observed against 1,404 ms + one or two ticks) and `Combat_Turn` (a blend space of 1.8 s
 /// clips, 1,632 and 1,683 ms against 1,600 ms). Unknown: an entry without an animation layer or
 /// whose base layer has no `<Animation>`, and one whose last clip or a clip before a chained
@@ -1019,11 +1107,20 @@ pub(crate) fn fragment_length(
     if last.looped {
         return Ok(FragmentLength::Loops);
     }
-    let length = lengths
-        .get(&last.name.to_lowercase())
-        .map_err(|reason| format!("{}: {reason}", last.name))?;
-    let end_s = last.natural_end_s(length);
-    Ok(FragmentLength::Seconds(end_s as f32))
+    let name = last.name.to_lowercase();
+    match (lengths.get(&name), lengths.facing(&name)) {
+        (Ok(length), _) => Ok(FragmentLength::Seconds(last.natural_end_s(length) as f32)),
+        (Err(_), Some(examples)) => Ok(FragmentLength::ByFacing(
+            examples
+                .iter()
+                .map(|(facing, length)| FacingLength {
+                    facing_rad: *facing as f32,
+                    seconds: last.natural_end_s(*length) as f32,
+                })
+                .collect(),
+        )),
+        (Err(reason), None) => Err(format!("{}: {reason}", last.name)),
+    }
 }
 
 /// The lower-case names of the clips the base animation layers of `databases` play: the clips
@@ -1302,7 +1399,9 @@ pub fn build_ai_data(
     let clip_names = base_clip_names(adbs.values());
     let lengths = ClipLengths::read(source, game_dir, &clip_names)?;
     for name in &clip_names {
-        if let Err(reason) = lengths.get(name) {
+        if let Err(reason) = lengths.get(name)
+            && lengths.facing(name).is_none()
+        {
             report.unknown_clips.insert(name.clone(), reason);
         }
     }
@@ -1515,7 +1614,12 @@ pub fn build_ai_data(
     let variants = builder.actions.iter().flat_map(|action| &action.variants);
     report.variants = variants.clone().count();
     report.timed_variants = variants
-        .filter(|variant| matches!(variant.length, FragmentLength::Seconds(_)))
+        .filter(|variant| {
+            matches!(
+                variant.length,
+                FragmentLength::Seconds(_) | FragmentLength::ByFacing(_)
+            )
+        })
         .count();
     report.unknown_fragments = builder.unknown_fragments;
     let data = AiData {
@@ -1999,6 +2103,94 @@ mod tests {
                 fragments: vec![one, cut],
             }]),
             BTreeSet::from(["boar_gore".to_owned()])
+        );
+    }
+
+    /// The skeletons' turn blend space (`mc_broken_combat_turn_blend_comb.comb` and its `_l`
+    /// and `_r` blend spaces, build 25810808, trimmed): an idle at 0 and the 90 and 180 degree
+    /// turn clips of each side, of different lengths.
+    #[test]
+    fn a_turn_blend_space_of_clips_of_different_lengths_ends_by_the_turn() {
+        const IDLE_FRAMES: i32 = 76;
+        const QUARTER_FRAMES: i32 = 40;
+        const HALF_LEFT_FRAMES: i32 = 60;
+        const HALF_RIGHT_FRAMES: i32 = 66;
+        const TURN_SPEED: f64 = 2.0;
+        const QUARTER_RAD: f32 = 1.575;
+        const HALF_RAD: f32 = 3.150_000_1;
+        const COMB: &str = r#"<CombinedBlendSpace>
+ <Dimensions><Param name="DesiredFacing" ChooseBlendSpace="1" locked="1"/></Dimensions>
+ <AdditionalExtraction><Param name="MoveSpeed"/></AdditionalExtraction>
+ <BlendSpaces>
+  <BlendSpace AName="animations/Broken/BlendSpaces/turn_l.bspace"/>
+  <BlendSpace AName="animations/Broken/BlendSpaces/turn_r.bspace"/>
+ </BlendSpaces>
+</CombinedBlendSpace>"#;
+        const LEFT: &str = r#"<ParaGroup>
+ <Dimensions><Param Name="DesiredFacing" Min="0" Max="3.1400001" Cells="27" locked="1"/></Dimensions>
+ <AdditionalExtraction><Param name="MoveSpeed"/></AdditionalExtraction>
+ <ExampleList>
+  <Example SetPara0="0" AName="idle"/>
+  <Example SetPara0="1.575" AName="turn90_l"/>
+  <Example SetPara0="3.1500001" AName="turn180_l"/>
+ </ExampleList>
+</ParaGroup>"#;
+        const RIGHT: &str = r#"<ParaGroup>
+ <Dimensions><Param Name="DesiredFacing" Min="-3.1400001" Max="0" Cells="27" locked="1"/></Dimensions>
+ <ExampleList>
+  <Example SetPara0="-3.1500001" AName="turn180_r"/>
+  <Example SetPara0="-1.575" AName="turn90_r"/>
+  <Example SetPara0="0" AName="idle"/>
+ </ExampleList>
+</ParaGroup>"#;
+        /// A blend space on another parameter (the walk blend spaces: `MoveSpeed`).
+        const SPEED: &str = r#"<ParaGroup>
+ <Dimensions><Param Name="MoveSpeed" Min="0" Max="4"/></Dimensions>
+ <ExampleList>
+  <Example SetPara0="0" AName="idle"/>
+  <Example SetPara0="4" AName="turn90_l"/>
+ </ExampleList>
+</ParaGroup>"#;
+        let file = |name: &str, bytes: Vec<u8>| (name.to_owned(), Ok(bytes));
+        let raw: HashMap<String, Result<Vec<u8>, String>> = HashMap::from([
+            file("idle", caf(IDLE_FRAMES)),
+            file("turn90_l", caf(QUARTER_FRAMES)),
+            file("turn90_r", caf(QUARTER_FRAMES)),
+            file("turn180_l", caf(HALF_LEFT_FRAMES)),
+            file("turn180_r", caf(HALF_RIGHT_FRAMES)),
+            file("turn_l", LEFT.as_bytes().to_vec()),
+            file("turn_r", RIGHT.as_bytes().to_vec()),
+            file("turn_comb", COMB.as_bytes().to_vec()),
+            file("speed", SPEED.as_bytes().to_vec()),
+        ]);
+        let known = ClipLengths::resolved(&raw);
+        assert!(known.get("turn_comb").is_err(), "no one length");
+        let turn = entry(&format!(
+            r#"<Blend ExitTime="0"/><Animation name="Turn_Comb" speed="{TURN_SPEED}"/>"#
+        ));
+        let FragmentLength::ByFacing(examples) = fragment_length(&turn, &known).expect("length")
+        else {
+            panic!("by facing");
+        };
+        let seconds = |frames: i32| {
+            (f64::from(frames) * f64::from(SECONDS_PER_FRAME) / TURN_SPEED) as f32
+        };
+        let expected = [
+            (-HALF_RAD, seconds(HALF_RIGHT_FRAMES)),
+            (-QUARTER_RAD, seconds(QUARTER_FRAMES)),
+            (0.0, seconds(IDLE_FRAMES)),
+            (QUARTER_RAD, seconds(QUARTER_FRAMES)),
+            (HALF_RAD, seconds(HALF_LEFT_FRAMES)),
+        ];
+        assert_eq!(examples.len(), expected.len(), "{examples:?}");
+        for (example, (facing_rad, length_s)) in examples.iter().zip(expected) {
+            assert!((example.facing_rad - facing_rad).abs() < 1e-6, "{example:?}");
+            assert!((example.seconds - length_s).abs() < 1e-5, "{example:?}");
+        }
+        let walk = entry(r#"<Blend ExitTime="0"/><Animation name="speed"/>"#);
+        assert!(
+            fragment_length(&walk, &known).is_err(),
+            "a blend on another parameter stays Unknown"
         );
     }
 

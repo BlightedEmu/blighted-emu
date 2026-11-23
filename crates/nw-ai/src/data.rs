@@ -378,8 +378,23 @@ impl FacingMode {
     }
 }
 
-/// How long a fragment entry plays.
+/// The facing of a mob that turns to nothing: the `DesiredFacing` blend parameter stays 0
+/// (Inferred: `SetDesiredFacingBlendParam` is the only activity that sets it).
+pub const NO_FACING_RAD: f32 = 0.0;
+
+/// One example clip of a `DesiredFacing` blend space: how long the entry plays when the mob
+/// turns by `facing_rad`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FacingLength {
+    /// The example's `SetPara0`: the signed turn, radians (the `_l` blend space holds 0 to pi,
+    /// the `_r` one -pi to 0).
+    pub facing_rad: f32,
+    /// How long the entry plays with this example alone, seconds.
+    pub seconds: f32,
+}
+
+/// How long a fragment entry plays.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FragmentLength {
     /// It ends after this many seconds.
     Seconds(f32),
@@ -387,6 +402,41 @@ pub enum FragmentLength {
     Loops,
     /// Unknown: a clip whose length could not be read (the reason is in the build report).
     Unknown,
+    /// Its last clip is a blend space on `DesiredFacing` whose example clips differ in length:
+    /// the examples, sorted by facing (Observed: `mc_broken_combat_turn_blend_comb.comb`, the
+    /// skeletons' `Alert_Turn` and `Combat_Turn`, blends `mc_broken_combat_idle_76` at 0 with
+    /// the 90 and 180 degree turn clips of each side).
+    ByFacing(Vec<FacingLength>),
+}
+
+impl FragmentLength {
+    /// The seconds it plays for a mob that turns by `facing_rad`; `None` when it loops or is
+    /// Unknown. A blend space plays the blend of its two examples around the facing, each by
+    /// its weight, and a facing past its last example plays that example (Inferred: the
+    /// `VGrid` weights of the blend space files are linear in the parameter, and the engine
+    /// blends the example durations by the same weights; Observed fit: the retail boar
+    /// `Combat_Turn`, a blend space of clips of one length, plays that length).
+    pub fn seconds_at(&self, facing_rad: f32) -> Option<f32> {
+        match self {
+            Self::Seconds(seconds) => Some(*seconds),
+            Self::Loops | Self::Unknown => None,
+            Self::ByFacing(examples) => {
+                let after = examples
+                    .iter()
+                    .position(|example| example.facing_rad >= facing_rad);
+                match after {
+                    None => examples.last().map(|example| example.seconds),
+                    Some(0) => examples.first().map(|example| example.seconds),
+                    Some(index) => {
+                        let (low, high) = (examples[index - 1], examples[index]);
+                        let share =
+                            (facing_rad - low.facing_rad) / (high.facing_rad - low.facing_rad);
+                        Some(low.seconds + (high.seconds - low.seconds) * share)
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A procedural clip of a fragment entry (`CAGE-Damage`, `Homing`): when it runs (seconds after
@@ -557,11 +607,14 @@ impl CageAction {
     /// without an end the Quartermaster of "A Most Mysterious Tablet" stabbed once and then stood
     /// in its stab, sim test 2026-11-12, while the retail one hit a player beside it eight times
     /// in 21 s, `12a_msq_08_destroyrune` ledger 108,777 to 130,076 ms). `None` when the fragment
-    /// loops or its length is Unknown.
-    pub fn done_after_s(&self, has_tag: &impl Fn(NameId) -> bool) -> Option<f32> {
-        let FragmentLength::Seconds(length) = self.variant(has_tag)?.length else {
-            return None;
-        };
+    /// loops or its length is Unknown. `facing_rad` is the turn the action plays its
+    /// `DesiredFacing` blend space with ([`FragmentLength::seconds_at`]).
+    pub fn done_after_s(
+        &self,
+        has_tag: &impl Fn(NameId) -> bool,
+        facing_rad: f32,
+    ) -> Option<f32> {
+        let length = self.variant(has_tag)?.length.seconds_at(facing_rad)?;
         let offset = self.completion.as_ref().map_or(0.0, |completion| {
             completion
                 .conditional
@@ -931,7 +984,7 @@ mod tests {
                 plays_fragment: &|_| false,
                 hit_angle_deg: angle,
             });
-            let length = CageAction::variant_of(variants, &|_| false).map(|v| v.length);
+            let length = CageAction::variant_of(variants, &|_| false).map(|v| v.length.clone());
             (fragment, length)
         };
         assert_eq!(
@@ -990,12 +1043,14 @@ mod tests {
 
     #[test]
     fn the_gore_is_done_its_offset_before_the_fragment_end() {
-        let plain = gore().done_after_s(&|_| false).expect("done");
+        let plain = gore().done_after_s(&|_| false, NO_FACING_RAD).expect("done");
         assert!((plain - (GORE_FRAMES_S / GORE_SPEED - GORE_OFFSET_S)).abs() < 1e-6);
-        let chained = gore().done_after_s(&|tag| tag == CHAIN_TAG).expect("done");
+        let chained = gore()
+            .done_after_s(&|tag| tag == CHAIN_TAG, NO_FACING_RAD)
+            .expect("done");
         assert!((chained - (GORE_FRAMES_S / GORE_SPEED - CHAINED_OFFSET_S)).abs() < 1e-6);
         assert_eq!(
-            gore().done_after_s(&|tag| tag == ARMADILLO_TAG),
+            gore().done_after_s(&|tag| tag == ARMADILLO_TAG, NO_FACING_RAD),
             None,
             "loops"
         );
@@ -1009,7 +1064,7 @@ mod tests {
             completion: None,
             ..gore()
         };
-        let done = stab.done_after_s(&|_| false).expect("done");
+        let done = stab.done_after_s(&|_| false, NO_FACING_RAD).expect("done");
         assert!((done - GORE_FRAMES_S / GORE_SPEED).abs() < 1e-6, "{done}");
     }
 
@@ -1032,14 +1087,56 @@ mod tests {
             ..gore()
         };
         assert_eq!(
-            turn.variant(&|_| false).map(|variant| variant.length),
-            Some(FragmentLength::Seconds(TURN_S))
+            turn.variant(&|_| false).map(|variant| &variant.length),
+            Some(&FragmentLength::Seconds(TURN_S))
         );
         let unknown = CageAction {
             variants: vec![option(FragmentLength::Unknown)],
             ..gore()
         };
-        assert_eq!(unknown.done_after_s(&|_| false), None, "no length, no end");
+        assert_eq!(
+            unknown.done_after_s(&|_| false, NO_FACING_RAD),
+            None,
+            "no length, no end"
+        );
+    }
+
+    /// A turn blend space plays the blend of its examples around the turn (the skeletons'
+    /// `Alert_Turn`: an idle at 0, the 90 and 180 degree turns of each side).
+    #[test]
+    fn a_facing_blend_plays_the_blend_of_its_examples_around_the_turn() {
+        use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+        const IDLE_S: f32 = 2.5;
+        const QUARTER_S: f32 = 1.5;
+        const HALF_LEFT_S: f32 = 2.0;
+        const HALF_RIGHT_S: f32 = 2.2;
+        let example = |facing_rad, seconds| FacingLength {
+            facing_rad,
+            seconds,
+        };
+        let turn = CageAction {
+            completion: None,
+            variants: vec![FragmentVariant {
+                tags: Vec::new(),
+                frag_tags: Vec::new(),
+                length: FragmentLength::ByFacing(vec![
+                    example(-PI, HALF_RIGHT_S),
+                    example(-FRAC_PI_2, QUARTER_S),
+                    example(NO_FACING_RAD, IDLE_S),
+                    example(FRAC_PI_2, QUARTER_S),
+                    example(PI, HALF_LEFT_S),
+                ]),
+                windows: Vec::new(),
+            }],
+            ..gore()
+        };
+        let done = |facing_rad| turn.done_after_s(&|_| false, facing_rad).expect("done");
+        assert!((done(NO_FACING_RAD) - IDLE_S).abs() < 1e-6);
+        assert!((done(FRAC_PI_2) - QUARTER_S).abs() < 1e-6);
+        assert!((done(FRAC_PI_4) - (IDLE_S + QUARTER_S) / 2.0).abs() < 1e-6);
+        assert!((done(-3.0 * FRAC_PI_4) - (QUARTER_S + HALF_RIGHT_S) / 2.0).abs() < 1e-6);
+        assert!((done(2.0 * PI) - HALF_LEFT_S).abs() < 1e-6, "past the last");
+        assert!((done(-2.0 * PI) - HALF_RIGHT_S).abs() < 1e-6, "before the first");
     }
 
     #[test]

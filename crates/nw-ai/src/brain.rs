@@ -33,7 +33,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::data::{AiData, Archetype, CageAction, TagEffect};
+use crate::data::{
+    AiData, Archetype, CageAction, FacingMode, FragmentLength, NO_FACING_RAD, TagEffect,
+};
 use crate::keys::{
     CAGE_TASK_PREFIX, EngineKey, KeySource, STATUS_CATEGORY_PREFIX, STATUS_EFFECT_PREFIX,
 };
@@ -57,6 +59,11 @@ const MS_PER_S: f64 = 1000.0;
 fn ms_of(seconds: f64) -> u64 {
     (seconds * MS_PER_S).round() as u64
 }
+/// How long a task the tree waits for plays when the length of its entry is Unknown, seconds.
+/// Design choice (no source has these lengths: build 25810808 leaves about 80 such tasks, for
+/// example the Anubian brute's `Alert_Turn` and the naga's `Combat_Turn`): the middle of the
+/// known alert and turn entries, which play 1.0 to 2.5 s.
+const UNKNOWN_LENGTH_S: f32 = 1.5;
 /// `Parallel.CompletionMode` (names Observed: AllCompleted, FirstCompleted, AnyCompleted; the
 /// numbers 0, 1, 2 are Inferred from the name order; the trees use 0).
 const COMPLETION_ALL: i64 = 0;
@@ -1794,8 +1801,17 @@ impl<'a, W: World> Ctx<'a, '_, W> {
                 let Some((action, cage_action)) = self.cage_action(task) else {
                     return LeafStart::Done(Status::Failure);
                 };
+                // A task the tree waits for must end. An entry whose length is Unknown gives
+                // no end, so the mob stood in the task for good (live 2026-11-23, module test
+                // `a_turn_of_a_facing_blend_space_ends_by_the_angle_to_the_target`): it then
+                // ends after [`UNKNOWN_LENGTH_S`].
+                let unknown = cage.wait_for_completion
+                    && cage_action
+                        .variant(&has_tag)
+                        .is_some_and(|variant| variant.length == FragmentLength::Unknown);
                 let done_at = cage_action
-                    .done_after_s(&has_tag)
+                    .done_after_s(&has_tag, self.facing_rad(cage_action.facing))
+                    .or(unknown.then_some(UNKNOWN_LENGTH_S))
                     .map(|seconds| self.now + ms_of(f64::from(seconds)));
                 for activity in cage_action
                     .tags
@@ -1970,6 +1986,17 @@ impl<'a, W: World> Ctx<'a, '_, W> {
                 LeafStart::Done(Status::Success)
             }
             _ => LeafStart::Done(Status::Failure),
+        }
+    }
+
+    /// The turn an action of facing mode `facing` starts with, radians: the signed angle to
+    /// the target for `AngleToTarget` (`Target_Angle`); else none (Inferred: the angle to a
+    /// destination is Unknown to the trees, and the two `AngleToDestination` actions play with
+    /// a move that ends them).
+    fn facing_rad(&self, facing: Option<FacingMode>) -> f32 {
+        match (facing, self.world.engine_value(EngineKey::TargetAngle)) {
+            (Some(FacingMode::AngleToTarget), Some(Value::Float(degrees))) => degrees.to_radians(),
+            _ => NO_FACING_RAD,
         }
     }
 
@@ -2758,6 +2785,88 @@ mod tests {
             mob.resolve(&runtime, &world, &Param::of_key(counter)),
             Some(Value::Int(4))
         );
+    }
+
+    /// A turn whose entry is a blend space of clips of different lengths ends by the angle to
+    /// the target. Live 2026-11-23 (sim 12:43:59): a skeleton of `skeleton_sword` took a player
+    /// 11.3 m away by sight, started `Alert_Turn` (a `DesiredFacing` blend space; its length was
+    /// Unknown) and stood in it for the rest of the run, the player 7 m from it.
+    #[test]
+    fn a_turn_of_a_facing_blend_space_ends_by_the_angle_to_the_target() {
+        use crate::data::{FacingLength, FacingMode};
+        const IDLE_S: f32 = 2.5;
+        const QUARTER_S: f32 = 1.5;
+        const QUARTER_DEG: f32 = 90.0;
+        let mut build = Build::default();
+        let turn = build.cage(
+            "Alert_Turn",
+            FragmentLength::ByFacing(vec![
+                FacingLength {
+                    facing_rad: 0.0,
+                    seconds: IDLE_S,
+                },
+                FacingLength {
+                    facing_rad: QUARTER_DEG.to_radians(),
+                    seconds: QUARTER_S,
+                },
+            ]),
+            Vec::new(),
+        );
+        let gore = build.gore("Gore");
+        let root = build.sequence(&[turn, gore]);
+        let mut data = build.finish(root);
+        data.cage_actions[0].facing = Some(FacingMode::AngleToTarget);
+        let runtime = Runtime::new(data.clone());
+        let mut world = TestWorld::default();
+        world.set(EngineKey::TargetAngle, Value::Float(QUARTER_DEG));
+        let mut mob = brain(&data);
+        let mut out = Vec::new();
+        mob.tick(&runtime, &world, &mut out);
+        let turn_ends_ms = ms_of(f64::from(QUARTER_S - crate::build::COMPLETION_OFFSET_S));
+        let played = |out: &[Command]| -> Vec<(u32, Option<u64>)> {
+            out.iter()
+                .filter_map(|command| match command {
+                    Command::PlayTask {
+                        action, done_at_ms, ..
+                    } => Some((*action, *done_at_ms)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(played(&out), vec![(0, Some(turn_ends_ms))]);
+        world.now = turn_ends_ms;
+        out.clear();
+        mob.tick(&runtime, &world, &mut out);
+        assert_eq!(
+            played(&out).first().map(|(action, _)| *action),
+            Some(1),
+            "the gore follows the turn"
+        );
+    }
+
+    /// A task the tree waits for ends when the length of its entry is Unknown (the Anubian
+    /// brute's `Alert_Turn`, build 25810808).
+    #[test]
+    fn a_waited_task_of_unknown_length_ends() {
+        let mut build = Build::default();
+        let turn = build.cage("Alert_Turn", FragmentLength::Unknown, Vec::new());
+        let gore = build.gore("Gore");
+        let root = build.sequence(&[turn, gore]);
+        let data = build.finish(root);
+        let runtime = Runtime::new(data.clone());
+        let mut world = TestWorld::default();
+        let mut mob = brain(&data);
+        let mut out = Vec::new();
+        mob.tick(&runtime, &world, &mut out);
+        let plays_gore = |out: &[Command]| {
+            out.iter()
+                .any(|command| matches!(command, Command::PlayTask { action: 1, .. }))
+        };
+        assert!(!plays_gore(&out), "the turn plays first");
+        world.now = ms_of(f64::from(UNKNOWN_LENGTH_S));
+        out.clear();
+        mob.tick(&runtime, &world, &mut out);
+        assert!(plays_gore(&out), "the gore follows the turn");
     }
 
     #[test]

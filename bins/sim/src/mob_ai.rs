@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use nw_ai::brain::{Brain, Command, Destination, MotionOutcome, Runtime, Slot, World};
 use nw_ai::data::{
-    AiData, Archetype, CageAction, FacingMode, FragmentLength, FragmentVariant, MobCage, NavConfig,
+    AiData, Archetype, CageAction, FacingMode, FragmentVariant, MobCage, NO_FACING_RAD, NavConfig,
     ProcWindow, SliceTriggerRef,
 };
 use nw_ai::keys::EngineKey;
@@ -2640,16 +2640,15 @@ impl TreeMind {
     fn entry_length_ms(&self, variants: &[FragmentVariant]) -> Option<u64> {
         let tags = self.brain.tags();
         let has_tag = |tag: NameId| tags.contains(&tag);
-        CageAction::variant_of(variants, &has_tag).and_then(|variant| match variant.length {
-            // A reaction of a few seconds.
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "a reaction of a few seconds"
-            )]
-            FragmentLength::Seconds(seconds) => Some((seconds * MS_PER_SECOND_F32).round() as u64),
-            FragmentLength::Loops | FragmentLength::Unknown => None,
-        })
+        // A reaction of a few seconds.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a reaction of a few seconds"
+        )]
+        CageAction::variant_of(variants, &has_tag)
+            .and_then(|variant| variant.length.seconds_at(NO_FACING_RAD))
+            .map(|seconds| (seconds * MS_PER_SECOND_F32).round() as u64)
     }
 
     /// Its grit is on at `now_ms` while it holds the effects `held`: its slice's grit is its
@@ -3405,6 +3404,9 @@ impl TreeMind {
             target = ?self.state.target,
             target_m = ?self.state.target_at.map(|target| target.horizontal_distance(at)),
             reachable = ?self.state.reach.map(|check| check.reachable),
+            x = at.x,
+            y = at.y,
+            z = at.z,
             "mob decision"
         );
     }
@@ -4879,7 +4881,7 @@ pub mod test_support {
 mod tests {
     use std::collections::BTreeMap;
 
-    use nw_ai::data::ProcWindow;
+    use nw_ai::data::{FragmentLength, ProcWindow};
     use nw_content::combat::{GritBody, LARGE_BODY_GRIT_SHARE};
     use nw_sim_core::test_support::FlatGround;
     use nw_world::records::SpawnAi as DesignSpawn;
