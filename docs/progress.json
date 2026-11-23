@@ -76,8 +76,12 @@
               "proof": "bots"
             },
             {
-              "check": "The QuestLiang boss area has retail places with no floor under them; the missing piece is Unknown.",
-              "proof": "none"
+              "check": "A thin seam between two floor pieces counts as floor (2026-11-23, tests): the QuestLiang boss area had retail places on such seams. A side floor counts only within 0.1 m and 0.5 m down (Inferred).",
+              "proof": "tests"
+            },
+            {
+              "check": "The arena, Outpost Rush and capture the flag levels have collision files (2026-11-23, bots): before, their instance sims stopped at start.",
+              "proof": "bots"
             }
           ]
         },
@@ -248,7 +252,15 @@
               "proof": "bots"
             },
             {
-              "check": "Whole-PC stalls of 3 to 8 s silence every sim and the gateway, and all players leave (2026-11-22, seen six times during builds and instance starts). Cause Inferred: memory pressure on the PC.",
+              "check": "PC freezes are much shorter (2026-11-23, bots): log lines are written by their own thread, the largest debug lines are gone, one instance sim starts at a time, and builds run at the lowest priority (`scripts/cargo-low.sh`). One 4 s stall still came, during a build and an instance start together; after it, ticks stayed within about 1 s over 7 hours of bot runs and builds.",
+              "proof": "bots"
+            },
+            {
+              "check": "150 to 340 bots on four sims cross sim borders while they fight and gather (2026-11-23, bots): 1,626 handoffs, none failed, no move refused, no open-world sim silent. Health, quest steps and group are checked over each crossing (no change but open-world health).",
+              "proof": "bots"
+            },
+            {
+              "check": "At 340 bots only about 98 % of handoffs end within one tick (limit 99 %): the offer waits in the busy target sim's loop behind other work; a fix needs a design for message priority.",
               "proof": "none"
             }
           ]
@@ -328,6 +340,10 @@
             {
               "check": "Not seen with a real client: the sky after a phase change and after a set time.",
               "proof": "none"
+            },
+            {
+              "check": "A full save over a log out and over a stack restart (2026-11-23, bots): level, experience, coins, faction, inn, the running quest step, attributes, weapon points, masteries, standing, worn gear, storage and the bag come back the same.",
+              "proof": "bots"
             }
           ]
         },
@@ -382,6 +398,14 @@
             {
               "check": "`!gearup` also wears the bag's gathering tools in their tool slots (2026-11-22, bots): before, a bot with a pick in its bag was refused a crystal gather.",
               "proof": "bots"
+            },
+            {
+              "check": "`!sheet` lists what a save keeps, for save checks (2026-11-23, bots).",
+              "proof": "bots"
+            },
+            {
+              "check": "`!tp` lands on a floor up to 1 m above the asked point (2026-11-23, tests): a point just under a floor fell through to a floor 61 m below.",
+              "proof": "tests"
             }
           ]
         },
@@ -1386,6 +1410,10 @@
             {
               "check": "A player saved dead logs in dead and lives again at its respawn request (bots, 2026-11-21: two hunt bots saved at no health respawned at their login and were saved alive).",
               "proof": "bots"
+            },
+            {
+              "check": "A downed bot revived by another bot (2026-11-23).",
+              "proof": "bots"
             }
           ]
         },
@@ -1563,6 +1591,10 @@
             {
               "check": "Spawns whose creature no source names still get a bare card: mostly objects and encounters the open map does not run. Unknown for the rest.",
               "proof": "none"
+            },
+            {
+              "check": "Bosses and named mobs that had no look get their retail look (2026-11-23, bots): 216 rows for 190 mob kinds from the retail captures; the Goliaths now show their health.",
+              "proof": "bots"
             }
           ]
         },
@@ -1983,6 +2015,10 @@
             {
               "check": "A have-items step drops its item from its kill and container columns (2026-11-22, bots): retail `13a_sq_21` opens five containers for it.",
               "proof": "bots"
+            },
+            {
+              "check": "A timed step whose fail condition is off runs as a plain timer (2026-11-23, bots): the tutorial and beach timers end again.",
+              "proof": "bots"
             }
           ]
         },
@@ -2121,7 +2157,19 @@
               "proof": "bots"
             },
             {
-              "check": "The boss stages of the story trials QuestLiang and QuestIsabella wait for events (`Phase1_started`, `Transform_Winged`, ...) that nothing sends: the boss behaviour trees are not in the server pak this project has. Unknown.",
+              "check": "Story trial bosses by bots (2026-11-23): QuestLiang (talisman piles; 4, 6 and 8 talismans each take a third of his health), QuestIsabella (health floors at 80, 65, 55, 40 and 25 % with her cultists) and QuestAdiana (intro, shadow archers, phase 2 at half health) are won, and `99F_MSQ_ER_FightLiang`, `99G_MSQ_SM_DestroyEnemy` and `09A_M15_FightArtemis` complete. Their stage rules come from retail captures; the timings the captures do not fix are Inferred.",
+              "proof": "bots"
+            },
+            {
+              "check": "Tempest's Heart quests `0726_0101` to `0726_0107` by bots (2026-11-23): the gate, cellar and city areas of the expedition's script count, and the gravestone, the corrupted naga and the Shard of Madness steps complete.",
+              "proof": "bots"
+            },
+            {
+              "check": "`09A_M14_GetInfusedSeed` by bots (2026-11-23): a cyclic object is found by its variant id too (retail `09a_m14_getinfusedseed` gathers its states).",
+              "proof": "bots"
+            },
+            {
+              "check": "Whether retail gives each player of a group its own `0726_0104` gravestone is Unknown: the level data marks it as shared, so one player per run gathers it.",
               "proof": "none"
             }
           ]
@@ -2169,6 +2217,10 @@
             {
               "check": "Territory standing XP bonus: each `TB_GainXP` point of the territory the player is in raises its character experience (3 % for the first point, 12.3 % for five; fitted to retail kills, more than five points follow the same curve).",
               "proof": "tests"
+            },
+            {
+              "check": "Kill experience as retail (a level 2 boar gives 10) and a level up by kill experience alone, and an attribute point spend, by bots (2026-11-23).",
+              "proof": "bots"
             }
           ]
         },
@@ -2195,6 +2247,10 @@
             {
               "check": "Weapon key 2 is read from `Use_MainHandSlot_2`, and the swap weapon key swaps weapons: skills and kill experience follow the weapon in the hand",
               "proof": "tests"
+            },
+            {
+              "check": "A weapon point spend by a bot (2026-11-23).",
+              "proof": "bots"
             }
           ]
         },
@@ -2488,6 +2544,10 @@
             {
               "check": "Settlement station steps (`06A_TS_02`, `09A_S0`) end through their sibling step, as in retail `06a_ts_02_forgesword`, and a craft-a-weapon-family step plans the craft (2026-11-22, bots).",
               "proof": "bots"
+            },
+            {
+              "check": "A craft at a smelting station by a bot (2026-11-23).",
+              "proof": "bots"
             }
           ]
         },
@@ -2568,6 +2628,10 @@
             {
               "check": "No live test.",
               "proof": "none"
+            },
+            {
+              "check": "A salvage by a bot (2026-11-23).",
+              "proof": "bots"
             }
           ]
         },
@@ -2610,6 +2674,10 @@
             {
               "check": "Not checked live.",
               "proof": "none"
+            },
+            {
+              "check": "A shop purchase by a bot (2026-11-23).",
+              "proof": "bots"
             }
           ]
         },
@@ -2632,6 +2700,10 @@
             {
               "check": "Weight limit, transfer fee and the notes after a view from afar are Unknown.",
               "proof": "none"
+            },
+            {
+              "check": "Storage put and take by a bot (2026-11-23).",
+              "proof": "bots"
             }
           ]
         },
@@ -2670,6 +2742,10 @@
             {
               "check": "Buys at another settlement and expired sell orders go to the bag (Unknown).",
               "proof": "none"
+            },
+            {
+              "check": "A sell order by one bot and its purchase by another (2026-11-23).",
+              "proof": "bots"
             }
           ]
         }
@@ -2779,6 +2855,10 @@
             {
               "check": "The PvP camp respawn cooldown (a flagged player's camp respawns get a longer cooldown each time, a public game wiki): how it grows is Unknown; not built.",
               "proof": "none"
+            },
+            {
+              "check": "A camp stays over a log out (2026-11-23, bots): retail logins show a camp from an earlier session. Over a server stop it stays too (Inferred).",
+              "proof": "bots"
             }
           ]
         },
@@ -2931,6 +3011,10 @@
             {
               "check": "Live: a group that turns into a raid in the client, with the vote and the raid window.",
               "proof": "none"
+            },
+            {
+              "check": "Chat, a friend request and accept, and a group invite, join and leave between bots (2026-11-23).",
+              "proof": "bots"
             }
           ]
         },
@@ -2997,6 +3081,10 @@
             {
               "check": "The company list counts and sorts by owned territories.",
               "proof": "tests"
+            },
+            {
+              "check": "A company made, an invite and a join by bots (2026-11-23).",
+              "proof": "bots"
             }
           ]
         },
@@ -3149,8 +3237,28 @@
               "proof": "bots"
             },
             {
-              "check": "Expedition quests not yet ended by bots (2026-11-22): `C10A_M6`, `1689_EXP_Coins`, `1403A`, `0525_EXP` and `09A_S20` need runs longer than 30 minutes for one bot; `Dynasty_Summoner_Named_DG_Ebonscale_00` (`0899_0801`) has no spawn in the instance data (Unknown).",
+              "check": "Expedition quests not yet ended by bots (2026-11-23): `1403A`, `0525_EXP` and `09A_S20` (long fights not run), `C10A_M7R` and `09A_S19` (not run), and `0899_0801` for the whole group (a bot saw no Empress at her place; cause Unknown).",
               "proof": "none"
+            },
+            {
+              "check": "A group quest kill and a group loot bag in an instance (2026-11-23, bots): a kill counts for the killer and each player whose hits credit the kill, and each of them gets its own loot bag with its own quest items (retail: two Dynasty Shipyard captures, a non-killer gets its own shackles). The Ennead Goliaths, the Cutlass Keys siren (`C10A_M6`, `C10A_M7`) and the Shipyard summoner end for all five bots. The open world keeps one bag for the killer.",
+              "proof": "bots"
+            },
+            {
+              "check": "Linked bosses (2026-11-23, bots): the Ennead Goliaths go down and revive until both fall together, Horus takes hits only after the Brute is down, and `1689_EXP_Finish` completes. The revive shares (50 %, then 25 % and 20 %) are Inferred from the captures' ranges.",
+              "proof": "bots"
+            },
+            {
+              "check": "Every mob kind of a mixed spawner slice spawns (2026-11-23, bots): before, a slice spawned only its first kind, so the Shipyard summoner and five other named mobs never came.",
+              "proof": "bots"
+            },
+            {
+              "check": "Only one instance sim starts at a time (2026-11-23, bots): two or three loading a level at once froze the PC. Every expedition, trial and game mode run of the night started this way.",
+              "proof": "bots"
+            },
+            {
+              "check": "The director keeps an instance its sim just opened (2026-11-23, bots): it took a sim report from before the open as \"no instance\" and ended Outpost Rush matches 0.2 s after they opened.",
+              "proof": "bots"
             }
           ]
         },
@@ -3501,6 +3609,18 @@
             {
               "check": "Outpost Rush turret use names the user in the turret's ownership as retail: the user's company with its name and crest, the user and the user's faction; the release keeps them; a new owner team sends the raid alone to a used turret or vat and the zero company with the raid to the other structures. Tests written, not run yet.",
               "proof": "tests"
+            },
+            {
+              "check": "The 3v3 arena by six bots (2026-11-23): queue, match, the instance, rounds, the end and the way back; also a queue leave and a role cancel.",
+              "proof": "bots"
+            },
+            {
+              "check": "Outpost Rush by four bots, two teams of two (2026-11-23): queue, match, the island map, outpost captures, the score win and the win and loss rewards. The match id now reaches the players: two states of one tick merge.",
+              "proof": "bots"
+            },
+            {
+              "check": "Capture the flag by four bots (2026-11-23): queue, match, pre-game, three flag captures, the 3-point win and the rewards.",
+              "proof": "bots"
             }
           ]
         },
@@ -3871,6 +3991,14 @@
             {
               "check": "A bot signs up for an invasion the way the client does: the remote board use (2791) gets the territory (2722) and the defender sign-up (2762) the answer (2169) (`nw-testclient` activity `invasion-signup`, PC 2026-11-15).",
               "proof": "bots"
+            },
+            {
+              "check": "A war by four bots in two companies (2026-11-23): sign-ups, rosters, raid invites, the war instance, the capture points, the end and the territory's new owner. The bots set the owner and the declaration with GM lines; the war board path is not tested.",
+              "proof": "bots"
+            },
+            {
+              "check": "An invasion by ten bots (2026-11-23): sign-up, raid, the fort, and wave 2 and wave 3 start only after the earlier wave is cleared, as retail. Wave mobs now stay dead (before, they came back after 62 s and no next wave ever started). A full invasion to its end is not run.",
+              "proof": "bots"
             }
           ]
         },
@@ -4115,7 +4243,7 @@
     }
   ],
   "nextSteps": [
-    "**Quests by bots (2026-11-22, day run).**\n\n- Boss stage events of QuestLiang and QuestIsabella: find what sends them.\n- Expedition quests that need long runs: `C10A_M6`, `1689_EXP_Coins`, `1403A`, `0525_EXP`, `09A_S20`; and the missing summoner of `0899_0801`.\n- Shattered Mountain expedition quests (`0726_01xx`) and the Cutlass Keys trinket (`C10A_M7`, `C10A_M7R`), and `09A_S19` in First Light.\n- The QuestAdiana trial itself, and the QuestLiang floor gap.\n- Whole-PC stalls that drop every player.",
+    "**Bots, night of 2026-11-23.**\n\n- Expeditions not ended by bots: `1403A`, `0525_EXP`, `09A_S20`, `C10A_M7R`, `09A_S19`, and `0899_0801` for the whole group.\n- A full invasion to its end; the war board path of a war.\n- Handoff priority in the sim loop for 340 bots on four sims.\n- The one remaining PC stall during a build and an instance start.",
     "**Player body: physics leads (2026-11-21).**\n\n- Done (tests): attack root motion along the camera, side dodge rolls, the jump's wind-up, the start and stop lag, the camera on the floor, the measuring tool.\n- Next, in order: held-key attack chains, late and missed dodges (1,657 of 6,507 retail presses), the sprint before a jump and the sprint landing, the walls retail walks by (a stall near 7643, 4268).\n- Then let key physics lead and the camera only correct small error, measured on the fresh-start tool for keys and pad, and a live controller trace (no retail ledger has controller input).",
     "**Other players: live check of the 2026-11-20 second round (tests only).** Two players, keyboard and controller: crouch and prone with the pad (left shoulder with a left stick click, and held), quick double dodge presses (one roll each, no restart), and a keyboard video like the controller one. Then the earlier list: a bow's hip shots held long and short, walking and running backward, keys let go during an attack, walk starts, jumps and falls, the bow's full draw, blunderbuss re-fire and reload, blocks, a spear chain on a boar, a rapier's light and heavy attacks (the heavy now 19 records into the hold).\n\nStill open: the jerk of a player on a slow link (Unknown), the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
     "**Bow abilities and other players: live check of the 2026-11-21 fixes (tests only).** Two players, keyboard and controller: another player running across the screen (no saw-tooth), Rain of Arrows' place on a slope and on a structure. Rain of Arrows still keeps its own player in the aim: trace the client's `SpellRaycastState` during F (needs a player at the keyboard), then fix from what it shows.",
@@ -4458,9 +4586,10 @@
     "Bot tools and fixes (2026-11-21, bots): a bot walks with real input records (keys and pad), a bot saved dead respawns at login, a bot opens the mount reward box, `!gearup` wears the bag's class gear, a twice-listed quest task ends with its first copy, a tutorial exit is saved in the open world, and the director waits longer before each new start of a level whose sim stops at once.",
     "Physics-first body, first round (2026-11-21, tests): attacks move the body by their root motion, side dodges roll sideways, moving jumps wind up, starts and stops lag a record as retail, a camera on the floor gives the body nothing, the musket's jump shows to others, and the measuring tool reads the equip load, abilities and mobs.",
     "Quests by bots (2026-11-22, bots): the Everfall main story to its end with the staff in the bag, the Windsward main story to its end, side quests in 14 zones, encounter success events, video objects, turning stones, story trials entered at their doors, and tools worn by `!gearup`.",
-    "Quests by bots, day run (2026-11-22, bots): open world wave encounters, puzzle steps, story trial collision and trials, expedition bosses and expedition side quests, level variants for kills, loot and looks, fishing, PvP kills, mount courses, songs and settlement stations."
+    "Quests by bots, day run (2026-11-22, bots): open world wave encounters, puzzle steps, story trial collision and trials, expedition bosses and expedition side quests, level variants for kills, loot and looks, fishing, PvP kills, mount courses, songs and settlement stations.",
+    "Bots, night of 2026-11-23: story trial bosses (Liang, Isabella, Adiana), Tempest's Heart, group kills and loot in expeditions, the Ennead Goliaths, all three PvP modes, a war and invasion waves, saves over a restart, the economy and social basics, and many bots across four sims; PC freezes much shorter."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-22",
+  "updated": "2026-11-23",
   "lastCommit": "10b9bf3e"
 }
