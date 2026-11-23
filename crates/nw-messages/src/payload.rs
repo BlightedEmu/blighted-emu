@@ -131,8 +131,8 @@ pub enum MemberState {
     /// `Javelin::GameModeReplicatedState`: a game mode entity the sim runs (written only; a
     /// capture's own reads through the member table).
     GameMode(Box<GameModeState>),
-    /// `Javelin::GameModeParticipantReplicatedState`: the game modes of a player (written
-    /// only; a capture's own reads through the member table).
+    /// `Javelin::GameModeParticipantReplicatedState`: the game modes of a player and its
+    /// matchmaking queue (a bot reads its own queue pop and match from it).
     GameModeParticipant(GameModeParticipantState),
     /// `Javelin::HouseDataReplicatedState`: the furniture of a house the sim spawns (written
     /// only; a capture's own reads through the member table).
@@ -516,6 +516,13 @@ impl MemberState {
             }
             TypeId::FileSlot(GROUPS_STATE_TYPE_INDEX) => {
                 GroupsState::read(reader).map(Self::Groups)
+            }
+            // The empty first body stays the player's empty state that the own player card
+            // carries ([`EmptyState`]); a body that sets a slot is the queue's.
+            TypeId::FileSlot(GAME_MODE_PARTICIPANT_TYPE_INDEX) => {
+                empty_player_body(GAME_MODE_PARTICIPANT_TYPE_INDEX, reader, |reader| {
+                    GameModeParticipantState::read(reader).map(Self::GameModeParticipant)
+                })
             }
             TypeId::FileSlot(SOCIAL_TYPE_INDEX) => SocialState::read(reader).map(Self::Social),
             TypeId::FileSlot(GUILDS_STATE_TYPE_INDEX) => {
@@ -931,6 +938,30 @@ mod tests {
     const OTHER_CLASS: u64 = 1;
     /// An entity integer that fits one prefix byte.
     const SMALL_ENTITY: u8 = 5;
+
+    #[test]
+    fn a_participant_state_reads_as_the_queue_and_its_empty_first_body_as_the_empty_state() {
+        use crate::game_mode_participant::{GAME_MODE_PARTICIPANT_TYPE_INDEX, MatchmakingService};
+        assert_eq!(
+            MemberState::decode(GAME_MODE_PARTICIPANT_TYPE_INDEX, &[0]).expect("reads"),
+            MemberState::Empty(EmptyState {
+                class: GAME_MODE_PARTICIPANT_TYPE_INDEX
+            }),
+            "the own player card's state of no slot"
+        );
+        // Retail `20261010-125035-658`: the status 1 two seconds after a pop.
+        assert_eq!(
+            MemberState::decode(GAME_MODE_PARTICIPANT_TYPE_INDEX, &[0x02, 0x02, 0, 0, 0, 1])
+                .expect("reads"),
+            MemberState::GameModeParticipant(GameModeParticipantState {
+                service: MatchmakingService {
+                    status: Some(1),
+                    ..MatchmakingService::default()
+                },
+                ..GameModeParticipantState::default()
+            })
+        );
+    }
 
     fn position_member(x: f32) -> BundleMember {
         BundleMember {

@@ -31,9 +31,10 @@
 //! The meaning of the bits of `flags` and of `groupActivityEligibility` is Unknown: the sim
 //! sends the values retail sent in each phase.
 
+use crate::combat::{read_string, write_string};
 use crate::items::FullList;
-use crate::slots::{children_mask, write_known_children};
-use crate::wire::{MessageError, RAW_ID_LEN, Writer};
+use crate::slots::{children_mask, read_children, read_slot_byte, write_known_children};
+use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
 
 /// Type index of `Javelin::GameModeParticipantReplicatedState`.
 pub const GAME_MODE_PARTICIPANT_TYPE_INDEX: u64 = 3312;
@@ -59,6 +60,10 @@ const SLOT_2: u8 = 0x04;
 const NO_SLOT: u8 = 0;
 /// The child bit of `groupActivityEligibility` in slot 2.
 const ELIGIBILITY_CHILD: u16 = 0x01;
+/// The slots of the state.
+const SLOTS: u8 = 3;
+/// The field name of the state's read errors.
+const FIELD: &str = "game mode participant";
 
 /// One game mode a player takes part in (`activeGameModes`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,9 +169,7 @@ impl MatchmakingService {
             }
             2 => {
                 if let Some(text) = &self.match_id {
-                    result = writer.prefixed(text.len() as u64).map(|writer| {
-                        writer.bytes(text.as_bytes());
-                    });
+                    result = write_string(writer, text.as_bytes());
                 }
             }
             3 => {
@@ -186,6 +189,37 @@ impl MatchmakingService {
             }
         });
         result
+    }
+}
+
+impl MatchmakingService {
+    /// Takes each child that `later` sets over this one's.
+    fn merge(&mut self, later: Self) {
+        self.activity = later.activity.or(self.activity);
+        self.status = later.status.or(self.status);
+        self.match_id = later.match_id.or(self.match_id.take());
+        self.desired = later.desired.or(self.desired);
+        self.accepted = later.accepted.or(self.accepted);
+        self.replicating_group = later.replicating_group.or(self.replicating_group);
+    }
+
+    fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let mut service = Self::default();
+        read_children(reader, FIELD, SLOT_1_CHILDREN, |reader, child| {
+            match child {
+                0 => service.activity = Some(reader.u8()?),
+                1 => service.status = Some(reader.u32()?),
+                2 => {
+                    service.match_id =
+                        Some(String::from_utf8_lossy(&read_string(reader)?).into_owned());
+                }
+                3 => service.desired = Some(reader.u8()?),
+                4 => service.accepted = Some(reader.u8()?),
+                _ => service.replicating_group = Some(reader.boolean()?),
+            }
+            Ok(())
+        })?;
+        Ok(service)
     }
 }
 
@@ -253,6 +287,92 @@ impl GameModeParticipantState {
             });
         }
         Ok(())
+    }
+
+    /// Reads the state of a bundle member body: the inverse of [`Self::write`], so a bot
+    /// reads its queue pops and its match from its own state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the body ends early, sets a slot or child the state does
+    /// not have, or holds a list in its delta form ([`MessageError::Unsized`]).
+    pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let slots = read_slot_byte(reader, FIELD, SLOTS)?;
+        let mut state = Self::default();
+        if slots & SLOT_0 != 0 {
+            state.read_slot_0(reader)?;
+        }
+        if slots & SLOT_1 != 0 {
+            state.service = MatchmakingService::read(reader)?;
+        }
+        if slots & SLOT_2 != 0 {
+            read_children(reader, FIELD, SLOT_2_CHILDREN, |reader, _| {
+                state.eligibility = Some(reader.array()?);
+                Ok(())
+            })?;
+        }
+        Ok(state)
+    }
+
+    /// Takes each child that `later` sets over this one's: one state that sets what the two
+    /// states sent one after the other set, for a bundle that holds one state per component.
+    pub fn merge(&mut self, later: Self) {
+        self.active = later.active.or(self.active.take());
+        self.flags = later.flags.or(self.flags);
+        self.queuing = later.queuing.or(self.queuing.take());
+        self.eligible = later.eligible.or(self.eligible.take());
+        self.mutation_context = later.mutation_context.or(self.mutation_context);
+        self.last_team = later.last_team.or(self.last_team);
+        self.service.merge(later.service);
+        self.eligibility = later.eligibility.or(self.eligibility);
+    }
+
+    fn read_slot_0(&mut self, reader: &mut Reader<'_>) -> Result<(), MessageError> {
+        read_children(reader, FIELD, SLOT_0_CHILDREN, |reader, child| {
+            match child {
+                0 => {
+                    self.active = Some(FullList::read(reader, |reader| {
+                        Ok(ActiveGameMode {
+                            raw_id: reader.raw_id()?,
+                            facet: reader.u64()?,
+                            second: reader.u64()?,
+                            mode: reader.u32()?,
+                            map: reader.u32()?,
+                            joined_ns: reader.u64()?,
+                            phase: reader.u64()?,
+                        })
+                    })?);
+                }
+                1 => self.flags = Some(reader.array()?),
+                2 => {
+                    self.queuing = Some(FullList::read(reader, |reader| {
+                        Ok(QueueEntry {
+                            mode: reader.u32()?,
+                            joined_ns: reader.u64()?,
+                            unknown: reader.u32()?,
+                            match_size: reader.u32()?,
+                            flag: reader.u8()?,
+                        })
+                    })?);
+                }
+                3 => {
+                    self.eligible = Some(FullList::read(reader, |reader| {
+                        Ok((reader.u32()?, reader.u64()?))
+                    })?);
+                }
+                4 => {
+                    self.mutation_context = Some(MutationContextWire {
+                        elemental: reader.u32()?,
+                        promotion: reader.u32()?,
+                        curse: reader.u32()?,
+                        difficulty: reader.u8()?,
+                    });
+                }
+                _ => self.last_team = Some(reader.u8()?),
+            }
+            Ok(())
+        })
+        .map(|_| ())
     }
 
     fn write_slot_0(&self, writer: &mut Writer, mask: u16) -> Result<(), MessageError> {
@@ -329,14 +449,16 @@ mod tests {
     /// CRC-32 of `arena3v3`.
     const ARENA: u32 = 0x1fad_9d42;
 
+    /// The state's bytes as hex; the bytes read back into the same state.
     fn hex(state: &GameModeParticipantState) -> String {
         let mut writer = Writer::new();
         state.write(&mut writer).expect("the state writes");
-        writer
-            .finish()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        let bytes = writer.finish();
+        let mut reader = Reader::new(&bytes);
+        let read = GameModeParticipantState::read(&mut reader).expect("the state reads");
+        reader.finish().expect("the read takes every byte");
+        assert_eq!(&read, state, "the bytes read back into the state");
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
     /// Retail `duel_capture`: the join at 67.299 s (a made-up game mode entity), the fight's
@@ -463,6 +585,51 @@ mod tests {
                 "1fad9d421fad9d420bb9d8f4468c275c8b2cbbb86ac5c88903c0e708000000",
             ]
             .concat()
+        );
+    }
+
+    /// An Outpost Rush pop and its invite in one tick (live 2026-11-23 03:52:08Z: the match's
+    /// instance opened within 1 ms of the pop): the merged state holds the pop's queue entry and
+    /// match id and the invite's status.
+    #[test]
+    fn a_later_state_merges_over_an_earlier_one_child_by_child() {
+        const MATCH: &str = "00000000-0000-7000-8000-000000000001";
+        let entry = QueueEntry {
+            mode: ARENA,
+            joined_ns: 1,
+            unknown: 0,
+            match_size: 4,
+            flag: 1,
+        };
+        let mut pop = GameModeParticipantState {
+            queuing: Some(FullList::first(vec![entry])),
+            service: MatchmakingService {
+                status: Some(10),
+                match_id: Some(MATCH.to_owned()),
+                desired: Some(4),
+                ..MatchmakingService::default()
+            },
+            ..GameModeParticipantState::default()
+        };
+        pop.merge(GameModeParticipantState {
+            service: MatchmakingService {
+                status: Some(1),
+                ..MatchmakingService::default()
+            },
+            ..GameModeParticipantState::default()
+        });
+        assert_eq!(
+            pop,
+            GameModeParticipantState {
+                queuing: Some(FullList::first(vec![entry])),
+                service: MatchmakingService {
+                    status: Some(1),
+                    match_id: Some(MATCH.to_owned()),
+                    desired: Some(4),
+                    ..MatchmakingService::default()
+                },
+                ..GameModeParticipantState::default()
+            }
         );
     }
 

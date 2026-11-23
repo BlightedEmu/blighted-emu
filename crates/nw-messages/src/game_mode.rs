@@ -84,6 +84,17 @@ pub const MATCHMAKING_MATCH_CANCELLED_TYPE_INDEX: u64 = 6228;
 pub const MATCH_CANCELLED_LEN: usize = 3;
 /// Type index of `VitalsComponentClientFacet_ClientSyncDeathRecapForAllGameModeParticipants`.
 pub const DEATH_RECAP_FOR_ALL_TYPE_INDEX: u64 = 4977;
+/// The 6254 activity of the 3v3 arena (Observed: 16 retail arena joins).
+pub const ARENA_ACTIVITY: u16 = 0x3316;
+/// The 6254 activity of Outpost Rush (Observed: `opr_que_and_lost` 522.066 s, `OPR_TEST3`
+/// 12.510 s).
+pub const OUTPOST_RUSH_ACTIVITY: u16 = 0x3116;
+/// The 6254 activity of capture the flag (Observed:
+/// `CTF_QueueAndJoin_PickUpSpeedHealthAndFlagThenDied` 27.657 s, `CTF01`).
+pub const CAPTURE_THE_FLAG_ACTIVITY: u16 = 0x3016;
+/// The 6254 activity of the catacombs (Observed: `CATACOMBS2` 4.546 s, `CATACOMBS6` 6.734 s and
+/// three Hive catacombs ledgers).
+pub const CATACOMBS_ACTIVITY: u16 = 0x0c16;
 /// The hex digits of each hyphen-separated group of a UUID text.
 const UUID_GROUP_DIGITS: [usize; 5] = [8, 4, 4, 4, 12];
 /// The separator of a UUID text.

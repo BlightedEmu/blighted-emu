@@ -1338,13 +1338,25 @@ fn has_own_reader(class: u64) -> bool {
 
 /// Puts `member` into the own group `members`: in place of the member of its component (an
 /// empty state of the card), else before the last member (the position, which ends an own
-/// group, as [`change_members`] go).
+/// group, as [`change_members`] go). A second game mode participant state of the tick merges
+/// into the first
+/// ([`crate::game_mode_participant::GameModeParticipantState::merge`]): a bundle holds one member per
+/// component, and the client must get what both set (live 2026-11-23 03:52:08Z: an Outpost
+/// Rush invite in the tick of its pop took the pop's match id away, and no player could accept).
 pub fn put_member(members: &mut Vec<BundleMember>, member: BundleMember) {
     match members
         .iter_mut()
         .find(|known| known.component == member.component)
     {
-        Some(known) => *known = member,
+        Some(known) => match (&mut known.state, member.state) {
+            (
+                MemberState::GameModeParticipant(earlier),
+                MemberState::GameModeParticipant(later),
+            ) => {
+                earlier.merge(later);
+            }
+            (state, later) => *state = later,
+        },
         None => members.insert(members.len().saturating_sub(1), member),
     }
 }
@@ -1427,6 +1439,43 @@ fn put_player_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_participant_state_merges_and_another_state_replaces() {
+        use crate::game_mode_participant::{
+            GAME_MODE_PARTICIPANT_COMPONENT, GameModeParticipantState, MatchmakingService,
+        };
+        let state = |status, match_id: Option<&str>| BundleMember {
+            component: GAME_MODE_PARTICIPANT_COMPONENT,
+            state: MemberState::GameModeParticipant(GameModeParticipantState {
+                service: MatchmakingService {
+                    status: Some(status),
+                    match_id: match_id.map(str::to_owned),
+                    ..MatchmakingService::default()
+                },
+                ..GameModeParticipantState::default()
+            }),
+        };
+        const MATCH: &str = "00000000-0000-7000-8000-000000000001";
+        const POPPED: u32 = 10;
+        const INVITED: u32 = 1;
+        let mut members = vec![state(POPPED, Some(MATCH))];
+        put_member(&mut members, state(INVITED, None));
+        assert_eq!(members, [state(INVITED, Some(MATCH))], "the pop's id stays");
+        let empty = BundleMember {
+            component: GAME_MODE_PARTICIPANT_COMPONENT,
+            state: MemberState::Empty(EmptyState {
+                class: crate::game_mode_participant::GAME_MODE_PARTICIPANT_TYPE_INDEX,
+            }),
+        };
+        let mut card = vec![empty];
+        put_member(&mut card, state(INVITED, None));
+        assert_eq!(
+            card,
+            [state(INVITED, None)],
+            "the card's empty state is replaced"
+        );
+    }
     use crate::payload::{BundleGroup, BundlePayload};
 
     const LOCAL_SLOT: u64 = 1;
