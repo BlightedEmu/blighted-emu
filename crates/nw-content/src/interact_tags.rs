@@ -248,6 +248,14 @@ impl InteractTags {
         found
     }
 
+    /// The interact tags the variants of gatherable `gatherable` (the CRC-32 of its lowercase
+    /// `GatherableEntryID`) set; empty for a gatherable with none.
+    pub fn of_gatherable(&self, gatherable: u32) -> &[String] {
+        self.by_gatherable
+            .get(&gatherable)
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// The interact tags of the object with facet entity `facet`; empty for an object with none.
     pub fn of(&self, facet: u64) -> &[String] {
         self.by_key

@@ -204,6 +204,25 @@ impl ItemRolls {
         self.items.get(&item_id.to_lowercase())
     }
 
+    /// The first item whose `ItemClass` holds every class of `classes` (any case): the lowest
+    /// tier, the lowest id first on a tie; `None` when no item has them all.
+    pub fn first_of_classes(&self, classes: &[&str]) -> Option<&ItemRollRow> {
+        self.items
+            .values()
+            .filter(|row| {
+                classes.iter().all(|class| {
+                    row.classes
+                        .iter()
+                        .any(|known| known.eq_ignore_ascii_case(class))
+                })
+            })
+            .min_by(|a, b| {
+                a.tier
+                    .cmp(&b.tier)
+                    .then_with(|| a.item_id.to_lowercase().cmp(&b.item_id.to_lowercase()))
+            })
+    }
+
     /// The best item of `item_id`'s kind: of the items whose `ItemClass` holds the same classes
     /// (the same slot, weapon type or armor weight) and whose gear score is not fixed (a fixed
     /// `GearScoreOverride` marks the playtest and blank items), the one with the highest
@@ -336,6 +355,42 @@ fn sorted_classes(classes: &[String]) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_item_of_a_class_is_its_lowest_tier() {
+        let row = |item: &str, tier| ItemRollRow {
+            item_id: item.to_owned(),
+            classes: vec!["EquippableTool".to_owned(), "InstrumentFlute".to_owned()],
+            tier,
+            ..ItemRollRow::default()
+        };
+        // A flute skin has the class too, not the tool's (live 2026-11-22 14:35: the plan named
+        // `Skin_Flute_DarkFae`).
+        let skin = ItemRollRow {
+            item_id: "Skin_Flute_DarkFae".to_owned(),
+            classes: vec!["InstrumentFlute".to_owned()],
+            ..ItemRollRow::default()
+        };
+        let rolls = ItemRolls::build(
+            [
+                row("2hInstrumentFluteT2", 2),
+                row("2hInstrumentFluteT1", 1),
+                skin,
+            ],
+            PerkTable::default(),
+        );
+        assert_eq!(
+            rolls
+                .first_of_classes(&["equippabletool", "instrumentflute"])
+                .map(|row| row.item_id.as_str()),
+            Some("2hInstrumentFluteT1")
+        );
+        assert!(
+            rolls
+                .first_of_classes(&["EquippableTool", "InstrumentDrums"])
+                .is_none()
+        );
+    }
     use crate::perks::{Perk, PerkBucketRow, PerkSheet, PerkSource};
 
     const SWORD: &str = "1hSwordT4";

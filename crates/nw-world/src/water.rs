@@ -35,6 +35,12 @@ pub const WATER_CONTAINER: ContainerSpec = ContainerSpec {
     format_version: WATER_FORMAT_VERSION,
     schema_hash: WATER_SCHEMA_VERSION,
 };
+/// The shift of a leaf's stored flags (the file's four big-endian bytes) down to their first
+/// byte, the water's kind: a sea leaf stores `0x0a00_0000` (`content-tool water`), and the kind
+/// bits (fishable `1 << 1`, fresh `1 << 2`, salt `1 << 3`, `nw_content::fishing::WaterType`)
+/// are of that byte. Observed: the lake west of retail `16_side_11_feedifrit`'s fishing place
+/// (6473.6, 9155.9) stores `0x0700_0000`.
+const KIND_SHIFT: u32 = 24;
 /// The height of a node that has children (with floor height 65535 and flags 0).
 pub const INNER_NODE_HEIGHT: f32 = 65_535.0;
 /// Children of an inner node.
@@ -142,9 +148,10 @@ impl WaterMap {
     }
 
     /// The water flags at (`x`, `y`) where water is there (sea `0x0a`, lake or river `0x07`,
-    /// pond `0x04`); `None` on dry land and outside every region with a water tree.
+    /// pond `0x04`): the first byte of the leaf's stored flags ([`KIND_SHIFT`]); `None` on dry
+    /// land and outside every region with a water tree.
     pub fn flags_at(&self, x: f32, y: f32) -> Option<u32> {
-        self.water_leaf(x, y).map(|leaf| leaf.flags)
+        self.water_leaf(x, y).map(|leaf| leaf.flags >> KIND_SHIFT)
     }
 
     /// The leaf at (`x`, `y`) when it holds water.
@@ -203,8 +210,11 @@ mod tests {
     const REGION_M: f32 = 1024.0;
     const SEA_M: f32 = 20.0;
     const POND_M: f32 = 22.331;
-    const SEA: u32 = 0x0a;
-    const POND: u32 = 0x04;
+    /// The stored flags of a sea and a pond leaf, and their kind bytes.
+    const SEA: u32 = 0x0a00_0000;
+    const POND: u32 = 0x0400_0000;
+    const SEA_KIND: u32 = 0x0a;
+    const POND_KIND: u32 = 0x04;
     const DRY: u32 = 0;
     const BUILD: &str = "25810808";
 
@@ -259,8 +269,8 @@ mod tests {
     #[test]
     fn a_place_takes_the_flags_of_its_leaf() {
         let map = map();
-        assert_eq!(map.flags_at(100.0, 100.0), Some(SEA));
-        assert_eq!(map.flags_at(300.0, 100.0), Some(POND));
+        assert_eq!(map.flags_at(100.0, 100.0), Some(SEA_KIND));
+        assert_eq!(map.flags_at(300.0, 100.0), Some(POND_KIND));
         assert_eq!(map.flags_at(100.0, 300.0), None, "dry");
         assert_eq!(map.flags_at(1100.0, 100.0), None, "no region");
     }

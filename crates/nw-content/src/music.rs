@@ -29,6 +29,39 @@ const INSTRUMENT_SLOTS: [(&str, u32); 5] = [
     ("instrument-drums-slot", 43),
 ];
 
+/// The instrument `ItemClass` part of each instrument slot row (`MasterItemDefinitions`:
+/// `EquippableTool+InstrumentFlute`, 22 rows, and so on). Observed: retail
+/// `04a_side05_02_playfortown` equipped the flute into paperdoll slot 39 (106.1 s) before its
+/// performance; the other instruments' slots follow the slot table.
+const INSTRUMENT_CLASSES: [(&str, &str); 5] = [
+    ("InstrumentFlute", "instrument-flute-slot"),
+    ("InstrumentGuitar", "instrument-guitar-slot"),
+    ("InstrumentMandolin", "instrument-mandolin-slot"),
+    ("InstrumentUprightBass", "instrument-uprightbass-slot"),
+    ("InstrumentDrums", "instrument-drums-slot"),
+];
+
+/// The paperdoll slot an item of `ItemClass` part `class` is worn in when it is an instrument
+/// (`InstrumentFlute`: 39); `None` for another class.
+pub fn instrument_class_slot(class: &str) -> Option<u32> {
+    let (_, row) = INSTRUMENT_CLASSES
+        .iter()
+        .find(|(known, _)| known.eq_ignore_ascii_case(class))?;
+    INSTRUMENT_SLOTS
+        .iter()
+        .find(|(name, _)| name == row)
+        .map(|(_, slot)| *slot)
+}
+
+/// The instrument `ItemClass` part of the items worn in instrument slot row `instrument`
+/// (`instrument-flute-slot`: `InstrumentFlute`).
+pub fn instrument_class_of(instrument: &str) -> Option<&'static str> {
+    INSTRUMENT_CLASSES
+        .iter()
+        .find(|(_, row)| row.eq_ignore_ascii_case(instrument))
+        .map(|(class, _)| *class)
+}
+
 /// One song (`SongBookData`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Song {
@@ -296,6 +329,18 @@ impl MusicRules {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_instrument_class_is_worn_in_its_slot_row_s_paperdoll_slot() {
+        assert_eq!(instrument_class_slot("InstrumentFlute"), Some(39));
+        assert_eq!(instrument_class_slot("instrumentdrums"), Some(43));
+        assert_eq!(instrument_class_slot("FishingPole"), None);
+        assert_eq!(
+            instrument_class_of("instrument-flute-slot"),
+            Some("InstrumentFlute")
+        );
+        assert_eq!(instrument_class_of("instrument-tuba-slot"), None);
+    }
     use crate::generated::{
         MusicalInstrumentSlot, MusicalPerformanceRewards, MusicalRanking, MusicalScoring,
         SongBookData, SongBookSheets,

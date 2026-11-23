@@ -17,6 +17,8 @@ const SKINNING: &str = "Skinning";
 const TOOL_REQUIRED: &str = "ToolRequired";
 /// The `GatheringType` of a gatherable taken by hand, not with a tool's action.
 const BY_HAND: &str = "None";
+/// The `Tradeskill` of a gatherable of no tradeskill.
+const NO_TRADESKILL: &str = "None";
 /// Milliseconds per second.
 const MS_PER_SECOND: f64 = 1_000.0;
 /// The gatherers a gatherable without a `NumRequiredToGather` above it needs.
@@ -95,6 +97,18 @@ impl Gatherable {
     /// It is a corpse to skin (`Tradeskill` Skinning).
     pub fn skinning(&self) -> bool {
         self.tradeskill.as_deref() == Some(SKINNING)
+    }
+
+    /// It is a quest object: its gather fires a game event and it has no tradeskill (an
+    /// encounter start object such as `1434_0103_EncStart_Pyre`, event
+    /// `1434_0103_EncStart_Pyre_Interact`), unlike a tradeskill node that also fires one
+    /// (`Wolf_Elemental_Wood`, Logging, `Gather_LoggingT6`).
+    pub fn quest_interact(&self) -> bool {
+        self.game_event.is_some()
+            && self
+                .tradeskill
+                .as_deref()
+                .is_none_or(|tradeskill| tradeskill == NO_TRADESKILL)
     }
 
     /// Its node entity has the gatherable controller in bundle slot 3 and the interact in slot 4,
@@ -730,6 +744,9 @@ impl CrateLoot {
 pub struct InstancedGathers {
     /// Each object's slice values, by its facet key.
     objects: HashMap<u64, InstancedObject>,
+    /// The places of the instanced capitals, with their slice values
+    /// ([`InstancedGathers::with_places`]).
+    places: Vec<(crate::interact_tags::Place, InstancedObject)>,
 }
 
 /// The values of an instanced object's slice that its looter's loot tracker entry follows.
@@ -767,7 +784,43 @@ impl InstancedGathers {
                         .map(|(id, object)| (id & !FACET_FREE_BITS, object)),
                 )
                 .collect(),
+            places: Vec::new(),
         }
+    }
+
+    /// These objects with the places `capitals` (GUID text, place) of their capitals, so that a
+    /// gather that names its node by the node's gatherable point finds the capital on it
+    /// ([`InstancedGathers::at`]).
+    #[must_use]
+    pub fn with_places<'a>(
+        mut self,
+        capitals: impl IntoIterator<Item = (&'a str, crate::interact_tags::Place)>,
+    ) -> Self {
+        for (guid, place) in capitals {
+            if let Some(object) = capital_key(guid).and_then(|key| self.objects.get(&key)) {
+                self.places.push((place, *object));
+            }
+        }
+        self
+    }
+
+    /// The slice values of the instanced capital that stands on `point` (each axis within
+    /// `within_m`); `None` when no instanced capital stands there.
+    ///
+    /// Observed (retail `09a_s16_destroyabomination`, 75.267 s): the gather of the capital
+    /// `09A_S16_ReroutePylonA` (slice `Master_Quest_Instanced`, at 8364.0 1421.0 279.8) sent no
+    /// gatherer count and gave the gatherer an own loot tracker entry (kind 4 at 8363.3 1419.4):
+    /// an instanced gather, also for a request that names the pylon by its gatherable point.
+    pub fn at(&self, point: crate::interact_tags::Place, within_m: f32) -> Option<InstancedObject> {
+        self.places
+            .iter()
+            .find(|(place, _)| {
+                place
+                    .iter()
+                    .zip(point)
+                    .all(|(axis, other)| (axis - other).abs() <= within_m)
+            })
+            .map(|(_, object)| *object)
     }
 
     /// Whether the gathers of the object with facet entity `facet` are instanced.
@@ -815,6 +868,31 @@ mod tests {
         );
         assert!(!gatherable_of("17dw_DoorLarge", None).plant_layout());
         assert!(!gatherable_of("16BS_AncientGlyphLock", Some("AzothStaff")).plant_layout());
+    }
+
+    #[test]
+    fn a_quest_interact_fires_an_event_and_has_no_tradeskill() {
+        let with_event = |id: &str, tradeskill: Option<&str>, event: &str| Gatherable {
+            game_event: Some(event.to_owned()),
+            ..gatherable_of(id, tradeskill)
+        };
+        assert!(
+            with_event(
+                "1434_0103_EncStart_Pyre",
+                Some("None"),
+                "1434_0103_EncStart_Pyre_Interact"
+            )
+            .quest_interact()
+        );
+        assert!(
+            !with_event("Wolf_Elemental_Wood", Some("Logging"), "Gather_LoggingT6")
+                .quest_interact(),
+            "a tradeskill node"
+        );
+        assert!(
+            !gatherable_of("Damned_Axeman", Some("None")).quest_interact(),
+            "no game event"
+        );
     }
 
     #[test]

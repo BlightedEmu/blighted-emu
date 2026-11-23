@@ -1170,6 +1170,15 @@ fn one_action(value: usize, bit: u32) -> InputSlots {
     slots
 }
 
+/// The action slots of a record that holds each key of `keys` (slot value, bit).
+fn actions(keys: &[(usize, u32)]) -> InputSlots {
+    let mut slots = no_action();
+    for &(value, bit) in keys {
+        slots.values[value] |= 1 << bit;
+    }
+    slots
+}
+
 /// The action slots of a record with no key held.
 fn no_action() -> InputSlots {
     InputSlots {
@@ -1229,6 +1238,54 @@ impl ClientInputMsg {
     /// `counter`, a record with no key in the next, newest first (the sim summons, or dismounts
     /// a rider, on a record that holds the key).
     pub fn summon_mount(position: InputPosition, counter: u16) -> Self {
+        Self::press_then_rest(position, counter, SUMMON_MOUNT_KEY)
+    }
+
+    /// A press of the fishing key at `position` (the pole comes out or goes away): the press in
+    /// the record of counter `counter`, a record with no key in the next, newest first.
+    pub fn fishing_key(position: InputPosition, counter: u16) -> Self {
+        Self::press_then_rest(position, counter, FISHING_TOGGLE_KEY)
+    }
+
+    /// The attack key held at `position` in one record of counter `counter`, pressed in it when
+    /// `pressed` (the first record of a hold: a cast's charge, a hook, a reel). Fishing study, run
+    /// 15: the held bit was set from the record of each press until the release.
+    pub fn attack_holding(position: InputPosition, counter: u16, pressed: bool) -> Self {
+        let keys: &[(usize, u32)] = if pressed {
+            &[(ATTACK_PRESS_VALUE, ATTACK_PRESS_BIT), ATTACK_HELD_KEY]
+        } else {
+            &[ATTACK_HELD_KEY]
+        };
+        Self::one_record(position, counter, actions(keys))
+    }
+
+    /// The attack key let go at `position` in one record of counter `counter` (a cast flies, a
+    /// reel rests).
+    pub fn attack_letting_go(position: InputPosition, counter: u16) -> Self {
+        Self::one_record(
+            position,
+            counter,
+            one_action(ATTACK_RELEASE_VALUE, ATTACK_RELEASE_BIT),
+        )
+    }
+
+    /// An input of one record of counter `counter` at `position` with the action slots `slots`.
+    fn one_record(position: InputPosition, counter: u16, slots: InputSlots) -> Self {
+        Self {
+            records: vec![InputRecord {
+                mask: 1 << BIT_7,
+                u16_after_mask: counter,
+                bit_7: Some(position),
+                slots,
+                ..InputRecord::default()
+            }],
+            ..Self::default()
+        }
+    }
+
+    /// A press of `key` (slot value, bit) at `position` in the record of counter `counter`, a
+    /// record with no key in the next, newest first.
+    fn press_then_rest(position: InputPosition, counter: u16, key: (usize, u32)) -> Self {
         let record = |counter, slots| InputRecord {
             mask: 1 << BIT_7,
             u16_after_mask: counter,
@@ -1239,7 +1296,7 @@ impl ClientInputMsg {
         Self {
             records: vec![
                 record(counter.wrapping_add(1), no_action()),
-                record(counter, one_action(SUMMON_MOUNT_KEY.0, SUMMON_MOUNT_KEY.1)),
+                record(counter, one_action(key.0, key.1)),
             ],
             ..Self::default()
         }
@@ -2466,6 +2523,31 @@ mod tests {
         assert!(press.summon_mount_pressed() && press.u16_after_mask == COUNTER);
         assert!(!later.summon_mount_pressed() && later.u16_after_mask == COUNTER + 1);
         assert!(!press.attack_pressed(), "no other key");
+    }
+
+    #[test]
+    fn fishing_inputs_press_the_fishing_key_then_hold_and_let_go_of_the_attack_key() {
+        const COUNTER: u16 = 9;
+        let read = |input: ClientInputMsg| {
+            let decoded = ClientInputMsg::decode(&input.encode().expect("encode")).expect("decode");
+            assert_eq!(decoded, input);
+            decoded
+        };
+        let toggle = read(ClientInputMsg::fishing_key(position(), COUNTER));
+        let [later, press] = toggle.records.as_slice() else {
+            panic!("two records");
+        };
+        assert!(press.fishing_toggle_pressed() && press.u16_after_mask == COUNTER);
+        assert!(!later.fishing_toggle_pressed() && later.u16_after_mask == COUNTER + 1);
+        let first = read(ClientInputMsg::attack_holding(position(), COUNTER, true));
+        let [first] = first.records.as_slice() else {
+            panic!("one record");
+        };
+        assert!(first.attack_pressed() && first.attack_held() && !first.attack_released());
+        let held = read(ClientInputMsg::attack_holding(position(), COUNTER, false));
+        assert!(held.records[0].attack_held() && !held.records[0].attack_pressed());
+        let gone = read(ClientInputMsg::attack_letting_go(position(), COUNTER));
+        assert!(gone.records[0].attack_released() && !gone.records[0].attack_held());
     }
 
     #[test]
