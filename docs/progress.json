@@ -70,6 +70,14 @@
             {
               "check": "Each solid of the collision names its level entity (2026-11-13, tests only): a capital's id, or the packed id of a slice the level spawns as it loads. Collision file schema 5.",
               "proof": "tests"
+            },
+            {
+              "check": "Story and season trial levels have collision files (2026-11-22, bots): the `nw_ori_*`, `nw_trial_*` and two `nw_raid_*` levels; retail places stand on the floor in most of each level (doc section 6.4) and the trial sims start.",
+              "proof": "bots"
+            },
+            {
+              "check": "The QuestLiang boss area has retail places with no floor under them; the missing piece is Unknown.",
+              "proof": "none"
             }
           ]
         },
@@ -238,6 +246,10 @@
             {
               "check": "Ten hunt bots fight for four hours on one open world sim with less logging (bots, 2026-11-21): 126,504 hits, 7,600 mob deaths, 232 bot deaths and every dead bot lived again after its respawn request, no move refused, every server message read, and the tick's p99 stayed within one tick in 239 of 240 minutes. The sim's memory stayed flat (2,203 MB at the start, 2,208 MB at the end). The one late minute (796 ms without a bundle) came while a big test build ran on the same PC.",
               "proof": "bots"
+            },
+            {
+              "check": "Whole-PC stalls of 3 to 8 s silence every sim and the gateway, and all players leave (2026-11-22, seen six times during builds and instance starts). Cause Inferred: memory pressure on the PC.",
+              "proof": "none"
             }
           ]
         },
@@ -1456,6 +1468,10 @@
             {
               "check": "The PvP flag bonus effect (more luck when gathering and from loot) is held while a PvP flag is on, own or free-for-all, and ends with the flag, as on retail (tests only, 2026-11-11).",
               "proof": "tests"
+            },
+            {
+              "check": "A player kill fires the `PlayerKill` event for quests (2026-11-22, bots; Inferred, no retail capture of the quest): two bots end `C10A_Q6` and `C10A_Q6R`.",
+              "proof": "bots"
             }
           ]
         }
@@ -1534,6 +1550,18 @@
             },
             {
               "check": "Not made: the three Myrkgard monolith events cannot end (no retail entity table for their carapaces and pylons).",
+              "proof": "none"
+            },
+            {
+              "check": "Level variants of a mob type count for quest kills, drops and skins (2026-11-22, bots): retail `0332_0102_fabulousfurs` kills `Elk_Strange_48`, a variant of `Elk_Strange_40`.",
+              "proof": "bots"
+            },
+            {
+              "check": "A mob with no prefab of its own shows the creature of its spawner slice, with its own vitals id (2026-11-22, bots): before, it got a bare card with no vitals and no death, so a client did not see it die. Retail cards of the same lion asset carry each variant's id.",
+              "proof": "bots"
+            },
+            {
+              "check": "Spawns whose creature no source names still get a bare card: mostly objects and encounters the open map does not run. Unknown for the rest.",
               "proof": "none"
             }
           ]
@@ -1685,6 +1713,18 @@
             {
               "check": "A mob that cannot walk home stays in a leash reset (bot soak, 2026-11-21: five mobs looped for more than 30 minutes where the floor ahead was missing). The game data names stuck fixes (move left, move right, teleport a little) and a give-up choice; their values are Unknown: not done.",
               "proof": "none"
+            },
+            {
+              "check": "Open world encounter mobs run to a player in the encounter's volume (2026-11-22, bots): retail `09a_s17` prowlers spawn 31 to 32 m out and run to the player.",
+              "proof": "bots"
+            },
+            {
+              "check": "A mob never drops a target that stands next to it as unreachable (2026-11-22, bots): a target within 3.8 m counts as reachable (`1434_0103` dryad).",
+              "proof": "bots"
+            },
+            {
+              "check": "An AI animation action with no entry for the mob's tags ends at once (2026-11-22, bots; Inferred): the prowlers' alert step waited forever before.",
+              "proof": "bots"
             }
           ]
         },
@@ -1927,6 +1967,22 @@
             {
               "check": "Turning stones and carts (cyclic objects with no gather point) can be used, again at once, and do not run out (2026-11-22, bots): the retail capture turns a stone twice 1.8 s apart. `06A_MSQ_18` and `99D_MSQ_01` complete.",
               "proof": "bots"
+            },
+            {
+              "check": "Puzzle steps (`TaskSlayerScript`) by bots (2026-11-22): the Ebonscale gongs (`99F_MSQ_ER_MeetWiseman`, three strikes) and the Shattered Mountain altars (`99G_MSQ_SM_AttackMentally`, three altars, then the puzzle ends 15.07 s later as in retail). The order and the altar names are Inferred from the retail captures.",
+              "proof": "bots"
+            },
+            {
+              "check": "A gong strike sends the hit messages 2071 and 2724 to the gong's own entity id, as retail (2026-11-22, tests): the ids are those of the spawned gong slices. Not seen in a client yet.",
+              "proof": "tests"
+            },
+            {
+              "check": "A quest started inside an instance counts the steps of the instance's game mode (2026-11-22, bots): the Windsward quest offered in Amrine counts its boss kill.",
+              "proof": "bots"
+            },
+            {
+              "check": "A have-items step drops its item from its kill and container columns (2026-11-22, bots): retail `13a_sq_21` opens five containers for it.",
+              "proof": "bots"
             }
           ]
         },
@@ -2045,19 +2101,27 @@
               "proof": "bots"
             },
             {
-              "check": "Side quests of 14 zones by bots (2026-11-22): 274 of 348 complete, Monarch's Bluffs 17 of 17 in two plays with new bots, and 30 more of the 34 Everfall side quests.",
+              "check": "Side quests of 14 zones by bots (2026-11-22, a night and a day of bot runs): most end, Monarch's Bluffs all of them in two plays with new bots. The quests still open are in the next steps.",
               "proof": "bots"
             },
             {
-              "check": "Open world encounters whose objective counts kills of alias targets never start: the waves spawn other minion targets (`99B_MSQ_05`, `99E_MSQ_07`, `1656_0401`, `1434_0103`). Not done.",
-              "proof": "none"
+              "check": "Open world wave encounters by bots (2026-11-22): `99B_MSQ_05`, `99E_MSQ_07`, `C10A_Q3` and `C10A_Q3R` (one bot, both in one play), `1602_0401`, `1434_0103`, `09A_S16`, `09A_S17` and `09A_S3` complete. The bot fights only in the encounter's volume, waits there for the encounter's own start object, and kills the encounter's own mobs (retail `99b_msq_05_findingfort`: the encounter ends 0.14 s after the tenth kill).",
+              "proof": "bots"
             },
             {
-              "check": "The story trial levels (`nw_ori_*`, `nw_trial_*`) have no collision file, so their instance sims stop at start: `99D_MSQ_07` and the later story trials. Not done.",
-              "proof": "none"
+              "check": "Story trials by bots (2026-11-22): QuestNihilo (`99D_MSQ_07`), QuestMotherwell (`99E_MSQ_09`) and QuestCaerDun (`99B_MSQ_10`) complete; any step with a game mode enters its trial first, and the bot leaves a trial before the next one.",
+              "proof": "bots"
             },
             {
-              "check": "Still not run (2026-11-22): the puzzle steps of `99F` and `99G` (client puzzle scripts), the cave door of `99C_MSQ_07` (the staff rank it needs is Unknown), the settlement station steps (`06A_TS_02`, `09A_S0`), and steps the bot cannot play yet (mount courses, fishing, PvP kills, a song).",
+              "check": "Steps first played by bots (2026-11-22): the cave door of `99C_MSQ_07` (it needs the staff rank 2 that `99B_MSQ_10` gives), the settlement station steps (`06A_TS_02`, `09A_S0`), mount courses (`0334_0102`, `09A_S11`), a quest fish (`16_Side_11`), PvP kills (`C10A_Q6`, `C10A_Q6R`), a song (`04A_Side05_02`) and the Elysian Wilds elite kill (`09A_S14`).",
+              "proof": "bots"
+            },
+            {
+              "check": "A quest NPC on a swap placement is found (2026-11-22, bots): `09a_Trahern_LC` stands on a swap NPC placement that the level's NPC list leaves out; `09A_M15_FightArtemis` completes.",
+              "proof": "bots"
+            },
+            {
+              "check": "The boss stages of the story trials QuestLiang and QuestIsabella wait for events (`Phase1_started`, `Transform_Winged`, ...) that nothing sends: the boss behaviour trees are not in the server pak this project has. Unknown.",
               "proof": "none"
             }
           ]
@@ -2200,6 +2264,10 @@
             {
               "check": "A quest item that a named mob drops is in the loot bag of its kill, and the loot interaction (kind 28) on the bag gives it (bots, 2026-11-17: A Pirate's Plan's blunderbuss, Broken Oath's three seals).",
               "proof": "bots"
+            },
+            {
+              "check": "Level variants roll their base type's loot (2026-11-22, bots): a `Legion_Sagittarii_61` bag gives gear, before only the quest notes.",
+              "proof": "bots"
             }
           ]
         },
@@ -2334,6 +2402,14 @@
             {
               "check": "The broken quest objects (nodules, damageable tablets) and the tutorial chest have a tracker range: the slice's `m_aoiRadius` (100 m for instanced quest objects; 80 m for the tutorial chest, seen leave the list in the retail new character run), and a broken instanced object's lock follows the respawn roll as other instanced gathers (tests only, tests not run yet).",
               "proof": "tests"
+            },
+            {
+              "check": "A skin step takes the gatherable that the creature slice names (2026-11-22, bots): `pig_domestic` names `PigDomestic` (`1127_0102`, retail capture skins it).",
+              "proof": "bots"
+            },
+            {
+              "check": "Per-player quest nodes (instanced capitals) are not used up for other players (2026-11-22, bots): the `09A_S16` pylons and the `C10A_Q2R` cages.",
+              "proof": "bots"
             }
           ]
         },
@@ -2408,6 +2484,10 @@
             {
               "check": "A quest's cook step is played as on retail (bots, 2026-11-17, Boar Feast): the player opens the nearest level campfire, crafts `Procedural_HealthRecoveryT1` with the pork it skinned, closes the craft screen and the station, and the quest counts the craft (retail capture `12-3_boarfeast-Campfire-Feast`).",
               "proof": "bots"
+            },
+            {
+              "check": "Settlement station steps (`06A_TS_02`, `09A_S0`) end through their sibling step, as in retail `06a_ts_02_forgesword`, and a craft-a-weapon-family step plans the craft (2026-11-22, bots).",
+              "proof": "bots"
             }
           ]
         },
@@ -2438,6 +2518,10 @@
             {
               "check": "Lighter fish (tests only, 2026-11-12): Focus 150 and the bag perks make fish and other item classes weigh less in the bag (fast travel weight and cost).",
               "proof": "tests"
+            },
+            {
+              "check": "A bot catches a quest fish (2026-11-22, bots): the cast's water check takes the full depth (client function `FUN_1430e8590`) and the water map's flags are read in the right byte order; before, every cast hit land. The quest fish bites at the latest on the sixth catch, as in the retail capture.",
+              "proof": "bots"
             }
           ]
         },
@@ -2740,6 +2824,10 @@
             },
             {
               "check": "The mount quest's reward box opens from the bag (1733) and gives the horse (bots, 2026-11-21): a bot opened the box, summoned the horse and rode it.",
+              "proof": "bots"
+            },
+            {
+              "check": "Mount race courses by bots (2026-11-22): `0334_0102` and the three `09A_S11` time trials end.",
               "proof": "bots"
             }
           ]
@@ -3049,7 +3137,19 @@
               "proof": "bots"
             },
             {
-              "check": "The boss of an expedition does not die when a bot group fights it (Amrine, Starstone Barrows): its hits stop after 20 to 30. Cause Unknown.",
+              "check": "Expedition bosses die when a bot group fights them (2026-11-22, bots): Starstone Barrows, Amrine, the Cutlass Keys admiral, Ebonscale, Brimstone Sands, Shattered Mountain and Edengrove bosses. The cause was a bot fault: god mode did not follow the bot into the instance sim, so the bot died there.",
+              "proof": "bots"
+            },
+            {
+              "check": "Expedition side quests by bot groups (2026-11-22): Windsward, Brightwood, Restless Shore, Ebonscale, Brimstone Sands, Shattered Mountain, Cutlass Keys and Everfall quests that kill an expedition boss or take its drop complete. A drop of an encounter mob plans the entry into its instance.",
+              "proof": "bots"
+            },
+            {
+              "check": "A story trial runs one boss, not two (2026-11-22, bots): the daily twin of a trial encounter runs only for a player on that daily trial (Inferred from the door conditions; retail captures show one encounter per run).",
+              "proof": "bots"
+            },
+            {
+              "check": "Expedition quests not yet ended by bots (2026-11-22): `C10A_M6`, `1689_EXP_Coins`, `1403A`, `0525_EXP` and `09A_S20` need runs longer than 30 minutes for one bot; `Dynasty_Summoner_Named_DG_Ebonscale_00` (`0899_0801`) has no spawn in the instance data (Unknown).",
               "proof": "none"
             }
           ]
@@ -3887,6 +3987,10 @@
             {
               "check": "Not checked live.",
               "proof": "none"
+            },
+            {
+              "check": "A bot plays a full song for a quest (2026-11-22, bots: `04A_Side05_02`); an instrument goes to its own equip slot (the flute to slot 39, as in retail).",
+              "proof": "bots"
             }
           ]
         }
@@ -4011,7 +4115,7 @@
     }
   ],
   "nextSteps": [
-    "**Quests by bots (2026-11-22).**\n\n- Encounters that count kills of alias targets (`99B_MSQ_05`, `99E_MSQ_07`): read the minion slices' own mob slice in the content and count its kills.\n- Collision files for the story trial levels (`nw_ori_*`, `nw_trial_*`), as for the expeditions.\n- Expedition bosses with a bot group: run the instance sims at debug level and find why the hits stop.\n- Puzzle steps (`99F`, `99G`): decode the retail captures.\n- A content table of each quest object's interaction kind, read from its slice.",
+    "**Quests by bots (2026-11-22, day run).**\n\n- Boss stage events of QuestLiang and QuestIsabella: find what sends them.\n- Expedition quests that need long runs: `C10A_M6`, `1689_EXP_Coins`, `1403A`, `0525_EXP`, `09A_S20`; and the missing summoner of `0899_0801`.\n- Shattered Mountain expedition quests (`0726_01xx`) and the Cutlass Keys trinket (`C10A_M7`, `C10A_M7R`), and `09A_S19` in First Light.\n- The QuestAdiana trial itself, and the QuestLiang floor gap.\n- Whole-PC stalls that drop every player.",
     "**Player body: physics leads (2026-11-21).**\n\n- Done (tests): attack root motion along the camera, side dodge rolls, the jump's wind-up, the start and stop lag, the camera on the floor, the measuring tool.\n- Next, in order: held-key attack chains, late and missed dodges (1,657 of 6,507 retail presses), the sprint before a jump and the sprint landing, the walls retail walks by (a stall near 7643, 4268).\n- Then let key physics lead and the camera only correct small error, measured on the fresh-start tool for keys and pad, and a live controller trace (no retail ledger has controller input).",
     "**Other players: live check of the 2026-11-20 second round (tests only).** Two players, keyboard and controller: crouch and prone with the pad (left shoulder with a left stick click, and held), quick double dodge presses (one roll each, no restart), and a keyboard video like the controller one. Then the earlier list: a bow's hip shots held long and short, walking and running backward, keys let go during an attack, walk starts, jumps and falls, the bow's full draw, blunderbuss re-fire and reload, blocks, a spear chain on a boar, a rapier's light and heavy attacks (the heavy now 19 records into the hold).\n\nStill open: the jerk of a player on a slow link (Unknown), the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
     "**Bow abilities and other players: live check of the 2026-11-21 fixes (tests only).** Two players, keyboard and controller: another player running across the screen (no saw-tooth), Rain of Arrows' place on a slope and on a structure. Rain of Arrows still keeps its own player in the aim: trace the client's `SpellRaycastState` during F (needs a player at the keyboard), then fix from what it shows.",
@@ -4353,7 +4457,8 @@
     "Other players' animations (2026-11-17, tests only): block pose end, upper slot times, landings and falls, draw ends, sheathed dodges, the re-mined player sequence table, the heavy attack lift and the press start kept at a draw.",
     "Bot tools and fixes (2026-11-21, bots): a bot walks with real input records (keys and pad), a bot saved dead respawns at login, a bot opens the mount reward box, `!gearup` wears the bag's class gear, a twice-listed quest task ends with its first copy, a tutorial exit is saved in the open world, and the director waits longer before each new start of a level whose sim stops at once.",
     "Physics-first body, first round (2026-11-21, tests): attacks move the body by their root motion, side dodges roll sideways, moving jumps wind up, starts and stops lag a record as retail, a camera on the floor gives the body nothing, the musket's jump shows to others, and the measuring tool reads the equip load, abilities and mobs.",
-    "Quests by bots (2026-11-22, bots): the Everfall main story to its end with the staff in the bag, the Windsward main story to its end, side quests in 14 zones, encounter success events, video objects, turning stones, story trials entered at their doors, and tools worn by `!gearup`."
+    "Quests by bots (2026-11-22, bots): the Everfall main story to its end with the staff in the bag, the Windsward main story to its end, side quests in 14 zones, encounter success events, video objects, turning stones, story trials entered at their doors, and tools worn by `!gearup`.",
+    "Quests by bots, day run (2026-11-22, bots): open world wave encounters, puzzle steps, story trial collision and trials, expedition bosses and expedition side quests, level variants for kills, loot and looks, fishing, PvP kills, mount courses, songs and settlement stations."
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-22",
