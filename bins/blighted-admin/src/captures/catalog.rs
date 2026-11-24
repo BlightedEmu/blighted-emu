@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The sessions under the captures folder (admin tools spec section 4.4): every `ledger.bin`
-//! and every ledger attached to a saved Discord post (`ledger-<hash>.bin`), with the name and
+//! and every ledger attached to a saved Discord post (`<name>ledger-<hash>.bin`), with the name and
 //! start time of its `metadata.json` and, for a shared session, the title of the saved Discord
 //! post that holds its archive or ledger.
 
@@ -11,8 +11,11 @@ use serde::{Deserialize, Serialize};
 
 /// File name of a ledger.
 pub const LEDGER_FILE: &str = "ledger.bin";
-/// Start of the file name of a ledger attached to a saved Discord post (`ledger-<hash>.bin`).
-const ATTACHED_LEDGER_START: &str = "ledger-";
+/// End of the original name of a ledger attached to a saved Discord post (`ledger`,
+/// `opr_ledger`, `roads-windsward-20261001-0610-ledger`).
+const ATTACHED_LEDGER_NAME_END: &str = "ledger";
+/// Separator before the hash a saved Discord post adds to an attachment's name.
+const ATTACHMENT_HASH_SEPARATOR: char = '-';
 /// End of the file name of a ledger.
 const LEDGER_END: &str = ".bin";
 /// File name of the capture tool's session facts.
@@ -135,9 +138,18 @@ fn find_ledgers(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// `ledger.bin`, or `ledger-<hash>.bin` as a saved Discord post names an attached ledger.
+/// `ledger.bin`, or an attached ledger as a saved Discord post names it: the original name,
+/// which ends in `ledger`, then `-<hex hash>.bin`.
 fn is_ledger_file(name: &str) -> bool {
-    name == LEDGER_FILE || (name.starts_with(ATTACHED_LEDGER_START) && name.ends_with(LEDGER_END))
+    name == LEDGER_FILE
+        || name
+            .strip_suffix(LEDGER_END)
+            .and_then(|stem| stem.rsplit_once(ATTACHMENT_HASH_SEPARATOR))
+            .is_some_and(|(original, hash)| {
+                original.ends_with(ATTACHED_LEDGER_NAME_END)
+                    && !hash.is_empty()
+                    && hash.chars().all(|letter| letter.is_ascii_hexdigit())
+            })
 }
 
 /// `metadata.json` beside the ledger, else in the folder above (sessions with a `dtls` folder).
@@ -289,20 +301,33 @@ mod tests {
         let discord = captures.join("posts");
         let post = discord.join("Example Server - captures - Bow cap [456].html_Files");
         std::fs::create_dir_all(&post).expect("dir");
-        std::fs::write(post.join("ledger-0123abcd.bin"), LEDGER_BYTES).expect("ledger");
-        std::fs::write(post.join("ledgers.bin.css"), b"").expect("page file");
+        let ledgers = [
+            "ledger-0123abcd.bin",
+            "opr_ledger-4567cdef.bin",
+            "roads-zone-20261001-0610-ledger-89ab0123.bin",
+        ];
+        for name in ledgers {
+            std::fs::write(post.join(name), LEDGER_BYTES).expect("ledger");
+        }
+        for name in [
+            "ledgers.bin.css",
+            "notes-0123abcd.bin",
+            "ledger-notahash.bin",
+            "ledger.bin.bak",
+        ] {
+            std::fs::write(post.join(name), b"").expect("page file");
+        }
         let sessions = scan(&captures, &discord);
-        let found: Vec<(&str, Option<&str>)> = sessions
+        let found: Vec<(String, Option<&str>)> = sessions
             .iter()
-            .map(|entry| (entry.id.as_str(), entry.post_title.as_deref()))
+            .map(|entry| (entry.id.clone(), entry.post_title.as_deref()))
             .collect();
-        assert_eq!(
-            found,
-            vec![(
-                "posts/Example Server - captures - Bow cap [456].html_Files/ledger-0123abcd.bin",
-                Some("Bow cap")
-            )]
-        );
+        let folder = "posts/Example Server - captures - Bow cap [456].html_Files";
+        let expected: Vec<(String, Option<&str>)> = ledgers
+            .iter()
+            .map(|name| (format!("{folder}/{name}"), Some("Bow cap")))
+            .collect();
+        assert_eq!(found, expected);
     }
 
     #[test]
