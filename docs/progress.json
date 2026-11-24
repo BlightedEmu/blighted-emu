@@ -406,6 +406,10 @@
             {
               "check": "`!tp` lands on a floor up to 1 m above the asked point (2026-11-23, tests): a point just under a floor fell through to a floor 61 m below.",
               "proof": "tests"
+            },
+            {
+              "check": "The capture scan finds an attached ledger under any name that ends in `ledger` (`opr_ledger-<hash>.bin` too), so the capture index holds every shared retail capture (2026-11-24, tests).",
+              "proof": "tests"
             }
           ]
         },
@@ -4618,5 +4622,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-24",
-  "lastCommit": "59285dce"
+  "lastCommit": "3b633461"
 }
