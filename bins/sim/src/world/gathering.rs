@@ -187,6 +187,13 @@ const PROGRESS_STEP_MS: u64 = 100;
 /// player gathers at a time (Observed: retail 1 for 795 of 795 gathers of a shared open-world
 /// object, [`nw_content::gathering::InstancedGathers`]); a node sends its own gatherers.
 const SOLE_GATHERER: u8 = 1;
+/// The slice values of an expedition run's loot container ([`SimWorld::run_container`]): a POI
+/// loot lock (`InstancedLootType` 0, as `master_lootcontainer`) with no range (Inferred).
+const RUN_CONTAINER: nw_content::gathering::InstancedObject =
+    nw_content::gathering::InstancedObject {
+        loot_type: 0,
+        aoi_radius_m: None,
+    };
 /// The gatherer count of a gather that counts none: an instanced object's (Observed: retail 0 at
 /// the start of 2,584 of 2,584 such gathers), and a water gather's, which sends no start state.
 const NO_GATHERERS: u8 = 0;
@@ -419,27 +426,48 @@ fn work_done_ms(elapsed_ms: u64, efficiency: f32) -> u64 {
 }
 
 impl SimWorld {
-    /// The nodes depleted since the last call, for the world database.
+    /// The nodes depleted since the last call, for the world database. An instance sim's nodes
+    /// are its instance's own ([`Self::fresh_instance_nodes`]): none is kept for the level.
     pub(crate) fn take_depleted_nodes(&mut self) -> Vec<DepletedNode> {
         let (now_ms, server_ms) = (self.last_now_ms, self.server_ms);
-        self.nodes.take_unsaved(|at_ms| {
+        let unsaved = self.nodes.take_unsaved(|at_ms| {
             at_ms
                 .saturating_sub(now_ms)
                 .saturating_add(server_ms)
                 .saturating_add(SERVER_EPOCH_UNIX_MS)
-        })
+        });
+        if self.instance_sim {
+            return Vec::new();
+        }
+        unsaved
+    }
+
+    /// A new instance (`instance`) starts with every node of its level grown: an instance is a private copy
+    /// of its level, and the instance sim that ran another one before keeps no depletion of it.
+    /// Inferred (no capture shows two runs of one trial): live 2026-11-24 07:54:51Z, the crown
+    /// `MB_MSQ2_DefeatGawain_Crown` that a bot took at 07:51Z in another `QuestGawain` instance
+    /// was refused as depleted to the next player in a new one.
+    pub(super) fn fresh_instance_nodes(&mut self, instance: Option<uuid::Uuid>) {
+        if self.nodes.instance != instance {
+            self.nodes.instance = instance;
+            self.nodes.grow_all();
+        }
     }
 
     /// Holds again the depleted nodes the world database kept for this level, at sim ms
     /// `now_ms` and Unix ms `now_unix_ms`: each grows back at its saved time. A node on an
     /// instanced capital is no shared node ([`Self::instanced_object`]): a saved depletion of
-    /// one (left by a gather that the sim took for a shared one) is not held.
+    /// one (left by a gather that the sim took for a shared one) is not held; an instance sim
+    /// holds none ([`Self::fresh_instance_nodes`]).
     pub(crate) fn restore_depleted_nodes(
         &mut self,
         saved: &[DepletedNode],
         now_ms: u64,
         now_unix_ms: u64,
     ) {
+        if self.instance_sim {
+            return;
+        }
         let on_instanced = |point: usize| {
             self.content
                 .gather_points
@@ -540,7 +568,9 @@ impl SimWorld {
         };
         let table = self.gather_table(&gatherable, request, name);
         let node_at = point.map(|(_, at)| at);
-        let instanced = mob.is_none() && self.instanced_object(&request, node_at).is_some();
+        let instanced = mob.is_none()
+            && (self.instanced_object(&request, node_at).is_some()
+                || self.run_container(&gatherable));
         // An instanced object stays locked for its gatherer until its tracker entry's reset.
         let opened = instanced
             && self
@@ -764,10 +794,18 @@ impl SimWorld {
                 self.content.crates.table(request.target_entity, crc, name)
             })
             .flatten();
-        if gatherable.loot_container && variant.is_none() {
-            tracing::info!(gatherable = %gatherable.id, ?request, "crate of an unknown variant");
-        }
+        // A crate of an Unknown variant rolls its gatherable's usual variant table (Inferred,
+        // [`nw_content::gathering::CrateLoot::usual_table`]).
+        let usual = (gatherable.loot_container && variant.is_none())
+            .then(|| {
+                let crc = request.gatherable?;
+                let usual = self.content.crates.usual_table(crc);
+                tracing::info!(gatherable = %gatherable.id, ?usual, "crate of an unknown variant");
+                usual
+            })
+            .flatten();
         variant
+            .or(usual)
             .map(str::to_owned)
             .or_else(|| gatherable.loot_table.clone())
     }
@@ -1225,6 +1263,11 @@ impl SimWorld {
                 }
             }
         }
+        if gather.gatherable.loot_container
+            && let Some(node) = self.nodes.position_of(&gather.request.target)
+        {
+            self.end_chest_gathered(gather.number, node, &gather.gatherable.id);
+        }
         let locked = self.lock_of(gather);
         let tag = self.tracked_tag(gather.request.target_entity, gather.request.gatherable);
         let Some(entity) = self.player_by_number(gather.number) else {
@@ -1347,8 +1390,22 @@ impl SimWorld {
             return None;
         }
         let at = self.nodes.position_of(&gather.request.target)?;
-        let object = self.instanced_object(&gather.request, Some(at))?;
+        let object = self
+            .instanced_object(&gather.request, Some(at))
+            .or_else(|| {
+                self.run_container(&gather.gatherable)
+                    .then_some(RUN_CONTAINER)
+            })?;
         self.instanced_lock(object, &gather.gatherable, gather.request.gatherable, at)
+    }
+
+    /// Whether a gather of `gatherable` is a loot container of an expedition run: each player
+    /// opens its own (**Inferred**: an expedition's chests stand in slices of its level with no
+    /// instanced capital; live 2026-11-24 04:43:54Z a group's end chest went `Depleted` for the
+    /// four other players after the first open, while retail groups each loot the end chest;
+    /// every retail gather of an instanced object counts no gatherer, Observed).
+    pub(super) fn run_container(&self, gatherable: &Gatherable) -> bool {
+        gatherable.loot_container && self.expedition_run().is_some()
     }
 
     /// The slice values of the instanced object that `request` gathers: the one its facet
@@ -2078,6 +2135,8 @@ pub(super) struct Nodes {
     /// The node of each level gatherable point (its index in
     /// [`crate::player_content::PlayerContent::gather_points`]).
     by_point: HashMap<usize, usize>,
+    /// The instance whose nodes these are, on an instance sim ([`SimWorld::fresh_instance_nodes`]).
+    instance: Option<uuid::Uuid>,
 }
 
 impl Nodes {
@@ -2268,6 +2327,22 @@ impl Nodes {
         let index = self.nodes.len() - 1;
         self.by_ref.insert(saved.gde_ref, index);
         self.by_point.insert(saved.point, index);
+    }
+
+    /// Every depleted node grows back now, its work and gatherers cleared; its grown state goes
+    /// to the players near it.
+    pub(super) fn grow_all(&mut self) {
+        for node in &mut self.nodes {
+            node.gatherers.clear();
+            if let Some(work) = node.group.as_mut() {
+                work.reset();
+            }
+            node.unsaved = false;
+            if node.respawn_at_ms.take().is_some() {
+                node.version += 1;
+                node.last_change = NodeChange::States;
+            }
+        }
     }
 
     /// The depleted nodes whose time came at `now_ms` grow back, and the Fire Cannon timelines
@@ -2575,6 +2650,62 @@ pub(crate) mod tests {
         assert!(
             restarted.take_unsaved(|at_ms| at_ms).is_empty(),
             "a load is no new save"
+        );
+    }
+
+    /// An instance is a private copy of its level: an instance sim keeps no depletion for the
+    /// level, loads none, and a new instance on the same sim process finds every node grown
+    /// (live 2026-11-24 07:54:51Z: the Gawain crown taken in one `QuestGawain` instance was
+    /// refused as depleted in the next).
+    #[test]
+    fn a_new_instance_finds_the_nodes_the_last_instance_took() {
+        let instance_sim = || {
+            let mut settings = crate::world::tests::settings(
+                crate::world::tests::MANY,
+                crate::world::tests::MAX_PLAYERS,
+            );
+            settings.instance_role = true;
+            crate::world::tests::world_with_combat(settings, crate::combat::tests::test_combat())
+        };
+        let mut sim = instance_sim();
+        let first = Some(uuid::Uuid::from_u128(1));
+        let next = Some(uuid::Uuid::from_u128(2));
+        sim.fresh_instance_nodes(first);
+        assert_eq!(
+            sim.nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
+            Ok(1)
+        );
+        sim.nodes.deplete(&FLINT, HARVESTED_AT_MS, RESPAWN_AT_MS);
+        assert!(
+            sim.take_depleted_nodes().is_empty(),
+            "no save for the level"
+        );
+        sim.fresh_instance_nodes(first);
+        assert_eq!(
+            sim.nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
+            Err(NodeBusy::Depleted),
+            "the same instance keeps its depletion"
+        );
+        sim.fresh_instance_nodes(next);
+        assert_eq!(
+            sim.nodes.join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
+            Ok(1),
+            "the next instance finds it grown"
+        );
+        let saved = DepletedNode {
+            gde_ref: FLINT,
+            point: FLINT_POINT,
+            position: AT,
+            respawn_at_unix_ms: u64::MAX,
+        };
+        let mut loaded = instance_sim();
+        loaded.restore_depleted_nodes(&[saved], HARVESTED_AT_MS, HARVESTED_AT_MS);
+        assert_eq!(
+            loaded
+                .nodes
+                .join(FLINT, FLINT_POINT, AT, PLAYER, SENT, None),
+            Ok(1),
+            "an instance sim loads no depletion of the level"
         );
     }
 

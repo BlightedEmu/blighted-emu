@@ -132,7 +132,7 @@ const PLAN_USE_ITEM_BAG: &str = "bag";
 const PLAN_PVP: &str = "pvp";
 const PLAN_FISH_YAW: &str = "yaw";
 /// How many rolls of a gatherable's loot table measure how often it gives a step's item.
-const SOURCE_ROLLS: u32 = 64;
+pub(super) const SOURCE_ROLLS: u32 = 64;
 /// The fixed random sequence of those rolls (a 64-bit linear congruential generator, Knuth's
 /// MMIX constants), so a plan names the same source every time.
 const SOURCE_ROLL_SEED: u64 = 0x2545_f491_4f6c_dd1d;
@@ -1655,16 +1655,62 @@ impl SimWorld {
     /// The encounter whose success fires game event `fired` (its `m_universalSuccessGameEventId`,
     /// [`super::dungeon_script::DungeonRun::success_event_of`]): one of the instance this sim
     /// runs, else one of the open world when this sim runs its encounters.
-    fn encounter_firing(&self, fired: &str) -> Option<&nw_world::dungeon_scripts::Encounter> {
+    pub(super) fn encounter_firing(
+        &self,
+        fired: &str,
+    ) -> Option<&nw_world::dungeon_scripts::Encounter> {
+        self.encounter_firing_at(fired)
+            .map(|(_, encounter)| encounter)
+    }
+
+    /// The encounter whose success fires game event `fired`, with its index in the script
+    /// ([`Self::encounter_firing`]). Of the open world's spawn groups only the choice runs (a
+    /// group of breaches runs one at a time): an encounter that is no choice spawns nothing when
+    /// a player comes (live 2026-11-24 04:22:32Z: `FM_corruption_breach` named the first breach
+    /// of the list, the bot saw no mob there in 45 s).
+    fn encounter_firing_at(
+        &self,
+        fired: &str,
+    ) -> Option<(usize, &nw_world::dungeon_scripts::Encounter)> {
+        let may_run = |index: usize| {
+            self.dungeon_run.is_some()
+                || self
+                    .world_events
+                    .as_ref()
+                    .is_none_or(|run| run.chosen(index))
+        };
         self.encounter_script()?
             .encounters
             .iter()
-            .find(|encounter| {
-                encounter
-                    .rewards
-                    .as_ref()
-                    .is_some_and(|rewards| rewards.global_event.eq_ignore_ascii_case(fired))
+            .enumerate()
+            .find(|(index, encounter)| {
+                may_run(*index)
+                    && encounter
+                        .rewards
+                        .as_ref()
+                        .is_some_and(|rewards| rewards.global_event.eq_ignore_ascii_case(fired))
             })
+    }
+
+    /// The living mob of open world encounter `index` that a fight there takes next: the one
+    /// that takes hits and has the most health, with its vitals id (CRC) and place; `None`
+    /// while none lives (its waves have not come, or the encounter is an instance's).
+    pub(super) fn encounter_mob_now(&self, index: usize) -> Option<(u32, [f32; 3])> {
+        let run = self.world_events.as_ref()?;
+        run.living_mobs_of(index)
+            .into_iter()
+            .filter(|(entity, _)| self.mobs.invulnerable(*entity).is_none())
+            .filter_map(|(entity, _)| {
+                let vitals = self.mobs.vitals_of(entity)?;
+                let mob = self.mobs.get(entity)?;
+                Some((
+                    vitals,
+                    [mob.position.x, mob.position.y, mob.position.z],
+                    mob.health.current(),
+                ))
+            })
+            .max_by_key(|(_, _, health)| *health)
+            .map(|(vitals, at, _)| (vitals, at))
     }
 
     /// The open world encounter of slice `slice`, when this sim runs the open world's
@@ -1683,8 +1729,11 @@ impl SimWorld {
             .find(|encounter| encounter.slice == slice)
     }
 
-    /// The places where the encounter of slice `slice` spawns pickups taken by touch, each once,
-    /// in stage order.
+    /// The places where the encounter of slice `slice` spawns pickups taken by touch and its
+    /// area triggers ([`super::dungeon_script::is_area_trigger`]), each once, in stage order:
+    /// the fight walks onto them. Live 2026-11-24 07:52-08:07Z: the bot stood at Medusa's spawn,
+    /// 31 m from the `Wave 0 - Setup` trigger at 8644.3 1406.0, which never fired, so Medusa
+    /// never came.
     fn touch_points(&self, slice: &str) -> Vec<Position> {
         let Some(encounter) = self
             .encounter_script()
@@ -1695,10 +1744,10 @@ impl SimWorld {
         let mut places: Vec<[f32; 3]> = Vec::new();
         for spawn in encounter.stages.iter().flat_map(|stage| &stage.spawns) {
             let touched = encounter.targets.get(spawn.target).is_some_and(|target| {
-                target
-                    .slices
-                    .iter()
-                    .any(|known| super::boss_scripts::touch_pickup(&known.path))
+                target.slices.iter().any(|known| {
+                    super::boss_scripts::touch_pickup(&known.path)
+                        || super::dungeon_script::is_area_trigger(&known.path)
+                })
             });
             if touched {
                 for place in &spawn.locations {
@@ -1732,7 +1781,7 @@ impl SimWorld {
         let StepPlan::Event(FlowEvent::GameEvent(fired), _) = &plan else {
             return plan;
         };
-        let Some(encounter) = self.encounter_firing(fired) else {
+        let Some((index, encounter)) = self.encounter_firing_at(fired) else {
             return plan;
         };
         let place = position_of(encounter.position);
@@ -1748,16 +1797,22 @@ impl SimWorld {
                 event: Box::new(plan),
             };
         }
-        let vitals = encounter
-            .targets
-            .iter()
-            .flat_map(|target| &target.slices)
-            .find_map(|slice| slice.mob.as_ref())
-            .map_or_else(|| encounter.name.clone(), |mob| mob.vitals_id.clone());
+        // While a wave of it lives, the fight takes that wave's mob where it stands (live
+        // 2026-11-24 05:24-05:39Z: a major breach's later waves are impalers, heavies and an
+        // ogre, and a plan of its first target's acolyte held the bot at the acolytes).
+        let (vitals_id, at) = self.encounter_mob_now(index).unwrap_or_else(|| {
+            let vitals = encounter
+                .targets
+                .iter()
+                .flat_map(|target| &target.slices)
+                .find_map(|slice| slice.mob.as_ref())
+                .map_or_else(|| encounter.name.clone(), |mob| mob.vitals_id.clone());
+            (lowercase_crc32(&vitals), encounter.position)
+        });
         let kill = StepPlan::Kill {
             spawn: VitalsSpawn {
-                vitals_id: lowercase_crc32(&vitals),
-                position: encounter.position,
+                vitals_id,
+                position: at,
                 is_encounter: true,
                 ..VitalsSpawn::default()
             },
@@ -1878,7 +1933,7 @@ impl SimWorld {
     /// of an encounter of the instance this sim runs ([`Self::instance_encounter_spawn`]), else
     /// a spawn of such a mob that the open map runs, else one that an open world encounter it
     /// runs spawns ([`Self::spawning_encounter`]).
-    fn walk_kill(
+    pub(super) fn walk_kill(
         &self,
         level: &QuestGuide,
         enemy: &str,
@@ -1996,7 +2051,7 @@ impl SimWorld {
     /// random sequence) item `item` drops: a table can hold an item that its rolls almost never
     /// give (live 2026-11-22 07:05:31: three `DyePlantViolet` gathers for `WoodT1` gave none,
     /// and a `Goat` gave 13 `RawhideT1` at once where a `Bison` gave meat only).
-    fn roll_hits(&self, table: &str, item: &str) -> u32 {
+    pub(super) fn roll_hits(&self, table: &str, item: &str) -> u32 {
         let mut seed = SOURCE_ROLL_SEED;
         let mut below = |bound: u32| {
             seed = seed
@@ -2378,6 +2433,12 @@ impl SimWorld {
     /// per waiting step, with what the player does next ([`Self::plan_line`]); `not running`
     /// when the player does not run it.
     pub(crate) fn quest_plan_lines(&mut self, number: u64, objective: &str) -> Vec<String> {
+        if let Some(mode) = super::run_plan::run_mode(objective) {
+            return self.run_plan_lines(number, mode);
+        }
+        if let Some(skill) = super::trade_plan::trade_skill(objective) {
+            return self.trade_plan_lines(number, skill);
+        }
         let entity = self.player_by_number(number);
         let at = entity
             .and_then(|entity| self.world.get::<super::Body>(entity))
@@ -2500,7 +2561,7 @@ impl SimWorld {
     /// category of such a spawn names (live 2026-11-22 09:00:
     /// `16_Side_20_HelpBastet` drops its heart from `Barbary_Lion_16BS12`, whose categories
     /// hold `Primal_Lion`, a skinning gatherable; no gatherable has the vitals id's name).
-    fn skinning_gatherable(&self, enemy: &str) -> Option<String> {
+    pub(super) fn skinning_gatherable(&self, enemy: &str) -> Option<String> {
         let skinning = |name: &str| {
             self.content
                 .gatherables
@@ -2595,6 +2656,13 @@ impl SimWorld {
             }
             _ => return plan,
         };
+        self.trial_into(mode, plan)
+    }
+
+    /// `plan`, outside an instance of game mode `mode` (never a matched kind), as the entry of
+    /// that mode ([`StepPlan::Trial`], [`Self::trial_for_game_mode`]); inside one, or for a
+    /// matched or unknown mode, `plan` as it is.
+    pub(super) fn trial_into(&self, mode: &str, plan: StepPlan) -> StepPlan {
         let inside = self
             .instance_run
             .as_ref()
@@ -2878,7 +2946,11 @@ impl SimWorld {
     /// the song's first sheet ([`StepPlan::Equip`]), or the item step of the first such
     /// instrument when the bag holds none (a game master gives it to a bot); any other plan as it
     /// is.
-    fn song_for_event(&self, entity: Option<bevy_ecs::entity::Entity>, plan: StepPlan) -> StepPlan {
+    pub(super) fn song_for_event(
+        &self,
+        entity: Option<bevy_ecs::entity::Entity>,
+        plan: StepPlan,
+    ) -> StepPlan {
         let StepPlan::Event(FlowEvent::Song { song, at }, _) = &plan else {
             return plan;
         };
@@ -2958,7 +3030,7 @@ impl SimWorld {
 
     /// The equip of the first fishing pole in the bag of player `entity` ([`StepPlan::Equip`]
     /// into its tool slot); `None` when the bag holds none.
-    fn bag_pole_equip(&self, entity: bevy_ecs::entity::Entity) -> Option<StepPlan> {
+    pub(super) fn bag_pole_equip(&self, entity: bevy_ecs::entity::Entity) -> Option<StepPlan> {
         let gear = self.world.get::<Player>(entity)?.gear.as_ref()?;
         gear.carried().into_iter().find_map(|stack| {
             self.content.fishing.pole(&stack.item_id)?;
@@ -2981,7 +3053,7 @@ impl SimWorld {
     /// carried item that fits it with the most in the bag, else the ingredient's own item or the
     /// lowest item of its category ([`nw_content::crafting::Recipes::item_for`]), by its id in
     /// the item table's case; `None` for a category that no item is in.
-    fn ingredient_item(
+    pub(super) fn ingredient_item(
         &self,
         gear: Option<&super::gear::Gear>,
         ingredient: &nw_content::crafting::Ingredient,
@@ -4707,7 +4779,8 @@ mod tests {
     }
 
     /// `QuestLiang`: the encounter of the step's event spawns talisman piles, which a player
-    /// takes by walking onto them; the kill plan names their places once each.
+    /// takes by walking onto them; the kill plan names their places once each, and the place
+    /// of the area trigger that starts the fight (`QuestMedusa`'s `Wave 0 - Setup`).
     #[test]
     fn an_encounter_kill_names_the_places_of_its_touch_pickups() {
         use nw_world::dungeon_scripts::{
@@ -4773,13 +4846,27 @@ mod tests {
                             }],
                             ..Target::default()
                         },
+                        Target {
+                            slices: vec![TargetSlice {
+                                path: "slices/encounters/ai_encounter_area_trigger.dynamicslice"
+                                    .to_owned(),
+                                ..TargetSlice::default()
+                            }],
+                            ..Target::default()
+                        },
                     ],
                     stages: vec![
                         Stage {
-                            spawns: vec![pile(vec![
-                                [1041.1, 938.4, 130.0],
-                                [1034.1, 938.4, 130.0],
-                            ])],
+                            spawns: vec![
+                                pile(vec![[1041.1, 938.4, 130.0], [1034.1, 938.4, 130.0]]),
+                                Spawn {
+                                    target: 2,
+                                    delay_s: 0,
+                                    count: 1,
+                                    locations: vec![[1050.0, 950.0, 130.0]],
+                                    turns_deg: Vec::new(),
+                                },
+                            ],
                             ..Stage::default()
                         },
                         Stage {
@@ -4800,7 +4887,7 @@ mod tests {
             world.quest_plan_lines(1, QUEST),
             [format!(
                 "plan t_wait kill {TEST_MOB} 1 at 1045.1 943.4 130.0 placed \
-                 touch 1041.1 938.4 130.0 touch 1034.1 938.4 130.0"
+                 touch 1041.1 938.4 130.0 touch 1034.1 938.4 130.0 touch 1050.0 950.0 130.0"
             )]
         );
     }

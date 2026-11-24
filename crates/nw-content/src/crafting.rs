@@ -386,14 +386,24 @@ impl Recipes {
     /// category with the shortest lowercase id (the lowest tier: `timbert1` before `timbert2`),
     /// the alphabetically first of those on a tie; `None` for a category no item is in.
     pub fn item_for(&self, ingredient: &Ingredient) -> Option<String> {
+        self.items_for(ingredient).into_iter().next()
+    }
+
+    /// Every item that `ingredient` takes, in the order of [`Self::item_for`]: its own item, or
+    /// the items of its category, the shortest lowercase id first.
+    pub fn items_for(&self, ingredient: &Ingredient) -> Vec<String> {
         match &ingredient.kind {
-            IngredientKind::Item(item) => Some(item.clone()),
-            IngredientKind::Category(_) => self
-                .categories
-                .keys()
-                .filter(|item| self.fits(ingredient, item))
-                .min_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
-                .cloned(),
+            IngredientKind::Item(item) => vec![item.clone()],
+            IngredientKind::Category(_) => {
+                let mut items: Vec<String> = self
+                    .categories
+                    .keys()
+                    .filter(|item| self.fits(ingredient, item))
+                    .cloned()
+                    .collect();
+                items.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+                items
+            }
         }
     }
 
@@ -727,6 +737,11 @@ mod tests {
         assert_eq!(
             recipes.item_for(&ration.ingredients[0]).as_deref(),
             Some("porkt1")
+        );
+        assert_eq!(
+            recipes.items_for(&ration.ingredients[0]),
+            ["porkt1", "porkt12"],
+            "every item of the category, the lowest first"
         );
         let empty = Ingredient {
             kind: IngredientKind::Category("Timber".to_owned()),

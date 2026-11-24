@@ -401,6 +401,9 @@ pub(crate) struct ExpeditionMode {
     victory_due_ms: Option<u64>,
     /// The curse meter of a mutated run.
     curse: Option<RunCurse>,
+    /// The players (by number) who opened the run's end chest
+    /// ([`super::run_plan`]).
+    end_chest_openers: Vec<u64>,
 }
 
 impl ExpeditionMode {
@@ -575,7 +578,7 @@ enum RunEvent {
 
 /// The file name of slice path `path` without its folder and extension: the name an event
 /// task gives ([`TaskEvent`]).
-fn slice_stem(path: &str) -> &str {
+pub(super) fn slice_stem(path: &str) -> &str {
     let file = path.rsplit('/').next().unwrap_or(path);
     file.split('.').next().unwrap_or(file)
 }
@@ -685,6 +688,7 @@ impl SimWorld {
                 tasks: Vec::new(),
                 victory_due_ms: None,
                 curse: None,
+                end_chest_openers: Vec::new(),
             });
         }
     }
@@ -1329,9 +1333,45 @@ impl SimWorld {
         );
     }
 
-    /// Every encounter of the run ended (the dungeon script's completion): the tasks up to the
-    /// last boss end, the end time and the final score go out, and the task after it waits for
-    /// the expedition's delay (module text).
+    /// Whether the run's last boss task ended and the run has not ended yet: the objective's
+    /// done tasks reached [`ExpeditionScript::end_done`] (Observed, module text: retail ends
+    /// the run at the last boss's task, 24 runs, while optional encounters still stand; our
+    /// run of 2026-11-23 09:14:25Z killed the Dynasty empress and never ended, as the sim
+    /// waited for every encounter of the level script).
+    pub(super) fn expedition_reached_end(&self) -> bool {
+        self.expedition().is_some_and(|expedition| {
+            !expedition.score.ended
+                && expedition
+                    .script
+                    .is_some_and(|script| expedition.done >= script.end_done)
+        })
+    }
+
+    /// The script values of this sim's expedition and whether its run ended; `None` outside
+    /// an expedition the script table holds.
+    pub(super) fn expedition_run(&self) -> Option<(&'static ExpeditionScript, bool)> {
+        let expedition = self.expedition()?;
+        Some((expedition.script?, expedition.score.ended))
+    }
+
+    /// Whether player `number` opened the end chest of this sim's expedition run.
+    pub(super) fn opened_end_chest(&self, number: u64) -> bool {
+        self.expedition()
+            .is_some_and(|expedition| expedition.end_chest_openers.contains(&number))
+    }
+
+    /// Player `number` opened the end chest of this sim's expedition run.
+    pub(super) fn note_end_chest_opened(&mut self, number: u64) {
+        if let Some(expedition) = self.expedition_mut()
+            && !expedition.end_chest_openers.contains(&number)
+        {
+            expedition.end_chest_openers.push(number);
+        }
+    }
+
+    /// The run ended (its last boss task, or the dungeon script's completion): the tasks up to
+    /// the last boss end, the end time and the final score go out, and the task after it waits
+    /// for the expedition's delay (module text).
     pub(super) fn complete_expedition_run(&mut self, now_ms: u64) {
         let unix_s = self.unix_s();
         let Some(script) = self
@@ -2916,6 +2956,55 @@ pub(super) mod tests {
             event == TaskEvent::ObjectUsed("dungeon_everfall_00_azoth_shrine")
         });
         assert_eq!(tasks_of(&world).0, 20);
+    }
+
+    /// Live 2026-11-24 04:43:54Z: a group's end chest went `Depleted` for the other players
+    /// after the first open. An expedition's loot container is each player's own (Inferred);
+    /// another gatherable, and a container outside an expedition, are not.
+    #[test]
+    fn an_expedition_s_loot_container_is_each_player_s_own() {
+        let chest = nw_content::gathering::Gatherable {
+            id: "LootLargeT3".to_owned(),
+            gather_ms: 5_000,
+            respawn_ms: (0, 0),
+            loot_table: Some("Empty".to_owned()),
+            loot_container: true,
+            tradeskill: None,
+            tool_required: false,
+            by_hand: true,
+            game_event: None,
+            animation: None,
+        };
+        let node = nw_content::gathering::Gatherable {
+            loot_container: false,
+            ..chest.clone()
+        };
+        let world = opened();
+        assert!(world.run_container(&chest));
+        assert!(!world.run_container(&node));
+        let open = crate::world::tests::world_with_spawns(Vec::new());
+        assert!(!open.run_container(&chest), "the open world");
+    }
+
+    /// Retail Starstone (runs 3 and 30): the regent's encounter success ends task 24, the last
+    /// boss task, and the run ends then, with encounters of the level script still open; the
+    /// run's end is once.
+    #[test]
+    fn the_last_boss_task_ends_the_run() {
+        const REGENT: TaskEvent =
+            TaskEvent::EncounterSucceeded("dg_enc_everfall_00_ancientheavyboss");
+        let mut world = opened();
+        arrive(&mut world, PLAYER);
+        world.end_event_tasks(|event| {
+            event == TaskEvent::EncounterSucceeded("dg_enc_everfall_00_ancientshrine")
+        });
+        assert!(!world.expedition_reached_end(), "an earlier task");
+        world.end_event_tasks(|event| event == REGENT);
+        assert_eq!(tasks_of(&world).0, 24);
+        assert!(world.expedition_reached_end());
+        let now = world.server_ms;
+        world.complete_expedition_run(now);
+        assert!(!world.expedition_reached_end(), "the run ended");
     }
 
     /// Retail Glacial Tarn (runs 19 and 40): the first locked azoth seal switch ends task 4,

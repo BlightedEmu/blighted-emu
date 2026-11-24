@@ -23,6 +23,8 @@ pub struct PlacedPoints {
     /// level's millions of plant points (a `!questplan` that asked for a few kinds scanned
     /// them all and stalled the tick for 630 ms, PC stack 2026-11-17).
     first_of_kind: HashMap<u32, usize>,
+    /// How many points each kind has: [`PlacedPoints::count`] scans no point either.
+    count_of_kind: HashMap<u32, u32>,
 }
 
 /// The grid cell of `position`.
@@ -51,6 +53,8 @@ impl PlacedPoints {
                 .first_of_kind
                 .entry(kind)
                 .or_insert(index.points.len());
+            let count = index.count_of_kind.entry(kind).or_default();
+            *count = count.saturating_add(1);
             index.points.push((kind, position));
         }
         index
@@ -72,6 +76,11 @@ impl PlacedPoints {
             .get(&kind)
             .and_then(|index| self.points.get(*index))
             .map(|(_, position)| *position)
+    }
+
+    /// How many points of kind `kind` the level has.
+    pub fn count(&self, kind: u32) -> u32 {
+        self.count_of_kind.get(&kind).copied().unwrap_or(0)
     }
 
     /// The points of kind `kind` within `reach_m` (at most [`CELL_M`]) of `at`, across the
@@ -137,6 +146,15 @@ mod tests {
             points.first(TREE),
             Some(at(65.0, 0.0)),
             "anywhere on the level"
+        );
+        assert_eq!(
+            [
+                points.count(FLINT),
+                points.count(TREE),
+                points.count(0x3333)
+            ],
+            [3, 1, 0],
+            "each kind's points on the level"
         );
         assert_eq!(points.first(0x3333), None);
     }

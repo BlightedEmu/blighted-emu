@@ -964,6 +964,8 @@ pub struct PlayerContent {
     pub mob_loot: MobLoot,
     /// The loot table of each loot crate of the level.
     pub crates: CrateLoot,
+    /// The soul trials: the daily repeat of each story trial.
+    pub soul_trials: nw_content::soul_trials::SoulTrials,
     /// The level's objects whose gathers are instanced (the gatherer's own).
     pub instanced_gathers: InstancedGathers,
     /// The interact tags of the level's objects, for `TaskInteract`.
@@ -1814,6 +1816,7 @@ impl PlayerContent {
             rewards: Rewards::from_tables(tables),
             loot: LootTables::from_tables(tables),
             mob_loot: MobLoot::from_tables(tables),
+            soul_trials: nw_content::soul_trials::SoulTrials::from_tables(tables),
             crates: CrateLoot::build(
                 CrateVariant::from_tables(tables),
                 level.capitals.iter().filter_map(|capital| {

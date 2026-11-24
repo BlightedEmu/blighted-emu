@@ -3,7 +3,7 @@
 //! of its lowercase `GatherableID`, and the gatherable's `FinalLootTable` gives the items (see
 //! [`crate::loot`]). A loot crate's items come from its variant instead ([`CrateLoot`]).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use nw_formats::objectstream::lowercase_crc32;
 use serde::{Deserialize, Serialize};
@@ -725,6 +725,28 @@ impl CrateLoot {
             _ => None,
         }
     }
+
+    /// The loot table that most variants of gatherable `gatherable` (the CRC-32 of its
+    /// lowercase id) give, the first in name order on a tie; `None` for a gatherable no variant
+    /// names. **Inferred**: a crate whose variant is Unknown (an expedition's chests stand in
+    /// slices of the level with no capital, and their `@LootContainer_Dungeon_Large_DisplayName`
+    /// is in no variant row) rolls the table of its gatherable's usual variant: `LootLargeT3`'s
+    /// `*_T3_L` supply chests roll `ContainerLootLarge`.
+    pub fn usual_table(&self, gatherable: u32) -> Option<&str> {
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for variant in self
+            .variants
+            .iter()
+            .filter(|variant| lowercase_crc32(&variant.gatherable) == gatherable)
+        {
+            *counts.entry(variant.table.as_str()).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .rev()
+            .max_by_key(|(_, count)| *count)
+            .map(|(table, _)| table)
+    }
 }
 
 /// The level objects whose gathers are instanced (the world file's instanced gathers,
@@ -1273,5 +1295,48 @@ mod tests {
             Some(BEACH_CHEST_FACET & !FACET_FREE_BITS)
         );
         assert_eq!(capital_key("aabcf082"), None);
+    }
+
+    /// An expedition's chest has no capital and a name no variant has: its gatherable's usual
+    /// variant table; a tie takes the first table by name, and a gatherable no variant names
+    /// has none.
+    #[test]
+    fn a_crate_of_an_unknown_variant_takes_its_gatherables_usual_table() {
+        let crates = CrateLoot::build(
+            vec![
+                variant(
+                    "Abandoned_T3_L",
+                    "LootLargeT3",
+                    SUPPLIES_NAME,
+                    "ContainerLootLarge",
+                ),
+                variant(
+                    "Military_T3_L",
+                    "LootLargeT3",
+                    SUPPLIES_NAME,
+                    "ContainerLootLarge",
+                ),
+                variant(
+                    "Alchemy_T3_L",
+                    "LootLargeT3",
+                    SUPPLIES_NAME,
+                    "ContainerLootAlchemyLarge",
+                ),
+                variant("Beach_1", "LootLargeT1", ARMOR_CHEST_NAME, "BeachChestMB2"),
+                variant("Beach_2", "LootLargeT1", ARMOR_CHEST_NAME, "BeachChestMB1"),
+            ],
+            std::iter::empty(),
+            std::iter::empty(),
+        );
+        assert_eq!(
+            crates.usual_table(lowercase_crc32("LootLargeT3")),
+            Some("ContainerLootLarge")
+        );
+        assert_eq!(
+            crates.usual_table(lowercase_crc32("LootLargeT1")),
+            Some("BeachChestMB1"),
+            "a tie: the first by name"
+        );
+        assert_eq!(crates.usual_table(lowercase_crc32("LootSmallT9")), None);
     }
 }

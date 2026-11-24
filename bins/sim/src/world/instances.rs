@@ -606,6 +606,7 @@ impl SimWorld {
 
     /// Answers a 5039 or a dungeon menu: may the player use `crc`'s game mode.
     fn offer_game_mode(&mut self, entity: Entity, crc: u32, remote: bool) {
+        self.open_soul_trial(entity, crc);
         let content = std::sync::Arc::clone(&self.content);
         let allowed = content
             .instances

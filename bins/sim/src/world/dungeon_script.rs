@@ -372,6 +372,39 @@ struct PickedSpawner {
     leaves_ms: Option<u64>,
 }
 
+/// An area trigger slice that a stage spawned: a stage objective that tracks it (`SliceDestroyed`)
+/// counts it once a living player came into it.
+#[derive(Debug, Clone, PartialEq)]
+struct AreaTrigger {
+    /// Its target.
+    target: usize,
+    /// Its place.
+    at: [f32; 3],
+    /// When a player came into it.
+    fired_ms: Option<u64>,
+}
+
+/// The file name start of an encounter's area trigger slice
+/// (`slices/encounters/ai_encounter_area_trigger` and its named kinds `_20m`, `_sol`, `_yonas`):
+/// a trigger volume with no mob, which a stage that waits for players spawns and tracks as
+/// destroyed (`QuestMedusa`'s and `QuestDracula`'s `Wave 0 - Setup`, and 18 more encounters of
+/// trials and the open world). Live 2026-11-24 05:44-05:52Z: the Medusa trial never left its
+/// setup, as no mob of that target could die; 08:23Z: Dracula's `_20m` trigger was taken for a
+/// slice of no mob, and Cecilia never came.
+const AREA_TRIGGER_STEM: &str = "ai_encounter_area_trigger";
+
+/// Whether slice `path` is an encounter's area trigger ([`AREA_TRIGGER_STEM`]).
+pub(super) fn is_area_trigger(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .is_some_and(|file| file.starts_with(AREA_TRIGGER_STEM) && file.ends_with(SLICE_END))
+}
+
+/// The radius of an area trigger slice, m (**Inferred**: its volume is in the slice, which the
+/// content does not read; the retail trial starts came at 10 to 27 m: Isabella's `AreaBossStart`
+/// box, Adiana's 27 m `AreaBossFightStart` sphere).
+const AREA_TRIGGER_RADIUS_M: f32 = 20.0;
+
 /// A detectable object an encounter spawned ([`TargetSlice::detectable_radius_m`]).
 #[derive(Debug, Clone, PartialEq)]
 struct Deactivator {
@@ -422,6 +455,8 @@ struct EncounterRun {
     picked: Vec<PickedSpawner>,
     /// The detectable objects it spawned.
     deactivators: Vec<Deactivator>,
+    /// The area trigger slices it spawned ([`is_area_trigger`]).
+    area_triggers: Vec<AreaTrigger>,
     /// The gathering timelines of its standing start objects.
     gather_clocks: Vec<GatherClock>,
     /// The `Family` its mobs keep, once a spawn picked one
@@ -515,6 +550,9 @@ impl SpawnGroup {
 const DAILY_SLICE_END: &str = "_daily.dynamicslice";
 /// The end of a slice path.
 const SLICE_END: &str = ".dynamicslice";
+/// The end of the name of a daily solo trial encounter (lowercase): `EncounterBossDaily` is the
+/// daily twin of `EncounterBoss`.
+const DAILY_NAME_END: &str = "daily";
 /// The start of a game mode's daily trial flag (achievement `DailyTrialLiang`).
 const DAILY_TRIAL_FLAG: &str = "DailyTrial";
 /// The end of the flag that the daily trial was done (`DailyTrialLiangComplete`).
@@ -549,7 +587,24 @@ fn trial_variant(mut script: LevelScript, daily: bool) -> LevelScript {
         .iter()
         .map(|encounter| encounter.slice.to_lowercase())
         .collect();
+    let names: std::collections::HashSet<String> = script
+        .encounters
+        .iter()
+        .map(|encounter| encounter.name.to_lowercase())
+        .collect();
     script.encounters.retain(|encounter| {
+        // The twins by name (`EncounterBoss` and `EncounterBossDaily`): `QuestMorgaine`'s two
+        // name one slice, `enc_morgaine` (live 2026-11-24 06:41:18Z and 06:41:22Z: both ran and
+        // the bot fought two Morgaines).
+        let name = encounter.name.to_lowercase();
+        if let Some(stem) = name.strip_suffix(DAILY_NAME_END)
+            && names.contains(stem)
+        {
+            return daily;
+        }
+        if names.contains(&format!("{name}{DAILY_NAME_END}")) {
+            return !daily;
+        }
         let slice = encounter.slice.to_lowercase();
         if let Some(stem) = slice.strip_suffix(DAILY_SLICE_END) {
             return daily || !slices.contains(&format!("{stem}{SLICE_END}"));
@@ -698,6 +753,18 @@ impl DungeonRun {
         &self.script
     }
 
+    /// Whether its run ended (every encounter done, or an expedition's last boss task).
+    pub(super) const fn completed(&self) -> bool {
+        self.completed
+    }
+
+    /// Whether encounter `index` is done.
+    pub(super) fn encounter_done(&self, index: usize) -> bool {
+        self.encounters
+            .get(index)
+            .is_some_and(|run| run.status == EncounterStatus::Done)
+    }
+
     /// The place in its top order of the top stage encounter `index` runs; `None` when it does
     /// not run.
     pub(super) fn running_top(&self, index: usize) -> Option<usize> {
@@ -790,6 +857,20 @@ impl DungeonRun {
             })
             .collect();
         Some((manager, stages))
+    }
+
+    /// The living mobs of encounter `index`: each one's entity and its target's index.
+    pub(super) fn living_mobs_of(&self, index: usize) -> Vec<(u64, usize)> {
+        self.encounters
+            .get(index)
+            .map(|run| {
+                run.mobs
+                    .iter()
+                    .filter(|mob| !mob.gone && mob.died_ms.is_none())
+                    .map(|mob| (mob.entity, mob.target))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The live mobs of every encounter.
@@ -1162,6 +1243,17 @@ fn tick_encounter(
     hazard_areas_due(run, host, now_ms);
     gather_clocks_due(encounter, run, host, now_ms);
     deactivators_due(encounter, run, host, now_ms);
+    for trigger in run
+        .area_triggers
+        .iter_mut()
+        .filter(|trigger| trigger.fired_ms.is_none())
+    {
+        if view.living.iter().any(|player| {
+            distance([player.x, player.y, player.z], trigger.at) <= AREA_TRIGGER_RADIUS_M
+        }) {
+            trigger.fired_ms = Some(now_ms);
+        }
+    }
     let radius = encounter
         .detection_radius_m
         .unwrap_or(DEFAULT_VOLUME_RADIUS_M);
@@ -1709,6 +1801,13 @@ fn spawn_one(
                                 next: 0,
                             });
                         }
+                    }
+                    None if is_area_trigger(&target_slice.path) => {
+                        run.area_triggers.push(AreaTrigger {
+                            target: spawn.target,
+                            at,
+                            fired_ms: None,
+                        });
                     }
                     None => {
                         tracing::debug!(slice = %target_slice.path, "encounter spawn of no mob")
@@ -2396,10 +2495,21 @@ fn objective_count(
     started_ms: u64,
 ) -> Option<u32> {
     let count = match kind {
-        ObjectiveSpec::SliceDestroyed { target, .. } => tracked(encounter, run, stage, *target)
-            .into_iter()
-            .filter(|mob| mob.died_ms.is_some_and(|died| died >= started_ms))
-            .count(),
+        ObjectiveSpec::SliceDestroyed { target, .. } => {
+            let triggers = run
+                .area_triggers
+                .iter()
+                .filter(|trigger| {
+                    Some(trigger.target) == *target
+                        && trigger.fired_ms.is_some_and(|fired| fired >= started_ms)
+                })
+                .count();
+            tracked(encounter, run, stage, *target)
+                .into_iter()
+                .filter(|mob| mob.died_ms.is_some_and(|died| died >= started_ms))
+                .count()
+                + triggers
+        }
         ObjectiveSpec::SliceSpawned { target, .. } => run
             .mobs
             .iter()
@@ -2744,6 +2854,7 @@ impl SimWorld {
                 .as_ref()
                 .map_or(0, |(instance, _)| instance.as_u64_pair().0);
             self.start_gates(running.as_ref().map(|(_, mode)| mode.as_str()), salt);
+            self.fresh_instance_nodes(running.as_ref().map(|(instance, _)| *instance));
             // The script's start objects (the talisman piles of `QuestLiang`) are slices of the
             // start objects table; a catacombs run builds its own ([`super::catacombs`]), and an
             // instance sim runs no open world encounters that hold one.
@@ -2797,6 +2908,12 @@ impl SimWorld {
         self.show_encounters(&mut run, &owned, now_ms);
         self.tick_gates(&run, now_ms);
         self.expedition_encounter_events(&run);
+        // An expedition ends at its last boss's task, not when every encounter of its level
+        // script is done ([`SimWorld::expedition_reached_end`]).
+        if !run.completed && self.expedition_reached_end() {
+            run.completed = true;
+            self.instance_run_ended(&run, "the last boss task ended", now_ms);
+        }
         for outcome in outcomes {
             match outcome {
                 ScriptOutcome::EncounterDone(index) => {
@@ -2821,14 +2938,22 @@ impl SimWorld {
                 // A catacombs run ends by its extraction, not by its encounters.
                 ScriptOutcome::Completed if self.catacomb_run().is_some() => {}
                 ScriptOutcome::Completed => {
-                    tracing::info!(instance = %run.instance, "every encounter done");
-                    self.complete_mutated_instance(now_ms);
-                    self.complete_expedition_run(now_ms);
-                    self.game_mode_completed(now_ms);
+                    self.instance_run_ended(&run, "every encounter done", now_ms);
                 }
             }
         }
         self.dungeon_run = Some(run);
+    }
+
+    /// The instance's run ended for `why`: a mutated run's rewards, the expedition's end time
+    /// and score, every player's finish of the game mode (`TaskCompleteDungeon`) and a soul
+    /// trial's daily end ([`super::soul_trials`]).
+    fn instance_run_ended(&mut self, run: &DungeonRun, why: &str, now_ms: u64) {
+        tracing::info!(instance = %run.instance, why, "instance run ended");
+        self.complete_mutated_instance(now_ms);
+        self.complete_expedition_run(now_ms);
+        self.game_mode_completed(now_ms);
+        self.soul_trial_ended(now_ms);
     }
 
     /// The places of the players, for a script's view.
@@ -3310,6 +3435,28 @@ mod tests {
         }
     }
 
+    /// `QuestMorgaine`: `EncounterBoss` and `EncounterBossDaily` name one slice; the run keeps
+    /// the twin of its kind by the encounters' names.
+    #[test]
+    fn twins_by_name_of_one_slice_run_one_of_them() {
+        const SLICE: &str = "slices/dunwood/soultrial/morgaine/enc_morgaine.dynamicslice";
+        let named = |name: &str| Encounter {
+            name: name.to_owned(),
+            slice: SLICE.to_owned(),
+            ..boss_encounter()
+        };
+        let both = script(vec![named("EncounterBoss"), named("EncounterBossDaily")]);
+        let names = |daily: bool| -> Vec<String> {
+            trial_variant(both.clone(), daily)
+                .encounters
+                .into_iter()
+                .map(|encounter| encounter.name)
+                .collect()
+        };
+        assert_eq!(names(false), ["EncounterBoss"]);
+        assert_eq!(names(true), ["EncounterBossDaily"]);
+    }
+
     #[test]
     fn a_solo_trial_runs_the_quest_or_the_daily_twin_of_an_encounter_never_both() {
         const QUEST: &str = "slices/dungeon/liang/enc_quest_boss.dynamicslice";
@@ -3712,6 +3859,64 @@ mod tests {
     /// A spawner slice of mixed mobs makes each member at its own place, and a wave that tracks
     /// one member's creature slice ends with that member's death only (the Shipyard cave's
     /// `Wave_01` ends when its summoner dies, not its swarmers).
+    /// Retail `QuestMedusa`: its `Wave 0 - Setup` spawns an area trigger slice at the arena and
+    /// waits for it to be destroyed; a player who comes into it ends the setup, one far from it
+    /// does not.
+    #[test]
+    fn a_player_in_a_spawned_area_trigger_ends_the_stage_that_tracks_it() {
+        const TRIGGER: &str = "slices/encounters/ai_encounter_area_trigger_20m.dynamicslice";
+        let trigger_at = [PLACE[0] + 10.0, PLACE[1], PLACE[2]];
+        let setup = Stage {
+            name: "Wave 0 - Setup".to_owned(),
+            spawns: vec![Spawn {
+                target: 0,
+                count: 1,
+                locations: vec![trigger_at],
+                ..Spawn::default()
+            }],
+            objectives: vec![objective(
+                ObjectiveSpec::SliceDestroyed {
+                    target: Some(0),
+                    required: 1,
+                },
+                0,
+                false,
+            )],
+            ..Stage::default()
+        };
+        let encounter = Encounter {
+            name: "EncounterBoss".to_owned(),
+            position: PLACE,
+            auto_activate: true,
+            grace_period_s: GRACE_S,
+            detection_radius_m: Some(RADIUS_M),
+            top_stages: vec![0],
+            stages: vec![setup],
+            targets: vec![Target {
+                name: TRIGGER.to_owned(),
+                slices: vec![TargetSlice {
+                    path: TRIGGER.to_owned(),
+                    ..TargetSlice::default()
+                }],
+            }],
+            ..Encounter::default()
+        };
+        let mut run = DungeonRun::new(Uuid::nil(), script(vec![encounter]));
+        let mut host = Host::default();
+        let far = [PLACE[0] - RADIUS_M + 1.0, PLACE[1], PLACE[2]];
+        run.tick(&mut host, &view(&[far]), &[], T0);
+        run.tick(&mut host, &view(&[far]), &[], T0 + 1);
+        run.tick(&mut host, &view(&[far]), &[], T0 + 2);
+        assert_eq!(
+            stage_status(&run, 0),
+            StageStatus::Running,
+            "no player in it"
+        );
+        run.tick(&mut host, &view(&[trigger_at]), &[], T0 + 3);
+        run.tick(&mut host, &view(&[trigger_at]), &[], T0 + 4);
+        assert_eq!(stage_status(&run, 0), StageStatus::Done);
+    }
+
     #[test]
     fn a_mixed_spawner_slice_spawns_each_member_and_only_its_tracked_member_ends_the_wave() {
         const SWARMER: &str = "Corruption_Swarmer_DG_Ebonscale_00";
@@ -4582,6 +4787,35 @@ mod tests {
             spawned,
             [SWARMER_DT1, SWARMER_DT1],
             "a wave without a mob of the difficulty spawns its own"
+        );
+    }
+
+    /// Live 2026-11-24 04:22:32Z: `FM_corruption_breach` waits for the global success of any
+    /// breach; the plan named the first breach of the list, which its group had not chosen, and
+    /// the bot saw no mob there. The plan names the group's choice.
+    #[test]
+    fn a_breach_event_step_is_the_fight_at_the_breach_its_group_runs() {
+        let other = [PLACE[0] + 150.0, PLACE[1], PLACE[2]];
+        let script = script(vec![breach(PLACE, 2), breach(other, 2)]);
+        let run = DungeonRun::of_open_world(script.clone(), open_rules(), &|_| false);
+        let chosen = if run.chosen(0) { PLACE } else { other };
+        let mut world = crate::world::tests::world_with_spawns(Vec::new());
+        world.settings.world_events = true;
+        world.content = std::sync::Arc::new(crate::player_content::PlayerContent {
+            dungeon_scripts: nw_world::dungeon_scripts::DungeonScripts {
+                game_modes: [(OPEN_WORLD_LEVEL.to_owned(), script)]
+                    .into_iter()
+                    .collect(),
+            },
+            ..crate::player_content::PlayerContent::default()
+        });
+        world.world_events = Some(run);
+        let encounter = world.encounter_firing(GLOBAL_EVENT).expect("a breach");
+        assert_eq!(encounter.position, chosen);
+        assert_eq!(
+            world.encounter_mob_now(usize::from(chosen != PLACE)),
+            None,
+            "no wave lives yet: the plan takes its first mob at the breach"
         );
     }
 

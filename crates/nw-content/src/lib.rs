@@ -81,6 +81,7 @@ pub mod seasons;
 pub mod sheathe;
 pub mod shot_entities;
 pub mod skins;
+pub mod soul_trials;
 pub mod spell_slices;
 pub mod starter;
 pub mod starting_ranks;

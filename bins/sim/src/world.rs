@@ -155,6 +155,7 @@ mod replica;
 mod rested;
 mod revive;
 mod rolled_loot;
+mod run_plan;
 mod salvage;
 mod scripts;
 mod seasons;
@@ -166,6 +167,7 @@ mod slots;
 pub mod social;
 mod social_bus;
 mod social_states;
+mod soul_trials;
 mod spell_areas;
 mod stamina;
 mod statics;
@@ -177,6 +179,7 @@ mod title_choice;
 mod town_projects;
 mod town_props;
 mod town_stations;
+mod trade_plan;
 mod tradeskill;
 mod trading_post_cards;
 pub mod transmog;
@@ -1338,6 +1341,8 @@ pub struct SimWorld {
     nodes: Nodes,
     /// The level's crafting stations.
     stations: crafting::Stations,
+    /// The trade skill runs of the players ([`trade_plan`]).
+    trade_runs: trade_plan::TradeRuns,
     /// The loot bags of killed mobs.
     bags: loot_bag::LootBags,
     /// The musical performances of this sim's players.
@@ -1567,6 +1572,7 @@ impl SimWorld {
             look_targets: HashMap::new(),
             nodes: Nodes::default(),
             stations,
+            trade_runs: trade_plan::TradeRuns::default(),
             claim_entities,
             town_stations: town_stations::TownStationsShown::default(),
             bags: loot_bag::LootBags::default(),

@@ -60,11 +60,11 @@ const UNKNOWN: &str = "Unknown command. Type !help for the list.";
 /// The answer when no event runs.
 const NO_EVENTS: &str = "No events are running.";
 /// The first word of each `!queststate` line.
-const QUEST_RUNNING: &str = "running";
+pub(super) const QUEST_RUNNING: &str = "running";
 const QUEST_FINISHED: &str = "finished";
-const QUEST_DONE: &str = "done";
+pub(super) const QUEST_DONE: &str = "done";
 const QUEST_NOT_TAKEN: &str = "not taken";
-const QUEST_STEP: &str = "step";
+pub(super) const QUEST_STEP: &str = "step";
 /// The words of the `!state` line.
 const STATE_LINE: &str = "state";
 const STATE_ON: &str = "on";
@@ -849,6 +849,12 @@ impl SimWorld {
     /// each step it waits on, with its progress and what it waits for), waits for its turn-in,
     /// is done, or was not taken.
     fn quest_state_lines(&mut self, number: u64, objective: &str) -> Vec<String> {
+        if let Some(mode) = super::run_plan::run_mode(objective) {
+            return self.run_state_lines(number, objective, mode);
+        }
+        if let Some(skill) = super::trade_plan::trade_skill(objective) {
+            return self.trade_state_lines(number, objective, skill);
+        }
         if let Some(quest) = self
             .quests_of_player(number)
             .iter()

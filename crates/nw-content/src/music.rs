@@ -278,6 +278,11 @@ impl MusicRules {
         }
     }
 
+    /// Every song, in no order.
+    pub fn songs(&self) -> impl Iterator<Item = &Song> {
+        self.songs.values()
+    }
+
     /// The song whose lowercase id has CRC-32 `crc`.
     pub fn song(&self, crc: u32) -> Option<&Song> {
         self.songs.get(&crc)
