@@ -51,6 +51,8 @@ const DEAD_HEAD: u8 = 1;
 const DEATHS_DOOR_HEAD: u8 = 2;
 /// The `invulnerability` of a player at death's door.
 const DEATHS_DOOR_INVULNERABLE: u8 = 1;
+/// The `invulnerability` (and `displayImmuneWhenInvulnerable`) of a creature that takes hits.
+const TAKES_HITS: u8 = 0;
 /// The `vitalsData` head byte of a live creature's first state (ship-mobs-lockon-ai note,
 /// section 3.3: every retail tutorial creature card).
 const ALIVE_HEAD: u8 = 0;
@@ -237,7 +239,11 @@ impl VitalsState {
 
     /// A recorded retail first state of a creature (with its stamina, data and tick children)
     /// with this creature's `health`, `health_max`, ids and `level` written in, as
-    /// [`VitalsState::creature`] sets them.
+    /// [`VitalsState::creature`] sets them. A recorded invulnerability is of the retail moment
+    /// of the recording: the state says the creature takes hits, and the sim sends its own
+    /// invulnerability over it. Live 2026-11-24 07:25Z: the recorded first state of
+    /// `Lost_Monarch` (the Gawain trial boss, recorded during its intro) said invulnerable, the
+    /// sim took every hit on it, and the bots fought the other mobs and never the boss.
     pub fn creature_as_recorded(
         &self,
         health: u32,
@@ -258,6 +264,8 @@ impl VitalsState {
                 vitals_category_id: ours.vitals_category_id,
                 vitals_level: ours.vitals_level,
                 max_health: ours.max_health,
+                invulnerability: recorded.invulnerability.map(|_| TAKES_HITS),
+                display_immune: recorded.display_immune.map(|_| TAKES_HITS),
                 ..recorded
             }),
             slot_1: self.slot_1.clone(),
@@ -943,5 +951,30 @@ mod tests {
         assert_eq!((now.vitals_id, now.vitals_level), (Some(1), Some(LEVEL)));
         assert_eq!(now.vitals_data, was.vitals_data, "the recorded data stays");
         assert_eq!(now.stamina_max, was.stamina_max);
+    }
+
+    #[test]
+    fn a_recorded_invulnerable_creature_state_says_it_takes_hits() {
+        // The recorded first vitals of `Lost_Monarch` (mob prefab looks, asset `243f3827...`).
+        const RETAIL_MONARCH: &str = concat!(
+            "01bd463e0000000bbd9be88f0d39c70000000000000000ff00463e000000005a45016ce000000011",
+            "012f80"
+        );
+        const HEALTH: u32 = 12_160;
+        const LEVEL: u32 = 17;
+        const INVULNERABLE: u8 = 1;
+        let bytes: Vec<u8> = (0..RETAIL_MONARCH.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&RETAIL_MONARCH[at..at + 2], 16).expect("hex"))
+            .collect();
+        let recorded = read_all(&bytes);
+        let ours = recorded.creature_as_recorded(HEALTH, HEALTH, 1, 2, LEVEL);
+        let (Some(was), Some(now)) = (recorded.slot_0, ours.slot_0) else {
+            panic!("slot 0");
+        };
+        assert_eq!(was.invulnerability, Some(INVULNERABLE), "recorded");
+        assert_eq!(now.invulnerability, Some(TAKES_HITS));
+        assert_eq!(now.display_immune, was.display_immune.map(|_| TAKES_HITS));
+        assert_eq!(now.vitals_data, was.vitals_data, "the recorded data stays");
     }
 }
