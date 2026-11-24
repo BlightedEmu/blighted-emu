@@ -1485,6 +1485,27 @@ fn kind_of(row: &TaskRow) -> TaskKind {
 }
 
 impl ObjectiveTree {
+    /// Whether task `index` is the reset branch of a step: a `TaskDie` beside another task in a
+    /// `SimpleTaskContainer`. Observed (content bundle 25810808): each step of a PvP faction
+    /// mission is such a container, `FM_02_PVP_Spy_Syndicate_first_ordie` with the dead drop
+    /// `FM_02_PVP_Spy_Syndicate_first` and `M_task_die_reset`. Inferred from the ids (`_ordie`,
+    /// `die_reset`; no retail capture of a death in such a step was read): the step ends when
+    /// its other tasks are done, and a death puts them back to their start. Before, the step
+    /// waited for the death too, so no PvP faction mission went past its first step (bot run
+    /// 2026-11-24 06:23Z).
+    pub(crate) fn resets_on_death(&self, index: usize) -> bool {
+        let task = &self.tasks[index];
+        matches!(task.kind, TaskKind::Die { .. })
+            && task.parent.is_some_and(|parent| {
+                let parent = &self.tasks[parent];
+                matches!(parent.kind, TaskKind::Simple)
+                    && parent
+                        .children
+                        .iter()
+                        .any(|child| !matches!(self.tasks[*child].kind, TaskKind::Die { .. }))
+            })
+    }
+
     /// Whether the server runs every task of the tree: none is of a type it does not run
     /// ([`TaskKind::NotRun`]), so the objective can end.
     pub fn runs(&self) -> bool {
@@ -2177,8 +2198,11 @@ impl ObjectiveRun {
             .tasks
             .iter()
             .zip(&self.states)
-            .filter_map(|(task, state)| match (state, &task.kind) {
+            .enumerate()
+            .filter_map(|(index, (task, state))| match (state, &task.kind) {
                 (_, TaskKind::Consecutive | TaskKind::Partial | TaskKind::Simple) => None,
+                // The reset branch of a step is nothing a player does for the quest.
+                _ if self.tree.resets_on_death(index) => None,
                 (TaskState::Active { progress, .. }, kind) => {
                     Some((task.id.as_str(), kind, *progress))
                 }
@@ -3131,14 +3155,35 @@ impl ObjectiveRun {
                 }
                 self.complete(parent, now_ms, effects);
             }
+            // The player died in a step that resets on death: the step starts again.
+            TaskKind::Simple if tree.resets_on_death(index) => {
+                for sibling in siblings {
+                    self.reset(*sibling);
+                }
+                for sibling in siblings {
+                    self.activate(*sibling, now_ms, effects);
+                }
+            }
             TaskKind::Simple
-                if siblings
-                    .iter()
-                    .all(|sibling| self.states[*sibling] == TaskState::Done) =>
+                if siblings.iter().all(|sibling| {
+                    self.states[*sibling] == TaskState::Done || tree.resets_on_death(*sibling)
+                }) =>
             {
+                for sibling in siblings {
+                    self.stop(*sibling);
+                }
                 self.complete(parent, now_ms, effects);
             }
             _ => {}
+        }
+    }
+
+    /// Puts task `index` and its children back to before their start, done ones too.
+    fn reset(&mut self, index: usize) {
+        self.states[index] = TaskState::Idle;
+        let tree = Arc::clone(&self.tree);
+        for child in &tree.tasks[index].children {
+            self.reset(*child);
         }
     }
 
@@ -4624,6 +4669,51 @@ pub(crate) mod tests {
         entry.event(Event::GameModeEntered(MODE), NOW);
         entry.event(kill("Ogre"), NOW);
         assert!(entry.finished());
+    }
+
+    /// `FM_02_PVP_Spy_Syndicate_first_ordie`: the dead drop and `M_task_die_reset`.
+    #[test]
+    fn a_step_beside_a_die_task_ends_without_a_death_and_starts_again_at_one() {
+        const ITEM: &str = "FM_PVP_Syndicate_item_1";
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["First_ordie", "Last"]),
+            container("First_ordie", "SimpleTaskContainer", &["First", "Die"]),
+            TaskRow {
+                item_name: Some(ITEM.to_owned()),
+                target_qty: Some(2),
+                ..row("First", "TaskGatherItems")
+            },
+            row("Die", "TaskDie"),
+            row("Last", "TaskDie"),
+        ];
+        let gained = Event::ItemGained {
+            item: ITEM,
+            quantity: 1,
+        };
+        let waiting = |run: &ObjectiveRun| -> Vec<(String, u32)> {
+            run.waiting_steps()
+                .into_iter()
+                .map(|(task, _, progress)| (task.to_owned(), progress))
+                .collect()
+        };
+        let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        assert_eq!(
+            waiting(&run),
+            [("First".to_owned(), 0)],
+            "the reset branch is no step"
+        );
+        run.event(gained, NOW);
+        assert_eq!(waiting(&run), [("First".to_owned(), 1)]);
+        // A death: the step starts again, its progress lost.
+        run.event(Event::Died, NOW);
+        assert_eq!(waiting(&run), [("First".to_owned(), 0)]);
+        run.event(gained, NOW);
+        run.event(gained, NOW);
+        // The step ended with no death; a die task alone in its container is a task to do.
+        assert_eq!(waiting(&run), [("Last".to_owned(), 0)]);
+        run.event(Event::Died, NOW);
+        assert!(run.finished());
     }
 
     #[test]
