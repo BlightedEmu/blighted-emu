@@ -260,8 +260,12 @@
               "proof": "bots"
             },
             {
-              "check": "At 340 bots only about 98 % of handoffs end within one tick (limit 99 %): the offer waits in the busy target sim's loop behind other work; a fix needs a design for message priority.",
-              "proof": "none"
+              "check": "Handoffs go first in the sim's loop (2026-11-24, bots): an offer waited behind the input, ghost and hit messages of a busy border, because the loop took its ready messages in a random order. Now a task of its own takes the handoff messages off the bus, and the loop takes up to 16 waiting offers and 16 answers before each wait. Two runs of 340 bots on four sims: 692 and 941 handoffs, none failed, 99.71 % and 99.79 % within one tick (limit 99 %; 98.08 % before), none over 50 ms. The metric `sim_handoff_take_seconds` has the parts `wait` and `take`.",
+              "proof": "bots"
+            },
+            {
+              "check": "A load test world runs next to the real-client stack (2026-11-24, bots): `LIVE_STACK_INSTANCE=2` starts a second world with its own ports, edge config and remote config copy. Before, its sims did not start.",
+              "proof": "bots"
             }
           ]
         },
@@ -1442,7 +1446,7 @@
               "proof": "none"
             },
             {
-              "check": "Faction boards, forts.",
+              "check": "Forts: not checked.",
               "proof": "none"
             },
             {
@@ -1503,6 +1507,10 @@
             },
             {
               "check": "A player kill fires the `PlayerKill` event for quests (2026-11-22, bots; Inferred, no retail capture of the quest): two bots end `C10A_Q6` and `C10A_Q6R`.",
+              "proof": "bots"
+            },
+            {
+              "check": "A bot takes and ends faction missions (2026-11-24, bots): it opens the faction board, reads the offered missions from its own state as a client does, and takes a PvE mission by its place in the list and a PvP mission by its id. A kill mission and a PvP dead drop mission each ended with a turn-in and gave territory standing, faction reputation and faction tokens; the PvP mission gave its faction 100 influence in its territory. Not checked: whether retail asks for the PvP flag in a PvP mission.",
               "proof": "bots"
             }
           ]
@@ -1598,6 +1606,10 @@
             },
             {
               "check": "Bosses and named mobs that had no look get their retail look (2026-11-23, bots): 216 rows for 190 mob kinds from the retail captures; the Goliaths now show their health.",
+              "proof": "bots"
+            },
+            {
+              "check": "A mob's card says that it takes hits (2026-11-24, bots): the recorded first state of some mobs (the Gawain trial's boss) said that the mob takes no hits, and the server sent it as recorded while it took every hit. A client then shows the mob as immune. The server now sends its own value.",
               "proof": "bots"
             }
           ]
@@ -2047,6 +2059,10 @@
             {
               "check": "A timed step whose fail condition is off runs as a plain timer (2026-11-23, bots): the tutorial and beach timers end again.",
               "proof": "bots"
+            },
+            {
+              "check": "A step of a PvP faction mission ends without a death (2026-11-24, bots): each step sits in a group with a die task (`M_task_die_reset`), and the engine waited for every task of the group, so for a death. Now such a die task is the step's reset: the step ends when its other tasks are done, and a death starts it again (the reset is Inferred from the task ids; no retail capture of a death in such a step was read).",
+              "proof": "bots"
             }
           ]
         },
@@ -2199,6 +2215,14 @@
             {
               "check": "Whether retail gives each player of a group its own `0726_0104` gravestone is Unknown: the level data marks it as shared, so one player per run gathers it.",
               "proof": "none"
+            },
+            {
+              "check": "One new bot plays the Monarch's Bluffs main story from the beach to its end in one run (2026-11-24, bots): `12_getoffbeach` and `12A_MSQ_02` to `12A_MSQ_26`, with the Gawain trial and its crown, and each quest's achievement as the client gets it. Two faults stopped the trial first and are fixed: a mob card told the client that the boss takes no hits, and a quest object taken in one copy of a trial was gone in the next copy.",
+              "proof": "bots"
+            },
+            {
+              "check": "The same bot goes on with the next main stories (2026-11-24, bots): Everfall ends but for one quest (the Azoth staff quests and the Heartforge trial end), Brightwood ends (`99B_MSQ_01` to `99B_MSQ_11`), Weaver's Fen plays to `99C_MSQ_04`. Open: `99A_MSQ_03` (its fight area is on a tower top where the server has no floor), `99C_MSQ_05` (a named knight's fight does not end).",
+              "proof": "bots"
             }
           ]
         },
@@ -2305,7 +2329,15 @@
               "proof": "tests"
             },
             {
-              "check": "Live check.",
+              "check": "Live check with the game client.",
+              "proof": "none"
+            },
+            {
+              "check": "A bot gets its achievements as a client does (2026-11-24, bots): it reads its own achievement set from the server and its report names what each quest set. A quest that ends without the achievement of its data row counts as broken. For the first beach quest the bot got the same seven quest achievements as a retail player in a capture of that quest; a first craft set its first-craft achievement.",
+              "proof": "bots"
+            },
+            {
+              "check": "Not done: a bot charts few areas (it teleports and reports only the areas of its quest steps), so most map achievements of a retail player are missing in a bot run. The area shapes are client data.",
               "proof": "none"
             }
           ]
@@ -2351,6 +2383,10 @@
             },
             {
               "check": "Level variants roll their base type's loot (2026-11-22, bots): a `Legion_Sagittarii_61` bag gives gear, before only the quest notes.",
+              "proof": "bots"
+            },
+            {
+              "check": "A bot opens an elite chest and gets its loot, and a second open on the same day is refused (2026-11-24, bots).",
               "proof": "bots"
             }
           ]
@@ -2494,6 +2530,10 @@
             {
               "check": "Per-player quest nodes (instanced capitals) are not used up for other players (2026-11-22, bots): the `09A_S16` pylons and the `C10A_Q2R` cages.",
               "proof": "bots"
+            },
+            {
+              "check": "A bot plays every gathering skill from nothing (2026-11-24, bots): the objective `trade:<skill>` gives the next thing to do, as a quest plan does. Logging, Mining and Harvesting: one node of the skill's common gatherable. Skinning: a kill and its skin. Each is done when the skill's experience rose.",
+              "proof": "bots"
             }
           ]
         },
@@ -2576,6 +2616,10 @@
             {
               "check": "A craft at a smelting station by a bot (2026-11-23).",
               "proof": "bots"
+            },
+            {
+              "check": "A bot plays all 12 refining and crafting skills from the raw material to the product (2026-11-24, bots): it gathers or skins each ingredient, refines it at a settlement station and crafts the skill's lowest recipe there (charcoal, timber, leather, cloth, a stone block, a light ration, a great axe, a blunderbuss, a flail, a trinket, armour, a lantern). Each skill gained its experience. Which recipe stands for a skill is our choice.",
+              "proof": "bots"
             }
           ]
         },
@@ -2609,6 +2653,10 @@
             },
             {
               "check": "A bot catches a quest fish (2026-11-22, bots): the cast's water check takes the full depth (client function `FUN_1430e8590`) and the water map's flags are read in the right byte order; before, every cast hit land. The quest fish bites at the latest on the sixth catch, as in the retail capture.",
+              "proof": "bots"
+            },
+            {
+              "check": "A bot fishes for the Fishing skill (2026-11-24, bots): a pole (worn, from the bag, or crafted from gathered wood and fibre), a cast and a catch give Fishing experience.",
               "proof": "bots"
             }
           ]
@@ -3286,6 +3334,22 @@
             },
             {
               "check": "The director keeps an instance its sim just opened (2026-11-23, bots): it took a sim report from before the open as \"no instance\" and ended Outpost Rush matches 0.2 s after they opened.",
+              "proof": "bots"
+            },
+            {
+              "check": "An expedition run ends at its last boss (2026-11-24, bots): the server ended a run only when every encounter of the level was done; retail ends it at the last boss task. Bot groups of 5 ended 10 of the 12 expeditions (Amrine, Starstone, Depths, Dynasty, Lazarus, Genesis, Tempest's Heart, Barnacles, Ennead, Empyrean), and each bot opened its own end chest and got loot (the chest's loot table is Inferred). Bots play a run with the objective `run:<game mode>`.",
+              "proof": "bots"
+            },
+            {
+              "check": "Not ended by bots (2026-11-24): Savage Divide (the bots saw no mob near the boss's place) and Glacial Tarn (725 hits on the boss and no death). Raids and catacombs: no bot flow yet.",
+              "proof": "none"
+            },
+            {
+              "check": "A new copy of a trial or expedition has all its objects (2026-11-24, bots): the instance servers are reused, and a quest object taken in one copy was gone in the next copy, also after a restart. Three bots took the Gawain trial's crown one after the other. That a copy keeps nothing of the copy before is Inferred.",
+              "proof": "bots"
+            },
+            {
+              "check": "Story trials by bots (2026-11-24): Gawain, Heartforge, Empress Zhou, Apophis, Morgaine and Seraphim end. A soul trial ends too (Isabella: the daily entry, the fight, the done flag and its reward event; the daily reset is Unknown). A mutated Starstone run of difficulty 1 ends. Open: Medusa, Dracula's later phases, Mahantaram, Varlaam and the wolf trial.",
               "proof": "bots"
             }
           ]
@@ -4111,6 +4175,10 @@
             {
               "check": "The season is the account's, as on retail, where a new character came in with the account's season rank 39 (tests only, 2026-11-12, global migration 0010): every character of an account has the account's season experience and season pass state. The season a character kept before is moved into its account once, at the first load.",
               "proof": "tests"
+            },
+            {
+              "check": "Not built: seasonal events. Found 2026-11-24: the game data's schedule table names each event (`EventHalloween`, `EventWinter`, `EventSpring`, `EventSummer`, `TurkeyTerror`, the world boss weeks), and retail moved an event to its weeks with a `javelin.schedule-overrides` line of the remote config. The server reads those lines and does nothing with a schedule yet. How an event's world objects are tied to its schedule is Unknown.",
+              "proof": "none"
             }
           ]
         },
@@ -4146,6 +4214,10 @@
             },
             {
               "check": "A bot plays a full song for a quest (2026-11-22, bots: `04A_Side05_02`); an instrument goes to its own equip slot (the flute to slot 39, as in retail).",
+              "proof": "bots"
+            },
+            {
+              "check": "A bot plays the Musician skill (2026-11-24, bots): it wears an instrument (a game master gave it), plays a song to its end and gets Musician experience (`trade:Musician`).",
               "proof": "bots"
             }
           ]
@@ -4192,8 +4264,12 @@
               "proof": "none"
             },
             {
-              "check": "Live test.",
+              "check": "Live test with the game client: the purchase screen, the furniture placement view, a furniture move, trophies, travel home, a visit of another player's house.",
               "proof": "none"
+            },
+            {
+              "check": "A bot buys a house and furnishes it (2026-11-24, bots): the purchase screen of a plot, the purchase (a tier 3 house for 15,000 coins), the taxes asked and paid, the entry, a bed placed (it leaves the bag) and taken back, the exit, and the house given up.",
+              "proof": "bots"
             }
           ]
         },
@@ -4271,6 +4347,7 @@
     }
   ],
   "nextSteps": [
+    "**Bots, night of 2026-11-24.**\n\n- Main story: the missing floor on the Arcturus tower top (`99A_MSQ_03`), the knight fight of `99C_MSQ_05`, then one bot run from the beach to the end of the list.\n- Expeditions: Savage Divide and Glacial Tarn; raids and catacombs need a bot flow.\n- Trials: Medusa, Dracula's later phases, Mahantaram, Varlaam, the wolf trial.\n- Corrupted breaches: the major portal's core has no mob, so a breach cannot end; the staff's close of a breach is not built.\n- World bosses, world tours and artifact drops by bots.\n- Achievements: compare more quests with retail captures (whisper, talk and cinematic achievements differ); area charting by a bot.\n- Seasonal events: a rule for the game data's schedules and their remote config overrides.",
     "**Bots, night of 2026-11-23.**\n\n- Expeditions not ended by bots: `1403A`, `0525_EXP`, `09A_S20`, `C10A_M7R`, `09A_S19`, and `0899_0801` for the whole group.\n- A full invasion to its end; the war board path of a war.\n- Handoff priority in the sim loop for 340 bots on four sims.\n- The one remaining PC stall during a build and an instance start.",
     "**Player body: physics leads (2026-11-21).**\n\n- Done (tests): attack root motion along the camera, side dodge rolls, the jump's wind-up, the start and stop lag, the camera on the floor, the measuring tool.\n- Next, in order: held-key attack chains, late and missed dodges (1,657 of 6,507 retail presses), the sprint before a jump and the sprint landing, the walls retail walks by (a stall near 7643, 4268).\n- Then let key physics lead and the camera only correct small error, measured on the fresh-start tool for keys and pad, and a live controller trace (no retail ledger has controller input).",
     "**Other players: live check of the 2026-11-20 second round (tests only).** Two players, keyboard and controller: crouch and prone with the pad (left shoulder with a left stick click, and held), quick double dodge presses (one roll each, no restart), and a keyboard video like the controller one. Then the earlier list: a bow's hip shots held long and short, walking and running backward, keys let go during an attack, walk starts, jumps and falls, the bow's full draw, blunderbuss re-fire and reload, blocks, a spear chain on a boar, a rapier's light and heavy attacks (the heavy now 19 records into the hold).\n\nStill open: the jerk of a player on a slow link (Unknown), the drawn block shake (no measured fault left); what children 41 bit 1, 42 and 44 do for other players (Unknown).",
@@ -4359,6 +4436,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Bots play more of the game (2026-11-24): handoffs go first in the sim's loop (99.7 % within one tick at 340 bots), every trade skill from the raw material to the product, achievements as the client gets them, housing, faction and PvP missions, expedition runs to their end chest, soul trials, and the Monarch's Bluffs main story by one bot in one run.",
     "Other players and ranged magic (2026-11-21, tests only): each state number keeps its own record's place for the players who see it (the other player's saw-tooth run), and Rain of Arrows lands where the camera's look meets the real ground.",
     "Ranged and magic (2026-11-20, tests only): a click in an ability's aim is no longer lost when two input messages come before one server tick, and Rain of Arrows and Penetrating Shot show their shot and end as in the retail captures.",
     "Progress check against the code (2026-11-20): every check was compared with the code. Checks whose tests exist now say tests, the built parts of not-built checks are split out with their own proof, and out-of-date text is fixed. The area once named \"Not started\" is now \"Late systems\": each of its systems has code.",
