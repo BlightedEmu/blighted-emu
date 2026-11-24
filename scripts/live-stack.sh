@@ -17,7 +17,8 @@
 # programs keep running. Results go to LOG_DIR/control.log.
 # LIVE_STACK_INSTANCE=2 (up to 9) starts a second test world next to the first: every port moves
 # up by 100 per instance, the world id ends in the instance number, the logs go to
-# local-data/logs/live-<instance>/, and the bots get their own names (edge config copied there).
+# local-data/logs/live-<instance>/, and the bots get their own names (edge config and remote
+# config copied there).
 set -euo pipefail
 
 readonly EXIT_USAGE=2
@@ -41,6 +42,8 @@ readonly ENV_FILE="local-data/m3-test.env"
 readonly EDGE_CONFIG="local-data/edge-http/edge.toml"
 readonly DIRECTOR_CONFIG="local-data/world-director.toml"
 readonly SOCIAL_CONFIG="config/social.toml"
+# The remote config folder of an edge config that names none.
+readonly DEFAULT_REMOTE_CONFIG_DIR="config/remote-config"
 if ((INSTANCE == 1)); then
   readonly LOG_DIR="local-data/logs/live"
 else
@@ -165,6 +168,8 @@ start_server() {
 }
 
 # Starts the world-director, the social service and the sims; their pids go to `pids` (in the world loop's shell).
+# Each sim reads its world from the edge config this stack's edge runs with (a second world has
+# its own copy), not from the committed example.
 start_world() {
   start_server director env NW_DIRECTOR_WORLD_ID="$WORLD_ID" \
     NW_DIRECTOR_METRICS_LISTEN="$DIRECTOR_METRICS_LISTEN" \
@@ -177,6 +182,7 @@ start_world() {
   for ((index = 0; index < sims; index++)); do
     local sim_id="sim-$((index + 1))"
     start_server "$sim_id" env NW_SIM_SIM_ID="$sim_id" NW_SIM_WORLD_ID="$WORLD_ID" \
+      NW_SIM_EDGE_CONFIG="$edge_config" \
       NW_SIM_METRICS_LISTEN="127.0.0.1:${SIM_METRICS_PORTS[index]}" \
       NW_SIM_TICK_THREADS="$sim_tick_threads" NW_SIM_MAX_PLAYERS="$SIM_MAX_PLAYERS" \
       NW_SIM_ADMIN__SNAPSHOT_INTERVAL_MS="$snapshot_interval_ms" "$BIN/sim"
@@ -211,6 +217,18 @@ if ((INSTANCE > 1)); then
   edge_config="$LOG_DIR/edge.toml"
   sed -e "s/$FIRST_WORLD_ID/$WORLD_ID/" \
     -e "s/127\.0\.0\.1:33435/127.0.0.1:$GATEWAY_PORT/" "$EDGE_CONFIG" >"$edge_config"
+  # The remote config has one file pair per world id: the second world gets a copy of the
+  # folder with the first world's pair under its own id. The edge and the sims read the folder
+  # from the edge config, so the override goes to both.
+  remote_config_source="$(sed -n '/^\[remote_config\]/,/^\[/s/^directory *= *"\(.*\)" *$/\1/p' "$EDGE_CONFIG")"
+  remote_config_source="${remote_config_source:-$DEFAULT_REMOTE_CONFIG_DIR}"
+  remote_config_copy="$LOG_DIR/remote-config"
+  mkdir -p "$remote_config_copy"
+  cp "$remote_config_source"/*.json "$remote_config_copy/"
+  for world_file in "$remote_config_copy"/*"$FIRST_WORLD_ID".json; do
+    mv "$world_file" "${world_file/$FIRST_WORLD_ID/$WORLD_ID}"
+  done
+  export NW_EDGE_REMOTE_CONFIG__DIRECTORY="$remote_config_copy"
 fi
 start_server edge env NW_EDGE_HTTPS_LISTEN="$EDGE_LISTEN" \
   NW_EDGE_PING_LISTEN="$EDGE_PING_LISTEN" NW_EDGE_METRICS_LISTEN="$EDGE_METRICS_LISTEN" \
