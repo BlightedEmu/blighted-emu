@@ -5301,6 +5301,88 @@ mod retail_tests {
         assert!(average < BUDGET, "{average:?}");
     }
 
+    /// The mobs of a retail camp walk every point of their spawner's path. Live 2026-11-23
+    /// 23:15 to 23:17: the crawler of spawn (8147.5, 3528.3) and the sword skeleton of spawn
+    /// (8148.3, 3517.7) walked to 0.5 m from their first point and stood there for minutes: the
+    /// tree's `AdvanceWayPoint` went out four times for one arrival, and their paths have four
+    /// and two points.
+    #[test]
+    fn the_mobs_of_a_camp_walk_every_point_of_their_path() {
+        const CRAWLER_ID: &str = "Skeleton_Crawler_16";
+        const CRAWLER: &str = "7b6289c864f85c1290e24bca095c9471";
+        const CRAWLER_SPAWN_XY: [f32; 2] = [8147.475, 3528.3394];
+        const SWORD_ID: &str = "Skeleton_1H_Sword_17";
+        const SWORD: &str = "67b05bb4f09e5c119e1ea9751c161480";
+        const SWORD_SPAWN_XY: [f32; 2] = [8148.3164, 3517.7197];
+        const SPAWN_MATCH_M: f32 = 0.1;
+        /// Past the mobs' 12 m ambient vision, inside the sim's wake radius.
+        const PLAYER_AWAY_M: f32 = 40.0;
+        /// The tree's `IsAgentOutsideArrivalThreshold` (0.6 m) and a step of the walk.
+        const AT_POINT_M: f32 = 1.0;
+        const WALK_MS: u64 = 120_000;
+        for (id, slice, spawn_xy) in [
+            (CRAWLER_ID, CRAWLER, CRAWLER_SPAWN_XY),
+            (SWORD_ID, SWORD, SWORD_SPAWN_XY),
+        ] {
+            let mut world =
+                nw_world::WorldFile::load(&nw_content::layout::repo_layout(), OPEN_WORLD_LEVEL)
+                    .expect("world file");
+            let spawn = world
+                .vitals
+                .iter()
+                .position(|vitals| {
+                    (vitals.position[0] - spawn_xy[0]).hypot(vitals.position[1] - spawn_xy[1])
+                        < SPAWN_MATCH_M
+                })
+                .expect("its spawn");
+            let position = world.vitals[spawn].position;
+            world.vitals_ai = vec![world.vitals_ai[spawn].clone()];
+            let points = world.vitals_ai[0]
+                .path
+                .as_ref()
+                .and_then(|path| world.paths.get(path))
+                .expect("its path")
+                .points
+                .clone();
+            let ground = real_ground();
+            let mut mobs = retail_mobs(Vec::new(), &[(id, asset(slice))]);
+            let ai = MobAi::new(retail_data(), AiRates::default(), LookAssets::default());
+            let overrides = crate::mob_ai::resolve_ai(&world, &ai)[0].clone();
+            let entity = mobs
+                .spawn_gm(
+                    VitalsSpawn {
+                        vitals_id: lowercase_crc32(id),
+                        level: TEST_LEVEL,
+                        position,
+                        ..VitalsSpawn::default()
+                    },
+                    overrides,
+                    Some(asset(slice)),
+                )
+                .expect("spawned");
+            let player = Seen {
+                entity: PLAYER,
+                position: Position {
+                    x: position[0] + PLAYER_AWAY_M,
+                    y: position[1],
+                    z: position[2],
+                },
+            };
+            let mut visited = vec![false; points.len()];
+            for now in (0..WALK_MS).step_by(TICK_MS as usize) {
+                mobs.tick(&[player], now, &ground, 1);
+                let at = mobs.get(entity).expect("the mob").position;
+                for (point, seen) in points.iter().zip(&mut visited) {
+                    *seen |= (point[0] - at.x).hypot(point[1] - at.y) < AT_POINT_M;
+                }
+            }
+            assert!(
+                visited.iter().all(|seen| *seen),
+                "{id} walked to each point of {points:?}: {visited:?}"
+            );
+        }
+    }
+
     /// The rows of the scale test start here.
     const ROW_Y_OFFSET: f32 = 1_000.0;
 }

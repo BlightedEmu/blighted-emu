@@ -679,13 +679,19 @@ impl Brain {
             + self.cooldown_times.capacity() * size_of::<(NameId, f64, f64)>()
     }
 
-    /// One AI tick: plan, then execute; commands go to `out`.
-    pub fn tick(&mut self, runtime: &Runtime, world: &impl World, out: &mut Vec<Command>) {
+    /// One AI tick: plan, then execute; commands go to `out`. `true` when a plan that sent a
+    /// [`Command::Action`] out ended at once: the sim runs the commands and ticks again
+    /// ([`MAX_PLANS_PER_TICK`] times at most), so that the next plan reads the world after the
+    /// action. Planned again in the same tick it read the world before it: the Patrol sub-tree's
+    /// `AdvanceWayPoint` went out four times for one arrival, which on a path of four or two
+    /// points is the same point again (live 2026-11-23 23:15 to 23:17: a crawler of archetype
+    /// 619 and a skeleton of archetype 608 stood 0.5 m from their first waypoint for minutes).
+    pub fn tick(&mut self, runtime: &Runtime, world: &impl World, out: &mut Vec<Command>) -> bool {
         let Some(arch) = runtime.data().archetypes.get(self.archetype as usize) else {
-            return;
+            return false;
         };
         let Some(root) = self.root else {
-            return;
+            return false;
         };
         let now = world.now_ms();
         let mut ctx = Ctx {
@@ -707,7 +713,7 @@ impl Brain {
                 let planned = ctx.plan(ROOT_SLOT, root, &mut fresh).is_some();
                 if idle {
                     if !planned {
-                        return;
+                        return false;
                     }
                     ctx.brain.plan = fresh;
                 } else if planned && fresh != ctx.brain.plan {
@@ -717,11 +723,19 @@ impl Brain {
                     ctx.brain.plan = fresh;
                 }
             }
+            let sent = ctx.out.len();
             if ctx.exec(ROOT_SLOT, root, None) == Status::Running {
-                return;
+                return false;
             }
             ctx.brain.plan.clear();
+            if ctx.out[sent..]
+                .iter()
+                .any(|command| matches!(command, Command::Action { .. }))
+            {
+                return true;
+            }
         }
+        false
     }
 }
 
@@ -1510,7 +1524,8 @@ impl<'a, W: World> Ctx<'a, '_, W> {
                 self.set_state(slot, id, state);
             }
         }
-        if let Some(status) = self.stop_check(slot, kind, fresh) {
+        let held = fresh || self.plays_to_its_end();
+        if let Some(status) = self.stop_check(slot, kind, held) {
             if let Some(child) = kind.child() {
                 self.cancel_tree(slot_of(slot, 0), child);
             }
@@ -1620,13 +1635,28 @@ impl<'a, W: World> Ctx<'a, '_, W> {
         }
     }
 
-    /// The executing checks of a decorator: `Some(status)` stops its child with that status. On
-    /// the tick it starts (`fresh`), its continuation conditions are not checked: they hold a
-    /// running child, the entry conditions gate the start (Inferred from the risen's
+    /// Whether an action runs that cannot be cut (`Interruptable` false) and ends by itself (a
+    /// fragment of a known length): an attack.
+    fn plays_to_its_end(&self) -> bool {
+        let data = self.rt.data();
+        self.brain.active.iter().any(|active| {
+            !data.node(active.node).interruptable
+                && matches!(active.state, State::Leaf { done_at, .. } if done_at.get().is_some())
+        })
+    }
+
+    /// The executing checks of a decorator: `Some(status)` stops its child with that status.
+    /// While `held`, its continuation conditions are not checked. That is on the tick it starts:
+    /// they hold a running child, the entry conditions gate the start (Inferred from the risen's
     /// `AlertUntilClose`: entry `True Equal True`, continuation `Target_Dist > 4`; a check at
     /// the start would never let a mob whose target is already near play its alert, whose
-    /// `Alerted` tag its fight needs).
-    fn stop_check(&mut self, slot: Slot, kind: &NodeKind, fresh: bool) -> Option<Status> {
+    /// `Alerted` tag its fight needs). And it is while an action plays that cannot be cut and
+    /// ends by itself ([`Self::plays_to_its_end`]; Inferred: the javelineer's `MidCombatBehavior`
+    /// enters with `Target_Dist` under 9 and continues to 7, and its throws are not
+    /// interruptable. Live 2026-11-24 00:09:06 to 00:09:31: with the player 7.1 to 8.1 m away
+    /// the gate cut each throw on the tick after its start, and the mob of archetype 26 started
+    /// 213 throws in 25 s and hit with one).
+    fn stop_check(&mut self, slot: Slot, kind: &NodeKind, held: bool) -> Option<Status> {
         let gates = match kind {
             NodeKind::BlackboardCondition { gates, .. } => Some(gates.as_ref()),
             NodeKind::EntityQuery { params, .. } => Some(&params.gates),
@@ -1634,7 +1664,7 @@ impl<'a, W: World> Ctx<'a, '_, W> {
         };
         if let Some(gates) = gates {
             let continues =
-                fresh || gates.continuation.is_empty() || self.holds(&gates.continuation);
+                held || gates.continuation.is_empty() || self.holds(&gates.continuation);
             let interrupted = !gates.interrupt.is_empty() && self.holds(&gates.interrupt);
             return (!continues || interrupted).then_some(Status::Failure);
         }
@@ -1646,7 +1676,7 @@ impl<'a, W: World> Ctx<'a, '_, W> {
                 allow_dynamic_scaling,
                 ..
             } => {
-                let continues = fresh
+                let continues = held
                     || gates.continuation.is_empty()
                     || self.distance_holds(
                         &gates.continuation,
@@ -2364,6 +2394,35 @@ mod tests {
         assert_eq!(played(&out, &data), ["Gore"]);
     }
 
+    /// A plan that is one action of the sim ends the tick after it, and asks for a tick after
+    /// the sim ran it: the action goes out once, not once for each plan of the tick. A plan that
+    /// goes on to a task asks for none.
+    #[test]
+    fn a_plan_that_ends_with_an_action_waits_for_the_sim_to_run_it() {
+        let mut build = Build::default();
+        let order = build.node(NodeKind::CompleteOrder);
+        let data = build.finish(order);
+        let runtime = Runtime::new(data.clone());
+        let mut mob = brain(&data);
+        let mut out = Vec::new();
+        assert!(mob.tick(&runtime, &TestWorld::default(), &mut out));
+        let actions = out
+            .iter()
+            .filter(|command| matches!(command, Command::Action { .. }))
+            .count();
+        assert_eq!(actions, 1);
+
+        let mut build = Build::default();
+        let order = build.node(NodeKind::CompleteOrder);
+        let gore = build.gore("Gore");
+        let root = build.sequence(&[order, gore]);
+        let data = build.finish(root);
+        let runtime = Runtime::new(data.clone());
+        let mut mob = brain(&data);
+        out.clear();
+        assert!(!mob.tick(&runtime, &TestWorld::default(), &mut out));
+    }
+
     /// The `09A_S17` prowler: its `Alert` entries all need a weapon tag it has not, so the
     /// action plays no fragment and is done at once; the sequence goes on to its next task.
     #[test]
@@ -2704,6 +2763,38 @@ mod tests {
                 .any(|command| matches!(command, Command::EndTask { .. })),
             "its continuation stops it on the next tick: {out:?}"
         );
+    }
+
+    /// An attack that cannot be cut plays to its end when the continuation of its gate fails;
+    /// one that can be cut stops ([`a_continuation_holds_a_running_child_and_does_not_gate_its_start`]).
+    #[test]
+    fn a_failed_continuation_does_not_cut_an_action_that_cannot_be_cut() {
+        let mut build = Build::default();
+        let gore = build.gore("Gore");
+        let condition = build.condition("Target_Dist", CompareOp::GreaterThan, NEAR_M);
+        let gated = build.node(NodeKind::BlackboardCondition {
+            child: Some(gore),
+            gates: Box::new(Gates {
+                continuation: ConditionGroup {
+                    any: false,
+                    conditions: vec![condition],
+                },
+                ..Gates::default()
+            }),
+        });
+        let mut data = build.finish(gated);
+        data.nodes[gore as usize].interruptable = false;
+        let mut world = TestWorld::default();
+        world.set(EngineKey::TargetDist, Value::Float(NEAR_M));
+        let mut mob = brain(&data);
+        let runtime = Runtime::new(data.clone());
+        let mut out = Vec::new();
+        mob.tick(&runtime, &world, &mut out);
+        assert_eq!(played(&out, &data), ["Gore"]);
+        world.now += TICK_MS;
+        out.clear();
+        mob.tick(&runtime, &world, &mut out);
+        assert!(out.is_empty(), "it plays on: {out:?}");
     }
 
     #[test]

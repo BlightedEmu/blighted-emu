@@ -41,7 +41,9 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use nw_ai::brain::{Brain, Command, Destination, MotionOutcome, Runtime, Slot, World};
+use nw_ai::brain::{
+    Brain, Command, Destination, MAX_PLANS_PER_TICK, MotionOutcome, Runtime, Slot, World,
+};
 use nw_ai::data::{
     AiData, Archetype, CageAction, FacingMode, FragmentVariant, MobCage, NO_FACING_RAD, NavConfig,
     ProcWindow, SliceTriggerRef,
@@ -1083,12 +1085,13 @@ struct Motion {
 enum MotionKind {
     /// To a point.
     To(Position),
-    /// To the target: to a point the archetype's navigation config `config` picks around it,
-    /// picked again when the target moved more than the config's repath distance from where it
-    /// was.
+    /// To the target: to a point that `around` picks around it (`goal`: the point, and where
+    /// the target was then), picked again when the target moved more than `repath_m` from where
+    /// it was (`m_targetRepathDistance`).
     Follow {
         goal: Option<(Position, Position)>,
-        config: Option<usize>,
+        repath_m: f32,
+        around: Option<Around>,
     },
     /// Around the target until `until_ms`.
     Strafe {
@@ -1103,6 +1106,32 @@ enum MotionKind {
     /// degrees of straight away, and eight ended with the player beyond the turkey's 15 m
     /// ambient vision; Inferred: the end rule, as the engine's rule is Unknown).
     Away,
+}
+
+/// Whose `m_selectPositionParams` pick the point around the target that a mob runs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Around {
+    /// The archetype's navigation config of this index.
+    Config(usize),
+    /// The navigation node.
+    Node(NodeId),
+}
+
+impl Around {
+    fn params(self, ai: &MobAi, archetype: u32) -> Option<&SelectPositionParams> {
+        match self {
+            Self::Config(index) => ai
+                .arch(archetype)?
+                .nav_configs
+                .get(index)?
+                .select_position
+                .as_ref(),
+            Self::Node(node) => match &ai.data().node(node).kind {
+                NodeKind::Navigation(nav) => nav.motion.select_position.as_ref(),
+                _ => None,
+            },
+        }
+    }
 }
 
 /// The CAGE action a mob plays, as its replicated animation shows it.
@@ -2343,18 +2372,19 @@ impl MindState {
                 steer_along(&mut self.path, &mut mover, *goal, &motion.steering, dt_s)
                     .then_some(MotionOutcome::Arrived)
             }
-            MotionKind::Follow { goal, config } => match target {
+            MotionKind::Follow {
+                goal,
+                repath_m,
+                around: picker,
+            } => match target {
                 None => Some(MotionOutcome::Failed),
                 Some(target) => {
-                    let config =
-                        config.and_then(|index| ai.arch(self.archetype)?.nav_configs.get(index));
-                    let repath_m = config.map_or(0.0, |config| config.target_repath_distance);
                     let stale = goal.is_none_or(|(_, picked_at)| {
-                        picked_at.horizontal_distance(target.position) > repath_m
+                        picked_at.horizontal_distance(target.position) > *repath_m
                     });
                     if stale {
-                        let picked = config
-                            .and_then(|config| config.select_position.as_ref())
+                        let picked = picker
+                            .and_then(|picker| picker.params(ai, self.archetype))
                             .and_then(|params| {
                                 self.pick_around(ai, *at, target.position, params, around.ground)
                             })
@@ -3358,22 +3388,29 @@ impl TreeMind {
             entity: around.entity,
             tagged: around.tagged,
         };
-        let mut out = Vec::new();
-        let picks = {
-            let mut view = self.state.view(ai, *at, now_ms, passive);
-            view.target = perceived.target;
-            view.candidates = perceived.candidates;
-            view.health_share = around.health_share;
-            view.ground = Some(around.ground);
-            view.others = others;
-            view.seen = around.seen;
-            view.held = around.held;
-            self.brain.tick(&ai.runtime, &view, &mut out);
-            view.picks.get()
-        };
-        self.state.picks = picks;
+        // A plan that ends at once after an action of the sim is planned again after the
+        // action ([`Brain::tick`]).
+        for _ in 0..MAX_PLANS_PER_TICK {
+            let mut out = Vec::new();
+            let (picks, again) = {
+                let mut view = self.state.view(ai, *at, now_ms, passive);
+                view.target = perceived.target;
+                view.candidates = perceived.candidates;
+                view.health_share = around.health_share;
+                view.ground = Some(around.ground);
+                view.others = others;
+                view.seen = around.seen;
+                view.held = around.held;
+                let again = self.brain.tick(&ai.runtime, &view, &mut out);
+                (view.picks.get(), again)
+            };
+            self.state.picks = picks;
+            self.apply(ai, *at, now_ms, out, &mut thought, others);
+            if !again {
+                break;
+            }
+        }
         thought.ticked = true;
-        self.apply(ai, *at, now_ms, out, &mut thought, others);
         self.log_target_change(ai, perceived_target, *at);
         let activity = if self.state.target.is_some() {
             Activity::Combat
@@ -3427,6 +3464,28 @@ impl TreeMind {
                 "mob target changed"
             );
         }
+    }
+
+    /// How far the target of a move may go from where it was before the move's point is picked
+    /// again: the `m_targetRepathDistance` of the navigation config, or the node's own.
+    #[allow(clippy::cast_possible_truncation, reason = "a node field of metres")]
+    fn repath_m(
+        &self,
+        ai: &MobAi,
+        node: NodeId,
+        config: Option<&NavConfig>,
+        view: &View<'_>,
+    ) -> f32 {
+        if let Some(config) = config {
+            return config.target_repath_distance;
+        }
+        let NodeKind::Navigation(nav) = &ai.data().node(node).kind else {
+            return 0.0;
+        };
+        self.brain
+            .resolve(&ai.runtime, view, &nav.motion.target_repath_distance)
+            .and_then(Value::as_number)
+            .map_or(0.0, |value| value as f32)
     }
 
     /// The steering of a navigation config of the archetype, or of the node's own fields.
@@ -3550,12 +3609,41 @@ impl TreeMind {
                         }
                         _ => false,
                     };
-                    let kind = match destination {
-                        Destination::Point(point) => MotionKind::To(position_of(point)),
-                        Destination::Target if flees => MotionKind::Away,
-                        Destination::Target => MotionKind::Follow {
+                    // A point the node picked around the target is picked again as the target
+                    // moves, as the config's point of a move to the target is. Kept as it was
+                    // picked, the mob ran to where the player had been and hit the air (live
+                    // 2026-11-23 23:17:33 to 23:17:40: a skeleton of archetype 617 ran
+                    // `RunToTarget_TicketPosition`, node 574, to the player's place of 3 s
+                    // before and played `Attack_2H_Flurry` 11.35 m from the player).
+                    let around_target = match &ai.data().node(node).kind {
+                        NodeKind::Navigation(nav) => {
+                            nav.nav_key.is_none()
+                                && nav
+                                    .motion
+                                    .select_position
+                                    .as_ref()
+                                    .is_some_and(|params| params.origin == PositionType::Target)
+                        }
+                        _ => false,
+                    };
+                    let repath_m = {
+                        let view = self.state.view(ai, at, now_ms, passive);
+                        self.repath_m(ai, node, config, &view)
+                    };
+                    let kind = match (destination, self.state.target_at) {
+                        (Destination::Point(point), Some(target_at)) if around_target => {
+                            MotionKind::Follow {
+                                goal: Some((position_of(point), target_at)),
+                                repath_m,
+                                around: Some(Around::Node(node)),
+                            }
+                        }
+                        (Destination::Point(point), _) => MotionKind::To(position_of(point)),
+                        (Destination::Target, _) if flees => MotionKind::Away,
+                        (Destination::Target, _) => MotionKind::Follow {
                             goal: None,
-                            config: config_index,
+                            repath_m,
+                            around: config_index.map(Around::Config),
                         },
                     };
                     self.state.motion = Some(Motion {
@@ -6774,6 +6862,67 @@ mod tests {
             Some(wait_action)
         );
         assert_eq!(at, START);
+    }
+
+    /// A run to a point that the node picks around the target goes where the target goes
+    /// (live 2026-11-23: a skeleton ran to the player's place of 3 s before and hit the air).
+    #[test]
+    fn a_run_to_a_point_around_the_target_follows_the_target() {
+        use super::test_support::TEST_SIGHT_M;
+        const RUN_TASK: &str = "Move_Combat_CAGE_Task";
+        const STEP_MS: u64 = 33;
+        const NODE_MAX_SPEED: f32 = 5.0;
+        const NODE_MIN_SPEED: f32 = 2.0;
+        const NODE_ACCELERATION: f32 = 2.0;
+        const NODE_ARRIVAL_M: f32 = 0.25;
+        const NODE_REPATH_M: f32 = 0.15;
+        const NODE_TURN_RATE_DEG: f32 = 720.0;
+        const PLAYER_M: f32 = 8.0;
+        const PLAYER_MOVED_M: f32 = 5.0;
+        let mut build = nw_ai::build::Build::default();
+        let run = build.navigation_to(RUN_TASK, None, PositionType::Target);
+        let fight = build.gate("Has_Target", nw_ai::value::CompareOp::Equal, 1.0, run);
+        let stand = build.idle("Idle_Task");
+        let root = build.selector(&[fight, stand]);
+        let mut data = build.finish(root);
+        if let NodeKind::Navigation(nav) = &mut data.nodes[run as usize].kind {
+            let literal = |value: f32| Param::literal(Value::Float(value));
+            nav.motion.max_speed = literal(NODE_MAX_SPEED);
+            nav.motion.min_speed = literal(NODE_MIN_SPEED);
+            nav.motion.linear_acceleration = literal(NODE_ACCELERATION);
+            nav.motion.linear_deceleration = literal(NODE_ACCELERATION);
+            nav.motion.arrival_threshold = literal(NODE_ARRIVAL_M);
+            nav.motion.target_repath_distance = literal(NODE_REPATH_M);
+            nav.turn_rate = literal(NODE_TURN_RATE_DEG);
+        }
+        data.archetypes[0].ambient_vision = Some(nw_ai::data::Vision {
+            angle_deg: 360.0,
+            distance_m: TEST_SIGHT_M,
+        });
+        let ai = MobAi::new(data, AiRates::default(), LookAssets::new());
+        let ground = FlatGround(GROUND_Z);
+        let player = |position| {
+            [Seen {
+                entity: 7,
+                position,
+            }]
+        };
+        let first = east(PLAYER_M);
+        let mut mind = TreeMind::new(&ai, 0, START, 0.0, 1, None).expect("a tree");
+        let mut at = START;
+        mind.step(&ai, &mut at, &alone_with(0, &player(first), &ground));
+        let goal = mind.state.motion_goal().expect("it runs");
+        assert!(goal.horizontal_distance(first) < NODE_ARRIVAL_M, "{goal:?}");
+        let moved = Position {
+            y: first.y + PLAYER_MOVED_M,
+            ..first
+        };
+        mind.step(&ai, &mut at, &alone_with(STEP_MS, &player(moved), &ground));
+        let goal = mind.state.motion_goal().expect("it still runs");
+        assert!(
+            goal.horizontal_distance(moved) < NODE_ARRIVAL_M,
+            "the point goes with the target: {goal:?}"
+        );
     }
 
     /// A `Flee` navigation to the target runs straight away from it until the target lies
