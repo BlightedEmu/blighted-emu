@@ -609,11 +609,7 @@ impl CageAction {
     /// in 21 s, `12a_msq_08_destroyrune` ledger 108,777 to 130,076 ms). `None` when the fragment
     /// loops or its length is Unknown. `facing_rad` is the turn the action plays its
     /// `DesiredFacing` blend space with ([`FragmentLength::seconds_at`]).
-    pub fn done_after_s(
-        &self,
-        has_tag: &impl Fn(NameId) -> bool,
-        facing_rad: f32,
-    ) -> Option<f32> {
+    pub fn done_after_s(&self, has_tag: &impl Fn(NameId) -> bool, facing_rad: f32) -> Option<f32> {
         let length = self.variant(has_tag)?.length.seconds_at(facing_rad)?;
         let offset = self.completion.as_ref().map_or(0.0, |completion| {
             completion
@@ -1043,7 +1039,9 @@ mod tests {
 
     #[test]
     fn the_gore_is_done_its_offset_before_the_fragment_end() {
-        let plain = gore().done_after_s(&|_| false, NO_FACING_RAD).expect("done");
+        let plain = gore()
+            .done_after_s(&|_| false, NO_FACING_RAD)
+            .expect("done");
         assert!((plain - (GORE_FRAMES_S / GORE_SPEED - GORE_OFFSET_S)).abs() < 1e-6);
         let chained = gore()
             .done_after_s(&|tag| tag == CHAIN_TAG, NO_FACING_RAD)
@@ -1136,7 +1134,10 @@ mod tests {
         assert!((done(FRAC_PI_4) - (IDLE_S + QUARTER_S) / 2.0).abs() < 1e-6);
         assert!((done(-3.0 * FRAC_PI_4) - (QUARTER_S + HALF_RIGHT_S) / 2.0).abs() < 1e-6);
         assert!((done(2.0 * PI) - HALF_LEFT_S).abs() < 1e-6, "past the last");
-        assert!((done(-2.0 * PI) - HALF_RIGHT_S).abs() < 1e-6, "before the first");
+        assert!(
+            (done(-2.0 * PI) - HALF_RIGHT_S).abs() < 1e-6,
+            "before the first"
+        );
     }
 
     #[test]

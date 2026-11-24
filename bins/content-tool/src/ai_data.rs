@@ -25,9 +25,8 @@ use std::path::Path;
 use nw_ai::data::{
     AiData, Archetype, BlockActivity, BlockEffect, CageAction, CageCondition, Completion, Creature,
     EntityTrigger, FacingLength, FacingMode, FragmentCase, FragmentLength, FragmentVariant, Grid,
-    NavConfig,
-    ProcWindow, ProjectileSlice, RangedAttack, SliceTriggerRef, TagActivity, TagEffect, TreeRef,
-    Vision,
+    NavConfig, ProcWindow, ProjectileSlice, RangedAttack, SliceTriggerRef, TagActivity, TagEffect,
+    TreeRef, Vision,
 };
 use nw_ai::decode::{DecodeError, ServerPakError, TreeDecoder, decode_entries, server_pak_entries};
 use nw_ai::node::NodeId;
@@ -2172,9 +2171,8 @@ mod tests {
         else {
             panic!("by facing");
         };
-        let seconds = |frames: i32| {
-            (f64::from(frames) * f64::from(SECONDS_PER_FRAME) / TURN_SPEED) as f32
-        };
+        let seconds =
+            |frames: i32| (f64::from(frames) * f64::from(SECONDS_PER_FRAME) / TURN_SPEED) as f32;
         let expected = [
             (-HALF_RAD, seconds(HALF_RIGHT_FRAMES)),
             (-QUARTER_RAD, seconds(QUARTER_FRAMES)),
@@ -2184,7 +2182,10 @@ mod tests {
         ];
         assert_eq!(examples.len(), expected.len(), "{examples:?}");
         for (example, (facing_rad, length_s)) in examples.iter().zip(expected) {
-            assert!((example.facing_rad - facing_rad).abs() < 1e-6, "{example:?}");
+            assert!(
+                (example.facing_rad - facing_rad).abs() < 1e-6,
+                "{example:?}"
+            );
             assert!((example.seconds - length_s).abs() < 1e-5, "{example:?}");
         }
         let walk = entry(r#"<Blend ExitTime="0"/><Animation name="speed"/>"#);
