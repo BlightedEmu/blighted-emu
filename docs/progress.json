@@ -1803,7 +1803,7 @@
               "proof": "tests"
             },
             {
-              "check": "Not done: a mob does not walk onto low objects and stand behind them. Live 2026-11-24: a javelin skeleton on a ruin platform stepped up two ledges of 0.4 m onto an object at the edge and stood there with a solid on every straight line to the player. The server has no navigation mesh; it walks straight lines over the level collision. A view check (a target behind a solid is not visible) was tried and taken out: a beach boss then lost a player 10 m away behind an object.",
+              "check": "Not done: a mob does not walk onto low objects and stand behind them. Live 2026-11-24: a javelin skeleton on a ruin platform stepped up two ledges of 0.4 m onto an object at the edge and stood there with a solid on every straight line to the player. The server has no navigation mesh; it walks straight lines over the level collision. A view check (a target behind a solid is not visible) was tried and taken out: a beach boss then lost a player 10 m away behind an object. Measured 2026-11-24 from 51 retail captures: a retail mob steps up a ledge of at most about 0.30 m; the server allows 0.6 m, and the object here is two brick piles of 0.36 m and 0.40 m. A ledge rule of 0.30 m alone was tried and taken out: a beach sailor then walked into a pocket between objects and found no way home. The fix needs a map of the places a mob body may stand.",
               "proof": "none"
             },
             {
