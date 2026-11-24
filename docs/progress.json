@@ -1827,6 +1827,10 @@
               "proof": "tests"
             },
             {
+              "check": "The walk map behind its switch does not break the bots (2026-11-24, bots): with `mob_walk_map` on, 90 hunt bots fought mobs for 10 minutes with no late tick (the mob step took 0.90 ms a tick, 0.82 ms without the map), one bot ended the same 26 main story quests as without the map, and a group of 5 bots ended an expedition. The switch is off by default. Not checked: the other expeditions, the side quests, and the live game client.",
+              "proof": "bots"
+            },
+            {
               "check": "A mob that runs to a place beside its target goes where the target goes (2026-11-23, tests only): the place was picked once at the start of the run. Live 2026-11-23: a club skeleton ran to where the player had stood 3 s before and swung 11 m from the player.",
               "proof": "tests"
             }
