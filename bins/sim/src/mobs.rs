@@ -44,7 +44,7 @@ use crate::combat::CombatSettings;
 use crate::mob_ai::{
     COMBAT_LEASH_KEY, GritHit, GuardHit, HeldEffects, MobAi, PATH_ASK_LIFE, RemoteFact, Shown,
     SpawnAi, SpellCast, Strike, Summon, Surroundings, TaggedMob, TreeMind, floor_line,
-    height_after_move,
+    height_after_move, stand_after_move,
 };
 use crate::mob_path::PathPool;
 use crate::objectives::KillTypes;
@@ -1226,10 +1226,8 @@ impl Mobs {
         let index = spawn_index(entity)?;
         let from = self.live.get(&index)?.position;
         let end = self.lunge(entity, to, max_m)?;
-        let landed = floor_line(ground, from, end, None).map_or(from, |on_floor| Position {
-            z: height_after_move(ground, on_floor),
-            ..on_floor
-        });
+        let landed = floor_line(ground, from, end, None)
+            .map_or(from, |on_floor| stand_after_move(ground, on_floor));
         let mob = self.live.get_mut(&index)?;
         mob.position = landed;
         Some(landed)
@@ -1274,10 +1272,7 @@ impl Mobs {
             };
             landed = Some(on_floor);
         }
-        let landed = landed.map(|on_floor| Position {
-            z: height_after_move(ground, on_floor),
-            ..on_floor
-        })?;
+        let landed = landed.map(|on_floor| stand_after_move(ground, on_floor))?;
         self.live.get_mut(&index)?.position = landed;
         Some(landed)
     }
@@ -4159,7 +4154,7 @@ mod retail_tests {
         const SAME_PLACE_M: f32 = 1.0;
         /// How far the player is: out of every sense of the mob.
         const FAR_M: f32 = 40.0;
-        let world = ground.terrain();
+        let world = ground.ground().terrain();
         let id = lowercase_crc32(vitals_id);
         let index = world
             .vitals
@@ -4568,8 +4563,13 @@ mod retail_tests {
     /// How near a level spawn is to [`JANSZOON_SPAWN`] to be his (the level's: 1.7 m).
     const JANSZOON_SPAWN_MATCH_M: f32 = 3.0;
 
-    /// The real ground of Janszoon's level.
-    type RealGround = nw_sim_core::LevelGround<Arc<nw_world::WorldFile>>;
+    /// The real ground of Janszoon's level, as the live sim's mobs have it: with the walk map
+    /// layer, which is on when [`WALK_MAP_VARIABLE`] is set.
+    type RealGround =
+        nw_sim_core::walk_map::WalkMapGround<nw_sim_core::LevelGround<Arc<nw_world::WorldFile>>>;
+    /// Set to run the real-ground tests with the walk map on (the walk map plan, gate 2: every
+    /// test passes with the map off and with it on).
+    const WALK_MAP_VARIABLE: &str = "NW_TEST_WALK_MAP";
 
     /// Janszoon at his beach spawn and the real ground of his level.
     fn janszoon_on_real_ground() -> (Mobs, RealGround) {
@@ -4598,7 +4598,12 @@ mod retail_tests {
         let marks = Arc::new(nw_world::collision_index::NavMarkIndex::of(
             &index, &nav_marks,
         ));
-        LevelGround::new(Arc::new(world), Arc::new(index.with_bodies(mob_bodies))).with_marks(marks)
+        nw_sim_core::walk_map::WalkMapGround::new(
+            LevelGround::new(Arc::new(world), Arc::new(index.with_bodies(mob_bodies)))
+                .with_marks(marks),
+            nw_sim_core::walk_map::MOB_BODY,
+            std::env::var_os(WALK_MAP_VARIABLE).is_some(),
+        )
     }
 
     /// The mob of vitals id `vitals_id`, shown with slice asset `slice`, at `position` of the
@@ -5381,6 +5386,249 @@ mod retail_tests {
                 "{id} walked to each point of {points:?}: {visited:?}"
             );
         }
+    }
+
+    /// With the walk map on, the javelineer of the ruin platform takes no step onto the brick
+    /// piles beside its door frame, and it still walks the platform (live 2026-11-24 00:31:43:
+    /// without the map it stepped up 0.36 m and 0.40 m onto them and stood at (8129.24, 3576.76)
+    /// with a solid on every line to the player).
+    #[test]
+    fn with_the_walk_map_a_mob_does_not_climb_the_brick_piles_of_the_ruin_platform() {
+        const FROM: Position = Position {
+            x: 8127.51,
+            y: 3570.93,
+            z: 120.92,
+        };
+        const ONTO_THE_BRICKS: Position = Position {
+            x: 8129.24,
+            y: 3576.76,
+            z: 121.01,
+        };
+        const ALONG_THE_PLATFORM: Position = Position {
+            x: 8128.3,
+            y: 3566.5,
+            z: 120.95,
+        };
+        /// The slice's `m_maxSlope` (`ancientguardian_javelineer`).
+        const MAX_SLOPE_DEG: f32 = 70.0;
+        let with_map = nw_sim_core::walk_map::WalkMapGround::new(
+            real_ground(),
+            nw_sim_core::walk_map::MOB_BODY,
+            true,
+        );
+        assert_eq!(
+            crate::mob_ai::floor_line(&with_map, FROM, ONTO_THE_BRICKS, Some(MAX_SLOPE_DEG)),
+            None
+        );
+        assert!(
+            crate::mob_ai::floor_line(&with_map, FROM, ALONG_THE_PLATFORM, Some(MAX_SLOPE_DEG))
+                .is_some()
+        );
+    }
+
+    /// With the walk map on, the javelineer of the ruin platform fights a player at places all
+    /// around its platform and never stands on a place that the map closes: not on the brick
+    /// piles, not behind the door frame (live 2026-11-24 00:31:43: without the map it stood
+    /// there for 18 s with a solid on every line to the player).
+    #[test]
+    fn with_the_walk_map_the_platform_javelineer_never_stands_off_the_map() {
+        const JAVELINEER_ID: &str = "AncientGuardian_Javelineer_12";
+        const JAVELINEER: &str = "32711ff8f3a15609ac62ccb18246a947";
+        const SPAWN: [f32; 3] = [8130.161, 3566.9536, 120.903_725];
+        const PLATFORM_MIDDLE: [f32; 2] = [8128.5, 3571.0];
+        const PLATFORM_Z: f32 = 121.0;
+        const AROUND_M: f32 = 5.0;
+        const PLACES: u16 = 12;
+        const ON_PLATFORM_M: f32 = 1.0;
+        const FIGHT_MS: u64 = 25_000;
+        let ground = nw_sim_core::walk_map::WalkMapGround::new(
+            real_ground(),
+            nw_sim_core::walk_map::MOB_BODY,
+            true,
+        );
+        let mut fights = 0;
+        for place in 0..PLACES {
+            let bearing = std::f32::consts::TAU * f32::from(place) / f32::from(PLACES);
+            let (x, y) = (
+                PLATFORM_MIDDLE[0] + AROUND_M * bearing.cos(),
+                PLATFORM_MIDDLE[1] + AROUND_M * bearing.sin(),
+            );
+            let Some(z) = ground
+                .floor_at(x, y, PLATFORM_Z)
+                .filter(|floor| (floor - PLATFORM_Z).abs() <= ON_PLATFORM_M)
+            else {
+                continue;
+            };
+            let player = Seen {
+                entity: PLAYER,
+                position: Position { x, y, z },
+            };
+            let mut mobs = retail_mobs(Vec::new(), &[(JAVELINEER_ID, asset(JAVELINEER))]);
+            let entity = mobs
+                .spawn_gm(
+                    VitalsSpawn {
+                        vitals_id: lowercase_crc32(JAVELINEER_ID),
+                        level: TEST_LEVEL,
+                        position: SPAWN,
+                        ..VitalsSpawn::default()
+                    },
+                    None,
+                    Some(asset(JAVELINEER)),
+                )
+                .expect("spawned");
+            let mut fought = false;
+            for now in (0..FIGHT_MS).step_by(TICK_MS as usize) {
+                mobs.tick(&[player], now, &ground, 1);
+                let at = mobs.get(entity).expect("the mob").position;
+                assert!(
+                    !ground.closed_by_walk_map(at),
+                    "player at ({x:.1}, {y:.1}), {now} ms: it stands off the map at {at:?}"
+                );
+                fought |= mobs.target(entity) == Some(PLAYER);
+            }
+            assert!(fought, "it takes the player at ({x:.1}, {y:.1})");
+            fights += 1;
+        }
+        assert!(fights >= 6, "player places on the platform: {fights}");
+    }
+
+    /// The walk map plan's gate 3, the part that needs no running stack: patrol mobs of the open
+    /// world walk their spawner paths as well with the walk map as without it. Run with
+    /// `cargo test -p sim --lib --features local-data patrol_mobs_walk -- --ignored --nocapture`
+    /// and without `NW_TEST_WALK_MAP`. It prints the counts of both modes.
+    #[test]
+    #[ignore = "minutes: hundreds of real patrol mobs, twice"]
+    #[allow(clippy::print_stdout)]
+    fn patrol_mobs_walk_their_paths_with_the_walk_map_as_without_it() {
+        const MOBS: usize = 200;
+        const PLAYER_AWAY_M: f32 = 40.0;
+        const AT_POINT_M: f32 = 1.0;
+        const WALK_MS: u64 = 120_000;
+        const FIRST_PLAYER: u64 = 1_000;
+        /// The most mobs that may walk their whole path without the map and not with it, of
+        /// [`MOBS`] (our limit for this gate: 2 %).
+        const MAY_LOSE: usize = MOBS / 50;
+        let layout = nw_content::layout::repo_layout();
+        let world = nw_world::WorldFile::load(&layout, OPEN_WORLD_LEVEL).expect("world file");
+        let prefabs: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(layout.file(nw_content::layout::MOB_PREFABS))
+                .expect("the mob prefab table"),
+        )
+        .expect("json");
+        let mut kind_of: std::collections::HashMap<u32, (String, String)> =
+            std::collections::HashMap::new();
+        for row in prefabs.as_array().expect("rows") {
+            let id = row["vitals_id"].as_u64().expect("id") as u32;
+            kind_of.entry(id).or_insert_with(|| {
+                (
+                    row["vitals_name"].as_str().expect("name").to_owned(),
+                    row["asset"].as_str().expect("asset").to_owned(),
+                )
+            });
+        }
+        let candidates: Vec<usize> = (0..world.vitals.len())
+            .filter(|&index| {
+                kind_of.contains_key(&world.vitals[index].vitals_id)
+                    && world.vitals_ai[index]
+                        .path
+                        .as_ref()
+                        .and_then(|path| world.paths.get(path))
+                        .is_some_and(|path| {
+                            path.points.len() >= 2 && path.tasks.iter().all(Option::is_none)
+                        })
+            })
+            .collect();
+        let every = (candidates.len() / MOBS).max(1);
+        let chosen: Vec<usize> = candidates.into_iter().step_by(every).take(MOBS).collect();
+        let kinds: Vec<(&str, [u8; ASSET_ID_LEN])> = chosen
+            .iter()
+            .map(|&index| {
+                let (name, hex) = &kind_of[&world.vitals[index].vitals_id];
+                (name.as_str(), asset(hex))
+            })
+            .collect();
+        let ai = MobAi::new(retail_data(), AiRates::default(), LookAssets::default());
+        let overrides = crate::mob_ai::resolve_ai(&world, &ai);
+        let mut walked = Vec::new();
+        for with_map in [false, true] {
+            let ground = nw_sim_core::walk_map::WalkMapGround::new(
+                real_ground(),
+                nw_sim_core::walk_map::MOB_BODY,
+                with_map,
+            );
+            let mut mobs = retail_mobs(Vec::new(), &kinds);
+            let mut entities = Vec::new();
+            let mut players = Vec::new();
+            for (number, &index) in chosen.iter().enumerate() {
+                let spawn = &world.vitals[index];
+                let (name, hex) = &kind_of[&spawn.vitals_id];
+                let Some(entity) = mobs.spawn_gm(
+                    VitalsSpawn {
+                        vitals_id: lowercase_crc32(name),
+                        level: TEST_LEVEL,
+                        position: spawn.position,
+                        ..VitalsSpawn::default()
+                    },
+                    overrides[index].clone(),
+                    Some(asset(hex)),
+                ) else {
+                    continue;
+                };
+                let points = world.paths[world.vitals_ai[index].path.as_ref().expect("a path")]
+                    .points
+                    .clone();
+                entities.push((entity, points));
+                players.push(Seen {
+                    entity: FIRST_PLAYER + number as u64,
+                    position: Position {
+                        x: spawn.position[0] + PLAYER_AWAY_M,
+                        y: spawn.position[1],
+                        z: spawn.position[2],
+                    },
+                });
+            }
+            let mut visited: Vec<Vec<bool>> = entities
+                .iter()
+                .map(|(_, points)| vec![false; points.len()])
+                .collect();
+            for now in (0..WALK_MS).step_by(TICK_MS as usize) {
+                mobs.tick(&players, now, &ground, 1);
+                for ((entity, points), seen) in entities.iter().zip(&mut visited) {
+                    let Some(mob) = mobs.get(*entity) else {
+                        continue;
+                    };
+                    for (point, seen) in points.iter().zip(seen.iter_mut()) {
+                        *seen |= (point[0] - mob.position.x).hypot(point[1] - mob.position.y)
+                            < AT_POINT_M;
+                    }
+                }
+            }
+            let whole: Vec<bool> = visited
+                .iter()
+                .map(|seen| seen.iter().all(|seen| *seen))
+                .collect();
+            let off_the_map = entities
+                .iter()
+                .filter(|(entity, _)| {
+                    mobs.get(*entity)
+                        .is_some_and(|mob| ground.closed_by_walk_map(mob.position))
+                })
+                .count();
+            println!(
+                "walk map {with_map}: {} mobs, {} walked every point of their path, {} stand off the map at the end",
+                entities.len(),
+                whole.iter().filter(|whole| **whole).count(),
+                off_the_map
+            );
+            walked.push(whole);
+        }
+        let lost = walked[0]
+            .iter()
+            .zip(&walked[1])
+            .filter(|(without, with)| **without && !**with)
+            .count();
+        println!("walked their path without the map and not with it: {lost}");
+        assert!(lost <= MAY_LOSE, "{lost} of {MOBS}");
     }
 
     /// The rows of the scale test start here.

@@ -39,7 +39,7 @@ pub const MAX_EXPANDED: usize = 2_000;
 /// at least a body's height apart).
 const FLOOR_BAND_M: f32 = 1.5;
 /// A goal this near (ground plane) ends the search, with a straight floor line to it.
-const GOAL_REACH_M: f32 = CELL_M * 1.5;
+pub const GOAL_REACH_M: f32 = CELL_M * 1.5;
 /// A goal this far above or below a place is on another floor, m.
 const GOAL_HEIGHT_M: f32 = FLOOR_BAND_M;
 /// The furthest a way is pulled straight in one look, in points (our engineering limit).
@@ -150,6 +150,7 @@ pub fn find_path(
         z,
     };
     let estimate = |at: Position| at.horizontal_distance(to);
+    let goal_closed_by_map = ground.closed_by_walk_map(to);
     let mut nodes = vec![Node {
         at: from,
         cost: 0.0,
@@ -171,10 +172,16 @@ pub fn find_path(
         if estimate(here.at) < estimate(nodes[nearest].at) {
             nearest = node;
         }
-        if here.at.horizontal_distance(to) <= GOAL_REACH_M
-            && (here.at.z - to.z).abs() <= GOAL_HEIGHT_M
-            && let Some(end) = floor_line(ground, here.at, to, max_slope_deg)
-        {
+        // A goal that only the walk map closes (a player beside a wall: a mob's body does not
+        // fit there) is reached at the place of the map nearest to it: the mob's attacks reach
+        // from there (live sim test 2026-11-24: the beach officer dropped a player who stood
+        // 10 m away on such a place, the way ended 1 m short of it).
+        let near_goal = here.at.horizontal_distance(to) <= GOAL_REACH_M
+            && (here.at.z - to.z).abs() <= GOAL_HEIGHT_M;
+        if near_goal && goal_closed_by_map {
+            return Some(plan(ground, &nodes, node, to, true, max_slope_deg));
+        }
+        if near_goal && let Some(end) = floor_line(ground, here.at, to, max_slope_deg) {
             nodes.push(Node {
                 at: end,
                 cost: here.cost + here.at.horizontal_distance(end),

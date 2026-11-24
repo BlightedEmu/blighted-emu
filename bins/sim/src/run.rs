@@ -26,6 +26,7 @@ use nw_content::player_attacks::PlayerAttacks;
 use nw_content::player_sequences::PlayerSequences;
 use nw_content::store::store_table;
 use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
+use nw_sim_core::walk_map::{MOB_BODY, WalkMapGround};
 use nw_sim_core::{LevelGround, level_bounds};
 use nw_world::WorldFile;
 use nw_world::camps::CampSlices;
@@ -873,10 +874,15 @@ async fn serve_async(
         let _ = nw_common::shutdown::stop_signal().await;
     };
     let databases = Databases { world: db, global };
+    tracing::info!(on = config.mob_walk_map, "mob walk map");
     Ok(serve_loop(
         settings,
         level.ground,
-        level.mob_ground,
+        Arc::new(WalkMapGround::new(
+            level.mob_ground,
+            MOB_BODY,
+            config.mob_walk_map,
+        )),
         bus,
         databases,
         shutdown,

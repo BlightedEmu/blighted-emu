@@ -20,6 +20,7 @@ pub mod steering;
 pub mod test_support;
 pub mod tick;
 pub mod tracking;
+pub mod walk_map;
 
 pub use among::{AmongCharacters, CharacterBody};
 pub use brain::{BrainAction, ChaseBrain, ChaseSettings, Gait, MobState, Seen, walk_within};

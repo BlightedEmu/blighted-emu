@@ -67,7 +67,7 @@ use nw_world::records::{AiBehaviour, AiProfile, PathMode, PatrolPath};
 use serde::Deserialize;
 
 use crate::mob_homing::{self, Body, HOMING_CLIP, HomingClip, HomingRun, PARAM_TRUE};
-use crate::mob_path::{PathAnswer, PathPlan, PathPool, find_path};
+use crate::mob_path::{GOAL_REACH_M, PathAnswer, PathPlan, PathPool, find_path};
 use crate::mobs::MobReach;
 
 /// A moving mob keeps its own height when the level's ground lies more than this far below it
@@ -878,6 +878,26 @@ pub fn height_after_move(ground: &dyn Ground, to: Position) -> f32 {
     height_over(ground.floor_at(to.x, to.y, to.z), to.z)
 }
 
+/// Where a mob stands after a move that ended at `on_floor`, the end of a [`floor_line`]: on the
+/// floor there ([`height_after_move`]), unless that floor is more than [`MAX_STEP_RISE_M`] over
+/// the line's own end. The floor search reaches [`nw_world::collision_index::FLOOR_SEARCH_ABOVE_M`]
+/// over the feet, and the line and this second look ask with heights a few millimetres apart: at
+/// that limit the second look found the top of a rock that the line did not, and the mob stood on
+/// it with no check of the rise (sim test with the walk map on, 2026-11-24: the beach officer
+/// strafed from (7058.77, 3134.56, 41.99) to (7058.79, 3134.52, 43.29), 1.30 m up in one tick, and
+/// did not walk home from the rock).
+pub fn stand_after_move(ground: &dyn Ground, on_floor: Position) -> Position {
+    let floor = height_after_move(ground, on_floor);
+    Position {
+        z: if floor - on_floor.z > MAX_STEP_RISE_M {
+            on_floor.z
+        } else {
+            floor
+        },
+        ..on_floor
+    }
+}
+
 /// [`height_after_move`] of a mob at height `z` over `floor`.
 fn height_over(floor: Option<f32>, z: f32) -> f32 {
     match floor {
@@ -916,10 +936,9 @@ pub fn floor_line(
     )]
     let steps = (length / FLOOR_STEP_M).ceil().max(1.0) as u32;
     let max_rise = max_slope_deg.map(|slope| slope.to_radians().tan());
-    let mut last = Position {
-        z: height_after_move(ground, from),
-        ..from
-    };
+    // The line starts where the body stands; a floor more than a step over its feet is not its
+    // floor ([`stand_after_move`]).
+    let mut last = stand_after_move(ground, from);
     let mut free = !ground.no_stand(last);
     for step in 1..=steps {
         // A few hundred steps.
@@ -1413,6 +1432,8 @@ struct MindState {
     manual: Option<Position>,
     last_damage: Option<Position>,
     reachable_ms: Option<u64>,
+    /// Its home and its route's points are fitted to the walk map ([`Self::fit_to_map`]).
+    fitted: bool,
     reach: Option<ReachCheck>,
     statuses: Vec<NameId>,
     /// While a hit reaction plays: until when.
@@ -1572,7 +1593,68 @@ struct TargetView {
     reachable: bool,
 }
 
+/// The step of the search for the place of the walk map nearest a point (the map's own cell).
+const FIT_STEP_M: f32 = nw_sim_core::walk_map::RING_STEP_M;
+/// The directions of that search, degrees.
+const FIT_TURNS_DEG: [f64; 8] = [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0];
+
+/// `at`, or when only the walk map closes it for a mob, the nearest place within
+/// [`GOAL_REACH_M`] where a mob may stand: a spawn or a waypoint beside a wall is a place the
+/// retail mesh did not hold either (3,622 of the 115,965 open world spawns and 1,380 of the
+/// 50,921 patrol points are off the map, findings `2026-11-24-walk-map-phase0.md`, section 8),
+/// and the trees' arrival checks need a place the mob can stand on.
+fn on_map_near(ground: &dyn Ground, at: Position) -> Position {
+    let stand = |place: Position| Position {
+        z: height_after_move(ground, place),
+        ..place
+    };
+    if !ground.closed_by_walk_map(stand(at)) {
+        return at;
+    }
+    // A handful of search steps.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "a handful of search steps"
+    )]
+    let rings = (GOAL_REACH_M / FIT_STEP_M) as u32;
+    (1..=rings)
+        .flat_map(|ring| {
+            #[allow(clippy::cast_precision_loss, reason = "a handful of search steps")]
+            let reach = ring as f32 * FIT_STEP_M;
+            FIT_TURNS_DEG
+                .iter()
+                .map(move |degrees| stand(ahead(at, turned(0.0, *degrees), reach)))
+        })
+        .find(|place| !ground.no_stand(*place))
+        .unwrap_or(at)
+}
+
 impl MindState {
+    /// Fits its home and the points of its route to the walk map, once ([`on_map_near`]).
+    fn fit_to_map(&mut self, ground: &dyn Ground) {
+        if self.fitted {
+            return;
+        }
+        self.fitted = true;
+        self.spawn = on_map_near(ground, self.spawn);
+        if let Some(walk) = &mut self.route {
+            let fitted: Vec<Position> = walk
+                .route
+                .points
+                .iter()
+                .map(|point| on_map_near(ground, *point))
+                .collect();
+            if fitted != walk.route.points {
+                walk.route = Arc::new(Route {
+                    points: fitted,
+                    ..(*walk.route).clone()
+                });
+            }
+        }
+    }
+
     /// The vision of the archetype: ambient without a target, combat with one (the slice's
     /// `m_ambientVisionProfile` and `m_combatVisionProfile`; `-1` is none). A design override of
     /// the sight replaces the ambient distance.
@@ -1752,10 +1834,7 @@ impl MindState {
             target,
             rooted,
             |from, to| {
-                floor_line(ground, from, to, max_slope).map(|end| Position {
-                    z: height_after_move(ground, end),
-                    ..end
-                })
+                floor_line(ground, from, to, max_slope).map(|end| stand_after_move(ground, end))
             },
         );
         if body
@@ -2428,12 +2507,18 @@ impl MindState {
         };
         let outcome = match floor_move(ground, *at, mover.position, max_slope) {
             Some(on_floor) => {
-                *at = Position {
-                    z: height_after_move(ground, on_floor),
-                    ..on_floor
-                };
+                *at = stand_after_move(ground, on_floor);
                 self.keep_trail(ai, *at);
                 outcome
+            }
+            // Its goal is a place that only the walk map closes, and it stands as near as the
+            // map lets a body come: it has arrived (a player beside a wall).
+            None if goal.is_some_and(|goal| {
+                at.horizontal_distance(goal) <= GOAL_REACH_M && ground.closed_by_walk_map(goal)
+            }) =>
+            {
+                mover.speed_mps = 0.0;
+                Some(MotionOutcome::Arrived)
             }
             // The straight move is closed: it searches a way around and walks it from its next
             // step.
@@ -2562,6 +2647,7 @@ impl TreeMind {
                 manual: None,
                 last_damage: None,
                 reachable_ms: None,
+                fitted: false,
                 reach: None,
                 // The slice's `m_initialStatusEffects` (`AI_Enable_Stagger`); the cards do
                 // not show them (Observed: no such effect on the heavies' and Seraphim's cards).
@@ -3320,6 +3406,7 @@ impl TreeMind {
     pub fn step(&mut self, ai: &MobAi, at: &mut Position, around: &Surroundings<'_>) -> Thought {
         let now_ms = around.now_ms;
         let mut thought = Thought::default();
+        self.state.fit_to_map(around.ground);
         if self
             .state
             .reaction_until_ms
@@ -4460,7 +4547,7 @@ impl World for View<'_> {
             reason = "a few attempts"
         )]
         let attempts = attempts as u32;
-        for _ in 0..attempts {
+        for attempt in 0..attempts {
             let angle = start + f64::from(self.draw()) * span;
             let range = range_min + f64::from(self.draw()) * (range_max - range_min);
             // Metres of a pick.
@@ -4481,8 +4568,18 @@ impl World for View<'_> {
             // level has no height data: a leash reset's walk home to the spawn failed at once and
             // the mob stood past its leash (sim test `a_returning_mob_is_refused`, 2026-11-12).
             if !(params.check_path_to_origin || params.check_path_to_anchor) {
+                // With the walk map the point is a place of the map: one that only the map
+                // closes becomes the nearest place where a body stands ([`on_map_near`]). Without
+                // such a place near, the next attempt picks again, and the last attempt keeps
+                // its point as before the map (sim test with the map on, 2026-11-24: the beach
+                // officer picked a walk-home point inside a rock, did not arrive, and took no
+                // player again).
                 let z = height_after_move(ground, point);
-                return Some([point.x, point.y, z]);
+                let fitted = on_map_near(ground, Position { z, ..point });
+                if attempt + 1 < attempts && ground.closed_by_walk_map(fitted) {
+                    continue;
+                }
+                return Some([fitted.x, fitted.y, fitted.z]);
             }
             if let Some(reached) = floor_line(ground, self.at, point, self.max_slope())
                 .filter(|reached| reached.horizontal_distance(point) < FLOOR_STEP_M)
@@ -5059,6 +5156,49 @@ mod tests {
         assert_eq!(ai.archetype_for(vitals + 1, None), None);
         assert!(ai.has_tree(0));
         assert!(!MobAi::empty().has_tree(0));
+    }
+
+    /// Ground whose floor search finds a rock's top, `rise` m up, only from feet a hair over the
+    /// ground: the search's reach over the feet ends between the two.
+    struct TopAtTheLimit {
+        rise: f32,
+    }
+
+    const HAIR_M: f32 = 0.001;
+
+    impl Ground for TopAtTheLimit {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(GROUND_Z)
+        }
+
+        fn floor_at(&self, _: f32, _: f32, z: f32) -> Option<f32> {
+            Some(if z > GROUND_Z + HAIR_M {
+                GROUND_Z + self.rise
+            } else {
+                GROUND_Z
+            })
+        }
+    }
+
+    /// A mob is not lifted onto a rock by the second look at the floor after a move (the beach
+    /// officer, 1.30 m up in one tick); a floor within a step is taken.
+    #[test]
+    fn a_move_does_not_lift_a_mob_more_than_a_step() {
+        const ROCK_M: f32 = 1.3;
+        const SILL_M: f32 = 0.2;
+        let feet = Position {
+            z: GROUND_Z + 2.0 * HAIR_M,
+            ..START
+        };
+        let rock = TopAtTheLimit { rise: ROCK_M };
+        assert_eq!(stand_after_move(&rock, feet).z, feet.z);
+        assert_eq!(
+            floor_line(&rock, feet, east(0.04), None),
+            None,
+            "and the line does not climb it"
+        );
+        let sill = TopAtTheLimit { rise: SILL_M };
+        assert_eq!(stand_after_move(&sill, feet).z, GROUND_Z + SILL_M);
     }
 
     #[test]

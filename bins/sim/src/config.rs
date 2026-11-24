@@ -262,6 +262,10 @@ pub struct SimConfig {
     /// build. Empty by default: every queued mode of the catalog is open.
     #[serde(default)]
     pub closed_queues: Vec<QueuedMode>,
+    /// Whether the mobs walk on the walk map (`nw_sim_core::walk_map`): a mob then takes no step
+    /// onto a place where its body does not stand. Off by default (the walk map plan, phase 2).
+    #[serde(default)]
+    pub mob_walk_map: bool,
 }
 
 /// A game mode that players enter by the matchmaking queue (`closed_queues`).

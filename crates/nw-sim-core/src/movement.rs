@@ -113,6 +113,13 @@ pub trait Ground {
     fn no_stand(&self, _feet: Position) -> bool {
         false
     }
+
+    /// Whether `_feet` is a place where a mob may not stand only because its body does not fit
+    /// there by the walk map ([`crate::walk_map::WalkMapGround`]): a player can stand there, and
+    /// a mob that goes to it has arrived at the nearest place of the map. Never without that map.
+    fn closed_by_walk_map(&self, _feet: Position) -> bool {
+        false
+    }
 }
 
 /// The ground a reference names.
@@ -152,6 +159,10 @@ impl<T: Ground + ?Sized> Ground for &T {
     fn no_stand(&self, feet: Position) -> bool {
         (**self).no_stand(feet)
     }
+
+    fn closed_by_walk_map(&self, feet: Position) -> bool {
+        (**self).closed_by_walk_map(feet)
+    }
 }
 
 /// The ground a shared value holds.
@@ -190,6 +201,10 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
 
     fn no_stand(&self, feet: Position) -> bool {
         (**self).no_stand(feet)
+    }
+
+    fn closed_by_walk_map(&self, feet: Position) -> bool {
+        (**self).closed_by_walk_map(feet)
     }
 }
 
