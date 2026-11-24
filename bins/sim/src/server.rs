@@ -99,6 +99,12 @@ pub const POLL: Duration = Duration::from_millis(5);
 pub const SERVER_EPOCH_UNIX_MS: u64 = 946_684_800_000;
 /// Handoff answers that may wait for the loop.
 const RESULT_QUEUE: usize = 1024;
+/// Handoff messages (offers and cancels) that may wait for the loop.
+const HANDOFF_QUEUE: usize = 1024;
+/// Most handoff messages, and most handoff answers, the loop takes before one wait
+/// ([`waiting`]): a border crowd's offers go first, and the tick still gets its turn (a take
+/// is about 0.04 ms, so a full burst of both is about 1 ms of a 33 ms tick).
+const HANDOFF_BURST: usize = 16;
 /// Output batches that may wait for NATS (one per gateway per tick); more are dropped and
 /// counted, so a NATS outage never sends minutes of old bundles.
 pub const OUTPUT_QUEUE: usize = 256;
@@ -169,9 +175,14 @@ pub const METRIC_ADMITS: &str = "sim_admits_total";
 pub const METRIC_HANDOFFS: &str = "sim_handoffs_total";
 /// Metric: time from the freeze to the answer of a handoff.
 pub const METRIC_HANDOFF_SECONDS: &str = "sim_handoff_seconds";
-/// Metric: time the target sim's loop spends on a handoff offer (the take and its answer): the
-/// rest of [`METRIC_HANDOFF_SECONDS`] is the bus and the wait in the target's loop.
+/// Metric: the target sim's time for a handoff offer, by `part`: [`HANDOFF_PART_WAIT`] from the
+/// offer's arrival off the bus to the loop's turn for it, [`HANDOFF_PART_TAKE`] the loop's work
+/// (the take and its answer). The rest of [`METRIC_HANDOFF_SECONDS`] is the bus.
 pub const METRIC_HANDOFF_TAKE_SECONDS: &str = "sim_handoff_take_seconds";
+/// Part of [`METRIC_HANDOFF_TAKE_SECONDS`]: the offer waits for the loop.
+const HANDOFF_PART_WAIT: &str = "wait";
+/// Part of [`METRIC_HANDOFF_TAKE_SECONDS`]: the loop takes the player and answers.
+const HANDOFF_PART_TAKE: &str = "take";
 /// Metric: inputs sent on to the sim that took their player.
 pub const METRIC_FORWARDED_INPUTS: &str = "sim_forwarded_inputs_total";
 /// Metric: forwarded client messages dropped because a direct one came first.
@@ -339,11 +350,42 @@ struct HandoffResult {
     elapsed: Duration,
 }
 
+/// A handoff message and when it came off the bus.
+struct ArrivedHandoff {
+    arrived: Instant,
+    handoff: Result<Incoming<HandoffMessage>, BusError>,
+}
+
+/// Takes the handoff messages off the bus in a task of their own and notes each one's arrival,
+/// so the loop can take them before its other work ([`waiting`]) and the time they waited for
+/// the loop is known ([`HANDOFF_PART_WAIT`]). The task ends with the subscription or the loop.
+fn arrivals(mut handoffs: nw_bus::Subscription<HandoffMessage>) -> mpsc::Receiver<ArrivedHandoff> {
+    let (arrived, queue) = mpsc::channel(HANDOFF_QUEUE);
+    tokio::spawn(async move {
+        while let Some(handoff) = handoffs.next().await {
+            let message = ArrivedHandoff {
+                arrived: Instant::now(),
+                handoff,
+            };
+            if arrived.send(message).await.is_err() {
+                break;
+            }
+        }
+    });
+    queue
+}
+
+/// The messages that wait in `queue` now, at most `most` of them, in their order.
+fn waiting<T>(queue: &mut mpsc::Receiver<T>, most: usize) -> impl Iterator<Item = T> + '_ {
+    std::iter::from_fn(|| queue.try_recv().ok()).take(most)
+}
+
 /// The subscriptions of one sim.
 struct Inbox {
     admits: nw_bus::Subscription<Admit>,
     inputs: nw_bus::Subscription<InputBatch>,
-    handoffs: nw_bus::Subscription<HandoffMessage>,
+    /// The handoff offers and cancels, with their arrival times ([`arrivals`]).
+    handoffs: mpsc::Receiver<ArrivedHandoff>,
     ghosts: nw_bus::Subscription<Ghosts>,
     hits: nw_bus::Subscription<Hit>,
     tables: nw_bus::Subscription<CellTable>,
@@ -368,7 +410,7 @@ impl Inbox {
         let inbox = Self {
             admits: bus.subscribe(subject::sim_admit(world_id, sim)).await?,
             inputs: bus.subscribe(subject::sim_input(world_id, sim)).await?,
-            handoffs: bus.subscribe(subject::sim_handoff(world_id, sim)).await?,
+            handoffs: arrivals(bus.subscribe(subject::sim_handoff(world_id, sim)).await?),
             ghosts: bus.subscribe(subject::sim_ghosts(world_id, sim)).await?,
             hits: bus.subscribe(subject::sim_hit(world_id, sim)).await?,
             tables: bus.subscribe(subject::director_table(world_id)).await?,
@@ -562,6 +604,17 @@ pub async fn serve(
         if beats.take(Instant::now()) {
             state.heartbeat();
         }
+        // Handoffs go before the other work. The branches of `select!` take turns at random,
+        // and at a busy border the input, ghost and hit branches are ready every round, so an
+        // offer waited several rounds of them (2026-11-23, 340 bots: 3 % of the offers took
+        // 50 to 250 ms, with every tick within 50 ms). Asked here, an offer waits for one
+        // round at most. The burst limit keeps the tick's turn.
+        for arrived in waiting(&mut inbox.handoffs, HANDOFF_BURST) {
+            state.handoff_arrived(arrived);
+        }
+        for answer in waiting(&mut answers, HANDOFF_BURST) {
+            state.handoff_done(answer);
+        }
         tokio::select! {
             () = &mut shutdown => break,
             Some(admit) = inbox.admits.next() => match admit {
@@ -576,10 +629,7 @@ pub async fn serve(
                 Ok(batch) => state.inputs(batch.message),
                 Err(error) => tracing::warn!(%error, "bad input batch"),
             },
-            Some(handoff) = inbox.handoffs.next() => match handoff {
-                Ok(handoff) => state.handoff(handoff),
-                Err(error) => tracing::warn!(%error, "bad handoff message"),
-            },
+            Some(arrived) = inbox.handoffs.recv() => state.handoff_arrived(arrived),
             Some(ghosts) = inbox.ghosts.next() => match ghosts {
                 Ok(ghosts) => state.ghosts_in(ghosts.message),
                 Err(error) => tracing::warn!(%error, "bad ghost message"),
@@ -1492,6 +1542,16 @@ impl Loop {
         }
     }
 
+    /// A handoff message at the loop's turn for it: its wait is counted, then it is read.
+    fn handoff_arrived(&mut self, arrived: ArrivedHandoff) {
+        metrics::histogram!(METRIC_HANDOFF_TAKE_SECONDS, PART_LABEL => HANDOFF_PART_WAIT)
+            .record(arrived.arrived.elapsed().as_secs_f64());
+        match arrived.handoff {
+            Ok(handoff) => self.handoff(handoff),
+            Err(error) => tracing::warn!(%error, "bad handoff message"),
+        }
+    }
+
     /// A handoff offer from another sim, or the cancel of one that this sim took too late.
     fn handoff(&mut self, handoff: Incoming<HandoffMessage>) {
         let started = Instant::now();
@@ -1528,7 +1588,7 @@ impl Loop {
         };
         if let Some(reply) = reply {
             self.reply(handoff, reply);
-            metrics::histogram!(METRIC_HANDOFF_TAKE_SECONDS)
+            metrics::histogram!(METRIC_HANDOFF_TAKE_SECONDS, PART_LABEL => HANDOFF_PART_TAKE)
                 .record(started.elapsed().as_secs_f64());
         }
         self.count_players();
@@ -2920,6 +2980,27 @@ mod metric_tests {
         assert!(!says_in_game(Some(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX)));
         assert!(!says_in_game(Some(TEARDOWN_TYPE_INDEX)));
         assert!(!says_in_game(None));
+    }
+}
+
+#[cfg(test)]
+mod handoff_turn_tests {
+    use super::*;
+
+    /// More messages than one burst.
+    const QUEUED: usize = HANDOFF_BURST + 4;
+
+    #[test]
+    fn the_loop_takes_one_burst_of_waiting_messages_in_order_and_leaves_the_rest() {
+        let (sender, mut queue) = mpsc::channel(QUEUED);
+        for message in 0..QUEUED {
+            sender.try_send(message).expect("room");
+        }
+        let burst: Vec<usize> = waiting(&mut queue, HANDOFF_BURST).collect();
+        assert_eq!(burst, (0..HANDOFF_BURST).collect::<Vec<_>>());
+        let rest: Vec<usize> = waiting(&mut queue, HANDOFF_BURST).collect();
+        assert_eq!(rest, (HANDOFF_BURST..QUEUED).collect::<Vec<_>>());
+        assert_eq!(waiting(&mut queue, HANDOFF_BURST).count(), 0);
     }
 }
 
