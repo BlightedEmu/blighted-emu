@@ -1795,8 +1795,20 @@
               "proof": "none"
             },
             {
-              "check": "Crawling skeletons that looked still on a patrol path (live 2026-11-23): the cause is Unknown. The mob log now holds each mob's place, so the next live run shows if the server moves them.",
+              "check": "A mob walks every point of a spawner path whose points have no task (2026-11-23; seen live 2026-11-24: the camp mobs patrol again): the tree's step to the next point ran four times for one arrival, so on a path of two or four points the mob stood half a metre from its first point for good. Live 2026-11-23: a crawling skeleton and a sword skeleton of one camp stood so for minutes and did not turn to a player behind them.",
+              "proof": "live"
+            },
+            {
+              "check": "An attack that the tree marks as not interruptable plays to its end when the gate over it stops holding (2026-11-24, tests only; Inferred from the tree data). Live 2026-11-24: with the player 7 to 8 m away a javelin skeleton started 213 throws in 25 s and hit with one, because the gate cut each throw on the next tick.",
+              "proof": "tests"
+            },
+            {
+              "check": "Not done: a mob does not walk onto low objects and stand behind them. Live 2026-11-24: a javelin skeleton on a ruin platform stepped up two ledges of 0.4 m onto an object at the edge and stood there with a solid on every straight line to the player. The server has no navigation mesh; it walks straight lines over the level collision. A view check (a target behind a solid is not visible) was tried and taken out: a beach boss then lost a player 10 m away behind an object.",
               "proof": "none"
+            },
+            {
+              "check": "A mob that runs to a place beside its target goes where the target goes (2026-11-23, tests only): the place was picked once at the start of the run. Live 2026-11-23: a club skeleton ran to where the player had stood 3 s before and swung 11 m from the player.",
+              "proof": "tests"
             }
           ]
         },
@@ -4600,9 +4612,11 @@
     "Quests by bots (2026-11-22, bots): the Everfall main story to its end with the staff in the bag, the Windsward main story to its end, side quests in 14 zones, encounter success events, video objects, turning stones, story trials entered at their doors, and tools worn by `!gearup`.",
     "Quests by bots, day run (2026-11-22, bots): open world wave encounters, puzzle steps, story trial collision and trials, expedition bosses and expedition side quests, level variants for kills, loot and looks, fishing, PvP kills, mount courses, songs and settlement stations.",
     "Bots, night of 2026-11-23: story trial bosses (Liang, Isabella, Adiana), Tempest's Heart, group kills and loot in expeditions, the Ennead Goliaths, all three PvP modes, a war and invasion waves, saves over a restart, the economy and social basics, and many bots across four sims; PC freezes much shorter.",
-    "Mob aggro (2026-11-23, tests only): a mob that turns to a player it sees no longer stands in the turn for good. The turn animation's length now comes from the angle to the player; 291 mob kinds had no length for it."
+    "Mob aggro (2026-11-23, tests only): a mob that turns to a player it sees no longer stands in the turn for good. The turn animation's length now comes from the angle to the player; 291 mob kinds had no length for it.",
+    "Mob patrols and chases (2026-11-23, tests only): camp mobs on a path of two or four points walk it again, and a mob that runs at a player follows the player and no longer runs to the old place. Live 2026-11-24: a player saw the camp mobs patrol again.",
+    "Mob attacks (2026-11-24, tests only): a javelin skeleton no longer starts a new throw each tick at mid range; an attack that cannot be cut plays to its end."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-23",
-  "lastCommit": "dcce1ad8"
+  "updated": "2026-11-24",
+  "lastCommit": "59285dce"
 }
