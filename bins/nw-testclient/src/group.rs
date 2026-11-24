@@ -317,7 +317,13 @@ pub fn quest_group_steps(seat: &GroupSeat, hold: Duration, members_play: bool) -
 /// (the CRC-32 of its lowercase id `crc`) and walks with `records`: the group
 /// (the leader invites, a member accepts and waits for the leader in the instance), the entry,
 /// and the walk of [`WALK_LEGS`] with a server place before it and after each leg.
-pub fn expedition_steps(seat: &GroupSeat, mode: &str, crc: u32, records: &RecordWalk) -> Vec<Step> {
+pub fn expedition_steps(
+    seat: &GroupSeat,
+    mode: &str,
+    crc: u32,
+    mutation: Option<u8>,
+    records: &RecordWalk,
+) -> Vec<Step> {
     let mut steps = if seat.leads() {
         vec![invite_step(seat)]
     } else {
@@ -331,7 +337,7 @@ pub fn expedition_steps(seat: &GroupSeat, mode: &str, crc: u32, records: &Record
             },
         ]
     };
-    steps.extend(trial_steps(mode, crc));
+    steps.extend(trial_steps(mode, crc, mutation));
     if seat.leads() {
         steps.push(Step {
             what: "tell the group the leader is in".to_owned(),
@@ -497,7 +503,7 @@ mod tests {
     fn the_leader_enters_first_and_each_bot_walks_every_leg() {
         let seats = GroupBoard::seats(2);
         let what = |seat: &GroupSeat| -> Vec<String> {
-            expedition_steps(seat, "DungeonTest", 1, &flat_walk())
+            expedition_steps(seat, "DungeonTest", 1, None, &flat_walk())
                 .into_iter()
                 .map(|step| step.what)
                 .collect()

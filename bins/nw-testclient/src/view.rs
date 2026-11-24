@@ -24,7 +24,9 @@ use nw_messages::{
 };
 use thiserror::Error;
 
+use crate::achievements::OwnAchievements;
 use crate::rep::Received;
+use nw_messages::objective_interactor::MissionParams;
 
 /// A world message that does not decode.
 #[derive(Debug, Error)]
@@ -326,6 +328,11 @@ pub struct CombatView {
     /// The bot's bag: one item per bag slot, empty slots included (quantity 0), as its own
     /// bag container sent them.
     bag: Vec<ItemRecord>,
+    /// The bot's own achievements, from each state of its own player.
+    achievements: OwnAchievements,
+    /// The missions of the board the bot has open: the list of its own objective interactor
+    /// state (3829), a full list or its changed elements.
+    board: Vec<MissionParams>,
     /// Mobs in view whose vitals said they died.
     mob_deaths: u64,
     /// The vitals id of each mob in view whose card named one.
@@ -384,6 +391,14 @@ impl CombatView {
                             && let Some(items) = &container.items
                         {
                             apply_bag(&mut self.bag, items);
+                        }
+                        if let MemberState::Achievement(state) = &member.state {
+                            self.achievements.apply(state);
+                        }
+                        if let MemberState::ObjectiveInteractor(state) = &member.state
+                            && let Some(missions) = &state.missions
+                        {
+                            apply_list(&mut self.board, missions);
                         }
                         if let MemberState::Fishing(state) = &member.state
                             && let Some(listing) = &state.transitions
@@ -556,6 +571,16 @@ impl CombatView {
         self.own_dead
     }
 
+    /// The bot's own achievements.
+    pub const fn achievements(&self) -> &OwnAchievements {
+        &self.achievements
+    }
+
+    /// The missions of the board the bot has open.
+    pub fn board(&self) -> &[MissionParams] {
+        &self.board
+    }
+
     /// The bot's bag: one record per bag slot, empty slots included (quantity 0).
     pub fn bag(&self) -> &[ItemRecord] {
         &self.bag
@@ -644,17 +669,23 @@ fn is_mob_card(update: &SlotUpdate) -> bool {
 /// Takes the bag list `items` into `bag`: a full list is the whole bag, a change sets one slot
 /// (a slot past the end appends, with empty slots before it).
 fn apply_bag(bag: &mut Vec<ItemRecord>, items: &ReplicatedList<ItemRecord>) {
-    match items {
-        ReplicatedList::Full(list) => bag.clone_from(&list.elements),
+    apply_list(bag, items);
+}
+
+/// Takes the replicated list `changes` into `list`: a full list is the whole list, a change
+/// sets one element (an index past the end appends, with default elements before it).
+fn apply_list<T: Clone + Default>(list: &mut Vec<T>, changes: &ReplicatedList<T>) {
+    match changes {
+        ReplicatedList::Full(full) => list.clone_from(&full.elements),
         ReplicatedList::Changes(changes) => {
             for change in changes {
-                let Ok(slot) = usize::try_from(change.index) else {
+                let Ok(index) = usize::try_from(change.index) else {
                     continue;
                 };
-                if slot >= bag.len() {
-                    bag.resize(slot + 1, ItemRecord::default());
+                if index >= list.len() {
+                    list.resize(index + 1, T::default());
                 }
-                bag[slot] = change.value;
+                list[index] = change.value.clone();
             }
         }
     }

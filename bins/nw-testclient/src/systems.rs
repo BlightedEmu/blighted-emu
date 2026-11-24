@@ -94,13 +94,24 @@ pub enum SystemsCheck {
     /// A company of two bots owns the invasion fort; a game master schedules its invasion, both
     /// sign up, move in and hold the claim point to the invasion's result.
     Invasion,
+    /// One bot buys a house, pays its taxes, places and takes back a piece of furniture and
+    /// gives the house up ([`crate::housing`]).
+    Housing,
+    /// One bot of a faction opens a settlement's faction board and takes its first mission
+    /// ([`crate::faction_board`]).
+    FactionBoard,
 }
 
 impl SystemsCheck {
     /// How many bots the check takes.
     pub const fn bots(self) -> RangeInclusive<usize> {
         match self {
-            Self::SaveRecord | Self::SaveCheck | Self::Economy | Self::KillXp => 1..=1,
+            Self::SaveRecord
+            | Self::SaveCheck
+            | Self::Economy
+            | Self::KillXp
+            | Self::Housing
+            | Self::FactionBoard => 1..=1,
             Self::Trade | Self::Social | Self::Progress => 2..=2,
             Self::Invasion => 2..=INVASION_MOST_BOTS,
             Self::War => WAR_BOTS..=WAR_BOTS,
@@ -247,6 +258,8 @@ pub fn seat_steps(
         SystemsCheck::KillXp => kill_xp(),
         SystemsCheck::War => war(seat, data)?,
         SystemsCheck::Invasion => invasion(seat, data)?,
+        SystemsCheck::Housing => crate::housing::housing_steps(data)?,
+        SystemsCheck::FactionBoard => crate::faction_board::faction_board_steps(data)?,
     });
     Ok(steps)
 }
@@ -300,7 +313,7 @@ fn call(make: impl Fn(u64) -> Result<(u64, Vec<u8>), MessageError> + 'static) ->
 }
 
 /// The total quantity of client item index `item_index` in `bag`.
-fn bag_count(bag: &[nw_messages::ItemRecord], item_index: u32) -> u32 {
+pub(crate) fn bag_count(bag: &[nw_messages::ItemRecord], item_index: u32) -> u32 {
     bag.iter()
         .filter(|item| item.item_index == item_index)
         .map(|item| item.quantity)
@@ -325,7 +338,7 @@ fn bag_shows(item_index: u32, holds: impl Fn(u32) -> bool + 'static, described: 
 }
 
 /// The client item index of item `item_id`.
-fn item_index(data: &SystemsData<'_>, item_id: &str) -> Result<u32, String> {
+pub(crate) fn item_index(data: &SystemsData<'_>, item_id: &str) -> Result<u32, String> {
     StarterKits::from_tables(data.activity.tables)
         .item(item_id)
         .map(|item| item.item_index)

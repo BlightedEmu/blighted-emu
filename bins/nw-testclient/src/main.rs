@@ -210,6 +210,10 @@ enum Command {
         /// expedition and fights its bosses.
         #[arg(long)]
         all_play: bool,
+        /// The mutation difficulty of the run (the byte of every bot's 5037): a mutated
+        /// expedition of this week's mutation; none for a normal run.
+        #[arg(long)]
+        mutation: Option<u8>,
     },
     /// Game master bots check one of the server's systems through the client's calls
     /// (`nw_testclient::systems`): saves, the economy, the trading post, social, character
@@ -346,6 +350,7 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
                 pvp_foe,
                 hold: Duration::from_secs(minutes * SECONDS_PER_MINUTE),
                 registration_timeout: Duration::from_secs(config.registration_timeout_seconds),
+                mutation: None,
             };
             play(
                 &config,
@@ -366,6 +371,7 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
             quests,
             gm_start,
             all_play,
+            mutation,
         } => {
             let first = own(&config)?;
             let bots = accounts
@@ -390,6 +396,7 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
                     pvp_foe: None,
                     hold: Duration::from_secs(minutes * SECONDS_PER_MINUTE),
                     registration_timeout: Duration::from_secs(config.registration_timeout_seconds),
+                    mutation,
                 })
                 .collect::<Vec<_>>();
             expedition(
@@ -423,6 +430,7 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
                     pvp_foe: None,
                     hold: Duration::from_secs(minutes * SECONDS_PER_MINUTE),
                     registration_timeout: Duration::from_secs(config.registration_timeout_seconds),
+                    mutation: None,
                 })
                 .collect::<Vec<_>>();
             systems(
@@ -926,6 +934,20 @@ fn trial_nodes(
         .collect()
 }
 
+/// A game mode (lowercase id) of each instance level of `tables` other than `open_level`, by the
+/// level's folder; a level of several modes keeps the first in the catalog's order.
+fn trial_levels(tables: &nw_content::Tables, open_level: &str) -> HashMap<String, String> {
+    let mut levels = HashMap::new();
+    for mode in InstanceCatalog::from_tables(tables).modes() {
+        if mode.map.folder != open_level {
+            levels
+                .entry(mode.map.folder.clone())
+                .or_insert_with(|| mode.id.to_lowercase());
+        }
+    }
+    levels
+}
+
 /// What a play bot reads of the content: the `[swarm]` level's world file, the tables and the
 /// settlements' station slots.
 struct PlayContent {
@@ -940,6 +962,8 @@ struct PlayContent {
     /// The gather nodes of each instance game mode whose map is another level than the
     /// `[swarm]` level, by the lowercase game mode id.
     trial_nodes: Arc<HashMap<String, Arc<[GatherNode]>>>,
+    /// A game mode of each instance level, by the level's folder.
+    trial_levels: Arc<HashMap<String, String>>,
 }
 
 impl PlayContent {
@@ -947,9 +971,11 @@ impl PlayContent {
         let layout = level_layout(config)?;
         let tables = ContentBundle::load(&layout)?.tables;
         let trial_nodes = Arc::new(trial_nodes(&layout, &tables, &config.swarm.level));
+        let trial_levels = Arc::new(trial_levels(&tables, &config.swarm.level));
         Ok(Self {
             world: WorldFile::load(&layout, &config.swarm.level)?,
             trial_nodes,
+            trial_levels,
             courses: Arc::new(CourseRoutes {
                 rules: QuickCourseRules::from_tables(&tables),
                 paths: QuickCoursePaths::load(&layout)?,
@@ -984,11 +1010,15 @@ impl PlayContent {
             game_master_setup: true,
             nodes,
             trial_nodes: Arc::clone(&self.trial_nodes),
+            trial_levels: Arc::clone(&self.trial_levels),
             containers,
             poi_tags: PoiTags::from_tables(&self.tables),
             group,
             courses: Arc::clone(&self.courses),
             mount_reward_box: mount_reward_box(&self.tables),
+            achievements: Arc::new(nw_testclient::achievements::AchievementBook::from_tables(
+                &self.tables,
+            )),
         }
     }
 }
@@ -1058,7 +1088,7 @@ async fn expedition(
         let steps = if questing {
             quest_group_steps(seat, settings.hold, !settings.quests.is_empty())
         } else {
-            expedition_steps(seat, &mode.id, mode.crc, &records)
+            expedition_steps(seat, &mode.id, mode.crc, settings.mutation, &records)
         };
         let activity = Activity {
             kind: ActivityKind::Group,

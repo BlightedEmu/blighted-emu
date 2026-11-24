@@ -38,7 +38,7 @@ const MIN_GOAL_LEN: usize = 8;
 const FIELD: &str = "objective interactor";
 
 /// One mission a board offers (`FUN_145cea3e0`, then `FUN_145b520f0` and `FUN_145b55b70`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MissionParams {
     /// The mission instance: the id the client sends to turn it in (2461).
     pub instance: u64,

@@ -129,6 +129,11 @@ const CRAFT_RANK: u32 = 200;
 pub(crate) const STEP_WAIT: Duration = Duration::from_secs(10);
 /// How long a gather or a fast travel may take: the gather time, the 10 s channel.
 pub(crate) const LONG_WAIT: Duration = Duration::from_secs(25);
+/// How long the answer to an instance entry may take: the sim holds the request while the
+/// director starts an instance sim (`instance_request_timeout_ms` 65 s of `config/sim.toml`,
+/// the director's `start_wait_ms` 60 s). With 25 s a bot gave up at a door while every instance
+/// sim was busy (live 2026-11-24 07:20Z, `99A_MSQ_15_Ritual`, QuestHeartforge).
+pub(crate) const INSTANCE_ENTRY_WAIT: Duration = Duration::from_secs(70);
 /// The first words of the sim's `!state` line.
 const STATE_LEVEL: &str = "state level ";
 /// How the first word of the PvP part of the `!state` line starts.
@@ -147,6 +152,9 @@ pub enum ActivityKind {
     PvpFoe,
     /// Harvest a gather node by hand.
     Harvest,
+    /// Open an elite chest of the open world, then be refused a second open until the daily
+    /// reset ([`crate::elite_chest`]).
+    EliteChest,
     /// Craft a recipe at a crafting station.
     Craft,
     /// Craft a recipe at a settlement station that the server spawns: its card gives its id.
@@ -163,8 +171,6 @@ pub enum ActivityKind {
     Group,
     /// Summon and ride a mount.
     Mount,
-    /// Play a song on an instrument.
-    Music,
     /// A game master's company of the bot's faction owns Monarch's Bluffs, and the bot opens
     /// the town's war board; the town is given back to no owner at the end.
     Company,
@@ -225,6 +231,9 @@ pub struct BotSight<'a> {
     pub matchmaking: &'a Matchmaking,
     /// The first invite in the bot's own groups state (a group's or a war raid's).
     pub group_invite: Option<[u8; RAW_ID_LEN]>,
+    /// The missions of the board the bot has open, from its own objective interactor state
+    /// ([`crate::view::CombatView::board`]).
+    pub board: &'a [nw_messages::objective_interactor::MissionParams],
 }
 
 /// The calls of an act that reads what the bot saw: `None` to wait for a later tick, else the
@@ -339,6 +348,8 @@ pub enum Proof {
     Accepted,
     /// The interaction ended (3746).
     Ended,
+    /// The server refused the step's interaction (3743 with a status other than 1).
+    Refused,
     /// The server answered the step's interaction (3743), taken or refused: a later step proves
     /// what it gave.
     Answered,
@@ -582,6 +593,9 @@ impl Activity {
             ActivityKind::Pvp => Ok(pvp()),
             ActivityKind::PvpFoe => Ok(pvp_foe()),
             ActivityKind::Harvest => harvest(data),
+            ActivityKind::EliteChest => {
+                crate::elite_chest::elite_chest_steps(data.world, data.tables)
+            }
             ActivityKind::Craft => craft(data),
             ActivityKind::TownCraft => town_craft(data),
             ActivityKind::Inn => inn(data),
@@ -594,22 +608,16 @@ impl Activity {
                     .to_owned(),
             ),
             ActivityKind::Mount => mount(data),
-            ActivityKind::Music => Err(
-                "needs an instrument worn: the bot cannot read the bag slot of a given instrument to equip it"
-                    .to_owned(),
-            ),
             ActivityKind::Company => company(data),
             ActivityKind::EnemyCompany => Ok(enemy_company()),
             ActivityKind::WarSignup => Ok(war_signup()),
             ActivityKind::InvasionSignup => Ok(invasion_signup()),
-            ActivityKind::Systems => Err(
-                "needs its check and its bots: `nw-testclient systems` runs it".to_owned(),
-            ),
+            ActivityKind::Systems => {
+                Err("needs its check and its bots: `nw-testclient systems` runs it".to_owned())
+            }
             ActivityKind::Arena => queued_match_steps(data, InstanceKind::Arena),
             ActivityKind::OutpostRush => queued_match_steps(data, InstanceKind::OutpostRush),
-            ActivityKind::CaptureTheFlag => {
-                queued_match_steps(data, InstanceKind::CaptureTheFlag)
-            }
+            ActivityKind::CaptureTheFlag => queued_match_steps(data, InstanceKind::CaptureTheFlag),
             ActivityKind::QueueLeave => queue_leave_steps(data),
         };
         Self { kind, steps }
@@ -896,6 +904,78 @@ pub fn gather_steps(name: &str, node: GatherNode, index: usize) -> Vec<Step> {
         target,
         target_entity,
         node.gatherable,
+    )
+}
+
+/// Goes to `node` (its index in the level's gatherables) of the capital whose entity id is
+/// `capital` and gathers it as a client does: by the capital's id (which names its variant and
+/// its instanced lock to the server), its gather point and the variant's display name
+/// `display` (`@LootContainer_..._DisplayName`, which the server matches with the variant's);
+/// waits for the gather's end.
+pub fn capital_gather_steps(
+    what: &str,
+    node: GatherNode,
+    index: usize,
+    capital: u64,
+    display: &[u8],
+) -> Vec<Step> {
+    let (target, _) = node_id(index);
+    let request = InteractionRequest {
+        target,
+        target_entity: capital,
+        interaction: 0,
+        kind: GATHER_KIND,
+        gatherable: Some(node.gatherable),
+    };
+    vec![
+        step(
+            format!("go to the {what} and gather it"),
+            vec![
+                teleport(node.at),
+                Act::Interact {
+                    request,
+                    name: display.to_vec(),
+                },
+            ],
+            Proof::Accepted,
+            STEP_WAIT,
+        ),
+        step("the gather ends", Vec::new(), Proof::Ended, LONG_WAIT),
+        step(
+            "acknowledge the end of the gather",
+            vec![Act::EndInteraction {
+                target_entity: capital,
+            }],
+            Proof::Sent,
+            STEP_WAIT,
+        ),
+    ]
+}
+
+/// A gather of the capital `capital` on `node` (as [`capital_gather_steps`]) that the server
+/// refuses: the step `what` proves the refusal (3743 with a status other than 1).
+pub fn refused_capital_gather_step(
+    what: &str,
+    node: GatherNode,
+    index: usize,
+    capital: u64,
+    display: &[u8],
+) -> Step {
+    let (target, _) = node_id(index);
+    step(
+        what.to_owned(),
+        vec![Act::Interact {
+            request: InteractionRequest {
+                target,
+                target_entity: capital,
+                interaction: 0,
+                kind: GATHER_KIND,
+                gatherable: Some(node.gatherable),
+            },
+            name: display.to_vec(),
+        }],
+        Proof::Refused,
+        STEP_WAIT,
     )
 }
 
@@ -1440,20 +1520,20 @@ const ARENA_CALL_FLAG: u8 = 0;
 
 /// Enters an instance of game mode `game_mode` (the CRC-32 of its lowercase id) from afar, as
 /// the client does (run 15 instances study): 5039, 5037 (the 6776 answer), then 946, after
-/// which the handoff to the instance sim sends the instance level (1635).
-pub fn trial_steps(mode: &str, game_mode: u32) -> Vec<Step> {
+/// which the handoff to the instance sim sends the instance level (1635). A mutated run's 5037
+/// carries its difficulty `mutation` in the byte (the sim's `difficulty_of_request`); `None`
+/// asks for a normal run.
+pub fn trial_steps(mode: &str, game_mode: u32, mutation: Option<u8>) -> Vec<Step> {
+    let flag = mutation.unwrap_or(ARENA_CALL_FLAG);
     vec![
         ask_remote_entry(format!("ask to enter game mode {mode}"), game_mode),
         step(
             format!("activate game mode {mode}"),
-            vec![arena_call(|header| {
-                ArenaClientMsg::RequestRemoteEnterDungeon {
-                    header,
-                    flag: ARENA_CALL_FLAG,
-                }
+            vec![arena_call(move |header| {
+                ArenaClientMsg::RequestRemoteEnterDungeon { header, flag }
             })],
             Proof::ArenaYes(DUNGEON_ACTIVATE_RESULT_TYPE_INDEX),
-            LONG_WAIT,
+            INSTANCE_ENTRY_WAIT,
         ),
         teleport_into(mode),
     ]
@@ -1487,7 +1567,7 @@ pub fn door_trial_steps(mode: &str, game_mode: u32, door: u64, at: Option<[f32; 
             format!("enter game mode {mode} at its entrance"),
             vec![request(ENTER_DUNGEON_KIND)],
             Proof::ArenaYes(DUNGEON_ACTIVATE_RESULT_TYPE_INDEX),
-            LONG_WAIT,
+            INSTANCE_ENTRY_WAIT,
         ),
         teleport_into(mode),
     ]
@@ -2238,6 +2318,28 @@ pub(crate) fn siege_points(
 mod tests {
     use super::*;
 
+    /// The 5037 of an entry from afar carries the mutated run's difficulty in its byte, and 0
+    /// for a normal run.
+    #[test]
+    fn a_mutated_entry_asks_for_its_difficulty_in_the_5037_byte() {
+        const OWN: u64 = 77;
+        const CRC: u32 = 0x1234_5678;
+        const DIFFICULTY: u8 = 3;
+        let flag_of = |mutation: Option<u8>| {
+            let steps = trial_steps("DungeonAmrine", CRC, mutation);
+            let Some(Act::Call(call)) = steps[1].acts.first() else {
+                panic!("the activation is a call");
+            };
+            let (type_index, body) = call(OWN).expect("encodes");
+            match ArenaClientMsg::decode(type_index, &body) {
+                Some(Ok(ArenaClientMsg::RequestRemoteEnterDungeon { flag, .. })) => flag,
+                other => panic!("not a 5037: {other:?}"),
+            }
+        };
+        assert_eq!(flag_of(Some(DIFFICULTY)), DIFFICULTY);
+        assert_eq!(flag_of(None), ARENA_CALL_FLAG);
+    }
+
     /// The cold-stack refusal (6776 `EntranceActivationFailure`) fails the activation step
     /// instead of letting the teleport go out.
     #[test]
@@ -2428,9 +2530,10 @@ mod tests {
             town_stations: &town_stations,
             war_forts: &WarForts::default(),
         };
-        for kind in [ActivityKind::Group, ActivityKind::Music] {
-            assert!(Activity::of(kind, &data).steps.is_err(), "{kind:?}");
-        }
+        assert!(
+            Activity::of(ActivityKind::Group, &data).steps.is_err(),
+            "a group needs its other bots"
+        );
         assert_eq!(
             Activity::of(ActivityKind::Mount, &data)
                 .steps

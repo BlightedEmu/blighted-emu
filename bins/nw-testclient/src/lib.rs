@@ -2,14 +2,18 @@
 //! `nw-testclient` (M3 spec section 8): the client side of the REP connection, used by the test
 //! client program and by the `rep-gateway` tests.
 
+pub mod achievements;
 pub mod activity;
 pub mod chat;
 pub mod config;
 pub mod crossing_state;
+pub mod elite_chest;
+pub mod faction_board;
 pub mod fishing;
 pub mod fleet;
 pub mod gather;
 pub mod group;
+pub mod housing;
 pub mod hunt;
 pub mod pair;
 pub mod play;

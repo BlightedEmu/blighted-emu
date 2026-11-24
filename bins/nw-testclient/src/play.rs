@@ -15,7 +15,7 @@
 //! keep it alive (`!god on`), and give it the items no gather gives (`!give`), with the source
 //! the sim names.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +37,7 @@ use nw_reflect::LoginToken;
 use nw_sim_core::{Position, yaw_toward};
 use reqwest::Client;
 
+use crate::achievements::AchievementBook;
 use crate::activity::{
     Act, Activity, ActivityKind, BotSight, CLEAR_RADIUS_M, CourseRoutes, MatchEnd, MatchGoal,
     OPEN_STORAGE_KIND, OPEN_STORAGE_NAME, PVP_KILLER_FACTION, Proof, STORAGE_TAG, Step,
@@ -160,6 +161,14 @@ const SPAWN_LEVEL: u32 = 1;
 const MAX_ROUNDS: u32 = 80;
 /// The same plan line this many times in a row stops the quest as broken.
 const MAX_SAME_PLAN: u32 = 3;
+/// The words of a refused interaction's step failure ([`Proof::Accepted`]).
+const GATHER_REFUSED: &str = "refused (status";
+/// How often the bot gathers a node again that the server refused while another player
+/// gathered it, in one quest (Inferred: a group of 5 opens one chest in turn).
+const MAX_BUSY_RETRIES: u32 = 8;
+/// The bot's wait before it gathers a refused node again: one large chest's gather (retail
+/// `LootLargeT3` 5.0 s, `ck08` 1218.0 to 1223.1 s) and a margin.
+const BUSY_NODE_WAIT: Duration = Duration::from_secs(6);
 /// A step whose drop comes at a chance gets the tries that give the drop at least this often
 /// ([`max_tries`]).
 const DROP_CONFIDENCE: f64 = 0.95;
@@ -365,6 +374,9 @@ pub struct PlaySettings {
     pub hold: Duration,
     /// Longest wait for a registration response.
     pub registration_timeout: Duration,
+    /// The mutation difficulty the bot's entries from afar ask for (the 5037 byte); `None`
+    /// for a normal run.
+    pub mutation: Option<u8>,
 }
 
 /// How the play of one quest ended.
@@ -387,6 +399,24 @@ pub struct QuestPlay {
     pub verdict: Verdict,
     /// What the bot did, in order.
     pub actions: Vec<String>,
+}
+
+impl QuestPlay {
+    /// The row of the report's table: the quest, its verdict, its stop and what the bot did.
+    /// A run prints it when the quest ends, and the report lists it.
+    pub fn line(&self) -> String {
+        let (verdict, stop) = match &self.verdict {
+            Verdict::Completed => ("Completed", ""),
+            Verdict::Broken(stop) => ("Broken", stop.as_str()),
+            Verdict::NotPlayed(stop) => ("Not played", stop.as_str()),
+        };
+        format!(
+            "| {} | {verdict} | {} | {} |",
+            cell(&self.quest),
+            cell(stop),
+            cell(&self.actions.join("; "))
+        )
+    }
 }
 
 /// What the play run saw.
@@ -433,18 +463,7 @@ impl PlayReport {
             "| Quest | Verdict | Stop | What the bot did |\n|---|---|---|---|"
         );
         for quest in &self.quests {
-            let (verdict, stop) = match &quest.verdict {
-                Verdict::Completed => ("Completed", ""),
-                Verdict::Broken(stop) => ("Broken", stop.as_str()),
-                Verdict::NotPlayed(stop) => ("Not played", stop.as_str()),
-            };
-            let _ = writeln!(
-                text,
-                "| {} | {verdict} | {} | {} |",
-                cell(&quest.quest),
-                cell(stop),
-                cell(&quest.actions.join("; "))
-            );
+            let _ = writeln!(text, "{}", quest.line());
         }
         if !self.activities.is_empty() {
             let _ = writeln!(
@@ -452,18 +471,7 @@ impl PlayReport {
                 "\n## Activities\n\nEach activity's steps sent the client's calls and waited for the server's proof: an answer, a message of a type, or the answer to an interaction.\n\n| Activity | Verdict | Stop | Steps proved |\n|---|---|---|---|"
             );
             for activity in &self.activities {
-                let (verdict, stop) = match &activity.verdict {
-                    Verdict::Completed => ("Completed", ""),
-                    Verdict::Broken(stop) => ("Broken", stop.as_str()),
-                    Verdict::NotPlayed(stop) => ("Not played", stop.as_str()),
-                };
-                let _ = writeln!(
-                    text,
-                    "| {} | {verdict} | {} | {} |",
-                    cell(&activity.quest),
-                    cell(stop),
-                    cell(&activity.actions.join("; "))
-                );
+                let _ = writeln!(text, "{}", activity.line());
             }
         }
         text
@@ -1332,6 +1340,8 @@ struct Player {
     world_nodes: Arc<[GatherNode]>,
     /// The gather nodes of each trial level ([`PlayData::trial_nodes`]).
     trial_nodes: Arc<HashMap<String, Arc<[GatherNode]>>>,
+    /// A game mode of each instance level ([`PlayData::trial_levels`]).
+    trial_levels: Arc<HashMap<String, String>>,
     /// The gatherables of the nodes that are loot containers (`IsLootContainer`).
     containers: HashSet<u32>,
     /// The `POITag`s of the territories, which name the area of a step's place.
@@ -1340,6 +1350,16 @@ struct Player {
     setup_lines: Vec<String>,
     /// The nodes the bot gathered or tried to gather.
     tried_nodes: HashSet<usize>,
+    /// The game data's achievements ([`PlayData::achievements`]).
+    achievements: Arc<AchievementBook>,
+    /// The bot's own achievements when it took the quest it plays; `None` for the first quest,
+    /// which the bot holds before its login: that one counts from the login's set.
+    achieved_before: Option<BTreeSet<u32>>,
+    /// The node of the running gather of an item step, while it runs.
+    node_gather: Option<usize>,
+    /// The gathers of the current quest the server refused at a node another player held,
+    /// which the bot tries again ([`MAX_BUSY_RETRIES`]).
+    busy_retries: u32,
     /// The corpses the bot skinned or tried to skin.
     skinned: HashSet<u64>,
     /// Where the bags the bot has not opened start in the view's list of loot bags
@@ -1394,6 +1414,8 @@ struct Player {
     caught_last: bool,
     /// The character of the foe bot of a PvP step ([`PlaySettings::pvp_foe`]).
     pvp_foe: Option<String>,
+    /// The mutation difficulty of its entries from afar ([`PlaySettings::mutation`]).
+    mutation: Option<u8>,
     /// Whether the bot's PvP flag is on (its flag steps ended well).
     pvp_armed: bool,
     /// Whether the running gather puts the PvP flag on: it is on once it ends well.
@@ -1643,10 +1665,21 @@ fn fight_target(
         .or_else(|| in_fight.iter().copied().min_by(nearest))
 }
 
+/// How far above or below the place of a kill step's fight area a bot in it may stand and stay
+/// (**Inferred**: about two storeys). Live 2026-11-24 08:32Z: the bot stood 16 m under the
+/// `99A_Enc_MSQ_09_Torment` encounter (a cylinder volume from 158.8 to 168.8 m), on the floor
+/// of the step before, stayed there, and the encounter never saw it.
+const FIGHT_AREA_HEIGHT_M: f32 = 8.0;
+
 /// Whether a bot at `own` stays where it is for a kill step's fight in `area`: it is in that
-/// area already (a fight without one starts at the step's place).
+/// area already, within [`FIGHT_AREA_HEIGHT_M`] of its place's height (a fight without one
+/// starts at the step's place).
 fn stays_in_fight_area(area: Option<(Position, f32)>, own: Option<Position>) -> bool {
-    area.is_some() && own.is_some_and(|own_at| in_area(area, [own_at.x, own_at.y]))
+    area.is_some_and(|(place, _)| {
+        own.is_some_and(|own_at| {
+            in_area(area, [own_at.x, own_at.y]) && (own_at.z - place.z).abs() <= FIGHT_AREA_HEIGHT_M
+        })
+    })
 }
 
 /// Whether a mob at `at` is in the fight's `area` (place and radius): within the radius less
@@ -1734,6 +1767,11 @@ impl Player {
             let _ = self.world.read(received);
             let _ = self.combat.read(received);
             self.afk_warned |= is_afk_warning(received);
+            if let Some(Ok(ServerMessage::LevelInfoChanged(info))) =
+                ServerMessage::from_envelope(&received.envelope)
+            {
+                self.level_entered(info.level.folder);
+            }
         }
         if let Some(own) = self.combat.time_sync_due() {
             send_time_sync(client, own)?;
@@ -1877,6 +1915,9 @@ impl Player {
         since: Duration,
     ) -> Result<(), RepError> {
         if self.current.is_none() {
+            if self.activities.is_empty() && self.leave_trial_at_end() {
+                return Ok(());
+            }
             self.phase = if self.activities.is_empty() {
                 Phase::Done
             } else {
@@ -2335,6 +2376,7 @@ impl Player {
                     return self.next_quest(client, own, since);
                 };
                 self.tried_nodes.insert(index);
+                self.node_gather = Some(index);
                 // A drop that counts in one place only (a `POITag`) needs the bot in that area,
                 // as a client that walked in has told the server.
                 if let Some(territory) = self.step_area(&task) {
@@ -2556,7 +2598,7 @@ impl Player {
                     Some((capital, at)) => {
                         door_trial_steps(&mode, crc, capital, at.map(|at| [at.x, at.y, at.z]))
                     }
-                    None => trial_steps(&mode, crc),
+                    None => trial_steps(&mode, crc, self.mutation),
                 };
                 self.gather = Some((
                     format!("{task}: entered the instance of {mode}"),
@@ -2776,13 +2818,73 @@ impl Player {
                 self.mounting = false;
                 self.arming_pvp = false;
                 self.actions.push(format!("{what}: {why}"));
+                if self.take_busy_retry(&why) {
+                    self.phase = Phase::Pause {
+                        until: since + BUSY_NODE_WAIT,
+                        then: Ask::State,
+                    };
+                    return Ok(());
+                }
             }
             None => {
                 self.gather = Some((what, running));
                 return Ok(());
             }
         }
+        self.node_gather = None;
         self.ask(client, own, Ask::State, since)
+    }
+
+    /// Whether the bot, at the end of its play, leaves the instance it is in (926), as a player
+    /// leaves an expedition or a trial once it is done: a character that stays inside comes back
+    /// into it at its next login, and its group counts as in that expedition while it is open
+    /// (live 2026-11-24 05:32:42Z: the next run's entry got `GroupAlreadyInDungeon`).
+    fn leave_trial_at_end(&mut self) -> bool {
+        let Some(mode) = self.in_trial.take() else {
+            return false;
+        };
+        self.nodes = level_nodes(&self.world_nodes, &self.trial_nodes, None);
+        self.tried_nodes.clear();
+        self.gather = Some((
+            format!("left the instance of {mode} at the end"),
+            RunningSteps::of(leave_trial_steps()),
+        ));
+        self.changing_sim = true;
+        self.phase = Phase::Gather;
+        true
+    }
+
+    /// The server put the bot on level `folder` (1635): a level of an instance that the bot did
+    /// not enter by a trial step is the one it logged in to (its character was saved inside a
+    /// run that is still open, live 2026-11-24 04:04:51Z: a group logged in inside the Starstone
+    /// instance and asked for the Depths from there, which an instance sim does not answer), so
+    /// it is in that trial and leaves it before it enters another.
+    fn level_entered(&mut self, folder: &str) {
+        if self.in_trial.is_some() || self.entering_trial.is_some() {
+            return;
+        }
+        if let Some(mode) = self.trial_levels.get(folder).cloned() {
+            self.nodes = level_nodes(&self.world_nodes, &self.trial_nodes, Some(&mode));
+            self.tried_nodes.clear();
+            self.in_trial = Some(mode);
+        }
+    }
+
+    /// Whether the refused gather `why` of the running item step's node is one to play again:
+    /// another player holds the node (a shared chest of a group: `busy`), as a player who comes
+    /// second sees; the bot opens the same node once that gather ended, and the wait is no new
+    /// try of the step. At most [`MAX_BUSY_RETRIES`] in a quest.
+    fn take_busy_retry(&mut self, why: &str) -> bool {
+        let Some(index) = self.node_gather.take() else {
+            return false;
+        };
+        if !why.contains(GATHER_REFUSED) || self.busy_retries >= MAX_BUSY_RETRIES {
+            return false;
+        }
+        self.tried_nodes.remove(&index);
+        self.busy_retries += 1;
+        self.same_plan = self.same_plan.saturating_sub(1);
+        true
     }
 
     /// Plays one tick of the fishing of a catch step ([`Angler`]): its keys go out in the bot's
@@ -3227,6 +3329,17 @@ impl Player {
             Proof::Ended => new_answers
                 .contains(&InteractionAnswer::Ended)
                 .then_some(Ok(())),
+            Proof::Refused => new_answers.iter().find_map(|answer| match answer {
+                InteractionAnswer::Validated {
+                    interaction,
+                    status,
+                } if Some(*interaction) == running.interaction => Some(if *status == ACCEPTED {
+                    Err(format!("{}: taken, not refused", step.what))
+                } else {
+                    Ok(())
+                }),
+                _ => None,
+            }),
             Proof::Answered => new_answers
                 .iter()
                 .any(|answer| {
@@ -3259,6 +3372,7 @@ impl Player {
                     Proof::ArenaYes(type_index) => format!("a {type_index} answer that says yes"),
                     Proof::Accepted => "the interaction's answer".to_owned(),
                     Proof::Ended => "the interaction's end".to_owned(),
+                    Proof::Refused => "the interaction's refusal".to_owned(),
                     Proof::Answered => "an answer to the interaction".to_owned(),
                     Proof::Sent => String::new(),
                     Proof::GroupFull(_) => "every other bot in the group".to_owned(),
@@ -3301,6 +3415,7 @@ impl Player {
             in_group: self.world.own_group().is_some(),
             matchmaking: self.world.matchmaking(),
             group_invite: self.world.inbound_group_invite(),
+            board: self.combat.board(),
         }
     }
 
@@ -3939,6 +4054,24 @@ impl Player {
     }
 
     fn end_quest(&mut self, verdict: Verdict) {
+        // What the quest set of the bot's own achievements, as the server sent them; a quest
+        // that ended without the achievement its row names did not end as retail's does.
+        let own = self.combat.achievements();
+        let before = self
+            .achieved_before
+            .clone()
+            .unwrap_or_else(|| own.at_login());
+        let set = self.achievements.set_since(&before, own);
+        if !set.is_empty() {
+            self.actions
+                .push(format!("achievements set: {}", set.join(", ")));
+        }
+        let verdict = match self.achievements.missing(self.current(), own) {
+            Some(missing) if verdict == Verdict::Completed => Verdict::Broken(format!(
+                "the quest ended and the server did not set achievement {missing}, which its objective row names"
+            )),
+            _ => verdict,
+        };
         if verdict == Verdict::Completed {
             self.completed_since_deferral = true;
         }
@@ -4004,6 +4137,8 @@ impl Player {
         self.last_plan = None;
         self.same_plan = 0;
         self.tried_nodes.clear();
+        self.busy_retries = 0;
+        self.achieved_before = Some(self.combat.achievements().bits());
     }
 }
 
@@ -4046,6 +4181,9 @@ pub struct PlayData {
     /// The gather nodes of each instance game mode on a level of its own, by the lowercase
     /// game mode id: the bot gathers them while it is in that trial.
     pub trial_nodes: Arc<HashMap<String, Arc<[GatherNode]>>>,
+    /// A game mode of each instance level, by the level's folder (the lowercase map name a 1635
+    /// names): a bot that logs in inside an instance knows which.
+    pub trial_levels: Arc<HashMap<String, String>>,
     /// The gatherables (the CRC-32 of each lowercase id) of the nodes that are loot containers.
     pub containers: HashSet<u32>,
     /// The territories' `POITag`s.
@@ -4056,6 +4194,8 @@ pub struct PlayData {
     pub courses: Arc<CourseRoutes>,
     /// The client item index of the mount quest's reward box, or why the catalog has none.
     pub mount_reward_box: Result<u32, String>,
+    /// The game data's achievements: what each bit is, and what each quest's row names.
+    pub achievements: Arc<AchievementBook>,
 }
 
 impl Player {
@@ -4068,11 +4208,13 @@ impl Player {
             game_master_setup,
             nodes,
             trial_nodes,
+            trial_levels,
             containers,
             poi_tags,
             group: _,
             courses,
             mount_reward_box,
+            achievements,
         } = data;
         Self {
             world: WorldView::default(),
@@ -4118,9 +4260,14 @@ impl Player {
             nodes: Arc::clone(&nodes),
             world_nodes: nodes,
             trial_nodes,
+            trial_levels,
             containers,
             poi_tags,
             tried_nodes: HashSet::new(),
+            achievements,
+            achieved_before: None,
+            node_gather: None,
+            busy_retries: 0,
             skinned: HashSet::new(),
             loot_from: 0,
             gather: None,
@@ -4145,6 +4292,7 @@ impl Player {
             catches: 0,
             caught_last: false,
             pvp_foe: settings.pvp_foe.clone(),
+            mutation: settings.mutation,
             pvp_armed: false,
             arming_pvp: false,
             hunting: false,
@@ -4173,6 +4321,7 @@ pub async fn run_play(
         seat.set_character(admission.token.character_id.clone());
     }
     let mut player = Player::new(settings, data);
+    let mut reported = 0;
     let session = session_with(
         admission.rep_address,
         new_client(login_token(&admission.token))?,
@@ -4182,26 +4331,57 @@ pub async fn run_play(
             if player.phase == Phase::Done {
                 return client.close();
             }
-            player.tick(client, outcome, since)
+            let ticked = player.tick(client, outcome, since);
+            // Each quest's end goes to the run's lines at once: a long run shows where it is,
+            // and a run that is killed leaves what it played.
+            for play in &player.plays[reported..] {
+                report(play.line());
+            }
+            reported = player.plays.len();
+            ticked
         },
     )
-    .await?;
-    // A quest still being played when the hold ended stops as broken.
+    .await
+    .map(|session| session.outcome);
+    let played = !player.plays.is_empty() || !player.activity_plays.is_empty();
+    let (outcome, ended) = run_end(session, played)?;
+    // A quest still being played when the run ended stops as broken.
     if player.current.is_some() && player.phase != Phase::Done {
-        player.end_quest(Verdict::Broken("the hold ended first".to_owned()));
+        player.end_quest(Verdict::Broken(ended.clone()));
     }
     if let Some((kind, running)) = player.running.take() {
         player.activity_plays.push(QuestPlay {
             quest: format!("{kind:?}"),
-            verdict: Verdict::Broken("the hold ended first".to_owned()),
+            verdict: Verdict::Broken(ended),
             actions: running.proved,
         });
     }
     Ok(PlayReport {
-        outcome: session.outcome,
+        outcome,
         quests: player.plays,
         activities: player.activity_plays,
     })
+}
+
+/// Why a quest still in play stops when the hold ends.
+const HOLD_ENDED: &str = "the hold ended first";
+
+/// How a run ended: the connection's outcome and why a quest still in play stops. A connection
+/// that failed after the bot `played` a quest or an activity still gives its report (live
+/// 2026-11-24 06:54Z: a stack restart ended a main story run of 27 quests, and nothing of it
+/// was written); one that failed before is the run's error.
+fn run_end(
+    session: Result<RepOutcome, PairError>,
+    played: bool,
+) -> Result<(RepOutcome, String), PairError> {
+    match session {
+        Ok(outcome) => Ok((outcome, HOLD_ENDED.to_owned())),
+        Err(error) if played => Ok((
+            RepOutcome::default(),
+            format!("the connection ended: {error}"),
+        )),
+        Err(error) => Err(error),
+    }
 }
 
 /// The gather nodes of the level the bot is in: those of trial `in_trial`'s own level, else
@@ -4326,14 +4506,18 @@ mod tests {
             !stays_in_fight_area(area, None),
             "a bot whose place is not known"
         );
+        let under = Position {
+            z: centre.z - FIGHT_AREA_HEIGHT_M - 1.0,
+            ..near
+        };
+        assert!(
+            !stays_in_fight_area(area, Some(under)),
+            "a floor under the area"
+        );
     }
 
-    #[test]
-    fn the_next_quest_tries_every_node_again() {
-        // Live 2026-11-22 19:00-19:02: one run played `C10A_Q3_Revelation`, then
-        // `C10A_Q3R_Revelation`, whose pylon step names the same three nodes.
-        const QUESTS: [&str; 2] = ["C10A_Q3_Revelation", "C10A_Q3R_Revelation"];
-        const TRIED_NODE: usize = 3;
+    /// A bot that plays `quests`, with no level data.
+    fn bare_player(quests: &[&str]) -> Player {
         let settings = PlaySettings {
             account: WalkSettings {
                 login_url: String::new(),
@@ -4343,11 +4527,12 @@ mod tests {
                 character_name: String::new(),
                 creation_params: String::new(),
             },
-            quests: QUESTS.map(str::to_owned).to_vec(),
+            quests: quests.iter().map(|quest| (*quest).to_owned()).collect(),
             gm_start: Vec::new(),
             pvp_foe: None,
             hold: Duration::ZERO,
             registration_timeout: Duration::ZERO,
+            mutation: None,
         };
         let data = PlayData {
             activities: Vec::new(),
@@ -4355,13 +4540,77 @@ mod tests {
             game_master_setup: true,
             nodes: Arc::from(Vec::new()),
             trial_nodes: Arc::new(HashMap::new()),
+            trial_levels: Arc::new(HashMap::from([(
+                LOGIN_LEVEL.to_owned(),
+                LOGIN_MODE.to_owned(),
+            )])),
             containers: HashSet::new(),
             poi_tags: PoiTags::default(),
             group: None,
             courses: Arc::new(CourseRoutes::default()),
             mount_reward_box: Err(String::new()),
+            achievements: Arc::default(),
         };
-        let mut player = Player::new(&settings, data);
+        Player::new(&settings, data)
+    }
+
+    /// The test bots' instance level and its game mode.
+    const LOGIN_LEVEL: &str = "nw_dungeon_everfall_00";
+    const LOGIN_MODE: &str = "dungeonshatteredobelisk";
+
+    /// Live 2026-11-24 04:04:51Z: a bot that logs in inside an instance is in that trial, so a
+    /// trial step of another mode leaves it first; the open world's level and a level the bot
+    /// entered by its own trial step change nothing.
+    #[test]
+    fn a_bot_that_logs_in_inside_an_instance_is_in_its_trial() {
+        let mut player = bare_player(&["run:DungeonRestlessShores01"]);
+        player.level_entered("newworld_vitaeeterna");
+        assert_eq!(player.in_trial, None);
+        player.level_entered(LOGIN_LEVEL);
+        assert_eq!(player.in_trial.as_deref(), Some(LOGIN_MODE));
+        assert!(
+            player.leave_trial_at_end(),
+            "it leaves the instance at its end"
+        );
+        assert_eq!(player.in_trial, None);
+        assert!(!player.leave_trial_at_end(), "once");
+        let mut entering = bare_player(&["run:DungeonShatteredObelisk"]);
+        entering.entering_trial = Some(LOGIN_MODE.to_owned());
+        entering.level_entered(LOGIN_LEVEL);
+        assert_eq!(
+            entering.in_trial, None,
+            "its own trial step sets it at its end"
+        );
+    }
+
+    /// Live 2026-11-24 03:55:24Z: a group bot's gather of the Amrine end chest was refused
+    /// (`busy=Gathered`) while another bot opened it; the bot opens the same node again, and the
+    /// wait is no new try of the step, up to its limit; another failure is no retry.
+    #[test]
+    fn a_node_refused_while_another_player_gathers_it_is_gathered_again() {
+        const NODE: usize = 23;
+        const REFUSED: &str = "go to a LootLargeT3 node and gather it: refused (status 2)";
+        let mut player = bare_player(&["run:DungeonAmrine"]);
+        player.tried_nodes.insert(NODE);
+        player.node_gather = Some(NODE);
+        player.same_plan = 2;
+        assert!(player.take_busy_retry(REFUSED));
+        assert!(!player.tried_nodes.contains(&NODE), "the node is untried");
+        assert_eq!(player.same_plan, 1, "the wait is no new try");
+        player.node_gather = Some(NODE);
+        assert!(!player.take_busy_retry("the gather ends: no answer"));
+        player.busy_retries = MAX_BUSY_RETRIES;
+        player.node_gather = Some(NODE);
+        assert!(!player.take_busy_retry(REFUSED), "past the limit");
+    }
+
+    #[test]
+    fn the_next_quest_tries_every_node_again() {
+        // Live 2026-11-22 19:00-19:02: one run played `C10A_Q3_Revelation`, then
+        // `C10A_Q3R_Revelation`, whose pylon step names the same three nodes.
+        const QUESTS: [&str; 2] = ["C10A_Q3_Revelation", "C10A_Q3R_Revelation"];
+        const TRIED_NODE: usize = 3;
+        let mut player = bare_player(&QUESTS);
         player.tried_nodes.insert(TRIED_NODE);
         player.same_plan = 1;
         player.take_next_quest();
@@ -4609,7 +4858,7 @@ mod tests {
             None,
             "a trial line without its game mode's CRC does not read"
         );
-        let proofs: Vec<u64> = trial_steps(MODE, CRC)
+        let proofs: Vec<u64> = trial_steps(MODE, CRC, None)
             .into_iter()
             .filter_map(|step| match step.proof {
                 Proof::Message(type_index) | Proof::ArenaYes(type_index) => Some(type_index),
@@ -5711,6 +5960,21 @@ mod tests {
             None,
             "each tried"
         );
+    }
+
+    #[test]
+    fn a_run_whose_connection_fails_keeps_its_report_once_the_bot_played() {
+        let lost = || {
+            Err(PairError::Rep(RepError::Route(
+                crate::route::RouteError::TooShort,
+            )))
+        };
+        let (outcome, ended) = run_end(lost(), true).expect("a report");
+        assert_eq!(outcome, RepOutcome::default());
+        assert!(ended.starts_with("the connection ended: "), "{ended}");
+        assert!(run_end(lost(), false).is_err(), "nothing played: the error");
+        let (_, ended) = run_end(Ok(RepOutcome::default()), false).expect("the hold's end");
+        assert_eq!(ended, HOLD_ENDED);
     }
 
     #[test]
