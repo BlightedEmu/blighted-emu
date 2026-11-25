@@ -1831,7 +1831,7 @@
               "proof": "tests"
             },
             {
-              "check": "The walk map behind its switch does not break the bots (2026-11-24, bots): with `mob_walk_map` on, 90 hunt bots fought mobs for 10 minutes with no late tick (the mob step took 0.90 ms a tick, 0.82 ms without the map), one bot ended the same 26 main story quests as without the map, and a group of 5 bots ended an expedition. The switch is off by default. Not checked: the other expeditions, the side quests, and the live game client.",
+              "check": "The walk map behind its switch does not break the bots (2026-11-24, bots): with `mob_walk_map` on, 90 hunt bots fought mobs for 10 minutes with no late tick (the mob step took 0.90 ms a tick, 0.82 ms without the map), one bot ended the same 26 main story quests as without the map, and a group of 5 bots ended an expedition. 2026-11-25, bots, map on: groups of 5 bots fought to the run end of the other 11 expeditions (last boss dead, run ended); in 10 of them every bot that stayed connected opened its end chest, and in one (Barnacles) 2 of 5 did, in two runs, the same count as with the map off. The switch is off by default in the code; the test servers run with it on since 2026-11-25. Not checked: the side quests, the trials but one, and the live game client.",
               "proof": "bots"
             },
             {
