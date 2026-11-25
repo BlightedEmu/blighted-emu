@@ -1208,6 +1208,8 @@ fn query_shape(shape: &Element, centre: [f32; AXES], names: &Names) -> Option<Sh
 /// The world volume of a `DetectionVolumeComponent`'s first query shape `shape` with the
 /// volume's offset `offset`, on an entity at world place `place`: a box, a sphere, a cylinder or
 /// a capsule, without the entity's scale ([`without_scale`]); `None` for another kind.
+///
+/// A detection cylinder has its middle at the volume's place ([`about_its_middle`]).
 pub(crate) fn detector_volume(
     shape: &Element,
     offset: [f32; AXES],
@@ -1217,9 +1219,34 @@ pub(crate) fn detector_volume(
         return None;
     };
     Some(nw_world::dungeon_scripts::Detector {
-        shape: geometry,
+        shape: about_its_middle(geometry),
         place: compose(&without_scale(place), &local),
     })
+}
+
+/// A cylinder `geometry` moved along its axis so that its middle is at its origin; another
+/// kind as it is.
+///
+/// Observed (retail `99a_msq_03_climbarcturus`): the one detection cylinder of the build
+/// (`99A_Enc_MSQ_09_Torment`: 10 m high, 40 m round, offset 5 m up, on a tower top at z 153.84)
+/// started its encounter 169.4 s into the run, as the player stepped from the stair (z 152.48
+/// at 168.9 s) up on the floor (z 154.06 at 169.4 s; the stage states changed 6 s later, after
+/// two stages of 3 s). The player was within 40 m of the axis for a minute before, 151.5 m high
+/// for 4 s before, and never above z 155.35. So the cylinder's bottom is at the floor: it
+/// reaches half its height to each side of its offset. Whether a rigid body's own cylinder
+/// ([`query_shape`]) does the same is Unknown.
+fn about_its_middle(geometry: Geometry) -> Geometry {
+    match geometry {
+        Geometry::Cylinder { from, to, radius } => {
+            let half: [f32; AXES] = std::array::from_fn(|axis| (to[axis] - from[axis]) * HALF);
+            Geometry::Cylinder {
+                from: std::array::from_fn(|axis| from[axis] - half[axis]),
+                to: std::array::from_fn(|axis| to[axis] - half[axis]),
+                radius,
+            }
+        }
+        other => other,
+    }
 }
 
 /// `place` with each axis column brought to unit length: its rotation and translation, no scale.
@@ -3362,6 +3389,38 @@ mod tests {
             panic!("{source:?}");
         };
         (geometry, [place[0][3], place[1][3], place[2][3]])
+    }
+
+    /// The Arcturus tower fight (`99A_Enc_MSQ_09_Torment`): a detection cylinder 10 m high with
+    /// an offset of 5 m up, on a floor at z 153.84. It holds a player on the floor.
+    #[test]
+    fn a_detection_cylinder_reaches_half_its_height_under_its_offset() {
+        const FLOOR: [f32; 3] = [9534.756, 4516.8745, 153.844];
+        const FEET_ON_FLOOR_M: f32 = 153.87;
+        const UNDER_FLOOR_M: f32 = 152.48;
+        const OVER_VOLUME_M: f32 = 164.0;
+        let mut place = IDENTITY_AFFINE;
+        for (axis, value) in FLOOR.iter().enumerate() {
+            place[axis][AXES] = *value;
+        }
+        let cylinder = query(
+            types::QUERY_SHAPE_CYLINDER,
+            &[("m_height", 10.0), ("m_radius", 40.0)],
+            &[],
+        );
+        let detector = detector_volume(&cylinder, [0.0, 0.0, 5.0], &place).expect("a volume");
+        assert_eq!(
+            detector.shape,
+            Geometry::Cylinder {
+                from: [0.0, 0.0, -5.0],
+                to: [0.0, 0.0, 5.0],
+                radius: 40.0
+            }
+        );
+        let holds = |z: f32| detector.contains([FLOOR[0], FLOOR[1], z]);
+        assert!(holds(FEET_ON_FLOOR_M));
+        assert!(!holds(UNDER_FLOOR_M));
+        assert!(!holds(OVER_VOLUME_M));
     }
 
     #[test]
