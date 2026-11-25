@@ -784,8 +784,15 @@ impl InstanceLoop {
             // A sim that exits before its first beat is not in the registry.
             self.launches.exited(id, sims.level_of(id).is_some(), now);
         }
-        let free =
-            |level: &str| u32::try_from(sims.free_instance_sims(level).len()).unwrap_or(u32::MAX);
+        // A sim that just got an instance is not free, though its heartbeat does not show the
+        // instance yet: stopping it would end that instance.
+        let idle = |level: &str| -> Vec<SimSlot> {
+            sims.free_instance_sims(level)
+                .into_iter()
+                .filter(|slot| !self.instances.holds(slot))
+                .collect()
+        };
+        let free = |level: &str| u32::try_from(idle(level).len()).unwrap_or(u32::MAX);
         let live = |id: &BusId| sims.level_of(id).is_some();
         for Launch { id, level } in self.launches.to_start(settings, free, live, now) {
             match start_sim(settings, &id, &level) {
@@ -799,10 +806,7 @@ impl InstanceLoop {
                 }
             }
         }
-        for id in self
-            .launches
-            .to_stop(settings, |level| sims.free_instance_sims(level), now)
-        {
+        for id in self.launches.to_stop(settings, idle, now) {
             if let Some(mut child) = self.children.remove(&id) {
                 tracing::info!(sim = %id, "free instance sim stopped");
                 if let Err(error) = child.start_kill() {

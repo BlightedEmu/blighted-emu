@@ -166,6 +166,12 @@ impl Instances {
         self.open.is_empty()
     }
 
+    /// Whether an open instance holds `sim`. A sim that just got an instance holds it before
+    /// its heartbeat shows the instance as running.
+    pub fn holds(&self, sim: &SimSlot) -> bool {
+        self.open.values().any(|open| open.sim == *sim)
+    }
+
     /// The decision for `request` with the requester's group `group` and the free instance sims
     /// of the level `free` (by id), at Unix millisecond `now_ms`. `phase` and `id` are the new
     /// instance's when one opens.
@@ -235,10 +241,9 @@ impl Instances {
         ids: (Uuid, u64),
         now_ms: u64,
     ) -> Result<OpenInstance, InstanceRefusal> {
-        let taken: Vec<&SimSlot> = self.open.values().map(|open| &open.sim).collect();
         let sim = free
             .iter()
-            .find(|sim| !taken.contains(sim))
+            .find(|sim| !self.holds(sim))
             .ok_or(InstanceRefusal::NoInstanceSim)?;
         let (id, phase) = ids;
         let instance = OpenInstance {
@@ -783,6 +788,28 @@ mod tests {
             ),
             Err(InstanceRefusal::NoInstanceSim)
         );
+    }
+
+    #[test]
+    fn a_sim_holds_its_new_match_before_its_beat_shows_it() {
+        let mut instances = Instances::default();
+        let free = [slot("inst-1"), slot("inst-2")];
+        assert!(!instances.holds(&slot("inst-1")));
+        let opened = instances
+            .open_match(
+                Uuid::from_u128(40),
+                &request(1),
+                vec![character(1), character(2)],
+                &free,
+                (Uuid::from_u128(8), PHASE),
+                NOW_MS,
+            )
+            .expect("a free sim");
+        // The beats of `opened.sim` still show no instance; the director must not stop it.
+        assert!(instances.holds(&opened.sim));
+        assert!(!instances.holds(&slot("inst-2")));
+        instances.closed(opened.id);
+        assert!(!instances.holds(&opened.sim));
     }
 
     #[test]
