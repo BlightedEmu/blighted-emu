@@ -46,6 +46,9 @@ use crate::activity::{
     pvp_flag_shown, pvp_flag_steps, quest_craft_steps, skin_steps, song_steps, start_object_steps,
     trial_steps, use_steps,
 };
+use crate::arena::{
+    ArenaSeat, BETWEEN_ROUNDS_STATE, OVERTIME_STATE, PREGAME_STATE, READY_BIT, ROUND_STATE,
+};
 use crate::chat::{chat_lines, is_system};
 use crate::fishing::{Angler, FishAct, FishEnd};
 use crate::gather::GatherNode;
@@ -57,6 +60,8 @@ use crate::rep::{Received, RepClient, RepError};
 use crate::udp::RepOutcome;
 use crate::view::{CombatView, InteractionAnswer, WorldView};
 use crate::walk::{WalkSettings, login_token, walk};
+use nw_messages::GameModeClientMsg;
+use nw_messages::facet::component::GAME_MODE_PARTICIPANT;
 use nw_messages::game_mode::MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX;
 use nw_messages::social::groups::SIEGE_WARFARE_ENDED_TYPE_INDEX;
 
@@ -234,6 +239,14 @@ const FRIEND_MEMORY: Duration = Duration::from_secs(30);
 /// A match player farther than this is no foe of the bot: an entity of the level the bot left
 /// keeps its last place in the view.
 const MATCH_SIGHT_M: f32 = 200.0;
+/// How long a bot waits for its ready-up (6824) to show in the game mode state before it sends
+/// it again (Observed: the status bit came 50 to 165 ms after the call, arena flow study 3.3).
+const READY_RETRY: Duration = Duration::from_secs(5);
+/// How often a bot that waits in a match (the pregame, between rounds) takes a step, east and
+/// back west in turn, as a player walks about: the arena round's AFK rule (`3v3ArenaRound`,
+/// 15 s warning, 30 s removal) counts the still time from before the round (live 2026-11-25
+/// 03:14:12Z: six bots that stood still in the 90 s pregame were removed as the round began).
+const WAIT_STEP_INTERVAL: Duration = Duration::from_secs(10);
 /// The team that plays the objectives of an Outpost Rush or capture the flag match
 /// ([`MatchGoal`]); the other team stays at its spawn.
 const OBJECTIVE_TEAM: u8 = 0;
@@ -1426,6 +1439,10 @@ struct Player {
     match_play: Option<MatchPlay>,
     /// The pops the bot accepts ([`Act::AcceptPops`]).
     accepting: Option<Accepting>,
+    /// The bot's seat in a PvP run ([`crate::arena`]), which notes what it saw of its matches.
+    arena: Option<ArenaSeat>,
+    /// The bot's own character id (UUID text), from its login token.
+    character: Option<String>,
 }
 
 /// The accepts of a bot's pops ([`Act::AcceptPops`]): when the act began and the match id it
@@ -1452,6 +1469,11 @@ struct MatchPlay {
     at_place_since: Option<Duration>,
     /// When the bot last sent a flag take.
     last_take: Option<Duration>,
+    /// When the bot last readied up (6824).
+    last_ready: Option<Duration>,
+    /// When the bot last took a step while it waited ([`WAIT_STEP_INTERVAL`]), and whether that
+    /// step went east.
+    last_wait_step: Option<(Duration, bool)>,
 }
 
 impl MatchPlay {
@@ -1464,6 +1486,8 @@ impl MatchPlay {
             next_place: 0,
             at_place_since: None,
             last_take: None,
+            last_ready: None,
+            last_wait_step: None,
         }
     }
 }
@@ -1490,7 +1514,10 @@ fn objective_places(goal: &MatchGoal, team: Option<u8>, own: Position) -> Vec<Po
         return Vec::new();
     }
     let maps: Vec<Vec<[f32; 3]>> = match goal {
-        MatchGoal::Fight | MatchGoal::Siege(_) | MatchGoal::Defend(_) | MatchGoal::Clear { .. } => {
+        MatchGoal::Fight { .. }
+        | MatchGoal::Siege(_)
+        | MatchGoal::Defend(_)
+        | MatchGoal::Clear { .. } => {
             return Vec::new();
         }
         MatchGoal::Outposts => sim::world::outpost_places()
@@ -1783,6 +1810,18 @@ impl Player {
         self.heard.extend(heard.into_iter().map(|line| line.body));
         self.read = outcome.messages.len();
         self.answers.extend(self.combat.take_interactions());
+        if let Some(seat) = &self.arena {
+            let step = self
+                .running
+                .as_ref()
+                .and_then(|(_, running)| running.steps.get(running.step))
+                .map(|step| step.what.as_str());
+            seat.observe(
+                &self.world,
+                (self.combat.hits_dealt(), self.combat.hits_taken()),
+                step,
+            );
+        }
         let Some(own) = self.world.own_number() else {
             return Ok(());
         };
@@ -3122,6 +3161,12 @@ impl Player {
                         z: *z,
                     },
                 )?,
+                Act::TeleportTo(place) => {
+                    let Some([x, y, z]) = place(&self.sight(outcome, own, running)) else {
+                        return Ok(None);
+                    };
+                    self.teleport(client, own, Position { x, y, z })?;
+                }
                 Act::Call(make) => {
                     let (type_index, body) = make(own)?;
                     client.send_message(MESSAGE_CHANNEL, true, type_index, body)?;
@@ -3224,6 +3269,13 @@ impl Player {
                     }
                     let ended = match end {
                         MatchEnd::LeftMode(mode) => !self.world.matchmaking().active.contains(mode),
+                        MatchEnd::ScriptState { mode, state } => {
+                            !self.world.matchmaking().active.contains(mode)
+                                || self
+                                    .world
+                                    .game_mode(*mode)
+                                    .is_some_and(|view| view.script_state == Some(*state))
+                        }
                         MatchEnd::WarEnded => outcome.messages[running.marks.messages..]
                             .iter()
                             .any(|received| {
@@ -3232,7 +3284,7 @@ impl Player {
                             }),
                     };
                     if !ended {
-                        self.match_tick(client, own, goal, since)?;
+                        self.match_tick(client, own, goal, end.mode(), since)?;
                         return Ok(None);
                     }
                     self.match_play = None;
@@ -3417,6 +3469,8 @@ impl Player {
             group_invite: self.world.inbound_group_invite(),
             board: self.combat.board(),
             entitlements: self.combat.entitlements(),
+            world: &self.world,
+            place: self.own_place().map(|at| [at.x, at.y, at.z]),
         }
     }
 
@@ -3540,11 +3594,16 @@ impl Player {
     /// Steps [`AFK_STEP_M`] east of where the bot stands, as a player does at the AFK warning;
     /// a fight walks it back to its mob.
     fn step_aside(&mut self, client: &mut RepClient) -> Result<(), RepError> {
+        self.step_east(client, AFK_STEP_M)
+    }
+
+    /// Steps `east_m` metres east (west when below 0) of where the bot stands, in its input.
+    fn step_east(&mut self, client: &mut RepClient, east_m: f32) -> Result<(), RepError> {
         let Some(own) = self.own_place() else {
             return Ok(());
         };
         let to = Position {
-            x: own.x + AFK_STEP_M,
+            x: own.x + east_m,
             ..own
         };
         let Some(position) = InputPosition::from_metres(to.x, to.y, to.z) else {
@@ -3779,12 +3838,14 @@ impl Player {
         Ok(true)
     }
 
-    /// One tick of the bot's match play for `goal` ([`Act::PlayMatch`]); a dead bot waits.
+    /// One tick of the bot's match play for `goal` in game mode `mode` ([`Act::PlayMatch`]); a
+    /// dead bot waits.
     fn match_tick(
         &mut self,
         client: &mut RepClient,
         own_entity: u64,
         goal: &MatchGoal,
+        mode: Option<u32>,
         since: Duration,
     ) -> Result<(), RepError> {
         let Some(own) = self.own_place() else {
@@ -3794,7 +3855,9 @@ impl Player {
             return Ok(());
         }
         match goal {
-            MatchGoal::Fight => self.fight_foe(client, own, since),
+            MatchGoal::Fight { ready_up } => {
+                self.fight_foe(client, own_entity, own, (mode, *ready_up), since)
+            }
             MatchGoal::Defend(claim) => self.defend_claim(
                 client,
                 own_entity,
@@ -3915,17 +3978,62 @@ impl Player {
 
     /// Fights the nearest match player in sight that is no mob and not known as a friend: after
     /// [`MAX_SWINGS_WITHOUT_HIT`] swings with no hit dealt it is a friend for [`FRIEND_MEMORY`].
+    /// In game mode `mode` (with its game mode entity's state) the bot fights only in a round or
+    /// its overtime, and only the participants of the other team once the state names its own;
+    /// with `ready_up` it readies up (6824) in the pregame and between rounds, as a player
+    /// clicks the ready button. A mode whose state did not come yet waits.
     fn fight_foe(
         &mut self,
         client: &mut RepClient,
+        own_entity: u64,
         own: Position,
+        (mode, ready_up): (Option<u32>, bool),
         since: Duration,
     ) -> Result<(), RepError> {
         let hits = self.combat.hits_dealt();
         let mobs: HashSet<u64> = self.combat.mobs().map(|(number, _)| number).collect();
+        let character = self.character.clone().unwrap_or_default();
+        let view = mode.and_then(|mode| self.world.game_mode(mode));
+        if mode.is_some() && view.is_none() {
+            return Ok(());
+        }
+        let state = view.and_then(|view| view.script_state);
+        let unready = view
+            .and_then(|view| view.statuses.get(view.index_of(&character)?).copied())
+            .is_some_and(|status| status & READY_BIT == 0);
+        let foes = view.and_then(|view| view.foes_of(&character));
         let Some(play) = self.match_play.as_mut() else {
             return Ok(());
         };
+        if view.is_some() && !matches!(state, Some(ROUND_STATE | OVERTIME_STATE)) {
+            play.target = None;
+            let ready_due = play
+                .last_ready
+                .is_none_or(|last| since.saturating_sub(last) >= READY_RETRY);
+            if let (true, true, true, Some(mode)) = (
+                ready_up && matches!(state, Some(PREGAME_STATE | BETWEEN_ROUNDS_STATE)),
+                unready,
+                ready_due,
+                mode,
+            ) {
+                play.last_ready = Some(since);
+                let call = GameModeClientMsg::SetReadiedUpStatus {
+                    header: FacetHeader::of(GAME_MODE_PARTICIPANT, own_entity),
+                    game_mode: mode,
+                    ready: true,
+                };
+                client.send_message(MESSAGE_CHANNEL, true, call.type_index(), call.encode()?)?;
+            }
+            let east = match play.last_wait_step {
+                Some((last, _)) if since.saturating_sub(last) < WAIT_STEP_INTERVAL => {
+                    return Ok(());
+                }
+                Some((_, went_east)) => !went_east,
+                None => true,
+            };
+            play.last_wait_step = Some((since, east));
+            return self.step_east(client, if east { AFK_STEP_M } else { -AFK_STEP_M });
+        }
         play.friends
             .retain(|_, found| since.saturating_sub(*found) < FRIEND_MEMORY);
         let from = [own.x, own.y, own.z];
@@ -3934,6 +4042,10 @@ impl Player {
             .others()
             .into_iter()
             .filter(|number| !mobs.contains(number) && !play.friends.contains_key(number))
+            .filter(|number| {
+                foes.as_ref()
+                    .is_none_or(|foes| foes.is_empty() || foes.contains(number))
+            })
             .filter_map(|number| Some((number, self.world.position(number)?)))
             .filter(|(_, at)| planar(from, [at.x, at.y]) <= MATCH_SIGHT_M)
             .min_by(|(_, a), (_, b)| planar(from, [a.x, a.y]).total_cmp(&planar(from, [b.x, b.y])));
@@ -4197,6 +4309,8 @@ pub struct PlayData {
     pub mount_reward_box: Result<u32, String>,
     /// The game data's achievements: what each bit is, and what each quest's row names.
     pub achievements: Arc<AchievementBook>,
+    /// The bot's seat in a PvP run ([`crate::arena`]); `None` for other runs.
+    pub arena: Option<ArenaSeat>,
 }
 
 impl Player {
@@ -4216,6 +4330,7 @@ impl Player {
             courses,
             mount_reward_box,
             achievements,
+            arena,
         } = data;
         Self {
             world: WorldView::default(),
@@ -4299,6 +4414,8 @@ impl Player {
             hunting: false,
             match_play: None,
             accepting: None,
+            arena,
+            character: None,
         }
     }
 }
@@ -4321,7 +4438,11 @@ pub async fn run_play(
     if let Some(seat) = &group {
         seat.set_character(admission.token.character_id.clone());
     }
+    if let Some(seat) = &data.arena {
+        seat.set_character(admission.token.character_id.clone());
+    }
     let mut player = Player::new(settings, data);
+    player.character.clone_from(&admission.token.character_id);
     let mut reported = 0;
     let session = session_with(
         admission.rep_address,
@@ -4551,6 +4672,7 @@ mod tests {
             courses: Arc::new(CourseRoutes::default()),
             mount_reward_box: Err(String::new()),
             achievements: Arc::default(),
+            arena: None,
         };
         Player::new(&settings, data)
     }
@@ -4646,7 +4768,14 @@ mod tests {
             vec![at(long[FLAG_TEAM]), at(long[0])],
             "the other team's flag base, then the own base"
         );
-        assert!(objective_places(&MatchGoal::Fight, Some(OBJECTIVE_TEAM), at(long[0])).is_empty());
+        assert!(
+            objective_places(
+                &MatchGoal::Fight { ready_up: true },
+                Some(OBJECTIVE_TEAM),
+                at(long[0])
+            )
+            .is_empty()
+        );
         assert_eq!(
             objective_places(
                 &MatchGoal::Siege(vec![long[1], long[0]]),

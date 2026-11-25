@@ -6,21 +6,28 @@
 //! client's own player. A hunt bot also keeps the mobs it is sent and counts the combat messages
 //! for it (M6-B spec section 9.1). The own groups state tells the own group and the invites to
 //! it (an expedition group's bots, [`crate::group`]). The own game mode participant state
-//! (3312) tells the queue's pop, the match id and the game modes the player is in.
+//! (3312) tells the queue's pop, the match id and the game modes the player is in. The state of
+//! each game mode entity (2343) tells a match's or a duel's script state, participants, teams
+//! and values, the 4977 of each death in a game mode names the dead and the killer, and the own
+//! generic invite state (3408) tells an invite to a duel.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use nw_content::town_props::ASSET_ID_LEN;
 use nw_messages::entity_ids::IdHolder;
+use nw_messages::entity_ids::entity_of_raw_id;
 use nw_messages::fishing::StateTransition;
+use nw_messages::game_mode::{DEATH_RECAP_FOR_ALL_TYPE_INDEX, character_text};
 use nw_messages::game_mode_participant::GameModeParticipantState;
+use nw_messages::game_mode_state::{GAME_MODE_TYPE_INDEX, GameModeState, Keyed, ParticipantRef};
 use nw_messages::gde::LOOT_BAG_ASSET;
 use nw_messages::social::states::GroupsState;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    BAG_COMPONENT, EntitlementState, EntitySlots, ItemRecord, LOGIN_MESSAGE_TYPES, MemberState,
-    MessageError, PLAYER_VITALS_ID, ReplicatedList, ServerMessage, SlotRead, SlotUpdate,
-    VitalsData, WorldPosition, entity_of_facet, number_of_seen_raw_id, release_raw_id,
+    BAG_COMPONENT, BodyCodec, DeathRecapForAllMsg, EntitlementState, EntitySlots, ItemRecord,
+    LOGIN_MESSAGE_TYPES, MemberState, MessageError, PLAYER_VITALS_ID, ReplicatedList,
+    ServerMessage, SlotRead, SlotUpdate, VitalsData, WorldPosition, entity_of_facet,
+    number_of_seen_raw_id, release_raw_id,
 };
 use thiserror::Error;
 
@@ -752,6 +759,115 @@ pub struct WorldView {
     inbound_invites: Vec<[u8; RAW_ID_LEN]>,
     /// The own queue and game modes, from the own game mode participant state.
     matchmaking: Matchmaking,
+    /// The state of each game mode entity seen, by entity number.
+    game_modes: BTreeMap<u64, GameModeView>,
+    /// The deaths in the own game modes (4977), oldest first.
+    game_mode_deaths: Vec<DeathRecapForAllMsg>,
+    /// The invite in the own generic invite state (3408): its id and activity; `None` when the
+    /// state names none.
+    generic_invite: Option<([u8; RAW_ID_LEN], u32)>,
+}
+
+/// One change of a game mode's script state ([`GameModeView::states`]): the state and the
+/// participants' statuses after the body that set it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptChange {
+    /// The new script state.
+    pub state: u8,
+    /// The participants' statuses after it, in participant order.
+    pub statuses: Vec<u8>,
+}
+
+/// What a client keeps of the state of one game mode entity (2343): each child as the server
+/// last sent it, every script state change and every values list in order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GameModeView {
+    /// `curScriptStateId`.
+    pub script_state: Option<u8>,
+    /// `gameModeId`: the CRC-32 of the lowercase `GameModeId`.
+    pub mode: Option<u32>,
+    /// The participants, in order.
+    pub participants: Vec<ParticipantRef>,
+    /// Their statuses.
+    pub statuses: Vec<u8>,
+    /// Their teams.
+    pub teams: Vec<u8>,
+    /// Their characters.
+    pub characters: Vec<[u8; RAW_ID_LEN]>,
+    /// The values (round wins, an end value), as last sent.
+    pub values: Vec<Keyed>,
+    /// Each script state change, in order.
+    pub states: Vec<ScriptChange>,
+    /// Each values list sent, in order.
+    pub values_seen: Vec<Vec<Keyed>>,
+}
+
+impl GameModeView {
+    /// Takes each child that `state` sends.
+    pub(crate) fn apply(&mut self, state: GameModeState) {
+        if let Some(mode) = state.mode {
+            self.mode = Some(mode);
+        }
+        if let Some(participants) = &state.participants {
+            apply_list(&mut self.participants, participants);
+        }
+        if let Some(statuses) = &state.statuses {
+            apply_list(&mut self.statuses, statuses);
+        }
+        if let Some(teams) = &state.teams {
+            apply_list(&mut self.teams, teams);
+        }
+        if let Some(characters) = &state.characters {
+            apply_list(&mut self.characters, characters);
+        }
+        if let Some(values) = state.values {
+            self.values.clone_from(&values.elements);
+            self.values_seen.push(values.elements);
+        }
+        if let Some(script_state) = state.script_state {
+            self.script_state = Some(script_state);
+            self.states.push(ScriptChange {
+                state: script_state,
+                statuses: self.statuses.clone(),
+            });
+        }
+    }
+
+    /// The value of key `key` (the CRC-32 of its lowercase name), as last sent.
+    pub fn value(&self, key: u32) -> Option<u64> {
+        self.values
+            .iter()
+            .find(|(own, _)| *own == key)
+            .map(|(_, value)| *value)
+    }
+
+    /// The participant index of the character of id `character` (UUID text, as a login token
+    /// names it).
+    pub fn index_of(&self, character: &str) -> Option<usize> {
+        self.characters
+            .iter()
+            .position(|own| character_text(*own).eq_ignore_ascii_case(character))
+    }
+
+    /// The team of the character of id `character` (UUID text).
+    pub fn team_of(&self, character: &str) -> Option<u8> {
+        self.teams.get(self.index_of(character)?).copied()
+    }
+
+    /// The entity numbers of the participants of the other team than the character of id
+    /// `character` (UUID text) that this process saw; `None` while the state does not name the
+    /// character's team.
+    pub fn foes_of(&self, character: &str) -> Option<Vec<u64>> {
+        let team = self.team_of(character)?;
+        Some(
+            self.participants
+                .iter()
+                .zip(&self.teams)
+                .filter(|(_, other)| **other != team)
+                .filter_map(|(participant, _)| entity_of_raw_id(&participant.raw_id))
+                .collect(),
+        )
+    }
 }
 
 /// The own queue and game modes, from each part of the own game mode participant state (3312)
@@ -837,6 +953,10 @@ impl WorldView {
                         self.read_own_tasks(update);
                         self.read_own_groups(update);
                         self.read_own_matchmaking(update);
+                        self.read_own_invite(update);
+                    }
+                    if let Some(entity) = entity {
+                        self.read_game_mode(entity, update);
                     }
                 }
             }
@@ -845,9 +965,73 @@ impl WorldView {
             | Read::Interaction { type_index, .. }
             | Read::Other { type_index } => {
                 self.login.push(*type_index);
+                if *type_index == DEATH_RECAP_FOR_ALL_TYPE_INDEX {
+                    let death =
+                        DeathRecapForAllMsg::decode(&received.envelope.body).map_err(|source| {
+                            ViewError::Message {
+                                type_index: *type_index,
+                                source,
+                            }
+                        })?;
+                    self.game_mode_deaths.push(death);
+                }
             }
         }
         Ok(())
+    }
+
+    /// Keeps the game mode state (2343) of entity `entity` in `update`: a state of the class
+    /// comes as its recorded bytes (the members' readers write it only).
+    fn read_game_mode(&mut self, entity: u64, update: &SlotUpdate) {
+        for member in &update.members {
+            if let MemberState::Recorded {
+                class: GAME_MODE_TYPE_INDEX,
+                body,
+            } = &member.state
+            {
+                let mut reader = nw_messages::wire::Reader::new(body);
+                if let Ok(state) = GameModeState::read(&mut reader)
+                    && reader.finish().is_ok()
+                {
+                    self.game_modes.entry(entity).or_default().apply(state);
+                }
+            }
+        }
+    }
+
+    /// Keeps the invite of the own generic invite state (3408) in `update`.
+    fn read_own_invite(&mut self, update: &SlotUpdate) {
+        for member in &update.members {
+            if let MemberState::GenericInvite(state) = &member.state
+                && let Some(id) = state.invite_id
+            {
+                self.generic_invite = (id != [0; RAW_ID_LEN]).then(|| {
+                    (
+                        id,
+                        state.details.as_ref().map_or(0, |details| details.activity),
+                    )
+                });
+            }
+        }
+    }
+
+    /// The newest game mode entity of mode `mode` (the CRC-32 of its lowercase id) seen: the
+    /// one with the highest entity number (the numbers of a process only grow).
+    pub fn game_mode(&self, mode: u32) -> Option<&GameModeView> {
+        self.game_modes
+            .values()
+            .rev()
+            .find(|view| view.mode == Some(mode))
+    }
+
+    /// The deaths in the own game modes (4977), oldest first.
+    pub fn game_mode_deaths(&self) -> &[DeathRecapForAllMsg] {
+        &self.game_mode_deaths
+    }
+
+    /// The invite in the own generic invite state: its id and activity.
+    pub const fn generic_invite(&self) -> Option<([u8; RAW_ID_LEN], u32)> {
+        self.generic_invite
     }
 
     /// Whether the login messages came first, in the captured order, and bundles after them.

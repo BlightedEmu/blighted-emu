@@ -4,6 +4,7 @@
 
 pub mod achievements;
 pub mod activity;
+pub mod arena;
 pub mod chat;
 pub mod config;
 pub mod crossing_state;

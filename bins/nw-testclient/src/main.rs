@@ -8,8 +8,9 @@
 //! sets up the voice chat and checks the retail answers (it needs a `[voice]` service in the
 //! social service's configuration). `play`
 //! plays quests with a game master's bot and writes a report. `expedition` runs game master bots
-//! that form a group, enter an expedition and walk its start area. Prints one line per step;
-//! exits with 0 only when every step passed.
+//! that form a group, enter an expedition and walk its start area. `arena` runs game master
+//! bots that queue for the arena and play its match, or (`--duel`) two bots that duel. Prints
+//! one line per step; exits with 0 only when every step passed.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -39,6 +40,9 @@ use nw_messages::WorldPosition;
 use nw_reflect::REGISTRATION_STATUS_AUTHORIZED;
 use nw_testclient::activity::{
     Activity, ActivityData, ActivityKind, CourseRoutes, INVASION_FIGHT_TERRITORY, mount_reward_box,
+};
+use nw_testclient::arena::{
+    ArenaBoard, ArenaSeat, BotRun, DUELISTS, duel_mode, duel_steps, run_markdown,
 };
 use nw_testclient::chat::{ChatSettings, run_chat};
 use nw_testclient::config::{
@@ -74,6 +78,13 @@ const DEFAULT_PLAY_MINUTES: u64 = 30;
 const DEFAULT_EXPEDITION: &str = "DungeonAmrine";
 /// The longest expedition run without `--minutes`.
 const DEFAULT_EXPEDITION_MINUTES: u64 = 10;
+/// The longest arena or duel run without `--minutes`: the queue, the 90 s pregame, up to five
+/// rounds and the return.
+const DEFAULT_ARENA_MINUTES: u64 = 30;
+/// The fewest bots of an arena run: two teams of one (the 1v1 arena).
+const FEWEST_ARENA_BOTS: usize = 2;
+/// The teams of an arena match.
+const ARENA_TEAMS: usize = 2;
 /// Seconds per minute.
 const SECONDS_PER_MINUTE: u64 = 60;
 /// The end of a play bot's character name after its account name.
@@ -214,6 +225,26 @@ enum Command {
         /// expedition of this week's mutation; none for a normal run.
         #[arg(long)]
         mutation: Option<u8>,
+    },
+    /// Bots of game master accounts play PvP through the client's calls (`nw_testclient::arena`):
+    /// each queues alone for the 3v3 arena, readies up, fights the other team's bots and leaves
+    /// at the match's end (a match takes the world director's `[instances.arena] match_size`
+    /// bots: 6 for 3v3, 2 for 1v1); with `--duel` two bots duel in the open world. A new
+    /// account is registered; each needs the game master rank and takes the first account's
+    /// password.
+    Arena {
+        /// The bots' accounts, comma-separated: an even number, at least two (two for a duel).
+        #[arg(long, value_delimiter = ',', required = true)]
+        accounts: Vec<String>,
+        /// The report file (Markdown).
+        #[arg(long)]
+        report: PathBuf,
+        /// Longest time in the world, in minutes.
+        #[arg(long, default_value_t = DEFAULT_ARENA_MINUTES)]
+        minutes: u64,
+        /// The first bot invites the second to a duel and both fight it, in place of the arena.
+        #[arg(long)]
+        duel: bool,
     },
     /// Game master bots check one of the server's systems through the client's calls
     /// (`nw_testclient::systems`): saves, the economy, the trading post, social, character
@@ -403,6 +434,31 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
                 &config, &http, &trusted, &game_mode, &bots, &report, &ledger,
             )
             .await
+        }
+        Command::Arena {
+            accounts,
+            report,
+            minutes,
+            duel,
+        } => {
+            let first = own(&config)?;
+            let bots = accounts
+                .iter()
+                .map(|account| PlaySettings {
+                    account: WalkSettings {
+                        account: account.clone(),
+                        character_name: format!("{account}{PLAY_CHARACTER_MARK}"),
+                        ..first.clone()
+                    },
+                    quests: Vec::new(),
+                    gm_start: Vec::new(),
+                    pvp_foe: None,
+                    hold: Duration::from_secs(minutes * SECONDS_PER_MINUTE),
+                    registration_timeout: Duration::from_secs(config.registration_timeout_seconds),
+                    mutation: None,
+                })
+                .collect::<Vec<_>>();
+            arena(&config, &http, &trusted, &bots, duel, &report, &ledger).await
         }
         Command::Systems {
             check,
@@ -1019,6 +1075,7 @@ impl PlayContent {
             achievements: Arc::new(nw_testclient::achievements::AchievementBook::from_tables(
                 &self.tables,
             )),
+            arena: None,
         }
     }
 }
@@ -1132,6 +1189,99 @@ async fn expedition(
         );
         passed &= expedition_section(&mut markdown, report, seat, &ground, questing);
     }
+    std::fs::write(report_path, &markdown)?;
+    println!("{markdown}");
+    println!("report in {}", report_path.display());
+    Ok(passed)
+}
+
+/// The `arena` run: the bots of `bots` queue for the arena and play its match, or (`duel`) the
+/// two bots duel; the report goes to `report_path`.
+async fn arena(
+    config: &TestClientConfig,
+    http: &reqwest::Client,
+    trusted: &DtlsClientConfig,
+    bots: &[PlaySettings],
+    duel: bool,
+    report_path: &std::path::Path,
+    ledger: &LedgerSlot,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let content = PlayContent::load(config)?;
+    let activity_data = ActivityData {
+        world: &content.world,
+        tables: &content.tables,
+        town_stations: &content.town_stations,
+        war_forts: &content.war_forts,
+    };
+    let (mode, title) = if duel {
+        if bots.len() != DUELISTS {
+            return Err(format!("a duel takes {DUELISTS} accounts; {} given", bots.len()).into());
+        }
+        (duel_mode(), format!("Duel run: {DUELISTS} bots"))
+    } else {
+        if bots.len() < FEWEST_ARENA_BOTS || !bots.len().is_multiple_of(ARENA_TEAMS) {
+            return Err(format!(
+                "an arena match takes an even number of at least {FEWEST_ARENA_BOTS} accounts; {} given",
+                bots.len()
+            )
+            .into());
+        }
+        let per_team = bots.len() / ARENA_TEAMS;
+        let catalog = InstanceCatalog::from_tables(&content.tables);
+        let arena = catalog
+            .modes()
+            .find(|mode| mode.kind == nw_content::instances::InstanceKind::Arena)
+            .ok_or("no arena game mode in the content")?;
+        (
+            arena.crc,
+            format!(
+                "Arena run: {} ({per_team}v{per_team}), {} bots",
+                arena.id,
+                bots.len()
+            ),
+        )
+    };
+    let seats = ArenaBoard::seats(bots.len(), mode);
+    let runs = bots.iter().zip(&seats).map(|(settings, seat)| {
+        let activity = if duel {
+            Activity {
+                kind: ActivityKind::Duel,
+                steps: Ok(duel_steps(seat)),
+            }
+        } else {
+            Activity::of(ActivityKind::Arena, &activity_data)
+        };
+        let mut data = content.play_data(vec![activity], None);
+        data.activities_first = true;
+        data.arena = Some(seat.clone());
+        let bot = seat.number();
+        async move {
+            run_play(
+                http,
+                settings,
+                data,
+                |token| {
+                    RepClient::new(trusted, config.mtu, token, 0).map(|client| ledger.give(client))
+                },
+                move |line| println!("bot {bot}: {line}"),
+            )
+            .await
+        }
+    });
+    let reports = all(runs.collect()).await;
+    let runs: Vec<BotRun> = bots
+        .iter()
+        .zip(&seats)
+        .zip(reports)
+        .map(
+            |((settings, seat), report): ((&PlaySettings, &ArenaSeat), _)| BotRun {
+                account: settings.account.account.clone(),
+                facts: seat.facts(),
+                play: report.map_err(|error| error.to_string()),
+            },
+        )
+        .collect();
+    let (markdown, passed) = run_markdown(&title, &runs, duel);
     std::fs::write(report_path, &markdown)?;
     println!("{markdown}");
     println!("report in {}", report_path.display());

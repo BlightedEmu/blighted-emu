@@ -6,6 +6,8 @@
 //! mission) come from the level's world file and the content bundle, as the client knows them.
 //! An activity the bot cannot play names why instead of steps.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use clap::ValueEnum;
@@ -67,11 +69,12 @@ use nw_world::quick_courses::QuickCoursePaths;
 /// A game master line the sim carried out.
 use sim::world::GM_DONE as DONE;
 
+use crate::arena::{ARENA_ENDED_STATE, LEAVE_EVENT};
 use crate::gather::{GatherNode, node_id};
 use crate::group::{GroupSeat, accept_call};
 use crate::pair::RecordWalk;
 use crate::rep::Received;
-use crate::view::Matchmaking;
+use crate::view::{Matchmaking, WorldView};
 
 /// The kind of an inn's open interaction (`travel::kind::OPEN_INN` of the sim; retail opened
 /// the inn with it before the check in, live-inn note section 1).
@@ -193,7 +196,8 @@ pub enum ActivityKind {
     /// two bots at the same time: `nw-testclient systems` runs it ([`crate::systems`]).
     Systems,
     /// The bot queues for the 3v3 arena alone, accepts the match the queue finds, plays it (it
-    /// fights the players of the other team) and is back in the open world at its end
+    /// readies up in the pregame and between rounds and fights the players of the other team),
+    /// leaves at its end with the end screen's button and is back in the open world
     /// ([`queued_match_steps`]). The match needs as many bots in the queue as the world
     /// director's `[instances.arena] match_size`.
     Arena,
@@ -206,6 +210,9 @@ pub enum ActivityKind {
     /// The bot closes the arena queue's role picking screen, then joins and leaves the queue
     /// ([`queue_leave_steps`]): no match and no instance.
     QueueLeave,
+    /// A duel of two bots in the open world (the invite, its accept, the fight and the leave):
+    /// `nw-testclient arena --duel` runs it ([`crate::arena::duel_steps`]).
+    Duel,
 }
 
 /// One call of a step, written once the bot knows its own entity number.
@@ -237,11 +244,19 @@ pub struct BotSight<'a> {
     /// What the bot's account holds: its newest own entitlement state (3133) with the
     /// account's lists ([`crate::view::CombatView::entitlements`]).
     pub entitlements: Option<&'a nw_messages::EntitlementState>,
+    /// What the bot saw of the world: the game mode entities, the deaths in its game modes and
+    /// its own generic invite ([`crate::view::WorldView`]).
+    pub world: &'a WorldView,
+    /// Where the bot stands, east, north and height; `None` before its first own place.
+    pub place: Option<[f32; 3]>,
 }
 
 /// The calls of an act that reads what the bot saw: `None` to wait for a later tick, else the
 /// calls to send (type index and body each; none for an act that only notes what it saw).
 pub type Dynamic = Box<dyn Fn(&BotSight<'_>) -> Option<Result<Vec<(u64, Vec<u8>)>, MessageError>>>;
+
+/// The place of a teleport written from what the bot saw: `None` to wait for a later tick.
+pub type DynamicPlace = Box<dyn Fn(&BotSight<'_>) -> Option<[f32; 3]>>;
 
 /// The request of an interaction written from what the bot saw: `None` to wait for a later tick.
 pub type DynamicInteraction = Box<dyn Fn(&BotSight<'_>) -> Option<InteractionRequest>>;
@@ -256,6 +271,9 @@ pub enum Act {
     Gm(String),
     /// A game master's teleport to the place; the bot's next inputs stand there.
     Teleport([f32; 3]),
+    /// A game master's teleport to the place written from what the bot saw ([`DynamicPlace`],
+    /// another bot's place); the act waits while it gives `None`.
+    TeleportTo(DynamicPlace),
     /// A press of the summon mount key in the bot's input.
     SummonKey,
     /// A toggle of the PvP flag (2525) unless the newest `!state` line shows the flag on or on
@@ -380,8 +398,12 @@ pub enum Proof {
 /// place with a game master's teleport.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchGoal {
-    /// Fight the nearest player of the other team (the arena).
-    Fight,
+    /// Fight the nearest player of the other team (the arena, a duel); with `ready_up` the bot
+    /// readies up (6824) in the arena's pregame and between its rounds.
+    Fight {
+        /// Whether the bot readies up.
+        ready_up: bool,
+    },
     /// Team 0 goes onto the outposts A, B and C in turn and stays in each while it takes it;
     /// team 1 stays at its spawn (Outpost Rush).
     Outposts,
@@ -420,8 +442,26 @@ pub enum MatchEnd {
     /// The own participant state shows the player out of this game mode (the CRC-32 of its
     /// lowercase id): the match ended and the player is back.
     LeftMode(u32),
+    /// The game mode entity of `mode` (the CRC-32 of its lowercase id) shows the script state
+    /// `state` (its end), or the own participant state shows the player out of the mode.
+    ScriptState {
+        /// The game mode.
+        mode: u32,
+        /// The script state of its end.
+        state: u8,
+    },
     /// The war or invasion ended: its result came (245).
     WarEnded,
+}
+
+impl MatchEnd {
+    /// The game mode the play is in; `None` for a war.
+    pub const fn mode(self) -> Option<u32> {
+        match self {
+            Self::LeftMode(mode) | Self::ScriptState { mode, .. } => Some(mode),
+            Self::WarEnded => None,
+        }
+    }
 }
 
 /// One step of an activity.
@@ -622,6 +662,9 @@ impl Activity {
             ActivityKind::OutpostRush => queued_match_steps(data, InstanceKind::OutpostRush),
             ActivityKind::CaptureTheFlag => queued_match_steps(data, InstanceKind::CaptureTheFlag),
             ActivityKind::QueueLeave => queue_leave_steps(data),
+            ActivityKind::Duel => Err("needs the other bot in the world at the same time: \
+                 `nw-testclient arena --duel` runs it"
+                .to_owned()),
         };
         Self { kind, steps }
     }
@@ -1980,7 +2023,7 @@ const CAPTURE_THE_FLAG_LONGEST: Duration =
 const SECONDS_PER_MINUTE: u64 = 60;
 
 /// The participant call `make` with the bot's game mode participant header.
-fn participant_call(make: impl Fn(FacetHeader) -> GameModeClientMsg + 'static) -> Act {
+pub(crate) fn participant_call(make: impl Fn(FacetHeader) -> GameModeClientMsg + 'static) -> Act {
     Act::Call(Box::new(move |own| {
         let call = make(FacetHeader::of(facet_component::GAME_MODE_PARTICIPANT, own));
         Ok((call.type_index(), call.encode()?))
@@ -1988,7 +2031,10 @@ fn participant_call(make: impl Fn(FacetHeader) -> GameModeClientMsg + 'static) -
 }
 
 /// A proof that the own game mode participant state shows `wanted`, described.
-fn matchmaking_shows(wanted: impl Fn(&Matchmaking) -> bool + 'static, described: &str) -> Proof {
+pub(crate) fn matchmaking_shows(
+    wanted: impl Fn(&Matchmaking) -> bool + 'static,
+    described: &str,
+) -> Proof {
     Proof::Check(
         Box::new(move |sight| wanted(sight.matchmaking).then_some(Ok(()))),
         described.to_owned(),
@@ -2114,7 +2160,12 @@ fn queued_match_steps(data: &ActivityData<'_>, kind: InstanceKind) -> Result<Vec
         .find(|mode| mode.kind == kind)
         .ok_or_else(|| format!("no game mode of kind {kind:?}"))?;
     let (activity, goal, longest, god) = match kind {
-        InstanceKind::Arena => (ARENA_ACTIVITY, MatchGoal::Fight, ARENA_LONGEST, false),
+        InstanceKind::Arena => (
+            ARENA_ACTIVITY,
+            MatchGoal::Fight { ready_up: true },
+            ARENA_LONGEST,
+            false,
+        ),
         InstanceKind::OutpostRush => (
             OUTPOST_RUSH_ACTIVITY,
             MatchGoal::Outposts,
@@ -2179,6 +2230,24 @@ fn queued_match_steps(data: &ActivityData<'_>, kind: InstanceKind) -> Result<Vec
     if god {
         steps.push(gm_done("!god on".to_owned()));
     }
+    if kind == InstanceKind::Arena {
+        // The arena's end screen: the player leaves with its button (retail, 3 of 3 returns).
+        steps.push(step(
+            format!("play the {id} match ({described}) to its end (script state 2)"),
+            vec![Act::PlayMatch {
+                end: MatchEnd::ScriptState {
+                    mode: crc,
+                    state: ARENA_ENDED_STATE,
+                },
+                goal,
+                longest,
+            }],
+            Proof::Sent,
+            Duration::ZERO,
+        ));
+        steps.push(leave_match_step(crc));
+        return Ok(steps);
+    }
     steps.push(step(
         format!("play the {id} match ({described}) to its end and come back"),
         vec![Act::PlayMatch {
@@ -2193,6 +2262,42 @@ fn queued_match_steps(data: &ActivityData<'_>, kind: InstanceKind) -> Result<Vec
         RETURN_WAIT,
     ));
     Ok(steps)
+}
+
+/// The leave of the arena match of game mode `crc` with the end screen's button (1980 `Leave`),
+/// proved by the move back: the mode gone from the own participant state and the open world's
+/// 1635 (arena flow study section 4.2). A player the server moved back already (the end of
+/// `Cleanup`) sends no leave.
+fn leave_match_step(crc: u32) -> Step {
+    let sent = Rc::new(Cell::new(false));
+    let noted = Rc::clone(&sent);
+    step(
+        "leave the match (1980 Leave) and move back to the open world",
+        vec![Act::Dynamic(Box::new(move |sight| {
+            if !sight.matchmaking.active.contains(&crc) {
+                return Some(Ok(Vec::new()));
+            }
+            noted.set(true);
+            let call = GameModeClientMsg::ReceivedClientEvent {
+                header: FacetHeader::of(facet_component::GAME_MODE_PARTICIPANT, sight.own),
+                event: LEAVE_EVENT,
+            };
+            Some(call.encode().map(|body| vec![(call.type_index(), body)]))
+        }))],
+        Proof::Check(
+            Box::new(move |sight| {
+                let gone = !sight.matchmaking.active.contains(&crc);
+                let moved = !sent.get()
+                    || sight.messages.iter().any(|received| {
+                        received.envelope.type_index() == Some(LEVEL_INFO_CHANGED_MSG_TYPE_INDEX)
+                    });
+                (gone && moved).then_some(Ok(()))
+            }),
+            "the game mode gone from the own participant state and the open world's 1635"
+                .to_owned(),
+        ),
+        RETURN_WAIT,
+    )
 }
 
 /// The territory of the war fight activities: a war fort whose capture points the captures
