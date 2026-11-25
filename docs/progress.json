@@ -1462,8 +1462,8 @@
               "proof": "tests"
             },
             {
-              "check": "Duels (tests only, 2026-11-11): an accepted duel invite starts the duel's game mode as retail (the game mode entity and its state, each player's participant state and team marks, a 6 s countdown, a 90 s timer from each hit). The two can hurt each other with no PvP flag; the one whose health reaches 0 goes down, stands up with its whole health 3 s later, and both leave the duel 8 s after its end.",
-              "proof": "tests"
+              "check": "Duels (2026-11-11; bots 2026-11-25: 20 duels of two bots, invite 3404, accept 3406, the countdown, a fight to one bot down and both out of the duel): an accepted duel invite starts the duel's game mode as retail (the game mode entity and its state, each player's participant state and team marks, a 6 s countdown, a 90 s timer from each hit). The two can hurt each other with no PvP flag; the one whose health reaches 0 goes down, stands up with its whole health 3 s later, and both leave the duel 8 s after its end.",
+              "proof": "bots"
             },
             {
               "check": "Open in duels: the duel area and a forfeit by leaving it, and the stat changes retail sends during a duel (Unknown).",
@@ -3391,23 +3391,27 @@
               "proof": "tests"
             },
             {
-              "check": "3v3 arena queue as retail: the group eligibility answer (6211), the join (6254, 6295), the two role picks, the queue entry, the pop with its match id, the accept count, the matchmaking login (5449, 5450) and the move to the arena level.",
-              "proof": "tests"
+              "check": "3v3 arena queue as retail: the group eligibility answer (6211), the join (6254, 6295), the two role picks, the queue entry, the pop with its match id, the accept count, the matchmaking login (5449, 5450) and the move to the arena level. (2026-11-25, bots: 13 1v1 matches and 22 3v3 matches of six bots, each bot queued, accepted, fought and left as a client does)",
+              "proof": "bots"
             },
             {
               "check": "3v3 arena queue ends: a leave (1066), a match not every player accepted (6228 for those who accepted, 4970 for the others), a role pick cancel (6297, 6296), and the 30-minute bar after a leave of a running match, kept across logins.",
               "proof": "tests"
             },
             {
-              "check": "The director forms arena matches: two teams of the set match size (6 by default, 2 for a 1v1), a group in one team, at most one healer a team, an accept window, and its own arena instance on a free instance sim of the map of the rotation.",
-              "proof": "tests"
+              "check": "The director forms arena matches: two teams of the set match size (6 by default, 2 for a 1v1), a group in one team, at most one healer a team, an accept window, and its own arena instance on a free instance sim of the map of the rotation. Bots (2026-11-25) played matches of both sizes.",
+              "proof": "bots"
             },
             {
-              "check": "Arena match on its instance sim: the game mode state (2343) with its participants, teams, characters, raids, values and timers; the participant state (3312) and team affiliations (3563); pregame, rounds, overtime, round end and the end with the winning team after three round wins; the teams change sides each round.",
-              "proof": "tests"
+              "check": "Arena match on its instance sim: the game mode state (2343) with its participants, teams, characters, raids, values and timers; the participant state (3312) and team affiliations (3563); pregame, rounds, overtime, round end and the end with the winning team after three round wins; the teams change sides each round. Bots (2026-11-25): rounds to three wins, side changes, the winning team in script state 2.",
+              "proof": "bots"
             },
             {
-              "check": "Arena deaths: no death's door, the death recap for every participant (4977), the round lost by a team with no living player, PvP only between the two teams in a round; a team that left loses.",
+              "check": "Arena deaths: no death's door, the death recap for every participant (4977), the round lost by a team with no living player, PvP only between the two teams in a round (bots, 2026-11-25: each death named victim and killer).",
+              "proof": "bots"
+            },
+            {
+              "check": "Arena: a team that left loses (tests only).",
               "proof": "tests"
             },
             {
@@ -3415,11 +3419,15 @@
               "proof": "tests"
             },
             {
-              "check": "Arena leave and return: the leave button (1980), 3455, 5283, the left participant state and the move back to where the player queued; the players left at the end go back.",
+              "check": "Arena leave and return: the leave button (1980), 3455, 5283, the left participant state and the move back to where the player queued (bots, 2026-11-25: every bot came back to the open world after the end).",
+              "proof": "bots"
+            },
+            {
+              "check": "Arena: the players still in the match at the end of its clean-up time go back (tests only).",
               "proof": "tests"
             },
             {
-              "check": "The arena round AFK rule (3v3ArenaRound) in a round and its overtime.",
+              "check": "The arena round AFK rule (3v3ArenaRound) in a round and its overtime. Fixed 2026-11-25 (tests): the change from the pregame rule to the round rule starts the still time again, so a player who stood still through the pregame gets the 15 s warning before a removal (before, bots were removed at the round start with no warning; the restart is Inferred).",
               "proof": "tests"
             },
             {
@@ -3539,7 +3547,11 @@
               "proof": "none"
             },
             {
-              "check": "Not made: the arena hazards' damage and the score board stats (839); no live arena match yet.",
+              "check": "The director keeps an instance sim that just got a match (2026-11-25, bots: 11 of 11 3v3 matches after the fix moved in): before, it could stop the sim before the sim's next beat showed the match, and the six players who accepted never moved in (1 of 11 bot 3v3 matches).",
+              "proof": "bots"
+            },
+            {
+              "check": "Not made: the arena hazards' damage and the score board stats (839); no arena match with the real game client yet.",
               "proof": "none"
             },
             {
@@ -4461,6 +4473,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "PvP bots (2026-11-25, bots): a new `arena` bot run queues bots for the arena as a client does and fights to the match end: 13 1v1 matches and 22 3v3 matches, plus 20 duels. Two server faults found and fixed: the AFK rule removed players at a round start with no warning, and the director could stop an instance sim that had just got a match.",
     "Account removal (2026-11-24, tests): `edge-http delete-account --account <name> --confirm <name>` removes an account with its characters and all they own, in every world and in the global database. Before, the only way was a set of hand-written database deletes.",
     "Store entitlements on the game connection (2026-11-24, bots): each sim sends the client's entitlement state with the Rise of the Angry Earth expansion for every account, the account's store mounts, its Marks of Fortune and its tokens, at login and after each purchase, as 828 retail capture ledgers show it. Store mounts cost their retail prices by default (20000, 15000 or 10000 Marks of Fortune) and not 0. A bot check (`nw-testclient systems --check store`) proves both on a running stack. The README now says how to start the tutorial sim: without one, a new character starts in the open world.",
     "Bots play more of the game (2026-11-24): handoffs go first in the sim's loop (99.7 % within one tick at 340 bots), every trade skill from the raw material to the product, achievements as the client gets them, housing, faction and PvP missions, expedition runs to their end chest, soul trials, and the Monarch's Bluffs main story by one bot in one run.",
@@ -4726,6 +4739,6 @@
     "Mob attacks (2026-11-24, tests only): a javelin skeleton no longer starts a new throw each tick at mid range; an attack that cannot be cut plays to its end."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-24",
-  "lastCommit": "1922c102"
+  "updated": "2026-11-25",
+  "lastCommit": "b950c3b4"
 }
