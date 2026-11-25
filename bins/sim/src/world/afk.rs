@@ -11,7 +11,10 @@
 //! `Errors::aoi_afk_kicked`, whose popup is `@mm_rejected_Client_Kicked_AFK`; no kick 271 reason
 //! gives it (`FUN_146447430`). Inferred: only a move ends the still time (the rule's column is
 //! `ResetMinMove`; no capture shows a player who acts without moving); no capture holds an AFK
-//! removal.
+//! removal. Inferred: a change of the rule (an arena's pregame `3v3Arena` to its round
+//! `3v3ArenaRound`) starts the still time again, so the warning comes before the removal under
+//! the new rule too (every retail arena round warning carried the row's full 15 s left; no
+//! capture holds a removal without a warning).
 
 use nw_content::afk_modes::AfkMode;
 use nw_messages::{AfkWarningMsg, ServerMessage};
@@ -33,6 +36,8 @@ pub(super) struct AfkWatch {
     still: Option<(Position, u64)>,
     /// Its client holds a warning.
     warned: bool,
+    /// The rule of its last tick; `None` until its first tick.
+    rule: Option<AfkMode>,
 }
 
 /// What a tick of the rule does for one player.
@@ -50,10 +55,12 @@ enum AfkStep {
 impl AfkWatch {
     /// Follows the player at `at` at sim ms `now_ms` under `rule`.
     fn step(&mut self, rule: AfkMode, at: Position, now_ms: u64) -> AfkStep {
-        let moved = self.still.is_none_or(|(from, _)| {
-            let (east, north, up) = (at.x - from.x, at.y - from.y, at.z - from.z);
-            (east * east + north * north + up * up).sqrt() >= rule.reset_min_move_m
-        });
+        let rule_changed = self.rule.replace(rule) != Some(rule);
+        let moved = rule_changed
+            || self.still.is_none_or(|(from, _)| {
+                let (east, north, up) = (at.x - from.x, at.y - from.y, at.z - from.z);
+                (east * east + north * north + up * up).sqrt() >= rule.reset_min_move_m
+            });
         if moved {
             self.still = Some((at, now_ms));
             return if std::mem::take(&mut self.warned) {
@@ -180,6 +187,29 @@ mod tests {
         assert_eq!(
             watch.step(RULE, away, warned_ms + 2 + RULE.warn_ms - 1),
             AfkStep::Nothing
+        );
+    }
+
+    #[test]
+    fn a_shorter_rule_warns_with_its_full_time_before_it_removes() {
+        // The retail `3v3ArenaRound` row: warn at 15 s, remove at 30 s.
+        const ROUND_RULE: AfkMode = AfkMode {
+            warn_ms: 15_000,
+            disconnect_ms: 30_000,
+            reset_min_move_m: 1.0,
+        };
+        let mut watch = AfkWatch::default();
+        watch.step(RULE, HERE, START_MS);
+        // A pregame of 90 s stood still, then the round's rule.
+        let round_ms = START_MS + 90_000;
+        assert_eq!(watch.step(ROUND_RULE, HERE, round_ms), AfkStep::Nothing);
+        assert_eq!(
+            watch.step(ROUND_RULE, HERE, round_ms + ROUND_RULE.warn_ms),
+            AfkStep::Warn(15.0)
+        );
+        assert_eq!(
+            watch.step(ROUND_RULE, HERE, round_ms + ROUND_RULE.disconnect_ms),
+            AfkStep::Remove
         );
     }
 }
