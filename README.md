@@ -44,6 +44,73 @@ just infra-up
 just infra-test
 ```
 
+## Start a server
+
+This is the full order to start one world that players can enter. Each step names the section that holds its details. Run every command from the repository folder.
+
+### Set up once
+
+1. Start the databases and the message bus: `just infra-up` (see "Quick start").
+2. Make the environment file. Copy `config/servers.env.example` to `local-data/m3-test.env` and set the secrets: `NW_SECRET_SIGNING_KEY` (`openssl rand -hex 32`), and the two database passwords (the `POSTGRES_PASSWORD` of `deploy/.env`). Set `NW_GAME_DIR` to your New World install.
+3. Build the content files: `just content`, then `just realm-data <pack.zip>` (see "Content data"). Some tables, and the tutorial's entities, come only from the realm data pack. `just content-status` shows each file and what is missing.
+4. Set your domain in `config/edge.toml` and put the certificate of `login.<domain>` and `game.<domain>` where `[tls]` points (see "Login server and launcher"). Run `cargo run -p edge-http -- aws-mirror-certificate` once.
+5. Make the gateway's certificate: `cargo run -p rep-gateway -- generate-certificate` (see "World gateway and test client").
+6. Check that `world_id` is the same in `config/world-director.toml`, `config/sim.toml`, `config/rep-gateway.toml` and `config/social.toml`, and that it is the `[[world]] id` of `config/edge.toml`. The example files match.
+7. Set `game_dir` in `config/social.toml` to your New World install.
+
+### Build and start
+
+Build the servers, then load the environment file into your shell:
+
+```bash
+cargo build --release -p edge-http -p world-director -p social -p sim -p rep-gateway
+set -a; . local-data/m3-test.env; set +a
+```
+
+Apply the database migrations. Do this again after every update:
+
+```bash
+target/release/edge-http migrate
+```
+
+On Linux, give the login server the right to use ports 443 and 80. Do this again after every build:
+
+```bash
+sudo setcap 'cap_net_bind_service=+ep' target/release/edge-http
+```
+
+Start the servers in this order, each in its own terminal (or as its own service) with the environment file loaded:
+
+```bash
+target/release/edge-http serve
+target/release/world-director
+target/release/social
+NW_SIM_SIM_ID=sim-1 NW_SIM_METRICS_LISTEN=127.0.0.1:9102 target/release/sim
+NW_SIM_SIM_ID=tut-1 NW_SIM_LEVEL=ftue_v2 NW_SIM_METRICS_LISTEN=127.0.0.1:9106 target/release/sim
+target/release/rep-gateway serve
+```
+
+| Order | Program | What it is | It is ready when |
+|---|---|---|---|
+| 1 | `edge-http serve` | The login server and the game's web routes | Ports 443 and 80 listen |
+| 2 | `world-director` | Puts each player on a sim | Its log says `serving` |
+| 3 | `social` | Chat, friends, groups, companies | Its log says `serving`. It reads every character and the game files first, so this can take more than a minute |
+| 4 | `sim` (`sim-1`) | The open world | Its log says `serving`, and the director's log says `cells assigned` |
+| 5 | `sim` (`tut-1`, level `ftue_v2`) | The tutorial: the ship and the shipwreck | Its log says `serving` |
+| 6 | `rep-gateway serve` | The UDP entry point of the world | Its log says `serving UDP` (port 33435) |
+
+Start the gateway last, after the sims have their cells. Let players log in only after `social` serves: a login before that gets no chat and no friends.
+
+The tutorial sim is a part of a normal server. While one runs, the director puts each new character there, and the character goes to the open world when the tutorial ends. Without one, a new character starts in the open world at the next of the director's `start_positions`. The tutorial sim needs the level files of `ftue_v2` in the content folder: `collision.bin` and `water.bin`, and `entities.json` from the realm data pack.
+
+Each more open-world sim needs its own `NW_SIM_SIM_ID` and `NW_SIM_METRICS_LISTEN` (see "World simulation"). Expeditions, raids and trials need instance sims: remove the `#` marks of `[instances.launch]` in `config/world-director.toml`, and the director starts and stops them itself. Voice chat needs `voice-server` and the `[voice]` section of `config/social.toml`; without them the game keeps its voice chat off.
+
+To stop a server, press Ctrl-C or send it SIGTERM. A sim saves its players before it ends.
+
+### Play
+
+Players use the launcher (see "Login server and launcher" and [docs/launcher.md](docs/launcher.md)). It starts the patched game executable (see [docs/client-patch.md](docs/client-patch.md)).
+
 ## Commands
 
 | Command | What it does |
@@ -232,7 +299,7 @@ cargo run -p launcher
 
 `edge-http aws-mirror-certificate` makes the self-signed certificate of the `[aws_mirror]` hosts in `config/edge.toml`. It never replaces a file. When the host list changes, move the two old files away and make the certificate again. The launcher maps those Amazon host names to this server for the game process only (see [docs/client-patch.md](docs/client-patch.md)). The two news hosts serve the files in `config/cms/` (`[cms]` in `config/edge.toml`): the message of the day, the news stories and the menu tiles, and their images. The tracked files have no news. `ping_listen` (port 80, plain HTTP) answers the client's region ping on `dynamodb.us-east-1.amazonaws.com`; the `setcap` right covers it too.
 
-The game's store sells the store mounts of the game data. `[shop]` in `config/edge.toml` turns it on or off (`enabled`) and makes every mount free (`free`, as retail in its last weeks) or priced in Marks of Fortune (`mount_price`, `[shop.mount_prices]`), paid from the account's wallet. `blighted-admin give-marks <login name> <amount>` gives an account Marks of Fortune. `edge-http` serves the catalog, each account's unlocks and its wallet from the store table (`services/store.json` of the build folder of the content folder); a purchase in the game unlocks the mount for the account (global migration 0005; run `edge-http migrate` after this update). Each store call is logged (`store call`).
+The game's store sells the store mounts of the game data. `[shop]` in `config/edge.toml` turns it on or off (`enabled`). Each mount costs its retail price in Marks of Fortune (`mount_price`, `[shop.mount_prices]`), paid from the account's wallet; `free = true` makes every mount cost 0, as retail did in its last weeks. Every account holds the Rise of the Angry Earth expansion. `blighted-admin give-marks <login name> <amount>` gives an account Marks of Fortune. `edge-http` serves the catalog, each account's unlocks and its wallet from the store table (`services/store.json` of the build folder of the content folder); a purchase in the game unlocks the mount for the account (global migration 0005; run `edge-http migrate` after this update). Each `sim` also sends the game what the account holds (the expansion, its store mounts, its Marks of Fortune and its tokens) on the game connection, at login and after each purchase; an account that gets Marks of Fortune from `give-marks` while it plays sees them after its next login. Each store call is logged (`store call`).
 
 Experience is normal by default: 1.0 for every gain, as retail without an event. The `[experience]` section of `config/edge.toml` sets each kind on its own: `character`, `umbral_crystals`, one value per trade skill (`[experience.trade_skills]`), per weapon mastery (`[experience.weapon_masteries]`) and per territory's standing (`[experience.territory_standing]`). A comment above each setting says what it changes. The server sends these values to the game, and the sims use the same values. Restart `edge-http` and the sims after a change.
 
@@ -348,6 +415,8 @@ cargo run -p nw-testclient -- pair
 ```
 
 The director logs the x range of each `sim` (`cells assigned`). The same ids always give the same stripes.
+
+The tutorial (the ship and the shipwreck, level `ftue_v2`) runs on its own `sim`: "Start a server" has its command and what it needs.
 
 `nw-testclient pair` logs in two accounts (`account` and `second_account`) and keeps both in the world for `hold_seconds`. Each client must see the other. The first walks `route_m` (points east and north of where it stands) at `route_speed_mps`, and the second must see it on the route within `path_tolerance_m`. Then the first sends one move `jump_m` east, which `sim` must refuse. Then the first account logs in again and must appear at its saved position, within `position_tolerance_m`. It prints `pass` or `FAIL` for each check. The exit code is 0 only when every check passed. `hold_seconds` must be longer than the walk.
 
