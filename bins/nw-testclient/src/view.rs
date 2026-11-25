@@ -18,9 +18,9 @@ use nw_messages::gde::LOOT_BAG_ASSET;
 use nw_messages::social::states::GroupsState;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    BAG_COMPONENT, EntitySlots, ItemRecord, LOGIN_MESSAGE_TYPES, MemberState, MessageError,
-    PLAYER_VITALS_ID, ReplicatedList, ServerMessage, SlotRead, SlotUpdate, VitalsData,
-    WorldPosition, entity_of_facet, number_of_seen_raw_id, release_raw_id,
+    BAG_COMPONENT, EntitlementState, EntitySlots, ItemRecord, LOGIN_MESSAGE_TYPES, MemberState,
+    MessageError, PLAYER_VITALS_ID, ReplicatedList, ServerMessage, SlotRead, SlotUpdate,
+    VitalsData, WorldPosition, entity_of_facet, number_of_seen_raw_id, release_raw_id,
 };
 use thiserror::Error;
 
@@ -333,6 +333,9 @@ pub struct CombatView {
     /// The missions of the board the bot has open: the list of its own objective interactor
     /// state (3829), a full list or its changed elements.
     board: Vec<MissionParams>,
+    /// What the bot's account holds: its newest own entitlement state (3133) that carries the
+    /// account's lists.
+    entitlements: Option<EntitlementState>,
     /// Mobs in view whose vitals said they died.
     mob_deaths: u64,
     /// The vitals id of each mob in view whose card named one.
@@ -394,6 +397,11 @@ impl CombatView {
                         }
                         if let MemberState::Achievement(state) = &member.state {
                             self.achievements.apply(state);
+                        }
+                        if let MemberState::Entitlements(state) = &member.state
+                            && state.received == Some(true)
+                        {
+                            self.entitlements = Some(state.clone());
                         }
                         if let MemberState::ObjectiveInteractor(state) = &member.state
                             && let Some(missions) = &state.missions
@@ -574,6 +582,11 @@ impl CombatView {
     /// The bot's own achievements.
     pub const fn achievements(&self) -> &OwnAchievements {
         &self.achievements
+    }
+
+    /// What the bot's account holds, once the server sent it.
+    pub const fn entitlements(&self) -> Option<&EntitlementState> {
+        self.entitlements.as_ref()
     }
 
     /// The missions of the board the bot has open.

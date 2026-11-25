@@ -3416,6 +3416,7 @@ impl Player {
             matchmaking: self.world.matchmaking(),
             group_invite: self.world.inbound_group_invite(),
             board: self.combat.board(),
+            entitlements: self.combat.entitlements(),
         }
     }
 

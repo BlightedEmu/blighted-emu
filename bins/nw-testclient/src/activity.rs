@@ -234,6 +234,9 @@ pub struct BotSight<'a> {
     /// The missions of the board the bot has open, from its own objective interactor state
     /// ([`crate::view::CombatView::board`]).
     pub board: &'a [nw_messages::objective_interactor::MissionParams],
+    /// What the bot's account holds: its newest own entitlement state (3133) with the
+    /// account's lists ([`crate::view::CombatView::entitlements`]).
+    pub entitlements: Option<&'a nw_messages::EntitlementState>,
 }
 
 /// The calls of an act that reads what the bot saw: `None` to wait for a later tick, else the

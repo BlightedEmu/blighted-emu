@@ -20,6 +20,7 @@ pub mod play;
 pub mod record_walk;
 pub mod rep;
 pub mod route;
+pub mod store;
 pub mod swarm;
 pub mod sync;
 pub mod systems;

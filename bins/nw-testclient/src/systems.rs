@@ -100,6 +100,9 @@ pub enum SystemsCheck {
     /// One bot of a faction opens a settlement's faction board and takes its first mission
     /// ([`crate::faction_board`]).
     FactionBoard,
+    /// One bot reads what its account holds from its own entitlement state and buys a store
+    /// mount ([`crate::store`]).
+    Store,
 }
 
 impl SystemsCheck {
@@ -111,7 +114,8 @@ impl SystemsCheck {
             | Self::Economy
             | Self::KillXp
             | Self::Housing
-            | Self::FactionBoard => 1..=1,
+            | Self::FactionBoard
+            | Self::Store => 1..=1,
             Self::Trade | Self::Social | Self::Progress => 2..=2,
             Self::Invasion => 2..=INVASION_MOST_BOTS,
             Self::War => WAR_BOTS..=WAR_BOTS,
@@ -260,6 +264,7 @@ pub fn seat_steps(
         SystemsCheck::Invasion => invasion(seat, data)?,
         SystemsCheck::Housing => crate::housing::housing_steps(data)?,
         SystemsCheck::FactionBoard => crate::faction_board::faction_board_steps(data)?,
+        SystemsCheck::Store => crate::store::store_steps(data)?,
     });
     Ok(steps)
 }
