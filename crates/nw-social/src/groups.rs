@@ -52,8 +52,19 @@ fn reference(character: Uuid) -> CharacterRef {
 impl SocialWorld {
     /// The group of `character` for the director's [`nw_bus::GroupQuery`] (group expeditions):
     /// its id, leader and every member, the character included; [`GroupAnswer::Alone`] when it is
-    /// in no group.
+    /// in no group. A member of a players' raid answers with the raid: its id, leader and every
+    /// member (a raid trial takes up to 10, `RaidCutlassKeys00` `TeamCapacity`; the converted
+    /// group ends, so the raid is the only group its members have, `crate::player_raids`).
     pub fn group_of(&self, character: Uuid) -> GroupAnswer {
+        if let Some(entity) = self.player_raid_of(character)
+            && let Some(raid) = self.raids.get(&entity)
+        {
+            return GroupAnswer::Group {
+                group: Uuid::from_bytes(entity),
+                leader: raid.leader.unwrap_or(character),
+                members: raid.seats.iter().map(|(member, _)| *member).collect(),
+            };
+        }
         self.people
             .get(&character)
             .and_then(|person| person.group)

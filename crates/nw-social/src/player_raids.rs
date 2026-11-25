@@ -645,7 +645,7 @@ impl SocialWorld {
 
 #[cfg(test)]
 mod tests {
-    use nw_bus::SocialPlayer;
+    use nw_bus::{GroupAnswer, SocialPlayer};
     use nw_bus::{LeaveReason, SocialInput, SocialStateKind};
     use nw_db::SocialRecords;
     use nw_messages::payload::MemberState;
@@ -737,6 +737,26 @@ mod tests {
             accept_last_invite(&mut world, invitee);
         }
         (world, entity)
+    }
+
+    /// A raid trial (`RaidCutlassKeys00`: 10 players, at least 5) opens for a players' raid:
+    /// the director's group query answers with the raid and all its members.
+    #[test]
+    fn a_players_raid_answers_the_instance_group_query_with_all_its_members() {
+        const MEMBERS: u128 = 8;
+        let (world, entity) = raid_of(MEMBERS);
+        let answer = world.group_of(character(5));
+        let GroupAnswer::Group {
+            group,
+            leader,
+            members,
+        } = answer
+        else {
+            panic!("a raid member is in a group: {answer:?}");
+        };
+        assert_eq!(group, Uuid::from_bytes(entity));
+        assert_eq!(leader, character(1));
+        assert_eq!(members.len(), usize::try_from(MEMBERS).expect("members"));
     }
 
     fn groups_state(effects: &[Effect], to: Uuid) -> Option<GroupsState> {
