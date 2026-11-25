@@ -114,6 +114,10 @@
           "proof": "tests",
           "checks": [
             {
+              "check": "An account can be removed for good (tests, 2026-11-24): `edge-http delete-account` removes the account's characters from every world with all they own, then the account with its logins, rank, store items and names. A company with no member left goes too, and a company with no governor left gets its highest member as governor. A test keeps every new world table of a character or an account in the removal. One removal ran on a local database; no player account was removed, and the running social service is not told (it needs a new start).",
+              "proof": "tests"
+            },
+            {
               "check": "Saved servers in the launcher (2026-11-04; seen on Linux in both themes): a list of servers, each with its own name and login, and a click connects.",
               "proof": "live"
             },
@@ -4457,6 +4461,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Account removal (2026-11-24, tests): `edge-http delete-account --account <name> --confirm <name>` removes an account with its characters and all they own, in every world and in the global database. Before, the only way was a set of hand-written database deletes.",
     "Store entitlements on the game connection (2026-11-24, bots): each sim sends the client's entitlement state with the Rise of the Angry Earth expansion for every account, the account's store mounts, its Marks of Fortune and its tokens, at login and after each purchase, as 828 retail capture ledgers show it. Store mounts cost their retail prices by default (20000, 15000 or 10000 Marks of Fortune) and not 0. A bot check (`nw-testclient systems --check store`) proves both on a running stack. The README now says how to start the tutorial sim: without one, a new character starts in the open world.",
     "Bots play more of the game (2026-11-24): handoffs go first in the sim's loop (99.7 % within one tick at 340 bots), every trade skill from the raw material to the product, achievements as the client gets them, housing, faction and PvP missions, expedition runs to their end chest, soul trials, and the Monarch's Bluffs main story by one bot in one run.",
     "Other players and ranged magic (2026-11-21, tests only): each state number keeps its own record's place for the players who see it (the other player's saw-tooth run), and Rain of Arrows lands where the camera's look meets the real ground.",
@@ -4722,5 +4727,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-24",
-  "lastCommit": "f2a7ff1d"
+  "lastCommit": "1922c102"
 }
