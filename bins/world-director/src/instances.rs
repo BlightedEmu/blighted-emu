@@ -13,7 +13,7 @@
 //! the spare count: 10 players need none, 10,000 players start what the requests ask for, on any
 //! host that runs the command (no cloud service).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use nw_bus::{
@@ -141,6 +141,12 @@ pub struct Instances {
     by_owner: HashMap<Uuid, Uuid>,
     /// The instances that ended since the last [`Instances::take_ended`].
     ended: Vec<Uuid>,
+    /// The open instances that no player is in, by their sims' newest beats
+    /// ([`Instances::review`]).
+    empty: HashSet<Uuid>,
+    /// The empty instances that their group left for another game mode, to close
+    /// ([`Instances::take_left`]).
+    left: Vec<Closing>,
 }
 
 impl Instances {
@@ -199,7 +205,36 @@ impl Instances {
                 self.open.values().find(|open| {
                     open.members.contains(&request.requester) || members.contains(&open.owner)
                 })
+            })
+            .map(|open| open.id);
+        // An instance of another game mode that no player is in any more is left: it closes,
+        // and the request opens its own. Live 2026-11-25 19:20Z: a player left the mammoth
+        // trial (`QuestMammoth`), walked to the next trial of the story (`QuestMedusa`,
+        // `09A_M12_FightMedusa`) and was refused three times, as the empty instance stays open
+        // for its empty timeout (300 s). **Inferred**: no retail capture of two trials within
+        // that time was read.
+        let left = existing
+            .and_then(|id| self.open.get(&id))
+            .filter(|open| open.game_mode != request.game_mode && self.empty.contains(&open.id))
+            .map(|open| Closing {
+                sim: open.sim.clone(),
+                instance: open.id,
             });
+        // The sim of a left instance still runs it until its close arrives: it is not free yet.
+        let free: Vec<SimSlot> = free
+            .iter()
+            .filter(|sim| left.as_ref().is_none_or(|closing| closing.sim != **sim))
+            .cloned()
+            .collect();
+        let free = free.as_slice();
+        let existing = match left {
+            Some(closing) => {
+                self.remove(closing.instance);
+                self.left.push(closing);
+                None
+            }
+            None => existing.and_then(|id| self.open.get(&id)),
+        };
         if let Some(open) = existing {
             if open.game_mode != request.game_mode {
                 return refuse(InstanceRefusal::GroupInOtherInstance);
@@ -360,6 +395,7 @@ impl Instances {
         let empty_ms = u64::try_from(settings.empty_timeout.as_millis()).unwrap_or(u64::MAX);
         let mut closing = Vec::new();
         let mut gone = Vec::new();
+        let mut now_empty = Vec::new();
         for open in self.open.values() {
             let report = running
                 .iter()
@@ -378,6 +414,9 @@ impl Instances {
                 }
                 Some(Some(running)) if running.instance != open.id => gone.push(open.id),
                 Some(Some(running)) => {
+                    if running.empty_for_ms.is_some() {
+                        now_empty.push(open.id);
+                    }
                     let timed_out = open.ends_at_ms.is_some_and(|end| now_ms >= end);
                     let empty = running.empty_for_ms.is_some_and(|ms| ms >= empty_ms);
                     if timed_out || empty {
@@ -393,6 +432,7 @@ impl Instances {
         for id in gone {
             self.remove(id);
         }
+        self.empty = now_empty.into_iter().collect();
         closing
     }
 
@@ -459,6 +499,12 @@ impl Instances {
     /// The instance `id` ends now (its close went out).
     pub fn closed(&mut self, id: Uuid) {
         self.remove(id);
+    }
+
+    /// The empty instances that their groups left for another game mode since the last call:
+    /// their sims get the close.
+    pub fn take_left(&mut self) -> Vec<Closing> {
+        std::mem::take(&mut self.left)
     }
 
     /// The instances that ended since the last call, for the sims' entrances
@@ -952,6 +998,87 @@ mod tests {
             None
         );
         assert!(instances.is_empty());
+    }
+
+    /// `09A_M11` then `09A_M12`: a player leaves one story trial and asks for the next. While
+    /// the player is in the first, the second is refused; once the first is empty it closes and
+    /// the second opens.
+    #[test]
+    fn a_player_who_left_a_trial_gets_the_next_trial_and_the_empty_one_closes() {
+        const NEXT_ID: u128 = 8;
+        let mut instances = Instances::default();
+        let trial = |game_mode: &str| InstanceRequest {
+            game_mode: game_mode.to_owned(),
+            capacity: 1,
+            min_group: 0,
+            ..request(1)
+        };
+        let free = [slot("inst-1"), slot("inst-2")];
+        let Decision::Open(first) = instances.decide(
+            &trial("QuestMammoth"),
+            &GroupAnswer::Alone,
+            &free,
+            (Uuid::from_u128(7), PHASE),
+            NOW_MS,
+        ) else {
+            panic!("opens");
+        };
+        instances.opened(first.id, true, |_| CONFIRM_BEAT);
+        let report = |empty_for_ms: Option<u64>| {
+            vec![(
+                first.sim.clone(),
+                Some(RunningInstance {
+                    instance: first.id,
+                    game_mode: first.game_mode.clone(),
+                    members: first.members.clone(),
+                    players: 1,
+                    empty_for_ms,
+                    open_for_ms: 0,
+                    phase: first.phase,
+                    capacity: first.capacity,
+                    ends_at_ms: first.ends_at_ms,
+                    war: None,
+                }),
+            )]
+        };
+        let next = |instances: &mut Instances| {
+            instances.decide(
+                &trial("QuestMedusa"),
+                &GroupAnswer::Alone,
+                &free,
+                (Uuid::from_u128(NEXT_ID), PHASE),
+                NOW_MS,
+            )
+        };
+        assert!(
+            instances
+                .review(&report(None), &settings(), NOW_MS, |_| LATER_BEAT)
+                .is_empty()
+        );
+        assert_eq!(
+            next(&mut instances),
+            refuse(InstanceRefusal::GroupInOtherInstance),
+            "the player is in the first trial"
+        );
+        assert!(
+            instances
+                .review(&report(Some(1)), &settings(), NOW_MS, |_| LATER_BEAT)
+                .is_empty(),
+            "empty for less than its timeout"
+        );
+        let Decision::Open(second) = next(&mut instances) else {
+            panic!("the next trial opens");
+        };
+        assert_eq!(second.game_mode, "QuestMedusa");
+        assert_ne!(second.sim, first.sim);
+        assert_eq!(
+            instances.take_left(),
+            vec![Closing {
+                sim: first.sim.clone(),
+                instance: first.id,
+            }]
+        );
+        assert_eq!(instances.take_ended(), vec![first.id]);
     }
 
     #[test]

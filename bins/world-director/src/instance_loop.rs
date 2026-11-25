@@ -542,10 +542,13 @@ impl InstanceLoop {
         };
         let free = sims.free_instance_sims(&request.message.level);
         let ids = (Uuid::new_v4(), random_phase());
-        match self
+        let decision = self
             .instances
-            .decide(&request.message, &group, &free, ids, unix_ms())
-        {
+            .decide(&request.message, &group, &free, ids, unix_ms());
+        for left in self.instances.take_left() {
+            self.close(left.sim, left.instance);
+        }
+        match decision {
             Decision::Reply(InstanceReply::Refused {
                 reason: InstanceRefusal::NoInstanceSim,
             }) => self.hold(request, group, sims, held_until),
