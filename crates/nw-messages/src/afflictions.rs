@@ -245,6 +245,23 @@ impl GlobalAffliction {
             .u8(self.id)
             .boolean(self.afflicted);
     }
+
+    /// Reads the 30 bytes of the data: the inverse of [`Self::write`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the bytes end early or the flag is not a boolean.
+    pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        Ok(Self {
+            last_bits: reader.u32()?,
+            last_ns: reader.u64()?,
+            target_bits: reader.u32()?,
+            target_ns: reader.u64()?,
+            max_bits: reader.u32()?,
+            id: reader.u8()?,
+            afflicted: reader.boolean()?,
+        })
+    }
 }
 
 /// One item of the counted form.

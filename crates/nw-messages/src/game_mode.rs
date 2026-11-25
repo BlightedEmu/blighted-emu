@@ -621,8 +621,8 @@ impl DeathRecapForAllMsg {
     }
 }
 
-/// The 4977 text of `character`: its hyphenated lowercase UUID.
-fn character_text(character: [u8; RAW_ID_LEN]) -> String {
+/// The 4977 text of `character`: its hyphenated lowercase UUID (as a login token names it).
+pub fn character_text(character: [u8; RAW_ID_LEN]) -> String {
     let digits: String = character.iter().map(|byte| format!("{byte:02x}")).collect();
     let mut text = String::new();
     let mut at = 0;

@@ -27,8 +27,8 @@
 use crate::afflictions::GlobalAffliction;
 use crate::items::FullList;
 use crate::list_delta::{ReplicatedList, write_child};
-use crate::slots::{SLOT_0, write_known_wide_children};
-use crate::wire::{MessageError, RAW_ID_LEN, Writer};
+use crate::slots::{SLOT_0, read_slot_byte, read_wide_children, write_known_wide_children};
+use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
 
 /// Type index of `Javelin::GameModeReplicatedState`.
 pub const GAME_MODE_TYPE_INDEX: u64 = 2343;
@@ -59,9 +59,13 @@ const ICONS_CHILD: u8 = 28;
 const LINKED_MODE_CHILD: u8 = 29;
 /// The flag of a participant's character id in its raw form (Observed: `05`, then 16 bytes).
 const RAW_CHARACTER_ID: u8 = 0x05;
+/// The field name of the state's read errors.
+const FIELD: &str = "game mode state";
+/// The state has one slot.
+const SLOTS: u8 = 1;
 
 /// One participant of a game mode (`participantFacetRefs`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ParticipantRef {
     /// The raw id of its entity.
     pub raw_id: [u8; RAW_ID_LEN],
@@ -158,6 +162,10 @@ pub struct GameModeState {
 
 fn write_keyed(writer: &mut Writer, (key, value): &Keyed) {
     writer.u32(*key).u64(*value);
+}
+
+fn read_keyed(reader: &mut Reader<'_>) -> Result<Keyed, MessageError> {
+    Ok((reader.u32()?, reader.u64()?))
 }
 
 fn write_keyed_list(
@@ -318,6 +326,109 @@ impl GameModeState {
         });
         result
     }
+
+    /// Reads a state of the bundle path: the inverse of [`Self::write`], so a bot reads the
+    /// game mode entity of its match or duel (its script state, participants, teams and values).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the body ends early, sets a slot or child the class does not
+    /// have, or a participant's character id is not in its raw form.
+    pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let mut state = Self::default();
+        if read_slot_byte(reader, FIELD, SLOTS)? == 0 {
+            return Ok(state);
+        }
+        read_wide_children(reader, FIELD, CHILDREN, |reader, child| {
+            state.read_child(reader, child)
+        })?;
+        Ok(state)
+    }
+
+    /// Reads child `child` of the slot into this state.
+    fn read_child(&mut self, reader: &mut Reader<'_>, child: u8) -> Result<(), MessageError> {
+        match child {
+            SCRIPT_STATE_CHILD => self.script_state = Some(reader.u8()?),
+            SPAWNED_CHILD => self.spawned = Some(FullList::read(reader, read_keyed)?),
+            MODE_CHILD => self.mode = Some(reader.u32()?),
+            MAP_CHILD => self.map = Some(reader.u32()?),
+            PARTICIPANTS_CHILD => {
+                self.participants = Some(ReplicatedList::read(reader, FIELD, |reader| {
+                    Ok(ParticipantRef {
+                        raw_id: reader.raw_id()?,
+                        facet: reader.u64()?,
+                        second: reader.u64()?,
+                    })
+                })?);
+            }
+            STATUSES_CHILD => {
+                self.statuses = Some(ReplicatedList::read(reader, FIELD, |reader| reader.u8())?)
+            }
+            TEAMS_CHILD => {
+                self.teams = Some(ReplicatedList::read(reader, FIELD, |reader| reader.u8())?)
+            }
+            CHARACTERS_CHILD => {
+                self.characters = Some(ReplicatedList::read(reader, FIELD, |reader| {
+                    let flag = reader.u8()?;
+                    if flag != RAW_CHARACTER_ID {
+                        return Err(MessageError::Unsized {
+                            field: FIELD,
+                            byte: flag,
+                        });
+                    }
+                    reader.raw_id()
+                })?);
+            }
+            RAIDS_CHILD => {
+                self.raids = Some(ReplicatedList::read(reader, FIELD, |reader| reader.u64())?)
+            }
+            VALUES_CHILD => self.values = Some(FullList::read(reader, read_keyed)?),
+            TIMERS_CHILD => self.timers = Some(FullList::read(reader, read_keyed)?),
+            AFFLICTION_CHILD => {
+                let affliction = GlobalAffliction::read(reader)?;
+                if affliction == GlobalAffliction::NONE {
+                    self.no_affliction = true;
+                } else {
+                    self.affliction = Some(affliction);
+                }
+            }
+            MAP_ORIGIN_CHILD => self.level_map.origin_m = Some([reader.u16()?, reader.u16()?]),
+            TILE_SIZE_CHILD => self.level_map.tile_size_m = Some(reader.u8()?),
+            MAP_SIZE_CHILD => self.level_map.size_in_tiles = Some([reader.u8()?, reader.u8()?]),
+            TILES_CHILD => {
+                self.level_map.tiles =
+                    Some(ReplicatedList::read(reader, FIELD, |reader| reader.u8())?);
+            }
+            VISITED_CHILD => {
+                self.level_map.visited =
+                    Some(ReplicatedList::read(reader, FIELD, |reader| reader.u8())?);
+            }
+            ICONS_CHILD => {
+                self.level_map.icons = Some(ReplicatedList::read(reader, FIELD, |reader| {
+                    Ok(MapIcon {
+                        key: reader.u32()?,
+                        position_m: [whole_metres(reader.f32()?), whole_metres(reader.f32()?)],
+                    })
+                })?);
+            }
+            LINKED_MODE_CHILD => self.linked_mode = Some(reader.u8()?),
+            event => self.events.push((
+                event - FIRST_EVENT_CHILD,
+                GameModeEvent {
+                    name: reader.u32()?,
+                    at_ms: reader.u64()?,
+                    number: reader.u32()?,
+                },
+            )),
+        }
+        Ok(())
+    }
+}
+
+/// The whole metres of an icon's place as the state writes it (a 32-bit float of whole metres).
+fn whole_metres(metres: f32) -> u16 {
+    // Clamped to [0, u16::MAX] and rounded: the value fits.
+    metres.round().clamp(0.0, f32::from(u16::MAX)) as u16
 }
 
 #[cfg(test)]
@@ -346,14 +457,18 @@ mod tests {
     const FIRST_CHARACTER: [u8; RAW_ID_LEN] = [0xc1; RAW_ID_LEN];
     const SECOND_CHARACTER: [u8; RAW_ID_LEN] = [0xc2; RAW_ID_LEN];
 
+    /// The bytes of `state` as hex; a state of slots that the class has reads back the same.
     fn hex(state: &GameModeState) -> String {
         let mut writer = Writer::new();
         state.write(&mut writer).expect("the state writes");
-        writer
-            .finish()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        let bytes = writer.finish();
+        if state.events.iter().all(|(slot, _)| *slot < EVENT_SLOTS) {
+            let mut reader = Reader::new(&bytes);
+            let read = GameModeState::read(&mut reader).expect("the state reads");
+            reader.finish().expect("the read uses every byte");
+            assert_eq!(&read, state, "the state reads back");
+        }
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
     fn full<T>(version: u64, elements: Vec<T>) -> FullList<T> {
@@ -397,6 +512,23 @@ mod tests {
         ]
         .concat();
         assert_eq!(hex(&first), expected);
+    }
+
+    #[test]
+    fn a_character_id_not_in_its_raw_form_does_not_read() {
+        let state = GameModeState {
+            characters: Some(ReplicatedList::Full(full(2, vec![FIRST_CHARACTER]))),
+            ..GameModeState::default()
+        };
+        let mut writer = Writer::new();
+        state.write(&mut writer).expect("the state writes");
+        let mut bytes = writer.finish();
+        let flag = bytes
+            .iter()
+            .position(|byte| *byte == RAW_CHARACTER_ID)
+            .expect("the raw form's flag");
+        bytes[flag] = 0;
+        assert!(GameModeState::read(&mut Reader::new(&bytes)).is_err());
     }
 
     /// Retail `duel_capture`: the fight's start at 73.315 s, the duel's end at 83.914 s and the
