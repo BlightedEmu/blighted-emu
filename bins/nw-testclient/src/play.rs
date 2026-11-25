@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nw_carrier::MESSAGE_CHANNEL;
+use nw_content::character_points::{CONSTITUTION, CharacterPoints, DEXTERITY, STRENGTH};
 use nw_content::poi_tags::PoiTags;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::client_input::{TALK_KIND, TRIGGER_KIND};
@@ -31,7 +32,7 @@ use nw_messages::social::SocialFacet;
 use nw_messages::social::chat::{ChatCall, ChatChannel};
 use nw_messages::{
     AfkWarningMsg, Bit8, ClientFacetMsg, ClientInputMsg, ConversationClientMsg, FacetHeader,
-    InputPosition, InteractionRequest, ServerMessage,
+    InputPosition, InteractionRequest, PersistentAttributes, PointsClientMsg, ServerMessage,
 };
 use nw_reflect::LoginToken;
 use nw_sim_core::{Position, yaw_toward};
@@ -41,10 +42,10 @@ use crate::achievements::AchievementBook;
 use crate::activity::{
     Act, Activity, ActivityKind, BotSight, CLEAR_RADIUS_M, CourseRoutes, MatchEnd, MatchGoal,
     OPEN_STORAGE_KIND, OPEN_STORAGE_NAME, PVP_KILLER_FACTION, Proof, STORAGE_TAG, Step,
-    accept_calls, arena_verdict, camp_steps, course_steps, door_trial_steps, gather_steps,
-    leave_trial_steps, loot_steps, lore_steps, mission_turn_in_steps, mount_steps, pop_to_accept,
-    pvp_flag_shown, pvp_flag_steps, quest_craft_steps, skin_steps, song_steps, start_object_steps,
-    trial_steps, use_steps,
+    accept_calls, arena_verdict, camp_steps, catacombs_entry_steps, course_steps, door_trial_steps,
+    gather_steps, leave_trial_steps, loot_steps, lore_steps, mission_turn_in_steps, mount_steps,
+    pop_to_accept, pvp_flag_shown, pvp_flag_steps, quest_craft_steps, skin_steps, song_steps,
+    start_object_steps, trial_steps, use_steps,
 };
 use crate::arena::{
     ArenaSeat, BETWEEN_ROUNDS_STATE, OVERTIME_STATE, PREGAME_STATE, READY_BIT, ROUND_STATE,
@@ -52,7 +53,7 @@ use crate::arena::{
 use crate::chat::{chat_lines, is_system};
 use crate::fishing::{Angler, FishAct, FishEnd};
 use crate::gather::GatherNode;
-use crate::group::{GroupSeat, accept_call, invite_call};
+use crate::group::{GroupSeat, accept_call, convert_to_raid_call, invite_call};
 use crate::hunt::{MAX_SWINGS_WITHOUT_HIT, planar, send_input};
 use crate::pair::{PairError, RecordWalk, SEND_INTERVAL, session_with};
 use crate::record_walk::{ARRIVED_M, RecordWalker};
@@ -146,6 +147,15 @@ const AFK_STEP_M: f32 = 2.0;
 /// A mob of the kill this far from the bot is one it does not reach on foot: the game master bot
 /// teleports to it (Inferred: the bot walks [`SPEED_MPS`]; a fleeing elk kept 10-12 m away).
 const CHASE_TELEPORT_M: f32 = 6.0;
+/// The catacombs' game mode: a player enters it through its queue, not from afar
+/// ([`catacombs_entry_steps`]).
+const CATACOMBS_MODE: &str = "Catacombs";
+/// A mob this far above or below the bot is on another floor, out of its swing's reach: the game
+/// master bot teleports to it. Live 2026-11-25 13:45-13:56Z: in Glacial Tarn the bots fell 8.5 m
+/// and 34 m off Commander Loth's platform (z 253.5) and swung at him from below (x and y within
+/// 1 m, z 245 and 219.25) for 11 minutes, about 1 swing in 9 landing. Inferred: more than a
+/// body's height, so a slope or a step does not count.
+const CHASE_HEIGHT_M: f32 = 4.0;
 /// The shortest time between two teleports to a fleeing mob.
 const CHASE_INTERVAL: Duration = Duration::from_secs(1);
 /// Joins a plan line to its step's progress in the bot's same-plan count.
@@ -174,6 +184,15 @@ const MAX_BUSY_RETRIES: u32 = 8;
 /// The bot's wait before it gathers a refused node again: one large chest's gather (retail
 /// `LootLargeT3` 5.0 s, `ck08` 1218.0 to 1223.1 s) and a margin.
 const BUSY_NODE_WAIT: Duration = Duration::from_secs(6);
+/// The answer to an instance entry while no instance sim is free, as the bot's step names it
+/// ([`crate::activity::arena_verdict`]).
+const ENTRANCE_BUSY: &str = "answered EntranceBusy";
+/// How often the bot asks again for an instance whose entrance was busy, in one quest, and its
+/// wait before each new ask (Inferred: a player waits and asks again; live 2026-11-25
+/// 14:25-14:30Z the PC director's 4 instance sims were taken by other runs and three asks in a
+/// minute were refused; an expedition run takes 5 to 15 minutes).
+const MAX_ENTRANCE_RETRIES: u32 = 20;
+const ENTRANCE_BUSY_WAIT: Duration = Duration::from_secs(30);
 /// A step whose drop comes at a chance gets the tries that give the drop at least this often
 /// ([`max_tries`]).
 const DROP_CONFIDENCE: f64 = 0.95;
@@ -305,6 +324,11 @@ const PLACED: &str = "placed";
 /// The word before the radius around a kill plan's place that the bot fights within: the
 /// volume of the encounter that spawns the mobs, which resets when no player is in it.
 const WITHIN: &str = "within";
+/// The word before the lowest and the highest height of a kill plan's fight volume.
+const LEVELS: &str = "levels";
+/// A mob or the bot stands in a fight volume's heights with its feet this far under its
+/// lowest height, m (feet on the floor at the volume's bottom).
+const LEVEL_SLACK_M: f32 = 0.5;
 /// The word before each place of a kill plan where its encounter spawns a pickup taken by
 /// touch (the talisman piles of `QuestLiang`): the bot walks onto them between its hits.
 const TOUCH: &str = "touch";
@@ -532,6 +556,8 @@ enum PlanStep {
         placed: bool,
         /// The radius around `at` that the bot fights within (`within <m>`).
         within: Option<f32>,
+        /// The lowest and the highest height of the fight volume (`levels <low> <high>`).
+        levels: Option<(f32, f32)>,
         /// The places of the fight's pickups taken by touch (`touch x y z`, each): the bot
         /// walks onto one before every [`SWINGS_PER_TOUCH`] swings.
         touch: Vec<Position>,
@@ -941,6 +967,15 @@ fn what_step(what: &str, header: FacetHeader) -> Option<PlanStep> {
                 .iter()
                 .position(|word| *word == WITHIN)
                 .and_then(|index| words.get(index + 1)?.parse().ok()),
+            levels: words
+                .iter()
+                .position(|word| *word == LEVELS)
+                .and_then(|index| {
+                    Some((
+                        words.get(index + 1)?.parse().ok()?,
+                        words.get(index + 2)?.parse().ok()?,
+                    ))
+                }),
             touch: words
                 .iter()
                 .enumerate()
@@ -1373,6 +1408,9 @@ struct Player {
     /// The gathers of the current quest the server refused at a node another player held,
     /// which the bot tries again ([`MAX_BUSY_RETRIES`]).
     busy_retries: u32,
+    /// The entries of the current quest the server answered with a busy entrance, which the
+    /// bot asks again ([`MAX_ENTRANCE_RETRIES`]).
+    entrance_retries: u32,
     /// The corpses the bot skinned or tried to skin.
     skinned: HashSet<u64>,
     /// Where the bags the bot has not opened start in the view's list of loot bags
@@ -1443,6 +1481,11 @@ struct Player {
     arena: Option<ArenaSeat>,
     /// The bot's own character id (UUID text), from its login token.
     character: Option<String>,
+    /// Where the bot puts its attribute points ([`PlayData::attribute_plan`]).
+    attribute_plan: Arc<[(u32, u32)]>,
+    /// The unspent points of the bot's last spend: it asks again only once the server shows
+    /// another number.
+    spent_for: Option<u32>,
 }
 
 /// The accepts of a bot's pops ([`Act::AcceptPops`]): when the act began and the match id it
@@ -1559,6 +1602,8 @@ struct Fight {
     foe: bool,
     /// The place and radius the bot fights within: the mobs farther out are not its fight.
     area: Option<(Position, f32)>,
+    /// The lowest and the highest height the bot fights between ([`PlanStep::Kill`]).
+    levels: Option<(f32, f32)>,
     /// The vitals id (CRC-32 of the lowercase id) of the kill step's mob: the bot fights the
     /// nearest such mob first, then the nearest other one. Live 2026-11-22 13:58-14:03: the bot
     /// fought the `Wolf_White_49` that came at it beside the fleeing `Elk_Strange_48` of
@@ -1653,6 +1698,10 @@ fn spared_after(mut spared: Vec<u64>, swung_at: Vec<u64>, hits: u64) -> Vec<u64>
     spared
 }
 
+/// A kill step's fight area: its place and radius, and the low and high heights of its volume
+/// (each `None` when the step names none).
+type FightArea = (Option<(Position, f32)>, Option<(f32, f32)>);
+
 /// The mob (entity, place) a kill step's fight swings at, from `mobs` in view: the nearest one in
 /// `area` whose vitals id (`vitals_of`) is the step's `vitals`, else the nearest one there; a mob
 /// that takes no hits now (`takes_no_hits`: its vitals show invulnerability) only when every mob
@@ -1662,7 +1711,7 @@ fn fight_target(
     mobs: &[(u64, nw_messages::WorldPosition)],
     vitals_of: impl Fn(u64) -> Option<u32>,
     takes_no_hits: impl Fn(u64) -> bool,
-    area: Option<(Position, f32)>,
+    (area, levels): FightArea,
     vitals: Option<u32>,
     from: [f32; 3],
 ) -> Option<(u64, nw_messages::WorldPosition)> {
@@ -1671,7 +1720,7 @@ fn fight_target(
     };
     let in_area_mobs: Vec<(u64, nw_messages::WorldPosition)> = mobs
         .iter()
-        .filter(|(_, mob)| in_area(area, [mob.x, mob.y]))
+        .filter(|(_, mob)| in_area(area, [mob.x, mob.y]) && on_area_floor(area, levels, mob.z()))
         .copied()
         .collect();
     let hittable: Vec<(u64, nw_messages::WorldPosition)> = in_area_mobs
@@ -1692,6 +1741,12 @@ fn fight_target(
         .or_else(|| in_fight.iter().copied().min_by(nearest))
 }
 
+/// Whether a mob (or a foe) at `at` is one the bot at `from` does not reach on foot: farther
+/// than [`CHASE_TELEPORT_M`] or on another floor ([`CHASE_HEIGHT_M`]).
+fn out_of_reach(from: [f32; 3], at: &nw_messages::WorldPosition) -> bool {
+    planar(from, [at.x, at.y]) > CHASE_TELEPORT_M || (at.z() - from[2]).abs() > CHASE_HEIGHT_M
+}
+
 /// How far above or below the place of a kill step's fight area a bot in it may stand and stay
 /// (**Inferred**: about two storeys). Live 2026-11-24 08:32Z: the bot stood 16 m under the
 /// `99A_Enc_MSQ_09_Torment` encounter (a cylinder volume from 158.8 to 168.8 m), on the floor
@@ -1701,12 +1756,32 @@ const FIGHT_AREA_HEIGHT_M: f32 = 8.0;
 /// Whether a bot at `own` stays where it is for a kill step's fight in `area`: it is in that
 /// area already, within [`FIGHT_AREA_HEIGHT_M`] of its place's height (a fight without one
 /// starts at the step's place).
-fn stays_in_fight_area(area: Option<(Position, f32)>, own: Option<Position>) -> bool {
-    area.is_some_and(|(place, _)| {
-        own.is_some_and(|own_at| {
-            in_area(area, [own_at.x, own_at.y]) && (own_at.z - place.z).abs() <= FIGHT_AREA_HEIGHT_M
+fn stays_in_fight_area(
+    area: Option<(Position, f32)>,
+    levels: Option<(f32, f32)>,
+    own: Option<Position>,
+) -> bool {
+    area.is_some()
+        && own.is_some_and(|own_at| {
+            in_area(area, [own_at.x, own_at.y]) && on_area_floor(area, levels, own_at.z)
         })
-    })
+}
+
+/// Whether a mob at height `z` is on the floor of the fight's `area`: within
+/// [`FIGHT_AREA_HEIGHT_M`] of its place's height; every mob without one. Live 2026-11-25
+/// 14:07:55Z: the bot stood on the tower top of `99A_Enc_MSQ_09_Torment` (z 153.8) before the
+/// boss came, took a mob one floor down (z 132.6) for its fight, went down to it, and the
+/// encounter (grace 0 s) reset.
+///
+/// With the fight volume's own heights `levels` (the sim names them for an upright cylinder),
+/// the floor is between them instead: live 2026-11-25 14:34-14:43Z the bot fought the mobs of
+/// the ring 2.3 m under that tower top's platform, out of the volume (bottom at the platform),
+/// and the encounter reset again.
+fn on_area_floor(area: Option<(Position, f32)>, levels: Option<(f32, f32)>, z: f32) -> bool {
+    match levels {
+        Some((low, high)) => z >= low - LEVEL_SLACK_M && z <= high,
+        None => area.is_none_or(|(place, _)| (z - place.z).abs() <= FIGHT_AREA_HEIGHT_M),
+    }
 }
 
 /// Whether a mob at `at` is in the fight's `area` (place and radius): within the radius less
@@ -1831,6 +1906,12 @@ impl Player {
         }
         if std::mem::take(&mut self.afk_warned) {
             self.step_aside(client)?;
+        }
+        if !matches!(
+            self.phase,
+            Phase::LeaveTutorial | Phase::Leaving { .. } | Phase::Setup(_)
+        ) {
+            self.spend_attribute_points(client, own)?;
         }
         let header = FacetHeader::of(CALL_COMPONENT, own);
         match self.phase.clone() {
@@ -2320,6 +2401,7 @@ impl Player {
                 territory,
                 placed,
                 within,
+                levels,
                 touch,
             } => {
                 // A bot already in the encounter's fight area fights on where it stands: live
@@ -2328,7 +2410,7 @@ impl Player {
                 // to the ground was refused (`off_ground`) until 22:10, and the Hercyne it had
                 // hit to 16,690 of 31,098 was never hit again.
                 let area = within.map(|radius_m| (at, radius_m));
-                if !stays_in_fight_area(area, self.own_place()) {
+                if !stays_in_fight_area(area, levels, self.own_place()) {
                     self.teleport(client, own, at)?;
                 }
                 if let Some(territory) = territory {
@@ -2351,6 +2433,7 @@ impl Player {
                     task,
                     foe: false,
                     area,
+                    levels,
                     vitals: Some(lowercase_crc32(&vitals)),
                     saw_mobs: false,
                     swings: 0,
@@ -2553,6 +2636,7 @@ impl Player {
                     task,
                     foe: true,
                     area: None,
+                    levels: None,
                     vitals: None,
                     saw_mobs: false,
                     swings: 0,
@@ -2636,6 +2720,9 @@ impl Player {
                 let steps = match door {
                     Some((capital, at)) => {
                         door_trial_steps(&mode, crc, capital, at.map(|at| [at.x, at.y, at.z]))
+                    }
+                    None if mode.eq_ignore_ascii_case(CATACOMBS_MODE) => {
+                        catacombs_entry_steps(&mode, crc)
                     }
                     None => trial_steps(&mode, crc, self.mutation),
                 };
@@ -2864,6 +2951,13 @@ impl Player {
                     };
                     return Ok(());
                 }
+                if self.take_entrance_retry(&why) {
+                    self.phase = Phase::Pause {
+                        until: since + ENTRANCE_BUSY_WAIT,
+                        then: Ask::State,
+                    };
+                    return Ok(());
+                }
             }
             None => {
                 self.gather = Some((what, running));
@@ -2922,6 +3016,42 @@ impl Player {
         }
         self.tried_nodes.remove(&index);
         self.busy_retries += 1;
+        self.same_plan = self.same_plan.saturating_sub(1);
+        true
+    }
+
+    /// Spends the bot's unspent attribute points by its plan ([`attribute_spend`]), as a
+    /// player does after a level up (1502); once for each unspent number the server shows.
+    /// Live 2026-11-25: the bots at level 65 had spent no point, and their hits on Commander
+    /// Loth were 382-540 where the retail player's were 2,400-4,800 (`Glacial-964a...` 872.7 s).
+    fn spend_attribute_points(&mut self, client: &mut RepClient, own: u64) -> Result<(), RepError> {
+        let Some(points) = self.combat.attribute_points() else {
+            return Ok(());
+        };
+        if points.unspent == 0 || self.spent_for == Some(points.unspent) {
+            return Ok(());
+        }
+        self.spent_for = Some(points.unspent);
+        let (attributes, spent) = attribute_spend(&self.attribute_plan, points);
+        if attributes.is_empty() {
+            return Ok(());
+        }
+        let call = PointsClientMsg::SpendAttributePoints {
+            header: FacetHeader::of(CALL_COMPONENT, own),
+            attributes,
+            points: spent,
+        };
+        client.send_message(MESSAGE_CHANNEL, true, call.type_index(), call.encode())
+    }
+
+    /// Whether the failed step `why` is an instance entry the server answered with a busy
+    /// entrance (no instance sim free): the bot asks again after [`ENTRANCE_BUSY_WAIT`], and the
+    /// wait is no new try of the step. At most [`MAX_ENTRANCE_RETRIES`] in a quest.
+    fn take_entrance_retry(&mut self, why: &str) -> bool {
+        if !why.contains(ENTRANCE_BUSY) || self.entrance_retries >= MAX_ENTRANCE_RETRIES {
+            return false;
+        }
+        self.entrance_retries += 1;
         self.same_plan = self.same_plan.saturating_sub(1);
         true
     }
@@ -3197,6 +3327,19 @@ impl Player {
                         client.send_message(MESSAGE_CHANNEL, true, type_index, body)?;
                     }
                 }
+                Act::InviteSeats(seat, seats) => {
+                    let Some(members) = seat.members_ready_in(seats.clone()) else {
+                        return Ok(None);
+                    };
+                    for character in members {
+                        let (type_index, body) = invite_call(character, own)?;
+                        client.send_message(MESSAGE_CHANNEL, true, type_index, body)?;
+                    }
+                }
+                Act::ConvertToRaid => {
+                    let (type_index, body) = convert_to_raid_call(own)?;
+                    client.send_message(MESSAGE_CHANNEL, true, type_index, body)?;
+                }
                 // A bot already in a group (of an earlier run: the social service keeps it) has
                 // no invite to answer.
                 Act::AcceptGroupInvite(seat) if self.world.own_group().is_none() => {
@@ -3303,6 +3446,7 @@ impl Player {
                         task: "hunt".to_owned(),
                         foe: false,
                         area: Some((center, *radius_m)),
+                        levels: None,
                         vitals: None,
                         saw_mobs: false,
                         swings: 0,
@@ -3400,6 +3544,8 @@ impl Player {
                 })
                 .then_some(Ok(())),
             Proof::GroupFull(seat) => seat.others_joined().then_some(Ok(())),
+            Proof::SeatsJoined(seat, seats) => seat.joined_in(seats.clone()).then_some(Ok(())),
+            Proof::InRaid => self.world.own_raid().map(|_| Ok(())),
             Proof::InGroup(seat) => self.world.own_group().map(|_| {
                 seat.set_joined();
                 Ok(())
@@ -3428,6 +3574,10 @@ impl Player {
                     Proof::Answered => "an answer to the interaction".to_owned(),
                     Proof::Sent => String::new(),
                     Proof::GroupFull(_) => "every other bot in the group".to_owned(),
+                    Proof::SeatsJoined(_, seats) => {
+                        format!("the bots of seats {seats:?} in the group")
+                    }
+                    Proof::InRaid => "a raid in the own groups state".to_owned(),
                     Proof::InGroup(_) => "a group in the own groups state".to_owned(),
                     Proof::LeaderInside(_) => "the leader in the instance".to_owned(),
                     Proof::LeaderDone(_) => "the end of the leader's play".to_owned(),
@@ -3729,6 +3879,7 @@ impl Player {
             return self.walk_toward(client, own, place, distance, 0.0, since);
         }
         let area = self.fight.as_ref().and_then(|fight| fight.area);
+        let levels = self.fight.as_ref().and_then(|fight| fight.levels);
         let vitals = self.fight.as_ref().and_then(|fight| fight.vitals);
         let nearest = |a: &nw_messages::WorldPosition, b: &nw_messages::WorldPosition| {
             planar(from, [a.x, a.y]).total_cmp(&planar(from, [b.x, b.y]))
@@ -3751,7 +3902,7 @@ impl Player {
                 &mobs,
                 |entity| self.combat.vitals_of(entity),
                 |entity| self.combat.takes_no_hits(entity) || spared.contains(&entity),
-                area,
+                (area, levels),
                 vitals,
                 from,
             );
@@ -3766,7 +3917,7 @@ impl Player {
             if let Some((entity, mob)) = target
                 && vitals.is_some()
                 && self.combat.vitals_of(entity) == vitals
-                && planar(from, [mob.x, mob.y]) > CHASE_TELEPORT_M
+                && out_of_reach(from, &mob)
                 && self
                     .last_chase
                     .is_none_or(|last| since.saturating_sub(last) >= CHASE_INTERVAL)
@@ -3938,7 +4089,7 @@ impl Player {
                 play.target = None;
                 return Ok(());
             }
-            if planar([own.x, own.y, own.z], [mob.x, mob.y]) > CHASE_TELEPORT_M
+            if out_of_reach([own.x, own.y, own.z], &mob)
                 && self
                     .last_chase
                     .is_none_or(|last| since.saturating_sub(last) >= CHASE_INTERVAL)
@@ -4251,6 +4402,7 @@ impl Player {
         self.same_plan = 0;
         self.tried_nodes.clear();
         self.busy_retries = 0;
+        self.entrance_retries = 0;
         self.achieved_before = Some(self.combat.achievements().bits());
     }
 }
@@ -4311,6 +4463,44 @@ pub struct PlayData {
     pub achievements: Arc<AchievementBook>,
     /// The bot's seat in a PvP run ([`crate::arena`]); `None` for other runs.
     pub arena: Option<ArenaSeat>,
+    /// Where the bot puts its attribute points, in order: each attribute and the points it
+    /// takes at most above its base ([`attribute_plan`]).
+    pub attribute_plan: Arc<[(u32, u32)]>,
+}
+
+/// The attributes a soldier bot spends its points on, in order: the soldier's weapons scale
+/// with Strength (`SoldierArchetype_1hHatchet` `ScalingStrength`), then Constitution for health
+/// and Dexterity (Inferred: a melee player's build).
+const ATTRIBUTE_ORDER: [u32; 3] = [STRENGTH, CONSTITUTION, DEXTERITY];
+
+/// The attribute plan of the game data's `points`: each attribute of [`ATTRIBUTE_ORDER`] and its
+/// room, its largest value less its base.
+pub fn attribute_plan(points: &CharacterPoints) -> Arc<[(u32, u32)]> {
+    ATTRIBUTE_ORDER
+        .iter()
+        .filter_map(|id| {
+            let range = points.attribute(*id)?;
+            Some((*id, range.max.saturating_sub(range.base)))
+        })
+        .collect()
+}
+
+/// The spend of `points` by `plan`: every unspent point, each attribute filled up to its room
+/// in the plan's order; the attributes and their points (empty when nothing is to spend).
+fn attribute_spend(plan: &[(u32, u32)], points: &PersistentAttributes) -> (Vec<u32>, Vec<u32>) {
+    let mut left = points.unspent;
+    plan.iter()
+        .filter_map(|(id, room)| {
+            let spent = points
+                .spent
+                .iter()
+                .find(|(known, _)| known == id)
+                .map_or(0, |(_, spent)| *spent);
+            let given = room.saturating_sub(spent).min(left);
+            left -= given;
+            (given > 0).then_some((*id, given))
+        })
+        .unzip()
 }
 
 impl Player {
@@ -4331,6 +4521,7 @@ impl Player {
             mount_reward_box,
             achievements,
             arena,
+            attribute_plan,
         } = data;
         Self {
             world: WorldView::default(),
@@ -4384,6 +4575,7 @@ impl Player {
             achieved_before: None,
             node_gather: None,
             busy_retries: 0,
+            entrance_retries: 0,
             skinned: HashSet::new(),
             loot_from: 0,
             gather: None,
@@ -4416,6 +4608,8 @@ impl Player {
             accepting: None,
             arena,
             character: None,
+            attribute_plan,
+            spent_for: None,
         }
     }
 }
@@ -4615,17 +4809,17 @@ mod tests {
             ..centre
         };
         let area = Some((centre, RADIUS_M));
-        assert!(stays_in_fight_area(area, Some(near)));
+        assert!(stays_in_fight_area(area, None, Some(near)));
         assert!(
-            !stays_in_fight_area(area, Some(far)),
+            !stays_in_fight_area(area, None, Some(far)),
             "outside the area less the reach"
         );
         assert!(
-            !stays_in_fight_area(None, Some(near)),
+            !stays_in_fight_area(None, None, Some(near)),
             "a fight with no area"
         );
         assert!(
-            !stays_in_fight_area(area, None),
+            !stays_in_fight_area(area, None, None),
             "a bot whose place is not known"
         );
         let under = Position {
@@ -4633,7 +4827,7 @@ mod tests {
             ..near
         };
         assert!(
-            !stays_in_fight_area(area, Some(under)),
+            !stays_in_fight_area(area, None, Some(under)),
             "a floor under the area"
         );
     }
@@ -4673,6 +4867,7 @@ mod tests {
             mount_reward_box: Err(String::new()),
             achievements: Arc::default(),
             arena: None,
+            attribute_plan: Arc::from(Vec::new()),
         };
         Player::new(&settings, data)
     }
@@ -4725,6 +4920,51 @@ mod tests {
         player.busy_retries = MAX_BUSY_RETRIES;
         player.node_gather = Some(NODE);
         assert!(!player.take_busy_retry(REFUSED), "past the limit");
+    }
+
+    /// A level 65 bot of 480 points fills Strength, then Constitution, then puts the rest on
+    /// Dexterity; points it spent before count.
+    #[test]
+    fn a_bot_fills_its_attributes_in_its_plan_s_order() {
+        const ROOM: u32 = 295;
+        let plan = [(STRENGTH, ROOM), (CONSTITUTION, ROOM), (DEXTERITY, ROOM)];
+        let fresh = PersistentAttributes {
+            unspent: 480,
+            ..PersistentAttributes::default()
+        };
+        assert_eq!(
+            attribute_spend(&plan, &fresh),
+            (vec![STRENGTH, CONSTITUTION], vec![ROOM, 480 - ROOM])
+        );
+        let after = PersistentAttributes {
+            unspent: 10,
+            spent: vec![(STRENGTH, ROOM), (CONSTITUTION, 100)],
+            ..PersistentAttributes::default()
+        };
+        assert_eq!(
+            attribute_spend(&plan, &after),
+            (vec![CONSTITUTION], vec![10])
+        );
+        assert_eq!(
+            attribute_spend(&plan, &PersistentAttributes::default()),
+            (Vec::new(), Vec::new())
+        );
+    }
+
+    /// Live 2026-11-25 14:25-14:30Z: every instance sim was taken, and the Reekwater entry was
+    /// answered `EntranceBusy` three times in a minute; the bot asks again later, and the wait
+    /// is no new try, up to its limit; another failure is no retry.
+    #[test]
+    fn a_busy_entrance_is_asked_again_later() {
+        const BUSY: &str = "entered the instance of DungeonReekwater00: activate game mode \
+            DungeonReekwater00: the activation answered EntranceBusy";
+        let mut player = bare_player(&["0525_EXP_AncientHearts"]);
+        player.same_plan = 2;
+        assert!(player.take_entrance_retry(BUSY));
+        assert_eq!(player.same_plan, 1, "the wait is no new try");
+        assert!(!player.take_entrance_retry("the activation answered GroupAlreadyInDungeon"));
+        player.entrance_retries = MAX_ENTRANCE_RETRIES;
+        assert!(!player.take_entrance_retry(BUSY), "past the limit");
     }
 
     #[test]
@@ -5183,6 +5423,7 @@ mod tests {
                     territory: None,
                     placed: false,
                     within: None,
+                    levels: None,
                     touch: Vec::new()
                 })
             })
@@ -5217,6 +5458,7 @@ mod tests {
                     territory: None,
                     placed: true,
                     within: None,
+                    levels: None,
                     touch: Vec::new()
                 })
             })
@@ -5647,6 +5889,7 @@ mod tests {
                 territory: Some(42),
                 placed: false,
                 within: None,
+                levels: None,
                 touch: Vec::new()
             })
         );
@@ -5663,6 +5906,7 @@ mod tests {
                 Some(PlanStep::Kill {
                     placed: true,
                     within: Some(30.0),
+                    levels: None,
                     ..
                 })
             ),
@@ -5868,6 +6112,24 @@ mod tests {
         assert!(in_area(None, [place.x, place.y + 52.0]), "no area");
     }
 
+    /// Live 2026-11-25 Glacial Tarn: a bot 34 m under Commander Loth (x and y within 1 m) does
+    /// not reach him on foot; one on his floor, a little up a slope, does.
+    #[test]
+    fn a_mob_on_another_floor_is_out_of_reach() {
+        const LOTH_FLOOR: f32 = 253.5;
+        let loth =
+            nw_messages::WorldPosition::from_metres(875.4, 858.2, LOTH_FLOOR).expect("place");
+        assert!(out_of_reach([875.0, 858.4, 219.25], &loth), "under him");
+        assert!(
+            !out_of_reach([875.0, 858.4, LOTH_FLOOR + 1.0], &loth),
+            "on his floor"
+        );
+        assert!(
+            out_of_reach([885.0, 858.4, LOTH_FLOOR], &loth),
+            "far on his floor"
+        );
+    }
+
     #[test]
     fn a_kill_fights_the_nearest_mob_of_its_vitals_id_first() {
         // Live 2026-11-22 13:58: wolves came at the bot beside the fleeing elk of the step.
@@ -5884,12 +6146,19 @@ mod tests {
         };
         let from = [0.0, 0.0, 0.0];
         assert_eq!(
-            fight_target(&mobs, vitals_of, |_| false, None, Some(ELK_VITALS), from),
+            fight_target(
+                &mobs,
+                vitals_of,
+                |_| false,
+                (None, None),
+                Some(ELK_VITALS),
+                from
+            ),
             Some((ELK, at(9.0))),
             "the elk, though the wolf is nearer"
         );
         assert_eq!(
-            fight_target(&mobs, vitals_of, |_| false, None, None, from),
+            fight_target(&mobs, vitals_of, |_| false, (None, None), None, from),
             Some((WOLF, at(2.0))),
             "no vitals id: the nearest mob"
         );
@@ -5898,7 +6167,7 @@ mod tests {
                 &[(WOLF, at(2.0))],
                 vitals_of,
                 |_| false,
-                None,
+                (None, None),
                 Some(ELK_VITALS),
                 from
             ),
@@ -5911,7 +6180,7 @@ mod tests {
                 &mobs,
                 vitals_of,
                 elk_takes_no_hits,
-                None,
+                (None, None),
                 Some(ELK_VITALS),
                 from
             ),
@@ -5919,10 +6188,56 @@ mod tests {
             "the elk takes no hits now: the wolf"
         );
         assert_eq!(
-            fight_target(&mobs, vitals_of, |_| true, None, Some(ELK_VITALS), from),
+            fight_target(
+                &mobs,
+                vitals_of,
+                |_| true,
+                (None, None),
+                Some(ELK_VITALS),
+                from
+            ),
             Some((ELK, at(9.0))),
             "none takes hits: the step's mob"
         );
+    }
+
+    #[test]
+    fn a_fight_in_an_area_leaves_the_mobs_of_another_floor() {
+        const TOWER_TOP_M: f32 = 153.8;
+        const FLOOR_BELOW_M: f32 = 132.6;
+        const RADIUS_M: f32 = 40.0;
+        const GHOST: u64 = 1;
+        const BOSS: u64 = 2;
+        let place = Position {
+            x: 9534.8,
+            y: 4516.9,
+            z: TOWER_TOP_M,
+        };
+        let at =
+            |z| nw_messages::WorldPosition::from_metres(place.x + 5.0, place.y, z).expect("place");
+        let from = [place.x, place.y, TOWER_TOP_M];
+        const RING_M: f32 = 151.5;
+        const VOLUME: (f32, f32) = (153.8, 163.8);
+        let target = |levels, mobs: &[(u64, nw_messages::WorldPosition)]| {
+            fight_target(
+                mobs,
+                |_| None,
+                |_| false,
+                (Some((place, RADIUS_M)), levels),
+                None,
+                from,
+            )
+            .map(|(entity, _)| entity)
+        };
+        assert_eq!(target(None, &[(GHOST, at(FLOOR_BELOW_M))]), None);
+        assert_eq!(
+            target(None, &[(GHOST, at(FLOOR_BELOW_M)), (BOSS, at(TOWER_TOP_M))]),
+            Some(BOSS)
+        );
+        // The volume's own heights: the ring 2.3 m under the platform is out, the platform in.
+        assert_eq!(target(None, &[(GHOST, at(RING_M))]), Some(GHOST));
+        assert_eq!(target(Some(VOLUME), &[(GHOST, at(RING_M))]), None);
+        assert_eq!(target(Some(VOLUME), &[(BOSS, at(TOWER_TOP_M))]), Some(BOSS));
     }
 
     #[test]
@@ -5934,6 +6249,7 @@ mod tests {
             task: "16_Side_20_d_02_kill_lion".to_owned(),
             foe: false,
             area: None,
+            levels: None,
             vitals: None,
             saw_mobs: true,
             swings: 0,
@@ -5997,6 +6313,7 @@ mod tests {
             task: "t_kill".to_owned(),
             foe: false,
             area: None,
+            levels: None,
             vitals: None,
             saw_mobs: false,
             swings: 0,
@@ -6028,6 +6345,7 @@ mod tests {
             task: "w_kill".to_owned(),
             foe: false,
             area: None,
+            levels: None,
             vitals: None,
             saw_mobs: false,
             swings: 0,

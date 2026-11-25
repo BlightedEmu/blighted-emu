@@ -24,10 +24,10 @@ use nw_messages::gde::LOOT_BAG_ASSET;
 use nw_messages::social::states::GroupsState;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    BAG_COMPONENT, BodyCodec, DeathRecapForAllMsg, EntitlementState, EntitySlots, ItemRecord,
-    LOGIN_MESSAGE_TYPES, MemberState, MessageError, PLAYER_VITALS_ID, ReplicatedList,
-    ServerMessage, SlotRead, SlotUpdate, VitalsData, WorldPosition, entity_of_facet,
-    number_of_seen_raw_id, release_raw_id,
+    AttributeState, BAG_COMPONENT, BodyCodec, DeathRecapForAllMsg, EntitlementState, EntitySlots,
+    ItemRecord, LOGIN_MESSAGE_TYPES, MemberState, MessageError, PLAYER_VITALS_ID,
+    PersistentAttributes, ReplicatedList, ServerMessage, SlotRead, SlotUpdate, VitalsData,
+    WorldPosition, entity_of_facet, number_of_seen_raw_id, release_raw_id,
 };
 use thiserror::Error;
 
@@ -343,6 +343,9 @@ pub struct CombatView {
     /// What the bot's account holds: its newest own entitlement state (3133) that carries the
     /// account's lists.
     entitlements: Option<EntitlementState>,
+    /// The bot's attribute points: the newest `persistentAttributeData` of its own attribute
+    /// state (129).
+    attribute_points: Option<PersistentAttributes>,
     /// Mobs in view whose vitals said they died.
     mob_deaths: u64,
     /// The vitals id of each mob in view whose card named one.
@@ -414,6 +417,13 @@ impl CombatView {
                             && let Some(missions) = &state.missions
                         {
                             apply_list(&mut self.board, missions);
+                        }
+                        if let MemberState::Attributes(AttributeState {
+                            persistent: Some(points),
+                            ..
+                        }) = &member.state
+                        {
+                            self.attribute_points = Some(points.clone());
                         }
                         if let MemberState::Fishing(state) = &member.state
                             && let Some(listing) = &state.transitions
@@ -596,6 +606,11 @@ impl CombatView {
         self.entitlements.as_ref()
     }
 
+    /// The bot's attribute points, once the server sent them.
+    pub const fn attribute_points(&self) -> Option<&PersistentAttributes> {
+        self.attribute_points.as_ref()
+    }
+
     /// The missions of the board the bot has open.
     pub fn board(&self) -> &[MissionParams] {
         &self.board
@@ -755,6 +770,8 @@ pub struct WorldView {
     listed_tasks: Vec<(u64, u32)>,
     /// The own group, from the own groups state (`None`: none, or the all-zero id).
     group: Option<[u8; RAW_ID_LEN]>,
+    /// The own raid's id, from the own groups state (`None`: none, or 0).
+    raid: Option<u64>,
     /// The invites to the own player's group, from the last full list of the own groups state.
     inbound_invites: Vec<[u8; RAW_ID_LEN]>,
     /// The own queue and game modes, from the own game mode participant state.
@@ -1077,12 +1094,16 @@ impl WorldView {
             });
         for GroupsState {
             group_id,
+            raid_id,
             inbound_invites,
             ..
         } in groups
         {
             if let Some(group) = group_id {
                 self.group = (*group != [0; RAW_ID_LEN]).then_some(*group);
+            }
+            if let Some(raid) = raid_id {
+                self.raid = (*raid != 0).then_some(*raid);
             }
             if let Some(invites) = inbound_invites {
                 self.inbound_invites = invites.elements.iter().map(|data| data.invite).collect();
@@ -1108,6 +1129,11 @@ impl WorldView {
     /// The own group, once the own groups state names one.
     pub const fn own_group(&self) -> Option<[u8; RAW_ID_LEN]> {
         self.group
+    }
+
+    /// The own raid's id, once the own groups state names one.
+    pub const fn own_raid(&self) -> Option<u64> {
+        self.raid
     }
 
     /// The first invite to the own player's group.

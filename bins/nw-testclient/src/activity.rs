@@ -37,9 +37,9 @@ use nw_messages::facet::{
     component as facet_component,
 };
 use nw_messages::game_mode::{
-    ARENA_ACTIVITY, CAPTURE_THE_FLAG_ACTIVITY, MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX,
-    OUTPOST_RUSH_ACTIVITY, ROLE_SELECTION_CANCELED_TYPE_INDEX,
-    START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX,
+    ARENA_ACTIVITY, CAPTURE_THE_FLAG_ACTIVITY, CATACOMBS_ACTIVITY,
+    MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX, OUTPOST_RUSH_ACTIVITY,
+    ROLE_SELECTION_CANCELED_TYPE_INDEX, START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX,
 };
 use nw_messages::mount::{
     MOUNT_FACET, MountClientMsg, QUICK_COURSE_ENDED_TYPE_INDEX, SUMMON_PENDING_TYPE_INDEX,
@@ -312,6 +312,11 @@ pub enum Act {
     /// The leader of a group of bots invites every other bot of its seat's group (3492), once
     /// each of them is in the world ([`crate::group`]).
     InviteGroup(GroupSeat),
+    /// The leader invites the bots of these seats of its group (3492), once each of them is in
+    /// the world ([`crate::group`]).
+    InviteSeats(GroupSeat, std::ops::Range<usize>),
+    /// The leader starts the vote that turns its group into a players' raid (5317).
+    ConvertToRaid,
     /// A bot of a group accepts the invite its own groups state shows (3495), once one shows.
     AcceptGroupInvite(GroupSeat),
     /// The leader of a group tells the other bots it is in the instance.
@@ -379,6 +384,10 @@ pub enum Proof {
     Sent,
     /// Every other bot of the seat's group is in the group.
     GroupFull(GroupSeat),
+    /// Every other bot of these seats is in the group.
+    SeatsJoined(GroupSeat, std::ops::Range<usize>),
+    /// The own groups state names a raid.
+    InRaid,
     /// The own groups state names a group; the seat tells the others.
     InGroup(GroupSeat),
     /// The leader of the seat's group is in the instance.
@@ -2183,7 +2192,52 @@ fn queued_match_steps(data: &ActivityData<'_>, kind: InstanceKind) -> Result<Vec
     let crc = mode.crc;
     let id = mode.id.clone();
     let described = format!("{goal:?}");
-    let mut steps = vec![
+    let mut steps = queue_entry_steps(&id, crc, activity);
+    // God mode holds on the sim it was turned on in: the match's sim starts without it.
+    if god {
+        steps.push(gm_done("!god on".to_owned()));
+    }
+    if kind == InstanceKind::Arena {
+        // The arena's end screen: the player leaves with its button (retail, 3 of 3 returns).
+        steps.push(step(
+            format!("play the {id} match ({described}) to its end (script state 2)"),
+            vec![Act::PlayMatch {
+                end: MatchEnd::ScriptState {
+                    mode: crc,
+                    state: ARENA_ENDED_STATE,
+                },
+                goal,
+                longest,
+            }],
+            Proof::Sent,
+            Duration::ZERO,
+        ));
+        steps.push(leave_match_step(crc));
+        return Ok(steps);
+    }
+    steps.push(step(
+        format!("play the {id} match ({described}) to its end and come back"),
+        vec![Act::PlayMatch {
+            end: MatchEnd::LeftMode(crc),
+            goal,
+            longest,
+        }],
+        matchmaking_shows(
+            move |matchmaking| !matchmaking.active.contains(&crc),
+            "the game mode gone from the own participant state",
+        ),
+        RETURN_WAIT,
+    ));
+    Ok(steps)
+}
+
+/// The calls by which the bot enters game mode `id` (`crc`) through its queue `activity`, as the
+/// client does (the sim's `queue` module text): 6211 (subscribe), 6254 answered with 6295, the
+/// two 6272, the pop (the match id in the own participant state), 5741 with 946 answered with
+/// 5449, 5450 and the move into the game mode.
+fn queue_entry_steps(id: &str, crc: u32, activity: u16) -> Vec<Step> {
+    let id = id.to_owned();
+    vec![
         step(
             "open the queue screen (6211)",
             vec![participant_call(|header| {
@@ -2225,43 +2279,14 @@ fn queued_match_steps(data: &ActivityData<'_>, kind: InstanceKind) -> Result<Vec
             ),
             ARRIVAL_WAIT,
         ),
-    ];
-    // God mode holds on the sim it was turned on in: the match's sim starts without it.
-    if god {
-        steps.push(gm_done("!god on".to_owned()));
-    }
-    if kind == InstanceKind::Arena {
-        // The arena's end screen: the player leaves with its button (retail, 3 of 3 returns).
-        steps.push(step(
-            format!("play the {id} match ({described}) to its end (script state 2)"),
-            vec![Act::PlayMatch {
-                end: MatchEnd::ScriptState {
-                    mode: crc,
-                    state: ARENA_ENDED_STATE,
-                },
-                goal,
-                longest,
-            }],
-            Proof::Sent,
-            Duration::ZERO,
-        ));
-        steps.push(leave_match_step(crc));
-        return Ok(steps);
-    }
-    steps.push(step(
-        format!("play the {id} match ({described}) to its end and come back"),
-        vec![Act::PlayMatch {
-            end: MatchEnd::LeftMode(crc),
-            goal,
-            longest,
-        }],
-        matchmaking_shows(
-            move |matchmaking| !matchmaking.active.contains(&crc),
-            "the game mode gone from the own participant state",
-        ),
-        RETURN_WAIT,
-    ));
-    Ok(steps)
+    ]
+}
+
+/// Enters the catacombs (`mode`, `crc`) as a player does: through the catacombs queue alone
+/// (6254 activity `0c16`, retail `CATACOMBS2` 4.546 s); the queue sends a short team in after
+/// its fill wait.
+pub fn catacombs_entry_steps(mode: &str, crc: u32) -> Vec<Step> {
+    queue_entry_steps(mode, crc, CATACOMBS_ACTIVITY)
 }
 
 /// The leave of the arena match of game mode `crc` with the end screen's button (1980 `Leave`),
@@ -2425,6 +2450,26 @@ pub(crate) fn siege_points(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Retail `CATACOMBS2`: the client enters the catacombs through their queue (6254 activity
+    /// `0c16`, the two role picks, the pop's accept and the sign-in), not with a 5037.
+    #[test]
+    fn the_catacombs_are_entered_through_their_queue() {
+        const MODE: &str = "Catacombs";
+        let steps = catacombs_entry_steps(MODE, lowercase_crc32(MODE));
+        let whats: Vec<&str> = steps.iter().map(|step| step.what.as_str()).collect();
+        assert_eq!(
+            whats,
+            [
+                "open the queue screen (6211)",
+                "join the Catacombs queue alone (6254)",
+                "pick the roles (6272 twice)",
+                "the queue finds a match",
+                "accept the match (5741, 946)",
+                "sign in to the match (5450) and move into Catacombs",
+            ]
+        );
+    }
 
     /// The 5037 of an entry from afar carries the mutated run's difficulty in its byte, and 0
     /// for a normal run.

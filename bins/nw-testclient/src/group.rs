@@ -16,13 +16,14 @@
 //! place the server gave against the level's floor ([`floor_lines`]: `floor_at` of the level's
 //! collision file with the solids of its standing gates, as the sim's ground has them).
 
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use nw_messages::MessageError;
 use nw_messages::social::SocialFacet;
-use nw_messages::social::groups::{GroupCall, REPLY_ACCEPT};
+use nw_messages::social::groups::{GroupCall, LEAVE_VALUE, REPLY_ACCEPT};
 use nw_messages::wire::RAW_ID_LEN;
 use nw_world::collision_index::CollisionIndex;
 
@@ -53,6 +54,13 @@ const WHERE_WAIT: Duration = Duration::from_secs(10);
 const WHERE: &str = "!where";
 /// The last byte of an invite: 0 in every retail invite.
 const INVITE_FLAG: u8 = 0;
+/// The most members of a group; a larger group of bots turns into a players' raid (the social
+/// service's group; the client's `socialmenu.luac` "Convert to Raid", sent as 5317), as players
+/// do for a raid trial (`RaidCutlassKeys00`: `TeamCapacity` 10, `MinGroupSize` 5).
+pub const GROUP_MEMBERS_MAX: usize = 5;
+/// The leader's wait for its group to turn into a raid: the convert vote's time (the social
+/// service's `RAID_VOTE_MS`, 30 s: a vote with no deny converts at its end) and a margin.
+const RAID_CONVERT_WAIT: Duration = Duration::from_secs(45);
 /// A place differs from the floor by more than this, metres: the step-up height of the level
 /// collision (a floor up to it above the feet is still the floor; level-collision note 4.2).
 pub const OFF_FLOOR_M: f32 = 0.25;
@@ -130,14 +138,25 @@ impl GroupSeat {
 
     /// The characters of the other bots, once each of them is in the world; `None` before.
     pub fn members_ready(&self) -> Option<Vec<String>> {
-        self.with(|seats| {
-            seats
+        self.members_ready_in(0..self.size())
+    }
+
+    /// The characters of the other bots of seats `seats`, once each of them is in the world;
+    /// `None` before.
+    pub fn members_ready_in(&self, seats: Range<usize>) -> Option<Vec<String>> {
+        self.with(|states| {
+            states
                 .iter()
                 .enumerate()
-                .filter(|(seat, _)| *seat != self.seat)
+                .filter(|(seat, _)| *seat != self.seat && seats.contains(seat))
                 .map(|(_, state)| state.character.clone().filter(|_| state.ready))
                 .collect()
         })
+    }
+
+    /// How many bots the group has.
+    pub fn size(&self) -> usize {
+        self.with(|seats| seats.len())
     }
 
     /// This bot's groups state names its group.
@@ -147,11 +166,16 @@ impl GroupSeat {
 
     /// Whether every other bot is in the group.
     pub fn others_joined(&self) -> bool {
-        self.with(|seats| {
-            seats
+        self.joined_in(0..self.size())
+    }
+
+    /// Whether every other bot of seats `seats` is in the group.
+    pub fn joined_in(&self, seats: Range<usize>) -> bool {
+        self.with(|states| {
+            states
                 .iter()
                 .enumerate()
-                .all(|(seat, state)| seat == self.seat || state.joined)
+                .all(|(seat, state)| seat == self.seat || !seats.contains(&seat) || state.joined)
         })
     }
 
@@ -214,6 +238,20 @@ pub fn invite_call(character: String, own: u64) -> Result<(u64, Vec<u8>), Messag
     ))
 }
 
+/// The start (5317) of the vote that turns the group of the bot `own` into a players' raid: type
+/// index and body.
+///
+/// # Errors
+///
+/// Returns [`MessageError`] when the call does not encode.
+pub fn convert_to_raid_call(own: u64) -> Result<(u64, Vec<u8>), MessageError> {
+    let call = GroupCall::InitiateConvertToRaid;
+    Ok((
+        call.type_index(),
+        call.encode(SocialFacet::Groups.header(own))?,
+    ))
+}
+
 /// The accept (3495) of the invite `invite` by the bot `own`: type index and body.
 ///
 /// # Errors
@@ -259,7 +297,8 @@ fn where_step(seat: &GroupSeat, what: String) -> Step {
     }
 }
 
-/// The leader's invite of the other bots, proved once each of them is in the group.
+/// The leader's invite of the other bots, proved once each of them is in the group; a group of
+/// more than [`GROUP_MEMBERS_MAX`] bots becomes a players' raid ([`raid_steps`]).
 fn invite_step(seat: &GroupSeat) -> Step {
     Step {
         what: "invite the other bots into a group".to_owned(),
@@ -267,6 +306,35 @@ fn invite_step(seat: &GroupSeat) -> Step {
         proof: Proof::GroupFull(seat.clone()),
         wait: GROUP_WAIT,
     }
+}
+
+/// The leader's steps for a raid of `seat`'s bots, as players form one: it invites the first
+/// [`GROUP_MEMBERS_MAX`] bots into a group (3492), starts the convert vote (5317; the others let
+/// it pass, the default accept), and once its groups state names a raid invites the rest (3492
+/// into the raid's groups with room).
+fn raid_steps(seat: &GroupSeat) -> Vec<Step> {
+    let group = 0..GROUP_MEMBERS_MAX;
+    let rest = GROUP_MEMBERS_MAX..seat.size();
+    vec![
+        Step {
+            what: format!("invite the first {GROUP_MEMBERS_MAX} bots into a group"),
+            acts: vec![Act::InviteSeats(seat.clone(), group.clone())],
+            proof: Proof::SeatsJoined(seat.clone(), group),
+            wait: GROUP_WAIT,
+        },
+        Step {
+            what: "turn the group into a raid (5317)".to_owned(),
+            acts: vec![Act::ConvertToRaid],
+            proof: Proof::InRaid,
+            wait: RAID_CONVERT_WAIT,
+        },
+        Step {
+            what: "invite the other bots into the raid".to_owned(),
+            acts: vec![Act::InviteSeats(seat.clone(), rest)],
+            proof: Proof::GroupFull(seat.clone()),
+            wait: GROUP_WAIT,
+        },
+    ]
 }
 
 /// A member's accept of the leader's invite, proved by its own groups state.
@@ -283,16 +351,55 @@ fn accept_step(seat: &GroupSeat) -> Step {
 /// expedition opens only for a group of its `MinGroupSize`): the leader invites the others and
 /// then plays its quests (`crate::play::PlayData::activities_first`); a member accepts and stays
 /// in the group, in the open world, until the leader's play ends or `hold` passes. With
-/// `members_play` a member accepts, waits its turn ([`MEMBER_PLAY_GAP`] per seat) and then plays
+/// `members_play` a member accepts, waits until every bot is in the group (a raid's last
+/// bots join after the convert: a member that entered before them owned an instance of its
+/// first group alone, live r2 2026-11-25 19:27Z), waits its turn ([`MEMBER_PLAY_GAP`] per seat) and then plays
 /// the same quests: its entry of their
 /// expedition joins the group's instance (the director adds a member of the group to the group's
 /// open instance, or holds it until that instance is ready), so the whole group fights there.
 pub fn quest_group_steps(seat: &GroupSeat, hold: Duration, members_play: bool) -> Vec<Step> {
-    if seat.leads() {
+    let mut steps = vec![leave_old_group_step()];
+    steps.extend(seat_group_steps(seat, hold, members_play));
+    steps
+}
+
+/// The bot's leave of the group it is still in (2252; a no-op without one): a group is saved
+/// with its characters, so an account starts the run in the group of its last one. Live r3
+/// 2026-11-25 20:01Z: the accepts were proved at once by the old groups (two groups of five),
+/// so the raid steps passed without a raid and two instances opened.
+fn leave_old_group_step() -> Step {
+    Step {
+        what: "leave the group of an earlier run".to_owned(),
+        acts: vec![Act::Call(Box::new(|own| {
+            let call = GroupCall::Leave { value: LEAVE_VALUE };
+            Ok((
+                call.type_index(),
+                call.encode(SocialFacet::Groups.header(own))?,
+            ))
+        }))],
+        proof: Proof::Check(
+            Box::new(|sight| (!sight.in_group).then_some(Ok(()))),
+            "no group in the own groups state".to_owned(),
+        ),
+        wait: GROUP_WAIT,
+    }
+}
+
+/// The group steps of `seat` after its leave of an old group ([`quest_group_steps`]).
+fn seat_group_steps(seat: &GroupSeat, hold: Duration, members_play: bool) -> Vec<Step> {
+    if seat.leads() && seat.size() > GROUP_MEMBERS_MAX {
+        raid_steps(seat)
+    } else if seat.leads() {
         vec![invite_step(seat)]
     } else if members_play {
         vec![
             accept_step(seat),
+            Step {
+                what: "wait for every bot in the group".to_owned(),
+                acts: Vec::new(),
+                proof: Proof::SeatsJoined(seat.clone(), LEADER + 1..seat.size()),
+                wait: GROUP_WAIT + RAID_CONVERT_WAIT,
+            },
             Step {
                 what: "wait for the bots before it to plan".to_owned(),
                 acts: Vec::new(),
@@ -406,6 +513,57 @@ mod tests {
 
     use super::*;
 
+    /// A group of 10 bots (`RaidCutlassKeys00` takes 10): the leader forms a group of five,
+    /// turns it into a raid and invites the other five into it; a group of five stays a group.
+    #[test]
+    fn a_leader_of_more_than_a_group_forms_a_raid() {
+        const RAID_BOTS: usize = 10;
+        let raid = GroupBoard::seats(RAID_BOTS);
+        let steps = quest_group_steps(&raid[LEADER], Duration::ZERO, true);
+        let whats: Vec<&str> = steps.iter().map(|step| step.what.as_str()).collect();
+        assert_eq!(
+            whats,
+            [
+                "leave the group of an earlier run",
+                "invite the first 5 bots into a group",
+                "turn the group into a raid (5317)",
+                "invite the other bots into the raid",
+            ]
+        );
+        assert!(
+            matches!(&steps[3].acts[0], Act::InviteSeats(_, seats) if *seats == (GROUP_MEMBERS_MAX..RAID_BOTS))
+        );
+        let group = GroupBoard::seats(GROUP_MEMBERS_MAX);
+        let steps = quest_group_steps(&group[LEADER], Duration::ZERO, true);
+        assert_eq!(steps.len(), 2, "the leave of an old group and one invite");
+    }
+
+    /// A playing member of a raid plans only once every bot is in it: the first five bots'
+    /// joins alone do not let it go.
+    #[test]
+    fn a_playing_member_waits_for_the_whole_raid() {
+        const RAID_BOTS: usize = 10;
+        const MEMBER: usize = 1;
+        let raid = GroupBoard::seats(RAID_BOTS);
+        let steps = quest_group_steps(&raid[MEMBER], Duration::ZERO, true);
+        let wait = steps
+            .iter()
+            .find_map(|step| match &step.proof {
+                Proof::SeatsJoined(_, seats) => Some(seats.clone()),
+                _ => None,
+            })
+            .expect("a wait for the seats");
+        assert_eq!(wait, LEADER + 1..RAID_BOTS);
+        for seat in &raid[..GROUP_MEMBERS_MAX] {
+            seat.set_joined();
+        }
+        assert!(!raid[MEMBER].joined_in(wait.clone()));
+        for seat in &raid[GROUP_MEMBERS_MAX..] {
+            seat.set_joined();
+        }
+        assert!(raid[MEMBER].joined_in(wait));
+    }
+
     #[test]
     fn the_invite_and_the_accept_read_back_as_the_retail_calls() {
         use nw_messages::social::SocialCall;
@@ -433,6 +591,30 @@ mod tests {
                 answer: REPLY_ACCEPT,
             })
         );
+    }
+
+    /// Every bot of a quest group first leaves the group of its last run (2252), proved by a
+    /// groups state with no group.
+    #[test]
+    fn every_bot_first_leaves_the_group_of_an_earlier_run() {
+        use nw_messages::social::SocialCall;
+        const OWN: u64 = 7;
+        let seats = GroupBoard::seats(GROUP_MEMBERS_MAX);
+        for seat in &seats {
+            let steps = quest_group_steps(seat, Duration::ZERO, true);
+            let Some(Act::Call(make)) = steps[0].acts.first() else {
+                panic!("a call first");
+            };
+            let (type_index, body) = make(OWN).expect("leave");
+            assert_eq!(
+                SocialCall::decode(type_index, &body)
+                    .expect("a social call")
+                    .expect("reads")
+                    .1,
+                SocialCall::Group(GroupCall::Leave { value: LEAVE_VALUE })
+            );
+            assert!(matches!(steps[0].proof, Proof::Check(..)));
+        }
     }
 
     #[test]
@@ -538,20 +720,22 @@ mod tests {
         const HOLD: Duration = Duration::from_secs(600);
         let seats = GroupBoard::seats(3);
         let leader = quest_group_steps(&seats[0], HOLD, false);
-        assert_eq!(leader.len(), 1);
-        assert_eq!(leader[0].what, "invite the other bots into a group");
+        assert_eq!(leader.len(), 2);
+        assert_eq!(leader[0].what, "leave the group of an earlier run");
+        assert_eq!(leader[1].what, "invite the other bots into a group");
         let playing = quest_group_steps(&seats[2], HOLD, true);
-        assert_eq!(playing[0].what, "accept the leader's invite");
-        assert!(matches!(playing[1].proof, Proof::Paused));
+        assert_eq!(playing[1].what, "accept the leader's invite");
+        assert!(matches!(playing[2].proof, Proof::SeatsJoined(..)));
+        assert!(matches!(playing[3].proof, Proof::Paused));
         assert_eq!(
-            playing[1].wait,
+            playing[3].wait,
             MEMBER_PLAY_GAP * 2,
             "the third seat waits for two"
         );
         let member = quest_group_steps(&seats[2], HOLD, false);
-        assert_eq!(member[0].what, "accept the leader's invite");
-        assert!(matches!(&member[1].proof, Proof::LeaderDone(_)));
-        assert_eq!(member[1].wait, HOLD);
+        assert_eq!(member[1].what, "accept the leader's invite");
+        assert!(matches!(&member[2].proof, Proof::LeaderDone(_)));
+        assert_eq!(member[2].wait, HOLD);
         assert!(!seats[1].leader_done());
         seats[0].set_leader_done();
         assert!(seats[1].leader_done(), "every seat of the board sees it");

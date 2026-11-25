@@ -1076,6 +1076,9 @@ impl PlayContent {
                 &self.tables,
             )),
             arena: None,
+            attribute_plan: nw_testclient::play::attribute_plan(
+                &nw_content::character_points::CharacterPoints::of_tables(&self.tables),
+            ),
         }
     }
 }
