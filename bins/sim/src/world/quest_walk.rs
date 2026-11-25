@@ -3261,19 +3261,29 @@ impl SimWorld {
         if held >= wanted {
             return plan;
         }
-        let source = content.gatherables.iter().find(|source| {
-            let crc = lowercase_crc32(&source.id);
-            source
-                .loot_table
-                .as_deref()
-                .is_some_and(|table| content.loot.table_drops(table, &item))
-                && content.gather_points.first(crc).is_some()
-                && self.gate_opens(
-                    number,
-                    content.interact_tags.quest_gate(NO_FACET, Some(crc)),
-                    Some(crc),
-                )
-        });
+        // A source that the player's quest opens goes first: any other gatherable of the
+        // level may drop the item too (live 2026-11-25 22:40Z: the plan named a cactus of
+        // another zone for the water, by the order of a hash table).
+        let sources: Vec<(&nw_content::gathering::Gatherable, bool)> = content
+            .gatherables
+            .iter()
+            .filter_map(|source| {
+                let crc = lowercase_crc32(&source.id);
+                let gate = content.interact_tags.quest_gate(NO_FACET, Some(crc));
+                let fits = source
+                    .loot_table
+                    .as_deref()
+                    .is_some_and(|table| content.loot.table_drops(table, &item))
+                    && content.gather_points.first(crc).is_some()
+                    && self.gate_opens(number, gate, Some(crc));
+                fits.then_some((source, !gate.is_empty()))
+            })
+            .collect();
+        let source = sources
+            .iter()
+            .find(|(_, of_quest)| *of_quest)
+            .or(sources.first())
+            .map(|(source, _)| *source);
         match source {
             Some(source) => StepPlan::Gather {
                 gatherable: source.id.clone(),
@@ -5403,7 +5413,10 @@ mod tests {
                 ..ObjectiveRow::default()
             }],
             TaskBook::new(vec![
-                task("w_root", "ConsecutiveTaskContainer", &["w_fire"]),
+                TaskRow {
+                    interact_tag: Some("IO_Walk_Water".to_owned()),
+                    ..task("w_root", "ConsecutiveTaskContainer", &["w_fire"])
+                },
                 TaskRow {
                     kill_enemy_type: Some(format!("{FIRE}_Interact")),
                     ..task("w_fire", "TaskGameEvent", &[])
@@ -5423,11 +5436,25 @@ mod tests {
             ],
             bucket_items: Vec::new(),
         });
+        // A cactus of the level drops water too; the quest opens the camp's water.
+        const CACTUS: &str = "Walk_Cactus";
+        const WATER_TAG: &str = "IO_Walk_Water";
         content.gatherables = nw_content::gathering::Gatherables::build([
+            gatherable(CACTUS, Some(WATER_TABLE), None),
             gatherable(FIRE, None, Some(format!("{FIRE}_Interact"))),
             gatherable(WATER, Some(WATER_TABLE), None),
         ]);
-        content.gather_points = PlacedPoints::of([FIRE, WATER].map(|id| (lowercase_crc32(id), at)));
+        content.gather_points =
+            PlacedPoints::of([CACTUS, FIRE, WATER].map(|id| (lowercase_crc32(id), at)));
+        content.interact_tags =
+            nw_content::interact_tags::InteractTags::build(&HashMap::new(), [], [])
+                .with_gatherables([(
+                    lowercase_crc32(WATER),
+                    nw_content::interact_tags::VariantTag {
+                        tag: WATER_TAG.to_owned(),
+                        only_on_quest: true,
+                    },
+                )]);
         world.content = Arc::new(content.clone());
         world.start_quest(1, QUEST, NOW).expect("start");
         assert_eq!(
