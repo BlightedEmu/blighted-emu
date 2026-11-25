@@ -81,8 +81,12 @@ const PLAN_PLACED: &str = "placed";
 /// them during the fight.
 const PLAN_TOUCH: &str = "touch";
 /// The word before the radius around a kill plan's place that the player fights within: the
-/// volume of the encounter that spawns the mobs ([`super::dungeon_script::volume_radius_m`]).
+/// volume of the encounter that spawns the mobs ([`super::dungeon_script::fight_radius_m`]).
 const PLAN_WITHIN: &str = "within";
+/// The word before the lowest and the highest height of a kill plan's fight volume, when the
+/// encounter's volume is an upright cylinder ([`super::dungeon_script::volume_levels`]): the
+/// player fights between them.
+const PLAN_LEVELS: &str = "levels";
 /// The word before the gatherable whose nodes give an item plan's item.
 const PLAN_NODE: &str = "node";
 const PLAN_ACHIEVEMENTS: &str = "achievements";
@@ -104,6 +108,15 @@ const START_OBJECT_REACH_M: f32 = 2.0;
 /// The file name start of an open world encounter's start object slice
 /// (`io_worldevent_09a_s3_freshkill.dynamicslice`).
 const START_OBJECT_PREFIX: &str = "io_worldevent_";
+/// The words of a breach object slice's stem (`darkness_core_major_portal_dt3`) that its
+/// gatherable's id leaves out, the size words its id puts first, the start of its id and of its
+/// difficulty word ([`breach_core_gatherable_id`]).
+const BREACH_SLICE_WORDS_LEFT_OUT: [&str; 2] = ["darkness", "core"];
+const BREACH_SIZE_WORDS: [&str; 2] = ["major", "minor"];
+const BREACH_GATHERABLE_START: &str = "Darkness";
+const BREACH_DIFFICULTY_START: &str = "dt";
+/// The folder of the breach objects' slices.
+const BREACH_SLICE_FOLDER: &str = "slices/darkness/events/general/";
 /// The file name end of a slice.
 const SLICE_SUFFIX: &str = ".dynamicslice";
 const PLAN_CAMP: &str = "camp";
@@ -1208,7 +1221,19 @@ impl SimWorld {
                         territory: None,
                     }
                 }
-                (None, Some(place)) => self.walk_to_poi(level, std::slice::from_ref(place)),
+                // A leave task of a tagged volume goes out of it as one of a known area does
+                // (`99E_MSQ_10_d_04_04_03_05_ExitCaveTV_Failsafe`, `TriggerVol_99E_YonasCaveDoor`:
+                // live 2026-11-25 17:54Z the plan sent the bot into the volume four times).
+                (None, Some(place)) => match self.walk_to_poi(level, std::slice::from_ref(place)) {
+                    StepPlan::Go { at, territory } if *leave => StepPlan::Go {
+                        at: Position {
+                            x: at.x + LEAVE_DISTANCE_M,
+                            ..at
+                        },
+                        territory,
+                    },
+                    plan => plan,
+                },
                 (None, None) => broken(
                     "no place: its trigger volume, its location and its POI are all unknown"
                         .to_owned(),
@@ -1798,10 +1823,36 @@ impl SimWorld {
                 event: Box::new(plan),
             };
         }
+        // A breach ends with the gather of its core or fissure, which its last stage spawns
+        // beside the breach's place (`Darkness_SpawnGroup_Major_Master2` at 5087.4 7619.7, its
+        // core at 5086.1 7621.2: 2.0 m; live 2026-11-25 15:54Z the bot cleared every wave and saw
+        // no mob at `Wave_05 - Objective: Destroy the Portal`).
+        if let Some((slice, asset, at)) = self.encounter_objects.standing_where(
+            place,
+            super::dungeon_script::volume_radius_m(encounter),
+            |slice| self.breach_core_gatherable(slice).is_some(),
+        ) && let Some(gatherable) = self.breach_core_gatherable(slice)
+        {
+            return StepPlan::Start {
+                gatherable: gatherable.id.clone(),
+                asset,
+                at,
+                event: Box::new(plan),
+            };
+        }
         // While a wave of it lives, the fight takes that wave's mob where it stands (live
         // 2026-11-24 05:24-05:39Z: a major breach's later waves are impalers, heavies and an
-        // ogre, and a plan of its first target's acolyte held the bot at the acolytes).
-        let (vitals_id, at) = self.encounter_mob_now(index).unwrap_or_else(|| {
+        // ogre, and a plan of its first target's acolyte held the bot at the acolytes). In an
+        // instance the fight takes the encounter's boss ([`Self::boss_now`]): `QuestDracula`'s
+        // first target is Cecilia, who fights beside the player (retail `quest_18025-To-Face-
+        // the-End-2`: every hit of the player's went to Alecksi or Shadow Cecilia).
+        let now = if self.dungeon_run.is_some() {
+            self.boss_now(index, encounter)
+                .map(|spawn| (spawn.vitals_id, spawn.position))
+        } else {
+            self.encounter_mob_now(index)
+        };
+        let (vitals_id, at) = now.unwrap_or_else(|| {
             let vitals = encounter
                 .targets
                 .iter()
@@ -1810,6 +1861,13 @@ impl SimWorld {
                 .map_or_else(|| encounter.name.clone(), |mob| mob.vitals_id.clone());
             (lowercase_crc32(&vitals), encounter.position)
         });
+        // A wave's mob that stands out of the encounter's volume is fought from the encounter's
+        // place: it comes to the player there (live 2026-11-25 15:13:14Z: the boars of
+        // `WorldEvent_09A_M5_WaveEvent` spawn 62 m from its place, the plan sent the bot to
+        // them, out of the 45 m volume, and the encounter with a grace of 0 s reset).
+        let in_volume = position_of(at).horizontal_distance(place)
+            <= super::dungeon_script::fight_radius_m(encounter);
+        let at = if in_volume { at } else { encounter.position };
         let kill = StepPlan::Kill {
             spawn: VitalsSpawn {
                 vitals_id,
@@ -1836,6 +1894,16 @@ impl SimWorld {
     /// 21:31:38: the first quest gatherable at the wagon was `09A_S17_WagonSupplies`, a later
     /// step's object, and the sim refused that gather (`NotOnQuest`); A's run had named
     /// `09A_S17_ProtectRanger` (the order of a hash table).
+    /// The gatherable of a breach's core or fissure object of slice `slice`: the row its slice
+    /// names, as the retail client gathers it (`darkness_core_major_portal_dt1` is
+    /// `DarknessMajorPortalDT1`, Observed in `Corrupted-Breaches-Portal-Big-lvl25` 170.1 s;
+    /// `DarknessMajorPortalDT4` in `Portal-Big-lvl55` 246.2 s; the other kinds Inferred from the
+    /// same names: `darkness_fissure_minor_dt3` is `DarknessMinorFissureDT3`).
+    fn breach_core_gatherable(&self, slice: &str) -> Option<&nw_content::gathering::Gatherable> {
+        let id = breach_core_gatherable_id(slice)?;
+        self.content.gatherables.get(lowercase_crc32(&id))
+    }
+
     fn start_object_gatherable(
         &self,
         slice: &str,
@@ -2459,8 +2527,9 @@ impl SimWorld {
                     let plan = self.use_from_bag(entity, plan);
                     let plan = self.skin_from_drop(&content.quest_guide, step, plan);
                     let plan = self.loot_from_drop(&content.quest_guide, step, plan);
-                    let plan = self.gather_for_event(plan);
+                    let plan = self.gather_for_event(number, plan);
                     let plan = self.gather_for_cyclic(entity, plan);
+                    let plan = self.item_for_gather(entity, number, plan);
                     let plan = self.encounter_for_event(plan);
                     let plan = self.camp_for_event(entity, at, plan);
                     let plan = self.craft_for_event(entity, at, plan);
@@ -3083,23 +3152,47 @@ impl SimWorld {
     /// it ([`StepPlan::Gather`]), or as the gather of the start object an open world encounter
     /// spawns there, which the player awaits in the encounter's volume while it is not up
     /// ([`Self::wait_for_start_object`]). Any other plan as it is.
-    fn gather_for_event(&self, plan: StepPlan) -> StepPlan {
+    ///
+    /// When more than one placed gatherable fires the event, the plan is one gather of the
+    /// first whose quest gate is open to player `number` (build 25810808: the three boards
+    /// `09A_M5_WindowBoardA` to `C` fire `09A_M5_WindowBoard_1_Interact`, the step counts 3 of
+    /// it, and a chain of hidden tasks opens one board after the other; live 2026-11-24 the
+    /// plan named board A for all three and the sim refused the later gathers).
+    fn gather_for_event(&self, number: u64, plan: StepPlan) -> StepPlan {
+        /// No object of its own: the gate is the gate of the gatherable's variants.
+        const NO_FACET: u64 = 0;
+        const ONE_OF_SEVERAL: u32 = 1;
         let StepPlan::Event(FlowEvent::GameEvent(fired), count) = &plan else {
             return plan;
         };
-        let gatherable = self.content.gatherables.iter().find(|gatherable| {
-            gatherable
-                .game_event
-                .as_deref()
-                .is_some_and(|known| known.eq_ignore_ascii_case(fired))
-                && self
-                    .content
-                    .gather_points
-                    .first(lowercase_crc32(&gatherable.id))
-                    .is_some()
+        let firing: Vec<&nw_content::gathering::Gatherable> = self
+            .content
+            .gatherables
+            .iter()
+            .filter(|gatherable| {
+                gatherable
+                    .game_event
+                    .as_deref()
+                    .is_some_and(|known| known.eq_ignore_ascii_case(fired))
+                    && self
+                        .content
+                        .gather_points
+                        .first(lowercase_crc32(&gatherable.id))
+                        .is_some()
+            })
+            .collect();
+        let open = firing.iter().find(|gatherable| {
+            let crc = lowercase_crc32(&gatherable.id);
+            let gate = self.content.interact_tags.quest_gate(NO_FACET, Some(crc));
+            self.gate_opens(number, gate, Some(crc))
         });
-        let Some(gatherable) = gatherable else {
+        let Some(gatherable) = open.or(firing.first()).copied() else {
             return plan;
+        };
+        let count = if firing.len() > 1 {
+            ONE_OF_SEVERAL
+        } else {
+            *count
         };
         // An encounter's start object that stands on the gatherable's point is that gather
         // (retail `09a_s16_destroyabomination` 205.5 s: the gather of `09A_S16_ThrowSwitch`
@@ -3129,10 +3222,66 @@ impl SimWorld {
             },
             None => StepPlan::Gather {
                 gatherable: gatherable.id.clone(),
-                count: *count,
+                count,
                 again: false,
                 event: Box::new(plan),
             },
+        }
+    }
+
+    /// `plan`, with a gather whose gatherable asks for an item that the bag of player `entity`
+    /// (number `number`) lacks ([`nw_content::gathering`]'s gather rule: `ItemRestrictionId`)
+    /// as gathers of a placed gatherable that drops that item and whose quest gate is open to
+    /// the player, one gather for each missing item. Any other plan as it is.
+    ///
+    /// Build 25810808 `99E_MSQ_10_ToCaerDun`: the fire `MSQ_0037_PlanB_Fire_Rima` asks for 5
+    /// `WaterT1`, and the quest opens the water of the camp (`MSQ_0037_PlanB_Water_01`, loot
+    /// table `Settlement_Water`, tag `IO_MSQ_0037_Water`). Live 2026-11-25 17:38Z: the plan
+    /// named the fire only, and the sim refused each gather (`Item`).
+    fn item_for_gather(
+        &self,
+        entity: Option<bevy_ecs::entity::Entity>,
+        number: u64,
+        plan: StepPlan,
+    ) -> StepPlan {
+        /// No object of its own: the gate is the gate of the gatherable's variants.
+        const NO_FACET: u64 = 0;
+        let StepPlan::Gather { gatherable, .. } = &plan else {
+            return plan;
+        };
+        let content = &self.content;
+        let rule = content.gather_rules.of(lowercase_crc32(gatherable));
+        let Some((item, wanted)) = rule.required_item else {
+            return plan;
+        };
+        let held = entity
+            .and_then(|entity| self.world.get::<Player>(entity))
+            .and_then(|player| player.gear.as_ref())
+            .map_or(0, |gear| gear.bag_count(&item));
+        if held >= wanted {
+            return plan;
+        }
+        let source = content.gatherables.iter().find(|source| {
+            let crc = lowercase_crc32(&source.id);
+            source
+                .loot_table
+                .as_deref()
+                .is_some_and(|table| content.loot.table_drops(table, &item))
+                && content.gather_points.first(crc).is_some()
+                && self.gate_opens(
+                    number,
+                    content.interact_tags.quest_gate(NO_FACET, Some(crc)),
+                    Some(crc),
+                )
+        });
+        match source {
+            Some(source) => StepPlan::Gather {
+                gatherable: source.id.clone(),
+                count: wanted - held,
+                again: false,
+                event: Box::new(plan),
+            },
+            None => plan,
         }
     }
 
@@ -3299,9 +3448,12 @@ impl SimWorld {
                     .as_deref()
                     .and_then(|slice| self.open_world_encounter_of_slice(slice))
                     .map(|encounter| {
+                        let levels = super::dungeon_script::volume_levels(encounter)
+                            .map(|(low, high)| format!(" {PLAN_LEVELS} {low:.1} {high:.1}"))
+                            .unwrap_or_default();
                         format!(
-                            " {PLAN_WITHIN} {:.1}",
-                            super::dungeon_script::volume_radius_m(encounter)
+                            " {PLAN_WITHIN} {:.1}{levels}",
+                            super::dungeon_script::fight_radius_m(encounter)
                         )
                     })
                     .unwrap_or_default();
@@ -3506,6 +3658,39 @@ impl SimWorld {
         };
         let _ = self.facet_message(connection, message, now_ms);
     }
+}
+
+/// The gatherable id of breach object slice `slice` ([`SimWorld::breach_core_gatherable`]):
+/// `slices/darkness/events/general/core/darkness_core_major_portal_dt3.dynamicslice` is
+/// `DarknessMajorPortalDT3`; `None` for a slice of no breach object.
+fn breach_core_gatherable_id(slice: &str) -> Option<String> {
+    let stem = slice
+        .strip_prefix(BREACH_SLICE_FOLDER)?
+        .rsplit('/')
+        .next()?
+        .strip_suffix(SLICE_SUFFIX)?;
+    let words: Vec<&str> = stem
+        .split('_')
+        .filter(|word| !BREACH_SLICE_WORDS_LEFT_OUT.contains(word))
+        .collect();
+    let size = words
+        .iter()
+        .find(|word| BREACH_SIZE_WORDS.contains(*word))?;
+    let capital = |word: &str| {
+        if word.starts_with(BREACH_DIFFICULTY_START) {
+            word.to_uppercase()
+        } else {
+            let mut letters = word.chars();
+            letters.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(letters).collect()
+            })
+        }
+    };
+    let mut id = format!("{BREACH_GATHERABLE_START}{}", capital(size));
+    for word in words.iter().filter(|word| *word != size) {
+        id.push_str(&capital(word));
+    }
+    Some(id)
 }
 
 #[cfg(test)]
@@ -3801,6 +3986,39 @@ mod tests {
             }),
         );
         (world, level)
+    }
+
+    /// Retail `Corrupted-Breaches-Portal-Big-lvl25` and `-lvl55`: the client gathers the major
+    /// portal's core as `DarknessMajorPortalDT1` / `DT4`; the fissures and the other cores by
+    /// the same names; another slice names none.
+    #[test]
+    fn a_breach_object_s_slice_names_its_gatherable() {
+        let id = |stem: &str| {
+            breach_core_gatherable_id(&format!(
+                "slices/darkness/events/general/{stem}.dynamicslice"
+            ))
+        };
+        assert_eq!(
+            id("core/darkness_core_major_portal_dt1").as_deref(),
+            Some("DarknessMajorPortalDT1")
+        );
+        assert_eq!(
+            id("core/darkness_core_minor_monolith_dt4").as_deref(),
+            Some("DarknessMinorMonolithDT4")
+        );
+        assert_eq!(
+            id("fissure/darkness_fissure_minor_dt3").as_deref(),
+            Some("DarknessMinorFissureDT3")
+        );
+        assert_eq!(
+            id("hazards/darkness_hazard_corruption_major_l4").as_deref(),
+            Some("DarknessMajorHazardCorruptionL4"),
+            "a name the gatherables do not hold"
+        );
+        assert_eq!(
+            breach_core_gatherable_id("slices/encounters/io_worldevent_x.dynamicslice"),
+            None
+        );
     }
 
     #[test]
@@ -5086,6 +5304,244 @@ mod tests {
             [format!(
                 "plan y_switch start {SWITCH} {ASSET} at 8347.2 1362.4 279.9"
             )]
+        );
+    }
+
+    /// Build 25810808 `99E_MSQ_10_d_04_04_03_05_ExitCaveTV_Failsafe`: a leave task of a tagged
+    /// quest volume. The plan goes out of the volume; an enter task goes to it.
+    #[test]
+    fn a_leave_task_of_a_tagged_volume_goes_out_of_it() {
+        const DOOR_TAG: &str = "TriggerVol_Walk_CaveDoor";
+        const DOOR: [f32; 3] = [8771.5, 6576.5, 312.7];
+        let (mut world, level) = walk_world();
+        let mut place = nw_world::collision::IDENTITY_AFFINE;
+        for (axis, value) in DOOR.iter().enumerate() {
+            place[axis][3] = *value;
+        }
+        let mut content = (*world.content).clone();
+        content.quest_volumes = vec![nw_world::collision::QuestVolume {
+            tag: DOOR_TAG.to_owned(),
+            shape: nw_world::collision::Geometry::Sphere { radius: 5.0 },
+            place,
+        }];
+        world.content = Arc::new(content);
+        let go_x = |leave: bool| {
+            let step = WaitingStep {
+                quest: "walk_cave".to_owned(),
+                task: "walk_cave_door".to_owned(),
+                kind: TaskKind::TriggerArea {
+                    area: None,
+                    leave,
+                    place: Some(DOOR_TAG.to_owned()),
+                },
+                progress: 0,
+                container_item: false,
+                game_mode: None,
+            };
+            match world.walk_plan(&level, &step, at(CELL_M / 2.0)) {
+                StepPlan::Go { at, .. } => at.x,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!((go_x(false) - DOOR[0]).abs() < 0.01);
+        assert!((go_x(true) - DOOR[0] - LEAVE_DISTANCE_M).abs() < 0.01);
+    }
+
+    /// Build 25810808 `99E_MSQ_10_ToCaerDun`: the fire asks for water in the bag, and a placed
+    /// water gatherable drops it. The plan gathers the water first.
+    #[test]
+    fn a_gather_that_asks_for_an_item_the_bag_lacks_gathers_that_item_first() {
+        use nw_content::gathering::{GatherRule, GatherRules};
+        use nw_content::loot::{LootRow, LootSource, LootTables};
+        const QUEST: &str = "walk_fires";
+        const FIRE: &str = "Walk_Fire";
+        const WATER: &str = "Walk_Water";
+        const WATER_ITEM: &str = "Walk_WaterT1";
+        const WATER_TABLE: &str = "Walk_Settlement_Water";
+        const WATER_FOR_A_FIRE: u32 = 5;
+        const ALWAYS: &str = "0";
+        const MAX_ROLL: i64 = 100_000;
+        let at = Position {
+            x: 9152.0,
+            y: 6551.0,
+            z: 100.0,
+        };
+        let (mut world, _) = walk_world();
+        world
+            .admit(
+                &super::super::tests::admit_at(1, CELL_M / 2.0, true),
+                NOW,
+                NOW,
+            )
+            .expect("admit");
+        let row = |id: &str, cell: &str, and_or: Option<&str>, max_roll: Option<i64>| LootRow {
+            id: id.to_owned(),
+            and_or: and_or.map(str::to_owned),
+            max_roll,
+            cells: [(1, cell.to_owned())].into(),
+            ..LootRow::default()
+        };
+        let gatherable = |id: &str, table: Option<&str>, event: Option<String>| {
+            nw_content::gathering::Gatherable {
+                id: id.to_owned(),
+                gather_ms: 0,
+                respawn_ms: (0, 0),
+                loot_table: table.map(str::to_owned),
+                loot_container: true,
+                tradeskill: None,
+                tool_required: false,
+                by_hand: true,
+                game_event: event,
+                animation: None,
+            }
+        };
+        let mut content = (*world.content).clone();
+        content.quests = QuestBook::build(
+            [ObjectiveRow {
+                id: QUEST.to_owned(),
+                root: "w_root".to_owned(),
+                ..ObjectiveRow::default()
+            }],
+            TaskBook::new(vec![
+                task("w_root", "ConsecutiveTaskContainer", &["w_fire"]),
+                TaskRow {
+                    kill_enemy_type: Some(format!("{FIRE}_Interact")),
+                    ..task("w_fire", "TaskGameEvent", &[])
+                },
+            ]),
+        );
+        content.loot = LootTables::build(LootSource {
+            rows: vec![
+                row(WATER_TABLE, WATER_ITEM, Some("AND"), None),
+                row(&format!("{WATER_TABLE}_Qty"), "1", None, None),
+                row(
+                    &format!("{WATER_TABLE}_Probs"),
+                    ALWAYS,
+                    None,
+                    Some(MAX_ROLL),
+                ),
+            ],
+            bucket_items: Vec::new(),
+        });
+        content.gatherables = nw_content::gathering::Gatherables::build([
+            gatherable(FIRE, None, Some(format!("{FIRE}_Interact"))),
+            gatherable(WATER, Some(WATER_TABLE), None),
+        ]);
+        content.gather_points = PlacedPoints::of([FIRE, WATER].map(|id| (lowercase_crc32(id), at)));
+        world.content = Arc::new(content.clone());
+        world.start_quest(1, QUEST, NOW).expect("start");
+        assert_eq!(
+            world.quest_plan_lines(1, QUEST),
+            [format!("plan w_fire gather {FIRE} 1")],
+            "the fire asks for nothing"
+        );
+        content.gather_rules = GatherRules::build([(
+            FIRE.to_owned(),
+            GatherRule {
+                required_rank: 0,
+                required_item: Some((WATER_ITEM.to_owned(), WATER_FOR_A_FIRE)),
+            },
+        )]);
+        world.content = Arc::new(content);
+        assert_eq!(
+            world.quest_plan_lines(1, QUEST),
+            [format!("plan w_fire gather {WATER} {WATER_FOR_A_FIRE}")]
+        );
+    }
+
+    /// Build 25810808 `09A_M5_DefendSettlement`: three boards fire one game event, the step
+    /// counts the event, and a chain of hidden tasks opens one board after the other. The plan
+    /// names the board that is open to the player.
+    #[test]
+    fn a_game_event_step_of_several_gatherables_takes_the_one_its_quest_opens() {
+        use nw_content::interact_tags::{InteractTags, VariantTag};
+        const QUEST: &str = "walk_boards";
+        const BOARD_EVENT: &str = "Walk_Board_Interact";
+        const BOARDS: [&str; 2] = ["Walk_BoardA", "Walk_BoardB"];
+        const BOARD_COUNT: i64 = 2;
+        let at = Position {
+            x: 8881.8,
+            y: 696.7,
+            z: 120.0,
+        };
+        let (mut world, _) = walk_world();
+        world
+            .admit(
+                &super::super::tests::admit_at(1, CELL_M / 2.0, true),
+                NOW,
+                NOW,
+            )
+            .expect("admit");
+        let board_task = |board: &str| TaskRow {
+            kill_enemy_type: Some(BOARD_EVENT.to_owned()),
+            interact_tag: Some(format!("IO_{board}")),
+            ..task(&format!("x_{board}"), "TaskGameEvent", &[])
+        };
+        let mut content = (*world.content).clone();
+        content.quests = QuestBook::build(
+            [ObjectiveRow {
+                id: QUEST.to_owned(),
+                root: "x_root".to_owned(),
+                ..ObjectiveRow::default()
+            }],
+            TaskBook::new(vec![
+                task("x_root", "SimpleTaskContainer", &["x_tracker", "x_chain"]),
+                TaskRow {
+                    kill_enemy_type: Some(BOARD_EVENT.to_owned()),
+                    target_qty: Some(BOARD_COUNT),
+                    ..task("x_tracker", "TaskGameEvent", &[])
+                },
+                task(
+                    "x_chain",
+                    "ConsecutiveTaskContainer",
+                    &["x_Walk_BoardA", "x_Walk_BoardB"],
+                ),
+                board_task(BOARDS[0]),
+                board_task(BOARDS[1]),
+            ]),
+        );
+        content.gatherables = nw_content::gathering::Gatherables::build(BOARDS.map(|board| {
+            nw_content::gathering::Gatherable {
+                id: board.to_owned(),
+                gather_ms: 0,
+                respawn_ms: (0, 0),
+                loot_table: None,
+                loot_container: false,
+                tradeskill: None,
+                tool_required: false,
+                by_hand: true,
+                game_event: Some(BOARD_EVENT.to_owned()),
+                animation: None,
+            }
+        }));
+        content.gather_points = PlacedPoints::of(BOARDS.map(|board| (lowercase_crc32(board), at)));
+        content.interact_tags =
+            InteractTags::build(&HashMap::new(), [], []).with_gatherables(BOARDS.map(|board| {
+                (
+                    lowercase_crc32(board),
+                    VariantTag {
+                        tag: format!("IO_{board}"),
+                        only_on_quest: true,
+                    },
+                )
+            }));
+        world.content = Arc::new(content);
+        world.start_quest(1, QUEST, NOW).expect("start");
+        let tracker_plan = |world: &mut SimWorld| {
+            world
+                .quest_plan_lines(1, QUEST)
+                .into_iter()
+                .find(|line| line.starts_with("plan x_tracker "))
+                .expect("the tracker's plan")
+        };
+        assert_eq!(
+            tracker_plan(&mut world),
+            format!("plan x_tracker gather {} 1", BOARDS[0])
+        );
+        world.quest_event(1, Event::GameEvent(BOARD_EVENT), NOW);
+        assert_eq!(
+            tracker_plan(&mut world),
+            format!("plan x_tracker gather {} 1", BOARDS[1])
         );
     }
 

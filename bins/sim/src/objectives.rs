@@ -1484,6 +1484,10 @@ fn kind_of(row: &TaskRow) -> TaskKind {
     }
 }
 
+/// The longest timer that counts as a step's fall-through, ms (**Inferred**: the timers beside
+/// a monologue or a cinematic are some tens of seconds; a longer one is a time limit).
+const FALL_THROUGH_TIMER_MS: u64 = 60_000;
+
 impl ObjectiveTree {
     /// Whether task `index` is the reset branch of a step: a `TaskDie` beside another task in a
     /// `SimpleTaskContainer`. Observed (content bundle 25810808): each step of a PvP faction
@@ -1503,6 +1507,25 @@ impl ObjectiveTree {
                         .children
                         .iter()
                         .any(|child| !matches!(self.tasks[*child].kind, TaskKind::Die { .. }))
+            })
+    }
+
+    /// Whether a short timer ends task `index` for the player: its parent is a
+    /// `PartialTaskContainer` (done with any one of its tasks) with a timer of at most
+    /// [`FALL_THROUGH_TIMER_MS`] beside it. Build 25810808: `99E_MSQ_10_d_04_04_02_02a_container_monologueFallthru`
+    /// holds the game event of Isabella's monologue and a timer of 35 s. Live 2026-11-25
+    /// 17:48Z: the plan sent the bot to a fight for that event, the bot saw no mob for 45 s and
+    /// gave the quest up, 3 s after the timer had ended the step.
+    pub(crate) fn falls_through_by_timer(&self, index: usize) -> bool {
+        let task = &self.tasks[index];
+        !matches!(task.kind, TaskKind::Timer { .. })
+            && task.parent.is_some_and(|parent| {
+                let parent = &self.tasks[parent];
+                matches!(parent.kind, TaskKind::Partial)
+                    && parent.children.iter().any(|child| {
+                        matches!(self.tasks[*child].kind, TaskKind::Timer { duration_ms }
+                            if duration_ms <= FALL_THROUGH_TIMER_MS)
+                    })
             })
     }
 
@@ -2203,6 +2226,8 @@ impl ObjectiveRun {
                 (_, TaskKind::Consecutive | TaskKind::Partial | TaskKind::Simple) => None,
                 // The reset branch of a step is nothing a player does for the quest.
                 _ if self.tree.resets_on_death(index) => None,
+                // Nor is a step that a short timer beside it ends.
+                _ if self.tree.falls_through_by_timer(index) => None,
                 (TaskState::Active { progress, .. }, kind) => {
                     Some((task.id.as_str(), kind, *progress))
                 }
@@ -4714,6 +4739,37 @@ pub(crate) mod tests {
         assert_eq!(waiting(&run), [("Last".to_owned(), 0)]);
         run.event(Event::Died, NOW);
         assert!(run.finished());
+    }
+
+    /// `99E_MSQ_10_d_04_04_02_02a_container_monologueFallthru`: a monologue's game event and a
+    /// timer of 35 s. The timer ends the step; a long timer beside a step is a time limit.
+    #[test]
+    fn a_step_beside_a_short_timer_in_a_partial_container_is_no_step_of_the_player() {
+        const MONOLOGUE_S: f64 = 35.0;
+        const TIME_LIMIT_S: f64 = 600.0;
+        let rows = |timer_s: f64| {
+            vec![
+                container("Root", "PartialTaskContainer", &["Monologue", "Timer"]),
+                TaskRow {
+                    kill_enemy_type: Some("IsabellaIntro_Complete".to_owned()),
+                    ..row("Monologue", "TaskGameEvent")
+                },
+                TaskRow {
+                    duration: Some(timer_s),
+                    ..row("Timer", "TaskTimer")
+                },
+            ]
+        };
+        let waiting = |timer_s: f64| -> Vec<String> {
+            let tree = Arc::new(ObjectiveTree::build(&rows(timer_s), "Root").expect("tree"));
+            let (run, _) = ObjectiveRun::start(tree, NOW);
+            run.waiting_steps()
+                .into_iter()
+                .map(|(task, _, _)| task.to_owned())
+                .collect()
+        };
+        assert_eq!(waiting(MONOLOGUE_S), ["Timer"]);
+        assert_eq!(waiting(TIME_LIMIT_S), ["Monologue", "Timer"]);
     }
 
     #[test]

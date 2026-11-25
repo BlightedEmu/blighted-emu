@@ -938,14 +938,19 @@ impl SimWorld {
             .content
             .interact_tags
             .quest_gate(request.target_entity, request.gatherable);
+        self.gate_opens(number, gate, request.gatherable)
+    }
+
+    /// Whether the quest gate `gate` of an object that gathers `gatherable` is open to player
+    /// `number`: no gate, an active task of its quests that names a tag of the gate, or its
+    /// puzzle's turn.
+    pub(super) fn gate_opens(&self, number: u64, gate: &[String], gatherable: Option<u32>) -> bool {
         gate.is_empty()
             || self
                 .quests_of_player(number)
                 .iter()
                 .any(|quest| gate.iter().any(|tag| quest.run.enables_interact(tag)))
-            || request
-                .gatherable
-                .is_some_and(|crc| self.puzzle_opens(number, crc))
+            || gatherable.is_some_and(|crc| self.puzzle_opens(number, crc))
     }
 
     /// Whether player `entity` may gather `gatherable`: one that needs its tradeskill's tool
