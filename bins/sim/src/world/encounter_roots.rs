@@ -1251,15 +1251,29 @@ impl EncounterObjects {
         position: Position,
         radius_m: f32,
     ) -> Option<(&str, [u8; 16])> {
+        self.standing_where(position, radius_m, |_| true)
+            .map(|(slice, asset, _)| (slice, asset))
+    }
+
+    /// The slice, slice asset and place of a start object whose slice is `wanted` that stands,
+    /// not gathered, within `radius_m` of `position`.
+    pub(super) fn standing_where(
+        &self,
+        position: Position,
+        radius_m: f32,
+        wanted: impl Fn(&str) -> bool,
+    ) -> Option<(&str, [u8; 16], Position)> {
         self.objects
             .values()
             .filter(|object| {
-                !object.depleted && object.position.horizontal_distance(position) <= radius_m
+                !object.depleted
+                    && wanted(&object.slice)
+                    && object.position.horizontal_distance(position) <= radius_m
             })
             .find_map(|object| {
                 self.kinds
                     .get(&object.slice)
-                    .map(|kind| (object.slice.as_str(), kind.asset))
+                    .map(|kind| (object.slice.as_str(), kind.asset, object.position))
             })
     }
 

@@ -15,6 +15,13 @@
 //!   turn: she consumes her cultists, transforms, or calls the water.
 //! - Adiana (`QuestAdiana`, `FL_AI_Adiana_Bow`): shadow archers on a timer, a second phase below
 //!   half health.
+//! - Alecksi (`QuestDracula`, `Trial_Quest_Dracula_Boss_Alecksi`): his phase events at health
+//!   shares, his health held at each share until its event, no hits while Shadow Cecilia stands
+//!   (our tree sends none of `Phase_2`, `Phase_3`, `Phase_4`: live 2026-11-25 15:09-15:12Z a bot
+//!   took him from 225,333 to 6,661 in his first fight stage).
+//! - Varlaam (`QuestVarlaam`, `Werewolf_Asena_MSQ_Pt1`): a defense; he jumps away, fights to
+//!   70 %, leaves while a wave comes, returns and fights to 40 %, then leaves: the events of
+//!   each turn, his health held at each share, no hits while he is away.
 
 use std::collections::HashMap;
 
@@ -48,6 +55,10 @@ const LIANG_VITALS: &str = "abominable_liang_msq";
 const ISABELLA_VITALS: &str = "isabella_msq2";
 /// Adiana's vitals id.
 const ADIANA_VITALS: &str = "fl_ai_adiana_bow";
+/// Alecksi's vitals id.
+const ALECKSI_VITALS: &str = "trial_quest_dracula_boss_alecksi";
+/// Varlaam's vitals id.
+const VARLAAM_VITALS: &str = "werewolf_asena_msq_pt1";
 
 /// The talisman pile, a pickup a player takes by walking onto it: the plan of a kill step whose
 /// encounter spawns it names its places ([`touch_pickup`]).
@@ -189,6 +200,41 @@ const ADIANA_PHASE2_FRAGMENT: &str = "Intro_Phase2";
 /// 309.707 s.
 const PHASE2_SHADOW_FIRST_MS: u64 = 2_650;
 const PHASE2_SHADOW_EVERY_MS: u64 = 33_200;
+/// Alecksi's stages (`QuestDracula` `DraculaEnc`, in their order).
+const ALECKSI_FIGHT_STAGE: &str = "Wave 2 - Fight Alecksi";
+const ALECKSI_INTERLUDE_STAGE: &str = "Wave 3 - Interlude I - Alecksi vs. Cecilia";
+const ALECKSI_SHADOW_STAGE: &str = "Wave 4 - Destroy Shadow Cecilia";
+const ALECKSI_INTERLUDE_2_STAGE: &str = "Wave 5 - Interlude II - Alecksi vs. Lillith";
+/// `Phase_2` once his health is at this share in his fight stage. Observed in a range: the
+/// stage ended at 133.107 s with him at 196,221 of 226,384 (86.7 %), the sample before 89.4 %
+/// (`quest_18025-To-Face-the-End-2`); Inferred: 87.5 %.
+const ALECKSI_PHASE_2: (f64, &str) = (0.875, "Phase_2");
+/// `Phase_3` once his health is at this share in the first interlude. Observed: 135,989
+/// (60.07 %) at 235.3 s, the stage ended at 239.439 s; Inferred: 60 %.
+const ALECKSI_PHASE_3: (f64, &str) = (0.6, "Phase_3");
+/// `Phase_4` this long after the second interlude starts (Shadow Cecilia's death). Observed:
+/// 273.835 -> 274.934 s.
+const ALECKSI_PHASE_4: (u64, &str) = (1_099, "Phase_4");
+
+/// Varlaam's stages (`QuestVarlaam` `EncounterVarlaam`, children of `_Wave 2 - Defend`).
+const VARLAAM_INTRO_STAGE: &str = "Phase 1b - Intro";
+const VARLAAM_WAIT_STAGE: &str = "Phase 2c - Wait";
+/// `Intro_Complete` this long after his intro stage starts (it ends his `_Wave 1 - Boss Intro`
+/// too). Observed: 406.316 -> 410.609 s.
+const VARLAAM_INTRO: (u64, &str) = (4_293, "Intro_Complete");
+const VARLAAM_FIGHT_STAGE: &str = "Phase 2d - Fight Boss";
+const VARLAAM_RETURN_STAGE: &str = "Phase 2f - Boss Returns";
+/// `Boss_Jump` this long after his wait starts. Observed: 453.825 -> 460.592 s
+/// (`quest_18012-Connect-the-Dots`).
+const VARLAAM_JUMP: (u64, &str) = (6_767, "Boss_Jump");
+/// `Next_Wave` once his health is at this share in his fight. Observed: he stopped at 107,839 of
+/// 154,056 (70.0 %) at 481.090 s, the stage ended at 485.724 s.
+const VARLAAM_NEXT_WAVE: (f64, &str) = (0.7, "Next_Wave");
+/// `Boss_Outro`, then `Enc_Complete`, once his health is at this share after his return.
+/// Observed: he stopped at 61,622 (40.0 %) at 534.921 s and took no hits from 541.322 s;
+/// both events came at 640.601 s (Unknown what he waited for; Inferred: the share).
+const VARLAAM_OUTRO: (f64, [&str; 2]) = (0.4, ["Boss_Outro", "Enc_Complete"]);
+
 /// The length of a reaction or transition the bosses play (Inferred, the Liang reaction).
 const BOSS_MOVE_MS: u64 = LIANG_REACTION_MS;
 
@@ -214,6 +260,8 @@ enum Step {
         old: Option<&'static str>,
         new: Option<&'static str>,
     },
+    /// Its health floor becomes this share of its max health (`None`: no floor).
+    ShareFloor(Option<f64>),
     /// It consumes cultist `index` of [`CULTISTS`] (gone, a buff more).
     Consume(usize),
     /// It roots and consumes the players near it.
@@ -563,12 +611,185 @@ impl Adiana {
     }
 }
 
+/// Where Alecksi's encounter is: its stages' starts, and his health's share of his max.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AlecksiView {
+    /// His encounter's intro is over ([`super::dungeon_script::DungeonRun::boss_intro_over`]).
+    intro_over: bool,
+    fight_ms: Option<u64>,
+    interlude_ms: Option<u64>,
+    shadow_ms: Option<u64>,
+    interlude_2_ms: Option<u64>,
+    share: f64,
+    /// A hit took him down to his health floor since the last tick (the floor holds his health
+    /// a point above the share: 135,831 of 226,384 is 60.0002 %).
+    reached: bool,
+}
+
+/// Alecksi's fight: the phase events sent so far, and his health floor now.
+#[derive(Debug, Clone, PartialEq)]
+struct Alecksi {
+    sent: usize,
+    floor: Option<f64>,
+    intro: bool,
+    shadow: bool,
+}
+
+impl Alecksi {
+    const fn new() -> Self {
+        Self {
+            sent: 0,
+            floor: None,
+            intro: true,
+            shadow: false,
+        }
+    }
+
+    /// How he shows that he takes no hits: in his intro, as every boss of an expedition or a
+    /// trial ([`super::linked_bosses`]; Observed: invulnerable from his first card 14.5 s to
+    /// 99.8 s), and while Shadow Cecilia stands (from her spawn 239.905 s to her death
+    /// 273.935 s, no "Immune").
+    const fn invulnerable(&self) -> Option<Invulnerable> {
+        if self.intro {
+            Some(IMMUNE)
+        } else if self.shadow {
+            Some(UNTOUCHABLE)
+        } else {
+            None
+        }
+    }
+
+    /// A tick at `now_ms` with his encounter's `view`.
+    fn tick(&mut self, now_ms: u64, view: AlecksiView) -> Vec<Step> {
+        let mut steps = Vec::new();
+        let fight = view.fight_ms.is_some() && view.interlude_ms.is_none();
+        let interlude = view.interlude_ms.is_some() && view.shadow_ms.is_none();
+        self.intro = !view.intro_over;
+        self.shadow = view.shadow_ms.is_some() && view.interlude_2_ms.is_none();
+        let at = |share: f64| view.reached || view.share <= share;
+        let due = match self.sent {
+            0 => fight && at(ALECKSI_PHASE_2.0),
+            1 => interlude && at(ALECKSI_PHASE_3.0),
+            2 => view
+                .interlude_2_ms
+                .is_some_and(|start| now_ms >= start.saturating_add(ALECKSI_PHASE_4.0)),
+            _ => false,
+        };
+        if due {
+            let event = [ALECKSI_PHASE_2.1, ALECKSI_PHASE_3.1, ALECKSI_PHASE_4.1][self.sent];
+            steps.push(Step::Event(event));
+            self.sent += 1;
+        }
+        let floor = match self.sent {
+            0 if view.fight_ms.is_some() => Some(ALECKSI_PHASE_2.0),
+            1 => Some(ALECKSI_PHASE_3.0),
+            _ => None,
+        };
+        if floor != self.floor {
+            self.floor = floor;
+            steps.push(Step::ShareFloor(floor));
+        }
+        steps
+    }
+}
+
+/// Where Varlaam's encounter is: its stages' starts, his health's share, and whether a hit
+/// took him to his floor since the last tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VarlaamView {
+    intro_ms: Option<u64>,
+    wait_ms: Option<u64>,
+    fight_ms: Option<u64>,
+    return_ms: Option<u64>,
+    share: f64,
+    reached: bool,
+}
+
+/// Varlaam's fight: the turns he ended, his health floor now, whether he takes hits.
+#[derive(Debug, Clone, PartialEq)]
+struct Varlaam {
+    intro_sent: bool,
+    sent: usize,
+    floor: Option<f64>,
+    hittable: bool,
+}
+
+impl Varlaam {
+    const fn new() -> Self {
+        Self {
+            intro_sent: false,
+            sent: 0,
+            floor: None,
+            hittable: false,
+        }
+    }
+
+    /// He takes hits only in his fight and after his return, until each one's share (Observed:
+    /// invulnerable 399.4-462.0 s, 486.6-518.4 s and from 541.3 s; no "Immune").
+    const fn invulnerable(&self) -> Option<Invulnerable> {
+        if self.hittable {
+            None
+        } else {
+            Some(UNTOUCHABLE)
+        }
+    }
+
+    /// A tick at `now_ms` with his encounter's `view`.
+    fn tick(&mut self, now_ms: u64, view: VarlaamView) -> Vec<Step> {
+        let mut steps = Vec::new();
+        let at = |share: f64| view.reached || view.share <= share;
+        if !self.intro_sent
+            && view
+                .intro_ms
+                .is_some_and(|start| now_ms >= start.saturating_add(VARLAAM_INTRO.0))
+        {
+            self.intro_sent = true;
+            steps.push(Step::Event(VARLAAM_INTRO.1));
+        }
+        match self.sent {
+            0 if view
+                .wait_ms
+                .is_some_and(|start| now_ms >= start.saturating_add(VARLAAM_JUMP.0)) =>
+            {
+                steps.push(Step::Event(VARLAAM_JUMP.1));
+                self.sent = 1;
+            }
+            1 if view.fight_ms.is_some() && at(VARLAAM_NEXT_WAVE.0) => {
+                steps.push(Step::Event(VARLAAM_NEXT_WAVE.1));
+                self.sent = 2;
+            }
+            2 if view.return_ms.is_some() && at(VARLAAM_OUTRO.0) => {
+                steps.extend(VARLAAM_OUTRO.1.map(Step::Event));
+                self.sent = 3;
+            }
+            _ => {}
+        }
+        self.hittable = match self.sent {
+            1 => view.fight_ms.is_some(),
+            2 => view.return_ms.is_some(),
+            _ => false,
+        };
+        let floor = match self.sent {
+            1 => Some(VARLAAM_NEXT_WAVE.0),
+            2 => Some(VARLAAM_OUTRO.0),
+            _ => None,
+        };
+        if floor != self.floor {
+            self.floor = floor;
+            steps.push(Step::ShareFloor(floor));
+        }
+        steps
+    }
+}
+
 /// The fight of one boss.
 #[derive(Debug, Clone, PartialEq)]
 enum Fight {
     Liang(Liang),
     Isabella(Isabella),
     Adiana(Adiana),
+    Alecksi(Alecksi),
+    Varlaam(Varlaam),
 }
 
 /// The scripted bosses of the sim and their talisman piles.
@@ -594,6 +815,8 @@ impl Fight {
             Self::Liang(_) => None,
             Self::Isabella(isabella) => isabella.invulnerable(now_ms),
             Self::Adiana(adiana) => adiana.invulnerable(),
+            Self::Alecksi(alecksi) => alecksi.invulnerable(),
+            Self::Varlaam(varlaam) => varlaam.invulnerable(),
         }
     }
 }
@@ -602,6 +825,11 @@ impl BossFights {
     /// The encounter events the bosses sent since the last call: (boss, event id).
     pub(super) fn take_events(&mut self) -> Vec<(u64, String)> {
         std::mem::take(&mut self.events)
+    }
+
+    /// Whether boss `boss` plays a fight of these rules: they show its invulnerability.
+    pub(super) fn scripted(&self, boss: u64) -> bool {
+        self.fights.contains_key(&boss)
     }
 }
 
@@ -613,6 +841,10 @@ fn fight_of(vitals: u32, now_ms: u64) -> Option<Fight> {
         Some(Fight::Isabella(Isabella::new()))
     } else if vitals == lowercase_crc32(ADIANA_VITALS) {
         Some(Fight::Adiana(Adiana::new()))
+    } else if vitals == lowercase_crc32(ALECKSI_VITALS) {
+        Some(Fight::Alecksi(Alecksi::new()))
+    } else if vitals == lowercase_crc32(VARLAAM_VITALS) {
+        Some(Fight::Varlaam(Varlaam::new()))
     } else {
         None
     }
@@ -753,6 +985,49 @@ impl SimWorld {
                 self.boss_fights.fights.insert(boss, Fight::Adiana(adiana));
                 steps
             }
+            Some(Fight::Alecksi(mut alecksi)) => {
+                let view = AlecksiView {
+                    intro_over: self
+                        .dungeon_run
+                        .as_ref()
+                        .and_then(|run| run.boss_intro_over(boss))
+                        .unwrap_or(true),
+                    fight_ms: started(self, ALECKSI_FIGHT_STAGE),
+                    interlude_ms: started(self, ALECKSI_INTERLUDE_STAGE),
+                    shadow_ms: started(self, ALECKSI_SHADOW_STAGE),
+                    interlude_2_ms: started(self, ALECKSI_INTERLUDE_2_STAGE),
+                    share,
+                    reached: self
+                        .health_floors
+                        .take_reached(FLOOR_OWNER)
+                        .iter()
+                        .any(|reached| reached.mob == boss),
+                };
+                let steps = alecksi.tick(now_ms, view);
+                self.boss_fights
+                    .fights
+                    .insert(boss, Fight::Alecksi(alecksi));
+                steps
+            }
+            Some(Fight::Varlaam(mut varlaam)) => {
+                let view = VarlaamView {
+                    intro_ms: started(self, VARLAAM_INTRO_STAGE),
+                    wait_ms: started(self, VARLAAM_WAIT_STAGE),
+                    fight_ms: started(self, VARLAAM_FIGHT_STAGE),
+                    return_ms: started(self, VARLAAM_RETURN_STAGE),
+                    share,
+                    reached: self
+                        .health_floors
+                        .take_reached(FLOOR_OWNER)
+                        .iter()
+                        .any(|reached| reached.mob == boss),
+                };
+                let steps = varlaam.tick(now_ms, view);
+                self.boss_fights
+                    .fights
+                    .insert(boss, Fight::Varlaam(varlaam));
+                steps
+            }
             None => Vec::new(),
         };
         self.boss_steps(boss, steps, now_ms);
@@ -839,6 +1114,8 @@ impl SimWorld {
                     }
                     self.set_floor(boss, new);
                 }
+                Step::ShareFloor(Some(share)) => self.health_floors.set(boss, share, FLOOR_OWNER),
+                Step::ShareFloor(None) => self.health_floors.clear(boss),
                 Step::Consume(cultist) => {
                     let taken: Vec<u64> = self
                         .boss_fights
@@ -1321,6 +1598,124 @@ mod tests {
                 .tick(summon + SUMMON_MS + 60_000, &view(true))
                 .is_empty()
         );
+    }
+
+    /// Retail `quest_18025-To-Face-the-End-2`: Alecksi takes no hits in his intro, his health
+    /// holds at 87.5 % in his fight until `Phase_2`, at 60 % in the first interlude until
+    /// `Phase_3` (a floor reached counts: it holds a point above the share), he takes no hits while Shadow Cecilia stands, and `Phase_4` comes 1.1 s after
+    /// the second interlude starts.
+    #[test]
+    fn alecksi_sends_his_phases_at_his_health_shares_and_hides_behind_the_shadow() {
+        let mut alecksi = Alecksi::new();
+        let mut view = AlecksiView {
+            intro_over: false,
+            fight_ms: None,
+            interlude_ms: None,
+            shadow_ms: None,
+            interlude_2_ms: None,
+            share: 1.0,
+            reached: false,
+        };
+        assert!(alecksi.tick(T0, view).is_empty());
+        assert_eq!(alecksi.invulnerable(), Some(IMMUNE), "his intro");
+        view.intro_over = true;
+        view.fight_ms = Some(T0);
+        assert_eq!(
+            alecksi.tick(T0, view),
+            [Step::ShareFloor(Some(ALECKSI_PHASE_2.0))]
+        );
+        assert_eq!(alecksi.invulnerable(), None);
+        view.share = ALECKSI_PHASE_2.0;
+        assert_eq!(
+            alecksi.tick(T0 + 1, view),
+            [
+                Step::Event(ALECKSI_PHASE_2.1),
+                Step::ShareFloor(Some(ALECKSI_PHASE_3.0))
+            ]
+        );
+        assert!(alecksi.tick(T0 + 2, view).is_empty(), "no interlude yet");
+        view.interlude_ms = Some(T0 + 2);
+        view.share = ALECKSI_PHASE_3.0 + f64::EPSILON;
+        view.reached = true;
+        assert_eq!(
+            alecksi.tick(T0 + 3, view),
+            [Step::Event(ALECKSI_PHASE_3.1), Step::ShareFloor(None)]
+        );
+        view.reached = false;
+        view.shadow_ms = Some(T0 + 4);
+        assert!(alecksi.tick(T0 + 4, view).is_empty());
+        assert_eq!(
+            alecksi.invulnerable(),
+            Some(UNTOUCHABLE),
+            "the shadow stands"
+        );
+        view.interlude_2_ms = Some(T0 + 5);
+        assert!(alecksi.tick(T0 + 5, view).is_empty());
+        assert_eq!(alecksi.invulnerable(), None);
+        assert_eq!(
+            events(&alecksi.tick(T0 + 5 + ALECKSI_PHASE_4.0, view)),
+            [ALECKSI_PHASE_4.1]
+        );
+        assert!(alecksi.tick(T0 + 6 + ALECKSI_PHASE_4.0, view).is_empty());
+    }
+
+    /// Retail `quest_18012-Connect-the-Dots`: Varlaam ends his intro 4.3 s into it, takes no
+    /// hits until his fight, jumps
+    /// 6.8 s into his wait, fights to 70 % (`Next_Wave`), takes no hits until his return, then
+    /// fights to 40 % (`Boss_Outro`, `Enc_Complete`) and takes no hits again.
+    #[test]
+    fn varlaam_jumps_fights_to_his_shares_and_leaves() {
+        let mut varlaam = Varlaam::new();
+        let mut view = VarlaamView {
+            intro_ms: None,
+            wait_ms: None,
+            fight_ms: None,
+            return_ms: None,
+            share: 1.0,
+            reached: false,
+        };
+        assert!(varlaam.tick(T0, view).is_empty());
+        assert_eq!(varlaam.invulnerable(), Some(UNTOUCHABLE));
+        view.intro_ms = Some(T0 - VARLAAM_INTRO.0);
+        assert_eq!(events(&varlaam.tick(T0, view)), [VARLAAM_INTRO.1]);
+        view.wait_ms = Some(T0);
+        assert!(varlaam.tick(T0 + VARLAAM_JUMP.0 - 1, view).is_empty());
+        assert_eq!(
+            varlaam.tick(T0 + VARLAAM_JUMP.0, view),
+            [
+                Step::Event(VARLAAM_JUMP.1),
+                Step::ShareFloor(Some(VARLAAM_NEXT_WAVE.0))
+            ]
+        );
+        assert!(
+            varlaam.invulnerable().is_some(),
+            "his fight has not started"
+        );
+        view.fight_ms = Some(T0 + VARLAAM_JUMP.0);
+        assert!(varlaam.tick(T0 + VARLAAM_JUMP.0 + 1, view).is_empty());
+        assert_eq!(varlaam.invulnerable(), None);
+        view.reached = true;
+        assert_eq!(
+            varlaam.tick(T0 + VARLAAM_JUMP.0 + 2, view),
+            [
+                Step::Event(VARLAAM_NEXT_WAVE.1),
+                Step::ShareFloor(Some(VARLAAM_OUTRO.0))
+            ]
+        );
+        assert!(
+            varlaam.invulnerable().is_some(),
+            "away while the wave comes"
+        );
+        view.reached = false;
+        view.return_ms = Some(T0 + VARLAAM_JUMP.0 + 3);
+        assert!(varlaam.tick(T0 + VARLAAM_JUMP.0 + 3, view).is_empty());
+        assert_eq!(varlaam.invulnerable(), None);
+        view.share = VARLAAM_OUTRO.0;
+        assert_eq!(
+            events(&varlaam.tick(T0 + VARLAAM_JUMP.0 + 4, view)),
+            VARLAAM_OUTRO.1
+        );
+        assert!(varlaam.invulnerable().is_some());
     }
 
     /// Retail `Soul-Trial---The-End-of-new-Eden`: the intro 5.65 s after its stage, shadow

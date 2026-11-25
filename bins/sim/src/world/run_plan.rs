@@ -106,9 +106,12 @@ fn boss_targets(encounter: &Encounter) -> Vec<usize> {
     targets
 }
 
-/// The spawn of the boss of `encounter`: its first boss target ([`boss_targets`]).
+/// The spawn of the boss of `encounter`: its first boss target ([`boss_targets`]) that is a mob
+/// (`QuestDracula`'s first one is the setup's area trigger).
 fn boss_spawn(encounter: &Encounter) -> Option<VitalsSpawn> {
-    boss_spawn_of(encounter, *boss_targets(encounter).first()?)
+    boss_targets(encounter)
+        .into_iter()
+        .find_map(|target| boss_spawn_of(encounter, target))
 }
 
 /// The spawn of boss target `target` of `encounter`: its first mob, where a stage spawns it
@@ -181,7 +184,7 @@ impl SimWorld {
     /// place; else its first boss target where it spawns. Linked bosses take turns (the Ennead
     /// Goliaths: Horus takes no hits while the Brute stands, and both must fall at once; live
     /// 2026-11-24 05:02:48Z a group fought only the Brute in the `Both` phase).
-    fn boss_now(&self, index: usize, encounter: &Encounter) -> Option<VitalsSpawn> {
+    pub(super) fn boss_now(&self, index: usize, encounter: &Encounter) -> Option<VitalsSpawn> {
         let targets = boss_targets(encounter);
         let living = self
             .dungeon_run
@@ -269,7 +272,12 @@ impl SimWorld {
 
     /// Whether the run of game mode `mode` is done for player `number`: the run in this sim
     /// ended, and the player opened its end chest (a run with none needs no chest).
+    /// A catacombs run is done for a player once it was extracted or the run ended
+    /// ([`Self::catacomb_run_left`]).
     fn run_done(&self, number: u64, mode: &str) -> bool {
+        if let Some(left) = self.catacomb_run_left(number) {
+            return self.runs_mode(mode) && left;
+        }
         self.runs_mode(mode)
             && self.run_ended()
             && (self.end_chest().is_none() || self.opened_end_chest(number))
@@ -287,13 +295,16 @@ impl SimWorld {
     }
 
     /// The `!questplan` lines of the run of game mode `mode` for player `number`: its entry
-    /// outside the instance, the last boss while the run goes on, then the end chest.
+    /// outside the instance, the last boss while the run goes on, then the end chest; a
+    /// catacombs run's own plan ([`Self::catacomb_plan`]).
     pub(crate) fn run_plan_lines(&self, number: u64, mode: &str) -> Vec<String> {
         let plan = if !self.runs_mode(mode) {
             self.trial_into(
                 mode,
                 StepPlan::Stop(Outcome::Broken, format!("no entry of game mode {mode}")),
             )
+        } else if let Some(plan) = self.catacomb_plan(number) {
+            plan
         } else {
             match (self.dungeon_run.is_some(), self.run_ended()) {
                 (false, _) => StepPlan::Stop(
@@ -408,6 +419,26 @@ mod tests {
         let spawn = boss_spawn(&encounter).expect("boss");
         assert_eq!(spawn.vitals_id, lowercase_crc32("Withered_Brute_Named_08"));
         assert_eq!(spawn.position, BOSS_AT);
+    }
+
+    /// `QuestDracula`: the first stage tracks the setup's area trigger (no mob); the boss is the
+    /// next tracked target that is a mob, not the first target's mob (Cecilia, an ally).
+    #[test]
+    fn a_tracked_target_without_a_mob_is_no_boss() {
+        let mut encounter = boss_encounter();
+        encounter.targets.push(Target::default());
+        let trigger = encounter.targets.len() - 1;
+        let mut setup = encounter.stages[0].clone();
+        setup.children.clear();
+        setup.objectives[0].kind = ObjectiveSpec::SliceDestroyed {
+            target: Some(trigger),
+            required: 1,
+        };
+        encounter.stages.push(setup);
+        encounter.top_stages.insert(0, encounter.stages.len() - 1);
+        assert_eq!(boss_targets(&encounter), [trigger, 1]);
+        let spawn = boss_spawn(&encounter).expect("boss");
+        assert_eq!(spawn.vitals_id, lowercase_crc32("Withered_Brute_Named_08"));
     }
 
     #[test]

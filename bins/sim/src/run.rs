@@ -26,6 +26,7 @@ use nw_content::player_attacks::PlayerAttacks;
 use nw_content::player_sequences::PlayerSequences;
 use nw_content::store::store_table;
 use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
+use nw_formats::objectstream::lowercase_crc32;
 use nw_sim_core::walk_map::{MOB_BODY, WalkMapGround};
 use nw_sim_core::{LevelGround, level_bounds};
 use nw_world::WorldFile;
@@ -34,8 +35,9 @@ use nw_world::catacomb_tiles::{CatacombSolids, CatacombTiles};
 use nw_world::claim_plots::ClaimPlots;
 use nw_world::collision::{LevelCollision, QueryFilter};
 use nw_world::collision_index::{CollisionIndex, NavMarkIndex};
-use nw_world::dungeon_scripts::DungeonScripts;
+use nw_world::dungeon_scripts::{DungeonScripts, Encounter, TargetSlice};
 use nw_world::quick_courses::QuickCoursePaths;
+use nw_world::records::VitalsSpawn;
 use nw_world::roads::RoadMap;
 use nw_world::script::{DesignData, LevelDesign};
 use nw_world::water::WaterMap;
@@ -777,12 +779,29 @@ pub fn world_parts(config: &SimConfig, level: &LoadedLevel) -> Result<WorldParts
                 .collect()
         })
         .unwrap_or_default();
+    let scripted =
+        config.role == SimRole::Instance && level.content.dungeon_scripts.has_level(&config.level);
+    let all_ai = resolve_ai(world_file, &level.mob_ai);
+    let (script_spawns, script_ai) = if scripted {
+        without_script_mob_copies(
+            &level_spawns,
+            &all_ai,
+            level
+                .content
+                .dungeon_scripts
+                .game_modes
+                .values()
+                .filter(|script| script.level == config.level)
+                .flat_map(|script| &script.encounters),
+        )
+    } else {
+        (level_spawns.to_vec(), all_ai.to_vec())
+    };
     let (spawns, spawn_ai) = sim_spawns(
-        &level_spawns,
-        &resolve_ai(world_file, &level.mob_ai),
+        &script_spawns,
+        &script_ai,
         SpawnFilter {
-            scripted: config.role == SimRole::Instance
-                && level.content.dungeon_scripts.has_level(&config.level),
+            scripted,
             open_map: config.role == SimRole::OpenMap,
             kill_types: &level.content.kill_types,
             scripted_at: &scripted_at,
@@ -801,6 +820,48 @@ pub fn world_parts(config: &SimConfig, level: &LoadedLevel) -> Result<WorldParts
     let combat =
         config.combat_settings(Arc::clone(&level.combat), spawns, Arc::clone(&level.mob_ai));
     Ok((world, combat, spawn_ai))
+}
+
+/// How near a script encounter a plain level spawn (not `IsEncounter`) of a mob of that
+/// encounter stands when it is a copy of it, m. Observed: `nw_dungeon_greatcleave_00` holds two
+/// plain spawns of `Evil_Knight_Heavy_CommanderLoth_Boss` at 876.58 866.99, 2.8 m from the
+/// `LothBoss` encounter (873.92 867.95). Inferred: a little more than that distance.
+const SCRIPT_MOB_COPY_M: f32 = 5.0;
+
+/// The spawns of `spawns` (with their overrides `ai`, in spawn order) without the plain spawns
+/// of a mob of one of `encounters` near that encounter ([`SCRIPT_MOB_COPY_M`]): the script
+/// spawns that mob itself. Observed: every retail run of Glacial Tarn's last encounter shows one
+/// Commander Loth beside the ice torso (`Glacial-964a...` 822.8 s; `dungeon_great_cleave-springs`
+/// 1835.4, 1999.3, 2742.1 s after each reset), where an instance sim with the plain spawns had
+/// three (live 2026-11-25 13:41Z: bots killed two copies of 586,328 health that ended nothing).
+fn without_script_mob_copies<'a>(
+    spawns: &[VitalsSpawn],
+    ai: &[Option<SpawnAi>],
+    encounters: impl Iterator<Item = &'a Encounter>,
+) -> (Vec<VitalsSpawn>, Vec<Option<SpawnAi>>) {
+    let script_mobs: Vec<(u32, [f32; 3])> = encounters
+        .flat_map(|encounter| {
+            encounter
+                .targets
+                .iter()
+                .flat_map(|target| &target.slices)
+                .flat_map(TargetSlice::mobs)
+                .map(|mob| (lowercase_crc32(&mob.vitals_id), encounter.position))
+        })
+        .collect();
+    spawns
+        .iter()
+        .enumerate()
+        .filter(|(_, spawn)| {
+            spawn.is_encounter
+                || !script_mobs.iter().any(|(vitals, at)| {
+                    *vitals == spawn.vitals_id
+                        && (spawn.position[0] - at[0]).hypot(spawn.position[1] - at[1])
+                            <= SCRIPT_MOB_COPY_M
+                })
+        })
+        .map(|(index, spawn)| (spawn.clone(), ai.get(index).cloned().flatten()))
+        .unzip()
 }
 
 async fn serve_async(
@@ -888,4 +949,55 @@ async fn serve_async(
         shutdown,
     )
     .await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use nw_world::dungeon_scripts::{Target, TargetMob};
+
+    use super::*;
+
+    /// Glacial Tarn's `LothBoss` (data, build 25810808): the encounter at 873.92 867.95 spawns
+    /// Commander Loth; the level also holds two plain spawns of him 2.8 m from it, which go, and
+    /// its encounter spawn and a plain spawn of another row stay.
+    #[test]
+    fn a_plain_level_copy_of_a_script_encounter_s_mob_is_left_out() {
+        const LOTH: &str = "Evil_Knight_Heavy_CommanderLoth_Boss";
+        const OTHER: &str = "AncientGuardian_Reaver";
+        let encounter = Encounter {
+            position: [873.92, 867.95, 253.76],
+            targets: vec![Target {
+                name: LOTH.to_owned(),
+                slices: vec![TargetSlice {
+                    mob: Some(TargetMob {
+                        vitals_id: LOTH.to_owned(),
+                        ..TargetMob::default()
+                    }),
+                    ..TargetSlice::default()
+                }],
+            }],
+            ..Encounter::default()
+        };
+        let spawn = |vitals: &str, position: [f32; 3], is_encounter: bool| VitalsSpawn {
+            vitals_id: lowercase_crc32(vitals),
+            position,
+            is_encounter,
+            ..VitalsSpawn::default()
+        };
+        let copy = [876.58, 866.99, 240.52];
+        let spawns = [
+            spawn(LOTH, copy, false),
+            spawn(LOTH, encounter.position, true),
+            spawn(OTHER, copy, false),
+            spawn(LOTH, copy, false),
+            spawn(LOTH, [976.58, 866.99, 240.52], false),
+        ];
+        let ai = vec![None; spawns.len()];
+        let (kept, kept_ai) = without_script_mob_copies(&spawns, &ai, std::iter::once(&encounter));
+        assert_eq!(
+            kept,
+            [spawns[1].clone(), spawns[2].clone(), spawns[4].clone()]
+        );
+        assert_eq!(kept_ai.len(), kept.len());
+    }
 }

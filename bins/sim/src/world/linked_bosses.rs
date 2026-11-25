@@ -12,7 +12,16 @@
 //! 70.4 s, `Naga_AngryEarth` 33.7 to 63.8 s, the gorilla 28.4 to 58.0 s, the mammoth 42.3 to
 //! 56.9 s, `Legion_GeneralCrassus` 23.3 to 72.3 s (r2 FINDINGS item 3). An intro whose end event
 //! our trees never send ends at the latest [`INTRO_LIMIT_MS`] after the first sight (Inferred:
-//! the longest of those turns).
+//! the longest of those turns). A story trial's boss too: `Trial_Quest_Dracula_Boss_Alecksi`
+//! took no hits from his first card (14.5 s) to 99.8 s, the end of `Wave 1 - Intro` 100.075 s
+//! (`quest_18025-To-Face-the-End-2`); live 2026-11-24 09:08-09:16Z a bot killed him in the
+//! trial's setup, before any of his phases.
+//!
+//! **Intro end events.** The intro stage of some boss encounters waits for an encounter event
+//! that the boss's tree sends at the end of its intro animation (`Intro_Complete`), and the
+//! stages after it wait for that stage. Our trees do not send it for the bosses of
+//! [`INTRO_EVENT_AFTER_MS`] (the mammoth's tree plays no intro; Commander Loth's waits in
+//! `Intro_Idle`): the sim sends it for them at the retail time after the stage's start.
 //!
 //! **Goliaths.** Observed in both retail Ennead runs (`EXP-The-Ennead` 1565.5 to 1825.4 s,
 //! `Ennead-c910...` 1150.6 to 1475.7 s): a Goliath at 1 health turns invulnerable and is set
@@ -34,8 +43,27 @@ pub(super) const OWNER: &str = "linked_bosses";
 /// The longest intro of an expedition boss, from its first sight (Inferred: the longest retail
 /// first-sight invulnerability, `Legion_GeneralCrassus` 1272.6 -> 1345.0 s in `EXP-The-Ennead`).
 const INTRO_LIMIT_MS: u64 = 72_300;
-/// The game modes whose bosses take these rules: the expeditions (their ids start so).
-const EXPEDITION_MODE_PREFIX: &str = "Dungeon";
+/// The bosses whose intro end event no tree of ours sends, by vitals row, with the time from the
+/// start of the intro stage that waits for it to the event. Observed: the mammoth's `Intro 1 -
+/// Play` 2.666 s (`EXP-Savage-Divide` 1113.763 -> 1116.429 s) and 2.668 s (`Savage-f7f9...`
+/// 1587.200 -> 1589.868 s); Commander Loth's `Wave_03-Intro` 7.002 s (`Glacial-964a...`
+/// 865.187 -> 872.189 s; his invulnerability ended at 871.920 s); Alecksi's `Wave 1 - Intro`
+/// 7.052 s (`quest_18025-To-Face-the-End-2` 93.023 -> 100.075 s; Unknown whether his tree sends
+/// it: the stage ends at the first one, and a second changes nothing); Medusa's `Setup 1 -
+/// Play` 13.749 s (`09a_m12_fightmedusa-Garden-of-the-Gorgon` 238.158 -> 251.907 s; Unknown as
+/// Alecksi's); Asena's (`QuestWolf`) `Intro 0.1 - Play` 0.684 s (`quest_18018-The-Wolf-s-Den`
+/// 1294.927 -> 1295.611 s, the end of `_Wave 1 - Intro` too; live 2026-11-25 16:03-16:07Z no
+/// tree of ours sent it and the trial stayed in its intro after her death).
+const INTRO_EVENT_AFTER_MS: [(&str, u64); 5] = [
+    ("FL_Mammoth_Boss_DG_FirstLight_01", 2_667),
+    ("Evil_Knight_Heavy_CommanderLoth_Boss", 7_002),
+    ("Trial_Quest_Dracula_Boss_Alecksi", 7_052),
+    ("FL_Medusa", 13_749),
+    ("Werewolf_Asena_MSQ_Pt2", 684),
+];
+/// The game modes whose bosses take these rules: the expeditions and the trials (their ids
+/// start so).
+const BOSS_RULE_MODE_STARTS: [&str; 3] = ["Dungeon", "Quest", "Trial"];
 /// The Brute Goliath's vitals row.
 const BRUTE: &str = "AnubianGuardian_Brute_Boss";
 /// The Horus Goliath's vitals row.
@@ -195,17 +223,50 @@ pub(super) struct LinkedBosses {
     intro_ended: Vec<u64>,
     /// The Goliaths' fight, while it runs.
     goliaths: Option<GoliathFight>,
+    /// The intro end events the bosses sent since the last take: (boss, event).
+    events: Vec<(u64, String)>,
+}
+
+impl LinkedBosses {
+    /// The encounter events the bosses sent since the last call: (boss, event id).
+    pub(super) fn take_events(&mut self) -> Vec<(u64, String)> {
+        std::mem::take(&mut self.events)
+    }
+}
+
+/// Whether the bosses of game mode `game_mode` take these rules ([`BOSS_RULE_MODE_STARTS`]).
+fn boss_rules_apply(game_mode: &str) -> bool {
+    BOSS_RULE_MODE_STARTS
+        .iter()
+        .any(|start| game_mode.starts_with(start))
+}
+
+/// The intro end events a boss of vitals row `vitals` (CRC-32 of the lowercase id) sends at
+/// `now_ms`, of the `awaited` events (each with its stage's start): each one once its time of
+/// [`INTRO_EVENT_AFTER_MS`] passed; none for another boss.
+fn intro_events_due(vitals: u32, awaited: Vec<(String, u64)>, now_ms: u64) -> Vec<String> {
+    let Some(&(_, after_ms)) = INTRO_EVENT_AFTER_MS
+        .iter()
+        .find(|(row, _)| lowercase_crc32(row) == vitals)
+    else {
+        return Vec::new();
+    };
+    awaited
+        .into_iter()
+        .filter(|(_, started_ms)| now_ms >= started_ms.saturating_add(after_ms))
+        .map(|(event, _)| event)
+        .collect()
 }
 
 impl SimWorld {
-    /// The linked boss rules at `now_ms` (module text): the intros of the instance's expedition
-    /// bosses and the Goliaths' fight.
+    /// The linked boss rules at `now_ms` (module text): the intros of the bosses of the
+    /// instance's expedition or trial, and the Goliaths' fight.
     pub(super) fn tick_linked_bosses(&mut self, now_ms: u64) {
-        let expedition = self
+        let ruled = self
             .instance_run
             .as_ref()
-            .is_some_and(|run| run.game_mode().starts_with(EXPEDITION_MODE_PREFIX));
-        let Some(run) = self.dungeon_run.as_ref().filter(|_| expedition) else {
+            .is_some_and(|run| boss_rules_apply(run.game_mode()));
+        let Some(run) = self.dungeon_run.as_ref().filter(|_| ruled) else {
             return;
         };
         let bosses: Vec<(u64, bool)> = run
@@ -213,6 +274,19 @@ impl SimWorld {
             .filter_map(|mob| Some((mob, run.boss_intro_over(mob)?)))
             .filter(|(mob, _)| self.mobs.health(*mob).is_some_and(|health| health > 0))
             .collect();
+        let intro_events: Vec<(u64, String)> = bosses
+            .iter()
+            .filter_map(|(mob, _)| Some((*mob, self.mobs.vitals_of(*mob)?)))
+            .flat_map(|(mob, vitals)| {
+                intro_events_due(vitals, run.awaited_intro_events(mob), now_ms)
+                    .into_iter()
+                    .map(move |event| (mob, event))
+            })
+            .collect();
+        for (boss, event) in &intro_events {
+            tracing::info!(boss, event, "boss intro event");
+        }
+        self.linked_bosses.events.extend(intro_events);
         let brute_row = lowercase_crc32(BRUTE);
         let horus_row = lowercase_crc32(HORUS);
         let of_row = |row: u32| {
@@ -223,7 +297,9 @@ impl SimWorld {
         };
         let pair = of_row(brute_row).zip(of_row(horus_row));
         for &(boss, intro_over) in &bosses {
-            if pair.is_some_and(|((brute, _), (horus, _))| boss == brute || boss == horus) {
+            if pair.is_some_and(|((brute, _), (horus, _))| boss == brute || boss == horus)
+                || self.boss_fights.scripted(boss)
+            {
                 continue;
             }
             self.boss_intro(boss, intro_over, now_ms);
@@ -382,6 +458,37 @@ mod tests {
     const BRUTE_MOB: u64 = 1;
     const HORUS_MOB: u64 = 2;
     const T0: u64 = 1_000_000;
+
+    /// The retail mammoth (`EXP-Savage-Divide` 1113.763 -> 1116.429 s): its `Intro_Complete`
+    /// comes 2.667 s after the stage that waits for it started; another boss sends none.
+    #[test]
+    fn a_boss_whose_tree_plays_no_intro_sends_its_intro_end_at_the_retail_time() {
+        const STARTED: u64 = 5_000;
+        let mammoth = lowercase_crc32("FL_Mammoth_Boss_DG_FirstLight_01");
+        let awaited = || vec![("Intro_Complete".to_owned(), STARTED)];
+        let (_, after_ms) = INTRO_EVENT_AFTER_MS[0];
+        assert!(intro_events_due(mammoth, awaited(), STARTED + after_ms - 1).is_empty());
+        assert_eq!(
+            intro_events_due(mammoth, awaited(), STARTED + after_ms),
+            ["Intro_Complete"]
+        );
+        assert!(
+            intro_events_due(lowercase_crc32(BRUTE), awaited(), STARTED + after_ms).is_empty(),
+            "the Brute's own rules"
+        );
+    }
+
+    /// The expeditions and the story trials (`QuestDracula`, retail Alecksi) take the boss
+    /// rules; an arena or the open world does not.
+    #[test]
+    fn the_boss_rules_cover_the_expeditions_and_the_trials() {
+        for mode in ["DungeonFirstLight01", "QuestDracula", "TrialSeason04Q02"] {
+            assert!(boss_rules_apply(mode), "{mode}");
+        }
+        for mode in ["Arena3v3", "OutpostRush", ""] {
+            assert!(!boss_rules_apply(mode), "{mode}");
+        }
+    }
 
     fn invulnerable(tick: &GoliathTick) -> (bool, bool) {
         (tick.brute.invulnerable, tick.horus.invulnerable)
