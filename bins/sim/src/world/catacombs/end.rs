@@ -78,9 +78,9 @@ const BOSS_EVENT_PREFIX: &str = "CatacombsKillEvent_Boss_";
 /// The room kind of the start room.
 const START_ROOM: &str = "EncounterStart";
 /// The place in its top order of the extraction's `Survive` stage: the core was activated.
-const SURVIVE_TOP: usize = 2;
+pub(super) const SURVIVE_TOP: usize = 2;
 /// The place in its top order of the extraction's `Exit` stage: the exit is open.
-const EXIT_TOP: usize = 4;
+pub(super) const EXIT_TOP: usize = 4;
 /// The exit's trigger volume: radius, height and how far below the exit it starts, metres.
 const EXIT_RADIUS_M: f32 = 1.1;
 const EXIT_HEIGHT_M: f32 = 50.0;
@@ -292,6 +292,20 @@ impl RunEnd {
         self.extractions
             .iter()
             .any(|extraction| extraction.encounter == index)
+    }
+
+    /// The extractions that may run (their boss room was cleared, or the start room's time
+    /// came): each one's encounter index, room (by layout index) and exit.
+    pub(super) fn open_extractions(&self) -> impl Iterator<Item = (usize, usize, [f32; 3])> + '_ {
+        self.extractions
+            .iter()
+            .filter(|extraction| extraction.open)
+            .map(|extraction| (extraction.encounter, extraction.room, extraction.exit))
+    }
+
+    /// Whether player `number` was extracted, or the run ended.
+    pub(super) fn left_by(&self, number: u64) -> bool {
+        self.state == RUN_ENDED_STATE || self.extracted.contains(&number)
     }
 
     /// The values and timers of a run of `participants` players that starts at `server_ms` in

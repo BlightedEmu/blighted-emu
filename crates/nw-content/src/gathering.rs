@@ -267,6 +267,20 @@ pub struct GatherRule {
     pub required_item: Option<(String, u32)>,
 }
 
+/// The item a gather asks for: `ItemRestrictionId` (`quantity` of it, at least one), unless the
+/// gatherable's `Restriction` is its tool. Such a row's item is a tracking item (the one such
+/// row, `DG_Catacombs_Extraction_Initiator` with `Catacombs_ExtractionInitiation_Tracking`;
+/// retail `CATACOMBS5` 1591.225 to 1593.322 s its 2 s gather ended and the core was activated
+/// at 1593.555 s).
+fn required_item_of(
+    item: Option<&str>,
+    quantity: u32,
+    restriction: Option<&str>,
+) -> Option<(String, u32)> {
+    item.filter(|item| !item.is_empty() && restriction != Some(TOOL_REQUIRED))
+        .map(|item| (item.to_owned(), quantity.max(1)))
+}
+
 /// The gather rules of the gatherables that have one, by the CRC-32 of their lowercase id.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GatherRules {
@@ -286,11 +300,11 @@ impl GatherRules {
                         cell.and_then(|value| u32::try_from(value).ok())
                             .unwrap_or_default()
                     };
-                    let required_item = row
-                        .item_restriction_id
-                        .clone()
-                        .filter(|item| !item.is_empty())
-                        .map(|item| (item, count(row.item_restriction_quantity).max(1)));
+                    let required_item = required_item_of(
+                        row.item_restriction_id.as_deref(),
+                        count(row.item_restriction_quantity),
+                        row.restriction.as_deref(),
+                    );
                     (
                         row.gatherable_id.clone(),
                         GatherRule {
@@ -1034,6 +1048,31 @@ mod tests {
             rules.of(lowercase_crc32("FlintSmall")),
             GatherRule::default()
         );
+    }
+
+    #[test]
+    fn a_tool_gather_asks_for_no_tracking_item() {
+        assert_eq!(
+            required_item_of(
+                Some("Catacombs_ExtractionInitiation_Tracking"),
+                0,
+                Some(TOOL_REQUIRED)
+            ),
+            None
+        );
+        assert_eq!(
+            required_item_of(Some("SprigganKey"), 0, Some("ItemRequired")),
+            Some(("SprigganKey".to_owned(), 1))
+        );
+        assert_eq!(
+            required_item_of(
+                Some("1105_0202_MedallionCofferKey"),
+                2,
+                Some("NoToolNecessary")
+            ),
+            Some(("1105_0202_MedallionCofferKey".to_owned(), 2))
+        );
+        assert_eq!(required_item_of(Some(""), 1, None), None);
     }
 
     #[test]

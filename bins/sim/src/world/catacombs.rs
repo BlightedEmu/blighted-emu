@@ -113,6 +113,7 @@ use crate::player_content::PlayerContent;
 mod board;
 mod end;
 mod pool;
+mod route;
 mod secrets;
 
 /// The namespace of the `GdeRef`s of the run's tile entities ("catatile").
