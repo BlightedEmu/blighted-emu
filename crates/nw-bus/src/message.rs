@@ -207,6 +207,21 @@ pub struct Admit {
     /// mounts it got.
     #[serde(default)]
     pub entitlements: Vec<String>,
+    /// The account's store currency and consumables.
+    #[serde(default)]
+    pub balances: AccountBalances,
+}
+
+/// What an account holds in the store beside its lasting entitlements: the sim shows it to the
+/// game client in the entitlement state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountBalances {
+    /// Its Marks of Fortune, the store currency.
+    #[serde(default)]
+    pub marks: i64,
+    /// How many it holds of each consumable entitlement (the game data's `UniqueTagID`).
+    #[serde(default)]
+    pub consumables: BTreeMap<String, i64>,
 }
 
 /// The answer to [`Admit`].
@@ -432,6 +447,9 @@ pub struct HandoffOffer {
     /// The account's store entitlements, as in [`Admit::entitlements`].
     #[serde(default)]
     pub entitlements: Vec<String>,
+    /// The account's store currency and consumables, as in [`Admit::balances`].
+    #[serde(default)]
+    pub balances: AccountBalances,
     /// The player's quests: the active one with its run, and the finished ones.
     #[serde(default)]
     pub quests: PlayerQuests,
@@ -1847,6 +1865,10 @@ mod tests {
             game_master: false,
             account_in_probation: true,
             entitlements: vec!["Ent_Mount_MTX_7_bear_Ronin".to_owned()],
+            balances: AccountBalances {
+                marks: 13_000,
+                consumables: BTreeMap::from([("Ent_Barbershop_Token".to_owned(), 2)]),
+            },
         });
         round_trip(AdmitReply::Admitted);
         round_trip(AdmitReply::Refused {
@@ -1891,6 +1913,10 @@ mod tests {
             game_master: true,
             account_in_probation: true,
             entitlements: vec!["Ent_Mount_MTX_1_wolf".to_owned()],
+            balances: AccountBalances {
+                marks: 500,
+                consumables: BTreeMap::new(),
+            },
             achievement_version: 25,
             pvp_flagged: true,
             pvp_flag_left_ms: Some(u64::MAX),

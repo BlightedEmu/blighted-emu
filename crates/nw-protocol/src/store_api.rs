@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The store table: what this server's store sells, for free, and the entitlements every account
-//! holds. `content-tool store` writes it from the game data (`nw_content::store`) into the content
+//! The store table: what this server's store sells and the entitlements every account holds. `content-tool store` writes it from the game data (`nw_content::store`) into the content
 //! folder (`services/store.json` of the build folder) for `edge-http`, which serves the catalog
 //! and the entitlement list from it; the sims build the same table from the content bundle and
 //! grant the purchases.
 //!
 //! Retail sold its store mounts for 0 in its last weeks (`mount-menu-buying-all-store-horses`,
 //! 2026-11-04: 35 mounts unlocked for 0 Marks of Fortune), and its barbershop tokens too
-//! (`buy_barbertoken_and_change_style`: one token for 0, listed at 10000). This server keeps that
-//! price.
+//! (`buy_barbertoken_and_change_style`: one token for 0, listed at 10000). This server sells at
+//! the listed prices unless `[shop] free` is on.
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +17,14 @@ use serde::{Deserialize, Serialize};
 pub const STORE_CURRENCY: &str = "Marks of Fortune";
 /// The store currency's name (retail `currencyName`).
 pub const STORE_CURRENCY_NAME: &str = "New World - Marks of Fortune";
+/// The transmog token entitlement (retail `unlock_store_content`: alias `Transmog_Token`, name
+/// `Transmog Token`). The inventory's token counter (`transmogtokenscontainer.luac`) shows a
+/// spinner until the client holds its balance (`GetEntitlementBalance` of the CRC of
+/// `transmog_token`); retail's entitlement list and its entitlement state both held it.
+pub const TRANSMOG_TOKEN: &str = "Transmog_Token";
+/// The transmog tokens of every account. Inferred: this server grants none and charges none (a
+/// skin of the collection is applied for free, `bins/sim/src/world/transmog.rs`).
+pub const TRANSMOG_TOKENS_HELD: i64 = 0;
 
 /// An entitlement and its English name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

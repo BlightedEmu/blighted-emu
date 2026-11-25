@@ -767,6 +767,7 @@ impl Replica {
                 currency: None,
                 health_change: None,
                 cooldowns: None,
+                entitlements: None,
                 stamina: None,
                 combat_status: None,
                 mana: None,

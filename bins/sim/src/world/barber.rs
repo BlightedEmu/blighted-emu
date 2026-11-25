@@ -113,6 +113,7 @@ impl SimWorld {
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return false;
         };
+        player.consumable_changed(&held);
         let before = player.look.unwrap_or_default();
         player.look_flag = next_change_flag(player.look_flag);
         player.look_change = Some(PlayerAppearanceState::change(

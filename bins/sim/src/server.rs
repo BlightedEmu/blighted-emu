@@ -3515,6 +3515,7 @@ mod tests {
             game_master: false,
             account_in_probation: false,
             entitlements: Vec::new(),
+            balances: nw_bus::AccountBalances::default(),
         }
     }
 
@@ -4625,6 +4626,7 @@ mod tests {
                 game_master: false,
                 account_in_probation: false,
                 entitlements: Vec::new(),
+                balances: nw_bus::AccountBalances::default(),
                 quests: PlayerQuests::default(),
                 progression: PlayerProgression::default(),
                 achievement_version: 0,

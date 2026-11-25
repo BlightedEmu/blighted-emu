@@ -160,6 +160,49 @@ impl EffectTokens {
     }
 }
 
+/// The bit of each entitlement in the client's entitlement state
+/// (`nw_messages::EntitlementState`): its `EntitlementIndex`. Observed
+/// (`mount-menu-buying-all-store-horses`): the purchase of `Ent_Mount_MTX_9_horse_Valkyrie`
+/// (index 2364) set bit 2364 of the state, and that of `entMount_MTX_bear_Panda` (2673) bit 2673.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EntitlementIndexes {
+    /// The `EntitlementIndex` by lowercase `UniqueTagID`.
+    by_entitlement: HashMap<String, u32>,
+}
+
+impl EntitlementIndexes {
+    /// The indexes of the entitlement rows of `tables`.
+    pub fn from_tables(tables: &Tables) -> Self {
+        Self::build(
+            tables
+                .entitlement_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter_map(|row| {
+                    let index = u32::try_from(row.entitlement_index).ok()?;
+                    Some((row.unique_tag_id.as_str(), index))
+                }),
+        )
+    }
+
+    /// The indexes of the (entitlement, `EntitlementIndex`) pairs `pairs`.
+    pub fn build<'a>(pairs: impl IntoIterator<Item = (&'a str, u32)>) -> Self {
+        Self {
+            by_entitlement: pairs
+                .into_iter()
+                .map(|(entitlement, index)| (entitlement.to_lowercase(), index))
+                .collect(),
+        }
+    }
+
+    /// The bit of `entitlement` (any case); `None` for an entitlement the game data lacks.
+    pub fn index_of(&self, entitlement: &str) -> Option<u32> {
+        self.by_entitlement
+            .get(&entitlement.to_lowercase())
+            .copied()
+    }
+}
+
 /// The store products by lowercase `DisplayName`: the `UniqueTagID` of each.
 #[derive(Debug, Default)]
 pub struct StoreProducts {
@@ -509,6 +552,19 @@ mod tests {
         assert!(sold_tokens(&[&boost], &[&product(PRODUCT, true)], &text).is_empty());
         token.is_consumable = Some(false);
         assert!(sold_tokens(&[&token], &[&product(PRODUCT, true)], &text).is_empty());
+    }
+
+    #[test]
+    fn an_entitlement_s_bit_is_its_index_in_any_case() {
+        const VALKYRIE: &str = "Ent_Mount_MTX_9_horse_Valkyrie";
+        const VALKYRIE_INDEX: u32 = 2_364;
+        let indexes = EntitlementIndexes::build([(VALKYRIE, VALKYRIE_INDEX)]);
+        assert_eq!(indexes.index_of(VALKYRIE), Some(VALKYRIE_INDEX));
+        assert_eq!(
+            indexes.index_of(&VALKYRIE.to_uppercase()),
+            Some(VALKYRIE_INDEX)
+        );
+        assert_eq!(indexes.index_of("Ent_Unknown"), None);
     }
 
     #[test]

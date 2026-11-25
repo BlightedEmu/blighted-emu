@@ -524,6 +524,7 @@ impl SimWorld {
             game_master: false,
             account_in_probation: false,
             entitlements: Vec::new(),
+            balances: nw_bus::AccountBalances::default(),
         };
         self.admit(&admit, *now_ms, *now_ms)
             .map_err(|error| format!("the character was not admitted: {error}"))?;

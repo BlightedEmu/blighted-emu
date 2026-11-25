@@ -22,9 +22,9 @@ use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use nw_bus::{
-    Admit, BusId, CarriedItem, CellTable, ConnectionRef, Ghost, GhostName, HandoffOffer, ItemPlace,
-    MOB_STATES, MissionTake, MobGhost, PlayerGhost, PlayerInventory, PlayerProgression,
-    PlayerQuests, Point, QuestRun, ScriptLogLine, SimSlot, SnapMob, SnapPlayer,
+    AccountBalances, Admit, BusId, CarriedItem, CellTable, ConnectionRef, Ghost, GhostName,
+    HandoffOffer, ItemPlace, MOB_STATES, MissionTake, MobGhost, PlayerGhost, PlayerInventory,
+    PlayerProgression, PlayerQuests, Point, QuestRun, ScriptLogLine, SimSlot, SnapMob, SnapPlayer,
 };
 use nw_content::mutations::MutationCatalog;
 use nw_content::player_sequences::DodgeLoad;
@@ -242,8 +242,10 @@ use nw_content::creature_animations::CreatureAnimations;
 use nw_content::ftue_entities::{self, FACET_LEN, FtueLevel};
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_content::progression::Progression;
+use nw_content::store::EntitlementIndexes;
 use nw_messages::FRAG_TAGS_LEN;
 use nw_messages::raw_id_of_entity;
+use nw_protocol::store_api::StoreTable;
 
 /// The paperdoll slots whose items count toward the equip load: the armor and the off hand (a
 /// shield; Inferred, no capture shows its weight counted or not). The main-hand weapons do not
@@ -963,6 +965,10 @@ struct Player {
     account: Uuid,
     /// The store entitlements its account holds (the store mounts it got).
     entitlements: BTreeSet<String>,
+    /// Its account's store currency and consumables.
+    balances: AccountBalances,
+    /// Whether what its account holds changed since its client got the entitlement state.
+    entitlements_changed: bool,
     /// The crafting station it uses and the interaction it opened it with, until that
     /// interaction ends.
     station: Option<String>,
@@ -1505,6 +1511,8 @@ struct Arrival {
     account: Uuid,
     /// The store entitlements its account holds.
     entitlements: BTreeSet<String>,
+    /// Its account's store currency and consumables.
+    balances: AccountBalances,
     /// Its saved or carried quests.
     quests: PlayerQuests,
     /// Its PvP flag: off at a login, carried by a handoff.
@@ -1779,6 +1787,7 @@ impl SimWorld {
             account_in_probation: admit.account_in_probation,
             account: admit.account,
             entitlements: admit.entitlements.iter().cloned().collect(),
+            balances: admit.balances.clone(),
             quests: admit.quests.clone(),
             pvp_flagged: false,
             pvp_flag_left_ms: None,
@@ -1942,6 +1951,7 @@ impl SimWorld {
             account_in_probation: offer.account_in_probation,
             account: offer.account,
             entitlements: offer.entitlements.iter().cloned().collect(),
+            balances: offer.balances.clone(),
             quests: offer.quests.clone(),
             pvp_flagged: offer.pvp_flagged,
             pvp_flag_left_ms: offer.pvp_flag_left_ms,
@@ -5168,6 +5178,8 @@ impl SimWorld {
             performances: &self.performances,
             progression: &content.progression,
             cooldown_abilities: &content.cooldown_abilities,
+            store: &content.store,
+            entitlement_indexes: &content.entitlement_indexes,
             mutations: &content.mutations,
             mutation_unix_s: self.unix_s(),
             territories: &self.territories,
@@ -5429,6 +5441,8 @@ impl SimWorld {
                     account_in_probation: arrival.account_in_probation,
                     account: arrival.account,
                     entitlements: arrival.entitlements.clone(),
+                    balances: arrival.balances.clone(),
+                    entitlements_changed: false,
                     station: None,
                     station_interaction: None,
                     faction: arrival.progression.faction,
@@ -5844,6 +5858,9 @@ struct Neighbourhood<'a> {
     progression: &'a Progression,
     /// The abilities of each key's whole cooldown map ([`PlayerContent::cooldown_abilities`]).
     cooldown_abilities: &'a [u32],
+    /// The store table and the bit of each entitlement, for the entitlement state.
+    store: &'a StoreTable,
+    entitlement_indexes: &'a EntitlementIndexes,
     /// The week's mutated expeditions.
     mutations: &'a MutationCatalog,
     /// Unix seconds of this tick, for the mutation week.
@@ -6200,6 +6217,19 @@ impl Neighbourhood<'_> {
                 }
                 let cooldowns = (consumables.is_some() || keys.iter().any(Option::is_some))
                     .then_some(CooldownsState { keys, consumables });
+                // What the account holds: whole with the first card, then whole again after each
+                // change (retail sent the whole lists 0.3 s after each store purchase).
+                let entitlements = (first || std::mem::take(&mut player.entitlements_changed))
+                    .then(|| {
+                        player.list_version += 1;
+                        store_purchase::entitlement_state(
+                            player.list_version,
+                            self.store,
+                            self.entitlement_indexes,
+                            &player.entitlements,
+                            &player.balances,
+                        )
+                    });
                 // The health goes with each card; between cards, a change of it goes as its own
                 // vitals change (retail: 40 to 110 ms after each damaging 3601, flags 3 on the
                 // first damage from full health).
@@ -6301,6 +6331,7 @@ impl Neighbourhood<'_> {
                     currency,
                     health_change,
                     cooldowns: cooldowns.as_ref(),
+                    entitlements: entitlements.as_ref(),
                     stamina,
                     combat_status,
                     mana: player.abilities.mana.take_change(),
@@ -6796,6 +6827,7 @@ fn handoff_offer(
         account_in_probation: player.account_in_probation,
         account: player.account,
         entitlements: player.entitlements.iter().cloned().collect(),
+        balances: player.balances.clone(),
         quests,
         progression: player.progression(),
         achievement_version: player.flow.achievement_version(),
@@ -7198,6 +7230,7 @@ mod tests {
             game_master: false,
             account_in_probation: false,
             entitlements: Vec::new(),
+            balances: nw_bus::AccountBalances::default(),
         }
     }
 
@@ -10686,6 +10719,144 @@ mod tests {
             "the skin tone, the icon and the flag: {:?}",
             own.members
         );
+    }
+
+    #[test]
+    fn the_own_client_gets_what_its_account_holds_with_the_card_and_after_a_purchase() {
+        use nw_content::store::EntitlementIndexes;
+        use nw_formats::objectstream::lowercase_crc32;
+        use nw_protocol::store_api::{STORE_CURRENCY, StoreEntitlement, StoreMount, StoreTable};
+
+        const EXPANSION: &str = "Ent_Xpack_RiseOfTheAngryEarth_Owner";
+        const BEAR: &str = "Ent_Mount_MTX_7_bear_Ronin";
+        const WOLF: &str = "Ent_Mount_MTX_1_wolf";
+        const TOKEN: &str = "Ent_Barbershop_Token";
+        /// The `EntitlementIndex` of each in build 25810808.
+        const EXPANSION_BIT: u32 = 1_484;
+        const BEAR_BIT: u32 = 2_256;
+        const WOLF_BIT: u32 = 1_500;
+        const MARKS: i64 = 100_000;
+        const PRICE: u32 = 20_000;
+        const TOKENS: i64 = 2;
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        let content = Arc::make_mut(&mut world.content);
+        content.entitlement_indexes = EntitlementIndexes::build([
+            (EXPANSION, EXPANSION_BIT),
+            (BEAR, BEAR_BIT),
+            (WOLF, WOLF_BIT),
+        ]);
+        content.store = StoreTable {
+            mounts: vec![StoreMount {
+                unlock: StoreEntitlement {
+                    entitlement: BEAR.to_owned(),
+                    name: "Ronin Bear Mount".to_owned(),
+                },
+                mount: "Mount_MTX_7_bear_Ronin".to_owned(),
+                product: "Mount_Bear_MTX7_Ronin".to_owned(),
+            }],
+            tokens: Vec::new(),
+            held_by_all: vec![StoreEntitlement {
+                entitlement: EXPANSION.to_owned(),
+                name: "Rise of the Angry Earth".to_owned(),
+            }],
+        };
+        let mut admit = admit_at(1, CELL_M / 2.0, true);
+        admit.entitlements = vec![WOLF.to_owned()];
+        admit.balances = nw_bus::AccountBalances {
+            marks: MARKS,
+            consumables: BTreeMap::from([(TOKEN.to_owned(), TOKENS)]),
+        };
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let entity = world.player_by_number(1).expect("player");
+        let held = |world: &mut SimWorld, now: u64| {
+            let messages = tick(world, now).messages;
+            bundle_of(&messages, &connection(1))
+                .map(|bundle| SlotRead::of(&bundle).expect("read").updates)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(SlotUpdate::is_local_player)
+                .flat_map(|update| update.members)
+                .find_map(|member| match member.state {
+                    MemberState::Entitlements(state) if state.received.is_some() => Some(state),
+                    _ => None,
+                })
+        };
+        tick(&mut world, NOW);
+        let card_at = NOW + OWN_CARD_DELAY_MS;
+        let first = held(&mut world, card_at).expect("the state goes with the own card");
+        assert_eq!(first.received, Some(true));
+        assert!(
+            first.owns(EXPANSION_BIT),
+            "every account holds the expansion"
+        );
+        assert!(first.owns(WOLF_BIT), "a mount the account got before");
+        assert!(!first.owns(BEAR_BIT));
+        assert_eq!(
+            first.balance_of(lowercase_crc32(STORE_CURRENCY)),
+            Some(100_000)
+        );
+        assert_eq!(first.balance_of(lowercase_crc32(TOKEN)), Some(2));
+        assert_eq!(
+            first.balance_of(lowercase_crc32(nw_protocol::store_api::TRANSMOG_TOKEN)),
+            Some(0)
+        );
+        world
+            .world
+            .get_mut::<Vitals>(entity)
+            .expect("vitals")
+            .spawned = true;
+        assert_eq!(held(&mut world, card_at + 33), None, "no change, no state");
+        world.store_purchase(
+            entity,
+            nw_messages::FacetHeader {
+                target: 0,
+                entity: 0,
+            },
+            &nw_messages::store::StorePurchase {
+                language: b"en-US".to_vec(),
+                currency: b"USD".to_vec(),
+                country: b"US".to_vec(),
+                word_a: 1,
+                transaction: [7; nw_messages::RAW_ID_LEN],
+                offer: BEAR.as_bytes().to_vec(),
+                offer_again: BEAR.as_bytes().to_vec(),
+                byte_b: 0,
+                product: STORE_CURRENCY.as_bytes().to_vec(),
+                price: PRICE,
+                byte_c: 1,
+            },
+        );
+        let grants = world.take_store_grants();
+        let [grant] = &grants[..] else {
+            panic!("one grant");
+        };
+        assert_eq!(grant.price, PRICE, "the retail price, not a free store");
+        world.store_granted(
+            grant,
+            Ok(nw_db::Purchase::Bought {
+                held: nw_db::AccountEntitlement {
+                    entitlement: BEAR.to_owned(),
+                    instance: Uuid::from_u128(7),
+                    granted_at_ms: 0,
+                },
+                wallet: nw_db::Wallet {
+                    marks: MARKS - i64::from(PRICE),
+                    updated_at_ms: 0,
+                },
+            }),
+        );
+        let after = held(&mut world, card_at + 66).expect("the whole state after the purchase");
+        assert!(after.owns(BEAR_BIT) && after.owns(EXPANSION_BIT) && after.owns(WOLF_BIT));
+        assert_eq!(
+            after.balance_of(lowercase_crc32(STORE_CURRENCY)),
+            Some(80_000)
+        );
+        let version = |state: &nw_messages::EntitlementState| {
+            state.entitlements.as_ref().and_then(|set| set.version)
+        };
+        assert!(version(&after) > version(&first), "a newer list version");
+        assert_eq!(held(&mut world, card_at + 99), None, "sent once");
     }
 
     #[test]

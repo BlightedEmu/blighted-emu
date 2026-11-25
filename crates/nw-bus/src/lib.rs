@@ -29,9 +29,9 @@ pub use instance::{
 };
 pub use matchmaking::{MatchPlace, QueueCall, QueueJoin, QueueNews, QueueNewsKind};
 pub use message::{
-    Admit, AdmitReply, CarriedItem, CarriedMount, CellTable, ConnectionRef, DYE_CHANNELS,
-    EffectRepeat, GHOST_VISIBLE_ITEMS, GatewayOutput, Ghost, GhostItem, GhostMount, GhostName,
-    GhostPosture, GhostPvpFlags, GhostSlayer, GhostSlotChange, GhostUpperSlots, Ghosts,
+    AccountBalances, Admit, AdmitReply, CarriedItem, CarriedMount, CellTable, ConnectionRef,
+    DYE_CHANNELS, EffectRepeat, GHOST_VISIBLE_ITEMS, GatewayOutput, Ghost, GhostItem, GhostMount,
+    GhostName, GhostPosture, GhostPvpFlags, GhostSlayer, GhostSlotChange, GhostUpperSlots, Ghosts,
     HandoffMessage, HandoffOffer, HandoffReply, Heartbeat, Hit, HomeRecord, HousingItem,
     InputBatch, ItemLookState, ItemPlace, ItemState, Join, JoinReply, LootLimitCount,
     MAX_BATCH_BYTES, MAX_BUS_MESSAGE_BYTES, MAX_GHOST_BYTES, MISSION_BOARD_ID_LEN, MOB_ENTITY_BASE,

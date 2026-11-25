@@ -32,6 +32,7 @@ pub mod day_phase;
 pub mod door;
 pub mod dungeon_entrance_state;
 pub mod economy;
+pub mod entitlement_state;
 pub mod entity_ids;
 pub mod entity_slots;
 pub mod facet;
@@ -185,6 +186,9 @@ pub use day_phase::{
 };
 pub use door::{DOOR_TYPE_INDEX, DoorComponentState, DoorState};
 pub use economy::{EconomyCall, EconomyMessage};
+pub use entitlement_state::{
+    ENTITLEMENT_COMPONENT, ENTITLEMENT_TYPE_INDEX, EntitlementBalance, EntitlementState,
+};
 #[cfg(any(test, feature = "test-util"))]
 pub use entity_ids::number_of_facet;
 pub use entity_ids::{

@@ -33,6 +33,7 @@ use crate::containers::{
 };
 use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
 use crate::door::{DOOR_TYPE_INDEX, DoorComponentState};
+use crate::entitlement_state::{ENTITLEMENT_TYPE_INDEX, EntitlementState};
 use crate::fishing::{FISHING_TYPE_INDEX, FishingComponentState};
 use crate::game_events::{GAME_EVENT_TYPE_INDEX, GameEventState};
 use crate::game_mode_participant::{GAME_MODE_PARTICIPANT_TYPE_INDEX, GameModeParticipantState};
@@ -150,6 +151,8 @@ pub enum MemberState {
     Progression(ProgressionState),
     /// `CooldownTimersComponentReplicatedState`.
     Cooldowns(CooldownsState),
+    /// `MB::EntitlementComponentReplicatedState`.
+    Entitlements(EntitlementState),
     /// `MB::LootTrackerComponentReplicatedState`.
     LootTracker(LootTrackerState),
     /// `MB::GlobalStorageComponentReplicatedState`.
@@ -293,6 +296,7 @@ impl MemberState {
             Self::Objectives(_) => OBJECTIVES_TYPE_INDEX,
             Self::Progression(_) => PROGRESSION_TYPE_INDEX,
             Self::Cooldowns(_) => COOLDOWNS_TYPE_INDEX,
+            Self::Entitlements(_) => ENTITLEMENT_TYPE_INDEX,
             Self::LootTracker(_) => LOOT_TRACKER_TYPE_INDEX,
             Self::GlobalStorage(_) => GLOBAL_STORAGE_TYPE_INDEX,
             Self::BuildableController(_) => BUILDABLE_CONTROLLER_TYPE_INDEX,
@@ -436,6 +440,9 @@ impl MemberState {
             }
             TypeId::FileSlot(COOLDOWNS_TYPE_INDEX) => {
                 CooldownsState::read(reader).map(Self::Cooldowns)
+            }
+            TypeId::FileSlot(ENTITLEMENT_TYPE_INDEX) => {
+                EntitlementState::read(reader).map(Self::Entitlements)
             }
             TypeId::FileSlot(LOOT_TRACKER_TYPE_INDEX) => {
                 LootTrackerState::read(reader).map(Self::LootTracker)
@@ -645,6 +652,7 @@ impl MemberState {
                 Ok(())
             }
             Self::Cooldowns(state) => state.write(writer),
+            Self::Entitlements(state) => state.write(writer),
             Self::LootTracker(state) => state.write(writer),
             Self::GlobalStorage(state) => state.write(writer),
             Self::BuildableController(state) => state.write(writer),

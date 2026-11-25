@@ -6,17 +6,19 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nw_bus::{
-    Admit, AdmitReply, Bus, CarriedItem, CarriedMount, HomeRecord, HousingItem, InstanceStay,
-    ItemLookState, ItemPlace, ItemState, Join, LootLimitCount, MOB_ENTITY_BASE, OwnedHome,
-    PlacedCamp, PlayerArena, PlayerInventory, PlayerMounts, PlayerProgression, PlayerQuests,
-    PlayerTravel, Point, QuestRun, SavedLoadout, SimSlot, StoredItem, StoredPoint, subject,
+    AccountBalances, Admit, AdmitReply, Bus, CarriedItem, CarriedMount, HomeRecord, HousingItem,
+    InstanceStay, ItemLookState, ItemPlace, ItemState, Join, LootLimitCount, MOB_ENTITY_BASE,
+    OwnedHome, PlacedCamp, PlayerArena, PlayerInventory, PlayerMounts, PlayerProgression,
+    PlayerQuests, PlayerTravel, Point, QuestRun, SavedLoadout, SimSlot, StoredItem, StoredPoint,
+    subject,
 };
 use nw_db::{
     AdminRank, PgPool, SEASON_PASS_PROGRESSION, SavedAccountSeason, SavedArena, SavedInventory,
     SavedItem, SavedItemRolls, SavedMounts, SavedPlace, SavedPosition, SavedProgression,
-    SavedQuests, SavedStatusEffect, SavedTravel, account_by_id, account_entitlements,
-    account_season, admin_rank, character_by_id, character_inventory, character_items,
-    character_position, character_progression, character_quests, next_entity_number,
+    SavedQuests, SavedStatusEffect, SavedTravel, account_by_id, account_consumables,
+    account_entitlements, account_season, admin_rank, character_by_id, character_inventory,
+    character_items, character_position, character_progression, character_quests,
+    next_entity_number, wallet,
 };
 use nw_login::look::{saved_backstory, saved_look};
 use nw_sim_core::{Position, TUTORIAL_FOLDER, TUTORIAL_START};
@@ -327,6 +329,7 @@ pub async fn route_join(
         game_master,
         account_in_probation: standing.in_probation,
         entitlements: standing.entitlements,
+        balances: standing.balances,
     };
     let reply = context
         .bus
@@ -352,6 +355,8 @@ struct Standing {
     in_probation: bool,
     /// The store entitlements it holds.
     entitlements: Vec<String>,
+    /// Its store currency and consumables.
+    balances: AccountBalances,
 }
 
 /// The standing of `account` from the global database `ranks`. No database gives no GM rights,
@@ -372,7 +377,11 @@ async fn account_standing(ranks: Option<&PgPool>, account: Uuid) -> Result<Stand
             Ok::<_, nw_db::DbError>((
                 admin_rank(ranks, account).await?,
                 account_by_id(ranks, account).await?,
-                account_entitlements(ranks, account).await?,
+                StoreHoldings {
+                    entitlements: account_entitlements(ranks, account).await?,
+                    wallet: wallet(ranks, account).await?,
+                    consumables: account_consumables(ranks, account).await?,
+                },
             ))
         };
         match tokio::time::timeout(RANK_READ_TIMEOUT, read).await {
@@ -386,16 +395,27 @@ async fn account_standing(ranks: Option<&PgPool>, account: Uuid) -> Result<Stand
         tracing::warn!(%error, %account, "account read failed; join refused");
         JoinRefusal::AccountUnavailable(error)
     })?;
-    let (rank, found, held) = read;
-    standing_of(rank, found, held, unix_now())
+    let (rank, found, holdings) = read;
+    standing_of(rank, found, holdings, unix_now())
 }
 
-/// What the admin rank `rank`, the account row `found` and the entitlements `held` give an
-/// account at Unix second `now_unix`; a banned account is refused.
+/// What an account holds in the store, as the global database has it.
+#[derive(Debug, Clone, Default)]
+struct StoreHoldings {
+    /// Its lasting entitlements: the store mounts it got.
+    entitlements: Vec<nw_db::AccountEntitlement>,
+    /// Its Marks of Fortune.
+    wallet: nw_db::Wallet,
+    /// Its consumables with their counts.
+    consumables: Vec<nw_db::AccountConsumable>,
+}
+
+/// What the admin rank `rank`, the account row `found` and the store holdings `holdings` give
+/// an account at Unix second `now_unix`; a banned account is refused.
 fn standing_of(
     rank: Option<AdminRank>,
     found: Option<nw_db::Account>,
-    held: Vec<nw_db::AccountEntitlement>,
+    holdings: StoreHoldings,
     now_unix: i64,
 ) -> Result<Standing, JoinRefusal> {
     if found.as_ref().is_some_and(|found| found.banned) {
@@ -404,7 +424,19 @@ fn standing_of(
     Ok(Standing {
         game_master: rank.is_some_and(|rank| rank >= AdminRank::GameMaster),
         in_probation: in_probation(rank, found.map(|found| found.created_at_unix), now_unix),
-        entitlements: held.into_iter().map(|held| held.entitlement).collect(),
+        entitlements: holdings
+            .entitlements
+            .into_iter()
+            .map(|held| held.entitlement)
+            .collect(),
+        balances: AccountBalances {
+            marks: holdings.wallet.marks,
+            consumables: holdings
+                .consumables
+                .into_iter()
+                .map(|held| (held.entitlement, held.amount))
+                .collect(),
+        },
     })
 }
 
@@ -851,18 +883,54 @@ mod tests {
             banned,
         };
         assert_eq!(
-            standing_of(None, Some(account(true)), Vec::new(), NOW),
+            standing_of(None, Some(account(true)), StoreHoldings::default(), NOW),
             Err(JoinRefusal::Banned)
         );
         assert_eq!(JoinRefusal::Banned.label(), "banned");
         let standing = standing_of(
             Some(AdminRank::GameMaster),
             Some(account(false)),
-            Vec::new(),
+            StoreHoldings::default(),
             NOW,
         )
         .expect("not banned");
         assert!(standing.game_master && !standing.in_probation);
+        assert_eq!(standing.balances, AccountBalances::default());
+    }
+
+    #[test]
+    fn a_standing_holds_the_account_s_store_mounts_wallet_and_consumables() {
+        const NOW: i64 = 1_800_000_000;
+        const MOUNT: &str = "Ent_Mount_MTX_1_wolf";
+        const TOKEN: &str = "Ent_Barbershop_Token";
+        const MARKS: i64 = 100_000;
+        const TOKENS: i64 = 3;
+        let standing = standing_of(
+            None,
+            None,
+            StoreHoldings {
+                entitlements: vec![nw_db::AccountEntitlement {
+                    entitlement: MOUNT.to_owned(),
+                    instance: Uuid::from_u128(1),
+                    granted_at_ms: 0,
+                }],
+                wallet: nw_db::Wallet {
+                    marks: MARKS,
+                    updated_at_ms: 0,
+                },
+                consumables: vec![nw_db::AccountConsumable {
+                    entitlement: TOKEN.to_owned(),
+                    amount: TOKENS,
+                    purchases: 1,
+                    updated_at_ms: 0,
+                }],
+            },
+            NOW,
+        )
+        .expect("not banned");
+        assert_eq!(standing.entitlements, [MOUNT]);
+        assert_eq!(standing.balances.marks, MARKS);
+        assert_eq!(standing.balances.consumables.get(TOKEN), Some(&TOKENS));
     }
 
     #[test]

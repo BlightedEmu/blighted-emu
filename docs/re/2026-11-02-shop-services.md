@@ -113,6 +113,28 @@ From the retail captures under `local-data/captures` (folders `catalog` and `ent
   3113 `OnRequestFail` has no capture). The director gives each joining player its
   account's entitlements, and a handoff carries them; a store mount is usable when its
   entitlement is held.
+- The game connection carries what the account holds too (2026-11-24):
+  `MB::EntitlementComponentReplicatedState` (type 3133, player component 19,
+  `crates/nw-messages/src/entitlement_state.rs`). **Observed**
+  (`mount-menu-buying-all-store-horses`, 65 bodies): child 0 is a bitset, bit
+  `EntitlementIndex` of `javelindata_entitlements` (the purchase of
+  `Ent_Mount_MTX_9_horse_Valkyrie`, index 2364, set bit 2364; `entMount_MTX_bear_Panda`, 2673,
+  bit 2673; bit 1484 `Ent_Xpack_RiseOfTheAngryEarth_Owner` set in every body); child 1 is a list
+  of (CRC-32 of the lowercase `UniqueTagID`, amount) pairs (`Marks of Fortune` 13000,
+  `Transmog_Token` 0, the boost tokens with their counts); retail sent both lists whole, with a
+  higher list version, 0.3 s after each purchase. Before 2026-11-24 this server sent the state
+  empty, so the game client held no expansion and no Marks of Fortune whatever the HTTP list
+  said. Now each sim sends it with the own card and after each change: the expansion's bit for
+  every account, a bit per store mount the account got, the wallet and the consumables. The
+  director loads the wallet and the consumables at a join, and a handoff carries them.
+  **Inferred**: the store's "requires the expansion" text and the Marks of Fortune counter read
+  this state (no client trace yet). Not sent: retail's other bits and balances (season rewards,
+  Twitch and Prime items, dyes, emotes).
+- `[shop] free` is off by default since 2026-11-24: a mount costs its retail price. **Observed**
+  (269 catalog replies of the shared retail captures, `originalPrice` of the 31 mount offers,
+  the same in each): 20 mounts 20000, 10 mounts 15000, the turkey 10000; the tracked
+  `[shop.mount_prices]` holds the 11 that are not 20000. The 13 store mounts of the game data
+  with no retail offer cost `mount_price` (Inferred).
 - **Unknown.** Retail's answer to a refused purchase; this server sends none. Whether the client
   sends anything to these routes that proves which account asks: the store call log shows the
   header names of a live run.

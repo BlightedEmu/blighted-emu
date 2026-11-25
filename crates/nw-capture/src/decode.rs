@@ -312,6 +312,7 @@ fn member_position(state: &MemberState) -> Option<[f32; 3]> {
         | MemberState::GameEvents(_)
         | MemberState::TemporaryAffiliation(_)
         | MemberState::Cooldowns(_)
+        | MemberState::Entitlements(_)
         | MemberState::LootTracker(_)
         | MemberState::GlobalStorage(_)
         | MemberState::BuildableController(_)

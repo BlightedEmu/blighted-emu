@@ -48,7 +48,7 @@ use nw_content::salvage::Salvage;
 use nw_content::skins::{DyeCatalog, SkinCatalog};
 use nw_content::starting_ranks::StartingRanks;
 use nw_content::status_effects::StatusEffectRules;
-use nw_content::store::EffectTokens;
+use nw_content::store::{EffectTokens, EntitlementIndexes};
 use nw_content::titles::TitleRules;
 use nw_content::tradeskill_xp::{BonusChances, TradeskillCurves};
 use nw_formats::objectstream::lowercase_crc32;
@@ -1003,6 +1003,8 @@ pub struct PlayerContent {
     pub shop: ShopConfig,
     /// The status effect each status effect token starts when spent (5818).
     pub effect_tokens: EffectTokens,
+    /// The bit of each entitlement in the client's entitlement state.
+    pub entitlement_indexes: EntitlementIndexes,
     /// The quick course paths; empty until the sim loads the quick course file.
     pub quick_course_paths: QuickCoursePaths,
     /// The settlement and fort props the server spawns; empty until the sim loads their file.
@@ -1842,6 +1844,7 @@ impl PlayerContent {
             store: StoreTable::default(),
             shop: ShopConfig::default(),
             effect_tokens: EffectTokens::from_tables(tables),
+            entitlement_indexes: EntitlementIndexes::from_tables(tables),
             quick_course_paths: QuickCoursePaths::default(),
             town_props: nw_content::town_props::TownProps::default(),
             town_stations: nw_content::town_stations::TownStations::default(),

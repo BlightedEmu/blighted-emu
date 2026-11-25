@@ -33,6 +33,7 @@ use nw_common::time::iso8601_millis;
 use nw_db::{AccountConsumable, AccountEntitlement, Wallet};
 use nw_protocol::store_api::{
     STORE_CURRENCY, STORE_CURRENCY_NAME, StoreEntitlement, StoreMount, StoreTable, StoreToken,
+    TRANSMOG_TOKEN, TRANSMOG_TOKENS_HELD,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -79,14 +80,9 @@ const MOUNT_OFFER_METADATA: &str = r#"{"type":"Mount"}"#;
 const DURABLE: &str = "Durable";
 const WALLET: &str = "Wallet";
 const CONSUMABLE: &str = "Consumable";
-/// The transmog token entitlement (retail `unlock_store_content`: alias `Transmog_Token`, name
-/// `Transmog Token`). The inventory's token counter (`transmogtokenscontainer.luac`) shows a
-/// spinner until the list holds it (`GetEntitlementBalance` of the CRC of `transmog_token`).
-const TRANSMOG_TOKEN: &str = "Transmog_Token";
+/// The name of the transmog token entitlement ([`TRANSMOG_TOKEN`]; retail
+/// `unlock_store_content`).
 const TRANSMOG_TOKEN_NAME: &str = "Transmog Token";
-/// The transmog tokens of every account. Inferred: this server grants none and charges none (a
-/// skin of the collection is applied for free, `bins/sim/src/world/transmog.rs`).
-const TRANSMOG_TOKENS_HELD: i64 = 0;
 /// The description of a retail mount offer: its name and this.
 const DURABLE_SUFFIX: &str = " Durable";
 /// When every offer and every entitlement held by all accounts starts: the expansion's store
@@ -823,7 +819,10 @@ mod tests {
     }
 
     fn shop() -> ShopState<MemoryEntitlements> {
-        shop_with(ShopConfig::default())
+        shop_with(ShopConfig {
+            free: true,
+            ..ShopConfig::default()
+        })
     }
 
     fn shop_with(settings: ShopConfig) -> ShopState<MemoryEntitlements> {

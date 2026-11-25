@@ -1703,7 +1703,10 @@ mod tests {
             const GRANTED_MS: i64 = 1_793_795_546_050;
             /// The account's Marks of Fortune.
             const BALANCE: i64 = 13_000;
-            let mut world = world_with(vec![UNLOCK_BIT]);
+            let mut world = world_with_shop(ShopConfig {
+                free: true,
+                ..ShopConfig::default()
+            });
             let entity = world.player_by_number(PLAYER).expect("player");
             // Any facet header: the answers carry the call's own.
             let header = FacetHeader::of(MOUNT_FACET, PLAYER);

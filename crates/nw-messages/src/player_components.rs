@@ -33,6 +33,7 @@ use crate::containers::{
     ItemManagementState,
 };
 use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
+use crate::entitlement_state::{ENTITLEMENT_TYPE_INDEX, EntitlementState};
 use crate::faction_state::FACTION_TYPE_INDEX;
 use crate::game_events::GAME_EVENT_TYPE_INDEX;
 use crate::gathering::{GATHERING_TYPE_INDEX, GatheringState};
@@ -883,6 +884,7 @@ pub fn empty_state(class: u64) -> MemberState {
         }
         CURRENCY_TYPE_INDEX => MemberState::Currency(CurrencyState::default()),
         COOLDOWNS_TYPE_INDEX => MemberState::Cooldowns(CooldownsState::default()),
+        ENTITLEMENT_TYPE_INDEX => MemberState::Entitlements(EntitlementState::default()),
         LOOT_TRACKER_TYPE_INDEX => MemberState::LootTracker(LootTrackerState::default()),
         GLOBAL_STORAGE_TYPE_INDEX => MemberState::GlobalStorage(GlobalStorageState::default()),
         GATHERING_TYPE_INDEX => MemberState::Gathering(GatheringState::default()),
@@ -959,6 +961,8 @@ pub struct PlayerStates<'a> {
     pub health_change: Option<HealthChange>,
     /// The consumable cooldowns after a change, when there is one.
     pub cooldowns: Option<&'a CooldownsState>,
+    /// What the account holds, with the card and after a change.
+    pub entitlements: Option<&'a EntitlementState>,
     /// The stamina children that changed, when some did.
     pub stamina: Option<StaminaState>,
     /// The mana when it changed: the mana state's child 0, and the vitals' slot 1 mana (at most
@@ -1105,6 +1109,7 @@ pub fn change_members(states: PlayerStates<'_>) -> Vec<BundleMember> {
             PROGRESSION_POINT_TYPE_INDEX => states.progression_points.is_some(),
             CURRENCY_TYPE_INDEX => states.currency.is_some(),
             COOLDOWNS_TYPE_INDEX => states.cooldowns.is_some(),
+            ENTITLEMENT_TYPE_INDEX => states.entitlements.is_some(),
             COMBAT_STATUS_TYPE_INDEX => states.combat_status.is_some(),
             PAPERDOLL_TYPE_INDEX | CONTAINER_TYPE_INDEX | ITEM_MANAGEMENT_TYPE_INDEX => {
                 states.gear.is_some() && carries_gear_change(&member.state)
@@ -1185,6 +1190,7 @@ pub fn gear_members(gear: &PlayerGear) -> impl Iterator<Item = BundleMember> + '
         currency: None,
         health_change: None,
         cooldowns: None,
+        entitlements: None,
         stamina: None,
         combat_status: None,
         mana: None,
@@ -1233,6 +1239,11 @@ fn player_state(states: PlayerStates<'_>, component: u64, class: u64) -> MemberS
         && let Some(cooldowns) = states.cooldowns
     {
         return MemberState::Cooldowns(cooldowns.clone());
+    }
+    if class == ENTITLEMENT_TYPE_INDEX
+        && let Some(entitlements) = states.entitlements
+    {
+        return MemberState::Entitlements(entitlements.clone());
     }
     if class == COMBAT_STATUS_TYPE_INDEX
         && let Some(status) = states.combat_status
@@ -1312,6 +1323,7 @@ fn has_own_reader(class: u64) -> bool {
             | CATEGORICAL_PROGRESSION_TYPE_INDEX
             | PROGRESSION_POINT_TYPE_INDEX
             | COOLDOWNS_TYPE_INDEX
+            | ENTITLEMENT_TYPE_INDEX
             | GATHERING_TYPE_INDEX
             | INTERACTOR_TYPE_INDEX
             | CURRENCY_TYPE_INDEX
@@ -1590,6 +1602,7 @@ mod tests {
             currency: None,
             health_change: None,
             cooldowns: None,
+            entitlements: None,
             stamina: None,
             combat_status: None,
             mana: None,
@@ -1648,6 +1661,7 @@ mod tests {
             currency: None,
             health_change: None,
             cooldowns: None,
+            entitlements: None,
             stamina: None,
             combat_status: None,
             mana: None,
@@ -1695,6 +1709,7 @@ mod tests {
             currency: None,
             health_change: None,
             cooldowns: None,
+            entitlements: None,
             stamina: None,
             combat_status: None,
             mana: None,
@@ -1724,6 +1739,7 @@ mod tests {
             currency: None,
             health_change: None,
             cooldowns: None,
+            entitlements: None,
             stamina: None,
             combat_status: None,
             mana: None,
@@ -1795,6 +1811,7 @@ mod tests {
             currency: None,
             health_change: None,
             cooldowns: None,
+            entitlements: None,
             stamina: None,
             combat_status: None,
             mana: None,
@@ -1866,6 +1883,7 @@ mod tests {
                 incapacitated: None,
             }),
             cooldowns: None,
+            entitlements: None,
             stamina: None,
             combat_status: None,
             mana: None,
@@ -1937,6 +1955,7 @@ mod tests {
             currency: None,
             health_change: None,
             cooldowns: None,
+            entitlements: None,
             stamina: None,
             combat_status: None,
             mana: Some(MANA),
@@ -1987,6 +2006,7 @@ mod tests {
                 incapacitated: None,
             }),
             cooldowns: None,
+            entitlements: None,
             stamina: Some(spend),
             combat_status: None,
             mana: None,
@@ -2042,6 +2062,7 @@ mod tests {
             currency: None,
             health_change: None,
             cooldowns: None,
+            entitlements: None,
             stamina: None,
             combat_status: None,
             mana: None,
@@ -2090,6 +2111,7 @@ mod tests {
             currency: None,
             health_change: None,
             cooldowns: None,
+            entitlements: None,
             stamina: None,
             combat_status: Some(status),
             mana: None,
@@ -2154,6 +2176,7 @@ mod tests {
             currency: None,
             health_change: None,
             cooldowns: None,
+            entitlements: None,
             stamina: None,
             combat_status: None,
             mana: None,
@@ -2503,6 +2526,7 @@ mod tests {
             currency: None,
             health_change: None,
             cooldowns: None,
+            entitlements: None,
             stamina: None,
             combat_status: None,
             mana: None,

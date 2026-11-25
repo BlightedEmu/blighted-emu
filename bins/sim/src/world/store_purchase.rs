@@ -31,12 +31,17 @@
 //!
 //! [`EffectTokens`]: nw_content::store::EffectTokens
 
+use std::collections::BTreeSet;
+
 use bevy_ecs::prelude::Entity;
+use nw_bus::AccountBalances;
 use nw_common::time::iso8601_millis;
+use nw_content::store::EntitlementIndexes;
 use nw_db::{
     AccountConsumable, AccountEntitlement, DbError, PgPool, Purchase, Wallet, buy_consumable,
     buy_entitlement, save_changed_look, use_consumable,
 };
+use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::facet::component;
 use nw_messages::store::{
     CONSUMABLE_ENTITLEMENT_KIND, ClaimEntitlementFailMsg, DEBIT_REQUEST_STATUS,
@@ -44,8 +49,12 @@ use nw_messages::store::{
     RETAIL_DEBIT_TAIL, RETAIL_REQUEST_STATUS, RequestFailMsg, RequestInitializedMsg,
     RequestSuccessMsg, StorePurchase, WALLET_ENTITLEMENT_KIND,
 };
-use nw_messages::{FacetHeader, PlayerLook, RAW_ID_LEN, ServerMessage};
-use nw_protocol::store_api::{STORE_CURRENCY, STORE_CURRENCY_NAME};
+use nw_messages::{
+    EntitlementBalance, EntitlementState, FacetHeader, PlayerLook, RAW_ID_LEN, ServerMessage,
+};
+use nw_protocol::store_api::{
+    STORE_CURRENCY, STORE_CURRENCY_NAME, StoreTable, TRANSMOG_TOKEN, TRANSMOG_TOKENS_HELD,
+};
 use uuid::Uuid;
 
 use super::economy::count_call;
@@ -341,6 +350,61 @@ fn wallet_record(wallet: Wallet) -> EntitlementRecord {
     )
 }
 
+/// The entitlement state of an account at list version `version`: a bit for each entitlement
+/// every account holds (`store`: the expansion) and for each one of `owned` that the game data
+/// has (`indexes`), then the store currency, the transmog tokens and each consumable of
+/// `balances` (Observed, retail states of `mount-menu-buying-all-store-horses`: the expansion's
+/// bit, a bit per store mount, `Marks of Fortune` 13000, `Transmog_Token` 0 and each boost token
+/// with its count). The client reads its owned entitlements and its Marks of Fortune from it.
+pub(super) fn entitlement_state(
+    version: u64,
+    store: &StoreTable,
+    indexes: &EntitlementIndexes,
+    owned: &BTreeSet<String>,
+    balances: &AccountBalances,
+) -> EntitlementState {
+    let bits = store
+        .held_by_all
+        .iter()
+        .map(|held| held.entitlement.as_str())
+        .chain(owned.iter().map(String::as_str))
+        .filter_map(|entitlement| indexes.index_of(entitlement));
+    let amounts = [
+        (STORE_CURRENCY, balances.marks),
+        (TRANSMOG_TOKEN, TRANSMOG_TOKENS_HELD),
+    ]
+    .into_iter()
+    .chain(
+        balances
+            .consumables
+            .iter()
+            .map(|(entitlement, amount)| (entitlement.as_str(), *amount)),
+    )
+    .map(|(entitlement, amount)| EntitlementBalance {
+        tag: lowercase_crc32(entitlement),
+        amount: record_amount(amount),
+    })
+    .collect();
+    EntitlementState::of_account(version, bits, amounts)
+}
+
+impl Player {
+    /// Its account's wallet is `wallet` now: its client gets the entitlement state again.
+    fn wallet_changed(&mut self, wallet: Wallet) {
+        self.balances.marks = wallet.marks;
+        self.entitlements_changed = true;
+    }
+
+    /// Its account holds `held` of a consumable now: its client gets the entitlement state
+    /// again.
+    pub(super) fn consumable_changed(&mut self, held: &AccountConsumable) {
+        self.balances
+            .consumables
+            .insert(held.entitlement.clone(), held.amount);
+        self.entitlements_changed = true;
+    }
+}
+
 impl SimWorld {
     /// The next transaction number: the time in nanoseconds, above the last one.
     fn next_transaction(&mut self) -> Vec<u8> {
@@ -605,6 +669,7 @@ impl SimWorld {
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
+        player.consumable_changed(&held);
         let number = player.number;
         let added = player.status_effects.add_token(
             &content.status_effects,
@@ -669,6 +734,7 @@ impl SimWorld {
             return;
         };
         player.entitlements.insert(held.entitlement.clone());
+        player.wallet_changed(wallet);
         let connection = player.connection.clone();
         let done = grant.done(vec![record(&held, &name), wallet_record(wallet)]);
         send_now(&mut self.combat_messages, &connection, &[done]);
@@ -685,13 +751,19 @@ impl SimWorld {
         let Some((held, wallet)) = self.paid(grant, answer) else {
             return;
         };
-        let Some(connection) = self.connection_of_number(grant.number) else {
+        let Some(entity) = self.player_by_number(grant.number) else {
             return;
         };
         let done = grant.done(vec![
             consumable_record(&held, self.token_name(&held.entitlement)),
             wallet_record(wallet),
         ]);
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        player.consumable_changed(&held);
+        player.wallet_changed(wallet);
+        let connection = player.connection.clone();
         send_now(&mut self.combat_messages, &connection, &[done]);
     }
 
@@ -802,6 +874,10 @@ mod tests {
                     list_price: 10_000,
                 }],
                 ..StoreTable::default()
+            },
+            shop: nw_login::config::ShopConfig {
+                free: true,
+                ..nw_login::config::ShopConfig::default()
             },
             ..PlayerContent::default()
         });

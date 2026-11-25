@@ -190,6 +190,7 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::Objectives(_)
         | MemberState::Progression(_)
         | MemberState::Cooldowns(_)
+        | MemberState::Entitlements(_)
         | MemberState::LootTracker(_)
         | MemberState::GlobalStorage(_)
         | MemberState::BuildableController(_)

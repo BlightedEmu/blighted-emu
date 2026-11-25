@@ -245,12 +245,13 @@ pub struct ShopConfig {
     /// account got stay its own.
     #[serde(default = "switched_on")]
     pub enabled: bool,
-    /// Whether every mount costs 0 (retail's last weeks). Off, a mount costs its price from the
-    /// account's wallet.
-    #[serde(default = "switched_on")]
+    /// Whether every mount costs 0 (retail's last weeks). Off, the default, a mount costs its
+    /// price from the account's wallet: retail's price before its last weeks.
+    #[serde(default)]
     pub free: bool,
-    /// The price of a mount, in Marks of Fortune (Observed: 20 of retail's 31 mount offers cost
-    /// 20000, 10 cost 15000, 1 cost 10000).
+    /// The price of a mount, in Marks of Fortune (Observed, the `originalPrice` of the 31 mount
+    /// offers in each of 269 retail catalog replies: 20 cost 20000, 10 cost 15000, 1 cost
+    /// 10000).
     #[serde(default = "default_mount_price")]
     pub mount_price: u32,
     /// The price of single mounts, by the entitlement that unlocks them
@@ -281,7 +282,7 @@ impl Default for ShopConfig {
         Self {
             client_build_config: default_client_build_config(),
             enabled: switched_on(),
-            free: switched_on(),
+            free: false,
             mount_price: DEFAULT_MOUNT_PRICE,
             mount_prices: BTreeMap::new(),
         }
@@ -819,7 +820,7 @@ max_connections = 5
         assert_eq!(config.experience, ExperienceConfig::default());
         assert_eq!(config.fast_travel, FastTravelConfig::default());
         assert_eq!(config.shop, ShopConfig::default());
-        assert!(config.shop.enabled && config.shop.free);
+        assert!(config.shop.enabled && !config.shop.free);
         assert_eq!(config.login_host(), "login.example.org");
         assert_eq!(config.game_host(), "game.example.org");
         assert_eq!(config.login_authority(), "login.example.org");
