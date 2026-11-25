@@ -20,6 +20,13 @@ use super::{Placement, Player, QuestRefusal, SimWorld};
 /// (our choice: a point from the data sits at most a few tenths of a metre off its floor, and
 /// no floor is stacked within 1 m above another).
 const TELEPORT_FLOOR_ABOVE_M: f32 = 1.0;
+/// How far under a GM teleport's asked point a floor may be and still be the one it lands on
+/// at once (our choice: the lift a game master gives a point from the data; a floor farther
+/// down is a drop). A body dropped from above its floor comes down only with its player's next
+/// inputs, and a client sends them all the time. Live 2026-11-25 19:43Z: a bot that stood
+/// still after its teleport hung 1.1 m over the vault floor of `1624_0303_accursedalchemy`,
+/// above the 1 m high quest volume `TriggerVol_16_SearchVault`, and the step never ended.
+const TELEPORT_FLOOR_BELOW_M: f32 = 2.0;
 
 /// The answer for a player whose character has no bag (no starter kit row for it).
 pub const NO_BAG: &str = "the player has no bag (its character has no starter kit)";
@@ -151,14 +158,19 @@ impl SimWorld {
     }
 
     /// The height a GM teleport to `to` drops from: the floor at most
-    /// [`TELEPORT_FLOOR_ABOVE_M`] above the asked point when one is there, else the asked
-    /// height. A point taken from the data can sit just under its floor (live 2026-11-23: Horus's
+    /// [`TELEPORT_FLOOR_ABOVE_M`] above the asked point when one is there, else the floor at
+    /// most [`TELEPORT_FLOOR_BELOW_M`] under it, else the asked height. A point taken from the data can sit just under its floor (live 2026-11-23: Horus's
     /// spawn point in `nw_dungeon_brimstonesands_00` is 0.3 m under the arena floor), and a drop
     /// from there fell through to the floor 61 m below.
     fn teleport_drop_start(&self, to: Point) -> f32 {
         self.ground
             .floor_at(to.x, to.y, to.z + TELEPORT_FLOOR_ABOVE_M)
             .filter(|floor| *floor > to.z && *floor <= to.z + TELEPORT_FLOOR_ABOVE_M)
+            .or_else(|| {
+                self.ground
+                    .floor_at(to.x, to.y, to.z)
+                    .filter(|floor| *floor <= to.z && to.z - *floor <= TELEPORT_FLOOR_BELOW_M)
+            })
             .unwrap_or(to.z)
     }
 
@@ -533,6 +545,37 @@ mod tests {
             .find(|player| player.entity == PLAYER)
             .expect("player");
         assert_eq!(player.z, TARGET.z + NEAR_FLOOR_ABOVE_M);
+    }
+
+    /// `TriggerVol_16_SearchVault` (floor at z 210.2, the teleport asks for 211.3): a floor a
+    /// little under the asked point is where the teleport lands; a floor far down is a drop.
+    #[test]
+    fn a_teleport_just_over_a_floor_lands_on_that_floor() {
+        struct FloorUnder(f32);
+        impl nw_sim_core::Ground for FloorUnder {
+            fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+                Some(TARGET.z - self.0)
+            }
+            fn floor_at(&self, _: f32, _: f32, _: f32) -> Option<f32> {
+                Some(TARGET.z - self.0)
+            }
+        }
+        const NEAR_M: f32 = 1.1;
+        const FAR_M: f32 = 17.0;
+        for (under_m, lands_m) in [(NEAR_M, NEAR_M), (FAR_M, 0.0)] {
+            let mut world = admitted();
+            world.ground = std::sync::Arc::new(FloorUnder(under_m));
+            assert_eq!(
+                world.admin(&teleport(PLAYER, TARGET), NOW),
+                AdminReply::Done
+            );
+            let (players, _, _) = world.snapshot();
+            let player = players
+                .iter()
+                .find(|player| player.entity == PLAYER)
+                .expect("player");
+            assert_eq!(player.z, TARGET.z - lands_m);
+        }
     }
 
     #[test]
