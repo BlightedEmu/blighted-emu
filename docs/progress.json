@@ -29,7 +29,7 @@
         },
         {
           "name": "Collision, roads, water",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Tutorial and open world collision files.",
@@ -111,7 +111,7 @@
         },
         {
           "name": "Login server and launcher (M2)",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Saved servers in the launcher (2026-11-04; seen on Linux in both themes): a list of servers, each with its own name and login, and a click connects.",
@@ -205,7 +205,7 @@
         },
         {
           "name": "Many sims and handoff (M5)",
-          "proof": "bots",
+          "proof": "tests",
           "checks": [
             {
               "check": "1,000 bots cross cell borders.",
@@ -419,7 +419,7 @@
         },
         {
           "name": "Server status page",
-          "proof": "bots",
+          "proof": "tests",
           "checks": [
             {
               "check": "New `status-reporter` (`config/status-reporter.toml`, 2026-11-08): one per world, on the game machine.",
@@ -542,7 +542,7 @@
       "features": [
         {
           "name": "Create, select, enter world",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "New character goes in game.",
@@ -576,7 +576,7 @@
         },
         {
           "name": "Own movement",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "No more rubber banding (6d508fc).",
@@ -630,7 +630,7 @@
         },
         {
           "name": "See other players",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Look, gear, health, facing, attacks.",
@@ -884,7 +884,7 @@
         },
         {
           "name": "Swim, water, falls",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Swim strokes, water hold, fall damage.",
@@ -898,7 +898,7 @@
         },
         {
           "name": "Ship deck",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Bodies stay on the deck, also in fights.",
@@ -917,7 +917,7 @@
       "features": [
         {
           "name": "Melee hits",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Homing, lag help, retail damage messages.",
@@ -1015,7 +1015,7 @@
         },
         {
           "name": "Target lock",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Lock, release and wheel cycling work live (110ccc0).",
@@ -1385,7 +1385,7 @@
         },
         {
           "name": "Death, respawn, revive",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Death screen, 38 respawn points, revive at 1 health.",
@@ -1616,7 +1616,7 @@
         },
         {
           "name": "Mob AI",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "1,075 behavior trees from Server.pak.",
@@ -1861,7 +1861,7 @@
       "features": [
         {
           "name": "Tutorial flow (ftue_v2 level)",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Ship, quick time event, sailors, legionnaires, corruption, Thorpe, journal.",
@@ -1883,7 +1883,7 @@
         },
         {
           "name": "Starting beach (open world)",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Beach quests 12-1 to 12-9 played live up to the Demon Storm turn-in; lock, skinning, crafting, crates, cutscenes, journal auto pin.",
@@ -2357,7 +2357,7 @@
       "features": [
         {
           "name": "Inventory, gear, paperdoll",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Inventory, slots, gear versions.",
@@ -2401,7 +2401,7 @@
         },
         {
           "name": "Gathering and skinning",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Skinning, nodules and gatherables work live.",
@@ -2547,7 +2547,7 @@
         },
         {
           "name": "Crafting",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Campfire, recipes (the skinning knife crafts live with no error message), craft answers after the item change, and the bag reasons of a craft (2 used, 3 made, 2 on a used-up slot) as retail.",
@@ -2898,7 +2898,7 @@
         },
         {
           "name": "Player camps",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Place a camp for its costs, the retail camp entity group, respawn at its SpawnPoint, Camp crafting station, BindCamp event, the camp moves with its owner into another sim.",
@@ -2960,7 +2960,7 @@
         },
         {
           "name": "Mounts",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Summon, ride, dash, stamina, dismounts, cooldowns, mount screens and saves.",
@@ -3010,7 +3010,7 @@
         },
         {
           "name": "Social: chat, friends, groups, voice",
-          "proof": "live",
+          "proof": "tests",
           "checks": [
             {
               "check": "Chat, friends, groups and the voice option.",
