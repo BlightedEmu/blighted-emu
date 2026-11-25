@@ -484,6 +484,8 @@ struct EncounterRun {
     own_areas: Option<u64>,
     /// Its slice has no effect areas of its own (a host gave no handle).
     no_own_areas: bool,
+    /// It runs in the open world (set at each of its ticks there).
+    open_world: bool,
 }
 
 /// How the encounters of the open world start and end (see the module text).
@@ -929,18 +931,51 @@ impl DungeonRun {
     /// When the stage named `stage` of the encounter that spawned mob `mob` started, while it
     /// runs or after it ended; `None` before it started, or for a mob of no encounter.
     pub(super) fn stage_started_ms(&self, mob: u64, stage: &str) -> Option<u64> {
-        let (encounter, run) = self
-            .script
-            .encounters
-            .iter()
-            .zip(&self.encounters)
-            .find(|(_, run)| run.mobs.iter().any(|known| known.entity == mob))?;
+        let (encounter, run) = self.encounter_of_mob(mob)?;
         let index = encounter
             .stages
             .iter()
             .position(|known| known.name == stage)?;
         let stage = run.stages.get(index)?;
         matches!(stage.status, StageStatus::Running | StageStatus::Done).then_some(stage.started_ms)
+    }
+
+    /// The encounter events that the running intro stages (a name that holds
+    /// [`INTRO_STAGE_MARK`]) of the encounter that spawned mob `mob` wait for, each with its
+    /// stage's start: what the boss sends at the end of its intro.
+    pub(super) fn awaited_intro_events(&self, mob: u64) -> Vec<(String, u64)> {
+        let Some((encounter, run)) = self.encounter_of_mob(mob) else {
+            return Vec::new();
+        };
+        encounter
+            .stages
+            .iter()
+            .zip(&run.stages)
+            .filter(|(stage, state)| {
+                state.status == StageStatus::Running
+                    && stage.name.to_lowercase().contains(INTRO_STAGE_MARK)
+            })
+            .flat_map(|(stage, state)| {
+                stage
+                    .objectives
+                    .iter()
+                    .filter_map(move |objective| match &objective.kind {
+                        ObjectiveSpec::EncounterEvent { event } => {
+                            Some((event.clone(), state.started_ms))
+                        }
+                        _ => None,
+                    })
+            })
+            .collect()
+    }
+
+    /// The encounter that spawned mob `mob`, with its run.
+    fn encounter_of_mob(&self, mob: u64) -> Option<(&Encounter, &EncounterRun)> {
+        self.script
+            .encounters
+            .iter()
+            .zip(&self.encounters)
+            .find(|(_, run)| run.mobs.iter().any(|known| known.entity == mob))
     }
 
     /// One tick at `now_ms`. `owned` names the encounters this sim runs, by index (every one
@@ -988,6 +1023,7 @@ impl DungeonRun {
                 }
                 let events_before = run.entity_events.len();
                 let mobs_before = run.mobs.len();
+                run.open_world = self.open_world.is_some();
                 tick_encounter(encounter, run, host, view, now_ms);
                 if let Some(rules) = self.open_world {
                     // Observed (retail `09a_s17_establishdefenses`, 116.8 s): the two prowlers of
@@ -1061,9 +1097,17 @@ fn position([x, y, z]: [f32; 3]) -> Position {
 
 /// Whether a player at `at` is in `encounter`'s detection volume; an encounter without one
 /// (or of a shape not read) detects within `radius_m` of its place.
+///
+/// A player is in a volume with its feet or with the middle of its body
+/// ([`BODY_MIDDLE_M`]; **Inferred**: a volume detects a body, not a point. Retail
+/// `99a_msq_03_climbarcturus` fits both: the cylinder of `99A_Enc_MSQ_09_Torment` has its
+/// bottom at the floor, z 153.84, and started with the feet at 154.06, not at 152.48).
 fn detects(encounter: &Encounter, at: Position, radius_m: f32) -> bool {
     match &encounter.detector {
-        Some(detector) => detector.contains([at.x, at.y, at.z]),
+        Some(detector) => {
+            detector.contains([at.x, at.y, at.z])
+                || detector.contains([at.x, at.y, at.z + BODY_MIDDLE_M])
+        }
         None => at.horizontal_distance(position(encounter.position)) <= radius_m,
     }
 }
@@ -1183,6 +1227,42 @@ pub(super) fn volume_radius_m(encounter: &Encounter) -> f32 {
             .detection_radius_m
             .unwrap_or(DEFAULT_VOLUME_RADIUS_M),
     }
+}
+
+/// The radius around `encounter`'s place that lies in its volume all around: its volume's
+/// radius ([`volume_radius_m`]) less the distance of the volume's middle from that place. A
+/// fight plan names it. Live 2026-11-25 14:46:48Z: the sphere of `WorldEvent_09A_M5_WaveEvent`
+/// (45 m, grace 0 s) has its middle 10 m from the encounter's place; a player 45 m from the
+/// place was out of it, and the encounter reset in its last wave.
+pub(super) fn fight_radius_m(encounter: &Encounter) -> f32 {
+    const PLACE: usize = 3;
+    let off_middle = encounter.detector.as_ref().map_or(0.0, |detector| {
+        let middle = Position {
+            x: detector.place[0][PLACE],
+            y: detector.place[1][PLACE],
+            z: encounter.position[2],
+        };
+        middle.horizontal_distance(position(encounter.position))
+    });
+    (volume_radius_m(encounter) - off_middle).max(0.0)
+}
+
+/// The height of the middle of a standing player body over its feet, m (half the standing
+/// capsule of `slices/player.dynamicslice`, about 1.8 m high).
+const BODY_MIDDLE_M: f32 = 0.9;
+
+/// The lowest and the highest height of `encounter`'s detection volume when it is an upright
+/// cylinder (its axis along z); `None` for another volume.
+pub(super) fn volume_levels(encounter: &Encounter) -> Option<(f32, f32)> {
+    const UP: usize = 2;
+    const PLACE: usize = 3;
+    let detector = encounter.detector.as_ref()?;
+    let Geometry::Cylinder { from, to, .. } = &detector.shape else {
+        return None;
+    };
+    let upright = from[0] == to[0] && from[1] == to[1] && detector.place[UP][UP] > 0.0;
+    let base = detector.place[UP][PLACE];
+    upright.then(|| (base + from[UP].min(to[UP]), base + from[UP].max(to[UP])))
 }
 
 /// How long after its end at `done_ms` an open world encounter starts again: a time in its
@@ -1774,6 +1854,19 @@ fn spawn_one(
                         ends_ms,
                     });
                 }
+                // An area trigger counts by the players in it, also where the level knows its
+                // slice as an object (the open world's encounter objects hold
+                // `ai_encounter_area_trigger`; live 2026-11-24 09:19-09:29Z and 2026-11-25
+                // 14:00Z a player stood 1 m from the trigger of
+                // `99C_WorldEvent_SpawnGroup_Brytmar` and its stage never ended).
+                let area_trigger = is_area_trigger(&target_slice.path);
+                if area_trigger {
+                    run.area_triggers.push(AreaTrigger {
+                        target: spawn.target,
+                        at,
+                        fired_ms: None,
+                    });
+                }
                 match host.spawn_object(&target_slice.path, at, yaw_deg) {
                     Some(entity) => {
                         run.mobs.push(EncounterMob {
@@ -1802,13 +1895,7 @@ fn spawn_one(
                             });
                         }
                     }
-                    None if is_area_trigger(&target_slice.path) => {
-                        run.area_triggers.push(AreaTrigger {
-                            target: spawn.target,
-                            at,
-                            fired_ms: None,
-                        });
-                    }
+                    None if area_trigger => {}
                     None => {
                         tracing::debug!(slice = %target_slice.path, "encounter spawn of no mob")
                     }
@@ -2576,10 +2663,16 @@ fn objective_met(
             if *on_activated || *on_deactivated {
                 (*on_activated && sent(EVENT_ACTIVATE))
                     || (*on_deactivated && sent(EVENT_DEACTIVATE))
+                    || (run.open_world
+                        && run.engaged
+                        && !changed_by_a_stage(encounter, *entity, *on_activated, *on_deactivated))
             } else {
                 // Inferred: the entity is a timeline that the encounter's trigger area starts
-                // when a player comes in.
-                sent(EVENT_TRIGGER) || run.engaged
+                // when a player comes in; a player's arrival ends the stage only once its own
+                // spawns are made (retail `quest_18018-The-Wolf-s-Den`: `_Wave 0 - Wait` ran
+                // 19.4 s and spawned Asena 5 s in; live 2026-11-25 15:52Z the stage ended at
+                // once and dropped her spawn, so the trial had no boss).
+                sent(EVENT_TRIGGER) || (run.engaged && run.stages[stage].due.is_empty())
             }
         }
         ObjectiveSpec::WaitForParent => false,
@@ -2595,6 +2688,36 @@ fn objective_met(
             spawned_all && !own.is_empty() && own.iter().all(|mob| mob.died_ms.is_some())
         }
     }
+}
+
+/// Whether an action of a stage of `encounter` activates (`activated`) or deactivates
+/// (`deactivated`) its slice entity `entity`.
+///
+/// In build 25810808, 203 of the 207 open world stage objectives that wait for such a change
+/// wait for an entity that no stage action changes: a trigger volume of the encounter's slice
+/// (`Wave_00 - Setup - Wait for Enter Area`, `Trigger the Statue`) or an object the player uses
+/// (the horn of `Enc_Defense_09A_M5_WaveEvent`: its `Start_Trigger_Event` entity goes off when
+/// the horn is blown; a console). The content reads neither those volumes nor those objects.
+/// **Inferred**: in the open world such an objective is met while a living player is in the
+/// encounter's volume ([`objective_met`]). Not built: the trigger's own volume and the use of
+/// the horn. Live 2026-11-25 14:24-14:28Z: `WorldEvent_09A_M5_WaveEvent` stood in
+/// `Wave_00 - Wait for Players` with a player in it until that player left.
+fn changed_by_a_stage(
+    encounter: &Encounter,
+    entity: u64,
+    activated: bool,
+    deactivated: bool,
+) -> bool {
+    encounter
+        .stages
+        .iter()
+        .flat_map(|stage| stage.start_actions.iter().chain(&stage.end_actions))
+        .any(|action| {
+            matches!(action, StageAction::EntityEvent { entity: to, event, .. }
+                if *to == entity
+                    && ((activated && *event == EVENT_ACTIVATE)
+                        || (deactivated && *event == EVENT_DEACTIVATE)))
+        })
 }
 
 /// Runs `actions` of stage `stage`.
@@ -2830,6 +2953,8 @@ impl SimWorld {
         let mut events = self.mobs.take_encounter_events();
         // The scripted bosses' events ([`super::boss_scripts`]).
         events.extend(self.boss_fights.take_events());
+        // The intro ends of the expedition bosses ([`super::linked_bosses`]).
+        events.extend(self.linked_bosses.take_events());
         if !self.instance_sim {
             self.tick_world_events(events, now_ms);
             return;
@@ -3784,6 +3909,34 @@ mod tests {
         assert_eq!(host.removed, [1], "the body goes after its corpse time");
     }
 
+    /// Retail `quest_18018-The-Wolf-s-Den`: the trial's wait spawns Asena 5 s in; a player who
+    /// is there at the start ends the wait only once she is spawned.
+    #[test]
+    fn a_wait_for_a_player_ends_once_its_own_spawns_are_made() {
+        const DELAY_S: u32 = 5;
+        let mut encounter = boss_encounter();
+        encounter.stages[1].spawns = vec![Spawn {
+            target: ADDS,
+            delay_s: DELAY_S,
+            count: 1,
+            ..Spawn::default()
+        }];
+        let mut run = DungeonRun::new(Uuid::nil(), script(vec![encounter]));
+        let mut host = Host::default();
+        run.tick(&mut host, &view(&[PLACE]), &[], T0);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
+        assert_eq!(
+            stage_status(&run, 1),
+            StageStatus::Running,
+            "its spawn is not made yet"
+        );
+        let spawned_at = T0 + 1 + u64::from(DELAY_S) * MS_PER_S;
+        run.tick(&mut host, &view(&[PLACE]), &[], spawned_at);
+        assert!(host.spawned.iter().any(|(vitals, _)| vitals == ADD_VITALS));
+        run.tick(&mut host, &view(&[PLACE]), &[], spawned_at + 1);
+        assert_eq!(stage_status(&run, 1), StageStatus::Done);
+    }
+
     /// Retail `09a_m15_fightartemis`: Adiana spawns 1 s into her setup (263.141 -> 264.542 s),
     /// and her intro stage, beside the wait that waits for its parent, starts with her fight.
     #[test]
@@ -3856,6 +4009,49 @@ mod tests {
         assert_eq!(run.boss_intro_over(BOSS_MOB + 100), None, "no mob of it");
     }
 
+    /// Retail `DungeonFirstLight01` `Encounter_SecondBoss`: the main wave ends with the
+    /// mammoth's death only after its children ran: the wait, the intro that waits for
+    /// `Intro_Complete` with no time limit (2.7 s in both retail runs), and the fight. The
+    /// running intro names the event it waits for, and the event ends it.
+    #[test]
+    fn a_running_intro_names_the_event_it_waits_for_and_the_wave_waits_for_it() {
+        const BOSS_MOB: u64 = 1;
+        const INTRO_EVENT: &str = "Intro_Complete";
+        let mut encounter = boss_encounter();
+        encounter.stages[0].child_stages_optional = false;
+        encounter.stages[2].objectives = vec![objective(
+            ObjectiveSpec::EncounterEvent {
+                event: INTRO_EVENT.to_owned(),
+            },
+            0,
+            false,
+        )];
+        encounter.stages[3].objectives.clear();
+        let mut run = DungeonRun::new(Uuid::nil(), script(vec![encounter]));
+        let mut host = Host::default();
+        run.tick(&mut host, &view(&[PLACE]), &[], T0);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 1);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 2);
+        assert_eq!(
+            run.awaited_intro_events(BOSS_MOB),
+            [(INTRO_EVENT.to_owned(), T0)],
+            "a player at the encounter ended the wait at its start"
+        );
+        host.kill(BOSS_VITALS);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 3);
+        assert_eq!(
+            stage_status(&run, 0),
+            StageStatus::Running,
+            "the dead boss's wave waits for its intro"
+        );
+        let mut events = view(&[PLACE]);
+        events.events.push((BOSS_MOB, INTRO_EVENT.to_owned()));
+        run.tick(&mut host, &events, &[], T0 + 4);
+        run.tick(&mut host, &view(&[PLACE]), &[], T0 + 5);
+        assert!(run.awaited_intro_events(BOSS_MOB).is_empty());
+        assert_eq!(stage_status(&run, 0), StageStatus::Done);
+    }
+
     /// A spawner slice of mixed mobs makes each member at its own place, and a wave that tracks
     /// one member's creature slice ends with that member's death only (the Shipyard cave's
     /// `Wave_01` ends when its summoner dies, not its swarmers).
@@ -3864,7 +4060,18 @@ mod tests {
     /// does not.
     #[test]
     fn a_player_in_a_spawned_area_trigger_ends_the_stage_that_tracks_it() {
-        const TRIGGER: &str = "slices/encounters/ai_encounter_area_trigger_20m.dynamicslice";
+        // The second slice is one the level knows as an object (the open world's encounter
+        // objects hold the trigger slice): the host spawns it, and the trigger counts all the
+        // same.
+        for trigger in [
+            "slices/encounters/ai_encounter_area_trigger_20m.dynamicslice".to_owned(),
+            format!("slices/encounters/ai_encounter_area_trigger_{START_OBJECT}.dynamicslice"),
+        ] {
+            a_player_in_the_trigger_ends_its_stage(&trigger);
+        }
+    }
+
+    fn a_player_in_the_trigger_ends_its_stage(trigger: &str) {
         let trigger_at = [PLACE[0] + 10.0, PLACE[1], PLACE[2]];
         let setup = Stage {
             name: "Wave 0 - Setup".to_owned(),
@@ -3893,9 +4100,9 @@ mod tests {
             top_stages: vec![0],
             stages: vec![setup],
             targets: vec![Target {
-                name: TRIGGER.to_owned(),
+                name: trigger.to_owned(),
                 slices: vec![TargetSlice {
-                    path: TRIGGER.to_owned(),
+                    path: trigger.to_owned(),
                     ..TargetSlice::default()
                 }],
             }],
@@ -4100,6 +4307,114 @@ mod tests {
             inside.engaged.is_empty(),
             "an instance's encounter picks by its own script"
         );
+    }
+
+    /// Build 25810808 `99A_Enc_MSQ_09_Torment`: an upright cylinder from the tower top's floor
+    /// (z 153.84) 10 m up. A player on that floor is in it by its body; one on the ring 2.3 m
+    /// lower is not. The plan of its fight names its heights.
+    #[test]
+    fn an_upright_cylinder_volume_has_levels_and_detects_a_body_on_its_floor() {
+        const FLOOR_M: f32 = 153.844;
+        const HALF_HEIGHT_M: f32 = 5.0;
+        const RING_M: f32 = 151.5;
+        let at = |z: f32| Position {
+            x: PLACE[0],
+            y: PLACE[1],
+            z,
+        };
+        let mut place = nw_world::collision::IDENTITY_AFFINE;
+        place[0][3] = PLACE[0];
+        place[1][3] = PLACE[1];
+        place[2][3] = FLOOR_M + HALF_HEIGHT_M;
+        let encounter = Encounter {
+            position: [PLACE[0], PLACE[1], FLOOR_M],
+            detector: Some(nw_world::dungeon_scripts::Detector {
+                shape: Geometry::Cylinder {
+                    from: [0.0, 0.0, -HALF_HEIGHT_M],
+                    to: [0.0, 0.0, HALF_HEIGHT_M],
+                    radius: RADIUS_M,
+                },
+                place,
+            }),
+            ..Encounter::default()
+        };
+        let (low, high) = volume_levels(&encounter).expect("levels");
+        assert!(
+            (low - FLOOR_M).abs() < 1e-3 && (high - FLOOR_M - 2.0 * HALF_HEIGHT_M).abs() < 1e-3
+        );
+        assert!(
+            detects(&encounter, at(FLOOR_M - 0.01), RADIUS_M),
+            "feet on the floor"
+        );
+        assert!(
+            !detects(&encounter, at(RING_M), RADIUS_M),
+            "on the ring under it"
+        );
+        assert_eq!(volume_levels(&boss_encounter()), None, "no cylinder");
+    }
+
+    #[test]
+    fn a_fight_radius_is_the_volume_s_radius_less_its_middle_s_distance_from_the_place() {
+        const OFF_MIDDLE_M: f32 = 10.0;
+        let mut place = nw_world::collision::IDENTITY_AFFINE;
+        place[0][3] = PLACE[0] + OFF_MIDDLE_M;
+        place[1][3] = PLACE[1];
+        place[2][3] = PLACE[2];
+        let encounter = Encounter {
+            position: PLACE,
+            detector: Some(nw_world::dungeon_scripts::Detector {
+                shape: Geometry::Sphere { radius: RADIUS_M },
+                place,
+            }),
+            ..Encounter::default()
+        };
+        assert!((fight_radius_m(&encounter) - (RADIUS_M - OFF_MIDDLE_M)).abs() < 1e-3);
+        let centred = Encounter {
+            position: PLACE,
+            detection_radius_m: Some(RADIUS_M),
+            ..Encounter::default()
+        };
+        assert!((fight_radius_m(&centred) - RADIUS_M).abs() < 1e-3);
+    }
+
+    /// Build 25810808 `WorldEvent_09A_M5_WaveEvent`: `Wave_00 - Wait for Players` waits for
+    /// a slice entity to go off, which no stage action does. In the open world a player in the
+    /// volume ends the wait; an instance's script still waits.
+    #[test]
+    fn an_open_world_wait_for_an_entity_no_stage_changes_ends_with_a_player_in_the_volume() {
+        const START_TRIGGER: u64 = 23_997_448_385_935;
+        let wait = Stage {
+            name: "Wave_00 - Wait for Players".to_owned(),
+            objectives: vec![objective(
+                ObjectiveSpec::EntityActiveState {
+                    entity: START_TRIGGER,
+                    on_activated: false,
+                    on_deactivated: true,
+                },
+                0,
+                false,
+            )],
+            ..Stage::default()
+        };
+        let encounter = Encounter {
+            name: "WorldEvent_WaveEvent".to_owned(),
+            position: PLACE,
+            auto_activate: true,
+            grace_period_s: GRACE_S,
+            detection_radius_m: Some(RADIUS_M),
+            top_stages: vec![0],
+            stages: vec![wait],
+            ..Encounter::default()
+        };
+        let mut host = Host::default();
+        let mut instance = DungeonRun::new(Uuid::nil(), script(vec![encounter.clone()]));
+        let mut open = DungeonRun::of_open_world(script(vec![encounter]), open_rules(), &|_| false);
+        for tick in 0..4 {
+            instance.tick(&mut host, &view(&[PLACE]), &[], T0 + tick);
+            open.tick(&mut host, &view(&[PLACE]), &[], T0 + tick);
+        }
+        assert_eq!(stage_status(&instance, 0), StageStatus::Running);
+        assert_eq!(stage_status(&open, 0), StageStatus::Done);
     }
 
     #[test]
