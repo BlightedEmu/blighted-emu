@@ -565,7 +565,7 @@
               "proof": "tests"
             },
             {
-              "check": "Open: the kill contribution ring gets no entry per kill, the game event ring no entry per discovery (the meaning of several entry fields is Unknown), the entitlement and transmog bit sets are not filled (the bit order is Inferred only), the name tag's hide level does not change, and stat changes do not update the multiplier table.",
+              "check": "Open: the kill contribution ring gets no entry per kill, the game event ring no entry per discovery (the meaning of several entry fields is Unknown), the transmog bit set is not filled (the bit order is Inferred only), the name tag's hide level does not change, and stat changes do not update the multiplier table.",
               "proof": "none"
             },
             {
@@ -2724,6 +2724,18 @@
           "proof": "tests",
           "checks": [
             {
+              "check": "The game client gets what its account holds on the game connection (bots, 2026-11-24): the entitlement state (3133) carries a bit for the Rise of the Angry Earth expansion, which every account holds, a bit for each store mount the account got, and the balances of the Marks of Fortune and of each token. A bot read the expansion's bit and its Marks of Fortune at login, bought a store mount for its retail price of 20000, and then read the mount's bit and the lower balance; after a new login the state still held the mount. Retail: 828 of 828 capture ledgers with a filled state hold the expansion's bit, and each of 35 store purchases of one capture set the bit of the bought mount's `EntitlementIndex`. Before, the server sent this state empty.",
+              "proof": "bots"
+            },
+            {
+              "check": "Store mounts cost their retail prices by default (tests, 2026-11-24): `[shop] free` is off, a mount costs 20000 Marks of Fortune, ten mounts cost 15000 and one costs 10000, as the 31 mount offers of 269 retail catalog replies listed them before the sale to 0. The 13 store mounts of the game data with no retail offer cost 20000 (Inferred).",
+              "proof": "tests"
+            },
+            {
+              "check": "Open: no real game client has shown the store after this change. That the store's \"requires the expansion\" text and the Marks of Fortune counter read the entitlement state is Inferred (no client trace). The state does not carry retail's other bits and balances (season rewards, Twitch and Prime items, dyes, emotes). Marks of Fortune given by `blighted-admin give-marks` while the account plays show after its next login. Which id the client names in its store web paths (a live log of 2026-11-05 showed a Steam id, which finds no account) is not checked again.",
+              "proof": "none"
+            },
+            {
               "check": "Coins state, shop code.",
               "proof": "tests"
             },
@@ -4355,6 +4367,7 @@
     }
   ],
   "nextSteps": [
+    "**Store with the real game client (2026-11-24): live check.**\n\n- Give an account Marks of Fortune (`blighted-admin give-marks <login name> 100000`) and log in.\n- Open the change mount screen: the store mounts must show their prices and no \"requires Rise of the Angry Earth\" text, and the Marks of Fortune counter must show the balance.\n- Buy a mount: the balance goes down by its price and the mount can be chosen.\n- If the text or a zero balance stays, read the `store call` lines of the edge log: they show which id the client names in its store paths.",
     "**Bots, night of 2026-11-24.**\n\n- Main story: the missing floor on the Arcturus tower top (`99A_MSQ_03`), the knight fight of `99C_MSQ_05`, then one bot run from the beach to the end of the list.\n- Expeditions: Savage Divide and Glacial Tarn; raids and catacombs need a bot flow.\n- Trials: Medusa, Dracula's later phases, Mahantaram, Varlaam, the wolf trial.\n- Corrupted breaches: the major portal's core has no mob, so a breach cannot end; the staff's close of a breach is not built.\n- World bosses, world tours and artifact drops by bots.\n- Achievements: compare more quests with retail captures (whisper, talk and cinematic achievements differ); area charting by a bot.\n- Seasonal events: a rule for the game data's schedules and their remote config overrides.",
     "**Bots, night of 2026-11-23.**\n\n- Expeditions not ended by bots: `1403A`, `0525_EXP`, `09A_S20`, `C10A_M7R`, `09A_S19`, and `0899_0801` for the whole group.\n- A full invasion to its end; the war board path of a war.\n- Handoff priority in the sim loop for 340 bots on four sims.\n- The one remaining PC stall during a build and an instance start.",
     "**Player body: physics leads (2026-11-21).**\n\n- Done (tests): attack root motion along the camera, side dodge rolls, the jump's wind-up, the start and stop lag, the camera on the floor, the measuring tool.\n- Next, in order: held-key attack chains, late and missed dodges (1,657 of 6,507 retail presses), the sprint before a jump and the sprint landing, the walls retail walks by (a stall near 7643, 4268).\n- Then let key physics lead and the camera only correct small error, measured on the fresh-start tool for keys and pad, and a live controller trace (no retail ledger has controller input).",
@@ -4444,6 +4457,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Store entitlements on the game connection (2026-11-24, bots): each sim sends the client's entitlement state with the Rise of the Angry Earth expansion for every account, the account's store mounts, its Marks of Fortune and its tokens, at login and after each purchase, as 828 retail capture ledgers show it. Store mounts cost their retail prices by default (20000, 15000 or 10000 Marks of Fortune) and not 0. A bot check (`nw-testclient systems --check store`) proves both on a running stack. The README now says how to start the tutorial sim: without one, a new character starts in the open world.",
     "Bots play more of the game (2026-11-24): handoffs go first in the sim's loop (99.7 % within one tick at 340 bots), every trade skill from the raw material to the product, achievements as the client gets them, housing, faction and PvP missions, expedition runs to their end chest, soul trials, and the Monarch's Bluffs main story by one bot in one run.",
     "Other players and ranged magic (2026-11-21, tests only): each state number keeps its own record's place for the players who see it (the other player's saw-tooth run), and Rain of Arrows lands where the camera's look meets the real ground.",
     "Ranged and magic (2026-11-20, tests only): a click in an ability's aim is no longer lost when two input messages come before one server tick, and Rain of Arrows and Penetrating Shot show their shot and end as in the retail captures.",
@@ -4708,5 +4722,5 @@
   ],
   "clientBuild": "25810808",
   "updated": "2026-11-24",
-  "lastCommit": "7ec07354"
+  "lastCommit": "f2a7ff1d"
 }
