@@ -1615,6 +1615,10 @@
             {
               "check": "A mob's card says that it takes hits (2026-11-24, bots): the recorded first state of some mobs (the Gawain trial's boss) said that the mob takes no hits, and the server sent it as recorded while it took every hit. A client then shows the mob as immune. The server now sends its own value.",
               "proof": "bots"
+            },
+            {
+              "check": "Open world encounters (2026-11-25, bots): an enter trigger that an encounter spawns is watched also in the open world (the named knight of `99C_MSQ_05`). A stage that waits for a slice object to go on or off, which no stage does (203 of the 207 such waits of the open world: enter areas, statues, a horn, a console, world boss setups), ends while a living player is in the encounter's area (Inferred: the trigger's own area and the horn's use are not built). A corrupted breach of difficulty 6: one bot with the story's staff rank 5 clears all 7 waves, gathers the portal core, the breach ends and its faction mission step counts (the core asks for a staff rank by difficulty).",
+              "proof": "bots"
             }
           ]
         },
@@ -2233,8 +2237,16 @@
               "proof": "bots"
             },
             {
-              "check": "The same bot goes on with the next main stories (2026-11-24, bots): Everfall ends but for one quest (the Azoth staff quests and the Heartforge trial end), Brightwood ends (`99B_MSQ_01` to `99B_MSQ_11`), Weaver's Fen plays to `99C_MSQ_04`. Open: `99A_MSQ_03` (its fight area is on a tower top where the server has no floor), `99C_MSQ_05` (a named knight's fight does not end).",
+              "check": "One bot plays the whole main story list (2026-11-25, bots): the stories of Monarch's Bluffs, Everfall, Brightwood, Weaver's Fen, Great Cleave, Edengrove, Ebonscale Reach, Shattered Mountain, the Elysian Wilds and the two last Brimstone Sands quests, with their trials and each quest's achievement: 124 of the list's 129 quests ended; the 5 others are the twin quests of other character kinds, which a soldier is not offered. The bot played them over several runs between server fixes, not in one run; the Azoth staff reached rank 5 by the story and opened the Brimstone actuator that asks for it.",
               "proof": "bots"
+            },
+            {
+              "check": "Faults that stopped the story and are fixed (2026-11-25, bots). `99A_MSQ_03`: the fight area on the Arcturus tower top was read 5 m too high (a retail run starts the fight as the player steps on the floor). `99C_MSQ_05`: the knight came only after an enter trigger that the open world never watched. `09A_M5`: the defence waves waited for a horn that is not built (see World events), and the last wave reset as the plan left the fight area. `99E_MSQ_10`: the fires ask for water, a short timer ends the monologue step, and the leave step of the cave door. `09A_M12`: a player who left one trial was refused the next one while the empty trial stayed open (the empty one closes now; Inferred).",
+              "proof": "bots"
+            },
+            {
+              "check": "Not done: one new character that plays the whole list in one run with no server restart (a run is in work). The horn of the `09A_M5` defence cannot be blown: the waves start when a player is in the fight area.",
+              "proof": "none"
             }
           ]
         },
@@ -2399,6 +2411,10 @@
             },
             {
               "check": "A bot opens an elite chest and gets its loot, and a second open on the same day is refused (2026-11-24, bots).",
+              "proof": "bots"
+            },
+            {
+              "check": "A bot opens one elite chest in each of four zones, and a second open on the same day is refused (2026-11-25, bots). 106 of the 576 elite chest places have no object in the level data: they are not built.",
               "proof": "bots"
             }
           ]
@@ -3365,16 +3381,28 @@
               "proof": "bots"
             },
             {
-              "check": "Not ended by bots (2026-11-24): Savage Divide (the bots saw no mob near the boss's place) and Glacial Tarn (725 hits on the boss and no death). Raids and catacombs: no bot flow yet.",
-              "proof": "none"
+              "check": "Savage Divide and Glacial Tarn end by bots (2026-11-25, bots): the mammoth's stage waited for an intro end that no mob tree sent (now sent at the retail time), and the Glacial level's two plain copies of its boss stood beside the script's boss (retail shows one). With them, bot groups of 5 ended all 12 expeditions.",
+              "proof": "bots"
             },
             {
               "check": "A new copy of a trial or expedition has all its objects (2026-11-24, bots): the instance servers are reused, and a quest object taken in one copy was gone in the next copy, also after a restart. Three bots took the Gawain trial's crown one after the other. That a copy keeps nothing of the copy before is Inferred.",
               "proof": "bots"
             },
             {
-              "check": "Story trials by bots (2026-11-24): Gawain, Heartforge, Empress Zhou, Apophis, Morgaine and Seraphim end. A soul trial ends too (Isabella: the daily entry, the fight, the done flag and its reward event; the daily reset is Unknown). A mutated Starstone run of difficulty 1 ends. Open: Medusa, Dracula's later phases, Mahantaram, Varlaam and the wolf trial.",
+              "check": "Story trials by bots (2026-11-24 and 2026-11-25): Gawain, Heartforge, Empress Zhou, Apophis, Morgaine, Seraphim, Yonas, Medusa, Dracula, Mahantaram, Varlaam and the wolf trial end. The trial bosses take no hits until their intro ends, and Dracula's phases come at health shares (87.5 % and 60 %: Inferred from retail ranges). A soul trial's daily entry ends (Isabella, Mahantaram; the daily reset is Unknown). A mutated Starstone run of difficulty 1 and Shattered Obelisk runs of difficulty 2 and 3 end.",
               "proof": "bots"
+            },
+            {
+              "check": "A raid of 10 (2026-11-25, bots): 10 bots form a raid as players do (a group of 5, the change to a raid, 5 more invites), enter one raid instance of the Cutlass Keys raid and kill its first boss in about 10 minutes (7.8 M health, as retail at 10 players). A raid member's instance request was refused before: the director knew only plain groups. Not done: the raid's later bosses and its end; the second raid.",
+              "proof": "bots"
+            },
+            {
+              "check": "Catacombs (2026-11-25, bots): a bot enters a run through its queue, kills the boss of the first boss room, gathers the extraction core, stands in the exit and the run ends as extracted. Two faults are fixed: the run plan stopped at a hallway, and the core asked for a tracking item (a retail run gathers the core without it).",
+              "proof": "bots"
+            },
+            {
+              "check": "Not done in the catacombs: the side gates and the key. The server keeps no gate shut, so a run needs no key and no room clear; the retail rule is Unknown. A bot plays only the first boss room.",
+              "proof": "none"
             }
           ]
         },
@@ -4383,6 +4411,7 @@
     }
   ],
   "nextSteps": [
+    "**Bots, 2026-11-25.**\n\n- Main story: one new character through the whole list in one run with no restart.\n- Catacombs: the side gates and the key (retail rule Unknown). Raids: the later bosses and the run end; the second raid.\n- Open world encounters: read the trigger areas and the horn of the encounter slices, so a wait ends by the real trigger and not by the fight area.\n- World bosses and world tours: none is on the schedule now; a schedule rule is needed first. Artifacts: no loot table of this build drops one.\n- Free-for-all zone and influence towers: server rules have tests only; no bot check yet.",
     "**Store with the real game client (2026-11-24): live check.**\n\n- Give an account Marks of Fortune (`blighted-admin give-marks <login name> 100000`) and log in.\n- Open the change mount screen: the store mounts must show their prices and no \"requires Rise of the Angry Earth\" text, and the Marks of Fortune counter must show the balance.\n- Buy a mount: the balance goes down by its price and the mount can be chosen.\n- If the text or a zero balance stays, read the `store call` lines of the edge log: they show which id the client names in its store paths.",
     "**Bots, night of 2026-11-24.**\n\n- Main story: the missing floor on the Arcturus tower top (`99A_MSQ_03`), the knight fight of `99C_MSQ_05`, then one bot run from the beach to the end of the list.\n- Expeditions: Savage Divide and Glacial Tarn; raids and catacombs need a bot flow.\n- Trials: Medusa, Dracula's later phases, Mahantaram, Varlaam, the wolf trial.\n- Corrupted breaches: the major portal's core has no mob, so a breach cannot end; the staff's close of a breach is not built.\n- World bosses, world tours and artifact drops by bots.\n- Achievements: compare more quests with retail captures (whisper, talk and cinematic achievements differ); area charting by a bot.\n- Seasonal events: a rule for the game data's schedules and their remote config overrides.",
     "**Bots, night of 2026-11-23.**\n\n- Expeditions not ended by bots: `1403A`, `0525_EXP`, `09A_S20`, `C10A_M7R`, `09A_S19`, and `0899_0801` for the whole group.\n- A full invasion to its end; the war board path of a war.\n- Handoff priority in the sim loop for 340 bots on four sims.\n- The one remaining PC stall during a build and an instance start.",
@@ -4473,6 +4502,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Bots play the whole main story (2026-11-25): one bot ended 124 of the 129 list quests (the 5 others are twins of other character kinds), all 12 expeditions end, 12 story trials end, a raid of 10 kills its first boss, and elite chests open in four zones.",
     "PvP bots (2026-11-25, bots): a new `arena` bot run queues bots for the arena as a client does and fights to the match end: 13 1v1 matches and 22 3v3 matches, plus 20 duels. Two server faults found and fixed: the AFK rule removed players at a round start with no warning, and the director could stop an instance sim that had just got a match.",
     "Account removal (2026-11-24, tests): `edge-http delete-account --account <name> --confirm <name>` removes an account with its characters and all they own, in every world and in the global database. Before, the only way was a set of hand-written database deletes.",
     "Store entitlements on the game connection (2026-11-24, bots): each sim sends the client's entitlement state with the Rise of the Angry Earth expansion for every account, the account's store mounts, its Marks of Fortune and its tokens, at login and after each purchase, as 828 retail capture ledgers show it. Store mounts cost their retail prices by default (20000, 15000 or 10000 Marks of Fortune) and not 0. A bot check (`nw-testclient systems --check store`) proves both on a running stack. The README now says how to start the tutorial sim: without one, a new character starts in the open world.",
