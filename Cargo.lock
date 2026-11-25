@@ -1481,6 +1481,7 @@ dependencies = [
  "openssl",
  "reqwest",
  "rustls",
+ "serde_json",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",

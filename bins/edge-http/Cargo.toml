@@ -22,6 +22,8 @@ nw-protocol.workspace = true
 # The message of the day pull from the website (nw_login::motd_pull).
 reqwest.workspace = true
 rustls.workspace = true
+# The detail of the audit row of a removed account.
+serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }

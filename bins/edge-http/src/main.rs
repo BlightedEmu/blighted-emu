@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use edge_http::{link_discord, make_mirror_certificate, migrate, serve};
+use edge_http::{delete_account, link_discord, make_mirror_certificate, migrate, serve};
 
 /// The committed example configuration.
 const DEFAULT_CONFIG: &str = "config/edge.toml";
@@ -40,6 +40,15 @@ enum Command {
         #[arg(long)]
         discord_user_id: String,
     },
+    /// Removes an account for good, with its characters and all they own. It cannot be undone.
+    DeleteAccount {
+        /// The account: its login name, Discord user id or Discord username.
+        #[arg(long)]
+        account: String,
+        /// The same name again.
+        #[arg(long)]
+        confirm: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -52,6 +61,9 @@ fn main() -> ExitCode {
             username,
             discord_user_id,
         } => link_discord(&cli.config, &username, &discord_user_id),
+        Command::DeleteAccount { account, confirm } => {
+            delete_account(&cli.config, &account, &confirm)
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

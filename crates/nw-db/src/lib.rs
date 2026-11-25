@@ -8,6 +8,7 @@
 //! only through `edge-http migrate`; the server checks the schema version at start.
 
 mod account;
+mod account_delete;
 mod admin;
 mod analytics;
 mod arena;
@@ -56,6 +57,9 @@ pub use account::{
     DiscordLogin, account_by_discord, account_by_id, account_by_login_name,
     create_password_account, discord_account, discord_login, link_discord_login, password_login,
     set_banned,
+};
+pub use account_delete::{
+    RemovedFromWorld, WORLD_ACCOUNT_TABLES, delete_account_from_global, delete_account_from_world,
 };
 pub use admin::{
     AdminRank, AuditEntry, AuditRow, RankRow, admin_rank, admin_ranks, audit_rows, insert_audit,

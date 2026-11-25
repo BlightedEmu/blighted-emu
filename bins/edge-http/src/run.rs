@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `serve`, `migrate` and `link-discord`.
+//! `serve`, `migrate`, `link-discord` and `delete-account`.
 
 use nw_protocol::store_api::{StoreTable, StoreTableError};
 use std::collections::HashMap;
@@ -18,8 +18,9 @@ use nw_content::client_build::load_client_build;
 use nw_content::layout::{ContentLayout, STORE, content_dir};
 
 use nw_db::{
-    DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, account_by_discord, characters_for_account,
-    check_schema, link_discord_login, password_login,
+    AuditEntry, DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, account_by_discord,
+    account_by_login_name, characters_for_account, check_schema, delete_account_from_global,
+    delete_account_from_world, insert_audit, link_discord_login, password_login, set_banned,
 };
 use nw_login::cms::{CmsError, CmsObjects};
 use nw_login::config::{EdgeConfig, EdgeConfigError, load_edge_config};
@@ -133,6 +134,12 @@ pub enum RunError {
         /// Characters of that account over all worlds.
         characters: usize,
     },
+    /// The two names of `delete-account` differ.
+    #[error("the account is not removed: --confirm must repeat the name {0}")]
+    NotConfirmed(String),
+    /// No account has the name of `delete-account`.
+    #[error("no account has the login name, Discord user id or Discord username {0}")]
+    NoSuchAccount(String),
 }
 
 fn env_lookup(name: &str) -> Option<String> {
@@ -213,6 +220,79 @@ pub fn link_discord(
         }
         link_discord_login(&global, discord_user_id, account.id).await?;
         tracing::info!(%username, account = %account.id, "Discord user linked");
+        Ok(())
+    })
+}
+
+/// The audit command and result of a removed account (`admin_audit`).
+const DELETE_ACCOUNT_COMMAND: &str = "delete-account";
+const AUDIT_DONE: &str = "done";
+
+/// Whether `confirm` repeats `name`: the removal of an account cannot be undone.
+fn confirmed(name: &str, confirm: &str) -> Result<(), RunError> {
+    if name.is_empty() || name != confirm.trim() {
+        return Err(RunError::NotConfirmed(name.to_owned()));
+    }
+    Ok(())
+}
+
+/// Removes the account named `name` (a login name, a Discord user id or a Discord username) for
+/// good (`delete-account`): its characters with all they own in every world, then the account
+/// with its logins, ranks, store items and names (`nw_db::delete_account_from_world`,
+/// `nw_db::delete_account_from_global`). `confirm` must repeat the name. The account is banned
+/// first, so no login starts while its rows go; an audit row records the removal. A removal
+/// that stops part way leaves the account, and the same command finishes it.
+///
+/// Run it while the account is not in the game: a sim that still holds one of its characters
+/// cannot save it. The social service keeps the characters it read at its start, so start it
+/// again after a removal.
+pub fn delete_account(config_path: &Path, name: &str, confirm: &str) -> Result<(), RunError> {
+    let name = name.trim();
+    confirmed(name, confirm)?;
+    let config = load_edge_config(config_path)?;
+    let passwords = load_database_passwords(&config, env_lookup)?;
+    let _log_flush = init_logging(&config.log_filter)?;
+    runtime()?.block_on(async {
+        let (global, worlds) = connect_all(&config, &passwords)
+            .await
+            .map_err(RunError::Database)?;
+        check_schema(&global, &GLOBAL_MIGRATOR).await?;
+        for world in &worlds {
+            check_schema(world, &WORLD_MIGRATOR).await?;
+        }
+        let account = account_by_login_name(&global, name)
+            .await?
+            .ok_or_else(|| RunError::NoSuchAccount(name.to_owned()))?;
+        set_banned(&global, account.id, true).await?;
+        let mut characters = Vec::new();
+        let mut companies = 0;
+        for world in &worlds {
+            let removed = delete_account_from_world(world, account.id).await?;
+            characters.extend(removed.characters);
+            companies += removed.companies;
+        }
+        delete_account_from_global(&global, account.id, &characters).await?;
+        insert_audit(
+            &global,
+            &AuditEntry {
+                account: None,
+                rank: None,
+                command: DELETE_ACCOUNT_COMMAND.to_owned(),
+                target: format!("account {}", account.id),
+                detail: serde_json::json!({
+                    "characters": characters,
+                    "companies_removed": companies,
+                }),
+                result: AUDIT_DONE.to_owned(),
+            },
+        )
+        .await?;
+        tracing::info!(
+            account = %account.id,
+            characters = characters.len(),
+            companies_removed = companies,
+            "account removed"
+        );
         Ok(())
     })
 }
@@ -423,6 +503,17 @@ mod tests {
             check_discord_user_id("nelly"),
             Err(RunError::DiscordUserId(id)) if id == "nelly"
         ));
+    }
+
+    #[test]
+    fn delete_account_needs_the_name_twice_before_it_connects() {
+        assert!(confirmed("leaver", " leaver ").is_ok());
+        for (name, confirm) in [("leaver", "stayer"), ("leaver", ""), ("", "")] {
+            assert!(
+                matches!(confirmed(name, confirm), Err(RunError::NotConfirmed(asked)) if asked == name),
+                "{name:?} {confirm:?}"
+            );
+        }
     }
 
     #[test]
