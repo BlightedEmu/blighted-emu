@@ -49,6 +49,15 @@ use crate::value::{Blackboard, ConditionGroup, KeyId, NameId, Param, Value};
 /// Plans made at most in one tick (our engineering limit: a tree whose plan finishes at once,
 /// for example a lone `SetCooldownAction`, would otherwise plan forever).
 pub const MAX_PLANS_PER_TICK: usize = 4;
+
+/// The plan's mark of a child of a `PermissiveSequencer` that did not plan (its entry gate
+/// failed: a cooldown, a condition, a `RandomChance` roll): the sequence skips it when its
+/// execution reaches it. Without the mark every child ran, so a `RandomChance` of 0.15 passed
+/// every time (live 2026-11-26 00:08 to 00:10: a javelin thrower's `MoveToFarRange`, chance
+/// 0.15, ran after 5 of 5 melee ends; retail: 1 dash back after about 22 such ends in 21
+/// fights). No selector has this many children.
+const SKIPPED_CHILD: u16 = u16::MAX;
+
 /// The slot of the root node.
 const ROOT_SLOT: Slot = 0x9E37_79B9_7F4A_7C15;
 /// Children a `Parallel` can track (the trees have 2).
@@ -1021,7 +1030,10 @@ impl<'a, W: World> Ctx<'a, '_, W> {
             let mark = choices.len();
             match self.plan(slot_of(slot, index), *child, choices) {
                 Some(utility) => best = best.max(utility),
-                None if permissive => choices.truncate(mark),
+                None if permissive => {
+                    choices.truncate(mark);
+                    choices.push((slot_of(slot, index), SKIPPED_CHILD));
+                }
                 None => return None,
             }
         }
@@ -1376,15 +1388,23 @@ impl<'a, W: World> Ctx<'a, '_, W> {
                 let permissive = matches!(kind, NodeKind::PermissiveSequencer(_));
                 let each = matches!(kind, NodeKind::ForEachTarget { .. });
                 let children = data.children(id);
-                let mut index = match self.state(slot) {
-                    Some(State::Index(index)) => index as usize,
-                    _ => 0,
+                let (mut index, mut resumed) = match self.state(slot) {
+                    Some(State::Index(index)) => (index as usize, true),
+                    _ => (0, false),
                 };
                 loop {
                     let Some(child) = children.get(index) else {
                         self.remove(slot);
                         return Status::Success;
                     };
+                    // A child the plan dropped does not run; one that runs already goes on.
+                    let skipped = permissive
+                        && !std::mem::take(&mut resumed)
+                        && self.planned_choice(slot_of(slot, index)) == Some(SKIPPED_CHILD);
+                    if skipped {
+                        index += 1;
+                        continue;
+                    }
                     self.set_state(slot, id, State::Index(index as u32));
                     let target = if each {
                         u32::try_from(index).ok()
@@ -3047,6 +3067,28 @@ mod tests {
             let data = build.finish(root);
             let mut world = TestWorld::default();
             assert_eq!(run(&data, &mut brain(&data), &mut world, 0), [expected]);
+        }
+    }
+
+    #[test]
+    fn a_permissive_sequence_skips_a_child_whose_chance_fails() {
+        for (rate, expected) in [
+            (0.0, vec!["First", "Last"]),
+            (1.0, vec!["First", "Gore", "Last"]),
+        ] {
+            let mut build = Build::default();
+            let first = build.gore("First");
+            let gore = build.gore("Gore");
+            let chance = build.node(NodeKind::RandomChance {
+                child: Some(gore),
+                rate: Param::literal(Value::Float(rate)),
+            });
+            let last = build.idle("Last");
+            let children = build.children(&[first, chance, last]);
+            let root = build.node(NodeKind::PermissiveSequencer(children));
+            let data = build.finish(root);
+            let mut world = TestWorld::default();
+            assert_eq!(run(&data, &mut brain(&data), &mut world, 5_000), expected);
         }
     }
 
