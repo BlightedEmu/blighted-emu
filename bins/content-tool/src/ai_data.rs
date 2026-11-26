@@ -62,7 +62,7 @@ use crate::player_attacks::{
     slice_flight,
 };
 use crate::source::GameSource;
-use crate::stand_in_trees::{StandInError, stand_in_trees};
+use crate::stand_in_trees::{StandInError, fill_missing_trees, stand_in_trees};
 
 /// Where the user keeps the retrieved Server.pak (server-pak note).
 pub const DEFAULT_SERVER_PAK: &str = "local-data/server-pak/Server.pak";
@@ -798,19 +798,20 @@ fn list_actions(text: &str) -> Result<ParsedList, MannequinError> {
 fn grid_lists(text: &str) -> Result<GridLists, MannequinError> {
     let lists = CageGrid::lists(text)?;
     Ok(GridLists {
-        paths: lists.iter().map(GridList::pak_path).collect(),
         aliases: lists
             .iter()
             .flat_map(|list| &list.aliased)
             .filter_map(|action| Some((action.name.clone(), action.alias.clone()?)))
             .collect(),
+        lists,
     })
 }
 
-/// What a grid names: its action lists and the alias of each action.
+/// What a grid names: its action lists (with the actions each list's `<AliasMap>` names) and
+/// the alias of each action.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct GridLists {
-    paths: Vec<String>,
+    lists: Vec<GridList>,
     aliases: Vec<(String, String)>,
 }
 
@@ -1510,7 +1511,7 @@ pub fn build_ai_data(
     }
     let list_paths: HashSet<String> = grid_lists_by_path
         .values()
-        .flat_map(|lists| lists.paths.iter().cloned())
+        .flat_map(|lists| lists.lists.iter().map(GridList::pak_path))
         .collect();
     let list_bytes = read_entries(source, &list_paths)?;
     let mut lists: HashMap<String, ParsedList> = HashMap::new();
@@ -1614,7 +1615,7 @@ pub fn build_ai_data(
                         let named = &grid_lists_by_path[grid];
                         let GridIndex { tasks, actions } = builder.grid(
                             &mut decoder,
-                            &named.paths,
+                            &named.lists,
                             database(&adbs, slice.animation_database.as_deref()),
                             database(&adbs, weapon_adb.map(String::as_str)),
                         );
@@ -1726,16 +1727,21 @@ pub fn build_ai_data(
     }
     let shots = ranged_shots(source, &mut decoder, &builder.actions, &mut report)?;
     let damage_table_rows = table_rows(&mut decoder, tables.into_values());
-    let trees = decoder.finish();
-    let tree_of: HashMap<NameId, u32> = trees
-        .trees
-        .iter()
-        .enumerate()
-        .map(|(index, tree)| (tree.path, u32::try_from(index).unwrap_or(u32::MAX)))
-        .collect();
     for archetype in &mut archetypes {
         for reference in &mut archetype.trees {
-            reference.tree = tree_of.get(&reference.path).copied();
+            let path = decoder.name(reference.path).to_owned();
+            reference.tree = decoder.tree_by_path(&path).map(|(index, _)| index);
+        }
+    }
+    fill_missing_trees(&mut decoder, &mut archetypes, &grids, &builder.actions).map_err(
+        |source| AiDataError::Decode {
+            path: "stand-in".to_owned(),
+            source,
+        },
+    )?;
+    let trees = decoder.finish();
+    for archetype in &mut archetypes {
+        for reference in &archetype.trees {
             if reference.tree.is_none() {
                 report
                     .missing_trees
@@ -2174,26 +2180,45 @@ struct CageBuilder<'a> {
 
 impl CageBuilder<'_> {
     /// The tasks and actions of one grid with the CAGE actions they resolve to, each sorted by
-    /// name (the first action list that has a task or an action name wins, as the client reads
-    /// the grid's lists in order).
+    /// name. A task or an action name goes to the first action, in the order of the grid's
+    /// `grid_lists` and of each list's file, that the list's `<AliasMap>` names (an action the
+    /// client numbers, [`CageGrid::number`]); a task that no named action has goes to the first
+    /// action that has it, as before (the client reads the grid's lists in order).
+    ///
+    /// Observed: the knife priest's grid (archetype 932) lists `damned_nav.actionlist`, whose
+    /// `Move_Combat_Blocking` names `Move_Combat_CAGE_Task`, before the list of `Move_Combat`;
+    /// its `<AliasMap>` names only `Move_Combat`. Resolved to `Move_Combat_Blocking`, which the
+    /// client does not number, the run sent the idle entry `190/1/37` (`Idle`,
+    /// `Idle_No_Task`) in 18 of 18 runs at 4.0 to 5.2 m/s, and the priest glided (live sim log
+    /// 2026-11-26 05:28:32 UTC on); retail `Playthrough_Part_01` (interest 52, record ms
+    /// 1792338599733) sends `355/182/45`, `Move_Combat`, for the same slice's run.
+    ///
+    /// Inferred, the fall-back to an action that no `<AliasMap>` names: resolved only to named
+    /// actions, 3,266 of the 25,051 grid tasks that the archetypes' trees use (build 25810808)
+    /// had no action at all (for example the legion signifer's `Dodge_L_CAGE_Task` and the evil
+    /// knights' attacks), and their CAGE leaves would end at once; with the fall-back, the named
+    /// rule changes the action of 174 used tasks (169 of them `Move_Combat_Blocking` to
+    /// `Move_Combat`).
     fn grid(
         &mut self,
         decoder: &mut TreeDecoder,
-        list_paths: &[String],
+        grid_lists: &[GridList],
         adb: Option<(&str, &AnimDatabase)>,
         weapon_adb: Option<(&str, &AnimDatabase)>,
     ) -> GridIndex {
-        let mut tasks: BTreeMap<NameId, u32> = BTreeMap::new();
-        let mut names: BTreeMap<NameId, u32> = BTreeMap::new();
-        for list_path in list_paths {
+        // Each action of the lists in order: whether the grid names it, its name, its tasks and
+        // its CAGE action.
+        let mut found: Vec<(bool, NameId, Vec<NameId>, u32)> = Vec::new();
+        for grid_list in grid_lists {
+            let list_path = grid_list.pak_path();
             let Some(ParsedList {
                 actions,
                 conditions,
-            }) = self.lists.get(list_path)
+            }) = self.lists.get(&list_path)
             else {
                 continue;
             };
-            let list = decoder.intern(list_path);
+            let list = decoder.intern(&list_path);
             for action in actions {
                 let cage = self.action(decoder, list, action, conditions, adb, weapon_adb);
                 let name = cage.action;
@@ -2207,9 +2232,21 @@ impl CageBuilder<'_> {
                         index
                     }
                 };
-                names.entry(name).or_insert(index);
-                for task in &action.tasks {
-                    tasks.entry(decoder.intern(task)).or_insert(index);
+                let action_tasks = action
+                    .tasks
+                    .iter()
+                    .map(|task| decoder.intern(task))
+                    .collect();
+                found.push((grid_list.names(&action.name), name, action_tasks, index));
+            }
+        }
+        let mut tasks: BTreeMap<NameId, u32> = BTreeMap::new();
+        let mut names: BTreeMap<NameId, u32> = BTreeMap::new();
+        for named in [true, false] {
+            for (_, name, action_tasks, index) in found.iter().filter(|entry| entry.0 == named) {
+                names.entry(*name).or_insert(*index);
+                for task in action_tasks {
+                    tasks.entry(*task).or_insert(*index);
                 }
             }
         }
@@ -2934,6 +2971,80 @@ mod tests {
         assert_eq!(datasheet_path("other.datasheet"), "other.datasheet");
     }
 
+    /// The task each grid task of `lists` (action list paths and texts) resolves to under the
+    /// grid `grid`, as the action's name.
+    fn resolved_tasks(grid: &str, lists: &[(&str, &str)]) -> Vec<(String, String)> {
+        let parsed: HashMap<String, ParsedList> = lists
+            .iter()
+            .map(|(path, text)| ((*path).to_owned(), list_actions(text).expect("list")))
+            .collect();
+        let known = lengths(&[]);
+        let roots = root_clips();
+        let mut builder = CageBuilder {
+            lists: &parsed,
+            lengths: &known,
+            roots: &roots,
+            actions: Vec::new(),
+            index: HashMap::new(),
+            unknown_fragments: BTreeMap::new(),
+        };
+        let mut decoder = TreeDecoder::default();
+        let grid_lists = CageGrid::lists(grid).expect("grid");
+        let index = builder.grid(&mut decoder, &grid_lists, None, None);
+        index
+            .tasks
+            .iter()
+            .map(|(task, action)| {
+                (
+                    decoder.name(*task).to_owned(),
+                    decoder
+                        .name(builder.actions[*action as usize].action)
+                        .to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// A grid in the form of the knife priest's (archetype 932): `damned_nav.actionlist` holds
+    /// `Move_Combat_Blocking` for the run task before the list of `Move_Combat`, and the grid's
+    /// `<AliasMap>` of it does not name `Move_Combat_Blocking`.
+    const NAV_GRID: &str = r#"<Grid><ActionLists>
+<ActionList Path="Damned_Nav.actionlist"><AliasMap><Action ActionName="Move_Combat_Walk" Alias="BehaviorTreeTask"/></AliasMap></ActionList>
+<ActionList Path="BaseAI_Nav.actionlist"><AliasMap><Action ActionName="Move_Combat" Alias="BehaviorTreeTask"/></AliasMap></ActionList>
+</ActionLists></Grid>"#;
+    const DAMNED_NAV: &str = r#"<ActionList><Actions>
+<Action Name="Move_Combat_Blocking" FragmentName="Move_Combat"><ActivationCondition><IfBehaviorTreeTask ActionName="Move_Combat_CAGE_Task"/></ActivationCondition></Action>
+<Action Name="Move_Combat_Walk" FragmentName="Move_Combat_Walk"><ActivationCondition><IfBehaviorTreeTask ActionName="Move_Combat_Walk_CAGE_Task"/></ActivationCondition></Action>
+<Action Name="WalkBack" FragmentName="WalkBack"><ActivationCondition><IfBehaviorTreeTask ActionName="WalkBack_CAGE_Task"/></ActivationCondition></Action>
+</Actions></ActionList>"#;
+    const BASE_NAV: &str = r#"<ActionList><Actions>
+<Action Name="Move_Combat" FragmentName="Move_Combat"><ActivationCondition><IfBehaviorTreeTask ActionName="Move_Combat_CAGE_Task"/></ActivationCondition></Action>
+</Actions></ActionList>"#;
+
+    #[test]
+    fn a_task_goes_to_the_action_the_grid_names_before_one_it_does_not() {
+        let tasks = resolved_tasks(
+            NAV_GRID,
+            &[
+                ("damned_nav.actionlist", DAMNED_NAV),
+                ("baseai_nav.actionlist", BASE_NAV),
+            ],
+        );
+        let action_of = |task: &str| {
+            tasks
+                .iter()
+                .find(|(known, _)| known == task)
+                .map(|(_, action)| action.as_str())
+        };
+        assert_eq!(action_of("Move_Combat_CAGE_Task"), Some("Move_Combat"));
+        assert_eq!(
+            action_of("Move_Combat_Walk_CAGE_Task"),
+            Some("Move_Combat_Walk")
+        );
+        // No list names an action for this task: it keeps the first action that has it.
+        assert_eq!(action_of("WalkBack_CAGE_Task"), Some("WalkBack"));
+    }
+
     #[test]
     fn a_grid_names_its_lists_and_aliases() {
         let grid = r#"<Grid><ActionLists>
@@ -2942,7 +3053,11 @@ mod tests {
 </ActionLists></Grid>"#;
         let lists = grid_lists(grid).expect("grid");
         assert_eq!(
-            lists.paths,
+            lists
+                .lists
+                .iter()
+                .map(GridList::pak_path)
+                .collect::<Vec<_>>(),
             [
                 "sharedassets/springboardentitites/characters/baseai/cage/baseai_stun.actionlist",
                 "sharedassets/boar_reaction.actionlist"

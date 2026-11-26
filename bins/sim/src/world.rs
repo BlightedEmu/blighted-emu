@@ -1364,6 +1364,8 @@ pub struct SimWorld {
     skinned_shown: HashSet<u64>,
     /// The block state each mob's clients were last sent.
     blocks_shown: HashMap<u64, bool>,
+    /// The mobs and CAGE actions already logged as having no client number ([`tree_pose`]).
+    unnumbered_actions: HashSet<(u64, u32)>,
     /// The guard segments each mob's states last carried (ALC child 44).
     guard_segments_shown: HashMap<u64, u8>,
     dice: Dice,
@@ -1594,6 +1596,7 @@ impl SimWorld {
             skinned: HashMap::new(),
             skinned_shown: HashSet::new(),
             blocks_shown: HashMap::new(),
+            unnumbered_actions: HashSet::new(),
             guard_segments_shown: HashMap::new(),
             content,
             mobs: Mobs::new(Arc::clone(&combat.spawns), &combat),
@@ -5103,8 +5106,8 @@ impl SimWorld {
                     tree: tree_pose(
                         &self.mobs,
                         &content.creature_animations,
-                        entity,
-                        look.asset.id,
+                        (entity, look.asset.id),
+                        &mut self.unnumbered_actions,
                     ),
                 };
                 let frame = self.mob_timelines.advance(
@@ -5154,6 +5157,8 @@ impl SimWorld {
             .retain(|entity| skinned.contains_key(entity));
         self.blocks_shown
             .retain(|entity, _| mobs.health(*entity).is_some());
+        self.unnumbered_actions
+            .retain(|(entity, _)| mobs.health(*entity).is_some());
         self.guard_segments_shown
             .retain(|entity, _| mobs.health(*entity).is_some());
         // The radius is checked at start to be a finite number above 0.
@@ -5801,11 +5806,17 @@ impl SimWorld {
 /// What mob `entity` of the creature slice `asset` shows from its tree, when it runs one: the
 /// numbers of the action it plays in the creature's files (`table`), its tag state, and its
 /// facing once it turned.
+///
+/// An action or fragment that the creature's files do not number cannot go to the client: the
+/// mob shows its idle ([`mob_timeline`]), and the first time for each mob and action
+/// (`logged`) a debug line says so. Live 2026-11-26 05:28:32 UTC on: the knife priest
+/// (archetype 932) ran with the unnumbered `Move_Combat_Blocking` and glided in the idle pose
+/// (the grid rule of `content-tool ai-data` now resolves its run to `Move_Combat`).
 fn tree_pose(
     mobs: &Mobs,
     table: &CreatureAnimations,
-    entity: u64,
-    asset: [u8; ASSET_ID_LEN],
+    (entity, asset): (u64, [u8; ASSET_ID_LEN]),
+    logged: &mut HashSet<(u64, u32)>,
 ) -> Option<TreePose> {
     let mind = mobs.tree(entity)?;
     let creature = table.get(&asset);
@@ -5813,9 +5824,20 @@ fn tree_pose(
         mobs.shown(entity)
             .zip(creature)
             .and_then(|((shown, action, fragment), creature)| {
+                let numbers = creature.fragment(fragment).zip(creature.action(action));
+                if numbers.is_none() && logged.insert((entity, shown.action)) {
+                    tracing::debug!(
+                        mob = entity,
+                        archetype = mind.archetype(),
+                        action,
+                        fragment,
+                        "mob action without a client number"
+                    );
+                }
+                let (fragment, action) = numbers?;
                 Some(TreeEntry {
-                    fragment: creature.fragment(fragment)?,
-                    action: creature.action(action)?,
+                    fragment,
+                    action,
                     serial: shown.serial,
                 })
             });

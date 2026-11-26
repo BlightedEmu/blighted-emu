@@ -4663,6 +4663,90 @@ mod retail_tests {
         }
     }
 
+    /// The run actions that mob `vitals_id` of slice `slice`, at `place` on the real ground,
+    /// plays in a fight with a player who changes sides around it every few seconds: the name of
+    /// each `Move_Combat` start's action, and whether the creature table numbers its fragment
+    /// and its action (the numbers the client plays it by).
+    fn run_actions(vitals_id: &str, slice: &str, place: [f32; 3]) -> Vec<(String, bool)> {
+        const FIGHT_MS: u64 = 60_000;
+        const SIDE_MS: u64 = 6_000;
+        const AWAY_M: f32 = 8.0;
+        const SIDES: u64 = 4;
+        const RUN_FRAGMENT: &str = "Move_Combat";
+        let table = nw_content::creature_animations::CreatureAnimations::load(
+            &nw_content::layout::repo_layout(),
+        )
+        .expect("the creature table");
+        let creature = table.get(&asset(slice)).expect("the slice's creature row");
+        let (mut mobs, ground) = mob_on_real_ground(vitals_id, slice, place);
+        let mut serial = None;
+        let mut runs = Vec::new();
+        for now in (0..FIGHT_MS).step_by(TICK_MS as usize) {
+            // A fight's seconds.
+            #[allow(clippy::cast_precision_loss)]
+            let bearing = std::f32::consts::TAU * ((now / SIDE_MS) % SIDES) as f32 / SIDES as f32;
+            let (x, y) = (
+                place[0] + AWAY_M * bearing.cos(),
+                place[1] + AWAY_M * bearing.sin(),
+            );
+            let player = Seen {
+                entity: PLAYER,
+                position: Position {
+                    x,
+                    y,
+                    z: ground.height_at(x, y).unwrap_or(place[2]),
+                },
+            };
+            mobs.tick(&[player], now, &ground, 1);
+            let Some((shown, action, fragment)) = mobs.shown(mob_entity(0)) else {
+                continue;
+            };
+            if serial != Some(shown.serial) && fragment == RUN_FRAGMENT {
+                let numbered =
+                    creature.fragment(fragment).is_some() && creature.action(action).is_some();
+                runs.push((action.to_owned(), numbered));
+            }
+            serial = Some(shown.serial);
+        }
+        runs
+    }
+
+    #[test]
+    fn the_knife_priest_runs_with_an_action_the_client_numbers() {
+        // Live 2026-11-26 05:28:32 UTC on: the knife priest (archetype 932) glided in its idle
+        // pose in 18 of 18 runs, as its run task went to `Move_Combat_Blocking`, which its
+        // creature's files do not number; retail `Playthrough_Part_01` (interest 52, record ms
+        // 1792338599733) plays its run as `Move_Combat` (entry `355/182/45`).
+        const PRIEST_ID: &str = "Damned_Cultist_Named_03";
+        const PRIEST: &str = "f507b0c320b35746a35ab40b54c43904";
+        /// Its spawn: the place of its first card in that live log.
+        const SPAWN: [f32; 3] = [7349.177, 2917.83, 61.102];
+        let runs = run_actions(PRIEST_ID, PRIEST, SPAWN);
+        assert!(!runs.is_empty(), "it runs");
+        assert!(
+            runs.iter()
+                .all(|(action, numbered)| *numbered && action == "Move_Combat"),
+            "{runs:?}"
+        );
+    }
+
+    #[test]
+    fn the_beach_club_sailor_still_runs_with_an_action_the_client_numbers() {
+        // The club sailor of archetype 134 ran with `Move_Combat` in the same live log (its
+        // entries `182/26`, 112 of them) and stays so.
+        const SAILOR_ID: &str = "Corrupted_Sailor_1H_Club";
+        const SAILOR: &str = "4e6c3550d8ab546b95e1eb96a2bcfc51";
+        /// Its spawn: the place of its first card in that live log.
+        const SPAWN: [f32; 3] = [7310.742, 2862.85, 53.397];
+        let runs = run_actions(SAILOR_ID, SAILOR, SPAWN);
+        assert!(!runs.is_empty(), "it runs");
+        assert!(
+            runs.iter()
+                .all(|(action, numbered)| *numbered && action == "Move_Combat"),
+            "{runs:?}"
+        );
+    }
+
     #[test]
     fn root_moves_on_the_real_ground_never_end_on_a_closed_place() {
         // The first mate's dodges on his beach and the javelineer's dashes on its ruin platform:

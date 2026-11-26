@@ -708,7 +708,7 @@ impl GridList {
 
     /// Whether its `<AliasMap>` names action `name` (the client compares the names without
     /// case: `_stricmp` in `FUN_142a4f6c0`).
-    fn names(&self, name: &str) -> bool {
+    pub fn names(&self, name: &str) -> bool {
         self.aliased
             .iter()
             .any(|action| action.name.eq_ignore_ascii_case(name))
