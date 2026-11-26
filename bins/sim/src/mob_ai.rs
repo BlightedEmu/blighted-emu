@@ -62,7 +62,7 @@ use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_content::status_effects::Control;
 use nw_sim_core::character::STEP_UP_M;
 use nw_sim_core::steering::StrafeFacing;
-use nw_sim_core::walk_map::OffMap;
+use nw_sim_core::walk_map::{MOB_BODY, OffMap, RING_STEP_M};
 use nw_sim_core::{Ground, Mover, Position, Seen, Steering, Threat, yaw_gap, yaw_toward};
 use nw_world::WorldFile;
 use nw_world::records::{AiBehaviour, AiProfile, PathMode, PatrolPath};
@@ -118,6 +118,9 @@ const ROOT_STEP_EPSILON_M: f32 = 1e-4;
 const ROOT_TARGET_STOP_M: f32 = 0.79;
 /// The step of a floor check along a line (our engineering limit: half a body).
 const FLOOR_STEP_M: f32 = 0.5;
+/// How far over closed cells of the walk map a line goes to an open place (our engineering
+/// limit: one step of a floor check, two of the map's cells).
+const RING_REACH_M: f32 = FLOOR_STEP_M;
 /// A body this near the floor under it stands on that floor (our engineering limit: a floor
 /// check's step).
 const ON_FLOOR_M: f32 = 0.5;
@@ -967,7 +970,8 @@ fn height_over(floor: Option<f32>, z: f32) -> f32 {
 /// `max_slope_deg` (the slice's `m_maxSlope`; no limit without one) and below
 /// [`MAX_STEP_RISE_M`], no wall may stand at knee height between two steps, and no step may go
 /// from a place where a mob may stand to one where it may not ([`Ground::no_stand`]: a solid, a
-/// navigation mark, deep water; a mob already in such a place walks out). `None` when the
+/// navigation mark, deep water; a mob already in such a place walks out; the walk map is asked
+/// at the middle of a step too; a line crosses a ring of the map, [`ring_end`]). `None` when the
 /// line is too steep, climbs too high, meets a wall or a closed place, or when a body standing
 /// on a floor would step off an edge more than
 /// [`MAX_STEP_DOWN_M`] high: kept at its height it walked on in the air (live
@@ -994,51 +998,123 @@ pub fn floor_line(
     // floor ([`stand_after_move`]).
     let mut last = stand_after_move(ground, from);
     let mut free = !ground.no_stand(last);
+    // The last place of the line where a mob may stand, and the open place beyond the ring
+    // of the walk map that the line is in ([`ring_end`]).
+    let mut open_at = last;
+    let mut beyond_ring = None;
     for step in 1..=steps {
         // A few hundred steps.
         #[allow(clippy::cast_precision_loss, reason = "a few hundred steps")]
         let share = step as f32 / steps as f32;
         let x = from.x + (to.x - from.x) * share;
         let y = from.y + (to.y - from.y) * share;
-        let on_floor = ground
-            .floor_at(last.x, last.y, last.z)
-            .is_some_and(|floor| (last.z - floor).abs() <= ON_FLOOR_M);
-        let below = ground.floor_at(x, y, last.z);
-        if on_floor && below.is_some_and(|floor| last.z - floor > MAX_STEP_DOWN_M) {
-            return None;
+        let stand = floor_step(ground, last, [x, y], max_rise)?;
+        // The walk map's cells are half a step wide: the map is asked at the middle of a step
+        // too, so that no line goes over a closed cell unseen (a way search's line went over
+        // the closed edge of a ledge that the steps of a tick could not cross).
+        let middle = (last.horizontal_distance(stand) > RING_STEP_M).then(|| {
+            let (x, y) = ((last.x + x) * HALF, (last.y + y) * HALF);
+            Position {
+                x,
+                y,
+                z: height_over(ground.floor_at(x, y, last.z), last.z),
+            }
+        });
+        let middle_closed = middle.is_some_and(|middle| ground.closed_by_walk_map(middle));
+        for (place, closed) in middle
+            .map(|middle| (middle, middle_closed))
+            .into_iter()
+            .chain([(stand, ground.no_stand(stand))])
+        {
+            if closed {
+                if free {
+                    beyond_ring = Some(ring_end(ground, open_at, place, max_rise)?);
+                }
+            } else {
+                open_at = place;
+                beyond_ring = None;
+            }
+            free = !closed;
         }
-        let z = height_over(below, last.z);
-        let run = last.horizontal_distance(Position { x, y, z });
-        if max_rise.is_some_and(|rise| run > 0.0 && (z - last.z).abs() / run > rise) {
-            return None;
-        }
-        if z - last.z > MAX_STEP_RISE_M {
-            return None;
-        }
-        // A wall at knee height stops the line, as it stops a pushed body (mob ground height
-        // note: 13 of 14,548 live mob moves went into a solid, one 4 times next to a crate).
-        let knee = |at: Position| Position {
-            z: at.z + STEP_UP_M,
-            ..at
-        };
-        let stand = Position { x, y, z };
-        if ground.blocked(knee(last), knee(stand)) {
-            return None;
-        }
-        let closed = ground.no_stand(stand);
-        if free && closed {
-            return None;
-        }
-        free = !closed;
         last = stand;
     }
-    Some(last)
+    // A line that ends in a ring of the map ends at the open place beyond it.
+    Some(beyond_ring.unwrap_or(last))
+}
+
+/// The open place beyond a ring of the walk map that a line from the open place `open_at`
+/// enters at `closed`, a place that only the map closes: the place [`RING_REACH_M`] from
+/// `open_at` the same way, when a mob may stand there, it is one [`floor_step`] away, and it is
+/// on the same level by the map's own rule (no higher or lower than the map body's step, or
+/// its slope over that distance: the edge of a ledge is no ring toward the drop). `None` when
+/// the line goes into a closed part of the map. A line crosses such a ring and never ends in
+/// it. Without this a mob in an open cell with closed cells around it failed every step of a
+/// tick's length, and the move of its attack toward a player did not start, so its swings did
+/// not reach (live 2026-11-26 17:20:04, four beach mobs on a ledge beside a tree, 341 failed
+/// steps, seen walking in place; 17:19:08 to 17:19:34, a torch mob at the edge of a wreck's
+/// deck, the map's closed cells along the edge between it and a player 1.7 m away on the
+/// deck, 12 swings out of reach).
+fn ring_end(
+    ground: &dyn Ground,
+    open_at: Position,
+    closed: Position,
+    max_rise: Option<f32>,
+) -> Option<Position> {
+    let length = open_at.horizontal_distance(closed);
+    if length <= 0.0 || length >= RING_REACH_M || !ground.closed_by_walk_map(closed) {
+        return None;
+    }
+    let scale = RING_REACH_M / length;
+    let beyond = [
+        open_at.x + (closed.x - open_at.x) * scale,
+        open_at.y + (closed.y - open_at.y) * scale,
+    ];
+    let level_m = MOB_BODY
+        .step_m
+        .max(MOB_BODY.max_slope_deg.to_radians().tan() * RING_REACH_M);
+    floor_step(ground, open_at, beyond, max_rise)
+        .filter(|open| !ground.no_stand(*open) && (open.z - open_at.z).abs() <= level_m)
+}
+
+/// Where a body at `last` stands after one step of a [`floor_line`] to the ground point `to`
+/// (east, north): on the floor there, `None` when the step goes off an edge more than
+/// [`MAX_STEP_DOWN_M`] high, is steeper than `max_rise` (rise over run), climbs more than
+/// [`MAX_STEP_RISE_M`] or meets a wall at knee height.
+fn floor_step(
+    ground: &dyn Ground,
+    last: Position,
+    [x, y]: [f32; 2],
+    max_rise: Option<f32>,
+) -> Option<Position> {
+    let on_floor = ground
+        .floor_at(last.x, last.y, last.z)
+        .is_some_and(|floor| (last.z - floor).abs() <= ON_FLOOR_M);
+    let below = ground.floor_at(x, y, last.z);
+    if on_floor && below.is_some_and(|floor| last.z - floor > MAX_STEP_DOWN_M) {
+        return None;
+    }
+    let z = height_over(below, last.z);
+    let stand = Position { x, y, z };
+    let run = last.horizontal_distance(stand);
+    if max_rise.is_some_and(|rise| run > 0.0 && (z - last.z).abs() / run > rise) {
+        return None;
+    }
+    if z - last.z > MAX_STEP_RISE_M {
+        return None;
+    }
+    // A wall at knee height stops the line, as it stops a pushed body (mob ground height
+    // note: 13 of 14,548 live mob moves went into a solid, one 4 times next to a crate).
+    let knee = |at: Position| Position {
+        z: at.z + STEP_UP_M,
+        ..at
+    };
+    (!ground.blocked(knee(last), knee(stand))).then_some(stand)
 }
 
 /// The end of a move from `from` toward `to` over the floors ([`floor_line`]); when the straight
 /// line is blocked, the move of the same length along the nearest turn of [`DETOUR_TURNS_DEG`]
 /// that is free.
-fn floor_move(
+pub(crate) fn floor_move(
     ground: &dyn Ground,
     from: Position,
     to: Position,

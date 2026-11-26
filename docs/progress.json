@@ -1849,6 +1849,10 @@
             {
               "check": "A walk or strafe action the game client has no number for is sent as a numbered action of the same animation fragment (2026-11-26, tests only). Before, the server sent the idle pose for it and the mob slid. Open: 3,266 used grid tasks point at actions the creature's grid does not name; the rule for those is Unknown.",
               "proof": "tests"
+            },
+            {
+              "check": "A mob crosses a thin closed strip of the walk map in one step and never stops in it, and a way search asks the map at each of its cells (2026-11-26; the torch hits on the wreck's deck were seen live after the fix, the rest has tests only). Before, a mob in an open cell with closed cells around it failed every step of a tick's length: four beach mobs on a ledge beside a tree ran in place for 16 s on ways their searches gave them, and a torch mob at the edge of a wreck's deck did not move in on a player 1.7 m away, so 12 swings did not reach. The strip must be thinner than 0.5 m with an open place beyond it on the same level: the edge of a ledge is not crossed toward the drop. With no way over the map the mob's tree is told so and the mob does not run. Open: a mob that follows a player to a high object still fails some steps at a rise near the end of its way.",
+              "proof": "tests"
             }
           ]
         },
@@ -4583,6 +4587,7 @@
     "**Content folder layout (2026-11-16):** log in and play on the game VM, and run one admin site Apply with a design file on the new layout."
   ],
   "done": [
+    "Live play test of 2026-11-26, second round (seen live by a player): a named knife mob walks with its walk animation; grenadiers throw grenades that explode and hit with the torch at close range; the beach first mate moves faster. New fix after that round (tests only): mobs that ran in place beside a tree, and a torch mob on a wreck's deck whose swings did not reach.",
     "Night of 2026-11-26 (tests only, on the PC and the game VM): mobs use their size number for speed and reach; mobs hear a fast player behind them; walk and strafe actions with no client number fall back to a numbered action of the same fragment; `!marks` gives Marks of Fortune that show at once; a refused mount choice is logged with its reason.",
     "Mobs without a Server.pak behaviour tree (2026-11-26, tests only): `content-tool ai-data` now binds sibling Server.pak trees (plague rats, fox, lion diver, catacombs and solo bosses) and builds stand-in trees from `baseai` sub-trees and each creature's own CAGE grid attacks for spiders, werebeasts, Upyr, Inquisitors, feral ghouls, bloodbeasts and more (960 of 986 archetypes now have a tree). Sim test proves spiders, plague rats, werebeasts, Upyr and Inquisitors chase and attack; the three FTUE tutorial mobs stay on their measured script.",
     "Bots play the whole main story (2026-11-25): one bot ended 124 of the 129 list quests (the 5 others are twins of other character kinds), all 12 expeditions end, 12 story trials end, a raid of 10 kills its first boss, and elite chests open in four zones.",

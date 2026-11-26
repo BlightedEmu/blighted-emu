@@ -6023,6 +6023,132 @@ mod retail_tests {
         );
     }
 
+    #[test]
+    fn a_mob_on_a_ledge_beside_a_tree_walks_off_it_by_each_way_its_search_gives() {
+        // Live 2026-11-26 17:20:04 to 17:20:20: four beach mobs stood on a ledge 2 m over the
+        // sand beside a tree, the map's cells closed 0.2 m around them. Their searches gave
+        // ways to a player (`reachable=true`) and 341 steps of those ways failed: seen running
+        // in place for 16 s. A way that the search gives from there is one that steps of a
+        // tick walk off the ledge; with no way the mob's tree is told so and it does not run.
+        const STOOD: Position = Position {
+            x: 7196.3115,
+            y: 3105.2217,
+            z: 42.8279,
+        };
+        /// Where the player stood and ran in those seconds.
+        const PLAYER_AT: [Position; 3] = [
+            Position {
+                x: 7198.9346,
+                y: 3103.1008,
+                z: 41.5718,
+            },
+            Position {
+                x: 7206.5,
+                y: 3104.9,
+                z: 39.25,
+            },
+            Position {
+                x: 7224.2046,
+                y: 3092.7559,
+                z: 46.2568,
+            },
+        ];
+        /// A run of 6 m/s over a tick of 33 ms.
+        const TICK_STEP_M: f32 = 0.2;
+        const STEPS: usize = 400;
+        const AT_POINT_M: f32 = 0.25;
+        /// A mob this far from where it stood has left the ledge.
+        const AWAY_M: f32 = 2.0;
+        let level = real_ground();
+        let ground = nw_sim_core::walk_map::WalkMapGround::new(
+            level.ground(),
+            nw_sim_core::walk_map::MOB_BODY,
+            true,
+        );
+        // A way found without the map is walked without it (`mob_ai`'s moves).
+        let plain = nw_sim_core::walk_map::OffMap(&ground);
+        for player in PLAYER_AT {
+            let Some(plan) = crate::mob_path::find_path(&ground, STOOD, player, None, false) else {
+                continue;
+            };
+            let walked: &dyn Ground = if plan.off_map { &plain } else { &ground };
+            let mut at = STOOD;
+            'way: for point in &plan.points {
+                for _ in 0..STEPS {
+                    let left = at.horizontal_distance(*point);
+                    if left <= AT_POINT_M {
+                        break;
+                    }
+                    let share = TICK_STEP_M.min(left) / left;
+                    let step = Position {
+                        x: at.x + (point.x - at.x) * share,
+                        y: at.y + (point.y - at.y) * share,
+                        z: at.z,
+                    };
+                    match crate::mob_ai::floor_move(walked, at, step, None) {
+                        Some(stepped) => at = stepped,
+                        None => break 'way,
+                    }
+                }
+            }
+            let end = plan.points.last().copied().expect("its end");
+            assert!(
+                at.horizontal_distance(STOOD) > AWAY_M || at.horizontal_distance(end) <= AT_POINT_M,
+                "player at {player:?}: it stands {} m from the ledge place, {} m from its way's end",
+                at.horizontal_distance(STOOD),
+                at.horizontal_distance(end)
+            );
+        }
+    }
+
+    #[test]
+    fn a_torch_mob_on_a_deck_moves_in_on_a_player_in_steps_of_its_attack_move() {
+        // Live 2026-11-26 17:19:08 to 17:19:34: a named torch mob on a wreck's deck swung 12
+        // times at a player 1.7 m away and every swing was out of reach: its attack's move
+        // toward the player (`Homing`, `MoveToDistance` 1) did not start.
+        const MOB: Position = Position {
+            x: 7164.501,
+            y: 3123.713,
+            z: 48.730,
+        };
+        const PLAYER_AT: Position = Position {
+            x: 7163.0015,
+            y: 3124.5305,
+            z: 48.748,
+        };
+        /// The clip's move of 1 m over 0.5 s in a tick of 33 ms.
+        const MOVE_STEP_M: f32 = 0.07;
+        /// The clip's `MoveToDistance`.
+        const MOVE_TO_M: f32 = 1.0;
+        const STEPS: usize = 20;
+        let level = real_ground();
+        let ground = nw_sim_core::walk_map::WalkMapGround::new(
+            level.ground(),
+            nw_sim_core::walk_map::MOB_BODY,
+            true,
+        );
+        let mut at = MOB;
+        for _ in 0..STEPS {
+            let left = at.horizontal_distance(PLAYER_AT);
+            if left <= MOVE_TO_M {
+                break;
+            }
+            let share = MOVE_STEP_M / left;
+            let step = Position {
+                x: at.x + (PLAYER_AT.x - at.x) * share,
+                y: at.y + (PLAYER_AT.y - at.y) * share,
+                z: at.z,
+            };
+            at = crate::mob_ai::floor_line(&ground, at, step, None)
+                .unwrap_or_else(|| panic!("a step from {at:?}"));
+        }
+        assert!(
+            at.horizontal_distance(PLAYER_AT) <= MOVE_TO_M,
+            "it moved in: it stands {} m from the player",
+            at.horizontal_distance(PLAYER_AT)
+        );
+    }
+
     /// The walk map plan's gate 3, the part that needs no running stack: patrol mobs of the open
     /// world walk their spawner paths as well with the walk map as without it. Run with
     /// `cargo test -p sim --lib --features local-data patrol_mobs_walk -- --ignored --nocapture`
