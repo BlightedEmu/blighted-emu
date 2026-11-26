@@ -1286,6 +1286,14 @@
             {
               "check": "The server fires the bow and gun shots the other players see, by one rule (tests only, 2026-11-20): the animation side decides each shot from retail's timing, and the server fires the same shot with its damage and projectile. Live 2026-11-20 before the fix: a gun's aimed shot fired every 530 ms of fast presses (22 in 11 s) while the client showed one shot and its reload, and a bow's hip shots fired no arrow (a hold of 167 ms swung `Bow_Gunbutt`, and that swing held off the next hip shots). Retail: 29 bow hip presses held 167 to 1,000 ms each fired the hip shot and no swing; aimed bow shots came no sooner than 1,049 ms apart (p5 of 3,308 shots), not 530 ms as the old rule had it.",
               "proof": "tests"
+            },
+            {
+              "check": "A mob's shot is an entity the clients see, and a shot with an impact explodes where it lands (2026-11-26, tests only). Before, the sim sent no entity for any mob shot, and a grenadier's bomb did 0 damage: its own damage row has a coefficient of 0, and the damage is its explosion's (radius 2 m). Now 193 projectile slices have their entity; the bomb's projectile state equals the retail bytes; the bomb lobs by the arc values of its ranged attack (flight about 1 s, as retail); a miss still explodes. Retail, 4 captures: one hit for each throw, with the explosion. Not seen live. Not known: the lob to a target above the thrower, and one value of the explosion.",
+              "proof": "tests"
+            },
+            {
+              "check": "A heal that scales with its healer takes the healer's level, Focus and heal bonuses (2026-11-26, tests only). Before, a Sacred Ground tick was the plain weapon base: 33.5 a second for a level 22 player; now 51. Retail capture (level 65, Focus 250): 356.69 a second; the rule gives 354.0, 0.75 % low, the rest is not known. 37 heal effects use the rule; potions and food do not change.",
+              "proof": "tests"
             }
           ]
         },
@@ -1788,6 +1796,38 @@
             },
             {
               "check": "A waited AI animation whose length no source gives ends after 1.5 s (2026-11-23, tests only; design choice): about 80 such actions stay, for example the Anubian brute's alert turn and the naga's combat turn.",
+              "proof": "tests"
+            },
+            {
+              "check": "A mob on its way home that the walk map gives no way walks home without the map (2026-11-26, tests only). Live 2026-11-26: a sailor of a beach camp stood in one open place of the map with closed places all around it, 28 m from its home, and tried to go home every 3.5 s for minutes without a step. How a mob gets into such a place is not closed off.",
+              "proof": "tests"
+            },
+            {
+              "check": "A step of a mob tree that fails its chance or its condition inside a permissive sequence does not run (2026-11-26, tests only). Before, every such step ran: a javelin thrower's dash back with a chance of 0.15 ran after 5 of 5 melee attacks (live 2026-11-26); retail showed about 1 after 22 in 21 fights. Not done: a mob does not move by the root motion of its attack fragment, so its dash back moves it 0 m (retail 4.5 m).",
+              "proof": "tests"
+            },
+            {
+              "check": "A mob swing that does not reach its target is judged again until its damage window ends (2026-11-26, tests only). Before, it was judged once at the window's start, before the body had moved in: the beach first mate's close axe attack missed a player 2.6 m away who stood still (live 2026-11-26). Retail hits of that attack landed 0.69 to 0.78 s after its start. Not done: his anchor slam from 2.4 to 3.0 m can still miss; the place of its hit shape in front of the body is not known.",
+              "proof": "tests"
+            },
+            {
+              "check": "A mob with a torch in its off hand plays its throws, crossbow shots and torch swings (2026-11-26, tests only). The creature tags read only one of the two tag columns of an off-hand item, so these mobs lacked the off-hand torch tag that every such fragment needs: grenadiers and crossbow hunters picked the attack and stopped in the same tick (live 2026-11-26 and in older logs: 71 of 73 picks). Not seen live after the fix.",
+              "proof": "tests"
+            },
+            {
+              "check": "A mob in a pocket of the walk map leaves it (2026-11-26, tests only). Live 2026-11-26: a sailor of a cave stood inside a crate's box and its run failed 1,002 times in 53 s with no step; two more mobs failed the same way. Now a way search over the map that reaches at most 4 places and not its goal gives the shortest way without the map to the next place on the map. Not closed off: how a mob gets into such a place.",
+              "proof": "tests"
+            },
+            {
+              "check": "A mob whose move makes no way for 2 s searches a new way, and a move to a waypoint that cannot go on fails so that the tree picks again (2026-11-26, tests only). Live 2026-11-26: a patrol mob walked in place against a tree for 322 s with no waypoint reached. The cause of that case is Inferred (two code paths could do it without a log line); the sim now logs a stalled move.",
+              "proof": "tests"
+            },
+            {
+              "check": "A strafing mob turns to its target with the lag the trees hold, 0.25 s (2026-11-26, tests only). Before, it turned at most 45 or 90 degrees a second. 7,942 retail strafe moments replayed with each rule: the lag gives the retail gap to the player (p90 14.4 against 13.7 degrees), the old cap gave p90 21.9 and p99 105.9. The unit of the value is Inferred from that fit. Not proven: that this was why a named mob of the starting beach missed a fast player.",
+              "proof": "tests"
+            },
+            {
+              "check": "A mob moves by the root motion of the fragment its action plays: a dodge back, a dash, a lunge (2026-11-26, tests only). Before, such an action moved the mob 0 m (retail: a dash back of a javelin thrower 4.5 m; ours now 4.1 m from its own animation). The move goes through the same floor rules as every mob move and never ends on a closed place of the walk map. Inferred: the step turns with the mob's facing; it does not add to a homing move in the same tick; it stops 0.79 m from the target. Not compared with retail: reaction actions that now move.",
               "proof": "tests"
             }
           ]
@@ -2327,6 +2367,10 @@
             {
               "check": "A weapon point spend by a bot (2026-11-23).",
               "proof": "bots"
+            },
+            {
+              "check": "A weapon key or the swap key changes the weapon in a hit reaction too (2026-11-26, tests only). Before, the server did not read these keys in a hit reaction: the client held the other weapon than the server, and the ability keys used the wrong weapon and its cooldowns (live 2026-11-26). Retail, 1,220 captures: 46 of 55 such presses changed the weapon before the reaction ended, with the same delay as outside a reaction. Not checked: the sheathe key in a hit reaction (no retail case), and the block after a swap.",
+              "proof": "tests"
             }
           ]
         },
@@ -2562,6 +2606,10 @@
             {
               "check": "A bot plays every gathering skill from nothing (2026-11-24, bots): the objective `trade:<skill>` gives the next thing to do, as a quest plan does. Logging, Mining and Harvesting: one node of the skill's common gatherable. Skinning: a kill and its skin. Each is done when the skill's experience rose.",
               "proof": "bots"
+            },
+            {
+              "check": "A gather with a tool holds the tool in the gather hand until it ends (2026-11-26, tests only; the skinning knife as a retail capture shows, the other tools Inferred). Not seen live: the mining animation.",
+              "proof": "tests"
             }
           ]
         },
@@ -2686,6 +2734,10 @@
             {
               "check": "A bot fishes for the Fishing skill (2026-11-24, bots): a pole (worn, from the bag, or crafted from gathered wood and fibre), a cast and a catch give Fishing experience.",
               "proof": "bots"
+            },
+            {
+              "check": "The tool goes into the gather hand: the fishing pole while the player fishes, and a gather's tool during the gather (2026-11-26, tests only). Before, the hand kept the weapon: a player's musket fired at a cast, and mining played the plain gather animation (reports of 2026-11-25). The pole and the skinning knife are as two retail captures show; the pickaxe, the logging axe and the sickle are Inferred (no capture shows them). Not seen live.",
+              "proof": "tests"
             }
           ]
         },
@@ -4769,6 +4821,6 @@
     "Mob attacks (2026-11-24, tests only): a javelin skeleton no longer starts a new throw each tick at mid range; an attack that cannot be cut plays to its end."
   ],
   "clientBuild": "25810808",
-  "updated": "2026-11-25",
+  "updated": "2026-11-26",
   "lastCommit": "63052cd2"
 }
