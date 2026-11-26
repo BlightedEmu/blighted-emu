@@ -1829,6 +1829,10 @@
             {
               "check": "A mob moves by the root motion of the fragment its action plays: a dodge back, a dash, a lunge (2026-11-26, tests only). Before, such an action moved the mob 0 m (retail: a dash back of a javelin thrower 4.5 m; ours now 4.1 m from its own animation). The move goes through the same floor rules as every mob move and never ends on a closed place of the walk map. Inferred: the step turns with the mob's facing; it does not add to a homing move in the same tick; it stops 0.79 m from the target. Not compared with retail: reaction actions that now move.",
               "proof": "tests"
+            },
+            {
+              "check": "A mob that runs plays its run animation (2026-11-26, seen live). Before, 169 mob kinds got a run action the game client has no number for (`Move_Combat_Blocking`), and the server sent the idle pose in its place: a named knife mob slid over the ground with still legs in 18 of 18 runs. Now a task goes to the first action the creature's grid names; retail sends `Move_Combat` for the same mob. A damned pistol mob's shot now has an action too (before, its shot never started). Not checked live: the other mob kinds, and walk or strafe actions that still have no client number (the server now logs each one).",
+              "proof": "live"
             }
           ]
         },
